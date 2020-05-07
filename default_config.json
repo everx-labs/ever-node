@@ -1,0 +1,21 @@
+{
+    "log_config_path": "common/config/log_cfg.yml",
+    "ton_global_config_path": "ton-global.config.json",
+    "use_global_config": true,
+    "ip_address": "0.0.0.0:4191",
+    "overlay_peers": [
+
+    ],
+    "shard_keeper": {
+        "get_peer_attempt_timeout_ms": 1000,
+        "download_next_block_full_timeout_ms": 1000,
+        "download_block_full_timeout_ms": 1000
+    },
+    "kafka_consumer_config": {
+        "group_id": "101",
+        "brokers": "kafka",
+        "topic": "requests",
+        "session_timeout_ms": 6000,
+        "run_attempt_timeout_ms": 1000
+    }
+}
