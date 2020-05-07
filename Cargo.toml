@@ -66,7 +66,6 @@ optional = true
 
 [dev-dependencies]
 ed25519-dalek = "1.0.0-pre.3"
-ton_sdk = { git = "https://github.com/tonlabs/TON-SDK.git", branch = "fix", package = "ton_sdk" }
 
 [profile.release]
 debug = true
