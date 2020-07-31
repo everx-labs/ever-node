@@ -1,9 +1,12 @@
 use std::collections::hash_set::HashSet;
 use ton_block::{
     Account, InMsg, OutMsg, Deserializable, Serializable, MessageProcessingStatus, Transaction,
-    TransactionProcessingStatus, BlockProcessingStatus, Block, BlockProof
+    TransactionProcessingStatus, BlockProcessingStatus, Block, BlockProof, HashmapAugType,
+    AccountBlock, ShardAccount
 };
-use ton_types::{cells_serialization::serialize_toc, types::UInt256, Cell, Result, SliceData};
+use ton_types::{
+    cells_serialization::serialize_toc, types::UInt256, Cell, Result, SliceData, HashmapType
+};
 
 use crate::{
     engine_traits::ExternalDb, block::BlockStuff, shard_state::ShardStateStuff,
@@ -16,11 +19,13 @@ enum DbRecord {
     Transaction(String, String),
     Account(String, String),
     BlockProof(String, String),
-    Block(String, String)
+    Block(String, String),
+    RawBlock(Vec<u8>, Vec<u8>)
 }
 
 pub(super) struct Processor<T: WriteData> {
     write_block: T,
+    write_raw_block: T,
     write_message: T,
     write_transaction: T,
     write_account: T,
@@ -32,13 +37,14 @@ impl<T: WriteData> Processor<T> {
 
     pub fn new(
         write_block: T,
+        write_raw_block: T,
         write_message: T,
         write_transaction: T,
         write_account: T,
         write_block_proof: T,
         bad_blocks_storage: String) 
     -> Self {
-        Processor{ write_block, write_message, write_transaction, write_account, write_block_proof, bad_blocks_storage }
+        Processor{ write_block, write_raw_block, write_message, write_transaction, write_account, write_block_proof, bad_blocks_storage }
     }
 
     fn prepare_in_message_record(
@@ -172,6 +178,16 @@ impl<T: WriteData> Processor<T> {
         ))
     }
 
+    fn prepare_raw_block_record(
+        block_root: &Cell,
+        block_boc: Vec<u8>,
+    ) -> Result<DbRecord> {
+        Ok(DbRecord::RawBlock(
+            block_root.repr_hash().as_slice().to_vec(),
+            block_boc
+        ))
+    }
+
     fn prepare_block_proof_record(proof: &BlockProof) -> Result<DbRecord> {
         let doc = ton_block_json::db_serialize_block_proof("id", proof)?;
         Ok(DbRecord::BlockProof(
@@ -209,12 +225,19 @@ impl<T: WriteData> Processor<T> {
         add_proof: bool,
      ) -> Result<()> {
 
+        let process_block = self.write_block.enabled();
+        let process_raw_block = self.write_raw_block.enabled();
+        let process_message = self.write_message.enabled();
+        let process_transaction = self.write_transaction.enabled();
+        let process_account = self.write_account.enabled();
+        let process_block_proof = self.write_block_proof.enabled();
         let block_id = block_stuff.id().clone();
         let block = block_stuff.block().clone();
         let proof = block_proof.map(|p| p.proof().clone());
         let block_root = block_stuff.root_cell().clone();
         let block_extra = block.read_extra()?;
-        let block_boc = block_stuff.data().to_vec();
+        let block_boc1 = if process_block { Some(block_stuff.data().to_vec()) } else { None };
+        let block_boc2 = if process_raw_block { Some(block_stuff.data().to_vec()) } else { None };
         let shard_accounts = state.map(|s| s.shard_state().read_accounts()).transpose()?;
 
         let now = std::time::Instant::now();
@@ -224,83 +247,105 @@ impl<T: WriteData> Processor<T> {
             let mut db_records = Vec::new();
 
             // Messages
-            let now = std::time::Instant::now();
-            let mut msg_count = 0;
-            block_extra.read_in_msg_descr()?.iterate(&mut |msg| {
-                msg_count += 1;
-                db_records.push(
-                    Self::prepare_in_message_record(msg, &block_root, block_root.repr_hash(), add_proof)?
-                );
-                Ok(true)
-            })?;
-            log::trace!("TIME: in messages {} {}ms;   {}", msg_count, now.elapsed().as_millis(), block_id);
-            let now = std::time::Instant::now();
-            let mut msg_count = 0;
-            block_extra.read_out_msg_descr()?.iterate(&mut |msg| {
-                match Self::prepare_out_message_record(msg, &block_root, block_root.repr_hash(), add_proof)? {
-                    DbRecord::Empty => (),
-                    r => {
-                        msg_count += 1;
-                        db_records.push(r);
-                    }
-                }
-                Ok(true)
-            })?;
-            log::trace!("TIME: out messages {} {}ms;   {}", msg_count, now.elapsed().as_millis(), block_id);
-
-            // Transactions
-            let now = std::time::Instant::now();
-            let mut tr_count = 0;
-            let mut changed_acc = HashSet::new();
-            let workchain_id = block.read_info()?.shard().workchain_id();
-
-            block_extra.read_account_blocks()?.iterate(&mut |account_block| {
-                changed_acc.insert(account_block.account_id().clone());
-                account_block.transactions().iterate_slices(&mut |_, transaction_slice| {
-                    tr_count += 1;
+            if process_message {
+                let now = std::time::Instant::now();
+                let mut msg_count = 0;
+                block_extra.read_in_msg_descr()?.iterate_objects(|msg| {
+                    msg_count += 1;
                     db_records.push(
-                        Self::prepare_transaction_record(
-                            transaction_slice, &block_root, block_root.repr_hash(), workchain_id, add_proof
-                        )?
+                        Self::prepare_in_message_record(msg, &block_root, block_root.repr_hash(), add_proof)?
                     );
                     Ok(true)
                 })?;
-                Ok(true)
-            })?;
-            log::trace!("TIME: transactions {} {}ms;   {}", tr_count, now.elapsed().as_millis(), block_id);
+                log::trace!("TIME: in messages {} {}ms;   {}", msg_count, now.elapsed().as_millis(), block_id);
+                let now = std::time::Instant::now();
+                let mut msg_count = 0;
+                block_extra.read_out_msg_descr()?.iterate_objects(|msg| {
+                    match Self::prepare_out_message_record(msg, &block_root, block_root.repr_hash(), add_proof)? {
+                        DbRecord::Empty => (),
+                        r => {
+                            msg_count += 1;
+                            db_records.push(r);
+                        }
+                    }
+                    Ok(true)
+                })?;
+                log::trace!("TIME: out messages {} {}ms;   {}", msg_count, now.elapsed().as_millis(), block_id);
+            }
+            // Transactions
+            let mut changed_acc = HashSet::new();
+            if process_transaction || process_account{
+                let now = std::time::Instant::now();
+                let mut tr_count = 0;
+                let workchain_id = block.read_info()?.shard().workchain_id();
 
+                block_extra.read_account_blocks()?.iterate_objects(|account_block: AccountBlock| {
+                    let state_upd = account_block.read_state_update()?;
+                    if process_account && state_upd.old_hash != state_upd.new_hash {
+                        changed_acc.insert(account_block.account_id().clone());
+                    }
+                    if process_transaction {
+                        account_block.transactions().iterate_slices(|_, transaction_slice| {
+                            tr_count += 1;
+                            db_records.push(
+                                Self::prepare_transaction_record(
+                                    transaction_slice, &block_root, block_root.repr_hash(), workchain_id, add_proof
+                                )?
+                            );
+                            Ok(true)
+                        })?;
+                    }
+                    Ok(true)
+                })?;
+                log::trace!("TIME: transactions {} {}ms;   {}", tr_count, now.elapsed().as_millis(), block_id);
+            }
 
             // Accounts (changed only)
-            let now = std::time::Instant::now();
-            if let Some(shard_accounts) = shard_accounts {
-                for acc_addr in changed_acc.iter() {
-                    let acc = shard_accounts.account(acc_addr)?
-                        .ok_or_else(|| 
-                            NodeError::InvalidData(
-                                "Block and shard state mismatch: \
-                                state doesn't contain changed account".to_string()
-                            )
-                        )?;
-                    let acc = acc.read_account()?;
-                    db_records.push(Self::prepare_account_record(acc)?);
+            if process_account {
+                let now = std::time::Instant::now();
+                if let Some(shard_accounts) = shard_accounts {
+                    for acc_addr in changed_acc.iter() {
+                        let acc = shard_accounts.account(acc_addr)?
+                            .ok_or_else(|| 
+                                NodeError::InvalidData(
+                                    "Block and shard state mismatch: \
+                                    state doesn't contain changed account".to_string()
+                                )
+                            )?;
+                        let acc = acc.read_account()?;
+                        db_records.push(Self::prepare_account_record(acc)?);
+                    }
                 }
+                log::trace!("TIME: accounts {} {}ms;   {}", changed_acc.len(), now.elapsed().as_millis(), block_id);
             }
-            log::trace!("TIME: accounts {} {}ms;   {}", changed_acc.len(), now.elapsed().as_millis(), block_id);
 
             // Block
-            let now = std::time::Instant::now();
-            db_records.push(
-                Self::prepare_block_record(&block, &block_root, block_boc)?
-            );
-            log::trace!("TIME: block {}ms;   {}", now.elapsed().as_millis(), block_id);
-
-            // Block proof
-            if let Some(proof) = proof {
+            if process_block {
                 let now = std::time::Instant::now();
                 db_records.push(
-                    Self::prepare_block_proof_record(&proof)?
+                    Self::prepare_block_record(&block, &block_root, block_boc1.unwrap())?
                 );
-                log::trace!("TIME: block proof {}ms;   {}", now.elapsed().as_millis(), block_id);
+                log::trace!("TIME: block {}ms;   {}", now.elapsed().as_millis(), block_id);
+            }
+
+            // Block proof
+            if process_block_proof {
+                if let Some(proof) = proof {
+                    let now = std::time::Instant::now();
+                    db_records.push(
+                        Self::prepare_block_proof_record(&proof)?
+                    );
+                    log::trace!("TIME: block proof {}ms;   {}", now.elapsed().as_millis(), block_id);
+                }
+            }
+
+            // raw block
+            if process_raw_block {
+                let now = std::time::Instant::now();
+                db_records.push(
+                    Self::prepare_raw_block_record(&block_root, block_boc2.unwrap())?
+                );
+                log::trace!("TIME: raw block {}ms;   {}", now.elapsed().as_millis(), block_id);
             }
 
             Ok(db_records)
@@ -329,6 +374,7 @@ impl<T: WriteData> Processor<T> {
                 DbRecord::Transaction(key, value) => Some(self.write_transaction.write_data(key, value)),
                 DbRecord::Account(key, value) => Some(self.write_account.write_data(key, value)),
                 DbRecord::Block(key, value) => Some(self.write_block.write_data(key, value)),
+                DbRecord::RawBlock(key, value) => Some(self.write_raw_block.write_raw_data(key, value)),
                 DbRecord::BlockProof(key, value) => Some(self.write_block_proof.write_data(key, value)),
                 DbRecord::Empty => None
             } {
@@ -368,26 +414,28 @@ impl<T: WriteData> ExternalDb for Processor<T> {
         let now = std::time::Instant::now();
         log::trace!("process_full_state {} ...", state.block_id());
 
-        let mut accounts = Vec::new();
-        state.shard_state().read_accounts()?.iterate(&mut |acc| {
-            let acc = acc.read_account()?;
-            let record = Self::prepare_account_record(acc)?;
-            accounts.push(record);
-            Ok(true)
-        })?;
+        if self.write_account.enabled() {
+            let mut accounts = Vec::new();
+            state.shard_state().read_accounts()?.iterate_objects(|acc: ShardAccount| {
+                let acc = acc.read_account()?;
+                let record = Self::prepare_account_record(acc)?;
+                accounts.push(record);
+                Ok(true)
+            })?;
 
-        futures::future::join_all(
-            accounts.into_iter().map(|r| {
-                match r {
-                    DbRecord::Account(key, value) => self.write_account.write_data(key, value),
-                    _ => unreachable!(),
-                }
-            })
-        )
-        .await
-        .into_iter()
-        .find(|r| r.is_err())
-        .unwrap_or(Ok(()))?;
+            futures::future::join_all(
+                accounts.into_iter().map(|r| {
+                    match r {
+                        DbRecord::Account(key, value) => self.write_account.write_data(key, value),
+                        _ => unreachable!(),
+                    }
+                })
+            )
+            .await
+            .into_iter()
+            .find(|r| r.is_err())
+            .unwrap_or(Ok(()))?;
+        }
 
         log::trace!("TIME: process_full_state {}ms;   {}", now.elapsed().as_millis(), state.block_id());
         Ok(())

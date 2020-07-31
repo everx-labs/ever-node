@@ -1,0 +1,34 @@
+[package]
+edition = "2018"
+build = "../common/build/build.rs"
+name = "catchain"
+version = "0.0.1"
+
+[dependencies]
+# external
+sha2 = "^0.8"
+
+base64 = "0.11.0"
+log = "0.4.8"
+hex = "0.3.1"
+adnl = { git = "https://github.com/tonlabs/ton-labs-adnl.git", features = ["node"] }
+overlay = { git = "https://github.com/tonlabs/ton-labs-overlay.git" }
+rldp = { git = "https://github.com/tonlabs/ton-labs-rldp.git" }
+ton_types = { git = "https://github.com/tonlabs/ton-labs-types.git" }
+ton_api = { git = "https://github.com/tonlabs/ton-labs-tl.git", package = "ton_api" }
+tokio = { version = "0.2.18", features = ["rt-threaded", "stream", "tcp", "udp", "sync"] }
+ton-node-storage = { git = "https://github.com/tonlabs/ton-labs-node-storage.git" }
+futures = "0.3.4"
+crossbeam = "0.7.3"
+rand = "0.7.3"
+failure = "0.1.1"
+regex = "1.3.1"
+chrono = "0.4.10"
+metrics-core="0.5.2"
+metrics-runtime="0.13.0"
+ed25519-dalek = "1.0.0-pre.3"
+lazy_static = "1.4.0"
+
+[dev-dependencies]
+env_logger = "0.7.1"
+chrono = "0.4.10"

@@ -1,0 +1,106 @@
+{
+  "log_config_name": "common/config/log_cfg.yml",
+  "ton_global_config_name": "ton-global.config-tstnet.json",
+  "use_global_config": true,
+  "ip_address": null,
+  "adnl_node": {
+    "ip_address": "0.0.0.0:4191",
+    "keys": [
+      {
+        "tag": 1,
+        "data": {
+          "type_id": 1209251014,
+          "pub_key": null,
+          "pvt_key": "qMHT3OIoD13M9lNg952C4vSTgSxs3BIwbLFSBOJ7w3M="
+        }
+      },
+      {
+        "tag": 2,
+        "data": {
+          "type_id": 1209251014,
+          "pub_key": null,
+          "pvt_key": "UCpNK2cz3mhYizs5lL8krt4YEuwpYZmAy5vhcq4UDEE="
+        }
+      }
+    ]
+  },
+  "overlay_peers": [
+    {
+      "ip_address": "3.123.227.153:30303",
+      "keys": [
+        {
+          "tag": 2,
+          "data": {
+            "type_id": 1209251014,
+            "pub_key": "LI9V/Ypy98i49zRuUzxTXSrwqepU/qUbk55eqcbG7nE=",
+            "pvt_key": null
+          }
+        }
+      ]
+    }
+  ],
+  "kafka_consumer_config": {
+    "group_id": "101",
+    "brokers": "kafka",
+    "topic": "requests",
+    "session_timeout_ms": 6000,
+    "run_attempt_timeout_ms": 1000
+  },
+  "external_db_config": {
+    "block_producer": {
+      "enabled": true,
+      "brokers": "kafka",
+      "message_timeout_ms": 100,
+      "topic": "blocks",
+      "attempt_timeout_ms": 100,
+      "message_max_size": 1000000,
+      "big_messages_storage": "big-blocks"
+    },
+    "raw_block_producer": {
+      "enabled": false,
+      "brokers": "",
+      "message_timeout_ms": 0,
+      "topic": "",
+      "attempt_timeout_ms": 0,
+      "message_max_size": 0,
+      "big_messages_storage": ""
+    },
+    "message_producer": {
+      "enabled": true,
+      "brokers": "kafka",
+      "message_timeout_ms": 100,
+      "topic": "messages",
+      "attempt_timeout_ms": 100,
+      "message_max_size": 1000000,
+      "big_messages_storage": "big-messages"
+    },
+    "transaction_producer": {
+      "enabled": true,
+      "brokers": "kafka",
+      "message_timeout_ms": 100,
+      "topic": "transactions",
+      "attempt_timeout_ms": 100,
+      "message_max_size": 1000000,
+      "big_messages_storage": "big-transactions"
+    },
+    "account_producer": {
+      "enabled": true,
+      "brokers": "kafka",
+      "message_timeout_ms": 100,
+      "topic": "accounts",
+      "attempt_timeout_ms": 100,
+      "message_max_size": 2000000,
+      "big_messages_storage": "big-accounts"
+    },
+    "block_proof_producer": {
+      "enabled": true,
+      "brokers": "kafka",
+      "message_timeout_ms": 100,
+      "topic": "blocks_signatures",
+      "attempt_timeout_ms": 100,
+      "message_max_size": 2000000,
+      "big_messages_storage": "big-block-proofs"
+    },
+    "bad_blocks_storage": "bad-blocks"
+  }
+}

@@ -1,33 +1,28 @@
-use crate::network::node_network::NodeNetwork;
-use adnl::{
-    common::{KeyId, KeyOption, serialize_append}, node::AdnlNodeConfig
-};
+use adnl::common::{KeyId, KeyOption, Query, Wait};
 use dht::DhtNode;
 use overlay::{OverlayShortId, OverlayNode};
 use rand::{Rng};
 use rldp::RldpNode;
 use std::{
-    cmp::Ordering, {time::Duration}, sync::Arc, io::Cursor,
+    cmp::Ordering, time::{Duration, Instant}, sync::Arc,
     sync::atomic::{
         self, AtomicU32, AtomicI32, AtomicU64, AtomicI64
     }
 };
 use tokio::time::delay_for;
-use ton_api::{Deserializer, BoxedSerialize, BoxedDeserialize};
-use ton_types::{fail, Result};
+use ton_types::{error, fail, Result};
 use ton_api::ton::{
-    rpc::{
-        ton_node::{GetCapabilities}
-    },
-    ton_node::{Capabilities},
+    TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities
 };
 
 #[derive(Debug)]
 pub struct Neighbour {
     id : Arc<KeyId>,
+    last_ping: AtomicU64,
     proto_version: AtomicI32,
     capabilities: AtomicI64,
-    roundtrip: AtomicU64,
+    roundtrip_adnl: AtomicU64,
+    roundtrip_rldp: AtomicU64,
     unreliability: AtomicI32
 }
 
@@ -35,25 +30,26 @@ pub struct Neighbours {
     peers: NeighboursCache,
     overlay_id: Arc<OverlayShortId>,
     overlay: Arc<OverlayNode>,
-    rldp: Arc<RldpNode>,
-    dht: Arc<DhtNode>
+    dht: Arc<DhtNode>,
+    start: Instant
 }
-
 
 pub const DOWNLOAD_NEXT_PRIORITY: u8 = 1;
 pub const PROTO_VERSION: i32 = 2;
 pub const PROTO_CAPABILITIES: i64 = 1;
-pub const STOP_UNRELIABILITY: i32 = 50;
-pub const FAIL_UNRELIABILITY: i32 = 100;
+pub const STOP_UNRELIABILITY: i32 = 5;
+pub const FAIL_UNRELIABILITY: i32 = 10;
 
 impl Neighbour {
 
     pub fn new(id : Arc<KeyId>) ->  Result<Self> {
         Ok (Neighbour {
             id: id,
+            last_ping: AtomicU64::new(0),
             proto_version: AtomicI32::new(0),
             capabilities: AtomicI64::new(0),
-            roundtrip: AtomicU64::new(0),
+            roundtrip_adnl: AtomicU64::new(0),
+            roundtrip_rldp: AtomicU64::new(0),
             //roundtrip_relax_at: 0,
             //roundtrip_weight: 0.0,
             unreliability: AtomicI32::new(0),
@@ -69,54 +65,113 @@ impl Neighbour {
         &self.id
     }
     
-    pub fn query_success(&self, t: &Duration) {
-        log::trace!("query_success");
-        let mut un = self.unreliability.load(atomic::Ordering::Relaxed);
-        un -= 10;
-        if un < 0 {
-            un = 0;
+    pub fn query_success(&self, t: &Duration, is_rldp: bool) {
+        loop {
+            let old_un = self.unreliability.load(atomic::Ordering::Relaxed);
+            if old_un > 0 { 
+                let new_un = old_un - 1;
+                if self.unreliability.compare_exchange(
+                    old_un, 
+                    new_un, 
+                    atomic::Ordering::Relaxed,
+                    atomic::Ordering::Relaxed
+                ).is_err() {
+                    continue;
+                } else {
+                    log::trace!("query_success (key_id {}) new value: {}", self.id, new_un);
+                }
+            }
+            break;
+        } 
+        if is_rldp {
+            self.update_roundtrip_rldp(t)
+        } else {
+            self.update_roundtrip_adnl(t)
         }
-        log::trace!("query_success (key_id {}) new value: {}", self.id, un);
-        self.unreliability.store(un, atomic::Ordering::Relaxed);
-
-        self.update_roundtrip(t);
     }
 
-    pub fn query_failed(&self) {
-        log::trace!("query_failed");
-        let mut un = self.unreliability.load(atomic::Ordering::Relaxed);
-        un += 10;
+    pub fn query_failed(&self, t: &Duration, is_rldp: bool) {
+        let un = self.unreliability.fetch_add(1, atomic::Ordering::Relaxed) + 1;
         log::trace!("query_failed (key_id {}, overlay: ) new value: {}", self.id, un);
-        self.unreliability.store(un, atomic::Ordering::Relaxed);
+        if is_rldp {
+            self.update_roundtrip_rldp(t)
+        } else {
+            self.update_roundtrip_adnl(t)
+        }
+    }
+    
+    pub fn roundtrip_adnl(&self) -> Option<u64> {
+        Self::roundtrip(&self.roundtrip_adnl)
     }
 
-    pub fn update_roundtrip(&self, t: &Duration) {
-        let roundtrip = self.roundtrip.load(atomic::Ordering::Relaxed);
+    pub fn roundtrip_rldp(&self) -> Option<u64> {
+        Self::roundtrip(&self.roundtrip_rldp)
+    }
+
+    pub fn update_roundtrip_adnl(&self, t: &Duration) {
+        Self::set_roundtrip(&self.roundtrip_adnl, t)
+    }
+
+    pub fn update_roundtrip_rldp(&self, t: &Duration) {
+        Self::set_roundtrip(&self.roundtrip_rldp, t)
+    }
+     
+    fn last_ping(&self) -> u64 {
+        self.last_ping.load(atomic::Ordering::Relaxed)
+    }
+
+    fn roundtrip(storage: &AtomicU64) -> Option<u64> {
+        let roundtrip = storage.load(atomic::Ordering::Relaxed);
+        if roundtrip == 0 {
+            None
+        } else {
+            Some(roundtrip)
+        }
+    }
+
+    fn set_last_ping(&self, elapsed: u64) {
+        self.last_ping.store(elapsed, atomic::Ordering::Relaxed)
+    }
+
+    fn set_roundtrip(storage: &AtomicU64, t: &Duration) {
+        let roundtrip = storage.load(atomic::Ordering::Relaxed);
         let roundtrip = (t.as_millis() as u64 + roundtrip) / 2;
         log::trace!("roundtrip new value: {}", roundtrip);
-        self.roundtrip.store(roundtrip, atomic::Ordering::Relaxed);
-        //self.roundtrip = (t.as_millis() + self.roundtrip) / 2;
+        storage.store(roundtrip, atomic::Ordering::Relaxed);
     }
+
 }
 
-pub const MAX_NEIGHTBOURS: u32 = 16;
+pub const MAX_NEIGHBOURS: usize = 16;
 pub const ATTEMPTS: u32 = 1;
 
 impl Neighbours {
+
     pub fn new(
         start_peers: &Vec<Arc<KeyId>>,
         dht: &Arc<DhtNode>,
-        rldp: Arc<RldpNode>,
+        _rldp: Arc<RldpNode>,
         overlay: &Arc<OverlayNode>,
         overlay_id: Arc<OverlayShortId>) -> Result<Self> {
 
-        Ok (Neighbours {
-                peers: NeighboursCache::new(start_peers)?,
-                dht: dht.clone(),
-                overlay: overlay.clone(),
-                overlay_id: overlay_id,
-                rldp: rldp
+        Ok(Neighbours {
+            peers: NeighboursCache::new(start_peers)?,
+            dht: dht.clone(),
+            overlay: overlay.clone(),
+            overlay_id,
+            start: Instant::now()
         })
+    }
+
+    pub fn count(&self) -> usize {
+        self.peers.count()
+    }
+
+    pub fn add(&self, peer: Arc<KeyId>) -> Result<bool> {
+        if self.count() >= MAX_NEIGHBOURS {
+            return Ok(false);
+        }
+        self.peers.insert_ex(peer, true)
     }
 
     pub fn contains(&self, peer: &Arc<KeyId>) -> bool {
@@ -134,7 +189,7 @@ impl Neighbours {
             }
             let count = self.peers.count();
 
-            if count == MAX_NEIGHTBOURS {
+            if count == MAX_NEIGHBOURS {
                 let mut a: Option<Arc<KeyId>> = None;
                 let mut b: Option<Arc<KeyId>> = None;
                 let mut cnt: u32 = 0;
@@ -185,7 +240,7 @@ impl Neighbours {
                 match res_ping {
                     Ok(_) => {},
                     Err(e) => {
-                        log::trace!("reload neighbours err: {}", e);
+                        log::error!("reload neighbours err: {:?}", e);
                     },
                 };
             }
@@ -195,15 +250,9 @@ impl Neighbours {
     pub fn start_ping(self: Arc<Self>) {
         let _handler = tokio::spawn(async move {
             loop {
-                let sleep_time = rand::thread_rng().gen_range(500, 1000);
-                delay_for(Duration::from_millis(sleep_time)).await;
-                let res_ping = self.ping_neighbours().await;
-                match res_ping {
-                    Ok(_) => {},
-                    Err(e) => {
-                        log::trace!("ping neighbours err: {}", e);
-                    },
-                };
+                if let Err(e) = self.ping_neighbours().await {
+                    log::warn!("ERROR: {}", e)
+                }
             }
         });
     }
@@ -212,16 +261,15 @@ impl Neighbours {
         self.reload_neighbours(&self.overlay_id).await?;
         Ok(())
     }
-
+    
+/*
     pub async fn reload_neighbours(&self, overlay_id: &Arc<OverlayShortId>) -> Result<()> {
         let mut peers: Vec<Arc<KeyId>> = vec![];
 
         for peer in self.peers.get_iter() {
             let random_peers = self.overlay.get_random_peers(&peer.id, overlay_id).await?;
-
             if let Some(rnd_peers) = random_peers {
                 for random_peer in rnd_peers.iter() {
-                
                     let peer_key = KeyOption::from_tl_public_key(&random_peer.id)?;
                     log::trace!("reload_neighbours: peer {}", peer_key.id());
                     if self.peers.contains(peer_key.id()) {
@@ -229,18 +277,10 @@ impl Neighbours {
                         continue;
                     }
                     log::trace!("reload_neighbours start find address: peer {}", peer_key.id());
-                    let addr = self.dht.find_ip_address(peer_key.id()).await?;
-                    log::info!("reload_neighbours: addr peer {}", addr );
-                    let overlay_peer = AdnlNodeConfig::from_ip_address_and_key(
-                        &addr.to_string(), 
-                        peer_key,
-                        NodeNetwork::TAG_OVERLAY_KEY
-                    )?;
-                    peers.push(overlay_peer.key_by_tag(NodeNetwork::TAG_OVERLAY_KEY)?.id().clone());
-                    self.overlay.add_peer(
-                        overlay_peer.ip_address(),
-                        &overlay_peer.key_by_tag(NodeNetwork::TAG_OVERLAY_KEY)?
-                    )?;
+                    let addr = DhtNode::find_ip_address(&self.dht, peer_key.id()).await?;
+                    log::info!("reload_neighbours: addr peer {}", addr);
+                    peers.push(peer_key.id().clone());
+                    self.overlay.add_peer(&addr, random_peer, overlay_id)?;
                 }
             } else {
                 log::trace!("reload_neighbours: random peers result is None!");
@@ -252,7 +292,39 @@ impl Neighbours {
         }
         Ok(())
     }
-
+*/
+        
+    pub async fn reload_neighbours(&self, overlay_id: &Arc<OverlayShortId>) -> Result<()> {
+        for peer in self.peers.get_iter() {
+            let mut peers: Vec<Arc<KeyId>> = vec![];
+            let random_peers = self.overlay.get_random_peers(&peer.id, overlay_id, None).await?;
+            if let Some(rnd_peers) = random_peers {
+                for random_peer in rnd_peers.iter() {
+                    let peer_key = KeyOption::from_tl_public_key(&random_peer.id)?;
+                    log::trace!("reload_neighbours: peer {}", peer_key.id());
+                    if self.peers.contains(peer_key.id()) {
+                        log::trace!("reload_neighbours: peer contains in identificators");
+                        continue;
+                    }
+                    log::trace!("reload_neighbours start find address: peer {}", peer_key.id());
+                    let (ip, _) = DhtNode::find_address(&self.dht, peer_key.id()).await?;
+                    log::info!("reload_neighbours: addr peer {}", ip);
+                    peers.push(peer_key.id().clone());
+                    self.overlay.add_public_peer(&ip, random_peer, overlay_id)?;
+                }
+            } else {
+                log::trace!("reload_neighbours: random peers result is None!");
+            }
+            if peers.len() != 0 {
+                self.got_neighbours(peers)?;
+            }
+        }
+/*
+        if peers.len() != 0 {
+            self.got_neighbours(peers)?;
+        }*/
+        Ok(())
+    }
 
     pub fn start_rnd_peers_process(self: Arc<Self>) {
         let _handler = tokio::spawn(async move {
@@ -263,7 +335,7 @@ impl Neighbours {
             loop {
                 tokio::time::delay_for(std::time::Duration::from_millis(1000)).await;
                 for peer in self.peers.get_iter() {
-                    let answer = receiver.get_random_peers(&peer.id(), &id).await;
+                    let answer = receiver.get_random_peers(&peer.id(), &id, None).await;
                     match answer {
                         Ok(peers_opt) => {
                             match peers_opt {
@@ -289,9 +361,20 @@ impl Neighbours {
         let mut rng = rand::thread_rng();
         let mut best: Option<Arc<Neighbour>> = None; 
         let mut sum = 0;
+/*
+        let mut min = i32::MAX;
 
         for neighbour in self.peers.get_iter() {
-            let mut unr: i32 = neighbour.unreliability.load(atomic::Ordering::Relaxed);
+            let unr = neighbour.unreliability.load(atomic::Ordering::Relaxed);
+            if unr < min {
+                min = unr
+            }     
+        }
+*/
+
+        log::trace!("Select neighbour for overlay {}", self.overlay_id);
+        for neighbour in self.peers.get_iter() {
+            let mut unr = neighbour.unreliability.load(atomic::Ordering::Relaxed);
             let proto_version = neighbour.proto_version.load(atomic::Ordering::Relaxed);
             let capabilities = neighbour.capabilities.load(atomic::Ordering::Relaxed);
             
@@ -299,48 +382,71 @@ impl Neighbours {
                 return Ok(Some(neighbour.clone()))
             }
             if proto_version < PROTO_VERSION {
-                unr += 40;
-            } else if proto_version == PROTO_VERSION && capabilities == PROTO_CAPABILITIES {
-                unr += 20;
-            }
+                unr += 4;
+            } else if proto_version == PROTO_VERSION && capabilities < PROTO_CAPABILITIES {
+                unr += 2;
+            }  
+            log::trace!(
+                "Neighbour {}, unr {}, rt ADNL {}, rt RLDP {}", 
+                neighbour.id(), unr, 
+                neighbour.roundtrip_adnl.load(atomic::Ordering::Relaxed),
+                neighbour.roundtrip_rldp.load(atomic::Ordering::Relaxed)
+            );
+//            unr -= min;
             if unr <= FAIL_UNRELIABILITY {
-                let mut w = 1 << ((FAIL_UNRELIABILITY - unr) / 10) as i64;
+                let w = (1 << (FAIL_UNRELIABILITY - unr)) as i64;
                 sum += w;
                 // gen_range(low, heigh): low < height
-                if sum - 1 == 0 {
-                    sum = sum + 1;
-                    w = w + 1;
-                }
-                if rng.gen_range(0, sum - 1) <= w - 1 {
+//                if sum - 1 == 0 {
+//                    sum = sum + 1;
+//                    w = w + 1;
+//                }
+                if rng.gen_range(0, sum) < w {
                     best = Some(neighbour.clone());
                 }
             }
         }
-
+                                     
+        if let Some(best) = &best { 
+            log::trace!("Selected neighbour {}", best.id);
+        } else {
+            log::trace!("Selected neighbour None");
+        }
         Ok(best)
     }
 
-    pub fn update_neighbour_stats(&self, peer: &Arc<KeyId>, t: &Duration, success: bool) -> Result<()> {
+    pub fn update_neighbour_stats(
+        &self, 
+        peer: &Arc<KeyId>, 
+        t: &Duration, 
+        success: bool,
+        is_rldp: bool
+    ) -> Result<()> {
         log::trace!("update_neighbour_stats");
         let it = &self.peers.get(peer);
 
         if let Some(neightbour) = it {
             if success {
-                neightbour.query_success(t);
+                neightbour.query_success(t, is_rldp);
             } else {
-                neightbour.query_failed();
+                neightbour.query_failed(t, is_rldp);
             }
         }
         log::trace!("/update_neighbour_stats");
         Ok(())
     }
 
-    pub fn got_neighbour_capabilities(&self, peer: &Arc<KeyId>, t: &Duration, capabilities: &Capabilities) -> Result<()> {
+    pub fn got_neighbour_capabilities(
+        &self, 
+        peer: &Arc<KeyId>, 
+        t: &Duration, 
+        capabilities: &Capabilities
+    ) -> Result<()> {
         if let Some(it) = &self.peers.get(peer) {
             log::trace!("got_neighbour_capabilities: capabilities: {:?}", capabilities);
             log::trace!("got_neighbour_capabilities: t: {:?}", t);
             it.update_proto_version(capabilities);
-            it.update_roundtrip(t);
+//            it.update_roundtrip(t);
         } else {
             log::trace!("got_neighbour_capabilities: self.identificators not contains peer");
         }
@@ -348,84 +454,93 @@ impl Neighbours {
         Ok(())
     }
 
-    pub async fn ping_neighbours(&self) -> Result<()> {
-        log::trace!("ping neighbours");
+    pub async fn ping_neighbours(self: &Arc<Self>) -> Result<()> {
         let count = self.peers.count();
-        log::trace!("neigbours count : {}", count);
         if count == 0 {
-            return Ok(());
+            fail!("No peers in overlay {}", self.overlay_id)
+        } else {
+            log::trace!("neighbours: overlay {} count {}", self.overlay_id, count);
+         }
+        let max_count = if count < 6 {
+            count
+        } else {
+            6
+        };
+        let (wait, mut queue_reader) = Wait::new();
+        loop {
+            let peer = self.peers.next_for_ping(&self.start)?;
+            let last = self.start.elapsed().as_millis() as u64 - peer.last_ping();
+            if last < 1000 {
+                tokio::time::delay_for(Duration::from_millis(1000-last)).await;
+            } else {
+                tokio::time::delay_for(Duration::from_millis(10)).await;
+            }
+            let self_cloned = self.clone();
+            let wait_cloned = wait.clone();
+            let mut count = wait.request();
+            tokio::spawn(
+                async move {
+                    if let Err(e) = self_cloned.update_capabilities(peer).await {
+                        log::warn!("ERROR: {}", e)
+                    }
+                    wait_cloned.respond(Some(())); 
+                }
+            );
+            while count >= max_count {
+                wait.wait(&mut queue_reader, false).await;
+                count -= 1;     
+            }
         }
-        let mut max_cnt = 6;
-
-        if max_cnt > count{
-            max_cnt = count;
-        }
+/*
+        let total_now = Instant::now();
         while max_cnt > 0 {
             let peer = self.peers.next_for_ping()?;
-            let now = std::time::Instant::now();
-            let capabilities = self.get_capabilities(&peer.id, ATTEMPTS).await;
+            let now = Instant::now();
+            let capabilities = self.get_capabilities(&peer.id).await;
             let t = now.elapsed();
             match capabilities {
                 Ok(cap) => {
                     self.update_neighbour_stats(&peer.id, &t, true)?;
+println!("Good caps {}: {}", peer.id, self.overlay_id);
                     self.got_neighbour_capabilities(&peer.id, &t, &cap)?;
                 }
                 Err(_e) => {
+println!("Bad caps {}: {}", peer.id, self.overlay_id);
                     self.update_neighbour_stats(&peer.id, &t, false)?;
                 }
             }
             max_cnt = max_cnt - 1;
         };
-        Ok(())
+        let ret = total_now.elapsed();
+        log::trace!("neighbours pinged: overlay {} time {}", self.overlay_id, ret.as_millis());
+        Ok(ret)
+*/
     }
-
-    async fn send_query<T: BoxedSerialize, D: BoxedDeserialize>(
-        &self,
-        peer: &Arc<KeyId>,
-        request: T,
-        attempts: u32
-    ) -> Result<D> {
-        let res = self.send_data_query(request, peer, attempts).await?;
-        Ok(Deserializer::new(&mut Cursor::new(res)).read_boxed()?)
-    }
-
-    async fn send_data_query<T: BoxedSerialize>(
-        &self,
-        request: T,
-        peer: &Arc<KeyId>,
-        attempts: u32
-    ) -> Result<Vec<u8>> {
-        let mut query = self.overlay.get_query_prefix(&self.overlay_id)?;
-        serialize_append(&mut query, &request)?;
-        let data = Arc::new(query);
-
-        'attempts: for _ in 0..attempts {
-            
-            let res = self.overlay.query_via_rldp(
-                &self.rldp,
-                peer,
-                &data,
-                Some(10 * 1024 * 1024)
-            ).await?;
-
-            if let Some(res) = res {
-                return Ok(res)
-            } else {
-                continue 'attempts;
+                                                                            
+    async fn update_capabilities(self: Arc<Self>, peer: Arc<Neighbour>) -> Result<()> {
+        let now = Instant::now();
+        peer.set_last_ping(self.start.elapsed().as_millis() as u64); 
+        let query = TLObject::new(GetCapabilities);
+log::trace!("Query capabilities from {} {}", peer.id, self.overlay_id);
+        match self.overlay.query(&peer.id, &query, &self.overlay_id, None).await {
+            Ok(Some(answer)) => {
+                let caps: Capabilities = Query::parse(answer, &query)?;
+                log::trace!("Got capabilities from {} {}: {:?}", peer.id, self.overlay_id, caps);
+                let elapsed = now.elapsed();
+                self.update_neighbour_stats(&peer.id, &elapsed, true, false)?;
+log::trace!("Good caps {}: {}", peer.id, self.overlay_id);
+                self.got_neighbour_capabilities(&peer.id, &elapsed, &caps)?;
+                Ok(())
+            },
+            _ => {
+log::trace!("Bad caps {}: {}", peer.id, self.overlay_id);
+                let elapsed = now.elapsed();
+                self.update_neighbour_stats(&peer.id, &elapsed, false, false)?;
+                fail!("Capabilities were not received from {}", peer.id);
             }
         }
-        failure::bail!("Data was not downloaded after {} attempts!", attempts);
     }
 
-    async fn get_capabilities(&self, peer: &Arc<KeyId>, attempts: u32) -> Result<Capabilities> {
-        Ok(
-            self.send_query(
-                peer,
-                GetCapabilities {},
-                attempts
-            ).await?
-        )
-    }
 }
 
 #[derive(Clone)]
@@ -447,7 +562,7 @@ impl NeighboursCache {
         self.cache.insert(peer)
     }
 
-    pub fn count(&self) -> u32 {
+    pub fn count(&self) -> usize {
         self.cache.count()
     }
 
@@ -455,12 +570,16 @@ impl NeighboursCache {
         self.cache.get(peer)
     }
 
-    pub fn next_for_ping(&self) -> Result<Arc<Neighbour>> {
-        self.cache.next_for_ping()
+    pub fn next_for_ping(&self, start: &Instant) -> Result<Arc<Neighbour>> {
+        self.cache.next_for_ping(start)
     }
 
     pub fn replace(&self, old: &Arc<KeyId>, new: Arc<KeyId>) -> Result<bool> {
         self.cache.replace(old, new)
+    }
+
+    fn insert_ex(&self, peer: Arc<KeyId>, silent_insert: bool) -> Result<bool> {
+        self.cache.insert_ex(peer, silent_insert)
     }
 
     pub fn get_iter(&self) -> NeighboursCacheIterator {
@@ -486,7 +605,7 @@ impl NeighboursCacheCore {
 
         let mut index = 0;
         for peer in start_peers.iter() {
-            if index < MAX_NEIGHTBOURS {
+            if index < MAX_NEIGHBOURS {
                 instance.insert(peer.clone())?;
                 index = index + 1;
             }
@@ -504,8 +623,8 @@ impl NeighboursCacheCore {
         Ok(status)
     }
 
-    pub fn count(&self) -> u32 {
-        self.count.load(atomic::Ordering::Relaxed)
+    pub fn count(&self) -> usize {
+        self.count.load(atomic::Ordering::Relaxed) as usize
     }
 
     pub fn get(&self, peer: &Arc<KeyId>) -> Option<Arc<Neighbour>> {
@@ -518,38 +637,51 @@ impl NeighboursCacheCore {
         result
     }
 
-    pub fn next_for_ping(&self) -> Result<Arc<Neighbour>> {
+    pub fn next_for_ping(&self, start: &Instant) -> Result<Arc<Neighbour>> {
         let mut next = self.next.load(atomic::Ordering::Relaxed);
         let count = self.count.load(atomic::Ordering::Relaxed);
-        for _ in 0..5 {
-
-            let id = if let Some(key_id) = &self.indices.get(&next) {
-                key_id.val().clone()
+        let started_from = next;
+        let mut ret: Option<Arc<Neighbour>> = None;
+        loop {
+            let key_id = if let Some(key_id) = self.indices.get(&next) {
+                key_id
             } else {
-                fail!("index neighbour not found!");
+                fail!("Neighbour index is not found!");
             };
-
-            if let Some(neighbour) = &self.values.get(&id) {
+            if let Some(neighbour) = self.values.get(key_id.val()) {
                 next = if next == count - 1 {
                     0   // ping cyclically
                 } else {
                     next + 1
                 };
-
                 self.next.store(next, atomic::Ordering::Relaxed);
-                return Ok(neighbour.val().clone());
-            }else {
+                let neighbour = neighbour.val();
+                if start.elapsed().as_millis() as u64 - neighbour.last_ping() < 1000 {
+                    // Pinged recently
+                    if next == started_from {
+                        break
+                    } else {
+                        if let Some(ret) = &mut ret {
+                            if neighbour.last_ping() >= ret.last_ping() {
+                                continue
+                            }
+                        }
+                    }
+                }
+                ret.replace(neighbour.clone());
+            } else {
                 // Value has been updated. Repeat step
-                continue;
+                continue
             }
+            break
         }
-
-        fail!("neighbours cache is fail!")
+        let ret = ret.ok_or_else(|| error!("No neighbours available"))?;
+        Ok(ret)
     }
 
     fn insert_ex(&self, peer: Arc<KeyId>, silent_insert: bool) -> Result<bool> {
         let count = self.count.load(atomic::Ordering::Relaxed);
-        if !silent_insert && count >= MAX_NEIGHTBOURS {
+        if !silent_insert && (count >= MAX_NEIGHBOURS as u32) {
             failure::bail!("NeighboursCache overflow!");
         }
 
@@ -563,7 +695,7 @@ impl NeighboursCacheCore {
             } else {
                 if !silent_insert {
                     index = self.count.fetch_add(1, atomic::Ordering::Relaxed);
-                    if index >= MAX_NEIGHTBOURS {
+                    if index >= MAX_NEIGHBOURS as u32 {
                         self.count.fetch_sub(1, atomic::Ordering::Relaxed);
                         is_overflow = true;
                     }

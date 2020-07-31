@@ -7,7 +7,7 @@ use crate::{
 
 use std::{ops::Deref, sync::Arc};
 use ton_types::Result;
-use ton_block::{BlockIdExt};
+use ton_block::{BlockIdExt, AccountIdPrefixFull};
 
 pub async fn apply_block(handle: &BlockHandle, block: &BlockStuff, engine: &Arc<dyn EngineOperations>) -> Result<()> {
 
@@ -16,9 +16,9 @@ pub async fn apply_block(handle: &BlockHandle, block: &BlockStuff, engine: &Arc<
     check_prev_blocks(&prev_ids, engine).await?;
 
     let shard_state = if handle.state_inited() {
-        engine.load_state(&handle).await?
+        engine.load_state(handle.id()).await?
     } else {
-        calc_shard_state(handle, block, &prev_ids, engine.deref()).await?
+        calc_shard_state(handle, block, &prev_ids, engine).await?
     };
 
     set_next_prev_ids(&handle, block.id(), &prev_ids, engine.deref()).await?;
@@ -69,18 +69,18 @@ pub async fn calc_shard_state(
     handle: &BlockHandle,
     block: &BlockStuff,
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
-    engine: &dyn EngineOperations
+    engine: &Arc<dyn EngineOperations>
 ) -> Result<ShardStateStuff> {
     log::trace!("wait_shard_state: block: {}", block.id());
 
     let prev_ss_root = match prev_ids {
         (prev1, Some(prev2)) => {
-            let ss1 = engine.load_state(engine.load_block_handle(&prev1)?.deref()).await?;
-            let ss2 = engine.load_state(engine.load_block_handle(&prev2)?.deref()).await?;
+            let ss1 = engine.load_state(&prev1).await?;
+            let ss2 = engine.load_state(&prev2).await?;
             ShardStateStuff::construct_split_root(ss1, ss2)?
         },
         (prev, None) => {
-            engine.load_state(engine.load_block_handle(&prev)?.deref()).await?
+            engine.load_state(&prev).await?
                 .root_cell()
                 .clone()
         }
@@ -101,9 +101,14 @@ pub async fn calc_shard_state(
 
     engine.store_state(handle, &ss).await?;
 
-    // if block.is_key_block()? {
-    //     self.db.store_shard_state_persistent(&ss)?;
-    // }
+    if block.is_key_block()? {
+        let prev_key_block_seqno = block.block().read_info()?.prev_key_block_seqno();
+        let mc_pfx = AccountIdPrefixFull::any_masterchain();
+        let prev_key_block_handle = engine.find_block_by_seq_no(&mc_pfx, prev_key_block_seqno).await?;
+        if engine.is_persistent_state(handle.gen_utime()?, prev_key_block_handle.gen_utime()?) {
+            engine.clone().store_persistent_state(ss.clone()).await?;
+        }
+    }
 
     Ok(ss)
 }

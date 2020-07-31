@@ -1,13 +1,25 @@
 use crate::{
-    network::node_network::FullNodeOverlayClient,
+    network::full_node_client::{Attempts, FullNodeOverlayClient},
     shard_state::ShardStateStuff
 };
 
+#[cfg(not(feature = "local_test"))]
 use std::{ sync::{Arc, atomic::{AtomicUsize, Ordering}} };
-use ton_block::{BlockIdExt};
-use ton_types::{Result};
-use ton_types::fail;
 
+use ton_block::{BlockIdExt};
+use ton_types::{fail, Result};
+
+#[cfg(feature = "local_test")]
+pub async fn download_persistent_state(
+    id: &BlockIdExt,
+    master_id: &BlockIdExt,
+    overlay: &dyn FullNodeOverlayClient
+) -> Result<ShardStateStuff> {
+    let bytes = overlay.download_persistent_state_part(id, master_id, 0, 0, 0, None).await?.0;
+    ShardStateStuff::deserialize(id.clone(), &bytes)
+}
+
+#[cfg(not(feature = "local_test"))]
 pub async fn download_persistent_state(
     id: &BlockIdExt,
     master_id: &BlockIdExt,
@@ -16,7 +28,11 @@ pub async fn download_persistent_state(
 
     if id.seq_no == 0 {
         loop {
-            match overlay.download_zero_state(id, 3).await {
+            let attempts = Attempts {
+                limit: 3,
+                count: 0
+            };
+            match overlay.download_zero_state(id, &attempts).await {
                 Err(e) => log::warn!("Can't load zerostate {}: {:?}", id, e),
                 Ok(None) => log::warn!("Can't load zerostate {}: none returned", id),
                 Ok(Some(zs)) => return Ok(zs)
@@ -25,9 +41,17 @@ pub async fn download_persistent_state(
     }
 
     // Check
-    if !overlay.check_persistent_state(id, master_id, 100).await? { // TODO master block id???
-        fail!("download_persistent_state: state not found!")
-    }
+    let peer = loop {
+        let attempts = Attempts {
+            limit: 100,
+            count: 0
+        };
+        match overlay.check_persistent_state(id, master_id, &attempts).await {
+            Err(e) => log::trace!("check_persistent_state {}: {}", id.shard(), e),
+            Ok((false, _)) => log::trace!("download_persistent_state {}: state not found!", id.shard()),
+            Ok((true, peer)) => break peer,
+        }
+    };
 
     // Download
     log::trace!("download_persistent_state: start: id: {}, master_id: {}", id, master_id);
@@ -39,23 +63,29 @@ pub async fn download_persistent_state(
     let mut download_futures = vec!();
     let total_size = Arc::new(AtomicUsize::new(usize::max_value()));
     let errors = Arc::new(AtomicUsize::new(0));
-    let threads = 40;
+    let threads = 3;
 
     for _ in 0..threads {
         let parts = parts.clone();
         let total_size = total_size.clone();
         let errors = errors.clone();
+        let peer = peer.clone();
         download_futures.push(async move {
-            let mut attempts = 0_u32;
+            let mut attempts = Attempts {
+                limit: 0,
+                count: 0
+            };
             loop {
 
                 if offset >= total_size.load(Ordering::Relaxed) {
                     return Ok(());
                 }
 
-                match overlay.download_persistent_state_part(id, master_id, offset, max_size, 1).await {
+                match overlay.download_persistent_state_part(
+                    id, master_id, offset, max_size, Some(peer.clone()), &attempts
+                ).await {
                     Ok(next_bytes) => {
-                        attempts = 0;
+                        attempts.count = 0;
                         let len = next_bytes.len();
                         parts.insert(offset, next_bytes);
                         //if (offset / max_size) % 10 == 0 {
@@ -69,11 +99,14 @@ pub async fn download_persistent_state(
                     },
                     Err(e) => {
                         errors.fetch_add(1, Ordering::SeqCst);
-                        attempts += 1;
+                        attempts.count += 1;
                         log::error!("download_persistent_state_part {}: {}, attempt: {}, total errors: {}",
-                            id.shard(), e, attempts, errors.load(Ordering::Relaxed));
-                        if attempts > 65536 {
-                            failure::bail!("Error download_persistent_state_part after {} attempts : {}", attempts, e);
+                            id.shard(), e, attempts.count, errors.load(Ordering::Relaxed));
+                        if attempts.count > 100 {
+                            fail!(
+                                "Error download_persistent_state_part after {} attempts : {}", 
+                                attempts.count, e
+                            )
                         }
                         futures_timer::Delay::new(
                             std::time::Duration::from_millis(

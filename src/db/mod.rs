@@ -6,19 +6,19 @@ use crate::{
 };
 
 use std::{
-    path::Path, sync::Arc, sync::atomic::{AtomicU32, Ordering}
+    path::Path, sync::Arc, cmp::max
 };
-use ton_block::{BlockIdExt, BlockInfo, AccountIdPrefixFull};
+use ton_block::{BlockIdExt, AccountIdPrefixFull};
 use ton_node_storage::{
-    block_db::BlockDb, block_info_db::BlockInfoDb, 
-    node_state_db::NodeStateDb, shardstate_db::ShardStateDb,
+    block_db::BlockDb, block_info_db::BlockInfoDb, shardstate_persistent_db::ShardStatePersistentDb,
+    node_state_db::NodeStateDb, shardstate_db::ShardStateDb, shardstate_db,
     db::{rocksdb::RocksDb, traits::{KvcWriteable, DbKey}},
 };
 use ton_types::{error, fail, Result};
 
-#[cfg(test)]
-#[path = "tests/test_db.rs"]
-mod tests;
+pub mod block_handle;
+pub use block_handle::BlockHandle;
+
 
 pub trait NodeState: serde::Serialize + serde::de::DeserializeOwned {
     fn get_key() -> &'static str;
@@ -35,7 +35,7 @@ pub trait NodeState: serde::Serialize + serde::de::DeserializeOwned {
 #[macro_export]
 macro_rules! define_db_prop {
     ($name:ident, $key:literal, $type:ty) => {
-        #[derive(serde::Serialize, serde::Deserialize)]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct $name(pub $type);
         impl NodeState for $name {
             fn get_key() -> &'static str { $key }
@@ -43,143 +43,13 @@ macro_rules! define_db_prop {
     };
 }
 
-const FLAG_DATA: u32 = 1;
-const FLAG_PROOF: u32 = 1 << 1;
-const FLAG_PROOF_LINK: u32 = 1 << 2;
-const FLAG_EXT_DB: u32 = 1 << 3;
-const FLAG_STATE: u32 = 1 << 4;
-const FLAG_PERSISTENT_STATE: u32 = 1 << 5;
-const FLAG_NEXT_1: u32 = 1 << 6;
-const FLAG_NEXT_2: u32 = 1 << 7;
-const FLAG_PREV_1: u32 = 1 << 8;
-const FLAG_PREV_2: u32 = 1 << 9;
-const FLAG_APPLIED: u32 = 1 << 10;
-const FLAG_KEY_BLOCK: u32 = 1 << 11;
-
-/// Meta information related to block
-#[derive(Default)]
-pub struct BlockHandle {
-    id: BlockIdExt,
-    flags: AtomicU32,
-    gen_utime: AtomicU32,
-}
-
-impl BlockHandle {
-
-    pub fn new(id: &BlockIdExt) -> Self {
-        let mut res = Self::default();
-        res.id = id.clone();
-        res
-    }
-
-    pub fn with_data(id: &BlockIdExt, data: &[u8]) -> Result<Self> {
-        let mut gen_utime = 0;
-        let flags = match data.len() {
-            1 => data[0] as u32,
-            4 => u32::from_le_bytes(arrayref::array_ref!(&data, 0, 4).clone()),
-            8 => {
-                gen_utime = u32::from_le_bytes(arrayref::array_ref!(&data, 4, 4).clone());
-                u32::from_le_bytes(arrayref::array_ref!(&data, 0, 4).clone())
-            }
-            _ => fail!(NodeError::InvalidData("wrong data length".to_string()))
-        };
-        Ok(Self {
-            id: id.clone(),
-            flags: AtomicU32::new(flags),
-            gen_utime: AtomicU32::new(gen_utime),
-
-        })
-    }
-
-    pub fn serialize(&self) -> Vec<u8> {
-        let mut data = self.flags.load(Ordering::SeqCst).to_le_bytes().to_vec();
-        data.extend_from_slice(&self.flags.load(Ordering::SeqCst).to_le_bytes());
-        data
-    }
-
-    // This flags might be set into true only. So flush only after transform false -> true.
-
-    fn fetch_info(&self, info: &BlockInfo) -> Result<()> {
-        self.gen_utime.store(info.gen_utime().0, Ordering::SeqCst);
-        if info.key_block() {
-            self.flags.fetch_or(FLAG_KEY_BLOCK, Ordering::SeqCst);
-        }
-        Ok(())
-    }
-    pub(self) fn set_data_inited(&self, block: &BlockStuff) -> Result<()> {
-        self.fetch_info(&block.block().read_info()?)?;
-        self.flags.fetch_or(FLAG_DATA, Ordering::SeqCst);
-        Ok(())
-    }
-    pub(self) fn set_proof_inited(&self, proof: &BlockProofStuff) -> Result<()> {
-        self.fetch_info(&proof.virtualize_block()?.0.read_info()?)?;
-        self.flags.fetch_or(FLAG_PROOF, Ordering::SeqCst);
-        Ok(())
-    }
-    pub(self) fn set_proof_link_inited(&self, proof: &BlockProofStuff) -> Result<()> {
-        self.fetch_info(&proof.virtualize_block()?.0.read_info()?)?;
-        self.flags.fetch_or(FLAG_PROOF, Ordering::SeqCst);
-        Ok(())
-    }
-    pub(self) fn set_processed_in_ext_db(&self) {
-        self.flags.fetch_or(FLAG_EXT_DB, Ordering::SeqCst);
-    }
-    pub(self) fn set_state_inited(&self) {
-        self.flags.fetch_or(FLAG_STATE, Ordering::SeqCst);
-    }
-    pub(self) fn set_persistent_state_inited(&self) {
-        self.flags.fetch_or(FLAG_PERSISTENT_STATE, Ordering::SeqCst);
-    }
-    pub(self) fn set_next1_inited(&self) {
-        self.flags.fetch_or(FLAG_NEXT_1, Ordering::SeqCst);
-    }
-    pub(self) fn set_next2_inited(&self) {
-        self.flags.fetch_or(FLAG_NEXT_2, Ordering::SeqCst);
-    }
-    pub(self) fn set_prev1_inited(&self) {
-        self.flags.fetch_or(FLAG_PREV_1, Ordering::SeqCst);
-    }
-    pub(self) fn set_prev2_inited(&self) {
-        self.flags.fetch_or(FLAG_PREV_2, Ordering::SeqCst);
-    }
-    pub(self) fn set_applied(&self) {
-        self.flags.fetch_or(FLAG_APPLIED, Ordering::SeqCst);
-    }
-
-    pub fn id(&self) -> &BlockIdExt { &self.id }
-    pub fn data_inited(&self) -> bool { (self.flags.load(Ordering::SeqCst) & FLAG_DATA) != 0 }
-    pub fn proof_inited(&self) -> bool { (self.flags.load(Ordering::SeqCst) & FLAG_PROOF) != 0 }
-    pub fn proof_link_inited(&self) -> bool { (self.flags.load(Ordering::SeqCst) & FLAG_PROOF_LINK) != 0 }
-    pub fn processed_in_ext_db(&self) -> bool { (self.flags.load(Ordering::SeqCst) & FLAG_EXT_DB) != 0 }
-    pub fn state_inited(&self) -> bool { (self.flags.load(Ordering::SeqCst) & FLAG_STATE) != 0 }
-    pub fn persistent_state_inited(&self) -> bool { (self.flags.load(Ordering::SeqCst) & FLAG_PERSISTENT_STATE) != 0 }
-    pub fn next1_inited(&self) -> bool { (self.flags.load(Ordering::SeqCst) & FLAG_NEXT_1) != 0 }
-    pub fn next2_inited(&self) -> bool { (self.flags.load(Ordering::SeqCst) & FLAG_NEXT_2) != 0 }
-    pub fn prev1_inited(&self) -> bool { (self.flags.load(Ordering::SeqCst) & FLAG_PREV_1) != 0 }
-    pub fn prev2_inited(&self) -> bool { (self.flags.load(Ordering::SeqCst) & FLAG_PREV_2) != 0 }
-    pub fn applied(&self) -> bool { (self.flags.load(Ordering::SeqCst) & FLAG_APPLIED) != 0 }
-
-    pub fn gen_utime(&self) -> Result<u32> {
-        if self.data_inited() {
-            Ok(self.gen_utime.load(Ordering::Relaxed))
-        } else {
-            fail!("block data not inited yet")
-        }
-    }
-    pub fn is_key_block(&self) -> Result<bool> {
-        if self.data_inited() {
-            Ok((self.flags.load(Ordering::Relaxed) & FLAG_KEY_BLOCK) != 0)
-        } else {
-            fail!("block data not inited yet")
-        }
-    }
-}
-
+#[async_trait::async_trait]
 pub trait InternalDb : Sync + Send {
     fn load_block_handle(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>>;
 
     fn store_block_data(&self, handle: &BlockHandle, block: &BlockStuff) -> Result<()>;
     fn load_block_data(&self, id: &BlockIdExt) -> Result<BlockStuff>;
+    fn load_block_data_raw(&self, id: &BlockIdExt) -> Result<Vec<u8>>;
 
     fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seqno: u32) -> Result<Arc<BlockHandle>>;
     fn find_block_by_unix_time(&self, acc_pfx: &AccountIdPrefixFull, utime: u32) -> Result<Arc<BlockHandle>>;
@@ -187,12 +57,16 @@ pub trait InternalDb : Sync + Send {
 
     fn store_block_proof(&self, handle: &BlockHandle, proof: &BlockProofStuff) -> Result<()>;
     fn load_block_proof(&self, id: &BlockIdExt, is_link: bool) -> Result<BlockProofStuff>;
+    fn load_block_proof_raw(&self, id: &BlockIdExt, is_link: bool) -> Result<Vec<u8>>;
 
     fn store_shard_state_dynamic(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()>;
     fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<ShardStateStuff>;
+    fn gc_shard_state_dynamic_db(&self) -> Result<usize>;
 
-    fn store_shard_state_persistent(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()>;
-    fn load_shard_state_persistent(&self, id: &BlockIdExt) -> Result<ShardStateStuff>;
+    async fn store_shard_state_persistent(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()>;
+    async fn store_shard_state_persistent_raw(&self, handle: &BlockHandle, state_data: &Vec<u8>) -> Result<()>;
+    async fn load_shard_state_persistent_slice(&self, id: &BlockIdExt, offset: u64, length: u64) -> Result<Vec<u8>>;
+    async fn load_shard_state_persistent_size(&self, id: &BlockIdExt) -> Result<u64>;
 
     fn store_block_prev(&self, handle: &BlockHandle, prev: &BlockIdExt) -> Result<()>;
     fn load_block_prev(&self, id: &BlockIdExt) -> Result<BlockIdExt>;
@@ -232,7 +106,7 @@ impl DbKey for BlockSeqno {
 
 pub struct InternalDbImpl {
     block_db: BlockDb,
-    block_handle_db: BlockInfoDb,
+    block_handle_db: Arc<BlockInfoDb>,
     block_proof_db: BlockInfoDb,
     block_proof_link_db: BlockInfoDb,
     prev_block_db: BlockInfoDb,
@@ -240,19 +114,26 @@ pub struct InternalDbImpl {
     next_block_db: BlockInfoDb,
     next2_block_db: BlockInfoDb,
     node_state_db: NodeStateDb,
-    shard_state_persistent_db: BlockInfoDb,
+    shard_state_persistent_db: ShardStatePersistentDb,
     shard_state_dynamic_db: ShardStateDb,
     block_handle_cache: lockfree::map::Map<ton_api::ton::ton_node::blockidext::BlockIdExt, Arc<BlockHandle>>,
     mc_blocks_id_index: Box<dyn KvcWriteable<BlockSeqno>>,
     //ss_test_map: lockfree::map::Map<BlockIdExt, ShardStateStuff>,
+    shardstate_db_gc: shardstate_db::GC,
 }
 
 impl InternalDbImpl {
     pub fn new(config: InternalDbConfig) -> Result<Self> {
+        let block_handle_db = Arc::new(BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_handle_db")));
+        let shard_state_dynamic_db = ShardStateDb::with_paths(
+            &Self::build_name(&config.db_directory, "states_index_db"),
+            &Self::build_name(&config.db_directory, "cells_db")
+        );
+        let shardstate_db_gc = shardstate_db::GC::new(&shard_state_dynamic_db, Arc::clone(&block_handle_db));
         Ok(
             Self {
                 block_db: BlockDb::with_path(&Self::build_name(&config.db_directory, "block_db")),
-                block_handle_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_handle_db")),
+                block_handle_db,
                 block_proof_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_proof_db")),
                 block_proof_link_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_proof_link_db")),
                 prev_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "prev1_block_db")),
@@ -260,14 +141,13 @@ impl InternalDbImpl {
                 next_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "next1_block_db")),
                 next2_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "next2_block_db")),
                 node_state_db: NodeStateDb::with_path(&Self::build_name(&config.db_directory, "node_state_db")),
-                shard_state_persistent_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "shard_state_persistent_db")),
-                shard_state_dynamic_db: ShardStateDb::with_paths(
-                    &Self::build_name(&config.db_directory, "states_index_db"),
-                    &Self::build_name(&config.db_directory, "cells_db")
-                ),
+                shard_state_persistent_db: ShardStatePersistentDb::with_path(
+                    &Self::build_name(&config.db_directory, "shard_state_persistent_db")),
+                shard_state_dynamic_db,
                 block_handle_cache: lockfree::map::Map::new(),
                 mc_blocks_id_index: Box::new(RocksDb::with_path(&Self::build_name(&config.db_directory, "mc_blocks_id_index"))),
                 //ss_test_map: lockfree::map::Map::new(),
+                shardstate_db_gc,
             }
             // Self {
             //     block_db: BlockDb::in_memory(),
@@ -348,6 +228,7 @@ impl InternalDbImpl {
     }
 }
 
+#[async_trait::async_trait]
 impl InternalDb for InternalDbImpl {
 
     fn load_block_handle(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>> {
@@ -377,13 +258,14 @@ impl InternalDb for InternalDbImpl {
 
     fn load_block_data(&self, id: &BlockIdExt) -> Result<BlockStuff> {
         log::trace!("load_block_data {}", id);
+        let raw_block = self.load_block_data_raw(id)?;
+        BlockStuff::deserialize(id.clone(), raw_block.to_vec())
+    }
+
+    fn load_block_data_raw(&self, id: &BlockIdExt) -> Result<Vec<u8>> {
+        log::trace!("load_block_data_raw {}", id);
         let raw_block = self.block_db.get(&id.into())?;
-        let block = BlockStuff::deserialize(&raw_block)?;
-        if block.id() != id {
-            fail!(NodeError::InvalidData("Downloaded block has invalid id".to_string()))
-        } else {
-            Ok(block)
-        }
+        Ok(raw_block.to_vec())
     }
 
     fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seq_no: u32) -> Result<Arc<BlockHandle>> {
@@ -408,37 +290,45 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn store_block_proof(&self, handle: &BlockHandle, proof: &BlockProofStuff) -> Result<()> {
-        log::trace!("store_block_proof {}", proof.id());
+        if !cfg!(feature = "local_test") {
+            log::trace!("store_block_proof {}", proof.id());
 
-        if handle.id() != proof.id() {
-            fail!(NodeError::InvalidArg("`proof` and `handle` mismatch".to_string()))
-        }
-
-        if proof.is_link() {
-            if !handle.proof_link_inited() {
-                self.block_proof_link_db.put(&proof.id().into(), &proof.serialize()?)?;
-                handle.set_proof_link_inited(proof)?;
-                self.store_block_handle(handle)?;
+            if handle.id() != proof.id() {
+                fail!(NodeError::InvalidArg("`proof` and `handle` mismatch".to_string()))
             }
-        } else {
-            if !handle.proof_inited() {
-                self.block_proof_db.put(&proof.id().into(), &proof.serialize()?)?;
-                handle.set_proof_inited(proof)?;
-                self.store_block_handle(handle)?;
+
+            if proof.is_link() {
+                if !handle.proof_link_inited() {
+                    self.block_proof_link_db.put(&proof.id().into(), proof.data())?;
+                    handle.set_proof_link_inited(proof)?;
+                    self.store_block_handle(handle)?;
+                }
+            } else {
+                if !handle.proof_inited() {
+                    self.block_proof_db.put(&proof.id().into(), proof.data())?;
+                    handle.set_proof_inited(proof)?;
+                    self.store_block_handle(handle)?;
+                }
             }
         }
         Ok(())
     }
 
     fn load_block_proof(&self, id: &BlockIdExt, is_link: bool) -> Result<BlockProofStuff> {
-        log::trace!("load_block_proof {}", id);
+        log::trace!("load_block_proof {} {}", if is_link {"link"} else {""}, id);
+        let raw_proof = self.load_block_proof_raw(id, is_link)?;
+        let proof = BlockProofStuff::deserialize(id, raw_proof, is_link)?;
+        Ok(proof)
+    }
+
+    fn load_block_proof_raw(&self, id: &BlockIdExt, is_link: bool) -> Result<Vec<u8>> {
+        log::trace!("load_block_proof_raw {} {}", if is_link {"link"} else {""}, id);
         let raw_proof = if is_link {
             self.block_proof_link_db.get(&id.into())?
         } else {
             self.block_proof_db.get(&id.into())?
         };
-        let proof = BlockProofStuff::deserialize(id, &raw_proof, is_link)?;
-        Ok(proof)
+        Ok(raw_proof.to_vec())
     }
 
     fn store_shard_state_dynamic(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()> {
@@ -450,6 +340,7 @@ impl InternalDb for InternalDbImpl {
             self.shard_state_dynamic_db.put(&state.block_id().into(), state.root_cell().clone())?;
             //self.ss_test_map.insert(state.block_id().clone(), state.clone());
 
+            handle.set_gen_utime(state.shard_state().gen_time())?;
             handle.set_state_inited();
             self.store_block_handle(handle)?;
         }
@@ -463,24 +354,47 @@ impl InternalDb for InternalDbImpl {
         //Ok(self.ss_test_map.get(id).ok_or_else(|| error!("no state found"))?.val().clone()
     }
 
-    fn store_shard_state_persistent(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()> {
+    async fn store_shard_state_persistent(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()> {
         log::trace!("store_shard_state_persistent {}", state.block_id());
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
         if !handle.persistent_state_inited() {
-            self.shard_state_persistent_db.put(&state.block_id().into(), &state.serialize()?)?;
+            self.shard_state_persistent_db.put(&state.block_id().into(), &state.serialize()?).await?;
             handle.set_persistent_state_inited();
             self.store_block_handle(handle)?;
         }
         Ok(())
     }
 
-    fn load_shard_state_persistent(&self, id: &BlockIdExt) -> Result<ShardStateStuff>{
-        log::trace!("load_shard_state_persistent {}", id);
-        let raw_state = self.shard_state_persistent_db.get(&id.into())?;
-        let state = ShardStateStuff::deserialize(id.clone(), &raw_state)?;
-        Ok(state)
+    async fn store_shard_state_persistent_raw(&self, handle: &BlockHandle, state_data: &Vec<u8>) -> Result<()> {
+        log::trace!("store_shard_state_persistent_raw {}", handle.id());
+        if !handle.persistent_state_inited() {
+            self.shard_state_persistent_db.put(&handle.id().into(), state_data).await?;
+            handle.set_persistent_state_inited();
+            self.store_block_handle(handle)?;
+        }
+        Ok(())
+    }
+
+    async fn load_shard_state_persistent_slice(&self, id: &BlockIdExt, offset: u64, length: u64) -> Result<Vec<u8>> {
+        log::trace!("load_shard_state_persistent_slice {}", id);
+        let full_lenth = self.load_shard_state_persistent_size(id).await?;
+        if offset > full_lenth {
+            fail!("offset is greater than full length");
+        }
+        if offset == full_lenth {
+            Ok(vec![])
+        } else {
+            let length = max(length, full_lenth - offset);
+            let db_slice = self.shard_state_persistent_db.get_slice(&id.into(), offset, length).await?;
+            Ok(db_slice.to_vec())
+        }
+    }
+
+    async fn load_shard_state_persistent_size(&self, id: &BlockIdExt) -> Result<u64> {
+        log::trace!("load_shard_state_persistent_slice {}", id);
+        self.shard_state_persistent_db.get_size(&id.into()).await
     }
 
     fn store_block_prev(&self, handle: &BlockHandle, prev: &BlockIdExt) -> Result<()> {
@@ -571,7 +485,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn store_block_processed_in_ext_db(&self, handle: &BlockHandle) -> Result<()> {
-        log::trace!("store_block_processed_in_ext_db {}", handle.id);
+        log::trace!("store_block_processed_in_ext_db {}", handle.id());
         if !handle.processed_in_ext_db() {
             handle.set_processed_in_ext_db();
             self.store_block_handle(handle)?;
@@ -589,5 +503,9 @@ impl InternalDb for InternalDbImpl {
         log::trace!("load_node_state {}", key);
         let value = self.node_state_db.get(&key)?;
         Ok(value.as_ref().to_vec()) // TODO try not to copy
+    }
+
+    fn gc_shard_state_dynamic_db(&self) -> Result<usize> {
+        self.shardstate_db_gc.collect()
     }
 }

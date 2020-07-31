@@ -1,11 +1,8 @@
 use std::{
-    sync::{Arc, atomic::AtomicBool, atomic::Ordering},
+    sync::{Arc, atomic::AtomicBool, atomic::Ordering}, fmt::Display, hash::Hash, cmp::Ord
 };
 use ton_types::{Result, fail};
 
-#[cfg(test)]
-#[path = "tests/test_awaiters_pool.rs"]
-mod tests;
 
 struct OperationAwaiters<R> {
     pub is_started: AtomicBool,
@@ -25,14 +22,13 @@ impl<R: Clone> OperationAwaiters<R> {
     }
 }
 
-#[derive(Default)]
 pub struct AwaitersPool<I, R> {
     ops_awaiters: lockfree::map::Map<I, Arc<OperationAwaiters<R>>>,
 }
 
 impl<I, R> AwaitersPool<I, R> where
-    I: std::cmp::Ord + std::hash::Hash + std::clone::Clone,
-    R: std::clone::Clone,
+    I: Ord + Hash + Clone + Display,
+    R: Clone,
 {
     pub fn new() -> Self {
         Self {
@@ -40,31 +36,31 @@ impl<I, R> AwaitersPool<I, R> where
         }
     }
 
-    pub async fn do_or_wait(&self, id: &I, operation: impl futures::Future<Output = Result<R>>) -> Result<R> {
+    pub async fn do_or_wait(&self, id: &I, operation: impl futures::Future<Output = Result<R>>) -> Result<Option<R>> {
         loop {
             if let Some(op_awaiters) = self.ops_awaiters.get(id) {
                 if !op_awaiters.1.is_started.swap(true, Ordering::SeqCst) {
-                    return self.do_operation(id, operation, &op_awaiters.1).await
+                    return Ok(Some(self.do_operation(id, operation, &op_awaiters.1).await?))
                 } else {
-                    return self.wait_operation(&op_awaiters.1).await
+                    return self.wait_operation(id, &op_awaiters.1).await
                 }
             } else {
                 let new_awaiters = OperationAwaiters::new(true);
                 if self.try_insert_awaiters(id.clone(), new_awaiters.clone()) {
-                    return self.do_operation(id, operation, &new_awaiters).await
+                    return Ok(Some(self.do_operation(id, operation, &new_awaiters).await?))
                 }
             }
         }
     }
 
-    pub async fn wait(&self, id: &I) -> Result<R> {
+    pub async fn wait(&self, id: &I) -> Result<Option<R>> {
         loop {
             if let Some(op_awaiters) = self.ops_awaiters.get(id) {
-                return self.wait_operation(&op_awaiters.1).await
+                return self.wait_operation(id, &op_awaiters.1).await
             } else {
                 let new_awaiters = OperationAwaiters::new(false);
                 if self.try_insert_awaiters(id.clone(), new_awaiters.clone()) {
-                    return self.wait_operation(&new_awaiters).await
+                    return self.wait_operation(id, &new_awaiters).await
                 }
             }
         }
@@ -102,17 +98,20 @@ impl<I, R> AwaitersPool<I, R> where
         }
     }
 
-    async fn wait_operation(&self, op_awaiters: &OperationAwaiters<R>) -> Result<R> {
+    async fn wait_operation(&self, id: &I, op_awaiters: &OperationAwaiters<R>) -> Result<Option<R>> {
         if op_awaiters.is_finished.load(Ordering::SeqCst) {
-            unreachable!("AwaitersPool: op_awaiters.is_finished")
+            log::trace!("awaiters pool: wait_operation: is_finished {}", id);
+            return Ok(None)
         }
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         op_awaiters.awaiters.push(barrier.clone());
+        log::trace!("awaiters pool: wait_operation: waiting... {}", id);
         barrier.wait().await;
-        op_awaiters.results.pop().expect("AwaitersPool: op_awaiters.results is empty")
+        op_awaiters.results.pop().transpose()
     }
 
     async fn do_operation(&self, id: &I, operation: impl futures::Future<Output = Result<R>>, op_awaiters: &OperationAwaiters<R>) -> Result<R> {
+        log::trace!("awaiters pool: do_operation: doing... {}", id);
         let result = operation.await;
         op_awaiters.is_finished.store(true, Ordering::SeqCst);
         while let Some(barrier) = op_awaiters.awaiters.pop() {
@@ -123,6 +122,7 @@ impl<I, R> AwaitersPool<I, R> where
             barrier.wait().await;
         }
         self.ops_awaiters.remove(id).expect("AwaitersPool: ops_awaiters.remove returns None");
+        log::trace!("awaiters pool: do_operation: done {}", id);
         result
     }
 }

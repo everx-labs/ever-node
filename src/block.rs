@@ -1,11 +1,8 @@
 use sha2::Digest;
-use std::{io::{Write, Cursor}, collections::HashMap};
+use std::{io::{Write, Cursor}, collections::HashMap, sync::Arc};
 use ton_block::{Block, BlockIdExt, BlkPrevInfo, Deserializable, ShardIdent, ShardDescr};
-use ton_types::{Cell, Result, types::UInt256, deserialize_tree_of_cells, error};
+use ton_types::{Cell, Result, types::UInt256, deserialize_tree_of_cells, error, fail};
 
-#[cfg(test)]
-#[path = "tests/test_block.rs"]
-mod tests;
 
 /// It is a wrapper around various block's representations and properties.
 /// # Remark
@@ -16,7 +13,7 @@ pub struct BlockStuff {
     id: BlockIdExt,
     block: Block,
     root: Cell,
-    data: Vec<u8>,
+    data: Arc<Vec<u8>>, // Arc is used to make cloning more lightweight
 }
 
 impl BlockStuff {
@@ -36,27 +33,44 @@ impl BlockStuff {
     }
 */
 
-    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
-        let mut hasher = sha2::Sha256::new();
-        hasher.input(bytes);
-        let file_hash: [u8; 32] = hasher.result().into();
+    pub fn deserialize_checked(id: BlockIdExt, data: Vec<u8>) -> Result<Self> {
+        let file_hash = UInt256::from(sha2::Sha256::digest(&data).as_slice());
+        if id.file_hash() != &file_hash {
+            fail!("wrong file_hash for {}", id)
+        }
+        Self::deserialize(id, data)
+    }
 
-        let root = deserialize_tree_of_cells(&mut Cursor::new(bytes))?;
+    pub fn deserialize(id: BlockIdExt, data: Vec<u8>) -> Result<Self> {
+        let root = deserialize_tree_of_cells(&mut Cursor::new(&data))?;
+        if id.root_hash != root.repr_hash() {
+            fail!("wrong root hash for {}", id)
+        }
+        #[cfg(feature = "store_copy")]
+        {
+            let path = format!("./target/replication/blocks/{}", id.shard().shard_prefix_as_str_with_tag());
+            std::fs::create_dir_all(&path).ok();
+            std::fs::write(format!("{}/{}", path, id.seq_no()), &data).ok();
+        }
+        let block = Block::construct_from(&mut root.clone().into())?;
+        Ok(Self{ id, block, root, data: Arc::new(data), })
+    }
+
+    #[cfg(any(test, features = "local_test"))]
+    pub fn read_from_file(filename: &str) -> Result<Self> {
+        let data = std::fs::read(filename)?;
+        let file_hash = UInt256::from(sha2::Sha256::digest(&data).as_slice());
+
+        let root = deserialize_tree_of_cells(&mut Cursor::new(&data))?;
         let block = Block::construct_from(&mut root.clone().into())?;
         let block_info = block.read_info()?;
         let id = BlockIdExt {
             shard_id: *block_info.shard(),
             seq_no: block_info.seq_no(),
             root_hash: root.repr_hash(),
-            file_hash: file_hash.into(),
+            file_hash,
         };
-        Ok(Self{ id, block, root, data: bytes.to_owned(), })
-    }
-
-    #[cfg(test)]
-    pub fn read_from_file(filename: &str) -> Result<Self> {
-        let bytes = std::fs::read(filename)?;
-        Self::deserialize(&bytes)
+        Ok(Self{ id, block, root, data: Arc::new(data), })
     }
 
     pub fn block(&self) -> &Block { &self.block }
@@ -66,7 +80,6 @@ impl BlockStuff {
 
     pub fn shard(&self) -> &ShardIdent { self.id.shard() }
 
-    //#[cfg(feature = "external_db")]
     pub fn root_cell(&self) -> &Cell { &self.root }
 
     pub fn data(&self) -> &[u8] { &self.data }
@@ -134,7 +147,7 @@ impl BlockStuff {
 */
 
     pub fn shards_blocks(&self) -> Result<HashMap<ShardIdent, BlockIdExt>> {
-        let mut shardes = HashMap::new();
+        let mut shards = HashMap::new();
         self
             .block()
             .read_extra()?
@@ -148,11 +161,11 @@ impl BlockStuff {
                     root_hash: descr.root_hash,
                     file_hash: descr.file_hash
                 };
-                shardes.insert(ident, last_shard_block);
+                shards.insert(ident, last_shard_block);
                 Ok(true)
             })?;
 
-        Ok(shardes)
+        Ok(shards)
     }
 }
 
