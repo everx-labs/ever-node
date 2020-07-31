@@ -8,13 +8,28 @@ pub mod engine_traits;
 pub mod engine_operations;
 pub mod error;
 pub mod full_node;
+pub mod macros;
 pub mod network;
 pub mod shard_state;
 pub mod types;
+
+#[cfg(feature = "tracing")]
+pub mod jaeger;
+
+#[cfg(not(feature = "tracing"))]
+pub mod jaeger {
+    pub fn init_jaeger(){}
+    pub fn message_from_kafka_received(_kf_key: &[u8]) {}
+    pub fn broadcast_sended(_msg_id: String) {}
+}
+
+extern crate lazy_static;
+
 #[cfg(feature = "external_db")]
 mod external_db;
 
-use crate::{config::TonNodeConfig, engine_traits::ExternalDb};
+use crate::{config::TonNodeConfig, engine_traits::ExternalDb, engine::STATSD, jaeger::init_jaeger};
+use clap;
 
 #[cfg(feature = "external_db")]
 use ton_types::error;
@@ -68,39 +83,62 @@ fn log_version() {
 }
 
 #[cfg(feature = "external_db")]
-fn start_external_db() -> Result<Vec<Arc<dyn ExternalDb>>> {
-    let file = std::fs::File::open("kafka-config.json")
-        .map_err(|err| error!("Error reading kafka config: {}", err))?;
-    let reader = std::io::BufReader::new(file);
-    let kafka_config: external_db::ExternalDbConfig = serde_json::from_reader(reader)
-        .map_err(|err| error!("Error parsing kafka config: {}", err))?;
-    Ok(vec!(external_db::create_external_db(kafka_config)?))
+fn start_external_db(config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>> {
+    Ok(vec!(
+        external_db::create_external_db(
+            config.external_db_config().ok_or_else(|| error!("Can't load external database config!"))?
+        )?
+    ))
 }
 
 #[cfg(not(feature = "external_db"))]
-fn start_external_db() -> Result<Vec<Arc<dyn ExternalDb>>> {
+fn start_external_db(_config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>> {
     Ok(vec!())
 }
 
+
+
+
+
 async fn start_engine(config: TonNodeConfig) -> Result<()> {
-    let external_db = start_external_db()?;
+    let external_db = start_external_db(&config)?;
     crate::engine::run(config, external_db).await?;
     Ok(())
 }
 
 fn main() {
+    let app = clap::App::new("TON node")
+        .arg(clap::Arg::with_name("config")
+            .short("c")
+            .long("--configs")
+            .value_name("config")
+            .default_value("./"));
 
-    let config = match TonNodeConfig::from_file("config.json", "default_config.json") {
+    let matches = app.get_matches();
+
+    let config_dir_path = match matches.value_of("config") {
+        Some(config) => {
+            config
+        },
+        None => {
+            println!("Can't load config: config dir is not set!");
+            return;
+        }
+    };
+
+    let config = match TonNodeConfig::from_file(config_dir_path, "config.json", "default_config.json") {
         Err(e) => {
             println!("Can't load config: {:?}", e);
-            return; 
+            return;
         },
         Ok(c) => c
     };
 
     init_logger(config.log_config_path().as_ref().map(|s| s.as_str()));
     log_version();
-
+    
+    lazy_static::initialize(&STATSD);
+    
     let mut runtime = tokio::runtime::Builder::new()
         .threaded_scheduler()
         .enable_all()
@@ -108,6 +146,8 @@ fn main() {
         .build()
         .expect("Can't create tokio runtime");
 
+    init_jaeger();
+    
     runtime.block_on(async move {
         if let Err(e) = start_engine(config).await {
             log::error!("Can't start node's Engine: {:?}", e);

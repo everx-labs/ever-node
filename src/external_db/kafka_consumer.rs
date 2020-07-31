@@ -1,4 +1,6 @@
-use crate::{engine_traits::EngineOperations, config::KafkaConsumerConfig};
+use crate::{
+    engine_traits::EngineOperations, config::KafkaConsumerConfig, jaeger
+};
 use futures::StreamExt;
 use rdkafka::consumer::Consumer;
 use rdkafka::Message;
@@ -54,8 +56,8 @@ impl KafkaConsumer {
             let now = std::time::Instant::now();
             if let Some(payload) = rdkafka::Message::payload(&borrowed_message) {
                 log::trace!("Processing record, {:?}", payload);
+                
                 let count = self.engine.redirect_external_message(&payload).await?;
-
                 log::trace!("count number of nodes to broadcast to: {}", count);
             } else {
                 log::warn!("Record with empty payload, {}", message_descr);
@@ -63,6 +65,11 @@ impl KafkaConsumer {
 
             consumer.commit_message(&borrowed_message, rdkafka::consumer::CommitMode::Async)?;
             log::trace!("Processed record, {}, time: {} mcs", message_descr, now.elapsed().as_micros());
+            if let Some(msg_key) = rdkafka::Message::key(&borrowed_message){
+                jaeger::message_from_kafka_received(msg_key);
+            } else {
+                log::error!(target: "jaeger", "Can't read key from record");
+            }
         }
 
         Ok(())

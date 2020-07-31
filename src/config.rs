@@ -3,35 +3,42 @@ use adnl::{adnl_node_test_config, adnl_node_test_key,
     from_slice, common::KeyOption, node::{AdnlNodeConfig, AdnlNodeConfigJson}
 };
 use hex::FromHex;
-use std::{io::BufReader, fs::File, net::{Ipv4Addr, IpAddr, SocketAddr}};
+use std::{io::BufReader, fs::File, net::{Ipv4Addr, IpAddr, SocketAddr}, path::Path};
+use ton_api::{
+    IntoBoxed, 
+    ton::{
+        self, adnl::{address::address::Udp, addresslist::AddressList as AdnlAddressList}, 
+        dht::node::Node as DhtNodeConfig, pub_::publickey::Ed25519
+    }
+};
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256};
 
-#[derive(Debug)]
 pub struct TonNodeConfig {
     log_config_path: Option<String>,
     ton_global_config_path: Option<String>,
     use_global_config: bool,
-    ip_address: String,
-    adnl_node: Option<AdnlNodeConfig>,
+    adnl_node: AdnlNodeConfigJson,
+    port: Option<u16>,
     overlay_peers: Option<Vec<AdnlNodeConfig>>,
     dht_peers: Option<Vec<AdnlNodeConfig>>,
-    kafka_consumer_config: Option<KafkaConsumerConfig>
+    kafka_consumer_config: Option<KafkaConsumerConfig>,
+    external_db_config: Option<ExternalDbConfig>
 }
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct TonNodeConfigJson {
-    log_config_path: Option<String>,
-    ton_global_config_path: Option<String>,
+    log_config_name: Option<String>,
+    ton_global_config_name: Option<String>,
     use_global_config: bool,
-    ip_address: String,
+    ip_address: Option<String>,
     adnl_node: Option<AdnlNodeConfigJson>,
     overlay_peers: Option<Vec<AdnlNodeConfigJson>>,
-    kafka_consumer_config: Option<KafkaConsumerConfig>
+    kafka_consumer_config: Option<KafkaConsumerConfig>,
+    external_db_config: Option<ExternalDbConfig>
 }
-
 
 #[derive(serde::Deserialize, serde::Serialize, Default, Debug, Clone)]
 pub struct KafkaConsumerConfig {
@@ -42,11 +49,35 @@ pub struct KafkaConsumerConfig {
     pub run_attempt_timeout_ms: u32
 }
 
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
+pub struct KafkaProducerConfig {
+    pub enabled: bool,
+    pub brokers: String,
+    pub message_timeout_ms: u32,
+    pub topic: String,
+    pub attempt_timeout_ms: u32,
+    pub message_max_size: usize,
+    pub big_messages_storage: String,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
+#[serde(default)]
+pub struct ExternalDbConfig {
+    pub block_producer: KafkaProducerConfig,
+    pub raw_block_producer: KafkaProducerConfig,
+    pub message_producer: KafkaProducerConfig,
+    pub transaction_producer: KafkaProducerConfig,
+    pub account_producer: KafkaProducerConfig,
+    pub block_proof_producer: KafkaProducerConfig,
+    pub bad_blocks_storage: String,
+}
+
 impl TonNodeConfig {
 
-    pub fn from_file(json_file_name: &str, default_config_name: &str) -> Result<Self> {
-
-        let config_file = File::open(json_file_name);
+    pub fn from_file(configs_dir: &str, json_file_name: &str, default_config_name: &str) -> Result<Self> { 
+        let config_file_path = TonNodeConfig::build_path(configs_dir, json_file_name)?;
+        let config_file = File::open(config_file_path.clone());
 
         let config_json = match config_file {
             Ok(file) => {
@@ -56,7 +87,9 @@ impl TonNodeConfig {
             },
             Err(_) => {
                 // generate new config from default_config
-                let default_config_file = File::open(default_config_name)?;
+                let default_config_file = File::open(
+                    TonNodeConfig::build_path(configs_dir, default_config_name)?
+                )?;
                 let reader = BufReader::new(default_config_file);
                 let mut config: TonNodeConfigJson = serde_json::from_reader(reader)?;
                 // TODO: transfer to Helper
@@ -65,15 +98,21 @@ impl TonNodeConfig {
                 let dht_key_enc = base64::encode(dht_key.pvt_key()?);
                 let overlay_key = KeyOption::with_type_id(KeyOption::KEY_ED25519)?;
                 let overlay_key_enc = base64::encode(overlay_key.pvt_key()?);
-
-                config.adnl_node = Some(serde_json::from_str(
-                    adnl_node_test_config!(
-                        config.ip_address,
-                        adnl_node_test_key!(NodeNetwork::TAG_DHT_KEY, dht_key_enc),
-                        adnl_node_test_key!(NodeNetwork::TAG_OVERLAY_KEY, overlay_key_enc)
-                    )
-                )?);
-                std::fs::write(json_file_name, serde_json::to_string_pretty(&config)?)?;
+                if let Some(ip_address) = config.ip_address {
+                    config.adnl_node = Some(
+                        serde_json::from_str(
+                            adnl_node_test_config!(
+                                ip_address,
+                                adnl_node_test_key!(NodeNetwork::TAG_DHT_KEY, dht_key_enc),
+                                adnl_node_test_key!(NodeNetwork::TAG_OVERLAY_KEY, overlay_key_enc)
+                            )
+                        )?
+                    );
+                    config.ip_address = None
+                } else {
+                    fail!("IP address is not set in default config")
+                }
+                std::fs::write(config_file_path, serde_json::to_string_pretty(&config)?)?;
                 config
             }
         };
@@ -92,27 +131,40 @@ impl TonNodeConfig {
             None
         };
 
-        let adnl_node = if let Some(adnl_node) = &config_json.adnl_node {
-           AdnlNodeConfig::from_json_config(adnl_node, true)?
+        let adnl_node = if let Some(adnl_node) = config_json.adnl_node {
+            adnl_node
         } else {
-            fail!("adnl node is not found!")
+            fail!("ADNL node is not configured")
         };
 
+        let global_config_path = config_json.ton_global_config_name
+            .map(|name| TonNodeConfig::build_path(configs_dir, &name))
+            .transpose()?;
+        
+        let log_config_path = config_json.log_config_name
+            .map(|name| TonNodeConfig::build_path(configs_dir, &name))
+            .transpose()?;
+
         let result = TonNodeConfig {
-            log_config_path: config_json.log_config_path,
-            ton_global_config_path: config_json.ton_global_config_path,
+            log_config_path: log_config_path,
+            ton_global_config_path: global_config_path,
             use_global_config: config_json.use_global_config,
-            ip_address: config_json.ip_address,
-            adnl_node: Some(adnl_node),
+            adnl_node,
+            port: None,
             overlay_peers: peers,
             dht_peers: Some(dht_peers),
             kafka_consumer_config: config_json.kafka_consumer_config,
+            external_db_config: config_json.external_db_config
         };
         Ok(result)
     }
 
-    pub fn adnl_node(&mut self) -> Option<AdnlNodeConfig> {
-        self.adnl_node.take()
+    pub fn adnl_node(&self) -> Result<AdnlNodeConfig> {
+        let mut ret = AdnlNodeConfig::from_json_config(&self.adnl_node, true)?;
+        if let Some(port) = self.port {
+            ret.set_port(port)
+        }
+        Ok(ret)
     }
 
     pub fn log_config_path(&self) -> Option<&String> {
@@ -139,13 +191,12 @@ impl TonNodeConfig {
         self.kafka_consumer_config.clone()
     }
 
-    pub fn set_port(&mut self, port: u16) -> bool {
-        if let Some(adnl_node) = &mut self.adnl_node {
-            adnl_node.set_port(port);
-            true
-        } else {
-            false
-        }
+    pub fn external_db_config(&self) -> Option<ExternalDbConfig> {
+        self.external_db_config.clone()
+    }
+
+    pub fn set_port(&mut self, port: u16) {
+        self.port.replace(port);
     }
  
     pub fn load_global_config(&self) -> Result<TonNodeGlobalConfig> {
@@ -154,6 +205,14 @@ impl TonNodeConfig {
         let data = std::fs::read_to_string(path)
             .map_err(|err| error!("Global config file is not found! : {}", err))?;
         TonNodeGlobalConfig::from_json(&data)
+    }
+
+    fn build_path(directory_name: &str, file_name: &str) -> Result<String> {
+        let path = Path::new(directory_name);
+        let path = path.join(file_name);
+        let result = path.to_str()
+            .ok_or_else(|| error!("path is not valid!"))?;
+        Ok(String::from(result))
     }
 }
 
@@ -172,9 +231,9 @@ impl TonNodeGlobalConfig {
     pub fn init_block(&self) -> Result<Option<BlockIdExt>> {
         self.0.init_block()
     }
-
-    pub fn dht_nodes(&self) -> Result<Vec<AdnlNodeConfig>> {
-        self.0.get_adnl_nodes_configs()
+    
+    pub fn dht_nodes(&self) -> Result<Vec<DhtNodeConfig>> {
+        self.0.get_dht_nodes_configs()
     }
 
     pub fn dht_param_a(&self) -> Result<i32> {
@@ -304,7 +363,7 @@ impl Address {
     const IP_ADDR_COUNT_FIELDS : usize = 4;
 
     pub fn convert_ip_addr(intel_format_ip : &i64) -> Result<Ipv4Addr> {
-        let ip_hex = format!("{:02x}", intel_format_ip);
+        let ip_hex = format!("{:08x}", intel_format_ip);
         let mut ip_hex: Vec<u8> = Vec::from_hex(ip_hex)?;
 
         ip_hex.reverse();
@@ -352,6 +411,7 @@ impl IdDhtNode {
     }
 }
 
+/*
 impl DhtNode {
     pub fn convert_to_adnl_node_cfg(&self) -> Result<AdnlNodeConfig> {
         let key_option = self.id.convert_key()?;
@@ -366,6 +426,7 @@ impl DhtNode {
         Ok(ret)
     }
 }
+*/
 
 impl TonNodeGlobalConfigJson {
     
@@ -382,10 +443,74 @@ impl TonNodeGlobalConfigJson {
         Ok(json_config)
     }
 
-    pub fn get_adnl_nodes_configs(&self) -> Result<Vec<AdnlNodeConfig>> {
-        let mut result = vec![];
+    pub fn get_dht_nodes_configs(&self) -> Result<Vec<DhtNodeConfig>> {
+        let mut result = Vec::new();
         for dht_node in self.dht.static_nodes.nodes.iter() {
-            result.push(dht_node.convert_to_adnl_node_cfg()?);
+            let key = dht_node.id.convert_key()?;
+            let mut addrs = Vec::new();
+            for addr in dht_node.addr_list.addrs.iter() {
+                let ip = if let Some(ip) = addr.ip {
+                    ip
+                } else {
+                    continue;
+                };
+                let port = if let Some(port) = addr.port {
+                    port
+                } else {
+                    continue
+                };
+                let addr = Udp {
+                    ip: ip as i32,
+                    port: port as i32
+                }.into_boxed();
+                addrs.push(addr);
+            }
+            let version = if let Some(version) = dht_node.addr_list.version {
+                version
+            } else {
+                continue
+            };
+            let reinit_date = if let Some(reinit_date) = dht_node.addr_list.reinit_date {
+                reinit_date
+            } else {
+                continue
+            };
+            let priority = if let Some(priority) = dht_node.addr_list.priority {
+                priority
+            } else {
+                continue
+            };
+            let expire_at = if let Some(expire_at) = dht_node.addr_list.expire_at {
+                expire_at
+            } else {
+                continue
+            };           
+            let addr_list = AdnlAddressList {
+                addrs: addrs.into(),
+                version,
+                reinit_date,
+                priority,
+                expire_at
+            }; 
+            let version = if let Some(version) = dht_node.version {
+                version
+            } else {
+                continue
+            };
+            let signature = if let Some(signature) = &dht_node.signature {
+                signature
+            } else {
+                continue
+            };
+            let node = DhtNodeConfig {
+                id: Ed25519 {
+                    key: ton::int256(key.pub_key()?.clone())
+                }.into_boxed(),
+                addr_list,
+                version,
+                signature: ton::bytes(base64::decode(signature)?)
+            };
+            result.push(node)//convert_to_dht_node_cfg()?);
         }
         Ok(result)
     }

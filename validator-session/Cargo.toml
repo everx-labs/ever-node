@@ -1,0 +1,27 @@
+[package]
+edition = "2018"
+build = "../common/build/build.rs"
+name = "validator_session"
+version = "0.0.1"
+
+[dependencies]
+# external
+catchain = { path = "../catchain" }
+sha2 = "^0.8"
+log = "0.4.8"
+hex = "0.3.1"
+ton_types = { git = "https://github.com/tonlabs/ton-labs-types.git" }
+ton_api = { git = "https://github.com/tonlabs/ton-labs-tl.git", package = "ton_api" }
+adnl = { git = "https://github.com/tonlabs/ton-labs-adnl.git", package = "adnl", features = ["node"] }
+rand = "0.7.3"
+crossbeam = "0.7.3"
+failure = "0.1.1"
+crc32c = "0.4.0"
+lazy_static = "1.4.0"
+metrics-core="0.5.2"
+metrics-runtime="0.13.0"
+
+[dev-dependencies]
+env_logger = "0.7.1"
+chrono = "0.4.10"
+colored = "1.9.3"

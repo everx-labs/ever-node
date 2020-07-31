@@ -1,7 +1,5 @@
-use std::{io::{Write, Cursor}};
-use ton_block::{BlockIdExt};
-use ton_block::{Block, Deserializable, MerkleProof, BlockInfo, UnixTime32,
-    ValidatorDescr, Serializable, ValidatorSet, CatchainConfig, AccountIdPrefixFull
+use ton_block::{Block, BlockIdExt, Deserializable, MerkleProof, BlockInfo, UnixTime32,
+    ValidatorDescr, ValidatorSet, CatchainConfig, AccountIdPrefixFull
 };
 use ton_types::{Result, fail, error, dictionary::HashmapType, deserialize_tree_of_cells};
 
@@ -12,20 +10,18 @@ use crate::{
     engine_traits::EngineOperations,
 };
 
-#[cfg(test)]
-#[path = "tests/test_block_proof.rs"]
-mod tests;
 
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct BlockProofStuff {
     proof: ton_block::BlockProof,
     is_link: bool,
-    id: BlockIdExt
+    id: BlockIdExt,
+    data: Vec<u8>,
 }
 
 impl BlockProofStuff {
-    pub fn deserialize(block_id: &BlockIdExt, bytes: &[u8], is_link: bool) -> Result<Self> {
-        let root = deserialize_tree_of_cells(&mut Cursor::new(bytes))?;
+    pub fn deserialize(block_id: &BlockIdExt, data: Vec<u8>, is_link: bool) -> Result<Self> {
+        let root = deserialize_tree_of_cells(&mut std::io::Cursor::new(&data))?;
         let proof = ton_block::BlockProof::construct_from(&mut root.clone().into())?;
         if &proof.proof_for != block_id {
             fail!(
@@ -37,13 +33,19 @@ impl BlockProofStuff {
                 NodeError::InvalidData(format!("proof for non-masterchain block {}", block_id))
             )
         }
-        Ok(BlockProofStuff { proof, is_link, id: block_id.clone() })
+        #[cfg(feature = "store_copy")]
+        {
+            let path = format!("./target/replication/proofs/{}", block_id.shard().shard_prefix_as_str_with_tag());
+            std::fs::create_dir_all("{}").ok();
+            std::fs::write(format!("{}/{}", path, block_id.seq_no()), &data).ok();
+        }
+        Ok(BlockProofStuff { proof, is_link, id: block_id.clone(), data })
     }
 
     #[cfg(test)]
     pub fn read_from_file(block_id: &BlockIdExt, filename: &str, is_link: bool) -> Result<Self> {
-        let bytes = std::fs::read(filename)?;
-        Self::deserialize(block_id, &bytes, is_link)
+        let data = std::fs::read(filename)?;
+        Self::deserialize(block_id, data, is_link)
     }
 
     pub fn virtualize_block(&self) -> Result<(Block, ton_api::ton::int256)> {
@@ -65,16 +67,8 @@ impl BlockProofStuff {
         &self.proof
     }
 
-    pub fn write_to<T: Write>(&self, dst: &mut T) -> Result<()> {
-        let root = self.proof.write_to_new_cell()?.into();
-        ton_types::cells_serialization::serialize_tree_of_cells(&root, dst)?;
-        Ok(())
-    }
-
-    pub fn serialize(&self) -> Result<Vec<u8>> {
-        let mut bytes = Cursor::new(Vec::<u8>::new());
-        self.write_to(&mut bytes)?;
-        Ok(bytes.into_inner())
+    pub fn data(&self) -> &[u8] {
+        &self.data
     }
 
     pub fn check_with_prev_key_block_proof(&self, prev_key_block_proof: &BlockProofStuff) -> Result<()> {
@@ -307,7 +301,7 @@ impl BlockProofStuff {
 
         if info.key_block() && !self.id().is_masterchain() {
             fail!(NodeError::InvalidData(format!(
-                "proof for block {} contains a Merkle proof which declares non master chain but key block",
+                "proof for block {} contains a Merkle proof which declares non masterchain but key block",
                 self.id(),
             )))
         }

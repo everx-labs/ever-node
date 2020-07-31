@@ -5,19 +5,17 @@ use sha2::Digest;
 use std::io::{Write, Cursor};
 use ton_block::{BlockIdExt};
 use ton_block::{
-    ShardStateUnsplit, ShardStateSplit, Serializable, Deserializable, ConfigParamEnum,
+    ShardStateUnsplit, ShardStateSplit, Serializable, Deserializable, ConfigParams, McStateExtra, HashmapAugType,
 };
 use ton_types::{Cell, error, fail, Result, deserialize_tree_of_cells, UInt256};
 
-#[cfg(test)]
-#[path = "tests/test_shard_state.rs"]
-mod tests;
 
 /// It is a wrapper around various shard state's representations and properties.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ShardStateStuff {
     id: BlockIdExt,
     shard_state: ShardStateUnsplit,
+    shard_state_extra: Option<McStateExtra>,
     root: Cell
 }
 
@@ -34,7 +32,8 @@ impl ShardStateStuff {
                 NodeError::InvalidData("State's seqno is not equal to given one".to_string())
             )
         } else {
-            Ok(Self{ id, shard_state, root } )
+            let shard_state_extra = shard_state.read_custom()?;
+            Ok(Self{ id, shard_state, shard_state_extra, root } )
         }
     }
 
@@ -54,6 +53,13 @@ impl ShardStateStuff {
                 fail!("Wrong zero state {}. Hashes doesn't correspond", id)
             }
         }
+        #[cfg(feature = "store_copy")]
+        {
+            let path = format!("./target/replication/states/{}", id.shard().shard_prefix_as_str_with_tag());
+            std::fs::create_dir_all(&path).ok();
+            std::fs::write(format!("{}/{}", path, id.seq_no()), bytes).ok();
+        }
+
         Self::new(id, root)
     }
 
@@ -63,6 +69,11 @@ impl ShardStateStuff {
     }
 
     pub fn shard_state(&self) -> &ShardStateUnsplit { &self.shard_state }
+    pub fn shard_state_extra(&self) -> Result<&McStateExtra> {
+        self.shard_state_extra
+            .as_ref()
+            .ok_or_else(|| error!("Masterchain state of {} must contain McStateExtra", self.block_id()))
+    }
 
     pub fn root_cell(&self) -> &Cell { &self.root }
 
@@ -80,12 +91,14 @@ impl ShardStateStuff {
         Ok(bytes.into_inner())
     }
 
-    pub fn get_config(&self, index: u32) -> Result<Option<ConfigParamEnum>> {
-        self
-            .shard_state
-            .read_custom()?
-            .ok_or_else(|| error!("State does not contain `custom` field. Is it master state?"))?
-            .config
-            .config(index)
+    pub fn config_params(&self) -> Result<&ConfigParams> {
+        Ok(&self.shard_state_extra()?.config)
+    }
+
+    pub fn has_prev_block(&self, block_id: &BlockIdExt) -> Result<bool> {
+        Ok(self.shard_state_extra()?
+            .prev_blocks.get(&block_id.seq_no())?
+            .map(|id| &id.blk_ref().root_hash == block_id.root_hash() && &id.blk_ref().file_hash == block_id.file_hash())
+            .unwrap_or_default())
     }
 }

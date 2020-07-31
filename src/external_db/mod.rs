@@ -1,5 +1,5 @@
-use crate::engine_traits::ExternalDb;
-use kafka_producer::{ KafkaProducerConfig, KafkaProducer };
+use crate::{engine_traits::ExternalDb, config::ExternalDbConfig};
+use kafka_producer::{ KafkaProducer };
 use stub_producer::StubProducer;
 use processor::Processor;
 
@@ -11,37 +11,43 @@ mod kafka_producer;
 pub mod kafka_consumer;
 mod stub_producer;
 
-#[cfg(test)]
-#[path = "tests/test.rs"]
-mod tests;
-
-#[derive(Debug, Default, serde::Deserialize)]
-pub struct ExternalDbConfig {
-    block_producer: KafkaProducerConfig,
-    message_producer: KafkaProducerConfig,
-    transaction_producer: KafkaProducerConfig,
-    account_producer: KafkaProducerConfig,
-    block_proof_producer: KafkaProducerConfig,
-    bad_blocks_storage: String,
-}
 
 #[async_trait::async_trait]
 pub trait WriteData : Sync + Send {
+    fn enabled(&self) -> bool;
     async fn write_data(&self, key: String, data: String) -> Result<()>;
+    async fn write_raw_data(&self, key: Vec<u8>, data: Vec<u8>) -> Result<()>;
 }
 
 #[allow(dead_code)]
 pub fn create_external_db(config: ExternalDbConfig) -> Result<Arc<dyn ExternalDb>> {
-    Ok(
-        Arc::new(
-            Processor::new(
-                KafkaProducer::new(config.block_producer)?,
-                KafkaProducer::new(config.message_producer)?,
-                KafkaProducer::new(config.transaction_producer)?,
-                KafkaProducer::new(config.account_producer)?,
-                KafkaProducer::new(config.block_proof_producer)?,
-                config.bad_blocks_storage,
+    if cfg!(feature = "local_test") {
+        Ok(
+            Arc::new(
+                Processor::new(
+                    StubProducer{enabled: true},
+                    StubProducer{enabled: true},
+                    StubProducer{enabled: true},
+                    StubProducer{enabled: true},
+                    StubProducer{enabled: true},
+                    StubProducer{enabled: true},
+                    config.bad_blocks_storage,
+                )
             )
         )
-    )
+    } else {
+        Ok(
+            Arc::new(
+                Processor::new(
+                    KafkaProducer::new(config.block_producer)?,
+                    KafkaProducer::new(config.raw_block_producer)?,
+                    KafkaProducer::new(config.message_producer)?,
+                    KafkaProducer::new(config.transaction_producer)?,
+                    KafkaProducer::new(config.account_producer)?,
+                    KafkaProducer::new(config.block_proof_producer)?,
+                    config.bad_blocks_storage,
+                )
+            )
+        )
+    }
 }
