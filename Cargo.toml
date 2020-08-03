@@ -79,3 +79,7 @@ optional = true
 
 [dev-dependencies]
 ed25519-dalek = "1.0.0-pre.4"
+
+[features]
+external_db = ["rdkafka", "rdkafka-sys"]
+metrics = ["statsd"]
