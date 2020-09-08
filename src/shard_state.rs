@@ -37,12 +37,9 @@ impl ShardStateStuff {
         }
     }
 
-    pub fn construct_split_root(left: Self, right: Self) -> Result<Cell> {
-        let ss_split = ShardStateSplit {
-            left: left.shard_state,
-            right: right.shard_state,
-        };
-        Ok(ss_split.write_to_new_cell()?.into())
+    pub fn construct_split_root(left: Cell, right: Cell) -> Result<Cell> {
+        let ss_split = ShardStateSplit { left, right };
+        ss_split.serialize()
     }
 
     pub fn deserialize(id: BlockIdExt, bytes: &[u8]) -> Result<Self> {

@@ -46,7 +46,7 @@ serde = "1.0.105"
 serde_derive = "1.0.105"
 serde_json = "1.0.41"
 sha2 = "^0.8"
-statsd = { version = "0.13.1", optional = true }
+statsd = { version = "0.14.0", optional = true }
 tokio = { version = "0.2.5", features = ["rt-threaded", "stream", "tcp", "udp", "rt-core", "macros", "fs", "time"] }
 
 lockfree = { git = "https://github.com/tonlabs/lockfree.git", package = "lockfree" }
@@ -57,8 +57,10 @@ rldp = { git = "https://github.com/tonlabs/ton-labs-rldp.git" }
 ton_api = { git = "https://github.com/tonlabs/ton-labs-tl.git", package = "ton_api" }
 ton_block = { git = "https://github.com/tonlabs/ton-labs-block.git" }
 ton_block_json = { git = "https://github.com/tonlabs/ton-labs-block-json.git" }
+ton_executor = { git = "https://github.com/tonlabs/ton-labs-executor.git" }
 ton-node-storage = { git = "https://github.com/tonlabs/ton-labs-node-storage.git" }
 ton_types = { git = "https://github.com/tonlabs/ton-labs-types.git" }
+ton_vm = { git = "https://github.com/tonlabs/ton-labs-vm.git" }
 
 [target.'cfg(windows)'.dependencies.rdkafka]
 version = "0.23.1"

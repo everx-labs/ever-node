@@ -1,4 +1,5 @@
 use adnl::common::{KeyId, KeyOption, Query, Wait};
+use crate::engine::STATSD;
 use dht::DhtNode;
 use overlay::{OverlayShortId, OverlayNode};
 use rand::{Rng};
@@ -92,6 +93,8 @@ impl Neighbour {
 
     pub fn query_failed(&self, t: &Duration, is_rldp: bool) {
         let un = self.unreliability.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+        let metric = format!("neghbour.{}.failed", self.id);
+        STATSD.incr(&metric);
         log::trace!("query_failed (key_id {}, overlay: ) new value: {}", self.id, un);
         if is_rldp {
             self.update_roundtrip_rldp(t)
@@ -386,6 +389,8 @@ impl Neighbours {
             } else if proto_version == PROTO_VERSION && capabilities < PROTO_CAPABILITIES {
                 unr += 2;
             }  
+            let stat_name = format!("neighbour.{}.unr", neighbour.id());
+            STATSD.histogram(&stat_name, unr as f64);
             log::trace!(
                 "Neighbour {}, unr {}, rt ADNL {}, rt RLDP {}", 
                 neighbour.id(), unr, 

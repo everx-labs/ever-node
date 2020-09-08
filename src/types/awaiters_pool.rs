@@ -1,7 +1,7 @@
 use std::{
     sync::{Arc, atomic::AtomicBool, atomic::Ordering}, fmt::Display, hash::Hash, cmp::Ord
 };
-use ton_types::{Result, fail};
+use ton_types::{Result, error};
 
 
 struct OperationAwaiters<R> {
@@ -40,14 +40,14 @@ impl<I, R> AwaitersPool<I, R> where
         loop {
             if let Some(op_awaiters) = self.ops_awaiters.get(id) {
                 if !op_awaiters.1.is_started.swap(true, Ordering::SeqCst) {
-                    return Ok(Some(self.do_operation(id, operation, &op_awaiters.1).await?))
+                    return Some(self.do_operation(id, operation, &op_awaiters.1).await).transpose()
                 } else {
                     return self.wait_operation(id, &op_awaiters.1).await
                 }
             } else {
                 let new_awaiters = OperationAwaiters::new(true);
                 if self.try_insert_awaiters(id.clone(), new_awaiters.clone()) {
-                    return Ok(Some(self.do_operation(id, operation, &new_awaiters).await?))
+                    return Some(self.do_operation(id, operation, &new_awaiters).await).transpose()
                 }
             }
         }
@@ -117,7 +117,7 @@ impl<I, R> AwaitersPool<I, R> where
         while let Some(barrier) = op_awaiters.awaiters.pop() {
             op_awaiters.results.push(match result {
                 Ok(ref r) => Ok(r.clone()),
-                Err(e) => fail!("{}", e), // failure::Error doesn't impl Clone, so it is impossible to clone full result
+                Err(ref e) => Err(error!("{}", e)), // failure::Error doesn't impl Clone, so it is impossible to clone full result
             });
             barrier.wait().await;
         }

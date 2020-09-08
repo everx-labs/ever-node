@@ -504,7 +504,7 @@ lazy_static::lazy_static! {
         let mut statsd_endp = env::var("STATSD_DOMAIN").expect("STATSD_DOMAIN env variable not found");
         let statsd_port = env::var("STATSD_PORT").expect("STATSD_PORT env variable not found");
         statsd_endp.push_str(&statsd_port);
-        let statsd_client = match client::Client::new(statsd_endp, "rnode."){
+        let statsd_client = match client::Client::new(statsd_endp, "rnode"){
             Ok(client) => client,
             Err(e) => {
                 panic!("Can't init statsd client: {:?}", e);
@@ -521,6 +521,9 @@ pub struct StatsdClient {}
 impl StatsdClient {
     pub fn new() -> StatsdClient { StatsdClient{} }
     pub fn gauge(&self, _metric_name: &str, _value: f64) {}
+    pub fn incr(&self, _metric_name: &str) {}
+    pub fn histogram(&self, _metric_name: &str, _value: f64) {}
+    pub fn timer(&self, _metric_name: &str, _value: f64) {}
 }
 
 #[cfg(not(feature = "metrics"))]

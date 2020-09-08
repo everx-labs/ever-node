@@ -4,7 +4,7 @@ use crate::{
     types::awaiters_pool::AwaitersPool,
 };
 use adnl::{
-    common::KeyId, node::{AddressCacheIterator, AdnlNode, AdnlNodeConfig}
+    common::{KeyId, KeyOption}, node::{AddressCacheIterator, AdnlNode, AdnlNodeConfig}
 };
 use dht::DhtNode;
 use overlay::{OverlayShortId, OverlayNode, QueriesConsumer};
@@ -19,9 +19,7 @@ pub struct NodeNetwork {
     dht: Arc<DhtNode>,
     overlay: Arc<OverlayNode>,
     rldp: Arc<RldpNode>,
-//    use_global_cfg: bool,
     global_cfg: TonNodeGlobalConfig,
-//    overlay_peers: Option<Vec<AdnlNodeConfig>>,
     db: Arc<dyn InternalDb>,
     masterchain_overlay_id: Arc<OverlayShortId>,
     overlays: Arc<OverlayCache>,
@@ -32,6 +30,8 @@ impl NodeNetwork {
 
     pub(crate) const TAG_DHT_KEY: usize = 1;
     pub(crate) const TAG_OVERLAY_KEY: usize = 2;
+
+    const PERIOD_STORE_IP_ADDRESS: u64 = 3000;  // second
 
     pub async fn new(config: &mut TonNodeConfig, db: Arc<dyn InternalDb>) -> Result<Self> {
 
@@ -58,6 +58,12 @@ impl NodeNetwork {
             masterchain_zero_state_id.shard().shard_prefix_with_tag() as i64,
         )?;
 
+        let dht_key = adnl.key_by_tag(Self::TAG_DHT_KEY)?;
+        NodeNetwork::periodic_store_ip_addr(dht.clone(), dht_key);
+
+        let overlay_public_key = adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?;
+        NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_public_key);
+
         Ok(NodeNetwork {
             adnl,
             dht,
@@ -65,9 +71,7 @@ impl NodeNetwork {
             rldp,
             db,
             masterchain_overlay_id,
-  //          use_global_cfg: config.use_global_config().clone(),
             global_cfg: global_config,
-  //          overlay_peers: config.overlay_peers(),
             overlays: overlays,
             overlay_awaiters: AwaitersPool::new(),
         })
@@ -136,6 +140,19 @@ impl NodeNetwork {
 
     fn string_to_static_str(&self, s: String) -> &'static str {
         Box::leak(s.into_boxed_str())
+    }
+
+    fn periodic_store_ip_addr(dht: Arc<DhtNode>, node_key: Arc<KeyOption>) {
+        let _handler = tokio::spawn(async move {
+            let node_key = node_key.clone();
+            loop {
+                if let Err(e) = DhtNode::store_ip_address(&dht, &node_key).await {
+                    log::warn!("store ip address is ERROR: {}", e)
+                }
+
+                delay_for(Duration::from_secs(Self::PERIOD_STORE_IP_ADDRESS)).await;
+            }
+        });
     }
 
 /*  
@@ -296,7 +313,7 @@ impl NodeNetwork {
         overlay_id: &Arc<OverlayShortId>
     ) -> Result<Arc<dyn FullNodeOverlayClient>> {
 
-        self.overlay.add_shard(overlay_id)?;
+        self.overlay.add_shard(overlay_id).await?;
 
         let peers = self.update_overlay_peers(overlay_id, &mut None).await?; 
         if peers.first().is_none() {

@@ -1,10 +1,7 @@
 {
     "log_config_name": "log_cfg.yml",
     "ton_global_config_name": "ton-global.config.json",
-    "use_global_config": true,
     "ip_address": "0.0.0.0:30303",
-    "overlay_peers": [
-    ],
     "shard_keeper": {
         "get_peer_attempt_timeout_ms": 1000,
         "download_next_block_full_timeout_ms": 1000,

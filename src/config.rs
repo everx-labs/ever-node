@@ -17,10 +17,8 @@ use ton_types::{error, fail, Result, UInt256};
 pub struct TonNodeConfig {
     log_config_path: Option<String>,
     ton_global_config_path: Option<String>,
-    use_global_config: bool,
     adnl_node: AdnlNodeConfigJson,
     port: Option<u16>,
-    overlay_peers: Option<Vec<AdnlNodeConfig>>,
     dht_peers: Option<Vec<AdnlNodeConfig>>,
     kafka_consumer_config: Option<KafkaConsumerConfig>,
     external_db_config: Option<ExternalDbConfig>
@@ -32,10 +30,8 @@ pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
 struct TonNodeConfigJson {
     log_config_name: Option<String>,
     ton_global_config_name: Option<String>,
-    use_global_config: bool,
     ip_address: Option<String>,
     adnl_node: Option<AdnlNodeConfigJson>,
-    overlay_peers: Option<Vec<AdnlNodeConfigJson>>,
     kafka_consumer_config: Option<KafkaConsumerConfig>,
     external_db_config: Option<ExternalDbConfig>
 }
@@ -94,9 +90,9 @@ impl TonNodeConfig {
                 let mut config: TonNodeConfigJson = serde_json::from_reader(reader)?;
                 // TODO: transfer to Helper
                 // generate private key
-                let dht_key = KeyOption::with_type_id(KeyOption::KEY_ED25519)?;
+                let (_, dht_key) = KeyOption::with_type_id(KeyOption::KEY_ED25519)?;
                 let dht_key_enc = base64::encode(dht_key.pvt_key()?);
-                let overlay_key = KeyOption::with_type_id(KeyOption::KEY_ED25519)?;
+                let (_, overlay_key) = KeyOption::with_type_id(KeyOption::KEY_ED25519)?;
                 let overlay_key_enc = base64::encode(overlay_key.pvt_key()?);
                 if let Some(ip_address) = config.ip_address {
                     config.adnl_node = Some(
@@ -119,18 +115,6 @@ impl TonNodeConfig {
 
         let dht_peers = Vec::new();
 
-        let peers = if let Some(peers_json) = config_json.overlay_peers {
-            let mut peers = Vec::new();
-            for it in peers_json.iter() {
-                peers.push(
-                    AdnlNodeConfig::from_json_config(it, false)?
-                );
-            }
-            Some(peers)
-        } else {
-            None
-        };
-
         let adnl_node = if let Some(adnl_node) = config_json.adnl_node {
             adnl_node
         } else {
@@ -148,10 +132,8 @@ impl TonNodeConfig {
         let result = TonNodeConfig {
             log_config_path: log_config_path,
             ton_global_config_path: global_config_path,
-            use_global_config: config_json.use_global_config,
             adnl_node,
             port: None,
-            overlay_peers: peers,
             dht_peers: Some(dht_peers),
             kafka_consumer_config: config_json.kafka_consumer_config,
             external_db_config: config_json.external_db_config
@@ -177,14 +159,6 @@ impl TonNodeConfig {
 
     pub fn ton_global_config_path(&self) -> Option<&String> {
         self.ton_global_config_path.as_ref()
-    }
-
-    pub fn overlay_peers(&mut self) -> Option<Vec<AdnlNodeConfig>> {
-        self.overlay_peers.take()
-    }
-
-    pub fn use_global_config(&self) -> bool {
-        self.use_global_config.clone()
     }
 
     pub fn kafka_consumer_config(&self) -> Option<KafkaConsumerConfig> {

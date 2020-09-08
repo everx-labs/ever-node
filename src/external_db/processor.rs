@@ -5,13 +5,20 @@ use ton_block::{
     AccountBlock, ShardAccount
 };
 use ton_types::{
-    cells_serialization::serialize_toc, types::UInt256, Cell, Result, SliceData, HashmapType
+    cells_serialization::serialize_toc,
+    types::UInt256,
+    AccountId, Cell, Result, SliceData, HashmapType
 };
 
 use crate::{
     engine_traits::ExternalDb, block::BlockStuff, shard_state::ShardStateStuff,
     error::NodeError, external_db::WriteData, block_proof::BlockProofStuff,
+    engine::STATSD
 };
+
+lazy_static::lazy_static!(
+    static ref ACCOUNT_NONE_HASH: UInt256 = Cell::from(Account::default().write_to_new_cell().unwrap()).repr_hash();
+);
 
 enum DbRecord {
     Empty,
@@ -160,6 +167,19 @@ impl<T: WriteData> Processor<T> {
         ))
     }
 
+    fn prepare_deleted_account_record(account_id: AccountId, workchain_id: i32) -> Result<DbRecord> {
+        let set = ton_block_json::DeletedAccountSerializationSet {
+            account_id,
+            workchain_id
+        };
+
+        let doc = ton_block_json::db_serialize_deleted_account("id", &set)?;
+        Ok(DbRecord::Account(
+            doc["id"].to_string(),
+            format!("{:#}", serde_json::json!(doc))
+        ))
+    }
+
     fn prepare_block_record(
         block: &Block,
         block_root: &Cell,
@@ -274,6 +294,7 @@ impl<T: WriteData> Processor<T> {
             }
             // Transactions
             let mut changed_acc = HashSet::new();
+            let mut deleted_acc = HashSet::new();
             if process_transaction || process_account{
                 let now = std::time::Instant::now();
                 let mut tr_count = 0;
@@ -282,7 +303,11 @@ impl<T: WriteData> Processor<T> {
                 block_extra.read_account_blocks()?.iterate_objects(|account_block: AccountBlock| {
                     let state_upd = account_block.read_state_update()?;
                     if process_account && state_upd.old_hash != state_upd.new_hash {
-                        changed_acc.insert(account_block.account_id().clone());
+                        if state_upd.new_hash == *ACCOUNT_NONE_HASH {
+                            deleted_acc.insert(account_block.account_id().clone());
+                        } else {
+                            changed_acc.insert(account_block.account_id().clone());
+                        }
                     }
                     if process_transaction {
                         account_block.transactions().iterate_slices(|_, transaction_slice| {
@@ -298,25 +323,31 @@ impl<T: WriteData> Processor<T> {
                     Ok(true)
                 })?;
                 log::trace!("TIME: transactions {} {}ms;   {}", tr_count, now.elapsed().as_millis(), block_id);
-            }
 
-            // Accounts (changed only)
-            if process_account {
-                let now = std::time::Instant::now();
-                if let Some(shard_accounts) = shard_accounts {
-                    for acc_addr in changed_acc.iter() {
-                        let acc = shard_accounts.account(acc_addr)?
-                            .ok_or_else(|| 
-                                NodeError::InvalidData(
-                                    "Block and shard state mismatch: \
-                                    state doesn't contain changed account".to_string()
-                                )
-                            )?;
-                        let acc = acc.read_account()?;
-                        db_records.push(Self::prepare_account_record(acc)?);
+                // Accounts (changed only)
+                if process_account {
+                    let now = std::time::Instant::now();
+                    if let Some(shard_accounts) = shard_accounts {
+                        for acc_addr in changed_acc.iter() {
+                            let acc = shard_accounts.account(acc_addr)?
+                                .ok_or_else(|| 
+                                    NodeError::InvalidData(
+                                        "Block and shard state mismatch: \
+                                        state doesn't contain changed account".to_string()
+                                    )
+                                )?;
+                            let acc = acc.read_account()?;
+                            db_records.push(Self::prepare_account_record(acc)?);
+                        }
                     }
+                    for acc_addr in deleted_acc {
+                        db_records.push(Self::prepare_deleted_account_record(acc_addr, workchain_id)?);
+                    }
+                    log::trace!("TIME: accounts {} {}ms;   {}", changed_acc.len(), now.elapsed().as_millis(), block_id);
+                    STATSD.timer("accounts_parsing_time", now.elapsed().as_micros() as f64 / 1000f64);
+                    STATSD.histogram("parsed_accounts_count", changed_acc.len() as f64);
                 }
-                log::trace!("TIME: accounts {} {}ms;   {}", changed_acc.len(), now.elapsed().as_millis(), block_id);
+
             }
 
             // Block
@@ -374,7 +405,10 @@ impl<T: WriteData> Processor<T> {
                 DbRecord::Transaction(key, value) => Some(self.write_transaction.write_data(key, value)),
                 DbRecord::Account(key, value) => Some(self.write_account.write_data(key, value)),
                 DbRecord::Block(key, value) => Some(self.write_block.write_data(key, value)),
-                DbRecord::RawBlock(key, value) => Some(self.write_raw_block.write_raw_data(key, value)),
+                DbRecord::RawBlock(key, value) => {
+                    STATSD.histogram("raw_block_size", value.len() as f64);
+                    Some(self.write_raw_block.write_raw_data(key, value))
+                }
                 DbRecord::BlockProof(key, value) => Some(self.write_block_proof.write_data(key, value)),
                 DbRecord::Empty => None
             } {
@@ -423,6 +457,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
                 Ok(true)
             })?;
 
+            let accounts_len = accounts.len();
             futures::future::join_all(
                 accounts.into_iter().map(|r| {
                     match r {
@@ -435,6 +470,9 @@ impl<T: WriteData> ExternalDb for Processor<T> {
             .into_iter()
             .find(|r| r.is_err())
             .unwrap_or(Ok(()))?;
+
+            STATSD.timer("full_state_parsing_time", now.elapsed().as_micros() as f64 / 1000f64);
+            STATSD.histogram("full_state_accounts_count", accounts_len as f64);
         }
 
         log::trace!("TIME: process_full_state {}ms;   {}", now.elapsed().as_millis(), state.block_id());
