@@ -2,14 +2,14 @@ use crate::{
     block::BlockStuff,
     shard_state::ShardStateStuff,
     block_proof::BlockProofStuff,
-    engine::{Engine, LastMcBlockId, ShardsClientMcBlockId, STATSD, SavingState1, SavingState2},
+    engine::{Engine, LastMcBlockId, ShardsClientMcBlockId, STATSD},
     engine_traits::EngineOperations,
     db::{BlockHandle, NodeState},
     error::NodeError,
     network::full_node_client::Attempts
 };
 
-use std::{sync::Arc, ops::Deref, time::Duration, convert::TryInto};
+use std::{sync::Arc, ops::Deref, convert::TryInto};
 use ton_types::{fail, error, Result};
 use ton_block::{BlockIdExt, AccountIdPrefixFull};
 
@@ -52,20 +52,22 @@ impl EngineOperations for Engine {
         if !prev_handle.id().shard().is_masterchain() {
             fail!(NodeError::InvalidArg("`prev_handle` doesn't belong masterchain".to_string()))
         }
-        let next_id = loop {
+        loop {
             if prev_handle.next1_inited() {
-                break self.load_block_next1(prev_handle.id()).await?;
+                let id = self.load_block_next1(prev_handle.id()).await?;
+                let handle = self.load_block_handle(&id)?;
+                let block = self.wait_applied_block(&handle).await?;
+                break Ok((handle, block))
             } else {
                 if let Some(id) = self.next_block_applying_awaiters().wait(prev_handle.id()).await? {
-                    break id;
+                    let block_handle = self.load_block_handle(&id)?;
+                    break Ok((
+                        Arc::clone(&block_handle),
+                        self.load_block(&block_handle).await?
+                    ))
                 }
             }
-        };
-        let block_handle = self.load_block_handle(&next_id)?;
-        Ok((
-            Arc::clone(&block_handle),
-            self.load_block(&block_handle).await?
-        ))
+        }
     }
 
     async fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seqno: u32) -> Result<Arc<BlockHandle>> {
@@ -201,42 +203,6 @@ impl EngineOperations for Engine {
             async { Ok(state.clone()) }
         ).await?;
         self.db().store_shard_state_dynamic(handle, state)
-    }
-
-    async fn store_persistent_state(self: Arc<Self>, state: ShardStateStuff) -> Result<()> {
-        // this method is normally called only for master key blocks (from apply procedure)
-        // so it is impossible this method would be called in parallel
-
-        let handle = self.load_block_handle(state.block_id())?;
-        let empty_id = ton_api::ton::ton_node::blockidext::BlockIdExt::default();
-        let ss1 = SavingState1::load_from_db(self.db()).unwrap_or_default();
-        if ss1.0 != empty_id {
-            let ss2 = SavingState2::load_from_db(self.db()).unwrap_or_default();
-            if ss2.0 != empty_id {
-                fail!("Can't save persistent state: both `SavingState` properties are set!")
-            } else {
-                SavingState2(state.block_id().into()).store_to_db(self.db().deref())?;
-                tokio::spawn(async move {
-                    self.store_persistent_state_attempts(&handle, &state).await;
-                    while let Err(e) = SavingState2(empty_id.clone()).store_to_db(self.db().deref()) {
-                        log::error!("CRITICAL Error setting `SavingState2` param: {:?}", e);
-                        futures_timer::Delay::new(Duration::from_millis(1000)).await;
-                    }
-                    log::info!("Persistent shard state is saved {}", state.block_id());
-                });
-            }
-        } else {
-            SavingState1(state.block_id().into()).store_to_db(self.db().deref())?;
-            tokio::spawn(async move {
-                self.store_persistent_state_attempts(&handle, &state).await;
-                while let Err(e) = SavingState1(empty_id.clone()).store_to_db(self.db().deref()) {
-                    log::error!("CRITICAL Error setting `SavingState1` param: {:?}", e);
-                    futures_timer::Delay::new(Duration::from_millis(1000)).await;
-                }
-                log::info!("Persistent shard state is saved {}", state.block_id());
-            });
-        }
-        Ok(())
     }
 
     fn store_block_prev(&self, handle: &BlockHandle, prev: &BlockIdExt) -> Result<()> {
