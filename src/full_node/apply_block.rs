@@ -7,7 +7,7 @@ use crate::{
 
 use std::{ops::Deref, sync::Arc};
 use ton_types::Result;
-use ton_block::{BlockIdExt, AccountIdPrefixFull};
+use ton_block::BlockIdExt;
 
 pub async fn apply_block(handle: &BlockHandle, block: &BlockStuff, engine: &Arc<dyn EngineOperations>) -> Result<()> {
 
@@ -100,15 +100,6 @@ pub async fn calc_shard_state(
     }).await??;
 
     engine.store_state(handle, &ss).await?;
-
-    if block.is_key_block()? {
-        let prev_key_block_seqno = block.block().read_info()?.prev_key_block_seqno();
-        let mc_pfx = AccountIdPrefixFull::any_masterchain();
-        let prev_key_block_handle = engine.find_block_by_seq_no(&mc_pfx, prev_key_block_seqno).await?;
-        if engine.is_persistent_state(handle.gen_utime()?, prev_key_block_handle.gen_utime()?) {
-            engine.clone().store_persistent_state(ss.clone()).await?;
-        }
-    }
 
     Ok(ss)
 }

@@ -34,7 +34,7 @@ use overlay::QueriesConsumer;
 use std::{sync::Arc, ops::Deref, time::Duration, convert::TryInto};
 
 use ton_block::{
-    self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL, BASE_WORKCHAIN_ID
+    self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL, BASE_WORKCHAIN_ID, ShardDescr
 };
 use ton_types::{error, Result, fail};
 use tokio::task::JoinHandle;
@@ -44,8 +44,8 @@ define_db_prop!(LastMcBlockId,   "LastMcBlockId",   ton_api::ton::ton_node::bloc
 define_db_prop!(InitMcBlockId,   "InitMcBlockId",   ton_api::ton::ton_node::blockidext::BlockIdExt);
 define_db_prop!(GcMcBlockId,     "GcMcBlockId",     ton_api::ton::ton_node::blockidext::BlockIdExt);
 define_db_prop!(ClientMcBlockId, "ClientMcBlockId", ton_api::ton::ton_node::blockidext::BlockIdExt);
-define_db_prop!(SavingState1,    "SavingState1",    ton_api::ton::ton_node::blockidext::BlockIdExt);
-define_db_prop!(SavingState2,    "SavingState2",    ton_api::ton::ton_node::blockidext::BlockIdExt);
+// Persistent shard states (master and all shardes) actual for previous master block were saved
+define_db_prop!(PssKeeperBlockId, "PssKeeperBlockId", ton_api::ton::ton_node::blockidext::BlockIdExt);
 // Last master block all shard blocks listed in was applied
 define_db_prop!(ShardsClientMcBlockId, "ShardsClientMcBlockId", ton_api::ton::ton_node::blockidext::BlockIdExt);
 
@@ -372,26 +372,84 @@ impl Engine {
         handle
     }
 
-    /// Checks if some persistent state's saving is interrupted and resave it if need
-    async fn check_persistent_states(&self) -> Result<()> {
-        let empty_id = ton_api::ton::ton_node::blockidext::BlockIdExt::default();
-        let ss1 = SavingState1::load_from_db(self.db()).unwrap_or_default();
-        if ss1.0 != empty_id {
-            let handle = self.load_block_handle(&(&ss1.0).try_into()?)?;
-            let state = self.load_state(handle.id()).await?;
-            self.store_persistent_state_attempts(&handle, &state).await;
-            SavingState1(empty_id.clone()).store_to_db(self.db().deref())?;
-            log::info!("Persistent shard state saved {}", state.block_id());
+    async fn store_pss_keeper_block_id(&self, id: &BlockIdExt) -> Result<()> {
+        PssKeeperBlockId(id.into()).store_to_db(self.db())
+    }
+
+    pub fn start_persistent_states_keeper(
+        engine: Arc<Engine>,
+        pss_keeper_block: BlockIdExt
+    ) -> Result<JoinHandle<()>> {
+        let join_handle = tokio::spawn(async move {
+            if let Err(e) = Self::persistent_states_keeper(engine, pss_keeper_block).await {
+                log::error!("FATAL!!! Unexpected error in persistent states keeper: {:?}", e);
+            }
+        });
+        Ok(join_handle)
+    }
+
+    pub async fn persistent_states_keeper(
+        engine: Arc<Engine>,
+        pss_keeper_block: BlockIdExt
+    ) -> Result<()> {
+        if !pss_keeper_block.shard().is_masterchain() {
+            fail!("'pss_keeper_block' mast belong master chain");
         }
-        let ss2 = SavingState2::load_from_db(self.db()).unwrap_or_default();
-        if ss2.0 != empty_id {
-            let handle = self.load_block_handle(&(&ss2.0).try_into()?)?;
-            let state = self.load_state(handle.id()).await?;
-            self.store_persistent_state_attempts(&handle, &state).await;
-            SavingState2(empty_id.clone()).store_to_db(self.db().deref())?;
-            log::info!("Persistent shard state saved {}", state.block_id());
+        let mut handle = engine.load_block_handle(&pss_keeper_block)?;
+        loop {
+            if handle.is_key_block()? {
+                let mc_state = engine.load_state(handle.id()).await?;
+                let is_persistent_state = if handle.id().seq_no() == 0 {
+                    true
+                } else {
+                    if let Some(prev_key_block_id) =
+                        mc_state.shard_state_extra()?.prev_blocks.get_prev_key_block(handle.id().seq_no() - 1)? {
+                        let prev_handle = engine.load_block_handle(&BlockIdExt {
+                            shard_id: ShardIdent::masterchain(),
+                            seq_no: prev_key_block_id.seq_no,
+                            root_hash: prev_key_block_id.root_hash,
+                            file_hash: prev_key_block_id.file_hash
+                        })?;
+                        engine.is_persistent_state(handle.gen_utime()?, prev_handle.gen_utime()?)
+                    } else {
+                        false
+                    }
+                };
+                if !is_persistent_state {
+                    log::trace!("persistent_states_keeper: skip keyblock (is not persistent) {}", handle.id());
+                } else {
+                    log::trace!("persistent_states_keeper: saving {}", handle.id());
+                    let now = std::time::Instant::now();
+                    engine.store_persistent_state_attempts(&handle, &mc_state).await;
+                    log::trace!("persistent_states_keeper: saved {} TIME {}ms",
+                        handle.id(), now.elapsed().as_millis());
+
+                    let mut shard_blocks = vec!();
+                    mc_state.shard_state_extra()?.shards.iterate_shards(&mut |ident: ShardIdent, descr: ShardDescr| {
+                        shard_blocks.push(BlockIdExt {
+                            shard_id: ident,
+                            seq_no: descr.seq_no,
+                            root_hash: descr.root_hash,
+                            file_hash: descr.file_hash
+                        });
+                        Ok(true)
+                    })?;
+                    for block_id in shard_blocks {
+                        log::trace!("persistent_states_keeper: saving {}", block_id);
+                        let now = std::time::Instant::now();
+                        
+                        let handle = engine.load_block_handle(&block_id)?;
+                        let ss = engine.wait_state(&handle).await?;
+                        engine.store_persistent_state_attempts(&handle, &ss).await;
+
+                        log::trace!("persistent_states_keeper: saved {} TIME {}ms",
+                            handle.id(), now.elapsed().as_millis());
+                    };
+                }
+            }
+            handle = engine.wait_next_applied_mc_block(&handle).await?.0;
+            engine.store_pss_keeper_block_id(handle.id(), ).await?;
         }
-        Ok(())
     }
 
     pub async fn store_persistent_state_attempts(&self, handle: &BlockHandle, ss: &ShardStateStuff) {
@@ -404,7 +462,7 @@ impl Engine {
     }
 }
 
-async fn boot(engine: &Arc<Engine>) -> Result<(BlockIdExt, BlockIdExt)> {
+async fn boot(engine: &Arc<Engine>) -> Result<(BlockIdExt, BlockIdExt, BlockIdExt)> {
     log::info!(target: "node", "Booting...");
 
     let mut result = LastMcBlockId::load_from_db(engine.db().deref()).and_then(|id| (&id.0).try_into());
@@ -428,10 +486,19 @@ async fn boot(engine: &Arc<Engine>) -> Result<(BlockIdExt, BlockIdExt)> {
         }
     };
 
+    let pss_keeper_block = match PssKeeperBlockId::load_from_db(engine.db().deref()) {
+        Ok(id) => (&id.0).try_into()?,
+        Err(_) => {
+            engine.store_pss_keeper_block_id(&last_mc_block).await?;
+            log::info!(target: "node", "`PssKeeperBlockId` wasn't set - it is inited by `LastMcBlockId`.");
+            last_mc_block.clone()
+        }
+    };
+
     log::info!(target: "node", "Boot complete.");
     log::info!(target: "node", "LastMcBlockId: {}", last_mc_block);
     log::info!(target: "node", "ShardsClientMcBlockId: {}", shards_client_block);
-    Ok((last_mc_block, shards_client_block))
+    Ok((last_mc_block, shards_client_block, pss_keeper_block))
 }
 
 pub async fn run(general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>) -> Result<()> {
@@ -440,14 +507,10 @@ pub async fn run(general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>
     let consumer_config = general_config.kafka_consumer_config();
 
     //// Create engine
-
     let engine = Engine::new(general_config, ext_db).await?;
 
-    engine.check_persistent_states().await?;
-
     //// Boot
-
-    let (last_mc_block, shards_client_mc_block) = boot(&engine).await?;
+    let (last_mc_block, shards_client_mc_block, pss_keeper_block) = boot(&engine).await?;
 
     //// Start services
     start_external_broadcast_process(engine.clone(), &consumer_config)?;
@@ -460,6 +523,8 @@ pub async fn run(general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>
 
     // shard blocks download client
     let _ = start_shards_client(engine.clone(), shards_client_mc_block)?;
+
+    let _ = Engine::start_persistent_states_keeper(engine.clone(), pss_keeper_block)?;
 
     // mc blocks download client
     let _ = start_masterchain_client(engine, last_mc_block)?.await;
