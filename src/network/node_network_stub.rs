@@ -146,7 +146,7 @@ impl FullNodeOverlayClient for OverlayClientStub {
     async fn download_persistent_state_part(
         &self,
         block_id: &BlockIdExt,
-        _masterchain_block_id: &BlockIdExt,
+        masterchain_block_id: &BlockIdExt,
         offset: usize,
         max_size: usize,
         _attempts: u32,

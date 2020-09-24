@@ -88,6 +88,13 @@ impl BlockStuff {
         self.id.shard().is_masterchain()
     }
 
+    pub fn masterchain_ref_seq_no(&self) -> Result<u32> {
+        Ok(self.block()
+            .read_info()?
+            .read_master_id()?
+            .seq_no)
+    }
+
     pub fn gen_utime(&self) -> Result<u32> {
         Ok(self.block.read_info()?.gen_utime().0)
     }

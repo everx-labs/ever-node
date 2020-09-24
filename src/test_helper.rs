@@ -6,7 +6,7 @@ use crate::{
     shard_state::ShardStateStuff,
 };
 use sha2::Digest;
-use std::{io::Cursor, ops::Deref, str::FromStr, sync::Arc};
+use std::{io::Cursor, ops::Deref, sync::Arc};
 use ton_block::*;
 use ton_block_json::*;
 use ton_types::{
@@ -116,7 +116,7 @@ pub fn test_download_next_key_blocks_ids(block_id: &BlockIdExt) -> Result<Vec<Bl
     }
 }
 
-pub fn import_block(path: &str, shard_prefix: u64, seq_no: u32, db: &dyn InternalDb) -> Result<Arc<BlockHandle>> {
+pub async fn import_block(path: &str, shard_prefix: u64, seq_no: u32, db: &dyn InternalDb) -> Result<Arc<BlockHandle>> {
     let handle;
     if seq_no == 0 {
         unimplemented!("need to import state 0 itself")
@@ -127,10 +127,10 @@ pub fn import_block(path: &str, shard_prefix: u64, seq_no: u32, db: &dyn Interna
         let block_stuff = BlockStuff::read_from_file(&name)?;
         handle = db.load_block_handle(&block_stuff.id())?;
         if handle.data_inited() {
-            log::info!("block: {} already in base", name);
+            log::info!("block: {} already in DB", name);
         } else {
             log::info!("import block: {} with block_id: {}", name, handle.id());
-            db.store_block_data(&handle, &block_stuff)?;
+            db.store_block_data(&handle, &block_stuff).await?;
         }
     };
     let name = format!("{}/states/{:16X}/{}", path, shard_prefix, seq_no);
@@ -146,7 +146,7 @@ pub fn import_block(path: &str, shard_prefix: u64, seq_no: u32, db: &dyn Interna
 }
 
 // imports from replication folders persistent state and blocks and apply one by one
-pub fn import_replica(db: Arc<dyn InternalDb>, path: &str, _workchain_id: i32, prefix: u64, mut seq_no: u32, mut need_seqno: u32) -> Result<()> {
+pub async fn import_replica(db: Arc<dyn InternalDb>, path: &str, _workchain_id: i32, prefix: u64, mut seq_no: u32, mut need_seqno: u32) -> Result<()> {
     let path = format!("{}/{}", dirs::home_dir().unwrap().into_os_string().into_string().unwrap(), path);
     let acc_pfx = AccountIdPrefixFull::any_masterchain();
     // let acc_pfx = AccountIdPrefixFull::workchain(workchain_id, prefix);
@@ -159,9 +159,10 @@ pub fn import_replica(db: Arc<dyn InternalDb>, path: &str, _workchain_id: i32, p
         // println!("store state {}", need_seqno);
         // std::fs::write(format!("{}/states/{:16X}/{}", path, prefix, need_seqno), data)?;
     } else {
-        let result = db
-            .find_block_by_seq_no(&acc_pfx, seq_no)
-            .or_else(|_err| import_block(&path, prefix, seq_no, db.deref()));
+        let result = match db.find_block_by_seq_no(&acc_pfx, seq_no) {
+            Ok(block_handle) => Ok(block_handle),
+            Err(_err) => import_block(&path, prefix, seq_no, db.deref()).await
+        };
         let handle = match result {
             Ok(handle) => handle,
             Err(_) => return Ok(())
@@ -170,8 +171,8 @@ pub fn import_replica(db: Arc<dyn InternalDb>, path: &str, _workchain_id: i32, p
         let mut root = state.root_cell().clone();
         while seq_no <= need_seqno {
             seq_no += 1;
-            let handle = import_block(&path, prefix, seq_no, db.deref()).unwrap();
-            let block = db.load_block_data(handle.id()).unwrap();
+            let handle = import_block(&path, prefix, seq_no, db.deref()).await.unwrap();
+            let block = db.load_block_data(&handle).await.unwrap();
             let merkle_update = block.block().read_state_update().expect("bad StateUpdate");
             assert!(root.repr_hash() == merkle_update.old_hash);
             root = merkle_update.apply_for(&root).unwrap().clone();
@@ -187,18 +188,18 @@ pub fn import_replica(db: Arc<dyn InternalDb>, path: &str, _workchain_id: i32, p
     Ok(())
 }
 
-pub fn prepare_key_block_state(db: &dyn InternalDb) {
+pub async fn prepare_key_block_state(db: &dyn InternalDb) {
     let path = dirs::home_dir().unwrap().into_os_string().into_string().unwrap();
     let key_block_id = test_next_key_block();
     let key_handle = db.load_block_handle(&key_block_id).unwrap();
     let block_id = test_mc_state_block_id();
-    import_block(&path, block_id.shard().shard_prefix_with_tag(), block_id.seq_no, db).unwrap();
+    import_block(&path, block_id.shard().shard_prefix_with_tag(), block_id.seq_no, db).await.unwrap();
     if db.load_shard_state_dynamic(key_handle.id()).is_err() {
         let state = db.load_shard_state_dynamic(&block_id).expect("start state should present");
         let mut root = state.root_cell().clone();
         for seq_no in block_id.seq_no() + 1..=key_handle.id().seq_no() {
-            let handle = import_block(&path, block_id.shard().shard_prefix_with_tag(), seq_no, db).unwrap();
-            let block = db.load_block_data(handle.id()).unwrap();
+            let handle = import_block(&path, block_id.shard().shard_prefix_with_tag(), seq_no, db).await.unwrap();
+            let block = db.load_block_data(&handle).await.unwrap();
             let merkle_update = block.block().read_state_update().expect("bad StateUpdate");
             std::assert_eq!(root.repr_hash(), merkle_update.old_hash);
             root = merkle_update.apply_for(&root).unwrap().clone();
@@ -208,10 +209,10 @@ pub fn prepare_key_block_state(db: &dyn InternalDb) {
     }
 }
 
-pub fn prepare_test_db() -> Result<Arc<dyn InternalDb>> {
+pub async fn prepare_test_db() -> Result<Arc<dyn InternalDb>> {
     let db_config = InternalDbConfig { db_directory: format!("node_db") };
-    let db = Arc::new(InternalDbImpl::new(db_config)?);
-    prepare_key_block_state(db.deref());
+    let db = Arc::new(InternalDbImpl::new(db_config).await?);
+    prepare_key_block_state(db.deref()).await;
     Ok(db)
 }
 

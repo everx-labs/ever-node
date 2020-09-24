@@ -59,9 +59,8 @@ async fn load_master_blocks_cycle(engine: Arc<dyn EngineOperations>, last_got_bl
 async fn load_next_master_block(engine: &Arc<dyn EngineOperations>, prev_handle: &BlockHandle) -> Result<Arc<BlockHandle>> {
     log::trace!(target: "node", "load_blocks_cycle: prev block: {}", prev_handle.id());
     let next_handle = if prev_handle.next1_inited() {
-        let next_handle = engine.load_block_handle(
-            &engine.load_block_next1(prev_handle.id()).await?
-        )?;
+        let next_block_id = engine.load_block_next1(prev_handle.id()).await?;
+        let next_handle = engine.load_block_handle(&next_block_id)?;
         if !next_handle.applied() {
             engine.clone().apply_block(next_handle.deref(), None).await?;
         }

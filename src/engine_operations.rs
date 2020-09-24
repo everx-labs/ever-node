@@ -23,7 +23,7 @@ impl EngineOperations for Engine {
     async fn load_applied_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         // TODO make cache?
         if handle.applied() {
-            self.db().load_block_data(handle.id())
+            self.load_block(handle).await
         } else if handle.data_inited() {
             fail!("Block is not applied yet")
         } else {
@@ -31,16 +31,20 @@ impl EngineOperations for Engine {
         }
     }
 
+    async fn load_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
+        self.db().load_block_data(handle).await
+    }
+
     async fn load_block_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
-        self.db().load_block_data_raw(handle.id())
+        self.db().load_block_data_raw(handle).await
     }
 
     async fn wait_applied_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         if handle.applied() {
-            self.db().load_block_data(handle.id())
+            self.load_block(handle).await
         } else {
             self.block_applying_awaiters().wait(handle.id()).await?;
-            self.db().load_block_data(handle.id())
+            self.load_block(handle).await
         }
     }
 
@@ -57,9 +61,10 @@ impl EngineOperations for Engine {
                 }
             }
         };
+        let block_handle = self.load_block_handle(&next_id)?;
         Ok((
-            self.load_block_handle(&next_id)?,
-            self.db().load_block_data(&next_id)?
+            Arc::clone(&block_handle),
+            self.load_block(&block_handle).await?
         ))
     }
 
@@ -76,7 +81,8 @@ impl EngineOperations for Engine {
     }
 
     async fn load_last_applied_mc_block(&self) -> Result<BlockStuff> {
-        let handle = self.load_block_handle(&self.load_last_applied_mc_block_id().await?)?;
+        let block_id = &self.load_last_applied_mc_block_id().await?;
+        let handle = self.load_block_handle(&block_id)?;
         self.load_applied_block(&handle).await
     }
 
@@ -136,20 +142,20 @@ impl EngineOperations for Engine {
     }
 
     async fn store_block(&self, handle: &BlockHandle, block: &BlockStuff) -> Result<()> {
-        self.db().store_block_data(handle, block)
+        self.db().store_block_data(handle, block).await
     }
 
     async fn store_block_proof(&self, handle: &BlockHandle, proof: &BlockProofStuff) -> Result<()> {
-        self.db().store_block_proof(handle, proof)
+        self.db().store_block_proof(handle, proof).await
     }
 
     async fn load_block_proof(&self, handle: &BlockHandle, is_link: bool) -> Result<BlockProofStuff> {
         // TODO make cache?
-        self.db().load_block_proof(handle.id(), is_link)
+        self.db().load_block_proof(handle, is_link).await
     }
 
     async fn load_block_proof_raw(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>> {
-        self.db().load_block_proof_raw(handle.id(), is_link)
+        self.db().load_block_proof_raw(handle, is_link).await
     }
 
     async fn load_mc_zero_state(&self) -> Result<ShardStateStuff> {
@@ -233,23 +239,23 @@ impl EngineOperations for Engine {
         Ok(())
     }
 
-    async fn store_block_prev(&self, handle: &BlockHandle, prev: &BlockIdExt) -> Result<()> {
+    fn store_block_prev(&self, handle: &BlockHandle, prev: &BlockIdExt) -> Result<()> {
         self.db().store_block_prev(handle, prev)
     }
 
-    async fn load_block_prev(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_prev(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         self.db().load_block_prev(id)
     }
 
-    async fn store_block_prev2(&self, handle: &BlockHandle, prev2: &BlockIdExt) -> Result<()> {
+    fn store_block_prev2(&self, handle: &BlockHandle, prev2: &BlockIdExt) -> Result<()> {
         self.db().store_block_prev2(handle, prev2)
     }
 
-    async fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         self.db().load_block_prev2(id)
     }
 
-    async fn store_block_next1(&self, handle: &BlockHandle, next: &BlockIdExt) -> Result<()> {
+    fn store_block_next1(&self, handle: &BlockHandle, next: &BlockIdExt) -> Result<()> {
         self.db().store_block_next1(handle, next)
     }
 
@@ -257,7 +263,7 @@ impl EngineOperations for Engine {
         self.db().load_block_next1(id)
     }
 
-    async fn store_block_next2(&self, handle: &BlockHandle, next2: &BlockIdExt) -> Result<()> {
+    fn store_block_next2(&self, handle: &BlockHandle, next2: &BlockIdExt) -> Result<()> {
         self.db().store_block_next2(handle, next2)
     }
 
@@ -310,8 +316,8 @@ impl EngineOperations for Engine {
         ).await
     }
 
-    fn set_applied(&self, block_id: &BlockIdExt) -> Result<()> {
-        self.db().store_block_applied(block_id)
+    async fn set_applied(&self, block_id: &BlockIdExt) -> Result<()> {
+        self.db().store_block_applied(block_id).await
     }
 
     fn initial_sync_disabled(&self) -> bool { (self as &Engine).initial_sync_disabled() }

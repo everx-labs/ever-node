@@ -31,7 +31,8 @@ impl NodeNetwork {
     pub(crate) const TAG_DHT_KEY: usize = 1;
     pub(crate) const TAG_OVERLAY_KEY: usize = 2;
 
-    const PERIOD_STORE_IP_ADDRESS: u64 = 3000;  // second
+    const PERIOD_STORE_IP_ADDRESS: u64 = 500;  // second
+    const PERIOD_START_FIND_DHT_NODE: u64 = 60; // second
 
     pub async fn new(config: &mut TonNodeConfig, db: Arc<dyn InternalDb>) -> Result<Self> {
 
@@ -63,6 +64,7 @@ impl NodeNetwork {
 
         let overlay_public_key = adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?;
         NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_public_key);
+        NodeNetwork::find_dht_nodes(dht.clone());
 
         Ok(NodeNetwork {
             adnl,
@@ -143,7 +145,7 @@ impl NodeNetwork {
     }
 
     fn periodic_store_ip_addr(dht: Arc<DhtNode>, node_key: Arc<KeyOption>) {
-        let _handler = tokio::spawn(async move {
+        tokio::spawn(async move {
             let node_key = node_key.clone();
             loop {
                 if let Err(e) = DhtNode::store_ip_address(&dht, &node_key).await {
@@ -290,9 +292,24 @@ impl NodeNetwork {
         Ok(())
     }
 
+    fn find_dht_nodes(dht: Arc<DhtNode>) {
+        tokio::spawn(async move {
+            loop {
+                let mut iter = None;
+
+                while let Some(id) = dht.get_known_peer(&mut iter) {
+                    if let Err(e) = dht.find_dht_nodes(&id).await {
+                        log::warn!("find_dht_nodes result: {:?}", e)
+                    }
+                }
+                delay_for(Duration::from_secs(Self::PERIOD_START_FIND_DHT_NODE)).await;
+            }
+        });
+    }
+
     fn start_update_peers(self: Arc<Self>, client_overlay: &Arc<NodeClientOverlay>) {
         let client_overlay = client_overlay.clone();
-        let _handler = tokio::spawn(async move {
+        tokio::spawn(async move {
             let mut iter = None;
             loop {
                 log::trace!("find overlay nodes by dht...");

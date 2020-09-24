@@ -1,10 +1,15 @@
+use std::io::Write;
+use std::sync::{Arc, Weak};
 use std::sync::atomic::Ordering;
 
+use lockfree::map::Map;
+
 use ton_block::{BlockIdExt, BlockInfo};
+use ton_node_storage::traits::Serializable;
 use ton_node_storage::types::BlockMeta;
 use ton_types::{fail, Result};
 
-use crate::block::BlockStuff;
+use crate::block::{BlockStuff, BlockIdExtExtention};
 use crate::block_proof::BlockProofStuff;
 
 const FLAG_DATA: u32 = 1;
@@ -21,54 +26,64 @@ const FLAG_APPLIED: u32 = 1 << 10;
 const FLAG_KEY_BLOCK: u32 = 1 << 11;
 
 /// Meta information related to block
+#[derive(Debug)]
 pub struct BlockHandle {
     id: BlockIdExt,
     meta: BlockMeta,
+    block_handle_cache: Arc<Map<BlockIdExt, Weak<BlockHandle>>>,
 }
 
 impl BlockHandle {
-    pub fn new(id: &BlockIdExt) -> Self {
-        Self::with_values(id.clone(), BlockMeta::default())
+    pub(super) fn new(id: BlockIdExt, block_handle_cache: Arc<Map<BlockIdExt, Weak<BlockHandle>>>) -> Self {
+        Self::with_values(id, BlockMeta::default(), block_handle_cache)
     }
 
-    pub fn with_data(id: &BlockIdExt, data: &[u8]) -> Result<Self> {
-        Ok(Self::with_values(id.clone(), BlockMeta::deserialize(data)?))
+    pub(super) const fn with_values(id: BlockIdExt, meta: BlockMeta, block_handle_cache: Arc<Map<BlockIdExt, Weak<BlockHandle>>>) -> Self {
+        Self { id, meta, block_handle_cache }
     }
 
-    fn with_values(id: BlockIdExt, meta: BlockMeta) -> Self {
-        Self { id, meta }
-    }
-
-    pub fn serialize(&self) -> Vec<u8> {
-        self.meta.serialize()
+    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+        self.meta.serialize(writer)
     }
 
     // This flags might be set into true only. So flush only after transform false -> true.
 
     fn fetch_info(&self, info: &BlockInfo) -> Result<()> {
         self.meta.gen_utime().store(info.gen_utime().0, Ordering::SeqCst);
+        let masterchain_ref_seq_no = if info.shard().is_masterchain() {
+            info.seq_no()
+        } else {
+            info.read_master_id()?.seq_no
+        };
+        self.meta.masterchain_ref_seq_no().store(masterchain_ref_seq_no, Ordering::SeqCst);
         if info.key_block() {
             self.set_flag(FLAG_KEY_BLOCK);
         }
+        self.meta.set_fetched();
         Ok(())
     }
 
-    pub(super) fn set_data_inited(&self, block: &BlockStuff) -> Result<()> {
-        self.fetch_info(&block.block().read_info()?)?;
+    pub(super) fn fetch_block_info(&self, block: &BlockStuff) -> Result<()> {
+        self.fetch_info(&block.block().read_info()?)
+    }
+
+    pub(super) fn fetch_proof_info(&self, proof: &BlockProofStuff) -> Result<()> {
+        self.fetch_info(&proof.virtualize_block()?.0.read_info()?)
+    }
+
+    // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
+    pub(super) fn set_data_inited(&self) {
         self.set_flag(FLAG_DATA);
-        Ok(())
     }
 
-    pub(super) fn set_proof_inited(&self, proof: &BlockProofStuff) -> Result<()> {
-        self.fetch_info(&proof.virtualize_block()?.0.read_info()?)?;
+    // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
+    pub(super) fn set_proof_inited(&self) {
         self.set_flag(FLAG_PROOF);
-        Ok(())
     }
 
-    pub(super) fn set_proof_link_inited(&self, proof: &BlockProofStuff) -> Result<()> {
-        self.fetch_info(&proof.virtualize_block()?.0.read_info()?)?;
-        self.set_flag(FLAG_PROOF);
-        Ok(())
+    // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
+    pub(super) fn set_proof_link_inited(&self) {
+        self.set_flag(FLAG_PROOF_LINK);
     }
 
     pub(super) fn set_processed_in_ext_db(&self) {
@@ -107,10 +122,16 @@ impl BlockHandle {
         &self.id
     }
 
+    pub fn meta(&self) -> &BlockMeta {
+        &self.meta
+    }
+
+    // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
     pub fn data_inited(&self) -> bool {
         self.flag(FLAG_DATA)
     }
 
+    // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
     pub fn proof_inited(&self) -> bool {
         if cfg!(feature = "local_test") {
             true
@@ -119,6 +140,7 @@ impl BlockHandle {
         }
     }
 
+    // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
     pub fn proof_link_inited(&self) -> bool {
         if cfg!(feature = "local_test") {
             true
@@ -127,6 +149,7 @@ impl BlockHandle {
         }
     }
 
+    // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
     pub fn proof_or_link_inited(&self, is_link: &mut bool) -> bool {
         *is_link = self.id.shard().is_masterchain();
         if *is_link {
@@ -169,7 +192,7 @@ impl BlockHandle {
     }
 
     pub fn gen_utime(&self) -> Result<u32> {
-        if self.data_inited() || self.proof_inited() || self.proof_link_inited() || self.state_inited() {
+        if self.fetched() || self.state_inited() {
             Ok(self.meta.gen_utime().load(Ordering::Relaxed))
         } else {
             fail!("Data is not inited yet")
@@ -177,7 +200,7 @@ impl BlockHandle {
     }
 
     pub(super) fn set_gen_utime(&self, time: u32) -> Result<()> {
-        if self.data_inited() || self.proof_inited() || self.proof_link_inited() || self.state_inited() {
+        if self.fetched() || self.state_inited() {
             if time != self.meta.gen_utime().load(Ordering::Relaxed) {
                 fail!("gen_utime was already set with another value")
             } else {
@@ -189,8 +212,32 @@ impl BlockHandle {
         }
     }
 
+    pub fn masterchain_ref_seq_no(&self) -> Result<u32> {
+        if self.id.is_masterchain() {
+            return Ok(self.id.seq_no());
+        }
+
+        if !self.fetched() {
+            fail!("Data is not inited yet")
+        }
+
+        Ok(self.meta.masterchain_ref_seq_no().load(Ordering::SeqCst))
+    }
+
+    pub fn stored(&self) -> bool {
+        self.meta().handle_stored()
+    }
+
+    pub fn set_stored(&self) -> bool {
+        self.meta().set_handle_stored()
+    }
+
+    pub fn fetched(&self) -> bool {
+        self.meta().fetched()
+    }
+
     pub fn is_key_block(&self) -> Result<bool> {
-        if self.data_inited() || self.proof_inited() || self.proof_link_inited() {
+        if self.fetched() {
             Ok(self.flag(FLAG_KEY_BLOCK))
         } else {
             fail!("Data is not inited yet")
@@ -210,5 +257,11 @@ impl BlockHandle {
     #[inline]
     fn set_flag(&self, flag: u32) {
         self.meta.flags().fetch_or(flag, Ordering::SeqCst);
+    }
+}
+
+impl Drop for BlockHandle {
+    fn drop(&mut self) {
+        self.block_handle_cache.remove(self.id());
     }
 }

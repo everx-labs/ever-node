@@ -191,7 +191,7 @@ async fn download_zero_state(engine: &dyn EngineOperations, handle: &BlockHandle
         match engine.download_state(handle.id(), handle.id()).await {
             Ok(state) => {
                 engine.store_state(&handle, &state).await?;
-                engine.set_applied(handle.id())?;
+                engine.set_applied(handle.id()).await?;
                 engine.process_full_state_in_ext_db(&state).await?;
                 return Ok(state)
             }
@@ -244,10 +244,9 @@ async fn download_block_and_state(engine: &dyn EngineOperations, block_id: &Bloc
         }
         block
     } else {
-        engine.load_applied_block(&handle).await?
+        engine.load_block(&handle).await?
     };
     if !handle.state_inited() {
-        engine.store_block(&handle, &block).await?;
         let state_update = block.block().read_state_update()?;
         log::info!(target: "boot", "download state {}", handle.id());
         let state = engine.download_state(handle.id(), master_id).await?;
@@ -258,7 +257,7 @@ async fn download_block_and_state(engine: &dyn EngineOperations, block_id: &Bloc
         engine.store_state(&handle, &state).await?;
         engine.process_full_state_in_ext_db(&state).await?;
     }
-    engine.set_applied(handle.id())?;
+    engine.set_applied(handle.id()).await?;
     Ok(block)
 }
 
@@ -287,7 +286,7 @@ pub async fn warm_boot(engine: Arc<dyn EngineOperations>, mut block_id: BlockIdE
     while !handle.applied() { // go back to find last applied block
         CHECK!(handle.state_inited());
         CHECK!(handle.prev1_inited());
-        block_id = engine.load_block_prev(handle.id()).await?;
+        block_id = engine.load_block_prev(handle.id())?;
         handle = engine.load_block_handle(&block_id)?;
     }
     log::info!(target: "boot", "last applied block id = {}", &block_id);

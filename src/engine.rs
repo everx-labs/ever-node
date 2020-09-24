@@ -72,7 +72,7 @@ impl Engine {
         log::info!(target: "node", "Creating engine...");
 
         let db_config = InternalDbConfig { db_directory: "node_db".to_owned() };
-        let db = Arc::new(InternalDbImpl::new(db_config)?);
+        let db = Arc::new(InternalDbImpl::new(db_config).await?);
 
         let global_config = general_config.load_global_config()?;
         let zero_state_id = global_config.zero_state().expect("check zero state settings");
@@ -168,7 +168,7 @@ impl Engine {
         }
 
         let block = if handle.data_inited() {
-            self.db().load_block_data(handle.id())?
+            self.load_block(handle).await?
         } else {
             log::trace!("Start downloading block for apply... {}", handle.id());
 
@@ -197,7 +197,7 @@ impl Engine {
 
         // TODO fix trash with Arc and clone
         apply_block(handle.deref(), block, &(self.clone() as Arc<dyn EngineOperations>)).await?;
-        self.deref().db.store_block_applied(block.id())?;
+        self.set_applied(block.id()).await?;
 
         let ago = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i32 - block.gen_utime()? as i32;
@@ -452,7 +452,8 @@ pub async fn run(general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>
     //// Start services
     start_external_broadcast_process(engine.clone(), &consumer_config)?;
 
-    Arc::clone(&engine).start_gc_scheduler();
+    // TODO: Temporary disabled GC because of DB corruption. Enable after fix.
+    // Arc::clone(&engine).start_gc_scheduler();
 
     // mc broadcasts (shard blocks are received by this listener too)
     Arc::clone(&engine).listen_shard_blocks_broadcasts(ShardIdent::masterchain()).await?;
