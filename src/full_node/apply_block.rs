@@ -21,7 +21,7 @@ pub async fn apply_block(handle: &BlockHandle, block: &BlockStuff, engine: &Arc<
         calc_shard_state(handle, block, &prev_ids, engine).await?
     };
 
-    set_next_prev_ids(&handle, block.id(), &prev_ids, engine.deref()).await?;
+    set_next_prev_ids(&handle, block.id(), &prev_ids, engine.deref())?;
 
     engine.process_block_in_ext_db(handle, &block, None, &shard_state).await?;
 
@@ -114,7 +114,7 @@ pub async fn calc_shard_state(
 }
 
 // Sets next block link for prev. block and prev. for current one
-pub async fn set_next_prev_ids(
+pub fn set_next_prev_ids(
     handle: &BlockHandle,
     id: &BlockIdExt,
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
@@ -124,13 +124,13 @@ pub async fn set_next_prev_ids(
         (prev_id1, Some(prev_id2)) => {
             // After merge
             let prev_handle1 = engine.load_block_handle(&prev_id1)?;
-            engine.store_block_next1(&prev_handle1, id).await?;
+            engine.store_block_next1(&prev_handle1, id)?;
 
             let prev_handle2 = engine.load_block_handle(&prev_id2)?;
-            engine.store_block_next1(&prev_handle2, id).await?;
+            engine.store_block_next1(&prev_handle2, id)?;
 
-            engine.store_block_prev(handle, &prev_id1).await?;
-            engine.store_block_prev2(handle, &prev_id2).await?;
+            engine.store_block_prev(handle, &prev_id1)?;
+            engine.store_block_prev2(handle, &prev_id2)?;
         },
         (prev_id, None) => {
             // if after split and it is second ("1" branch) shard - set next2 for prev block
@@ -138,11 +138,11 @@ pub async fn set_next_prev_ids(
             let shard = id.shard().clone();
             let prev_handle = engine.load_block_handle(&prev_id)?;
             if prev_shard != shard && prev_shard.split()?.1 == shard {
-                engine.store_block_next2(&prev_handle, id).await?;
+                engine.store_block_next2(&prev_handle, id)?;
             } else {
-                engine.store_block_next1(&prev_handle, id).await?;
+                engine.store_block_next1(&prev_handle, id)?;
             }
-            engine.store_block_prev(handle, &prev_id).await?;
+            engine.store_block_prev(handle, &prev_id)?;
         }
     }
     Ok(())

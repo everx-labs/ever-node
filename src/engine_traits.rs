@@ -37,6 +37,9 @@ pub trait EngineOperations : Sync + Send {
     async fn load_applied_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         unimplemented!()
     }
+    async fn load_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
+        unimplemented!()
+    }
     async fn load_block_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
         unimplemented!()
     }
@@ -144,25 +147,25 @@ pub trait EngineOperations : Sync + Send {
 
     // Block next prev links
 
-    async fn store_block_prev(&self, handle: &BlockHandle, prev: &BlockIdExt) -> Result<()> {
+    fn store_block_prev(&self, handle: &BlockHandle, prev: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
-    async fn load_block_prev(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_prev(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         unimplemented!()
     }
-    async fn store_block_prev2(&self, handle: &BlockHandle, prev2: &BlockIdExt) -> Result<()> {
+    fn store_block_prev2(&self, handle: &BlockHandle, prev2: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
-    async fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         unimplemented!()
     }
-    async fn store_block_next1(&self, handle: &BlockHandle, next: &BlockIdExt) -> Result<()> {
+    fn store_block_next1(&self, handle: &BlockHandle, next: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
     async fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         unimplemented!()
     }
-    async fn store_block_next2(&self, handle: &BlockHandle, next2: &BlockIdExt) -> Result<()> {
+    fn store_block_next2(&self, handle: &BlockHandle, next2: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
     async fn load_block_next2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
@@ -261,7 +264,8 @@ pub trait EngineOperations : Sync + Send {
             fail!("External message is not properly formatted: {}", message)
         }
     }
-    fn set_applied(&self, block_id: &BlockIdExt) -> Result<()> {unimplemented!()}
+    
+    async fn set_applied(&self, block_id: &BlockIdExt) -> Result<()> {unimplemented!()}
 }
 
 /// External DB should implement this trait and put itself into engine's new function

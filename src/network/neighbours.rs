@@ -234,7 +234,7 @@ impl Neighbours {
     }
 
     pub fn start_reload(self: Arc<Self>) {
-        let _handler = tokio::spawn(async move {
+        tokio::spawn(async move {
             loop {
                 let sleep_time = rand::thread_rng().gen_range(10, 30);
                 delay_for(Duration::from_secs(sleep_time)).await;
@@ -251,7 +251,7 @@ impl Neighbours {
     }
 
     pub fn start_ping(self: Arc<Self>) {
-        let _handler = tokio::spawn(async move {
+        tokio::spawn(async move {
             loop {
                 if let Err(e) = self.ping_neighbours().await {
                     log::warn!("ERROR: {}", e)
@@ -521,7 +521,7 @@ println!("Bad caps {}: {}", peer.id, self.overlay_id);
         Ok(ret)
 */
     }
-                                                                            
+
     async fn update_capabilities(self: Arc<Self>, peer: Arc<Neighbour>) -> Result<()> {
         let now = Instant::now();
         peer.set_last_ping(self.start.elapsed().as_millis() as u64); 
