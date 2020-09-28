@@ -26,8 +26,6 @@ pub mod block_handle;
 pub use block_handle::BlockHandle;
 use ton_node_storage::archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId};
 use std::sync::Weak;
-use lockfree::map::{Preview, Insertion};
-
 
 pub trait NodeState: serde::Serialize + serde::de::DeserializeOwned {
     fn get_key() -> &'static str;
@@ -96,6 +94,8 @@ pub trait InternalDb : Sync + Send {
     fn load_node_state(&self, key: &'static str) -> Result<Vec<u8>>;
 }
 
+type BlockHandleCache = Arc<lockfree::map::Map<BlockIdExt, Weak<BlockHandle>>>;
+
 #[derive(serde::Deserialize)]
 pub struct InternalDbConfig {
     pub db_directory: String,
@@ -111,7 +111,7 @@ pub struct InternalDbImpl {
     node_state_db: NodeStateDb,
     shard_state_persistent_db: ShardStatePersistentDb,
     shard_state_dynamic_db: ShardStateDb,
-    block_handle_cache: Arc<lockfree::map::Map<BlockIdExt, Weak<BlockHandle>>>,
+    block_handle_cache: BlockHandleCache,
     //ss_test_map: lockfree::map::Map<BlockIdExt, ShardStateStuff>,
     shardstate_db_gc: shardstate_db::GC,
     archive_manager: Arc<ArchiveManager>,
@@ -150,7 +150,7 @@ impl InternalDbImpl {
                 shard_state_persistent_db: ShardStatePersistentDb::with_path(
                     &Self::build_name(&config.db_directory, "shard_state_persistent_db")),
                 shard_state_dynamic_db,
-                block_handle_cache: Arc::new(lockfree::map::Map::new()),
+                block_handle_cache: BlockHandleCache::default(),
                 //ss_test_map: lockfree::map::Map::new(),
                 shardstate_db_gc,
                 archive_manager,
@@ -183,58 +183,47 @@ impl InternalDbImpl {
         Ok(())
     }
 
-    fn load_block_handle_impl(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>> {
-        log::trace!("load_block_handle_impl {}", id);
-        if let Some(pair) = self.block_handle_cache.get(&id) {
-            if let Some(block_handle) = Weak::upgrade(pair.val()) {
-                return Ok(block_handle);
-            }
-        }
-
-        // Load from DB or create new if not exists
-        let block_handle = Arc::new(self.block_handle_db.try_get(&id.into())?
-            .map(|block_meta| {
+    fn load_or_create_handle(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>> {
+        Ok(Arc::new(match self.block_handle_db.try_get(&id.into())? {
+            None => BlockHandle::new(id.clone(), Arc::clone(&self.block_handle_cache)),
+            Some(block_meta) => {
                 let handle = BlockHandle::with_values(id.clone(), block_meta, Arc::clone(&self.block_handle_cache));
                 handle.set_stored();
                 handle
-            })
-            .unwrap_or_else(|| BlockHandle::new(id.clone(), Arc::clone(&self.block_handle_cache))));
+            },
+        }))
+    }
 
-        loop {
-            // This is so-called "interactive insertion"
-            let result = self.block_handle_cache.insert_with(id.clone(), |_key, prev_gen_val, updated_pair| {
-                if updated_pair.is_some() {
-                    // Other thread already added the value into the map,
-                    // so discard this insertion attempt
-                    Preview::Discard
-                } else if prev_gen_val.is_some() {
-                    // We've added the value just now - keep this value
-                    Preview::Keep
-                } else {
-                    // There is no value in the map - try to add.
-                    // If other thread is adding the value at the same time - the closure will be recalled
-                    Preview::New(Arc::downgrade(&block_handle))
-                }
-            });
-            match result {
-                Insertion::Created => {
-                    // Block handle we loaded now was added - use it
-                    return Ok(block_handle)
-                },
-                Insertion::Updated(_) => {
-                    // Unreachable situation - all updates must be discarded
-                    unreachable!("load_block_handle: unreachable Insertion::Updated")
-                },
-                Insertion::Failed(_) => {
-                    // Other thread's block handle was added - get it and use
-                    if let Some(pair) = self.block_handle_cache.get(&id) {
-                         if let Some(block_handle) = Weak::upgrade(pair.val()) {
-                            return Ok(block_handle);
-                        }
-                    }
-                }
-            };
+    fn load_or_create_handle_adaptor(
+        &self,
+        id: &BlockIdExt,
+        result: &mut Result<Arc<BlockHandle>>
+    ) -> Result<Option<Weak<BlockHandle>>> {
+        *result = self.load_or_create_handle(id);
+        if let Ok(ref block_handle) = result {
+            return Ok(Some(Arc::downgrade(block_handle)))
         }
+        Ok(None)
+    }
+
+    fn load_block_handle_impl(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>> {
+        log::trace!("load_block_handle_impl {}", id);
+        let mut result: Result<Arc<BlockHandle>> = Err(error!("Unexpected"));
+
+        adnl::common::add_object_to_map_with_update(&self.block_handle_cache, id.clone(), |weak_opt| {
+            if let Some(weak) = weak_opt {
+                if let Some(handle) = Weak::upgrade(weak) {
+                    result = Ok(handle);
+                    Ok(None)
+                } else {
+                    self.load_or_create_handle_adaptor(id, &mut result)
+                }
+            } else {
+                self.load_or_create_handle_adaptor(id, &mut result)
+            }
+        })?;
+
+        result
     }
 }
 
@@ -256,8 +245,9 @@ impl InternalDb for InternalDbImpl {
             handle.fetch_block_info(block)?;
             let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(block.id());
             self.archive_manager.add_file(&entry_id, block.data().to_vec()).await?;
-            handle.set_data_inited();
-            self.store_block_handle(handle)?;
+            if !handle.set_data_inited() {
+                self.store_block_handle(handle)?;
+            }
         }
         Ok(())
     }
@@ -271,7 +261,7 @@ impl InternalDb for InternalDbImpl {
     async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
         log::trace!("load_block_data_raw {}", handle.id());
         if !handle.data_inited() {
-            fail!("This block is not in the archive: {:?}", handle);
+            fail!("This block is not stored yet: {:?}", handle);
         }
         let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(handle.id());
         self.archive_manager.get_file(handle.id(), handle.meta(), &entry_id).await
@@ -302,16 +292,18 @@ impl InternalDb for InternalDbImpl {
                     handle.fetch_proof_info(proof)?;
                     let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(handle.id());
                     self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
-                    handle.set_proof_link_inited();
-                    self.store_block_handle(handle)?;
+                    if !handle.set_proof_link_inited() {
+                        self.store_block_handle(handle)?;
+                    }
                 }
             } else {
                 if !handle.proof_inited() {
                     handle.fetch_proof_info(proof)?;
                     let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Proof(handle.id());
                     self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
-                    handle.set_proof_inited();
-                    self.store_block_handle(handle)?;
+                    if !handle.set_proof_inited() {
+                        self.store_block_handle(handle)?;
+                    }
                 }
             }
         }
@@ -357,7 +349,6 @@ impl InternalDb for InternalDbImpl {
         log::trace!("load_shard_state_dynamic {}", id);
 
         Ok(ShardStateStuff::new(id.clone(), self.shard_state_dynamic_db.get(&id.into())?)?)
-        //Ok(self.ss_test_map.get(id).ok_or_else(|| error!("no state found"))?.val().clone()
     }
 
     fn gc_shard_state_dynamic_db(&self) -> Result<usize> {
@@ -371,8 +362,9 @@ impl InternalDb for InternalDbImpl {
         }
         if !handle.persistent_state_inited() {
             self.shard_state_persistent_db.put(&state.block_id().into(), &state.serialize()?).await?;
-            handle.set_persistent_state_inited();
-            self.store_block_handle(handle)?;
+            if !handle.set_persistent_state_inited() {
+                self.store_block_handle(handle)?;
+            }
         }
         Ok(())
     }
@@ -381,8 +373,9 @@ impl InternalDb for InternalDbImpl {
         log::trace!("store_shard_state_persistent_raw {}", handle.id());
         if !handle.persistent_state_inited() {
             self.shard_state_persistent_db.put(&handle.id().into(), state_data).await?;
-            handle.set_persistent_state_inited();
-            self.store_block_handle(handle)?;
+            if !handle.set_persistent_state_inited() {
+                self.store_block_handle(handle)?;
+            }
         }
         Ok(())
     }
@@ -413,8 +406,9 @@ impl InternalDb for InternalDbImpl {
             let value = bincode::serialize(&convert_block_id_ext_blk2api(prev))?;
             self.prev_block_db.put(&handle.id().into(), &value)?;
 
-            handle.set_prev1_inited();
-            self.store_block_handle(handle)?;
+            if !handle.set_prev1_inited() {
+                self.store_block_handle(handle)?;
+            }
         }
         Ok(())
     }
@@ -432,8 +426,9 @@ impl InternalDb for InternalDbImpl {
             let value = bincode::serialize(&convert_block_id_ext_blk2api(prev2))?;
             self.prev2_block_db.put(&handle.id().into(), &value)?;
 
-            handle.set_prev2_inited();
-            self.store_block_handle(handle)?;
+            if !handle.set_prev2_inited() {
+                self.store_block_handle(handle)?;
+            }
         }
         Ok(())
     }
@@ -451,8 +446,9 @@ impl InternalDb for InternalDbImpl {
             let value = bincode::serialize(&convert_block_id_ext_blk2api(next))?;
             self.next_block_db.put(&handle.id().into(), &value)?;
 
-            handle.set_next1_inited();
-            self.store_block_handle(handle)?;
+            if !handle.set_next1_inited() {
+                self.store_block_handle(handle)?;
+            }
         }
         Ok(())
     }
@@ -470,8 +466,9 @@ impl InternalDb for InternalDbImpl {
             let value = bincode::serialize(&convert_block_id_ext_blk2api(next2))?;
             self.next2_block_db.put(&handle.id().into(), &value)?;
 
-            handle.set_next2_inited();
-            self.store_block_handle(handle)?;
+            if !handle.set_next2_inited() {
+                self.store_block_handle(handle)?;
+            }
         }
         Ok(())
     }
@@ -485,8 +482,7 @@ impl InternalDb for InternalDbImpl {
 
     fn store_block_processed_in_ext_db(&self, handle: &BlockHandle) -> Result<()> {
         log::trace!("store_block_processed_in_ext_db {}", handle.id());
-        if !handle.processed_in_ext_db() {
-            handle.set_processed_in_ext_db();
+        if !handle.set_processed_in_ext_db() {
             self.store_block_handle(handle)?;
         }
         Ok(())
@@ -496,10 +492,17 @@ impl InternalDb for InternalDbImpl {
         log::trace!("store_block_applied {}", id);
 
         let handle = self.load_block_handle_impl(id)?;
-        if !handle.applied() {
-            self.archive_manager.move_to_archive(id, handle.meta()).await;
-            handle.set_applied();
+        if !handle.set_applied() {
             self.store_block_handle(&handle)?;
+        }
+        if !handle.moved_to_archive() {
+            if !handle.set_moving_to_archive() {
+                self.store_block_handle(&handle)?;
+                self.archive_manager.move_to_archive(id, handle.meta()).await;
+                if !handle.set_moved_to_archive() | handle.reset_moving_to_archive() {
+                    self.store_block_handle(&handle)?;
+                }
+            }
         }
         Ok(())
     }
@@ -516,3 +519,4 @@ impl InternalDb for InternalDbImpl {
         Ok(value.as_ref().to_vec()) // TODO try not to copy
     }
 }
+

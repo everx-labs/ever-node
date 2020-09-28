@@ -1,16 +1,14 @@
 use std::io::Write;
-use std::sync::{Arc, Weak};
 use std::sync::atomic::Ordering;
-
-use lockfree::map::Map;
 
 use ton_block::{BlockIdExt, BlockInfo};
 use ton_node_storage::traits::Serializable;
 use ton_node_storage::types::BlockMeta;
 use ton_types::{fail, Result};
 
-use crate::block::{BlockStuff, BlockIdExtExtention};
+use crate::block::{BlockIdExtExtention, BlockStuff};
 use crate::block_proof::BlockProofStuff;
+use crate::db::BlockHandleCache;
 
 const FLAG_DATA: u32 = 1;
 const FLAG_PROOF: u32 = 1 << 1;
@@ -24,21 +22,23 @@ const FLAG_PREV_1: u32 = 1 << 8;
 const FLAG_PREV_2: u32 = 1 << 9;
 const FLAG_APPLIED: u32 = 1 << 10;
 const FLAG_KEY_BLOCK: u32 = 1 << 11;
+const FLAG_MOVING_TO_ARCHIVE: u32 = 1 << 12;
+const FLAG_MOVED_TO_ARCHIVE: u32 = 1 << 13;
 
 /// Meta information related to block
 #[derive(Debug)]
 pub struct BlockHandle {
     id: BlockIdExt,
     meta: BlockMeta,
-    block_handle_cache: Arc<Map<BlockIdExt, Weak<BlockHandle>>>,
+    block_handle_cache: BlockHandleCache,
 }
 
 impl BlockHandle {
-    pub(super) fn new(id: BlockIdExt, block_handle_cache: Arc<Map<BlockIdExt, Weak<BlockHandle>>>) -> Self {
+    pub(super) fn new(id: BlockIdExt, block_handle_cache: BlockHandleCache) -> Self {
         Self::with_values(id, BlockMeta::default(), block_handle_cache)
     }
 
-    pub(super) const fn with_values(id: BlockIdExt, meta: BlockMeta, block_handle_cache: Arc<Map<BlockIdExt, Weak<BlockHandle>>>) -> Self {
+    pub(super) const fn with_values(id: BlockIdExt, meta: BlockMeta, block_handle_cache: BlockHandleCache) -> Self {
         Self { id, meta, block_handle_cache }
     }
 
@@ -72,50 +72,50 @@ impl BlockHandle {
     }
 
     // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
-    pub(super) fn set_data_inited(&self) {
-        self.set_flag(FLAG_DATA);
+    pub(super) fn set_data_inited(&self) -> bool {
+        self.set_flag(FLAG_DATA)
     }
 
     // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
-    pub(super) fn set_proof_inited(&self) {
-        self.set_flag(FLAG_PROOF);
+    pub(super) fn set_proof_inited(&self) -> bool {
+        self.set_flag(FLAG_PROOF)
     }
 
     // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
-    pub(super) fn set_proof_link_inited(&self) {
-        self.set_flag(FLAG_PROOF_LINK);
+    pub(super) fn set_proof_link_inited(&self) -> bool {
+        self.set_flag(FLAG_PROOF_LINK)
     }
 
-    pub(super) fn set_processed_in_ext_db(&self) {
-        self.set_flag(FLAG_EXT_DB);
+    pub(super) fn set_processed_in_ext_db(&self) -> bool {
+        self.set_flag(FLAG_EXT_DB)
     }
 
-    pub(super) fn set_state_inited(&self) {
-        self.set_flag(FLAG_STATE);
+    pub(super) fn set_state_inited(&self) -> bool {
+        self.set_flag(FLAG_STATE)
     }
 
-    pub(super) fn set_persistent_state_inited(&self) {
-        self.set_flag(FLAG_PERSISTENT_STATE);
+    pub(super) fn set_persistent_state_inited(&self) -> bool {
+        self.set_flag(FLAG_PERSISTENT_STATE)
     }
 
-    pub(super) fn set_next1_inited(&self) {
-        self.set_flag(FLAG_NEXT_1);
+    pub(super) fn set_next1_inited(&self) -> bool {
+        self.set_flag(FLAG_NEXT_1)
     }
 
-    pub(super) fn set_next2_inited(&self) {
-        self.set_flag(FLAG_NEXT_2);
+    pub(super) fn set_next2_inited(&self) -> bool {
+        self.set_flag(FLAG_NEXT_2)
     }
 
-    pub(super) fn set_prev1_inited(&self) {
-        self.set_flag(FLAG_PREV_1);
+    pub(super) fn set_prev1_inited(&self) -> bool {
+        self.set_flag(FLAG_PREV_1)
     }
 
-    pub(super) fn set_prev2_inited(&self) {
-        self.set_flag(FLAG_PREV_2);
+    pub(super) fn set_prev2_inited(&self) -> bool {
+        self.set_flag(FLAG_PREV_2)
     }
 
-    pub(super) fn set_applied(&self) {
-        self.set_flag(FLAG_APPLIED);
+    pub(super) fn set_applied(&self) -> bool {
+        self.set_flag(FLAG_APPLIED)
     }
 
     pub fn id(&self) -> &BlockIdExt {
@@ -232,6 +232,26 @@ impl BlockHandle {
         self.meta().set_handle_stored()
     }
 
+    pub fn moving_to_archive(&self) -> bool {
+        self.flag(FLAG_MOVING_TO_ARCHIVE)
+    }
+
+    pub fn set_moving_to_archive(&self) -> bool {
+        self.set_flag(FLAG_MOVING_TO_ARCHIVE)
+    }
+
+    pub fn reset_moving_to_archive(&self) -> bool {
+        self.reset_flag(FLAG_MOVING_TO_ARCHIVE)
+    }
+
+    pub fn moved_to_archive(&self) -> bool {
+        self.flag(FLAG_MOVED_TO_ARCHIVE)
+    }
+
+    pub fn set_moved_to_archive(&self) -> bool {
+        self.set_flag(FLAG_MOVED_TO_ARCHIVE)
+    }
+
     pub fn fetched(&self) -> bool {
         self.meta().fetched()
     }
@@ -255,8 +275,13 @@ impl BlockHandle {
     }
 
     #[inline]
-    fn set_flag(&self, flag: u32) {
-        self.meta.flags().fetch_or(flag, Ordering::SeqCst);
+    fn set_flag(&self, flag: u32) -> bool {
+        self.meta.flags().fetch_or(flag, Ordering::SeqCst) & flag == flag
+    }
+
+    #[inline]
+    fn reset_flag(&self, flag: u32) -> bool {
+        self.meta.flags().fetch_and(!flag, Ordering::SeqCst) & flag == flag
     }
 }
 
@@ -265,3 +290,4 @@ impl Drop for BlockHandle {
         self.block_handle_cache.remove(self.id());
     }
 }
+
