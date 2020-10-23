@@ -56,9 +56,13 @@ impl KafkaConsumer {
             let now = std::time::Instant::now();
             if let Some(payload) = rdkafka::Message::payload(&borrowed_message) {
                 log::trace!("Processing record, {:?}", payload);
-                
-                let count = self.engine.redirect_external_message(&payload).await?;
-                log::trace!("count number of nodes to broadcast to: {}", count);
+                match self.engine.redirect_external_message(&payload).await {
+                    Ok(count) => log::trace!("count number of nodes to broadcast to: {}", count),
+                    Err(e) => log::error!(
+                        "error while processing external message (topic: {}, partition: {}, offset: {}): {:?}",
+                        borrowed_message.topic(), borrowed_message.partition(), borrowed_message.offset(), e
+                    ),
+                };
             } else {
                 log::warn!("Record with empty payload, {}", message_descr);
             }

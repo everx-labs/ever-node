@@ -13,14 +13,16 @@ use crate::{
         },
     },
     network::{
-        full_node_client::{Attempts, FullNodeOverlayClient}, node_network::NodeNetwork,
+        full_node_client::{Attempts, FullNodeOverlayClient},
         full_node_service::FullNodeOverlayService
     },
     shard_state::ShardStateStuff,
     types::awaiters_pool::AwaitersPool,
 };
-#[cfg(features = "local_test")]
+#[cfg(feature = "local_test")]
 use crate::network::node_network_stub::NodeNetworkStub;
+#[cfg(not(feature = "local_test"))]
+use crate::network::node_network::NodeNetwork;
 
 #[cfg(feature = "external_db")]
 use crate::external_db::kafka_consumer::KafkaConsumer;
@@ -68,8 +70,9 @@ impl Engine {
     pub(crate) const MAX_EXTERNAL_MESSAGE_DEPTH: u16 = 512;
     pub(crate) const MAX_EXTERNAL_MESSAGE_SIZE: usize = 65535;
 
+    #[allow(unused_mut)]
     pub async fn new(mut general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>) -> Result<Arc<Self>> {
-        log::info!(target: "node", "Creating engine...");
+        log::info!("Creating engine...");
 
         let db_config = InternalDbConfig { db_directory: "node_db".to_owned() };
         let db = Arc::new(InternalDbImpl::new(db_config).await?);
@@ -84,20 +87,20 @@ impl Engine {
         }
         let initial_sync_disabled = false;
 
-        #[cfg(features = "local_test")]
+        #[cfg(feature = "local_test")]
         let network = {
             let path = dirs::home_dir().unwrap().into_os_string().into_string().unwrap();
             let path = format!("{}/full-node-test", path);
             Arc::new(NodeNetworkStub::new(&general_config, db.clone(), path)?)
         };
-        #[cfg(not(features = "local_test"))]
+        #[cfg(not(feature = "local_test"))]
         let network = Arc::new(NodeNetwork::new(&mut general_config, db.clone()).await?);
         network.clone().start().await?;
 
-        log::info!(target: "node", "Engine is created.");
+        log::info!("Engine is created.");
 
         let engine = Arc::new(Engine {
-            db: db.clone(),
+            db,
             ext_db,
             overlay_operations: network.clone(),
             shard_states_awaiters: AwaitersPool::new(),
@@ -123,7 +126,7 @@ impl Engine {
         Ok(engine)
     }
 
-    pub fn db(&self) -> &dyn InternalDb { self.db.deref() }
+    pub fn db(&self) -> &Arc<dyn InternalDb> { &self.db }
 
     pub fn ext_db(&self) -> &Vec<Arc<dyn ExternalDb>> { &self.ext_db }
 
@@ -160,7 +163,7 @@ impl Engine {
         &self.next_block_applying_awaiters
     }
 
-    pub async fn download_and_apply_block_worker(self: Arc<Self>, handle: &BlockHandle) -> Result<()> {
+    pub async fn download_and_apply_block_worker(self: Arc<Self>, handle: &BlockHandle, mc_seq_no: u32) -> Result<()> {
 
         if handle.applied() {
             log::trace!("download_and_apply_block_worker: block is already applied {}", handle.id());
@@ -170,24 +173,32 @@ impl Engine {
         let block = if handle.data_inited() {
             self.load_block(handle).await?
         } else {
+            let now = std::time::Instant::now();
             log::trace!("Start downloading block for apply... {}", handle.id());
 
             let (block, proof) = self.download_block(handle.id()).await?;
+            let downloading_time = now.elapsed().as_millis();
+            let now = std::time::Instant::now();
             proof.check_proof(self.deref()).await?;
             self.store_block_proof(handle, &proof).await?;
             self.store_block(handle, &block).await?;
 
-            log::trace!("Downloaded block for apply {}", block.id());
+            log::trace!("Downloaded block for apply {} TIME download: {}ms, check & save: {}",
+                block.id(), downloading_time, now.elapsed().as_millis());
             block
         };
 
-        self.apply_block_worker(handle, &block).await?;
+        self.apply_block_worker(handle, &block, mc_seq_no).await?;
 
         Ok(())
     }
 
-    pub async fn apply_block_worker(self: Arc<Self>, handle: &BlockHandle, block: &BlockStuff) -> Result<()> {
-
+    pub async fn apply_block_worker(
+        self: Arc<Self>,
+        handle: &BlockHandle,
+        block: &BlockStuff,
+        mc_seq_no: u32
+    ) -> Result<()> {
         if handle.applied() {
             log::trace!("apply_block_worker: block is already applied {}", handle.id());
             return Ok(());
@@ -196,13 +207,13 @@ impl Engine {
         log::trace!("Start applying block... {}", block.id());
 
         // TODO fix trash with Arc and clone
-        apply_block(handle.deref(), block, &(self.clone() as Arc<dyn EngineOperations>)).await?;
-        self.set_applied(block.id()).await?;
+        apply_block(handle, block, mc_seq_no, &(self.clone() as Arc<dyn EngineOperations>)).await?;
+        self.set_applied(handle, mc_seq_no).await?;
 
         let ago = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i32 - block.gen_utime()? as i32;
         if block.id().shard().is_masterchain() {
-            LastMcBlockId(block.id_api().clone()).store_to_db(self.db.deref())?;
+            self.store_last_applied_mc_block_id(block.id()).await?;
             STATSD.gauge("last_applied_mc_block", block.id().seq_no() as f64);
             log::info!("Applied block {}, {} seconds old", block.id(), ago);
 
@@ -213,14 +224,7 @@ impl Engine {
             let id = handle.id().clone();
             self.next_block_applying_awaiters.do_or_wait(&prev_id, async move { Ok(id) }).await?;
         } else {
-            let master_ref = block
-                .block()
-                .read_info()?
-                .read_master_ref()?
-                .ok_or_else(|| NodeError::InvalidData(format!(
-                    "Block {} doesn't contain masterchain block extra", block.id(),
-                )))?;
-            log::info!("Applied block {} ref_mc_block: {}, {} seconds old", block.id(), master_ref.master.seq_no, ago);
+            log::info!("Applied block {} ref_mc_block: {}, {} seconds old", block.id(), mc_seq_no, ago);
         }
         Ok(())
     }
@@ -346,34 +350,50 @@ impl Engine {
         }
     }
 
+    pub(crate) async fn do_check_initial_sync_complete(&self) -> Result<bool> {
+        let last_mc_id = self.load_last_applied_mc_block_id().await?;
+        let last_mc_handle = self.load_block_handle(&last_mc_id)?;
+        if last_mc_handle.gen_utime()? + 600 <= self.now() {
+            return Ok(false);
+        }
+        let shards_client = self.load_shards_client_mc_block_id().await?;
+        if shards_client.seq_no() + 16 < last_mc_id.seq_no() {
+            return Ok(false);
+        }
+
+        // TODO see ValidatorManagerImpl::out_of_sync() in t-node for additional conditions (may be)
+
+        return Ok(true);
+    }
+
     pub fn start_gc_scheduler(self: Arc<Self>) -> JoinHandle<()>{
-        log::info!(target: "node", "Starting GC scheduler...");
+        log::info!("Starting GC scheduler...");
 
         let handle = tokio::spawn(async move {
             loop {
-                log::trace!(target: "node", "Waiting GC...");
+                log::trace!("Waiting GC...");
                 // 24 hour delay:
                 futures_timer::Delay::new(Duration::from_secs(3600 * 24)).await;
                 let self_cloned = Arc::clone(&self);
                 if let Err(error) = tokio::task::spawn_blocking(move || {
-                    log::info!(target: "node", "Starting GC...");
+                    log::info!("Starting GC...");
                     match self_cloned.db.gc_shard_state_dynamic_db() {
-                        Ok(count) => log::info!(target: "node", "Finished GC. Deleted {} cells.", count),
-                        Err(error) => log::error!(target: "node", "GC: Error occurred during garbage collecting of dynamic BOC: {:?}", error),
+                        Ok(count) => log::info!("Finished GC. Deleted {} cells.", count),
+                        Err(error) => log::error!("GC: Error occurred during garbage collecting of dynamic BOC: {:?}", error),
                     }
                 }).await {
-                    log::error!(target: "node", "GC: Failed to start. {:?}", error)
+                    log::error!("GC: Failed to start. {:?}", error)
                 }
             }
         });
 
-        log::info!(target: "node", "GC scheduler started.");
+        log::info!("GC scheduler started.");
 
         handle
     }
 
     async fn store_pss_keeper_block_id(&self, id: &BlockIdExt) -> Result<()> {
-        PssKeeperBlockId(id.into()).store_to_db(self.db())
+        PssKeeperBlockId(id.into()).store_to_db(self.db().deref())
     }
 
     pub fn start_persistent_states_keeper(
@@ -452,7 +472,7 @@ impl Engine {
         }
     }
 
-    pub async fn store_persistent_state_attempts(&self, handle: &BlockHandle, ss: &ShardStateStuff) {
+    pub async fn store_persistent_state_attempts(&self, handle: &Arc<BlockHandle>, ss: &ShardStateStuff) {
         let mut attempts = 1;
         while let Err(e) = self.db.store_shard_state_persistent(handle, ss).await {
             log::error!("CRITICAL Error saving persistent state (attempt: {}): {:?}", attempts, e);
@@ -463,9 +483,10 @@ impl Engine {
 }
 
 async fn boot(engine: &Arc<Engine>) -> Result<(BlockIdExt, BlockIdExt, BlockIdExt)> {
-    log::info!(target: "node", "Booting...");
+    log::info!("Booting...");
 
-    let mut result = LastMcBlockId::load_from_db(engine.db().deref()).and_then(|id| (&id.0).try_into());
+    let mut result = LastMcBlockId::load_from_db(engine.db().deref())
+        .and_then(|id| (&id.0).try_into());
     if let Ok(id) = result {
         result = crate::boot::warm_boot(engine.clone(), id).await;
     }
@@ -473,7 +494,9 @@ async fn boot(engine: &Arc<Engine>) -> Result<(BlockIdExt, BlockIdExt, BlockIdEx
         Ok(id) => id,
         Err(err) => {
             log::warn!("error before cold boot: {}", err);
-            crate::boot::cold_boot(engine.clone()).await?
+            let id = crate::boot::cold_boot(engine.clone()).await?;
+            engine.store_last_applied_mc_block_id(&id).await?;
+            id
         }
     };
 
@@ -481,7 +504,7 @@ async fn boot(engine: &Arc<Engine>) -> Result<(BlockIdExt, BlockIdExt, BlockIdEx
         Ok(id) => (&id.0).try_into()?,
         Err(_) => {
             engine.store_shards_client_mc_block_id(&last_mc_block).await?;
-            log::info!(target: "node", "`ShardsClientMcBlockId` wasn't set - it is inited by `LastMcBlockId`.");
+            log::info!("`ShardsClientMcBlockId` wasn't set - it is inited by `LastMcBlockId`.");
             last_mc_block.clone()
         }
     };
@@ -490,19 +513,19 @@ async fn boot(engine: &Arc<Engine>) -> Result<(BlockIdExt, BlockIdExt, BlockIdEx
         Ok(id) => (&id.0).try_into()?,
         Err(_) => {
             engine.store_pss_keeper_block_id(&last_mc_block).await?;
-            log::info!(target: "node", "`PssKeeperBlockId` wasn't set - it is inited by `LastMcBlockId`.");
+            log::info!("`PssKeeperBlockId` wasn't set - it is inited by `LastMcBlockId`.");
             last_mc_block.clone()
         }
     };
 
-    log::info!(target: "node", "Boot complete.");
-    log::info!(target: "node", "LastMcBlockId: {}", last_mc_block);
-    log::info!(target: "node", "ShardsClientMcBlockId: {}", shards_client_block);
+    log::info!("Boot complete.");
+    log::info!("LastMcBlockId: {}", last_mc_block);
+    log::info!("ShardsClientMcBlockId: {}", shards_client_block);
     Ok((last_mc_block, shards_client_block, pss_keeper_block))
 }
 
 pub async fn run(general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>) -> Result<()> {
-    log::info!(target: "node", "Engine::run");
+    log::info!("Engine::run");
 
     let consumer_config = general_config.kafka_consumer_config();
 
@@ -510,7 +533,15 @@ pub async fn run(general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>
     let engine = Engine::new(general_config, ext_db).await?;
 
     //// Boot
-    let (last_mc_block, shards_client_mc_block, pss_keeper_block) = boot(&engine).await?;
+    let (mut last_mc_block, mut shards_client_mc_block, pss_keeper_block) = boot(&engine).await?;
+
+    if !engine.check_initial_sync_complete().await? {
+        crate::sync::start_sync(Arc::clone(&engine) as Arc<dyn EngineOperations>).await?;
+        last_mc_block = LastMcBlockId::load_from_db(engine.db().deref())
+            .and_then(|id| (&id.0).try_into())?;
+        shards_client_mc_block = ShardsClientMcBlockId::load_from_db(engine.db().deref())
+            .and_then(|id| (&id.0).try_into())?;
+    }
 
     //// Start services
     start_external_broadcast_process(engine.clone(), &consumer_config)?;

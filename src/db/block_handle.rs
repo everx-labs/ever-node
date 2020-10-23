@@ -4,8 +4,8 @@ use std::sync::atomic::Ordering;
 use ton_block::{BlockIdExt, BlockInfo};
 use ton_node_storage::traits::Serializable;
 use ton_node_storage::types::BlockMeta;
-use ton_types::{fail, Result};
 
+use ton_types::{fail, Result};
 use crate::block::{BlockIdExtExtention, BlockStuff};
 use crate::block_proof::BlockProofStuff;
 use crate::db::BlockHandleCache;
@@ -22,8 +22,8 @@ const FLAG_PREV_1: u32 = 1 << 8;
 const FLAG_PREV_2: u32 = 1 << 9;
 const FLAG_APPLIED: u32 = 1 << 10;
 const FLAG_KEY_BLOCK: u32 = 1 << 11;
-const FLAG_MOVING_TO_ARCHIVE: u32 = 1 << 12;
 const FLAG_MOVED_TO_ARCHIVE: u32 = 1 << 13;
+const FLAG_INDEXED: u32 = 1 << 14;
 
 /// Meta information related to block
 #[derive(Debug)]
@@ -50,14 +50,8 @@ impl BlockHandle {
 
     fn fetch_info(&self, info: &BlockInfo) -> Result<()> {
         self.meta.gen_utime().store(info.gen_utime().0, Ordering::SeqCst);
-        let masterchain_ref_seq_no = if info.shard().is_masterchain() {
-            info.seq_no()
-        } else {
-            info.read_master_id()?.seq_no
-        };
-        self.meta.masterchain_ref_seq_no().store(masterchain_ref_seq_no, Ordering::SeqCst);
         if info.key_block() {
-            self.set_flag(FLAG_KEY_BLOCK);
+            self.set_flags(FLAG_KEY_BLOCK);
         }
         self.meta.set_fetched();
         Ok(())
@@ -73,49 +67,49 @@ impl BlockHandle {
 
     // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
     pub(super) fn set_data_inited(&self) -> bool {
-        self.set_flag(FLAG_DATA)
+        self.set_flags(FLAG_DATA)
     }
 
     // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
     pub(super) fn set_proof_inited(&self) -> bool {
-        self.set_flag(FLAG_PROOF)
+        self.set_flags(FLAG_PROOF)
     }
 
     // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
     pub(super) fn set_proof_link_inited(&self) -> bool {
-        self.set_flag(FLAG_PROOF_LINK)
+        self.set_flags(FLAG_PROOF_LINK)
     }
 
     pub(super) fn set_processed_in_ext_db(&self) -> bool {
-        self.set_flag(FLAG_EXT_DB)
+        self.set_flags(FLAG_EXT_DB)
     }
 
     pub(super) fn set_state_inited(&self) -> bool {
-        self.set_flag(FLAG_STATE)
+        self.set_flags(FLAG_STATE)
     }
 
     pub(super) fn set_persistent_state_inited(&self) -> bool {
-        self.set_flag(FLAG_PERSISTENT_STATE)
+        self.set_flags(FLAG_PERSISTENT_STATE)
     }
 
     pub(super) fn set_next1_inited(&self) -> bool {
-        self.set_flag(FLAG_NEXT_1)
+        self.set_flags(FLAG_NEXT_1)
     }
 
     pub(super) fn set_next2_inited(&self) -> bool {
-        self.set_flag(FLAG_NEXT_2)
+        self.set_flags(FLAG_NEXT_2)
     }
 
     pub(super) fn set_prev1_inited(&self) -> bool {
-        self.set_flag(FLAG_PREV_1)
+        self.set_flags(FLAG_PREV_1)
     }
 
     pub(super) fn set_prev2_inited(&self) -> bool {
-        self.set_flag(FLAG_PREV_2)
+        self.set_flags(FLAG_PREV_2)
     }
 
     pub(super) fn set_applied(&self) -> bool {
-        self.set_flag(FLAG_APPLIED)
+        self.set_flags(FLAG_APPLIED)
     }
 
     pub fn id(&self) -> &BlockIdExt {
@@ -126,9 +120,13 @@ impl BlockHandle {
         &self.meta
     }
 
+    pub(super) fn set_indexed(&self) -> bool {
+        self.set_flags(FLAG_INDEXED)
+    }
+
     // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
     pub fn data_inited(&self) -> bool {
-        self.flag(FLAG_DATA)
+        self.flags_all(FLAG_DATA)
     }
 
     // TODO: Give correct name due to actual meaning (not "inited", but "saved" or "stored")
@@ -136,7 +134,7 @@ impl BlockHandle {
         if cfg!(feature = "local_test") {
             true
         } else {
-            self.flag(FLAG_PROOF)
+            self.flags_all(FLAG_PROOF)
         }
     }
 
@@ -145,7 +143,7 @@ impl BlockHandle {
         if cfg!(feature = "local_test") {
             true
         } else {
-            self.flag(FLAG_PROOF_LINK)
+            self.flags_all(FLAG_PROOF_LINK)
         }
     }
 
@@ -160,35 +158,39 @@ impl BlockHandle {
     }
 
     pub fn processed_in_ext_db(&self) -> bool {
-        self.flag(FLAG_EXT_DB)
+        self.flags_all(FLAG_EXT_DB)
     }
 
     pub fn state_inited(&self) -> bool {
-        self.flag(FLAG_STATE)
+        self.flags_all(FLAG_STATE)
     }
 
     pub fn persistent_state_inited(&self) -> bool {
-        self.flag(FLAG_PERSISTENT_STATE)
+        self.flags_all(FLAG_PERSISTENT_STATE)
     }
 
     pub fn next1_inited(&self) -> bool {
-        self.flag(FLAG_NEXT_1)
+        self.flags_all(FLAG_NEXT_1)
     }
 
     pub fn next2_inited(&self) -> bool {
-        self.flag(FLAG_NEXT_2)
+        self.flags_all(FLAG_NEXT_2)
     }
 
     pub fn prev1_inited(&self) -> bool {
-        self.flag(FLAG_PREV_1)
+        self.flags_all(FLAG_PREV_1)
     }
 
     pub fn prev2_inited(&self) -> bool {
-        self.flag(FLAG_PREV_2)
+        self.flags_all(FLAG_PREV_2)
     }
 
     pub fn applied(&self) -> bool {
-        self.flag(FLAG_APPLIED)
+        self.flags_all(FLAG_APPLIED)
+    }
+
+    pub fn indexed(&self) -> bool {
+        self.flags_all(FLAG_INDEXED)
     }
 
     pub fn gen_utime(&self) -> Result<u32> {
@@ -217,39 +219,19 @@ impl BlockHandle {
             return Ok(self.id.seq_no());
         }
 
-        if !self.fetched() {
-            fail!("Data is not inited yet")
-        }
-
         Ok(self.meta.masterchain_ref_seq_no().load(Ordering::SeqCst))
     }
 
-    pub fn stored(&self) -> bool {
-        self.meta().handle_stored()
-    }
-
-    pub fn set_stored(&self) -> bool {
-        self.meta().set_handle_stored()
-    }
-
-    pub fn moving_to_archive(&self) -> bool {
-        self.flag(FLAG_MOVING_TO_ARCHIVE)
-    }
-
-    pub fn set_moving_to_archive(&self) -> bool {
-        self.set_flag(FLAG_MOVING_TO_ARCHIVE)
-    }
-
-    pub fn reset_moving_to_archive(&self) -> bool {
-        self.reset_flag(FLAG_MOVING_TO_ARCHIVE)
+    pub fn set_masterchain_ref_seq_no(&self, masterchain_ref_seq_no: u32) -> u32 {
+        self.meta.masterchain_ref_seq_no().swap(masterchain_ref_seq_no, Ordering::SeqCst)
     }
 
     pub fn moved_to_archive(&self) -> bool {
-        self.flag(FLAG_MOVED_TO_ARCHIVE)
+        self.flags_all(FLAG_MOVED_TO_ARCHIVE)
     }
 
     pub fn set_moved_to_archive(&self) -> bool {
-        self.set_flag(FLAG_MOVED_TO_ARCHIVE)
+        self.set_flags(FLAG_MOVED_TO_ARCHIVE)
     }
 
     pub fn fetched(&self) -> bool {
@@ -258,10 +240,17 @@ impl BlockHandle {
 
     pub fn is_key_block(&self) -> Result<bool> {
         if self.fetched() {
-            Ok(self.flag(FLAG_KEY_BLOCK))
+            Ok(self.flags_all(FLAG_KEY_BLOCK))
         } else {
             fail!("Data is not inited yet")
         }
+    }
+
+    #[cfg(test)]
+    pub fn cached(&self) -> bool {
+        self.block_handle_cache.get(self.id())
+            .map(|pair| std::ptr::eq(pair.val().as_ref(), self))
+            .unwrap_or(false)
     }
 
     #[inline]
@@ -270,24 +259,19 @@ impl BlockHandle {
     }
 
     #[inline]
-    fn flag(&self, flag: u32) -> bool {
-        self.flags() & flag != 0
+    fn flags_all(&self, flags: u32) -> bool {
+        self.flags() & flags == flags
     }
 
     #[inline]
-    fn set_flag(&self, flag: u32) -> bool {
-        self.meta.flags().fetch_or(flag, Ordering::SeqCst) & flag == flag
+    fn set_flags(&self, flags: u32) -> bool {
+        self.meta.flags().fetch_or(flags, Ordering::SeqCst) & flags == flags
     }
 
+    #[cfg(test)]
     #[inline]
-    fn reset_flag(&self, flag: u32) -> bool {
-        self.meta.flags().fetch_and(!flag, Ordering::SeqCst) & flag == flag
-    }
-}
-
-impl Drop for BlockHandle {
-    fn drop(&mut self) {
-        self.block_handle_cache.remove(self.id());
+    fn reset_flags(&self, flags: u32) -> bool {
+        self.meta.flags().fetch_and(!flags, Ordering::SeqCst) & flags == flags
     }
 }
 

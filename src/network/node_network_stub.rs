@@ -16,13 +16,14 @@ use std::{
 use tokio::io::AsyncReadExt;
 use ton_api::ton::{
     ton_node::{ 
-        ArchiveInfo, BlockDescription, BlocksDescription, 
+        BlockDescription, BlocksDescription,
     }
 };
 use adnl::common::KeyId;
 use overlay::QueriesConsumer;
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{fail, Result, error};
+use crate::network::full_node_client::Attempts;
 
 const MASTER_BLOCKS_TO_SYNC: u32 = 15;
 const MASTER_BLOCKS_INTERVAL_SEC: u64 = 5;
@@ -90,25 +91,26 @@ impl FullNodeOverlayClient for OverlayClientStub {
         unimplemented!();
     }
 
-    async fn get_next_block_description(&self, _prev_block_id: &BlockIdExt, _attempts: u32) -> Result<BlockDescription> {
+    async fn get_next_block_description(&self, _prev_block_id: &BlockIdExt, _attempts: &Attempts) -> Result<BlockDescription> {
         unimplemented!();
     }
 
-    async fn get_next_blocks_description(&self, _prev_block_id: &BlockIdExt, _limit: i32, _attempts: u32) -> Result<BlocksDescription> {
+    async fn get_next_blocks_description(&self, _prev_block_id: &BlockIdExt, _limit: i32, _attempts: &Attempts) -> Result<BlocksDescription> {
         unimplemented!();
     }
 
-    async fn get_prev_blocks_description(&self, _next_block_id: &BlockIdExt, _limit: i32, _cutoff_seqno: i32, _attempts: u32) -> Result<BlocksDescription> {
+    async fn get_prev_blocks_description(&self, _next_block_id: &BlockIdExt, _limit: i32, _cutoff_seqno: i32, _attempts: &Attempts) -> Result<BlocksDescription> {
         unimplemented!();
     }
 
-    async fn download_block_proof(&self, _block_id: &BlockIdExt, _is_link: bool, _key_block: bool, _attempts: u32) -> Result<Option<BlockProofStuff>> {
+    async fn download_block_proof(&self, _block_id: &BlockIdExt, _is_link: bool, _key_block: bool, _attempts: &Attempts) -> Result<Option<BlockProofStuff>> {
         unimplemented!();
     }
 
-    async fn download_block_full(&self, id: &BlockIdExt, _attempts: u32) -> Result<Option<(BlockStuff, BlockProofStuff)>> {
+    async fn download_block_full(&self, id: &BlockIdExt, _attempts: &Attempts) -> Result<Option<(BlockStuff, BlockProofStuff)>> {
         // first try to check if it in DB
-        let block = match self.db.load_block_data(id) {
+        let handle = self.db.load_block_handle(id)?;
+        let block = match self.db.load_block_data(&handle).await {
             Err(_) => {
                 let filename = format!("{}/blocks/{:016x}/{}", self.storage_root, id.shard().shard_prefix_with_tag(), id.seq_no);
                 BlockStuff::read_from_file(&filename)?
@@ -124,7 +126,7 @@ impl FullNodeOverlayClient for OverlayClientStub {
         Ok(Some((block, BlockProofStuff::default())))
     }
 
-    async fn download_block(&self, _id: &BlockIdExt, _attempts: u32) -> Result<Option<BlockStuff>> {
+    async fn download_block(&self, _id: &BlockIdExt, _attempts: &Attempts) -> Result<Option<BlockStuff>> {
         unimplemented!();
     }
 
@@ -132,7 +134,7 @@ impl FullNodeOverlayClient for OverlayClientStub {
         &self,
         block_id: &BlockIdExt,
         _masterchain_block_id: &BlockIdExt,
-        _attempts: u32
+        _attempts: &Attempts
     ) -> Result<(bool, Arc<Neighbour>)> {
         let filename = format!("{}/states/{:016x}/{}", self.storage_root, block_id.shard().shard_prefix_with_tag(), block_id.seq_no);
         let peer = Arc::new(Neighbour::new(KeyId::from_data([0; 32]))?);
@@ -146,12 +148,12 @@ impl FullNodeOverlayClient for OverlayClientStub {
     async fn download_persistent_state_part(
         &self,
         block_id: &BlockIdExt,
-        masterchain_block_id: &BlockIdExt,
+        _masterchain_block_id: &BlockIdExt,
         offset: usize,
         max_size: usize,
-        _attempts: u32,
-        _peer: Option<Arc<Neighbour>>
-    ) -> Result<(Vec<u8>, Arc<Neighbour>)> {
+        _peer: Option<Arc<Neighbour>>,
+        _attempts: &Attempts,
+    ) -> Result<Vec<u8>> {
         // first try to check if it in DB
         if offset | max_size == 0 {
             let handle = self.db.load_block_handle(block_id)?;
@@ -159,8 +161,7 @@ impl FullNodeOverlayClient for OverlayClientStub {
                 fail!("already downloaded")
             } else {
                 let filename = format!("{}/states/{:016x}/{}", self.storage_root, block_id.shard().shard_prefix_with_tag(), block_id.seq_no);
-                let peer = Arc::new(Neighbour::new(KeyId::from_data([0; 32]))?);
-                return Ok((std::fs::read(filename)?, peer))
+                return Ok(std::fs::read(filename)?)
             }
         }
 
@@ -196,25 +197,24 @@ impl FullNodeOverlayClient for OverlayClientStub {
 
         file.read(&mut data)?;
 
-        let peer = Arc::new(Neighbour::new(KeyId::from_data([0; 32]))?);
-        Ok((data, peer))
+        Ok(data)
     }
 
-    async fn download_zero_state(&self, _id: &BlockIdExt, _attempts: u32) -> Result<Option<ShardStateStuff>> {
+    async fn download_zero_state(&self, _id: &BlockIdExt, _attempts: &Attempts) -> Result<Option<ShardStateStuff>> {
         unimplemented!();
     }
 
     #[cfg(test)]
-    async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, _max_size: i32, _attempts: u32) -> Result<Vec<BlockIdExt>> {
+    async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, _max_size: i32, _attempts: &Attempts) -> Result<Vec<BlockIdExt>> {
         crate::test_helper::test_download_next_key_blocks_ids(block_id)
     }
 
     #[cfg(not(test))]
-    async fn download_next_key_blocks_ids(&self, _block_id: &BlockIdExt, _max_size: i32, _attempts: u32) -> Result<Vec<BlockIdExt>> {
+    async fn download_next_key_blocks_ids(&self, _block_id: &BlockIdExt, _max_size: i32, _attempts: &Attempts) -> Result<Vec<BlockIdExt>> {
         unimplemented!();
     }
 
-    async fn download_next_block_full(&self, prev_id: &BlockIdExt, attempts: u32) -> Result<(BlockStuff, BlockProofStuff)> {
+    async fn download_next_block_full(&self, prev_id: &BlockIdExt, attempts: &Attempts) -> Result<(BlockStuff, BlockProofStuff)> {
 
         let next: BlockIdExt = if prev_id.shard().is_masterchain() {
 
@@ -251,14 +251,6 @@ impl FullNodeOverlayClient for OverlayClientStub {
             self.download_block_full(&next, attempts).await?
                 .ok_or_else(|| error!("No block file"))?
         )
-    }
-
-    async fn get_archive_info(&self, _masterchain_seqno: u32, _attempts: u32) -> Result<ArchiveInfo> {
-        unimplemented!();
-    }
-
-    async fn get_archive_slice(&self, _archive_id: u64, _offset: u64, _max_size: u32, _attempts: u32) -> Result<Vec<u8>> {
-        unimplemented!();
     }
 
     async fn wait_block_broadcast(&self) -> Result<Box<ton_api::ton::ton_node::broadcast::BlockBroadcast>> {
@@ -307,5 +299,9 @@ impl FullNodeOverlayClient for OverlayClientStub {
                 return Ok(r)
             }
         }*/
+    }
+
+    async fn download_archive(&self, _mc_seq_no: u32) -> Result<Vec<u8>> {
+        unimplemented!()
     }
 }

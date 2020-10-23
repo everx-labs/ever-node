@@ -11,6 +11,7 @@ pub mod full_node;
 pub mod macros;
 pub mod network;
 pub mod shard_state;
+pub mod sync;
 pub mod types;
 
 #[cfg(feature = "tracing")]
@@ -82,6 +83,44 @@ fn log_version() {
     );
 }
 
+fn print_build_info() -> String {
+    let build_info: String = format!(
+        "TON Node, version {}\n\
+        Rust: {}\n\
+        TON NODE git commit:         {}\n\
+        ADNL git commit:             {}\n\
+        DHT git commit:              {}\n\
+        OVERLAY git commit:          {}\n\
+        RLDP git commit:             {}\n\
+        TON_BLOCK git commit:        {}\n\
+        TON_BLOCK_JSON git commit:   {}\n\
+        TON_NODE_STORAGE git commit: {}\n\
+        TON_SDK git commit:          {}\n\
+        TON_EXECUTOR git commit:     {}\n\
+        TON_TL git commit:           {}\n\
+        TON_TYPES git commit:        {}\n\
+        TON_VM git commit:           {}\n\
+        TON_LABS_ABI git commit:     {}\n",
+        std::option_env!("CARGO_PKG_VERSION").unwrap_or("Not set"),
+        std::option_env!("RUST_VERSION").unwrap_or("Not set"),
+        std::option_env!("GC_TON_NODE").unwrap_or("Not set"),
+        std::option_env!("GC_ADNL").unwrap_or("Not set"),
+        std::option_env!("GC_DHT").unwrap_or("Not set"),
+        std::option_env!("GC_OVERLAY").unwrap_or("Not set"),
+        std::option_env!("GC_RLDP").unwrap_or("Not set"),
+        std::option_env!("GC_TON_BLOCK").unwrap_or("Not set"),
+        std::option_env!("GC_TON_BLOCK_JSON").unwrap_or("Not set"),
+        std::option_env!("GC_TON_NODE_STORAGE").unwrap_or("Not set"),
+        std::option_env!("GC_TON_SDK").unwrap_or("Not set"),
+        std::option_env!("GC_TON_EXECUTOR").unwrap_or("Not set"),
+        std::option_env!("GC_TON_TL").unwrap_or("Not set"),
+        std::option_env!("GC_TON_TYPES").unwrap_or("Not set"),
+        std::option_env!("GC_TON_VM").unwrap_or("Not set"),
+        std::option_env!("GC_TON_LABS_ABI").unwrap_or("Not set")
+    );
+    return build_info;
+}
+
 #[cfg(feature = "external_db")]
 fn start_external_db(config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>> {
     Ok(vec!(
@@ -107,6 +146,8 @@ async fn start_engine(config: TonNodeConfig) -> Result<()> {
 }
 
 fn main() {
+    println!("{}", print_build_info());
+
     let app = clap::App::new("TON node")
         .arg(clap::Arg::with_name("config")
             .short("c")

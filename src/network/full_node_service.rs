@@ -2,7 +2,7 @@ use crate::{
     engine_traits::EngineOperations, network::neighbours::{PROTO_CAPABILITIES, PROTO_VERSION}
 };
 
-use adnl::common::{QueryResult};
+use adnl::common::{AdnlPeers, QueryResult};
 use overlay::QueriesConsumer;
 use std::{sync::Arc, convert::TryInto, cmp::min, fmt::Debug};
 use ton_api::{BoxedSerialize};
@@ -390,13 +390,33 @@ impl FullNodeOverlayService {
     // Not supported in t-node
 
     // tonNode.getArchiveInfo masterchain_seqno:int = tonNode.ArchiveInfo;
-    async fn get_archive_info(&self, _query: GetArchiveInfo) -> Result<ArchiveInfo> {
-        fail!("`tonNode.getArchiveInfo` request is not supported");
+    async fn get_archive_info(&self, query: GetArchiveInfo) -> Result<ArchiveInfo> {
+        self.engine.get_archive_id(query.masterchain_seqno as u32).await
+            .map(|id_opt| if let Some(id) = id_opt {
+                ArchiveInfo::TonNode_ArchiveInfo(
+                    Box::new(
+                        ton_api::ton::ton_node::archiveinfo::ArchiveInfo {
+                            id: id as ton_api::ton::long
+                        }
+                    )
+                )
+            } else {
+                ArchiveInfo::TonNode_ArchiveNotFound
+            })
     }
 
     // tonNode.getArchiveSlice archive_id:long offset:long max_size:int = tonNode.Data;
-    async fn get_archive_slice(&self, _query: GetArchiveSlice) -> Result<Data> {
-        fail!("`tonNode.getArchiveSlice` request is not supported");
+    async fn get_archive_slice(&self, query: GetArchiveSlice) -> Result<Data> {
+        self.engine.get_archive_slice(query.archive_id as u64, query.offset as u64, query.max_size as u32).await
+            .map(|vector|
+                Data::TonNode_Data(
+                    Box::new(
+                        ton_api::ton::ton_node::data::Data {
+                            data: vector.into()
+                        }
+                    )
+                )
+            )
     }
 
     // tonNode.getCapabilities = tonNode.Capabilities;
@@ -449,7 +469,7 @@ impl FullNodeOverlayService {
 #[async_trait::async_trait]
 impl QueriesConsumer for FullNodeOverlayService {
     #[allow(dead_code)]
-    async fn try_consume_query(&self, query: TLObject) -> Result<QueryResult> {
+    async fn try_consume_query(&self, query: TLObject, _adnl_peers: &AdnlPeers) -> Result<QueryResult> {
 
         log::debug!("try_consume_query {:?}", query);
 

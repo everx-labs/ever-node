@@ -130,7 +130,14 @@ impl BlockProofStuff {
                 self.check_with_master_state_(&zerostate, &virt_block, &virt_block_info)?;
             } else {
                 let mc_pfx = AccountIdPrefixFull::any_masterchain();
-                let handle = engine.find_block_by_seq_no(&mc_pfx, prev_key_block_seqno).await?;
+                let handle = engine.find_block_by_seq_no(&mc_pfx, prev_key_block_seqno).await
+                    .map_err(|err|
+                        error!(
+                            "Couldn't find previous MC key block by seq_no = {}: {}",
+                            prev_key_block_seqno,
+                            err
+                        )
+                    )?;
                 let prev_key_block_proof = engine.load_block_proof(&handle, false).await?;
 
                 self.check_with_prev_key_block_proof_(&prev_key_block_proof, &virt_block, &virt_block_info)?;
