@@ -3,7 +3,6 @@ use crate::engine::STATSD;
 use dht::DhtNode;
 use overlay::{OverlayShortId, OverlayNode};
 use rand::{Rng};
-use rldp::RldpNode;
 use std::{
     cmp::Ordering, time::{Duration, Instant}, sync::Arc,
     sync::atomic::{
@@ -24,6 +23,8 @@ pub struct Neighbour {
     capabilities: AtomicI64,
     roundtrip_adnl: AtomicU64,
     roundtrip_rldp: AtomicU64,
+    all_attempts: AtomicU64,
+    fail_attempts: AtomicU64,
     unreliability: AtomicI32
 }
 
@@ -32,6 +33,8 @@ pub struct Neighbours {
     overlay_id: Arc<OverlayShortId>,
     overlay: Arc<OverlayNode>,
     dht: Arc<DhtNode>,
+    fail_attempts: AtomicU64,
+    all_attempts: AtomicU64,
     start: Instant
 }
 
@@ -51,6 +54,8 @@ impl Neighbour {
             capabilities: AtomicI64::new(0),
             roundtrip_adnl: AtomicU64::new(0),
             roundtrip_rldp: AtomicU64::new(0),
+            all_attempts: AtomicU64::new(0),
+            fail_attempts: AtomicU64::new(0),
             //roundtrip_relax_at: 0,
             //roundtrip_weight: 0.0,
             unreliability: AtomicI32::new(0),
@@ -142,7 +147,6 @@ impl Neighbour {
         log::trace!("roundtrip new value: {}", roundtrip);
         storage.store(roundtrip, atomic::Ordering::Relaxed);
     }
-
 }
 
 pub const MAX_NEIGHBOURS: usize = 16;
@@ -153,7 +157,6 @@ impl Neighbours {
     pub fn new(
         start_peers: &Vec<Arc<KeyId>>,
         dht: &Arc<DhtNode>,
-        _rldp: Arc<RldpNode>,
         overlay: &Arc<OverlayNode>,
         overlay_id: Arc<OverlayShortId>) -> Result<Self> {
 
@@ -162,6 +165,8 @@ impl Neighbours {
             dht: dht.clone(),
             overlay: overlay.clone(),
             overlay_id,
+            fail_attempts: AtomicU64::new(0),
+            all_attempts: AtomicU64::new(0),
             start: Instant::now()
         })
     }
@@ -234,6 +239,7 @@ impl Neighbours {
     }
 
     pub fn start_reload(self: Arc<Self>) {
+    //    let neighbours = self.clone();
         tokio::spawn(async move {
             loop {
                 let sleep_time = rand::thread_rng().gen_range(10, 30);
@@ -364,23 +370,19 @@ impl Neighbours {
         let mut rng = rand::thread_rng();
         let mut best: Option<Arc<Neighbour>> = None; 
         let mut sum = 0;
-/*
-        let mut min = i32::MAX;
-
-        for neighbour in self.peers.get_iter() {
-            let unr = neighbour.unreliability.load(atomic::Ordering::Relaxed);
-            if unr < min {
-                min = unr
-            }     
-        }
-*/
+        let node_stat = self.fail_attempts.load(atomic::Ordering::Relaxed) as f64 / 
+            self.all_attempts.load(atomic::Ordering::Relaxed) as f64;
 
         log::trace!("Select neighbour for overlay {}", self.overlay_id);
         for neighbour in self.peers.get_iter() {
             let mut unr = neighbour.unreliability.load(atomic::Ordering::Relaxed);
             let proto_version = neighbour.proto_version.load(atomic::Ordering::Relaxed);
             let capabilities = neighbour.capabilities.load(atomic::Ordering::Relaxed);
-            
+            let roundtrip_rldp = neighbour.roundtrip_rldp.load(atomic::Ordering::Relaxed);
+            let roundtrip_adnl = neighbour.roundtrip_adnl.load(atomic::Ordering::Relaxed);
+            let peer_stat = neighbour.fail_attempts.load(atomic::Ordering::Relaxed) as f64 /
+                neighbour.all_attempts.load(atomic::Ordering::Relaxed) as f64;
+
             if count == 1 {
                 return Ok(Some(neighbour.clone()))
             }
@@ -392,20 +394,21 @@ impl Neighbours {
             let stat_name = format!("neighbour.{}.unr", neighbour.id());
             STATSD.histogram(&stat_name, unr as f64);
             log::trace!(
-                "Neighbour {}, unr {}, rt ADNL {}, rt RLDP {}", 
-                neighbour.id(), unr, 
-                neighbour.roundtrip_adnl.load(atomic::Ordering::Relaxed),
-                neighbour.roundtrip_rldp.load(atomic::Ordering::Relaxed)
+                "Neighbour {}, unr {}, rt ADNL {}, rt RLDP {} (node stat: {}, peer stat: {}))",
+                neighbour.id(), unr,
+                roundtrip_adnl,
+                roundtrip_rldp,
+                node_stat,
+                peer_stat
             );
-//            unr -= min;
             if unr <= FAIL_UNRELIABILITY {
+                if node_stat + (node_stat * 0.2 as f64) < peer_stat {
+                    continue;
+                }
+
                 let w = (1 << (FAIL_UNRELIABILITY - unr)) as i64;
                 sum += w;
-                // gen_range(low, heigh): low < height
-//                if sum - 1 == 0 {
-//                    sum = sum + 1;
-//                    w = w + 1;
-//                }
+
                 if rng.gen_range(0, sum) < w {
                     best = Some(neighbour.clone());
                 }
@@ -421,21 +424,30 @@ impl Neighbours {
     }
 
     pub fn update_neighbour_stats(
-        &self, 
-        peer: &Arc<KeyId>, 
-        t: &Duration, 
+        &self,
+        peer: &Arc<KeyId>,
+        t: &Duration,
         success: bool,
-        is_rldp: bool
+        is_rldp: bool,
+        is_register: bool
     ) -> Result<()> {
         log::trace!("update_neighbour_stats");
         let it = &self.peers.get(peer);
 
-        if let Some(neightbour) = it {
+        if let Some(neighbour) = it {
             if success {
-                neightbour.query_success(t, is_rldp);
+                neighbour.query_success(t, is_rldp);
             } else {
-                neightbour.query_failed(t, is_rldp);
+                neighbour.query_failed(t, is_rldp);
             }
+            if is_register {
+                neighbour.all_attempts.fetch_add(1, atomic::Ordering::Relaxed);
+                self.all_attempts.fetch_add(1, atomic::Ordering::Relaxed);
+                if !success {
+                    neighbour.fail_attempts.fetch_add(1, atomic::Ordering::Relaxed);
+                    self.fail_attempts.fetch_add(1, atomic::Ordering::Relaxed);
+                }
+            };
         }
         log::trace!("/update_neighbour_stats");
         Ok(())
@@ -532,7 +544,7 @@ log::trace!("Query capabilities from {} {}", peer.id, self.overlay_id);
                 let caps: Capabilities = Query::parse(answer, &query)?;
                 log::trace!("Got capabilities from {} {}: {:?}", peer.id, self.overlay_id, caps);
                 let elapsed = now.elapsed();
-                self.update_neighbour_stats(&peer.id, &elapsed, true, false)?;
+                self.update_neighbour_stats(&peer.id, &elapsed, true, false, false)?;
 log::trace!("Good caps {}: {}", peer.id, self.overlay_id);
                 self.got_neighbour_capabilities(&peer.id, &elapsed, &caps)?;
                 Ok(())
@@ -540,7 +552,7 @@ log::trace!("Good caps {}: {}", peer.id, self.overlay_id);
             _ => {
 log::trace!("Bad caps {}: {}", peer.id, self.overlay_id);
                 let elapsed = now.elapsed();
-                self.update_neighbour_stats(&peer.id, &elapsed, false, false)?;
+                self.update_neighbour_stats(&peer.id, &elapsed, false, false, false)?;
                 fail!("Capabilities were not received from {}", peer.id);
             }
         }

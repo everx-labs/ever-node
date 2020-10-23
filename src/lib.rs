@@ -11,6 +11,7 @@ pub mod full_node;
 pub mod macros;
 pub mod network;
 pub mod shard_state;
+pub mod sync;
 pub mod types;
 
 #[cfg(feature = "tracing")]

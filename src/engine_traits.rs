@@ -55,6 +55,9 @@ pub trait EngineOperations : Sync + Send {
     async fn load_last_applied_mc_block_id(&self) -> Result<BlockIdExt> {
         unimplemented!()
     }
+    async fn store_last_applied_mc_block_id(&self, last_mc_block: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
     async fn load_last_applied_mc_state(&self) -> Result<ShardStateStuff> {
         unimplemented!()
     }
@@ -73,7 +76,7 @@ pub trait EngineOperations : Sync + Send {
     async fn find_block_by_lt(&self, acc_pfx: &AccountIdPrefixFull, lt: u64) -> Result<Arc<BlockHandle>> {
         unimplemented!()
     }
-    async fn apply_block(self: Arc<Self>, handle: &BlockHandle, block: Option<&BlockStuff>) -> Result<()> {
+    async fn apply_block(self: Arc<Self>, handle: &BlockHandle, block: Option<&BlockStuff>, mc_seq_no: u32) -> Result<()> {
         unimplemented!()
     }
     async fn download_block(&self, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
@@ -262,7 +265,29 @@ pub trait EngineOperations : Sync + Send {
         }
     }
     
-    async fn set_applied(&self, block_id: &BlockIdExt) -> Result<()> {unimplemented!()}
+    async fn set_applied(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn get_archive_id(&self, mc_seq_no: u32) -> Result<Option<u64>> {
+        unimplemented!()
+    }
+
+    async fn get_archive_slice(&self, archive_id: u64, offset: u64, limit: u32) -> Result<Vec<u8>> {
+        unimplemented!()
+    }
+
+    async fn download_archive(&self, mc_seq_no: u32) -> Result<Vec<u8>> {
+        unimplemented!()
+    }
+
+    async fn check_initial_sync_complete(&self) -> Result<bool> {
+        unimplemented!()
+    }
+
+    fn assign_mc_ref_seq_no(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()> {
+        unimplemented!()
+    }
 }
 
 /// External DB should implement this trait and put itself into engine's new function

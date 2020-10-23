@@ -56,7 +56,7 @@ impl BlockStuff {
         Ok(Self{ id, block, root, data: Arc::new(data), })
     }
 
-    #[cfg(any(test, features = "local_test"))]
+    #[cfg(any(test, feature = "local_test"))]
     pub fn read_from_file(filename: &str) -> Result<Self> {
         let data = std::fs::read(filename)?;
         let file_hash = UInt256::from(sha2::Sha256::digest(&data).as_slice());
@@ -73,6 +73,16 @@ impl BlockStuff {
         Ok(Self{ id, block, root, data: Arc::new(data), })
     }
 
+    #[cfg(test)]
+    pub fn fake(id: BlockIdExt) -> Self {
+        BlockStuff {
+            id,
+            block: Block::default(),
+            root: Cell::default(),
+            data: Arc::new(vec!(0xfe; 200_000)),
+        }
+    }
+
     pub fn block(&self) -> &Block { &self.block }
 
     pub fn id_api(&self) -> ton_api::ton::ton_node::blockidext::BlockIdExt { convert_block_id_ext_blk2api(&self.id) }
@@ -86,13 +96,6 @@ impl BlockStuff {
 
     pub fn is_masterchain(&self) -> bool {
         self.id.shard().is_masterchain()
-    }
-
-    pub fn masterchain_ref_seq_no(&self) -> Result<u32> {
-        Ok(self.block()
-            .read_info()?
-            .read_master_id()?
-            .seq_no)
     }
 
     pub fn gen_utime(&self) -> Result<u32> {

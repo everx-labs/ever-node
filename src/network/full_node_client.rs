@@ -31,9 +31,16 @@ use ton_api::ton::{
 use ton_block::BlockIdExt;
 use ton_types::{fail, error, Result};
 
+#[derive(Debug, Default, Clone)]
 pub struct Attempts {
     pub limit: u32,
     pub count: u32
+}
+
+impl Attempts {
+    pub const fn with_limit(limit: u32) -> Self {
+        Self { limit, count: 0 }
+    }
 }
 
 #[async_trait::async_trait]
@@ -63,8 +70,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
     async fn download_zero_state(&self, id: &BlockIdExt, attempts: &Attempts) -> Result<Option<ShardStateStuff>>;
     async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, max_size: i32, attempts: &Attempts) -> Result<Vec<BlockIdExt>>;
     async fn download_next_block_full(&self, prev_id: &BlockIdExt, attempts: &Attempts) -> Result<(BlockStuff, BlockProofStuff)>;
-    async fn get_archive_info(&self, masterchain_seqno: u32, attempts: &Attempts) -> Result<ArchiveInfo>;
-    async fn get_archive_slice(&self, archive_id: u64, offset: u64, max_size: u64, attempts: &Attempts) -> Result<Vec<u8>>;
+    async fn download_archive(&self, mc_seq_no: u32) -> Result<Vec<u8>>;
 
     async fn wait_block_broadcast(&self) -> Result<Box<BlockBroadcast>>;
 }
@@ -132,7 +138,7 @@ impl NodeClientOverlay {
             if let Some(answer) = answer {
                 match answer.downcast::<D>() {
                     Ok(answer) => {
-                        self.peers.update_neighbour_stats(peer.id(), &t, true, false)?;
+                        self.peers.update_neighbour_stats(peer.id(), &t, true, false, false)?;
                         return Ok((answer, peer))
                     },
                     Err(obj) => {
@@ -142,7 +148,7 @@ impl NodeClientOverlay {
             } else {
                 log::warn!("No reply to {:?} from {}", data, peer.id())
             }
-            self.peers.update_neighbour_stats(peer.id(), &t, false, false)?;
+            self.peers.update_neighbour_stats(peer.id(), &t, false, false, true)?;
 
         }
 
@@ -160,7 +166,7 @@ impl NodeClientOverlay {
         T: BoxedSerialize + std::fmt::Debug
     {
         let (answer, peer, elapsed) = self.send_rldp_query(request, good_peer, attempt).await?;
-        self.peers.update_neighbour_stats(peer.id(), &elapsed, true, true)?;
+        self.peers.update_neighbour_stats(peer.id(), &elapsed, true, true, true)?;
         Ok(answer)
     }
 
@@ -190,11 +196,11 @@ impl NodeClientOverlay {
         let (answer, peer, elapsed) = self.send_rldp_query(request, good_peer, attempt).await?;
         match Deserializer::new(&mut Cursor::new(answer)).read_boxed() {
             Ok(data) => {
-                self.peers.update_neighbour_stats(peer.id(), &elapsed, true, true)?;
+                self.peers.update_neighbour_stats(peer.id(), &elapsed, true, true, true)?;
                 Ok((data, peer))
             },
             Err(e) => {
-                self.peers.update_neighbour_stats(peer.id(), &elapsed, false, true)?;
+                self.peers.update_neighbour_stats(peer.id(), &elapsed, false, true, true)?;
                 fail!(e)
             }
         }
@@ -228,14 +234,15 @@ impl NodeClientOverlay {
             &data,
             Some(10 * 1024 * 1024),
             peer.roundtrip_adnl(),
-            peer.roundtrip_rldp().map(|t| t + attempt as u64 * Self::TIMEOUT_DELTA)
+            peer.roundtrip_rldp().map(|t| t + attempt as u64 * Self::TIMEOUT_DELTA),
+            &self.overlay_id
         ).await?;
 
         let t = now.elapsed();
         if let Some(answer) = answer {  
             Ok((answer, peer, t))
         } else {
-            self.peers.update_neighbour_stats(peer.id(), &t, false, true)?;
+            self.peers.update_neighbour_stats(peer.id(), &t, false, true, true)?;
             fail!("No RLDP answer to {:?} from {}", request, peer.id())
         }
 
@@ -253,7 +260,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                 data: ton::bytes(msg.to_vec())
             }
         }.into_boxed();
-        self.overlay.broadcast(&self.overlay_id, &serialize(&broadcast)?).await
+        self.overlay.broadcast(&self.overlay_id, &serialize(&broadcast)?, None).await
     }
 
     // tonNode.getNextBlockDescription prev_block:tonNode.blockIdExt = tonNode.BlockDescription;
@@ -601,37 +608,55 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         Ok((block, proof))
     }
 
-    // tonNode.getArchiveInfo masterchain_seqno:int = tonNode.ArchiveInfo;
-    async fn get_archive_info(
-        &self, 
-        masterchain_seqno: u32, 
-        attempts: &Attempts
-    ) -> Result<ArchiveInfo> {
-        self.send_rldp_query_no_peer(
-            &GetArchiveInfo {
-                masterchain_seqno: masterchain_seqno as i32
-            },
-            attempts.limit
-        ).await
-    }
+    async fn download_archive(&self, mc_seq_no: u32) -> Result<Vec<u8>> {
+        let (archive_id, peer) = loop {
+            // tonNode.getArchiveInfo masterchain_seqno:int = tonNode.ArchiveInfo;
+            let result: Result<(ArchiveInfo, _)> = self.send_rldp_query_to_peer(
+                &GetArchiveInfo {
+                    masterchain_seqno: mc_seq_no as i32
+                },
+                None,
+                3
+            ).await;
+            if let Ok((archive_info, peer)) = result {
+                if let Some(archive_id) = archive_info.id() {
+                    break (*archive_id, peer);
+                }
+            }
+        };
 
-    // tonNode.getArchiveSlice archive_id:long offset:long max_size:int = tonNode.Data;
-    async fn get_archive_slice(
-        &self, 
-        archive_id: u64, 
-        offset: u64, 
-        max_size: u64, 
-        attempts: &Attempts
-    ) -> Result<Vec<u8>> {
-        self.send_rldp_query_to_peer_raw(
-            &GetArchiveSlice {
-                archive_id: archive_id as i64,
-                offset: offset as i64,
-                max_size: max_size as i32,
-            },
-            None,
-            attempts.count
-        ).await
+        const CHUNK_SIZE: i32 = 1 << 17;
+        let mut result = Vec::new();
+        let mut offset = 0;
+        loop {
+            let mut repeats = 10;
+            // tonNode.getArchiveSlice archive_id:long offset:long max_size:int = tonNode.Data;
+            let mut chunk = loop {
+                match self.send_rldp_query_to_peer_raw(
+                    &GetArchiveSlice {
+                        archive_id,
+                        offset,
+                        max_size: CHUNK_SIZE,
+                    },
+                    Some(Arc::clone(&peer)),
+                    10
+                ).await {
+                    Ok(data) => break data,
+                    Err(err) => {
+                        repeats -= 1;
+                        if repeats < 1 {
+                            return Err(err);
+                        }
+                    }
+                }
+            };
+            let actual_size = chunk.len() as i32;
+            result.append(&mut chunk);
+            if actual_size < CHUNK_SIZE {
+                return Ok(result);
+            }
+            offset += actual_size as i64;
+        }
     }
 
     async fn wait_block_broadcast(&self) -> Result<Box<BlockBroadcast>> {

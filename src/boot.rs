@@ -183,7 +183,7 @@ async fn download_start_blocks_and_states(engine: &dyn EngineOperations, handle:
 }
 
 /// download zero state and store it
-async fn download_zero_state(engine: &dyn EngineOperations, handle: &BlockHandle) -> Result<ShardStateStuff> {
+pub(crate) async fn download_zero_state(engine: &dyn EngineOperations, handle: &BlockHandle) -> Result<ShardStateStuff> {
     if handle.state_inited() {
         return engine.load_state(handle.id()).await
     }
@@ -191,7 +191,7 @@ async fn download_zero_state(engine: &dyn EngineOperations, handle: &BlockHandle
         match engine.download_state(handle.id(), handle.id()).await {
             Ok(state) => {
                 engine.store_state(&handle, &state).await?;
-                engine.set_applied(handle.id()).await?;
+                engine.set_applied(handle, 0).await?;
                 engine.process_full_state_in_ext_db(&state).await?;
                 return Ok(state)
             }
@@ -257,7 +257,7 @@ async fn download_block_and_state(engine: &dyn EngineOperations, block_id: &Bloc
         engine.store_state(&handle, &state).await?;
         engine.process_full_state_in_ext_db(&state).await?;
     }
-    engine.set_applied(handle.id()).await?;
+    engine.set_applied(&handle, master_id.seq_no()).await?;
     Ok(block)
 }
 

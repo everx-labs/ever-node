@@ -7,7 +7,9 @@ use crate::{
 use std::{ sync::{Arc, atomic::{AtomicUsize, Ordering}} };
 
 use ton_block::{BlockIdExt};
-use ton_types::{fail, Result};
+#[cfg(not(feature = "local_test"))]
+use ton_types::fail;
+use ton_types::Result;
 
 #[cfg(feature = "local_test")]
 pub async fn download_persistent_state(
@@ -15,7 +17,7 @@ pub async fn download_persistent_state(
     master_id: &BlockIdExt,
     overlay: &dyn FullNodeOverlayClient
 ) -> Result<ShardStateStuff> {
-    let bytes = overlay.download_persistent_state_part(id, master_id, 0, 0, 0, None).await?.0;
+    let bytes = overlay.download_persistent_state_part(id, master_id, 0, 0, None, &Attempts::with_limit(1)).await?;
     ShardStateStuff::deserialize(id.clone(), &bytes)
 }
 

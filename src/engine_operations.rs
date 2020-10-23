@@ -93,31 +93,35 @@ impl EngineOperations for Engine {
     }
 
     async fn load_last_applied_mc_block_id(&self) -> Result<BlockIdExt> {
-        (&LastMcBlockId::load_from_db(self.db())?.0).try_into()
+        (&LastMcBlockId::load_from_db(self.db().deref())?.0).try_into()
+    }
+
+    async fn store_last_applied_mc_block_id(&self, last_mc_block: &BlockIdExt) -> Result<()> {
+        LastMcBlockId(last_mc_block.into()).store_to_db(self.db().deref())
     }
 
     async fn load_shards_client_mc_block_id(&self) -> Result<BlockIdExt> {
-        (&ShardsClientMcBlockId::load_from_db(self.db())?.0).try_into()
+        (&ShardsClientMcBlockId::load_from_db(self.db().deref())?.0).try_into()
     }
 
     async fn store_shards_client_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
         STATSD.gauge("shards_client_mc_block", id.seq_no() as f64);
-        ShardsClientMcBlockId(id.into()).store_to_db(self.db())
+        ShardsClientMcBlockId(id.into()).store_to_db(self.db().deref())
     }
 
-    async fn apply_block(self: Arc<Self>, handle: &BlockHandle, block: Option<&BlockStuff>) -> Result<()> {
+    async fn apply_block(self: Arc<Self>, handle: &BlockHandle, block: Option<&BlockStuff>, mc_seq_no: u32) -> Result<()> {
         while !handle.applied() {
             if let Some(block) = block {
                 if self.block_applying_awaiters().do_or_wait(
                     handle.id(),
-                    self.clone().apply_block_worker(handle, block)
+                    self.clone().apply_block_worker(handle, block, mc_seq_no)
                 ).await?.is_some() {
                     break;
                 }
             } else {
                 if self.block_applying_awaiters().do_or_wait(
                     handle.id(),
-                    self.clone().download_and_apply_block_worker(handle)
+                    self.clone().download_and_apply_block_worker(handle, mc_seq_no)
                 ).await?.is_some() {
                     break;
                 }
@@ -282,8 +286,18 @@ impl EngineOperations for Engine {
         ).await
     }
 
-    async fn set_applied(&self, block_id: &BlockIdExt) -> Result<()> {
-        self.db().store_block_applied(block_id).await
+    async fn set_applied(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()> {
+        if handle.applied() {
+            return Ok(());
+        }
+
+        self.db().assign_mc_ref_seq_no(handle, mc_seq_no)?;
+        self.db().index_handle(handle)?;
+
+        self.db().archive_block(handle.id()).await?;
+        self.db().store_block_applied(handle).await?;
+
+        Ok(())
     }
 
     fn initial_sync_disabled(&self) -> bool { (self as &Engine).initial_sync_disabled() }
@@ -299,5 +313,26 @@ impl EngineOperations for Engine {
         let res = overlay.broadcast_external_message(data).await?;
 
         Ok(res)
+    }
+
+    async fn get_archive_id(&self, mc_seq_no: u32) -> Result<Option<u64>> {
+        self.db().archive_manager().get_archive_id(mc_seq_no).await
+    }
+
+    async fn get_archive_slice(&self, archive_id: u64, offset: u64, limit: u32) -> Result<Vec<u8>> {
+        self.db().archive_manager().get_archive_slice(archive_id, offset, limit).await
+    }
+
+    async fn download_archive(&self, masterchain_seqno: u32) -> Result<Vec<u8>> {
+        let client = self.get_masterchain_overlay().await?;
+        client.download_archive(masterchain_seqno).await
+    }
+
+    async fn check_initial_sync_complete(&self) -> Result<bool> {
+        self.do_check_initial_sync_complete().await
+    }
+
+    fn assign_mc_ref_seq_no(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()> {
+        self.db().assign_mc_ref_seq_no(handle, mc_seq_no)
     }
 }

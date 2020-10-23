@@ -340,7 +340,6 @@ impl NodeNetwork {
         let neigbours = Neighbours::new(
             &peers,
             &self.dht,
-            self.rldp.clone(),
             &self.overlay,
             overlay_id.clone()
         )?;

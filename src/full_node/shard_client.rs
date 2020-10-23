@@ -5,7 +5,7 @@ use crate::{
     error::NodeError, db::block_handle::BlockHandle,
 };
 
-use std::{sync::Arc, ops::Deref, mem::drop};
+use std::{sync::Arc, mem::drop};
 use tokio::task::JoinHandle;
 use ton_block::{
     BlockIdExt, BlockSignaturesPure, CryptoSignaturePair, CryptoSignature,
@@ -57,15 +57,16 @@ async fn load_master_blocks_cycle(engine: Arc<dyn EngineOperations>, last_got_bl
 }
 
 async fn load_next_master_block(engine: &Arc<dyn EngineOperations>, prev_handle: &BlockHandle) -> Result<Arc<BlockHandle>> {
-    log::trace!(target: "node", "load_blocks_cycle: prev block: {}", prev_handle.id());
+    log::trace!("load_blocks_cycle: prev block: {}", prev_handle.id());
     let next_handle = if prev_handle.next1_inited() {
         let next_block_id = engine.load_block_next1(prev_handle.id()).await?;
         let next_handle = engine.load_block_handle(&next_block_id)?;
         if !next_handle.applied() {
-            engine.clone().apply_block(next_handle.deref(), None).await?;
+            engine.clone().apply_block(&next_handle, None, next_block_id.seq_no()).await?;
         }
         next_handle
     } else {
+        log::trace!("load_blocks_cycle: downloading next block... prev: {}", prev_handle.id());
         let (block, proof) = engine.download_next_block(prev_handle.id()).await?;
         log::trace!("load_blocks_cycle: got next block: {}", block.id());
 
@@ -83,7 +84,7 @@ async fn load_next_master_block(engine: &Arc<dyn EngineOperations>, prev_handle:
         if !next_handle.data_inited() {
             engine.store_block(&next_handle, &block).await?;
         }
-        engine.clone().apply_block(next_handle.deref(), Some(&block)).await?;
+        engine.clone().apply_block(&next_handle, Some(&block), next_handle.id().seq_no()).await?;
         next_handle
     };
     Ok(next_handle)
@@ -120,6 +121,7 @@ pub async fn load_shard_blocks(
     mc_block: &BlockStuff
 ) -> Result<()> {
     let mut apply_tasks = Vec::new();
+    let mc_seq_no = mc_block.id().seq_no();
     for (shard_ident, shard_block_id) in mc_block.shards_blocks()?.iter() {
         let msg = format!(
             "process mc block {}, shard block {} {}", 
@@ -131,7 +133,7 @@ pub async fn load_shard_blocks(
             let apply_task = tokio::spawn(async move {
                 let mut attempt = 0;
                 log::trace!("load_shard_blocks_cycle: {}, applying...", msg);
-                while let Err(e) = Arc::clone(&engine).apply_block(&shard_block_handle, None).await {
+                while let Err(e) = Arc::clone(&engine).apply_block(&shard_block_handle, None, mc_seq_no).await {
                     log::error!(
                         "Error while applying shard block (attempt {}) {}: {}",
                         attempt,
@@ -229,7 +231,7 @@ pub async fn process_block_broadcast(engine: &Arc<dyn EngineOperations>, broadca
     // Apply (only blocks that is not too new for us)
     if block.id().shard().is_masterchain() {
         if block.id().seq_no() == last_applied_mc_block_id.seq_no() + 1 {
-            engine.clone().apply_block(handle.deref(), Some(&block)).await?;
+            engine.clone().apply_block(&handle, Some(&block), block.id().seq_no()).await?;
         } else {
             log::debug!(
                 "Skipped apply for block broadcast {} because it is too new (last master block: {})",

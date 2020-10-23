@@ -9,11 +9,15 @@ use std::{ops::Deref, sync::Arc};
 use ton_types::Result;
 use ton_block::BlockIdExt;
 
-pub async fn apply_block(handle: &BlockHandle, block: &BlockStuff, engine: &Arc<dyn EngineOperations>) -> Result<()> {
-
+pub async fn apply_block(
+    handle: &BlockHandle,
+    block: &BlockStuff,
+    mc_seq_no: u32,
+    engine: &Arc<dyn EngineOperations>
+) -> Result<()> {
     let prev_ids = block.construct_prev_id()?;
 
-    check_prev_blocks(&prev_ids, engine).await?;
+    check_prev_blocks(&prev_ids, engine, mc_seq_no).await?;
 
     let shard_state = if handle.state_inited() {
         engine.load_state(handle.id()).await?
@@ -31,8 +35,9 @@ pub async fn apply_block(handle: &BlockHandle, block: &BlockStuff, engine: &Arc<
 // Checks is prev block(s) applied and apply if need
 async fn check_prev_blocks(
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
-    engine: &Arc<dyn EngineOperations>) 
--> Result<()> {
+    engine: &Arc<dyn EngineOperations>,
+    mc_seq_no: u32,
+) -> Result<()> {
     match prev_ids {
         (prev1_id, Some(prev2_id)) => {
             let prev1_handle = engine.load_block_handle(&prev1_id)?;
@@ -40,12 +45,12 @@ async fn check_prev_blocks(
             let mut apply_prev_futures = Vec::with_capacity(2);
             if !prev1_handle.applied() {
                 apply_prev_futures.push(
-                    engine.clone().apply_block(prev1_handle.deref(), None)
+                    engine.clone().apply_block(&prev1_handle, None, mc_seq_no)
                 );
             }
             if !prev2_handle.applied() {
                 apply_prev_futures.push(
-                    engine.clone().apply_block(prev2_handle.deref(), None)
+                    engine.clone().apply_block(&prev2_handle, None, mc_seq_no)
                 );
             }
             futures::future::join_all(apply_prev_futures)
@@ -57,7 +62,7 @@ async fn check_prev_blocks(
         (prev_id, None) => {
             let prev_handle = engine.load_block_handle(&prev_id)?;
             if !prev_handle.applied() {
-                engine.clone().apply_block(prev_handle.deref(), None).await?;
+                engine.clone().apply_block(&prev_handle, None, mc_seq_no).await?;
             }
         }
     }
@@ -71,16 +76,16 @@ pub async fn calc_shard_state(
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
     engine: &Arc<dyn EngineOperations>
 ) -> Result<ShardStateStuff> {
-    log::trace!("wait_shard_state: block: {}", block.id());
+    log::trace!("calc_shard_state: block: {}", block.id());
 
     let prev_ss_root = match prev_ids {
         (prev1, Some(prev2)) => {
-            let ss1 = engine.load_state(&prev1).await?.root_cell().clone();
-            let ss2 = engine.load_state(&prev2).await?.root_cell().clone();
+            let ss1 = engine.wait_state(engine.load_block_handle(prev1)?.as_ref()).await?.root_cell().clone();
+            let ss2 = engine.wait_state(engine.load_block_handle(prev2)?.as_ref()).await?.root_cell().clone();
             ShardStateStuff::construct_split_root(ss1, ss2)?
         },
         (prev, None) => {
-            engine.load_state(&prev).await?
+            engine.wait_state(&engine.load_block_handle(&prev)?.as_ref()).await?
                 .root_cell()
                 .clone()
         }
@@ -94,7 +99,7 @@ pub async fn calc_shard_state(
     let ss = tokio::task::spawn_blocking(move || -> Result<ShardStateStuff> {
         let now = std::time::Instant::now();
         let ss_root = merkle_update.apply_for(&prev_ss_root)?;
-        log::trace!("TIME: wait_shard_state: applied Merkle update {}ms   {}",
+        log::trace!("TIME: calc_shard_state: applied Merkle update {}ms   {}",
             now.elapsed().as_millis(), block_id);
         ShardStateStuff::new(block_id.clone(), ss_root)
     }).await??;
