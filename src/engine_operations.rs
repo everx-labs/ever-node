@@ -208,7 +208,10 @@ impl EngineOperations for Engine {
         ).await?;
         self.db().store_shard_state_dynamic(handle, state)
     }
-
+    async fn store_zero_state(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()> {
+        self.store_state(handle, state).await?;
+        self.db().store_shard_state_persistent(handle, state).await
+    }
     fn store_block_prev(&self, handle: &BlockHandle, prev: &BlockIdExt) -> Result<()> {
         self.db().store_block_prev(handle, prev)
     }

@@ -2,7 +2,7 @@ use crate::{
     engine_traits::EngineOperations, network::neighbours::{PROTO_CAPABILITIES, PROTO_VERSION}
 };
 
-use adnl::common::{AdnlPeers, QueryResult};
+use adnl::common::{AdnlPeers, QueryResult, Answer};
 use overlay::QueriesConsumer;
 use std::{sync::Arc, convert::TryInto, cmp::min, fmt::Debug};
 use ton_api::{BoxedSerialize};
@@ -23,7 +23,7 @@ use ton_api::{
         },
         ton_node::{
             self,
-            ArchiveInfo, BlockDescription, Data, DataFull, KeyBlocks,
+            ArchiveInfo, BlockDescription, DataFull, KeyBlocks,
             Prepared, PreparedProof, PreparedState, Capabilities,
 
         }
@@ -270,29 +270,20 @@ impl FullNodeOverlayService {
     }
 
     // tonNode.downloadBlock block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_block(&self, query: DownloadBlock) -> Result<Data> {
+    async fn download_block(&self, query: DownloadBlock) -> Result<Vec<u8>> {
         let block_id = (&query.block).try_into()?;
         let handle = self.engine.load_block_handle(&block_id)?;
         if !handle.data_inited() {
             fail!("Block's data isn't initialized");
         }
-        let data = self.engine.load_block_raw(&handle).await?;
-        Ok(
-            Data::TonNode_Data(
-                Box::new(
-                    ton_node::data::Data{
-                        data: ton_api::ton::bytes(data)
-                    }
-                )
-            )
-        )
+        Ok(self.engine.load_block_raw(&handle).await?)
     }
 
     // tonNode.downloadBlocks blocks:(vector tonNode.blockIdExt) = tonNode.DataList;
     // Not supported in t-node
 
     // tonNode.downloadPersistentState block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_persistent_state(&self, query: DownloadPersistentState) -> Result<Data> {
+    async fn download_persistent_state(&self, query: DownloadPersistentState) -> Result<Vec<u8>> {
         // This request is never called in t-node, because new downloadPersistentStateSlice exists.
         // Because of state is pretty big it is bad idea to send it by one request.
         fail!(
@@ -303,7 +294,7 @@ impl FullNodeOverlayService {
     }
 
     // tonNode.downloadPersistentStateSlice block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt offset:long max_size:long = tonNode.Data;
-    async fn download_persistent_state_slice(&self, query: DownloadPersistentStateSlice) -> Result<Data> {
+    async fn download_persistent_state_slice(&self, query: DownloadPersistentStateSlice) -> Result<Vec<u8>> {
         let block_id = (&query.block).try_into()?;
         let handle = self.engine.load_block_handle(&block_id)?;
         if !handle.persistent_state_inited() {
@@ -314,15 +305,11 @@ impl FullNodeOverlayService {
             query.offset as u64,
             query.max_size as u64
         ).await?;
-        Ok(
-            ton_node::data::Data{
-                data: ton_api::ton::bytes(data)
-            }.into_boxed()
-        )
+        Ok(data)
     }
 
     // tonNode.downloadZeroState block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_zero_state(&self, query: DownloadZeroState) -> Result<Data> {
+    async fn download_zero_state(&self, query: DownloadZeroState) -> Result<Vec<u8>> {
         let block_id = (&query.block).try_into()?;
         let handle = self.engine.load_block_handle(&block_id)?;
         if !handle.persistent_state_inited() {
@@ -331,20 +318,16 @@ impl FullNodeOverlayService {
 
         let size = self.engine.load_persistent_state_size(&block_id).await?;
         let data = self.engine.load_persistent_state_slice(&handle, 0, size).await?;
-        Ok(
-            ton_node::data::Data{
-                data: ton_api::ton::bytes(data)
-            }.into_boxed()
-        )
+        Ok(data)
     }
 
     // tonNode.downloadBlockProof block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_block_proof(&self, query: DownloadBlockProof) -> Result<Data> {
+    async fn download_block_proof(&self, query: DownloadBlockProof) -> Result<Vec<u8>> {
         self.download_block_proof_((&query.block).try_into()?, false, false).await
     }
 
     // tonNode.downloadKeyBlockProof block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_key_block_proof(&self, query: DownloadKeyBlockProof) -> Result<Data> {
+    async fn download_key_block_proof(&self, query: DownloadKeyBlockProof) -> Result<Vec<u8>> {
         self.download_block_proof_((&query.block).try_into()?, false, true).await
     }
 
@@ -355,32 +338,23 @@ impl FullNodeOverlayService {
     // Not supported in t-node
 
     // tonNode.downloadBlockProofLink block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_block_proof_link(&self, query: DownloadBlockProofLink) -> Result<Data> {
+    async fn download_block_proof_link(&self, query: DownloadBlockProofLink) -> Result<Vec<u8>> {
         self.download_block_proof_((&query.block).try_into()?, true, false).await
     }
 
     // tonNode.downloadKeyBlockProofLink block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_key_block_proof_link(&self, query: DownloadKeyBlockProofLink) -> Result<Data> {
+    async fn download_key_block_proof_link(&self, query: DownloadKeyBlockProofLink) -> Result<Vec<u8>> {
         self.download_block_proof_((&query.block).try_into()?, true, true).await
     }
 
-    async fn download_block_proof_(&self, block_id: BlockIdExt, is_link: bool, _key_block: bool) -> Result<Data> {
+    async fn download_block_proof_(&self, block_id: BlockIdExt, is_link: bool, _key_block: bool) -> Result<Vec<u8>> {
         let handle = self.engine.load_block_handle(&block_id)?;
         if is_link && !handle.proof_link_inited() {
             fail!("Block's proof link isn't initialized");
         } else if !is_link && !handle.proof_inited() {
             fail!("Block's proof isn't initialized");
         }
-        let proof = self.engine.load_block_proof_raw(&handle, is_link).await?;
-        Ok(
-            Data::TonNode_Data(
-                Box::new(
-                    ton_node::data::Data{
-                        data: ton_api::ton::bytes(proof)
-                    }
-                )
-            )
-        )
+        Ok(self.engine.load_block_proof_raw(&handle, is_link).await?)
     }
 
     // tonNode.downloadBlockProofLinks blocks:(vector tonNode.blockIdExt) = tonNode.DataList;
@@ -406,17 +380,9 @@ impl FullNodeOverlayService {
     }
 
     // tonNode.getArchiveSlice archive_id:long offset:long max_size:int = tonNode.Data;
-    async fn get_archive_slice(&self, query: GetArchiveSlice) -> Result<Data> {
-        self.engine.get_archive_slice(query.archive_id as u64, query.offset as u64, query.max_size as u32).await
-            .map(|vector|
-                Data::TonNode_Data(
-                    Box::new(
-                        ton_api::ton::ton_node::data::Data {
-                            data: vector.into()
-                        }
-                    )
-                )
-            )
+    async fn get_archive_slice(&self, query: GetArchiveSlice) -> Result<Vec<u8>> {
+        self.engine.get_archive_slice(
+            query.archive_id as u64, query.offset as u64, query.max_size as u32).await
     }
 
     // tonNode.getCapabilities = tonNode.Capabilities;
@@ -443,22 +409,63 @@ impl FullNodeOverlayService {
             match query.downcast::<Q>() {
                 Ok(query) => {
 
-                    log::trace!("consume_query: before consume query {:?}", query);
+                    let query_str = if log::log_enabled!(log::Level::Trace) {
+                        format!("{:?}", query)
+                    } else {
+                        String::default()
+                    };
+                    log::trace!("consume_query: before consume query {}", query_str);
 
                     let answer = match consumer(self, query).await {
                         Ok(answer) => {
-                            log::trace!("consume_query: consumed, answer {:?}", answer);
+                            log::trace!("consume_query: consumed {}", query_str);
                             answer
                         }
                         Err(e) => {
-                            log::trace!("consume_query: consumed, error {:?}", e);
+                            log::trace!("consume_query: consumed {}, error {:?}", query_str, e);
                             return Err(e)
                         }
                     };
 
-                    Ok(
-                        QueryResult::Consumed(Some(TLObject::new(answer)))
-                    )
+                    Ok(QueryResult::Consumed(Some(Answer::Object(TLObject::new(answer)))))
+                },
+                Err(query) => Err(query)
+            }
+        )
+    }
+
+    async fn consume_query_raw<'a, Q, F>(
+        &'a self,
+        query: TLObject,
+        consumer: &'a (dyn Fn(&'a Self, Q) -> F + Send + Sync)
+    ) -> Result<std::result::Result<QueryResult, TLObject>>
+    where
+        Q: AnyBoxedSerialize + Debug,
+        F: futures::Future<Output = Result<Vec<u8>>>,
+    {
+        Ok(
+            match query.downcast::<Q>() {
+                Ok(query) => {
+
+                    let query_str = if log::log_enabled!(log::Level::Trace) {
+                        format!("{:?}", query)
+                    } else {
+                        String::default()
+                    };
+                    log::trace!("consume_query_raw: before consume query {}", query_str);
+
+                    let answer = match consumer(self, query).await {
+                        Ok(answer) => {
+                            log::trace!("consume_query_raw: consumed {}", query_str);
+                            answer
+                        }
+                        Err(e) => {
+                            log::trace!("consume_query_raw: consumed {}, error {:?}", query_str, e);
+                            return Err(e)
+                        }
+                    };
+
+                    Ok(QueryResult::Consumed(Some(Answer::Raw(answer))))
                 },
                 Err(query) => Err(query)
             }
@@ -545,7 +552,7 @@ impl QueriesConsumer for FullNodeOverlayService {
             Err(query) => query
         };
 
-        let query = match self.consume_query::<DownloadBlock, _, _>(
+        let query = match self.consume_query_raw::<DownloadBlock, _>(
             query,
             &Self::download_block
         ).await? {
@@ -553,7 +560,7 @@ impl QueriesConsumer for FullNodeOverlayService {
             Err(query) => query
         };
 
-        let query = match self.consume_query::<DownloadPersistentState, _, _>(
+        let query = match self.consume_query_raw::<DownloadPersistentState, _>(
             query,
             &Self::download_persistent_state
         ).await? {
@@ -561,7 +568,7 @@ impl QueriesConsumer for FullNodeOverlayService {
             Err(query) => query
         };
 
-        let query = match self.consume_query::<DownloadPersistentStateSlice, _, _>(
+        let query = match self.consume_query_raw::<DownloadPersistentStateSlice, _>(
             query,
             &Self::download_persistent_state_slice
         ).await? {
@@ -569,7 +576,7 @@ impl QueriesConsumer for FullNodeOverlayService {
             Err(query) => query
         };
 
-        let query = match self.consume_query::<DownloadZeroState, _, _>(
+        let query = match self.consume_query_raw::<DownloadZeroState, _>(
             query,
             &Self::download_zero_state
         ).await? {
@@ -577,7 +584,7 @@ impl QueriesConsumer for FullNodeOverlayService {
             Err(query) => query
         };
 
-        let query = match self.consume_query::<DownloadBlockProof, _, _>(
+        let query = match self.consume_query_raw::<DownloadBlockProof, _>(
             query,
             &Self::download_block_proof
         ).await? {
@@ -585,7 +592,7 @@ impl QueriesConsumer for FullNodeOverlayService {
             Err(query) => query
         };
 
-        let query = match self.consume_query::<DownloadKeyBlockProof, _, _>(
+        let query = match self.consume_query_raw::<DownloadKeyBlockProof, _>(
             query,
             &Self::download_key_block_proof
         ).await? {
@@ -593,7 +600,7 @@ impl QueriesConsumer for FullNodeOverlayService {
             Err(query) => query
         };
 
-        let query = match self.consume_query::<DownloadBlockProofLink, _, _>(
+        let query = match self.consume_query_raw::<DownloadBlockProofLink, _>(
             query,
             &Self::download_block_proof_link
         ).await? {
@@ -601,7 +608,7 @@ impl QueriesConsumer for FullNodeOverlayService {
             Err(query) => query
         };
 
-        let query = match self.consume_query::<DownloadKeyBlockProofLink, _, _>(
+        let query = match self.consume_query_raw::<DownloadKeyBlockProofLink, _>(
             query,
             &Self::download_key_block_proof_link
         ).await? {
@@ -617,7 +624,7 @@ impl QueriesConsumer for FullNodeOverlayService {
             Err(query) => query
         };
 
-        let query = match self.consume_query::<GetArchiveSlice, _, _>(
+        let query = match self.consume_query_raw::<GetArchiveSlice, _>(
             query,
             &Self::get_archive_slice
         ).await? {

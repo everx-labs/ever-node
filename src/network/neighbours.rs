@@ -6,7 +6,7 @@ use rand::{Rng};
 use std::{
     cmp::Ordering, time::{Duration, Instant}, sync::Arc,
     sync::atomic::{
-        self, AtomicU32, AtomicI32, AtomicU64, AtomicI64
+        self, AtomicBool, AtomicU32, AtomicI32, AtomicU64, AtomicI64
     }
 };
 use tokio::time::delay_for;
@@ -25,6 +25,8 @@ pub struct Neighbour {
     roundtrip_rldp: AtomicU64,
     all_attempts: AtomicU64,
     fail_attempts: AtomicU64,
+    fines_points: AtomicU32,
+    active_check: AtomicBool,
     unreliability: AtomicI32
 }
 
@@ -44,6 +46,8 @@ pub const PROTO_CAPABILITIES: i64 = 1;
 pub const STOP_UNRELIABILITY: i32 = 5;
 pub const FAIL_UNRELIABILITY: i32 = 10;
 
+const FINES_POINTS_COUNT: u32 = 100;
+
 impl Neighbour {
 
     pub fn new(id : Arc<KeyId>) ->  Result<Self> {
@@ -56,6 +60,8 @@ impl Neighbour {
             roundtrip_rldp: AtomicU64::new(0),
             all_attempts: AtomicU64::new(0),
             fail_attempts: AtomicU64::new(0),
+            fines_points: AtomicU32::new(0),
+            active_check: AtomicBool::new(false),
             //roundtrip_relax_at: 0,
             //roundtrip_weight: 0.0,
             unreliability: AtomicI32::new(0),
@@ -382,6 +388,7 @@ impl Neighbours {
             let roundtrip_adnl = neighbour.roundtrip_adnl.load(atomic::Ordering::Relaxed);
             let peer_stat = neighbour.fail_attempts.load(atomic::Ordering::Relaxed) as f64 /
                 neighbour.all_attempts.load(atomic::Ordering::Relaxed) as f64;
+            let fines_points = neighbour.fines_points.load(atomic::Ordering::Relaxed);
 
             if count == 1 {
                 return Ok(Some(neighbour.clone()))
@@ -394,16 +401,21 @@ impl Neighbours {
             let stat_name = format!("neighbour.{}.unr", neighbour.id());
             STATSD.histogram(&stat_name, unr as f64);
             log::trace!(
-                "Neighbour {}, unr {}, rt ADNL {}, rt RLDP {} (node stat: {}, peer stat: {}))",
+                "Neighbour {}, unr {}, rt ADNL {}, rt RLDP {} (all stat: {:.4}, peer stat: {:.4}/{}))",
                 neighbour.id(), unr,
                 roundtrip_adnl,
                 roundtrip_rldp,
                 node_stat,
-                peer_stat
+                peer_stat,
+                fines_points
             );
             if unr <= FAIL_UNRELIABILITY {
                 if node_stat + (node_stat * 0.2 as f64) < peer_stat {
-                    continue;
+                    if fines_points > 0 {
+                        neighbour.fines_points.fetch_sub(1, atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                    neighbour.active_check.store(true, atomic::Ordering::Relaxed);
                 }
 
                 let w = (1 << (FAIL_UNRELIABILITY - unr)) as i64;
@@ -414,7 +426,7 @@ impl Neighbours {
                 }
             }
         }
-                                     
+
         if let Some(best) = &best { 
             log::trace!("Selected neighbour {}", best.id);
         } else {
@@ -446,6 +458,13 @@ impl Neighbours {
                 if !success {
                     neighbour.fail_attempts.fetch_add(1, atomic::Ordering::Relaxed);
                     self.fail_attempts.fetch_add(1, atomic::Ordering::Relaxed);
+                }
+
+                if neighbour.active_check.load(atomic::Ordering::Relaxed) {
+                    if !success {
+                        neighbour.fines_points.fetch_add(FINES_POINTS_COUNT, atomic::Ordering::Relaxed);
+                    }
+                    neighbour.active_check.store(false, atomic::Ordering::Relaxed);
                 }
             };
         }
