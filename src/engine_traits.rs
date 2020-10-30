@@ -141,6 +141,9 @@ pub trait EngineOperations : Sync + Send {
     async fn store_state(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()> {
         unimplemented!()
     }
+    async fn store_zero_state(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()> {
+        unimplemented!()
+    }
     async fn process_full_state_in_ext_db(&self, state: &ShardStateStuff)-> Result<()> {
         unimplemented!()
     }
