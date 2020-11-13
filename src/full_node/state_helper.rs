@@ -8,7 +8,7 @@ use std::{ sync::{Arc, atomic::{AtomicUsize, Ordering}} };
 
 use ton_block::{BlockIdExt};
 #[cfg(not(feature = "local_test"))]
-use ton_types::fail;
+use ton_types::{error, fail};
 use ton_types::Result;
 
 #[cfg(feature = "local_test")]
@@ -23,6 +23,30 @@ pub async fn download_persistent_state(
 
 #[cfg(not(feature = "local_test"))]
 pub async fn download_persistent_state(
+    id: &BlockIdExt,
+    master_id: &BlockIdExt,
+    overlay: &dyn FullNodeOverlayClient
+) -> Result<ShardStateStuff> {
+    let mut result = None;
+
+    for _ in 0..10 {
+        match download_persistent_state_iter(id, master_id, overlay).await {
+            Err(e) => {
+                log::warn!("download_persistent_state_iter err: {}", e);
+                result = Some(Err(e));
+                continue;
+            },
+            Ok(res) => { 
+                return Ok(res); 
+            }
+        }
+    }
+
+    result.ok_or_else(|| error!("internal error!"))?
+}
+
+#[cfg(not(feature = "local_test"))]
+async fn download_persistent_state_iter(
     id: &BlockIdExt,
     master_id: &BlockIdExt,
     overlay: &dyn FullNodeOverlayClient
@@ -94,7 +118,7 @@ pub async fn download_persistent_state(
                         attempts.count += 1;
                         log::error!("download_persistent_state_part {}: {}, attempt: {}, total errors: {}",
                             id.shard(), e, attempts.count, errors.load(Ordering::Relaxed));
-                        if attempts.count > 100 {
+                        if attempts.count > 10 {
                             fail!(
                                 "Error download_persistent_state_part after {} attempts : {}", 
                                 attempts.count, e

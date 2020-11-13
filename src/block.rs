@@ -73,7 +73,6 @@ impl BlockStuff {
         Ok(Self{ id, block, root, data: Arc::new(data), })
     }
 
-
     pub fn block(&self) -> &Block { &self.block }
 
     pub fn id_api(&self) -> ton_api::ton::ton_node::blockidext::BlockIdExt { convert_block_id_ext_blk2api(&self.id) }
@@ -220,3 +219,4 @@ pub fn compare_block_ids(id: &BlockIdExt, id_api: &ton_api::ton::ton_node::block
         && id.root_hash.as_slice() == &id_api.root_hash.0
         && id.file_hash.as_slice() == &id_api.file_hash.0
 }
+

@@ -2,7 +2,7 @@ use crate::{
     block::{BlockStuff, convert_block_id_ext_api2blk},
     block_proof::BlockProofStuff,
     engine_traits::EngineOperations,
-    error::NodeError, db::block_handle::BlockHandle,
+    error::NodeError,
 };
 
 use std::{sync::Arc, mem::drop};
@@ -13,6 +13,7 @@ use ton_block::{
 };
 use ton_types::{Result, fail, error, UInt256};
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
+use ton_node_storage::types::BlockHandle;
 
 pub fn start_masterchain_client(engine: Arc<dyn EngineOperations>, last_got_block_id: BlockIdExt) -> Result<JoinHandle<()>> {
     let join_handle = tokio::spawn(async move {
