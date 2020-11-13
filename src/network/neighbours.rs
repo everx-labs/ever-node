@@ -196,6 +196,7 @@ impl Neighbours {
         log::trace!("got_neighbours");
         let mut ex = false;
         let mut rng = rand::thread_rng();
+        let mut is_delete_peer = false;
 
         for elem in peers.iter() {
             if self.contains(&elem) {
@@ -224,13 +225,17 @@ impl Neighbours {
 
                 if u > STOP_UNRELIABILITY {
                     deleted_peer = a;
+                    is_delete_peer = true;
                 } else {
                    ex = true;
                 }
-                self.peers.replace(
-                    &deleted_peer
-                        .ok_or(failure::err_msg("Internal error: removed peer <a> is not set!"))?, 
-                    elem.clone())?;
+                let deleted_peer = deleted_peer.ok_or_else(|| error!("Internal error: deleted peer is not set!"))?;
+                self.peers.replace(&deleted_peer, elem.clone())?;
+
+                if is_delete_peer {
+                    self.overlay.delete_public_peer(&deleted_peer, &self.overlay_id)?;
+                    is_delete_peer = false;
+                }
             } else {
                 self.peers.insert(elem.clone())?;
             }
@@ -276,39 +281,7 @@ impl Neighbours {
         self.reload_neighbours(&self.overlay_id).await?;
         Ok(())
     }
-    
-/*
-    pub async fn reload_neighbours(&self, overlay_id: &Arc<OverlayShortId>) -> Result<()> {
-        let mut peers: Vec<Arc<KeyId>> = vec![];
 
-        for peer in self.peers.get_iter() {
-            let random_peers = self.overlay.get_random_peers(&peer.id, overlay_id).await?;
-            if let Some(rnd_peers) = random_peers {
-                for random_peer in rnd_peers.iter() {
-                    let peer_key = KeyOption::from_tl_public_key(&random_peer.id)?;
-                    log::trace!("reload_neighbours: peer {}", peer_key.id());
-                    if self.peers.contains(peer_key.id()) {
-                        log::trace!("reload_neighbours: peer contains in identificators");
-                        continue;
-                    }
-                    log::trace!("reload_neighbours start find address: peer {}", peer_key.id());
-                    let addr = DhtNode::find_ip_address(&self.dht, peer_key.id()).await?;
-                    log::info!("reload_neighbours: addr peer {}", addr);
-                    peers.push(peer_key.id().clone());
-                    self.overlay.add_peer(&addr, random_peer, overlay_id)?;
-                }
-            } else {
-                log::trace!("reload_neighbours: random peers result is None!");
-            }
-        }
-
-        if peers.len() != 0 {
-            self.got_neighbours(peers)?;
-        }
-        Ok(())
-    }
-*/
-        
     pub async fn reload_neighbours(&self, overlay_id: &Arc<OverlayShortId>) -> Result<()> {
         for peer in self.peers.get_iter() {
             let mut peers: Vec<Arc<KeyId>> = vec![];

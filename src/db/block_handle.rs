@@ -246,12 +246,6 @@ impl BlockHandle {
         }
     }
 
-    #[cfg(test)]
-    pub fn cached(&self) -> bool {
-        self.block_handle_cache.get(self.id())
-            .map(|pair| std::ptr::eq(pair.val().as_ref(), self))
-            .unwrap_or(false)
-    }
 
     #[inline]
     fn flags(&self) -> u32 {
@@ -268,10 +262,5 @@ impl BlockHandle {
         self.meta.flags().fetch_or(flags, Ordering::SeqCst) & flags == flags
     }
 
-    #[cfg(test)]
-    #[inline]
-    fn reset_flags(&self, flags: u32) -> bool {
-        self.meta.flags().fetch_and(!flags, Ordering::SeqCst) & flags == flags
-    }
 }
 

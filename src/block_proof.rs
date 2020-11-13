@@ -42,11 +42,6 @@ impl BlockProofStuff {
         Ok(BlockProofStuff { proof, is_link, id: block_id.clone(), data })
     }
 
-    #[cfg(test)]
-    pub fn read_from_file(block_id: &BlockIdExt, filename: &str, is_link: bool) -> Result<Self> {
-        let data = std::fs::read(filename)?;
-        Self::deserialize(block_id, data, is_link)
-    }
 
     pub fn virtualize_block(&self) -> Result<(Block, ton_api::ton::int256)> {
         let merkle_proof = MerkleProof::construct_from(&mut self.proof.root.clone().into())?;

@@ -115,11 +115,11 @@ impl Engine {
             FullNodeOverlayService::new(Arc::clone(&engine) as Arc<dyn EngineOperations>)
         );
         network.add_consumer(
-            &network.calc_overlay_short_id(MASTERCHAIN_ID, SHARD_FULL)?,
+            &network.calc_overlay_id(MASTERCHAIN_ID, SHARD_FULL)?.0,
             Arc::clone(&full_node_service)
         )?;
         network.add_consumer(
-            &network.calc_overlay_short_id(BASE_WORKCHAIN_ID, SHARD_FULL)?,
+            &network.calc_overlay_id(BASE_WORKCHAIN_ID, SHARD_FULL)?.0,
             Arc::clone(&full_node_service)
         )?;
 
@@ -147,8 +147,8 @@ impl Engine {
     }
 
     pub async fn get_full_node_overlay(&self, workchain: i32, shard: u64) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        let id = self.overlay_operations.calc_overlay_short_id(workchain, shard)?;
-        self.overlay_operations.clone().get_overlay(&id).await
+        let id = self.overlay_operations.calc_overlay_id(workchain, shard)?;
+        self.overlay_operations.clone().get_overlay(id).await
     }
 
     pub fn shard_states_awaiters(&self) -> &AwaitersPool<BlockIdExt, ShardStateStuff> {
