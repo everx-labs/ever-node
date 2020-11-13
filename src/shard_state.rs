@@ -72,7 +72,6 @@ impl ShardStateStuff {
         Self::new(id, root)
     }
 
-
     pub fn shard_state(&self) -> &ShardStateUnsplit { &self.shard_state }
     pub fn shard_state_extra(&self) -> Result<&McStateExtra> {
         self.shard_state_extra
@@ -107,3 +106,4 @@ impl ShardStateStuff {
             .unwrap_or_default())
     }
 }
+

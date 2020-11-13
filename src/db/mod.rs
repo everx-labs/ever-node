@@ -22,9 +22,9 @@ use ton_node_storage::{
 };
 use ton_types::{error, fail, Result, UInt256};
 
-pub mod block_handle;
-pub use block_handle::BlockHandle;
+pub use ton_node_storage::types::BlockHandle;
 use ton_node_storage::archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId};
+use ton_node_storage::block_handle_db::BlockHandleStorage;
 
 pub trait NodeState: serde::Serialize + serde::de::DeserializeOwned {
     fn get_key() -> &'static str;
@@ -100,15 +100,13 @@ pub trait InternalDb : Sync + Send {
     fn assign_mc_ref_seq_no(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()>;
 }
 
-type BlockHandleCache = Arc<lockfree::map::Map<BlockIdExt, Arc<BlockHandle>>>;
-
 #[derive(serde::Deserialize)]
 pub struct InternalDbConfig {
     pub db_directory: String,
 }
 
 pub struct InternalDbImpl {
-    block_handle_db: Arc<BlockHandleDb>,
+    block_handle_storage: Arc<BlockHandleStorage>,
     block_index_db: Arc<BlockIndexDb>,
     prev_block_db: BlockInfoDb,
     prev2_block_db: BlockInfoDb,
@@ -117,7 +115,6 @@ pub struct InternalDbImpl {
     node_state_db: NodeStateDb,
     shard_state_persistent_db: ShardStatePersistentDb,
     shard_state_dynamic_db: ShardStateDb,
-    block_handle_cache: BlockHandleCache,
     //ss_test_map: lockfree::map::Map<BlockIdExt, ShardStateStuff>,
     shardstate_db_gc: shardstate_db::GC,
     archive_manager: Arc<ArchiveManager>,
@@ -137,6 +134,7 @@ impl InternalDbImpl {
                 &Self::build_name(&config.db_directory, "block_handle_db"),
             )
         );
+        let block_handle_storage = Arc::new(BlockHandleStorage::new(Arc::clone(&block_handle_db)));
         let shard_state_dynamic_db = ShardStateDb::with_paths(
             &Self::build_name(&config.db_directory, "shardstate_db"),
             &Self::build_name(&config.db_directory, "cells_db")
@@ -145,7 +143,7 @@ impl InternalDbImpl {
         let archive_manager = Arc::new(ArchiveManager::with_data(Arc::new(PathBuf::from(&config.db_directory))).await?);
         Ok(
             Self {
-                block_handle_db,
+                block_handle_storage,
                 block_index_db,
                 prev_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "prev1_block_db")),
                 prev2_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "prev2_block_db")),
@@ -155,7 +153,6 @@ impl InternalDbImpl {
                 shard_state_persistent_db: ShardStatePersistentDb::with_path(
                     &Self::build_name(&config.db_directory, "shard_state_persistent_db")),
                 shard_state_dynamic_db,
-                block_handle_cache: BlockHandleCache::default(),
                 //ss_test_map: lockfree::map::Map::new(),
                 shardstate_db_gc,
                 archive_manager,
@@ -183,34 +180,11 @@ impl InternalDbImpl {
     }
 
     fn store_block_handle(&self, handle: &BlockHandle) -> Result<()> {
-        self.block_handle_db.put_value(&handle.id().into(), handle.meta())?;
-        Ok(())
+        self.block_handle_storage.store_block_handle(handle)
     }
-
-    fn load_or_create_handle(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>> {
-        Ok(Arc::new(match self.block_handle_db.try_get_value(&id.into())? {
-            None => BlockHandle::new(id.clone(), Arc::clone(&self.block_handle_cache)),
-            Some(block_meta) => BlockHandle::with_values(id.clone(), block_meta, Arc::clone(&self.block_handle_cache)),
-        }))
-    }
-
 
     fn load_block_handle_impl(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>> {
-        log::trace!("load_block_handle_impl {}", id);
-
-        adnl::common::add_object_to_map_with_update(&self.block_handle_cache, id.clone(), |val| {
-            if val.is_some() {
-                Ok(None)
-            } else {
-                Some(self.load_or_create_handle(id)).transpose()
-            }
-        })?;
-
-        Ok(self.block_handle_cache
-            .get(id)
-            .ok_or_else(|| error!("unexpected error in load_block_handle_impl"))?
-            .1.clone()
-        )
+        self.block_handle_storage.load_block_handle(id)
     }
 }
 
@@ -229,7 +203,8 @@ impl InternalDb for InternalDbImpl {
             fail!(NodeError::InvalidArg("`block` and `handle` mismatch".to_string()))
         }
         if !handle.data_inited() {
-            handle.fetch_block_info(block)?;
+            handle.fetch_block_info(block.block())?;
+            self.store_block_handle(handle)?;
             self.store_block_handle(handle)?;
             let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(block.id());
             self.archive_manager.add_file(&entry_id, block.data().to_vec()).await?;
@@ -252,7 +227,7 @@ impl InternalDb for InternalDbImpl {
             fail!("This block is not stored yet: {:?}", handle);
         }
         let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(handle.id());
-        self.archive_manager.get_file(handle.id(), handle.meta(), &entry_id).await
+        self.archive_manager.get_file(handle, &entry_id).await
     }
 
     fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seq_no: u32) -> Result<Arc<BlockHandle>> {
@@ -277,7 +252,8 @@ impl InternalDb for InternalDbImpl {
 
             if proof.is_link() {
                 if !handle.proof_link_inited() {
-                    handle.fetch_proof_info(proof)?;
+                    handle.fetch_block_info(&proof.virtualize_block()?.0)?;
+                    self.store_block_handle(handle)?;
                     self.store_block_handle(handle)?;
                     let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(handle.id());
                     self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
@@ -287,7 +263,8 @@ impl InternalDb for InternalDbImpl {
                 }
             } else {
                 if !handle.proof_inited() {
-                    handle.fetch_proof_info(proof)?;
+                    handle.fetch_block_info(&proof.virtualize_block()?.0)?;
+                    self.store_block_handle(handle)?;
                     self.store_block_handle(handle)?;
                     let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Proof(handle.id());
                     self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
@@ -316,7 +293,7 @@ impl InternalDb for InternalDbImpl {
         if !inited {
             fail!("This proof{} is not in the archive: {:?}", if is_link { "link" } else { "" }, handle);
         }
-        self.archive_manager.get_file(handle.id(), handle.meta(), &entry_id).await
+        self.archive_manager.get_file(handle, &entry_id).await
     }
 
     fn store_shard_state_dynamic(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()> {
@@ -496,8 +473,7 @@ impl InternalDb for InternalDbImpl {
         }
 
         self.archive_manager.move_to_archive(
-            id,
-            handle.meta(),
+            &handle,
             || {
                 if !handle.set_moved_to_archive() {
                     self.store_block_handle(&handle)?;
@@ -534,7 +510,7 @@ impl InternalDb for InternalDbImpl {
 
     fn index_handle(&self, handle: &BlockHandle) -> Result<()> {
         if !handle.set_indexed() {
-            self.block_index_db.add_handle(&handle.id().into(), handle.meta())?;
+            self.block_index_db.add_handle(handle)?;
             self.store_block_handle(&handle)?;
         }
 

@@ -42,7 +42,6 @@ impl BlockProofStuff {
         Ok(BlockProofStuff { proof, is_link, id: block_id.clone(), data })
     }
 
-
     pub fn virtualize_block(&self) -> Result<(Block, ton_api::ton::int256)> {
         let merkle_proof = MerkleProof::construct_from(&mut self.proof.root.clone().into())?;
         let block_virt_root = merkle_proof.proof.clone().virtualize(1);
@@ -482,3 +481,4 @@ impl BlockProofStuff {
         Ok((validators, hash_short))
     }
 }
+
