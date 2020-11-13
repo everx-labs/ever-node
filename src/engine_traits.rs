@@ -13,15 +13,18 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use ton_types::{deserialize_tree_of_cells, fail, Result};
-use overlay::{OverlayShortId, QueriesConsumer};
+use overlay::{OverlayId, OverlayShortId, QueriesConsumer};
 use ton_block::{AccountIdPrefixFull, BlockIdExt, Deserializable, Message, ShardIdent};
 
 #[async_trait::async_trait]
 pub trait OverlayOperations : Sync + Send {
     async fn start(self: Arc<Self>) -> Result<Arc<dyn FullNodeOverlayClient>>;
-    async fn get_overlay(self: Arc<Self>, overlay_id: &Arc<OverlayShortId>) -> Result<Arc<dyn FullNodeOverlayClient>>;
+    async fn get_overlay(
+        self: Arc<Self>, 
+        overlay_id: (Arc<OverlayShortId>, OverlayId)
+    ) -> Result<Arc<dyn FullNodeOverlayClient>>;
     fn add_consumer(&self, overlay_id: &Arc<OverlayShortId>, consumer: Arc<dyn QueriesConsumer>) -> Result<()>;
-    fn calc_overlay_short_id(&self, workchain: i32, shard: u64) -> Result<Arc<OverlayShortId>>;
+    fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<OverlayShortId>, OverlayId)> ;
 }
 
 // TODO make separate traits for read and write operations (may be critical and not etc.)
@@ -118,6 +121,9 @@ pub trait EngineOperations : Sync + Send {
     async fn download_state(&self, block_id: &BlockIdExt, master_id: &BlockIdExt) -> Result<ShardStateStuff> {
         unimplemented!()
     }
+    async fn download_zerostate(&self, id: &BlockIdExt) -> Result<(ShardStateStuff, Vec<u8>)> {
+        unimplemented!()
+    }
     async fn load_mc_zero_state(&self) -> Result<ShardStateStuff> {
         unimplemented!()
     }
@@ -141,7 +147,7 @@ pub trait EngineOperations : Sync + Send {
     async fn store_state(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()> {
         unimplemented!()
     }
-    async fn store_zero_state(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()> {
+    async fn store_zerostate(&self, handle: &BlockHandle, state: &ShardStateStuff, state_bytes: &[u8]) -> Result<()> {
         unimplemented!()
     }
     async fn process_full_state_in_ext_db(&self, state: &ShardStateStuff)-> Result<()> {

@@ -70,7 +70,7 @@ pub trait InternalDb : Sync + Send {
     fn gc_shard_state_dynamic_db(&self) -> Result<usize>;
 
     async fn store_shard_state_persistent(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()>;
-    async fn store_shard_state_persistent_raw(&self, handle: &BlockHandle, state_data: &Vec<u8>) -> Result<()>;
+    async fn store_shard_state_persistent_raw(&self, handle: &BlockHandle, state_data: &[u8]) -> Result<()>;
     async fn load_shard_state_persistent_slice(&self, id: &BlockIdExt, offset: u64, length: u64) -> Result<Vec<u8>>;
     async fn load_shard_state_persistent_size(&self, id: &BlockIdExt) -> Result<u64>;
 
@@ -359,7 +359,7 @@ impl InternalDb for InternalDbImpl {
         Ok(())
     }
 
-    async fn store_shard_state_persistent_raw(&self, handle: &BlockHandle, state_data: &Vec<u8>) -> Result<()> {
+    async fn store_shard_state_persistent_raw(&self, handle: &BlockHandle, state_data: &[u8]) -> Result<()> {
         log::trace!("store_shard_state_persistent_raw {}", handle.id());
         if !handle.persistent_state_inited() {
             self.shard_state_persistent_db.put(&handle.id().into(), state_data).await?;

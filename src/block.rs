@@ -73,15 +73,6 @@ impl BlockStuff {
         Ok(Self{ id, block, root, data: Arc::new(data), })
     }
 
-    #[cfg(test)]
-    pub fn fake(id: BlockIdExt) -> Self {
-        BlockStuff {
-            id,
-            block: Block::default(),
-            root: Cell::default(),
-            data: Arc::new(vec!(0xfe; 200_000)),
-        }
-    }
 
     pub fn block(&self) -> &Block { &self.block }
 

@@ -42,14 +42,26 @@ impl ShardStateStuff {
         ss_split.serialize()
     }
 
-    pub fn deserialize(id: BlockIdExt, bytes: &[u8]) -> Result<Self> {
-        let root = deserialize_tree_of_cells(&mut Cursor::new(bytes))?;
-        if id.seq_no() == 0 {
-            let file_hash = UInt256::from(sha2::Sha256::digest(bytes).as_slice());
-            if file_hash != id.file_hash && root.repr_hash() != id.root_hash {
-                fail!("Wrong zero state {}. Hashes doesn't correspond", id)
-            }
+    pub fn deserialize_zerostate(id: BlockIdExt, bytes: &[u8]) -> Result<Self> {
+        if id.seq_no() != 0 {
+            fail!("Given id has non-zero seq number");
+        }        
+        let file_hash = UInt256::from(sha2::Sha256::digest(bytes).as_slice());
+        if file_hash != id.file_hash {
+            fail!("Wrong zero state's {} file hash", id);
         }
+        let root = deserialize_tree_of_cells(&mut Cursor::new(bytes))?;
+        if root.repr_hash() != id.root_hash() {
+            fail!("Wrong zero state's {} root hash", id);
+        }
+        Self::new(id, root)
+    }
+
+    pub fn deserialize(id: BlockIdExt, bytes: &[u8]) -> Result<Self> {
+        if id.seq_no() == 0 {
+            fail!("Use `deserialize_zerostate` method for zerostate");
+        }
+        let root = deserialize_tree_of_cells(&mut Cursor::new(bytes))?;
         #[cfg(feature = "store_copy")]
         {
             let path = format!("./target/replication/states/{}", id.shard().shard_prefix_as_str_with_tag());
@@ -60,10 +72,6 @@ impl ShardStateStuff {
         Self::new(id, root)
     }
 
-    #[cfg(test)]
-    pub fn read_from_file(id: BlockIdExt, filename: &str) -> Result<Self> {
-        Self::deserialize(id, &mut std::fs::read(filename)?)
-    }
 
     pub fn shard_state(&self) -> &ShardStateUnsplit { &self.shard_state }
     pub fn shard_state_extra(&self) -> Result<&McStateExtra> {

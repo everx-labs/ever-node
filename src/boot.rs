@@ -188,9 +188,9 @@ pub(crate) async fn download_zero_state(engine: &dyn EngineOperations, handle: &
         return engine.load_state(handle.id()).await
     }
     loop {
-        match engine.download_state(handle.id(), handle.id()).await {
-            Ok(state) => {
-                engine.store_zero_state(&handle, &state).await?;
+        match engine.download_zerostate(handle.id()).await {
+            Ok((state, state_bytes)) => {
+                engine.store_zerostate(&handle, &state, &state_bytes).await?;
                 engine.set_applied(handle, 0).await?;
                 engine.process_full_state_in_ext_db(&state).await?;
                 return Ok(state)

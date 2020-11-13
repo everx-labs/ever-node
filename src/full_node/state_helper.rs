@@ -29,17 +29,7 @@ pub async fn download_persistent_state(
 ) -> Result<ShardStateStuff> {
 
     if id.seq_no == 0 {
-        loop {
-            let attempts = Attempts {
-                limit: 3,
-                count: 0
-            };
-            match overlay.download_zero_state(id, &attempts).await {
-                Err(e) => log::warn!("Can't load zerostate {}: {:?}", id, e),
-                Ok(None) => log::warn!("Can't load zerostate {}: none returned", id),
-                Ok(Some(zs)) => return Ok(zs)
-            }
-        }
+        fail!("zerostate is not supported");
     }
 
     // Check

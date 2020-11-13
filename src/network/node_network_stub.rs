@@ -66,9 +66,12 @@ impl NodeNetworkStub {
 
 #[async_trait::async_trait]
 impl OverlayOperations for NodeNetworkStub {
-    fn calc_overlay_short_id(&self, _workchain: i32, _shard: u64) -> Result<Arc<OverlayShortId>> {
+    fn calc_overlay_short_id(
+        &self, workchain: i32, _shard: u64) -> Result<Arc<OverlayShortId>, OverlayId> 
+    {
         let zero = [0_u8; 32];
-        Ok(adnl::common::KeyId::from_data(zero))
+        let short_id = self.overlay.calc_overlay_short_id(workchain, shard as i64);
+        Ok(adnl::common::KeyId::from_data(zero). short_id)
     }
     async fn start(self: Arc<Self>) -> Result<Arc<dyn FullNodeOverlayClient>> {
         Ok(self.client.clone())
@@ -204,10 +207,6 @@ impl FullNodeOverlayClient for OverlayClientStub {
         unimplemented!();
     }
 
-    #[cfg(test)]
-    async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, _max_size: i32, _attempts: &Attempts) -> Result<Vec<BlockIdExt>> {
-        crate::test_helper::test_download_next_key_blocks_ids(block_id)
-    }
 
     #[cfg(not(test))]
     async fn download_next_key_blocks_ids(&self, _block_id: &BlockIdExt, _max_size: i32, _attempts: &Attempts) -> Result<Vec<BlockIdExt>> {

@@ -147,6 +147,21 @@ impl EngineOperations for Engine {
         crate::full_node::state_helper::download_persistent_state(block_id, master_id, overlay.deref()).await
     }
 
+    async fn download_zerostate(&self, id: &BlockIdExt) -> Result<(ShardStateStuff, Vec<u8>)> {
+        loop {
+            let overlay = self.get_full_node_overlay(id.shard().workchain_id(), id.shard().shard_prefix_with_tag()).await?;
+            let attempts = Attempts {
+                limit: 3,
+                count: 0
+            };
+            match overlay.download_zero_state(id, &attempts).await {
+                Err(e) => log::warn!("Can't load zerostate {}: {:?}", id, e),
+                Ok(None) => log::warn!("Can't load zerostate {}: none returned", id),
+                Ok(Some(zs)) => return Ok(zs)
+            }
+        }
+    }
+
     async fn store_block(&self, handle: &BlockHandle, block: &BlockStuff) -> Result<()> {
         self.db().store_block_data(handle, block).await
     }
@@ -208,9 +223,9 @@ impl EngineOperations for Engine {
         ).await?;
         self.db().store_shard_state_dynamic(handle, state)
     }
-    async fn store_zero_state(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()> {
+    async fn store_zerostate(&self, handle: &BlockHandle, state: &ShardStateStuff, state_bytes: &[u8]) -> Result<()> {
         self.store_state(handle, state).await?;
-        self.db().store_shard_state_persistent(handle, state).await
+        self.db().store_shard_state_persistent_raw(handle, state_bytes).await
     }
     fn store_block_prev(&self, handle: &BlockHandle, prev: &BlockIdExt) -> Result<()> {
         self.db().store_block_prev(handle, prev)
