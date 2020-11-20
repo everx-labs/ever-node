@@ -184,7 +184,7 @@ impl EngineOperations for Engine {
         let len = self.db().load_shard_state_persistent_size(id).await?;
         let data = self.db().load_shard_state_persistent_slice(id, 0, len).await?;
 
-        ShardStateStuff::deserialize(self.zero_state_id().clone(), &data)
+        ShardStateStuff::deserialize_zerostate(self.zero_state_id().clone(), &data)
     }
 
     async fn load_state(&self, block_id: &BlockIdExt) -> Result<ShardStateStuff> {

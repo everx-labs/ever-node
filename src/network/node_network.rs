@@ -363,7 +363,7 @@ impl NodeNetwork {
 
         let peers = self.update_overlay_peers(&overlay_id.0, &mut None).await?; 
         if peers.first().is_none() {
-            fail!("No nodes were found in overlay {}", overlay_id.0);
+            log::warn!("No nodes were found in overlay {}", overlay_id.0);
         }
 
         let neigbours = Neighbours::new(

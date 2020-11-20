@@ -185,7 +185,7 @@ impl Neighbours {
         if self.count() >= MAX_NEIGHBOURS {
             return Ok(false);
         }
-        self.peers.insert_ex(peer, true)
+        self.peers.insert_ex(peer, false)
     }
 
     pub fn contains(&self, peer: &Arc<KeyId>) -> bool {
