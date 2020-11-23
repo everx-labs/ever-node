@@ -11,11 +11,11 @@ sha2 = "^0.8"
 base64 = "0.11.0"
 log = "0.4.8"
 hex = "0.3.1"
-adnl = { git = "https://github.com/tonlabs/ton-labs-adnl.git", features = ["node"] }
-overlay = { git = "https://github.com/tonlabs/ton-labs-overlay.git" }
-rldp = { git = "https://github.com/tonlabs/ton-labs-rldp.git" }
-ton_types = { git = "https://github.com/tonlabs/ton-labs-types.git" }
-ton_api = { git = "https://github.com/tonlabs/ton-labs-tl.git", package = "ton_api" }
+adnl = { git = "https://github.com/tonlabs/ton-labs-adnl", features = ["node"] }
+overlay = { git = "https://github.com/tonlabs/ton-labs-overlay" }
+rldp = { git = "https://github.com/tonlabs/ton-labs-rldp" }
+ton_types = { git = "https://github.com/tonlabs/ton-labs-types" }
+ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }
 tokio = { version = "0.2.18", features = ["rt-threaded", "stream", "tcp", "udp", "sync"] }
 ton-node-storage = { git = "https://github.com/tonlabs/ton-labs-node-storage.git" }
 futures = "0.3.4"

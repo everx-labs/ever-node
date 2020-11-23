@@ -10,9 +10,9 @@ catchain = { path = "../catchain" }
 sha2 = "^0.8"
 log = "0.4.8"
 hex = "0.3.1"
-ton_types = { git = "https://github.com/tonlabs/ton-labs-types.git" }
-ton_api = { git = "https://github.com/tonlabs/ton-labs-tl.git", package = "ton_api" }
-adnl = { git = "https://github.com/tonlabs/ton-labs-adnl.git", package = "adnl", features = ["node"] }
+ton_types = { git = "https://github.com/tonlabs/ton-labs-types" }
+ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }
+adnl = { git = "https://github.com/tonlabs/ton-labs-adnl", package = "adnl", features = ["node"] }
 rand = "0.7.3"
 crossbeam = "0.7.3"
 failure = "0.1.1"
