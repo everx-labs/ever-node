@@ -11,7 +11,7 @@ use overlay::{OverlayId, OverlayShortId, OverlayNode, QueriesConsumer};
 use rldp::RldpNode;
 use std::{sync::Arc, time::Duration};
 use tokio::time::delay_for;
-use ton_types::{Result, fail};
+use ton_types::Result;
 
 type OverlayCache = lockfree::map::Map<Arc<OverlayShortId>, Arc<NodeClientOverlay>>;
 pub struct NodeNetwork {
