@@ -6,7 +6,7 @@ use crate::{
 };
 
 use std::{
-    path::{Path, PathBuf}, sync::Arc, cmp::max
+    path::{Path, PathBuf}, sync::Arc, cmp::min
 };
 use ton_api::ton::PublicKey;
 use ton_block::{BlockIdExt, AccountIdPrefixFull, UnixTime32};
@@ -356,7 +356,7 @@ impl InternalDb for InternalDbImpl {
         if offset == full_lenth {
             Ok(vec![])
         } else {
-            let length = max(length, full_lenth - offset);
+            let length = min(length, full_lenth - offset);
             let db_slice = self.shard_state_persistent_db.get_slice(&id.into(), offset, length).await?;
             Ok(db_slice.to_vec())
         }
