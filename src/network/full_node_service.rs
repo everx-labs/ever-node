@@ -365,18 +365,17 @@ impl FullNodeOverlayService {
 
     // tonNode.getArchiveInfo masterchain_seqno:int = tonNode.ArchiveInfo;
     async fn get_archive_info(&self, query: GetArchiveInfo) -> Result<ArchiveInfo> {
-        self.engine.get_archive_id(query.masterchain_seqno as u32).await
-            .map(|id_opt| if let Some(id) = id_opt {
-                ArchiveInfo::TonNode_ArchiveInfo(
-                    Box::new(
-                        ton_api::ton::ton_node::archiveinfo::ArchiveInfo {
-                            id: id as ton_api::ton::long
-                        }
-                    )
+        Ok(if let Some(id) = self.engine.get_archive_id(query.masterchain_seqno as u32).await {
+            ArchiveInfo::TonNode_ArchiveInfo(
+                Box::new(
+                    ton_api::ton::ton_node::archiveinfo::ArchiveInfo {
+                        id: id as ton_api::ton::long
+                    }
                 )
-            } else {
-                ArchiveInfo::TonNode_ArchiveNotFound
-            })
+            )
+        } else {
+            ArchiveInfo::TonNode_ArchiveNotFound
+        })
     }
 
     // tonNode.getArchiveSlice archive_id:long offset:long max_size:int = tonNode.Data;

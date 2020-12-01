@@ -278,7 +278,7 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    async fn get_archive_id(&self, mc_seq_no: u32) -> Result<Option<u64>> {
+    async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
         unimplemented!()
     }
 
