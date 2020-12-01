@@ -333,7 +333,7 @@ impl EngineOperations for Engine {
         Ok(res)
     }
 
-    async fn get_archive_id(&self, mc_seq_no: u32) -> Result<Option<u64>> {
+    async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
         self.db().archive_manager().get_archive_id(mc_seq_no).await
     }
 
