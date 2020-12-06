@@ -16,7 +16,7 @@ use ton_node_storage::{
     block_info_db::BlockInfoDb,
     node_state_db::NodeStateDb,
     shardstate_db::ShardStateDb,
-    status_db::StatusDb,
+//    status_db::StatusDb,
     shardstate_db,
     shardstate_persistent_db::ShardStatePersistentDb,
 };
@@ -122,12 +122,11 @@ pub struct InternalDbImpl {
 
 impl InternalDbImpl {
     pub async fn new(config: InternalDbConfig) -> Result<Self> {
-        let status_db = Arc::new(StatusDb::with_path(&Self::build_name(&config.db_directory, "status_db")));
+        // TODO: StatusDb is reserved for DynamicBocDb:
+        //let status_db = Arc::new(StatusDb::with_path(&Self::build_name(&config.db_directory, "status_db")));
         let block_index_db = Arc::new(BlockIndexDb::with_paths(
             &Self::build_name(&config.db_directory, "index_db/lt_desc_db"),
             &Self::build_name(&config.db_directory, "index_db/lt_db"),
-            &Self::build_name(&config.db_directory, "index_db/lt_shard_db"),
-            Arc::clone(&status_db),
         ));
         let block_handle_db = Arc::new(
             BlockHandleDb::with_path(

@@ -167,7 +167,12 @@ fn main() {
         }
     };
 
-    let config = match TonNodeConfig::from_file(config_dir_path, "config.json", "default_config.json") {
+    let config = match TonNodeConfig::from_file(
+        config_dir_path, 
+        "config.json", 
+        None,
+        "default_config.json"
+    ) {
         Err(e) => {
             println!("Can't load config: {:?}", e);
             return;

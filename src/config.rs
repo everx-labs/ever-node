@@ -1,7 +1,5 @@
 use crate::{network::node_network::NodeNetwork};
-use adnl::{adnl_node_test_config, adnl_node_test_key,
-    from_slice, common::KeyOption, node::{AdnlNodeConfig, AdnlNodeConfigJson}
-};
+use adnl::{from_slice, common::KeyOption, node::{AdnlNodeConfig, AdnlNodeConfigJson}};
 use hex::FromHex;
 use std::{io::BufReader, fs::File, net::{Ipv4Addr, IpAddr, SocketAddr}, path::Path};
 use ton_api::{
@@ -71,7 +69,12 @@ pub struct ExternalDbConfig {
 
 impl TonNodeConfig {
 
-    pub fn from_file(configs_dir: &str, json_file_name: &str, default_config_name: &str) -> Result<Self> { 
+    pub fn from_file(
+        configs_dir: &str, 
+        json_file_name: &str, 
+        adnl_config: Option<AdnlNodeConfigJson>,
+        default_config_name: &str
+    ) -> Result<Self> { 
         let config_file_path = TonNodeConfig::build_path(configs_dir, json_file_name)?;
         let config_file = File::open(config_file_path.clone());
 
@@ -88,26 +91,23 @@ impl TonNodeConfig {
                 )?;
                 let reader = BufReader::new(default_config_file);
                 let mut config: TonNodeConfigJson = serde_json::from_reader(reader)?;
-                // TODO: transfer to Helper
-                // generate private key
-                let (_, dht_key) = KeyOption::with_type_id(KeyOption::KEY_ED25519)?;
-                let dht_key_enc = base64::encode(dht_key.pvt_key()?);
-                let (_, overlay_key) = KeyOption::with_type_id(KeyOption::KEY_ED25519)?;
-                let overlay_key_enc = base64::encode(overlay_key.pvt_key()?);
-                if let Some(ip_address) = config.ip_address {
-                    config.adnl_node = Some(
-                        serde_json::from_str(
-                            adnl_node_test_config!(
-                                ip_address,
-                                adnl_node_test_key!(NodeNetwork::TAG_DHT_KEY, dht_key_enc),
-                                adnl_node_test_key!(NodeNetwork::TAG_OVERLAY_KEY, overlay_key_enc)
-                            )
-                        )?
-                    );
-                    config.ip_address = None
+                // Set ADNL config
+                config.adnl_node = if let Some(adnl_config) = adnl_config {
+                    Some(adnl_config)
                 } else {
-                    fail!("IP address is not set in default config")
-                }
+                    let ip_address = if let Some(ip_address) = config.ip_address {
+                        ip_address                    
+                    } else {
+                        fail!("IP address is not set in default config")
+                    };
+                    let (adnl_config, _) = AdnlNodeConfig::with_ip_address_and_key_type(
+                        ip_address.as_str(), 
+                        KeyOption::KEY_ED25519,
+                        vec![NodeNetwork::TAG_DHT_KEY, NodeNetwork::TAG_OVERLAY_KEY]
+                    )?;
+                    Some(adnl_config)
+                };
+                config.ip_address = None;
                 std::fs::write(config_file_path, serde_json::to_string_pretty(&config)?)?;
                 config
             }
