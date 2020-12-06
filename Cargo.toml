@@ -18,11 +18,11 @@ name = "ton_node"
 version = "0.1.0"
 edition = "2018"
 
-[workspace]
-members = [
-  "catchain",
-  "validator-session"
-]
+#[workspace]
+#members = [
+#  "catchain",
+#  "validator-session"
+#]
 
 [dependencies]
 arrayref = "0.3.5"
@@ -81,6 +81,7 @@ optional = true
 
 [dev-dependencies]
 ed25519-dalek = "1.0.0-pre.4"
+external-ip = "1.0.0"
 
 [features]
 external_db = ["rdkafka", "rdkafka-sys"]

@@ -16,8 +16,6 @@ use ton_types::{
 use ton_executor::TransactionExecutor;
 use ton_vm::stack::StackItem;
 
-include!("../common/src/log.rs");
-
 // replace assert_eq for compare not to get panic
 macro_rules! assert_eq {
     ($left:expr , $right:expr,) => ({

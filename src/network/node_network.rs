@@ -29,8 +29,8 @@ pub struct NodeNetwork {
 
 impl NodeNetwork {
 
-    pub(crate) const TAG_DHT_KEY: usize = 1;
-    pub(crate) const TAG_OVERLAY_KEY: usize = 2;
+    pub const TAG_DHT_KEY: usize = 1;
+    pub const TAG_OVERLAY_KEY: usize = 2;
 
     const PERIOD_STORE_IP_ADDRESS: u64 = 500;  // second
     const PERIOD_START_FIND_DHT_NODE: u64 = 60; // second
