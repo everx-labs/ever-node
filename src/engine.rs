@@ -70,13 +70,11 @@ impl Engine {
     pub(crate) const MAX_EXTERNAL_MESSAGE_DEPTH: u16 = 512;
     pub(crate) const MAX_EXTERNAL_MESSAGE_SIZE: usize = 65535;
 
-    #[allow(unused_mut)]
-    pub async fn new(mut general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>) -> Result<Arc<Self>> {
+    pub async fn new(general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>) -> Result<Arc<Self>> {
         log::info!("Creating engine...");
 
         let db_config = InternalDbConfig { db_directory: "node_db".to_owned() };
         let db = Arc::new(InternalDbImpl::new(db_config).await?);
-
         let global_config = general_config.load_global_config()?;
         let zero_state_id = global_config.zero_state().expect("check zero state settings");
         let mut init_mc_block_id = global_config.init_block()?.unwrap_or_else(|| zero_state_id.clone());
@@ -94,7 +92,7 @@ impl Engine {
             Arc::new(NodeNetworkStub::new(&general_config, db.clone(), path)?)
         };
         #[cfg(not(feature = "local_test"))]
-        let network = Arc::new(NodeNetwork::new(&mut general_config, db.clone()).await?);
+        let network = Arc::new(NodeNetwork::new(general_config, db.clone()).await?);
         network.clone().start().await?;
 
         log::info!("Engine is created.");
@@ -524,13 +522,13 @@ async fn boot(engine: &Arc<Engine>) -> Result<(BlockIdExt, BlockIdExt, BlockIdEx
     Ok((last_mc_block, shards_client_block, pss_keeper_block))
 }
 
-pub async fn run(general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>) -> Result<()> {
+pub async fn run(node_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>) -> Result<()> {
     log::info!("Engine::run");
 
-    let consumer_config = general_config.kafka_consumer_config();
+    let consumer_config = node_config.kafka_consumer_config();
 
     //// Create engine
-    let engine = Engine::new(general_config, ext_db).await?;
+    let engine = Engine::new(node_config, ext_db).await?;
 
     //// Boot
     let (mut last_mc_block, mut shards_client_mc_block, pss_keeper_block) = boot(&engine).await?;

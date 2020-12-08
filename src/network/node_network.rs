@@ -1,6 +1,9 @@
 use crate::{
-    config::{TonNodeGlobalConfig, TonNodeConfig}, db::InternalDb,  engine_traits::OverlayOperations, 
-    network::{neighbours::{self, Neighbours}, full_node_client::{NodeClientOverlay, FullNodeOverlayClient}},
+    config::{NodeConfigHandler, TonNodeGlobalConfig, TonNodeConfig}, db::InternalDb,  engine_traits::OverlayOperations, 
+    network::{
+        control::ControlServer, full_node_client::{NodeClientOverlay, FullNodeOverlayClient},
+        neighbours::{self, Neighbours}
+    },
     types::awaiters_pool::AwaitersPool,
 };
 use adnl::{
@@ -25,6 +28,8 @@ pub struct NodeNetwork {
     masterchain_overlay_id: OverlayId,
     overlays: Arc<OverlayCache>,
     overlay_awaiters: AwaitersPool<Arc<OverlayShortId>, Arc<dyn FullNodeOverlayClient>>,
+    _config_handler: Arc<NodeConfigHandler>,
+    _control: Option<ControlServer>
 }
 
 impl NodeNetwork {
@@ -35,12 +40,12 @@ impl NodeNetwork {
     const PERIOD_STORE_IP_ADDRESS: u64 = 500;  // second
     const PERIOD_START_FIND_DHT_NODE: u64 = 60; // second
 
-    pub async fn new(config: &mut TonNodeConfig, db: Arc<dyn InternalDb>) -> Result<Self> {
+    pub async fn new(node_config: TonNodeConfig, db: Arc<dyn InternalDb>) -> Result<Self> {
 
-        let global_config = config.load_global_config()?;
+        let global_config = node_config.load_global_config()?;
         let masterchain_zero_state_id = global_config.zero_state()?;
 
-        let adnl = AdnlNode::with_config(config.adnl_node()?).await?;
+        let adnl = AdnlNode::with_config(node_config.adnl_node()?).await?;
         let dht = DhtNode::with_adnl_node(adnl.clone(), Self::TAG_DHT_KEY)?;
         let overlay = OverlayNode::with_adnl_node_and_zero_state(
             adnl.clone(), 
@@ -70,6 +75,21 @@ impl NodeNetwork {
         let overlay_public_key = adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?;
         NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_public_key);
         NodeNetwork::find_dht_nodes(dht.clone());
+        let control_server_config =node_config.control_server();
+        let config_handler = Arc::new(NodeConfigHandler::new(node_config)?);
+
+        let _control = match control_server_config {
+            Ok(config) => Some(
+                ControlServer::with_config(
+                    config, config_handler.clone(),
+                    config_handler.clone()
+                ).await?
+            ),
+            Err(e) => {
+                log::warn!("{}", e);
+                None
+            }
+        };
 
         Ok(NodeNetwork {
             adnl,
@@ -80,8 +100,10 @@ impl NodeNetwork {
             masterchain_overlay_short_id,
             masterchain_overlay_id,
             global_cfg: global_config,
-            overlays: overlays,
+            overlays,
             overlay_awaiters: AwaitersPool::new(),
+            _config_handler: config_handler,
+            _control
         })
     }
 
@@ -389,6 +411,14 @@ impl NodeNetwork {
         Neighbours::start_rnd_peers_process(Arc::clone(&peers));
         NodeNetwork::start_update_peers(self.clone(), &client_overlay);
         Ok(self.try_add_new_overlay(&overlay_id.0, client_overlay))
+    }
+}
+
+impl Drop for NodeNetwork {
+    fn drop(&mut self) {
+        if let Some(control) = self._control.take() {
+            control.shutdown()
+        }
     }
 }
 

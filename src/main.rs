@@ -135,15 +135,14 @@ fn start_external_db(_config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>
     Ok(vec!())
 }
 
-
-
-
-
 async fn start_engine(config: TonNodeConfig) -> Result<()> {
     let external_db = start_external_db(&config)?;
     crate::engine::run(config, external_db).await?;
     Ok(())
 }
+
+const CONFIG_NAME: &str = "config.json";
+const DEFAULT_CONFIG_NAME: &str = "default_config.json";
 
 fn main() {
     println!("{}", print_build_info());
@@ -169,9 +168,9 @@ fn main() {
 
     let config = match TonNodeConfig::from_file(
         config_dir_path, 
-        "config.json", 
+        CONFIG_NAME, 
         None,
-        "default_config.json"
+        DEFAULT_CONFIG_NAME
     ) {
         Err(e) => {
             println!("Can't load config: {:?}", e);
