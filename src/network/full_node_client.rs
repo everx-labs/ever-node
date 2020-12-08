@@ -711,8 +711,8 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         while let None = result {
             let message = receiver.wait_for_broadcast(&id).await;
             match message {
-                Ok(data) => {
-                    let answer: Broadcast = Deserializer::new(&mut Cursor::new(data.0)).read_boxed()?;
+                Ok((data, _)) => {
+                    let answer: Broadcast = Deserializer::new(&mut Cursor::new(&data)).read_boxed()?;
                     match answer {
                         Broadcast::TonNode_BlockBroadcast(broadcast) => {
                             log::trace!("broadcast block:{:?}", &broadcast.id);

@@ -27,3 +27,40 @@ pub mod jaeger {
 #[cfg(feature = "external_db")]
 mod external_db;
 
+
+use std::sync::Arc;
+use config::{NodeConfigHandler, TonNodeConfig};
+use network::control::ControlServer;
+use ton_types::Result;
+
+pub struct LightEngine {
+    _config_handler: Arc<NodeConfigHandler>,
+    control: Option<ControlServer>
+}
+
+impl LightEngine {
+    pub async fn with_config(node_config_path: &str) -> Result<Self> {
+        let node_config = TonNodeConfig::from_file("target", node_config_path, None, "")?;
+        let control_server_config = node_config.control_server();
+        let config_handler = Arc::new(NodeConfigHandler::new(node_config)?);
+        let control = match control_server_config {
+            Ok(config) => Some(
+                ControlServer::with_config(config, config_handler.clone(), config_handler.clone()).await?
+            ),
+            Err(e) => {
+                log::warn!("{}", e);
+                None
+            }
+        };
+
+        Ok(Self {
+            _config_handler: config_handler,
+            control
+        })
+    }
+    pub fn shutdown(mut self) {
+        if let Some(control) = self.control.take() {
+            control.shutdown()
+        }
+    }
+}
