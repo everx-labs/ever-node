@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 use ton_block::BlockIdExt;
-use ton_types::{error, fail, Result};
+use ton_types::{fail, Result};
 
 use ton_node_storage::archives::archive_manager::SLICE_SIZE;
 use ton_node_storage::archives::package::read_package_from;
@@ -19,17 +19,27 @@ use crate::engine_traits::EngineOperations;
 type PreDownloadTask = (u32, JoinHandle<Result<Vec<u8>>>);
 
 pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> {
-    let mut last_mc_block_id = Arc::new(engine.load_last_applied_mc_block_id().await?);
-    let last_shards_client_mc_block_id = Arc::new(engine.load_shards_client_mc_block_id().await?);
-    if last_mc_block_id.seq_no() > last_shards_client_mc_block_id.seq_no() {
-        last_mc_block_id = last_shards_client_mc_block_id;
-    }
-    log::info!(target: "sync", "Starting sync: last applied block_id = {}", last_mc_block_id);
+    log::info!(target: "sync", "Started sync");
     let mut predownload_task = None;
     while !engine.check_initial_sync_complete().await? {
+        let mc_block_id = Arc::new(engine.load_last_applied_mc_block_id().await?);
+        let sc_block_id = Arc::new(engine.load_shards_client_mc_block_id().await?);
+        let sync_mc_block_id = if mc_block_id.seq_no() > sc_block_id.seq_no() {
+            Arc::clone(&sc_block_id)
+        } else {
+            Arc::clone(&mc_block_id)
+        };
+
+        log::info!(
+            target: "sync",
+            "Last MC block_id for sync = {} (MC = {}, SC = {})",
+            sync_mc_block_id,
+            mc_block_id,
+            sc_block_id,
+        );
         predownload_task = match download_and_import_package(
             &engine,
-            &mut last_mc_block_id,
+            &sync_mc_block_id,
             predownload_task
         ).await {
             Ok(predownload_task) => Some(predownload_task),
@@ -65,7 +75,7 @@ async fn download_archive(engine: Arc<dyn EngineOperations>, mc_seq_no: u32) -> 
 
 async fn download_and_import_package(
     engine: &Arc<dyn EngineOperations>,
-    last_mc_block_id: &mut Arc<BlockIdExt>,
+    last_mc_block_id: &Arc<BlockIdExt>,
     predownload_task: Option<PreDownloadTask>,
 ) -> Result<PreDownloadTask> {
     let mc_seq_no = last_mc_block_id.seq_no() + 1;
@@ -103,7 +113,7 @@ async fn download_and_import_package(
 async fn import_package(
     maps: Arc<BlockMaps>,
     engine: &Arc<dyn EngineOperations>,
-    last_mc_block_id: &mut Arc<BlockIdExt>,
+    last_mc_block_id: &Arc<BlockIdExt>,
 ) -> Result<()> {
     if maps.mc_blocks_ids.keys().next().is_none() {
         fail!("Archive doesn't contain any masterchain blocks!");
@@ -236,7 +246,7 @@ async fn wait_for(tasks: Vec<JoinHandle<Result<()>>>) -> Result<()> {
 async fn import_mc_blocks(
     engine: &Arc<dyn EngineOperations>,
     maps: &BlockMaps,
-    last_mc_block_id: &mut Arc<BlockIdExt>,
+    mut last_mc_block_id: &Arc<BlockIdExt>,
 ) -> Result<()> {
     for id in maps.mc_blocks_ids.values() {
         if id.seq_no() <= last_mc_block_id.seq_no() {
@@ -271,7 +281,7 @@ async fn import_mc_blocks(
             Arc::clone(engine).apply_block(&handle, Some(&block), id.seq_no()).await?;
         }
 
-        *last_mc_block_id = Arc::clone(id);
+        last_mc_block_id = id;
     }
 
     Ok(())
@@ -333,13 +343,27 @@ async fn import_shard_blocks(
                 }
 
                 log::debug!(target: "sync", "Applying shardchain block: {}...", id);
-                let entry = maps.blocks.get(&id)
-                    .ok_or_else(|| error!("Shard block is not found in the package: {}", id))?;
-                let block = match entry.block {
-                    Some(ref block) => Arc::clone(block),
-                    None => Arc::new(engine.load_block(&handle).await?),
+                let block = match maps.blocks.get(&id) {
+                    Some(entry) => {
+                        match entry.block {
+                            Some(ref block) => Some(block.as_ref().clone()),
+                            None => engine.load_block(&handle).await.ok(),
+                        }
+                    },
+                    None => {
+                        log::warn!(target: "sync", "Shard block is not found in the package: {}", id);
+                        engine.load_block(&handle).await.ok()
+                    },
                 };
-                Arc::clone(&engine).apply_block(&handle, Some(&block), mc_seq_no).await
+                if block.is_none() {
+                    log::warn!(
+                        target: "sync",
+                        "Shard block is not found either in the package or in the un-applied blocks. \
+                        We will try to download it individually: {}",
+                        id
+                    );
+                }
+                Arc::clone(&engine).apply_block(&handle, block.as_ref(), mc_seq_no).await
             }));
         }
 

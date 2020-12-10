@@ -365,6 +365,12 @@ impl FullNodeOverlayService {
 
     // tonNode.getArchiveInfo masterchain_seqno:int = tonNode.ArchiveInfo;
     async fn get_archive_info(&self, query: GetArchiveInfo) -> Result<ArchiveInfo> {
+        if query.masterchain_seqno as u32 > self.engine.load_last_applied_mc_block_id().await?.seq_no()
+            || query.masterchain_seqno as u32 > self.engine.load_shards_client_mc_block_id().await?.seq_no()
+        {
+            return Ok(ArchiveInfo::TonNode_ArchiveNotFound);
+        }
+
         Ok(if let Some(id) = self.engine.get_archive_id(query.masterchain_seqno as u32).await {
             ArchiveInfo::TonNode_ArchiveInfo(
                 Box::new(
