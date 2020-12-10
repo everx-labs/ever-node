@@ -91,7 +91,10 @@ async fn load_next_master_block(engine: &Arc<dyn EngineOperations>, prev_handle:
     Ok(next_handle)
 }
 
-const SHARD_CLIENT_WINDOW: usize = 2;
+// TODO: We limited this window to 1 thread instead of 2 because of the issue with archives.
+//       If we still need to process 2 parallel MC blocks or more, we should develop an algorithm
+//       to mark correctly shard blocks with appropriate mc_seq_no despite of application order.
+const SHARD_CLIENT_WINDOW: usize = 1;
 
 async fn load_shard_blocks_cycle(engine: Arc<dyn EngineOperations>, shards_mc_block_id: BlockIdExt) -> Result<()> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(SHARD_CLIENT_WINDOW));
