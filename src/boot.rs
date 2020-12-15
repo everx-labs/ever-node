@@ -85,7 +85,7 @@ async fn get_key_blocks(
                 futures_timer::Delay::new(Duration::from_secs(1)).await;
                 continue
             }
-            Ok(ids) => ids,
+            Ok(ids) => ids
         };
         if let Some(block_id) = ids.last() {
             log::info!(target: "boot", "last key block is {}", block_id);
