@@ -160,6 +160,9 @@ pub const ATTEMPTS: u32 = 1;
 
 impl Neighbours {
 
+    const TIMEOUT_PING_MAX: u64 = 1000;  // Milliseconds
+    const TIMEOUT_PING_MIN: u64 = 10;    // Milliseconds
+
     pub fn new(
         start_peers: &Vec<Arc<KeyId>>,
         dht: &Arc<DhtNode>,
@@ -477,12 +480,17 @@ impl Neighbours {
         };
         let (wait, mut queue_reader) = Wait::new();
         loop {
-            let peer = self.peers.next_for_ping(&self.start)?;
-            let last = self.start.elapsed().as_millis() as u64 - peer.last_ping();
-            if last < 1000 {
-                tokio::time::delay_for(Duration::from_millis(1000-last)).await;
+            let peer = if let Some(peer) = self.peers.next_for_ping(&self.start)? {
+                peer
             } else {
-                tokio::time::delay_for(Duration::from_millis(10)).await;
+                tokio::time::delay_for(Duration::from_millis(Self::TIMEOUT_PING_MIN)).await;
+                continue
+            };
+            let last = self.start.elapsed().as_millis() as u64 - peer.last_ping();
+            if last < Self::TIMEOUT_PING_MAX {
+                tokio::time::delay_for(Duration::from_millis(Self::TIMEOUT_PING_MAX - last)).await;
+            } else {
+                tokio::time::delay_for(Duration::from_millis(Self::TIMEOUT_PING_MIN)).await;
             }
             let self_cloned = self.clone();
             let wait_cloned = wait.clone();
@@ -579,7 +587,7 @@ impl NeighboursCache {
         self.cache.get(peer)
     }
 
-    pub fn next_for_ping(&self, start: &Instant) -> Result<Arc<Neighbour>> {
+    pub fn next_for_ping(&self, start: &Instant) -> Result<Option<Arc<Neighbour>>> {
         self.cache.next_for_ping(start)
     }
 
@@ -646,7 +654,7 @@ impl NeighboursCacheCore {
         result
     }
 
-    pub fn next_for_ping(&self, start: &Instant) -> Result<Arc<Neighbour>> {
+    pub fn next_for_ping(&self, start: &Instant) -> Result<Option<Arc<Neighbour>>> {
         let mut next = self.next.load(atomic::Ordering::Relaxed);
         let count = self.count.load(atomic::Ordering::Relaxed);
         let started_from = next;
@@ -684,7 +692,6 @@ impl NeighboursCacheCore {
             }
             break
         }
-        let ret = ret.ok_or_else(|| error!("No neighbours available"))?;
         Ok(ret)
     }
 
