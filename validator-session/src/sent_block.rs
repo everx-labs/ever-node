@@ -6,14 +6,17 @@ pub use super::*;
 
 #[derive(Clone)]
 pub(crate) struct SentBlockImpl {
-    pool: SessionPool,                       //pool of the object
-    hash: HashType,                          //block hash
-    candidate_id: BlockId,                   //candidate identifier
-    source_id: u32,                          //source identifier
-    root_hash: BlockHash,                    //root block hash
-    file_hash: BlockHash,                    //block file hash
-    collated_data_file_hash: BlockHash,      //collated data hash
-    instance_counter: CachedInstanceCounter, //instance counter
+    pool: SessionPool,                                  //pool of the object
+    hash: HashType,                                     //block hash
+    candidate_id: BlockId,                              //candidate identifier
+    source_id: u32,                                     //source identifier
+    root_hash: BlockHash,                               //root block hash
+    file_hash: BlockHash,                               //block file hash
+    collated_data_file_hash: BlockHash,                 //collated data hash
+    instance_counter: CachedInstanceCounter,            //instance counter
+    block_creation_time: std::time::SystemTime,         //block creation time
+    block_payload_creation_time: std::time::SystemTime, //block payload creation time
+    sent_block_creation_time: std::time::SystemTime,    //sent block creation time
 }
 
 /*
@@ -49,11 +52,25 @@ impl SentBlock for SentBlockImpl {
         &self.collated_data_file_hash
     }
 
+    fn get_source_block_creation_time(&self) -> std::time::SystemTime {
+        self.block_creation_time
+    }
+
+    fn get_source_block_payload_creation_time(&self) -> std::time::SystemTime {
+        self.block_payload_creation_time
+    }
+
+    fn get_creation_time(&self) -> std::time::SystemTime {
+        self.sent_block_creation_time
+    }
+
     /*
         Clone object to pool
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn SentBlock> {
+        profiling::instrument!();
+
         Self::create_persistent_object(self.clone(), cache)
     }
 }
@@ -77,6 +94,8 @@ impl SentBlockWrapper for SentBlockPtr {
 
 impl Merge<Option<PoolPtr<dyn SentBlock>>> for Option<PoolPtr<dyn SentBlock>> {
     fn merge(&self, right: &Self, _desc: &mut dyn SessionDescription) -> Self {
+        profiling::instrument!();
+
         let left = self;
 
         if left.is_some() {
@@ -221,6 +240,8 @@ impl SentBlockImpl {
         collated_data_file_hash: BlockHash,
         candidate_id: BlockId,
         instance_counter: &CachedInstanceCounter,
+        block_creation_time: std::time::SystemTime,
+        block_payload_creation_time: std::time::SystemTime,
     ) -> Self {
         trace!(
           "...sent block {:?} has been created (source_id={}, root_hash={:?}, file_hash={:?}, collated_data_file_hash={:?})",
@@ -245,6 +266,9 @@ impl SentBlockImpl {
                 &candidate_id.clone(),
             ),
             instance_counter: instance_counter.clone(),
+            block_creation_time: block_creation_time,
+            block_payload_creation_time: block_payload_creation_time,
+            sent_block_creation_time: std::time::SystemTime::now(),
         }
     }
 
@@ -254,7 +278,11 @@ impl SentBlockImpl {
         root_hash: BlockHash,
         file_hash: BlockHash,
         collated_data_file_hash: BlockHash,
+        block_creation_time: std::time::SystemTime,
+        block_payload_creation_time: std::time::SystemTime,
     ) -> SentBlockPtr {
+        profiling::instrument!();
+
         let candidate_id =
             desc.candidate_id(source_id, &root_hash, &file_hash, &collated_data_file_hash);
         let body = Self::new(
@@ -264,18 +292,24 @@ impl SentBlockImpl {
             collated_data_file_hash,
             candidate_id,
             desc.get_sent_blocks_instance_counter(),
+            block_creation_time,
+            block_payload_creation_time,
         );
 
         Some(Self::create_temp_object(body, desc.get_cache()))
     }
 
     pub(crate) fn create_empty(desc: &mut dyn SessionDescription) -> SentBlockPtr {
+        let now = std::time::SystemTime::now();
+
         Self::create(
             desc,
             0,
             BlockHash::default(),
             BlockHash::default(),
             BlockHash::default(),
+            now.clone(),
+            now.clone(),
         )
     }
 }

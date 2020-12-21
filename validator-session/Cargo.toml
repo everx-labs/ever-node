@@ -20,6 +20,7 @@ crc32c = "0.4.0"
 lazy_static = "1.4.0"
 metrics-core="0.5.2"
 metrics-runtime="0.13.0"
+backtrace = "0.3.54"
 
 [dev-dependencies]
 env_logger = "0.7.1"

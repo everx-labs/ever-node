@@ -1,11 +1,13 @@
 pub use super::*;
 
 use super::session_description::SessionDescriptionImpl;
-use super::task_queue::*;
+use crate::task_queue::*;
 use crate::ton_api::IntoBoxed;
+use backtrace::Backtrace;
+use catchain::profiling::check_execution_time;
+use catchain::profiling::instrument;
+use catchain::profiling::ResultStatusCounter;
 use catchain::BlockPtr;
-use catchain::CatchainListener;
-use catchain::CatchainPtr;
 use catchain::ExternalQueryResponseCallback;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -18,8 +20,18 @@ use std::time::SystemTime;
 
 const DEBUG_IGNORE_PROPOSALS_PRIORITY: bool = false; //ignore proposals priority and generate block each round
 const DEBUG_DUMP_BLOCKS: bool = false; //dump blocks with dependencies and actions for debugging
-const DEBUG_REQUEST_NEW_BLOCKS_IMMEDIATELY: bool = true; //request new blocks immediately without waiting
+const DEBUG_DUMP_ON_NEW_ROUND: bool = false; //debug dump for each new round
+const DEBUG_DUMP_AFTER_BLOCK_APPLYING: bool = false; //debug dump after each block applying
+const DEBUG_REQUEST_NEW_BLOCKS_IMMEDIATELY: bool = false; //request new blocks immediately without waiting
 const DEBUG_CHECK_ALL_BEFORE_ROUND_SWITCH: bool = false; //check updates before round switching
+                                                         //TODO: remove this debug option after performance tuning
+const DEBUG_DUMP_BACKTRACE_FOR_LATE_VALIDATIONS: bool = true; //dump all late validations backtrace
+const DEBUG_EVENTS_LOG: bool = true; //dump consensus events
+const COMPLETION_HANDLERS_MAX_WAIT_PERIOD: Duration = Duration::from_millis(60000); //max wait time for completion handlers
+const COMPLETION_HANDLERS_CHECK_PERIOD: Duration = Duration::from_millis(5000); //period of completion handlers checking
+const BLOCK_PREPROCESSING_WARN_LATENCY: Duration = Duration::from_millis(100); //max block processing latency
+const BLOCK_PROCESSING_WARN_LATENCY: Duration = Duration::from_millis(200); //max block processing latency
+const MAX_NEXT_BLOCK_WAIT_DELAY: Duration = Duration::from_millis(500); //max next block wait delay
 
 const STATES_RESERVED_COUNT: usize = 100000; //reserved states count for blocks
 const ROUND_DEBUG_PERIOD: std::time::Duration = Duration::from_secs(15); //round debug time
@@ -28,14 +40,13 @@ const ROUND_DEBUG_PERIOD: std::time::Duration = Duration::from_secs(15); //round
     Implementation details for SessionProcessor
 */
 
-type CatchainOptions = catchain::Options;
 type BlockCandidateTlPtr = Rc<::ton_api::ton::validator_session::Candidate>;
-type BlockCandidateMap = Rc<RefCell<HashMap<BlockId, BlockCandidateTlPtr>>>;
+type BlockCandidateMap =
+    Rc<RefCell<HashMap<BlockId, (BlockCandidateTlPtr, std::time::SystemTime)>>>;
 type RoundBlockMap = HashMap<u32, BlockCandidateMap>;
-type BlockApproveMap = HashMap<BlockId, (SystemTime, BlockPayload)>;
-type BlockMap = HashMap<BlockId, BlockPayload>;
+type BlockApproveMap = HashMap<BlockId, (SystemTime, BlockPayloadPtr)>;
+type BlockMap = HashMap<BlockId, BlockPayloadPtr>;
 type BlockSet = HashSet<BlockId>;
-type ArcCatchainListenerPtr = Arc<Mutex<dyn CatchainListener + Send>>;
 
 pub(crate) struct SessionProcessorImpl {
     task_queue: TaskQueuePtr, //task queue for session callbacks
@@ -43,17 +54,20 @@ pub(crate) struct SessionProcessorImpl {
     session_id: SessionId,    //catchain session ID (incarnation)
     session_listener: SessionListenerPtr, //session listener
     catchain: CatchainPtr,    //catchain session
-    _catchain_listener: ArcCatchainListenerPtr, //catchain session listener
     next_completion_handler_available_index: CompletionHandlerId, //index of next available complete handler
-    completion_handlers: HashMap<CompletionHandlerId, Box<dyn Any>>, //complete handlers
-    catchain_started: bool, //flag indicates that catchain has been started
-    description: SessionDescriptionImpl, //session description
+    completion_handlers: HashMap<CompletionHandlerId, Box<dyn CompletionHandler>>, //complete handlers
+    completion_handlers_check_last_time: SystemTime, //time of last completion handlers check
+    catchain_started: bool,                          //flag indicates that catchain has been started
+    local_key: PrivateKey,                           //private key for signing
+    description: SessionDescriptionImpl,             //session description
     block_to_state_map: Vec<Option<SessionStatePtr>>, //session states
-    real_state: SessionStatePtr, //real state (TODO: comment)
-    virtual_state: SessionStatePtr, //virtual state (TODO: comment)
-    current_round: u32,     //current round sequence number
-    requested_new_block: bool, //new block has been requested in catchain
+    real_state: SessionStatePtr,                     //real state (TODO: comment)
+    virtual_state: SessionStatePtr,                  //virtual state (TODO: comment)
+    current_round: u32,                              //current round sequence number
+    requested_new_block: bool,                       //new block has been requested in catchain
     requested_new_block_now: bool, //new block has been requested in catchain to be generated immediately
+    session_creation_time: SystemTime, //session creation time
+    session_processor_creation_time: SystemTime, //session processor creation time
     next_awake_time: SystemTime,   //next awake timestamp
     round_started_at: SystemTime,  //round start time
     round_debug_at: SystemTime,    //round debug checkpoint time
@@ -72,6 +86,10 @@ pub(crate) struct SessionProcessorImpl {
     signed_block: BlockId,         //signated block ID
     signature: BlockSignature,     //block candidate signature
     log_replay_report_current_time: SystemTime, //log replay current time (for reporting)
+    validates_counter: ResultStatusCounter, //result status counter for approval requests
+    collates_counter: ResultStatusCounter, //result status counter for collation requests
+    commits_counter: ResultStatusCounter, //result status counter for commits requests
+    rldp_queries_counter: ResultStatusCounter, //result status counter for RLDP queries
 }
 
 /*
@@ -83,12 +101,28 @@ impl SessionProcessor for SessionProcessorImpl {
         Accessors
     */
 
+    fn get_description(&self) -> &dyn SessionDescription {
+        &self.description
+    }
+
     fn get_impl(&self) -> &dyn Any {
         self
     }
 
     fn get_mut_impl(&mut self) -> &mut dyn Any {
         self
+    }
+
+    /*
+        Stop processing
+    */
+
+    fn stop(&mut self) {
+        debug!("Stopping ValidatorSession processor...");
+
+        self.catchain.stop();
+
+        debug!("ValidatorSession processor has been stopped");
     }
 
     /*
@@ -122,6 +156,22 @@ impl SessionProcessor for SessionProcessorImpl {
     */
 
     fn check_all(&mut self) {
+        instrument!();
+
+        //check completion handlers
+
+        if let Ok(completion_handlers_check_elapsed) =
+            self.completion_handlers_check_last_time.elapsed()
+        {
+            if completion_handlers_check_elapsed > COMPLETION_HANDLERS_CHECK_PERIOD {
+                instrument!();
+                check_execution_time!(10_000);
+
+                self.check_completion_handlers();
+                self.completion_handlers_check_last_time = std::time::SystemTime::now();
+            }
+        }
+
         //no actions are needed before start of Catchain
 
         if !self.catchain_started {
@@ -160,98 +210,40 @@ impl SessionProcessor for SessionProcessorImpl {
         self.set_next_awake_time(self.round_debug_at);
         self.set_next_awake_time(self.description.get_attempt_start_at(attempt_seqno + 1));
     }
-}
 
-/*
-    Implementation of CatchainListener
-*/
-
-struct CatchainListenerImpl {
-    task_queue: TaskQueuePtr, //task queue
-}
-
-impl CatchainListener for CatchainListenerImpl {
-    fn preprocess_block(&mut self, block: BlockPtr) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.preprocess_block(block);
-        });
-    }
-
-    fn process_blocks(&mut self, blocks: Vec<BlockPtr>) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.process_blocks(blocks);
-        });
-    }
-
-    fn finished_processing(&mut self) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.finished_processing();
-        });
-    }
-
-    fn started(&mut self) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.started();
-        });
-    }
-
-    fn process_broadcast(&mut self, source_id: PublicKeyHash, data: BlockPayload) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.process_broadcast(source_id, data);
-        });
-    }
-
-    fn process_message(&mut self, source_id: PublicKeyHash, data: BlockPayload) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.process_message(source_id, data);
-        });
-    }
-
-    fn process_query(
-        &mut self,
-        source_id: PublicKeyHash,
-        data: BlockPayload,
-        callback: ExternalQueryResponseCallback,
-    ) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.process_query(source_id, data, callback);
-        });
-    }
-
-    fn set_time(&mut self, time: std::time::SystemTime) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.set_time(time);
-        });
-    }
-}
-
-impl CatchainListenerImpl {
-    fn post_closure<F>(&mut self, task_fn: F)
-    where
-        F: FnOnce(&mut dyn SessionProcessor),
-        F: Send + 'static,
-    {
-        self.task_queue.post_closure(Box::new(task_fn));
-    }
-
-    fn create(task_queue: TaskQueuePtr) -> ArcCatchainListenerPtr {
-        Arc::new(Mutex::new(Self {
-            task_queue: task_queue,
-        }))
-    }
-}
-
-impl CatchainListener for SessionProcessorImpl {
     /*
-        Blocks processing management
+        Catchain blocks processing management
     */
 
     fn preprocess_block(&mut self, block: BlockPtr) {
+        check_execution_time!(100_000);
+        instrument!();
+
         let start_time = SystemTime::now();
 
-        debug!("Preprocessing block {}", block);
+        trace!("Preprocessing block {}", block);
 
-        let payload_len = block.get_payload().len();
+        let block_payload_creation_time = block.get_payload().get_creation_time();
+
+        if let Ok(block_payload_processing_latency) = block_payload_creation_time.elapsed() {
+            if block_payload_processing_latency > BLOCK_PREPROCESSING_WARN_LATENCY {
+                let block_creation_time = block.get_creation_time();
+
+                if let Ok(block_processing_latency) = block_creation_time.elapsed() {
+                    let delivery_issue =
+                        block_processing_latency < BLOCK_PREPROCESSING_WARN_LATENCY;
+                    let source_id = block.get_source_id();
+                    let source_public_key_hash =
+                        self.description.get_source_public_key_hash(source_id);
+
+                    warn!("{}: ValidatorSession block payload latency is {:.3}s, block latency is {:.3}s (expected_latency={:.3}s, source=v{:03} ({})): {}",
+                        if delivery_issue { "Delivery time issue" } else { "Preprocessing time issue" }, block_payload_processing_latency.as_secs_f64(), block_processing_latency.as_secs_f64(), BLOCK_PREPROCESSING_WARN_LATENCY.as_secs_f64(),
+                        source_id, source_public_key_hash, &block);
+                }
+            }
+        }
+
+        let payload_len = block.get_payload().data().len();
         let deps_len = block.get_deps().len();
 
         trace!(
@@ -305,13 +297,13 @@ impl CatchainListener for SessionProcessorImpl {
 
         //apply actions from incoming block & check payload
 
-        if block.get_payload().len() != 0 || deps.len() != 0 {
+        if block.get_payload().data().len() != 0 || deps.len() != 0 {
             trace!("...parsing incoming block update");
 
             //try to parse block update
 
             let block_update: Result<ton::BlockUpdate> =
-                catchain::utils::deserialize_tl_boxed_object(&block.get_payload());
+                catchain::utils::deserialize_tl_boxed_object(&block.get_payload().data());
             let node_public_key_hash = self
                 .description
                 .get_source_public_key_hash(block.get_source_id() as u32)
@@ -334,7 +326,7 @@ impl CatchainListener for SessionProcessorImpl {
                     trace!("...applying actions");
 
                     for msg in block_update.actions.iter() {
-                        debug!(
+                        trace!(
                             "Node {} applying action on block {:?}: {:?}",
                             node_public_key_hash,
                             block.get_hash(),
@@ -346,6 +338,8 @@ impl CatchainListener for SessionProcessorImpl {
                             node_source_id,
                             attempt_id,
                             msg,
+                            block.get_creation_time(),
+                            block.get_payload().get_creation_time(),
                         );
                     }
 
@@ -358,21 +352,12 @@ impl CatchainListener for SessionProcessorImpl {
                     trace!("...check hashes");
 
                     if state.get_hash() != block_update.state as u32 {
-                        //TODO: convert to warning after debugging; enable apply_action below after fixes of hash computation
-                        debug!("Node {} sent a block {:?} with hash mismatch: computed={:08x?}, received={:08x?}",
+                        warn!("Node {} sent a block {:?} with hash mismatch: computed={:08x?}, received={:08x?}",
               node_public_key_hash, block.get_hash(), state.get_hash(), block_update.state as u32);
 
-                        /*for msg in block_update.actions.iter() {
-                            //TODO: convert to warning after debugging
-                            debug!("...applied action: {:?}", msg);
-
-                            state = state.apply_action(
-                                &mut self.description,
-                                node_source_id,
-                                attempt_id,
-                                msg,
-                            );
-                        }*/
+                        for msg in block_update.actions.iter() {
+                            warn!("Node {} sent a block {:?} with hash mismatch: applited action: {:?}", node_public_key_hash, block.get_hash(), msg);
+                        }
                     }
                 }
                 Err(err) => {
@@ -448,7 +433,9 @@ impl CatchainListener for SessionProcessorImpl {
 
         //debug dump
 
-        self.debug_dump();
+        if DEBUG_DUMP_AFTER_BLOCK_APPLYING {
+            self.debug_dump();
+        }
 
         trace!("...do consensus iteration (after preprocess block)");
 
@@ -480,9 +467,12 @@ impl CatchainListener for SessionProcessorImpl {
     }
 
     fn process_blocks(&mut self, blocks: Vec<BlockPtr>) {
+        check_execution_time!(100_000);
+        instrument!();
+
         let start_time = SystemTime::now();
 
-        debug!("Processing blocks {:?}", blocks);
+        trace!("Processing blocks {:?}", blocks);
 
         //reset flags
 
@@ -497,6 +487,26 @@ impl CatchainListener for SessionProcessorImpl {
         );
 
         for block in &blocks {
+            let block_payload_creation_time = block.get_payload().get_creation_time();
+
+            if let Ok(block_payload_processing_latency) = block_payload_creation_time.elapsed() {
+                if block_payload_processing_latency > BLOCK_PROCESSING_WARN_LATENCY {
+                    let block_creation_time = block.get_creation_time();
+
+                    if let Ok(block_processing_latency) = block_creation_time.elapsed() {
+                        let delivery_issue =
+                            block_processing_latency < BLOCK_PROCESSING_WARN_LATENCY;
+                        let source_id = block.get_source_id();
+                        let source_public_key_hash =
+                            self.description.get_source_public_key_hash(source_id);
+
+                        warn!("{}: ValidatorSession block payload processing latency is {:.3}s, block processing latency is {:.3}s (expected_latency={:.3}s, source=v{:03} ({})): {}",
+                            if delivery_issue { "Delivery time issue" } else { "Processing time issue" }, block_payload_processing_latency.as_secs_f64(), block_processing_latency.as_secs_f64(), BLOCK_PROCESSING_WARN_LATENCY.as_secs_f64(),
+                            source_id, source_public_key_hash, &block);
+                    }
+                }
+            }
+
             let real_state_hash = self.real_state.get_hash();
             let block_state = self.get_state(&block).clone();
 
@@ -521,6 +531,7 @@ impl CatchainListener for SessionProcessorImpl {
         let local_idx = self.get_local_idx();
         let ts = self.description.get_ts();
         let attempt = self.description.get_attempt_sequence_number(ts);
+        let now = std::time::SystemTime::now();
 
         trace!(
             "...local_idx={}, round={}, attempt={}, ts_unix_time={}",
@@ -539,7 +550,7 @@ impl CatchainListener for SessionProcessorImpl {
         if self.generated && !self.sent_generated {
             //generate SubmittedBlock message to notify other validators about block candidate from this validator
 
-            let block_candidate = self
+            let (block_candidate, _candidate_creation_time) = self
                 .get_signed_block_for_round(self.current_round, &self.generated_block)
                 .unwrap();
             let file_hash = catchain::utils::get_hash(&block_candidate.data());
@@ -577,7 +588,7 @@ impl CatchainListener for SessionProcessorImpl {
                     let message = ton::message::ApprovedBlock {
                         round: self.current_round as i32,
                         candidate: block_id.clone().into(),
-                        signature: block_pair.1.clone(),
+                        signature: block_pair.1.data().clone(),
                     };
 
                     trace!("...generated ApprovedBlock: {:?}", message);
@@ -593,7 +604,7 @@ impl CatchainListener for SessionProcessorImpl {
             let message = ton::message::RejectedBlock {
                 round: self.current_round as i32,
                 candidate: block_id.clone().into(),
-                reason: rejection_reason.clone(),
+                reason: rejection_reason.data().clone(),
             };
 
             trace!("...generated RejectedBlock: {:?}", message);
@@ -638,9 +649,14 @@ impl CatchainListener for SessionProcessorImpl {
                 msg
             );
 
-            self.real_state =
-                self.real_state
-                    .apply_action(&mut self.description, local_idx, attempt, msg);
+            self.real_state = self.real_state.apply_action(
+                &mut self.description,
+                local_idx,
+                attempt,
+                msg,
+                now.clone(),
+                now.clone(),
+            );
         }
 
         //votes processing
@@ -664,9 +680,14 @@ impl CatchainListener for SessionProcessorImpl {
                 msg
             );
 
-            self.real_state =
-                self.real_state
-                    .apply_action(&mut self.description, local_idx, attempt, &msg);
+            self.real_state = self.real_state.apply_action(
+                &mut self.description,
+                local_idx,
+                attempt,
+                &msg,
+                now.clone(),
+                now.clone(),
+            );
 
             messages.push(msg);
         }
@@ -692,9 +713,21 @@ impl CatchainListener for SessionProcessorImpl {
                 local_idx,
                 attempt,
                 &msg.as_ref().unwrap(),
+                now.clone(),
+                now.clone(),
             );
 
             messages.push(msg.unwrap());
+
+            const MESSAGES_COUNT_WARN: usize = 100;
+
+            if messages.len() > MESSAGES_COUNT_WARN && messages.len() % MESSAGES_COUNT_WARN == 0 {
+                warn!(
+                    "Too many messages {} during processing blocks for session {}",
+                    messages.len(),
+                    self.session_id.to_hex_string()
+                );
+            }
 
             if stop {
                 break;
@@ -734,9 +767,9 @@ impl CatchainListener for SessionProcessorImpl {
         );
 
         self.catchain
-            .lock()
-            .unwrap()
-            .processed_block(serialized_payload);
+            .processed_block(catchain::CatchainFactory::create_block_payload(
+                serialized_payload,
+            ));
 
         //check if new round is appeared
 
@@ -788,8 +821,11 @@ impl CatchainListener for SessionProcessorImpl {
         );
     }
 
-    fn finished_processing(&mut self) {
-        debug!("Finished catchain blocks processing");
+    fn finished_catchain_processing(&mut self) {
+        check_execution_time!(100_000);
+        instrument!();
+
+        trace!("Finished catchain blocks processing");
 
         let virtual_state_hash = &self.virtual_state.get_hash();
         let real_state_hash = &self.real_state.get_hash();
@@ -804,7 +840,9 @@ impl CatchainListener for SessionProcessorImpl {
         self.check_all();
     }
 
-    fn started(&mut self) {
+    fn catchain_started(&mut self) {
+        instrument!();
+
         info!("Catchain startup notification has been received");
 
         self.catchain_started = true;
@@ -852,10 +890,11 @@ impl CatchainListener for SessionProcessorImpl {
               src : ::ton_api::ton::int256(*block_source_id.clone().data()),
               round : round as i32,
               root_hash : block_root_hash.clone().into(),
-              data : candidate.data.0.clone().into(),
-              collated_data : candidate.collated_data.0.clone().into(),
+              data : candidate.data.data().0.clone().into(),
+              collated_data : candidate.collated_data.data().0.clone().into(),
             }.into_boxed();
             let data = catchain::utils::serialize_tl_boxed_object!(&broadcast);
+            let data = catchain::CatchainFactory::create_block_payload(data);
 
             post_closure(&task_queue, move |processor : &mut dyn SessionProcessor|
             {
@@ -870,19 +909,21 @@ impl CatchainListener for SessionProcessorImpl {
     }
 
     /*
-        Time synchronization for log replay
+        Time synchronization for Catchain log replay
     */
 
     fn set_time(&mut self, time: std::time::SystemTime) {
-        if let Ok(duration) = time.duration_since(self.log_replay_report_current_time) {
-            const REPORT_TIMEOUT: Duration = Duration::from_millis(1000);
+        if log_enabled!(log::Level::Trace) {
+            if let Ok(duration) = time.duration_since(self.log_replay_report_current_time) {
+                const REPORT_TIMEOUT: Duration = Duration::from_millis(1000);
 
-            if duration > REPORT_TIMEOUT {
-                debug!(
-                    "Set log replay time {}",
-                    catchain::utils::time_to_string(&time)
-                );
-                self.log_replay_report_current_time = time;
+                if duration > REPORT_TIMEOUT {
+                    trace!(
+                        "Set log replay time {}",
+                        catchain::utils::time_to_string(&time)
+                    );
+                    self.log_replay_report_current_time = time;
+                }
             }
         }
 
@@ -893,10 +934,13 @@ impl CatchainListener for SessionProcessorImpl {
         Network messages processing
     */
 
-    fn process_broadcast(&mut self, source_id: PublicKeyHash, data: BlockPayload) {
+    fn process_broadcast(&mut self, source_id: PublicKeyHash, data: BlockPayloadPtr) {
+        instrument!();
+
         let src_idx = self.description.get_source_index(&source_id);
-        let candidate = catchain::utils::deserialize_tl_boxed_object::<ton::Candidate>(&data);
-        let data_hash = catchain::utils::get_hash(&data.into());
+        let candidate =
+            catchain::utils::deserialize_tl_boxed_object::<ton::Candidate>(&data.data());
+        let data_hash = catchain::utils::get_hash_from_block_payload(&data);
 
         if let Err(err) = candidate {
             warn!(
@@ -906,11 +950,14 @@ impl CatchainListener for SessionProcessorImpl {
             return;
         }
 
-        debug!(
+        trace!(
             "Processing broadcast {:?} from node {} (src_idx={})",
-            data_hash, source_id, src_idx
+            data_hash,
+            source_id,
+            src_idx
         );
 
+        let candidate_creation_time = data.get_creation_time();
         let candidate_wrapper = candidate.ok().unwrap();
         let candidate = candidate_wrapper.clone().only();
 
@@ -957,9 +1004,12 @@ impl CatchainListener for SessionProcessorImpl {
         if block_round < self.current_round
         //block_round >= self.current_round + self.blocks.len() //this check does not needed because this node implementation stores all furture rounds instead of 100 rounds in a reference implementation
         {
-            debug!(
+            trace!(
                 "Broadcast {:?} from source {:?} has invalid round {} (current round is {})",
-                data_hash, source_id, block_round, self.current_round
+                data_hash,
+                source_id,
+                block_round,
+                self.current_round
             );
             return;
         }
@@ -968,9 +1018,10 @@ impl CatchainListener for SessionProcessorImpl {
             .get_signed_block_for_round(block_round, &block_id)
             .is_some()
         {
-            debug!(
+            trace!(
                 "Duplicate broadcast {:?} from source {:?}",
-                data_hash, source_id
+                data_hash,
+                source_id
             );
             return;
         }
@@ -985,7 +1036,11 @@ impl CatchainListener for SessionProcessorImpl {
 
         //register the block
 
-        self.insert_signed_block_for_round(block_round, &block_id, Rc::new(candidate_wrapper));
+        self.insert_signed_block_for_round(
+            block_round,
+            &block_id,
+            (Rc::new(candidate_wrapper), candidate_creation_time),
+        );
 
         trace!(
             "...broadcast received for round {}, current round is {}",
@@ -1019,20 +1074,137 @@ impl CatchainListener for SessionProcessorImpl {
         }
     }
 
-    fn process_message(&mut self, source_id: PublicKeyHash, data: BlockPayload) {
-        debug!(
+    fn process_message(&mut self, source_id: PublicKeyHash, data: BlockPayloadPtr) {
+        trace!(
             "SessionProcessor::process_message: received message from source {}: {:?}",
-            source_id, data
+            source_id,
+            data
         );
     }
 
     fn process_query(
         &mut self,
         _source_id: PublicKeyHash,
-        _data: BlockPayload,
-        _callback: ExternalQueryResponseCallback,
+        data: BlockPayloadPtr,
+        callback: ExternalQueryResponseCallback,
     ) {
-        unimplemented!();
+        instrument!();
+
+        //read query data
+
+        let reader: &mut dyn std::io::Read = &mut data.data().as_ref();
+        let mut deserializer = ton_api::Deserializer::new(reader);
+        let message = match deserializer.read_boxed::<ton_api::ton::TLObject>() {
+            Ok(message) => {
+                let message =
+                    message.downcast::<::ton_api::ton::rpc::validator_session::DownloadCandidate>();
+                if let Err(err) = message {
+                    let err = format_err!("validator session: cannot parse query: {:?}", err);
+                    callback(Err(err));
+                    return;
+                }
+
+                message.unwrap()
+            }
+            Err(err) => {
+                let err = format_err!("validator session: cannot parse query: {:?}", err);
+                callback(Err(err));
+                return;
+            }
+        };
+
+        //check correctness
+
+        let round_id = message.round as u32;
+
+        if round_id > self.real_state.get_current_round_sequence_number() {
+            let err = format_err!("too big round id {}", round_id);
+            callback(Err(err));
+            return;
+        }
+
+        use adnl::common::KeyId;
+
+        let id = self.description.candidate_id(
+            self.description
+                .get_source_index(&KeyId::from_data(message.id.src.0.clone())),
+            &message.id.root_hash.into(),
+            &message.id.file_hash.into(),
+            &message.id.collated_data_file_hash.into(),
+        );
+
+        let block = if round_id < self.real_state.get_current_round_sequence_number() {
+            let block = self
+                .real_state
+                .get_committed_block(&self.description, round_id);
+
+            if block.is_none() || block.as_ref().unwrap().get_id() != &id {
+                let err = format_err!("wrong block in old round {}", round_id);
+                callback(Err(err));
+                return;
+            }
+
+            block.unwrap().unwrap()
+        } else {
+            assert!(round_id == self.real_state.get_current_round_sequence_number());
+
+            let block = self.real_state.get_block(&self.description, &id);
+
+            if block.is_none() || block.as_ref().unwrap().is_none() {
+                let err = format_err!("wrong block in current round {}", round_id);
+                callback(Err(err));
+                return;
+            }
+
+            if !self
+                .real_state
+                .check_block_is_approved_by(self.get_local_idx(), &id)
+            {
+                let err = format_err!("not approved in current round {}", round_id);
+                callback(Err(err));
+                return;
+            }
+
+            block.unwrap().unwrap()
+        };
+
+        //request approved block from validator
+
+        let source_idx = message.id.src;
+        let candidate_response = Box::new(move |candidate: Result<ValidatorBlockCandidatePtr>| {
+            if candidate.is_err() {
+                let err = format_err!("failed to get candidate for round {}", round_id);
+                callback(Err(err));
+                return;
+            }
+
+            let candidate = candidate.unwrap();
+            let candidate = ton::candidate::Candidate {
+                src: source_idx,
+                round: round_id as ton::int,
+                root_hash: candidate.id.root_hash.clone().into(),
+                data: candidate.data.data().clone().into(),
+                collated_data: candidate.collated_data.data().clone().into(),
+            }
+            .into_boxed();
+            let serialized_candidate = catchain::utils::serialize_tl_boxed_object!(&candidate);
+            let serialized_candidate =
+                catchain::CatchainFactory::create_block_payload(serialized_candidate);
+
+            callback(Ok(serialized_candidate));
+        });
+
+        let source_public_key_hash = self
+            .description
+            .get_source_public_key(block.get_source_index())
+            .clone();
+        self.notify_get_approved_candidate(
+            &source_public_key_hash,
+            &message.id.root_hash.into(),
+            &message.id.file_hash.into(),
+            &message.id.collated_data_file_hash.into(),
+            candidate_response,
+        );
     }
 }
 
@@ -1045,7 +1217,7 @@ impl CompletionHandlerProcessor for SessionProcessorImpl {
         &self.task_queue
     }
 
-    fn add_completion_handler(&mut self, handler: CompletionHandler) -> CompletionHandlerId {
+    fn add_completion_handler(&mut self, handler: CompletionHandlerPtr) -> CompletionHandlerId {
         let handler_index = self.next_completion_handler_available_index;
 
         self.next_completion_handler_available_index += 1;
@@ -1062,7 +1234,7 @@ impl CompletionHandlerProcessor for SessionProcessorImpl {
     fn remove_completion_handler(
         &mut self,
         handler_id: CompletionHandlerId,
-    ) -> Option<CompletionHandler> {
+    ) -> Option<CompletionHandlerPtr> {
         self.completion_handlers.remove(&handler_id)
     }
 }
@@ -1101,19 +1273,69 @@ impl SessionProcessorImpl {
         Debug utilities
     */
 
+    fn check_completion_handlers(&mut self) {
+        instrument!();
+
+        let mut expired_handlers = Vec::new();
+
+        for (handler_id, handler) in self.completion_handlers.iter() {
+            if let Ok(latency) = handler.get_creation_time().elapsed() {
+                if latency > COMPLETION_HANDLERS_MAX_WAIT_PERIOD {
+                    expired_handlers.push((handler_id.clone(), latency));
+                }
+            }
+        }
+
+        for (handler_id, latency) in expired_handlers.iter_mut() {
+            let handler = self.completion_handlers.remove(&handler_id);
+
+            if let Some(mut handler) = handler {
+                let warning = format!("Remove ValidatorSession completion handler #{} with latency {:.3}s (expected_latency={:.3}s): created at {}", handler_id, latency.as_secs_f64(), COMPLETION_HANDLERS_MAX_WAIT_PERIOD.as_secs_f64(), catchain::utils::time_to_string(&handler.get_creation_time()));
+
+                warn!("{}", warning);
+
+                handler.reset_with_error(failure::err_msg(warning), self);
+            }
+        }
+    }
+
     fn debug_dump(&self) {
+        instrument!();
+
         let mut result = "".to_string();
+        let round_duration = self.round_started_at.elapsed();
+
+        if let Ok(round_duration) = round_duration {
+            if round_duration > ROUND_DEBUG_PERIOD {
+                warn!("Session {} round #{} is too long (duration is {:.3}s, max expected duration is {:.3}s)", self.session_id.to_hex_string(), self.real_state.get_current_round_sequence_number(), round_duration.as_secs_f64(),
+                    ROUND_DEBUG_PERIOD.as_secs_f64());
+            }
+        }
+
+        //all code below will work only for debug logging mode
+
+        if !log_enabled!(log::Level::Debug) {
+            return;
+        }
 
         result = format!(
             "{}Session {} dump:\n",
             result,
             self.session_id.to_hex_string()
         );
+        if let Ok(round_duration) = round_duration {
+            result = format!(
+                "{}  - round_duration: {:.3}s\n",
+                result,
+                round_duration.as_secs_f64(),
+            );
+        }
         result = format!(
             "{}  - validators_count: {}\n",
             result,
             self.description.get_total_nodes()
         );
+        result = format!("{}  - local_idx: v{:03}\n", result, self.get_local_idx());
         result = format!(
             "{}  - total_weight: {}\n",
             result,
@@ -1137,17 +1359,7 @@ impl SessionProcessorImpl {
             self.virtual_state.dump(&self.description)
         );
 
-        info!("{}", result);
-
-        debug!(
-            "ValidatorSession {} metrics:",
-            &self.session_id.to_hex_string()
-        );
-
-        catchain::utils::dump_metrics(
-            &self.description.get_metrics_receiver(),
-            &utils::dump_metric,
-        );
+        debug!("{}", result);
     }
 
     fn dump_block(&self, block: &BlockPtr) {
@@ -1192,7 +1404,7 @@ impl SessionProcessorImpl {
         );
 
         let block_update: Result<ton::BlockUpdate> =
-            catchain::utils::deserialize_tl_boxed_object(&block.get_payload());
+            catchain::utils::deserialize_tl_boxed_object(&block.get_payload().data());
         let node_public_key_hash = self
             .description
             .get_source_public_key_hash(block.get_source_id() as u32)
@@ -1236,9 +1448,8 @@ impl SessionProcessorImpl {
             .get_source_public_key_hash(self.description.get_self_idx())
     }
 
-    fn get_local_key(&self) -> &PublicKey {
-        self.description
-            .get_source_public_key(self.description.get_self_idx())
+    fn get_local_key(&self) -> &PrivateKey {
+        &self.local_key
     }
 
     /*
@@ -1296,20 +1507,26 @@ impl SessionProcessorImpl {
     */
 
     fn new_round(&mut self, round: u32) {
+        instrument!();
+
         //debug dump for states
 
         trace!(
-            "...new round request for current round {} and round {}",
+            "...new round request for current round {} and round {}, {}",
             self.current_round,
-            round
+            round,
+            self.session_id.to_hex_string()
         );
 
-        self.debug_dump();
+        if DEBUG_DUMP_ON_NEW_ROUND {
+            self.debug_dump();
+        }
 
         if round != 0 {
-            debug!(
+            trace!(
                 "...reset current round {}, because round {} is started",
-                self.current_round, round
+                self.current_round,
+                round
             );
 
             assert!(self.current_round < round);
@@ -1334,13 +1551,14 @@ impl SessionProcessorImpl {
         //apply finished rounds to current state
 
         while self.current_round < round {
-            debug!(
+            trace!(
                 "...apply current round {}, target round is {}",
-                self.current_round, round
+                self.current_round,
+                round
             );
 
             if DEBUG_CHECK_ALL_BEFORE_ROUND_SWITCH {
-                debug!(
+                trace!(
                     "...check session state before switching of current round {}, target round is {}",
                     self.current_round, round
                 );
@@ -1363,8 +1581,8 @@ impl SessionProcessorImpl {
 
             let signatures_exporter = |desc: &dyn SessionDescription,
                                        signatures: &BlockCandidateSignatureVectorPtr|
-             -> Vec<(PublicKeyHash, BlockPayload)> {
-                let mut result: Vec<(PublicKeyHash, BlockPayload)> =
+             -> Vec<(PublicKeyHash, BlockPayloadPtr)> {
+                let mut result: Vec<(PublicKeyHash, BlockPayloadPtr)> =
                     Vec::with_capacity(desc.get_total_nodes() as usize);
 
                 for i in 0..desc.get_total_nodes() as usize {
@@ -1373,7 +1591,9 @@ impl SessionProcessorImpl {
                             self.description
                                 .get_source_public_key_hash(i as u32)
                                 .clone(),
-                            signature.get_signature().clone(),
+                            catchain::CatchainFactory::create_block_payload(
+                                signature.get_signature().clone(),
+                            ),
                         ));
                     }
                 }
@@ -1392,10 +1612,20 @@ impl SessionProcessorImpl {
             if let Some(signed_block) = signed_block {
                 //signed block was committed
 
-                debug!(
+                trace!(
                     "...block is signed for round {}; signatures={:?}, approve_signatures={:?}",
-                    self.current_round, signatures, approve_signatures
+                    self.current_round,
+                    signatures,
+                    approve_signatures
                 );
+
+                if DEBUG_EVENTS_LOG {
+                    info!(
+                        "EVENTS LOG: Commit for round {}: root_hash={:?}",
+                        self.current_round,
+                        signed_block.get_root_hash()
+                    );
+                }
 
                 let signed_tl_block = self
                     .get_signed_block_for_round(self.current_round, signed_block.get_id())
@@ -1405,7 +1635,7 @@ impl SessionProcessorImpl {
                     .get_source_public_key(signed_block.get_source_index())
                     .clone();
 
-                if let Some(signed_tl_block) = signed_tl_block {
+                if let Some((signed_tl_block, _signed_block_creation_time)) = signed_tl_block {
                     //normal signed block
 
                     self.notify_block_committed(
@@ -1413,7 +1643,9 @@ impl SessionProcessorImpl {
                         &validator_public_key,
                         &signed_block.get_root_hash(),
                         &signed_block.get_file_hash(),
-                        signed_tl_block.data(),
+                        &catchain::CatchainFactory::create_block_payload(
+                            signed_tl_block.data().clone(),
+                        ),
                         signatures,
                         approve_signatures,
                     );
@@ -1425,7 +1657,7 @@ impl SessionProcessorImpl {
                         &validator_public_key,
                         &signed_block.get_root_hash(),
                         &signed_block.get_file_hash(),
-                        &BlockPayload::default(),
+                        &catchain::CatchainFactory::create_empty_block_payload(),
                         signatures,
                         approve_signatures,
                     );
@@ -1433,7 +1665,7 @@ impl SessionProcessorImpl {
             } else {
                 //no block was committed
 
-                debug!("...block is skipped for round {}", self.current_round);
+                trace!("...block is skipped for round {}", self.current_round);
 
                 self.notify_block_skipped(self.current_round);
             }
@@ -1445,6 +1677,10 @@ impl SessionProcessorImpl {
             //increment round
 
             self.current_round += 1;
+
+            if DEBUG_EVENTS_LOG {
+                info!("EVENTS LOG: New round {}", self.current_round);
+            }
         }
 
         //update debug checking time points
@@ -1458,6 +1694,8 @@ impl SessionProcessorImpl {
     }
 
     fn request_new_block(&mut self, now: bool) {
+        instrument!();
+
         if self.requested_new_block_now {
             //ignore double attempts to generate new block immediately
 
@@ -1485,21 +1723,19 @@ impl SessionProcessorImpl {
                 //calculate timeout when new block should be generated
 
                 let lambda = 10.0 / (self.description.get_total_nodes() as f64);
-                let mut delta_secs = -1.0 / lambda
+                let delta_secs = -1.0 / lambda
                     * f64::ln((self.description.generate_random_usize() % 999 + 1) as f64 * 0.001);
+                let mut delta_secs = Duration::from_secs_f64(delta_secs);
 
-                if delta_secs > 0.5 {
-                    delta_secs = 0.5;
+                if delta_secs > MAX_NEXT_BLOCK_WAIT_DELAY {
+                    delta_secs = MAX_NEXT_BLOCK_WAIT_DELAY;
                 }
 
-                block_generation_time += Duration::from_secs_f64(delta_secs);
+                block_generation_time += delta_secs;
             }
         }
 
-        self.catchain
-            .lock()
-            .unwrap()
-            .request_new_block(block_generation_time);
+        self.catchain.request_new_block(block_generation_time);
     }
 
     /*
@@ -1507,6 +1743,8 @@ impl SessionProcessorImpl {
     */
 
     fn check_action(&mut self, attempt: u32) {
+        instrument!();
+
         if !self.catchain_started {
             return;
         }
@@ -1539,7 +1777,7 @@ impl SessionProcessorImpl {
         &mut self,
         round: u32,
         block_id: &BlockId,
-        data: BlockCandidateTlPtr,
+        data: (BlockCandidateTlPtr, std::time::SystemTime),
     ) {
         let round_block_map = if let Some(round_block_map) = self.blocks.get(&round) {
             round_block_map.clone()
@@ -1558,7 +1796,7 @@ impl SessionProcessorImpl {
         &self,
         round: u32,
         block_id: &BlockId,
-    ) -> Option<BlockCandidateTlPtr> {
+    ) -> Option<(BlockCandidateTlPtr, std::time::SystemTime)> {
         if let Some(round_block_map) = self.blocks.get(&round) {
             if let Some(block) = round_block_map.borrow().get(&block_id) {
                 return Some(block.clone());
@@ -1569,6 +1807,8 @@ impl SessionProcessorImpl {
     }
 
     fn check_generate_slot(&mut self) {
+        instrument!();
+
         //don't do anything until catchain is started
 
         if !self.catchain_started {
@@ -1629,44 +1869,79 @@ impl SessionProcessorImpl {
         self.pending_generate = true;
 
         let round = self.current_round;
-        let task_queue = self.task_queue.clone();
 
-        self.notify_generate_slot(self.current_round, Box::new(move |candidate| {
-      match candidate
-      {
-        Ok(candidate) => {
-          debug!("SessionProcessor::check_generate_slot: new block candidate has been generated {:?}", candidate);
+        const MAX_GENERATION_TIME: std::time::Duration = std::time::Duration::from_millis(1000);
+        let start_generation_time = std::time::SystemTime::now();
 
-          post_closure(&task_queue, move |processor : &mut dyn SessionProcessor| {
-            get_mut_impl(processor).generated_block(round, candidate.id.root_hash.clone().into(), candidate.data.clone(), candidate.collated_data.clone());
-          });
-        },
-        Err(_err) => {
-          warn!("SessionProcessor::check_generate_slot: failed to generate block candidate");
-        },
-      }
-    }));
+        let completion_handler = task_queue::create_completion_handler(
+            self,
+            move |result: Result<ValidatorBlockCandidatePtr>, processor| {
+                let generation_duration = start_generation_time.elapsed().unwrap();
+
+                if generation_duration > MAX_GENERATION_TIME {
+                    warn!(
+                        "Execution time {:.3}ms for block generation is greater than expected time {:.3}ms at {}({})",
+                        generation_duration.as_secs_f64() * 1000.0,
+                        MAX_GENERATION_TIME.as_secs_f64() * 1000.0,
+                        file!(),
+                        line!()
+                    );
+                }
+
+                let processor = get_mut_impl(processor);
+
+                match result {
+                    Ok(candidate) => {
+                        trace!("SessionProcessor::check_generate_slot: new block candidate has been generated {:?}", candidate);
+
+                        processor.collates_counter.success();
+
+                        processor.generated_block(
+                            round,
+                            candidate.id.root_hash.clone().into(),
+                            candidate.data.clone(),
+                            candidate.collated_data.clone(),
+                        );
+                    }
+                    Err(err) => {
+                        processor.collates_counter.failure();
+
+                        warn!("SessionProcessor::check_generate_slot: failed to generate block candidate: {:?}", err);
+                    }
+                }
+            },
+        );
+
+        self.notify_generate_slot(self.current_round, completion_handler);
     }
 
     fn generated_block(
         &mut self,
         round: u32,
         root_hash: BlockId,
-        data: BlockPayload,
-        collated_data: BlockPayload,
+        data: BlockPayloadPtr,
+        collated_data: BlockPayloadPtr,
     ) {
+        instrument!();
+
         if round != self.current_round {
             //accept blocks only for current round
 
             return;
         }
 
-        debug!("SessionProcessor::generated_block: candidate has been received for round={}, root_hash={:?}", round, root_hash);
+        trace!("SessionProcessor::generated_block: candidate has been received for round={}, root_hash={:?}", round, root_hash);
 
-        if data.0.len() > self.description.opts().max_block_size as usize
-            || collated_data.0.len() > self.description.opts().max_collated_data_size as usize
+        if DEBUG_EVENTS_LOG {
+            info!("EVENTS LOG: New block candidate has been generated for round {}: root_hash={:?}, data_size={}, collated_data_size={}", round, root_hash,
+                data.data().0.len(), collated_data.data().0.len());
+        }
+
+        if data.data().0.len() > self.description.opts().max_block_size as usize
+            || collated_data.data().0.len()
+                > self.description.opts().max_collated_data_size as usize
         {
-            error!("SessionProcessor::generated_block: generated candidate is too big. Dropping. size={}/{}", data.0.len(), collated_data.0.len());
+            error!("SessionProcessor::generated_block: generated candidate is too big. Dropping. size={}/{}", data.data().0.len(), collated_data.data().0.len());
             return;
         }
 
@@ -1674,18 +1949,25 @@ impl SessionProcessorImpl {
 
         use ton_api::ton::validator_session::*;
 
-        let file_hash = catchain::utils::get_hash(&data);
-        let collated_data_file_hash = catchain::utils::get_hash(&collated_data);
+        let candidate_creation_time =
+            if data.get_creation_time() < collated_data.get_creation_time() {
+                data.get_creation_time()
+            } else {
+                collated_data.get_creation_time()
+            };
+        let file_hash = catchain::utils::get_hash_from_block_payload(&data);
+        let collated_data_file_hash = catchain::utils::get_hash_from_block_payload(&collated_data);
         let candidate = Rc::new(Candidate::ValidatorSession_Candidate(Box::new(
             candidate::Candidate {
                 src: ::ton_api::ton::int256(self.get_local_id().data().clone()),
                 round: round as i32,
                 root_hash: root_hash.clone().into(),
-                data: data.0.into(),
-                collated_data: collated_data.0.into(),
+                data: data.data().clone().0.into(),
+                collated_data: collated_data.data().clone().0.into(),
             },
         )));
         let serialized_block = catchain::utils::serialize_tl_boxed_object!(&*candidate);
+        let serialized_block = catchain::CatchainFactory::create_block_payload(serialized_block);
         let block_id = self.description.candidate_id(
             self.get_local_idx(),
             &root_hash,
@@ -1695,14 +1977,15 @@ impl SessionProcessorImpl {
 
         //send broadcast to catchain about new block candidate
 
-        self.catchain
-            .lock()
-            .unwrap()
-            .send_broadcast(serialized_block);
+        self.catchain.send_broadcast(serialized_block);
 
         //save block and update state
 
-        self.insert_signed_block_for_round(self.current_round, &block_id, candidate);
+        self.insert_signed_block_for_round(
+            self.current_round,
+            &block_id,
+            (candidate, candidate_creation_time),
+        );
 
         self.pending_generate = false;
         self.generated = true;
@@ -1718,6 +2001,8 @@ impl SessionProcessorImpl {
     */
 
     fn check_approve(&mut self) {
+        instrument!();
+
         //don't do anything until catchain is started
 
         if !self.catchain_started {
@@ -1727,10 +2012,10 @@ impl SessionProcessorImpl {
         //choose blocks to approve from proposed candidates
 
         let to_approve = self
-            .real_state
+            .virtual_state
             .choose_blocks_to_approve(&self.description, self.get_local_idx());
 
-        debug!("block to approve {:?}", &to_approve);
+        trace!("block to approve {:?}", &to_approve);
 
         for block in to_approve {
             self.try_approve_block(block);
@@ -1738,6 +2023,8 @@ impl SessionProcessorImpl {
     }
 
     fn try_approve_block(&mut self, block: SentBlockPtr) {
+        instrument!();
+
         let block_id = block.get_id();
 
         //check if this block has been already approved
@@ -1804,7 +2091,10 @@ impl SessionProcessorImpl {
 
             self.approved.insert(
                 block_id.clone(),
-                (SystemTime::UNIX_EPOCH, BlockPayload::default()),
+                (
+                    SystemTime::UNIX_EPOCH,
+                    catchain::CatchainFactory::create_empty_block_payload(),
+                ),
             );
             self.request_new_block(false);
             return;
@@ -1824,7 +2114,7 @@ impl SessionProcessorImpl {
             self.current_round
         );
 
-        let tl_block_opt: Option<BlockCandidateTlPtr> =
+        let tl_block_opt: Option<(BlockCandidateTlPtr, std::time::SystemTime)> =
             match self.get_signed_block_for_round(self.current_round, &block_id) {
                 Some(tl_block) => Some(tl_block.clone()),
                 None => None,
@@ -1832,7 +2122,7 @@ impl SessionProcessorImpl {
 
         //if block was proposed in current round - validate it
 
-        if let Some(tl_block) = tl_block_opt {
+        if let Some((tl_block, broadcast_creation_time)) = tl_block_opt {
             trace!(
                 "...validating block {:?} for round {}",
                 tl_block,
@@ -1847,8 +2137,91 @@ impl SessionProcessorImpl {
             let hash = block_id.clone();
             let root_hash = block.get_root_hash().clone();
             let file_hash = block.get_file_hash().clone();
-            let completion_handler =
-                task_queue::create_completion_handler(self, move |result, processor| {
+
+            const MAX_VALIDATION_TIME: std::time::Duration = std::time::Duration::from_millis(750);
+            let start_validation_time = std::time::SystemTime::now();
+            let session_processor_creation_time = self.session_processor_creation_time.clone();
+            let session_creation_time = self.session_creation_time.clone();
+            let block_creation_time = block.get_source_block_creation_time();
+            let block_payload_creation_time = block.get_source_block_payload_creation_time();
+            let sent_block_creation_time = block.get_creation_time();
+            let tl_block_clone = tl_block.clone();
+
+            let backtrace = if DEBUG_DUMP_BACKTRACE_FOR_LATE_VALIDATIONS {
+                Some(Backtrace::new())
+            } else {
+                None
+            };
+
+            let completion_handler = task_queue::create_completion_handler(
+                self,
+                move |result, processor| {
+                    let validation_duration = start_validation_time.elapsed().unwrap();
+                    let broadcast_processing_duration = broadcast_creation_time.elapsed().unwrap();
+
+                    if let Err(ref err) = &result {
+                        let source_id: PublicKeyHash =
+                            catchain::utils::int256_to_public_key_hash(tl_block_clone.src());
+                        let source_idx = processor.get_description().get_source_index(&source_id);
+
+                        if DEBUG_EVENTS_LOG {
+                            info!("EVENTS LOG: Validation failed for round {}: root_hash={}, data_size={}, collated_data_size={}", round, tl_block_clone.root_hash(),
+                                tl_block_clone.data().0.len(), tl_block_clone.collated_data().0.len());
+                        }
+
+                        warn!(
+                            "Validation failed for block {:?} with verdict {:?} (round={}, source=v{:03} ({}), full_processing_time={:.3}ms, expected_processing_time={:.3}ms, validation_time={:.3}ms, sent_block_creation_time={:.3}ms, block_creation_time={:.3}ms, block_payload_creation_time={:.3}ms, session_duration={:.3}s/{:.3}s) at {}({}); {}",
+                            &tl_block_clone.root_hash(),
+                            err,
+                            round,
+                            source_idx,
+                            source_id,
+                            broadcast_processing_duration.as_secs_f64() * 1000.0,
+                            MAX_VALIDATION_TIME.as_secs_f64() * 1000.0,
+                            validation_duration.as_secs_f64() * 1000.0,
+                            sent_block_creation_time.elapsed().unwrap().as_secs_f64() * 1000.0,
+                            block_creation_time.elapsed().unwrap().as_secs_f64() * 1000.0,
+                            block_payload_creation_time.elapsed().unwrap().as_secs_f64() * 1000.0,
+                            session_creation_time.elapsed().unwrap().as_secs_f64(),
+                            session_processor_creation_time.elapsed().unwrap().as_secs_f64(),
+                            file!(),
+                            line!(),
+                            if DEBUG_DUMP_BACKTRACE_FOR_LATE_VALIDATIONS { format!("{:?}", backtrace) } else { "".to_string() },
+                        );
+
+                        if validation_duration > MAX_VALIDATION_TIME {
+                            warn!(
+                                "Execution time {:.3}ms for validation is greater than expected time {:.3}ms at {}({})",
+                                validation_duration.as_secs_f64() * 1000.0,
+                                MAX_VALIDATION_TIME.as_secs_f64() * 1000.0,
+                                file!(),
+                                line!()
+                            );
+                        }
+
+                        if broadcast_processing_duration > MAX_VALIDATION_TIME {
+                            warn!(
+                                "Execution time {:.3}ms for full block processing during validation is greater than expected time {:.3}ms (round={}, validation_time={:.3}ms, sent_block_creation_time={:.3}ms, block_creation_time={:.3}ms, block_payload_creation_time={:.3}ms, session_duration={:.3}s/{:.3}s) at {}({})",
+                                broadcast_processing_duration.as_secs_f64() * 1000.0,
+                                MAX_VALIDATION_TIME.as_secs_f64() * 1000.0,
+                                round,
+                                validation_duration.as_secs_f64() * 1000.0,
+                                sent_block_creation_time.elapsed().unwrap().as_secs_f64() * 1000.0,
+                                block_creation_time.elapsed().unwrap().as_secs_f64() * 1000.0,
+                                block_payload_creation_time.elapsed().unwrap().as_secs_f64() * 1000.0,
+                                session_creation_time.elapsed().unwrap().as_secs_f64(),
+                                session_processor_creation_time.elapsed().unwrap().as_secs_f64(),
+                                file!(),
+                                line!(),
+                            );
+                        }
+                    } else {
+                        if DEBUG_EVENTS_LOG {
+                            info!("EVENTS LOG: Validation succeed for round {}: root_hash={}, data_size={}, collated_data_size={}", round, tl_block_clone.root_hash(),
+                                tl_block_clone.data().0.len(), tl_block_clone.collated_data().0.len());
+                        }
+                    }
+
                     let processor = get_mut_impl(processor);
 
                     match result {
@@ -1861,19 +2234,25 @@ impl SessionProcessorImpl {
                         ),
                         Err(err) => processor.candidate_decision_fail(round, hash, err),
                     }
-                });
+                },
+            );
 
             let source_public_key = self
                 .description
                 .get_source_public_key(block.get_source_index())
                 .clone();
 
+            if DEBUG_EVENTS_LOG {
+                info!("EVENTS LOG: Validating block candidate for round {}: root_hash={}, data_size={}, collated_data_size={}", round, tl_block.root_hash(),
+                    tl_block.data().0.len(), tl_block.collated_data().0.len());
+            }
+
             self.notify_candidate(
                 round,
                 &source_public_key,
                 &tl_block.root_hash().clone().into(),
-                tl_block.data(),
-                tl_block.collated_data(),
+                &catchain::CatchainFactory::create_block_payload(tl_block.data().clone()),
+                &catchain::CatchainFactory::create_block_payload(tl_block.collated_data().clone()),
                 completion_handler,
             );
 
@@ -1907,9 +2286,9 @@ impl SessionProcessorImpl {
             }
 
             let node_index = self.description.generate_random_usize() % approvers.len();
-            let node_id = self
+            let node_adnl_id = self
                 .description
-                .get_source_public_key_hash(approvers[node_index] as u32)
+                .get_source_adnl_id(approvers[node_index] as u32)
                 .clone();
             let source_id = self
                 .description
@@ -1921,19 +2300,19 @@ impl SessionProcessorImpl {
             const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
             let block_id_clone = block_id.clone();
-            let node_id_clone = node_id.clone();
+            let node_adnl_id_clone = node_adnl_id.clone();
             let source_id_clone = source_id.clone();
             let round = self.current_round;
 
             self.get_broadcast_p2p(
-                &node_id,
+                &node_adnl_id,
                 block.get_file_hash(),
                 block.get_collated_data_file_hash(),
                 &source_id,
                 self.current_round,
                 block.get_root_hash(),
-                SystemTime::now() + DOWNLOAD_TIMEOUT,
-                move |result: Result<BlockPayload>, processor: &mut dyn SessionProcessor| {
+                self.description.get_time() + DOWNLOAD_TIMEOUT,
+                move |result: Result<BlockPayloadPtr>, processor: &mut dyn SessionProcessor| {
                     let processor = get_mut_impl(processor);
 
                     if processor.current_round == round {
@@ -1941,12 +2320,16 @@ impl SessionProcessorImpl {
                     }
 
                     if let Err(err) = result {
+                        processor.rldp_queries_counter.failure();
+
                         warn!(
                             "Failed to get block candidate {:?} from node {}: {:?}",
-                            block_id_clone, node_id_clone, err
+                            block_id_clone, node_adnl_id_clone, err
                         );
                         return;
                     }
+
+                    processor.rldp_queries_counter.success();
 
                     processor.process_broadcast(source_id_clone, result.ok().unwrap());
                 },
@@ -1968,21 +2351,54 @@ impl SessionProcessorImpl {
 
     fn get_broadcast_p2p<F>(
         &mut self,
-        _node_id: &PublicKeyHash,
-        _file_hash: &BlockHash,
-        _collated_data_file_hash: &BlockHash,
-        _source: &PublicKeyHash,
-        _round: u32,
-        _root_hash: &BlockHash,
-        _timeout: std::time::SystemTime,
-        _complete_handler: F,
+        node_adnl_id: &PublicKeyHash,
+        file_hash: &BlockHash,
+        collated_data_file_hash: &BlockHash,
+        source: &PublicKeyHash,
+        round: u32,
+        root_hash: &BlockHash,
+        timeout: std::time::SystemTime,
+        complete_handler: F,
     ) where
-        F: FnOnce(Result<BlockPayload>, &mut dyn SessionProcessor) + 'static,
+        F: FnOnce(Result<BlockPayloadPtr>, &mut dyn SessionProcessor) + 'static,
     {
-        warn!(
-            "get_broadcast_p2p is not implemented yet at {}({})",
-            file!(),
-            line!()
+        instrument!();
+
+        if self.description.is_in_past(timeout) {
+            complete_handler(Err(failure::format_err!("get_broadcast_p2p timeout")), self);
+            return;
+        }
+
+        let download_candidate = ton::DownloadCandidate {
+            round: round as ton::int,
+            id: ton::candidateid::CandidateId {
+                src: catchain::utils::public_key_hash_to_int256(source),
+                root_hash: root_hash.clone().into(),
+                file_hash: file_hash.clone().into(),
+                collated_data_file_hash: collated_data_file_hash.clone().into(),
+            },
+        };
+        let serialized_download_candidate =
+            catchain::utils::serialize_tl_boxed_object!(&download_candidate);
+        let serialized_download_candidate =
+            catchain::CatchainFactory::create_block_payload(serialized_download_candidate);
+        let max_answer_size = self.description.opts().max_block_size
+            + self.description.opts().max_collated_data_size
+            + 1024;
+        let response_callback =
+            task_queue::create_completion_handler(self, move |result, processor| {
+                complete_handler(result, processor);
+            });
+
+        self.rldp_queries_counter.total_increment();
+
+        self.catchain.send_query_via_rldp(
+            node_adnl_id.clone(),
+            "download candidate".to_string(),
+            response_callback,
+            timeout,
+            serialized_download_candidate,
+            max_answer_size as u64,
         );
     }
 
@@ -1994,11 +2410,15 @@ impl SessionProcessorImpl {
         file_hash: BlockHash,
         validity_start_time: SystemTime,
     ) {
+        instrument!();
+
+        self.validates_counter.success();
+
         if round != self.current_round {
             return;
         }
 
-        debug!(
+        trace!(
             "SessionProcessor::candidate_decision_ok: approved candidate {:?}",
             hash
         );
@@ -2026,6 +2446,10 @@ impl SessionProcessorImpl {
     }
 
     fn candidate_decision_fail(&mut self, round: u32, hash: BlockId, err: failure::Error) {
+        instrument!();
+
+        self.validates_counter.failure();
+
         if round != self.current_round {
             return;
         }
@@ -2038,8 +2462,10 @@ impl SessionProcessorImpl {
         );
 
         self.pending_approve.remove(&hash);
-        self.pending_reject
-            .insert(hash.clone(), reason.as_bytes().to_vec().into());
+        self.pending_reject.insert(
+            hash.clone(),
+            catchain::CatchainFactory::create_block_payload(reason.as_bytes().to_vec().into()),
+        );
         self.rejected.insert(hash);
     }
 
@@ -2050,9 +2476,16 @@ impl SessionProcessorImpl {
         validity_start_time: SystemTime,
         signature: BlockSignature,
     ) {
+        instrument!();
+
         self.pending_approve.remove(&hash);
-        self.approved
-            .insert(hash.clone(), (validity_start_time, signature));
+        self.approved.insert(
+            hash.clone(),
+            (
+                validity_start_time,
+                catchain::CatchainFactory::create_block_payload(signature),
+            ),
+        );
 
         if validity_start_time <= self.description.get_time() {
             self.request_new_block(false);
@@ -2067,6 +2500,8 @@ impl SessionProcessorImpl {
     */
 
     fn check_vote_for_slot(&mut self, attempt: u32) {
+        instrument!();
+
         if !self.catchain_started {
             return;
         }
@@ -2085,6 +2520,8 @@ impl SessionProcessorImpl {
     */
 
     fn check_sign_slot(&mut self) {
+        instrument!();
+
         //if catchain is not started, there is nothing to do
 
         if !self.catchain_started {
@@ -2177,6 +2614,8 @@ impl SessionProcessorImpl {
     }
 
     fn signed_block(&mut self, round: u32, hash: BlockId, signature: BlockSignature) {
+        instrument!();
+
         if round != self.current_round {
             return;
         }
@@ -2202,11 +2641,14 @@ impl SessionProcessorImpl {
         round: u32,
         source: &PublicKey,
         root_hash: &BlockHash,
-        data: &BlockPayload,
-        collated_data: &BlockPayload,
+        data: &BlockPayloadPtr,
+        collated_data: &BlockPayloadPtr,
         callback: ValidatorBlockCandidateDecisionCallback,
     ) {
-        debug!(
+        check_execution_time!(5000);
+        instrument!();
+
+        trace!(
             "SessionProcessor::notify_candidate: post on_candidate event for further processing"
         );
 
@@ -2216,40 +2658,50 @@ impl SessionProcessorImpl {
         let data_clone = data.clone();
         let collated_data_clone = collated_data.clone();
 
+        self.validates_counter.total_increment();
+
         post_callback_closure(&self.callbacks_task_queue, move || {
+            check_execution_time!(5000);
+
             if let Some(listener) = listener.upgrade() {
-                debug!("SessionProcessor::notify_candidate: on_candidate start");
+                trace!("SessionProcessor::notify_candidate: on_candidate start");
 
-                if let Ok(mut listener) = listener.lock() {
-                    listener.on_candidate(
-                        round,
-                        source_clone,
-                        root_hash_clone,
-                        data_clone,
-                        collated_data_clone,
-                        callback,
-                    );
-                }
+                listener.on_candidate(
+                    round,
+                    source_clone,
+                    root_hash_clone,
+                    data_clone,
+                    collated_data_clone,
+                    callback,
+                );
 
-                debug!("SessionProcessor::notify_candidate: on_candidate finish");
+                trace!("SessionProcessor::notify_candidate: on_candidate finish");
             }
         });
     }
 
     fn notify_generate_slot(&mut self, round: u32, callback: ValidatorBlockCandidateCallback) {
-        trace!("...post on_generate_slot event for further processing");
+        check_execution_time!(5000);
+        instrument!();
+
+        trace!(
+            "...post on_generate_slot event for further processing, {}",
+            self.session_id
+        );
 
         let listener = self.session_listener.clone();
 
+        self.collates_counter.total_increment();
+
         post_callback_closure(&self.callbacks_task_queue, move || {
+            check_execution_time!(5000);
+
             if let Some(listener) = listener.upgrade() {
-                debug!("SessionProcessor::notify_generate_slot: on_generate_slot start");
+                trace!("SessionProcessor::notify_generate_slot: on_generate_slot start");
 
-                if let Ok(mut listener) = listener.lock() {
-                    listener.on_generate_slot(round, callback);
-                }
+                listener.on_generate_slot(round, callback);
 
-                debug!("SessionProcessor::notify_generate_slot: on_generate_slot finish");
+                trace!("SessionProcessor::notify_generate_slot: on_generate_slot finish");
             }
         });
     }
@@ -2260,10 +2712,13 @@ impl SessionProcessorImpl {
         source: &PublicKey,
         root_hash: &BlockHash,
         file_hash: &BlockHash,
-        data: &BlockPayload,
-        signatures: Vec<(PublicKeyHash, BlockPayload)>,
-        approve_signatures: Vec<(PublicKeyHash, BlockPayload)>,
+        data: &BlockPayloadPtr,
+        signatures: Vec<(PublicKeyHash, BlockPayloadPtr)>,
+        approve_signatures: Vec<(PublicKeyHash, BlockPayloadPtr)>,
     ) {
+        check_execution_time!(5000);
+        instrument!();
+
         trace!("...post on_block_committed event for further processing");
 
         let listener = self.session_listener.clone();
@@ -2272,41 +2727,50 @@ impl SessionProcessorImpl {
         let file_hash_clone = file_hash.clone();
         let data_clone = data.clone();
 
+        self.commits_counter.total_increment();
+        self.commits_counter.success();
+
         post_callback_closure(&self.callbacks_task_queue, move || {
+            check_execution_time!(5000);
+
             if let Some(listener) = listener.upgrade() {
-                debug!("SessionProcessor::notify_block_committed: on_block_committed start");
+                trace!("SessionProcessor::notify_block_committed: on_block_committed start");
 
-                if let Ok(mut listener) = listener.lock() {
-                    listener.on_block_committed(
-                        round,
-                        source_clone,
-                        root_hash_clone,
-                        file_hash_clone,
-                        data_clone,
-                        signatures,
-                        approve_signatures,
-                    );
-                }
+                listener.on_block_committed(
+                    round,
+                    source_clone,
+                    root_hash_clone,
+                    file_hash_clone,
+                    data_clone,
+                    signatures,
+                    approve_signatures,
+                );
 
-                debug!("SessionProcessor::notify_block_committed: on_block_committed finish");
+                trace!("SessionProcessor::notify_block_committed: on_block_committed finish");
             }
         });
     }
 
     fn notify_block_skipped(&mut self, round: u32) {
+        check_execution_time!(5000);
+        instrument!();
+
         trace!("...post on_block_skipped event for further processing");
 
         let listener = self.session_listener.clone();
 
+        self.commits_counter.total_increment();
+        self.commits_counter.failure();
+
         post_callback_closure(&self.callbacks_task_queue, move || {
+            check_execution_time!(5000);
+
             if let Some(listener) = listener.upgrade() {
-                debug!("SessionProcessor::notify_block_skipped: on_block_skipped start");
+                trace!("SessionProcessor::notify_block_skipped: on_block_skipped start");
 
-                if let Ok(mut listener) = listener.lock() {
-                    listener.on_block_skipped(round);
-                }
+                listener.on_block_skipped(round);
 
-                debug!("SessionProcessor::notify_block_skipped: on_block_skipped finish");
+                trace!("SessionProcessor::notify_block_skipped: on_block_skipped finish");
             }
         });
     }
@@ -2319,6 +2783,9 @@ impl SessionProcessorImpl {
         collated_data_hash: &BlockHash,
         callback: ValidatorBlockCandidateCallback,
     ) {
+        check_execution_time!(5000);
+        instrument!();
+
         trace!("...post get_approved_candidate event for further processing");
 
         let listener = self.session_listener.clone();
@@ -2328,22 +2795,22 @@ impl SessionProcessorImpl {
         let collated_data_hash_clone = collated_data_hash.clone();
 
         post_callback_closure(&self.callbacks_task_queue, move || {
+            check_execution_time!(5000);
+
             if let Some(listener) = listener.upgrade() {
-                debug!(
+                trace!(
                     "SessionProcessor::notify_get_approved_candidate: get_approved_candidate start"
                 );
 
-                if let Ok(mut listener) = listener.lock() {
-                    listener.get_approved_candidate(
-                        source_clone,
-                        root_hash_clone,
-                        file_hash_clone,
-                        collated_data_hash_clone,
-                        callback,
-                    );
-                }
+                listener.get_approved_candidate(
+                    source_clone,
+                    root_hash_clone,
+                    file_hash_clone,
+                    collated_data_hash_clone,
+                    callback,
+                );
 
-                debug!("SessionProcessor::notify_get_approved_candidate: get_approved_candidate finish");
+                trace!("SessionProcessor::notify_get_approved_candidate: get_approved_candidate finish");
             }
         });
     }
@@ -2356,46 +2823,57 @@ impl SessionProcessorImpl {
         options: SessionOptions,
         session_id: SessionId,
         ids: Vec<SessionNode>,
-        local_id: PublicKeyHash,
-        db_root: &String,
-        db_suffix: &String,
-        allow_unsafe_self_blocks_resync: bool,
-        overlay_creator: catchain::OverlayCreator,
+        local_key: PrivateKey,
         listener: SessionListenerPtr,
+        catchain: CatchainPtr,
         task_queue: TaskQueuePtr,
         callbacks_task_queue: CallbackTaskQueuePtr,
+        session_creation_time: std::time::SystemTime,
+        metrics: Option<Arc<metrics_runtime::Receiver>>,
     ) -> SessionProcessorPtr {
-        //remove fraction part from all timeouts
+        //dump session params for further log replaying
 
-        let mut options = options;
+        if log_enabled!(log::Level::Debug) {
+            let exp_pvt_key_dump = &hex::encode(
+                [*local_key.pvt_key().unwrap(), *local_key.exp_key().unwrap()].concat(),
+            ); //TODO: optional dump for security reason
 
-        options.catchain_idle_timeout =
-            Duration::from_secs(options.catchain_idle_timeout.as_secs());
-        options.round_attempt_duration =
-            Duration::from_secs(options.round_attempt_duration.as_secs());
-        options.next_candidate_delay = Duration::from_secs(options.next_candidate_delay.as_secs());
+            debug!(
+                "Create validator session {} for local ID {} and key {} (timestamp={})",
+                session_id.to_hex_string(),
+                &hex::encode(local_key.id().data()),
+                exp_pvt_key_dump,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("Time went backwards")
+                    .as_millis()
+            );
+
+            for node in &ids {
+                debug!("Validator session {} node: weight={}, public_key={}, adnl_id={} (timestamp={})", session_id.to_hex_string(), node.weight,
+                &hex::encode(&catchain::serialize_tl_boxed_object!(&node.public_key.into_tl_public_key().unwrap()).as_ref()),
+                &hex::encode(node.adnl_id.data()),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("Time went backwards").as_millis());
+            }
+        }
 
         //create child objects
 
-        let catchain_options = CatchainOptions {
-            idle_timeout: options.catchain_idle_timeout,
-            max_deps: options.catchain_max_deps,
-            skip_processed_blocks: options.catchain_skip_processed_blocks,
-            debug_disable_db: false,
-        };
-        let mut description = SessionDescriptionImpl::new(&options, &ids, &local_id);
-        let catchain_listener = CatchainListenerImpl::create(task_queue.clone());
-        let catchain = catchain::CatchainFactory::create_catchain(
-            &catchain_options,
-            &session_id.clone(),
-            &description.export_catchain_nodes(),
-            &local_id,
-            db_root,
-            db_suffix,
-            allow_unsafe_self_blocks_resync,
-            overlay_creator,
-            Arc::downgrade(&catchain_listener.clone()),
-        );
+        let local_id = local_key.id().clone();
+        let mut description = SessionDescriptionImpl::new(&options, &ids, &local_id, metrics);
+
+        //initialize metrics
+
+        let metrics_receiver = description.get_metrics_receiver();
+
+        let collates_counter =
+            ResultStatusCounter::new(&metrics_receiver, &"collate_requests".to_owned());
+        let validates_counter =
+            ResultStatusCounter::new(&metrics_receiver, &"validate_requests".to_owned());
+        let commits_counter =
+            ResultStatusCounter::new(&metrics_receiver, &"commit_requests".to_owned());
+        let rldp_queries_counter =
+            ResultStatusCounter::new(&metrics_receiver, &"rldp_queries".to_owned());
 
         //initialize state
 
@@ -2405,13 +2883,14 @@ impl SessionProcessorImpl {
 
         let body = Self {
             session_id: session_id,
+            local_key: local_key,
             task_queue: task_queue,
             callbacks_task_queue: callbacks_task_queue,
             session_listener: listener,
             catchain: catchain,
-            _catchain_listener: catchain_listener,
             next_completion_handler_available_index: 1,
             completion_handlers: HashMap::new(),
+            completion_handlers_check_last_time: SystemTime::now(),
             block_to_state_map: Vec::with_capacity(STATES_RESERVED_COUNT),
             catchain_started: false,
             description: description,
@@ -2421,6 +2900,8 @@ impl SessionProcessorImpl {
             next_awake_time: now,
             round_started_at: now,
             round_debug_at: now,
+            session_processor_creation_time: now,
+            session_creation_time: session_creation_time,
             requested_new_block_now: false,
             requested_new_block: false,
             pending_generate: false,
@@ -2438,7 +2919,15 @@ impl SessionProcessorImpl {
             signed_block: BlockId::default(),
             signature: BlockSignature::default(),
             log_replay_report_current_time: std::time::UNIX_EPOCH,
+            collates_counter: collates_counter,
+            validates_counter: validates_counter,
+            commits_counter: commits_counter,
+            rldp_queries_counter: rldp_queries_counter,
         };
+
+        if DEBUG_EVENTS_LOG {
+            info!("EVENTS LOG: New round {}", body.current_round);
+        }
 
         //check state
 
@@ -2446,38 +2935,6 @@ impl SessionProcessorImpl {
 
         result.borrow_mut().check_all();
 
-        //add ID to RLDP
-
-        warn!("SessionProcessor::create: RLDP initialization is skipped!");
-
         result
-    }
-
-    pub(crate) fn create_dummy(
-        session_id: SessionId,
-        ids: Vec<SessionNode>,
-        local_id: PublicKeyHash,
-        listener: SessionListenerPtr,
-    ) -> SessionProcessorPtr {
-        let task_queue = SessionFactory::create_task_queue();
-        let callbacks_task_queue = SessionFactory::create_callback_task_queue();
-        let options = SessionOptions::default();
-        let db_root = "".to_string();
-        let db_suffix = "".to_string();
-        let allow_unsafe_self_blocks_resync = false;
-
-        Self::create(
-            options,
-            session_id,
-            ids,
-            local_id,
-            &db_root,
-            &db_suffix,
-            allow_unsafe_self_blocks_resync,
-            Box::new(catchain::CatchainFactory::create_dummy_overlay),
-            listener,
-            task_queue,
-            callbacks_task_queue,
-        )
     }
 }
