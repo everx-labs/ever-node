@@ -3,7 +3,6 @@ extern crate lazy_static;
 
 extern crate catchain;
 extern crate crc32c;
-extern crate failure;
 extern crate metrics_runtime;
 extern crate rand;
 extern crate sha2;
@@ -13,12 +12,14 @@ extern crate ton_types;
 #[macro_use]
 extern crate log;
 
+#[macro_use]
+extern crate failure;
+
 use std::any::Any;
 use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::Weak;
 mod block_candidate;
 mod cache;
@@ -36,10 +37,16 @@ mod vector;
 mod vote_candidate;
 
 pub use cache::*;
+pub use catchain::ActivityNodePtr;
+use catchain::CatchainPtr;
 pub use catchain::CatchainReplayListener;
 use task_queue::CallbackTaskQueuePtr;
 use task_queue::CompletionHandlerProcessor;
 use task_queue::TaskQueuePtr;
+
+pub mod profiling {
+    pub use catchain::profiling::*;
+}
 
 pub mod ton {
     pub use ton_api::ton::int;
@@ -74,8 +81,11 @@ pub type BlockHash = ::catchain::BlockHash;
 /// Signature of the block
 pub type BlockSignature = ::catchain::BlockSignature;
 
+/// Raw buffer
+pub type RawBuffer = ::catchain::RawBuffer;
+
 /// Block payload
-pub type BlockPayload = ::catchain::BlockPayload;
+pub type BlockPayloadPtr = ::catchain::BlockPayloadPtr;
 
 /// Catchain node
 pub type CatchainNode = ::catchain::CatchainNode;
@@ -85,6 +95,9 @@ pub type SessionId = ::catchain::SessionId;
 
 /// Pointer to overlay API for the Catchain
 pub type CatchainOverlayPtr = ::catchain::CatchainOverlayPtr;
+
+/// Private key
+pub type PrivateKey = ::catchain::PrivateKey;
 
 /// Public key
 pub type PublicKey = ::catchain::PublicKey;
@@ -97,14 +110,14 @@ pub type BlockId = BlockHash;
 
 lazy_static! {
   /// Block candidate identifier for skip round (optional case to identify candidate as empty)
-  static ref SKIP_ROUND_CANDIDATE_BLOCKID : BlockId = ton_types::UInt256::default();
+  pub static ref SKIP_ROUND_CANDIDATE_BLOCKID : BlockId = ton_types::UInt256::default();
 
   /// Default block ID for internal use
-  static ref DEFAULT_BLOCKID : BlockId = ton_types::UInt256::default();
+  pub static ref DEFAULT_BLOCKID : BlockId = ton_types::UInt256::default();
 }
 
-/// Overlay creator
-pub type OverlayCreator = catchain::OverlayCreator;
+/// Overlay manager
+pub type CatchainOverlayManagerPtr = catchain::CatchainOverlayManagerPtr;
 
 /// Log replay options
 pub type LogReplayOptions = catchain::LogReplayOptions;
@@ -211,10 +224,10 @@ pub type SessionStatePtr = PoolPtr<dyn SessionState>;
 pub type SessionProcessorPtr = Rc<RefCell<dyn SessionProcessor>>;
 
 /// Pointer to Session
-pub type SessionPtr = Arc<Mutex<dyn Session>>;
+pub type SessionPtr = Arc<dyn Session + Send>;
 
 /// Pointer to SessionListener
-pub type SessionListenerPtr = Weak<Mutex<dyn SessionListener + Send>>;
+pub type SessionListenerPtr = Weak<dyn SessionListener + Send + Sync>;
 
 /// Validator's weight
 pub type ValidatorWeight = catchain::ValidatorWeight;
@@ -456,6 +469,15 @@ pub trait SentBlock: fmt::Display + fmt::Debug + PoolObject + HashableObject {
 
     /// Collated data file hash
     fn get_collated_data_file_hash(&self) -> &BlockHash;
+
+    /// Timestamp of source block creation (when the block and all its dependencies are resolved)
+    fn get_source_block_creation_time(&self) -> std::time::SystemTime;
+
+    /// Timestamp of source block creation itself (without dependencies resolving)
+    fn get_source_block_payload_creation_time(&self) -> std::time::SystemTime;
+
+    /// Timestamp of sent block creation
+    fn get_creation_time(&self) -> std::time::SystemTime;
 
     /// Clone object to persistent pool
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn SentBlock>;
@@ -740,6 +762,8 @@ pub trait RoundStateWrapper {
         src_idx: u32,
         attempt_id: u32,
         message: &ton::Message,
+        block_creation_time: std::time::SystemTime,
+        block_payload_creation_time: std::time::SystemTime,
     ) -> RoundStatePtr;
 
     /// Consensus iteration actualization
@@ -889,6 +913,8 @@ pub trait SessionState: fmt::Display + fmt::Debug + PoolObject + HashableObject 
         src_idx: u32,
         attempt_id: u32,
         message: &ton::Message,
+        block_creation_time: std::time::SystemTime,
+        block_payload_creation_time: std::time::SystemTime,
     ) -> SessionStatePtr;
 
     /// Create action according to a current state
@@ -1082,9 +1108,6 @@ pub trait SessionDescription: fmt::Display + fmt::Debug + cache::SessionCache {
 /// Validator's block ID
 #[derive(Debug)]
 pub struct ValidatorBlockId {
-    /// Blocks' identifier
-    pub id: BlockId,
-
     /// Root hash
     pub root_hash: BlockHash,
 
@@ -1105,10 +1128,10 @@ pub struct ValidatorBlockCandidate {
     pub collated_file_hash: BlockHash,
 
     /// Block's data
-    pub data: BlockPayload,
+    pub data: BlockPayloadPtr,
 
     /// Block's collated data
-    pub collated_data: BlockPayload,
+    pub collated_data: BlockPayloadPtr,
 }
 
 /// Pointer to a validator's block candidate from
@@ -1126,36 +1149,36 @@ pub type ValidatorBlockCandidateCallback =
 pub trait SessionListener {
     /// New block candidate appears
     fn on_candidate(
-        &mut self,
+        &self,
         round: u32,
         source: PublicKey,
         root_hash: BlockHash,
-        data: BlockPayload,
-        collated_data: BlockPayload,
+        data: BlockPayloadPtr,
+        collated_data: BlockPayloadPtr,
         callback: ValidatorBlockCandidateDecisionCallback,
     );
 
     /// New block should be collated
-    fn on_generate_slot(&mut self, round: u32, callback: ValidatorBlockCandidateCallback);
+    fn on_generate_slot(&self, round: u32, callback: ValidatorBlockCandidateCallback);
 
     /// New block is committed
     fn on_block_committed(
-        &mut self,
+        &self,
         round: u32,
         source: PublicKey,
         root_hash: BlockHash,
         file_hash: BlockHash,
-        data: BlockPayload,
-        signatures: Vec<(PublicKeyHash, BlockPayload)>,
-        approve_signatures: Vec<(PublicKeyHash, BlockPayload)>,
+        data: BlockPayloadPtr,
+        signatures: Vec<(PublicKeyHash, BlockPayloadPtr)>,
+        approve_signatures: Vec<(PublicKeyHash, BlockPayloadPtr)>,
     );
 
     /// Block generation is skipped for the current round
-    fn on_block_skipped(&mut self, round: u32);
+    fn on_block_skipped(&self, round: u32);
 
     /// Ask validator to validate block candidate
     fn get_approved_candidate(
-        &mut self,
+        &self,
         source: PublicKey,
         root_hash: BlockHash,
         file_hash: BlockHash,
@@ -1165,9 +1188,39 @@ pub trait SessionListener {
 }
 
 /// Validator session processor
-pub trait SessionProcessor:
-    CompletionHandlerProcessor + catchain::CatchainListener + fmt::Display
-{
+pub trait SessionProcessor: CompletionHandlerProcessor + fmt::Display {
+    /// Session description
+    fn get_description(&self) -> &dyn SessionDescription;
+
+    /// Preprocess block
+    fn preprocess_block(&mut self, block: catchain::BlockPtr);
+
+    /// Process blocks
+    fn process_blocks(&mut self, blocks: Vec<catchain::BlockPtr>);
+
+    /// Notify about finished of blocks processing
+    fn finished_catchain_processing(&mut self);
+
+    /// Notify about catchain start
+    fn catchain_started(&mut self);
+
+    /// Notify about incoming broadcasts
+    fn process_broadcast(&mut self, source_id: PublicKeyHash, data: BlockPayloadPtr);
+
+    /// Notify about incoming message
+    fn process_message(&mut self, source_id: PublicKeyHash, data: BlockPayloadPtr);
+
+    /// Notify about incoming query
+    fn process_query(
+        &mut self,
+        source_id: PublicKeyHash,
+        data: BlockPayloadPtr,
+        callback: catchain::ExternalQueryResponseCallback,
+    );
+
+    /// Set timestamp for all further events
+    fn set_time(&mut self, timestamp: std::time::SystemTime);
+
     /// Check & update session state
     fn check_all(&mut self);
 
@@ -1177,6 +1230,9 @@ pub trait SessionProcessor:
     /// Get next awake time
     fn get_next_awake_time(&self) -> std::time::SystemTime;
 
+    /// Stop all further session processing
+    fn stop(&mut self);
+
     /// Returns implementation specific details
     fn get_impl(&self) -> &dyn Any;
 
@@ -1185,7 +1241,10 @@ pub trait SessionProcessor:
 }
 
 /// Validator session (wrapper on top of SessionProcessor for multi-threaded use)
-pub trait Session: fmt::Display {}
+pub trait Session: fmt::Display + Send + Sync {
+    /// Stop the session
+    fn stop(&self);
+}
 
 /// Validator session factory
 pub struct SessionFactory;
@@ -1249,6 +1308,8 @@ impl SessionFactory {
         root_hash: BlockHash,
         file_hash: BlockHash,
         collated_data_file_hash: BlockHash,
+        block_creation_time: std::time::SystemTime,
+        block_payload_creation_time: std::time::SystemTime,
     ) -> SentBlockPtr {
         sent_block::SentBlockImpl::create(
             desc,
@@ -1256,6 +1317,8 @@ impl SessionFactory {
             root_hash,
             file_hash,
             collated_data_file_hash,
+            block_creation_time,
+            block_payload_creation_time,
         )
     }
 
@@ -1272,8 +1335,17 @@ impl SessionFactory {
         block_candidate::BlockCandidateSignatureImpl::create(desc, signature)
     }
 
+    /// Create block candidate with approvers
+    pub fn create_block_candidate(
+        desc: &mut dyn SessionDescription,
+        block: SentBlockPtr,
+        approved_by: BlockCandidateSignatureVectorPtr,
+    ) -> BlockCandidatePtr {
+        block_candidate::BlockCandidateImpl::create(desc, block, approved_by)
+    }
+
     /// Create block candidate without approvers
-    pub(crate) fn create_unapproved_block_candidate(
+    pub fn create_unapproved_block_candidate(
         desc: &mut dyn SessionDescription,
         block: SentBlockPtr,
     ) -> BlockCandidatePtr {
@@ -1281,7 +1353,7 @@ impl SessionFactory {
     }
 
     /// Create vote candidate
-    pub(crate) fn create_vote_candidate(
+    pub fn create_vote_candidate(
         desc: &mut dyn SessionDescription,
         block: SentBlockPtr,
     ) -> VoteCandidatePtr {
@@ -1289,7 +1361,7 @@ impl SessionFactory {
     }
 
     /// Create attempt
-    pub(crate) fn create_attempt(
+    pub fn create_attempt(
         desc: &mut dyn SessionDescription,
         sequence_number: u32,
     ) -> RoundAttemptStatePtr {
@@ -1297,15 +1369,12 @@ impl SessionFactory {
     }
 
     /// Create current round
-    pub(crate) fn create_round(
-        desc: &mut dyn SessionDescription,
-        sequence_number: u32,
-    ) -> RoundStatePtr {
+    pub fn create_round(desc: &mut dyn SessionDescription, sequence_number: u32) -> RoundStatePtr {
         round::RoundStateImpl::create_current_round(desc, sequence_number)
     }
 
     /// Create old round
-    pub(crate) fn create_old_round(
+    pub fn create_old_round(
         desc: &mut dyn SessionDescription,
         round: RoundStatePtr,
     ) -> OldRoundStatePtr {
@@ -1313,7 +1382,7 @@ impl SessionFactory {
     }
 
     /// Create state
-    pub(crate) fn create_state(desc: &mut dyn SessionDescription) -> SessionStatePtr {
+    pub fn create_state(desc: &mut dyn SessionDescription) -> SessionStatePtr {
         session_state::SessionStateImpl::create_empty(desc)
     }
 
@@ -1332,22 +1401,22 @@ impl SessionFactory {
         options: &SessionOptions,
         session_id: &SessionId,
         ids: &Vec<SessionNode>,
-        local_id: &PublicKeyHash,
+        local_key: &PrivateKey,
         db_root: &String,
         db_suffix: &String,
         allow_unsafe_self_blocks_resync: bool,
-        overlay_creator: OverlayCreator,
+        overlay_manager: CatchainOverlayManagerPtr,
         listener: SessionListenerPtr,
     ) -> SessionPtr {
         session::SessionImpl::create(
             options,
             session_id,
             ids,
-            local_id,
+            local_key,
             db_root,
             db_suffix,
             allow_unsafe_self_blocks_resync,
-            overlay_creator,
+            overlay_manager,
             listener,
         )
     }
@@ -1372,37 +1441,25 @@ impl SessionFactory {
         options: SessionOptions,
         session_id: SessionId,
         ids: Vec<SessionNode>,
-        local_id: PublicKeyHash,
-        db_root: &String,
-        db_suffix: &String,
-        allow_unsafe_self_blocks_resync: bool,
-        overlay_creator: OverlayCreator,
+        local_key: PrivateKey,
         listener: SessionListenerPtr,
+        catchain: CatchainPtr,
         task_queue: TaskQueuePtr,
         callbacks_task_queue: CallbackTaskQueuePtr,
+        session_creation_time: std::time::SystemTime,
+        metrics: Option<Arc<metrics_runtime::Receiver>>,
     ) -> SessionProcessorPtr {
         session_processor::SessionProcessorImpl::create(
             options,
             session_id,
             ids,
-            local_id,
-            db_root,
-            db_suffix,
-            allow_unsafe_self_blocks_resync,
-            overlay_creator,
+            local_key,
             listener,
+            catchain,
             task_queue,
             callbacks_task_queue,
+            session_creation_time,
+            metrics,
         )
-    }
-
-    /// Create default session processor (for tests)
-    pub fn create_dummy_session_processor(
-        session_id: SessionId,
-        ids: Vec<SessionNode>,
-        local_id: PublicKeyHash,
-        listener: SessionListenerPtr,
-    ) -> SessionProcessorPtr {
-        session_processor::SessionProcessorImpl::create_dummy(session_id, ids, local_id, listener)
     }
 }

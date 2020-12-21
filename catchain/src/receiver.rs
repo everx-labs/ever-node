@@ -1,5 +1,9 @@
 use self::ton::CatchainSentResponse;
 pub use super::*;
+use crate::profiling::check_execution_time;
+use crate::profiling::instrument;
+use crate::profiling::ResultStatusCounter;
+use crate::ton_api::IntoBoxed;
 use rand::Rng;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -29,14 +33,14 @@ lazy_static! {
 */
 
 struct PendingBlock {
-    payload: BlockPayload,      //payload of a new block
+    payload: BlockPayloadPtr,   //payload of a new block
     dep_hashes: Vec<BlockHash>, //list of dependencies for a new block
 }
 
 pub(crate) struct ReceiverImpl {
-    incarnation: SessionId,                            //session ID (incarnation)
-    options: Options,                                  //Catchain options
-    blocks: HashMap<BlockHash, ReceivedBlockPtr>,      //all received blocks
+    incarnation: SessionId, //session ID (incarnation, overlay short ID)
+    options: Options,       //Catchain options
+    blocks: HashMap<BlockHash, ReceivedBlockPtr>, //all received blocks
     blocks_to_run: VecDeque<ReceivedBlockPtr>, //blocks which has been scheduled for delivering (fully resolved)
     root_block: ReceivedBlockPtr, //root block for catchain sesssion (hash is equal to session incarnation)
     last_sent_block: ReceivedBlockPtr, //last block sent to catchain
@@ -44,22 +48,28 @@ pub(crate) struct ReceiverImpl {
     pending_blocks: VecDeque<PendingBlock>, //pending blocks for sending
     sources: Vec<ReceiverSourcePtr>, //receiver sources (knowledge about other catchain validators)
     source_public_key_hashes: Vec<PublicKeyHash>, //public key hashes of all sources
-    source_adnl_addrs: Vec<PublicKeyHash>, //ADNL ids of all sources
-    local_id: PublicKeyHash,      //this node public key hash
-    local_key: PublicKey,         //this node public key
-    local_idx: usize,             //this node source index
+    public_key_hash_to_source: HashMap<PublicKeyHash, ReceiverSourcePtr>, //map from public key hash to source
+    adnl_id_to_source: HashMap<PublicKeyHash, ReceiverSourcePtr>, //map from ADNL ID to source
+    local_id: PublicKeyHash,                                      //this node's public key hash
+    local_key: PrivateKey,                                        //this node's private key
+    local_idx: usize,                                             //this node's source index
     _local_ids: Vec<CatchainNode>, //receiver sources identifiers (pub keys, ADNL ids)
-    total_forks: usize,           //total forks number for this receiver
-    neighbours: Vec<usize>,       //list of neighbour indices to synchronize
+    total_forks: usize,            //total forks number for this receiver
+    neighbours: Vec<usize>,        //list of neighbour indices to synchronize
     listener: ReceiverListenerPtr, //listener for callbacks
-    metrics_receiver: metrics_runtime::Receiver, //receiver for profiling metrics
+    metrics_receiver: Arc<metrics_runtime::Receiver>, //receiver for profiling metrics
     received_blocks_instance_counter: InstanceCounter, //received blocks instances
-    pending_in_db: i32,           //blocks pending to read from DB
-    db: Option<DatabasePtr>,      //database with (BlockHash, Payload)
-    read_db: bool,                //flag to indicate receiver is in reading DB mode
-    db_root_block: BlockHash,     //root DB block
-    db_root: String,              //DB root prefix
-    db_suffix: String,            //DB name suffix
+    in_queries_counter: ResultStatusCounter, //result status counter for queries
+    out_queries_counter: ResultStatusCounter, //result status counter for queries
+    in_messages_counter: metrics_runtime::data::Counter, //incoming messages counter
+    out_messages_counter: metrics_runtime::data::Counter, //outgoing messages counter
+    in_broadcasts_counter: metrics_runtime::data::Counter, //incoming broadcasts counter
+    pending_in_db: i32,            //blocks pending to read from DB
+    db: Option<DatabasePtr>,       //database with (BlockHash, Payload)
+    read_db: bool,                 //flag to indicate receiver is in reading DB mode
+    db_root_block: BlockHash,      //root DB block
+    db_root: String,               //DB root prefix
+    db_suffix: String,             //DB name suffix
     allow_unsafe_self_blocks_resync: bool, //indicates we can receive self blocks from other validators
     unsafe_root_block_writing: bool, //indicates we are in the middle of unsafe root block writing
     started: bool,                   //indicates catchain is started
@@ -150,7 +160,7 @@ impl Receiver for ReceiverImpl {
         self.notify_on_blame(source_id);
     }
 
-    fn add_fork_proof(&mut self, fork_proof: &BlockPayload) {
+    fn add_fork_proof(&mut self, fork_proof: &BlockPayloadPtr) {
         trace!("...add block {:?} as a fork proof", fork_proof);
 
         self.add_block_for_delivery(fork_proof.clone(), Vec::new());
@@ -161,6 +171,8 @@ impl Receiver for ReceiverImpl {
     */
 
     fn get_block_by_hash(&self, b: &BlockHash) -> Option<ReceivedBlockPtr> {
+        instrument!();
+
         match self.blocks.get(b) {
             None => None,
             Some(t) => Some(t.clone()),
@@ -172,6 +184,8 @@ impl Receiver for ReceiverImpl {
     */
 
     fn validate_block_dependency(&self, dep: &ton::BlockDep) -> Result<()> {
+        instrument!();
+
         (received_block::ReceivedBlockImpl::pre_validate_block_dependency(self, dep))?;
 
         if dep.height <= 0 {
@@ -204,9 +218,22 @@ impl Receiver for ReceiverImpl {
     fn receive_query_from_overlay(
         &mut self,
         adnl_id: &PublicKeyHash,
-        data: &BlockPayload,
+        data: &BlockPayloadPtr,
         response_callback: ExternalQueryResponseCallback,
     ) {
+        check_execution_time!(50000);
+        instrument!();
+
+        let source = self.get_source_by_adnl_id(adnl_id);
+
+        if let Some(ref source) = source {
+            source.borrow_mut().get_mut_statistics().in_queries_count += 1;
+        }
+
+        let in_query_status = self.in_queries_counter.clone();
+
+        in_query_status.total_increment();
+
         if !self.read_db {
             response_callback(Err(format_err!(
                 "DB is not read for catchain receiver {}",
@@ -218,18 +245,18 @@ impl Receiver for ReceiverImpl {
         let result = self.process_query(&adnl_id, &data);
 
         if let Ok(result) = result {
+            in_query_status.success();
             response_callback(Ok(result));
             return;
         }
 
-        let source_public_key_hash = self
-            .get_source_by_adnl_id(adnl_id)
-            .unwrap()
-            .borrow()
-            .get_public_key_hash()
-            .clone();
+        if let Some(source) = source {
+            let source_public_key_hash = source.borrow().get_public_key_hash().clone();
 
-        self.notify_on_custom_query(&source_public_key_hash, data, response_callback);
+            in_query_status.success(); //TODO: add statistics processing for custom queries
+
+            self.notify_on_custom_query(&source_public_key_hash, data, response_callback);
+        }
     }
 
     /*
@@ -240,27 +267,26 @@ impl Receiver for ReceiverImpl {
         &mut self,
         adnl_id: &PublicKeyHash,
         block: &ton::Block,
-        payload: BlockPayload,
+        payload: BlockPayloadPtr,
     ) -> Result<ReceivedBlockPtr> {
-        let id = self.get_block_id(&block, &payload);
+        instrument!();
+
+        let id = self.get_block_id(&block, payload.data());
         let hash = get_block_id_hash(&id);
         let block_opt = self.get_block_by_hash(&hash);
 
-        if log_enabled!(log::Level::Debug) {
-            debug!(
-                "New block with hash={:?} and id={:?} has been received",
-                hash, id
-            );
-        }
+        trace!(
+            "New block with hash={:?} and id={:?} has been received",
+            hash,
+            id
+        );
 
         if let Some(block) = block_opt {
             if block.borrow().is_initialized() {
-                if log_enabled!(log::Level::Debug) {
-                    trace!(
-                        "...skip block {:?} because it has been already initialized",
-                        hash
-                    );
-                }
+                trace!(
+                    "...skip block {:?} because it has been already initialized",
+                    hash
+                );
 
                 return Ok(block.clone());
             }
@@ -318,18 +344,41 @@ impl Receiver for ReceiverImpl {
         let received_block = self.create_block_with_payload(&block, payload.clone())?;
 
         if let Some(ref db) = self.db {
-            let raw_data = utils::serialize_block_with_payload(block, &payload).unwrap();
+            let hash = hash.clone();
+            let block = block.clone();
+            let payload = payload.clone();
+            let db = db.clone();
 
-            db.put_block(&hash, raw_data);
-        }
+            if let Some(listener) = self.listener.upgrade() {
+                let listener = listener.borrow();
+                let task_queue = listener.get_task_queue();
+                let task_queue_clone = task_queue.clone();
+                let id = id.clone();
+                let hash = hash.clone();
 
-        self.block_written_to_db(&id);
+                task_queue.post_utility_closure(Box::new(move || {
+                    match utils::serialize_block_with_payload(&block, &payload) {
+                        Ok(raw_data) => {
+                            db.put_block(&hash, raw_data);
 
-        if log_enabled!(log::Level::Debug) {
-            trace!(
-                "...block {:?} has been successfully processed after receiving",
-                hash
-            );
+                            task_queue_clone.post_closure(Box::new(move |receiver| {
+                                let receiver = receiver
+                                    .get_mut_impl()
+                                    .downcast_mut::<ReceiverImpl>()
+                                    .unwrap();
+
+                                receiver.block_written_to_db(&id);
+
+                                trace!(
+                                    "...block {:?} has been successfully processed after receiving",
+                                    hash
+                                );
+                            }));
+                        }
+                        Err(err) => warn!("Block serialization error: {:?}", err),
+                    }
+                }));
+            }
         }
 
         Ok(received_block)
@@ -340,16 +389,16 @@ impl Receiver for ReceiverImpl {
         adnl_id: &PublicKeyHash,
         bytes: &mut &[u8],
     ) -> Result<ReceivedBlockPtr> {
-        if !self.read_db {
-            bail!("DB is not read");
+        instrument!();
+
+        self.in_messages_counter.increment();
+
+        if let Some(ref source) = self.get_source_by_adnl_id(adnl_id) {
+            source.borrow_mut().get_mut_statistics().in_messages_count += 1;
         }
 
-        if log_enabled!(log::Level::Debug) {
-            debug!(
-                "Receive message from overlay for source {}: {}",
-                adnl_id,
-                &hex::encode(&bytes)
-            );
+        if !self.read_db {
+            bail!("DB is not read");
         }
 
         let reader: &mut dyn std::io::Read = bytes;
@@ -362,7 +411,8 @@ impl Receiver for ReceiverImpl {
 
                     reader.read_to_end(&mut payload)?;
 
-                    let payload = ton_api::ton::bytes(payload);
+                    let payload =
+                        CatchainFactory::create_block_payload(ton_api::ton::bytes(payload));
 
                     return self.receive_block(
                         adnl_id,
@@ -389,11 +439,19 @@ impl Receiver for ReceiverImpl {
     fn receive_broadcast_from_overlay(
         &mut self,
         source_key_hash: &PublicKeyHash,
-        data: &BlockPayload,
+        data: &BlockPayloadPtr,
     ) {
+        instrument!();
+
+        if let Some(ref source) = self.get_source_by_hash(source_key_hash) {
+            source.borrow_mut().get_mut_statistics().in_broadcasts_count += 1;
+        }
+
         if !self.read_db {
             return;
         }
+
+        self.in_broadcasts_counter.increment();
 
         self.notify_on_broadcast(source_key_hash, &data);
     }
@@ -407,7 +465,9 @@ impl Receiver for ReceiverImpl {
     }
 
     fn deliver_block(&mut self, block: &mut dyn ReceivedBlock) {
-        debug!(
+        instrument!();
+
+        trace!(
             "Catchain delivering block {:?} from source={} fork={} height={} custom={}",
             block.get_hash(),
             block.get_source_id(),
@@ -419,7 +479,8 @@ impl Receiver for ReceiverImpl {
         //notify listeners about new block appearance
 
         lazy_static! {
-            static ref DEFAULT_BLOCK: BlockPayload = BlockPayload::default();
+            static ref DEFAULT_BLOCK: BlockPayloadPtr =
+                CatchainFactory::create_empty_block_payload();
         }
 
         self.notify_on_new_block(
@@ -446,25 +507,27 @@ impl Receiver for ReceiverImpl {
 
         for &it in &self.neighbours {
             let neighbour = self.get_source(it);
+            let adnl_id = neighbour.borrow().get_adnl_id().clone();
 
-            receiver_addresses.push(neighbour.borrow().get_adnl_id().clone());
+            if !block.mark_block_for_sending(&adnl_id) {
+                continue;
+            }
+
+            receiver_addresses.push(adnl_id);
         }
 
-        let block_update_event = ton::BlockUpdateEvent {
-            block: block.export_tl(),
-        };
+        if receiver_addresses.len() < 1 {
+            return;
+        }
 
         self.send_block_update_event_multicast(
             receiver_addresses.as_ref(),
-            block_update_event,
-            &block.get_payload(),
+            block.get_serialized_block_with_payload(),
         );
     }
 
     fn process(&mut self) {
-        while let Some(pending_block) = self.pending_blocks.pop_front() {
-            self.add_block_impl(pending_block.payload, pending_block.dep_hashes);
-        }
+        instrument!();
 
         if self.blocks_to_run.len() > 0 {
             self.run_scheduler();
@@ -476,6 +539,8 @@ impl Receiver for ReceiverImpl {
     */
 
     fn create_block(&mut self, block: &ton::BlockDep) -> ReceivedBlockPtr {
+        instrument!();
+
         if block.height == 0 {
             return self.root_block.clone();
         }
@@ -506,7 +571,9 @@ impl Receiver for ReceiverImpl {
         Adding new block (initiated by validator session during new block creation)
     */
 
-    fn add_block(&mut self, payload: BlockPayload, deps: Vec<BlockHash>) {
+    fn add_block(&mut self, payload: BlockPayloadPtr, deps: Vec<BlockHash>) {
+        instrument!();
+
         if self.active_send {
             self.add_block_for_delivery(payload, deps);
             return;
@@ -543,31 +610,32 @@ impl Receiver for ReceiverImpl {
         &self.received_blocks_instance_counter
     }
 
-    fn dump_metrics(&self) {
-        utils::dump_metrics(&self.metrics_receiver, &utils::dump_metric);
-    }
-
     /*
         Triggers
     */
 
     fn check_all(&mut self) {
-        let now = SystemTime::now();
+        instrument!();
 
-        //synchronize with choosen neighbours
+        let now = SystemTime::now();
+        trace!("Catchain_startup: check_all called; now {:?}", now);
+
+        //synchronize with chosen neighbours
 
         if let Ok(_elapsed) = self.next_sync_time.elapsed() {
             self.synchronize();
 
-            self.next_sync_time = now
-                + Duration::from_millis(self.rng.gen_range(
-                    CATCHAIN_NEIGHBOURS_SYNC_MIN_PERIOD_MS,
-                    CATCHAIN_NEIGHBOURS_SYNC_MAX_PERIOD_MS + 1,
-                ));
+            let delay = Duration::from_millis(self.rng.gen_range(
+                CATCHAIN_NEIGHBOURS_SYNC_MIN_PERIOD_MS,
+                CATCHAIN_NEIGHBOURS_SYNC_MAX_PERIOD_MS + 1,
+            ));
+
+            self.next_sync_time = now + delay;
 
             trace!(
-                "...next sync is scheduled at {}",
-                utils::time_to_string(&self.next_sync_time)
+                "...next sync is scheduled at {} (in {:.3}s from now)",
+                utils::time_to_string(&self.next_sync_time),
+                delay.as_secs_f64(),
             );
         }
 
@@ -576,22 +644,35 @@ impl Receiver for ReceiverImpl {
         if let Ok(_elapsed) = self.next_neighbours_rotate_time.elapsed() {
             self.choose_neighbours();
 
-            self.next_neighbours_rotate_time = now
-                + Duration::from_millis(self.rng.gen_range(
-                    CATCHAIN_NEIGHBOURS_ROTATE_MIN_PERIOD_MS,
-                    CATCHAIN_NEIGHBOURS_ROTATE_MAX_PERIOD_MS + 1,
-                ));
+            let delay = Duration::from_millis(self.rng.gen_range(
+                CATCHAIN_NEIGHBOURS_ROTATE_MIN_PERIOD_MS,
+                CATCHAIN_NEIGHBOURS_ROTATE_MAX_PERIOD_MS + 1,
+            ));
+
+            self.next_neighbours_rotate_time = now + delay;
 
             trace!(
-                "...next neighbours rotation is scheduled at {}",
-                utils::time_to_string(&self.next_neighbours_rotate_time)
+                "...next neighbours rotation is scheduled at {} (in {:.3}s from now)",
+                utils::time_to_string(&self.next_neighbours_rotate_time),
+                delay.as_secs_f64(),
             );
         }
 
         //start up checks (for unsafe startup)
+        trace!(
+            "Catchain_startup: self.started {}, self.read_db {}",
+            self.started,
+            self.read_db
+        );
 
         if !self.started && self.read_db {
             let elapsed = self.initial_sync_complete_time.elapsed();
+            trace!(
+                "Catchain_startup: initial sync complete time {:?}, now {:?}, elapsed? {:?}",
+                self.initial_sync_complete_time,
+                SystemTime::now(),
+                elapsed
+            );
 
             if let Ok(_elapsed) = elapsed {
                 let allow = if self.allow_unsafe_self_blocks_resync {
@@ -599,6 +680,7 @@ impl Receiver for ReceiverImpl {
                 } else {
                     true
                 };
+                trace!("Catchain_startup: allow {}", allow);
 
                 if allow {
                     self.initial_sync_complete_time =
@@ -644,12 +726,18 @@ impl Receiver for ReceiverImpl {
     Dummy listener for receiver
 */
 
-struct DummyListener {}
+//TODO: move dummy listener & dummy task queue to tests
 
-impl DummyListener {
-    pub(crate) fn new() -> Self {
-        Self {}
-    }
+struct DummyTaskQueue {}
+
+impl ReceiverTaskQueue for DummyTaskQueue {
+    fn post_utility_closure(&self, _handler: Box<dyn FnOnce() + Send>) {}
+
+    fn post_closure(&self, _handler: Box<dyn FnOnce(&mut dyn Receiver) + Send>) {}
+}
+
+struct DummyListener {
+    task_queue: ReceiverTaskQueuePtr,
 }
 
 impl ReceiverListener for DummyListener {
@@ -672,7 +760,7 @@ impl ReceiverListener for DummyListener {
         _prev: BlockHash,
         _deps: Vec<BlockHash>,
         _forks_dep_heights: Vec<BlockHeight>,
-        _payload: &BlockPayload,
+        _payload: &BlockPayloadPtr,
     ) {
     }
 
@@ -680,7 +768,7 @@ impl ReceiverListener for DummyListener {
         &mut self,
         _receiver: &mut dyn Receiver,
         _source_key_hash: &PublicKeyHash,
-        _data: &BlockPayload,
+        _data: &BlockPayloadPtr,
     ) {
     }
 
@@ -690,7 +778,7 @@ impl ReceiverListener for DummyListener {
         &mut self,
         _receiver: &mut dyn Receiver,
         _source_public_key_hash: &PublicKeyHash,
-        _data: &BlockPayload,
+        _data: &BlockPayloadPtr,
     ) {
     }
 
@@ -698,7 +786,7 @@ impl ReceiverListener for DummyListener {
         &mut self,
         _receiver: &mut dyn Receiver,
         _source_public_key_hash: &PublicKeyHash,
-        _data: &BlockPayload,
+        _data: &BlockPayloadPtr,
         _response_callback: ExternalQueryResponseCallback,
     ) {
     }
@@ -707,7 +795,8 @@ impl ReceiverListener for DummyListener {
         &mut self,
         _receiver_id: &PublicKeyHash,
         _sender_id: &PublicKeyHash,
-        _message: &BlockPayload,
+        _message: &BlockPayloadPtr,
+        _can_be_postponed: bool,
     ) {
     }
 
@@ -715,7 +804,7 @@ impl ReceiverListener for DummyListener {
         &mut self,
         _receiver_ids: &[PublicKeyHash],
         _sender_id: &PublicKeyHash,
-        _message: &BlockPayload,
+        _message: &BlockPayloadPtr,
     ) {
     }
 
@@ -725,9 +814,21 @@ impl ReceiverListener for DummyListener {
         _sender_id: &PublicKeyHash,
         _name: &str,
         _timeout: std::time::Duration,
-        _message: &BlockPayload,
+        _message: &BlockPayloadPtr,
         _response_callback: QueryResponseCallback,
     ) {
+    }
+
+    fn get_task_queue(&self) -> &ReceiverTaskQueuePtr {
+        &self.task_queue
+    }
+}
+
+impl DummyListener {
+    fn create() -> Rc<RefCell<dyn ReceiverListener>> {
+        Rc::new(RefCell::new(Self {
+            task_queue: Arc::new(DummyTaskQueue {}),
+        }))
     }
 }
 
@@ -741,6 +842,8 @@ impl ReceiverImpl {
     */
 
     fn unsafe_start_up_check_completed(&mut self) -> bool {
+        instrument!();
+
         let source = self.get_source(self.local_idx);
         let source = source.borrow();
         let now = SystemTime::now();
@@ -822,28 +925,16 @@ impl ReceiverImpl {
         &self,
         source_public_key_hash: &PublicKeyHash,
     ) -> Option<ReceiverSourcePtr> {
-        //todo: optimize with hash map
-
-        for (i, hash) in self.source_public_key_hashes.iter().enumerate() {
-            if hash != source_public_key_hash {
-                continue;
-            }
-
-            return Some(self.sources[i].clone());
+        if let Some(source) = self.public_key_hash_to_source.get(source_public_key_hash) {
+            return Some(source.clone());
         }
 
         None
     }
 
     fn get_source_by_adnl_id(&self, adnl_id: &PublicKeyHash) -> Option<ReceiverSourcePtr> {
-        //todo: optimize with hash map
-
-        for (i, id) in self.source_adnl_addrs.iter().enumerate() {
-            if id != adnl_id {
-                continue;
-            }
-
-            return Some(self.sources[i].clone());
+        if let Some(source) = self.adnl_id_to_source.get(adnl_id) {
+            return Some(source.clone());
         }
 
         None
@@ -853,7 +944,7 @@ impl ReceiverImpl {
         General ReceivedBlock methods
     */
 
-    fn get_block_id(&self, block: &ton::Block, payload: &BlockPayload) -> ton::BlockId {
+    fn get_block_id(&self, block: &ton::Block, payload: &RawBuffer) -> ton::BlockId {
         utils::get_block_id(
             &UInt256::from(block.incarnation.0),
             &self.get_source_public_key_hash(block.src as usize),
@@ -890,15 +981,17 @@ impl ReceiverImpl {
     fn validate_block_with_payload(
         &self,
         block: &ton::Block,
-        payload: &BlockPayload,
+        payload: &BlockPayloadPtr,
     ) -> Result<()> {
+        instrument!();
+
         (received_block::ReceivedBlockImpl::pre_validate_block(self, block, payload))?;
 
         if block.height <= 0 {
             return Ok(());
         }
 
-        let id = &self.get_block_id(&block, &payload);
+        let id = &self.get_block_id(&block, payload.data());
         let serialized_block_id = utils::serialize_tl_boxed_object!(id);
 
         if let Some(_block) = self.get_block_by_hash(&utils::get_hash(&serialized_block_id)) {
@@ -912,10 +1005,7 @@ impl ReceiverImpl {
         let public_key = source.unwrap().borrow().get_public_key().clone();
 
         match public_key.verify(&serialized_block_id.0, &block.signature.0) {
-            Err(err) => {
-                error!("Verification failed for block {:?}: {:?}", id, err);
-                Ok(())
-            } //Err(err), //TODO: return error instead of OK after debugging
+            Err(err) => Err(err),
             Ok(_) => Ok(()),
         }
     }
@@ -925,22 +1015,27 @@ impl ReceiverImpl {
     */
 
     fn run_scheduler(&mut self) {
+        instrument!();
+
         while let Some(block) = self.blocks_to_run.pop_front() {
             block.borrow_mut().process(self);
         }
     }
 
-    fn add_block_for_delivery(&mut self, payload: BlockPayload, deps: Vec<BlockHash>) {
+    fn add_block_for_delivery(&mut self, payload: BlockPayloadPtr, deps: Vec<BlockHash>) {
         self.pending_blocks.push_back(PendingBlock {
             payload: payload,
             dep_hashes: deps,
         });
     }
 
-    fn add_block_impl(&mut self, payload: BlockPayload, deps: Vec<BlockHash>) {
-        debug!(
+    fn add_block_impl(&mut self, payload: BlockPayloadPtr, deps: Vec<BlockHash>) {
+        instrument!();
+
+        trace!(
             "Adding new block with deps {:?} and payload {:?}",
-            deps, payload
+            deps,
+            payload
         );
 
         self.active_send = true;
@@ -987,7 +1082,7 @@ impl ReceiverImpl {
             signature: Vec::new().into(), //block will be signed later
         };
 
-        let block_id = self.get_block_id(&block, &payload);
+        let block_id = self.get_block_id(&block, payload.data());
         let block_id_serialized = serialize_tl_boxed_object!(&block_id);
 
         //block ID signing
@@ -1009,37 +1104,63 @@ impl ReceiverImpl {
         trace!("...save block to DB");
 
         if let Some(ref db) = self.db {
-            //save mapping: sha256(block_id) -> serialized block with payload
-
+            let db = db.clone();
             let block_id_hash = get_block_id_hash(&block_id);
-            let block_raw_data = utils::serialize_block_with_payload(&block, &payload).unwrap();
+            let block = block.clone();
+            let payload = payload.clone();
 
-            db.put_block(&block_id_hash, block_raw_data);
+            if let Some(listener) = self.listener.upgrade() {
+                let listener = listener.borrow();
+                let task_queue = listener.get_task_queue();
+                let task_queue_clone = task_queue.clone();
 
-            //save mapping for root block to it's ID
+                task_queue.post_utility_closure(Box::new(move || {
+                    //save mapping: sha256(block_id) -> serialized block with payload
 
-            db.put_block(
-                &ZERO_HASH,
-                ::ton_api::ton::bytes(block_id_hash.as_slice().to_vec()),
-            );
-        }
+                    match utils::serialize_block_with_payload(&block, &payload) {
+                        Ok(raw_data) => db.put_block(&block_id_hash, raw_data),
+                        Err(err) => warn!("Block serialization error: {:?}", err),
+                    }
 
-        //initiate delivery flow
+                    //save mapping for root block to it's ID
 
-        trace!("...deliver a new created block {:?}", block);
+                    db.put_block(
+                        &ZERO_HASH,
+                        ::ton_api::ton::bytes(block_id_hash.as_slice().to_vec()),
+                    );
 
-        match self.create_block_with_payload(&block, payload) {
-            Ok(block) => {
-                self.last_sent_block = block.clone();
+                    //create new block and send
 
-                block.borrow_mut().written(self);
+                    task_queue_clone.post_closure(Box::new(move |receiver| {
+                        let receiver = receiver
+                            .get_mut_impl()
+                            .downcast_mut::<ReceiverImpl>()
+                            .unwrap();
+
+                        //initiate delivery flow
+
+                        trace!("...deliver a new created block {:?}", block);
+
+                        match receiver.create_block_with_payload(&block, payload) {
+                            Ok(block) => {
+                                receiver.last_sent_block = block.clone();
+
+                                block.borrow_mut().written(receiver);
+                            }
+                            Err(err) => error!("...creation block error: {:?}", err),
+                        }
+
+                        receiver.run_scheduler();
+
+                        receiver.active_send = false;
+
+                        if let Some(pending_block) = receiver.pending_blocks.pop_front() {
+                            receiver.add_block(pending_block.payload, pending_block.dep_hashes);
+                        }
+                    }));
+                }));
             }
-            Err(err) => error!("...creation block error: {:?}", err),
         }
-
-        self.run_scheduler();
-
-        self.active_send = false;
     }
 
     /*
@@ -1047,6 +1168,8 @@ impl ReceiverImpl {
     */
 
     fn start_up_db(&mut self) {
+        instrument!();
+
         trace!("...starting up DB");
 
         if self.options.debug_disable_db {
@@ -1054,12 +1177,15 @@ impl ReceiverImpl {
             return;
         }
 
-        let db = CatchainFactory::create_database(&format!(
-            "{}/catchainreceiver{}{}",
-            self.db_root,
-            self.db_suffix,
-            base64::encode(self.incarnation.as_slice())
-        ));
+        let db = CatchainFactory::create_database(
+            &format!(
+                "{}/catchainreceiver{}{}",
+                self.db_root,
+                self.db_suffix,
+                base64::encode_config(self.incarnation.as_slice(), base64::URL_SAFE),
+            ),
+            self.get_metrics_receiver(),
+        );
 
         self.db = Some(db.clone());
 
@@ -1073,12 +1199,21 @@ impl ReceiverImpl {
     }
 
     fn read_db(&mut self) {
+        instrument!();
+
         trace!("...reading DB");
 
+        trace!("Catchain_startup: db_root_block {:?}", self.db_root_block);
         if self.db_root_block != ZERO_HASH.clone() {
             self.run_scheduler();
 
-            self.last_sent_block = self.get_block_by_hash(&self.db_root_block).unwrap();
+            match self.get_block_by_hash(&self.db_root_block) {
+                None => warn!(
+                    "Catchain_startup: no block with hash {:?} in db",
+                    self.db_root_block
+                ),
+                Some(blk) => self.last_sent_block = blk,
+            }
 
             assert!(self.last_sent_block.borrow().is_delivered());
         }
@@ -1112,7 +1247,9 @@ impl ReceiverImpl {
     }
 
     fn read_db_from(&mut self, id: &BlockHash) {
-        trace!("...reading DB from block {}", id);
+        instrument!();
+
+        trace!("...reading DB from block {:?}", id);
 
         self.pending_in_db = 1;
         self.db_root_block = id.clone();
@@ -1122,8 +1259,10 @@ impl ReceiverImpl {
         self.read_block_from_db(id, block_raw_data);
     }
 
-    fn read_block_from_db(&mut self, id: &BlockHash, raw_data: BlockPayload) {
-        trace!("...reading block {} from DB", id);
+    fn read_block_from_db(&mut self, id: &BlockHash, raw_data: RawBuffer) {
+        instrument!();
+
+        trace!("...reading block {:?} from DB", id);
 
         self.pending_in_db -= 1;
 
@@ -1140,18 +1279,18 @@ impl ReceiverImpl {
 
         let message = message.unwrap();
 
-        if !message.is::<::ton_api::ton::catchain::Update>() {
+        if !message.is::<::ton_api::ton::catchain::Block>() {
             error!(
-                "DB block {:?} parsing error: object does not contain Update message: object={:?}",
+                "DB block {:?} parsing error: object does not contain Block message: object={:?}",
                 id, message
             );
             return;
         }
 
         let block = message
-            .downcast::<::ton_api::ton::catchain::Update>()
-            .unwrap();
-        let block = &block.block();
+            .downcast::<::ton_api::ton::catchain::Block>()
+            .unwrap()
+            .only();
 
         //parse payload of a block
 
@@ -1159,11 +1298,11 @@ impl ReceiverImpl {
 
         reader.read_to_end(&mut payload).unwrap();
 
-        let payload = ton_api::ton::bytes(payload);
+        let payload = CatchainFactory::create_block_payload(ton_api::ton::bytes(payload));
 
         //check block ID
 
-        let block_id = self.get_block_id(&block, &payload);
+        let block_id = self.get_block_id(&block, payload.data());
         let block_id_hash = get_block_id_hash(&block_id);
 
         assert!(&block_id_hash == id);
@@ -1205,7 +1344,7 @@ impl ReceiverImpl {
 
         //create received block
 
-        let block = self.create_block_with_payload(block, payload).unwrap();
+        let block = self.create_block_with_payload(&block, payload).unwrap();
 
         block.borrow_mut().written(self);
 
@@ -1242,6 +1381,8 @@ impl ReceiverImpl {
     }
 
     fn block_written_to_db(&mut self, block_id: &ton::BlockId) {
+        instrument!();
+
         let block = self
             .get_block_by_hash(&get_block_id_hash(block_id))
             .unwrap();
@@ -1256,12 +1397,14 @@ impl ReceiverImpl {
     */
 
     fn choose_neighbours(&mut self) {
-        debug!("Rotate neighbours");
+        instrument!();
+
+        trace!("Rotate neighbours");
 
         //randomly choose max neighbours from sources
 
         let sources_count = self.get_sources_count();
-        let mut rng = rand::thread_rng();
+        let mut rng = self.rng;
         let mut new_neighbours: Vec<usize> = Vec::new();
         let mut items_count = MAX_NEIGHBOURS_COUNT;
 
@@ -1303,9 +1446,11 @@ impl ReceiverImpl {
     }
 
     fn synchronize(&mut self) {
-        debug!("Synchronize with other validators");
+        instrument!();
 
-        let mut rng = rand::thread_rng();
+        trace!("Synchronize with other validators");
+
+        let mut rng = self.rng;
         let sources_count = self.get_sources_count();
 
         for _i in 0..MAX_SOURCES_SYNC_ATTEMPS {
@@ -1316,7 +1461,9 @@ impl ReceiverImpl {
                 continue;
             }
 
-            self.synchronize_with(&*source.borrow());
+            self.synchronize_with(source);
+
+            break;
         }
     }
 
@@ -1324,10 +1471,12 @@ impl ReceiverImpl {
         Sources synchronization
     */
 
-    fn synchronize_with(&mut self, source: &dyn ReceiverSource) {
-        trace!("...synchronize with source {}", source.get_id());
+    fn synchronize_with(&mut self, source: ReceiverSourcePtr) {
+        instrument!();
 
-        assert!(!source.is_blamed());
+        trace!("...synchronize with source {}", source.borrow().get_id());
+
+        assert!(!source.borrow().is_blamed());
 
         //prepare the list of known delivered heights for each source
         //this list will be sent to syncrhonization source to obtain partial absent difference back
@@ -1343,47 +1492,62 @@ impl ReceiverImpl {
             })
             .collect();
 
-        type TonVector = ::ton_api::ton::vector<::ton_api::ton::Bare, ::ton_api::ton::int>;
-
         let get_difference_request = ton::GetDifferenceRequest {
-            rt: TonVector::from(sources_delivered_heights),
+            rt: sources_delivered_heights.into(),
         };
 
         //send a difference query to a synchronization source
 
         let get_difference_response_handler =
             |result: Result<ton::GetDifferenceResponse>,
-             payload: BlockPayload,
+             _payload: BlockPayloadPtr,
              receiver: &mut dyn Receiver| {
                 use ton_api::ton::catchain::*;
 
                 match result {
-                    Err(err) => warn!("GetDifference query error: {:?}", err),
-                    Ok(response) => match response {
-                        Difference::Catchain_Difference(difference) => {
-                            debug!("GetDifference response: {:?}", difference);
+                    Err(err) => {
+                        get_mut_impl(receiver).out_queries_counter.failure();
+
+                        warn!("GetDifference query error: {:?}", err)
+                    }
+                    Ok(response) => {
+                        get_mut_impl(receiver).out_queries_counter.success();
+
+                        match response {
+                            Difference::Catchain_Difference(difference) => {
+                                trace!("GetDifference response: {:?}", difference);
+                            }
+                            Difference::Catchain_DifferenceFork(difference_fork) => {
+                                get_mut_impl(receiver).got_fork_proof(*difference_fork);
+                            }
                         }
-                        Difference::Catchain_DifferenceFork(_difference_fork) => {
-                            get_mut_impl(receiver).got_fork_proof(&payload);
-                        }
-                    },
+                    }
                 }
             };
 
+        source.borrow_mut().get_mut_statistics().out_queries_count += 1;
+
+        self.out_queries_counter.total_increment();
+
         self.send_get_difference_request(
-            source.get_adnl_id(),
+            source.borrow().get_adnl_id(),
             get_difference_request,
             get_difference_response_handler,
         );
 
         //request for absent blocks
+        let delivered_height = source.borrow().get_delivered_height();
+        let received_height = source.borrow().get_received_height();
 
-        if source.get_delivered_height() >= source.get_received_height() {
+        if delivered_height >= received_height {
             return;
         }
 
         //get first undelivered block for the source and request its dependencies
-        if let Some(first_block) = source.get_block(source.get_delivered_height() + 1) {
+
+        let first_block = source.borrow().get_block(delivered_height + 1);
+
+        if let Some(first_block) = first_block {
             let mut dep_hashes = Vec::new();
 
             const MAX_PENDING_DEPS_COUNT: usize = 16;
@@ -1398,38 +1562,51 @@ impl ReceiverImpl {
                 let get_block_request = ton::GetBlockRequest {
                     block: dep_hash.clone().into(),
                 };
-                let source_adnl_id = source.get_adnl_id().clone();
+                let source_adnl_id = source.borrow().get_adnl_id().clone();
+                let source_adnl_id_clone = source_adnl_id.clone();
 
                 let get_block_response_handler =
                     move |result: Result<ton::BlockResultResponse>,
-                          payload: BlockPayload,
+                          payload: BlockPayloadPtr,
                           receiver: &mut dyn Receiver| {
                         use ton_api::ton::catchain::*;
 
                         match result {
-                            Err(err) => warn!(
-                                "GetBlock {:} query error: {:?}",
-                                dep_hash.to_hex_string(),
-                                err
-                            ),
-                            Ok(response) => match response {
-                                BlockResult::Catchain_BlockNotFound => warn!(
-                                    "GetBlock {:} query didn't find the block",
-                                    dep_hash.to_hex_string()
-                                ),
-                                BlockResult::Catchain_BlockResult(block_result) => {
-                                    let _block = receiver.receive_block(
-                                        &source_adnl_id,
-                                        &block_result.block,
-                                        payload,
-                                    );
+                            Err(err) => {
+                                get_mut_impl(receiver).out_queries_counter.failure();
+
+                                warn!(
+                                    "GetBlock {:} query error: {:?}",
+                                    dep_hash.to_hex_string(),
+                                    err
+                                );
+                            }
+                            Ok(response) => {
+                                get_mut_impl(receiver).out_queries_counter.success();
+
+                                match response {
+                                    BlockResult::Catchain_BlockNotFound => warn!(
+                                        "GetBlock {:} query didn't find the block",
+                                        dep_hash.to_hex_string()
+                                    ),
+                                    BlockResult::Catchain_BlockResult(block_result) => {
+                                        let _block = receiver.receive_block(
+                                            &source_adnl_id,
+                                            &block_result.block,
+                                            payload,
+                                        );
+                                    }
                                 }
-                            },
+                            }
                         }
                     };
 
+                source.borrow_mut().get_mut_statistics().out_queries_count += 1;
+
+                self.out_queries_counter.total_increment();
+
                 self.send_get_block_request(
-                    source.get_adnl_id(),
+                    &source_adnl_id_clone,
                     get_block_request,
                     get_block_response_handler,
                 );
@@ -1440,17 +1617,22 @@ impl ReceiverImpl {
     fn process_query(
         &mut self,
         adnl_id: &PublicKeyHash,
-        data: &BlockPayload,
-    ) -> Result<BlockPayload> {
-        debug!("Receiver: received query from {}: {:?}", adnl_id, data);
+        data: &BlockPayloadPtr,
+    ) -> Result<BlockPayloadPtr> {
+        instrument!();
 
-        match ton_api::Deserializer::new(&mut &data.0[..]).read_boxed::<ton_api::ton::TLObject>() {
+        trace!("Receiver: received query from {}: {:?}", adnl_id, data);
+
+        match ton_api::Deserializer::new(&mut &data.data().0[..])
+            .read_boxed::<ton_api::ton::TLObject>()
+        {
             Ok(message) => {
                 if message.is::<ton::GetDifferenceRequest>() {
                     return utils::serialize_query_boxed_response(
                         self.process_get_difference_query(
                             adnl_id,
                             &message.downcast::<ton::GetDifferenceRequest>().unwrap(),
+                            data.get_creation_time().elapsed().unwrap(),
                         ),
                     );
                 } else if message.is::<ton::GetBlockRequest>() {
@@ -1459,23 +1641,23 @@ impl ReceiverImpl {
                         &message.downcast::<ton::GetBlockRequest>().unwrap(),
                     ) {
                         Ok(response) => {
-                            let mut ret: BlockPayload = BlockPayload::default();
+                            let mut ret: RawBuffer = RawBuffer::default();
                             let mut serializer = ton_api::Serializer::new(&mut ret.0);
 
                             serializer.write_boxed(&response.0).unwrap();
-                            serializer.write_bare(&response.1).unwrap();
+                            serializer.write_bare(response.1.data()).unwrap();
 
-                            return Ok(ret);
+                            return Ok(CatchainFactory::create_block_payload(ret));
                         }
                         Err(err) => return Err(err),
                     }
                 } else if message.is::<ton::GetBlocksRequest>() {
-                    return utils::serialize_query_bare_response(self.process_get_blocks_query(
+                    return utils::serialize_query_boxed_response(self.process_get_blocks_query(
                         adnl_id,
                         &message.downcast::<ton::GetBlocksRequest>().unwrap(),
                     ));
                 } else if message.is::<ton::GetBlockHistoryRequest>() {
-                    return utils::serialize_query_bare_response(
+                    return utils::serialize_query_boxed_response(
                         self.process_get_block_history_query(
                             adnl_id,
                             &message.downcast::<ton::GetBlockHistoryRequest>().unwrap(),
@@ -1499,8 +1681,11 @@ impl ReceiverImpl {
         &mut self,
         adnl_id: &PublicKeyHash,
         query: &ton::GetDifferenceRequest,
+        query_latency: std::time::Duration,
     ) -> Result<ton::GetDifferenceResponse> {
-        debug!("Got GetDifferenceRequest: {:?}", query);
+        instrument!();
+
+        trace!("Got GetDifferenceRequest: {:?}", query);
 
         let sources_delivered_heights = &*query.rt;
 
@@ -1521,16 +1706,13 @@ impl ReceiverImpl {
             let source_ptr = self.get_source(i).clone();
             let ref source = source_ptr.borrow();
 
-            if let Some(fork_proof) = source.get_fork_proof() {
+            if let Some(fork) = source.get_fork_proof() {
                 //return differenceFork as response
-
-                let fork_proof_deserialized =
-                    deserialize_tl_bare_object::<ton::DifferenceFork>(fork_proof).unwrap();
-                let response = ton::GetDifferenceResponse::Catchain_DifferenceFork(Box::new(
-                    fork_proof_deserialized,
-                ));
-
-                return Ok(response);
+                return Ok(ton::DifferenceFork {
+                    left: fork.left.clone().only(),
+                    right: fork.right.clone().only(),
+                }
+                .into_boxed());
             }
         }
 
@@ -1559,9 +1741,23 @@ impl ReceiverImpl {
         //compute optimal number of blocks for sending
 
         const MAX_BLOCKS_TO_SEND: BlockHeight = 100;
+        const OVERLOAD_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+        const OVERLOAD_MAX_DIVIDER: f64 = 20.0;
+
+        let mut max_blocks_to_send = MAX_BLOCKS_TO_SEND;
+
+        if query_latency > OVERLOAD_DELAY {
+            let mut divider = query_latency.as_secs_f64() / OVERLOAD_DELAY.as_secs_f64();
+
+            if divider > OVERLOAD_MAX_DIVIDER {
+                divider = OVERLOAD_MAX_DIVIDER;
+            }
+
+            max_blocks_to_send = (max_blocks_to_send as f64 / divider) as i32;
+        }
 
         let mut left: BlockHeight = 0;
-        let mut right: BlockHeight = MAX_BLOCKS_TO_SEND + 1;
+        let mut right: BlockHeight = max_blocks_to_send + 1;
 
         while right - left > 1 {
             let middle = (right + left) / 2;
@@ -1576,14 +1772,14 @@ impl ReceiverImpl {
 
                     sum += if diff > middle { middle } else { diff } as i64;
                 }
+            }
 
-                //limit number of blocks for sending
+            //limit number of blocks for sending
 
-                if sum > MAX_BLOCKS_TO_SEND as i64 {
-                    right = middle;
-                } else {
-                    left = middle;
-                }
+            if sum > max_blocks_to_send as i64 {
+                right = middle;
+            } else {
+                left = middle;
             }
         }
 
@@ -1594,6 +1790,8 @@ impl ReceiverImpl {
         let mut response_sources_delivered_heights: Vec<BlockHeight> =
             sources_delivered_heights.to_vec().clone();
 
+        let mut total_sent_blocks = 0;
+
         for i in 0..sources_count {
             let diff = ours_sources_delivered_heights[i] - sources_delivered_heights[i];
 
@@ -1601,8 +1799,7 @@ impl ReceiverImpl {
                 continue;
             }
 
-            let source_ptr = self.get_source(i);
-            let source = source_ptr.borrow();
+            let source = self.get_source(i);
             let blocks_to_send = if diff > right { right } else { diff };
 
             assert!(blocks_to_send > 0);
@@ -1611,29 +1808,40 @@ impl ReceiverImpl {
                 response_sources_delivered_heights[i] += 1;
 
                 let block_ptr = source
+                    .borrow()
                     .get_block(response_sources_delivered_heights[i])
                     .unwrap();
-                let block = block_ptr.borrow();
-                let serialized_block = block.export_tl();
-                let block_update_event = ton::BlockUpdateEvent {
-                    block: serialized_block,
-                };
+                let mut block = block_ptr.borrow_mut();
 
-                //send block update event to counterparty
+                if block.mark_block_for_sending(&adnl_id) {
+                    //send block update event to counterparty
 
-                self.send_block_update_event(adnl_id, block_update_event, &block.get_payload());
+                    self.send_block_update_event(
+                        adnl_id,
+                        block.get_serialized_block_with_payload(),
+                        true,
+                    );
+
+                    total_sent_blocks += 1;
+                }
             }
+        }
+
+        const BLOCKS_SENT_WARN_THRESHOLD: usize = MAX_BLOCKS_TO_SEND as usize / 2;
+
+        if total_sent_blocks > BLOCKS_SENT_WARN_THRESHOLD {
+            warn!(
+                "Sending {} absent blocks to node with ADNL ID {}",
+                total_sent_blocks, adnl_id
+            );
         }
 
         //send response to counterparty
 
-        type TonVector = ::ton_api::ton::vector<::ton_api::ton::Bare, ::ton_api::ton::int>;
-
-        let difference = ::ton_api::ton::catchain::difference::Difference {
-            sent_upto: TonVector::from(response_sources_delivered_heights),
-        };
-        let response =
-            ::ton_api::ton::catchain::Difference::Catchain_Difference(Box::new(difference));
+        let response = ::ton_api::ton::catchain::difference::Difference {
+            sent_upto: response_sources_delivered_heights.into(),
+        }
+        .into_boxed();
 
         Ok(response)
     }
@@ -1642,8 +1850,10 @@ impl ReceiverImpl {
         &mut self,
         _adnl_id: &PublicKeyHash,
         query: &ton::GetBlockRequest,
-    ) -> Result<(ton::BlockResultResponse, BlockPayload)> {
-        debug!("Got GetBlockQuery: {:?}", query);
+    ) -> Result<(ton::BlockResultResponse, BlockPayloadPtr)> {
+        instrument!();
+
+        trace!("Got GetBlockQuery: {:?}", query);
 
         let block_hash = query.block;
         let block_result = self.get_block_by_hash(&UInt256::from(block_hash.0));
@@ -1664,7 +1874,7 @@ impl ReceiverImpl {
 
         let response = ::ton_api::ton::catchain::BlockResult::Catchain_BlockNotFound {};
 
-        return Ok((response, BlockPayload::default()));
+        return Ok((response, CatchainFactory::create_empty_block_payload()));
     }
 
     fn process_get_blocks_query(
@@ -1672,6 +1882,8 @@ impl ReceiverImpl {
         adnl_id: &PublicKeyHash,
         query: &ton::GetBlocksRequest,
     ) -> Result<CatchainSentResponse> {
+        instrument!();
+
         //limit number of blocks to be process by the request
 
         if query.blocks.len() > 100 {
@@ -1684,22 +1896,25 @@ impl ReceiverImpl {
 
         for block_hash in &query.blocks.0 {
             if let Some(block_ptr) = self.get_block_by_hash(&UInt256::from(block_hash.0)) {
-                let block = block_ptr.borrow();
+                let mut block = block_ptr.borrow_mut();
 
-                assert!(block.get_payload().len() > 0);
+                assert!(block.get_payload().data().len() > 0);
 
                 if block.get_height() <= 0 {
                     continue;
                 }
 
+                if !block.mark_block_for_sending(&adnl_id) {
+                    continue;
+                }
+
                 //send block to the requester
 
-                let serialized_block = block.export_tl();
-                let block_update_event = ton::BlockUpdateEvent {
-                    block: serialized_block,
-                };
-
-                self.send_block_update_event(adnl_id, block_update_event, &block.get_payload());
+                self.send_block_update_event(
+                    adnl_id,
+                    block.get_serialized_block_with_payload(),
+                    true,
+                );
 
                 response_blocks_count += 1;
             }
@@ -1709,7 +1924,8 @@ impl ReceiverImpl {
 
         Ok(ton_api::ton::catchain::sent::Sent {
             cnt: response_blocks_count,
-        })
+        }
+        .into_boxed())
     }
 
     fn process_get_block_history_query(
@@ -1717,6 +1933,8 @@ impl ReceiverImpl {
         adnl_id: &PublicKeyHash,
         query: &ton::GetBlockHistoryRequest,
     ) -> Result<CatchainSentResponse> {
+        instrument!();
+
         //limit number of blocks to be processed by the request
 
         let mut height = match query.height {
@@ -1744,7 +1962,7 @@ impl ReceiverImpl {
             let mut block_it = block.clone();
 
             for _i in 0..height {
-                let block = block_it.borrow();
+                let mut block = block_it.borrow_mut();
 
                 //terminate loop if the termination block has been found
 
@@ -1752,16 +1970,19 @@ impl ReceiverImpl {
                     break;
                 }
 
-                assert!(block.get_payload().len() > 0);
+                assert!(block.get_payload().data().len() > 0);
 
-                //send block back to the requester
+                if block.mark_block_for_sending(&adnl_id) {
+                    //send block back to the requester
 
-                let serialized_block = block.export_tl();
-                let block_update_event = ton::BlockUpdateEvent {
-                    block: serialized_block,
-                };
+                    self.send_block_update_event(
+                        adnl_id,
+                        block.get_serialized_block_with_payload(),
+                        true,
+                    );
 
-                self.send_block_update_event(adnl_id, block_update_event, &block.get_payload());
+                    response_blocks_count += 1;
+                }
 
                 //move to the next block
 
@@ -1773,53 +1994,44 @@ impl ReceiverImpl {
                 drop(block);
 
                 block_it = prev;
-
-                response_blocks_count += 1;
             }
         }
 
         Ok(ton_api::ton::catchain::sent::Sent {
             cnt: response_blocks_count,
-        })
+        }
+        .into_boxed())
     }
 
     /*
         Forks management
     */
 
-    fn got_fork_proof(&mut self, fork_proof: &BlockPayload) {
-        let fork_difference_result =
-            utils::deserialize_tl_bare_object::<ton::DifferenceFork>(fork_proof);
-
-        if let Err(status) = fork_difference_result {
-            warn!("Received bad fork proof {:?}: {:?}", fork_proof, status);
-            return;
-        }
-
-        let fork_diff = fork_difference_result.unwrap();
-
-        if let Err(status) = self.validate_block_dependency(&fork_diff.left) {
+    fn got_fork_proof(&mut self, fork_proof: ton::DifferenceFork) {
+        if let Err(status) = self.validate_block_dependency(&fork_proof.left) {
             warn!("Incorrect fork blame, left is invalid: {:?}", status);
             return;
         }
 
-        if let Err(status) = self.validate_block_dependency(&fork_diff.right) {
+        if let Err(status) = self.validate_block_dependency(&fork_proof.right) {
             warn!("Incorrect fork blame, right is invalid: {:?}", status);
             return;
         }
 
-        if fork_diff.left.height != fork_diff.right.height
-            || fork_diff.left.src != fork_diff.right.src
-            || fork_diff.left.data_hash != fork_diff.right.data_hash
+        if fork_proof.left.height != fork_proof.right.height
+            || fork_proof.left.src != fork_proof.right.src
+            || fork_proof.left.data_hash != fork_proof.right.data_hash
         {
             warn!("Incorrect fork blame, not a fork");
             return;
         }
 
-        let source = self.get_source(fork_diff.left.src as usize);
-        let serialized_fork_proof = serialize_tl_bare_object!(&fork_diff.left, &fork_diff.right);
+        let source = self.get_source(fork_proof.left.src as usize);
 
-        source.borrow_mut().set_fork_proof(serialized_fork_proof);
+        source.borrow_mut().set_fork_proof(ton::BlockDataFork {
+            left: fork_proof.left.clone().into_boxed(),
+            right: fork_proof.right.clone().into_boxed(),
+        });
         source.borrow_mut().mark_as_blamed(self);
     }
 
@@ -1828,6 +2040,8 @@ impl ReceiverImpl {
     */
 
     fn notify_on_started(&mut self) {
+        check_execution_time!(5000);
+
         if let Some(listener) = self.listener.upgrade() {
             listener.borrow_mut().on_started();
         }
@@ -1842,8 +2056,11 @@ impl ReceiverImpl {
         prev: BlockHash,
         deps: Vec<BlockHash>,
         forks_dep_heights: Vec<BlockHeight>,
-        payload: &BlockPayload,
+        payload: &BlockPayloadPtr,
     ) {
+        check_execution_time!(5000);
+        instrument!();
+
         if let Some(listener) = self.listener.upgrade() {
             listener.borrow_mut().on_new_block(
                 self,
@@ -1859,7 +2076,10 @@ impl ReceiverImpl {
         }
     }
 
-    fn notify_on_broadcast(&mut self, source_key_hash: &PublicKeyHash, data: &BlockPayload) {
+    fn notify_on_broadcast(&mut self, source_key_hash: &PublicKeyHash, data: &BlockPayloadPtr) {
+        check_execution_time!(5000);
+        instrument!();
+
         if let Some(listener) = self.listener.upgrade() {
             listener
                 .borrow_mut()
@@ -1868,6 +2088,7 @@ impl ReceiverImpl {
     }
 
     fn notify_on_blame(&mut self, source_id: usize) {
+        check_execution_time!(5000);
         if let Some(listener) = self.listener.upgrade() {
             listener.borrow_mut().on_blame(self, source_id);
         }
@@ -1877,8 +2098,11 @@ impl ReceiverImpl {
     fn notify_on_custom_message(
         &mut self,
         source_public_key_hash: &PublicKeyHash,
-        data: &BlockPayload,
+        data: &BlockPayloadPtr,
     ) {
+        check_execution_time!(5000);
+        instrument!();
+
         if let Some(listener) = self.listener.upgrade() {
             listener
                 .borrow_mut()
@@ -1889,9 +2113,12 @@ impl ReceiverImpl {
     fn notify_on_custom_query(
         &mut self,
         source_public_key_hash: &PublicKeyHash,
-        data: &BlockPayload,
+        data: &BlockPayloadPtr,
         response_promise: ExternalQueryResponseCallback,
     ) {
+        check_execution_time!(5000);
+        profiling::instrument!();
+
         if let Some(listener) = self.listener.upgrade() {
             listener.borrow_mut().on_custom_query(
                 self,
@@ -1908,72 +2135,119 @@ impl ReceiverImpl {
 
     fn send_block_update_event(
         &mut self,
-        receiver_id: &PublicKeyHash,
-        request: ton::BlockUpdateEvent,
-        payload: &BlockPayload,
+        receiver_adnl_id: &PublicKeyHash,
+        serialized_block_with_payload: &BlockPayloadPtr,
+        can_be_postponed: bool,
     ) {
+        instrument!();
+
         if let Some(listener) = self.listener.upgrade() {
-            debug!(
-                "Send to {}: {:?} with payload {:?}",
-                receiver_id, request, payload
+            trace!(
+                "Send to {}: {:?}",
+                receiver_adnl_id,
+                serialized_block_with_payload
             );
 
-            let mut serialized_message = serialize_tl_bare_object!(&request);
+            if let Some(ref source) = self.get_source_by_adnl_id(receiver_adnl_id) {
+                source.borrow_mut().get_mut_statistics().out_messages_count += 1;
+            }
 
-            serialized_message.0.extend(payload.iter());
+            self.out_messages_counter.increment();
 
             listener.borrow_mut().send_message(
-                receiver_id,
+                receiver_adnl_id,
                 &self.get_source(self.local_idx).borrow().get_adnl_id(),
-                &serialized_message,
+                &serialized_block_with_payload,
+                can_be_postponed,
             );
         }
     }
 
     fn send_block_update_event_multicast(
         &mut self,
-        receiver_ids: &[PublicKeyHash],
-        request: ton::BlockUpdateEvent,
-        payload: &BlockPayload,
+        receiver_adnl_ids: &[PublicKeyHash],
+        serialized_block_with_payload: &BlockPayloadPtr,
     ) {
+        instrument!();
+
         if let Some(listener) = self.listener.upgrade() {
-            debug!(
-                "Send to {:?}: {:?} with payload {:?}",
-                public_key_hashes_to_string(receiver_ids),
-                request,
-                payload
+            trace!(
+                "Send to {:?}: {:?}",
+                public_key_hashes_to_string(receiver_adnl_ids),
+                serialized_block_with_payload
             );
 
-            let mut serialized_message = serialize_tl_bare_object!(&request);
+            self.out_messages_counter.increment();
 
-            serialized_message.0.extend(payload.iter());
+            for receiver_adnl_id in receiver_adnl_ids {
+                if let Some(ref source) = self.get_source_by_adnl_id(receiver_adnl_id) {
+                    source.borrow_mut().get_mut_statistics().out_messages_count += 1;
+                }
+            }
 
             listener.borrow_mut().send_message_multicast(
-                receiver_ids,
+                receiver_adnl_ids,
                 &self.get_source(self.local_idx).borrow().get_adnl_id(),
-                &serialized_message,
+                &serialized_block_with_payload,
             );
         }
     }
 
     fn create_response_handler_boxed<T, F>(
         response_callback: F,
-    ) -> Box<dyn FnOnce(Result<BlockPayload>, &mut dyn Receiver)>
+    ) -> Box<dyn FnOnce(Result<BlockPayloadPtr>, &mut dyn Receiver)>
     where
-        T: 'static + ::ton_api::BoxedDeserialize,
-        F: FnOnce(Result<T>, BlockPayload, &mut dyn Receiver) + 'static,
+        T: 'static + ::ton_api::BoxedDeserialize + ::ton_api::AnyBoxedSerialize,
+        F: FnOnce(Result<T>, BlockPayloadPtr, &mut dyn Receiver) + 'static,
     {
         let boxed_response_callback = Box::new(response_callback);
 
-        let handler = move |result: Result<BlockPayload>, receiver: &mut dyn Receiver| match result
-        {
-            Err(err) => boxed_response_callback(Err(err), BlockPayload::default(), receiver),
-            Ok(payload) => boxed_response_callback(
-                utils::deserialize_tl_boxed_object::<T>(&payload),
-                payload,
-                receiver,
-            ),
-        };
+        let handler =
+            move |result: Result<BlockPayloadPtr>, receiver: &mut dyn Receiver| match result {
+                Err(err) => boxed_response_callback(
+                    Err(err),
+                    CatchainFactory::create_empty_block_payload(),
+                    receiver,
+                ),
+                Ok(payload) => {
+                    let data: &mut &[u8] = &mut payload.data().0.as_ref();
+                    let reader: &mut dyn std::io::Read = data;
+                    let mut deserializer = ton_api::Deserializer::new(reader);
+
+                    match deserializer.read_boxed::<ton_api::ton::TLObject>() {
+                        Ok(response) => match response.downcast::<T>() {
+                            Ok(response) => {
+                                let mut payload = Vec::new();
+
+                                match reader.read_to_end(&mut payload) {
+                                    Ok(_) => {
+                                        let payload = CatchainFactory::create_block_payload(
+                                            ton_api::ton::bytes(payload),
+                                        );
+
+                                        boxed_response_callback(Ok(response), payload, receiver)
+                                    }
+                                    Err(err) => boxed_response_callback(
+                                        Err(err.into()),
+                                        CatchainFactory::create_empty_block_payload(),
+                                        receiver,
+                                    ),
+                                }
+                            }
+                            Err(obj) => boxed_response_callback(
+                                Err(format_err!("unknown response {:?}", obj)),
+                                CatchainFactory::create_empty_block_payload(),
+                                receiver,
+                            ),
+                        },
+                        Err(err) => boxed_response_callback(
+                            Err(err),
+                            CatchainFactory::create_empty_block_payload(),
+                            receiver,
+                        ),
+                    }
+                }
+            };
 
         Box::new(handler)
     }
@@ -1981,47 +2255,53 @@ impl ReceiverImpl {
     #[allow(dead_code)]
     fn create_response_handler<T, F>(
         response_callback: F,
-    ) -> Box<dyn FnOnce(Result<BlockPayload>, &mut dyn Receiver)>
+    ) -> Box<dyn FnOnce(Result<BlockPayloadPtr>, &mut dyn Receiver)>
     where
-        T: 'static + ::ton_api::BareDeserialize,
-        F: FnOnce(Result<T>, BlockPayload, &mut dyn Receiver) + 'static,
+        T: 'static + ::ton_api::BoxedDeserialize,
+        F: FnOnce(Result<T>, BlockPayloadPtr, &mut dyn Receiver) + 'static,
     {
         let boxed_response_callback = Box::new(response_callback);
 
-        let handler = move |result: Result<BlockPayload>, receiver: &mut dyn Receiver| match result
-        {
-            Err(err) => boxed_response_callback(Err(err), BlockPayload::default(), receiver),
-            Ok(payload) => boxed_response_callback(
-                utils::deserialize_tl_bare_object::<T>(&payload),
-                payload,
-                receiver,
-            ),
-        };
+        let handler =
+            move |result: Result<BlockPayloadPtr>, receiver: &mut dyn Receiver| match result {
+                Err(err) => boxed_response_callback(
+                    Err(err),
+                    CatchainFactory::create_empty_block_payload(),
+                    receiver,
+                ),
+                Ok(payload) => boxed_response_callback(
+                    utils::deserialize_tl_boxed_object::<T>(payload.data()),
+                    payload,
+                    receiver,
+                ),
+            };
 
         Box::new(handler)
     }
 
     fn send_get_block_request<F>(
         &mut self,
-        receiver_id: &PublicKeyHash,
+        receiver_adnl_id: &PublicKeyHash,
         request: ton::GetBlockRequest,
         response_callback: F,
     ) where
-        F: FnOnce(Result<ton::BlockResultResponse>, BlockPayload, &mut dyn Receiver) + 'static,
+        F: FnOnce(Result<ton::BlockResultResponse>, BlockPayloadPtr, &mut dyn Receiver) + 'static,
     {
-        if let Some(listener) = self.listener.upgrade() {
-            trace!("...query GetBlock {}: {:?}", receiver_id, request);
+        instrument!();
 
-            let serialized_message = serialize_tl_bare_object!(&request);
+        if let Some(listener) = self.listener.upgrade() {
+            trace!("...query GetBlock {}: {:?}", receiver_adnl_id, request);
+
+            let serialized_message = serialize_tl_boxed_object!(&request);
 
             static GET_BLOCK_QUERY_TIMEOUT: Duration = Duration::from_millis(2000);
 
             listener.borrow_mut().send_query(
-                receiver_id,
+                receiver_adnl_id,
                 &self.get_source(self.local_idx).borrow().get_adnl_id(),
                 "sync blocks",
                 GET_BLOCK_QUERY_TIMEOUT,
-                &serialized_message,
+                &CatchainFactory::create_block_payload(serialized_message),
                 Self::create_response_handler_boxed(response_callback),
             );
         }
@@ -2029,25 +2309,27 @@ impl ReceiverImpl {
 
     fn send_get_difference_request<F>(
         &mut self,
-        receiver_id: &PublicKeyHash,
+        receiver_adnl_id: &PublicKeyHash,
         request: ton::GetDifferenceRequest,
         response_callback: F,
     ) where
-        F: FnOnce(Result<ton::GetDifferenceResponse>, BlockPayload, &mut dyn Receiver) + 'static,
+        F: FnOnce(Result<ton::GetDifferenceResponse>, BlockPayloadPtr, &mut dyn Receiver) + 'static,
     {
-        if let Some(listener) = self.listener.upgrade() {
-            trace!("...query GetDifference {}: {:?}", receiver_id, request);
+        instrument!();
 
-            let serialized_message = serialize_tl_bare_object!(&request);
+        if let Some(listener) = self.listener.upgrade() {
+            trace!("...query GetDifference {}: {:?}", receiver_adnl_id, request);
+
+            let serialized_message = serialize_tl_boxed_object!(&request);
 
             static GET_DIFFERENCE_QUERY_TIMEOUT: Duration = Duration::from_millis(5000);
 
             listener.borrow_mut().send_query(
-                receiver_id,
+                receiver_adnl_id,
                 &self.get_source(self.local_idx).borrow().get_adnl_id(),
                 "sync",
                 GET_DIFFERENCE_QUERY_TIMEOUT,
-                &serialized_message,
+                &CatchainFactory::create_block_payload(serialized_message),
                 Self::create_response_handler_boxed(response_callback),
             );
         }
@@ -2061,16 +2343,30 @@ impl ReceiverImpl {
         listener: ReceiverListenerPtr,
         incarnation: &SessionId,
         ids: &Vec<CatchainNode>,
-        local_id: &PublicKeyHash,
+        local_key: &PrivateKey,
         db_root: &String,
         db_suffix: &String,
         allow_unsafe_self_blocks_resync: bool,
+        metrics_receiver: Option<Arc<metrics_runtime::Receiver>>,
     ) -> Self {
-        let metrics_receiver = metrics_runtime::Receiver::builder()
-            .build()
-            .expect("failed to create metrics receiver");
+        let metrics_receiver = if let Some(metrics_receiver) = metrics_receiver {
+            metrics_receiver.clone()
+        } else {
+            Arc::new(
+                metrics_runtime::Receiver::builder()
+                    .build()
+                    .expect("failed to create metrics receiver"),
+            )
+        };
         let received_blocks_instance_counter =
             InstanceCounter::new(&metrics_receiver, &"received_blocks".to_owned());
+        let out_queries_counter =
+            ResultStatusCounter::new(&metrics_receiver, &"receiver_out_queries".to_owned());
+        let in_queries_counter =
+            ResultStatusCounter::new(&metrics_receiver, &"receiver_in_queries".to_owned());
+        let out_messages_counter = metrics_receiver.sink().counter("receiver_out_messages");
+        let in_messages_counter = metrics_receiver.sink().counter("receiver_in_messages");
+        let in_broadcasts_counter = metrics_receiver.sink().counter("receiver_in_broadcasts");
 
         let sources_count = ids.len();
 
@@ -2090,10 +2386,11 @@ impl ReceiverImpl {
             incarnation
         );
 
-        let local_key_finder = || {
+        let local_key_id_finder = || {
+            let local_id = local_key.id();
             for (i, id) in ids.iter().enumerate() {
                 if get_public_key_hash(&id.public_key) == *local_id {
-                    return (id.public_key.clone(), i);
+                    return (local_id, i);
                 }
             }
 
@@ -2102,13 +2399,42 @@ impl ReceiverImpl {
                 local_id
             );
         };
-        let (local_key, local_idx) = local_key_finder();
+        let (local_id, local_idx) = local_key_id_finder();
+
+        assert!(sources_count == 0 || local_idx != sources_count);
+
+        debug!(
+            "Receiver local_idx={}, sources_count={}",
+            local_idx, sources_count
+        );
+
+        let mut sources = Vec::new();
+        let mut public_key_hash_to_source = HashMap::new();
+        let mut adnl_id_to_source = HashMap::new();
+        let mut source_public_key_hashes = Vec::new();
+
+        for id in ids {
+            let source_id = sources.len();
+            let source = CatchainFactory::create_receiver_source(
+                source_id,
+                id.public_key.clone(),
+                &id.adnl_id,
+            );
+
+            let public_key_hash = id.public_key.id().clone();
+
+            sources.push(source.clone());
+            source_public_key_hashes.push(public_key_hash.clone());
+            public_key_hash_to_source.insert(public_key_hash.clone(), source.clone());
+            adnl_id_to_source.insert(id.adnl_id.clone(), source.clone());
+        }
 
         let now = SystemTime::now();
         let mut obj = ReceiverImpl {
-            sources: Vec::new(),
-            source_public_key_hashes: Vec::new(),
-            source_adnl_addrs: Vec::new(),
+            sources: sources,
+            public_key_hash_to_source: public_key_hash_to_source,
+            adnl_id_to_source: adnl_id_to_source,
+            source_public_key_hashes: source_public_key_hashes,
             incarnation: incarnation.clone(),
             options: Options {
                 idle_timeout: std::time::Duration::new(16, 0),
@@ -2124,13 +2450,18 @@ impl ReceiverImpl {
             last_sent_block: root_block.clone(),
             _local_ids: ids.to_vec(),
             local_id: local_id.clone(),
-            local_key: local_key,
+            local_key: local_key.clone(),
             local_idx: local_idx,
             total_forks: 0,
             neighbours: Vec::new(),
             listener: listener,
             metrics_receiver: metrics_receiver,
             received_blocks_instance_counter: received_blocks_instance_counter,
+            out_queries_counter: out_queries_counter,
+            in_queries_counter: in_queries_counter,
+            out_messages_counter: out_messages_counter,
+            in_messages_counter: in_messages_counter,
+            in_broadcasts_counter: in_broadcasts_counter,
             pending_in_db: 0,
             db: None,
             read_db: false,
@@ -2148,30 +2479,6 @@ impl ReceiverImpl {
             rng: rand::thread_rng(),
         };
 
-        for id in ids {
-            let source_id = obj.sources.len();
-            let source = CatchainFactory::create_receiver_source(
-                source_id,
-                id.public_key.clone(),
-                &id.adnl_id,
-            );
-
-            obj.sources.push(source);
-        }
-
-        assert!(sources_count == 0 || obj.local_idx != sources_count);
-
-        obj.source_public_key_hashes = obj
-            .sources
-            .iter()
-            .map(|source| source.borrow().get_public_key_hash().clone())
-            .collect();
-        obj.source_adnl_addrs = obj
-            .sources
-            .iter()
-            .map(|source| source.borrow().get_adnl_id().clone())
-            .collect();
-
         obj.add_received_block(root_block.clone());
 
         obj.start_up_db();
@@ -2182,11 +2489,11 @@ impl ReceiverImpl {
     }
 
     pub(crate) fn create_dummy_listener() -> Rc<RefCell<dyn ReceiverListener>> {
-        Rc::new(RefCell::new(DummyListener::new()))
+        DummyListener::create()
     }
 
     pub(crate) fn create_dummy() -> ReceiverPtr {
-        let local_id = parse_hex_as_public_key_hash(
+        let local_key = parse_hex_as_private_key(
             "0000000000000000000000000000000000000000000000000000000000000000",
         );
         let ids: Vec<CatchainNode> = Vec::new();
@@ -2200,10 +2507,11 @@ impl ReceiverImpl {
             Rc::downgrade(&receiver_listener),
             &incarnation,
             &ids,
-            &local_id,
+            &local_key,
             &db_root,
             &db_suffix,
             allow_unsafe_self_blocks_resync,
+            None,
         )
     }
 
@@ -2211,44 +2519,46 @@ impl ReceiverImpl {
         listener: ReceiverListenerPtr,
         incarnation: &SessionId,
         ids: &Vec<CatchainNode>,
-        local_id: &PublicKeyHash,
+        local_key: &PrivateKey,
         db_root: &String,
         db_suffix: &String,
         allow_unsafe_self_blocks_resync: bool,
+        metrics: Option<Arc<metrics_runtime::Receiver>>,
     ) -> ReceiverPtr {
         Rc::new(RefCell::new(ReceiverImpl::new(
             listener,
             incarnation,
             ids,
-            local_id,
+            local_key,
             db_root,
             db_suffix,
             allow_unsafe_self_blocks_resync,
+            metrics,
         )))
     }
 
     fn create_block_with_payload(
         &mut self,
         block: &ton::Block,
-        payload: BlockPayload,
+        payload: BlockPayloadPtr,
     ) -> Result<ReceivedBlockPtr> {
+        instrument!();
+
         if block.height == 0 {
             return Ok(self.root_block.clone());
         }
 
-        let block_id = self.get_block_id(block, &payload);
+        let block_id = self.get_block_id(block, payload.data());
         let block_hash = get_block_id_hash(&block_id);
 
         if let Some(existing_block_entry) = self.blocks.get(&block_hash) {
             let existing_block = existing_block_entry.clone();
 
             if !existing_block.borrow().is_initialized() {
-                if log_enabled!(log::Level::Debug) {
-                    trace!(
-                        "...create block with hash={:?} exists but has not been initialized",
-                        block_hash
-                    );
-                }
+                trace!(
+                    "...create block with hash={:?} exists but has not been initialized",
+                    block_hash
+                );
 
                 existing_block
                     .borrow_mut()
@@ -2257,9 +2567,7 @@ impl ReceiverImpl {
 
             return Ok(existing_block.clone());
         } else {
-            if log_enabled!(log::Level::Debug) {
-                trace!("...create block with hash={:?}", block_hash);
-            }
+            trace!("...create block with hash={:?}", block_hash);
 
             let new_block =
                 received_block::ReceivedBlockImpl::create_with_payload(&block, payload, self)?;

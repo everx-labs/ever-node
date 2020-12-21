@@ -114,6 +114,8 @@ impl RoundAttemptState for RoundAttemptStateImpl {
         src_idx: u32,
         attempt_id: u32,
     ) -> Option<ton::Message> {
+        profiling::instrument!();
+
         trace!(
             "...create attempt action for source={} and attempt={}",
             src_idx,
@@ -183,6 +185,8 @@ impl RoundAttemptState for RoundAttemptStateImpl {
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn RoundAttemptState> {
+        profiling::instrument!();
+
         let self_cloned = Self::new(
             self.sequence_number,
             self.votes.move_to_persistent(cache),
@@ -200,6 +204,8 @@ impl RoundAttemptState for RoundAttemptStateImpl {
     */
 
     fn dump(&self, desc: &dyn SessionDescription) -> String {
+        profiling::instrument!();
+
         let mut result = "".to_string();
 
         result = format!("{}      - attempt #{}\n", result, self.sequence_number);
@@ -353,6 +359,8 @@ impl RoundAttemptStateWrapper for RoundAttemptStatePtr {
         message: &ton::Message,
         round_state: &dyn RoundState,
     ) -> RoundAttemptStatePtr {
+        profiling::instrument!();
+
         get_impl(&**self).apply_action_dispatch(
             desc,
             src_idx,
@@ -370,6 +378,8 @@ impl RoundAttemptStateWrapper for RoundAttemptStatePtr {
         attempt_id: u32,
         round_state: &dyn RoundState,
     ) -> (RoundAttemptStatePtr, bool) {
+        profiling::instrument!();
+
         trace!(
             "......actualizing attempt {} of round {} for source {}",
             attempt_id,
@@ -394,6 +404,8 @@ impl RoundAttemptStateWrapper for RoundAttemptStatePtr {
 
 impl Merge<PoolPtr<dyn RoundAttemptState>> for PoolPtr<dyn RoundAttemptState> {
     fn merge(&self, right: &Self, desc: &mut dyn SessionDescription) -> Self {
+        profiling::instrument!();
+
         let left = &get_impl(&**self);
         let right = &get_impl(&**right);
 
@@ -551,6 +563,8 @@ impl RoundAttemptStateImpl {
         round_state: &dyn RoundState,
         default_state: RoundAttemptStatePtr,
     ) -> RoundAttemptStatePtr {
+        profiling::instrument!();
+
         //dispatching incremental message based on its ID
 
         trace!("...dispatching incoming attempt message");
@@ -620,6 +634,8 @@ impl RoundAttemptStateImpl {
         round_state: &dyn RoundState,
         default_state: RoundAttemptStatePtr,
     ) -> RoundAttemptStatePtr {
+        profiling::instrument!();
+
         trace!("...apply vote-for action");
 
         //check the node has already sent vote-for message
@@ -695,6 +711,8 @@ impl RoundAttemptStateImpl {
         round_state: &dyn RoundState,
         default_state: RoundAttemptStatePtr,
     ) -> (RoundAttemptStatePtr, bool) {
+        profiling::instrument!();
+
         trace!("......apply default action");
 
         //try to vote
@@ -758,6 +776,8 @@ impl RoundAttemptStateImpl {
         round_state: &dyn RoundState,
         default_state: RoundAttemptStatePtr,
     ) -> (RoundAttemptStatePtr, bool) {
+        profiling::instrument!();
+
         trace!("......try to vote");
 
         //check if we have already received a vote from the node
@@ -855,6 +875,8 @@ impl RoundAttemptStateImpl {
         _round_state: &dyn RoundState,
         default_state: RoundAttemptStatePtr,
     ) -> (RoundAttemptStatePtr, bool) {
+        profiling::instrument!();
+
         trace!("......try to precommit");
 
         //check if we have already received a precommit from the node
@@ -942,12 +964,19 @@ impl RoundAttemptStateImpl {
         precommitted: &BoolVectorPtr,
         vote_for: &Option<SentBlockPtr>,
     ) -> HashType {
+        //The mistake below in 'vote_for' hash repeats the mistake in Telegram's node
+        //reference implementation of ValidatorSessionRoundAttemptState::create_hash function.
+        //Such mistake is needed to generate the same hash as in Telegram's node
+
         crate::utils::compute_hash(ton::hashable::ValidatorSessionRoundAttempt {
             seqno: sequence_number as ton::int,
             votes: votes.get_ton_hash(),
             precommitted: precommitted.get_ton_hash(),
             vote_for_inited: vote_for.is_some() as ton::int,
-            vote_for: vote_for.get_ton_hash(),
+            vote_for: match vote_for.get_ton_hash() {
+                0 => 0,
+                _ => 1,
+            },
         })
     }
 
@@ -977,6 +1006,8 @@ impl RoundAttemptStateImpl {
         precommitted: BoolVectorPtr,
         vote_for: Option<SentBlockPtr>,
     ) -> RoundAttemptStatePtr {
+        profiling::instrument!();
+
         let hash = Self::compute_hash(sequence_number, &votes, &precommitted, &vote_for);
         let body = Self::new(
             sequence_number,

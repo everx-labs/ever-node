@@ -50,17 +50,17 @@ struct Source {
 }
 
 pub(crate) struct SessionDescriptionImpl {
-    options: SessionOptions,                      //validator session options
-    persistent_objects_cache: Vec<CacheEntryPtr>, //cache of persistent objects
-    temp_objects_cache: Vec<CacheEntryPtr>,       //cache of temporary objects objects
-    sources: Vec<Source>,                         //list of sources
-    rev_sources: HashMap<PublicKeyHash, u32>,     //mapping between public key hash and source index
-    cutoff_weight: ValidatorWeight,               //cutoff weight for validators decision making
-    total_weight: ValidatorWeight,                //total weight of all validators
-    self_idx: u32,                                //index of this validator in a list of sources
-    rng: ThreadRng,                               //random generator
-    current_time: Option<std::time::SystemTime>,  //current time for log replaying
-    metrics_receiver: metrics_runtime::Receiver,  //receiver for profiling metrics
+    options: SessionOptions,                          //validator session options
+    persistent_objects_cache: Vec<CacheEntryPtr>,     //cache of persistent objects
+    temp_objects_cache: Vec<CacheEntryPtr>,           //cache of temporary objects objects
+    sources: Vec<Source>,                             //list of sources
+    rev_sources: HashMap<PublicKeyHash, u32>, //mapping between public key hash and source index
+    cutoff_weight: ValidatorWeight,           //cutoff weight for validators decision making
+    total_weight: ValidatorWeight,            //total weight of all validators
+    self_idx: u32,                            //index of this validator in a list of sources
+    rng: ThreadRng,                           //random generator
+    current_time: Option<std::time::SystemTime>, //current time for log replaying
+    metrics_receiver: Arc<metrics_runtime::Receiver>, //receiver for profiling metrics
     sent_blocks_instance_counter: CachedInstanceCounter, //instance counter for sent blocks
     block_candidate_signatures_instance_counter: CachedInstanceCounter, //instance counter for block candidate signatures
     block_candidates_instance_counter: CachedInstanceCounter, //instance counter for block candidates
@@ -493,6 +493,7 @@ impl SessionDescriptionImpl {
         options: &SessionOptions,
         nodes: &Vec<SessionNode>,
         local_id: &PublicKeyHash,
+        metrics_receiver: Option<Arc<metrics_runtime::Receiver>>,
     ) -> Self {
         let mut total_weight = 0;
         let mut sources = Vec::new();
@@ -526,9 +527,15 @@ impl SessionDescriptionImpl {
             }
         };
 
-        let metrics_receiver = metrics_runtime::Receiver::builder()
-            .build()
-            .expect("failed to create validator session metrics receiver");
+        let metrics_receiver = if let Some(metrics_receiver) = metrics_receiver {
+            metrics_receiver.clone()
+        } else {
+            Arc::new(
+                metrics_runtime::Receiver::builder()
+                    .build()
+                    .expect("failed to create validator session metrics receiver"),
+            )
+        };
 
         let body = Self {
             options: *options,
