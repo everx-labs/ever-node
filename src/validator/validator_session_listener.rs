@@ -1,9 +1,9 @@
-use std::{fmt, time::{*, SystemTime}, sync::*};
+use std::{fmt, time::{*, SystemTime, SystemTimeError}, sync::*};
 use tokio::{time::timeout, runtime::Runtime};
 
 use validator_session::*;
 use crate::validator::validator_group::{ValidatorGroup, ValidatorGroupStatus};
-use crossbeam_channel::{Sender, Receiver, unbounded};
+use crossbeam_channel::{Sender, Receiver, unbounded, TryRecvError};
 
 pub struct OnBlockCommitted {
     round: u32,
@@ -205,30 +205,50 @@ async fn process_validation_action (action: ValidationAction, g: Arc<ValidatorGr
     }
 }
 
+const VALIDATION_ACTION_TOO_LONG: Duration = Duration::from_secs(3);
+const QUEUE_EMPTY_TOO_LONG: Duration = Duration::from_secs(10);
+const QUEUE_POLLING_DELAY: Duration = Duration::from_millis(10);
+
 pub async fn process_validation_queue(
         queue: Arc<Receiver<ValidationAction>>,
         g: Arc<ValidatorGroup>,
         rt: Arc<Runtime>
 ) {
     let mut cur_round = 0;
+    let mut last_action = SystemTime::now();
 
-    while g.clone().get_status().await != ValidatorGroupStatus::Stopped {
+    'queue_loop: while g.clone().get_status().await != ValidatorGroupStatus::Stopped {
         let g_clone = g.clone();
         let g_info = g_clone.info().await;
-        match queue.recv_timeout(Duration::from_secs(10)) {
-            Err(_r) => log::info!(target: "validator", "Session {}: queue empty", g_info),
+
+        match queue.try_recv() { //recv_timeout(Duration::from_secs(10))
+            Err(TryRecvError::Disconnected) => {
+                log::warn!(target: "validator", "Session {}: validation action queue disconnected, exiting", g_info);
+                break 'queue_loop;
+            },
+            Err(TryRecvError::Empty) => {
+                tokio::time::delay_for(QUEUE_POLLING_DELAY).await;
+                match (last_action + QUEUE_EMPTY_TOO_LONG).elapsed() {
+                    Ok(_) => {
+                        log::info!(target: "validator", "Session {}: validation action queue empty", g_info);
+                        last_action = SystemTime::now();
+                    },
+                    Err(SystemTimeError{..}) => ()
+                }
+            },
             Ok(action) => {
+                last_action = SystemTime::now();
                 let action_str = format!("{}", action);
+
+                log::info!(target: "validator", "Validation action request received from queue: {}, {}", action_str, g_info);
 
                 if let Some(new_round) = action.get_round() {
                     if new_round < cur_round {
                         log::warn!(target: "validator", "Round {} is over, current round is {}; skipping action", new_round, cur_round);
-                        continue
+                        continue 'queue_loop;
                     }
                     cur_round = new_round;
                 }
-
-                log::info!(target: "validator", "Starting validation action: {}, {}", action_str, g_info);
 
                 let start_time = SystemTime::now();
                 let mut join_handle = rt.spawn(async move {
@@ -236,18 +256,19 @@ pub async fn process_validation_queue(
                 });
 
                 loop {
-                    match timeout(Duration::from_secs(3), &mut join_handle).await {
+                    match timeout(VALIDATION_ACTION_TOO_LONG, &mut join_handle).await {
                         Ok(res) => {
                             let res_txt = match res {
                                 Ok(_) => "Ok".to_string(),
                                 Err(r) => format!("Error: {}", r)
                             };
-                            log::info!(target: "validator", "Validation action {}, {} stopped: `{}`", action_str, g_info, res_txt);
+                            log::info!(target: "validator", "Validation action {}, {} finished: `{}`", action_str, g_info, res_txt);
                             break
                         },
-                        Err(msg) => log::warn!(target: "validator", "Validation action {}, {} takes {:#?}, too long: `{}`",
-                            action_str, g_info, start_time.elapsed().unwrap(), msg
-                        )
+                        Err(tokio::time::Elapsed{..}) =>
+                            log::warn!(target: "validator", "Validation action {}, {} takes {:#?} and not finished",
+                                action_str, g_info, start_time.elapsed().unwrap()
+                            )
                     }
 
                     if g.clone().get_status().await == ValidatorGroupStatus::Stopped {
@@ -255,7 +276,7 @@ pub async fn process_validation_queue(
                             "Session processing cancelled, but validation action took {:#?} and not finished {}, {}",
                             start_time.elapsed().unwrap(), action_str, g_info
                         );
-                        break;
+                        break 'queue_loop;
                     }
                 }
             }
