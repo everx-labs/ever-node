@@ -469,6 +469,61 @@ impl NodeNetwork {
 
         Ok(result as Arc<dyn FullNodeOverlayClient>)
     }
+
+    fn search_validator_keys(
+        dht: Arc<DhtNode>,
+        overlay: Arc<OverlayNode>,
+        validators_contexts: Arc<Cache<UInt256, ValidatorSetContext>>,
+        validator_list_id: UInt256,
+        validators: Vec<CatchainNode>
+    ) {
+        const SLEEP_TIME: u64 = 1;  //secs
+        tokio::spawn(async move {
+            let mut current_validators = validators;
+            loop {
+                match Self::search_validator_keys_round(dht.clone(), overlay.clone(), current_validators).await {
+                    Ok(looser_validators) => {
+                        current_validators = looser_validators;
+                    },
+                    Err(e) => {
+                        log::warn!("{:?}", e);
+                        break;
+                    }
+                }
+                if current_validators.is_empty() {
+                    break;
+                }
+                delay_for(Duration::from_secs(SLEEP_TIME)).await;
+
+                if validators_contexts.get(&validator_list_id).is_none() {
+                    break;
+                }
+            }
+        });
+    }
+
+    async fn search_validator_keys_round(
+        dht: Arc<DhtNode>,
+        overlay: Arc<OverlayNode>,
+        validators: Vec<CatchainNode>
+    ) -> Result<Vec<CatchainNode>> {
+        let mut loser_validators = Vec::new();
+        for val in validators {
+            let res = DhtNode::find_address(&dht, &val.adnl_id).await;
+
+            match res {
+                Ok((addr, key)) => {
+                    log::info!("addr: {:?}, key: {:x?}", &addr, &key);
+                    overlay.add_private_peers(&val.adnl_id, vec![(addr, key)])?;
+                }
+                Err(e) => { 
+                    loser_validators.push(val.clone());
+                    log::error!("find address failed: {:?}", e); 
+                }
+            }
+        }
+        Ok(loser_validators)
+    }
 }
 
 impl Drop for NodeNetwork {
@@ -531,25 +586,6 @@ impl OverlayOperations for NodeNetwork {
         self.overlay.add_consumer(overlay_id, consumer)?;
         Ok(())
     }
-
-    /*fn load_validator_adnl_keys(&self, validators: &Vec<CatchainNode>) -> Result<(Vec<CatchainNode>)> {
-        let mut loser_validators = Vec::new();
-        for val in validators {
-            if val.public_key.id() == local_validator_key.id() {
-                continue;
-            }
-            let res = DhtNode::find_address(&self.dht, &val.adnl_id).await;
-
-            match res {
-                Ok((addr, key)) => {
-                    log::info!("addr: {:?}, key: {:x?}", &addr, &key);
-                    peers.push((addr, key));
-                    self.overlay.add_private_peers(val.adnl_id, vec![(addr, key)])?;
-                }
-                Err(e) => { log::error!("find address failed: {:?}", e); }
-            }
-        }
-    }*/
 }
 
 #[async_trait::async_trait]
@@ -565,17 +601,15 @@ impl PrivateOverlayOperations for NodeNetwork {
         let mut local_validator_adnl_key_raw = None;
         let mut election_id_raw = None;
         for validator in validators {
-            if let Some(validator_key) = self.config_handler.get_validator_key(validator.public_key.id()).await {
-                local_validator_key_raw = Some(validator_key.0);
-                if let Some (adnl_key) = self.config_handler.get_validator_key(&validator.adnl_id).await {
-                    local_validator_adnl_key_raw = Some(adnl_key.0);
-                    election_id_raw = Some(adnl_key.1);
+            if let Some((validator_key, _)) = self.config_handler.get_validator_key(validator.public_key.id()).await {
+                local_validator_key_raw = Some(validator_key);
+                if let Some ((adnl_key, election_id)) = self.config_handler.get_validator_key(&validator.adnl_id).await {
+                    local_validator_adnl_key_raw = Some(adnl_key);
+                    election_id_raw = Some(election_id);
                 }
                 break;
             }
         }
-
-        let mut peers = Vec::new();
 
         let local_validator_key: KeyOption = match local_validator_key_raw {
             Some(key) => { key },
@@ -592,20 +626,25 @@ impl PrivateOverlayOperations for NodeNetwork {
             None => { return Ok(None) }
         };
 
-        let mut adnl_ids = Vec::new();
+        let mut peers = Vec::new();
+        let mut skiped_peers = Vec::new();
+        let mut peers_ids = Vec::new();
+
         for val in validators {
             if val.public_key.id() == local_validator_key.id() {
                 continue;
             }
-            adnl_ids.push(val.adnl_id.clone());
-            let res = DhtNode::find_address(&self.dht, &val.adnl_id).await;
+            peers_ids.push(val.adnl_id.clone());
 
-            match res {
+            match DhtNode::find_address(&self.dht, &val.adnl_id).await {
                 Ok((addr, key)) => {
                     log::info!("addr: {:?}, key: {:x?}", &addr, &key);
                     peers.push((addr, key));
                 }
-                Err(e) => { log::error!("find address failed: {:?}", e); }
+                Err(e) => {
+                    log::error!("find address failed: {:?}", e);
+                    skiped_peers.push(val.clone());
+                }
             }
         }
 
@@ -620,9 +659,9 @@ impl PrivateOverlayOperations for NodeNetwork {
             self.adnl.key_by_id(&local_validator_adnl_key.id().clone())?
         };
 
-        let _validator_adnl_peers = self.overlay.add_private_peers(adnl_key.id(), peers)?;
+        self.overlay.add_private_peers(adnl_key.id(), peers)?;
         let validator_set_context = ValidatorSetContext {
-            validator_peers: adnl_ids,
+            validator_peers: peers_ids,
             validator_key: Arc::new(local_validator_key),
             validator_adnl_key: adnl_key.clone(),
             election_id: election_id.clone()
@@ -633,6 +672,16 @@ impl PrivateOverlayOperations for NodeNetwork {
             validator_set_context,
             &self.validator_context.sets_contexts
         );
+
+        if !skiped_peers.is_empty() {
+            Self::search_validator_keys(
+                self.dht.clone(), 
+                self.overlay.clone(),
+                self.validator_context.sets_contexts.clone(),
+                validator_list_id,
+                skiped_peers
+            );
+        }
 
         if store {
             NodeNetwork::periodic_store_ip_addr(
