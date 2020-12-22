@@ -3,18 +3,62 @@ use crate::{
     shard_state::ShardStateStuff,
     block_proof::BlockProofStuff,
     engine::{Engine, LastMcBlockId, ShardsClientMcBlockId, STATSD},
-    engine_traits::EngineOperations,
+    engine_traits::{EngineOperations, PrivateOverlayOperations},
     db::{BlockHandle, NodeState},
     error::NodeError,
-    network::full_node_client::Attempts
+    network::full_node_client::Attempts,
+    types::top_block_descr::TopBlockDescrStuff,
 };
 
+use adnl::common::KeyOption;
+use catchain::{
+    CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
+};
+use overlay::PrivateOverlayShortId;
 use std::{sync::Arc, ops::Deref, convert::TryInto};
-use ton_types::{fail, error, Result};
-use ton_block::{BlockIdExt, AccountIdPrefixFull};
+use ton_types::{fail, error, Result, UInt256};
+use ton_api::ton::ton_node::broadcast::BlockBroadcast;
+use ton_block::{BlockIdExt, AccountIdPrefixFull, ShardIdent, Message, SHARD_FULL, MASTERCHAIN_ID};
 
 #[async_trait::async_trait]
 impl EngineOperations for Engine {
+
+    fn validator_network(&self) -> Arc<dyn PrivateOverlayOperations> {
+        Engine::validator_network(self)
+    }
+
+    async fn set_validator_list(
+        &self, 
+        validator_list_id: UInt256,
+        validators: &Vec<CatchainNode>
+    ) -> Result<Option<Arc<KeyOption>>> {
+        self.validator_network().set_validator_list(validator_list_id, validators).await
+    }
+
+    async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
+        self.validator_network().remove_validator_list(validator_list_id).await
+    }
+
+    fn create_catchain_client(
+        &self,
+        validator_list_id: UInt256,
+        overlay_short_id : &Arc<PrivateOverlayShortId>,
+        nodes_public_keys : &Vec<CatchainNode>,
+        listener : CatchainOverlayListenerPtr,
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr
+    ) -> Result<Arc<dyn CatchainOverlay + Send>> {
+        self.validator_network().create_catchain_client(
+            validator_list_id,
+            overlay_short_id,
+            nodes_public_keys,
+            listener,
+            _log_replay_listener
+        )
+    }
+
+    fn stop_catchain_client(&self, overlay_short_id: &Arc<PrivateOverlayShortId>) {
+        self.validator_network().stop_catchain_client(overlay_short_id)
+    }
 
     fn load_block_handle(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>> {
         self.db().load_block_handle(id)
@@ -109,19 +153,21 @@ impl EngineOperations for Engine {
         ShardsClientMcBlockId(id.into()).store_to_db(self.db().deref())
     }
 
-    async fn apply_block(self: Arc<Self>, handle: &BlockHandle, block: Option<&BlockStuff>, mc_seq_no: u32) -> Result<()> {
-        while !handle.applied() {
+    async fn apply_block(self: Arc<Self>, handle: &BlockHandle, block: Option<&BlockStuff>, mc_seq_no: u32, pre_apply: bool) -> Result<()> {
+        // if it is pre-apply we are waiting for `state_inited` or `applied`
+        // otherwise - only for applied
+        while !((pre_apply && handle.state_inited()) || handle.applied()) {
             if let Some(block) = block {
                 if self.block_applying_awaiters().do_or_wait(
                     handle.id(),
-                    self.clone().apply_block_worker(handle, block, mc_seq_no)
+                    self.clone().apply_block_worker(handle, block, mc_seq_no, pre_apply)
                 ).await?.is_some() {
                     break;
                 }
             } else {
                 if self.block_applying_awaiters().do_or_wait(
                     handle.id(),
-                    self.clone().download_and_apply_block_worker(handle, mc_seq_no)
+                    self.clone().download_and_apply_block_worker(handle, mc_seq_no, pre_apply)
                 ).await?.is_some() {
                     break;
                 }
@@ -130,16 +176,27 @@ impl EngineOperations for Engine {
         Ok(())
     }
 
-    async fn download_block(&self, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
-        self.download_block_worker(id).await
+    async fn download_block(
+        &self, 
+        handle: &BlockHandle, 
+        limit: Option<u32>
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
+        if handle.data_inited() {
+            Ok((
+                self.load_block(handle).await?,
+                self.load_block_proof(handle, !handle.id().shard().is_masterchain()).await?
+            ))
+        } else {
+            self.download_block_worker(handle.id(), limit).await
+        }
     }
 
     async fn download_block_proof(&self, id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff> {
-        self.download_block_proof_worker(id, is_link, key_block).await
+        self.download_block_proof_worker(id, is_link, key_block, None).await
     }
 
     async fn download_next_block(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
-        self.download_next_block_worker(prev_id).await
+        self.download_next_block_worker(prev_id, None).await
     }
 
     async fn download_state(&self, block_id: &BlockIdExt, master_id: &BlockIdExt) -> Result<ShardStateStuff> {
@@ -148,22 +205,18 @@ impl EngineOperations for Engine {
     }
 
     async fn download_zerostate(&self, id: &BlockIdExt) -> Result<(ShardStateStuff, Vec<u8>)> {
-        loop {
-            let overlay = self.get_full_node_overlay(id.shard().workchain_id(), id.shard().shard_prefix_with_tag()).await?;
-            let attempts = Attempts {
-                limit: 3,
-                count: 0
-            };
-            match overlay.download_zero_state(id, &attempts).await {
-                Err(e) => log::warn!("Can't load zerostate {}: {:?}", id, e),
-                Ok(None) => log::warn!("Can't load zerostate {}: none returned", id),
-                Ok(Some(zs)) => return Ok(zs)
-            }
-        }
+        self.download_zerostate_worker(id, None).await
     }
 
     async fn store_block(&self, handle: &BlockHandle, block: &BlockStuff) -> Result<()> {
-        self.db().store_block_data(handle, block).await
+        self.db().store_block_data(handle, block).await?;
+        if handle.id().shard().is_masterchain() {
+            if handle.is_key_block()? {
+                self.update_last_known_keyblock_seqno(handle.id().seq_no());
+            }
+            self.update_last_known_mc_block_seqno(handle.id().seq_no());
+        }
+        Ok(())
     }
 
     async fn store_block_proof(&self, handle: &BlockHandle, proof: &BlockProofStuff) -> Result<()> {
@@ -298,6 +351,7 @@ impl EngineOperations for Engine {
             block_id, 
             5, 
             &Attempts {
+//                total_limit: 0,
                 limit: 10,
                 count: 0
             }
@@ -318,7 +372,7 @@ impl EngineOperations for Engine {
         Ok(())
     }
 
-    fn initial_sync_disabled(&self) -> bool { (self as &Engine).initial_sync_disabled() }
+    fn initial_sync_disabled(&self) -> bool { Engine::initial_sync_disabled(self) }
 
     fn init_mc_block_id(&self) -> &BlockIdExt { (self as &Engine).init_mc_block_id() }
 
@@ -346,11 +400,71 @@ impl EngineOperations for Engine {
         client.download_archive(masterchain_seqno).await
     }
 
-    async fn check_initial_sync_complete(&self) -> Result<bool> {
-        self.do_check_initial_sync_complete().await
-    }
-
     fn assign_mc_ref_seq_no(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()> {
         self.db().assign_mc_ref_seq_no(handle, mc_seq_no)
+    }
+
+    async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()> {
+        let overlay = self.get_full_node_overlay(
+            MASTERCHAIN_ID, //broadcast.id.workchain, by t-node all broadcast are sending into masterchain overlay
+            SHARD_FULL, //broadcast.id.shard as u64
+        ).await?;
+        overlay.send_block_broadcast(broadcast).await
+    }
+
+    async fn send_top_shard_block_description(&self, tbd: TopBlockDescrStuff) -> Result<()> {
+        let overlay = self.get_full_node_overlay(
+            MASTERCHAIN_ID, //tbd.proof_for().shard().workchain_id(), by t-node all broadcast are sending into masterchain overlay
+            SHARD_FULL, //tbd.proof_for().shard().shard_prefix_with_tag()
+        ).await?;
+
+        overlay.send_top_shard_block_description(tbd).await
+    }
+
+    async fn check_sync(&self) -> Result<bool> {
+        Engine::check_sync(self).await
+    }
+
+    fn set_will_validate(&self, will_validate: bool) {
+        Engine::set_will_validate(self, will_validate);
+    }
+
+    fn is_validator(&self) -> bool {
+        self.will_validate()
+    }
+
+    fn new_external_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
+        if !self.is_validator() {
+            return Ok(());
+        }
+        self.external_messages().new_message(id, message, self.now())
+    }
+
+    fn new_external_message_raw(&self, data: &[u8]) -> Result<()> {
+        if !self.is_validator() {
+            return Ok(());
+        }
+        self.external_messages().new_message_raw(data, self.now())
+    }
+
+    fn get_external_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
+        self.external_messages().get_messages(shard, self.now())
+    }
+
+    fn complete_external_messages(&self, to_delay: Vec<UInt256>, to_delete: Vec<UInt256>) -> Result<()> {
+        self.external_messages().complete_messages(to_delay, to_delete, self.now())
+    }
+
+    fn aux_mc_shard_states(&self) -> &lockfree::map::Map<u32, ShardStateStuff> {
+        Engine::aux_mc_shard_states(self)
+    }
+    fn shard_states(&self) -> &lockfree::map::Map<ShardIdent, ShardStateStuff> {
+        Engine::shard_states(self)
+    }
+
+    // Get current list of new shard blocks with respect to last mc block.
+    // If given mc_seq_no is not equal to last mc seq_no - function fails.
+    fn get_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+        self.shard_blocks().get_shard_blocks(mc_seq_no)
     }
 }

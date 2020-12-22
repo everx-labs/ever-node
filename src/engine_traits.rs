@@ -1,24 +1,29 @@
 use crate::{
-    block::{BlockStuff}, engine::Engine, 
+    block::{BlockStuff}, 
     shard_state::ShardStateStuff,
-    network::full_node_client::FullNodeOverlayClient,
+    network::{full_node_client::FullNodeOverlayClient},
     block_proof::BlockProofStuff,
     db::BlockHandle,
-    jaeger
+    types::top_block_descr::TopBlockDescrStuff,
+    ext_messages::create_ext_message,
+    jaeger,
 };
 
+use adnl::common::KeyOption;
+use catchain::{CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr};
 use std::{
-    io::Cursor,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use ton_types::{deserialize_tree_of_cells, fail, Result};
-use overlay::{OverlayId, OverlayShortId, QueriesConsumer};
-use ton_block::{AccountIdPrefixFull, BlockIdExt, Deserializable, Message, ShardIdent};
+use ton_types::{fail, Result, UInt256};
+use overlay::{OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId};
+use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, HashmapAugType};
+use ton_api::ton::ton_node::broadcast::BlockBroadcast;
 
 #[async_trait::async_trait]
 pub trait OverlayOperations : Sync + Send {
     async fn start(self: Arc<Self>) -> Result<Arc<dyn FullNodeOverlayClient>>;
+    async fn get_peers_count(&self, masterchain_zero_state_id: &BlockIdExt) -> Result<usize>;
     async fn get_overlay(
         self: Arc<Self>, 
         overlay_id: (Arc<OverlayShortId>, OverlayId)
@@ -27,10 +32,64 @@ pub trait OverlayOperations : Sync + Send {
     fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<OverlayShortId>, OverlayId)> ;
 }
 
+#[async_trait::async_trait]
+pub trait PrivateOverlayOperations: Sync + Send {
+    async fn set_validator_list(
+        &self, 
+        validator_list_id: UInt256,
+        validators: &Vec<CatchainNode>
+    ) -> Result<Option<Arc<KeyOption>>>;
+
+    async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool>;
+
+    fn create_catchain_client(
+        &self,
+        validator_list_id: UInt256,
+        overlay_short_id : &Arc<PrivateOverlayShortId>,
+        nodes_public_keys : &Vec<CatchainNode>,
+        listener : CatchainOverlayListenerPtr,
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr
+    ) -> Result<Arc<dyn CatchainOverlay + Send>>;
+
+    fn stop_catchain_client(&self, overlay_short_id: &Arc<PrivateOverlayShortId>);
+}
+
 // TODO make separate traits for read and write operations (may be critical and not etc.)
 #[async_trait::async_trait]
 #[allow(unused)]
 pub trait EngineOperations : Sync + Send {
+
+    fn validator_network(&self) -> Arc<dyn PrivateOverlayOperations> {
+        unimplemented!()
+    }
+
+    // Validator specific operations
+    async fn set_validator_list(
+        &self, 
+        validator_list_id: UInt256,
+        validators: &Vec<CatchainNode>
+    ) -> Result<Option<Arc<KeyOption>>> {
+        unimplemented!()
+    }
+
+    async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
+        unimplemented!()
+    }
+
+    fn create_catchain_client(
+        &self,
+        validator_list_id: UInt256,
+        overlay_short_id : &Arc<PrivateOverlayShortId>,
+        nodes_public_keys : &Vec<CatchainNode>,
+        listener : CatchainOverlayListenerPtr,
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr
+    ) -> Result<Arc<dyn CatchainOverlay + Send>> {
+        unimplemented!()
+    }
+
+    fn stop_catchain_client(&self, overlay_short_id: &Arc<PrivateOverlayShortId>) {
+        unimplemented!()
+    }
 
     // Block related operations
 
@@ -40,13 +99,13 @@ pub trait EngineOperations : Sync + Send {
     async fn load_applied_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         unimplemented!()
     }
+    async fn wait_applied_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
+        unimplemented!()
+    }
     async fn load_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         unimplemented!()
     }
     async fn load_block_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
-        unimplemented!()
-    }
-    async fn wait_applied_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         unimplemented!()
     }
     async fn wait_next_applied_mc_block(&self, prev_handle: &BlockHandle) -> Result<(Arc<BlockHandle>, BlockStuff)> {
@@ -79,10 +138,10 @@ pub trait EngineOperations : Sync + Send {
     async fn find_block_by_lt(&self, acc_pfx: &AccountIdPrefixFull, lt: u64) -> Result<Arc<BlockHandle>> {
         unimplemented!()
     }
-    async fn apply_block(self: Arc<Self>, handle: &BlockHandle, block: Option<&BlockStuff>, mc_seq_no: u32) -> Result<()> {
+    async fn apply_block(self: Arc<Self>, handle: &BlockHandle, block: Option<&BlockStuff>, mc_seq_no: u32, pre_apply: bool) -> Result<()> {
         unimplemented!()
     }
-    async fn download_block(&self, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
+    async fn download_block(&self, handle: &BlockHandle, limit: Option<u32>) -> Result<(BlockStuff, BlockProofStuff)> {
         unimplemented!()
     }
     async fn download_block_proof(&self, id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff> {
@@ -181,6 +240,38 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
+    // Global node's state
+
+    async fn check_sync(&self) -> Result<bool> {
+        unimplemented!()
+    }
+    fn set_will_validate(&self, will_validate: bool) {
+        unimplemented!()
+    }
+    fn is_validator(&self) -> bool {
+        unimplemented!()
+    }
+    // Get current list of new shard blocks with respect to last mc block.
+    // If given mc_seq_no is not equal to last mc seq_no - function fails.
+    fn get_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+        unimplemented!()
+    }
+
+    // External messages
+
+    fn new_external_message_raw(&self, data: &[u8]) -> Result<()> {
+        unimplemented!()
+    }
+    fn new_external_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
+        unimplemented!()
+    }
+    fn get_external_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
+        unimplemented!()
+    }
+    fn complete_external_messages(&self, to_delay: Vec<UInt256>, to_delete: Vec<UInt256>) -> Result<()> {
+        unimplemented!()
+    }
+
     // Utils
 
     fn now(&self) -> u32 {
@@ -220,7 +311,7 @@ pub trait EngineOperations : Sync + Send {
         if cfg!(feature = "local_test") {
             !0 >> 2 // allow to sync with test data
         } else {
-            86400 // One day period
+            86400 // One day period 
         }
     }
 
@@ -250,30 +341,32 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()    
     }
 
-    async fn redirect_external_message(&self, msg: &[u8]) -> Result<u32> {
-        if msg.len() > Engine::MAX_EXTERNAL_MESSAGE_SIZE {
-            fail!("External message is too large: {}", msg.len())
-        }
-        let root = deserialize_tree_of_cells(&mut Cursor::new(msg))?;
-        if root.level() != 0 {
-            fail!("External message must have zero level, but has {}", root.level())
-        }
-        if root.repr_depth() >= Engine::MAX_EXTERNAL_MESSAGE_DEPTH {
-            fail!("External message is too deep: {}", root.repr_depth())
-        }
-        let message = Message::construct_from(&mut root.clone().into())?;
+    async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn send_top_shard_block_description(&self, tbd: TopBlockDescrStuff) -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn redirect_external_message(&self, message_data: &[u8]) -> Result<u32> {
+        let (id, message) = create_ext_message(message_data)?;
+        let message = Arc::new(message);
+        self.new_external_message(id.clone(), message.clone())?;
         if let Some(header) = message.ext_in_header() {
             let res = self.broadcast_to_public_overlay(
                 &AccountIdPrefixFull::checked_prefix(&header.dst)?,
-                msg
+                message_data
             ).await;
-            jaeger::broadcast_sended(root.repr_hash().to_hex_string());
+            jaeger::broadcast_sended(id.to_hex_string());
             res
         } else {
             fail!("External message is not properly formatted: {}", message)
         }
     }
-    
+
+    // Boot specific operations
+
     async fn set_applied(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()> {
         unimplemented!()
     }
@@ -290,12 +383,50 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    async fn check_initial_sync_complete(&self) -> Result<bool> {
+    fn assign_mc_ref_seq_no(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()> {
         unimplemented!()
     }
 
-    fn assign_mc_ref_seq_no(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()> {
-        unimplemented!()
+    fn aux_mc_shard_states(&self) -> &lockfree::map::Map<u32, ShardStateStuff> {unimplemented!()}
+    fn shard_states(&self) -> &lockfree::map::Map<ShardIdent, ShardStateStuff> {unimplemented!()}
+
+    async fn request_aux_mc_state(&self, seq_no: u32) -> Result<bool> {
+        log::debug!("requesting mc state for seq_no {}", seq_no);
+        if self.aux_mc_shard_states().get(&seq_no).is_some() {
+            return Ok(true)
+        }
+        let state = self.load_last_applied_mc_state().await?;
+        if seq_no >= state.shard_state().seq_no() {
+            return Ok(true)
+        }
+        let block_id = match state.shard_state_extra()?.prev_blocks.get(&seq_no) {
+            Ok(Some(result)) => result.master_block_id().1,
+            _ => fail!("cannot find masterchain block with seqno {} \
+                to load corresponding state as required", seq_no)
+        };
+        self.set_aux_mc_state(&self.load_state(&block_id).await?)
+    }
+    fn set_aux_mc_state(&self, state: &ShardStateStuff) -> Result<bool> {
+        adnl::common::add_object_to_map_with_update(
+            self.aux_mc_shard_states(),
+            state.block_id().seq_no,
+            |other| match other {
+                Some(other) if other.block_id() != state.block_id() => {
+                    fail!("got two masterchain states of same height \
+                        corresponding to different blocks {} and {}",
+                            other.block_id(), state.block_id()
+                    )
+                }
+                Some(_) => Ok(None),
+                _ => Ok(Some(state.clone()))
+            }
+        )
+    }
+    fn get_aux_mc_state(&self, seq_no: u32) -> Option<ShardStateStuff> {
+        self.aux_mc_shard_states().get(&seq_no).map(|k_v| k_v.1.clone())
+    }
+    fn set_shard_state(&self, state: &ShardStateStuff) {
+        self.shard_states().insert(state.shard().clone(), state.clone());
     }
 }
 

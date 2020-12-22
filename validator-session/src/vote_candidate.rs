@@ -74,6 +74,8 @@ impl VoteCandidate for VoteCandidateImpl {
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn VoteCandidate> {
+        profiling::instrument!();
+
         let self_cloned = Self::new(
             self.block.move_to_persistent(cache),
             self.voted_by.move_to_persistent(cache),
@@ -90,6 +92,8 @@ impl VoteCandidate for VoteCandidateImpl {
 
 impl VoteCandidateWrapper for VoteCandidatePtr {
     fn push(&self, desc: &mut dyn SessionDescription, src_idx: u32) -> VoteCandidatePtr {
+        profiling::instrument!();
+
         let &self_impl = &get_impl(&**self);
 
         //if vote from the node exists, do nothing
@@ -112,6 +116,8 @@ impl VoteCandidateWrapper for VoteCandidatePtr {
 
 impl Merge<PoolPtr<dyn VoteCandidate>> for PoolPtr<dyn VoteCandidate> {
     fn merge(&self, right: &Self, desc: &mut dyn SessionDescription) -> Self {
+        profiling::instrument!();
+
         let left = self;
 
         assert!(left.get_id() == right.get_id());
@@ -244,6 +250,8 @@ impl VoteCandidateImpl {
         block: SentBlockPtr,
         voted_by: BoolVectorPtr,
     ) -> VoteCandidatePtr {
+        profiling::instrument!();
+
         let body = Self::new(block, voted_by, desc.get_vote_candidates_instance_counter());
 
         Self::create_temp_object(body, desc.get_cache())

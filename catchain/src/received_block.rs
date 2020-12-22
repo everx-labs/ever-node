@@ -1,8 +1,16 @@
 pub use super::*;
+use crate::ton_api::IntoBoxed;
 use std::cmp;
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use utils::*;
+
+/*
+    Constants
+*/
+
+const BLOCK_SENDING_THROTTLING_DELAY: std::time::Duration = std::time::Duration::from_millis(500); //time delay for duplicate block resend
 
 /*
     Implementation details for ReceivedBlock
@@ -20,14 +28,16 @@ pub(crate) struct ReceivedBlockImpl {
     prev: Option<ReceivedBlockPtr>, //previous block in a fork chain
     next: Option<Weak<RefCell<dyn ReceivedBlock>>>, //next block in a fork chain
     signature: BlockSignature, //signature of the block
-    payload: BlockPayload, //block's payload (for validator session)
+    payload: BlockPayloadPtr, //block's payload (for validator session)
     block_deps: Vec<ReceivedBlockPtr>, //dependencies which have been used for this block creation
     rev_deps: Vec<Weak<RefCell<dyn ReceivedBlock>>>, //reverse dependecies (dependent blocks)
     forks_dep_heights: Vec<BlockHeight>, //heights of each fork which is used in prev & dependency blocks for this block
     pending_deps: usize, //number of pending dependencies for this block to be fully received
     in_db: bool,         //flag which showes that this block has been written to DB
     is_custom: bool, //flag which showes that this block should be processed by validator session
-    _instance_counter: InstanceCounter, //received blocks instance counter
+    last_sending_times: HashMap<PublicKeyHash, std::time::SystemTime>, //last sending time for the source
+    serialized_block_with_payload: Option<BlockPayloadPtr>, //serialized block with payload
+    _instance_counter: InstanceCounter,                     //received blocks instance counter
 }
 
 /// Functions which converts public ReceivedBlock to its implementation
@@ -109,7 +119,7 @@ impl ReceivedBlock for ReceivedBlockImpl {
         &self.signature
     }
 
-    fn get_payload(&self) -> &BlockPayload {
+    fn get_payload(&self) -> &BlockPayloadPtr {
         &self.payload
     }
 
@@ -205,7 +215,7 @@ impl ReceivedBlock for ReceivedBlockImpl {
     fn initialize(
         &mut self,
         block: &ton::Block,
-        payload: BlockPayload,
+        payload: BlockPayloadPtr,
         receiver: &mut dyn Receiver,
     ) -> Result<()> {
         if self.state != ReceivedBlockState::Null {
@@ -216,11 +226,11 @@ impl ReceivedBlock for ReceivedBlockImpl {
             trace!(
                 "...initialize block {:?} with payload of {} bytes",
                 self.hash,
-                payload.len()
+                payload.data().len()
             );
         }
 
-        assert!(!payload.is_empty());
+        assert!(!payload.data().is_empty());
         self.payload = payload;
 
         let prev = receiver.create_block(&block.data.prev);
@@ -370,6 +380,50 @@ impl ReceivedBlock for ReceivedBlockImpl {
         if self.pending_deps == 0 {
             self.schedule(receiver);
         }
+    }
+
+    /*
+        Throttling & serialization cache
+    */
+
+    fn mark_block_for_sending(&mut self, adnl_id: &PublicKeyHash) -> bool {
+        //check if block is requested to resend earlier than throttling limit
+
+        if let Some(last_send_time) = self.last_sending_times.get(adnl_id) {
+            if let Ok(delay) = last_send_time.elapsed() {
+                if delay < BLOCK_SENDING_THROTTLING_DELAY {
+                    return false;
+                }
+            }
+        }
+
+        //update trhottling
+
+        self.last_sending_times
+            .insert(adnl_id.clone(), std::time::SystemTime::now());
+
+        true
+    }
+
+    fn get_serialized_block_with_payload(&mut self) -> &BlockPayloadPtr {
+        if self.serialized_block_with_payload.is_some() {
+            return self.serialized_block_with_payload.as_ref().unwrap();
+        }
+
+        let block_update_event = ton::BlockUpdateEvent {
+            block: self.export_tl(),
+        }
+        .into_boxed();
+        let mut serialized_message = serialize_tl_boxed_object!(&block_update_event);
+
+        serialized_message.0.extend(self.payload.data().iter());
+
+        let serialized_block_with_payload =
+            CatchainFactory::create_block_payload(serialized_message);
+
+        self.serialized_block_with_payload = Some(serialized_block_with_payload);
+
+        self.serialized_block_with_payload.as_ref().unwrap()
     }
 
     /*
@@ -644,7 +698,7 @@ impl ReceivedBlockImpl {
 
         use ton_api::ton::catchain::block::inner::Data;
 
-        match ton_api::Deserializer::new(&mut self.payload.as_ref()).read_boxed::<Data>() {
+        match ton_api::Deserializer::new(&mut self.payload.data().as_ref()).read_boxed::<Data>() {
             Ok(message) => match message {
                 Data::Catchain_Block_Data_Fork(message) => {
                     let left = message.left.only();
@@ -671,9 +725,12 @@ impl ReceivedBlockImpl {
                     }
 
                     let source = receiver.get_source(left.src as usize);
-                    let serialized_fork_proof = serialize_tl_bare_object!(&left, &right);
+                    let fork_proof = ton::BlockDataFork {
+                        left: left.into_boxed(),
+                        right: right.into_boxed(),
+                    };
 
-                    source.borrow_mut().set_fork_proof(serialized_fork_proof);
+                    source.borrow_mut().set_fork_proof(fork_proof);
                     source.borrow_mut().mark_as_blamed(receiver);
                 }
                 Data::Catchain_Block_Data_Nop | Data::Catchain_Block_Data_BadBlock(_) => { /*do nothing*/
@@ -682,16 +739,6 @@ impl ReceivedBlockImpl {
             },
             Err(_err) => self.is_custom = true,
         }
-
-        /*
-          auto X = fetch_tl_object<ton_api::catchain_block_inner_Data>(payload_.as_slice(), true);
-          if (X.is_error()) {
-            is_custom_ = true;
-          } else {
-            ton_api::downcast_call(*X.move_as_ok().get(), [Self = this](auto &obj) { Self->pre_deliver(obj); });
-          }
-
-        */
     }
 
     fn deliver(&mut self, receiver: &mut dyn Receiver) {
@@ -787,7 +834,7 @@ impl ReceivedBlockImpl {
     pub(crate) fn pre_validate_block(
         receiver: &dyn Receiver,
         block: &ton::Block,
-        payload: &BlockPayload,
+        payload: &BlockPayloadPtr,
     ) -> Result<()> {
         if UInt256::from(block.incarnation.0) != *receiver.get_incarnation() {
             bail!("Invalid session ID".to_string());
@@ -849,7 +896,7 @@ impl ReceivedBlockImpl {
             (receiver.validate_block_dependency(dep))?;
         }
 
-        if payload.len() == 0 {
+        if payload.data().len() == 0 {
             bail!("Empty payload");
         }
 
@@ -873,13 +920,15 @@ impl ReceivedBlockImpl {
             prev: None,
             next: None,
             signature: BlockSignature::default(),
-            payload: BlockPayload::default(),
+            payload: CatchainFactory::create_empty_block_payload(),
             block_deps: Vec::new(),
             rev_deps: Vec::new(),
             forks_dep_heights: Vec::new(),
             pending_deps: 0,
             in_db: false,
             is_custom: false,
+            last_sending_times: HashMap::new(),
+            serialized_block_with_payload: None,
             _instance_counter: instance_counter.clone(),
         }
     }
@@ -918,7 +967,7 @@ impl ReceivedBlockImpl {
                     body.signature = parse_hex_as_bytes(value);
                 }
                 if id == "payload" {
-                    body.payload = parse_hex_as_bytes(value);
+                    body.payload = parse_hex_as_block_payload(value);
                 }
                 if id == "deps" {
                     let dep_hash: BlockHash = parse_hex_as_int256(value);
@@ -957,7 +1006,7 @@ impl ReceivedBlockImpl {
 
     pub(crate) fn create_with_payload(
         block: &ton::Block,
-        payload: BlockPayload,
+        payload: BlockPayloadPtr,
         receiver: &mut dyn Receiver,
     ) -> Result<ReceivedBlockPtr> {
         let mut body: ReceivedBlockImpl =
@@ -966,10 +1015,10 @@ impl ReceivedBlockImpl {
             &receiver.get_incarnation(),
             receiver.get_source_public_key_hash(block.src as usize),
             block.height,
-            &payload,
+            payload.data(),
         );
 
-        body.data_hash = get_hash(&payload);
+        body.data_hash = get_hash(payload.data());
         body.signature = block.signature.clone();
         body.hash = get_block_id_hash(&block_id);
         body.source_id = block.src as usize;

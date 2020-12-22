@@ -30,7 +30,7 @@ use ton_api::{
     }
 };
 use ton_block::BlockIdExt;
-use ton_types::{fail, error, Result};
+use ton_types::{fail, Result};
 
 pub struct FullNodeOverlayService {
     engine: Arc<dyn EngineOperations>
@@ -173,33 +173,18 @@ impl FullNodeOverlayService {
         }
 
         let last_mc_state = self.engine.load_last_applied_mc_state().await?;
-        let prev_blocks = &last_mc_state
-            .shard_state()
-            .read_custom()?
-            .ok_or_else(|| error!("Given master state doesn't contain `custom` field"))?
-            .prev_blocks;
+        let prev_blocks = &last_mc_state.shard_state_extra()?.prev_blocks;
 
         if start_block_id.seq_no != 0 {
             // check if start block is key-block
-            let id = prev_blocks.get_prev_key_block(start_block_id.seq_no())?
-                .ok_or_else(|| error!("Given master state doesn't contain previous key block for {}", start_block_id))?;
-            if id.seq_no != start_block_id.seq_no ||
-                id.root_hash != *start_block_id.root_hash() ||
-                id.file_hash != *start_block_id.file_hash() {
-                fail!("Given block {} is not a key-block", start_block_id);
-            }
+            prev_blocks.check_key_block(start_block_id, Some(true))?;
         }
 
         let mut ids = vec!();
         let mut seq_no = start_block_id.seq_no();
         while let Some(id) = prev_blocks.get_next_key_block(seq_no + 1)? {
             seq_no = id.seq_no;
-            let ext_id = BlockIdExt {
-                shard_id: start_block_id.shard().clone(),
-                seq_no: seq_no,
-                root_hash: id.root_hash,
-                file_hash: id.file_hash,
-            };
+            let ext_id = id.master_block_id().1;
             ids.push(ext_id);
             if ids.len() == limit {
                 break;
@@ -235,7 +220,7 @@ impl FullNodeOverlayService {
             let mut is_link = false;
             if next_handle.data_inited() && next_handle.proof_or_link_inited(&mut is_link) {
                 let block = self.engine.load_block_raw(&next_handle).await?;
-                let proof = self.engine.load_block_proof_raw(&prev_handle, is_link).await?;
+                let proof = self.engine.load_block_proof_raw(&next_handle, is_link).await?;
                 return Ok(DataFull::TonNode_DataFull(Box::new(
                     ton_node::datafull::DataFull{
                         id: next_id.into(),
