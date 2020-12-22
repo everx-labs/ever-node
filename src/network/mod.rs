@@ -1,4 +1,3 @@
-pub mod catchain_client;
 pub mod node_network;
 pub mod neighbours;
 pub mod full_node_client;

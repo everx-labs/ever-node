@@ -1,17 +1,14 @@
 pub use super::*;
 use crate::ton_api::ton::Hashable;
 use crate::ton_api::IntoBoxed;
+use std::collections::BTreeMap;
 
 /*
     hash specialization
 */
 
-pub(crate) fn compute_hash_from_buffer(data: &[u8]) -> HashType {
-    crc32c::crc32c(data)
-}
-
 pub(crate) fn compute_hash_from_bytes(data: &::ton_api::ton::bytes) -> HashType {
-    compute_hash_from_buffer(&data.0[..])
+    crc32c::crc32c(&data.0[..])
 }
 
 pub(crate) fn compute_hash<T>(hashable: T) -> HashType
@@ -283,4 +280,33 @@ where
     fn get_vector_instance_counter(desc: &dyn SessionDescription) -> &CachedInstanceCounter {
         T::get_vector_instance_counter(desc)
     }
+}
+
+/*
+    metrics
+*/
+
+pub(crate) fn dump_metric(
+    key: &String,
+    value: &metrics_runtime::Measurement,
+    metrics: &BTreeMap<String, &metrics_runtime::Measurement>,
+) {
+    if !key.contains(".total") && !key.contains(".temp") && !key.contains(".persistent") {
+        catchain::utils::dump_metric(key, value, metrics);
+        return;
+    }
+
+    if !key.contains(".total.create") {
+        return;
+    }
+
+    let basic_key = key.replace(".total.create", "");
+
+    debug!(
+        "...{}={} (persistent={}; temp={})",
+        basic_key,
+        catchain::utils::instance_counter_to_string(&(basic_key.clone() + ".total"), metrics),
+        catchain::utils::instance_counter_to_string(&(basic_key.clone() + ".persistent"), metrics),
+        catchain::utils::instance_counter_to_string(&(basic_key.clone() + ".temp"), metrics)
+    );
 }

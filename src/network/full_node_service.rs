@@ -235,7 +235,7 @@ impl FullNodeOverlayService {
             let mut is_link = false;
             if next_handle.data_inited() && next_handle.proof_or_link_inited(&mut is_link) {
                 let block = self.engine.load_block_raw(&next_handle).await?;
-                let proof = self.engine.load_block_proof_raw(&next_handle, is_link).await?;
+                let proof = self.engine.load_block_proof_raw(&prev_handle, is_link).await?;
                 return Ok(DataFull::TonNode_DataFull(Box::new(
                     ton_node::datafull::DataFull{
                         id: next_id.into(),

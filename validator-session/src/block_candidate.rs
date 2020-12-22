@@ -45,8 +45,6 @@ impl BlockCandidateSignature for BlockCandidateSignatureImpl {
 
 impl Merge<PoolPtr<dyn BlockCandidateSignature>> for PoolPtr<dyn BlockCandidateSignature> {
     fn merge(&self, right: &Self, _desc: &mut dyn SessionDescription) -> Self {
-        profiling::instrument!();
-
         let left = self;
 
         if left.get_signature().0 < right.get_signature().0 {
@@ -174,8 +172,6 @@ impl BlockCandidateSignatureImpl {
         desc: &mut dyn SessionDescription,
         signature: BlockSignature,
     ) -> BlockCandidateSignaturePtr {
-        profiling::instrument!();
-
         let body = Self::new(
             signature,
             desc.get_block_candidate_signatures_instance_counter(),
@@ -270,8 +266,6 @@ impl BlockCandidate for BlockCandidateImpl {
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn BlockCandidate> {
-        profiling::instrument!();
-
         let self_cloned = Self::new(
             self.block.move_to_persistent(cache),
             self.approved_by.move_to_persistent(cache),
@@ -288,8 +282,6 @@ impl BlockCandidate for BlockCandidateImpl {
 
 impl Merge<PoolPtr<dyn BlockCandidate>> for PoolPtr<dyn BlockCandidate> {
     fn merge(&self, right: &Self, desc: &mut dyn SessionDescription) -> Self {
-        profiling::instrument!();
-
         let left = self;
 
         assert!(left.get_id() == right.get_id());
@@ -344,8 +336,6 @@ impl BlockCandidateWrapper for BlockCandidatePtr {
         src_idx: u32,
         signature: BlockCandidateSignaturePtr,
     ) -> BlockCandidatePtr {
-        profiling::instrument!();
-
         let &self_impl = &get_impl(&**self);
 
         //if source has already sent signature for the proposed candidate - ignore new signature
@@ -466,8 +456,6 @@ impl BlockCandidateImpl {
         block: SentBlockPtr,
         approved_by: BlockCandidateSignatureVectorPtr,
     ) -> BlockCandidatePtr {
-        profiling::instrument!();
-
         let body = Self::new(
             block,
             approved_by,

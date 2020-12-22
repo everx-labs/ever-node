@@ -17,6 +17,7 @@ use crate::{
     shard_state::ShardStateStuff,
 };
 
+
 /// cold boot entry point
 /// download zero state or block proof link and check it
 async fn run_cold(engine: &dyn EngineOperations) -> Result<(Arc<BlockHandle>, Option<ShardStateStuff>, Option<BlockProofStuff>)> {
@@ -135,12 +136,12 @@ async fn choose_masterchain_state(engine: &dyn EngineOperations, mut key_blocks:
         }
         if ptime == 0 || engine.is_persistent_state(utime, ptime) {
             let ttl = engine.persistent_state_ttl(utime);
-            let time_to_download = 3600; 
+            let time_to_download = 3600;
             if ttl > engine.now() + time_to_download {
                 log::info!(target: "boot", "best handle is {}", handle.id());
                 return Ok(handle)
             } else {
-               log::info!(target: "boot", "ignoring: state is expiring shortly: expire_at={}", ttl);
+                log::info!(target: "boot", "ignoring: state is expiring shortly: expire_at={}", ttl);
             }
         } else {
             log::info!(target: "boot", "ignoring: state is not persistent");
@@ -173,11 +174,7 @@ async fn download_start_blocks_and_states(engine: &dyn EngineOperations, handle:
 
     for (_shard_ident, block_id) in init_mc_block.shards_blocks()? {
         let shard_handle = engine.load_block_handle(&block_id)?;
-        if shard_handle.id().seq_no() == 0 {
-            download_zero_state(engine, &shard_handle).await?;
-        } else {
-            download_block_and_state(engine, &block_id, handle.id()).await?;
-        }
+        download_block_and_state(engine, &block_id, handle.id()).await?;
         CHECK!(shard_handle.state_inited());
         CHECK!(shard_handle.applied());
     }
@@ -240,7 +237,7 @@ async fn download_key_block_proof(
 async fn download_block_and_state(engine: &dyn EngineOperations, block_id: &BlockIdExt, master_id: &BlockIdExt) -> Result<BlockStuff> {
     let handle = engine.load_block_handle(block_id)?;
     let block = if !handle.data_inited() {
-        let (block, proof) = engine.download_block(&handle, None).await?;
+        let (block, proof) = engine.download_block(handle.id()).await?;
         engine.store_block(&handle, &block).await?;
         if !handle.proof_inited() {
             engine.store_block_proof(&handle, &proof).await?;

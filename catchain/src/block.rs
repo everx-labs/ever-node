@@ -14,11 +14,10 @@ pub(crate) struct BlockImpl {
     height: BlockHeight, //height of the block
     hash: BlockHash,  //hash of the block
     prev: Option<BlockPtr>, //previous block in a fork chain
-    payload: BlockPayloadPtr, //block's payload (for validator session)
+    payload: BlockPayload, //block's payload (for validator session)
     block_deps: Vec<BlockPtr>, //dependencies for this block
     forks_dep_heights: Vec<BlockHeight>, //heights of each fork which is used in prev & dependency blocks for this block
     extra_id: BlockExtraId,              //block extra data identifier
-    creation_time: std::time::SystemTime, //block creation time
 }
 
 /*
@@ -30,20 +29,16 @@ impl Block for BlockImpl {
         General purpose methods & accessors
     */
 
-    fn get_creation_time(&self) -> std::time::SystemTime {
-        self.creation_time
-    }
-
     fn get_extra_id(&self) -> BlockExtraId {
         self.extra_id
     }
 
-    fn get_payload(&self) -> &BlockPayloadPtr {
+    fn get_payload(&self) -> &BlockPayload {
         &self.payload
     }
 
-    fn get_source_id(&self) -> u32 {
-        self.source_id as u32
+    fn get_source_id(&self) -> usize {
+        self.source_id
     }
 
     fn get_fork_id(&self) -> usize {
@@ -116,7 +111,7 @@ impl BlockImpl {
         source_public_key_hash: PublicKeyHash,
         height: BlockHeight,
         hash: BlockHash,
-        payload: BlockPayloadPtr,
+        payload: BlockPayload,
         prev_block: Option<BlockPtr>,
         block_deps: Vec<BlockPtr>,
         forks_dep_heights: Vec<BlockHeight>,
@@ -133,7 +128,6 @@ impl BlockImpl {
             block_deps: block_deps,
             forks_dep_heights: forks_dep_heights,
             extra_id: extra_id,
-            creation_time: std::time::SystemTime::now(),
         };
 
         Arc::new(body)
@@ -151,11 +145,10 @@ impl BlockImpl {
                 "0000000000000000000000000000000000000000000000000000000000000000",
             ),
             prev: None,
-            payload: CatchainFactory::create_empty_block_payload(),
+            payload: parse_hex_as_bytes(""),
             block_deps: [].to_vec(),
             forks_dep_heights: [].to_vec(),
             extra_id: extra_id,
-            creation_time: std::time::SystemTime::now(),
         };
 
         for line in dump.lines() {
@@ -180,7 +173,7 @@ impl BlockImpl {
                     body.source_public_key_hash = parse_hex_as_public_key_hash(value);
                 }
                 if id == "payload" {
-                    body.payload = parse_hex_as_block_payload(value);
+                    body.payload = parse_hex_as_bytes(value);
                 }
             }
         }

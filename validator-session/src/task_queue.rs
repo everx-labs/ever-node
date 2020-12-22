@@ -1,5 +1,7 @@
 pub use super::*;
 
+use std::any::Any;
+
 /// Task of task queue
 pub type TaskPtr = Box<dyn FnOnce(&mut dyn SessionProcessor) + Send>;
 
@@ -16,22 +18,15 @@ pub type CallbackTaskQueuePtr = Arc<dyn TaskQueue<CallbackTaskPtr>>;
 pub type CompletionHandlerId = u64;
 
 /// Completion handler
-pub type CompletionHandlerPtr = Box<dyn CompletionHandler>;
+pub type CompletionHandler = Box<dyn Any>;
 
 /// Task queue
 pub trait TaskQueue<FuncPtr: Send + 'static>: Send + Sync {
-    /// Queue size
-    fn len(&self) -> usize;
-
     /// Post closure (non-generic interface)
     fn post_closure(&self, task: FuncPtr);
 
     /// Pull closure
-    fn pull_closure(
-        &self,
-        timeout: std::time::Duration,
-        last_warn_dump_time: &mut std::time::SystemTime,
-    ) -> Option<FuncPtr>;
+    fn pull_closure(&self, timeout: std::time::Duration) -> Option<FuncPtr>;
 }
 
 /// Post closure to be run in a main processing thread
@@ -58,13 +53,13 @@ pub trait CompletionHandlerProcessor {
     fn get_task_queue(&self) -> &TaskQueuePtr;
 
     /// Add completion handler
-    fn add_completion_handler(&mut self, handler: CompletionHandlerPtr) -> CompletionHandlerId;
+    fn add_completion_handler(&mut self, handler: CompletionHandler) -> CompletionHandlerId;
 
     /// Remove completion handler
     fn remove_completion_handler(
         &mut self,
         handler_id: CompletionHandlerId,
-    ) -> Option<CompletionHandlerPtr>;
+    ) -> Option<CompletionHandler>;
 }
 
 /// Create completion handler
@@ -78,7 +73,7 @@ where
 {
     let response_callback = Box::new(response_callback);
     let handler_index = completion_handler_processor.add_completion_handler(Box::new(
-        SingleThreadedCompletionHandler::<T>::new(response_callback),
+        SingleThreadedCompletionHandler::new(response_callback),
     ));
     let queue_weak_ptr = Arc::downgrade(&completion_handler_processor.get_task_queue().clone());
 
@@ -86,15 +81,11 @@ where
         if let Some(mut queue) = queue_weak_ptr.upgrade() {
             post_closure(&mut queue, move |processor: &mut dyn SessionProcessor| {
                 if let Some(mut handler) = processor.remove_completion_handler(handler_index) {
-                    if let Some(handler) = handler
-                        .get_mut_impl()
-                        .downcast_mut::<SingleThreadedCompletionHandler<T>>()
+                    if let Some(handler) =
+                        handler.downcast_mut::<SingleThreadedCompletionHandler<T>>()
                     {
-                        if let Some(handler) = handler.handler.take() {
-                            handler(result, processor);
-                        }
-                    } else {
-                        unreachable!();
+                        let handler = handler.handler.take();
+                        (handler.unwrap())(result, processor);
                     }
                 }
             })
@@ -104,51 +95,15 @@ where
     Box::new(handler)
 }
 
-/// Completion handler interface
-pub trait CompletionHandler {
-    ///Time of handler creation
-    fn get_creation_time(&self) -> std::time::SystemTime;
-
-    ///Execute with error
-    fn reset_with_error(&mut self, error: failure::Error, receiver: &mut dyn SessionProcessor);
-
-    /// Cast to Any
-    fn get_mut_impl(&mut self) -> &mut dyn std::any::Any;
-}
-
 /// Completion handler wrapper for single-threaded usage
 struct SingleThreadedCompletionHandler<T> {
     handler: Option<Box<dyn FnOnce(Result<T>, &mut dyn SessionProcessor)>>,
-    creation_time: std::time::SystemTime,
 }
 
 impl<T> SingleThreadedCompletionHandler<T> {
     fn new(handler: Box<dyn FnOnce(Result<T>, &mut dyn SessionProcessor)>) -> Self {
         Self {
             handler: Some(handler),
-            creation_time: std::time::SystemTime::now(),
         }
-    }
-}
-
-impl<T> CompletionHandler for SingleThreadedCompletionHandler<T>
-where
-    T: 'static,
-{
-    ///Time of handler creation
-    fn get_creation_time(&self) -> std::time::SystemTime {
-        self.creation_time
-    }
-
-    ///Execute handler with error
-    fn reset_with_error(&mut self, error: failure::Error, receiver: &mut dyn SessionProcessor) {
-        if let Some(handler) = self.handler.take() {
-            handler(Err(error), receiver);
-        }
-    }
-
-    /// Cast to Any
-    fn get_mut_impl(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 }

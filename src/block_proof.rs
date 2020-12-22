@@ -1,10 +1,7 @@
 use ton_block::{Block, BlockIdExt, Deserializable, MerkleProof, BlockInfo, UnixTime32,
-    ValidatorDescr, ValidatorSet, CatchainConfig, AccountIdPrefixFull, Serializable
+    ValidatorDescr, ValidatorSet, CatchainConfig, AccountIdPrefixFull
 };
-use ton_types::{
-    Result, fail, error, dictionary::HashmapType, deserialize_tree_of_cells, serialize_tree_of_cells,
-    Cell
-};
+use ton_types::{Result, fail, error, dictionary::HashmapType, deserialize_tree_of_cells};
 
 use crate::{
     block::{BlockIdExtExtention},
@@ -17,7 +14,6 @@ use crate::{
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct BlockProofStuff {
     proof: ton_block::BlockProof,
-    root: Cell,
     is_link: bool,
     id: BlockIdExt,
     data: Vec<u8>,
@@ -29,7 +25,7 @@ impl BlockProofStuff {
         let proof = ton_block::BlockProof::construct_from(&mut root.clone().into())?;
         if &proof.proof_for != block_id {
             fail!(
-                NodeError::InvalidData(format!("proof for another block (found: {}, expected: {})", proof.proof_for, block_id))
+                NodeError::InvalidData(format!("proof for another block ({} != {})", proof.proof_for, block_id))
             )
         }
         if !block_id.is_masterchain() && !is_link {
@@ -37,54 +33,20 @@ impl BlockProofStuff {
                 NodeError::InvalidData(format!("proof for non-masterchain block {}", block_id))
             )
         }
-        Ok(BlockProofStuff { proof, root, is_link, id: block_id.clone(), data })
-    }
-
-    pub fn new(proof: ton_block::BlockProof, is_link: bool) -> Result<Self> {
-        let id = proof.proof_for.clone();
-        if !id.is_masterchain() && !is_link {
-            fail!(
-                NodeError::InvalidData(format!("proof for non-masterchain block {}", id))
-            )
+        #[cfg(feature = "store_copy")]
+        {
+            let path = format!("./target/replication/proofs/{}", block_id.shard().shard_prefix_as_str_with_tag());
+            std::fs::create_dir_all("{}").ok();
+            std::fs::write(format!("{}/{}", path, block_id.seq_no()), &data).ok();
         }
-        let cell = proof.write_to_new_cell()?.into();
-        let mut data = vec!();
-        serialize_tree_of_cells(&cell, &mut data)?;
-        Ok(Self {
-            root: proof.write_to_new_cell()?.into(),
-            proof,
-            is_link,
-            id,
-            data,
-        })
-    }
-
-
-    pub fn root(&self) -> &Cell {
-        &self.root
-    }
-
-    pub fn proof_root(&self) -> &Cell {
-        &self.proof.root
-    }
-
-    pub fn virtualize_block_root(&self) -> Result<Cell> {
-        let merkle_proof = MerkleProof::construct_from(&mut self.proof.root.clone().into())?;
-        let block_virt_root = merkle_proof.proof.clone().virtualize(1);
-        if *self.proof.proof_for.root_hash() != block_virt_root.repr_hash() {
-            fail!(NodeError::InvalidData(format!(
-                "merkle proof has invalid virtual hash (found: {}, expected: {})",
-                block_virt_root.repr_hash(),
-                self.proof.proof_for
-            )))
-        }
-        Ok(block_virt_root)
+        Ok(BlockProofStuff { proof, is_link, id: block_id.clone(), data })
     }
 
     pub fn virtualize_block(&self) -> Result<(Block, ton_api::ton::int256)> {
-        let cell = self.virtualize_block_root()?;
-        let hash = ton_api::ton::int256(cell.repr_hash().as_slice().to_owned());
-        Ok((Block::construct_from(&mut cell.into())?, hash))
+        let merkle_proof = MerkleProof::construct_from(&mut self.proof.root.clone().into())?;
+        let block_virt_root = merkle_proof.proof.clone().virtualize(1);
+        let hash = ton_api::ton::int256(block_virt_root.repr_hash().as_slice().to_owned());
+        Ok((Block::construct_from(&mut block_virt_root.into())?, hash))
     }
 
     pub fn is_link(&self) -> bool {
@@ -101,10 +63,6 @@ impl BlockProofStuff {
 
     pub fn data(&self) -> &[u8] {
         &self.data
-    }
-
-    pub fn drain_data(self) -> Vec<u8> { 
-        self.data
     }
 
     pub fn check_with_prev_key_block_proof(&self, prev_key_block_proof: &BlockProofStuff) -> Result<()> {
@@ -344,7 +302,7 @@ impl BlockProofStuff {
 
         if info.key_block() && !self.id().is_masterchain() {
             fail!(NodeError::InvalidData(format!(
-                "proof for block {} contains a Merkle proof which declares non master chain but key block",
+                "proof for block {} contains a Merkle proof which declares non masterchain but key block",
                 self.id(),
             )))
         }

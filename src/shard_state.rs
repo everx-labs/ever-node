@@ -1,10 +1,11 @@
 use crate::error::NodeError;
 use crate::block::convert_block_id_ext_blk2api;
 
-use std::{io::{Write, Cursor}};
+use sha2::Digest;
+use std::io::{Write, Cursor};
+use ton_block::{BlockIdExt};
 use ton_block::{
-    BlockIdExt, ShardIdent, ShardStateUnsplit, ShardStateSplit, Serializable, Deserializable, 
-    ConfigParams, McStateExtra, ShardHashes, HashmapAugType
+    ShardStateUnsplit, ShardStateSplit, Serializable, Deserializable, ConfigParams, McStateExtra, HashmapAugType,
 };
 use ton_types::{Cell, error, fail, Result, deserialize_tree_of_cells, UInt256};
 
@@ -12,48 +13,28 @@ use ton_types::{Cell, error, fail, Result, deserialize_tree_of_cells, UInt256};
 /// It is a wrapper around various shard state's representations and properties.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ShardStateStuff {
-    block_id: BlockIdExt,
+    id: BlockIdExt,
     shard_state: ShardStateUnsplit,
     shard_state_extra: Option<McStateExtra>,
-    root: Cell,
+    root: Cell
 }
 
 impl ShardStateStuff {
-    pub fn new(block_id: BlockIdExt, root: Cell) -> Result<Self> {
-        let shard_state = ShardStateUnsplit::construct_from(&mut root.clone().into())?;
-        if shard_state.shard() != block_id.shard() {
-            fail!(NodeError::InvalidData("State's shard block_id is not equal to given one".to_string()))
-        }
-        if shard_state.shard().shard_prefix_with_tag() != block_id.shard().shard_prefix_with_tag() {
+
+    pub fn new(id: BlockIdExt, root: Cell) -> Result<Self> {
+        let shard_state: ShardStateUnsplit = ShardStateUnsplit::construct_from(&mut root.clone().into())?;
+        if shard_state.shard().shard_prefix_with_tag() != id.shard().shard_prefix_with_tag() {
             fail!(
                 NodeError::InvalidData("State's shard id is not equal to given one".to_string())
             )
-        } else if shard_state.seq_no() != block_id.seq_no {
+        } else if shard_state.seq_no() != id.seq_no {
             fail!(
                 NodeError::InvalidData("State's seqno is not equal to given one".to_string())
             )
+        } else {
+            let shard_state_extra = shard_state.read_custom()?;
+            Ok(Self{ id, shard_state, shard_state_extra, root } )
         }
-        let mut stuff = Self::default();
-        stuff.block_id = block_id;
-        stuff.shard_state_extra = shard_state.read_custom()?;
-        stuff.shard_state = shard_state;
-        stuff.root = root;
-        Ok(stuff)
-    }
-
-    pub fn from_state(shard_state: ShardStateUnsplit) -> Result<Self> {
-        let block_id = BlockIdExt::with_params(shard_state.shard().clone(),
-            shard_state.seq_no(), Default::default(), Default::default());
-        Self::with_state(block_id, shard_state)
-    }
-
-    pub fn with_state(block_id: BlockIdExt, shard_state: ShardStateUnsplit) -> Result<Self> {
-        let mut stuff = Self::default();
-        stuff.block_id = block_id;
-        stuff.root = shard_state.serialize()?;
-        stuff.shard_state = shard_state;
-        stuff.shard_state_extra = stuff.shard_state.read_custom()?;
-        Ok(stuff)
     }
 
     pub fn construct_split_root(left: Cell, right: Cell) -> Result<Cell> {
@@ -65,7 +46,7 @@ impl ShardStateStuff {
         if id.seq_no() != 0 {
             fail!("Given id has non-zero seq number");
         }        
-        let file_hash = UInt256::calc_file_hash(&bytes);
+        let file_hash = UInt256::from(sha2::Sha256::digest(bytes).as_slice());
         if file_hash != id.file_hash {
             fail!("Wrong zero state's {} file hash", id);
         }
@@ -92,24 +73,16 @@ impl ShardStateStuff {
     }
 
     pub fn shard_state(&self) -> &ShardStateUnsplit { &self.shard_state }
-    pub fn state(&self) -> &ShardStateUnsplit { &self.shard_state }
-    pub fn withdraw_state(self) -> ShardStateUnsplit { self.shard_state }
     pub fn shard_state_extra(&self) -> Result<&McStateExtra> {
         self.shard_state_extra
             .as_ref()
             .ok_or_else(|| error!("Masterchain state of {} must contain McStateExtra", self.block_id()))
     }
-    pub fn shards(&self) -> Result<&ShardHashes> { Ok(self.shard_state_extra()?.shards()) }
 
     pub fn root_cell(&self) -> &Cell { &self.root }
 
-    pub fn shard(&self) -> &ShardIdent { &self.block_id.shard() }
-
-    pub fn set_shard(&mut self, shard: ShardIdent) { self.block_id.shard_id = shard; }
-
-    pub fn id(&self) -> ton_api::ton::ton_node::blockidext::BlockIdExt { convert_block_id_ext_blk2api(&self.block_id) }
-
-    pub fn block_id(&self) -> &BlockIdExt { &self.block_id }
+    pub fn block_id_api(&self) -> ton_api::ton::ton_node::blockidext::BlockIdExt { convert_block_id_ext_blk2api(&self.id) }
+    pub fn block_id(&self) -> &BlockIdExt { &self.id }
 
     pub fn write_to<T: Write>(&self, dst: &mut T) -> Result<()> {
         ton_types::cells_serialization::serialize_tree_of_cells(&self.root, dst)?;

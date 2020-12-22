@@ -1,16 +1,9 @@
 pub use super::*;
 
 use super::task_queue::*;
-use catchain::check_execution_time;
-use catchain::profiling::instrument;
-use catchain::utils::compute_instance_counter;
-use catchain::utils::MetricsDumper;
-use catchain::BlockPtr;
-use catchain::CatchainListener;
-use catchain::CatchainPtr;
-use catchain::ExternalQueryResponseCallback;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -20,12 +13,6 @@ use std::time::SystemTime;
 
 const MAIN_LOOP_NAME: &str = "VS1"; //validator session main loop short name
 const CALLBACKS_LOOP_NAME: &str = "VS2"; //validator session callbacks loop short name
-const TASK_QUEUE_WARN_TASK_QUEUE_SIZE: usize = 50; //warning level for task queue size
-const TASK_QUEUE_WARN_PROCESSING_LATENCY: Duration = Duration::from_millis(100); //max processing latency
-const TASK_QUEUE_LATENCY_WARN_DUMP_PERIOD: Duration = Duration::from_millis(500); //latency warning dump period
-const SESSION_METRICS_DUMP_PERIOD_MS: u64 = 5000; //period of metrics dump
-const MAIN_LOOP_OVERLOADED_QUEUE_SIZE: usize = 10; //queue size for main loop overload indicator
-const CALLBACKS_LOOP_OVERLOADED_QUEUE_SIZE: usize = 10; //queue size for main loop overload indicator
 
 /*
 ===================================================================================================
@@ -33,15 +20,9 @@ const CALLBACKS_LOOP_OVERLOADED_QUEUE_SIZE: usize = 10; //queue size for main lo
 ===================================================================================================
 */
 
-struct TaskDesc<FuncPtr> {
-    task: FuncPtr,                        //closure for execution
-    creation_time: std::time::SystemTime, //task creation time
-}
-
 struct TaskQueueImpl<FuncPtr> {
-    name: String,                                                         //queue name
-    queue_sender: crossbeam::channel::Sender<Box<TaskDesc<FuncPtr>>>, //queue sender from outer world to the ValidatorSession
-    queue_receiver: crossbeam::channel::Receiver<Box<TaskDesc<FuncPtr>>>, //queue receiver from outer world to the ValidatorSession
+    queue_sender: crossbeam::channel::Sender<FuncPtr>, //queue sender from outer world to the ValidatorSession
+    queue_receiver: crossbeam::channel::Receiver<FuncPtr>, //queue receiver from outer world to the ValidatorSession
 }
 
 /*
@@ -52,44 +33,15 @@ impl<FuncPtr> TaskQueue<FuncPtr> for TaskQueueImpl<FuncPtr>
 where
     FuncPtr: Send + 'static,
 {
-    fn len(&self) -> usize {
-        self.queue_receiver.len()
-    }
-
     fn post_closure(&self, task: FuncPtr) {
-        let task_desc = Box::new(TaskDesc::<FuncPtr> {
-            task: task,
-            creation_time: std::time::SystemTime::now(),
-        });
-        if let Err(send_error) = self.queue_sender.send(task_desc) {
+        if let Err(send_error) = self.queue_sender.send(task) {
             error!("ValidatorSession method post closure error: {}", send_error);
         }
     }
 
-    fn pull_closure(
-        &self,
-        timeout: std::time::Duration,
-        last_warn_dump_time: &mut std::time::SystemTime,
-    ) -> Option<FuncPtr> {
+    fn pull_closure(&self, timeout: std::time::Duration) -> Option<FuncPtr> {
         match self.queue_receiver.recv_timeout(timeout) {
-            Ok(task_desc) => {
-                if let Ok(warn_elapsed) = last_warn_dump_time.elapsed() {
-                    if warn_elapsed > TASK_QUEUE_LATENCY_WARN_DUMP_PERIOD {
-                        let queue_len = self.queue_receiver.len();
-                        if queue_len > TASK_QUEUE_WARN_TASK_QUEUE_SIZE {
-                            warn!("ValidatorSession {} task queue size is {} (expected max level is {})", self.name, queue_len, TASK_QUEUE_WARN_TASK_QUEUE_SIZE);
-                            *last_warn_dump_time = SystemTime::now();
-                        }
-                        let processing_latency = task_desc.creation_time.elapsed().unwrap();
-                        if processing_latency > TASK_QUEUE_WARN_PROCESSING_LATENCY {
-                            warn!("ValidatorSession {} task queue latency is {:.3}s (expected max latency is {:.3}s)", self.name, processing_latency.as_secs_f64(), TASK_QUEUE_WARN_PROCESSING_LATENCY.as_secs_f64());
-                            *last_warn_dump_time = SystemTime::now();
-                        }
-                    }
-                }
-
-                Some(task_desc.task)
-            }
+            Ok(task) => Some(task),
             _ => None,
         }
     }
@@ -104,98 +56,13 @@ where
     FuncPtr: Send + 'static,
 {
     pub(crate) fn new(
-        name: String,
-        queue_sender: crossbeam::channel::Sender<Box<TaskDesc<FuncPtr>>>,
-        queue_receiver: crossbeam::channel::Receiver<Box<TaskDesc<FuncPtr>>>,
+        queue_sender: crossbeam::channel::Sender<FuncPtr>,
+        queue_receiver: crossbeam::channel::Receiver<FuncPtr>,
     ) -> Self {
         Self {
-            name: name,
             queue_sender: queue_sender,
             queue_receiver: queue_receiver,
         }
-    }
-}
-
-/*
-===================================================================================================
-    CatchainListener
-===================================================================================================
-*/
-
-type ArcCatchainListenerPtr = Arc<dyn CatchainListener + Send + Sync>;
-
-struct CatchainListenerImpl {
-    task_queue: TaskQueuePtr, //task queue
-}
-
-impl CatchainListener for CatchainListenerImpl {
-    fn preprocess_block(&self, block: BlockPtr) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.preprocess_block(block);
-        });
-    }
-
-    fn process_blocks(&self, blocks: Vec<BlockPtr>) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.process_blocks(blocks);
-        });
-    }
-
-    fn finished_processing(&self) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.finished_catchain_processing();
-        });
-    }
-
-    fn started(&self) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.catchain_started();
-        });
-    }
-
-    fn process_broadcast(&self, source_id: PublicKeyHash, data: BlockPayloadPtr) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.process_broadcast(source_id, data);
-        });
-    }
-
-    fn process_message(&self, source_id: PublicKeyHash, data: BlockPayloadPtr) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.process_message(source_id, data);
-        });
-    }
-
-    fn process_query(
-        &self,
-        source_id: PublicKeyHash,
-        data: BlockPayloadPtr,
-        callback: ExternalQueryResponseCallback,
-    ) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.process_query(source_id, data, callback);
-        });
-    }
-
-    fn set_time(&self, time: std::time::SystemTime) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.set_time(time);
-        });
-    }
-}
-
-impl CatchainListenerImpl {
-    fn post_closure<F>(&self, task_fn: F)
-    where
-        F: FnOnce(&mut dyn SessionProcessor),
-        F: Send + 'static,
-    {
-        self.task_queue.post_closure(Box::new(task_fn));
-    }
-
-    fn create(task_queue: TaskQueuePtr) -> ArcCatchainListenerPtr {
-        Arc::new(Self {
-            task_queue: task_queue,
-        })
     }
 }
 
@@ -211,56 +78,17 @@ impl CatchainListenerImpl {
 
 pub(crate) struct SessionImpl {
     stop_flag: Arc<AtomicBool>, //atomic flag to indicate that all processing threads should be stopped
-    main_processing_thread_stopped: Arc<AtomicBool>, //atomic flag to indicate that processing thread has been stopped
-    session_callbacks_processing_thread_stopped: Arc<AtomicBool>, //atomic flag to indicate that processing thread has been stopped
-    _main_task_queue: TaskQueuePtr, //task queue for main thread tasks processing
-    _session_callbacks_task_queue: CallbackTaskQueuePtr, //task queue for session callbacks processing
-    catchain: CatchainPtr,                               //catchain session
-    session_id: SessionId,
-    _catchain_listener: ArcCatchainListenerPtr, //catchain session listener
-    _activity_node: ActivityNodePtr,            //activity node for session lifetime tracking
+    main_task_queue: TaskQueuePtr, //task queue for main thread tasks processing
+    main_processing_thread: Option<JoinHandle<()>>, //main session processing thread
+    session_callbacks_task_queue: CallbackTaskQueuePtr, //task queue for session callbacks processing
+    session_callbacks_processing_thread: Option<JoinHandle<()>>, //session callbacks catchain processing thread
 }
 
 /*
     Implementation for public Session trait
 */
 
-impl Session for SessionImpl {
-    fn stop(&self) {
-        self.stop_flag.store(true, Ordering::Release);
-
-        debug!(
-            "...stopping Catchain (session_id is {})",
-            self.session_id.to_hex_string()
-        );
-
-        self.catchain.stop();
-
-        loop {
-            if self
-                .session_callbacks_processing_thread_stopped
-                .load(Ordering::Relaxed)
-                && self.main_processing_thread_stopped.load(Ordering::Relaxed)
-            {
-                break;
-            }
-
-            info!(
-                "...waiting for ValidatorSession threads (session_id is {})",
-                self.session_id.to_hex_string()
-            );
-
-            const CHECKING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
-
-            std::thread::sleep(CHECKING_INTERVAL);
-        }
-
-        info!(
-            "ValidatorSession has been stopped (session_id is {})",
-            self.session_id.to_hex_string()
-        );
-    }
-}
+impl Session for SessionImpl {}
 
 /*
     Implementation for public Display
@@ -294,423 +122,154 @@ impl SessionImpl {
     */
 
     fn main_loop(
-        should_stop_flag: Arc<AtomicBool>,
-        is_stopped_flag: Arc<AtomicBool>,
-        task_queue: TaskQueuePtr,
-        callbacks_task_queue: CallbackTaskQueuePtr,
+        session: Arc<Mutex<SessionImpl>>,
         options: SessionOptions,
         session_id: SessionId,
         ids: Vec<SessionNode>,
-        local_key: PrivateKey,
+        local_id: PublicKeyHash,
+        db_root: &String,
+        db_suffix: &String,
+        allow_unsafe_self_blocks_resync: bool,
+        overlay_creator: catchain::OverlayCreator,
         listener: SessionListenerPtr,
-        catchain: CatchainPtr,
-        session_activity_node: ActivityNodePtr,
-        session_creation_time: std::time::SystemTime,
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
     ) {
-        info!(
-            "ValidatorSession main loop is started (session_id is {}); session thread creation time is {:.3}ms",
-            session_id.to_hex_string(),
-            session_creation_time.elapsed().unwrap().as_secs_f64() * 1000.0,
-        );
+        debug!("ValidatorSession main loop is started");
 
-        //configure metrics
+        //cache main loop data
 
-        let loop_counter = metrics_receiver
-            .sink()
-            .counter("validator_session_main_loop_iterations");
-        let loop_overloads_counter = metrics_receiver
-            .sink()
-            .counter("validator_session_main_loop_overloads");
-
-        //create session processor
+        let (task_queue, callbacks_task_queue, stop_flag) = match session.lock() {
+            Ok(session) => (
+                session.main_task_queue.clone(),
+                session.session_callbacks_task_queue.clone(),
+                session.stop_flag.clone(),
+            ),
+            Err(err) => {
+                error!("ValidatorSession main loop error: {:?}", err);
+                return;
+            }
+        };
 
         let processor = SessionFactory::create_session_processor(
             options,
-            session_id.clone(),
+            session_id,
             ids,
-            local_key,
+            local_id,
+            db_root,
+            db_suffix,
+            allow_unsafe_self_blocks_resync,
+            overlay_creator,
             listener,
-            catchain,
             task_queue.clone(),
             callbacks_task_queue.clone(),
-            session_creation_time,
-            Some(metrics_receiver),
         );
-
-        //create metrics dumper
-
-        let mut metrics_dumper = MetricsDumper::new();
-
-        metrics_dumper
-            .add_compute_handler("sent_blocks.total".to_string(), &compute_instance_counter);
-        metrics_dumper.add_compute_handler(
-            "block_candidates_signatures.total".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "block_candidates.total".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "vote_candidates.total".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "round_attempts.total".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler("rounds.total".to_string(), &compute_instance_counter);
-        metrics_dumper
-            .add_compute_handler("old_rounds.total".to_string(), &compute_instance_counter);
-        metrics_dumper.add_compute_handler(
-            "session_states.total".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "integer_vectors.total".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper
-            .add_compute_handler("bool_vectors.total".to_string(), &compute_instance_counter);
-        metrics_dumper.add_compute_handler(
-            "block_candidate_vectors.total".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "block_candidate_signature_vectors.total".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "vote_candidate_vectors.total".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "round_attempt_vectors.total".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "old_round_vectors.total".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_derivative_metric("session_states.total".to_string());
-        metrics_dumper.add_derivative_metric("round_attempts.total".to_string());
-        metrics_dumper.add_derivative_metric("sent_blocks.total".to_string());
-
-        metrics_dumper.add_compute_handler(
-            "sent_blocks.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "block_candidates_signatures.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "block_candidates.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "vote_candidates.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "round_attempts.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper
-            .add_compute_handler("rounds.persistent".to_string(), &compute_instance_counter);
-        metrics_dumper.add_compute_handler(
-            "old_rounds.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "session_states.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "integer_vectors.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "bool_vectors.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "block_candidate_vectors.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "block_candidate_signature_vectors.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "vote_candidate_vectors.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "round_attempt_vectors.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "old_round_vectors.persistent".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_derivative_metric("session_states.persistent".to_string());
-        metrics_dumper.add_derivative_metric("round_attempts.persistent".to_string());
-        metrics_dumper.add_derivative_metric("sent_blocks.persistent".to_string());
-
-        metrics_dumper
-            .add_compute_handler("sent_blocks.temp".to_string(), &compute_instance_counter);
-        metrics_dumper.add_compute_handler(
-            "block_candidates_signatures.temp".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "block_candidates.temp".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "vote_candidates.temp".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper
-            .add_compute_handler("round_attempts.temp".to_string(), &compute_instance_counter);
-        metrics_dumper.add_compute_handler("rounds.temp".to_string(), &compute_instance_counter);
-        metrics_dumper
-            .add_compute_handler("old_rounds.temp".to_string(), &compute_instance_counter);
-        metrics_dumper
-            .add_compute_handler("session_states.temp".to_string(), &compute_instance_counter);
-        metrics_dumper.add_compute_handler(
-            "integer_vectors.temp".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper
-            .add_compute_handler("bool_vectors.temp".to_string(), &compute_instance_counter);
-        metrics_dumper.add_compute_handler(
-            "block_candidate_vectors.temp".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "block_candidate_signature_vectors.temp".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "vote_candidate_vectors.temp".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "round_attempt_vectors.temp".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "old_round_vectors.temp".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper.add_derivative_metric("session_states.temp".to_string());
-        metrics_dumper.add_derivative_metric("round_attempts.temp".to_string());
-        metrics_dumper.add_derivative_metric("sent_blocks.temp".to_string());
-        metrics_dumper.add_derivative_metric("sent_blocks.temp".to_string());
-
-        use catchain::utils::add_compute_percentage_metric;
-        use catchain::utils::add_compute_result_metric;
-
-        metrics_dumper.add_derivative_metric("validator_session_main_loop_iterations".to_string());
-        metrics_dumper.add_derivative_metric("validator_session_main_loop_overloads".to_string());
-        metrics_dumper
-            .add_derivative_metric("validator_session_callbacks_loop_iterations".to_string());
-        metrics_dumper
-            .add_derivative_metric("validator_session_callbacks_loop_overloads".to_string());
-        add_compute_percentage_metric(
-            &mut metrics_dumper,
-            &"validator_session_main_loop_load".to_string(),
-            &"validator_session_main_loop_overloads".to_string(),
-            &"validator_session_main_loop_iterations".to_string(),
-        );
-        add_compute_percentage_metric(
-            &mut metrics_dumper,
-            &"validator_session_callbacks_loop_load".to_string(),
-            &"validator_session_callbacks_loop_overloads".to_string(),
-            &"validator_session_callbacks_loop_iterations".to_string(),
-        );
-
-        add_compute_result_metric(&mut metrics_dumper, &"collate_requests".to_string());
-        add_compute_result_metric(&mut metrics_dumper, &"validate_requests".to_string());
-        add_compute_result_metric(&mut metrics_dumper, &"commit_requests".to_string());
-        add_compute_result_metric(&mut metrics_dumper, &"rldp_queries".to_string());
-        metrics_dumper.add_derivative_metric("rldp_queries.total".to_string());
 
         //main loop
 
-        let mut last_warn_dump_time = std::time::SystemTime::now();
-        let mut next_metrics_dump_time = last_warn_dump_time;
-
         loop {
-            {
-                instrument!();
+            //check if the main loop should be stopped
 
-                session_activity_node.tick();
-                loop_counter.increment();
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
+            }
 
-                //check if the main loop should be stopped
+            //handle session event with timeout
 
-                if should_stop_flag.load(Ordering::Relaxed) {
-                    processor.borrow_mut().stop();
-                    break;
-                }
+            let now = SystemTime::now();
+            let timeout = match processor.borrow().get_next_awake_time().duration_since(now) {
+                Ok(timeout) => timeout,
+                Err(_err) => Duration::default(),
+            };
 
-                //check overload flag
+            const MAX_TIMEOUT: Duration = Duration::from_secs(2); //such little timeout is needed to check stop_flag and thread exiting
 
-                let is_overloaded = task_queue.len() >= MAIN_LOOP_OVERLOADED_QUEUE_SIZE;
+            processor
+                .borrow_mut()
+                .set_next_awake_time(now + MAX_TIMEOUT);
 
-                if is_overloaded {
-                    loop_overloads_counter.increment();
-                }
+            let task = task_queue.pull_closure(timeout);
 
-                //handle session event with timeout
+            if let Some(task) = task {
+                let start = SystemTime::now();
 
-                let now = SystemTime::now();
-                let timeout = match processor.borrow().get_next_awake_time().duration_since(now) {
-                    Ok(timeout) => timeout,
-                    Err(_err) => Duration::default(),
-                };
+                task(&mut *processor.borrow_mut());
 
-                const MAX_TIMEOUT: Duration = Duration::from_secs(2); //such little timeout is needed to check should_stop_flag and thread exiting
+                if let Ok(duration) = start.elapsed() {
+                    const WARNING_DURATION: Duration = Duration::from_millis(100);
 
-                processor
-                    .borrow_mut()
-                    .set_next_awake_time(now + MAX_TIMEOUT);
-
-                let task = {
-                    instrument!();
-
-                    task_queue.pull_closure(timeout, &mut last_warn_dump_time)
-                };
-
-                if let Some(task) = task {
-                    check_execution_time!(100_000);
-
-                    task(&mut *processor.borrow_mut());
-                }
-
-                {
-                    //check & update session state
-
-                    instrument!();
-                    check_execution_time!(10_000);
-
-                    //todo: only for next awake time
-
-                    processor.borrow_mut().check_all();
+                    if duration > WARNING_DURATION {
+                        warn!(
+                            "ValidatorSession main loop task time execution warning: {:?}",
+                            duration
+                        );
+                    }
                 }
             }
 
-            //dump metrics
+            //check & update session state
 
-            if let Ok(_elapsed) = next_metrics_dump_time.elapsed() {
-                metrics_dumper.update(&processor.borrow().get_description().get_metrics_receiver());
-
-                if log_enabled!(log::Level::Debug) {
-                    let session_id_str = session_id.to_hex_string();
-                    debug!("ValidatorSession {} metrics:", &session_id_str);
-
-                    metrics_dumper.dump(|string| {
-                        debug!("{}{}", session_id_str, string);
-                    });
-
-                    let profiling_dump = profiling::Profiler::local_instance()
-                        .with(|profiler| profiler.borrow().dump());
-
-                    debug!(
-                        "ValidatorSession {} profiling: {}",
-                        &session_id.to_hex_string(),
-                        profiling_dump
-                    );
-                }
-
-                next_metrics_dump_time = std::time::SystemTime::now()
-                    + Duration::from_millis(SESSION_METRICS_DUMP_PERIOD_MS);
-            }
+            processor.borrow_mut().check_all();
         }
 
         //finishing routines
 
-        info!(
-            "ValidatorSession main loop is finished (session_id is {})",
-            session_id.to_hex_string()
-        );
-
-        is_stopped_flag.store(true, Ordering::Release);
+        debug!("ValidatorSession main loop is finished");
     }
 
-    fn session_callbacks_loop(
-        should_stop_flag: Arc<AtomicBool>,
-        is_stopped_flag: Arc<AtomicBool>,
-        task_queue: CallbackTaskQueuePtr,
-        session_id: SessionId,
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
-    ) {
-        info!(
-            "ValidatorSession session callbacks processing loop is started (session_id is {})",
-            session_id.to_hex_string()
-        );
+    fn session_callbacks_loop(session: Arc<Mutex<SessionImpl>>) {
+        debug!("ValidatorSession session callbacks processing loop is started");
 
-        let activity_node = catchain::CatchainFactory::create_activity_node(format!(
-            "ValidatorSessionCallbacks_{}",
-            session_id.to_hex_string()
-        ));
+        //cache main loop data
 
-        //configure metrics
-
-        let loop_counter = metrics_receiver
-            .sink()
-            .counter("validator_session_callbacks_loop_iterations");
-        let loop_overloads_counter = metrics_receiver
-            .sink()
-            .counter("validator_session_callbacks_loop_overloads");
+        let (task_queue, stop_flag) = match session.lock() {
+            Ok(session) => (
+                session.session_callbacks_task_queue.clone(),
+                session.stop_flag.clone(),
+            ),
+            Err(err) => {
+                error!(
+                    "ValidatorSession session callbacks processing loop error: {:?}",
+                    err
+                );
+                return;
+            }
+        };
 
         //session callbacks processing loop
 
-        let mut last_warn_dump_time = std::time::SystemTime::now();
-
         loop {
-            activity_node.tick();
-            loop_counter.increment();
+            //check if the main loop should be stopped
 
-            //check if the loop should be stopped
-
-            if should_stop_flag.load(Ordering::Relaxed) {
+            if stop_flag.load(Ordering::Relaxed) {
                 break;
-            }
-
-            //check overload flag
-
-            let is_overloaded = task_queue.len() >= CALLBACKS_LOOP_OVERLOADED_QUEUE_SIZE;
-
-            if is_overloaded {
-                loop_overloads_counter.increment();
             }
 
             //handle session outgoing event with timeout
 
             const MAX_TIMEOUT: Duration = Duration::from_secs(1);
 
-            let task = task_queue.pull_closure(MAX_TIMEOUT, &mut last_warn_dump_time);
+            let task = task_queue.pull_closure(MAX_TIMEOUT);
 
             if let Some(task) = task {
-                check_execution_time!(100_000);
+                let start = SystemTime::now();
 
                 task();
+
+                if let Ok(duration) = start.elapsed() {
+                    const WARNING_DURATION: Duration = Duration::from_millis(100);
+
+                    if duration > WARNING_DURATION {
+                        warn!(
+                            "ValidatorSession callback task time execution warning: {:?}",
+                            duration
+                        );
+                    }
+                }
             }
         }
 
         //finishing routines
 
-        info!(
-            "ValidatorSession session callbacks processing loop is finished (session_id is {})",
-            session_id.to_hex_string()
-        );
-
-        is_stopped_flag.store(true, Ordering::Release);
+        debug!("ValidatorSession session callbacks processing loop is finished");
     }
 
     /*
@@ -719,29 +278,25 @@ impl SessionImpl {
 
     pub(crate) fn create_task_queue() -> TaskQueuePtr {
         type ChannelPair = (
-            crossbeam::channel::Sender<Box<TaskDesc<TaskPtr>>>,
-            crossbeam::channel::Receiver<Box<TaskDesc<TaskPtr>>>,
+            crossbeam::channel::Sender<TaskPtr>,
+            crossbeam::channel::Receiver<TaskPtr>,
         );
 
         let (queue_sender, queue_receiver): ChannelPair = crossbeam::crossbeam_channel::unbounded();
-        let task_queue: TaskQueuePtr = Arc::new(TaskQueueImpl::<TaskPtr>::new(
-            "processing".to_string(),
-            queue_sender,
-            queue_receiver,
-        ));
+        let task_queue: TaskQueuePtr =
+            Arc::new(TaskQueueImpl::<TaskPtr>::new(queue_sender, queue_receiver));
 
         task_queue
     }
 
     pub(crate) fn create_callback_task_queue() -> CallbackTaskQueuePtr {
         type ChannelPair = (
-            crossbeam::channel::Sender<Box<TaskDesc<CallbackTaskPtr>>>,
-            crossbeam::channel::Receiver<Box<TaskDesc<CallbackTaskPtr>>>,
+            crossbeam::channel::Sender<CallbackTaskPtr>,
+            crossbeam::channel::Receiver<CallbackTaskPtr>,
         );
 
         let (queue_sender, queue_receiver): ChannelPair = crossbeam::crossbeam_channel::unbounded();
         let task_queue: CallbackTaskQueuePtr = Arc::new(TaskQueueImpl::<CallbackTaskPtr>::new(
-            "callbacks".to_string(),
             queue_sender,
             queue_receiver,
         ));
@@ -753,142 +308,75 @@ impl SessionImpl {
         options: &SessionOptions,
         session_id: &SessionId,
         ids: &Vec<SessionNode>,
-        local_key: &PrivateKey,
+        local_id: &PublicKeyHash,
         db_root: &String,
         db_suffix: &String,
         allow_unsafe_self_blocks_resync: bool,
-        overlay_manager: CatchainOverlayManagerPtr,
+        overlay_creator: catchain::OverlayCreator,
         listener: SessionListenerPtr,
     ) -> SessionPtr {
         debug!("Creating ValidatorSession...");
 
-        let session_creation_time = std::time::SystemTime::now();
-
-        //remove fraction part from all timeouts
-
-        let mut options = options.clone();
-
-        options.catchain_idle_timeout =
-            Duration::from_secs(options.catchain_idle_timeout.as_secs());
-        options.round_attempt_duration =
-            Duration::from_secs(options.round_attempt_duration.as_secs());
-        options.next_candidate_delay = Duration::from_secs(options.next_candidate_delay.as_secs());
-
-        //create task queues
-
         let main_task_queue = Self::create_task_queue();
         let session_callbacks_task_queue = Self::create_callback_task_queue();
-
-        //create catchain
-
-        let catchain_options = catchain::Options {
-            idle_timeout: options.catchain_idle_timeout,
-            max_deps: options.catchain_max_deps,
-            skip_processed_blocks: options.catchain_skip_processed_blocks,
-            debug_disable_db: false,
-        };
-        let catchain_nodes = ids
-            .iter()
-            .map(|source| CatchainNode {
-                public_key: source.public_key.clone(),
-                adnl_id: source.adnl_id.clone(),
-            })
-            .collect();
-        let catchain_listener = CatchainListenerImpl::create(main_task_queue.clone());
-        let catchain = catchain::CatchainFactory::create_catchain(
-            &catchain_options,
-            &session_id.clone(),
-            &catchain_nodes,
-            &local_key,
-            db_root,
-            db_suffix,
-            allow_unsafe_self_blocks_resync,
-            overlay_manager,
-            Arc::downgrade(&catchain_listener.clone()),
-        );
-
-        //create threads
-
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let main_processing_thread_stopped = Arc::new(AtomicBool::new(false));
-        let session_callbacks_processing_thread_stopped = Arc::new(AtomicBool::new(false));
-        let session_activity_node = catchain::CatchainFactory::create_activity_node(format!(
-            "ValidatorSession_{}",
-            session_id.to_hex_string()
-        ));
         let body: SessionImpl = SessionImpl {
             stop_flag: stop_flag.clone(),
-            main_processing_thread_stopped: main_processing_thread_stopped.clone(),
-            session_callbacks_processing_thread_stopped:
-                session_callbacks_processing_thread_stopped.clone(),
-            _main_task_queue: main_task_queue.clone(),
-            _session_callbacks_task_queue: session_callbacks_task_queue.clone(),
-            catchain: catchain.clone(),
-            session_id: session_id.clone(),
-            _catchain_listener: catchain_listener,
-            _activity_node: session_activity_node.clone(),
+            main_task_queue: main_task_queue.clone(),
+            main_processing_thread: None,
+            session_callbacks_task_queue: session_callbacks_task_queue.clone(),
+            session_callbacks_processing_thread: None,
         };
 
-        let metrics_receiver = Arc::new(
-            metrics_runtime::Receiver::builder()
-                .build()
-                .expect("failed to create validator session metrics receiver"),
-        );
-
-        let session = Arc::new(body);
-        let stop_flag_for_main_loop = stop_flag.clone();
-        let stop_flag_for_callbacks_loop = stop_flag.clone();
-        let session_callbacks_task_queue_for_main_loop = session_callbacks_task_queue.clone();
-        let session_callbacks_task_queue_for_callbacks_loop = session_callbacks_task_queue.clone();
+        let session = Arc::new(Mutex::new(body));
+        let session_clone_for_main_loop = session.clone();
+        let session_clone_for_callbacks_processing_loop = session.clone();
+        let session_result: SessionPtr = session.clone();
         let ids_clone = ids.clone();
-        let local_key_clone = local_key.clone();
+        let local_id_clone = local_id.clone();
         let session_id_clone = session_id.clone();
+        let options_clone = *options;
+        let db_root = db_root.clone();
+        let db_suffix = db_suffix.clone();
 
-        //create processing threads
+        if let Ok(mut session) = session.lock() {
+            //create processing threads
 
-        let metrics_receiver_clone = metrics_receiver.clone();
-        let _main_processing_thread = std::thread::Builder::new()
-            .name(format!(
-                "{}:{}",
-                MAIN_LOOP_NAME.to_string(),
-                session_id.to_hex_string()
-            ))
-            .spawn(move || {
-                SessionImpl::main_loop(
-                    stop_flag_for_main_loop,
-                    main_processing_thread_stopped,
-                    main_task_queue,
-                    session_callbacks_task_queue_for_main_loop,
-                    options,
-                    session_id_clone,
-                    ids_clone,
-                    local_key_clone,
-                    listener,
-                    catchain,
-                    session_activity_node,
-                    session_creation_time,
-                    metrics_receiver,
-                );
-            });
+            session.main_processing_thread = Some(
+                std::thread::Builder::new()
+                    .name(MAIN_LOOP_NAME.to_string())
+                    .spawn(move || {
+                        SessionImpl::main_loop(
+                            session_clone_for_main_loop,
+                            options_clone,
+                            session_id_clone,
+                            ids_clone,
+                            local_id_clone,
+                            &db_root,
+                            &db_suffix,
+                            allow_unsafe_self_blocks_resync,
+                            overlay_creator,
+                            listener,
+                        );
+                    })
+                    .unwrap(),
+            );
 
-        let session_id_clone = session_id.clone();
-        let _session_callbacks_processing_thread = std::thread::Builder::new()
-            .name(format!(
-                "{}:{}",
-                CALLBACKS_LOOP_NAME.to_string(),
-                session_id.to_hex_string()
-            ))
-            .spawn(move || {
-                SessionImpl::session_callbacks_loop(
-                    stop_flag_for_callbacks_loop,
-                    session_callbacks_processing_thread_stopped,
-                    session_callbacks_task_queue_for_callbacks_loop,
-                    session_id_clone,
-                    metrics_receiver_clone,
-                );
-            });
+            session.session_callbacks_processing_thread = Some(
+                std::thread::Builder::new()
+                    .name(CALLBACKS_LOOP_NAME.to_string())
+                    .spawn(move || {
+                        SessionImpl::session_callbacks_loop(
+                            session_clone_for_callbacks_processing_loop,
+                        );
+                    })
+                    .unwrap(),
+            );
+        } else {
+            unreachable!("Session::create: can't lock session object");
+        }
 
-        session
+        session_result
     }
 
     pub fn create_replay(
@@ -919,12 +407,36 @@ impl SessionImpl {
             options,
             player.get_session_id(),
             &nodes,
-            player.get_local_key(),
+            player.get_local_id(),
             &log_replay_options.db_root,
             &log_replay_options.db_suffix,
             log_replay_options.allow_unsafe_self_blocks_resync,
-            player.get_overlay_manager(replay_listener),
+            player.get_overlay_creator(replay_listener),
             session_listener,
         ))
+    }
+
+    fn stop(&mut self) {
+        if self.stop_flag.load(Ordering::Relaxed) {
+            return;
+        }
+
+        self.stop_flag.store(true, Ordering::Release);
+
+        debug!("...waiting for ValidatorSession main processing thread");
+
+        if let Some(handle) = self.main_processing_thread.take() {
+            handle
+                .join()
+                .expect("Failed to join ValidatorSession main loop thread");
+        }
+
+        debug!("...waiting for ValidatorSession session callbacks processing thread");
+
+        if let Some(handle) = self.session_callbacks_processing_thread.take() {
+            handle
+                .join()
+                .expect("Failed to join ValidatorSession session callbacks processing loop thread");
+        }
     }
 }

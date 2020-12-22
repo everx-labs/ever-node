@@ -252,7 +252,7 @@ impl FullNodeOverlayClient for OverlayClientStub {
         )
     }
 
-    async fn wait_broadcast(&self) -> Result<ton_api::ton::ton_node::Broadcast> {
+    async fn wait_block_broadcast(&self) -> Result<Box<ton_api::ton::ton_node::broadcast::BlockBroadcast>> {
         futures::future::pending().await
         /*loop {
             let (duration, lost, rnd, lag_incr): (Duration, bool, usize, u32) = {

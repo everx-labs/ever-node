@@ -6,8 +6,4 @@ pub enum NodeError {
     InvalidData(String),
     #[fail(display = "Invalid operation: {}", 0)]
     InvalidOperation(String),
-    #[fail(display = "{}", 0)]
-    ValidatorReject(String),
-    #[fail(display = "{}", 0)]
-    ValidatorSoftReject(String),
 }

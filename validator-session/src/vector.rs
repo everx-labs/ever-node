@@ -17,53 +17,6 @@ where
     })
 }
 
-fn compute_bool_vector_hash(data: &Vec<bool>) -> HashType {
-    let elements_count = if data.len() % 32 == 0 {
-        data.len() / 32
-    } else {
-        data.len() - data.len() % 32 + 32
-    };
-    let mut buffer: Vec<u8> = vec![0; elements_count / 32 * 4];
-
-    for (i, item) in data.iter().enumerate() {
-        let index = i / 8;
-        let offset = i % 8;
-        let mask: u8 = 1 << offset;
-
-        if *item {
-            buffer[index] |= mask;
-        } else {
-            buffer[index] &= !mask;
-        }
-    }
-
-    utils::compute_hash_from_buffer(&buffer[..])
-}
-
-fn compute_vector_hash<T>(data: &Vec<T>) -> HashType
-where
-    T: HashableObject + 'static,
-{
-    let obj: &dyn std::any::Any = data;
-
-    if let Some(ref data) = obj.downcast_ref::<Vec<bool>>() {
-        compute_bool_vector_hash(data)
-    } else {
-        crate::utils::compute_hash(ton::hashable::CntVector {
-            data: compute_hash(data) as ton::int,
-        })
-    }
-}
-
-fn compute_sorted_vector_hash<T>(data: &Vec<T>) -> HashType
-where
-    T: HashableObject,
-{
-    crate::utils::compute_hash(ton::hashable::CntSortedVector {
-        data: compute_hash(data) as ton::int,
-    })
-}
-
 fn compare<T>(left: &Vec<T>, right: &Vec<T>) -> bool
 where
     T: std::cmp::PartialEq,
@@ -144,8 +97,6 @@ where
     */
 
     fn push(&self, desc: &mut dyn SessionDescription, value: T) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
-
         let mut result = VectorImpl::<T>::new(self.data.len() + 1, &self.instance_counter);
 
         result.data.extend_from_slice(&self.data);
@@ -161,8 +112,6 @@ where
         index: usize,
         value: T,
     ) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
-
         assert!(index <= self.data.len());
 
         let mut result = VectorImpl::<T>::with_data(self.data.clone(), &self.instance_counter);
@@ -179,8 +128,6 @@ where
         desc: &mut dyn SessionDescription,
         modifier: &Box<dyn Fn(&T) -> T>,
     ) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
-
         let modified_vec = self
             .data
             .clone()
@@ -197,8 +144,6 @@ where
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
-
         let data_cloned = self
             .data
             .iter()
@@ -255,8 +200,6 @@ where
     */
 
     fn push(&self, desc: &mut dyn SessionDescription, value: T) -> Option<PoolPtr<dyn Vector<T>>> {
-        profiling::instrument!();
-
         Some(match &self {
             Some(ref src) => VectorImpl::<T>::get_impl(&**src).push(desc, value),
             _ => VectorImpl::<T>::new(1, T::get_vector_instance_counter(desc)).push(desc, value),
@@ -269,8 +212,6 @@ where
         index: usize,
         value: T,
     ) -> Option<PoolPtr<dyn Vector<T>>> {
-        profiling::instrument!();
-
         match &self {
             Some(ref src) => Some(VectorImpl::<T>::get_impl(&**src).change(desc, index, value)),
             _ => None,
@@ -282,8 +223,6 @@ where
         desc: &mut dyn SessionDescription,
         modifier: &Box<dyn Fn(&T) -> T>,
     ) -> Option<PoolPtr<dyn Vector<T>>> {
-        profiling::instrument!();
-
         match &self {
             Some(ref src) => Some(VectorImpl::<T>::get_impl(&**src).modify(desc, modifier)),
             _ => None,
@@ -312,8 +251,6 @@ where
         merge_all: bool,
         merge_fn: &dyn Fn(&T, &T, &mut dyn SessionDescription) -> T,
     ) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
-
         let left = self;
         let left_count = left.len();
         let right_count = right.len();
@@ -423,8 +360,6 @@ where
     T: Clone + HashableObject + TypeDesc + MovablePoolObject<T> + fmt::Debug,
 {
     fn move_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
-
         if SessionPool::Persistent == self.get_pool() {
             return self.clone();
         }
@@ -502,7 +437,7 @@ where
 
         Self {
             pool: SessionPool::Temp,
-            hash: compute_vector_hash(&data),
+            hash: compute_hash(&data),
             data: data,
             instance_counter: instance_counter.clone(),
         }
@@ -511,22 +446,20 @@ where
     fn with_data(data: Vec<T>, instance_counter: &CachedInstanceCounter) -> Self {
         Self {
             pool: SessionPool::Temp,
-            hash: compute_vector_hash(&data),
+            hash: compute_hash(&data),
             data: data,
             instance_counter: instance_counter.clone(),
         }
     }
 
     fn recompute_hash(&mut self) {
-        self.hash = compute_vector_hash(&self.data);
+        self.hash = compute_hash(&self.data);
     }
 
     pub(crate) fn create(
         desc: &mut dyn SessionDescription,
         data: Vec<T>,
     ) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
-
         VectorImpl::create_temp_object(
             Self::with_data(data, T::get_vector_instance_counter(desc)),
             desc.get_cache(),
@@ -673,8 +606,6 @@ where
         desc: &mut dyn SessionDescription,
         value: T,
     ) -> Option<PoolPtr<dyn SortedVector<T, Compare>>> {
-        profiling::instrument!();
-
         match &self {
             Some(ref src) => {
                 let data = &SortedVectorImpl::<T>::get_impl(&**src).data;
@@ -773,8 +704,6 @@ where
         _merge_all: bool,
         merge_fn: &dyn Fn(&T, &T, &mut dyn SessionDescription) -> T,
     ) -> PoolPtr<dyn SortedVector<T, Compare>> {
-        profiling::instrument!();
-
         let left = self;
         let left_count = left.len();
         let right_count = right.len();
@@ -998,7 +927,7 @@ where
 
         Self {
             pool: SessionPool::Temp,
-            hash: compute_sorted_vector_hash(&data),
+            hash: compute_hash(&data),
             data: data,
             instance_counter: instance_counter.clone(),
         }
@@ -1007,14 +936,14 @@ where
     fn with_data(data: Vec<T>, instance_counter: &CachedInstanceCounter) -> Self {
         Self {
             pool: SessionPool::Temp,
-            hash: compute_sorted_vector_hash(&data),
+            hash: compute_hash(&data),
             data: data,
             instance_counter: instance_counter.clone(),
         }
     }
 
     fn recompute_hash(&mut self) {
-        self.hash = compute_sorted_vector_hash(&self.data);
+        self.hash = compute_hash(&self.data);
     }
 
     fn create<Compare>(
@@ -1024,8 +953,6 @@ where
     where
         Compare: SortingPredicate<T> + 'static,
     {
-        profiling::instrument!();
-
         SortedVectorImpl::create_temp_object(
             Self::with_data(data, T::get_vector_instance_counter(desc)),
             desc.get_cache(),

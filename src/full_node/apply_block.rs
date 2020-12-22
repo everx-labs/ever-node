@@ -13,12 +13,11 @@ pub async fn apply_block(
     handle: &BlockHandle,
     block: &BlockStuff,
     mc_seq_no: u32,
-    engine: &Arc<dyn EngineOperations>,
-    pre_apply: bool,
+    engine: &Arc<dyn EngineOperations>
 ) -> Result<()> {
     let prev_ids = block.construct_prev_id()?;
 
-    check_prev_blocks(&prev_ids, engine, mc_seq_no, pre_apply).await?;
+    check_prev_blocks(&prev_ids, engine, mc_seq_no).await?;
 
     let shard_state = if handle.state_inited() {
         engine.load_state(handle.id()).await?
@@ -26,11 +25,9 @@ pub async fn apply_block(
         calc_shard_state(handle, block, &prev_ids, engine).await?
     };
 
-    if !pre_apply {
-        set_next_prev_ids(&handle, block.id(), &prev_ids, engine.deref())?;
+    set_next_prev_ids(&handle, block.id(), &prev_ids, engine.deref())?;
 
-        engine.process_block_in_ext_db(handle, &block, None, &shard_state).await?;
-    }
+    engine.process_block_in_ext_db(handle, &block, None, &shard_state).await?;
 
     Ok(())
 }
@@ -40,23 +37,20 @@ async fn check_prev_blocks(
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
     engine: &Arc<dyn EngineOperations>,
     mc_seq_no: u32,
-    pre_apply: bool,
 ) -> Result<()> {
     match prev_ids {
         (prev1_id, Some(prev2_id)) => {
             let prev1_handle = engine.load_block_handle(&prev1_id)?;
             let prev2_handle = engine.load_block_handle(&prev2_id)?;
             let mut apply_prev_futures = Vec::with_capacity(2);
-            let applied1 = if pre_apply { prev1_handle.state_inited() } else { prev1_handle.applied() };
-            if !applied1 {
+            if !prev1_handle.applied() {
                 apply_prev_futures.push(
-                    engine.clone().apply_block(&prev1_handle, None, mc_seq_no, pre_apply)
+                    engine.clone().apply_block(&prev1_handle, None, mc_seq_no)
                 );
             }
-            let applied2 = if pre_apply { prev2_handle.state_inited() } else { prev2_handle.applied() };
-            if !applied2 {
+            if !prev2_handle.applied() {
                 apply_prev_futures.push(
-                    engine.clone().apply_block(&prev2_handle, None, mc_seq_no, pre_apply)
+                    engine.clone().apply_block(&prev2_handle, None, mc_seq_no)
                 );
             }
             futures::future::join_all(apply_prev_futures)
@@ -67,9 +61,8 @@ async fn check_prev_blocks(
         },
         (prev_id, None) => {
             let prev_handle = engine.load_block_handle(&prev_id)?;
-            let applied = if pre_apply { prev_handle.state_inited() } else { prev_handle.applied() };
-            if !applied {
-                engine.clone().apply_block(&prev_handle, None, mc_seq_no, pre_apply).await?;
+            if !prev_handle.applied() {
+                engine.clone().apply_block(&prev_handle, None, mc_seq_no).await?;
             }
         }
     }
