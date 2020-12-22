@@ -6,7 +6,7 @@ use crate::{
 };
 
 use std::{
-    path::{Path, PathBuf}, sync::Arc, cmp::min
+    path::PathBuf, sync::Arc, cmp::min
 };
 use ton_api::ton::PublicKey;
 use ton_block::{BlockIdExt, AccountIdPrefixFull, UnixTime32};
@@ -16,10 +16,12 @@ use ton_node_storage::{
     block_info_db::BlockInfoDb,
     node_state_db::NodeStateDb,
     shardstate_db::ShardStateDb,
-//    status_db::StatusDb,
     shardstate_db,
     shardstate_persistent_db::ShardStatePersistentDb,
 };
+#[cfg(feature = "read_old_db")]
+use ton_node_storage::block_db::BlockDb;
+
 use ton_types::{error, fail, Result, UInt256};
 
 pub use ton_node_storage::types::BlockHandle;
@@ -118,12 +120,18 @@ pub struct InternalDbImpl {
     //ss_test_map: lockfree::map::Map<BlockIdExt, ShardStateStuff>,
     shardstate_db_gc: shardstate_db::GC,
     archive_manager: Arc<ArchiveManager>,
+
+    #[cfg(feature = "read_old_db")]
+    old_block_db: BlockDb,
+    #[cfg(feature = "read_old_db")]
+    old_block_proof_db: BlockInfoDb,
+    #[cfg(feature = "read_old_db")]
+    old_block_proof_link_db: BlockInfoDb,
+
 }
 
 impl InternalDbImpl {
     pub async fn new(config: InternalDbConfig) -> Result<Self> {
-        // TODO: StatusDb is reserved for DynamicBocDb:
-        //let status_db = Arc::new(StatusDb::with_path(&Self::build_name(&config.db_directory, "status_db")));
         let block_index_db = Arc::new(BlockIndexDb::with_paths(
             &Self::build_name(&config.db_directory, "index_db/lt_desc_db"),
             &Self::build_name(&config.db_directory, "index_db/lt_db"),
@@ -155,6 +163,13 @@ impl InternalDbImpl {
                 //ss_test_map: lockfree::map::Map::new(),
                 shardstate_db_gc,
                 archive_manager,
+
+                #[cfg(feature = "read_old_db")]
+                old_block_db: BlockDb::with_path(&Self::build_name(&config.db_directory, "block_db")),
+                #[cfg(feature = "read_old_db")]
+                old_block_proof_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_proof_db")),
+                #[cfg(feature = "read_old_db")]
+                old_block_proof_link_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_proof_link_db")),
             }
             // Self {
             //     block_handle_db: BlockInfoDb::in_memory(),
@@ -171,11 +186,8 @@ impl InternalDbImpl {
         )
     }
 
-    fn build_name(dir: &str, name: &str) -> String {
-        let dir = Path::new(dir);
-        let name = Path::new(name);
-        // `dir` and `name` are correct utf-8 string so `dir.join(name)` too and `unwrap()` is safe.
-        dir.join(name).to_str().unwrap().to_owned()
+    pub fn build_name(dir: &str, name: &str) -> String {
+        format!("{}/{}", dir, name)
     }
 
     fn store_block_handle(&self, handle: &BlockHandle) -> Result<()> {
@@ -186,6 +198,7 @@ impl InternalDbImpl {
         self.block_handle_storage.load_block_handle(id)
     }
 }
+
 
 #[async_trait::async_trait]
 impl InternalDb for InternalDbImpl {
@@ -204,7 +217,6 @@ impl InternalDb for InternalDbImpl {
         if !handle.data_inited() {
             handle.fetch_block_info(block.block())?;
             self.store_block_handle(handle)?;
-            self.store_block_handle(handle)?;
             let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(block.id());
             self.archive_manager.add_file(&entry_id, block.data().to_vec()).await?;
             if !handle.set_data_inited() {
@@ -217,7 +229,7 @@ impl InternalDb for InternalDbImpl {
     async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         log::trace!("load_block_data {}", handle.id());
         let raw_block = self.load_block_data_raw(handle).await?;
-        BlockStuff::deserialize(handle.id().clone(), raw_block.to_vec())
+        BlockStuff::deserialize(handle.id().clone(), raw_block)
     }
 
     async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
@@ -225,11 +237,18 @@ impl InternalDb for InternalDbImpl {
         if !handle.data_inited() {
             fail!("This block is not stored yet: {:?}", handle);
         }
-        let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(handle.id());
-        self.archive_manager.get_file(handle, &entry_id).await
+        #[cfg(feature = "read_old_db")] {
+            let raw_block = self.old_block_db.get(&handle.id().into())?;
+            return Ok(raw_block.to_vec());
+        }
+        #[cfg(not(feature = "read_old_db"))] {
+            let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(handle.id());
+            self.archive_manager.get_file(handle, &entry_id).await
+        }
     }
 
     fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seq_no: u32) -> Result<Arc<BlockHandle>> {
+        log::trace!("find_block_by_seq_no {} {}", acc_pfx, seq_no);
         self.load_block_handle(&self.block_index_db.get_block_by_seq_no(acc_pfx, seq_no)?)
     }
 
@@ -253,7 +272,6 @@ impl InternalDb for InternalDbImpl {
                 if !handle.proof_link_inited() {
                     handle.fetch_block_info(&proof.virtualize_block()?.0)?;
                     self.store_block_handle(handle)?;
-                    self.store_block_handle(handle)?;
                     let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(handle.id());
                     self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
                     if !handle.set_proof_link_inited() {
@@ -263,7 +281,6 @@ impl InternalDb for InternalDbImpl {
             } else {
                 if !handle.proof_inited() {
                     handle.fetch_block_info(&proof.virtualize_block()?.0)?;
-                    self.store_block_handle(handle)?;
                     self.store_block_handle(handle)?;
                     let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Proof(handle.id());
                     self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
@@ -282,8 +299,21 @@ impl InternalDb for InternalDbImpl {
         BlockProofStuff::deserialize(handle.id(), raw_proof, is_link)
     }
 
+    #[cfg(feature = "read_old_db")]
     async fn load_block_proof_raw(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>> {
         log::trace!("load_block_proof_raw {} {}", if is_link {"link"} else {""}, handle.id());
+        let raw_proof = if is_link {
+            self.old_block_proof_link_db.get(&handle.id().into())?
+        } else {
+            self.old_block_proof_db.get(&handle.id().into())?
+        };
+        Ok(raw_proof.to_vec())
+    }
+
+    #[cfg(not(feature = "read_old_db"))]
+    async fn load_block_proof_raw(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>> {
+        log::trace!("load_block_proof_raw {} {}", if is_link {"link"} else {""}, handle.id());
+
         let (entry_id, inited) = if is_link {
             (PackageEntryId::<_, UInt256, PublicKey>::ProofLink(handle.id()), handle.proof_link_inited())
         } else {
@@ -301,6 +331,9 @@ impl InternalDb for InternalDbImpl {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
         if !handle.state_inited() {
+            if !handle.fetched() {
+                handle.fetch_shard_state(state.state())?;
+            }
             self.shard_state_dynamic_db.put(&state.block_id().into(), state.root_cell().clone())?;
             //self.ss_test_map.insert(state.block_id().clone(), state.clone());
 
@@ -456,7 +489,6 @@ impl InternalDb for InternalDbImpl {
 
     async fn store_block_applied(&self, handle: &BlockHandle) -> Result<()> {
         log::trace!("store_block_applied {}", handle.id());
-
         if !handle.set_applied() {
             self.store_block_handle(&handle)?;
         }
@@ -464,7 +496,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     async fn archive_block(&self, id: &BlockIdExt) -> Result<()> {
-        log::trace!("store_block_applied {}", id);
+        log::trace!("archive_block {}", id);
 
         let handle = self.load_block_handle_impl(id)?;
         if handle.moved_to_archive() {
@@ -523,5 +555,6 @@ impl InternalDb for InternalDbImpl {
 
         Ok(())
     }
+
 }
 

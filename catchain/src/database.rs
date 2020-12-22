@@ -6,8 +6,10 @@ use ton_node_storage::catchain_persistent_db::*;
 */
 
 pub struct DatabaseImpl {
-    pub db_path: String,          //path to database
-    pub db: CatchainPersistentDb, //persistent storage
+    db_path: String,                                //path to database
+    db: CatchainPersistentDb,                       //persistent storage
+    put_tx_counter: metrics_runtime::data::Counter, //DB put transactions counter
+    get_tx_counter: metrics_runtime::data::Counter, //DB get transactions counter
 }
 
 /*
@@ -28,20 +30,32 @@ impl Database for DatabaseImpl {
     */
 
     fn is_block_in_db(&self, hash: &BlockHash) -> bool {
+        instrument!();
+
         match self.db.contains(&hash) {
             Ok(status) => status,
             _ => false,
         }
     }
 
-    fn get_block(&self, hash: &BlockHash) -> Result<BlockPayload> {
+    fn get_block(&self, hash: &BlockHash) -> Result<RawBuffer> {
+        check_execution_time!(10000);
+        instrument!();
+
+        self.get_tx_counter.increment();
+
         match self.db.get(hash) {
             Ok(ref data) => Ok(ton_api::ton::bytes(data.as_ref().to_vec())),
             Err(err) => bail!("Block {} not found: {:?}", hash, err),
         }
     }
 
-    fn put_block(&self, hash: &BlockHash, data: BlockPayload) {
+    fn put_block(&self, hash: &BlockHash, data: RawBuffer) {
+        check_execution_time!(10000);
+        instrument!();
+
+        self.put_tx_counter.increment();
+
         match self.db.put(&hash, &data) {
             Err(err) => error!("Block {} DB saving error: {:?}", hash, err),
             _ => (),
@@ -49,6 +63,9 @@ impl Database for DatabaseImpl {
     }
 
     fn erase_block(&self, hash: &BlockHash) {
+        check_execution_time!(10000);
+        instrument!();
+
         match self.db.delete(&hash) {
             Err(err) => warn!("Block {} DB erasing error: {:?}", hash, err),
             _ => (),
@@ -62,9 +79,13 @@ impl Database for DatabaseImpl {
 
 impl Drop for DatabaseImpl {
     fn drop(&mut self) {
+        instrument!();
+
         debug!("Dropping Catchain database...");
 
         self.destroy_database();
+
+        debug!("Catchain database has been successfully dropped");
     }
 }
 
@@ -80,14 +101,21 @@ impl DatabaseImpl {
         }
     }
 
-    pub(crate) fn create(path: &String) -> DatabasePtr {
+    pub(crate) fn create(
+        path: &String,
+        metrics_receiver: &metrics_runtime::Receiver,
+    ) -> DatabasePtr {
         debug!("Creating catchain DB at path '{}'", path);
 
+        let put_tx_counter = metrics_receiver.sink().counter("db_put_txs");
+        let get_tx_counter = metrics_receiver.sink().counter("db_get_txs");
         let db = CatchainPersistentDb::with_path(path);
 
-        Rc::new(Self {
+        Arc::new(Self {
             db_path: path.clone(),
             db: db,
+            put_tx_counter: put_tx_counter,
+            get_tx_counter: get_tx_counter,
         })
     }
 }

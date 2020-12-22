@@ -5,6 +5,8 @@ pub use super::*;
 use crate::ton_api::IntoBoxed;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 /*
     to string conversions
@@ -35,6 +37,13 @@ pub fn time_to_string(time: &std::time::SystemTime) -> String {
     let datetime: chrono::DateTime<chrono::offset::Utc> = time.clone().into();
 
     datetime.format("%Y-%m-%d %T.%f").to_string()
+}
+
+pub fn time_to_timestamp_string(time: &std::time::SystemTime) -> String {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(timestamp) => format!("{:.3}", timestamp.as_millis() as f64 / 1000.0),
+        Err(err) => format!("{}", err),
+    }
 }
 
 /*
@@ -81,6 +90,10 @@ pub fn parse_hex_as_bytes(hex_asm: &str) -> ::ton_api::ton::bytes {
     ::ton_api::ton::bytes(parse_hex(&hex_asm))
 }
 
+pub fn parse_hex_as_block_payload(hex_asm: &str) -> BlockPayloadPtr {
+    CatchainFactory::create_block_payload(parse_hex_as_bytes(hex_asm))
+}
+
 pub fn parse_hex_as_public_key(hex_asm: &str) -> PublicKey {
     assert!(hex_asm.len() % 2 == 0);
     let mut key_slice = vec![0; hex_asm.len() / 2];
@@ -111,9 +124,29 @@ pub fn parse_hex_as_private_key(hex_asm: &str) -> PrivateKey {
     ))
 }
 
+pub fn parse_hex_as_expanded_private_key(hex_asm: &str) -> PrivateKey {
+    assert!(hex_asm.len() % 2 == 0);
+    let mut key_slice = vec![0; hex_asm.len() / 2];
+    parse_hex_to_array(hex_asm, &mut key_slice[..]);
+    //TODO: errors processing for key creation
+    assert!(key_slice.len() == 64);
+    let expanded_private_key =
+        ed25519_dalek::ExpandedSecretKey::from_bytes(&key_slice[..64]).unwrap();
+    Arc::new(adnl::common::KeyOption::from_ed25519_expanded_secret_key(
+        expanded_private_key,
+    ))
+}
+
 pub fn get_hash(data: &::ton_api::ton::bytes) -> BlockHash {
     let mut hasher = Sha256::new();
     hasher.input(&data.0);
+    let result: &[u8] = &hasher.result();
+    UInt256::from(result)
+}
+
+pub fn get_hash_from_block_payload(data: &BlockPayloadPtr) -> BlockHash {
+    let mut hasher = Sha256::new();
+    hasher.input(&data.data().0);
     let result: &[u8] = &hasher.result();
     UInt256::from(result)
 }
@@ -146,18 +179,15 @@ pub fn get_block_id(
     incarnation: &SessionId,
     source_hash: &PublicKeyHash,
     height: ::ton_api::ton::int,
-    payload: &BlockPayload,
+    payload: &RawBuffer,
 ) -> ton::BlockId {
-    let data_hash = get_hash(payload);
-
-    ::ton_api::ton::catchain::block::Id::Catchain_Block_Id(Box::new(
-        ::ton_api::ton::catchain::block::id::Id {
-            incarnation: incarnation.clone().into(),
-            src: public_key_hash_to_int256(source_hash),
-            height: height,
-            data_hash: data_hash.into(),
-        },
-    ))
+    ::ton_api::ton::catchain::block::id::Id {
+        incarnation: incarnation.clone().into(),
+        src: public_key_hash_to_int256(source_hash),
+        height: height,
+        data_hash: get_hash(payload).into(),
+    }
+    .into_boxed()
 }
 
 pub fn get_block_dependency_id(block: &ton::BlockDep, receiver: &dyn Receiver) -> ton::BlockId {
@@ -201,7 +231,7 @@ pub fn get_block_dependency_hash(block: &ton::BlockDep, receiver: &dyn Receiver)
 macro_rules! serialize_tl_bare_object
 {
   ($($args:expr),*) => {{
-    let mut ret : BlockPayload = BlockPayload::default();
+    let mut ret : ton_api::ton::bytes = ton_api::ton::bytes::default();
     let mut serializer = ton_api::Serializer::new(&mut ret.0);
 
     $(serializer.write_bare($args).unwrap();)*
@@ -214,7 +244,7 @@ macro_rules! serialize_tl_bare_object
 macro_rules! serialize_tl_boxed_object
 {
   ($($args:expr),*) => {{
-    let mut ret : BlockPayload = BlockPayload::default();
+    let mut ret : ton_api::ton::bytes = ton_api::ton::bytes::default();
     let mut serializer = ton_api::Serializer::new(&mut ret.0);
 
     $(serializer.write_boxed($args).unwrap();)*
@@ -225,55 +255,41 @@ macro_rules! serialize_tl_boxed_object
 
 pub fn serialize_block_with_payload(
     block: &ton::Block,
-    payload: &BlockPayload,
-) -> Result<BlockPayload> {
-    let mut raw_data: BlockPayload = BlockPayload::default();
+    payload: &BlockPayloadPtr,
+) -> Result<RawBuffer> {
+    let mut raw_data: RawBuffer = RawBuffer::default();
     let mut serializer = ton_api::Serializer::new(&mut raw_data.0);
 
     serializer.write_boxed(&block.clone().into_boxed())?;
-    serializer.write_bare(payload)?;
+    serializer.write_bare(payload.data())?;
 
     Ok(raw_data)
 }
 
-pub fn serialize_query_boxed_response<T>(response: Result<T>) -> Result<BlockPayload>
+pub fn serialize_query_boxed_response<T>(response: Result<T>) -> Result<BlockPayloadPtr>
 where
     T: ::ton_api::BoxedSerialize,
 {
     match response {
         Ok(response) => {
-            let mut ret: BlockPayload = BlockPayload::default();
+            let mut ret: RawBuffer = RawBuffer::default();
             let mut serializer = ton_api::Serializer::new(&mut ret.0);
 
             serializer.write_boxed(&response).unwrap();
 
-            Ok(ret)
+            Ok(CatchainFactory::create_block_payload(ret))
         }
         Err(err) => Err(err),
     }
 }
 
-pub fn serialize_query_bare_response<T>(response: Result<T>) -> Result<BlockPayload>
-where
-    T: ::ton_api::BareSerialize,
-{
-    match response {
-        Ok(response) => Ok(serialize_tl_bare_object!(&response)),
-        Err(err) => Err(err),
-    }
-}
-
-pub fn deserialize_tl_bare_object<T: ::ton_api::BareDeserialize>(
-    bytes: &BlockPayload,
-) -> Result<T> {
+pub fn deserialize_tl_bare_object<T: ::ton_api::BareDeserialize>(bytes: &RawBuffer) -> Result<T> {
     let cloned_bytes = bytes.clone();
     let data: &mut &[u8] = &mut cloned_bytes.0.as_ref();
     ton_api::Deserializer::new(data).read_bare()
 }
 
-pub fn deserialize_tl_boxed_object<T: ::ton_api::BoxedDeserialize>(
-    bytes: &BlockPayload,
-) -> Result<T> {
+pub fn deserialize_tl_boxed_object<T: ::ton_api::BoxedDeserialize>(bytes: &RawBuffer) -> Result<T> {
     let cloned_bytes = bytes.clone();
     let data: &mut &[u8] = &mut cloned_bytes.0.as_ref();
     ton_api::Deserializer::new(data).read_boxed()
@@ -283,73 +299,295 @@ pub fn deserialize_tl_boxed_object<T: ::ton_api::BoxedDeserialize>(
    metrics
 */
 
-pub fn instance_counter_to_string(
-    basic_key: &String,
-    metrics: &BTreeMap<String, &metrics_runtime::Measurement>,
-) -> String {
-    let create_key = basic_key.clone() + ".create";
-    let create_value = metrics.get(&create_key);
-    let create_value = match create_value {
-        Some(metrics_runtime::Measurement::Counter(value)) => value,
-        _ => return "N/A".to_string(),
-    };
+enum MetricUsage {
+    Counter,
+    Derivative,
+    Percents,
+}
 
-    let drop_key = basic_key.clone() + ".drop";
-    let drop_value = metrics.get(&drop_key);
-    let drop_value = match drop_value {
-        Some(metrics_runtime::Measurement::Counter(value)) => value,
-        _ => return "N/A".to_string(),
-    };
+pub struct Metric {
+    value: u64,
+    usage: MetricUsage,
+}
 
-    let instance_count = create_value - drop_value;
+pub struct MetricsDumper {
+    prev_metrics: BTreeMap<String, Metric>,
+    compute_handlers:
+        HashMap<String, Box<dyn Fn(&String, &BTreeMap<String, Metric>) -> Option<Metric>>>,
+    derivative_metrics: HashSet<String>,
+    last_dump_time: std::time::SystemTime,
+}
 
-    if *drop_value == 0 && instance_count == *create_value {
-        format!("{}", instance_count)
-    } else {
-        format!("{} ({}-{})", instance_count, create_value, drop_value)
+impl MetricsDumper {
+    pub const METRIC_DERIVATIVE_MULTIPLIER: f64 = 1000000.0;
+    pub const METRIC_PERCENT_MULTIPLIER: f64 = 10000.0;
+
+    pub fn add_compute_handler<F>(&mut self, key: String, handler: F)
+    where
+        F: Fn(&String, &BTreeMap<String, Metric>) -> Option<Metric>,
+        F: 'static,
+    {
+        self.compute_handlers.insert(key, Box::new(handler));
+    }
+
+    pub fn add_derivative_metric(&mut self, key: String) {
+        self.derivative_metrics.insert(key);
+    }
+
+    pub fn update(&mut self, metrics_receiver: &metrics_runtime::Receiver) {
+        //convert metrics
+
+        let mut metrics: BTreeMap<String, Metric> = BTreeMap::new();
+
+        for (key, value) in &metrics_receiver.controller().snapshot().into_measurements() {
+            if let metrics_runtime::Measurement::Counter(value) = value {
+                metrics.insert(
+                    key.name().to_string(),
+                    Metric {
+                        value: *value,
+                        usage: MetricUsage::Counter,
+                    },
+                );
+            }
+        }
+
+        //snapshot time
+
+        let duration = self.last_dump_time.elapsed().unwrap().as_secs_f64();
+        self.last_dump_time = std::time::SystemTime::now();
+
+        //compute metrics
+
+        for (key, handler) in &self.compute_handlers {
+            if let Some(value) = handler(key, &metrics) {
+                metrics.insert(key.to_string(), value);
+            }
+        }
+
+        //compute derivative metrics
+
+        for key in &self.derivative_metrics {
+            if let Some(value) = metrics.get(key) {
+                if let Some(prev_value) = self.prev_metrics.get(key) {
+                    let delta = (value.value as isize - prev_value.value as isize) as f64;
+                    let derivative = (delta / duration * Self::METRIC_DERIVATIVE_MULTIPLIER) as u64;
+
+                    metrics.insert(
+                        format!("{}.speed", key),
+                        Metric {
+                            value: derivative,
+                            usage: MetricUsage::Derivative,
+                        },
+                    );
+                }
+            }
+        }
+
+        //update state
+
+        self.prev_metrics = metrics;
+    }
+
+    pub fn dump<F>(&self, handler: F)
+    where
+        F: Fn(String),
+    {
+        for (key, metric) in &self.prev_metrics {
+            use MetricUsage::*;
+
+            let metric_dump = match metric.usage {
+                Counter => format!("{}", metric.value),
+                Derivative => {
+                    let value = metric.value as f64 / Self::METRIC_DERIVATIVE_MULTIPLIER;
+
+                    let (multiplier, suffix) = if value > 1000000.0 {
+                        (1000000.0, "M")
+                    } else if value > 1000.0 {
+                        (1000.0, "K")
+                    } else {
+                        (1.0, "")
+                    };
+
+                    format!("{:.2}{}/s", value / multiplier, suffix)
+                }
+                Percents => format!(
+                    "{:.1}%",
+                    (metric.value as f64) / Self::METRIC_PERCENT_MULTIPLIER * 100.0
+                ),
+            };
+
+            handler(format!("    {:12} - {}", metric_dump, key));
+        }
+    }
+
+    pub fn new() -> MetricsDumper {
+        MetricsDumper {
+            last_dump_time: std::time::SystemTime::now(),
+            prev_metrics: BTreeMap::new(),
+            compute_handlers: HashMap::new(),
+            derivative_metrics: HashSet::new(),
+        }
     }
 }
 
-pub fn dump_metric(
+fn get_metrics_counters_pair(
+    metrics: &BTreeMap<String, Metric>,
+    key1: &String,
+    key2: &String,
+) -> Option<(u64, u64)> {
+    let value1 = metrics.get(key1);
+    let value1 = match value1 {
+        Some(value) => value,
+        _ => return None,
+    };
+
+    let value2 = metrics.get(key2);
+    let value2 = match value2 {
+        Some(value) => value,
+        _ => return None,
+    };
+
+    if !match value1.usage {
+        MetricUsage::Counter => true,
+        _ => false,
+    } || !match value2.usage {
+        MetricUsage::Counter => true,
+        _ => false,
+    } {
+        return None;
+    }
+
+    Some((value1.value, value2.value))
+}
+
+pub fn compute_instance_counter(
+    basic_key: &String,
+    metrics: &BTreeMap<String, Metric>,
+) -> Option<Metric> {
+    let create_key = basic_key.clone() + ".create";
+    let drop_key = basic_key.clone() + ".drop";
+
+    if let Some((create_value, drop_value)) =
+        get_metrics_counters_pair(metrics, &create_key, &drop_key)
+    {
+        let instance_count = create_value - drop_value;
+
+        return Some(Metric {
+            value: instance_count,
+            usage: MetricUsage::Counter,
+        });
+    }
+
+    Some(Metric {
+        value: 0,
+        usage: MetricUsage::Counter,
+    })
+}
+
+pub fn add_compute_percentage_metric(
+    metrics_dumper: &mut MetricsDumper,
     key: &String,
-    value: &metrics_runtime::Measurement,
-    metrics: &BTreeMap<String, &metrics_runtime::Measurement>,
+    value_key: &String,
+    total_key: &String,
 ) {
-    if !key.contains(".create") && !key.contains(".drop") {
-        debug!("...{}={:?}", key, value);
-        return;
-    }
+    let value_key = value_key.clone();
+    let total_key = total_key.clone();
+    metrics_dumper.add_compute_handler(key.to_string(), move |_key, metrics| -> Option<Metric> {
+        if let Some((value, total_value)) =
+            get_metrics_counters_pair(metrics, &value_key, &total_key)
+        {
+            let percentage = (value as f64) / (total_value as f64);
 
-    let create_key = key;
+            return Some(Metric {
+                value: (percentage * MetricsDumper::METRIC_PERCENT_MULTIPLIER) as u64,
+                usage: MetricUsage::Percents,
+            });
+        }
 
-    if !create_key.contains(".create") {
-        return;
-    }
+        None
+    });
+}
 
-    let basic_key = create_key.replace(".create", "");
-
-    debug!(
-        "...{}={}",
-        basic_key,
-        instance_counter_to_string(&basic_key, metrics)
+pub fn add_compute_result_metric(metrics_dumper: &mut MetricsDumper, basic_key: &String) {
+    metrics_dumper.add_compute_handler(
+        format!("{}.success.frequency", basic_key),
+        &utils::compute_result_success_metric,
+    );
+    metrics_dumper.add_compute_handler(
+        format!("{}.failure.frequency", basic_key),
+        &utils::compute_result_failure_metric,
+    );
+    metrics_dumper.add_compute_handler(
+        format!("{}.ignore.frequency", basic_key),
+        &utils::compute_result_ignore_metric,
     );
 }
 
-pub fn dump_metrics(
-    metrics_receiver: &metrics_runtime::Receiver,
-    dump: &dyn Fn(
-        &String,
-        &metrics_runtime::Measurement,
-        &BTreeMap<String, &metrics_runtime::Measurement>,
-    ),
-) {
-    let metrics = metrics_receiver.controller().snapshot().into_measurements();
-    let map: BTreeMap<String, &metrics_runtime::Measurement> = metrics
-        .iter()
-        .map(|x| (x.0.name().to_string(), &x.1))
-        .collect();
+pub fn compute_result_status_metric(
+    basic_key: &String,
+    success: bool,
+    metrics: &BTreeMap<String, Metric>,
+) -> Option<Metric> {
+    let suffix = if success {
+        ".success.frequency"
+    } else {
+        ".failure.frequency"
+    };
+    let basic_key = basic_key.trim_end_matches(suffix).to_string();
+    let key1 = basic_key.clone() + if success { ".success" } else { ".failure" };
+    let key2 = basic_key.clone() + ".total";
 
-    for (key, value) in &map {
-        dump(key, value, &map);
+    if let Some((value, total_value)) = get_metrics_counters_pair(metrics, &key1, &key2) {
+        let percentage = (value as f64) / (total_value as f64);
+
+        return Some(Metric {
+            value: (percentage * MetricsDumper::METRIC_PERCENT_MULTIPLIER) as u64,
+            usage: MetricUsage::Percents,
+        });
     }
+
+    None
+}
+
+pub fn compute_result_success_metric(
+    basic_key: &String,
+    metrics: &BTreeMap<String, Metric>,
+) -> Option<Metric> {
+    compute_result_status_metric(basic_key, true, metrics)
+}
+
+pub fn compute_result_failure_metric(
+    basic_key: &String,
+    metrics: &BTreeMap<String, Metric>,
+) -> Option<Metric> {
+    compute_result_status_metric(basic_key, false, metrics)
+}
+
+pub fn compute_result_ignore_metric(
+    basic_key: &String,
+    metrics: &BTreeMap<String, Metric>,
+) -> Option<Metric> {
+    let basic_key = basic_key.trim_end_matches(".ignore.frequency").to_string();
+    let key1 = basic_key.clone() + ".success";
+    let key2 = basic_key.clone() + ".failure";
+    let key3 = basic_key.clone() + ".total";
+
+    let success = get_metrics_counters_pair(metrics, &key1, &key3);
+    let failure = get_metrics_counters_pair(metrics, &key2, &key3);
+
+    if success.is_none() || failure.is_none() {
+        return None;
+    }
+
+    let total_value = success.unwrap().1 as f64;
+    let success = success.unwrap().0 as f64;
+    let failure = failure.unwrap().0 as f64;
+    let reports_count = success + failure;
+
+    let percentage = (total_value - reports_count as f64) / (total_value as f64);
+
+    Some(Metric {
+        value: (percentage * MetricsDumper::METRIC_PERCENT_MULTIPLIER) as u64,
+        usage: MetricUsage::Percents,
+    })
 }

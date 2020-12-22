@@ -4,6 +4,7 @@ use crate::{
     },
     block_proof::BlockProofStuff, shard_state::ShardStateStuff,
     network::neighbours::{Neighbours, Neighbour},
+    types::top_block_descr::TopBlockDescrStuff,
 };
 
 use adnl::{common::{serialize, serialize_append}, node::AdnlNode};
@@ -23,9 +24,11 @@ use ton_api::ton::{
         }
     },
     ton_node::{ 
-        ArchiveInfo, BlockDescription, BlocksDescription, Broadcast, DataFull,
-        KeyBlocks, Prepared, PreparedProof, PreparedState,
-        broadcast::{BlockBroadcast, ExternalMessageBroadcast}, externalmessage::ExternalMessage
+        ArchiveInfo, BlockDescription, BlocksDescription, Broadcast, 
+        Broadcast::{TonNode_BlockBroadcast, TonNode_NewShardBlockBroadcast}, 
+        DataFull, KeyBlocks, Prepared, PreparedProof, PreparedState, 
+        broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}, 
+        externalmessage::ExternalMessage, 
     }
 };
 use ton_block::BlockIdExt;
@@ -33,19 +36,26 @@ use ton_types::{fail, error, Result};
 
 #[derive(Debug, Default, Clone)]
 pub struct Attempts {
+//    pub total_limit: u32,
     pub limit: u32,
     pub count: u32
 }
 
 impl Attempts {
     pub const fn with_limit(limit: u32) -> Self {
-        Self { limit, count: 0 }
+        Self {
+//            total_limit: 0,
+            limit,
+            count: 0,
+        }
     }
 }
 
 #[async_trait::async_trait]
 pub trait FullNodeOverlayClient : Sync + Send {
     async fn broadcast_external_message(&self, msg: &[u8]) -> Result<u32>;
+    async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()>;
+    async fn send_top_shard_block_description(&self, tbd: TopBlockDescrStuff) -> Result<()>;
     async fn get_next_block_description(&self, prev_block_id: &BlockIdExt, attempts: &Attempts) -> Result<BlockDescription>;
     async fn get_next_blocks_description(&self, prev_block_id: &BlockIdExt, limit: i32, attempts: &Attempts) -> Result<BlocksDescription>;
     async fn get_prev_blocks_description(&self, next_block_id: &BlockIdExt, limit: i32, cutoff_seqno: i32, attempts: &Attempts) -> Result<BlocksDescription>;
@@ -69,10 +79,10 @@ pub trait FullNodeOverlayClient : Sync + Send {
     ) -> Result<Vec<u8>>;
     async fn download_zero_state(&self, id: &BlockIdExt, attempts: &Attempts) -> Result<Option<(ShardStateStuff, Vec<u8>)>>;
     async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, max_size: i32, attempts: &Attempts) -> Result<Vec<BlockIdExt>>;
-    async fn download_next_block_full(&self, prev_id: &BlockIdExt, attempts: &Attempts) -> Result<(BlockStuff, BlockProofStuff)>;
+    async fn download_next_block_full(&self, prev_id: &BlockIdExt, attempts: &Attempts) -> Result<Option<(BlockStuff, BlockProofStuff)>>;
     async fn download_archive(&self, mc_seq_no: u32) -> Result<Vec<u8>>;
 
-    async fn wait_block_broadcast(&self) -> Result<Box<BlockBroadcast>>;
+    async fn wait_broadcast(&self) -> Result<Broadcast>;
 }
 
 #[derive(Clone)]
@@ -284,6 +294,23 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             }
         }.into_boxed();
         self.overlay.broadcast(&self.overlay_id, &serialize(&broadcast)?, None).await
+    }
+
+    async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()> {
+        let id = broadcast.id.clone();
+        let block_bloadcast = TonNode_BlockBroadcast(Box::new(broadcast));
+        let n = self.overlay.broadcast(&self.overlay_id, &serialize(&block_bloadcast)?, None).await?;
+        log::trace!("send_block_broadcast {} (overlay {}) sent to {} nodes", self.overlay_id, id, n);
+        Ok(())
+    }
+    
+    async fn send_top_shard_block_description(&self, tbd: TopBlockDescrStuff) -> Result<()> {
+        let broadcast = TonNode_NewShardBlockBroadcast(Box::new(
+            NewShardBlockBroadcast { block: tbd.new_shard_block()? })
+        );
+        let n = self.overlay.broadcast(&self.overlay_id, &serialize(&broadcast)?, None).await?;
+        log::trace!("send_top_shard_block_description {} (overlay {}) sent to {} nodes", tbd.proof_for(), self.overlay_id, n);
+        Ok(())
     }
 
     // tonNode.getNextBlockDescription prev_block:tonNode.blockIdExt = tonNode.BlockDescription;
@@ -603,7 +630,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         &self, 
         prev_id: &BlockIdExt, 
         attempts: &Attempts
-    ) -> Result<(BlockStuff, BlockProofStuff)> {
+    ) -> Result<Option<(BlockStuff, BlockProofStuff)>> {
         // Download
         let data_full: DataFull = self.send_rldp_query_no_peer(
             &DownloadNextBlockFull {
@@ -613,23 +640,19 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         ).await?;
 
         // Parse
-        let id = convert_block_id_ext_api2blk(
-            data_full.id().ok_or_else(|| failure::err_msg("get_next_block_attempts: got empty id"))?
-        )?;
-        let block_bytes = data_full
-            .block()
-            .ok_or_else(|| failure::err_msg("get_next_block_attempts: got empty data"))?;
-        let block = BlockStuff::deserialize_checked(id, block_bytes.to_vec())?;
-
-        let proof_bytes = data_full
-            .proof()
-            .ok_or_else(|| failure::err_msg("get_next_block_attempts: got empty data"))?;
-        let is_link = data_full
-            .is_link()
-            .ok_or_else(|| failure::err_msg("get_next_block_attempts: got empty data"))?;
-        let proof = BlockProofStuff::deserialize(block.id(), proof_bytes.to_vec(), (is_link.clone()).into())?;
-
-        Ok((block, proof))
+        match data_full {
+            DataFull::TonNode_DataFullEmpty => return Ok(None),
+            DataFull::TonNode_DataFull(data_full) => {
+                let id = convert_block_id_ext_api2blk(&data_full.id)?;
+                let block = BlockStuff::deserialize_checked(id, data_full.block.to_vec())?;
+                let proof = BlockProofStuff::deserialize(
+                    block.id(), 
+                    data_full.proof.to_vec(), 
+                    data_full.is_link.clone().into()
+                )?;
+                Ok(Some((block, proof)))
+            }
+        }
     }
 
     async fn download_archive(&self, mc_seq_no: u32) -> Result<Vec<u8>> {
@@ -703,40 +726,18 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         }
     }
 
-    async fn wait_block_broadcast(&self) -> Result<Box<BlockBroadcast>> {
+    async fn wait_broadcast(&self) -> Result<Broadcast> {
         let receiver = self.overlay.clone();
         let id = self.overlay_id.clone();
-        let mut result: Option<Box<BlockBroadcast>> = None;
-
-        while let None = result {
-            let message = receiver.wait_for_broadcast(&id).await;
-            match message {
-                Ok((data, _)) => {
-                    let answer: Broadcast = Deserializer::new(&mut Cursor::new(&data)).read_boxed()?;
-                    match answer {
-                        Broadcast::TonNode_BlockBroadcast(broadcast) => {
-                            log::trace!("broadcast block:{:?}", &broadcast.id);
-                            result = Some(broadcast);
-                        },
-                        Broadcast::TonNode_ExternalMessageBroadcast(broadcast) => {
-                            log::trace!("TonNode_ExternalMessageBroadcast: {:?}", broadcast);
-                        },
-                        Broadcast::TonNode_IhrMessageBroadcast(broadcast) => {
-                            log::trace!("TonNode_IhrMessageBroadcast: {:?}", broadcast);
-                        },
-                        Broadcast::TonNode_NewShardBlockBroadcast(broadcast) => {
-                            log::trace!("TonNode_NewShardBlockBroadcast: {:?}", broadcast);
-                        },
-                    }
-                },
-                Err(e) => {
-                    log::error!("broadcast err: {}", e);
-                },
-            };
+        loop {
+            match receiver.wait_for_broadcast(&id).await {
+                Ok(data) => {
+                    let answer: Broadcast = Deserializer::new(&mut Cursor::new(data.0)).read_boxed()?;
+                    break Ok(answer)
+                }
+                Err(e) => log::error!("broadcast waiting error: {}", e)
+            }
         }
-
-        let result = result.ok_or_else(|| error!("Failed to receive a broadcast!"))?;
-        Ok(result)
     }
 
 }

@@ -1,7 +1,10 @@
 use crate::{
-    config::{NodeConfigHandler, TonNodeGlobalConfig, TonNodeConfig}, db::InternalDb,  engine_traits::OverlayOperations, 
+    config::{NodeConfigHandler, TonNodeGlobalConfig, TonNodeConfig},
+    db::InternalDb,
+    engine_traits::{OverlayOperations, PrivateOverlayOperations},
     network::{
-        control::ControlServer, full_node_client::{NodeClientOverlay, FullNodeOverlayClient},
+        catchain_client::CatchainClient, control::ControlServer,
+        full_node_client::{NodeClientOverlay, FullNodeOverlayClient},
         neighbours::{self, Neighbours}
     },
     types::awaiters_pool::AwaitersPool,
@@ -9,27 +12,47 @@ use crate::{
 use adnl::{
     common::{KeyId, KeyOption}, node::{AddressCacheIterator, AdnlNode, AdnlNodeConfig}
 };
+use catchain::{CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr};
 use dht::DhtNode;
-use overlay::{OverlayId, OverlayShortId, OverlayNode, QueriesConsumer};
+use overlay::{OverlayId, OverlayShortId, OverlayNode, QueriesConsumer, PrivateOverlayShortId};
 use rldp::RldpNode;
-use std::{sync::Arc, time::Duration};
+use std::{hash::Hash, sync::Arc, time::Duration};
 use tokio::time::delay_for;
-use ton_types::Result;
+use ton_types::{Result, error, UInt256};
+use ton_block::BlockIdExt;
 
-type OverlayCache = lockfree::map::Map<Arc<OverlayShortId>, Arc<NodeClientOverlay>>;
+type Cache<K, T> = lockfree::map::Map<K, T>;
+
 pub struct NodeNetwork {
     adnl: Arc<AdnlNode>,
     dht: Arc<DhtNode>,
     overlay: Arc<OverlayNode>,
     rldp: Arc<RldpNode>,
     global_cfg: TonNodeGlobalConfig,
+   // config: TonNodeConfig,
     db: Arc<dyn InternalDb>,
     masterchain_overlay_short_id: Arc<OverlayShortId>,
     masterchain_overlay_id: OverlayId,
-    overlays: Arc<OverlayCache>,
+    overlays: Arc<Cache<Arc<OverlayShortId>, Arc<NodeClientOverlay>>>,
+    validator_context: ValidatorContext,
     overlay_awaiters: AwaitersPool<Arc<OverlayShortId>, Arc<dyn FullNodeOverlayClient>>,
-    _config_handler: Arc<NodeConfigHandler>,
+    runtime_handle: tokio::runtime::Handle,
+    config_handler: Arc<NodeConfigHandler>,
     _control: Option<ControlServer>
+}
+
+struct ValidatorContext {
+    private_overlays: Arc<Cache<Arc<OverlayShortId>, Arc<CatchainClient>>>,
+    validator_adnl_keys: Arc<Cache<Arc<KeyId>, usize>>,   //KeyId, tag
+    sets_contexts: Arc<Cache<UInt256, ValidatorSetContext>>,
+}
+
+#[derive(Clone)]
+struct ValidatorSetContext {
+    validator_peers: Vec<Arc<KeyId>>,
+    validator_key: Arc<KeyOption>,
+    validator_adnl_key: Arc<KeyOption>,
+    election_id: usize
 }
 
 impl NodeNetwork {
@@ -37,15 +60,14 @@ impl NodeNetwork {
     pub const TAG_DHT_KEY: usize = 1;
     pub const TAG_OVERLAY_KEY: usize = 2;
 
-    const PERIOD_STORE_IP_ADDRESS: u64 = 500;  // second
+    const PERIOD_STORE_IP_ADDRESS: u64 = 500;   // second
     const PERIOD_START_FIND_DHT_NODE: u64 = 60; // second
 
-    pub async fn new(node_config: TonNodeConfig, db: Arc<dyn InternalDb>) -> Result<Self> {
-
-        let global_config = node_config.load_global_config()?;
+    pub async fn new(config: TonNodeConfig, db: Arc<dyn InternalDb>) -> Result<Self> {
+        let global_config = config.load_global_config()?;
         let masterchain_zero_state_id = global_config.zero_state()?;
 
-        let adnl = AdnlNode::with_config(node_config.adnl_node()?).await?;
+        let adnl = AdnlNode::with_config(config.adnl_node()?).await?;
         let dht = DhtNode::with_adnl_node(adnl.clone(), Self::TAG_DHT_KEY)?;
         let overlay = OverlayNode::with_adnl_node_and_zero_state(
             adnl.clone(), 
@@ -59,7 +81,6 @@ impl NodeNetwork {
             dht.add_peer(peer)?;
         }
 
-        let overlays = Arc::new(OverlayCache::new());
         let masterchain_overlay_id = overlay.calc_overlay_id(
             masterchain_zero_state_id.shard().workchain_id(),
             masterchain_zero_state_id.shard().shard_prefix_with_tag() as i64,
@@ -70,18 +91,21 @@ impl NodeNetwork {
         )?;
 
         let dht_key = adnl.key_by_tag(Self::TAG_DHT_KEY)?;
-        NodeNetwork::periodic_store_ip_addr(dht.clone(), dht_key);
+        NodeNetwork::periodic_store_ip_addr(dht.clone(), dht_key, None, None);
 
-        let overlay_public_key = adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?;
-        NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_public_key);
+        let overlay_key = adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?;
+        NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_key, None, None);
+
         NodeNetwork::find_dht_nodes(dht.clone());
-        let control_server_config =node_config.control_server();
-        let config_handler = Arc::new(NodeConfigHandler::new(node_config)?);
+        let control_server_config = config.control_server();
+        let config_handler = Arc::new(NodeConfigHandler::new(config)?);
 
         let _control = match control_server_config {
             Ok(config) => Some(
                 ControlServer::with_config(
-                    config, config_handler.clone(),
+                    config,
+                    Some(Arc::new(super::control::DbEngine::new(db.clone()))),
+                    config_handler.clone(),
                     config_handler.clone()
                 ).await?
             ),
@@ -89,6 +113,15 @@ impl NodeNetwork {
                 log::warn!("{}", e);
                 None
             }
+        };
+
+     //   let validator_adnl_key = adnl.key_by_tag(Self::TAG_VALIDATOR_ADNL_KEY)?;
+     //   NodeNetwork::periodic_store_ip_addr(dht.clone(), validator_adnl_key);
+
+        let validator_context = ValidatorContext {
+            private_overlays: Arc::new(Cache::new()),
+            validator_adnl_keys: Arc::new(Cache::new()),
+            sets_contexts: Arc::new(Cache::new()),
         };
 
         Ok(NodeNetwork {
@@ -100,9 +133,12 @@ impl NodeNetwork {
             masterchain_overlay_short_id,
             masterchain_overlay_id,
             global_cfg: global_config,
-            overlays,
+           // config: config,
+            overlays: Arc::new(Cache::new()),
+            validator_context: validator_context,
             overlay_awaiters: AwaitersPool::new(),
-            _config_handler: config_handler,
+            runtime_handle: tokio::runtime::Handle::current(),
+            config_handler: config_handler,
             _control
         })
     }
@@ -111,13 +147,14 @@ impl NodeNetwork {
         &self.global_cfg
     }
 
-    fn try_add_new_overlay(
+    fn try_add_new_elem<K: Hash + Ord + Clone, T: Clone>(
         &self,
-        overlay_id: &Arc<OverlayShortId>,
-        overlay: Arc<NodeClientOverlay>
-    ) -> Arc<NodeClientOverlay> {
-        let insertion = self.overlays.insert_with(
-            overlay_id.clone(),
+        id: &K,
+        value: T,
+        cache: &Arc<Cache<K, T>>
+    ) -> T {
+        let insertion = cache.insert_with(
+            id.clone(),
             |_, prev_gen_val, updated_pair | if updated_pair.is_some() {
                 // other thread already added the value into map
                 // so discard this insertion attempt
@@ -128,13 +165,13 @@ impl NodeNetwork {
             } else {
                 // there is not the value in the map - try to add.
                 // If other thread adding value the same time - the closure will be recalled
-                lockfree::map::Preview::New(overlay.clone())
+                lockfree::map::Preview::New(value.clone())
             }
         );
         match insertion {
             lockfree::map::Insertion::Created => {
                 // overlay info we loaded now was added - use it
-                overlay
+                value
             },
             lockfree::map::Insertion::Updated(_) => {
                 // unreachable situation - all updates must be discarded
@@ -142,7 +179,7 @@ impl NodeNetwork {
             },
             lockfree::map::Insertion::Failed(_) => {
                 // othre thread's overlay info was added - get it and use
-                self.overlays.get(overlay_id).unwrap().val().clone()
+                cache.get(id).unwrap().val().clone()
             }
         }
     }
@@ -172,9 +209,15 @@ impl NodeNetwork {
         Box::leak(s.into_boxed_str())
     }
 
+    pub fn local_id(&self) -> Result<Arc<KeyId>> {
+        Ok(self.adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?.id().clone())
+    }
+
     fn periodic_store_ip_addr(
-        dht: Arc<DhtNode>, 
-        node_key: Arc<KeyOption>)
+        dht: Arc<DhtNode>,
+        node_key: Arc<KeyOption>,
+        validator_key: Option<Arc<KeyId>>,
+        validator_keys: Option<Arc<Cache<Arc<KeyId>, usize>>>)
     {
         tokio::spawn(async move {
             let node_key = node_key.clone();
@@ -183,6 +226,14 @@ impl NodeNetwork {
                     log::warn!("store ip address is ERROR: {}", e)
                 }
                 delay_for(Duration::from_secs(Self::PERIOD_STORE_IP_ADDRESS)).await;
+
+                if let Some(sets) = validator_keys.clone() {
+                    if let Some(key) = validator_key.clone() {
+                        if sets.get(&key).is_none() {
+                            break;
+                        }
+                    }
+                }
             }
         });
     }
@@ -269,6 +320,10 @@ impl NodeNetwork {
 
     pub fn masterchain_overlay_id(&self) -> &KeyId {
         &self.masterchain_overlay_short_id
+    }
+
+    pub fn get_validator_status(&self) -> bool {
+        self.config_handler.get_validator_status()
     }
 
     async fn update_overlay_peers(
@@ -385,7 +440,7 @@ impl NodeNetwork {
 
         let peers = self.update_overlay_peers(&overlay_id.0, &mut None).await?; 
         if peers.first().is_none() {
-            log::warn!("No nodes were found in overlay {}", overlay_id.0);
+            log::warn!("No nodes were found in overlay {}", &overlay_id.0);
         }
 
         let neigbours = Neighbours::new(
@@ -410,7 +465,64 @@ impl NodeNetwork {
         Neighbours::start_reload(Arc::clone(&peers));
         Neighbours::start_rnd_peers_process(Arc::clone(&peers));
         NodeNetwork::start_update_peers(self.clone(), &client_overlay);
-        Ok(self.try_add_new_overlay(&overlay_id.0, client_overlay))
+        let result = self.try_add_new_elem(&overlay_id.0, client_overlay, &self.overlays);
+
+        Ok(result as Arc<dyn FullNodeOverlayClient>)
+    }
+
+    fn search_validator_keys(
+        dht: Arc<DhtNode>,
+        overlay: Arc<OverlayNode>,
+        validators_contexts: Arc<Cache<UInt256, ValidatorSetContext>>,
+        validator_list_id: UInt256,
+        validators: Vec<CatchainNode>
+    ) {
+        const SLEEP_TIME: u64 = 1;  //secs
+        tokio::spawn(async move {
+            let mut current_validators = validators;
+            loop {
+                match Self::search_validator_keys_round(dht.clone(), overlay.clone(), current_validators).await {
+                    Ok(looser_validators) => {
+                        current_validators = looser_validators;
+                    },
+                    Err(e) => {
+                        log::warn!("{:?}", e);
+                        break;
+                    }
+                }
+                if current_validators.is_empty() {
+                    break;
+                }
+                delay_for(Duration::from_secs(SLEEP_TIME)).await;
+
+                if validators_contexts.get(&validator_list_id).is_none() {
+                    break;
+                }
+            }
+        });
+    }
+
+    async fn search_validator_keys_round(
+        dht: Arc<DhtNode>,
+        overlay: Arc<OverlayNode>,
+        validators: Vec<CatchainNode>
+    ) -> Result<Vec<CatchainNode>> {
+        let mut loser_validators = Vec::new();
+        for val in validators {
+            let res = DhtNode::find_address(&dht, &val.adnl_id).await;
+
+            match res {
+                Ok((addr, key)) => {
+                    log::info!("addr: {:?}, key: {:x?}", &addr, &key);
+                    overlay.add_private_peers(&val.adnl_id, vec![(addr, key)])?;
+                }
+                Err(e) => { 
+                    loser_validators.push(val.clone());
+                    log::error!("find address failed: {:?}", e); 
+                }
+            }
+        }
+        Ok(loser_validators)
     }
 }
 
@@ -432,10 +544,20 @@ impl OverlayOperations for NodeNetwork {
         Ok((short_id, id))
     }
 
+    async fn get_peers_count(&self, masterchain_zero_state_id: &BlockIdExt) -> Result<usize> {
+        let masterchain_overlay_short_id = self.overlay.calc_overlay_short_id(
+            masterchain_zero_state_id.shard().workchain_id(),
+            masterchain_zero_state_id.shard().shard_prefix_with_tag() as i64,
+        )?;
+        Ok(self.update_overlay_peers(&masterchain_overlay_short_id, &mut None).await?.len())
+    }
+
     async fn start(self: Arc<Self>) -> Result<Arc<dyn FullNodeOverlayClient>> {
         AdnlNode::start(
             &self.adnl, 
-            vec![self.dht.clone(), self.overlay.clone(), self.rldp.clone()]
+            vec![self.dht.clone(), 
+                self.overlay.clone(),
+                self.rldp.clone()]
         ).await?;
         Ok(self.clone().get_overlay(
             (self.masterchain_overlay_short_id.clone(), self.masterchain_overlay_id.clone())
@@ -463,5 +585,192 @@ impl OverlayOperations for NodeNetwork {
     fn add_consumer(&self, overlay_id: &Arc<OverlayShortId>, consumer: Arc<dyn QueriesConsumer>) -> Result<()> {
         self.overlay.add_consumer(overlay_id, consumer)?;
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl PrivateOverlayOperations for NodeNetwork {
+    async fn set_validator_list(
+        &self, 
+        validator_list_id: UInt256,
+        validators: &Vec<CatchainNode>
+    ) -> Result<Option<Arc<KeyOption>>> {
+        log::trace!("set_validator_list validator_list_id: {}", validator_list_id);
+
+        let mut local_validator_key_raw = None;
+        let mut local_validator_adnl_key_raw = None;
+        let mut election_id_raw = None;
+        for validator in validators {
+            if let Some((validator_key, _)) = self.config_handler.get_validator_key(validator.public_key.id()).await {
+                local_validator_key_raw = Some(validator_key);
+                if let Some ((adnl_key, election_id)) = self.config_handler.get_validator_key(&validator.adnl_id).await {
+                    local_validator_adnl_key_raw = Some(adnl_key);
+                    election_id_raw = Some(election_id);
+                }
+                break;
+            }
+        }
+
+        let local_validator_key: KeyOption = match local_validator_key_raw {
+            Some(key) => { key },
+            None => { return Ok(None) }
+        };
+
+        let local_validator_adnl_key: KeyOption = match local_validator_adnl_key_raw {
+            Some(key) => { key },
+            None => { return Ok(None) }
+        };
+
+        let election_id: usize = match election_id_raw {
+            Some(id) => { id as usize },
+            None => { return Ok(None) }
+        };
+
+        let mut peers = Vec::new();
+        let mut skiped_peers = Vec::new();
+        let mut peers_ids = Vec::new();
+
+        for val in validators {
+            if val.public_key.id() == local_validator_key.id() {
+                continue;
+            }
+            peers_ids.push(val.adnl_id.clone());
+
+            match DhtNode::find_address(&self.dht, &val.adnl_id).await {
+                Ok((addr, key)) => {
+                    log::info!("addr: {:?}, key: {:x?}", &addr, &key);
+                    peers.push((addr, key));
+                }
+                Err(e) => {
+                    log::error!("find address failed: {:?}", e);
+                    skiped_peers.push(val.clone());
+                }
+            }
+        }
+
+        let mut store = false;
+
+        let adnl_key = if self.validator_context.validator_adnl_keys.get(local_validator_adnl_key.id()).is_none() {
+            let id = self.adnl.add_key(local_validator_adnl_key, election_id)?;
+            store = true;
+            self.adnl.key_by_id(&id)?
+        
+        } else {
+            self.adnl.key_by_id(&local_validator_adnl_key.id().clone())?
+        };
+
+        self.overlay.add_private_peers(adnl_key.id(), peers)?;
+        let validator_set_context = ValidatorSetContext {
+            validator_peers: peers_ids,
+            validator_key: Arc::new(local_validator_key),
+            validator_adnl_key: adnl_key.clone(),
+            election_id: election_id.clone()
+        };
+
+        let context = self.try_add_new_elem(
+            &validator_list_id.clone(),
+            validator_set_context,
+            &self.validator_context.sets_contexts
+        );
+
+        if !skiped_peers.is_empty() {
+            Self::search_validator_keys(
+                self.dht.clone(), 
+                self.overlay.clone(),
+                self.validator_context.sets_contexts.clone(),
+                validator_list_id,
+                skiped_peers
+            );
+        }
+
+        if store {
+            NodeNetwork::periodic_store_ip_addr(
+                self.dht.clone(),
+                adnl_key,
+                Some(context.validator_key.id().clone()),
+                Some(self.validator_context.validator_adnl_keys.clone())
+            );
+        }
+        Ok(Some(context.validator_key.clone()))
+    }
+
+    async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
+        let context = self.validator_context.sets_contexts.get(&validator_list_id);
+        let mut status = false;
+        if let Some(context) = context {
+            let adnl_key = &context.val().validator_adnl_key;
+            self.overlay.delete_private_peers(
+                adnl_key.id(),
+                &context.val().validator_peers
+            )?;
+            if self.config_handler.get_validator_key(adnl_key.id()).await.is_none() {
+                // delete adnl key 
+                match self.validator_context.validator_adnl_keys.get(adnl_key.id()) {
+                    Some(adnl_key_info) => {
+                        self.adnl.delete_key(adnl_key_info.key(), *adnl_key_info.val())?;
+                        self.validator_context.validator_adnl_keys.remove(adnl_key.id());
+                    },
+                    None => { log::warn!("validator adnl key don`t deleted!"); }
+                }
+            }
+            self.validator_context.sets_contexts.remove(&validator_list_id);
+            log::trace!("remove validator list (validator key id: {})", &validator_list_id);
+            status = true;
+        }
+
+        Ok(status)
+    }
+
+    fn create_catchain_client(
+        &self,
+        validator_list_id: UInt256,
+        overlay_short_id : &Arc<PrivateOverlayShortId>,
+        nodes_public_keys : &Vec<CatchainNode>,
+        listener : CatchainOverlayListenerPtr,
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr
+    ) -> Result<Arc<dyn CatchainOverlay + Send>> {
+
+        
+        let validator_set_context = self.validator_context.sets_contexts.get(&validator_list_id)
+            .ok_or_else(|| error!("bad validator_list_id ({})!", validator_list_id.to_hex_string()))?;
+        let adnl_key = self.adnl.key_by_tag(validator_set_context.val().election_id)?;
+
+        let client = CatchainClient::new(
+            &self.runtime_handle,
+            overlay_short_id,
+            &self.overlay,
+            self.rldp.clone(),
+            nodes_public_keys,
+            &adnl_key,
+            validator_set_context.val().validator_key.clone(),
+            listener
+        )?;
+
+        let client = Arc::new(client);
+        CatchainClient::run_wait_broadcast(
+            client.clone(),
+            &self.runtime_handle,
+            overlay_short_id,
+            &self.overlay,
+            &client.validator_keys(),
+            &client.catchain_listener());
+
+        let result = self.try_add_new_elem(
+            overlay_short_id,
+            client.clone(),
+            &self.validator_context.private_overlays
+        );
+
+        Ok(result  as Arc<dyn CatchainOverlay + Send>)
+    }
+
+    fn stop_catchain_client(&self, overlay_short_id: &Arc<PrivateOverlayShortId>) {
+        if let Some(catchain_client) = self.validator_context.private_overlays.remove(overlay_short_id) {
+            let client = catchain_client.val().clone();
+            
+            self.runtime_handle.spawn(async move {
+                client.stop().await;
+            });
+        }
     }
 }
