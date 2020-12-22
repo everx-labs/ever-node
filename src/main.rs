@@ -1,7 +1,6 @@
 pub mod block;
 pub mod block_proof;
 pub mod boot;
-pub mod collator;
 pub mod config;
 pub mod db;
 pub mod engine;
@@ -11,15 +10,9 @@ pub mod error;
 pub mod full_node;
 pub mod macros;
 pub mod network;
-pub mod out_msg_queue;
 pub mod shard_state;
 pub mod sync;
 pub mod types;
-pub mod validator;
-pub mod shard_blocks;
-pub mod validating_utils;
-pub mod rng;
-pub mod collator_test_bundle;
 
 #[cfg(feature = "tracing")]
 pub mod jaeger;
@@ -35,7 +28,6 @@ extern crate lazy_static;
 
 #[cfg(feature = "external_db")]
 mod external_db;
-pub mod ext_messages;
 
 use crate::{config::TonNodeConfig, engine_traits::ExternalDb, engine::STATSD, jaeger::init_jaeger};
 use clap;
@@ -45,8 +37,7 @@ use ton_types::error;
 use ton_types::Result;
 use std::sync::Arc;
 
-
-fn init_logger(log_config_path: Option<String>) {
+fn init_logger(log_config_path: Option<&str>) {
 
     if let Some(path) = log_config_path {
         if let Err(err) = log4rs::init_file(path, Default::default()) {
@@ -144,9 +135,9 @@ fn start_external_db(_config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>
     Ok(vec!())
 }
 
-async fn start_engine(config: TonNodeConfig, zerostate_path: Option<&str>) -> Result<()> {
+async fn start_engine(config: TonNodeConfig) -> Result<()> {
     let external_db = start_external_db(&config)?;
-    crate::engine::run(config, zerostate_path, external_db).await?;
+    crate::engine::run(config, external_db).await?;
     Ok(())
 }
 
@@ -157,20 +148,11 @@ fn main() {
     println!("{}", print_build_info());
 
     let app = clap::App::new("TON node")
-        .arg(clap::Arg::with_name("zerostate")
-            .short("z")
-            .long("--zerostate")
-            .value_name("zerostate"))
         .arg(clap::Arg::with_name("config")
             .short("c")
             .long("--configs")
             .value_name("config")
-            .default_value("./"))
-        .arg(clap::Arg::with_name("console_key")
-            .short("k")
-            .long("--ckey")
-            .value_name("console_key")
-            .help("use console key in json format"));
+            .default_value("./"));
 
     let matches = app.get_matches();
 
@@ -184,22 +166,11 @@ fn main() {
         }
     };
 
-    let console_key = match matches.value_of("console_key") {
-        Some(console_key) => {
-            Some(console_key.to_string())
-        },
-        None => {
-            None
-        }
-    };
-
-    let zerostate_path = matches.value_of("zerostate");
     let config = match TonNodeConfig::from_file(
         config_dir_path, 
         CONFIG_NAME, 
         None,
-        DEFAULT_CONFIG_NAME,
-        console_key
+        DEFAULT_CONFIG_NAME
     ) {
         Err(e) => {
             println!("Can't load config: {:?}", e);
@@ -208,7 +179,7 @@ fn main() {
         Ok(c) => c
     };
 
-    init_logger(config.log_config_path());
+    init_logger(config.log_config_path().as_ref().map(|s| s.as_str()));
     log_version();
     
     lazy_static::initialize(&STATSD);
@@ -223,7 +194,7 @@ fn main() {
     init_jaeger();
     
     runtime.block_on(async move {
-        if let Err(e) = start_engine(config, zerostate_path).await {
+        if let Err(e) = start_engine(config).await {
             log::error!("Can't start node's Engine: {:?}", e);
         }
     });

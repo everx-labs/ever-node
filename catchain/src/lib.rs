@@ -19,10 +19,9 @@ extern crate log;
 extern crate failure;
 
 /// Modules
-mod activity_node;
 mod block;
-mod block_payload;
 mod catchain;
+mod catchain_network;
 mod database;
 mod log_player;
 pub mod profiling;
@@ -35,9 +34,7 @@ use adnl::common::KeyId;
 use adnl::common::KeyOption;
 use adnl::node::AdnlNode;
 use failure::err_msg;
-pub use overlay::PrivateOverlayShortId;
 pub use profiling::InstanceCounter;
-pub use profiling::ResultStatusCounter;
 use std::any::Any;
 use std::cell::RefCell;
 use std::fmt;
@@ -45,6 +42,7 @@ use std::fmt;
 use std::rc::Rc;
 use std::rc::Weak;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::SystemTime;
 use ton_types::types::UInt256;
 
@@ -58,9 +56,9 @@ pub type PublicKeyHash = Arc<KeyId>;
 pub type PrivateKey = Arc<KeyOption>;
 
 /// Result for operations
-pub type Result<T> = ton_types::Result<T>;
+pub type Result<T> = std::result::Result<T, failure::Error>;
 
-pub type DatabasePtr = Arc<dyn Database>;
+pub type DatabasePtr = Rc<dyn Database>;
 
 /// Overlay ID
 pub type OverlayId = PublicKeyHash;
@@ -77,11 +75,8 @@ pub type BlockHash = UInt256;
 /// Signature
 pub type BlockSignature = ::ton_api::ton::bytes;
 
-/// Raw data buffer
-pub type RawBuffer = ::ton_api::ton::bytes;
-
-/// Pointer to a BlockPayload
-pub type BlockPayloadPtr = Arc<dyn BlockPayload>;
+/// Block payload
+pub type BlockPayload = ::ton_api::ton::bytes;
 
 /// Block extra data identifier (is used by validator session to match blocks and states)
 pub type BlockExtraId = u64;
@@ -104,30 +99,24 @@ pub type ReceiverPtr = Rc<RefCell<dyn Receiver>>;
 /// Pointer to ReceiverListener
 pub type ReceiverListenerPtr = Weak<RefCell<dyn ReceiverListener>>;
 
-/// Pointer to receiver's task queue
-pub type ReceiverTaskQueuePtr = Arc<dyn ReceiverTaskQueue + Send + Sync>;
-
 /// Pointer to a Catchain
-pub type CatchainPtr = Arc<dyn Catchain>;
+pub type CatchainPtr = Arc<Mutex<dyn Catchain>>;
 
 /// Pointer to overlay API for the Catchain
-pub type CatchainOverlayPtr = Arc<dyn CatchainOverlay + Send>;
+pub type CatchainOverlayPtr = Arc<Mutex<dyn CatchainOverlay + Send>>;
 
 /// Pointer to overlay listener API for the Catchain
-pub type CatchainOverlayListenerPtr = std::sync::Weak<dyn CatchainOverlayListener + Send + Sync>;
+pub type CatchainOverlayListenerPtr = std::sync::Weak<Mutex<dyn CatchainOverlayListener + Send>>;
 
 /// Pointer to overlay log replay listener API for the Catchain
 pub type CatchainOverlayLogReplayListenerPtr =
-    std::sync::Weak<dyn CatchainOverlayLogReplayListener + Send + Sync>;
-
-/// Pointer to overlay manager API for the Catchain
-pub type CatchainOverlayManagerPtr = Arc<dyn CatchainOverlayManager + Send + Sync>;
+    std::sync::Weak<Mutex<dyn CatchainOverlayLogReplayListener + Send>>;
 
 /// Pointer to Catchain listener for validator session
-pub type CatchainListenerPtr = std::sync::Weak<dyn CatchainListener + Send + Sync>;
+pub type CatchainListenerPtr = std::sync::Weak<Mutex<dyn CatchainListener + Send>>;
 
 /// Pointer to Catchain replaying listener
-pub type CatchainReplayListenerPtr = std::sync::Weak<dyn CatchainReplayListener + Send + Sync>;
+pub type CatchainReplayListenerPtr = std::sync::Weak<Mutex<dyn CatchainReplayListener + Send>>;
 
 /// Pointer to ADNL Node
 pub type AdnlNodePtr = Arc<AdnlNode>;
@@ -138,12 +127,9 @@ pub type LogPlayerPtr = Rc<dyn LogPlayer>;
 /// Validator's weight
 pub type ValidatorWeight = u64;
 
-/// Activity node pointer
-pub type ActivityNodePtr = Arc<dyn ActivityNode>;
-
 pub mod ton {
-    pub use ::ton_api::ton::catchain::*;
-    pub use ::ton_api::ton::rpc::catchain::*;
+    use ::ton_api::ton::catchain::*;
+    use ::ton_api::ton::rpc::catchain::*;
 
     /// Catchain block ID
     pub type BlockId = block::Id;
@@ -179,7 +165,7 @@ pub mod ton {
     pub type DifferenceFork = difference::DifferenceFork;
 
     /// Response for GetBlocksRequest, GetBlockHistoryRequest
-    pub type CatchainSentResponse = Sent;
+    pub type CatchainSentResponse = sent::Sent;
 
     /// Response for GetBlockRequest which is sent if the block is found
     pub type BlockResultResponse = BlockResult;
@@ -261,15 +247,6 @@ pub enum ReceivedBlockState {
     Delivered,
 }
 
-/// Trait for block payload data
-pub trait BlockPayload: fmt::Debug + Send + Sync {
-    /// Get raw data buffer
-    fn data(&self) -> &RawBuffer;
-
-    /// Block creation time
-    fn get_creation_time(&self) -> std::time::SystemTime;
-}
-
 /// Is used as a temporary storage during the block receiving from the catchain
 pub trait ReceivedBlock: fmt::Display {
     /// State of block
@@ -297,7 +274,7 @@ pub trait ReceivedBlock: fmt::Display {
     fn get_signature(&self) -> &BlockSignature;
 
     /// Payload of the block
-    fn get_payload(&self) -> &BlockPayloadPtr;
+    fn get_payload(&self) -> &BlockPayload;
 
     /// Index of the receiver source
     fn get_source_id(&self) -> usize;
@@ -328,7 +305,7 @@ pub trait ReceivedBlock: fmt::Display {
     fn initialize(
         &mut self,
         block: &ton::Block,
-        payload: BlockPayloadPtr,
+        payload: BlockPayload,
         receiver: &mut dyn Receiver,
     ) -> Result<()>;
 
@@ -347,12 +324,6 @@ pub trait ReceivedBlock: fmt::Display {
     /// Export TL block dependency data
     fn export_tl_dep(&self) -> ton::BlockDep;
 
-    /// Check block can be sent to source according to throttling rules and save last sending time for a pair (block, source)
-    fn mark_block_for_sending(&mut self, adnl_id: &PublicKeyHash) -> bool;
-
-    /// Serialized block
-    fn get_serialized_block_with_payload(&mut self) -> &BlockPayloadPtr;
-
     /// Implementation specific
     fn get_impl(&self) -> &dyn Any;
 
@@ -364,25 +335,6 @@ pub trait ReceivedBlock: fmt::Display {
 
     /// Dump received block a string
     fn to_string(&self) -> String;
-}
-
-/// Source statistics
-#[derive(Default, Debug)]
-pub struct ReceiverSourceStatistics {
-    /// Number of incoming received queries
-    pub in_queries_count: usize,
-
-    /// Number of outgoing sent queries
-    pub out_queries_count: usize,
-
-    /// Number of incoming received messages
-    pub in_messages_count: usize,
-
-    /// Number of outgoing sent messages
-    pub out_messages_count: usize,
-
-    /// Number of received broadcasts
-    pub in_broadcasts_count: usize,
 }
 
 /// Source for received blocks
@@ -449,16 +401,10 @@ pub trait ReceiverSource {
     fn is_fork_found(&self) -> bool;
 
     /// Fork proof
-    fn get_fork_proof(&self) -> &Option<ton::BlockDataFork>;
+    fn get_fork_proof(&self) -> &Option<BlockPayload>;
 
     /// Fork proof notification
-    fn set_fork_proof(&mut self, slice: ton::BlockDataFork);
-
-    /// Source statistics
-    fn get_statistics(&self) -> &ReceiverSourceStatistics;
-
-    /// Source statistics (mutable)
-    fn get_mut_statistics(&mut self) -> &mut ReceiverSourceStatistics;
+    fn set_fork_proof(&mut self, slice: BlockPayload);
 
     /// Implementation specific
     fn get_impl(&self) -> &dyn Any;
@@ -500,7 +446,7 @@ pub trait Receiver {
     fn blame(&mut self, source_id: usize);
 
     /// Add fork proof
-    fn add_fork_proof(&mut self, fork_proof: &BlockPayloadPtr);
+    fn add_fork_proof(&mut self, fork_proof: &BlockPayload);
 
     /// Get block by it hash
     fn get_block_by_hash(&self, hash: &BlockHash) -> Option<ReceivedBlockPtr>;
@@ -517,14 +463,14 @@ pub trait Receiver {
     fn parse_add_received_block(&mut self, s: &String);
 
     /// Adding new block
-    fn add_block(&mut self, payload: BlockPayloadPtr, deps: Vec<BlockHash>);
+    fn add_block(&mut self, payload: BlockPayload, deps: Vec<BlockHash>);
 
     /// New block is received
     fn receive_block(
         &mut self,
         adnl_id: &PublicKeyHash,
         block: &ton::Block,
-        payload: BlockPayloadPtr,
+        payload: BlockPayload,
     ) -> Result<ReceivedBlockPtr>;
 
     /// New incoming message from overlay is received
@@ -538,14 +484,14 @@ pub trait Receiver {
     fn receive_broadcast_from_overlay(
         &mut self,
         source_key_hash: &PublicKeyHash,
-        data: &BlockPayloadPtr,
+        data: &BlockPayload,
     );
 
     /// New incoming query from overlay is received
     fn receive_query_from_overlay(
         &mut self,
         adnl_id: &PublicKeyHash,
-        data: &BlockPayloadPtr,
+        data: &BlockPayload,
         response_callback: ExternalQueryResponseCallback,
     );
 
@@ -558,6 +504,9 @@ pub trait Receiver {
 
     /// Received blocks instance counter
     fn get_received_blocks_instance_counter(&self) -> &InstanceCounter;
+
+    /// Dump profiling metrics
+    fn dump_metrics(&self);
 
     /// Implementation specific
     fn get_impl(&self) -> &dyn Any;
@@ -580,17 +529,14 @@ pub trait Receiver {
 
 /// Catchain block
 pub trait Block: fmt::Display + fmt::Debug + Send + Sync {
-    /// Block creation time
-    fn get_creation_time(&self) -> std::time::SystemTime;
-
     /// Get block extra data ID
     fn get_extra_id(&self) -> BlockExtraId;
 
     /// Payload
-    fn get_payload(&self) -> &BlockPayloadPtr;
+    fn get_payload(&self) -> &BlockPayload;
 
     /// Receiver source identifier
-    fn get_source_id(&self) -> u32;
+    fn get_source_id(&self) -> usize;
 
     /// Fork ID
     fn get_fork_id(&self) -> usize;
@@ -619,7 +565,7 @@ pub trait Block: fmt::Display + fmt::Debug + Send + Sync {
 }
 
 /// Database for blocks saving
-pub trait Database: Send + Sync {
+pub trait Database {
     /// Return path to db
     fn get_db_path(&self) -> &String;
 
@@ -627,115 +573,93 @@ pub trait Database: Send + Sync {
     fn is_block_in_db(&self, hash: &BlockHash) -> bool;
 
     /// Get block from DB
-    fn get_block(&self, hash: &BlockHash) -> Result<RawBuffer>;
+    fn get_block(&self, hash: &BlockHash) -> Result<BlockPayload>;
 
     /// Push block to database
-    fn put_block(&self, hash: &BlockHash, data: RawBuffer);
+    fn put_block(&self, hash: &BlockHash, data: BlockPayload);
 
     /// Erase block from database
     fn erase_block(&self, hash: &BlockHash);
 }
 
 /// Response for queries
-pub type ExternalQueryResponseCallback = Box<dyn FnOnce(Result<BlockPayloadPtr>) + Send>;
+pub type ExternalQueryResponseCallback = Box<dyn FnOnce(Result<BlockPayload>) + Send>;
 
 /// Response for queries
-pub type QueryResponseCallback = Box<dyn FnOnce(Result<BlockPayloadPtr>, &mut dyn Receiver)>;
+pub type QueryResponseCallback = Box<dyn FnOnce(Result<BlockPayload>, &mut dyn Receiver)>;
 
 /// Overlay inbound interface for Catchain (Overlay -> Catchain)
-pub trait CatchainOverlayListener: Send + Sync {
+pub trait CatchainOverlayListener {
     /// Incoming message processing
-    fn on_message(&self, adnl_id: PublicKeyHash, data: &BlockPayloadPtr);
+    fn on_message(&mut self, adnl_id: PublicKeyHash, data: &BlockPayload);
 
     /// Incoming broadcast processing
-    fn on_broadcast(&self, source_key_hash: PublicKeyHash, data: &BlockPayloadPtr);
+    fn on_broadcast(&mut self, source_key_hash: PublicKeyHash, data: &BlockPayload);
 
     /// Incoming query processing
     fn on_query(
-        &self,
+        &mut self,
         adnl_id: PublicKeyHash,
-        data: &BlockPayloadPtr,
+        data: &BlockPayload,
         response_callback: ExternalQueryResponseCallback,
     );
 }
 
 /// Overlay listener interface to control time during the log replay
-pub trait CatchainOverlayLogReplayListener: Send + Sync {
+pub trait CatchainOverlayLogReplayListener {
     /// Set timestamp for all further events
-    fn on_time_changed(&self, timestamp: std::time::SystemTime);
+    fn on_time_changed(&mut self, timestamp: std::time::SystemTime);
 }
 
 /// Overlay outgoing interface for Catchain (Catchain -> Overlay)
-pub trait CatchainOverlay: Send + Sync {
+pub trait CatchainOverlay {
     /// Send message
     fn send_message(
-        &self,
+        &mut self,
         receiver_id: &PublicKeyHash,
         sender_id: &PublicKeyHash,
-        message: &BlockPayloadPtr,
+        message: &BlockPayload,
     );
 
     /// Send message to multiple sources
     fn send_message_multicast(
-        &self,
+        &mut self,
         receiver_ids: &[PublicKeyHash],
         sender_id: &PublicKeyHash,
-        message: &BlockPayloadPtr,
+        message: &BlockPayload,
     );
 
     /// Send query
     fn send_query(
-        &self,
+        &mut self,
         receiver_id: &PublicKeyHash,
         sender_id: &PublicKeyHash,
         name: &str,
         timeout: std::time::Duration,
-        message: &BlockPayloadPtr,
+        message: &BlockPayload,
         response_callback: ExternalQueryResponseCallback,
-    );
-
-    /// Send query via RLDP (ADNL ID of the current node should be registered for the query)
-    fn send_query_via_rldp(
-        &self,
-        dst_adnl_id: PublicKeyHash,
-        name: String,
-        response_callback: ExternalQueryResponseCallback,
-        timeout: std::time::SystemTime,
-        query: BlockPayloadPtr,
-        max_answer_size: u64,
     );
 
     /// Send broadcast
     fn send_broadcast_fec_ex(
-        &self,
+        &mut self,
         sender_id: &PublicKeyHash,
         send_as: &PublicKeyHash,
-        payload: BlockPayloadPtr,
-    );
-
-    /// Implementation specific
-    fn get_impl(&self) -> &dyn Any;
-}
-
-/// Overlay manager
-pub trait CatchainOverlayManager {
-    /// Create new overlay
-    fn start_overlay(
-        &self,
-        local_id: &PublicKeyHash,
-        overlay_short_id: &Arc<PrivateOverlayShortId>,
-        nodes: &Vec<CatchainNode>,
-        overlay_listener: CatchainOverlayListenerPtr,
-        log_replay_listener: CatchainOverlayLogReplayListenerPtr,
-    ) -> Result<CatchainOverlayPtr>;
-
-    /// Stop existing overlay
-    fn stop_overlay(
-        &self,
-        overlay_short_id: &Arc<PrivateOverlayShortId>,
-        overlay: &CatchainOverlayPtr,
+        payload: BlockPayload,
     );
 }
+
+/// Overlay factory functor
+pub type OverlayCreator = Box<
+    dyn FnOnce(
+            &PublicKeyHash,                      //local ADNL id
+            &OverlayFullId,                      //full ID of the overlay
+            &Vec<CatchainNode>,                  //list of nodes
+            CatchainOverlayListenerPtr,          //listener for overlay events
+            CatchainOverlayLogReplayListenerPtr, //listener for log replay events
+        ) -> CatchainOverlayPtr
+        + Send,
+>;
 
 /// Listener for Receiver callbacks
 pub trait ReceiverListener {
@@ -759,7 +683,7 @@ pub trait ReceiverListener {
         prev: BlockHash,
         deps: Vec<BlockHash>,
         forks_dep_heights: Vec<BlockHeight>,
-        payload: &BlockPayloadPtr,
+        payload: &BlockPayload,
     );
 
     /// Incoming broadcast processing
@@ -767,7 +691,7 @@ pub trait ReceiverListener {
         &mut self,
         receiver: &mut dyn Receiver,
         source_key_hash: &PublicKeyHash,
-        data: &BlockPayloadPtr,
+        data: &BlockPayload,
     );
 
     /// Source blame event
@@ -778,7 +702,7 @@ pub trait ReceiverListener {
         &mut self,
         receiver: &mut dyn Receiver,
         source_public_key_hash: &PublicKeyHash,
-        data: &BlockPayloadPtr,
+        data: &BlockPayload,
     );
 
     /// Custom query event
@@ -786,7 +710,7 @@ pub trait ReceiverListener {
         &mut self,
         receiver: &mut dyn Receiver,
         source_public_key_hash: &PublicKeyHash,
-        data: &BlockPayloadPtr,
+        data: &BlockPayload,
         response_callback: ExternalQueryResponseCallback,
     );
 
@@ -795,8 +719,7 @@ pub trait ReceiverListener {
         &mut self,
         receiver_id: &PublicKeyHash,
         sender_id: &PublicKeyHash,
-        message: &BlockPayloadPtr,
-        can_be_postponed: bool,
+        message: &BlockPayload,
     );
 
     /// Send message to multiple sources
@@ -804,7 +727,7 @@ pub trait ReceiverListener {
         &mut self,
         receiver_ids: &[PublicKeyHash],
         sender_id: &PublicKeyHash,
-        message: &BlockPayloadPtr,
+        message: &BlockPayload,
     );
 
     /// Send query
@@ -814,79 +737,56 @@ pub trait ReceiverListener {
         sender_id: &PublicKeyHash,
         name: &str,
         timeout: std::time::Duration,
-        message: &BlockPayloadPtr,
+        message: &BlockPayload,
         response_callback: QueryResponseCallback,
     );
-
-    /// Task queue
-    fn get_task_queue(&self) -> &ReceiverTaskQueuePtr;
-}
-
-/// Tasks queue for receiver
-pub trait ReceiverTaskQueue: Send + Sync {
-    /// Task execution
-    fn post_closure(&self, handler: Box<dyn FnOnce(&mut dyn Receiver) + Send>);
-
-    /// Utility task execution
-    fn post_utility_closure(&self, handler: Box<dyn FnOnce() + Send>);
 }
 
 /// Listener for Catchain
 pub trait CatchainListener {
     /// Preprocess block
-    fn preprocess_block(&self, block: BlockPtr);
+    fn preprocess_block(&mut self, block: BlockPtr);
 
     /// Process blocks
-    fn process_blocks(&self, blocks: Vec<BlockPtr>);
+    fn process_blocks(&mut self, blocks: Vec<BlockPtr>);
 
     /// Notify about finished of blocks processing
-    fn finished_processing(&self);
+    fn finished_processing(&mut self);
 
     /// Notify about catchain start
-    fn started(&self);
+    fn started(&mut self);
 
     /// Notify about incoming broadcasts
-    fn process_broadcast(&self, source_id: PublicKeyHash, data: BlockPayloadPtr);
+    fn process_broadcast(&mut self, source_id: PublicKeyHash, data: BlockPayload);
 
     /// Notify about incoming message
-    fn process_message(&self, source_id: PublicKeyHash, data: BlockPayloadPtr);
+    fn process_message(&mut self, source_id: PublicKeyHash, data: BlockPayload);
 
     /// Notify about incoming query
     fn process_query(
-        &self,
+        &mut self,
         source_id: PublicKeyHash,
-        data: BlockPayloadPtr,
+        data: BlockPayload,
         callback: ExternalQueryResponseCallback,
     );
 
     /// Set timestamp for all further events
-    fn set_time(&self, timestamp: std::time::SystemTime);
+    fn set_time(&mut self, timestamp: std::time::SystemTime);
 }
 
 /// Root class for Catchain processing
-pub trait Catchain: Send + Sync {
+pub trait Catchain {
     /// Request for a new block
-    fn request_new_block(&self, time: SystemTime);
+    fn request_new_block(&mut self, time: SystemTime);
 
     /// Mark block as processed
-    fn processed_block(&self, payload: BlockPayloadPtr);
+    fn processed_block(&mut self, payload: BlockPayload);
 
     /// Send broadcast
-    fn send_broadcast(&self, payload: BlockPayloadPtr);
+    fn send_broadcast(&mut self, payload: BlockPayload);
 
     /// Stop the Catchain
-    fn stop(&self);
-
-    /// Send query via RLDP
-    fn send_query_via_rldp(
-        &self,
-        dst: PublicKeyHash,
-        name: String,
-        response_callback: ExternalQueryResponseCallback,
-        timeout: std::time::SystemTime,
-        query: BlockPayloadPtr,
-        max_answer_size: u64,
-    );
+    fn stop(&mut self);
 }
 
 /// Catchain log player
@@ -906,51 +806,23 @@ pub trait LogPlayer {
     /// Get weights
     fn get_weights(&self) -> &Vec<ValidatorWeight>;
 
-    /// Get overlay manager
-    fn get_overlay_manager(
-        &self,
-        replay_listener: CatchainReplayListenerPtr,
-    ) -> CatchainOverlayManagerPtr;
+    /// Get overlay creator
+    fn get_overlay_creator(&self, replay_listener: CatchainReplayListenerPtr) -> OverlayCreator;
 }
 
 /// Listener for Catchain replaying
 pub trait CatchainReplayListener {
     /// Start of replaying
-    fn replay_started(&self);
+    fn replay_started(&mut self);
 
     /// Finish of replaying
-    fn replay_finished(&self);
-}
-
-/// Activity node for liveness tracking
-pub trait ActivityNode: Send + Sync {
-    /// Name of the object
-    fn get_name(&self) -> String;
-
-    /// Get creation time
-    fn get_creation_time(&self) -> std::time::SystemTime;
-
-    /// Get last activity notification time
-    fn get_access_time(&self) -> std::time::SystemTime;
-
-    /// Notify about activity
-    fn tick(&self);
+    fn replay_finished(&mut self);
 }
 
 /// Catchain factory
 pub struct CatchainFactory;
 
 impl CatchainFactory {
-    /// Create block payload
-    pub fn create_block_payload(data: RawBuffer) -> BlockPayloadPtr {
-        block_payload::BlockPayloadImpl::create(data)
-    }
-
-    /// Create empty payload
-    pub fn create_empty_block_payload() -> BlockPayloadPtr {
-        Self::create_block_payload(RawBuffer::default())
-    }
-
     /// Create new received block from string dump
     pub fn create_received_block_from_string_dump(
         dump: &String,
@@ -975,7 +847,7 @@ impl CatchainFactory {
         source_public_key_hash: PublicKeyHash,
         height: BlockHeight,
         hash: BlockHash,
-        payload: BlockPayloadPtr,
+        payload: BlockPayload,
         prev_block: Option<BlockPtr>,
         deps: Vec<BlockPtr>,
         forks_dep_heights: Vec<BlockHeight>,
@@ -1023,32 +895,56 @@ impl CatchainFactory {
         listener: ReceiverListenerPtr,
         incarnation: &SessionId,
         ids: &Vec<CatchainNode>,
-        local_key: &PrivateKey,
+        local_id: &PublicKeyHash,
         db_root: &String,
         db_suffix: &String,
         allow_unsafe_self_blocks_resync: bool,
-        metrics: Option<Arc<metrics_runtime::Receiver>>,
     ) -> ReceiverPtr {
         receiver::ReceiverImpl::create(
             listener,
-            incarnation,
+            &incarnation,
             ids,
-            local_key,
+            local_id,
             db_root,
             db_suffix,
             allow_unsafe_self_blocks_resync,
-            metrics,
         )
     }
 
-    /// Create dummy overlay manager
-    pub fn create_dummy_overlay_manager() -> CatchainOverlayManagerPtr {
-        catchain::CatchainImpl::create_dummy_overlay_manager()
+    /// Create dummy overlay
+    pub fn create_dummy_overlay(
+        local_id: &PublicKeyHash,
+        overlay_full_id: &OverlayFullId,
+        nodes: &Vec<CatchainNode>,
+        listener: CatchainOverlayListenerPtr,
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
+    ) -> CatchainOverlayPtr {
+        catchain::CatchainImpl::create_dummy_overlay(local_id, overlay_full_id, nodes, listener)
+    }
+
+    /// Create overlay
+    pub fn create_overlay(
+        runtime_handle: &tokio::runtime::Handle,
+        adnl: &AdnlNodePtr,
+        local_id: &PublicKeyHash,
+        overlay_full_id: &OverlayFullId,
+        nodes: &Vec<CatchainNode>,
+        listener: CatchainOverlayListenerPtr,
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
+    ) -> CatchainOverlayPtr {
+        catchain_network::CatchainNetwork::create(
+            runtime_handle,
+            adnl,
+            local_id,
+            overlay_full_id,
+            nodes,
+            listener,
+        )
     }
 
     /// Create Catchain database
-    pub fn create_database(path: &String, metrics: &metrics_runtime::Receiver) -> DatabasePtr {
-        database::DatabaseImpl::create(path, metrics)
+    pub fn create_database(path: &String) -> DatabasePtr {
+        database::DatabaseImpl::create(path)
     }
 
     /// Create Catchain root object
@@ -1056,22 +952,22 @@ impl CatchainFactory {
         options: &Options,
         session_id: &SessionId,
         ids: &Vec<CatchainNode>,
-        local_key: &PrivateKey,
+        local_id: &PublicKeyHash,
         db_root: &String,
         db_suffix: &String,
         allow_unsafe_self_blocks_resync: bool,
-        overlay_manager: CatchainOverlayManagerPtr,
+        overlay_creator: OverlayCreator,
         listener: CatchainListenerPtr,
     ) -> CatchainPtr {
         catchain::CatchainImpl::create(
             options,
             session_id,
             ids,
-            local_key,
+            local_id,
             db_root,
             db_suffix,
             allow_unsafe_self_blocks_resync,
-            overlay_manager,
+            overlay_creator,
             listener,
         )
     }
@@ -1099,10 +995,5 @@ impl CatchainFactory {
             catchain_listener,
             replay_listener,
         )
-    }
-
-    /// Creaate activity node
-    pub fn create_activity_node(name: String) -> ActivityNodePtr {
-        activity_node::ActivityNodeManager::create_node(name)
     }
 }

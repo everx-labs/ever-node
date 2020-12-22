@@ -1,7 +1,6 @@
 pub mod block;
 pub mod block_proof;
 pub mod boot;
-pub mod collator;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -11,16 +10,9 @@ pub mod engine_operations;
 pub mod full_node;
 pub mod macros;
 pub mod network;
-pub mod out_msg_queue;
 pub mod shard_state;
 pub mod sync;
 pub mod types;
-pub mod validator;
-pub mod ext_messages;
-pub mod shard_blocks;
-pub mod validating_utils;
-pub mod rng;
-pub mod collator_test_bundle;
 
 #[cfg(feature = "tracing")]
 pub mod jaeger;
@@ -36,3 +28,39 @@ pub mod jaeger {
 mod external_db;
 
 
+use std::sync::Arc;
+use config::{NodeConfigHandler, TonNodeConfig};
+use network::control::ControlServer;
+use ton_types::Result;
+
+pub struct LightEngine {
+    _config_handler: Arc<NodeConfigHandler>,
+    control: Option<ControlServer>
+}
+
+impl LightEngine {
+    pub async fn with_config(node_config_path: &str) -> Result<Self> {
+        let node_config = TonNodeConfig::from_file("target", node_config_path, None, "")?;
+        let control_server_config = node_config.control_server();
+        let config_handler = Arc::new(NodeConfigHandler::new(node_config)?);
+        let control = match control_server_config {
+            Ok(config) => Some(
+                ControlServer::with_config(config, config_handler.clone(), config_handler.clone()).await?
+            ),
+            Err(e) => {
+                log::warn!("{}", e);
+                None
+            }
+        };
+
+        Ok(Self {
+            _config_handler: config_handler,
+            control
+        })
+    }
+    pub fn shutdown(mut self) {
+        if let Some(control) = self.control.take() {
+            control.shutdown()
+        }
+    }
+}

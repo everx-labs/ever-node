@@ -59,7 +59,6 @@ async fn download_persistent_state_iter(
     // Check
     let peer = loop {
         let attempts = Attempts {
-//            total_limit: 0,
             limit: 100,
             count: 0
         };
@@ -89,7 +88,6 @@ async fn download_persistent_state_iter(
         let peer = peer.clone();
         download_futures.push(async move {
             let mut attempts = Attempts {
-//                total_limit: 0,
                 limit: 0,
                 count: 0
             };

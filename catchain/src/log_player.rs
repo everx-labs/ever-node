@@ -1,6 +1,5 @@
 pub use super::*;
 
-use overlay::PrivateOverlayShortId;
 use regex::Captures;
 use regex::Regex;
 use std::collections::HashMap;
@@ -9,6 +8,7 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::thread::JoinHandle;
 use utils::*;
 
 /*
@@ -204,107 +204,6 @@ impl Format {
 }
 
 /*
-    Log player overlay manager
-*/
-
-struct LogPlayerOverlayManager {
-    node_ids: Vec<CatchainNode>,                //list of validators
-    session_id: SessionId,                      //catchain session ID
-    log_replay_options: LogReplayOptions,       //log replay options
-    initial_timestamp: SystemTime,              //initial timestamp for replaying
-    replay_listener: CatchainReplayListenerPtr, //replay listener
-}
-
-impl CatchainOverlayManager for LogPlayerOverlayManager {
-    /// Create new overlay
-    fn start_overlay(
-        &self,
-        local_id: &PublicKeyHash,
-        overlay_short_id: &Arc<PrivateOverlayShortId>,
-        nodes: &Vec<CatchainNode>,
-        listener: CatchainOverlayListenerPtr,
-        overlay_log_replay_listener: CatchainOverlayLogReplayListenerPtr,
-    ) -> Result<CatchainOverlayPtr> {
-        let should_stop_flag = Arc::new(AtomicBool::new(false));
-        let is_stopped_flag = Arc::new(AtomicBool::new(false));
-        let overlay = OverlayImpl::create_dummy_overlay(
-            should_stop_flag.clone(),
-            is_stopped_flag.clone(),
-            local_id,
-            overlay_short_id,
-            nodes,
-            listener,
-        );
-        let overlay_clone = overlay.clone();
-
-        if let Some(replay_listener) = overlay_log_replay_listener.upgrade() {
-            debug!(
-                "LogPlayer: set initial replay time to {}",
-                catchain::utils::time_to_string(&self.initial_timestamp)
-            );
-            replay_listener.on_time_changed(self.initial_timestamp);
-        }
-
-        //start processing thread
-
-        debug!("LogPlayer: create processing thread");
-
-        let log_replay_options = self.log_replay_options.clone();
-        let session_id = self.session_id.clone();
-        let node_ids = self.node_ids.clone();
-        let replay_listener = self.replay_listener.clone();
-
-        let _processing_thread = std::thread::Builder::new()
-            .name(MAIN_LOOP_NAME.to_string())
-            .spawn(move || {
-                LogPlayerImpl::main_loop(
-                    log_replay_options,
-                    session_id,
-                    node_ids,
-                    should_stop_flag,
-                    is_stopped_flag,
-                    overlay_clone,
-                    replay_listener,
-                    overlay_log_replay_listener,
-                );
-            })?;
-
-        let result: CatchainOverlayPtr = overlay;
-
-        Ok(result)
-    }
-
-    /// Stop existing overlay
-    fn stop_overlay(
-        &self,
-        _overlay_short_id: &Arc<PrivateOverlayShortId>,
-        overlay: &CatchainOverlayPtr,
-    ) {
-        if let Some(overlay) = overlay.get_impl().downcast_ref::<OverlayImpl>() {
-            overlay.stop();
-        }
-    }
-}
-
-impl LogPlayerOverlayManager {
-    fn create(
-        session_id: &SessionId,
-        node_ids: &Vec<CatchainNode>,
-        log_replay_options: &LogReplayOptions,
-        initial_timestamp: &SystemTime,
-        replay_listener: CatchainReplayListenerPtr,
-    ) -> Self {
-        Self {
-            session_id: session_id.clone(),
-            node_ids: node_ids.clone(),
-            log_replay_options: log_replay_options.clone(),
-            initial_timestamp: initial_timestamp.clone(),
-            replay_listener: replay_listener,
-        }
-    }
-}
-
-/*
     Log player for replaying previously written logs
 */
 
@@ -339,17 +238,66 @@ impl LogPlayer for LogPlayerImpl {
         &self.weights
     }
 
-    fn get_overlay_manager(
-        &self,
-        replay_listener: CatchainReplayListenerPtr,
-    ) -> CatchainOverlayManagerPtr {
-        Arc::new(LogPlayerOverlayManager::create(
-            &self.session_id,
-            &self.node_ids,
-            &self.options,
-            &self.initial_timestamp,
-            replay_listener,
-        ))
+    fn get_overlay_creator(&self, replay_listener: CatchainReplayListenerPtr) -> OverlayCreator {
+        let node_ids = self.node_ids.clone();
+        let session_id = self.session_id.clone();
+        let log_replay_options = self.options.clone();
+        let initial_timestamp = self.initial_timestamp.clone();
+        let overlay_creator =
+            move |local_id: &PublicKeyHash,
+                  overlay_full_id: &OverlayFullId,
+                  nodes: &Vec<CatchainNode>,
+                  listener: CatchainOverlayListenerPtr,
+                  overlay_log_replay_listener: CatchainOverlayLogReplayListenerPtr| {
+                let stop_flag = Arc::new(AtomicBool::new(false));
+                let stop_flag_clone = stop_flag.clone();
+                let overlay = OverlayImpl::create_dummy_overlay(
+                    stop_flag_clone,
+                    local_id,
+                    overlay_full_id,
+                    nodes,
+                    listener,
+                );
+                let overlay_clone = overlay.clone();
+
+                if let Some(replay_listener) = overlay_log_replay_listener.upgrade() {
+                    debug!(
+                        "LogPlayer: set initial replay time to {}",
+                        catchain::utils::time_to_string(&initial_timestamp)
+                    );
+                    replay_listener
+                        .lock()
+                        .unwrap()
+                        .on_time_changed(initial_timestamp);
+                }
+
+                //start processing thread
+
+                debug!("LogPlayer: create processing thread");
+
+                overlay.lock().unwrap().processing_thread = Some(
+                    std::thread::Builder::new()
+                        .name(MAIN_LOOP_NAME.to_string())
+                        .spawn(move || {
+                            Self::main_loop(
+                                log_replay_options,
+                                session_id,
+                                node_ids,
+                                stop_flag,
+                                overlay_clone,
+                                replay_listener,
+                                overlay_log_replay_listener,
+                            );
+                        })
+                        .unwrap(),
+                );
+
+                let result: CatchainOverlayPtr = overlay;
+
+                result
+            };
+
+        Box::new(overlay_creator)
     }
 }
 
@@ -362,9 +310,8 @@ impl LogPlayerImpl {
         log_replay_options: LogReplayOptions,
         session_id: SessionId,
         node_ids: Vec<CatchainNode>,
-        should_stop_flag: Arc<AtomicBool>,
-        is_stopped_flag: Arc<AtomicBool>,
-        overlay: Arc<OverlayImpl>,
+        stop_flag: Arc<AtomicBool>,
+        overlay: Arc<Mutex<OverlayImpl>>,
         replay_listener: CatchainReplayListenerPtr,
         overlay_log_replay_listener: CatchainOverlayLogReplayListenerPtr,
     ) {
@@ -375,19 +322,19 @@ impl LogPlayerImpl {
             log_replay_options
         );
 
-        let listener = overlay.listener.clone();
+        let listener = overlay.lock().unwrap().listener.clone();
 
         trace!("...replay log from '{}'", log_replay_options.log_file_name);
 
         if let Some(listener) = replay_listener.upgrade() {
-            listener.replay_started();
+            listener.lock().unwrap().replay_started();
         }
 
         if let Err(err) = Self::parse_body(
             &log_replay_options,
             &session_id,
             &node_ids,
-            &should_stop_flag,
+            &stop_flag,
             listener,
             overlay_log_replay_listener,
         ) {
@@ -395,15 +342,13 @@ impl LogPlayerImpl {
         }
 
         if let Some(listener) = replay_listener.upgrade() {
-            listener.replay_finished();
+            listener.lock().unwrap().replay_finished();
         }
 
         debug!(
             "LogReplay main loop is finished in {:?}",
             start_time.elapsed()
         );
-
-        is_stopped_flag.store(true, Ordering::Release);
     }
 
     /*
@@ -543,7 +488,7 @@ impl LogPlayerImpl {
             let replay_time = std::time::UNIX_EPOCH + std::time::Duration::from_millis(timestamp);
 
             if let Some(replay_listener) = replay_listener.upgrade() {
-                replay_listener.on_time_changed(replay_time);
+                replay_listener.lock().unwrap().on_time_changed(replay_time);
             }
 
             assert!(bytes.len() >= data_size as usize);
@@ -552,14 +497,14 @@ impl LogPlayerImpl {
 
             if let Some(listener) = listener.upgrade() {
                 match message_type {
-                    "block" => listener.on_message(
-                        source_id.clone(),
-                        &CatchainFactory::create_block_payload(::ton_api::ton::bytes(bytes)),
-                    ),
-                    "broadcast" => listener.on_broadcast(
-                        source_id.clone(),
-                        &CatchainFactory::create_block_payload(::ton_api::ton::bytes(bytes)),
-                    ),
+                    "block" => listener
+                        .lock()
+                        .unwrap()
+                        .on_message(source_id.clone(), &::ton_api::ton::bytes(bytes)),
+                    "broadcast" => listener
+                        .lock()
+                        .unwrap()
+                        .on_broadcast(source_id.clone(), &::ton_api::ton::bytes(bytes)),
                     _ => warn!("...unknown message type {}", message_type),
                 }
             }
@@ -567,34 +512,19 @@ impl LogPlayerImpl {
             Ok(true)
         });
 
-        let parse_message_rust = parse_data.clone();
-        let parse_broadcast_rust = parse_data.clone();
-        let parse_message_cpp = parse_data.clone();
-        let parse_broadcast_cpp = parse_data.clone();
+        let parse_data_clone = parse_data.clone();
         let formats = [
-            Format::new(
-                concat!(
-                    r".*Receive message from overlay for source: size=(\d+), payload=([0-9a-fA-F]+), source=([0-9a-fA-F]+), session_id=([0-9a-fA-F]+), timestamp=(\d+).*"
-                ),
-                move |captures: &Captures| parse_message_rust("block", captures),
-            )?,
-            Format::new(
-                concat!(
-                    r".*Receive broadcast from overlay for source: size=(\d+), payload=([0-9a-fA-F]+), source=([0-9a-fA-F]+), session_id=([0-9a-fA-F]+), timestamp=(\d+).*"
-                ),
-                move |captures: &Captures| parse_broadcast_rust("broadcast", captures),
-            )?,
             Format::new(
                 concat!(
                     r"^CatChainReceivedBlockImpl::receive_block payload.size = (\d+) payload = ([0-9a-fA-F]+) source.size = \d+ source = ([0-9a-fA-F]+) session_id.size = \d+ session_id = ([0-9a-fA-F]+) block_source_id = \d+ height = \d+ timestamp = (\d+) .*$"
                 ),
-                move |captures: &Captures| parse_message_cpp("block", captures),
+                move |captures: &Captures| parse_data("block", captures),
             )?,
             Format::new(
                 concat!(
                     r"^CatChainReceivedBlockImpl::receive_broadcast payload.size = (\d+) payload = ([0-9a-fA-F]+) source.size = \d+ source = ([0-9a-fA-F]+) session_id.size = \d+ session_id = ([0-9a-fA-F]+) timestamp = (\d+) .*$"
                 ),
-                move |captures: &Captures| parse_broadcast_cpp("broadcast", captures),
+                move |captures: &Captures| parse_data_clone("broadcast", captures),
             )?,
         ];
 
@@ -636,54 +566,10 @@ impl LogPlayerImpl {
                 .borrow_mut()
                 .add_node(session_id, catchain_node, weight);
         };
-        let add_session_id_clone = add_session_id.clone();
-        let add_local_id_clone = add_local_id.clone();
-        let add_private_key_clone = add_private_key.clone();
-        let add_node_clone = add_node.clone();
 
         //enumerate lines for header
 
         let formats = [
-            Format::new(
-                r".* Create validator session ([0-9a-fA-F]+) for local ID ([0-9a-fA-F]+) and key ([0-9a-fA-F]+) .*timestamp=([0-9]+)",
-                move |captures: &Captures| {
-                    let session_id = parse_hex_as_session_id(&captures.get(1).unwrap().as_str());
-                    let local_id = parse_hex_as_public_key_hash(&captures.get(2).unwrap().as_str());
-                    let local_key = parse_hex_as_expanded_private_key(
-                        &captures.get(3).unwrap().as_str().trim(),
-                    );
-                    let timestamp: u64 = captures.get(4).unwrap().as_str().parse().unwrap();
-                    let replay_time =
-                        std::time::UNIX_EPOCH + std::time::Duration::from_millis(timestamp);
-
-                    add_session_id_clone(session_id.clone(), replay_time);
-                    add_local_id_clone(session_id, local_id.clone());
-                    add_private_key_clone(local_id, local_key);
-
-                    Ok(true)
-                },
-            )?,
-            Format::new(
-                r".* Validator session ([0-9a-fA-F]+) node: weight=([0-9]+), public_key=([0-9a-fA-F]+), adnl_id=([0-9a-fA-F]+) .*timestamp=([0-9]+)",
-                move |captures: &Captures| {
-                    let session_id = parse_hex_as_session_id(&captures.get(1).unwrap().as_str());
-                    let weight = captures
-                        .get(2)
-                        .unwrap()
-                        .as_str()
-                        .parse::<ValidatorWeight>()?;
-                    let public_key = parse_hex_as_public_key(&captures.get(3).unwrap().as_str());
-                    let adnl_id = parse_hex_as_public_key_hash(&captures.get(4).unwrap().as_str());
-                    let catchain_node = CatchainNode {
-                        public_key: public_key,
-                        adnl_id: adnl_id,
-                    };
-
-                    add_node_clone(session_id, catchain_node, weight);
-
-                    Ok(true)
-                },
-            )?,
             Format::new(
                 r"^SessionId\.size.*SessionId = ([0-9a-fA-F]+) timestamp = ([0-9]+) *$",
                 move |captures: &Captures| {
@@ -891,11 +777,11 @@ impl LogPlayerImpl {
             options,
             player.get_session_id(),
             player.get_nodes(),
-            player.get_local_key(),
+            player.get_local_id(),
             &log_replay_options.db_root,
             &log_replay_options.db_suffix,
             log_replay_options.allow_unsafe_self_blocks_resync,
-            player.get_overlay_manager(replay_listener),
+            player.get_overlay_creator(replay_listener),
             catchain_listener,
         ))
     }
@@ -906,21 +792,17 @@ impl LogPlayerImpl {
 */
 
 struct OverlayImpl {
-    should_stop_flag: Arc<AtomicBool>, //atomic flag to indicate that LogPlayer thread should be stopped
-    is_stopped_flag: Arc<AtomicBool>, //atomic flag to indicate that LogPlayer thread has been stopped
+    stop_flag: Arc<AtomicBool>, //atomic flag to indicate that LogPlayer thread should be stopped
+    processing_thread: Option<JoinHandle<()>>, //catchain processing thread
     listener: CatchainOverlayListenerPtr, //overlay listener
 }
 
 impl CatchainOverlay for OverlayImpl {
-    fn get_impl(&self) -> &dyn Any {
-        self
-    }
-
     fn send_message(
-        &self,
+        &mut self,
         receiver_id: &PublicKeyHash,
         sender_id: &PublicKeyHash,
-        message: &BlockPayloadPtr,
+        message: &BlockPayload,
     ) {
         debug!(
             "LogReplay: send message {} -> {}: {:?}",
@@ -929,10 +811,10 @@ impl CatchainOverlay for OverlayImpl {
     }
 
     fn send_message_multicast(
-        &self,
+        &mut self,
         receiver_ids: &[PublicKeyHash],
         sender_id: &PublicKeyHash,
-        message: &BlockPayloadPtr,
+        message: &BlockPayload,
     ) {
         debug!(
             "LogReplay: send multicast message {} -> {}: {:?}",
@@ -943,12 +825,12 @@ impl CatchainOverlay for OverlayImpl {
     }
 
     fn send_query(
-        &self,
+        &mut self,
         receiver_id: &PublicKeyHash,
         sender_id: &PublicKeyHash,
         name: &str,
         _timeout: std::time::Duration,
-        message: &BlockPayloadPtr,
+        message: &BlockPayload,
         _response_callback: ExternalQueryResponseCallback,
     ) {
         debug!(
@@ -957,26 +839,11 @@ impl CatchainOverlay for OverlayImpl {
         );
     }
 
-    fn send_query_via_rldp(
-        &self,
-        dst: PublicKeyHash,
-        name: String,
-        _response_callback: ExternalQueryResponseCallback,
-        _timeout: std::time::SystemTime,
-        query: BlockPayloadPtr,
-        _max_answer_size: u64,
-    ) {
-        debug!(
-            "LogReplay: send query '{}' via RLDP -> {}: {:?}",
-            name, dst, query
-        );
-    }
-
     fn send_broadcast_fec_ex(
-        &self,
+        &mut self,
         sender_id: &PublicKeyHash,
         send_as: &PublicKeyHash,
-        payload: BlockPayloadPtr,
+        payload: BlockPayload,
     ) {
         debug!(
             "LogReplay: send broadcast_fec_ex {}/{}: {:?}",
@@ -994,44 +861,37 @@ impl Drop for OverlayImpl {
 }
 
 impl OverlayImpl {
-    fn stop(&self) {
-        self.should_stop_flag.store(true, Ordering::Release);
-
-        loop {
-            if self.is_stopped_flag.load(Ordering::Relaxed) {
-                break;
-            }
-
-            info!("...waiting for LogPlayer overlay thread");
-
-            const CHECKING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
-
-            std::thread::sleep(CHECKING_INTERVAL);
+    fn stop(&mut self) {
+        if self.stop_flag.load(Ordering::Relaxed) {
+            return;
         }
 
-        info!("LogPlayer has been stopped");
+        trace!("...waiting for LogPlayer overlay thread");
+
+        self.stop_flag.store(true, Ordering::Release);
+
+        if let Some(handle) = self.processing_thread.take() {
+            handle
+                .join()
+                .expect("Failed to join LogPlayer overlay main loop thread");
+        }
     }
 
     fn create_dummy_overlay(
-        should_stop_flag: Arc<AtomicBool>,
-        is_stopped_flag: Arc<AtomicBool>,
+        stop_flag: Arc<AtomicBool>,
         _local_id: &PublicKeyHash,
-        _overlay_short_id: &Arc<PrivateOverlayShortId>,
+        _overlay_full_id: &OverlayFullId,
         _nodes: &Vec<CatchainNode>,
         listener: CatchainOverlayListenerPtr,
-    ) -> Arc<OverlayImpl> {
-        Arc::new(Self::new(should_stop_flag, is_stopped_flag, listener))
+    ) -> Arc<Mutex<OverlayImpl>> {
+        Arc::new(Mutex::new(Self::new(stop_flag, listener)))
     }
 
-    fn new(
-        should_stop_flag: Arc<AtomicBool>,
-        is_stopped_flag: Arc<AtomicBool>,
-        listener: CatchainOverlayListenerPtr,
-    ) -> Self {
+    fn new(stop_flag: Arc<AtomicBool>, listener: CatchainOverlayListenerPtr) -> Self {
         Self {
             listener: listener,
-            should_stop_flag: should_stop_flag,
-            is_stopped_flag: is_stopped_flag,
+            stop_flag: stop_flag,
+            processing_thread: None,
         }
     }
 }

@@ -73,8 +73,6 @@ impl OldRoundState for OldRoundStateImpl {
         right: &dyn RoundState,
         desc: &mut dyn SessionDescription,
     ) -> PoolPtr<dyn OldRoundState> {
-        profiling::instrument!();
-
         let left = self;
 
         assert!(left.get_sequence_number() == right.get_sequence_number());
@@ -102,8 +100,6 @@ impl OldRoundState for OldRoundStateImpl {
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn OldRoundState> {
-        profiling::instrument!();
-
         let self_cloned = Self::new(
             self.sequence_number,
             self.block.move_to_persistent(cache),
@@ -129,8 +125,6 @@ impl OldRoundStateWrapper for OldRoundStatePtr {
         attempt_id: u32,
         message: &ton::Message,
     ) -> OldRoundStatePtr {
-        profiling::instrument!();
-
         get_impl(&**self).apply_action_dispatch(desc, src_idx, attempt_id, message, self.clone())
     }
 }
@@ -141,8 +135,6 @@ impl OldRoundStateWrapper for OldRoundStatePtr {
 
 impl Merge<PoolPtr<dyn OldRoundState>> for PoolPtr<dyn OldRoundState> {
     fn merge(&self, right: &Self, desc: &mut dyn SessionDescription) -> Self {
-        profiling::instrument!();
-
         let left = &get_impl(&**self);
         let right = &get_impl(&**right);
 
@@ -271,8 +263,6 @@ impl OldRoundStateImpl {
         message: &ton::Message,
         default_state: OldRoundStatePtr,
     ) -> OldRoundStatePtr {
-        profiling::instrument!();
-
         trace!("...applying action on old round #{}", self.sequence_number);
 
         let new_round_state = match message {
@@ -304,8 +294,6 @@ impl OldRoundStateImpl {
         message: &ton::message::ApprovedBlock,
         default_state: OldRoundStatePtr,
     ) -> OldRoundStatePtr {
-        profiling::instrument!();
-
         trace!("...applying approved block action");
 
         let candidate_id: BlockId = message.candidate.clone().into();
@@ -388,8 +376,6 @@ impl OldRoundStateImpl {
         message: &ton::message::Commit,
         default_state: OldRoundStatePtr,
     ) -> OldRoundStatePtr {
-        profiling::instrument!();
-
         trace!("...applying commit action");
 
         //check if the node is trying to sign a block which has not been committed
@@ -506,8 +492,6 @@ impl OldRoundStateImpl {
         signatures: BlockCandidateSignatureVectorPtr,
         approve_signatures: BlockCandidateSignatureVectorPtr,
     ) -> OldRoundStatePtr {
-        profiling::instrument!();
-
         let hash = Self::compute_hash(sequence_number, &block, &signatures, &approve_signatures);
         let body = Self::new(
             sequence_number,

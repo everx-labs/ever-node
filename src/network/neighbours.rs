@@ -274,7 +274,6 @@ impl Neighbours {
         tokio::spawn(async move {
             loop {
                 if let Err(e) = self.ping_neighbours().await {
-                    tokio::time::delay_for(Duration::from_millis(500)).await;
                     log::warn!("ERROR: {}", e)
                 }
             }
@@ -374,7 +373,7 @@ impl Neighbours {
                 unr += 4;
             } else if proto_version == PROTO_VERSION && capabilities < PROTO_CAPABILITIES {
                 unr += 2;
-            }
+            }  
             let stat_name = format!("neighbour.{}.unr", neighbour.id());
             STATSD.histogram(&stat_name, unr as f64);
             log::trace!(
@@ -404,7 +403,7 @@ impl Neighbours {
             }
         }
 
-        if let Some(best) = &best {
+        if let Some(best) = &best { 
             log::trace!("Selected neighbour {}", best.id);
         } else {
             log::trace!("Selected neighbour None");
@@ -473,7 +472,7 @@ impl Neighbours {
             fail!("No peers in overlay {}", self.overlay_id)
         } else {
             log::trace!("neighbours: overlay {} count {}", self.overlay_id, count);
-        }
+         }
         let max_count = if count < 6 {
             count
         } else {
