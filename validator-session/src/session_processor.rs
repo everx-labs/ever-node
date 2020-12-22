@@ -27,6 +27,7 @@ const DEBUG_CHECK_ALL_BEFORE_ROUND_SWITCH: bool = false; //check updates before 
                                                          //TODO: remove this debug option after performance tuning
 const DEBUG_DUMP_BACKTRACE_FOR_LATE_VALIDATIONS: bool = true; //dump all late validations backtrace
 const DEBUG_EVENTS_LOG: bool = true; //dump consensus events
+const DEBUG_DUMP_PRIVATE_KEY_TO_LOG: bool = false; //dump private key for further log replaying
 const COMPLETION_HANDLERS_MAX_WAIT_PERIOD: Duration = Duration::from_millis(60000); //max wait time for completion handlers
 const COMPLETION_HANDLERS_CHECK_PERIOD: Duration = Duration::from_millis(5000); //period of completion handlers checking
 const BLOCK_PREPROCESSING_WARN_LATENCY: Duration = Duration::from_millis(100); //max block processing latency
@@ -61,8 +62,8 @@ pub(crate) struct SessionProcessorImpl {
     local_key: PrivateKey,                           //private key for signing
     description: SessionDescriptionImpl,             //session description
     block_to_state_map: Vec<Option<SessionStatePtr>>, //session states
-    real_state: SessionStatePtr,                     //real state (TODO: comment)
-    virtual_state: SessionStatePtr,                  //virtual state (TODO: comment)
+    real_state: SessionStatePtr,                     //real state
+    virtual_state: SessionStatePtr,                  //virtual state
     current_round: u32,                              //current round sequence number
     requested_new_block: bool,                       //new block has been requested in catchain
     requested_new_block_now: bool, //new block has been requested in catchain to be generated immediately
@@ -2834,9 +2835,11 @@ impl SessionProcessorImpl {
         //dump session params for further log replaying
 
         if log_enabled!(log::Level::Debug) {
-            let exp_pvt_key_dump = &hex::encode(
-                [*local_key.pvt_key().unwrap(), *local_key.exp_key().unwrap()].concat(),
-            ); //TODO: optional dump for security reason
+            let exp_pvt_key_dump = if DEBUG_DUMP_PRIVATE_KEY_TO_LOG {
+                hex::encode([*local_key.pvt_key().unwrap(), *local_key.exp_key().unwrap()].concat())
+            } else {
+                "<SECRET>".to_string()
+            };
 
             debug!(
                 "Create validator session {} for local ID {} and key {} (timestamp={})",
