@@ -1,4 +1,5 @@
 pub use super::*;
+use crate::ton_api::IntoBoxed;
 use std::collections::BTreeMap;
 use utils::*;
 
@@ -15,9 +16,11 @@ pub(crate) struct ReceiverSourceImpl {
     blocks: BTreeMap<BlockHeight, ReceivedBlockPtr>, //map from height to block for this source - our knowledge about the source chain
     delivered_height: BlockHeight, //how many blocks have been delivered for this source
     received_height: BlockHeight,  //how many blocks have been received for this source
-    fork_proof: Option<::ton_api::ton::bytes>, //fork proof
+    fork_proof: Option<ton::BlockDataFork>, //fork proof
+    fork_proof_serialized: Option<BlockPayloadPtr>, //fork proof serialized
     fork_ids: Vec<usize>,          //fork identifiers for this source
     blamed_heights: Vec<BlockHeight>, //blamed heights for each fork id
+    statistics: ReceiverSourceStatistics, //source statistics
 }
 
 /// Functions which converts public ReceiverSource to its implementation
@@ -77,6 +80,14 @@ impl ReceiverSource for ReceiverSourceImpl {
         self.blamed
     }
 
+    fn get_statistics(&self) -> &ReceiverSourceStatistics {
+        &self.statistics
+    }
+
+    fn get_mut_statistics(&mut self) -> &mut ReceiverSourceStatistics {
+        &mut self.statistics
+    }
+
     /*
         Blocks management
     */
@@ -107,14 +118,14 @@ impl ReceiverSource for ReceiverSourceImpl {
             );
 
             if !self.is_fork_found() {
-                let serialized_fork_proof = serialize_tl_bare_object!(
-                    &block.export_tl_dep(),
-                    &existing_block.borrow().export_tl_dep()
-                );
+                let fork = ton::BlockDataFork {
+                    left: block.export_tl_dep().into_boxed(),
+                    right: existing_block.borrow().export_tl_dep().into_boxed(),
+                };
 
-                self.set_fork_proof(serialized_fork_proof);
+                self.set_fork_proof(fork);
 
-                receiver.add_fork_proof(self.get_fork_proof().as_ref().unwrap());
+                receiver.add_fork_proof(self.fork_proof_serialized.as_ref().unwrap());
             }
 
             self.mark_as_blamed(receiver);
@@ -196,19 +207,24 @@ impl ReceiverSource for ReceiverSourceImpl {
         !self.fork_proof.is_none()
     }
 
-    fn set_fork_proof(&mut self, fork_proof: BlockPayload) {
-        if !self.is_fork_found() {
-            self.fork_proof = Some(fork_proof);
-
-            error!(
-                "Fork has been found for source {} hash={:?}",
-                self.get_id(),
-                get_hash(self.fork_proof.as_ref().unwrap())
-            );
+    fn set_fork_proof(&mut self, fork_proof: ton::BlockDataFork) {
+        if self.is_fork_found() {
+            return;
         }
+
+        self.fork_proof = Some(fork_proof.clone());
+        self.fork_proof_serialized = Some(CatchainFactory::create_block_payload(
+            serialize_tl_boxed_object!(&fork_proof.into_boxed()),
+        ));
+
+        error!(
+            "Fork has been found for source {} hash={:?}",
+            self.get_id(),
+            get_hash(self.fork_proof_serialized.as_ref().unwrap().data())
+        );
     }
 
-    fn get_fork_proof(&self) -> &Option<BlockPayload> {
+    fn get_fork_proof(&self) -> &Option<ton::BlockDataFork> {
         &self.fork_proof
     }
 
@@ -327,8 +343,10 @@ impl ReceiverSourceImpl {
             received_height: 0,
             blocks: BTreeMap::new(),
             fork_proof: None,
+            fork_proof_serialized: None,
             fork_ids: Vec::new(),
             blamed_heights: Vec::new(),
+            statistics: ReceiverSourceStatistics::default(),
         }
     }
 

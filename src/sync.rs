@@ -21,7 +21,7 @@ type PreDownloadTask = (u32, JoinHandle<Result<Vec<u8>>>);
 pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> {
     log::info!(target: "sync", "Started sync");
     let mut predownload_task = None;
-    while !engine.check_initial_sync_complete().await? {
+    while !engine.check_sync().await? {
         let mc_block_id = Arc::new(engine.load_last_applied_mc_block_id().await?);
         let sc_block_id = Arc::new(engine.load_shards_client_mc_block_id().await?);
         let sync_mc_block_id = if mc_block_id.seq_no() > sc_block_id.seq_no() {
@@ -278,7 +278,7 @@ async fn import_mc_blocks(
             let (block, _proof) = save_block(engine, &handle, entry).await?;
 
             log::debug!(target: "sync", "Applying masterchain block: {}...", id);
-            Arc::clone(engine).apply_block(&handle, Some(&block), id.seq_no()).await?;
+            Arc::clone(engine).apply_block(&handle, Some(&block), id.seq_no(), false).await?;
         }
 
         last_mc_block_id = id;
@@ -363,7 +363,7 @@ async fn import_shard_blocks(
                         id
                     );
                 }
-                Arc::clone(&engine).apply_block(&handle, block.as_ref(), mc_seq_no).await
+                Arc::clone(&engine).apply_block(&handle, block.as_ref(), mc_seq_no, false).await
             }));
         }
 

@@ -124,6 +124,8 @@ impl SessionState for SessionStateImpl {
         desc: &dyn SessionDescription,
         src_idx: u32,
     ) -> Vec<SentBlockPtr> {
+        profiling::instrument!();
+
         self.current_round.choose_blocks_to_approve(desc, src_idx)
     }
 
@@ -158,6 +160,8 @@ impl SessionState for SessionStateImpl {
         src_idx: u32,
         attempt_id: u32,
     ) -> ton::Message {
+        profiling::instrument!();
+
         self.current_round
             .generate_vote_for(desc, src_idx, attempt_id)
     }
@@ -187,6 +191,8 @@ impl SessionState for SessionStateImpl {
         desc: &dyn SessionDescription,
         src_idx: u32,
     ) -> Option<SentBlockPtr> {
+        profiling::instrument!();
+
         if self.current_round.check_block_is_signed_by(src_idx) {
             return None;
         }
@@ -220,7 +226,11 @@ impl SessionState for SessionStateImpl {
         src_idx: u32,
         mut attempt_id: u32,
         message: &ton::Message,
+        block_creation_time: std::time::SystemTime,
+        block_payload_creation_time: std::time::SystemTime,
     ) -> SessionStatePtr {
+        profiling::instrument!();
+
         trace!(
             "...received message from node #{} with public key hash {}",
             src_idx,
@@ -279,9 +289,14 @@ impl SessionState for SessionStateImpl {
         if round_id == current_round_id {
             trace!("...forward action applying to a round #{}", round_id);
 
-            let mut new_current_round = self
-                .current_round
-                .apply_action(desc, src_idx, attempt_id, message);
+            let mut new_current_round = self.current_round.apply_action(
+                desc,
+                src_idx,
+                attempt_id,
+                message,
+                block_creation_time,
+                block_payload_creation_time,
+            );
             let mut new_old_rounds = self.old_rounds.clone();
 
             if new_current_round.check_block_is_signed(desc) {
@@ -330,6 +345,8 @@ impl SessionState for SessionStateImpl {
         src_idx: u32,
         attempt_id: u32,
     ) -> Option<ton::Message> {
+        profiling::instrument!();
+
         self.current_round.create_action(desc, src_idx, attempt_id)
     }
 
@@ -338,6 +355,8 @@ impl SessionState for SessionStateImpl {
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn SessionState> {
+        profiling::instrument!();
+
         let self_cloned = Self::new(
             self.attempt_ids.move_to_persistent(cache),
             self.current_round.move_to_persistent(cache),
@@ -354,6 +373,8 @@ impl SessionState for SessionStateImpl {
     */
 
     fn dump(&self, desc: &dyn SessionDescription) -> String {
+        profiling::instrument!();
+
         self.current_round.dump(desc)
     }
 }
@@ -369,6 +390,8 @@ impl SessionStateWrapper for SessionStatePtr {
         src_idx: u32,
         attempt_id: u32,
     ) -> SessionStatePtr {
+        profiling::instrument!();
+
         trace!("...actualizing state");
 
         let mut state = self.clone();
@@ -392,6 +415,8 @@ impl SessionStateWrapper for SessionStatePtr {
 
 impl Merge<PoolPtr<dyn SessionState>> for PoolPtr<dyn SessionState> {
     fn merge(&self, right: &Self, desc: &mut dyn SessionDescription) -> Self {
+        profiling::instrument!();
+
         let left = &get_impl(&**self);
         let right = &get_impl(&**right);
 
@@ -454,9 +479,11 @@ impl Merge<PoolPtr<dyn SessionState>> for PoolPtr<dyn SessionState> {
         let result = SessionStateImpl::create(desc, attempt_ids, round, old_rounds);
 
         if DEBUG_DUMP_MERGE {
-            debug!(
+            trace!(
                 "leftstate={:?} ============= rightstate={:?} =========== mergedstate={:?}",
-                left, right, result
+                left,
+                right,
+                result
             );
         }
 
@@ -566,6 +593,8 @@ impl SessionStateImpl {
         mut attempt_id: u32,
         default_state: SessionStatePtr,
     ) -> (SessionStatePtr, bool) {
+        profiling::instrument!();
+
         trace!(
             "......actualizing state (source={}, attempt={})",
             src_idx,
@@ -675,6 +704,8 @@ impl SessionStateImpl {
         current_round: RoundStatePtr,
         old_rounds: OldRoundVector,
     ) -> SessionStatePtr {
+        profiling::instrument!();
+
         let hash = Self::compute_hash(&attempt_ids, &current_round, &old_rounds);
         let body = Self::new(
             attempt_ids,

@@ -1,5 +1,9 @@
 use crate::{network::node_network::NodeNetwork};
-use adnl::{from_slice, common::{add_object_to_map, KeyOption, KeyOptionJson, Wait},
+use adnl::{from_slice, client::AdnlClientConfigJson,
+    common::{
+        add_object_to_map, add_object_to_map_with_update, KeyId, KeyOption,
+        KeyOptionJson, Wait
+    },
     node::{AdnlNodeConfig, AdnlNodeConfigJson},
     server::{AdnlServerConfig, AdnlServerConfigJson}
 };
@@ -7,7 +11,7 @@ use hex::FromHex;
 use std::{
     collections::HashMap, io::{BufReader}, fs::File,
     net::{Ipv4Addr, IpAddr, SocketAddr}, path::Path,
-    sync::Arc, time::Duration
+    sync::{Arc, atomic::{self, AtomicI32} }, time::Duration
 };
 use ton_api::{
     IntoBoxed, 
@@ -19,26 +23,40 @@ use ton_api::{
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256};
 
+#[macro_export]
+macro_rules! key_option_public_key {
+    ($key: expr) => {
+        format!(
+            "{{
+               \"type_id\": 1209251014,
+               \"pub_key\": \"{}\"
+            }}",
+            $key
+        ).as_str()
+    }
+}
+
 #[async_trait::async_trait]
 pub trait KeyRing : Sync + Send  {
     async fn generate(&self) -> Result<[u8; 32]>;
     // find private key in KeyRing by public key hash
     fn find(&self, key_hash: &[u8; 32]) -> Result<Arc<KeyOption>>;
-
     fn sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Vec<u8>>;
 }
 
 pub trait NodeConfigSubscriber: Send + Sync {
-
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct TonNodeConfig {
-    log_config_path: Option<String>,
+    log_config_name: Option<String>,
     ton_global_config_name: Option<String>,
+    #[serde(skip_serializing)]
     ip_address: Option<String>,
     adnl_node: Option<AdnlNodeConfigJson>,
     validator_keys: Option<Vec<ValidatorKeysJson>>,
+    #[serde(skip_serializing)]
+    control_server_port: Option<u16>,
     control_server: Option<AdnlServerConfigJson>,
     kafka_consumer_config: Option<KafkaConsumerConfig>,
     external_db_config: Option<ExternalDbConfig>,
@@ -92,13 +110,15 @@ pub struct ExternalDbConfig {
     pub bad_blocks_storage: String,
 }
 
-impl TonNodeConfig {
+const LOCAL_HOST: &str = "127.0.0.1";
 
+impl TonNodeConfig {
     pub fn from_file(
         configs_dir: &str, 
         json_file_name: &str, 
         adnl_config: Option<AdnlNodeConfigJson>,
-        default_config_name: &str
+        default_config_name: &str,
+        client_console_key: Option<String>
     ) -> Result<Self> { 
         let config_file_path = TonNodeConfig::build_path(configs_dir, json_file_name)?;
         let config_file = File::open(config_file_path.clone());
@@ -107,6 +127,10 @@ impl TonNodeConfig {
             Ok(file) => {
                 let reader = BufReader::new(file);
                 let config: TonNodeConfig = serde_json::from_reader(reader)?;
+
+                if client_console_key.is_some() {
+                    println!("Can't generate console_config.json: delete config.json before");
+                }
                 config
             },
             Err(_) => {
@@ -120,18 +144,22 @@ impl TonNodeConfig {
                 config.adnl_node = if let Some(adnl_config) = adnl_config {
                     Some(adnl_config)
                 } else {
-                    let ip_address = if let Some(ip_address) = config.ip_address {
-                        ip_address                    
+                    let ip_address = if let Some(ip_address) = &config.ip_address {
+                        ip_address
                     } else {
                         fail!("IP address is not set in default config")
                     };
                     let (adnl_config, _) = AdnlNodeConfig::with_ip_address_and_key_type(
-                        ip_address.as_str(), 
+                        ip_address, 
                         KeyOption::KEY_ED25519,
                         vec![NodeNetwork::TAG_DHT_KEY, NodeNetwork::TAG_OVERLAY_KEY]
                     )?;
                     Some(adnl_config)
                 };
+                config.create_and_save_console_configs(
+                    configs_dir,
+                    client_console_key
+                )?;
                 config.ip_address = None;
                 std::fs::write(config_file_path, serde_json::to_string_pretty(&config)?)?;
                 config
@@ -139,6 +167,7 @@ impl TonNodeConfig {
         };
         config_json.configs_dir = configs_dir.to_string();
         config_json.file_name = json_file_name.to_string();
+
         Ok(config_json)
     }
 
@@ -160,8 +189,13 @@ impl TonNodeConfig {
         }
     }
 
-    pub fn log_config_path(&self) -> Option<&String> {
-        self.log_config_path.as_ref()
+    pub fn log_config_path(&self) -> Option<String> {
+        if let Some(log_config_name) = &self.log_config_name {
+            if let Ok(log_path) = TonNodeConfig::build_path(&self.configs_dir, &log_config_name) {
+                return Some(log_path);
+            }
+        }
+        None
     }
 
     pub fn kafka_consumer_config(&self) -> Option<KafkaConsumerConfig> {
@@ -187,6 +221,51 @@ impl TonNodeConfig {
         TonNodeGlobalConfig::from_json(&data)
     }
 
+    fn create_and_save_console_configs(
+        &mut self,
+        configs_dir: &str,
+        client_pub_key: Option<String>
+    ) -> Result<()> {
+        let server_address = if let Some (port) = self.control_server_port {
+            format!("{}:{}", LOCAL_HOST, port)
+        } else {
+            println!(
+                "Can`t generate console_config.json: default_config.json doesn`t contain control_server_port."
+            );
+            return Ok(());
+        };
+        let (server_private_key, server_key) = KeyOption::with_type_id(KeyOption::KEY_ED25519)?;
+
+        // generate and save client console template
+        let config_file_path = TonNodeConfig::build_path(configs_dir, "console_config.json")?;
+        let console_client_config = AdnlClientConfigJson::with_params(
+            &server_address,
+            serde_json::from_str(key_option_public_key!(
+                base64::encode(&server_key.pub_key()?)
+            ))?,
+            None
+        );
+        std::fs::write(config_file_path, serde_json::to_string_pretty(&console_client_config)?)?;
+
+        // generate and save server config
+        let client_keys = if let Some(client_key) = client_pub_key {
+            vec![serde_json::from_str(&client_key)?]
+        } else {
+            Vec::new()
+        };
+
+        let console_server_config = AdnlServerConfigJson::with_params(
+            server_address,
+            server_private_key,
+            client_keys,
+            None
+        );
+
+        self.control_server = Some(console_server_config);
+        self.control_server_port = None;
+        Ok(())
+    }
+
     fn get_validator_key_info(
         &self,
         validator_key_id: String,
@@ -201,13 +280,13 @@ impl TonNodeConfig {
         Ok(None)
     }
 
-    fn update_validator_key_info(&mut self, updated_info: ValidatorKeysJson) -> Result<()> {
+    fn update_validator_key_info(&mut self, updated_info: ValidatorKeysJson) -> Result<ValidatorKeysJson> {
         if let Some(validator_keys) = &mut self.validator_keys {
             for keys_info in validator_keys.iter_mut() {
                 if keys_info.validator_key_id == updated_info.validator_key_id && 
                     keys_info.election_id == updated_info.election_id {
                         keys_info.validator_adnl_key_id = updated_info.validator_adnl_key_id;
-                        return Ok(());
+                        return Ok(keys_info.clone());
                 }
             }
         } 
@@ -263,7 +342,11 @@ impl TonNodeConfig {
         Ok(())
     }
 
-    fn add_validator_adnl_key(&mut self, validator_key_id: &[u8; 32], adnl_key_id: &[u8; 32]) -> Result<()> {
+    fn add_validator_adnl_key(
+        &mut self,
+        validator_key_id: &[u8; 32],
+        adnl_key_id: &[u8; 32]
+    ) -> Result<ValidatorKeysJson> {
         let key_info = self.get_validator_key_info(base64::encode(validator_key_id));
         match key_info {
             Ok(Some(validator_key_info)) => {
@@ -277,24 +360,49 @@ impl TonNodeConfig {
             Err(e) => Err(e)
         }
     }
+
+    fn remove_validator_key(&mut self, validator_key_id: String, election_id: i32) -> Result<bool> {
+        let mut removed = false;
+        if let Some(validator_keys) = &self.validator_keys {
+            let mut new_validator_keys = Vec::new();
+            for key_json in validator_keys {
+                if key_json.validator_key_id == validator_key_id && key_json.election_id == election_id {
+                    removed = true;
+                    continue;
+                }
+                new_validator_keys.push(key_json.clone());
+            }
+
+            if removed {
+                self.validator_keys = Some(new_validator_keys);
+            }
+        }
+        Ok(removed)
+    }
+
 }
 
 enum Task {
     Generate,
     AddValidatorKey([u8; 32], i32),
-    AddValidatorAdnlKey([u8; 32], [u8; 32])
+    AddValidatorAdnlKey([u8; 32], [u8; 32]),
+    GetKey([u8; 32])
 }
 
 enum Answer {
     Generate(Result<[u8; 32]>),
     AddValidatorKey(Result<()>),
-    AddValidatorAdnlKey(Result<()>)
+    AddValidatorAdnlKey(Result<()>),
+    GetKey(Option<KeyOption>)
 }
 
 pub struct NodeConfigHandler {
     //subscribers: Vec<Arc<dyn NodeConfigSubscriber>>,
     tasks: Arc<lockfree::queue::Queue<Arc<(Arc<Wait<Answer>>, Task)>>>,
-    key_ring: Arc<lockfree::map::Map<String, Arc<KeyOption>>>
+    key_ring: Arc<lockfree::map::Map<String, Arc<KeyOption>>>,
+    validator_keys: Arc<lockfree::map::Map<i32, (ValidatorKeysJson, Option<i32>)>>, // election_id, (keys_info, next_election_id)
+    last_election_id: Arc<AtomicI32>,
+    first_election_id: Arc<AtomicI32>
 }
 
 impl NodeConfigHandler {
@@ -304,11 +412,19 @@ impl NodeConfigHandler {
         let handler = NodeConfigHandler {
            // subscribers: Vec::new(),
             tasks: Arc::new(lockfree::queue::Queue::new()),
-            key_ring: Arc::new(lockfree::map::Map::new())
+            key_ring: Arc::new(lockfree::map::Map::new()),
+            validator_keys: Arc::new(lockfree::map::Map::new()),
+            first_election_id: Arc::new(AtomicI32::new(0)),
+            last_election_id: Arc::new(AtomicI32::new(0))
         };
-        handler.start_sheduler(config.file_name.clone(), config);
+        handler.start_sheduler(config.file_name.clone(), config)?;
 
         Ok(handler)
+    }
+
+    pub fn get_validator_status(&self) -> bool {
+        let election_id = self.first_election_id.load(atomic::Ordering::Relaxed);
+        self.validator_keys.get(&election_id).is_some()
     }
 
     pub async fn add_validator_key(
@@ -324,13 +440,12 @@ impl NodeConfigHandler {
             None => fail!("Waiting returned an internal error!")
         };
 
-       let result = match answer {
-           Answer::Generate(_) => fail!("Bad answer (Generate)!"),
-           Answer::AddValidatorKey(res) => res,
-           Answer::AddValidatorAdnlKey(_) => fail!("Bad answer (AddValidatorAdnlKey)!")
-       };
+        let result = match answer {
+            Answer::AddValidatorKey(res) => res,
+            _ => fail!("Bad answer (AddValidatorKey)!"),
+        };
 
-       result
+        result
     }
 
     pub async fn add_validator_adnl_key(
@@ -352,9 +467,71 @@ impl NodeConfigHandler {
         };
 
        let result = match answer {
-           Answer::Generate(_) => fail!("Bad answer (Generate)!"),
-           Answer::AddValidatorKey(_) => fail!("Bad answer (AddValidator Key)!"),
-           Answer::AddValidatorAdnlKey(res) => res
+           Answer::AddValidatorAdnlKey(res) => res,
+           _ => fail!("Bad answer (AddValidatorAdnlKey)!"),
+       };
+
+       result
+    }
+
+    pub async fn get_validator_key(&self, key_id: &Arc<KeyId>) -> Option<(KeyOption, i32)> {
+        let first_election_id = self.first_election_id.load(atomic::Ordering::Relaxed);
+
+        if first_election_id <= 0 {
+            return None;
+        }
+
+        let mut current_election_id = Some(first_election_id);
+        let key_id_str = base64::encode(key_id.data());
+        let mut key_election_id = 0;
+        while let Some(election_id) = current_election_id {
+            let validator_key = self.validator_keys.get(&election_id);
+            match validator_key {
+                Some(key_info) => {
+                    if key_info.val().0.validator_key_id == key_id_str {
+                        key_election_id = key_info.val().0.election_id;
+                    } else if let Some(validator_adnl_key_id) = &key_info.val().0.validator_adnl_key_id {
+                        if validator_adnl_key_id == &key_id_str {
+                            key_election_id = key_info.val().0.election_id;
+                        }
+                    }
+                    current_election_id = key_info.val().1;
+                    if key_election_id > 0 {
+                        break;
+                    }
+                },
+                None => { current_election_id = None; }
+            }
+        }
+        
+        if key_election_id <= 0 {
+            return None;
+        }
+
+ //       let result = if let Some(key) = self.key_ring.get(&key_id) {
+ //           Some(key.(val(), key_election_id))
+        let result = if let Some(key) = self.get_key_raw(*key_id.data()).await {
+            Some((key, key_election_id))
+        } else {
+            None
+        };
+
+        result
+    }
+
+    async fn get_key_raw(&self, key_hash: [u8; 32]) -> Option<KeyOption> {
+        let (wait, mut queue_reader) = Wait::new();
+        let pushed_task = Arc::new((wait.clone(), Task::GetKey(key_hash)));
+        wait.request();
+        self.tasks.push(pushed_task);
+        let answer = match wait.wait(&mut queue_reader, true).await {
+            Some(Some(answer)) => answer,
+            _ => return None
+        };
+
+       let result = match answer {
+           Answer::GetKey(key) => key,
+           _ => None,
        };
 
        result
@@ -374,30 +551,166 @@ impl NodeConfigHandler {
     }
 
     fn add_validator_adnl_key_and_save(
+        validator_keys: Arc<lockfree::map::Map<i32, (ValidatorKeysJson, Option<i32>)>>,
         config: &mut TonNodeConfig,
-        validator_key_hash: &[u8; 32], 
+        validator_key_hash: &[u8; 32],
         validator_adnl_key_hash: &[u8; 32],
+        first_election_id: Arc<AtomicI32>,
+        last_election_id: Arc<AtomicI32>
     )-> Result<()> {
-        config.add_validator_adnl_key(&validator_key_hash, validator_adnl_key_hash)?;
+        let key = config.add_validator_adnl_key(&validator_key_hash, validator_adnl_key_hash)?;
+        let oldest_validator_key = NodeConfigHandler::get_oldest_validator_key(&config);
+        if let Some(oldest_key) = oldest_validator_key {
+            if oldest_key.election_id < key.election_id {
+                let new_last_election_id = key.election_id;
+                config.remove_validator_key(oldest_key.validator_key_id, oldest_key.election_id)?;
+                add_object_to_map(&validator_keys, key.election_id,
+                    || Ok((key.clone(), None)))?;
+                let prev_election_id = last_election_id.load(atomic::Ordering::Relaxed);
+                if prev_election_id > 0 {
+                    add_object_to_map_with_update(&validator_keys, prev_election_id,
+                        |old_value| if let Some(old_value) = old_value {
+                            Ok(Some((old_value.0.clone(), Some(new_last_election_id))))
+                        } else {
+                            Ok(None)
+                        }
+                    )?;
+                }
+                last_election_id.store(new_last_election_id, atomic::Ordering::Relaxed);
+                if (first_election_id.load(atomic::Ordering::Relaxed)) == 0 {
+                    first_election_id.store(new_last_election_id, atomic::Ordering::Relaxed);
+                } else {
+                    validator_keys.remove(&oldest_key.election_id);
+                }
+            }
+        }
         config.save_to_file(&config.file_name)?;
         Ok(())
     }
 
     fn add_validator_key_and_save(
         config: &mut TonNodeConfig,
-        adnl_key_id: &[u8; 32],
+        key_id: &[u8; 32],
         election_id: i32
     )-> Result<()> {
-        config.add_validator_key(&adnl_key_id, election_id)?;
+        config.add_validator_key(&key_id, election_id)?;
         config.save_to_file(&config.file_name)?;
         Ok(())
     }
 
-    fn start_sheduler(&self, config_name: String, config: TonNodeConfig) {
+    fn get_oldest_validator_key(config: &TonNodeConfig) -> Option<ValidatorKeysJson> {
+        let mut oldest_validator_key: Option<ValidatorKeysJson> = None;
+        if let Some(validator_keys) = &config.validator_keys {
+            for key in validator_keys.iter() {
+                if let Some(oldest_val_key) = &oldest_validator_key {
+                    if key.election_id < oldest_val_key.election_id {
+                        oldest_validator_key = Some(key.clone());
+                    }
+                } else {
+                    oldest_validator_key = Some(key.clone());
+                }
+            }
+        }
+        oldest_validator_key
+    }
+
+    fn get_key(config: &TonNodeConfig, key_id: [u8; 32]) -> Option<KeyOption> {
+        if let Some(validator_key_ring) = &config.validator_key_ring {
+            if let Some(key_data)  = validator_key_ring.get(&base64::encode(&key_id)) {
+                match KeyOption::from_private_key(&key_data) {
+                    Ok(key) => { return Some(key)},
+                    _ => return None
+                }
+            }
+        }
+        None
+    }
+
+    fn load_config(&self, config: &TonNodeConfig) -> Result<()>{
+        // load key ring
+        if let Some(key_ring) = &config.validator_key_ring {
+            for (key_id, key) in key_ring.iter() {
+                if let Err(e) = self.add_key_to_dynamic_key_ring(key_id.to_string(), key) {
+                    log::warn!("fail added key from key ring: {}", e);
+                }
+            }
+        }
+
+        // load validator keys
+        
+        if let Some(validator_keys) = &config.validator_keys {
+            for key in validator_keys.iter() {
+               if let Err(e) = self.add_or_update_validator_key_in_map(key) {
+                   log::warn!("fail added key to validator keys map: {}", e);
+               }
+            }
+        }
+        Ok(())
+    }
+
+    fn add_or_update_validator_key_in_map(&self, validator_key: &ValidatorKeysJson) -> Result<()> {
+        if self.first_election_id.load(atomic::Ordering::Relaxed) <= 0 {
+            add_object_to_map(
+                &self.validator_keys,
+                validator_key.election_id,
+                || Ok((validator_key.clone(), None))
+            )?;
+            self.first_election_id.store(validator_key.election_id, atomic::Ordering::Relaxed);
+            return Ok(());
+        }
+
+        let mut next_election_id = Some(self.first_election_id.load(atomic::Ordering::Relaxed));
+        let mut prev_election_id = 0;
+        // search prev_election_id
+        while let Some(election_id) = next_election_id {
+            let key = self.validator_keys.get(&election_id)
+                .ok_or_else(|| error!("Failed to load key!"))?;
+
+            if election_id > validator_key.election_id {
+                break;
+            }
+            prev_election_id = election_id;
+            next_election_id = key.val().1;
+        }
+
+        add_object_to_map(
+            &self.validator_keys,
+            validator_key.election_id,
+            || Ok((validator_key.clone(), next_election_id))
+        )?;
+
+        add_object_to_map_with_update(&self.validator_keys, prev_election_id,
+            |old_value| if let Some(old_value) = old_value {
+                Ok(Some((old_value.0.clone(), Some(validator_key.election_id))))
+            } else {
+                Ok(None)
+            }
+        )?;
+
+        if self.last_election_id.load(atomic::Ordering::Relaxed) < validator_key.election_id {
+            self.last_election_id.store(validator_key.election_id, atomic::Ordering::Relaxed);
+        }
+
+        Ok(())
+    }
+
+    fn add_key_to_dynamic_key_ring(&self, key_id: String, key_json: &KeyOptionJson) -> Result<()> {
+        add_object_to_map(&self.key_ring, key_id,
+            || Ok(Arc::new(KeyOption::from_private_key(key_json)?))
+        )?;
+        Ok(())
+    }
+
+    fn start_sheduler(&self, config_name: String, config: TonNodeConfig) -> Result<()> {
         let mut actual_config = config;
         let tasks = self.tasks.clone();
         let name = config_name.clone();
         let key_ring = self.key_ring.clone();
+        let validator_keys = self.validator_keys.clone();
+        let last_election_id = self.last_election_id.clone();
+        let first_election_id = self.first_election_id.clone();
+        self.load_config(&actual_config)?;
+        
         tokio::spawn(async move {
             loop {
                 if let Some(task) = tasks.pop() {
@@ -405,10 +718,15 @@ impl NodeConfigHandler {
                         Task::Generate => {
                             let result = NodeConfigHandler::generate_and_save(&key_ring, &mut actual_config, &name);
                             task.0.respond(Some(Answer::Generate(result)));
-                        }, 
+                        },
                         Task::AddValidatorAdnlKey(key, adnl_key) => {
                             let result = NodeConfigHandler::add_validator_adnl_key_and_save(
-                                &mut actual_config, &key, &adnl_key
+                                validator_keys.clone(),
+                                &mut actual_config,
+                                &key,
+                                &adnl_key,
+                                first_election_id.clone(),
+                                last_election_id.clone()
                             );
                             task.0.respond(Some(Answer::AddValidatorAdnlKey(result)));
                         },
@@ -417,6 +735,10 @@ impl NodeConfigHandler {
                                 &mut actual_config, &key, election_id
                             );
                             task.0.respond(Some(Answer::AddValidatorKey(result)));
+                        }, 
+                        Task::GetKey(key_data) => {
+                            let result = NodeConfigHandler::get_key(&actual_config, key_data);
+                            task.0.respond(Some(Answer::GetKey(result))); 
                         }
                     }
                 } else {
@@ -424,6 +746,7 @@ impl NodeConfigHandler {
                 }
             }
         });
+        Ok(())
     }
 }
 
@@ -442,8 +765,7 @@ impl KeyRing for NodeConfigHandler {
 
        let result = match answer {
            Answer::Generate(res) => res,
-           Answer::AddValidatorAdnlKey(_) => fail!("Bad answer (AddValidatorAdnlKey)!"),
-           Answer::AddValidatorKey(_) => fail!("Bad answer (AddValidatorKey)!")
+           _ => fail!("Bad answer (Generate)!")
        };
 
        result
@@ -663,7 +985,6 @@ impl IdDhtNode {
 impl DhtNode {
     pub fn convert_to_adnl_node_cfg(&self) -> Result<AdnlNodeConfig> {
         let key_option = self.id.convert_key()?;
-
         //TODO!!!!
         let address = self.addr_list.addrs[0].to_str()?;
         let ret = AdnlNodeConfig::from_ip_address_and_key(
