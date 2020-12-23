@@ -11,7 +11,7 @@ use hex::FromHex;
 use std::{
     collections::HashMap, io::{BufReader}, fs::File,
     net::{Ipv4Addr, IpAddr, SocketAddr}, path::Path,
-    sync::{Arc, atomic::{self, AtomicI32} }, time::Duration
+    sync::{Arc, atomic::{self, AtomicI32} }
 };
 use ton_api::{
     IntoBoxed, 
@@ -51,6 +51,7 @@ pub trait NodeConfigSubscriber: Send + Sync {
 pub struct TonNodeConfig {
     log_config_name: Option<String>,
     ton_global_config_name: Option<String>,
+    internal_db_path: Option<String>,
     #[serde(skip_serializing)]
     ip_address: Option<String>,
     adnl_node: Option<AdnlNodeConfigJson>,
@@ -202,6 +203,12 @@ impl TonNodeConfig {
         self.kafka_consumer_config.clone()
     }
 
+    pub fn internal_db_path(&self) -> Option<&str> {
+        self.internal_db_path.as_ref().map(|path| path.as_str())
+    }
+    pub fn set_internal_db_path(&mut self, path: String) {
+        self.internal_db_path.replace(path);
+    }
     pub fn external_db_config(&self) -> Option<ExternalDbConfig> {
         self.external_db_config.clone()
     }
@@ -382,6 +389,7 @@ impl TonNodeConfig {
 
 }
 
+#[derive(Debug)]
 enum Task {
     Generate,
     AddValidatorKey([u8; 32], i32),
@@ -389,6 +397,7 @@ enum Task {
     GetKey([u8; 32])
 }
 
+#[derive(Debug)]
 enum Answer {
     Generate(Result<[u8; 32]>),
     AddValidatorKey(Result<()>),
@@ -398,7 +407,7 @@ enum Answer {
 
 pub struct NodeConfigHandler {
     //subscribers: Vec<Arc<dyn NodeConfigSubscriber>>,
-    tasks: Arc<lockfree::queue::Queue<Arc<(Arc<Wait<Answer>>, Task)>>>,
+    sender: tokio::sync::mpsc::UnboundedSender<Arc<(Arc<Wait<Answer>>, Task)>>,
     key_ring: Arc<lockfree::map::Map<String, Arc<KeyOption>>>,
     validator_keys: Arc<lockfree::map::Map<i32, (ValidatorKeysJson, Option<i32>)>>, // election_id, (keys_info, next_election_id)
     last_election_id: Arc<AtomicI32>,
@@ -406,18 +415,18 @@ pub struct NodeConfigHandler {
 }
 
 impl NodeConfigHandler {
-    const TIMEOUT_SHEDULER_STOP: u64 = 1;       // Milliseconds
-
     pub fn new(config: TonNodeConfig) -> Result<Self> {
+        let (sender, reader) = tokio::sync::mpsc::unbounded_channel();
+
         let handler = NodeConfigHandler {
            // subscribers: Vec::new(),
-            tasks: Arc::new(lockfree::queue::Queue::new()),
+            sender: sender,
             key_ring: Arc::new(lockfree::map::Map::new()),
             validator_keys: Arc::new(lockfree::map::Map::new()),
             first_election_id: Arc::new(AtomicI32::new(0)),
             last_election_id: Arc::new(AtomicI32::new(0))
         };
-        handler.start_sheduler(config.file_name.clone(), config)?;
+        handler.start_sheduler(config.file_name.clone(), config, reader)?;
 
         Ok(handler)
     }
@@ -433,7 +442,9 @@ impl NodeConfigHandler {
         let (wait, mut queue_reader) = Wait::new();
         let pushed_task = Arc::new((wait.clone(), Task::AddValidatorKey(key_hash.clone(), elecation_date)));
         wait.request();
-        self.tasks.push(pushed_task);
+        if let Err(e) = self.sender.send(pushed_task) {
+            fail!("Error add_validator_key: {}", e);
+        }
         let answer = match wait.wait(&mut queue_reader, true).await {
             Some(None) => fail!("Answer was not set!"),
             Some(Some(answer)) => answer,
@@ -459,7 +470,9 @@ impl NodeConfigHandler {
             Task::AddValidatorAdnlKey(validator_key_hash.clone(), validator_adnl_key_hash.clone())
         ));
         wait.request();
-        self.tasks.push(pushed_task);
+        if let Err(e) = self.sender.send(pushed_task) {
+            fail!("Error add_validator_adnl_key: {}", e);
+        }
         let answer = match wait.wait(&mut queue_reader, true).await {
             Some(None) => fail!("Answer was not set!"),
             Some(Some(answer)) => answer,
@@ -523,7 +536,10 @@ impl NodeConfigHandler {
         let (wait, mut queue_reader) = Wait::new();
         let pushed_task = Arc::new((wait.clone(), Task::GetKey(key_hash)));
         wait.request();
-        self.tasks.push(pushed_task);
+        if let Err(e) = self.sender.send(pushed_task) {
+            log::warn!("Error get_key_raw {}", e);
+            return None;
+        }
         let answer = match wait.wait(&mut queue_reader, true).await {
             Some(Some(answer)) => answer,
             _ => return None
@@ -701,9 +717,14 @@ impl NodeConfigHandler {
         Ok(())
     }
 
-    fn start_sheduler(&self, config_name: String, config: TonNodeConfig) -> Result<()> {
+    fn start_sheduler(
+        &self,
+        config_name: String,
+        config: TonNodeConfig,
+        reader: tokio::sync::mpsc::UnboundedReceiver<Arc<(Arc<Wait<Answer>>, Task)>>
+    ) -> Result<()> {
         let mut actual_config = config;
-        let tasks = self.tasks.clone();
+        let mut reader = reader;
         let name = config_name.clone();
         let key_ring = self.key_ring.clone();
         let validator_keys = self.validator_keys.clone();
@@ -712,39 +733,36 @@ impl NodeConfigHandler {
         self.load_config(&actual_config)?;
         
         tokio::spawn(async move {
-            loop {
-                if let Some(task) = tasks.pop() {
-                    match task.1 {
-                        Task::Generate => {
-                            let result = NodeConfigHandler::generate_and_save(&key_ring, &mut actual_config, &name);
-                            task.0.respond(Some(Answer::Generate(result)));
-                        },
-                        Task::AddValidatorAdnlKey(key, adnl_key) => {
-                            let result = NodeConfigHandler::add_validator_adnl_key_and_save(
-                                validator_keys.clone(),
-                                &mut actual_config,
-                                &key,
-                                &adnl_key,
-                                first_election_id.clone(),
-                                last_election_id.clone()
-                            );
-                            task.0.respond(Some(Answer::AddValidatorAdnlKey(result)));
-                        },
-                        Task::AddValidatorKey(key, election_id) => {
-                            let result = NodeConfigHandler::add_validator_key_and_save(
-                                &mut actual_config, &key, election_id
-                            );
-                            task.0.respond(Some(Answer::AddValidatorKey(result)));
-                        }, 
-                        Task::GetKey(key_data) => {
-                            let result = NodeConfigHandler::get_key(&actual_config, key_data);
-                            task.0.respond(Some(Answer::GetKey(result))); 
-                        }
+            while let Some(task) = reader.recv().await {
+                match task.1 {
+                    Task::Generate => {
+                        let result = NodeConfigHandler::generate_and_save(&key_ring, &mut actual_config, &name);
+                        task.0.respond(Some(Answer::Generate(result)));
+                    },
+                    Task::AddValidatorAdnlKey(key, adnl_key) => {
+                        let result = NodeConfigHandler::add_validator_adnl_key_and_save(
+                            validator_keys.clone(),
+                            &mut actual_config,
+                            &key,
+                            &adnl_key,
+                            first_election_id.clone(),
+                            last_election_id.clone()
+                        );
+                        task.0.respond(Some(Answer::AddValidatorAdnlKey(result)));
+                    },
+                    Task::AddValidatorKey(key, election_id) => {
+                        let result = NodeConfigHandler::add_validator_key_and_save(
+                            &mut actual_config, &key, election_id
+                        );
+                        task.0.respond(Some(Answer::AddValidatorKey(result)));
+                    }, 
+                    Task::GetKey(key_data) => {
+                        let result = NodeConfigHandler::get_key(&actual_config, key_data);
+                        task.0.respond(Some(Answer::GetKey(result))); 
                     }
-                } else {
-                    tokio::time::delay_for(Duration::from_millis(Self::TIMEOUT_SHEDULER_STOP)).await;
                 }
             }
+            reader.close();
         });
         Ok(())
     }
@@ -756,7 +774,9 @@ impl KeyRing for NodeConfigHandler {
         let (wait, mut queue_reader) = Wait::new();
         let pushed_task = Arc::new((wait.clone(), Task::Generate));
         wait.request();
-        self.tasks.push(pushed_task);
+        if let Err(e) = self.sender.send(pushed_task) {
+            fail!("Error generate: {}", e);
+        }
         let answer = match wait.wait(&mut queue_reader, true).await {
             Some(None) => fail!("Answer was not set!"),
             Some(Some(answer)) => answer,
