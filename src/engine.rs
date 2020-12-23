@@ -194,18 +194,16 @@ impl Downloader for ZeroStateDownloader {
         &self, 
         context: &DownloadContext<'_, Self::Item>
     ) -> Result<Option<Self::Item>> {
-        context.client.download_zero_state(context.id, &context.attempts).await        
+        context.client.download_zero_state(context.id, &context.attempts).await
     }
-}                          
-                                        
+}
+
 impl Engine {
     pub async fn new(general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>) -> Result<Arc<Self>> {
-        Self::with_db_path("node_db", general_config, ext_db).await
-    }
-    pub async fn with_db_path(db_path: &str, general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>) -> Result<Arc<Self>> {
-        log::info!("Creating engine...");
+         log::info!("Creating engine...");
 
-        let db_config = InternalDbConfig { db_directory: db_path.to_string() };
+        let db_directory = general_config.internal_db_path().unwrap_or_else(|| {"node_db"});
+        let db_config = InternalDbConfig { db_directory: db_directory.to_string() };
         let db = Arc::new(InternalDbImpl::new(db_config).await?);
         let global_config = general_config.load_global_config()?;
         let zero_state_id = global_config.zero_state().expect("check zero state settings");
