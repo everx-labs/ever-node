@@ -16,7 +16,7 @@ In general, the catchain component provides an operation framework for other com
 
 ### Catchain Initialization in a Node
 
-Catchain session begins from creation of the `CatchainImpl` and the `CatChainReceiverImpl` objects. `CatChainReceiverImpl` configures an ADNL overlay for communication with other validators. Then the receiver starts reading blocks from a RocksDB database (see `CatChainReceiverImpl::read_db_from` and `CatChainReceiverImpl::read_block_from_db` for the details). On top there is always q block with hash=0 m it is used as a start block for downloading block predecessors and dependencies. After database reading the main processing loops is started (see `CatChainImpl::on_receiver_started` and `CatChainImpl::send_process` for the details). The consensus algorithm initiates generation of new block candidates for further approval. When a new candidate appears, the block is sent to the catchain. If there are no blocks, a validator waits for blocks from other validators in the catchain.
+Catchain session begins from creation of the `Catchain` object which creates `Receiver` object. `Receiver` configures an ADNL overlay for communication with other validators. Then the receiver starts reading blocks from a RocksDB database (see `ReceiverImpl::read_db_from` and `ReceiverImpl::read_block_from_db` for the details). On top there is always a block with hash=0 which is used as a start block for downloading block predecessors and dependencies. After database reading the main processing loops are started which consists from preprocessing of each particular block (`CatchainProcessor::send_preprocess`) and processing of blocks (`CatchainProcessor::send_process`). Preprocessing means restoring a consensus state for each block based on increments which it contains. Processing means merging several consensus states together (for network performance reasons) and creating new consensus block based on them for sending to other validators. The consensus algorithm initiates generation of new block candidates for further approval. When a new candidate appears, the block is sent to the catchain. If there are no blocks, a validator waits for blocks from other validators in the catchain.
 
 ### Scheduled Actions
 
@@ -31,10 +31,10 @@ To minimize traffic, each validator sends results of its work only to several it
 There are several types of blocks in the catchain:
 
 - blocks written to a blockchain;
-- catchain blocks with a state of particular validator (`CatchainReceivedBlock`). They are the messages with source validator number identification, consensus algorithm iteration number (height) and consensus increment messages; `CatchainReceivedBlock` are temporal and are needed as a source for consensus blocks creation (`CatchainBlock`);
-- `CatchainBlock` blocks which are built from several `CatchainReceivedBlock` (`CatchainBlock` consists from states of `CatchainReceivedBlock` blocks with maximal known for a validator height).
+- catchain blocks with a state of particular validator (`ReceivedBlock`). They are the messages with source validator number identification, consensus algorithm iteration number (height) and consensus increment messages; `ReceivedBlock` are temporal and are needed as a source for consensus blocks creation (`Block`);
+- `Block` blocks which are built from several `ReceivedBlock` (`Block` consists from states of `ReceivedBlock` blocks with maximal known for a validator height).
 
-The `CatchainReceivedBlock` block has following structure:
+The `ReceivedBlock` block has following structure:
 
 - catchain session identifier (to exclude the case when blocks the previous catchain session are processed);
 - number of the source validator that generated the block;
@@ -48,13 +48,13 @@ The dependent blocks graph allows:
 - recursively downloading all blocks required for the full state of the processed block;
 - recursively marking a sub graph of blocks as an invalid if forks are detected from a particular source validator.
 
-Each validator contains a list of states of other validators. Each of them stores `CatchainReceivedBlock` blocks that came from them. Every new incoming `CatchainReceivedBlock` block is checked regardless of which data channel it came from (directly from the validator or transitively, see `CatChainReceiverImpl::validate_block_sync`). If the block signature does not match the expected signature of the sender validator, or if the block is invalid, the block is ignored.
+Each validator contains a list of states of other validators. Each of them stores `ReceivedBlock` blocks that came from them. Every new incoming `ReceivedBlock` block is checked regardless of which data channel it came from (directly from the validator or transitively). If the block signature does not match the expected signature of the sender validator, or if the block is invalid, the block is ignored.
 
-The validator checks each catchain validator for  forks. Only one fork per validator is allowed. In case when the same validator sends two different blocks with the same height, it is marked as a blamed and all `CatChainReceivedBlockImpl` corresponding to this validator are invalidated. The validator itself ignore till the end of the current catchain session.
+The validator checks each catchain validator for  forks. Only one fork per validator is allowed. In case when the same validator sends two different blocks with the same height, it is marked as a blamed and all `ReceivedBlock` corresponding to this validator are invalidated. The validator itself ignore till the end of the current catchain session.
 
-After the `CatChainReceivedBlockImpl` block is received, its processing is initiated (see `CatChainReceiverImpl::receive_block`). Then it is recorded to the database. The processing procedure downloads all dependents for the block and further adding the block to a queue of blocks ready to be run. This download procedure is done each 2-3 seconds by synchronization with other validators which are being asked for absent CatChainReceivedBlockImpl blocks.
+After the `ReceivedBlock` block is received, its processing is initiated (see `Receiver::receive_block`). Then it is recorded to the database. The processing procedure downloads all dependents for the block and further adding the block to a queue of blocks ready to be run. This download procedure is done each 2-3 seconds by synchronization with other validators which are being asked for absent ReceivedBlock blocks.
 
-When any data updates are received (from the database during initialization, when new blocks are received, and while adding new blocks after the work of the consensus algorithm (see `CatChainImpl::processing_block`)), the CatChainReceivedBlockImpl block execution procedure is launched.
+When any data updates are received (from the database during initialization, when new blocks are received, and while adding new blocks after the work of the consensus algorithm (see `CatchainProcessor::processed_block`)), the ReceivedBlock block execution procedure is launched.
 
 Block execution includes:
 
@@ -62,19 +62,19 @@ Block execution includes:
 - preliminary procedures for processing the block (pre_deliver);
 - processing of the block.
 
-Pre-processing of a CatChainReceivedBlockImpl includes the checking of forks (see `CatChainReceivedBlockImpl::pre_deliver`). Block processing (see `CatChainReceivedBlockImpl::delivery`) includes the following:
+Pre-processing of a ReceivedBlock includes the checking of forks (see `ReceivedBlock::pre_deliver`). Block processing (see `ReceivedBlock::delivery`) includes the following:
 
 - deliver_block - notification of the block readiness for this validator. This notification includes following:
-    1. notification of all neighbors about the appearance of a new CatChainReceivedBlockImpl block;
-    2. generating of the new CatchainBlock block and placing it on the top of the chain from the validator which sent the corresponding CatChainReceivedBlockImpl block. In fact, the CatchainBlock block, that is used in the consensus algorithm, is a copy (snapshot) relative to the corresponding CatChainReceivedBlockImpl block, excluding the data which was needed for dependencies downloading process;
-- dep_delivered - notification of all dependent CatChainReceivedBlockImpl blocks (outgoing dependency). This leads to the placing of dependents to a queue of blocks ready to be run;
-- block_delivered - update of internal data on received blocks for the state of the validator that sent the incoming block CatChainReceivedBlockImpl.
+    1. notification of all neighbors about the appearance of a new ReceivedBlock block;
+    2. generating of the new Block block and placing it on the top of the chain from the validator which sent the corresponding ReceivedBlock block. In fact, the Block block, that is used in the consensus algorithm, is a copy (snapshot) relative to the corresponding ReceivedBlock block, excluding the data which was needed for dependencies downloading process;
+- dep_delivered - notification of all dependent ReceivedBlock blocks (outgoing dependency). This leads to the placing of dependents to a queue of blocks ready to be run;
+- block_delivered - update of internal data on received blocks for the state of the validator that sent the incoming block ReceivedBlock.
 
-The received from each validator CatchainBlock-s are the input for the consensus algorithm. Structurally, this block is very similar to the CatChainReceivedBlockImpl block, but it contains all the data necessary for further processing (unlike CatChainReceivedBlockImpl, some of which data may be missing). Catchain stores a list of the CatchainBlock top blocks — one for each validator — and runs the consensus algorithm periodically by timer at the beginning of work and on demand (see `CatChainImpl::send_process` for the details). The consensus iteration for each validator is identified by the height of a block which the consensus algorithm generated. Thus, a pair (validator number, block height) uniquely identifies the block for a particular validator.
+The received from each validator Block-s are the input for the consensus algorithm. Structurally, this block is very similar to the ReceivedBlock block, but it contains all the data necessary for further processing (unlike ReceivedBlock, some of which data may be missing). Catchain stores a list of the Block top blocks — one for each validator — and runs the consensus algorithm periodically by timer at the beginning of work and on demand (see `CatchainProcessor::send_process` for the details). The consensus iteration for each validator is identified by the height of a block which the consensus algorithm generated. Thus, a pair (validator number, block height) uniquely identifies the block for a particular validator.
 
-In the case of processing the consensus results of one validator on the another validator, it is possible that two different blocks will be received with the same height and validator numbers. This leads to the fork appearance, so the identification key extends up to (validator number, block height, fork number). However, because the catchain does not allow forks, the source validator which sent forked block will be blamed. So the fork number may be skipped and CatchainBlock identifiation may be done only using (validator number, block height).
+In the case of processing the consensus results of one validator on the another validator, it is possible that two different blocks will be received with the same height and validator numbers. This leads to the fork appearance, so the identification key extends up to (validator number, block height, fork number). However, because the catchain does not allow forks, the source validator which sent forked block will be blamed. So the fork number may be skipped and Block identifiation may be done only using (validator number, block height).
 
-The consensus iteration begins by selecting a random subset from the list of CatchainBlock top blocks (no more than max_deps=4) and passing them to the consensus algorithm described above (see `ValidatorSessionImpl::process_blocks`). Note, each of such block is received from a separate validator, and the case in which more than one block from one validator is sent to a consensus algorithm iteration is fully excluded. In the consensus algorithm, these blocks are merged, and a new CatchainBlock is built on their basis, the appearance of which is reported by catchain (see `CatchainImpl::processed_block`). Adding a new block leads to writing it to the database and creating a CatChainReceivedBlockImpl block from it, which will be sent to neighbors.
+The consensus iteration begins by selecting a random subset from the list of Block top blocks (no more than max_deps=4) and passing them to the consensus algorithm described above (see `validator_session::SessionProcessor::process_blocks`). Note, each of such block is received from a separate validator, and the case in which more than one block from one validator is sent to a consensus algorithm iteration is fully excluded. In the consensus algorithm, these blocks are merged, and a new Block is built on their basis, the appearance of which is reported by catchain (see `CatchainProcessor::processed_block`). Adding a new block leads to writing it to the database and creating a ReceivedBlock block from it, which will be sent to neighbors.
 
 ### Catchain Protocol Messages & Structures
 
@@ -99,7 +99,7 @@ Main flows:
     - validator receives an incoming **catchain.differenceFork** event, checks the fork proof and marks the counterparty validator which sent fork as blamed; so all data from  this validator will be discarded; also, block for the same height received from this validator (fork block) will be marked as "ill" as well as all dependent blocks from it.
 4. Consensus iteration
     - each **catchain.blockUpdate** may lead to decision that one or several catchain blocks laying on the top of counter-party validators' are fully resolved (so these blocks will have enough data including dependencies to be used in consensus calculations);
-    - a validator randomly chooses up to `CatChainOptions::max_deps`(equal to 4 for now) top blocks from different counter-party validators and sends them for further processing to the validator session component;
+    - a validator randomly chooses up to `Options::max_deps`(equal to 4 for now) top blocks from different counter-party validators and sends them for further processing to the validator session component;
     - the validator session component merges such dependencies and gets a new merged state;
     - according to the new state, the validator session component generates incremental messages that transform the state before merge (previous block) to a state after merge (new block). This batch of messages is included as a payload to a Catchain structure `catchain.block.data.vector` and is used as a new Catchain block data: The height of a catchain block is equal to the iteration index increased sequentially after each consensus iteration;
     - the new Catchain block is stored on the current validator without being immediately sent to other validators, so counter-party validators have to request current validator for blocks update using the **catchain.getDifference** request to obtain computed blocks (pull model).
