@@ -17,21 +17,23 @@ use crate::{
                     validatordescr_to_catchain_node,
                     get_shard_name, validatorset_to_string,
                     compute_validator_list_id,
-                    hex_to_publickey, sigpubkey_to_publickey, get_adnl_id,
                     ValidatorListHash
-                },
-                candidate_db::LastRotationBlockDb
-    }
+                }}
 };
 use catchain::{CatchainNode, PublicKey, PublicKeyHash};
-use catchain::{utils::serialize_tl_boxed_object, BlockPayloadPtr};
 use sha2::{Digest, Sha256};
 use tokio::{task::JoinHandle, time::timeout, sync::oneshot, runtime::Runtime };
 use ton_api::IntoBoxed;
 use ton_block::master::{FutureSplitMerge, ShardDescr};
-use ton_block::{CatchainConfig, signature::SigPubKey, ConfigParamEnum, ConsensusConfig, McStateExtra, Serializable, ShardIdent, ValidatorDescr, ValidatorSet, BlockIdExt};
+use ton_block::{
+    CatchainConfig, signature::SigPubKey, ConfigParamEnum, ConsensusConfig, McStateExtra,
+    Serializable, ShardIdent, ValidatorDescr, ValidatorSet,
+};
 use ton_types::BuilderData;
 use ton_types::{fail, Result, UInt256};
+
+use crate::validator::validator_utils::{hex_to_publickey, sigpubkey_to_publickey, get_adnl_id};
+use catchain::{utils::serialize_tl_boxed_object, BlockPayloadPtr};
 
 pub fn get_validator_set_id_serialize(
     shard: ShardIdent,
@@ -222,17 +224,12 @@ impl Default for ValidatorListStatus {
     }
 }
 
-fn rotate_all_shards(mc_state_extra: &McStateExtra) -> bool {
-    return mc_state_extra.validator_info.nx_cc_updated
-}
-
 struct ValidatorManagerImpl {
     engine: Arc<dyn EngineOperations>,
     rt: Arc<Runtime>,
     validator_sessions: HashMap<UInt256, Arc<ValidatorGroup>>, // Sessions: both actual (started) and future
     validator_list_status: ValidatorListStatus,
     config: ValidatorManagerConfig,
-    last_rotation_block_db: LastRotationBlockDb,
 
     validation_status: ValidationStatus,
 }
@@ -252,8 +249,7 @@ impl ValidatorManagerImpl {
             validator_sessions: HashMap::default(),
             validator_list_status: ValidatorListStatus::default(),
             config: ValidatorManagerConfig::default(),
-            validation_status: ValidationStatus::Disabled,
-            last_rotation_block_db: LastRotationBlockDb::new("node_db/last_rotation_block".to_string())
+            validation_status: ValidationStatus::Disabled
         }
     }
 
@@ -375,7 +371,9 @@ impl ValidatorManagerImpl {
                     }
                 }
             }
+            log::trace!(target: "validator", "stop&remove: removed {}", id_name.to_hex_string());
         }
+        log::trace!("stop&remove -- ok");
     }
 
     async fn compute_session_options(&mut self, mc_state_extra: &McStateExtra)
@@ -403,11 +401,11 @@ impl ValidatorManagerImpl {
     async fn update_validation_status(&mut self, mc_state: &ShardStateStuff, mc_state_extra: &McStateExtra) -> Result<()> {
         match self.validation_status {
             ValidationStatus::Waiting => {
-                let rotate = rotate_all_shards(mc_state_extra);
+                let rotate_all_shards = mc_state_extra.validator_info.nx_cc_updated;
                 let last_masterchain_block = mc_state.block_id();
                 let later_than_hardfork = self.engine.get_last_fork_masterchain_seqno() <= last_masterchain_block.seq_no;
                 if self.engine.check_sync().await?
-                    && (rotate || last_masterchain_block.seq_no == 0) && later_than_hardfork
+                    && (rotate_all_shards || last_masterchain_block.seq_no == 0) && later_than_hardfork
                 {
                     self.validation_status = ValidationStatus::Countdown
                 }
@@ -431,16 +429,14 @@ impl ValidatorManagerImpl {
         Ok(())
     }
 
-    pub async fn disable_validation(&mut self) -> Result<()> {
+    pub async fn disable_validation(&mut self) {
         self.validation_status = ValidationStatus::Disabled;
 
         let existing_validator_sessions: HashSet<UInt256> =
             self.validator_sessions.keys().cloned().collect();
         self.stop_and_remove_sessions(&existing_validator_sessions).await;
         self.engine.set_will_validate(false);
-        self.last_rotation_block_db.clear_last_rotation_block_id()?;
         log::info!(target: "validator", "All sessions were removed, validation disabled");
-        Ok(())
     }
 
     pub fn enable_validation(&mut self) {
@@ -556,7 +552,7 @@ impl ValidatorManagerImpl {
     pub async fn update_shards(&mut self, mc_state: ShardStateStuff) -> Result<()> {
         if !self.update_validator_lists(&mc_state).await? {
             log::info!("Current validator list is empty, validation is disabled.");
-            self.disable_validation().await?;
+            let _ = self.disable_validation().await;
             return Ok(())
         }
 
@@ -745,10 +741,6 @@ impl ValidatorManagerImpl {
             }
         }
 
-        if rotate_all_shards(&mc_state_extra) {
-            log::info!(target: "validator", "New last rotation block: {}", last_masterchain_block);
-            self.last_rotation_block_db.set_last_rotation_block_id(last_masterchain_block)?;
-        }
         log::trace!(target: "validator", "starting stop&remove");
         self.stop_and_remove_sessions(&gc_validator_sessions).await;
         log::trace!(target: "validator", "starting garbage collect");
@@ -767,21 +759,8 @@ impl ValidatorManagerImpl {
     }
 
     pub async fn invoke(&mut self) -> Result<()> {
-        let mc_block_id = match self.last_rotation_block_db.get_last_rotation_block_id()? {
-            None => {
-                let id = self.engine.load_last_applied_mc_block_id().await?;
-                log::info!(target: "validator",
-                           "Validator manager initialization: last applied block: {}, no last rotation block",
-                           id
-                );
-                id
-            },
-            Some(id) => {
-                log::info!(target: "validator", "Validator manager initialization: last rotation block: {}", id);
-                id
-            }
-        };
-
+        let mc_block_id = self.engine.load_last_applied_mc_block_id().await?;
+        log::info!(target: "validator", "Last applied block: {}", mc_block_id);
         let mut mc_handle = self.engine.load_block_handle(&mc_block_id)?;
         loop {
             let s = self.engine.load_state(mc_handle.id()).await?;
@@ -792,7 +771,10 @@ impl ValidatorManagerImpl {
             mc_handle = loop {
                 match timeout(self.config.update_interval, self.engine.wait_next_applied_mc_block(&mc_handle)).await {
                     Ok(r_res) => break r_res?.0,
-                    Err(tokio::time::Elapsed{..}) => self.stats().await
+                    Err(err) => {
+                        log::error!("Validator manager error: `{}`", err);
+                        self.stats().await
+                    }
                 }
             };
         }
