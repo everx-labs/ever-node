@@ -507,7 +507,7 @@ impl ValidatorManagerImpl {
                 0, /* temp */
             );
 
-            log::info!(target: "validator", "Shard {}, cc_seqno {}, keyblock_seqno {}, validator_set {}, session_id {}",
+            log::trace!(target: "validator", "Shard {}, cc_seqno {}, keyblock_seqno {}, validator_set {}, session_id {}",
                 shard_name, cc_seqno_delta, keyblock_seqno,
                 validatorset_to_string(&vsubset), session_id.to_hex_string()
             );
@@ -609,7 +609,6 @@ impl ValidatorManagerImpl {
                 }
             }
             else if descr.before_merge {
-                log::info!(target: "validator", "Before merge");
                 let parent_shard = ident.merge();
                 match parent_shard {
                     Err(e) => log::error!(target: "validator", "Cannot merge shard: `{}`", e),
@@ -622,8 +621,6 @@ impl ValidatorManagerImpl {
                         // Add previous block for the shard: there are two parents for merge, so two prevs
                         let (_l,r) = p.split()?;
                         prev_blocks[(r == ident) as usize] = top_block;
-                        log::info!(target: "validator", "new shard {}, merging prev blocks: {} and {}",
-                                   p, prev_blocks[0], prev_blocks[1]);
                         new_shards.insert(p, prev_blocks);
                     }
                 }
