@@ -2,7 +2,7 @@
 
 use std::{
     cmp::{min, max},
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, BinaryHeap},
     ops::Deref,
     sync::{atomic::Ordering, Arc},
 };
@@ -190,6 +190,36 @@ impl PrevData {
     }
 }
 
+
+#[derive(Eq, PartialEq)]
+struct NewMessage {
+    lt_hash: (u64, UInt256),
+    msg: Message,
+    tr_cell: Cell,
+}
+
+impl NewMessage {
+    fn new(lt_hash: (u64, UInt256), msg: Message, tr_cell: Cell) -> Self {
+        Self {
+            lt_hash,
+            msg,
+            tr_cell,
+        }
+    }
+}
+
+impl Ord for NewMessage {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.lt_hash.cmp(&self.lt_hash)
+    }
+}
+
+impl PartialOrd for NewMessage {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 struct CollatorData {
     // lists, empty by default
     changed_accounts: HashMap<AccountId, ShardAccountStuff>,
@@ -200,7 +230,7 @@ struct CollatorData {
     shard_fees: ShardFees,
     shard_top_block_descriptors: Vec<Arc<TopBlockDescrStuff>>,
     block_create_count: HashMap<UInt256, u64>,
-    new_messages: Vec<(Message, Cell)>,
+    new_messages: BinaryHeap<NewMessage>, // using for priority queue
     usage_tree: UsageTree,
 
     // determined fields
@@ -265,7 +295,7 @@ impl CollatorData {
             shard_fees: ShardFees::default(),
             shard_top_block_descriptors: Vec::new(),
             block_create_count: HashMap::new(),
-            new_messages: Vec::new(),
+            new_messages: Default::default(),
             usage_tree,
             gen_utime,
             config,
@@ -356,10 +386,13 @@ impl CollatorData {
             self.add_in_msg_to_block(in_msg)?;
         }
         let tr_cell = transaction.serialize()?;
-        transaction.iterate_out_msgs(|msg| {
+        transaction.out_msgs.iterate_slices(|slice| {
+            let msg_cell = slice.reference(0)?;
+            let msg_hash = msg_cell.repr_hash();
+            let msg = Message::construct_from_cell(msg_cell)?;
             match msg.header() {
                 CommonMsgInfo::IntMsgInfo(info) => {
-                    self.new_messages.push((msg, tr_cell.clone()));
+                    self.new_messages.push(NewMessage::new((info.created_lt, msg_hash), msg, tr_cell.clone()));
                 }
                 CommonMsgInfo::ExtOutMsgInfo(info) => {
                     let out_msg = OutMsg::external(&msg, tr_cell.clone())?;
@@ -741,15 +774,17 @@ impl CollatorNew {
 
         let imported_data = self.import_data().await?;
         let (mc_data, prev_data, mut collator_data) = self.prepare_data(imported_data).await?;
-        let res = self.do_collate(&mc_data, &prev_data, &mut collator_data).await?;
+        let (candidate, state) = self.do_collate(&mc_data, &prev_data, &mut collator_data).await?;
 
         log::info!(
-            "{}: COLLATED GAS {} TIME {}ms",
+            "{}: COLLATED SIZE: {} GAS: {} TIME: {}ms RATIO: {}",
             self.collated_block_descr,
+            candidate.data.len(),
             collator_data.block_limit_status.gas_used(),
-            now.elapsed().as_millis()
+            now.elapsed().as_millis(),
+            collator_data.block_limit_status.gas_used() / now.elapsed().as_millis() as u32,
         );
-        Ok(res)
+        Ok((candidate, state))
     }
 
     async fn import_data(&self) -> Result<ImportedData> {
@@ -806,19 +841,6 @@ impl CollatorNew {
         let now = self.init_utime(&mc_data, &prev_data)?;
         let config = BlockchainConfig::with_config(mc_data.config().clone())?;
         let mut collator_data = CollatorData::new(now, config, usage_tree, &prev_data, is_masterchain)?;
-
-        // if self.is_fake() {
-        //     collator_data.max_in_out = match self.new_block_id_part.seq_no {
-        //         172789 if self.shard == ShardIdent::with_tagged_prefix(0, 0x38 << 56)? => Some((495, 854)),
-        //         172790 if self.shard == ShardIdent::with_tagged_prefix(0, 0x34 << 56)? => Some((662, 662)),
-        //         172790 if self.shard == ShardIdent::with_tagged_prefix(0, 0x3C << 56)? => Some((492, 839)),
-        //         172870 if self.shard == ShardIdent::with_tagged_prefix(0, 0x33 << 56)? => Some((474, 471)),
-        //         172880 if self.shard == ShardIdent::with_tagged_prefix(0, 0x33 << 56)? => Some((442, 511)),
-        //         172881 if self.shard == ShardIdent::with_tagged_prefix(0, 0x338 << 52)? => Some((640, 640)),
-        //         230703 if self.shard == ShardIdent::with_tagged_prefix(0, 0xa8 << 56)? => Some((3, 30)),
-        //         _ => None
-        //     };
-        // }
 
         if !self.shard.is_masterchain() {
             let (now_upper_limit, before_split, _accept_msgs) = check_this_shard_mc_info(
@@ -1751,8 +1773,7 @@ impl CollatorNew {
         log::trace!("{}: process_new_messages", self.collated_block_descr);
         let config = collator_data.config.clone();
         let executor = OrdinaryTransactionExecutor::new(config);
-        while !collator_data.new_messages.is_empty() {
-            let (msg, tr_cell) = collator_data.new_messages.remove(0);
+        while let Some(NewMessage{ lt_hash, msg, tr_cell }) = collator_data.new_messages.pop() {
             let info = msg.int_header().ok_or_else(|| error!("message is not internal"))?;
             let fwd_fee = info.fwd_fee().clone();
             enqueue_only |= collator_data.block_full;
@@ -1802,7 +1823,11 @@ impl CollatorNew {
 
         let mut shard_acc = match collator_data.account(&account_id) {
             Some(shard_acc) => shard_acc,
-            None => ShardAccountStuff::from_shard_state(account_id, &prev_data.accounts, collator_data.start_lt()? + 1)?
+            None => ShardAccountStuff::from_shard_state(
+                account_id,
+                &prev_data.accounts,
+                collator_data.start_lt()? + 1,
+            )?
         };
         let mut account_root = shard_acc.account_cell().clone();
         
@@ -1819,7 +1844,7 @@ impl CollatorNew {
             self.debug
         )?;
         let gas = transaction.gas_used().unwrap_or(0);
-        log::trace!("GAS: {} TIME: execute for {} {}ms;", gas, transaction.logical_time(), now.elapsed().as_millis());
+        log::trace!("GAS: {} TIME: {}ms execute for {}", gas, now.elapsed().as_millis(), transaction.logical_time());
 
         shard_acc.add_transaction(&mut transaction, account_root)?;
         collator_data.update_account(shard_acc);
