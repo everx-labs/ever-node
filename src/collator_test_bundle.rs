@@ -159,11 +159,11 @@ pub struct CollatorTestBundle {
 
 impl CollatorTestBundle {
 
-    pub async fn build_with_zero_state(path: &str) -> Result<Self> {
-        log::info!("Building with zerostate from {}", path);
+    pub async fn build_with_zero_state(mc_zero_state_name: &str, wc_zero_state_name: &str) -> Result<Self> {
+        log::info!("Building with zerostate from {} and {}", mc_zero_state_name, wc_zero_state_name);
 
-        let (mc_state, mc_fh, mc_rh) = construct_from_file::<ShardStateUnsplit>("src/tests/static/zerostate.boc")?;
-        let (wc_state, wc_fh, wc_rh) = construct_from_file::<ShardStateUnsplit>("src/tests/static/basestate0.boc")?;
+        let (mc_state, mc_fh, mc_rh) = construct_from_file::<ShardStateUnsplit>(mc_zero_state_name)?;
+        let (wc_state, wc_fh, wc_rh) = construct_from_file::<ShardStateUnsplit>(wc_zero_state_name)?;
 
         let now = std::cmp::max(mc_state.gen_time(), wc_state.gen_time()) + 1;
 
