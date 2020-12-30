@@ -261,7 +261,7 @@ pub fn serialize_block_with_payload(
     let mut serializer = ton_api::Serializer::new(&mut raw_data.0);
 
     serializer.write_boxed(&block.clone().into_boxed())?;
-    serializer.write_bare(payload.data())?;
+    raw_data.0.extend(payload.data().iter());
 
     Ok(raw_data)
 }

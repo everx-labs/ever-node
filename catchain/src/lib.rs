@@ -576,6 +576,9 @@ pub trait Receiver {
 
     /// Get next awake time
     fn get_next_awake_time(&self) -> std::time::SystemTime;
+
+    /// Destroy DB
+    fn destroy_db(&mut self);
 }
 
 /// Catchain block
@@ -634,6 +637,9 @@ pub trait Database: Send + Sync {
 
     /// Erase block from database
     fn erase_block(&self, hash: &BlockHash);
+
+    /// Destroy DB (after drop)
+    fn destroy(&self);
 }
 
 /// Response for queries
@@ -875,7 +881,7 @@ pub trait Catchain: Send + Sync {
     fn send_broadcast(&self, payload: BlockPayloadPtr);
 
     /// Stop the Catchain
-    fn stop(&self);
+    fn stop(&self, destroy_db: bool);
 
     /// Send query via RLDP
     fn send_query_via_rldp(

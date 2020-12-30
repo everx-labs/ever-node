@@ -1,0 +1,30 @@
+{
+    "@type": "config.global",
+    "dht": {
+        "@type": "dht.config.global",
+        "k": 6,
+        "a": 3,
+        "static_nodes": {
+            "@type": "dht.nodes",
+            "nodes": [
+{"@type":"dht.node","id":{"@type":"pub.ed25519","key":"aa2pSPzenne2eS5kMTansanLxPl/2+Q5duaaJzjqDAE="},"addr_list":{"@type":"adnl.addressList","addrs":[{"@type":"adnl.address.udp","ip":-1846591369,"port":30303}],"version":0,"reinit_date":0,"priority":0,"expire_at":0},"version":-1,"signature":"XSuga44uUxTSV6kCNaHx7UaAqpKkH8jNr9vFUTWX1LXnMUCxU3C9KE8VlFO5C/UTHBgFmObZTkynY0l8KoCJBA=="}
+,{"@type":"dht.node","id":{"@type":"pub.ed25519","key":"v0MMEOuWxQgWCp43BAKcA/kSVy/YiaEtudBavS3GALg="},"addr_list":{"@type":"adnl.addressList","addrs":[{"@type":"adnl.address.udp","ip":-1846591365,"port":30303}],"version":0,"reinit_date":0,"priority":0,"expire_at":0},"version":-1,"signature":"LfUWhEg2GJVKKEV9k7RxgYmuglpBFq2kMLyGzajj0i4ZloYfZvraBOO6RVYZD7xSPVqQsodFXDopZ8l3Ygw9CA=="}
+,{"@type":"dht.node","id":{"@type":"pub.ed25519","key":"Q0xlKXxNzKdxLWse7PxR95daM00ix231pD9DmmOFWts="},"addr_list":{"@type":"adnl.addressList","addrs":[{"@type":"adnl.address.udp","ip":-1846591357,"port":30303}],"version":0,"reinit_date":0,"priority":0,"expire_at":0},"version":-1,"signature":"XujHidJTmYsMPoyEIMkdUBqlZmAIWV7jxM/RNBZztYS8W36C6yRP61Z+gIha6CUkAnt6wfxZOhsBWHMyDlYQCw=="}
+,{"@type":"dht.node","id":{"@type":"pub.ed25519","key":"63jpL+I9Scgci4SQ6dgfrhfJnB+/Us2c+7uvF4li2sY="},"addr_list":{"@type":"adnl.addressList","addrs":[{"@type":"adnl.address.udp","ip":-1846591353,"port":30303}],"version":0,"reinit_date":0,"priority":0,"expire_at":0},"version":-1,"signature":"pvlqXJXx3FijM6gLwO1JSM646N4DK9fzugRhn75rBdX+WGn7JY5IjmiBrS3ht66c9IKCnBGZaLDk4l0CE1aqBw=="}
+,{"@type":"dht.node","id":{"@type":"pub.ed25519","key":"4NsdyATLU5q4XLafyehjwIIIluCk8a8qs8SuAiXOgHU="},"addr_list":{"@type":"adnl.addressList","addrs":[{"@type":"adnl.address.udp","ip":-1846591348,"port":30303}],"version":0,"reinit_date":0,"priority":0,"expire_at":0},"version":-1,"signature":"fZFpbcSE/gMLlN11PleZXws3CqN7vSCbGfAtarGm/WJJ8NSDtJSihiLnvPjI9DlQvpsxtXFHH5Holm4z8VfeAw=="}
+,{"@type":"dht.node","id":{"@type":"pub.ed25519","key":"BhZq3bAHWm3Xqb5ifEqwAoLeKezltuUazXkw+6nC0K0="},"addr_list":{"@type":"adnl.addressList","addrs":[{"@type":"adnl.address.udp","ip":908344762,"port":30303}],"version":0,"reinit_date":0,"priority":0,"expire_at":0},"version":-1,"signature":"2S2ocL6OYPI9tRAdFVTQ+lrnRs953YQbNMrDCcZ8AIw9RX/I6Cou+hPZRuNUOmmA9dzxgqH28ZKtGl8wguEpBA=="}
+,{"@type":"dht.node","id":{"@type":"pub.ed25519","key":"x82sVCuXCQAWhrPdx7s70Piy1JWsULAJ5Eji317nWmQ="},"addr_list":{"@type":"adnl.addressList","addrs":[{"@type":"adnl.address.udp","ip":908344763,"port":30303}],"version":0,"reinit_date":0,"priority":0,"expire_at":0},"version":-1,"signature":"gUljmMym6v2OtcmzzN4P8aPkTa0vjvW+scdwwmet0ItuLRKIxhTxnI1u5Z2CIycIVgAVC2SZKvi1MKeGetefBg=="}
+            ]
+        }
+    },
+    "validator": {
+        "@type": "validator.config.global",
+        "zero_state": {
+            "workchain": -1,
+            "shard": -9223372036854775808,
+            "seqno": 0,
+            "root_hash": "nHr8CsL3so/Y2yB/wFrF4OjBmhVUIDEArkYicSpCt9M=",
+            "file_hash": "VsBCvRsjDMiqEiVJjveFHh6T6nKpz0W1dpOxQ0g8gnM="
+        }
+    }
+}

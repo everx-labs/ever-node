@@ -123,6 +123,7 @@ pub(crate) struct CatchainImpl {
     utility_thread_is_stopped_flag: Arc<AtomicBool>, //atomic flag to indicate that utility processing thread has been stopped
     main_thread_overloaded_flag: Arc<AtomicBool>, //indicates that catchain main thrad is overloaded
     _utility_thread_overloaded_flag: Arc<AtomicBool>, //indicates that catchain utility thread is overloaded
+    destroy_db_flag: Arc<AtomicBool>,                 //indicates catchain has to destroy DB
     session_id: SessionId,                            //session ID
     _activity_node: ActivityNodePtr, //activity node for tracing lifetime of this catchain
 }
@@ -175,7 +176,7 @@ impl CatchainOverlayListener for OverlayListenerImpl {
         response_callback: ExternalQueryResponseCallback,
     ) {
         if let Some(catchain) = self.catchain.upgrade() {
-            if !catchain.main_thread_overloaded_flag.load(Ordering::Relaxed) {
+            if !catchain.main_thread_overloaded_flag.load(Ordering::SeqCst) {
                 let adnl_id = adnl_id.clone();
                 let data = data.clone();
 
@@ -706,6 +707,12 @@ impl CatchainProcessor {
         debug!("CatchainProcessor has been stopped");
     }
 
+    fn destroy_db(&mut self) {
+        debug!("Destroying Catchain DB...");
+
+        self.receiver.borrow_mut().destroy_db();
+    }
+
     /*
         Blocks management
     */
@@ -818,6 +825,7 @@ impl CatchainProcessor {
         should_stop_flag: Arc<AtomicBool>,
         is_stopped_flag: Arc<AtomicBool>,
         overloaded_flag: Arc<AtomicBool>,
+        destroy_db_flag: Arc<AtomicBool>,
         options: Options,
         session_id: SessionId,
         ids: Vec<CatchainNode>,
@@ -922,8 +930,12 @@ impl CatchainProcessor {
 
                 //check if the main loop should be stopped
 
-                if should_stop_flag.load(Ordering::Relaxed) {
+                if should_stop_flag.load(Ordering::SeqCst) {
                     processor.stop();
+
+                    if destroy_db_flag.load(Ordering::SeqCst) {
+                        processor.destroy_db();
+                    }
                     break;
                 }
 
@@ -931,7 +943,7 @@ impl CatchainProcessor {
 
                 let is_overloaded = queue_receiver.len() >= CATCHAIN_OVERLOADED_QUEUE_SIZE;
 
-                overloaded_flag.store(is_overloaded, Ordering::Release);
+                overloaded_flag.store(is_overloaded, Ordering::SeqCst);
 
                 if is_overloaded {
                     loop_overloads_counter.increment();
@@ -1091,8 +1103,8 @@ impl CatchainProcessor {
             session_id.to_hex_string()
         );
 
-        overloaded_flag.store(false, Ordering::Release);
-        is_stopped_flag.store(true, Ordering::Release);
+        overloaded_flag.store(false, Ordering::SeqCst);
+        is_stopped_flag.store(true, Ordering::SeqCst);
     }
 
     /*
@@ -1136,7 +1148,7 @@ impl CatchainProcessor {
 
             //check if the loop should be stopped
 
-            if should_stop_flag.load(Ordering::Relaxed) {
+            if should_stop_flag.load(Ordering::SeqCst) {
                 break;
             }
 
@@ -1144,7 +1156,7 @@ impl CatchainProcessor {
 
             let is_overloaded = queue_receiver.len() >= CATCHAIN_OVERLOADED_QUEUE_SIZE;
 
-            overloaded_flag.store(is_overloaded, Ordering::Release);
+            overloaded_flag.store(is_overloaded, Ordering::SeqCst);
 
             if is_overloaded {
                 loop_overloads_counter.increment();
@@ -1195,8 +1207,8 @@ impl CatchainProcessor {
             session_id.to_hex_string()
         );
 
-        overloaded_flag.store(false, Ordering::Release);
-        is_stopped_flag.store(true, Ordering::Release);
+        overloaded_flag.store(false, Ordering::SeqCst);
+        is_stopped_flag.store(true, Ordering::SeqCst);
     }
 
     /*
@@ -2029,9 +2041,11 @@ impl CatchainOverlay for DummyCatchainOverlay {
         sender_id: &PublicKeyHash,
         message: &BlockPayloadPtr,
     ) {
-        info!(
+        trace!(
             "DummyCatchainOverlay: send message {:?} -> {:?}: {:?}",
-            sender_id, receiver_id, message
+            sender_id,
+            receiver_id,
+            message
         );
     }
 
@@ -2041,9 +2055,11 @@ impl CatchainOverlay for DummyCatchainOverlay {
         sender_id: &PublicKeyHash,
         message: &BlockPayloadPtr,
     ) {
-        info!(
+        trace!(
             "DummyCatchainOverlay: send message multicast {:?} -> {:?}: {:?}",
-            sender_id, receiver_ids, message
+            sender_id,
+            receiver_ids,
+            message
         );
     }
 
@@ -2056,9 +2072,12 @@ impl CatchainOverlay for DummyCatchainOverlay {
         message: &BlockPayloadPtr,
         _response_callback: ExternalQueryResponseCallback,
     ) {
-        info!(
+        trace!(
             "DummyCatchainOverlay: send query {} {:?} -> {:?}: {:?}",
-            name, sender_id, receiver_id, message
+            name,
+            sender_id,
+            receiver_id,
+            message
         );
     }
 
@@ -2071,9 +2090,11 @@ impl CatchainOverlay for DummyCatchainOverlay {
         query: BlockPayloadPtr,
         _max_answer_size: u64,
     ) {
-        info!(
+        trace!(
             "DummyCatchainOverlay: send query '{}' via RLDP -> {}: {:?}",
-            name, dst_adnl_id, query
+            name,
+            dst_adnl_id,
+            query
         );
     }
 
@@ -2083,9 +2104,11 @@ impl CatchainOverlay for DummyCatchainOverlay {
         send_as: &PublicKeyHash,
         payload: BlockPayloadPtr,
     ) {
-        info!(
+        trace!(
             "DummyCatchainOverlay: send broadcast_fec_ex {:?}/{:?}: {:?}",
-            sender_id, send_as, payload
+            sender_id,
+            send_as,
+            payload
         );
     }
 }
@@ -2123,12 +2146,16 @@ impl Catchain for CatchainImpl {
         Catchain stop
     */
 
-    fn stop(&self) {
-        self.should_stop_flag.store(true, Ordering::Release);
+    fn stop(&self, destroy_db: bool) {
+        if destroy_db {
+            self.destroy_db_flag.store(true, Ordering::SeqCst);
+        }
+
+        self.should_stop_flag.store(true, Ordering::SeqCst);
 
         loop {
-            if self.main_thread_is_stopped_flag.load(Ordering::Relaxed)
-                && self.utility_thread_is_stopped_flag.load(Ordering::Relaxed)
+            if self.main_thread_is_stopped_flag.load(Ordering::SeqCst)
+                && self.utility_thread_is_stopped_flag.load(Ordering::SeqCst)
             {
                 break;
             }
@@ -2205,7 +2232,7 @@ impl Drop for CatchainImpl {
     fn drop(&mut self) {
         debug!("Dropping Catchain...");
 
-        self.stop();
+        self.stop(false);
     }
 }
 
@@ -2273,6 +2300,7 @@ impl CatchainImpl {
         ) = crossbeam::crossbeam_channel::unbounded();
         let utility_queue_sender_clone = utility_queue_sender.clone();
         let should_stop_flag = Arc::new(AtomicBool::new(false));
+        let destroy_db_flag = Arc::new(AtomicBool::new(false));
         let main_thread_is_stopped_flag = Arc::new(AtomicBool::new(false));
         let utility_thread_is_stopped_flag = Arc::new(AtomicBool::new(false));
         let main_thread_overloaded_flag = Arc::new(AtomicBool::new(false));
@@ -2289,6 +2317,7 @@ impl CatchainImpl {
             utility_thread_is_stopped_flag: utility_thread_is_stopped_flag.clone(),
             main_thread_overloaded_flag: main_thread_overloaded_flag.clone(),
             _utility_thread_overloaded_flag: utility_thread_overloaded_flag.clone(),
+            destroy_db_flag: destroy_db_flag.clone(),
             session_id: session_id.clone(),
             _activity_node: catchain_activity_node.clone(),
         };
@@ -2324,6 +2353,7 @@ impl CatchainImpl {
                     stop_flag_for_main_loop,
                     main_thread_is_stopped_flag,
                     main_thread_overloaded_flag,
+                    destroy_db_flag,
                     options,
                     session_id,
                     ids,

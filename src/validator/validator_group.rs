@@ -122,6 +122,8 @@ pub struct ValidatorGroupImpl {
 
 impl Drop for ValidatorGroupImpl {
     fn drop (&mut self) {
+        // Important: does not stop the session -- to avoid database deletion,
+        // which otherwise would happen each time the validator-manager crashes.
         log::info!(target: "validator", "ValidatorGroupImpl: dropping session {}", self.info());
     }
 }
@@ -185,11 +187,16 @@ impl ValidatorGroupImpl {
         );
 
         self.session_ptr = Some(session_ptr);
+        self.candidate_db.start()?;
         return Ok(())
     }
 
     pub fn get_session_ptr(&self) -> Option<SessionPtr> {
         return self.session_ptr.clone();
+    }
+
+    pub fn destroy_db(&mut self) -> Result<()> {
+        self.candidate_db.destroy()
     }
 
     pub fn info_round(&self, round: u32) -> String {
@@ -212,7 +219,7 @@ impl ValidatorGroupImpl {
             min_ts: SystemTime::now(),
             status: ValidatorGroupStatus::Created,
             last_known_round: 0,
-            candidate_db: CandidateDb::new(),
+            candidate_db: CandidateDb::new(format!("node_db/candidates/{}", session_id.to_hex_string())),
 
             shard,
             session_id,
@@ -351,9 +358,15 @@ impl ValidatorGroup {
                 }
                 log::info!(target: "validator", "Group stopped: {}", self.info().await);
                 let _ = self.set_status(ValidatorGroupStatus::Stopped).await;
+                let _ = self.destroy_db().await;
             }
         });
         Ok(())
+    }
+
+    pub async fn destroy_db(&self) -> Result<()> {
+        let mut group_impl = self.group_impl.clone().lock_owned().await;
+        group_impl.destroy_db()
     }
 
     pub async fn get_status(&self) -> ValidatorGroupStatus {
@@ -489,8 +502,7 @@ impl ValidatorGroup {
                 let vb_candidate = validator_query_candidate_to_validator_block_candidate(
                     source.clone(), candidate
                 );
-                let mut group_impl = self.group_impl.clone().lock_owned().await;
-
+                let group_impl = self.group_impl.clone().lock_owned().await;
                 let res = group_impl.candidate_db.save(vb_candidate).await;
                 match &res {
                     Ok(()) => format!("Validation successful: finished at {:?}", x),
@@ -627,6 +639,8 @@ impl ValidatorGroup {
 
 impl Drop for ValidatorGroup {
     fn drop (&mut self) {
+        // Important: does not stop the session -- to avoid database deletion,
+        // which otherwise would happen each time the validator-manager crashes.
         log::info!(target: "validator", "ValidatorGroup: dropping session {}",
             self.session_id.to_hex_string()
         );

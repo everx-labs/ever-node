@@ -720,6 +720,16 @@ impl Receiver for ReceiverImpl {
     fn get_next_awake_time(&self) -> std::time::SystemTime {
         self.next_awake_time.clone()
     }
+
+    /*
+        Database management
+    */
+
+    fn destroy_db(&mut self) {
+        if let Some(db) = &self.db {
+            db.destroy();
+        }
+    }
 }
 
 /*
@@ -1118,7 +1128,9 @@ impl ReceiverImpl {
                     //save mapping: sha256(block_id) -> serialized block with payload
 
                     match utils::serialize_block_with_payload(&block, &payload) {
-                        Ok(raw_data) => db.put_block(&block_id_hash, raw_data),
+                        Ok(raw_data) => {
+                            db.put_block(&block_id_hash, raw_data);
+                        }
                         Err(err) => warn!("Block serialization error: {:?}", err),
                     }
 
