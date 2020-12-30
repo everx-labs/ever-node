@@ -1,4 +1,6 @@
 pub use super::*;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use ton_node_storage::catchain_persistent_db::*;
 
 /*
@@ -10,6 +12,7 @@ pub struct DatabaseImpl {
     db: CatchainPersistentDb,                       //persistent storage
     put_tx_counter: metrics_runtime::data::Counter, //DB put transactions counter
     get_tx_counter: metrics_runtime::data::Counter, //DB get transactions counter
+    destroy_db: Arc<AtomicBool>,                    //DB should be destroyed at drop
 }
 
 /*
@@ -23,6 +26,10 @@ impl Database for DatabaseImpl {
 
     fn get_db_path(&self) -> &String {
         &self.db_path
+    }
+
+    fn destroy(&self) {
+        self.destroy_db.store(true, Ordering::SeqCst);
     }
 
     /*
@@ -83,7 +90,10 @@ impl Drop for DatabaseImpl {
 
         debug!("Dropping Catchain database...");
 
-        self.destroy_database();
+        if self.destroy_db.load(Ordering::SeqCst) {
+            debug!("Destroying DB at path '{}'", self.db_path);
+            self.destroy_database();
+        }
 
         debug!("Catchain database has been successfully dropped");
     }
@@ -116,6 +126,7 @@ impl DatabaseImpl {
             db: db,
             put_tx_counter: put_tx_counter,
             get_tx_counter: get_tx_counter,
+            destroy_db: Arc::new(AtomicBool::new(false)),
         })
     }
 }

@@ -227,6 +227,42 @@ pub(crate) struct SessionImpl {
 
 impl Session for SessionImpl {
     fn stop(&self) {
+        self.stop_impl(true); //manual stop of session requires removing of Catchain's DB
+    }
+}
+
+/*
+    Implementation for public Display
+*/
+
+impl fmt::Display for SessionImpl {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        unimplemented!();
+    }
+}
+
+/*
+    Drop trait implementation for SessionImpl
+*/
+
+impl Drop for SessionImpl {
+    fn drop(&mut self) {
+        debug!("Dropping ValidatorSession...");
+
+        self.stop_impl(false);
+    }
+}
+
+/*
+    Implementation internals of SessionImpl
+*/
+
+impl SessionImpl {
+    /*
+        Session stopping
+    */
+
+    fn stop_impl(&self, destroy_catchain_db: bool) {
         self.stop_flag.store(true, Ordering::Release);
 
         debug!(
@@ -234,7 +270,7 @@ impl Session for SessionImpl {
             self.session_id.to_hex_string()
         );
 
-        self.catchain.stop();
+        self.catchain.stop(destroy_catchain_db);
 
         loop {
             if self
@@ -260,35 +296,7 @@ impl Session for SessionImpl {
             self.session_id.to_hex_string()
         );
     }
-}
 
-/*
-    Implementation for public Display
-*/
-
-impl fmt::Display for SessionImpl {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!();
-    }
-}
-
-/*
-    Drop trait implementation for SessionImpl
-*/
-
-impl Drop for SessionImpl {
-    fn drop(&mut self) {
-        debug!("Dropping ValidatorSession...");
-
-        self.stop();
-    }
-}
-
-/*
-    Implementation internals of SessionImpl
-*/
-
-impl SessionImpl {
     /*
         Main loop & session callbacks processing loop
     */

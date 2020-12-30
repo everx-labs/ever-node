@@ -1,9 +1,6 @@
 use crate::{network::node_network::NodeNetwork};
 use adnl::{from_slice, client::AdnlClientConfigJson,
-    common::{
-        add_object_to_map, add_object_to_map_with_update, KeyId, KeyOption,
-        KeyOptionJson, Wait
-    },
+    common::{KeyId, KeyOption, KeyOptionJson, Wait},
     node::{AdnlNodeConfig, AdnlNodeConfigJson},
     server::{AdnlServerConfig, AdnlServerConfigJson}
 };
@@ -72,7 +69,7 @@ pub struct TonNodeConfig {
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
 
-#[derive(serde::Deserialize, serde::Serialize, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 struct ValidatorKeysJson {
     election_id: i32,
     validator_key_id: String,
@@ -275,7 +272,7 @@ impl TonNodeConfig {
 
     fn get_validator_key_info(
         &self,
-        validator_key_id: String,
+        validator_key_id: &str,
     ) -> Result<Option<ValidatorKeysJson>> {
         if let Some(validator_keys) = &self.validator_keys {
             for key_json in validator_keys {
@@ -287,11 +284,25 @@ impl TonNodeConfig {
         Ok(None)
     }
 
+    fn get_validator_key_info_by_election_id(
+        &self,
+        election_id: &i32,
+    ) -> Result<Option<ValidatorKeysJson>> {
+        if let Some(validator_keys) = &self.validator_keys {
+            for key_json in validator_keys {
+                if key_json.election_id == *election_id {
+                    return Ok(Some(key_json.clone()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     fn update_validator_key_info(&mut self, updated_info: ValidatorKeysJson) -> Result<ValidatorKeysJson> {
         if let Some(validator_keys) = &mut self.validator_keys {
             for keys_info in validator_keys.iter_mut() {
-                if keys_info.validator_key_id == updated_info.validator_key_id && 
-                    keys_info.election_id == updated_info.election_id {
+                    if keys_info.election_id == updated_info.election_id {
+                        keys_info.validator_key_id = updated_info.validator_key_id;
                         keys_info.validator_adnl_key_id = updated_info.validator_adnl_key_id;
                         return Ok(keys_info.clone());
                 }
@@ -330,23 +341,32 @@ impl TonNodeConfig {
         Ok((key_id.clone(), Arc::new(public)))
     }
 
-    fn add_validator_key(&mut self, key_id: &[u8; 32], election_date: i32) -> Result<()> {
+    fn add_validator_key(&mut self, key_id: &[u8; 32], election_date: i32) -> Result<ValidatorKeysJson> {
         let key_info = ValidatorKeysJson {
             election_id: election_date,
             validator_key_id: base64::encode(key_id),
             validator_adnl_key_id: None
         };
+
+        let added_key_info = self.get_validator_key_info_by_election_id(&election_date)?;
         match &mut self.validator_keys {
             Some(validator_keys) => {
-                validator_keys.push(key_info);
+                match added_key_info {
+                    Some(_) => {
+                        self.update_validator_key_info(key_info.clone())?;
+                    },
+                    None => {
+                        validator_keys.push(key_info.clone());
+                    },
+                }
             },
             None => {
                 let mut keys  = Vec::new();
-                keys.push(key_info);
+                keys.push(key_info.clone());
                 self.validator_keys = Some(keys);
             }
         }
-        Ok(())
+        Ok(key_info)
     }
 
     fn add_validator_adnl_key(
@@ -354,39 +374,25 @@ impl TonNodeConfig {
         validator_key_id: &[u8; 32],
         adnl_key_id: &[u8; 32]
     ) -> Result<ValidatorKeysJson> {
-        let key_info = self.get_validator_key_info(base64::encode(validator_key_id));
-        match key_info {
-            Ok(Some(validator_key_info)) => {
-                let mut key_info = validator_key_info.clone();
-                key_info.validator_adnl_key_id = Some(base64::encode(adnl_key_id));
-                self.update_validator_key_info(key_info)
-            },
-            Ok(None) => {
-                fail!("Validator key was not added!");
-            },
-            Err(e) => Err(e)
+        if let Some(mut key_info) = self.get_validator_key_info(&base64::encode(validator_key_id))? {
+            key_info.validator_adnl_key_id = Some(base64::encode(adnl_key_id));
+            self.update_validator_key_info(key_info)
+        } else {
+            fail!("Validator key was not added!")
         }
     }
 
     fn remove_validator_key(&mut self, validator_key_id: String, election_id: i32) -> Result<bool> {
-        let mut removed = false;
-        if let Some(validator_keys) = &self.validator_keys {
-            let mut new_validator_keys = Vec::new();
-            for key_json in validator_keys {
-                if key_json.validator_key_id == validator_key_id && key_json.election_id == election_id {
-                    removed = true;
-                    continue;
-                }
-                new_validator_keys.push(key_json.clone());
-            }
-
-            if removed {
-                self.validator_keys = Some(new_validator_keys);
+        if let Some(validator_keys) = self.validator_keys.as_mut() {
+            let pos = validator_keys.iter()
+                .position(|item| item.validator_key_id == validator_key_id && item.election_id == election_id);
+            if let Some(pos) = pos {
+                validator_keys.swap_remove(pos);
+                return Ok(true)
             }
         }
-        Ok(removed)
+        Ok(false)
     }
-
 }
 
 #[derive(Debug)]
@@ -409,9 +415,7 @@ pub struct NodeConfigHandler {
     //subscribers: Vec<Arc<dyn NodeConfigSubscriber>>,
     sender: tokio::sync::mpsc::UnboundedSender<Arc<(Arc<Wait<Answer>>, Task)>>,
     key_ring: Arc<lockfree::map::Map<String, Arc<KeyOption>>>,
-    validator_keys: Arc<lockfree::map::Map<i32, (ValidatorKeysJson, Option<i32>)>>, // election_id, (keys_info, next_election_id)
-    last_election_id: Arc<AtomicI32>,
-    first_election_id: Arc<AtomicI32>
+    validator_keys: Arc<ValidatorKeys>
 }
 
 impl NodeConfigHandler {
@@ -422,9 +426,7 @@ impl NodeConfigHandler {
            // subscribers: Vec::new(),
             sender: sender,
             key_ring: Arc::new(lockfree::map::Map::new()),
-            validator_keys: Arc::new(lockfree::map::Map::new()),
-            first_election_id: Arc::new(AtomicI32::new(0)),
-            last_election_id: Arc::new(AtomicI32::new(0))
+            validator_keys: Arc::new(ValidatorKeys::new())
         };
         handler.start_sheduler(config.file_name.clone(), config, reader)?;
 
@@ -432,8 +434,7 @@ impl NodeConfigHandler {
     }
 
     pub fn get_validator_status(&self) -> bool {
-        let election_id = self.first_election_id.load(atomic::Ordering::Relaxed);
-        self.validator_keys.get(&election_id).is_some()
+        self.validator_keys.is_empty()
     }
 
     pub async fn add_validator_key(
@@ -488,48 +489,19 @@ impl NodeConfigHandler {
     }
 
     pub async fn get_validator_key(&self, key_id: &Arc<KeyId>) -> Option<(KeyOption, i32)> {
-        let first_election_id = self.first_election_id.load(atomic::Ordering::Relaxed);
-
-        if first_election_id <= 0 {
-            return None;
+        match self.validator_keys.get(&base64::encode(key_id.data())) {
+            Some(key) => {
+                //       let result = if let Some(key) = self.key_ring.get(&key_id) {
+                //           Some(key.(val(), key_election_id))
+                let result = if let Some(key_opt) = self.get_key_raw(*key_id.data()).await {
+                    Some((key_opt, key.election_id))
+                } else {
+                    None
+                };
+                result
+            },
+            None => None,
         }
-
-        let mut current_election_id = Some(first_election_id);
-        let key_id_str = base64::encode(key_id.data());
-        let mut key_election_id = 0;
-        while let Some(election_id) = current_election_id {
-            let validator_key = self.validator_keys.get(&election_id);
-            match validator_key {
-                Some(key_info) => {
-                    if key_info.val().0.validator_key_id == key_id_str {
-                        key_election_id = key_info.val().0.election_id;
-                    } else if let Some(validator_adnl_key_id) = &key_info.val().0.validator_adnl_key_id {
-                        if validator_adnl_key_id == &key_id_str {
-                            key_election_id = key_info.val().0.election_id;
-                        }
-                    }
-                    current_election_id = key_info.val().1;
-                    if key_election_id > 0 {
-                        break;
-                    }
-                },
-                None => { current_election_id = None; }
-            }
-        }
-        
-        if key_election_id <= 0 {
-            return None;
-        }
-
- //       let result = if let Some(key) = self.key_ring.get(&key_id) {
- //           Some(key.(val(), key_election_id))
-        let result = if let Some(key) = self.get_key_raw(*key_id.data()).await {
-            Some((key, key_election_id))
-        } else {
-            None
-        };
-
-        result
     }
 
     async fn get_key_raw(&self, key_hash: [u8; 32]) -> Option<KeyOption> {
@@ -562,54 +534,58 @@ impl NodeConfigHandler {
         config.save_to_file(config_name)?;
 
         let id = base64::encode(&key_id);
-        add_object_to_map(key_ring, id, || Ok(public_key.clone()))?;
+        key_ring.insert(id, public_key.clone());
         Ok(key_id)
     }
 
-    fn add_validator_adnl_key_and_save(
-        validator_keys: Arc<lockfree::map::Map<i32, (ValidatorKeysJson, Option<i32>)>>,
-        config: &mut TonNodeConfig,
-        validator_key_hash: &[u8; 32],
-        validator_adnl_key_hash: &[u8; 32],
-        first_election_id: Arc<AtomicI32>,
-        last_election_id: Arc<AtomicI32>
+    fn revision_validator_keys(
+        validator_keys: Arc<ValidatorKeys>,
+        config: &mut TonNodeConfig
     )-> Result<()> {
-        let key = config.add_validator_adnl_key(&validator_key_hash, validator_adnl_key_hash)?;
-        let oldest_validator_key = NodeConfigHandler::get_oldest_validator_key(&config);
-        if let Some(oldest_key) = oldest_validator_key {
-            if oldest_key.election_id < key.election_id {
-                let new_last_election_id = key.election_id;
-                config.remove_validator_key(oldest_key.validator_key_id, oldest_key.election_id)?;
-                add_object_to_map(&validator_keys, key.election_id,
-                    || Ok((key.clone(), None)))?;
-                let prev_election_id = last_election_id.load(atomic::Ordering::Relaxed);
-                if prev_election_id > 0 {
-                    add_object_to_map_with_update(&validator_keys, prev_election_id,
-                        |old_value| if let Some(old_value) = old_value {
-                            Ok(Some((old_value.0.clone(), Some(new_last_election_id))))
-                        } else {
-                            Ok(None)
+        loop {
+            match &config.validator_keys {
+                Some(config_validator_keys) => {
+                    if config_validator_keys.len() > 2 {
+                        let oldest_validator_key = NodeConfigHandler::get_oldest_validator_key(&config);
+                        if let Some(oldest_key) = oldest_validator_key {
+                                config.remove_validator_key(
+                                    oldest_key.validator_key_id.clone(),
+                                    oldest_key.election_id
+                                )?;
+                                validator_keys.remove(&oldest_key)?;
                         }
-                    )?;
-                }
-                last_election_id.store(new_last_election_id, atomic::Ordering::Relaxed);
-                if (first_election_id.load(atomic::Ordering::Relaxed)) == 0 {
-                    first_election_id.store(new_last_election_id, atomic::Ordering::Relaxed);
-                } else {
-                    validator_keys.remove(&oldest_key.election_id);
-                }
+                    } else {
+                        break;
+                    }
+                }, 
+                None => break
             }
         }
+        Ok(())
+    }
+
+    fn add_validator_adnl_key_and_save(
+        validator_keys: Arc<ValidatorKeys>,
+        config: &mut TonNodeConfig,
+        validator_key_hash: &[u8; 32],
+        validator_adnl_key_hash: &[u8; 32]
+    )-> Result<()> {
+        let key = config.add_validator_adnl_key(&validator_key_hash, validator_adnl_key_hash)?;
+        validator_keys.add(key)?;
+        // check validator keys
+        Self::revision_validator_keys(validator_keys, config)?;
         config.save_to_file(&config.file_name)?;
         Ok(())
     }
 
     fn add_validator_key_and_save(
+        validator_keys: Arc<ValidatorKeys>,
         config: &mut TonNodeConfig,
         key_id: &[u8; 32],
         election_id: i32
     )-> Result<()> {
-        config.add_validator_key(&key_id, election_id)?;
+        let key = config.add_validator_key(&key_id, election_id)?;
+        validator_keys.add(key)?;
         config.save_to_file(&config.file_name)?;
         Ok(())
     }
@@ -656,7 +632,7 @@ impl NodeConfigHandler {
         
         if let Some(validator_keys) = &config.validator_keys {
             for key in validator_keys.iter() {
-               if let Err(e) = self.add_or_update_validator_key_in_map(key) {
+               if let Err(e) = self.validator_keys.add(key.clone()) {
                    log::warn!("fail added key to validator keys map: {}", e);
                }
             }
@@ -664,56 +640,11 @@ impl NodeConfigHandler {
         Ok(())
     }
 
-    fn add_or_update_validator_key_in_map(&self, validator_key: &ValidatorKeysJson) -> Result<()> {
-        if self.first_election_id.load(atomic::Ordering::Relaxed) <= 0 {
-            add_object_to_map(
-                &self.validator_keys,
-                validator_key.election_id,
-                || Ok((validator_key.clone(), None))
-            )?;
-            self.first_election_id.store(validator_key.election_id, atomic::Ordering::Relaxed);
-            return Ok(());
-        }
-
-        let mut next_election_id = Some(self.first_election_id.load(atomic::Ordering::Relaxed));
-        let mut prev_election_id = 0;
-        // search prev_election_id
-        while let Some(election_id) = next_election_id {
-            let key = self.validator_keys.get(&election_id)
-                .ok_or_else(|| error!("Failed to load key!"))?;
-
-            if election_id > validator_key.election_id {
-                break;
-            }
-            prev_election_id = election_id;
-            next_election_id = key.val().1;
-        }
-
-        add_object_to_map(
-            &self.validator_keys,
-            validator_key.election_id,
-            || Ok((validator_key.clone(), next_election_id))
-        )?;
-
-        add_object_to_map_with_update(&self.validator_keys, prev_election_id,
-            |old_value| if let Some(old_value) = old_value {
-                Ok(Some((old_value.0.clone(), Some(validator_key.election_id))))
-            } else {
-                Ok(None)
-            }
-        )?;
-
-        if self.last_election_id.load(atomic::Ordering::Relaxed) < validator_key.election_id {
-            self.last_election_id.store(validator_key.election_id, atomic::Ordering::Relaxed);
-        }
-
-        Ok(())
-    }
-
     fn add_key_to_dynamic_key_ring(&self, key_id: String, key_json: &KeyOptionJson) -> Result<()> {
-        add_object_to_map(&self.key_ring, key_id,
-            || Ok(Arc::new(KeyOption::from_private_key(key_json)?))
-        )?;
+        if let Some(key) = self.key_ring.insert(key_id, Arc::new(KeyOption::from_private_key(key_json)?)) {
+            log::warn!("Added key was already in key ring collection (id: {})", key.key());
+        }
+        
         Ok(())
     }
 
@@ -728,8 +659,6 @@ impl NodeConfigHandler {
         let name = config_name.clone();
         let key_ring = self.key_ring.clone();
         let validator_keys = self.validator_keys.clone();
-        let last_election_id = self.last_election_id.clone();
-        let first_election_id = self.first_election_id.clone();
         self.load_config(&actual_config)?;
         
         tokio::spawn(async move {
@@ -744,15 +673,13 @@ impl NodeConfigHandler {
                             validator_keys.clone(),
                             &mut actual_config,
                             &key,
-                            &adnl_key,
-                            first_election_id.clone(),
-                            last_election_id.clone()
+                            &adnl_key
                         );
                         task.0.respond(Some(Answer::AddValidatorAdnlKey(result)));
                     },
                     Task::AddValidatorKey(key, election_id) => {
                         let result = NodeConfigHandler::add_validator_key_and_save(
-                            &mut actual_config, &key, election_id
+                            validator_keys.clone(), &mut actual_config, &key, election_id
                         );
                         task.0.respond(Some(Answer::AddValidatorKey(result)));
                     }, 
@@ -1178,5 +1105,119 @@ impl TonNodeGlobalConfigJson {
             root_hash,
             file_hash,
         }))
+    }
+}
+
+struct ValidatorKeys {
+    values: lockfree::map::Map<i32, ValidatorKeysJson>, // election_id, keys_info
+    index: lockfree::map::Map<i32, i32>,                // current_election_id, next_election_id
+    first: AtomicI32
+}
+
+impl ValidatorKeys {
+    fn new() -> Self {
+        ValidatorKeys {
+            values: lockfree::map::Map::new(),
+            index: lockfree::map::Map::new(),
+            first: AtomicI32::new(0)
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.first.load(atomic::Ordering::Relaxed) > 0
+    }
+
+    fn add(&self, key: ValidatorKeysJson) -> Result<()> {
+        self.values.insert(key.election_id, key.clone());
+
+        // inserted in sorted order
+        let mut current = self.first.load(atomic::Ordering::Relaxed);
+
+        if current == 0 {
+            self.first.store(key.election_id, atomic::Ordering::Relaxed);
+            return Ok(());
+        }
+
+        if current > key.election_id {
+            self.index.insert(key.election_id, current);
+            self.first.store(key.election_id, atomic::Ordering::Relaxed);
+            return Ok(());
+        } else if current == key.election_id {
+            return Ok(())
+        }
+
+        loop {
+            if let Some(item) = &self.index.get(&current) {
+                if item.val() > &key.election_id {
+                    self.index.insert(key.election_id, *item.val());
+                    self.index.insert(*item.key(), key.election_id);
+                    break;
+                } else if item.val() == &key.election_id {
+                    break;
+                } else {
+                    current = *item.val();
+                }
+            } else {
+                self.index.insert(current, key.election_id);
+                break;
+            };
+        }
+
+        Ok(())
+    }
+
+    fn remove(&self, key: &ValidatorKeysJson) -> Result<bool> {
+        let mut current = self.first.load(atomic::Ordering::Relaxed);
+
+        if current == key.election_id {
+            if let Some(item) = &self.index.get(&current) {
+                self.first.store(*item.val(), atomic::Ordering::Relaxed);
+            } else {
+                self.first.store(0, atomic::Ordering::Relaxed);
+            }
+            return Ok(true);
+        }
+
+        while let Some(item) = &self.index.get(&current) {
+            if item.val() == &key.election_id {
+                if let Some(removed_item) = &self.index.get(&item.val()) {
+                    self.index.insert(*item.key(), *removed_item.val());
+                } else {
+                    // remove last element
+                    self.index.remove(item.key());
+                }
+                return Ok(true)
+            } else {
+                current = *item.val();
+            }
+        }
+        Ok(false)
+    }
+
+    fn get(&self, id_key: &str) -> Option<ValidatorKeysJson> {
+        let mut current = self.first.load(atomic::Ordering::Relaxed);
+        loop {
+            if let Some(result) = self.get_try(id_key, current) {
+                return Some(result)
+            }
+            match self.index.get(&current) {
+                Some(next) => current = *next.val(),
+                None => return None
+            }
+        }
+    }
+
+    fn get_try(&self, id_key: &str, index: i32) -> Option<ValidatorKeysJson> {
+        let mut result = None;
+        if let Some(key) = self.values.get(&index) {
+            if &key.val().validator_key_id == id_key {
+                result = Some(key.val().clone());
+            } else if let Some(adnl_key) = &key.val().validator_adnl_key_id {
+                if adnl_key == id_key {
+                    result = Some(key.val().clone());
+                }
+            }
+        }
+        result
     }
 }

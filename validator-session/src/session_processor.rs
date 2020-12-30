@@ -121,7 +121,7 @@ impl SessionProcessor for SessionProcessorImpl {
     fn stop(&mut self) {
         debug!("Stopping ValidatorSession processor...");
 
-        self.catchain.stop();
+        self.catchain.stop(false);
 
         debug!("ValidatorSession processor has been stopped");
     }
