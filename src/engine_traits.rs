@@ -379,7 +379,7 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    async fn download_archive(&self, mc_seq_no: u32) -> Result<Vec<u8>> {
+    async fn download_archive(&self, masterchain_seqno: u32) -> Result<Option<Vec<u8>>> {
         unimplemented!()
     }
 

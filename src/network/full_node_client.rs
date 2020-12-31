@@ -80,7 +80,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
     async fn download_zero_state(&self, id: &BlockIdExt, attempts: &Attempts) -> Result<Option<(ShardStateStuff, Vec<u8>)>>;
     async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, max_size: i32, attempts: &Attempts) -> Result<Vec<BlockIdExt>>;
     async fn download_next_block_full(&self, prev_id: &BlockIdExt, attempts: &Attempts) -> Result<Option<(BlockStuff, BlockProofStuff)>>;
-    async fn download_archive(&self, mc_seq_no: u32) -> Result<Vec<u8>>;
+    async fn download_archive(&self, mc_seq_no: u32, attempts: &Attempts) -> Result<Option<Vec<u8>>>;
 
     async fn wait_broadcast(&self) -> Result<Broadcast>;
 }
@@ -164,29 +164,6 @@ impl NodeClientOverlay {
 
         fail!("Cannot send query {:?} in {} attempts", data, attempts)
  
-    }
-
-    async fn send_rldp_query_to_peer_raw_with_attempts<T>(
-        &self,
-        request: &T,
-        good_peer: Option<Arc<Neighbour>>,
-        attempts: u32
-    ) -> Result<Vec<u8>>
-    where
-        T: BoxedSerialize + std::fmt::Debug
-    {
-        let mut attempt = 0;
-        loop {
-            match self.send_rldp_query_to_peer_raw(request, good_peer.clone(), attempt).await {
-                Ok(data) => return Ok(data),
-                Err(err) => {
-                    attempt += 1;
-                    if attempt >= attempts {
-                        return Err(err);
-                    }
-                }
-            }
-        }
     }
 
     async fn send_rldp_query_to_peer_raw<T>(
@@ -655,74 +632,40 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         }
     }
 
-    async fn download_archive(&self, mc_seq_no: u32) -> Result<Vec<u8>> {
-        async fn get_archive_info(
-            client: &NodeClientOverlay,
-            mc_seq_no: u32,
-            attempts: u32,
-        ) -> Result<(i64, Arc<Neighbour>)> {
-            let mut attempt = 0;
-            loop {
-                // tonNode.getArchiveInfo masterchain_seqno:int = tonNode.ArchiveInfo;
-                let result: Result<(ArchiveInfo, _)> = client.send_rldp_query_to_peer(
-                    &GetArchiveInfo {
-                        masterchain_seqno: mc_seq_no as i32
-                    },
-                    None,
-                    attempt
-                ).await;
-                if let Ok((archive_info, peer)) = &result {
-                    if let Some(archive_id) = archive_info.id() {
-                        return Ok((*archive_id, Arc::clone(peer)));
-                    }
-                }
-                attempt += 1;
-                if attempt >= attempts {
-                    fail!("Cannot send GetArchiveInfo query in {} attempts. Result = {:?}", attempts, result);
-                }
-            }
-        }
+    async fn download_archive(&self, mc_seq_no: u32, attempts: &Attempts) -> Result<Option<Vec<u8>>> {
+        const CHUNK_SIZE: i32 = 1 << 17;
+        // tonNode.getArchiveInfo masterchain_seqno:int = tonNode.ArchiveInfo;
+        let (archive_info, peer) = self.send_adnl_query(
+            GetArchiveInfo {
+                masterchain_seqno: mc_seq_no as i32
+            },
+            None,
+            Some(Self::TIMEOUT_PREPARE)
+        ).await?;
 
-        async fn dowload_archive_body(
-            client: &NodeClientOverlay,
-            archive_id: i64,
-            peer: &Arc<Neighbour>,
-        ) -> Result<Vec<u8>> {
-            const CHUNK_SIZE: i32 = 1 << 17;
-            let mut result = Vec::new();
-            let mut offset = 0;
-            loop {
-                // tonNode.getArchiveSlice archive_id:long offset:long max_size:int = tonNode.Data;
-                let mut chunk = client.send_rldp_query_to_peer_raw_with_attempts(
-                    &GetArchiveSlice {
-                        archive_id,
-                        offset,
-                        max_size: CHUNK_SIZE,
-                    },
-                    Some(Arc::clone(peer)),
-                    10
-                ).await?;
-                let actual_size = chunk.len() as i32;
-                result.append(&mut chunk);
-                if actual_size < CHUNK_SIZE {
-                    return Ok(result);
-                }
-                offset += actual_size as i64;
-            }
-        }
-
-        let mut remaining_attempts = 50;
-        loop {
-            let (archive_id, peer) = get_archive_info(self, mc_seq_no, 100).await?;
-            match dowload_archive_body(self, archive_id, &peer).await {
-                Ok(data) => return Ok(data),
-                Err(err) => {
-                    remaining_attempts -= 1;
-                    if remaining_attempts <= 0 {
-                        return Err(err);
+        match archive_info {
+            ArchiveInfo::TonNode_ArchiveNotFound => Ok(None),
+            ArchiveInfo::TonNode_ArchiveInfo(info) => {
+                let mut result = Vec::new();
+                let mut offset = 0;
+                loop {
+                    let slice = GetArchiveSlice {
+                        archive_id: info.id, offset, max_size: CHUNK_SIZE
+                    };
+                    let mut block_bytes = self.send_rldp_query_to_peer_raw(
+                        &slice,
+                        Some(peer.clone()),
+                        attempts.count
+                    ).await?;
+                    let actual_size = block_bytes.len() as i32;
+                    result.append(&mut block_bytes);
+                    if actual_size < CHUNK_SIZE {
+                        return Ok(Some(result));
                     }
+                    offset += actual_size as i64;
                 }
-            }
+                
+            },
         }
     }
 
