@@ -62,15 +62,21 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
 
 async fn download_archive(engine: Arc<dyn EngineOperations>, mc_seq_no: u32) -> Result<Vec<u8>> {
     log::info!(target: "sync", "Requesting archive for MC seq_no = {}", mc_seq_no);
-    let data = engine.download_archive(mc_seq_no).await?;
-    log::info!(
-        target: "sync",
-        "Downloaded archive for MC seq_no = {}, package size = {} bytes",
-        mc_seq_no,
-        data.len()
-    );
-
-    Ok(data)
+    match engine.download_archive(mc_seq_no).await {
+        Ok(Some(data)) => {
+            log::info!(
+                target: "sync",
+                "Downloaded archive for MC seq_no = {}, package size = {} bytes",
+                mc_seq_no,
+                data.len()
+            );
+        
+            return Ok(data)
+        
+        },
+        Err(e) => fail!("Download archive failed for MC seq_no = {}, err: {}", mc_seq_no, e),
+        _ => fail!("Did`t downloaded archive for MC seq_no = {}", mc_seq_no)
+    }
 }
 
 async fn download_and_import_package(

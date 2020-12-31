@@ -395,9 +395,15 @@ impl EngineOperations for Engine {
         self.db().archive_manager().get_archive_slice(archive_id, offset, limit).await
     }
 
-    async fn download_archive(&self, masterchain_seqno: u32) -> Result<Vec<u8>> {
+    async fn download_archive(&self, masterchain_seqno: u32) -> Result<Option<Vec<u8>>> {
         let client = self.get_masterchain_overlay().await?;
-        client.download_archive(masterchain_seqno).await
+        client.download_archive(
+            masterchain_seqno,
+            &Attempts {
+                limit: 10,
+                count: 0
+            }
+        ).await
     }
 
     fn assign_mc_ref_seq_no(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()> {
