@@ -878,7 +878,7 @@ impl ValidatorQuery {
                 } else if shard.is_parent_for(&old.shard) {
                     // shard has been merged
                     if let Some(old2) = self.old_mc_shards.find_shard(&shard.right_ancestor_mask()?)? {
-                        if !old.shard().is_ancestor_for(&old2.shard()) {
+                        if &old.shard().sibling() != old2.shard() {
                             reject_query!("shard {} has been impossibly merged from more than two shards \
                                 {}, {} and others", shard, old.shard(), old2.shard())
                         }
