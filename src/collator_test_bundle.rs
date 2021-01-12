@@ -677,7 +677,7 @@ impl CollatorTestBundle {
 
         // ├─📂 external_messages
         for (m, id) in self.external_messages.iter() {
-            let path = format!("{}/top_shard_blocks/", path);
+            let path = format!("{}/external_messages/", path);
             std::fs::create_dir_all(&path)?;
             let filename = format!("{}/{:x}", path, id);
             m.write_to_file(filename)?;
@@ -760,6 +760,19 @@ impl CollatorTestBundle {
             let tbd = TopBlockDescr::construct_from_file(filename)?;
             top_shard_blocks.push(Arc::new(TopBlockDescrStuff::new(tbd, id, index.fake)?));
         }
+
+        // to add simple external message:
+        // uncomment this block, and change dst address then run test
+        // add id (new filename of message) to external messages in index.json
+        // std::fs::create_dir_all(format!("{}/external_messages", path)).ok();
+        // let src = ton_block::MsgAddressExt::with_extern([0x77; 32].into())?;
+        // let dst = hex::decode("b1219502b825ef2345f49fc9065e485e7f478bddafa63039d00c63e494ab7090")?;
+        // let dst = ton_block::MsgAddressInt::with_standart(None, 0, dst.into())?;
+        // let h = ton_block::ExternalInboundMessageHeader::new(src, dst);
+        // let msg = Message::with_ext_in_header(h);
+        // let id = msg.serialize()?.repr_hash();
+        // let filename = format!("{}/external_messages/{:x}", path, id);
+        // msg.write_to_file(filename)?;
 
         // ├─📂 external_messages
         let mut external_messages = vec!();
