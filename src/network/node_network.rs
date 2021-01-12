@@ -202,7 +202,7 @@ impl NodeNetwork {
                 AdnlNodeConfig::from_json(item, false)?
             );
         }
-        Ok(serde::export::Some(result))
+        Ok(Some(result))
     }
 
     fn string_to_static_str(&self, s: String) -> &'static str {

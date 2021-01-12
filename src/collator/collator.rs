@@ -1835,23 +1835,24 @@ impl CollatorNew {
         let lt = shard_acc.lt();
 
         let now = std::time::Instant::now();
-        let mut transaction = executor.execute(
+        let mut result = executor.execute(
             msg_opt,
             &mut account_root,
             collator_data.gen_utime,
             collator_data.start_lt()?,
             lt.clone(),
             self.debug
-        )?;
-        let gas = transaction.gas_used().unwrap_or(0);
-        log::trace!("GAS: {} TIME: {}ms execute for {}", gas, now.elapsed().as_millis(), transaction.logical_time());
+        );
+        if let Ok(mut transaction) = result.as_mut() {
+            let gas = transaction.gas_used().unwrap_or(0);
+            log::trace!("GAS: {} TIME: {}ms execute for {}", gas, now.elapsed().as_millis(), transaction.logical_time());
 
-        shard_acc.add_transaction(&mut transaction, account_root)?;
+            shard_acc.add_transaction(&mut transaction, account_root)?;
+            // LT of last out message or transaction itself
+            collator_data.update_max_lt(lt.load(Ordering::Relaxed) - 1);
+        }
         collator_data.update_account(shard_acc);
-        // LT of last out message or transaction itself
-        collator_data.update_max_lt(lt.load(Ordering::Relaxed) - 1);
-
-        Ok(transaction)
+        result
     }
 
     fn update_processed_upto(&self, mc_data: &McData, collator_data: &mut CollatorData) -> Result<()> {

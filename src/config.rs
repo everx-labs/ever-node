@@ -737,8 +737,7 @@ impl TonNodeGlobalConfig {
     /// Constructor from json file
     pub fn from_json(json : &str) -> Result<Self> {
         let ton_node_global_cfg_json = TonNodeGlobalConfigJson::from_json(&json)?;
-        Ok(TonNodeGlobalConfig(serde::export::Some(ton_node_global_cfg_json)
-            .ok_or_else(|| error!("Global cannot be parsed!"))?))
+        Ok(TonNodeGlobalConfig(ton_node_global_cfg_json))
     }
 
     pub fn zero_state(&self) -> Result<BlockIdExt> {
@@ -893,7 +892,7 @@ impl Address {
     }
 
     pub fn to_str(&self) -> Result<String> {
-         serde::export::Ok(self.convert_address()?.to_string())
+        Ok(self.convert_address()?.to_string())
     }
 
     pub fn ip(&self) -> Option<&i64> {
