@@ -471,6 +471,7 @@ impl NodeNetwork {
     }
 
     fn search_validator_keys(
+        local_adnl_id: Arc<KeyId>,
         dht: Arc<DhtNode>,
         overlay: Arc<OverlayNode>,
         validators_contexts: Arc<Cache<UInt256, ValidatorSetContext>>,
@@ -481,7 +482,12 @@ impl NodeNetwork {
         tokio::spawn(async move {
             let mut current_validators = validators;
             loop {
-                match Self::search_validator_keys_round(dht.clone(), overlay.clone(), current_validators).await {
+                match Self::search_validator_keys_round(
+                    local_adnl_id.clone(),
+                    dht.clone(),
+                    overlay.clone(),
+                    current_validators).await
+                {
                     Ok(lost_validators) => {
                         current_validators = lost_validators;
                     },
@@ -503,6 +509,7 @@ impl NodeNetwork {
     }
 
     async fn search_validator_keys_round(
+        local_adnl_id: Arc<KeyId>,
         dht: Arc<DhtNode>,
         overlay: Arc<OverlayNode>,
         validators: Vec<CatchainNode>
@@ -514,7 +521,7 @@ impl NodeNetwork {
             match res {
                 Ok((addr, key)) => {
                     log::info!("addr: {:?}, key: {:x?}", &addr, &key);
-                    overlay.add_private_peers(&val.adnl_id, vec![(addr, key)])?;
+                    overlay.add_private_peers(&local_adnl_id, vec![(addr, key)])?;
                 }
                 Err(e) => { 
                     lost_validators.push(val.clone());
@@ -675,6 +682,7 @@ impl PrivateOverlayOperations for NodeNetwork {
 
         if !lost_validators.is_empty() {
             Self::search_validator_keys(
+                adnl_key.id().clone(),
                 self.dht.clone(), 
                 self.overlay.clone(),
                 self.validator_context.sets_contexts.clone(),
