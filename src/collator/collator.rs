@@ -763,7 +763,7 @@ impl CollatorNew {
     }
 
     pub async fn collate(self) -> Result<(BlockCandidate, ShardStateUnsplit)> {
-        log::trace!(
+        log::info!(
             "{}: COLLATE min_mc_block_id.seqno = {}, prev_blocks_ids: {} {}",
             self.collated_block_descr,
             self.min_mc_block_id.seq_no(),
@@ -1927,7 +1927,9 @@ impl CollatorNew {
         let mut accounts = ShardAccountBlocks::default();
         for (_account_id, shard_acc) in collator_data.changed_accounts.iter() {
             let acc_block = shard_acc.update_shard_state(&mut new_accounts)?;
-            accounts.insert(&acc_block)?;
+            if !acc_block.transactions().is_empty() {
+                accounts.insert(&acc_block)?;
+            }
         }
 
         log::trace!("{}: finalize_block: calc value flow", self.collated_block_descr);
