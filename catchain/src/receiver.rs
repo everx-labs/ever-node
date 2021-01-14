@@ -1263,15 +1263,28 @@ impl ReceiverImpl {
 
         trace!("...reading DB from block {:?}", id);
 
+        let listener = self.listener.upgrade().unwrap();
+        let listener = listener.borrow();
+        let task_queue = listener.get_task_queue();
+        let task_queue_clone = task_queue.clone();
+
         self.pending_in_db = 1;
         self.db_root_block = id.clone();
 
         let block_raw_data = self.db.as_ref().unwrap().get_block(id).unwrap();
+        let id = id.clone();
 
-        self.read_block_from_db(id, block_raw_data);
+        task_queue.post_closure(Box::new(move |receiver| {
+            get_mut_impl(receiver).read_block_from_db(&id, block_raw_data, task_queue_clone);
+        }));
     }
 
-    fn read_block_from_db(&mut self, id: &BlockHash, raw_data: RawBuffer) {
+    fn read_block_from_db(
+        &mut self,
+        id: &BlockHash,
+        raw_data: RawBuffer,
+        task_queue: ReceiverTaskQueuePtr,
+    ) {
         instrument!();
 
         trace!("...reading block {:?} from DB", id);
@@ -1379,10 +1392,14 @@ impl ReceiverImpl {
             self.pending_in_db += 1;
 
             let dep_block = self.db.as_ref().unwrap().get_block(dep).unwrap();
+            let dep = dep.clone();
+            let task_queue_clone = task_queue.clone();
 
             //do recursion for block parsing
 
-            self.read_block_from_db(dep, dep_block);
+            task_queue.post_closure(Box::new(move |receiver| {
+                get_mut_impl(receiver).read_block_from_db(&dep, dep_block, task_queue_clone);
+            }));
         }
 
         //deliver blocks when all dependencies are requested from DB

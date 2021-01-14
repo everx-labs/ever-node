@@ -639,7 +639,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             GetArchiveInfo {
                 masterchain_seqno: mc_seq_no as i32
             },
-            None,
+            Some(attempts.limit),
             Some(Self::TIMEOUT_PREPARE)
         ).await?;
 
@@ -648,21 +648,34 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             ArchiveInfo::TonNode_ArchiveInfo(info) => {
                 let mut result = Vec::new();
                 let mut offset = 0;
+                let mut attempts_part = 0;
                 loop {
                     let slice = GetArchiveSlice {
                         archive_id: info.id, offset, max_size: CHUNK_SIZE
                     };
-                    let mut block_bytes = self.send_rldp_query_to_peer_raw(
-                        &slice,
-                        Some(peer.clone()),
-                        attempts.count
-                    ).await?;
-                    let actual_size = block_bytes.len() as i32;
-                    result.append(&mut block_bytes);
-                    if actual_size < CHUNK_SIZE {
-                        return Ok(Some(result));
+                    match self.send_rldp_query_to_peer_raw(&slice, Some(peer.clone()), attempts_part).await {
+                        Ok(mut block_bytes) => {
+                            let actual_size = block_bytes.len() as i32;
+                            result.append(&mut block_bytes);
+                            if actual_size < CHUNK_SIZE {
+                                return Ok(Some(result));
+                            }
+                            offset += actual_size as i64;
+                            attempts_part = 0;
+                        },
+                        Err(e) => {
+                            attempts_part += 1;
+                            log::error!("download_archive {}: {}, offset: {}, attempt: {}",
+                                info.id, e, offset, attempts_part);
+
+                            if attempts_part > 10 {
+                                fail!(
+                                    "Error download_archive after {} attempts : {}", 
+                                    attempts_part, e
+                                )
+                            }
+                        }
                     }
-                    offset += actual_size as i64;
                 }
                 
             },
