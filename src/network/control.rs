@@ -1,22 +1,21 @@
 use crate::{
     block::{convert_block_id_ext_api2blk, BlockStuff},
     block_proof::BlockProofStuff,
-    db::{BlockHandle, InternalDb},
+    db::{BlockHandle, InternalDb, NodeState},
     collator_test_bundle::CollatorTestBundle,
     config::{KeyRing, NodeConfigHandler},
     engine_traits::EngineOperations, shard_state::ShardStateStuff,
+    engine::LastMcBlockId,
+    validator::validator_utils::validatordescr_to_catchain_node
 };
-use std::sync::Arc;
-use std::ops::Deref;
-
 use adnl::common::{deserialize, QueryResult, Subscriber, AdnlPeers};
 use adnl::server::{AdnlServer, AdnlServerConfig};
+use std::{convert::TryInto, sync::Arc, ops::Deref};
 use ton_api::ton::{
     self, PublicKey, TLObject,
     engine::validator::{
-        keyhash::KeyHash,
-        signature::Signature,
-        Success,
+        keyhash::KeyHash, onestat::OneStat, 
+        signature::Signature, Success, stats::Stats
     },
     rpc::engine::validator::ControlQuery,
 };
@@ -49,6 +48,12 @@ impl crate::engine_traits::EngineOperations for DbEngine {
     }
     async fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seqno: u32) -> Result<Arc<BlockHandle>> {
         self.db.find_block_by_seq_no(acc_pfx, seqno)
+    }
+    async fn load_last_applied_mc_block_id(&self) -> Result<BlockIdExt> {
+        (&LastMcBlockId::load_from_db(self.db.deref())?.0).try_into()
+    }
+    async fn load_last_applied_mc_state(&self) -> Result<ShardStateStuff> {
+        self.load_state(&self.load_last_applied_mc_block_id().await?).await
     }
 }
 
@@ -88,6 +93,65 @@ impl ControlQuerySubscriber {
             config
         }
     }
+
+    async fn get_stats(&self) -> Result<Stats> {
+        if let Some(engine) = self.engine.as_ref() {
+            let mut stats: ton::vector<ton::Bare, OneStat> = ton::vector::default();
+
+            // masterchainblocktime
+            let mc_block_id = engine.load_last_applied_mc_block_id().await?;
+            stats.0.push(OneStat {
+                key: "masterchainblocktime".to_string(),
+                value: engine.load_block_handle(&mc_block_id)?.gen_utime()?.to_string()
+            });
+
+            // masterchainblocknumber
+            stats.0.push(OneStat {
+                key: "masterchainblocknumber".to_string(),
+                value: mc_block_id.seq_no().to_string()
+            });
+
+            // timediff
+            let diff = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i32 - 
+                engine.load_block_handle(&mc_block_id)?.gen_utime()? as i32;
+
+            stats.0.push(OneStat {
+                key: "timediff".to_string(),
+                value: diff.to_string()
+            });
+
+            // in_current_vset_p34
+            let adnl_ids = self.config.get_actual_validator_adnl_ids().await?;
+            let mc_state = engine.load_last_applied_mc_state().await?;
+            let current = mc_state.config_params()?.validator_set()?.list().iter().any(|val| {
+                match validatordescr_to_catchain_node(val) {
+                    Ok(catchain_node) => adnl_ids.contains(&catchain_node.adnl_id),
+                    _ => false
+                }
+            });
+            stats.0.push(OneStat {
+                key: "in_current_vset_p34".to_string(),
+                value: current.to_string()
+            });
+
+            // in_next_vset_p36
+            let next = mc_state.config_params()?.next_validator_set()?.list().iter().any(|val| {
+                match validatordescr_to_catchain_node(val) {
+                    Ok(catchain_node) => adnl_ids.contains(&catchain_node.adnl_id),
+                    _ => false
+                }
+            });
+            stats.0.push(OneStat {
+                key: "in_next_vset_p36".to_string(), 
+                value: next.to_string()
+            });
+
+            Ok(Stats {stats: stats})
+        } else {
+            fail!("Engine was not set!");
+        }
+    }
+
     async fn process_generate_keypair(&self) -> Result<KeyHash> {
         let key_hash = self.key_ring.generate().await?;
         Ok(KeyHash {key_hash: ton::int256(key_hash)})
@@ -105,7 +169,6 @@ impl ControlQuerySubscriber {
         Ok(Success::Engine_Validator_Success)
     }
     fn add_validator_temp_key(&self, _perm_key_hash: &[u8; 32], _key_hash: &[u8; 32], _ttl: ton::int) -> Result<Success> {
-        //todo!()
         Ok(Success::Engine_Validator_Success)
     }
     async fn add_validator_adnl_address(&self, perm_key_hash: &[u8; 32], key_hash: &[u8; 32], _ttl: ton::int) -> Result<Success> {
@@ -195,6 +258,15 @@ impl Subscriber for ControlQuerySubscriber {
                 let prev_block_ids = query.prev_block_ids.iter().filter_map(|id| convert_block_id_ext_api2blk(&id).ok()).collect();
                 return QueryResult::consume_boxed(self.prepare_future_bundle(prev_block_ids).await?)
             }
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::engine::validator::GetStats>() {
+            Ok(_) => {
+                return QueryResult::consume_boxed(
+                    ton_api::ton::engine::validator::Stats::Engine_Validator_Stats(
+                        Box::new(self.get_stats().await?)
+                ))
+            },
             Err(query) => query
         };
         fail!("Unsupported ControlQuery {:?}", query)

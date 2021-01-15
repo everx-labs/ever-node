@@ -488,6 +488,17 @@ impl NodeConfigHandler {
        result
     }
 
+    pub async fn get_actual_validator_adnl_ids(&self) -> Result<Vec<Arc<KeyId>>> {
+        let adnl_ids = self.validator_keys.get_validator_adnl_ids();
+        let mut result = Vec::new();
+
+        for adnl_id in adnl_ids.iter() {
+            let id = base64::decode(adnl_id)?;
+            result.push(KeyId::from_data(from_slice!(id, 32)));
+        }
+        Ok(result)
+    }
+
     pub async fn get_validator_key(&self, key_id: &Arc<KeyId>) -> Option<(KeyOption, i32)> {
         match self.validator_keys.get(&base64::encode(key_id.data())) {
             Some(key) => {
@@ -1218,5 +1229,21 @@ impl ValidatorKeys {
             }
         }
         result
+    }
+
+    fn get_validator_adnl_ids(&self) -> Vec<String> {
+        let mut adnl_ids = Vec::new();
+        let mut current = self.first.load(atomic::Ordering::Relaxed);
+        loop {
+            if let Some(validator_info) = self.values.get(&current) {
+                if let Some(adnl_key) = &validator_info.val().validator_adnl_key_id {
+                    adnl_ids.push(adnl_key.clone());
+                }
+            }
+            match self.index.get(&current) {
+                Some(next) => current = *next.val(),
+                None => return adnl_ids
+            }
+        }
     }
 }
