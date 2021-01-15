@@ -19,8 +19,8 @@ use ton_api::ton::{
     },
     rpc::engine::validator::ControlQuery,
 };
-use ton_types::{fail, Result};
-use ton_block::{AccountIdPrefixFull, BlockIdExt};
+use ton_types::{fail, Result, UInt256};
+use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent};
 
 pub(crate) struct DbEngine {
     db: Arc<dyn InternalDb>
@@ -54,6 +54,9 @@ impl crate::engine_traits::EngineOperations for DbEngine {
     }
     async fn load_last_applied_mc_state(&self) -> Result<ShardStateStuff> {
         self.load_state(&self.load_last_applied_mc_block_id().await?).await
+    }
+    fn get_external_messages(&self, _shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
+        Ok(vec![]) // TODO: need to get real current messages
     }
 }
 
