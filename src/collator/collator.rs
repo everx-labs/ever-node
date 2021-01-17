@@ -1801,6 +1801,7 @@ impl CollatorNew {
                 OutMsg::immediately(&env, tr_cell, &in_msg)?
             };
             collator_data.add_out_msg_to_block(out_msg.read_message_hash()?, &out_msg)?;
+            collator_data.block_full |= !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
         }
         Ok(())
     }

@@ -76,8 +76,8 @@ impl ProcessedUptoStuff {
         let shard_end_lt = if prefix.is_masterchain() {
             self.mc_end_lt
         } else if let Some(ref shards) = self.ref_shards {
-            shards.find_shard(&prefix.shard_ident()?)?
-            .map(|shard| shard.descr().end_lt).unwrap_or(0)
+            shards.find_shard_by_prefix(&prefix)?
+                .map(|shard| shard.descr().end_lt).unwrap_or(0)
         } else {
             0
         };
