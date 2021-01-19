@@ -320,6 +320,10 @@ impl ValidatorQuery {
         for i in 0..self.prev_blocks_ids.len() {
             log::debug!(target: "validator", "load state for prev block {} of {} {}", i + 1, self.prev_blocks_ids.len(), self.prev_blocks_ids[i]);
             let prev_state = self.load_prev_shard_state(i).await?;
+            if &self.shard == prev_state.shard() && prev_state.state().before_split() {
+                reject_query!("cannot accept new unsplit shardchain block for {} \
+                    after previous block {} with before_split set", self.shard, prev_state.block_id())
+            }
             self.prev_states.push(prev_state);
         }
         // 5. request masterchain state referred to in the block

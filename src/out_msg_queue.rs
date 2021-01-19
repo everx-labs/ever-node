@@ -50,7 +50,11 @@ impl ProcessedUptoStuff {
             || ((self.last_msg_lt == other.last_msg_lt) && (self.last_msg_hash >= other.last_msg_hash))
         )
     }
+    pub fn can_check_processed(&self) -> bool {
+        self.ref_shards.is_some()
+    }
     fn already_processed(&self, enq: &MsgEnqueueStuff) -> Result<bool> {
+        log::debug!("self: {} enqueued_lt {} created_lt {}", self, enq.enqueued_lt(), enq.created_lt());
         if enq.created_lt() > self.last_msg_lt {
             return Ok(false)
         }
@@ -67,10 +71,8 @@ impl ProcessedUptoStuff {
             return Ok(true)
         }
         let shard_end_lt = self.compute_shard_end_lt(&enq.cur_prefix())?;
+        log::debug!("shard_end_lt: {}", shard_end_lt);
         Ok(enq.enqueued_lt() < shard_end_lt)
-    }
-    pub fn can_check_processed(&self) -> bool {
-        self.ref_shards.is_some()
     }
     pub fn compute_shard_end_lt(&self, prefix: &AccountIdPrefixFull) -> Result<u64> {
         let shard_end_lt = if prefix.is_masterchain() {
@@ -87,8 +89,8 @@ impl ProcessedUptoStuff {
 
 impl std::fmt::Display for ProcessedUptoStuff {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "shard: {:016X}, mc_seqno: {}, last_msg_lt: {}, last_msg_hash: {:x}",
-            self.shard, self.mc_seqno, self.last_msg_lt, self.last_msg_hash)
+        write!(f, "shard: {:016X}, mc_seqno: {}, mc_end_lt: {}, last_msg_lt: {}, last_msg_hash: {:x}",
+            self.shard, self.mc_seqno, self.mc_end_lt, self.last_msg_lt, self.last_msg_hash)
     }
 }
 
@@ -312,7 +314,8 @@ impl OutMsgQueueInfoStuff {
             ref_shards: None
         };
         self.entries.push(entry);
-        self.compactify()
+        self.compactify()?;
+        Ok(())
     }
     pub fn entries(&self) -> &Vec<ProcessedUptoStuff> { &self.entries }
     pub fn is_empty(&self) -> bool {
@@ -331,14 +334,17 @@ impl OutMsgQueueInfoStuff {
         }
         Ok(false)
     }
-    pub fn compactify(&mut self) -> Result<()> {
-        let n = self.entries.len();
+    pub fn compactify(&mut self) -> Result<bool> {
+        Self::compactify_entries(&mut self.entries)
+    }
+    fn compactify_entries(entries: &mut Vec<ProcessedUptoStuff>) -> Result<bool> {
+        let n = entries.len();
         let mut mark = Vec::new();
         mark.resize(n, false);
         let mut found = false;
         for i in 0..n {
             for j in 0..n {
-                if i != j && !mark[j] && self.entries[j].contains(&self.entries[i]) {
+                if i != j && !mark[j] && entries[j].contains(&entries[i]) {
                     mark[i] = true;
                     found = true;
                     break;
@@ -348,17 +354,20 @@ impl OutMsgQueueInfoStuff {
         if found {
             for i in (0..n).rev() {
                 if mark[i] {
-                    self.entries.remove(i);
+                    entries.remove(i);
                 }
             }
         }
-        Ok(())
+        Ok(found)
     }
     pub fn is_reduced(&self) -> bool {
-        let n = self.entries.len();
+        Self::is_reduced_entries(&self.entries)
+    }
+    fn is_reduced_entries(entries: &Vec<ProcessedUptoStuff>) -> bool {
+        let n = entries.len();
         for i in 1..n {
             for j in 0..i {
-                if self.entries[i].contains(&self.entries[j]) || self.entries[j].contains(&self.entries[i]) {
+                if entries[i].contains(&entries[j]) || entries[j].contains(&entries[i]) {
                     return false
                 }
             }
