@@ -1215,7 +1215,7 @@ impl CollatorNew {
         output_queue_manager.init(
             self.engine.deref(),
             self.shard.clone(),
-            mc_data.mc_state_extra.shards(),
+            collator_data.shards.as_ref().unwrap_or_else(|| mc_data.mc_state_extra.shards()),
             &prev_data.states,
             None,
             self.after_merge,
