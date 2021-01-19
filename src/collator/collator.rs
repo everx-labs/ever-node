@@ -1010,6 +1010,10 @@ impl CollatorNew {
         let mut prev_ext_blocks_refs = vec![];
         for (i, prev_id) in self.prev_blocks_ids.iter().enumerate() {
             let prev_state = self.engine.load_state(prev_id).await?;
+            if &self.shard == prev_state.shard() && prev_state.state().before_split() {
+                fail!("cannot generate new unsplit shardchain block for {} \
+                    after previous block {} with before_split set", self.shard, prev_id)
+            }
 
             let end_lt = prev_state.shard_state().gen_lt();
             let ext_block_ref = ExtBlkRef {
