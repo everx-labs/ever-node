@@ -31,6 +31,7 @@ const COMPLETION_HANDLERS_MAX_WAIT_PERIOD: Duration = Duration::from_millis(6000
 const BLOCKS_PROCESSING_STACK_CAPACITY: usize = 1000; //number of blocks in stack for CatchainProcessor::set_processed method
 const MAIN_LOOP_NAME: &str = "CC"; //catchain main loop short thread name
 const UTILITY_LOOP_NAME: &str = "CCU"; //catchain utility loop short thread name
+const CATCHAIN_MAIN_LOOP_THREAD_STACK_SIZE: usize = 1024 * 1024 * 32; //stack size for catchain main loop thread
 
 /*
     Options
@@ -2346,6 +2347,7 @@ impl CatchainImpl {
                 MAIN_LOOP_NAME.to_string(),
                 session_id.to_hex_string()
             ))
+            .stack_size(CATCHAIN_MAIN_LOOP_THREAD_STACK_SIZE)
             .spawn(move || {
                 CatchainProcessor::main_loop(
                     catchain_weak,
