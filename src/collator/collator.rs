@@ -139,7 +139,6 @@ impl PrevData {
         state_root: Cell,
         subshard: Option<&ShardIdent>,
     ) -> Result<Self> {
-        log::trace!("from_prev_states");
         let mut gen_utime = states[0].state().gen_time();
         let mut gen_lt = states[0].state().gen_lt();
         let mut accounts = states[0].state().read_accounts()?;
@@ -236,6 +235,7 @@ struct CollatorData {
     // determined fields
     gen_utime: u32,
     config: BlockchainConfig,
+    collated_block_descr: String,
 
     // fields, uninitialized by default
     start_lt: Option<u64>,
@@ -283,8 +283,9 @@ impl CollatorData {
         config: BlockchainConfig, 
         usage_tree: UsageTree,
         prev_data: &PrevData,
-        is_masterchain: bool
-    ) -> Result<Self> {
+        is_masterchain: bool,
+        collated_block_descr: String,
+) -> Result<Self> {
         let limits = Arc::new(config.raw_config().block_limits(is_masterchain)?);
         let ret = Self {
             changed_accounts: HashMap::new(),
@@ -299,6 +300,7 @@ impl CollatorData {
             usage_tree,
             gen_utime,
             config,
+            collated_block_descr,
             start_lt: None,
             max_lt: None,
             value_flow: ValueFlow::default(),
@@ -360,11 +362,13 @@ impl CollatorData {
     fn update_last_proc_int_msg(&mut self, new_lt_hash: (u64, UInt256)) -> Result<()> {
         if self.last_proc_int_msg < new_lt_hash {
             CHECK!(new_lt_hash.0 > 0);
-            log::debug!("last_proc_int_msg updated to ({},{:x})", new_lt_hash.0, new_lt_hash.1);
+            log::debug!("{}: last_proc_int_msg updated to ({},{:x})",
+                self.collated_block_descr, new_lt_hash.0, new_lt_hash.1);
             self.last_proc_int_msg = new_lt_hash;
             Ok(())
         } else {
-            log::error!("processed message ({},{:x}) AFTER message ({},{:x})", new_lt_hash.0, new_lt_hash.1,
+            log::error!("{}: processed message ({},{:x}) AFTER message ({},{:x})",
+                self.collated_block_descr, new_lt_hash.0, new_lt_hash.1,
                 self.last_proc_int_msg.0, self.last_proc_int_msg.1);
             self.last_proc_int_msg.0 = std::u64::MAX;
             fail!("internal message processing order violated!")
@@ -461,7 +465,7 @@ impl CollatorData {
         requeue: bool,
     ) -> Result<()> {
         self.transit_count += 1;
-        log::debug!("enqueue_transit_message {}", enq);
+        log::debug!("{}: enqueue_transit_message {}", self.collated_block_descr, enq);
         let enqueued_lt = self.start_lt()?;
         let (new_enq, transit_fee) = enq.next_hop(shard, enqueued_lt, self.config.raw_config())?;
         let in_msg = InMsg::transit(enq.envelope(), new_enq.envelope(), transit_fee)?;
@@ -607,7 +611,7 @@ impl CollatorData {
 
     fn dequeue_message(&mut self, enq: MsgEnqueueStuff, deliver_lt: u64, short: bool) -> Result<()> {
         self.dequeue_count += 1;
-        log::debug!("dequeue message: {:x}", enq.message_hash());
+        log::debug!("{}: dequeue message: {:x}", self.collated_block_descr, enq.message_hash());
         let out_msg = OutMsg::dequeue(enq.envelope(), deliver_lt, short)?;
         self.add_out_msg_to_block(enq.message_hash(), &out_msg)
     }
@@ -840,7 +844,8 @@ impl CollatorNew {
 
         let now = self.init_utime(&mc_data, &prev_data)?;
         let config = BlockchainConfig::with_config(mc_data.config().clone())?;
-        let mut collator_data = CollatorData::new(now, config, usage_tree, &prev_data, is_masterchain)?;
+        let mut collator_data = CollatorData::new(now, config, usage_tree, &prev_data,
+            is_masterchain, self.collated_block_descr.clone())?;
 
         if !self.shard.is_masterchain() {
             let (now_upper_limit, before_split, _accept_msgs) = check_this_shard_mc_info(
@@ -912,7 +917,7 @@ impl CollatorNew {
         // })?;
         let now = std::time::Instant::now();
         self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager)?;
-        log::trace!("TIME: clean_out_msg_queue {}ms;", now.elapsed().as_millis());
+        log::trace!("{}: TIME: clean_out_msg_queue {}ms;", self.collated_block_descr, now.elapsed().as_millis());
 
         // copy out msg queue from next state
         collator_data.out_msg_queue_info = output_queue_manager.take_next();
@@ -932,18 +937,18 @@ impl CollatorNew {
         // import inbound internal messages, process or transit
         let now = std::time::Instant::now();
         self.process_inbound_internal_messages(prev_data, collator_data, &output_queue_manager)?;
-        log::trace!("TIME: process_inbound_internal_messages {}ms;", now.elapsed().as_millis());
+        log::trace!("{}: TIME: process_inbound_internal_messages {}ms;", self.collated_block_descr, now.elapsed().as_millis());
 
         // import inbound external messages (if space&gas left)
         let now = std::time::Instant::now();
         self.process_inbound_external_messages(prev_data, collator_data, ext_messages, collator_data.max_lt()? + 1)?;
-        log::trace!("TIME: process_inbound_external_messages {}ms;", now.elapsed().as_millis());
+        log::trace!("{}: TIME: process_inbound_external_messages {}ms;", self.collated_block_descr, now.elapsed().as_millis());
 
         // process newly-generated messages (if space&gas left)
         // (if we were unable to process all inbound messages, all new messages must be queued)
         let now = std::time::Instant::now();
         self.process_new_messages(!collator_data.inbound_queues_empty, prev_data, collator_data, collator_data.max_lt()?)?;
-        log::trace!("TIME: process_new_messages {}ms;", now.elapsed().as_millis());
+        log::trace!("{}: TIME: process_new_messages {}ms;", self.collated_block_descr, now.elapsed().as_millis());
 
         // split prepare / split install
         // ** will be implemented later **
@@ -1142,16 +1147,18 @@ impl CollatorNew {
             if skip_topmsgdescr {
                 collator_data.set_skip_topmsgdescr();
                 log::warn!(
-                    "randomly skipping import of new shard data because of overdue masterchain \
+                    "{}: randomly skipping import of new shard data because of overdue masterchain \
                     catchain rotation (overdue by {} seconds)",
+                    self.collated_block_descr,
                     overdue
                 );
             }
             if skip_extmsg {
                 collator_data.set_skip_extmsg();
                 log::warn!(
-                    "randomly skipping external message import because of overdue masterchain \
+                    "{}: randomly skipping external message import because of overdue masterchain \
                     catchain rotation (overdue by {} seconds)",
+                    self.collated_block_descr,
                     overdue
                 );
             }
@@ -1163,16 +1170,18 @@ impl CollatorNew {
             if skip_topmsgdescr {
                 collator_data.set_skip_topmsgdescr();
                 log::warn!(
-                    "randomly skipping import of new shard data because of overdue masterchain \
+                    "{}: randomly skipping import of new shard data because of overdue masterchain \
                     block (last block was {} seconds ago)",
+                    self.collated_block_descr,
                     interval
                 );
             }
             if skip_extmsg {
                 collator_data.set_skip_extmsg();
                 log::warn!(
-                    "randomly skipping external message import because of overdue masterchain \
+                    "{}: randomly skipping external message import because of overdue masterchain \
                     block (last block was {} seconds ago)",
+                    self.collated_block_descr,
                     interval
                 );
             }
@@ -1200,7 +1209,7 @@ impl CollatorNew {
         }
 
         collator_data.set_start_lt(start_lt)?;
-        log::debug!("start_lt set to {}", start_lt);
+        log::debug!("{}: start_lt set to {}", self.collated_block_descr, start_lt);
 
         Ok(())
     }
@@ -1286,20 +1295,21 @@ impl CollatorNew {
             ) {
                 Ok(len) => len as usize,
                 Err(e) => {
-                    log::debug!("ShardTopBlockDescr for {} skipped: res_flags = {}, error: {}",
-                        sh_bd.proof_for(), res_flags, e);
+                    log::debug!("{}: ShardTopBlockDescr for {} skipped: res_flags = {}, error: {}",
+                        self.collated_block_descr, sh_bd.proof_for(), res_flags, e);
                     continue;
                 }
             };
             if chain_len <= 0 || chain_len > 8 {
-                log::debug!("ShardTopBlockDescr for {} skipped: its chain length is {}",
-                    sh_bd.proof_for(), chain_len);
+                log::debug!("{}: ShardTopBlockDescr for {} skipped: its chain length is {}",
+                    self.collated_block_descr, sh_bd.proof_for(), chain_len);
                 continue;
             }
             if sh_bd.gen_utime() >= collator_data.gen_utime {
                 log::debug!(
-                    "ShardTopBlockDescr for {} skipped: it claims to be generated at {} \
+                    "{}: ShardTopBlockDescr for {} skipped: it claims to be generated at {} \
                     while it is still {}",
+                    self.collated_block_descr,
                     sh_bd.proof_for(),
                     sh_bd.gen_utime(),
                     collator_data.gen_utime()
@@ -1312,8 +1322,8 @@ impl CollatorNew {
             let start_blks = sh_bd.get_prev_at(chain_len);
             match may_update_shard_block_info(collator_data.shards()?, &descr, &start_blks, lt_limit, Some(&mut shards_updated)) {
                 Err(e) => {
-                    log::debug!("cannot add new top shard block {} to shard configuration: {}",
-                        sh_bd.proof_for(), e);
+                    log::debug!("{}: cannot add new top shard block {} to shard configuration: {}",
+                        self.collated_block_descr, sh_bd.proof_for(), e);
                     continue;
                 }
                 Ok((false, _)) => {
@@ -1334,7 +1344,8 @@ impl CollatorNew {
                         if let Err(e) = update_shard_block_info2(collator_data.shards_mut()?,
                                             prev_descr.clone(), descr.clone(), &start_blks2, Some(&mut shards_updated)) {
                             log::debug!(
-                                "cannot add new split top shard blocks {} and {} to shard configuration: {}",
+                                "{}: cannot add new split top shard blocks {} and {} to shard configuration: {}",
+                                self.collated_block_descr,
                                 sh_bd.proof_for(),
                                 prev_bd.proof_for(),
                                 e
@@ -1345,8 +1356,8 @@ impl CollatorNew {
                             // t-node doesn't contain next line, but I think it needs here.
                             prev_shard = ShardIdent::default();
                         } else {
-                            log::debug!("updated top shard block information with {} and {}",
-                                sh_bd.proof_for(), prev_bd.proof_for());
+                            log::debug!("{}: updated top shard block information with {} and {}",
+                                self.collated_block_descr, sh_bd.proof_for(), prev_bd.proof_for());
                             collator_data.store_shard_fees(&prev_descr)?;
                             collator_data.store_shard_fees(&descr)?;
                             collator_data.register_shard_block_creators(prev_bd.get_creator_list(prev_chain_len)?)?;
@@ -1360,9 +1371,11 @@ impl CollatorNew {
                             collator_data.update_shards_max_end_lt(end_lt);
                         }
                     } else if *shard == prev_shard {
-                        log::debug!("skip postponing new top shard block {}", sh_bd.proof_for());
+                        log::debug!("{}: skip postponing new top shard block {}",
+                        self.collated_block_descr, sh_bd.proof_for());
                     } else {
-                        log::debug!("postpone adding new top shard block {}", sh_bd.proof_for());
+                        log::debug!("{}: postpone adding new top shard block {}",
+                            self.collated_block_descr, sh_bd.proof_for());
                         prev_bd = Some(sh_bd);
                         prev_descr = Some(descr.clone());
                         prev_shard = shard.clone();
@@ -1380,14 +1393,15 @@ impl CollatorNew {
                     let end_lt = descr.descr.end_lt;
                     if let Err(e) = update_shard_block_info(collator_data.shards_mut()?,
                                         descr.clone(), &start_blks, Some(&mut shards_updated)) {
-                        log::debug!("cannot add new top shard block {} to shard configuration: {}",
-                            sh_bd.proof_for(), e);
+                        log::debug!("{}: cannot add new top shard block {} to shard configuration: {}",
+                            self.collated_block_descr, sh_bd.proof_for(), e);
                         //descr.clear();
                     } else {
                         collator_data.store_shard_fees(&descr)?;
                         collator_data.register_shard_block_creators(sh_bd.get_creator_list(chain_len)?)?;
                         collator_data.update_shards_max_end_lt(end_lt);
-                        log::debug!("updated top shard block information with {}", sh_bd.proof_for());
+                        log::debug!("{}: updated top shard block information with {}",
+                            self.collated_block_descr,  sh_bd.proof_for());
                         tb_act += 1;
                         collator_data.add_top_block_descriptor(sh_bd.clone());
                     }
@@ -1444,12 +1458,14 @@ impl CollatorNew {
 
             match mc_data.config().fee_collector_address() {
                 Err(_) => {
-                    log::debug!("fee recovery disabled (no collector smart contract defined in configuration)");
+                    log::debug!("{}: fee recovery disabled (no collector smart contract defined in configuration)",
+                        self.collated_block_descr);
                     collator_data.value_flow.recovered = CurrencyCollection::default();
                 }
                 Ok(addr) => {
                     if collator_data.value_flow.recovered.grams < Grams::from(1_000_000_000) {
-                        log::debug!("fee recovery skipped ({})", collator_data.value_flow.recovered);
+                        log::debug!("{}: fee recovery skipped ({})", 
+                            self.collated_block_descr, collator_data.value_flow.recovered);
                         collator_data.value_flow.recovered = CurrencyCollection::default();
                     }
                 }
@@ -1458,8 +1474,8 @@ impl CollatorNew {
             collator_data.value_flow.minted = self.compute_minted_amount(mc_data)?;
 
             if !collator_data.value_flow.minted.is_zero()? && mc_data.config().minter_address().is_err() {
-                log::warn!("minting of {} disabled: no minting smart contract defined",
-                    collator_data.value_flow.minted);
+                log::warn!("{}: minting of {} disabled: no minting smart contract defined",
+                    self.collated_block_descr, collator_data.value_flow.minted);
                 collator_data.value_flow.minted = CurrencyCollection::default();
             }
         } else {
@@ -1478,7 +1494,7 @@ impl CollatorNew {
 
         let to_mint_cp = match mc_data.config().to_mint() {
             Err(e) => {
-                log::warn!("Can't get config param 7 (to_mint): {}", e);
+                log::warn!("{}: Can't get config param 7 (to_mint): {}", self.collated_block_descr, e);
                 return Ok(to_mint)
             },
             Ok(v) => v
@@ -1490,8 +1506,8 @@ impl CollatorNew {
             if amount > amount2 {
                 let mut delta = amount.clone();
                 delta.sub(&amount2)?;
-                log::debug!("currency #{}: existing {}, required {}, to be minted {}",
-                    key, amount2, amount, delta);
+                log::debug!("{}: currency #{}: existing {}, required {}, to be minted {}",
+                    self.collated_block_descr, key, amount2, amount, delta);
                 if key != 0 {
                     to_mint.set_other_ex(key, &delta)?;
                 }
@@ -1647,9 +1663,9 @@ impl CollatorNew {
             let (key, enq, created_lt, block_id) = k_v?;
             collator_data.update_last_proc_int_msg((created_lt, enq.message_hash()))?;
             if collator_data.out_msg_queue_info.already_processed(&enq)? {
-                log::debug!("inbound internal message with lt={} hash={:x} enqueued_lt={} \
+                log::debug!("{}: inbound internal message with lt={} hash={:x} enqueued_lt={} \
                     has been already processed by us before, skipping",
-                        created_lt, key.hash, enq.enqueued_lt());
+                    self.collated_block_descr, created_lt, key.hash, enq.enqueued_lt());
             } else {
                 self.check_inbound_internal_message(&key, &enq, created_lt, block_id.shard(), collator_data)
                     .map_err(|err| error!("problem processing internal inbound message \
@@ -1850,7 +1866,8 @@ impl CollatorNew {
         );
         if let Ok(mut transaction) = result.as_mut() {
             let gas = transaction.gas_used().unwrap_or(0);
-            log::trace!("GAS: {} TIME: {}ms execute for {}", gas, now.elapsed().as_millis(), transaction.logical_time());
+            log::trace!("{}: GAS: {} TIME: {}ms execute for {}", 
+                self.collated_block_descr, gas, now.elapsed().as_millis(), transaction.logical_time());
 
             shard_acc.add_transaction(&mut transaction, account_root)?;
             // LT of last out message or transaction itself
@@ -1886,29 +1903,31 @@ impl CollatorNew {
         let class = collator_data.block_limit_status.classify();
         if class <= ParamLimitIndex::Underload {
             collator_data.underload_history |= 1;
-            log::info!("Block is underloaded");
+            log::info!("{}: Block is underloaded", self.collated_block_descr);
         } else if class >= ParamLimitIndex::Soft {
             collator_data.overload_history |= 1;
-            log::info!("Block is overloaded (category {:?})", class);
+            log::info!("{}: Block is overloaded (category {:?})", self.collated_block_descr, class);
         } else {
-            log::info!("Block is loaded normally");
+            log::info!("{}: Block is loaded normally", self.collated_block_descr);
         }
 
         if let Some(want_split) = self.collator_settings.want_split {
-            log::info!("want_split manually set");
+            log::info!("{}: want_split manually set", self.collated_block_descr);
             collator_data.want_split = true;
             return
         } else if let Some(want_merge) = self.collator_settings.want_merge {
-            log::info!("want_merge manually set");
+            log::info!("{}: want_merge manually set", self.collated_block_descr);
             collator_data.want_merge = true;
             return
         }
 
         if CollatorData::history_weight(collator_data.overload_history) >= 0 {
-            log::info!("want_split set because of overload history 0x{:X}", collator_data.overload_history);
+            log::info!("{}: want_split set because of overload history 0x{:X}",
+                self.collated_block_descr, collator_data.overload_history);
             collator_data.want_split = true;
         } else if CollatorData::history_weight(collator_data.underload_history) >= 0 {
-            log::info!("want_merge set because of underload history 0x{:X}", collator_data.underload_history);
+            log::info!("{}: want_merge set because of underload history 0x{:X}",
+                self.collated_block_descr, collator_data.underload_history);
             collator_data.want_merge = true;
         }
     }
@@ -2036,7 +2055,8 @@ impl CollatorNew {
             &new_ss_root,
             |h| visited.contains(h)
         )?;
-        log::trace!("TIME: merkle update creating {}ms;", now.elapsed().as_millis());
+        log::trace!("{}: TIME: merkle update creating {}ms;",
+            self.collated_block_descr, now.elapsed().as_millis());
 
         // let new_root2 = state_update.apply_for(&prev_data.state_root)?;
         // assert_eq!(new_root2.repr_hash(), new_ss_root.repr_hash());
@@ -2193,7 +2213,8 @@ impl CollatorNew {
         if is_key_block || (now / lifetime > prev_now / lifetime) {
             validator_info.catchain_seqno += 1;
             cc_updated = true;
-            log::debug!("increased masterchain catchain seqno to {}", validator_info.catchain_seqno);
+            log::debug!("{}: increased masterchain catchain seqno to {}",
+                self.collated_block_descr, validator_info.catchain_seqno);
         }
         let (validators, _hash_short) = cur_validators.calc_subset(
             &ccvc, 
@@ -2360,8 +2381,8 @@ impl CollatorNew {
                         interval: SPLIT_MERGE_INTERVAL,
                     };
                     changed = true;
-                    log::debug!("preparing to split shard {} during {}..{}", shard,
-                        info.fsm_utime(), info.fsm_utime_end());
+                    log::debug!("{}: preparing to split shard {} during {}..{}",
+                        self.collated_block_descr, shard, info.fsm_utime(), info.fsm_utime_end());
 
                 } else {
                     if let Some(sibling) = sibling {
@@ -2376,7 +2397,8 @@ impl CollatorNew {
                                 interval: SPLIT_MERGE_INTERVAL,
                             };
                             changed = true;
-                            log::debug!("preparing to merge shard {} with {} during {}..{}", shard,
+                            log::debug!("{}: preparing to merge shard {} with {} during {}..{}", 
+                                self.collated_block_descr, shard,
                                 shard.sibling(), info.fsm_utime(), info.fsm_utime_end());
 
                         } else if info.is_fsm_merge() &&
@@ -2388,8 +2410,8 @@ impl CollatorNew {
                             // force merge
                             info.before_merge = true;
                             changed = true;
-                            log::debug!("force immediate merging of shard {} with {}", shard,
-                                shard.sibling());
+                            log::debug!("{}: force immediate merging of shard {} with {}",
+                                self.collated_block_descr, shard, shard.sibling());
                         }
                     }
                 }
@@ -2463,7 +2485,7 @@ impl CollatorNew {
                     &mut stat
                 )?;
                 if !res {
-                    log::trace!("prunning CreatorStats for {:x}", key);
+                    log::trace!("{}: prunning CreatorStats for {:x}", self.collated_block_descr, key);
                     block_create_stats.counters.remove(&key)?;
                     removed += 1;
                 } 
@@ -2473,7 +2495,8 @@ impl CollatorNew {
                 break;
             }
         }
-        log::trace!("removed {} stale CreatorStats entries out of {} scanned", removed, scanned);
+        log::trace!("{}: removed {} stale CreatorStats entries out of {} scanned",
+            self.collated_block_descr, removed, scanned);
         Ok(())
     }
 
@@ -2527,7 +2550,7 @@ impl CollatorNew {
           fail!("cannot amortize counters in CreatorStats for {:x}", key);
         }
         if 0 == (stat.mc_blocks.cnt65536() | stat.shard_blocks.cnt65536()) {
-          log::trace!("removing stale CreatorStats for {:x}", key);
+          log::trace!("{}: removing stale CreatorStats for {:x}", self.collated_block_descr, key);
           Ok(false)
         } else {
           Ok(true)
