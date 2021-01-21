@@ -183,15 +183,19 @@ impl ControlQuerySubscriber {
     }
     async fn prepare_bundle(&self, block_id: BlockIdExt) -> Result<Success> {
         if let Some(engine) = self.engine.as_ref() {
-            let bundle = CollatorTestBundle::build_with_ethalon(&block_id, engine.deref()).await.unwrap();
-            bundle.save("target/bundles")?;
+            let bundle = CollatorTestBundle::build_with_ethalon(&block_id, engine.deref()).await?;
+            tokio::task::spawn_blocking(move || {
+                bundle.save("target/bundles").ok();
+            });
         }
         Ok(Success::Engine_Validator_Success)
     }
     async fn prepare_future_bundle(&self, prev_block_ids: Vec<BlockIdExt>) -> Result<Success> {
         if let Some(engine) = self.engine.as_ref() {
             let bundle = CollatorTestBundle::build_for_collating_block(prev_block_ids, engine.deref()).await?;
-            bundle.save("target/bundles")?;
+            tokio::task::spawn_blocking(move || {
+                bundle.save("target/bundles").ok();
+            });
         }
         Ok(Success::Engine_Validator_Success)
     }
