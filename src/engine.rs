@@ -199,7 +199,7 @@ impl Downloader for ZeroStateDownloader {
 }
 
 impl Engine {
-    pub async fn new(general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>) -> Result<Arc<Self>> {
+    pub async fn new(general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>, initial_sync_disabled : bool) -> Result<Arc<Self>> {
          log::info!("Creating engine...");
 
         let db_directory = general_config.internal_db_path().unwrap_or_else(|| {"node_db"});
@@ -213,7 +213,6 @@ impl Engine {
                 init_mc_block_id = convert_block_id_ext_api2blk(&block_id.0)?;
             }
         }
-        let initial_sync_disabled = false;
 
         #[cfg(feature = "local_test")]
         let network = {
@@ -984,13 +983,13 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
     Ok((last_mc_block, shards_client_block, pss_keeper_block))
 }
 
-pub async fn run(node_config: TonNodeConfig, zerostate_path: Option<&str>, ext_db: Vec<Arc<dyn ExternalDb>>) -> Result<()> {
+pub async fn run(node_config: TonNodeConfig, zerostate_path: Option<&str>, ext_db: Vec<Arc<dyn ExternalDb>>, initial_sync_disabled : bool) -> Result<()> {
     log::info!("Engine::run");
 
     let consumer_config = node_config.kafka_consumer_config();
 
     //// Create engine
-    let engine = Engine::new(node_config, ext_db).await?;
+    let engine = Engine::new(node_config, ext_db, initial_sync_disabled).await?;
 
     //// Boot
     let (mut last_mc_block, mut shards_client_mc_block, pss_keeper_block) = boot(&engine, zerostate_path).await?;
