@@ -44,10 +44,7 @@ pub trait CacheObject<T: PoolObject + HashableObject> {
         //search object in caches
 
         let hash = value.get_hash();
-        let allow_temp = match pool {
-            SessionPool::Persistent => true,
-            _ => false,
-        };
+        let allow_temp = pool == SessionPool::Temp;
 
         if let Some(ref cache_entry) = &cache.get_cache_entry_by_hash(hash, allow_temp) {
             if let Some(ref ptr) = Self::unwrap_cache_entry(&cache_entry) {

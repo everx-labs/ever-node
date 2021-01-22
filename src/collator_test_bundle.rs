@@ -4,7 +4,7 @@ use crate::{
     db::BlockHandle,
     engine_traits::EngineOperations,
     block::BlockStuff,
-    validator::{accept_block::create_top_shard_block_description, validator_query::BlockCandidate},
+    validator::{accept_block::create_top_shard_block_description, BlockCandidate},
     out_msg_queue::OutMsgQueueInfoStuff,
 };
 use ton_types::{UInt256, fail, error, Result, CellType, deserialize_cells_tree};

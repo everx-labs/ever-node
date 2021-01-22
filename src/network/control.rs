@@ -1,16 +1,21 @@
 use crate::{
     block::{convert_block_id_ext_api2blk, BlockStuff},
     block_proof::BlockProofStuff,
-    db::{BlockHandle, InternalDb, NodeState},
     collator_test_bundle::CollatorTestBundle,
     config::{KeyRing, NodeConfigHandler},
-    engine_traits::EngineOperations, shard_state::ShardStateStuff,
-    engine::LastMcBlockId,
+    db::{BlockHandle, InternalDb, NodeState},
+    engine::{LastMcBlockId, ShardsClientMcBlockId},
+    engine_traits::EngineOperations,
+    shard_state::ShardStateStuff,
     validator::validator_utils::validatordescr_to_catchain_node
 };
 use adnl::common::{deserialize, QueryResult, Subscriber, AdnlPeers};
 use adnl::server::{AdnlServer, AdnlServerConfig};
-use std::{convert::TryInto, sync::Arc, ops::Deref};
+use std::{
+    convert::TryInto,
+    ops::Deref,
+    sync::Arc,
+};
 use ton_api::ton::{
     self, PublicKey, TLObject,
     engine::validator::{
@@ -33,7 +38,7 @@ impl DbEngine {
 }
 
 #[async_trait::async_trait]
-impl crate::engine_traits::EngineOperations for DbEngine {
+impl EngineOperations for DbEngine {
     fn load_block_handle(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>> {
         self.db.load_block_handle(id)
     }
@@ -49,11 +54,23 @@ impl crate::engine_traits::EngineOperations for DbEngine {
     async fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seqno: u32) -> Result<Arc<BlockHandle>> {
         self.db.find_block_by_seq_no(acc_pfx, seqno)
     }
+    async fn find_block_by_unix_time(&self, acc_pfx: &AccountIdPrefixFull, utime: u32) -> Result<Arc<BlockHandle>> {
+        self.db.find_block_by_unix_time(acc_pfx, utime)
+    }
+    async fn find_block_by_lt(&self, acc_pfx: &AccountIdPrefixFull, lt: u64) -> Result<Arc<BlockHandle>> {
+        self.db.find_block_by_lt(acc_pfx, lt)
+    }
     async fn load_last_applied_mc_block_id(&self) -> Result<BlockIdExt> {
         (&LastMcBlockId::load_from_db(self.db.deref())?.0).try_into()
     }
+    async fn store_last_applied_mc_block_id(&self, last_mc_block: &BlockIdExt) -> Result<()> {
+        LastMcBlockId(last_mc_block.into()).store_to_db(self.db.deref())
+    }
     async fn load_last_applied_mc_state(&self) -> Result<ShardStateStuff> {
         self.load_state(&self.load_last_applied_mc_block_id().await?).await
+    }
+    async fn load_shards_client_mc_block_id(&self) -> Result<BlockIdExt> {
+        (&ShardsClientMcBlockId::load_from_db(self.db.deref())?.0).try_into()
     }
     fn get_external_messages(&self, _shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
         Ok(vec![]) // TODO: need to get real current messages

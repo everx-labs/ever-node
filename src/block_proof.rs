@@ -1,4 +1,5 @@
-use ton_block::{Block, BlockIdExt, Deserializable, MerkleProof, BlockInfo, UnixTime32,
+use ton_block::{
+    Block, BlockProof, BlockIdExt, Deserializable, MerkleProof, BlockInfo, UnixTime32,
     ValidatorDescr, ValidatorSet, CatchainConfig, AccountIdPrefixFull, Serializable
 };
 use ton_types::{
@@ -7,7 +8,7 @@ use ton_types::{
 };
 
 use crate::{
-    block::{BlockIdExtExtention},
+    block::BlockIdExtExtention,
     error::NodeError,
     shard_state::ShardStateStuff,
     engine_traits::EngineOperations,
@@ -16,7 +17,7 @@ use crate::{
 
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct BlockProofStuff {
-    proof: ton_block::BlockProof,
+    proof: BlockProof,
     root: Cell,
     is_link: bool,
     id: BlockIdExt,
@@ -26,7 +27,7 @@ pub struct BlockProofStuff {
 impl BlockProofStuff {
     pub fn deserialize(block_id: &BlockIdExt, data: Vec<u8>, is_link: bool) -> Result<Self> {
         let root = deserialize_tree_of_cells(&mut std::io::Cursor::new(&data))?;
-        let proof = ton_block::BlockProof::construct_from(&mut root.clone().into())?;
+        let proof = BlockProof::construct_from(&mut root.clone().into())?;
         if &proof.proof_for != block_id {
             fail!(
                 NodeError::InvalidData(format!("proof for another block (found: {}, expected: {})", proof.proof_for, block_id))
@@ -40,7 +41,7 @@ impl BlockProofStuff {
         Ok(BlockProofStuff { proof, root, is_link, id: block_id.clone(), data })
     }
 
-    pub fn new(proof: ton_block::BlockProof, is_link: bool) -> Result<Self> {
+    pub fn new(proof: BlockProof, is_link: bool) -> Result<Self> {
         let id = proof.proof_for.clone();
         if !id.is_masterchain() && !is_link {
             fail!(
@@ -95,7 +96,7 @@ impl BlockProofStuff {
         &self.id
     }
 
-    pub fn proof(&self) -> &ton_block::BlockProof {
+    pub fn proof(&self) -> &BlockProof {
         &self.proof
     }
 

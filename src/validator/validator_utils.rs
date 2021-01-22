@@ -93,7 +93,7 @@ pub fn get_shard_name(ident: &ShardIdent) -> String {
 }
 
 pub fn validator_query_candidate_to_validator_block_candidate(
-        source: PublicKey, candidate: super::validator_query::BlockCandidate
+        source: PublicKey, candidate: super::BlockCandidate
     ) -> validator_session::ValidatorBlockCandidate
 {
     return validator_session::ValidatorBlockCandidate {

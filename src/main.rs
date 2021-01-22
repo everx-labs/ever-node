@@ -1,7 +1,6 @@
 pub mod block;
 pub mod block_proof;
 pub mod boot;
-pub mod collator;
 pub mod config;
 pub mod db;
 pub mod engine;

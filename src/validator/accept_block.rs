@@ -272,7 +272,7 @@ fn precheck_header(
     Ok(())
 }
 
-fn create_new_proof(
+pub fn create_new_proof(
     block_stuff: &BlockStuff,
     validator_set: &ValidatorSet,
     signatures: Vec<CryptoSignaturePair>

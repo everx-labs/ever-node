@@ -65,7 +65,7 @@ pub fn check_this_shard_mc_info(
     // log::info!(target: "validator", "left for {} is {:?}", block_id(), left.descr());
     if left.shard() == shard {
 
-        log::info!("check_this_shard_mc_info, block: {} left: {:?}", block_id, left);
+        log::trace!("check_this_shard_mc_info, block: {} left: {:?}", block_id, left);
 
         // no split/merge
         if after_merge || after_split {
