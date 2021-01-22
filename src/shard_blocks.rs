@@ -115,7 +115,7 @@ impl ShardBlocksPool {
     pub fn get_shard_blocks(&self, last_mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
         if last_mc_seq_no != self.last_mc_seq_no.load(Ordering::Relaxed) {
             log::error!("get_shard_blocks: Given last_mc_seq_no {} is not actual", last_mc_seq_no);
-            fail!("Given last_mc_seq_no {} is not actual", last_mc_seq_no);
+            fail!("Given last_mc_seq_no {} is not actual {}", last_mc_seq_no, self.last_mc_seq_no.load(Ordering::Relaxed));
         } else {
             let mut returned_list = string_builder::Builder::default();
             let mut blocks = Vec::new();

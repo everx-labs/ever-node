@@ -1,31 +1,25 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(unused_macros)]
+use std::sync::Arc;
+use std::time::SystemTime;
 
-use std::sync::*;
-use std::time::*;
-
-use super::validator_query::*;
-use super::validator_utils::*;
+use super::validator_utils::{validator_query_candidate_to_validator_block_candidate, pairvec_to_cryptopair_vec};
 use crate::{
     engine_traits::EngineOperations,
-    collator::{CollatorNew, CollatorSettings},
+    validator::{Collator, CollatorSettings, ValidateQuery},
     collator_test_bundle::CollatorTestBundle,
 };
-use ton_block::{types::*, BlockIdExt, CryptoSignature, ShardIdent, ValidatorSet};
+use ton_block::{BlockIdExt, ShardIdent, ValidatorSet};
 use ton_types::{Result, UInt256};
-use validator_session::*;
+use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
 
 pub async fn run_validate_query(
     shard: ShardIdent,
-    min_ts: SystemTime,
+    _min_ts: SystemTime,
     min_masterchain_block_id: BlockIdExt,
     prev: Vec<BlockIdExt>,
-    block: super::validator_query::BlockCandidate,
+    block: super::BlockCandidate,
     set: ValidatorSet,
     engine: Arc<dyn EngineOperations>,
-    timeout: SystemTime,
+    _timeout: SystemTime,
 ) -> Result<SystemTime> {
     let seqno = prev.iter().fold(0, |a, b| u32::max(a, b.seq_no));
     log::info!(
@@ -36,19 +30,16 @@ pub async fn run_validate_query(
         seqno + 1
     );
 
-    let timeout = ton_block::types::UnixTime32(min_ts.duration_since(UNIX_EPOCH).unwrap().as_secs() as u32);
-
     if cfg!(feature = "build_test_bundles") {
-        let query = super::validator_query::ValidatorQuery::new(
+        let query = ValidateQuery::new(
             shard.clone(),
-            timeout,
             min_masterchain_block_id.seq_no(),
             prev.clone(),
             block.clone(),
             set,
             engine.clone(),
-            0,
             false,
+            true,
         );
         if let Err(err) = query.try_validate().await {
             if format!("{}", err).contains("new masterchain validator list hash") {
@@ -68,16 +59,15 @@ pub async fn run_validate_query(
             return Err(err);
         }
     } else {
-        let query = super::validator_query::ValidatorQuery::new(
+        let query = ValidateQuery::new(
             shard,
-            timeout,
             min_masterchain_block_id.seq_no(),
             prev,
             block,
             set,
             engine,
-            0,
             false,
+            true,
         );
         query.try_validate().await?;
     }
@@ -112,28 +102,24 @@ pub async fn run_accept_block_query(
 
 pub async fn run_collate_query (
     shard: ShardIdent,
-    min_ts: SystemTime,
+    _min_ts: SystemTime,
     min_masterchain_block_id: BlockIdExt,
     prev: Vec<BlockIdExt>,
     collator_id: PublicKey,
     set: ValidatorSet,
     engine: Arc<dyn EngineOperations>,
-    timeout: SystemTime,
+    _timeout: SystemTime,
 ) -> Result<ValidatorBlockCandidate>
 {
-    let collator = CollatorNew::new(
+    let collator = Collator::new(
         shard,
         min_masterchain_block_id,
         prev,
         set,
         UInt256::from(collator_id.pub_key()?),
         engine,
-        None, // TODO rand: Option<UInt256>,
-        CollatorSettings {
-            want_split: None,
-            want_merge: None,
-            is_fake: false,
-        }
+        None,
+        CollatorSettings::default()
     )?;
 
     let (candidate, _) = collator.collate().await?;

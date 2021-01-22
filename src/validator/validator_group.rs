@@ -11,8 +11,8 @@ use tokio::{runtime::Runtime, sync::Mutex};
 
 use crate::{engine_traits::{EngineOperations, PrivateOverlayOperations}};
 use catchain::utils::get_hash;
-use ton_block::{types::*, BlockIdExt, ShardIdent, ValidatorSet};
-use ton_types::UInt256;
+use ton_block::{BlockIdExt, ShardIdent, ValidatorSet};
+use ton_types::{Result, UInt256};
 use validator_session::*;
 use validator_utils::{
     sigpubkey_to_publickey, validatordescr_to_session_node,
@@ -24,7 +24,7 @@ use validator_session_listener::{ValidatorSessionListener, ValidationAction, OnB
 
 use super::*;
 use super::fabric::*;
-use super::validator_query::*;
+use super::validate_query::*;
 use super::candidate_db::CandidateDb;
 use catchain::CatchainOverlay;
 use failure::Error;
@@ -454,7 +454,7 @@ impl ValidatorGroup {
         log::trace!(target: "validator", "SessionListener::on_candidate: {}, {}",
             candidate_id, self.info_round(round).await);
 
-        let mut candidate = super::validator_query::BlockCandidate {
+        let mut candidate = super::BlockCandidate {
             block_id: BlockIdExt::with_params(self.shard, 0, root_hash, get_hash(&data.data())),
             data: data.data().to_vec(),
             collated_file_hash: catchain::utils::get_hash (&collated_data.data()),
