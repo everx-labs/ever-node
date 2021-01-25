@@ -49,6 +49,8 @@ pub trait CacheObject<T: PoolObject + HashableObject> {
         if let Some(ref cache_entry) = &cache.get_cache_entry_by_hash(hash, allow_temp) {
             if let Some(ref ptr) = Self::unwrap_cache_entry(&cache_entry) {
                 if ptr.compare(&value) {
+                    assert!(pool == (*ptr).get_pool() || (*ptr).get_pool() == SessionPool::Persistent);
+
                     return (*ptr).clone();
                 }
             }
@@ -79,7 +81,11 @@ pub trait CacheObject<T: PoolObject + HashableObject> {
     where
         T: CacheObject<T> + PoolObject + 'static,
     {
-        Self::create_object(value, SessionPool::Persistent, cache)
+        let result = Self::create_object(value, SessionPool::Persistent, cache);
+
+        assert!(result.get_pool() == SessionPool::Persistent);
+
+        result
     }
 }
 

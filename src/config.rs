@@ -1,6 +1,6 @@
 use crate::{network::node_network::NodeNetwork};
 use adnl::{from_slice, client::AdnlClientConfigJson,
-    common::{KeyId, KeyOption, KeyOptionJson, Wait},
+    common::{add_object_to_map_with_update, KeyId, KeyOption, KeyOptionJson, Wait},
     node::{AdnlNodeConfig, AdnlNodeConfigJson},
     server::{AdnlServerConfig, AdnlServerConfigJson}
 };
@@ -135,7 +135,8 @@ impl TonNodeConfig {
                 // generate new config from default_config
                 let default_config_file = File::open(
                     TonNodeConfig::build_path(configs_dir, default_config_name)?
-                )?;
+                ).map_err(|err| error!("Can`t open {}: {}", default_config_name, err))?;
+
                 let reader = BufReader::new(default_config_file);
                 let mut config: TonNodeConfig = serde_json::from_reader(reader)?;
                 // Set ADNL config
@@ -225,6 +226,10 @@ impl TonNodeConfig {
         TonNodeGlobalConfig::from_json(&data)
     }
 
+    pub fn remove_all_validator_keys(&mut self) {
+        self.validator_keys = None;
+    }
+
     fn create_and_save_console_configs(
         &mut self,
         configs_dir: &str,
@@ -249,7 +254,8 @@ impl TonNodeConfig {
             ))?,
             None
         );
-        std::fs::write(config_file_path, serde_json::to_string_pretty(&console_client_config)?)?;
+        std::fs::write(config_file_path, serde_json::to_string_pretty(&console_client_config)?)
+            .map_err(|err| error!("Can`t create console_config.json: {}", err))?;
 
         // generate and save server config
         let client_keys = if let Some(client_key) = client_pub_key {
@@ -341,14 +347,28 @@ impl TonNodeConfig {
         Ok((key_id.clone(), Arc::new(public)))
     }
 
-    fn add_validator_key(&mut self, key_id: &[u8; 32], election_date: i32) -> Result<ValidatorKeysJson> {
+    fn is_correct_election_id(&self, election_id: i32) -> bool {
+        if let Some(validator_keys) = &self.validator_keys {
+            for key_json in validator_keys {
+                if key_json.election_id > election_id {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    fn add_validator_key(&mut self, key_id: &[u8; 32], election_id: i32) -> Result<ValidatorKeysJson> {
         let key_info = ValidatorKeysJson {
-            election_id: election_date,
+            election_id: election_id,
             validator_key_id: base64::encode(key_id),
             validator_adnl_key_id: None
         };
 
-        let added_key_info = self.get_validator_key_info_by_election_id(&election_date)?;
+        if !self.is_correct_election_id(election_id) {
+            fail!("Invalid arg: bad election_id!");
+        }
+        let added_key_info = self.get_validator_key_info_by_election_id(&election_id)?;
         match &mut self.validator_keys {
             Some(validator_keys) => {
                 match added_key_info {
@@ -392,6 +412,12 @@ impl TonNodeConfig {
             }
         }
         Ok(false)
+    }
+
+    fn remove_key_from_key_ring(&mut self, validator_key_id: &String) {
+        if let Some(key_ring) = self.validator_key_ring.as_mut() {
+            key_ring.remove(validator_key_id);
+        }
     }
 }
 
@@ -564,6 +590,10 @@ impl NodeConfigHandler {
                                     oldest_key.election_id
                                 )?;
                                 validator_keys.remove(&oldest_key)?;
+                                config.remove_key_from_key_ring(&oldest_key.validator_key_id.clone());
+                                if let Some(adnl_key_id) = oldest_key.validator_adnl_key_id {
+                                    config.remove_key_from_key_ring(&adnl_key_id);
+                                }
                         }
                     } else {
                         break;
@@ -1138,19 +1168,39 @@ impl ValidatorKeys {
     }
 
     fn add(&self, key: ValidatorKeysJson) -> Result<()> {
-        self.values.insert(key.election_id, key.clone());
-
         // inserted in sorted order
-        let mut current = self.first.load(atomic::Ordering::Relaxed);
+        let mut first = false;
 
-        if current == 0 {
-            self.first.store(key.election_id, atomic::Ordering::Relaxed);
+        add_object_to_map_with_update(&self.values, key.election_id, |_| {
+            if self.first.compare_and_swap(0, key.election_id, atomic::Ordering::Relaxed) == 0 {
+                first = true;
+            }
+            Ok(Some(key.clone()))
+        })?;
+
+        if first {
             return Ok(());
         }
 
+        let mut current = self.first.load(atomic::Ordering::Relaxed);
         if current > key.election_id {
-            self.index.insert(key.election_id, current);
-            self.first.store(key.election_id, atomic::Ordering::Relaxed);
+            add_object_to_map_with_update(&self.index, key.election_id, |_| {
+                if let Err(prev) = self.first.fetch_update(
+                    atomic::Ordering::Relaxed, atomic::Ordering::Relaxed, |x| {
+                    if x > key.election_id {
+                        Some(key.election_id)
+                    } else {
+                        None
+                    }
+                }) {
+                    let old = self.index.insert(prev, key.election_id).ok_or_else(
+                        || error!("validator keys collections was broken!")
+                    )?;
+                    Ok(Some(*old.val()))
+                } else {
+                    Ok(Some(current))
+                }
+            })?;
             return Ok(());
         } else if current == key.election_id {
             return Ok(())
@@ -1159,8 +1209,10 @@ impl ValidatorKeys {
         loop {
             if let Some(item) = &self.index.get(&current) {
                 if item.val() > &key.election_id {
-                    self.index.insert(key.election_id, *item.val());
-                    self.index.insert(*item.key(), key.election_id);
+                    add_object_to_map_with_update(&self.index, *item.key(), |_| {
+                        self.index.insert(key.election_id, *item.val());
+                        Ok(Some(key.election_id))
+                    })?;
                     break;
                 } else if item.val() == &key.election_id {
                     break;
@@ -1238,6 +1290,8 @@ impl ValidatorKeys {
             if let Some(validator_info) = self.values.get(&current) {
                 if let Some(adnl_key) = &validator_info.val().validator_adnl_key_id {
                     adnl_ids.push(adnl_key.clone());
+                } else {
+                    adnl_ids.push(validator_info.val().validator_key_id.clone());
                 }
             }
             match self.index.get(&current) {
