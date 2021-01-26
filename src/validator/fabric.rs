@@ -4,7 +4,7 @@ use std::time::SystemTime;
 use super::validator_utils::{validator_query_candidate_to_validator_block_candidate, pairvec_to_cryptopair_vec};
 use crate::{
     engine_traits::EngineOperations,
-    validator::{Collator, CollatorSettings, ValidateQuery},
+    validator::{collator::Collator, CollatorSettings, validate_query::ValidateQuery},
     collator_test_bundle::CollatorTestBundle,
 };
 use ton_block::{BlockIdExt, ShardIdent, ValidatorSet};
