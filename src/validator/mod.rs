@@ -10,9 +10,6 @@ mod candidate_db;
 pub mod collator;
 pub mod collator_sync;
 
-pub use collator_sync::Collator;
-pub use validate_query::ValidateQuery;
-
 use ton_types::UInt256;
 use ton_block::BlockIdExt;
 
