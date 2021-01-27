@@ -2147,7 +2147,9 @@ impl Collator {
                 }
             }
             let acc_block = shard_acc.update_shard_state(&mut new_accounts)?;
-            accounts.insert(&acc_block)?;
+            if !acc_block.transactions().is_empty() {
+                accounts.insert(&acc_block)?;
+            }
             changed_accounts.insert(account_id, shard_acc);
         }
 
