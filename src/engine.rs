@@ -81,6 +81,8 @@ pub struct Engine {
     last_known_mc_block_seqno: AtomicU32,
     last_known_keyblock_seqno: AtomicU32,
     will_validate: AtomicBool,
+ 
+    shard_states_cache: lockfree::map::Map<BlockIdExt, ShardStateStuff>,
 }
 
 struct DownloadContext<'a, T> {
@@ -245,6 +247,7 @@ impl Engine {
             last_known_mc_block_seqno: AtomicU32::new(0),
             last_known_keyblock_seqno: AtomicU32::new(0),
             will_validate: AtomicBool::new(false),
+            shard_states_cache: Default::default(),
         });
 
         let full_node_service: Arc<dyn QueriesConsumer> = Arc::new(
@@ -282,6 +285,10 @@ impl Engine {
 
     pub fn shard_states(&self) -> &lockfree::map::Map<ShardIdent, ShardStateStuff> {
         &self.shard_states
+    }
+
+    pub fn shard_states_cache(&self) -> &lockfree::map::Map<BlockIdExt, ShardStateStuff> {
+        &self.shard_states_cache
     }
 
     pub fn set_init_mc_block_id(&self, init_mc_block_id: &BlockIdExt) {

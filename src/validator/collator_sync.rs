@@ -1373,7 +1373,7 @@ impl Collator {
                         collator_data.register_shard_block_creators(sh_bd.get_creator_list(chain_len)?)?;
                         collator_data.update_shards_max_end_lt(end_lt);
                         log::debug!("{}: updated top shard block information with {}",
-                            self.collated_block_descr,  sh_bd.proof_for());
+                            self.collated_block_descr, sh_bd.proof_for());
                         tb_act += 1;
                         collator_data.add_top_block_descriptor(sh_bd.clone());
                     }

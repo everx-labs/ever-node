@@ -3,9 +3,9 @@
 use adnl::common::Wait;
 use std::{
     cmp::{min, max},
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, BinaryHeap},
     ops::Deref,
-    sync::{atomic::{Ordering, AtomicU64}, Arc},
+    sync::{atomic::{AtomicU64, Ordering}, Arc},
 };
 use crate::{
     CHECK,
@@ -184,13 +184,42 @@ impl PrevData {
 }
 
 #[derive(Debug)]
-enum NewMessage {
+enum AsyncMessage {
     Recover(Message),
     Mint(Message),
     Ext(Message),
     Int(MsgEnqueueStuff, bool),
     New(MsgEnvelope, Message, Cell),
     TickTock(TransactionTickTock),
+}
+
+#[derive(Eq, PartialEq)]
+struct NewMessage {
+    lt_hash: (u64, UInt256),
+    msg: Message,
+    tr_cell: Cell,
+}
+
+impl NewMessage {
+    fn new(lt_hash: (u64, UInt256), msg: Message, tr_cell: Cell) -> Self {
+        Self {
+            lt_hash,
+            msg,
+            tr_cell,
+        }
+    }
+}
+
+impl Ord for NewMessage {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.lt_hash.cmp(&self.lt_hash)
+    }
+}
+
+impl PartialOrd for NewMessage {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 struct CollatorData {
@@ -202,7 +231,7 @@ struct CollatorData {
     shard_fees: ShardFees,
     shard_top_block_descriptors: Vec<Arc<TopBlockDescrStuff>>,
     block_create_count: HashMap<UInt256, u64>,
-    new_messages: Vec<(Message, Cell)>,
+    new_messages: BinaryHeap<NewMessage>, // using for priority queue
     to_delay: Vec<UInt256>, // list of not compleeted external messages
     complete: Vec<UInt256>, // list of compleeted external messages
     usage_tree: UsageTree,
@@ -267,7 +296,7 @@ impl CollatorData {
             shard_fees: ShardFees::default(),
             shard_top_block_descriptors: Vec::new(),
             block_create_count: HashMap::new(),
-            new_messages: Vec::new(),
+            new_messages: Default::default(),
             to_delay: Default::default(),
             complete: Default::default(),
             usage_tree,
@@ -348,10 +377,13 @@ impl CollatorData {
         if let Some(in_msg) = in_msg_opt {
             self.add_in_msg_to_block(in_msg)?;
         }
-        transaction.iterate_out_msgs(|msg| {
+        transaction.out_msgs.iterate_slices(|slice| {
+            let msg_cell = slice.reference(0)?;
+            let msg_hash = msg_cell.repr_hash();
+            let msg = Message::construct_from_cell(msg_cell)?;
             match msg.header() {
-                CommonMsgInfo::IntMsgInfo(_) => {
-                    self.new_messages.push((msg, tr_cell.clone()));
+                CommonMsgInfo::IntMsgInfo(info) => {
+                    self.new_messages.push(NewMessage::new((info.created_lt, msg_hash), msg, tr_cell.clone()));
                 }
                 CommonMsgInfo::ExtOutMsgInfo(_) => {
                     let out_msg = OutMsg::external(&msg, tr_cell.clone())?;
@@ -420,7 +452,6 @@ impl CollatorData {
         requeue: bool,
     ) -> Result<()> {
         self.transit_count += 1;
-        log::debug!("enqueue_transit_message {}", enq);
         let enqueued_lt = self.start_lt()?;
         let (new_enq, transit_fee) = enq.next_hop(shard, enqueued_lt, self.config.raw_config())?;
         let in_msg = InMsg::transit(enq.envelope(), new_enq.envelope(), transit_fee)?;
@@ -563,7 +594,6 @@ impl CollatorData {
 
     fn dequeue_message(&mut self, enq: MsgEnqueueStuff, deliver_lt: u64, short: bool) -> Result<()> {
         self.dequeue_count += 1;
-        log::debug!("dequeue message: {:x}", enq.message_hash());
         let out_msg = OutMsg::dequeue(enq.envelope(), deliver_lt, short)?;
         self.add_out_msg_to_block(enq.message_hash(), &out_msg)
     }
@@ -584,13 +614,13 @@ struct ExecutionManager {
     changed_accounts: HashMap<
         AccountId, 
         (
-            tokio::sync::mpsc::UnboundedSender<(Arc<NewMessage>, Arc<AtomicU64>)>,
+            tokio::sync::mpsc::UnboundedSender<(Arc<AsyncMessage>, Arc<AtomicU64>)>,
             tokio::task::JoinHandle<Result<ShardAccountStuff>>
         )
     >,
     
-    receive_tr: tokio::sync::mpsc::UnboundedReceiver<Option<(Arc<NewMessage>, Result<Transaction>, u64)>>,
-    wait_tr: Arc<Wait<(Arc<NewMessage>, Result<Transaction>, u64)>>,
+    receive_tr: tokio::sync::mpsc::UnboundedReceiver<Option<(Arc<AsyncMessage>, Result<Transaction>, u64)>>,
+    wait_tr: Arc<Wait<(Arc<AsyncMessage>, Result<Transaction>, u64)>>,
     max_collate_threads: usize,
     libraries: Libraries,
     gen_utime: u32,
@@ -689,7 +719,7 @@ impl ExecutionManager {
     pub async fn execute(
         &mut self,
         account_id: AccountId,
-        msg: NewMessage,
+        msg: AsyncMessage,
         prev_data: &PrevData,
         collator_data: &mut CollatorData,
     ) -> Result<()> {
@@ -722,7 +752,7 @@ impl ExecutionManager {
         &self,
         account_addr: AccountId,
         accounts: &ShardAccounts,
-    ) -> Result<(tokio::sync::mpsc::UnboundedSender<(Arc<NewMessage>, Arc<AtomicU64>)>, tokio::task::JoinHandle<Result<ShardAccountStuff>>)> {
+    ) -> Result<(tokio::sync::mpsc::UnboundedSender<(Arc<AsyncMessage>, Arc<AtomicU64>)>, tokio::task::JoinHandle<Result<ShardAccountStuff>>)> {
         log::trace!("{}: start_account_job: {:x}", self.collated_block_descr, account_addr);
         let mut account = ShardAccountStuff::from_shard_state(
             account_addr,
@@ -737,10 +767,10 @@ impl ExecutionManager {
         let wait_tr = self.wait_tr.clone();
         let config = self.config.clone();
         let libraries = self.libraries.clone().inner();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<(Arc<NewMessage>, Arc::<AtomicU64>)>();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<(Arc<AsyncMessage>, Arc::<AtomicU64>)>();
         let handle = tokio::spawn(async move {
             while let Some((new_msg, lt)) = receiver.recv().await {
-                log::trace!("{}: new message for {}", collated_block_descr, account.account_addr());
+                log::trace!("{}: new message for {:x}", collated_block_descr, account.account_addr());
                 let now = std::time::Instant::now();
                 let config = config.clone(); // TODO: use Arc
                 let next_lt = max(
@@ -766,7 +796,7 @@ impl ExecutionManager {
                 }
                 let duration = now.elapsed().as_micros() as u64;
                 total_trans_duration.fetch_add(duration, Ordering::Relaxed);
-                log::trace!("{}: account {} TIME execute {}μ;", 
+                log::trace!("{}: account {:x} TIME execute {}μ;", 
                     collated_block_descr, account.account_addr(), duration);
 
                 wait_tr.respond(Some((new_msg, transaction_res, lt.load(Ordering::Relaxed))));
@@ -777,7 +807,7 @@ impl ExecutionManager {
     }
 
     fn execute_new_message(
-        new_msg: &NewMessage,
+        new_msg: &AsyncMessage,
         lt: Arc::<AtomicU64>,
         account_root: &mut Cell,
         libraries: HashmapE,
@@ -787,16 +817,16 @@ impl ExecutionManager {
         debug: bool
     ) -> Result<Transaction> {
         let (executor, msg_opt): (Box<dyn TransactionExecutor>, _) = match new_msg {
-            NewMessage::Int(enq, _our) => {
+            AsyncMessage::Int(enq, _our) => {
                 (Box::new(OrdinaryTransactionExecutor::new(config)), Some(enq.message()))
             }
-            NewMessage::New(_env, msg, _tr_cell) => {
+            AsyncMessage::New(_env, msg, _tr_cell) => {
                 (Box::new(OrdinaryTransactionExecutor::new(config)), Some(msg))
             }
-            NewMessage::Recover(msg) | NewMessage::Mint(msg) | NewMessage::Ext(msg) => {
+            AsyncMessage::Recover(msg) | AsyncMessage::Mint(msg) | AsyncMessage::Ext(msg) => {
                 (Box::new(OrdinaryTransactionExecutor::new(config)), Some(msg))
             }
-            NewMessage::TickTock(tt) => {
+            AsyncMessage::TickTock(tt) => {
                 (Box::new(TickTockTransactionExecutor::new(config, tt.clone())), None)
             }
         };
@@ -814,12 +844,12 @@ impl ExecutionManager {
 
     fn finalize_transaction(
         &mut self,
-        new_msg: Arc<NewMessage>,
+        new_msg: Arc<AsyncMessage>,
         transaction_res: Result<Transaction>,
         max_lt: u64,
         collator_data: &mut CollatorData
     ) -> Result<()> {
-        if let NewMessage::Ext(ref msg) = new_msg.deref() {
+        if let AsyncMessage::Ext(ref msg) = new_msg.deref() {
             if let Err(err) = transaction_res {
                 let msg_id = msg.serialize()?.repr_hash();
                 log::warn!("{} external message {:x} transaction error: {}",
@@ -832,7 +862,7 @@ impl ExecutionManager {
         log::trace!("{}: finalize_transaction {}, {:x}",
             self.collated_block_descr, tr.lt, tr.account_addr);
         let in_msg_opt = match new_msg.deref() {
-            NewMessage::Int(enq, our) => {
+            AsyncMessage::Int(enq, our) => {
                 let in_msg = InMsg::finally(enq.envelope(), &tr, enq.fwd_fee_remaining().clone())?;
                 if *our {
                     let out_msg = OutMsg::dequeue_immediately(enq.envelope(), &in_msg)?;
@@ -841,23 +871,23 @@ impl ExecutionManager {
                 }
                 Some(in_msg)
             }
-            NewMessage::New(env, _msg, tr_cell) => {
+            AsyncMessage::New(env, _msg, tr_cell) => {
                 let in_msg = InMsg::immediatelly(&env, &tr, env.fwd_fee_remaining().clone())?;
                 let out_msg = OutMsg::immediately(&env, tr_cell.clone(), &in_msg)?;
                 collator_data.add_out_msg_to_block(env.message_cell().repr_hash(), &out_msg)?;
                 Some(in_msg)
             }
-            NewMessage::Mint(msg) |
-            NewMessage::Recover(msg) => {
+            AsyncMessage::Mint(msg) |
+            AsyncMessage::Recover(msg) => {
                 let env = MsgEnvelope::with_message_and_fee(&msg, Grams::default())?;
                 Some(InMsg::immediatelly(&env, &tr, Grams::default())?)
             }
-            NewMessage::Ext(msg) => {
+            AsyncMessage::Ext(msg) => {
                 let in_msg = InMsg::external(&msg, &tr)?;
                 collator_data.complete.push(in_msg.message_cell()?.repr_hash());
                 Some(in_msg)
             }
-            NewMessage::TickTock(_) => None
+            AsyncMessage::TickTock(_) => None
         };
         if tr.orig_status != tr.end_status {
             log::info!(
@@ -873,8 +903,8 @@ impl ExecutionManager {
         collator_data.update_lt(lt);
 
         match new_msg.deref() {
-            NewMessage::Mint(_) => collator_data.mint_msg = in_msg_opt,
-            NewMessage::Recover(_) => collator_data.recover_create_msg = in_msg_opt,
+            AsyncMessage::Mint(_) => collator_data.mint_msg = in_msg_opt,
+            AsyncMessage::Recover(_) => collator_data.recover_create_msg = in_msg_opt,
             _ => ()
         }
         collator_data.block_full |= !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
@@ -1003,7 +1033,7 @@ impl Collator {
     }
 
     pub async fn collate(self) -> Result<(BlockCandidate, ShardStateUnsplit)> {
-        log::trace!(
+        log::info!(
             "{}: COLLATE min_mc_block_id.seqno = {}, prev_blocks_ids: {} {}",
             self.collated_block_descr,
             self.min_mc_block_id.seq_no(),
@@ -1067,8 +1097,8 @@ impl Collator {
         -> Result<(McData, PrevData, CollatorData)> {
         log::trace!("{}: prepare_data", self.collated_block_descr);
 
-        CHECK!(imported_data.prev_states.len() == self.prev_blocks_ids.len());
         CHECK!(imported_data.prev_states.len() == 1 + self.after_merge as usize);
+        CHECK!(imported_data.prev_states.len() == self.prev_blocks_ids.len());
 
         CHECK!(imported_data.mc_state.block_id(), inited);
 
@@ -1247,6 +1277,7 @@ impl Collator {
         let short = mc_data.config().has_capability(GlobalCapabilities::CapShortDequeue);
         output_queue_manager.clean_out_msg_queue(
             |message, root| if let Some((enq, deliver_lt)) = message {
+                log::debug!("{}: dequeue message: {:x}", self.collated_block_descr, enq.message_hash());
                 collator_data.dequeue_message(enq, deliver_lt, short)?;
                 collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, false)?;
                 collator_data.block_full |= !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
@@ -1472,9 +1503,6 @@ impl Collator {
 
     async fn request_neighbor_msg_queues(&self, mc_data: &McData, prev_data: &PrevData, collator_data: &mut CollatorData) -> Result<MsgQueueManager> {
         log::trace!("{}: request_neighbor_msg_queues", self.collated_block_descr);
-
-        // &ValidatorManager::wait_block_message_queue_short
-
         MsgQueueManager::init(
             self.engine.deref(),
             self.shard.clone(),
@@ -1728,7 +1756,7 @@ impl Collator {
 
             if !collator_data.value_flow.minted.is_zero()? && mc_data.config().minter_address().is_err() {
                 log::warn!("{}: minting of {} disabled: no minting smart contract defined",
-                self.collated_block_descr, collator_data.value_flow.minted);
+                    self.collated_block_descr, collator_data.value_flow.minted);
                 collator_data.value_flow.minted = CurrencyCollection::default();
             }
         } else {
@@ -1821,7 +1849,7 @@ impl Collator {
         if (tick_tock.tock && tock) || (tick_tock.tick && !tock) {
             let tt = if tock {TransactionTickTock::Tock} else {TransactionTickTock::Tick};
             // different accounts can produce messages with same LT which cause order violation
-            exec_manager.execute(account_id, NewMessage::TickTock(tt), prev_data, collator_data).await?;
+            exec_manager.execute(account_id, AsyncMessage::TickTock(tt), prev_data, collator_data).await?;
         }
 
         Ok(())
@@ -1845,7 +1873,7 @@ impl Collator {
         self.create_special_transaction(
             account_id,
             collator_data.value_flow.recovered.clone(),
-            |msg| NewMessage::Recover(msg),
+            |msg| AsyncMessage::Recover(msg),
             prev_data,
             collator_data,
             exec_manager
@@ -1855,7 +1883,7 @@ impl Collator {
         self.create_special_transaction(
             account_id,
             collator_data.value_flow.minted.clone(),
-            |msg| NewMessage::Mint(msg),
+            |msg| AsyncMessage::Mint(msg),
             prev_data,
             collator_data,
             exec_manager
@@ -1871,7 +1899,7 @@ impl Collator {
         &self,
         account_id: AccountId,
         amount: CurrencyCollection,
-        f: impl FnOnce(Message) -> NewMessage,
+        f: impl FnOnce(Message) -> AsyncMessage,
         prev_data: &PrevData,
         collator_data: &mut CollatorData,
         exec_manager: &mut ExecutionManager,
@@ -1923,11 +1951,12 @@ impl Collator {
                 let to_us = self.shard.contains_full_prefix(&enq.dst_prefix());
                 if to_us {
                     let account_id = enq.dst_account_id()?;
-                    let msg = NewMessage::Int(enq, our);
+                    let msg = AsyncMessage::Int(enq, our);
                     exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
                 } else {
                     // println!("{:x} {:#}", key, enq);
                     // println!("cur: {}, dst: {}", enq.cur_prefix(), enq.dst_prefix());
+                    log::debug!("{}: enqueue_transit_message {:x}", self.collated_block_descr, enq.message_hash());
                     collator_data.enqueue_transit_message(&self.shard, &key, &enq, our)?;
                     if our {
                         collator_data.del_out_msg_from_state(&key)?;
@@ -1995,7 +2024,7 @@ impl Collator {
                     break
                 }
                 let (_, account_id) = header.dst.extract_std_address(true)?;
-                let msg = NewMessage::Ext(msg.deref().clone());
+                let msg = AsyncMessage::Ext(msg.deref().clone());
                 exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
             } else {
                 collator_data.to_delay.push(id);
@@ -2013,9 +2042,14 @@ impl Collator {
     ) -> Result<()> {
         log::trace!("{}: process_new_messages", self.collated_block_descr);
 
-        loop {
-            while !collator_data.new_messages.is_empty() {
-                let (msg, tr_cell) = collator_data.new_messages.remove(0);
+        while !collator_data.new_messages.is_empty() {
+
+            // In the iteration we execute only existing messages.
+            // Newly generating messages will be executed next itaration (only after waiting).
+
+            let mut new_messages = BinaryHeap::new();
+            std::mem::swap(&mut collator_data.new_messages, &mut new_messages);
+            while let Some(NewMessage{ lt_hash: _, msg, tr_cell }) = new_messages.pop() {
                 let info = msg.int_header().ok_or_else(|| error!("message is not internal"))?;
                 let fwd_fee = info.fwd_fee().clone();
                 enqueue_only |= collator_data.block_full;
@@ -2038,15 +2072,11 @@ impl Collator {
                     collator_data.update_last_proc_int_msg((info.created_lt, hash))?;
                     let account_id = msg.int_dst_account_id().unwrap_or_default();
                     let env = MsgEnvelope::with_message_and_fee(&msg, fwd_fee)?;
-                    let msg = NewMessage::New(env, msg, tr_cell);
+                    let msg = AsyncMessage::New(env, msg, tr_cell);
                     exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
                 };
             }
-            // new messages can appear while transactions execution, check it
-            if !exec_manager.wait_one_transaction(collator_data).await? &&
-                collator_data.new_messages.is_empty() {
-                break;
-            }
+            exec_manager.wait_transactions(collator_data).await?;
         }
 
         Ok(())
@@ -2135,7 +2165,7 @@ impl Collator {
         for (account_id, (sender, handle)) in exec_manager.changed_accounts.drain() {
             std::mem::drop(sender);
             let shard_acc = handle.await
-                .map_err(|err| error!("account {} thread didn't finish: {}", account_id, err))??;
+                .map_err(|err| error!("account {:x} thread didn't finish: {}", account_id, err))??;
             let account = shard_acc.shard_account().read_account()?;
             if let Some(addr) = &config_addr {
                 if addr == &account_id {

@@ -241,7 +241,13 @@ impl EngineOperations for Engine {
     }
 
     async fn load_state(&self, block_id: &BlockIdExt) -> Result<ShardStateStuff> {
-        self.db().load_shard_state_dynamic(block_id)
+        if let Some (kv) = self.shard_states_cache().get(block_id) {
+            Ok(kv.val().clone())
+        } else {
+            let state = self.db().load_shard_state_dynamic(block_id)?;
+            self.shard_states_cache().insert(block_id.clone(), state.clone());
+            Ok(state)
+        }
     }
 
     async fn load_persistent_state_size(&self, block_id: &BlockIdExt) -> Result<u64> {
@@ -274,6 +280,9 @@ impl EngineOperations for Engine {
             state.block_id(),
             async { Ok(state.clone()) }
         ).await?;
+        if self.shard_states_cache().get(handle.id()).is_none() {
+            self.shard_states_cache().insert(handle.id().clone(), state.clone());
+        }
         self.db().store_shard_state_dynamic(handle, state)
     }
     async fn store_zerostate(&self, handle: &BlockHandle, state: &ShardStateStuff, state_bytes: &[u8]) -> Result<()> {
