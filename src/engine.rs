@@ -2,7 +2,7 @@ use crate::{
     define_db_prop,
     block::{convert_block_id_ext_api2blk, BlockStuff, BlockIdExtExtention},
     block_proof::BlockProofStuff,
-    config::{TonNodeConfig, KafkaConsumerConfig},
+    config::{TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig},
     db::{BlockHandle, InternalDb, InternalDbConfig, InternalDbImpl, NodeState},
     engine_traits::{ExternalDb, OverlayOperations, EngineOperations, PrivateOverlayOperations},
     full_node::{
@@ -81,6 +81,8 @@ pub struct Engine {
     last_known_mc_block_seqno: AtomicU32,
     last_known_keyblock_seqno: AtomicU32,
     will_validate: AtomicBool,
+
+    test_bundles_config: CollatorTestBundlesGeneralConfig,
  
     shard_states_cache: lockfree::map::Map<BlockIdExt, ShardStateStuff>,
 }
@@ -208,6 +210,7 @@ impl Engine {
         let db_config = InternalDbConfig { db_directory: db_directory.to_string() };
         let db = Arc::new(InternalDbImpl::new(db_config).await?);
         let global_config = general_config.load_global_config()?;
+        let test_bundles_config = general_config.test_bundles_config().clone();
         let zero_state_id = global_config.zero_state().expect("check zero state settings");
         let mut init_mc_block_id = global_config.init_block()?.unwrap_or_else(|| zero_state_id.clone());
         if let Ok(block_id) = InitMcBlockId::load_from_db(db.deref()) {
@@ -247,6 +250,7 @@ impl Engine {
             last_known_mc_block_seqno: AtomicU32::new(0),
             last_known_keyblock_seqno: AtomicU32::new(0),
             will_validate: AtomicBool::new(false),
+            test_bundles_config,
             shard_states_cache: Default::default(),
         });
 
@@ -344,6 +348,10 @@ impl Engine {
 
     pub fn update_last_known_keyblock_seqno(&self, seqno: u32) -> bool {
         self.last_known_keyblock_seqno.fetch_max(seqno, Ordering::SeqCst) < seqno
+    }
+
+    pub fn test_bundles_config(&self) -> &CollatorTestBundlesGeneralConfig {
+        &self.test_bundles_config
     }
 
     pub async fn download_and_apply_block_worker(self: Arc<Self>, handle: &BlockHandle, mc_seq_no: u32, pre_apply: bool) -> Result<()> {

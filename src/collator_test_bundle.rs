@@ -40,6 +40,8 @@ struct CollatorTestBundleIndexJson {
     contains_ethalon: bool,
     #[serde(default)]
     contains_candidate: bool,
+    #[serde(default)]
+    notes: String,
 }
 
 impl TryFrom<CollatorTestBundleIndexJson> for CollatorTestBundleIndex {
@@ -80,6 +82,7 @@ impl TryFrom<CollatorTestBundleIndexJson> for CollatorTestBundleIndex {
             fake: value.fake,
             contains_ethalon: value.contains_ethalon,
             contains_candidate: value.contains_candidate,
+            notes: value.notes,
         })
     }
 }
@@ -104,6 +107,7 @@ impl From<&CollatorTestBundleIndex> for CollatorTestBundleIndexJson {
             fake: value.fake,
             contains_ethalon: value.contains_ethalon,
             contains_candidate: value.contains_candidate,
+            notes: Default::default(),
         }
     }
 }
@@ -123,6 +127,7 @@ struct CollatorTestBundleIndex {
     fake: bool,
     contains_ethalon: bool,
     contains_candidate: bool,
+    notes: String,
 }
 
 impl CollatorTestBundleIndex {
@@ -197,7 +202,9 @@ impl CollatorTestBundle {
             fake: true,
             contains_ethalon: false,
             contains_candidate: false,
+            notes: Default::default(),
         };
+
 
         Ok(Self {
             index,
@@ -336,6 +343,7 @@ impl CollatorTestBundle {
             fake: true,
             contains_ethalon: false,
             contains_candidate: false,
+            notes: Default::default(),
         };
 
         Ok(Self {
@@ -474,6 +482,7 @@ impl CollatorTestBundle {
             fake: true,
             contains_ethalon: false,
             contains_candidate: true,
+            notes: Default::default(),
         };
 
         Ok(Self {
@@ -669,6 +678,7 @@ impl CollatorTestBundle {
             fake: true,
             contains_ethalon: true,
             contains_candidate: false,
+            notes: Default::default(),
         };
 
         Ok(Self {
@@ -687,13 +697,7 @@ impl CollatorTestBundle {
 
     pub fn save(&self, path: &str) -> Result<()> {
         // 📂 root directory
-        let path = format!(
-            "{}/{}.{}_{}_collator_test_bundle",
-            path,
-            self.index.id.shard().workchain_id(),
-            self.index.id.shard().shard_prefix_as_str_with_tag(),
-            self.index.id.seq_no(),
-        );
+        let path = Self::build_filename(path, &self.index.id);
         log::info!("Saving {}", path);
         std::fs::create_dir_all(&path)?;
 
@@ -964,6 +968,27 @@ impl CollatorTestBundle {
     pub fn created_by(&self) -> &UInt256 { &self.index.created_by }
     pub fn rand_seed(&self) -> Option<&UInt256> { self.index.rand_seed.as_ref() }
     pub fn candidate(&self) -> Option<&BlockCandidate> { self.candidate.as_ref() }
+    pub fn notes(&self) -> &str { &self.index.notes }
+    pub fn set_notes(&mut self, notes: String) { self.index.notes = notes }
+
+    pub fn exists(path: &str, block_id: &BlockIdExt) -> bool {
+        let path = Self::build_filename(path, block_id);
+        std::path::Path::new(&path).exists()
+    }
+
+    fn build_filename(prefix: &str, block_id: &BlockIdExt) -> String {
+        format!(
+            "{}/{}.{}_{}_{:x}{:x}{:x}{:x}_collator_test_bundle",
+            prefix,
+            block_id.shard().workchain_id(),
+            block_id.shard().shard_prefix_as_str_with_tag(),
+            block_id.seq_no(),
+            block_id.root_hash().as_slice()[0],
+            block_id.root_hash().as_slice()[1],
+            block_id.root_hash().as_slice()[2],
+            block_id.root_hash().as_slice()[3],
+        )
+    }
 }
 
 // Is used instead full node's engine for run tests

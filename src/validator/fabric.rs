@@ -1,6 +1,8 @@
-use std::sync::Arc;
-use std::time::SystemTime;
-
+use std::{
+    sync::Arc,
+    time::SystemTime,
+    ops::Deref,
+};
 use super::validator_utils::{validator_query_candidate_to_validator_block_candidate, pairvec_to_cryptopair_vec};
 use crate::{
     engine_traits::EngineOperations,
@@ -30,7 +32,8 @@ pub async fn run_validate_query(
         seqno + 1
     );
 
-    if cfg!(feature = "build_test_bundles") {
+    if engine.test_bundles_config().validator.is_enable() {
+        let test_bundles_config = &engine.test_bundles_config().validator;
         let query = ValidateQuery::new(
             shard.clone(),
             min_masterchain_block_id.seq_no(),
@@ -42,18 +45,26 @@ pub async fn run_validate_query(
             true,
         );
         if let Err(err) = query.try_validate().await {
-            if format!("{}", err).contains("new masterchain validator list hash") {
+            let err_str = err.to_string();
+            if test_bundles_config.need_to_build_for(&err_str) {
                 let id = block.block_id.clone();
-                match CollatorTestBundle::build_for_validating_block(
-                    shard, min_masterchain_block_id, prev, block, engine).await {
-                    Err(e) => log::error!("Error while test bundle for {} building: {}", id, e),
-                    Ok(b) => {
-                        if let Err(e) = b.save("/shared/") {
-                            log::error!("Error while test bundle for {} saving: {}", id, e);
-                        } else {
-                            log::info!("Built test bundle for {}", id);
+                if !CollatorTestBundle::exists(test_bundles_config.path(), &id) {
+                    let path = test_bundles_config.path().to_string();
+                    let engine = engine.clone();
+                    tokio::spawn(async move {
+                        match CollatorTestBundle::build_for_validating_block(
+                            shard, min_masterchain_block_id, prev, block, engine).await {
+                            Err(e) => log::error!("Error while test bundle for {} building: {}", id, e),
+                            Ok(mut b) => {
+                                b.set_notes(err_str);
+                                if let Err(e) = b.save(&path) {
+                                    log::error!("Error while test bundle for {} saving: {}", id, e);
+                                } else {
+                                    log::info!("Built test bundle for {}", id);
+                                }
+                            }
                         }
-                    }
+                    });
                 }
             }
             return Err(err);
@@ -114,16 +125,49 @@ pub async fn run_collate_query (
     let collator = Collator::new(
         shard,
         min_masterchain_block_id,
-        prev,
+        prev.clone(),
         set,
         UInt256::from(collator_id.pub_key()?),
-        engine,
+        engine.clone(),
         None,
         CollatorSettings::default()
     )?;
-
-    let (candidate, _) = collator.collate().await?;
-
-    Ok(validator_query_candidate_to_validator_block_candidate (collator_id, candidate))
+    match collator.collate().await {
+        Ok((candidate, _)) => {
+            return Ok(validator_query_candidate_to_validator_block_candidate(collator_id, candidate))
+        }
+        Err(err) => {
+            let test_bundles_config = &engine.test_bundles_config().collator;
+            if test_bundles_config.is_enable() {
+                let err_str = err.to_string();
+                if test_bundles_config.need_to_build_for(&err_str) {
+                    let id = BlockIdExt {
+                        shard_id: shard,
+                        seq_no: prev.iter().max_by_key(|id| id.seq_no()).unwrap().seq_no() + 1,
+                        root_hash: UInt256::default(),
+                        file_hash: UInt256::default(),
+                    };
+                    if !CollatorTestBundle::exists(test_bundles_config.path(), &id) {
+                        let path = test_bundles_config.path().to_string();
+                        let engine = engine.clone();
+                        tokio::spawn(async move {
+                            match CollatorTestBundle::build_for_collating_block(prev, engine.deref()).await {
+                                Err(e) => log::error!("Error while test bundle for {} building: {}", id, e),
+                                Ok(mut b) => {
+                                    b.set_notes(err_str);
+                                    if let Err(e) = b.save(&path) {
+                                        log::error!("Error while test bundle for {} saving: {}", id, e);
+                                    } else {
+                                        log::info!("Built test bundle for {}", id);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            return Err(err);
+        }
+    }
 }
 

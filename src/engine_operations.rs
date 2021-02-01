@@ -8,6 +8,7 @@ use crate::{
     error::NodeError,
     network::full_node_client::Attempts,
     types::top_block_descr::TopBlockDescrStuff,
+    config::CollatorTestBundlesGeneralConfig,
 };
 
 use adnl::common::KeyOption;
@@ -481,5 +482,9 @@ impl EngineOperations for Engine {
     // If given mc_seq_no is not equal to last mc seq_no - function fails.
     fn get_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
         self.shard_blocks().get_shard_blocks(mc_seq_no)
+    }
+
+    fn test_bundles_config(&self) -> &CollatorTestBundlesGeneralConfig {
+        Engine::test_bundles_config(self)
     }
 }

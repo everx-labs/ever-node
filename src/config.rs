@@ -58,6 +58,8 @@ pub struct TonNodeConfig {
     control_server: Option<AdnlServerConfigJson>,
     kafka_consumer_config: Option<KafkaConsumerConfig>,
     external_db_config: Option<ExternalDbConfig>,
+    #[serde(default)]
+    test_bundles_config: CollatorTestBundlesGeneralConfig,
     validator_key_ring: Option<HashMap<String, KeyOptionJson>>,
     #[serde(skip)]
     configs_dir: String,
@@ -106,6 +108,42 @@ pub struct ExternalDbConfig {
     pub account_producer: KafkaProducerConfig,
     pub block_proof_producer: KafkaProducerConfig,
     pub bad_blocks_storage: String,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
+#[serde(default)]
+pub struct CollatorTestBundlesConfig {
+    build_for_unknown_errors: bool,
+    known_errors: Vec<String>,
+    build_for_errors: bool,
+    errors: Vec<String>,
+    path: String,
+}
+
+impl CollatorTestBundlesConfig {
+
+    pub fn is_enable(&self) -> bool {
+        self.build_for_unknown_errors ||
+            (self.build_for_errors && self.errors.len() > 0)
+    }
+
+    pub fn need_to_build_for(&self, error: &str) -> bool {
+        self.build_for_unknown_errors &&
+            self.known_errors.iter().all(|e| !error.contains(e))
+        || self.build_for_errors && 
+            self.errors.iter().any(|e| error.contains(e))
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
+#[serde(default)]
+pub struct CollatorTestBundlesGeneralConfig {
+    pub collator: CollatorTestBundlesConfig,
+    pub validator: CollatorTestBundlesConfig,
 }
 
 const LOCAL_HOST: &str = "127.0.0.1";
@@ -209,6 +247,9 @@ impl TonNodeConfig {
     }
     pub fn external_db_config(&self) -> Option<ExternalDbConfig> {
         self.external_db_config.clone()
+    }
+    pub fn test_bundles_config(&self) -> &CollatorTestBundlesGeneralConfig {
+        &self.test_bundles_config
     }
 
     pub fn set_port(&mut self, port: u16) {
