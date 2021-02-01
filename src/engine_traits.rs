@@ -7,6 +7,7 @@ use crate::{
     types::top_block_descr::TopBlockDescrStuff,
     ext_messages::create_ext_message,
     jaeger,
+    config::CollatorTestBundlesGeneralConfig,
 };
 
 use adnl::common::KeyOption;
@@ -328,6 +329,10 @@ pub trait EngineOperations : Sync + Send {
     }
 
     fn set_init_mc_block_id(&self, _init_block_id: &BlockIdExt) {
+        unimplemented!()
+    }
+
+    fn test_bundles_config(&self) -> &CollatorTestBundlesGeneralConfig {
         unimplemented!()
     }
 
