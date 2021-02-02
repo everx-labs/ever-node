@@ -11,7 +11,6 @@ use std::{
     net::ToSocketAddrs,
     sync::Mutex,
 };
-use base64::decode;
 
 use ton_types::types::*;
 use ton_types::{Result, fail};
@@ -38,17 +37,16 @@ pub fn init_jaeger(){
 }
 
 pub fn message_from_kafka_received(kf_key: &[u8]) {
-    let msg_id_b64 = kf_key.to_owned();
+    let msg_id_bytes = kf_key[0..32].to_vec();
     tokio::task::spawn_blocking(move || {
         match JAEGER.lock() {
             Ok(mut helper) => {
-                if let Ok(msg_id_bytes) = decode(&msg_id_b64) {
                     if msg_id_bytes.len() == 32 {
                         let msg_id = UInt256::from(msg_id_bytes).to_hex_string();
                         helper.send_span(msg_id, "kafka msg received".to_string());
+                    } else {
+                        log::error!(target: "jaeger", "Corrupted key field in message from q-server");
                     }
-                } 
-                log::error!(target: "jaeger", "Corrupted key field in message from q-server");
             }
             Err(e) => { log::error!(target: "jaeger", "Mutex locking error: {}", e); }
         }
