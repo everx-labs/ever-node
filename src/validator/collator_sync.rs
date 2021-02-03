@@ -1827,14 +1827,23 @@ impl Collator {
         let lt = shard_acc.lt().clone();
 
         let now = std::time::Instant::now();
-        let mut result = executor.execute(
-            msg_opt,
-            &mut account_root,
-            collator_data.gen_utime,
-            collator_data.start_lt()?,
-            lt.clone(),
-            self.debug
-        );
+        let (mut result, account_root) = {
+            let lt = lt.clone();
+            let gen_utime = collator_data.gen_utime;
+            let block_lt = collator_data.start_lt()?;
+            let debug = self.debug;
+            (
+                executor.execute(
+                    msg_opt,
+                    &mut account_root,
+                    gen_utime,
+                    block_lt,
+                    lt,
+                    debug
+                ),
+                account_root
+            )
+        };
         if let Ok(mut transaction) = result.as_mut() {
             let gas = transaction.gas_used().unwrap_or(0);
             log::trace!("{}: GAS: {} TIME: {}ms execute for {}", 

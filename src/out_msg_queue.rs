@@ -507,7 +507,7 @@ impl MsgQueueManager {
         })
     }
 
-    async fn load_out_queue_info(
+    pub async fn load_out_queue_info(
         engine: &dyn EngineOperations,
         state: &ShardStateStuff,
     ) -> Result<OutMsgQueueInfoStuff> {

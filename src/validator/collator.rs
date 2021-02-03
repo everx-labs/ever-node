@@ -645,7 +645,7 @@ impl ExecutionManager {
         libraries: Libraries,
         config: BlockchainConfig,
         max_collate_threads: usize,
-        collated_block_descr: String,
+        collated_block_descr: Arc<String>,
         debug: bool,
     ) -> Result<Self> {
         log::trace!("{}: ExecutionManager::new", collated_block_descr);
@@ -662,7 +662,7 @@ impl ExecutionManager {
             lt: Arc::new(AtomicU64::new(start_lt + 1)),
             pinned_lt: None,
             total_trans_duration: Arc::new(AtomicU64::new(0)),
-            collated_block_descr: Arc::new(collated_block_descr),
+            collated_block_descr,
             debug,
         })
     }
@@ -925,7 +925,7 @@ pub struct Collator {
     validator_set: ValidatorSet,
 
     // string with format like `-1:8000000000000000, 100500`, is used for logging.
-    collated_block_descr: String,
+    collated_block_descr: Arc<String>,
 
     debug: bool,
     rand_seed: Option<UInt256>,
@@ -956,11 +956,11 @@ impl Collator {
             _ => fail!("`prev_blocks_ids` has invlid length"),
         };
 
-        let collated_block_descr = format!("{}:{}, {}", 
+        let collated_block_descr = Arc::new(format!("{}:{}, {}", 
             shard.workchain_id(), 
             shard.shard_prefix_as_str_with_tag(), 
             new_block_seqno
-        );
+        ));
 
         log::trace!("{}: new", collated_block_descr);
 
@@ -1183,11 +1183,6 @@ impl Collator {
         let mut output_queue_manager = self.request_neighbor_msg_queues(mc_data, prev_data, collator_data).await?;
 
         // delete delivered messages from output queue
-        // preload output_queue_manager
-        // output_queue_manager.prev().out_queue().iterate_with_keys_and_aug(|_key, enq, created_lt| {
-        //     MsgEnqueueStuff::from_enqueue_and_lt(enq, created_lt)?;
-        //     Ok(true)
-        // })?;
         let now = std::time::Instant::now();
         self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager)?;
         log::trace!("{}: TIME: clean_out_msg_queue {}ms;",
