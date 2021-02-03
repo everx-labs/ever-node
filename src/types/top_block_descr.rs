@@ -144,9 +144,10 @@ impl TopBlockDescrStuff {
         self.get_prev_descr(0, index)
     }
 
-    pub fn drain_top_block_descr(self) -> TopBlockDescr {
-        self.tbd
-    }
+// Unused
+//    pub fn drain_top_block_descr(self) -> TopBlockDescr {
+//        self.tbd
+//    }
 
     pub fn top_block_descr(&self) -> &TopBlockDescr {
         &self.tbd

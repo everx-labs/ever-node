@@ -133,9 +133,10 @@ impl MsgEnqueueStuff {
     pub fn message(&self) -> &Message {
         &self.msg
     }
-    pub fn withdraw(self) -> (EnqueuedMsg, MsgEnvelope, Message) {
-        (self.enq, self.env, self.msg)
-    }
+// Unused
+//    pub fn withdraw(self) -> (EnqueuedMsg, MsgEnvelope, Message) {
+//        (self.enq, self.env, self.msg)
+//    }
     pub fn out_msg_key(&self) -> OutMsgQueueKey {
         OutMsgQueueKey::with_account_prefix(&self.next_prefix, self.message_hash())
     }
@@ -148,7 +149,8 @@ impl MsgEnqueueStuff {
     }
     pub fn created_lt(&self) -> u64 { self.created_lt }
     pub fn enqueued_lt(&self) -> u64 { self.enqueued_lt }
-    pub fn src_prefix(&self) -> &AccountIdPrefixFull { &self.src_prefix }
+// Unused 
+//    pub fn src_prefix(&self) -> &AccountIdPrefixFull { &self.src_prefix }
     pub fn dst_prefix(&self) -> &AccountIdPrefixFull { &self.dst_prefix }
     pub fn cur_prefix(&self) -> &AccountIdPrefixFull { &self.cur_prefix }
     pub fn next_prefix(&self) -> &AccountIdPrefixFull { &self.next_prefix }

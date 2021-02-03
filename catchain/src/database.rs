@@ -1,7 +1,7 @@
 pub use super::*;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use ton_node_storage::catchain_persistent_db::*;
+use storage::catchain_persistent_db::*;
 
 /*
     Implementation details for Database

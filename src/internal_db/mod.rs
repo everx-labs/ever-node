@@ -1,32 +1,19 @@
 use crate::{
     block::{convert_block_id_ext_blk2api, convert_block_id_ext_api2blk, BlockStuff},
-    error::NodeError,
-    shard_state::ShardStateStuff,
-    block_proof::BlockProofStuff,
+    block_proof::BlockProofStuff, error::NodeError, shard_state::ShardStateStuff
 };
-
-use std::{
-    path::PathBuf, sync::Arc, cmp::min
-};
-use ton_api::ton::PublicKey;
-use ton_block::{BlockIdExt, AccountIdPrefixFull, UnixTime32};
-use ton_node_storage::{
-    block_handle_db::BlockHandleDb,
-    block_index_db::BlockIndexDb,
-    block_info_db::BlockInfoDb,
-    node_state_db::NodeStateDb,
-    shardstate_db::ShardStateDb,
-    shardstate_db,
-    shardstate_persistent_db::ShardStatePersistentDb,
+use std::{path::PathBuf, sync::Arc, cmp::min};
+use storage::{
+    archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId},
+    block_handle_db::{BlockHandleDb, BlockHandleStorage}, block_index_db::BlockIndexDb, 
+    block_info_db::BlockInfoDb, node_state_db::NodeStateDb, shardstate_db::{GC, ShardStateDb},
+    shardstate_persistent_db::ShardStatePersistentDb, types::{BlockHandle, BlockMeta}
 };
 #[cfg(feature = "read_old_db")]
-use ton_node_storage::block_db::BlockDb;
-
+use storage::block_db::BlockDb;
+use ton_api::ton::PublicKey;
+use ton_block::{Block, BlockIdExt, AccountIdPrefixFull, UnixTime32};
 use ton_types::{error, fail, Result, UInt256};
-
-pub use ton_node_storage::types::BlockHandle;
-use ton_node_storage::archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId};
-use ton_node_storage::block_handle_db::BlockHandleStorage;
 
 pub trait NodeState: serde::Serialize + serde::de::DeserializeOwned {
     fn get_key() -> &'static str;
@@ -53,9 +40,15 @@ macro_rules! define_db_prop {
 
 #[async_trait::async_trait]
 pub trait InternalDb : Sync + Send {
-    fn load_block_handle(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>>;
+    fn create_or_load_block_handle(
+        &self, 
+        id: &BlockIdExt, 
+        block: Option<&Block>,
+        utime: Option<u32>
+    ) -> Result<Arc<BlockHandle>>;
+    fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>>;
 
-    async fn store_block_data(&self, handle: &BlockHandle, block: &BlockStuff) -> Result<()>;
+    async fn store_block_data(&self, block: &BlockStuff) -> Result<Arc<BlockHandle>>;
     async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff>;
     async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>>;
 
@@ -63,33 +56,42 @@ pub trait InternalDb : Sync + Send {
     fn find_block_by_unix_time(&self, acc_pfx: &AccountIdPrefixFull, utime: u32) -> Result<Arc<BlockHandle>>;
     fn find_block_by_lt(&self, acc_pfx: &AccountIdPrefixFull, lt: u64) -> Result<Arc<BlockHandle>>;
 
-    async fn store_block_proof(&self, handle: &BlockHandle, proof: &BlockProofStuff) -> Result<()>;
+    async fn store_block_proof(
+        &self, 
+        id: &BlockIdExt, 
+        handle: Option<Arc<BlockHandle>>, 
+        proof: &BlockProofStuff
+    ) -> Result<Arc<BlockHandle>>;
     async fn load_block_proof(&self, handle: &BlockHandle, is_link: bool) -> Result<BlockProofStuff>;
     async fn load_block_proof_raw(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>>;
 
-    fn store_shard_state_dynamic(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()>;
+    fn store_shard_state_dynamic(
+        &self, 
+        handle: &Arc<BlockHandle>, 
+        state: &ShardStateStuff
+    ) -> Result<()>;
     fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<ShardStateStuff>;
     fn gc_shard_state_dynamic_db(&self) -> Result<usize>;
 
-    async fn store_shard_state_persistent(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()>;
-    async fn store_shard_state_persistent_raw(&self, handle: &BlockHandle, state_data: &[u8]) -> Result<()>;
+    async fn store_shard_state_persistent(&self, handle: &Arc<BlockHandle>, state: &ShardStateStuff) -> Result<()>;
+    async fn store_shard_state_persistent_raw(&self, handle: &Arc<BlockHandle>, state_data: &[u8]) -> Result<()>;
     async fn load_shard_state_persistent_slice(&self, id: &BlockIdExt, offset: u64, length: u64) -> Result<Vec<u8>>;
     async fn load_shard_state_persistent_size(&self, id: &BlockIdExt) -> Result<u64>;
 
-    fn store_block_prev(&self, handle: &BlockHandle, prev: &BlockIdExt) -> Result<()>;
-    fn load_block_prev(&self, id: &BlockIdExt) -> Result<BlockIdExt>;
+    fn store_block_prev1(&self, handle: &Arc<BlockHandle>, prev: &BlockIdExt) -> Result<()>;
+    fn load_block_prev1(&self, id: &BlockIdExt) -> Result<BlockIdExt>;
 
-    fn store_block_prev2(&self, handle: &BlockHandle, prev2: &BlockIdExt) -> Result<()>;
+    fn store_block_prev2(&self, handle: &Arc<BlockHandle>, prev2: &BlockIdExt) -> Result<()>;
     fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt>;
 
-    fn store_block_next1(&self, handle: &BlockHandle, next: &BlockIdExt) -> Result<()>;
+    fn store_block_next1(&self, handle: &Arc<BlockHandle>, next: &BlockIdExt) -> Result<()>;
     fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt>;
 
-    fn store_block_next2(&self, handle: &BlockHandle, next2: &BlockIdExt) -> Result<()>;
+    fn store_block_next2(&self, handle: &Arc<BlockHandle>, next2: &BlockIdExt) -> Result<()>;
     fn load_block_next2(&self, id: &BlockIdExt) -> Result<BlockIdExt>;
 
-    fn store_block_processed_in_ext_db(&self, handle: &BlockHandle) -> Result<()>;
-    async fn store_block_applied(&self, handle: &BlockHandle) -> Result<()>;
+//    fn store_block_processed_in_ext_db(&self, handle: &Arc<BlockHandle>) -> Result<()>;
+    fn store_block_applied(&self, handle: &Arc<BlockHandle>) -> Result<()>;
 
     async fn archive_block(&self, id: &BlockIdExt) -> Result<()>;
 
@@ -98,8 +100,8 @@ pub trait InternalDb : Sync + Send {
 
     fn archive_manager(&self) -> &Arc<ArchiveManager>;
 
-    fn index_handle(&self, handle: &BlockHandle) -> Result<()>;
-    fn assign_mc_ref_seq_no(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()>;
+    fn index_handle(&self, handle: &Arc<BlockHandle>) -> Result<()>;
+    fn assign_mc_ref_seq_no(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<()>;
 }
 
 #[derive(serde::Deserialize)]
@@ -118,7 +120,7 @@ pub struct InternalDbImpl {
     shard_state_persistent_db: ShardStatePersistentDb,
     shard_state_dynamic_db: ShardStateDb,
     //ss_test_map: lockfree::map::Map<BlockIdExt, ShardStateStuff>,
-    shardstate_db_gc: shardstate_db::GC,
+    shardstate_db_gc: GC,
     archive_manager: Arc<ArchiveManager>,
 
     #[cfg(feature = "read_old_db")]
@@ -127,10 +129,11 @@ pub struct InternalDbImpl {
     old_block_proof_db: BlockInfoDb,
     #[cfg(feature = "read_old_db")]
     old_block_proof_link_db: BlockInfoDb,
-
+    
 }
 
 impl InternalDbImpl {
+
     pub async fn new(config: InternalDbConfig) -> Result<Self> {
         let block_index_db = Arc::new(BlockIndexDb::with_paths(
             &Self::build_name(&config.db_directory, "index_db/lt_desc_db"),
@@ -141,12 +144,14 @@ impl InternalDbImpl {
                 &Self::build_name(&config.db_directory, "block_handle_db"),
             )
         );
-        let block_handle_storage = Arc::new(BlockHandleStorage::new(Arc::clone(&block_handle_db)));
+        let block_handle_storage = Arc::new(
+            BlockHandleStorage::with_db(Arc::clone(&block_handle_db))
+        );
         let shard_state_dynamic_db = ShardStateDb::with_paths(
             &Self::build_name(&config.db_directory, "shardstate_db"),
             &Self::build_name(&config.db_directory, "cells_db")
         );
-        let shardstate_db_gc = shardstate_db::GC::new(&shard_state_dynamic_db, Arc::clone(&block_handle_db));
+        let shardstate_db_gc = GC::new(&shard_state_dynamic_db, Arc::clone(&block_handle_db));
         let archive_manager = Arc::new(ArchiveManager::with_data(Arc::new(PathBuf::from(&config.db_directory))).await?);
         Ok(
             Self {
@@ -190,40 +195,71 @@ impl InternalDbImpl {
         format!("{}/{}", dir, name)
     }
 
-    fn store_block_handle(&self, handle: &BlockHandle) -> Result<()> {
-        self.block_handle_storage.store_block_handle(handle)
+    fn store_block_handle(&self, handle: &Arc<BlockHandle>) -> Result<()> {
+        self.block_handle_storage.store_handle(handle)
     }
 
-    fn load_block_handle_impl(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>> {
-        self.block_handle_storage.load_block_handle(id)
+/*
+    fn create_trusted_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
+        log::trace!("create_trusted_block_handle {}", id);
+        self.block_handle_storage.create_handle(id.clone(), BlockMeta::with_data(0, 0, 0, 0, true))
     }
+*/
+
 }
 
 
 #[async_trait::async_trait]
 impl InternalDb for InternalDbImpl {
 
-    fn load_block_handle(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>> {
-        log::trace!("load_block_handle {}", id);
-        let handle = self.load_block_handle_impl(id)?;
-        Ok(handle)
+    fn create_or_load_block_handle(
+        &self, 
+        id: &BlockIdExt, 
+        block: Option<&Block>,
+        utime: Option<u32>
+    ) -> Result<Arc<BlockHandle>> {
+        if let Some(handle) = self.load_block_handle(id)? {
+            return Ok(handle) 
+        }
+        let meta = if let Some(block) = block {
+            BlockMeta::from_block(block)?
+        } else if id.seq_no == 0 {
+            if let Some(utime) = utime {
+                BlockMeta::with_data(0, utime, 0, 0)
+            } else {
+                fail!("Cannot create handle for zero block {} without UNIX time")
+            }
+        } else {
+            fail!("Cannot create handle for block {} without data", id)
+        };
+        if let Some(handle) = self.block_handle_storage.create_handle(id.clone(), meta)? {
+            return Ok(handle)
+        }
+        if let Some(handle) = self.load_block_handle(id)? {
+            return Ok(handle) 
+        }
+        fail!("Cannot create handle for block {}", id)
     }
 
-    async fn store_block_data(&self, handle: &BlockHandle, block: &BlockStuff) -> Result<()> {
+    fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
+        log::trace!("load_block_handle {}", id);
+        self.block_handle_storage.load_handle(id)
+    }
+
+    async fn store_block_data(
+        &self, 
+        block: &BlockStuff
+    ) -> Result<Arc<BlockHandle>> {
         log::trace!("store_block_data {}", block.id());
-        if handle.id() != block.id() {
-            fail!(NodeError::InvalidArg("`block` and `handle` mismatch".to_string()))
-        }
-        if !handle.data_inited() {
-            handle.fetch_block_info(block.block())?;
-            self.store_block_handle(handle)?;
+        let ret = self.create_or_load_block_handle(block.id(), Some(block.block()), None)?;
+        if !ret.has_data() {
             let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(block.id());
             self.archive_manager.add_file(&entry_id, block.data().to_vec()).await?;
-            if !handle.set_data_inited() {
-                self.store_block_handle(handle)?;
+            if ret.set_data() {
+                self.store_block_handle(&ret)?;
             }
         }
-        Ok(())
+        Ok(ret)
     }
 
     async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff> {
@@ -234,7 +270,7 @@ impl InternalDb for InternalDbImpl {
 
     async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
         log::trace!("load_block_data_raw {}", handle.id());
-        if !handle.data_inited() {
+        if !handle.has_data() {
             fail!("This block is not stored yet: {:?}", handle);
         }
         #[cfg(feature = "read_old_db")] {
@@ -249,48 +285,82 @@ impl InternalDb for InternalDbImpl {
 
     fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seq_no: u32) -> Result<Arc<BlockHandle>> {
         log::trace!("find_block_by_seq_no {} {}", acc_pfx, seq_no);
-        self.load_block_handle(&self.block_index_db.get_block_by_seq_no(acc_pfx, seq_no)?)
+        let id = self.block_index_db.get_block_by_seq_no(acc_pfx, seq_no)?;
+        self.load_block_handle(&id)?.ok_or_else(
+            || error!("Cannot find handle for block {}", id) 
+        )
     }
 
     fn find_block_by_unix_time(&self, acc_pfx: &AccountIdPrefixFull, utime: u32) -> Result<Arc<BlockHandle>> {
-        self.load_block_handle(&self.block_index_db.get_block_by_ut(acc_pfx, UnixTime32(utime))?)
+        log::trace!("find_block_by_unix_time {} {}", acc_pfx, utime);
+        let id = self.block_index_db.get_block_by_ut(acc_pfx, UnixTime32(utime))?;
+        self.load_block_handle(&id)?.ok_or_else(
+            || error!("Cannot find handle for block {}", id) 
+        )
     }
 
     fn find_block_by_lt(&self, acc_pfx: &AccountIdPrefixFull, lt: u64) -> Result<Arc<BlockHandle>> {
-        self.load_block_handle(&self.block_index_db.get_block_by_lt(acc_pfx, lt)?)
+        log::trace!("find_block_by_lt {} {}", acc_pfx, lt);
+        let id = self.block_index_db.get_block_by_lt(acc_pfx, lt)?;
+        self.load_block_handle(&id)?.ok_or_else(
+            || error!("Cannot find handle for block {}", id) 
+        )
     }
 
-    async fn store_block_proof(&self, handle: &BlockHandle, proof: &BlockProofStuff) -> Result<()> {
-        if !cfg!(feature = "local_test") {
-            log::trace!("store_block_proof {}", proof.id());
+    async fn store_block_proof(
+        &self, 
+        id: &BlockIdExt,
+        handle: Option<Arc<BlockHandle>>, 
+        proof: &BlockProofStuff
+    ) -> Result<Arc<BlockHandle>> {
 
-            if handle.id() != proof.id() {
-                fail!(NodeError::InvalidArg("`proof` and `handle` mismatch".to_string()))
+        if let Some(handle) = &handle {
+            if handle.id() != id {
+                fail!("Block handle and id mismatch: {} vs {}", handle.id(), id)
             }
+        }
+        if cfg!(feature = "local_test") {
+            if let Some(handle) = handle {
+                Ok(handle)
+            } else if let Some(handle) = self.load_block_handle(id)? {
+                Ok(handle)
+            } else {
+                fail!("Cannot load handle for block {} during test", id)
+            }
+        } else {
+
+            log::trace!("store_block_proof {}", proof.id());
+            if id != proof.id() {
+                fail!(NodeError::InvalidArg("`proof` and `id` mismatch".to_string()))
+            }
+              
+            let handle = if let Some(handle) = handle {
+                handle
+            } else {
+                self.create_or_load_block_handle(id, Some(&proof.virtualize_block()?.0), None)?
+            };
 
             if proof.is_link() {
-                if !handle.proof_link_inited() {
-                    handle.fetch_block_info(&proof.virtualize_block()?.0)?;
-                    self.store_block_handle(handle)?;
-                    let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(handle.id());
+                if !handle.has_proof_link() {
+                    let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(id);
                     self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
-                    if !handle.set_proof_link_inited() {
-                        self.store_block_handle(handle)?;
+                    if handle.set_proof_link() {
+                        self.store_block_handle(&handle)?;
                     }
                 }
             } else {
-                if !handle.proof_inited() {
-                    handle.fetch_block_info(&proof.virtualize_block()?.0)?;
-                    self.store_block_handle(handle)?;
-                    let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Proof(handle.id());
+                if !handle.has_proof() {
+                    let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Proof(id);
                     self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
-                    if !handle.set_proof_inited() {
-                        self.store_block_handle(handle)?;
+                    if handle.set_proof() {
+                        self.store_block_handle(&handle)?;
                     }
                 }
             }
+            Ok(handle)
+
         }
-        Ok(())
+
     }
 
     async fn load_block_proof(&self, handle: &BlockHandle, is_link: bool) -> Result<BlockProofStuff> {
@@ -313,11 +383,10 @@ impl InternalDb for InternalDbImpl {
     #[cfg(not(feature = "read_old_db"))]
     async fn load_block_proof_raw(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>> {
         log::trace!("load_block_proof_raw {} {}", if is_link {"link"} else {""}, handle.id());
-
         let (entry_id, inited) = if is_link {
-            (PackageEntryId::<_, UInt256, PublicKey>::ProofLink(handle.id()), handle.proof_link_inited())
+            (PackageEntryId::<_, UInt256, PublicKey>::ProofLink(handle.id()), handle.has_proof_link())
         } else {
-            (PackageEntryId::<_, UInt256, PublicKey>::Proof(handle.id()), handle.proof_inited())
+            (PackageEntryId::<_, UInt256, PublicKey>::Proof(handle.id()), handle.has_proof())
         };
         if !inited {
             fail!("This proof{} is not in the archive: {:?}", if is_link { "link" } else { "" }, handle);
@@ -325,21 +394,21 @@ impl InternalDb for InternalDbImpl {
         self.archive_manager.get_file(handle, &entry_id).await
     }
 
-    fn store_shard_state_dynamic(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()> {
+    fn store_shard_state_dynamic(
+        &self, 
+        handle: &Arc<BlockHandle>, 
+        state: &ShardStateStuff
+    ) -> Result<()> {
         log::trace!("store_shard_state_dynamic {}", state.block_id());
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
-        if !handle.state_inited() {
-            if !handle.fetched() {
-                handle.fetch_shard_state(state.state())?;
-            }
-            self.shard_state_dynamic_db.put(&state.block_id().into(), state.root_cell().clone())?;
+        if !handle.has_state() {
+            self.shard_state_dynamic_db.put(state.block_id(), state.root_cell().clone())?;
             //self.ss_test_map.insert(state.block_id().clone(), state.clone());
-
-            handle.set_gen_utime(state.shard_state().gen_time())?;
-            handle.set_state_inited();
-            self.store_block_handle(handle)?;
+            if handle.set_state() {
+                self.store_block_handle(handle)?;
+            }
         }
         Ok(())
     }
@@ -347,32 +416,40 @@ impl InternalDb for InternalDbImpl {
     fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<ShardStateStuff> {
         log::trace!("load_shard_state_dynamic {}", id);
 
-        Ok(ShardStateStuff::new(id.clone(), self.shard_state_dynamic_db.get(&id.into())?)?)
+        Ok(ShardStateStuff::new(id.clone(), self.shard_state_dynamic_db.get(id)?)?)
     }
 
     fn gc_shard_state_dynamic_db(&self) -> Result<usize> {
         self.shardstate_db_gc.collect()
     }
 
-    async fn store_shard_state_persistent(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()> {
+    async fn store_shard_state_persistent(
+        &self, 
+        handle: &Arc<BlockHandle>, 
+        state: &ShardStateStuff
+    ) -> Result<()> {
         log::trace!("store_shard_state_persistent {}", state.block_id());
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
-        if !handle.persistent_state_inited() {
-            self.shard_state_persistent_db.put(&state.block_id().into(), &state.serialize()?).await?;
-            if !handle.set_persistent_state_inited() {
+        if !handle.has_persistent_state() {
+            self.shard_state_persistent_db.put(state.block_id(), &state.serialize()?).await?;
+            if handle.set_persistent_state() {
                 self.store_block_handle(handle)?;
             }
         }
         Ok(())
     }
 
-    async fn store_shard_state_persistent_raw(&self, handle: &BlockHandle, state_data: &[u8]) -> Result<()> {
+    async fn store_shard_state_persistent_raw(
+        &self, 
+        handle: &Arc<BlockHandle>, 
+        state_data: &[u8]
+    ) -> Result<()> {
         log::trace!("store_shard_state_persistent_raw {}", handle.id());
-        if !handle.persistent_state_inited() {
-            self.shard_state_persistent_db.put(&handle.id().into(), state_data).await?;
-            if !handle.set_persistent_state_inited() {
+        if !handle.has_persistent_state() {
+            self.shard_state_persistent_db.put(handle.id(), state_data).await?;
+            if handle.set_persistent_state() {
                 self.store_block_handle(handle)?;
             }
         }
@@ -389,43 +466,41 @@ impl InternalDb for InternalDbImpl {
             Ok(vec![])
         } else {
             let length = min(length, full_lenth - offset);
-            let db_slice = self.shard_state_persistent_db.get_slice(&id.into(), offset, length).await?;
+            let db_slice = self.shard_state_persistent_db.get_slice(id, offset, length).await?;
             Ok(db_slice.to_vec())
         }
     }
 
     async fn load_shard_state_persistent_size(&self, id: &BlockIdExt) -> Result<u64> {
         log::trace!("load_shard_state_persistent_slice {}", id);
-        self.shard_state_persistent_db.get_size(&id.into()).await
+        self.shard_state_persistent_db.get_size(id).await
     }
 
-    fn store_block_prev(&self, handle: &BlockHandle, prev: &BlockIdExt) -> Result<()> {
+    fn store_block_prev1(&self, handle: &Arc<BlockHandle>, prev: &BlockIdExt) -> Result<()> {
         log::trace!("store_block_prev {}", handle.id());
-        if !handle.prev1_inited() {
+        if !handle.has_prev1() {
             let value = bincode::serialize(&convert_block_id_ext_blk2api(prev))?;
-            self.prev_block_db.put(&handle.id().into(), &value)?;
-
-            if !handle.set_prev1_inited() {
+            self.prev_block_db.put(handle.id(), &value)?;
+            if handle.set_prev1() {
                 self.store_block_handle(handle)?;
             }
         }
         Ok(())
     }
 
-    fn load_block_prev(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_prev1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         log::trace!("load_block_prev {}", id);
-        let bytes = self.prev_block_db.get(&id.into())?;
+        let bytes = self.prev_block_db.get(id)?;
         let prev = bincode::deserialize::<ton_api::ton::ton_node::blockidext::BlockIdExt>(&bytes)?;
         convert_block_id_ext_api2blk(&prev)
     }
 
-    fn store_block_prev2(&self, handle: &BlockHandle, prev2: &BlockIdExt) -> Result<()> {
+    fn store_block_prev2(&self, handle: &Arc<BlockHandle>, prev2: &BlockIdExt) -> Result<()> {
         log::trace!("store_block_prev2 {}", handle.id());
-        if !handle.prev2_inited() {
+        if !handle.has_prev2() {
             let value = bincode::serialize(&convert_block_id_ext_blk2api(prev2))?;
-            self.prev2_block_db.put(&handle.id().into(), &value)?;
-
-            if !handle.set_prev2_inited() {
+            self.prev2_block_db.put(handle.id(), &value)?;
+            if handle.set_prev2() {
                 self.store_block_handle(handle)?;
             }
         }
@@ -434,18 +509,17 @@ impl InternalDb for InternalDbImpl {
 
     fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         log::trace!("load_block_prev2 {}", id);
-        let bytes = self.prev2_block_db.get(&id.into())?;
+        let bytes = self.prev2_block_db.get(id)?;
         let prev2 = bincode::deserialize::<ton_api::ton::ton_node::blockidext::BlockIdExt>(&bytes)?;
         convert_block_id_ext_api2blk(&prev2)
     }
 
-    fn store_block_next1(&self, handle: &BlockHandle, next: &BlockIdExt) -> Result<()> {
+    fn store_block_next1(&self, handle: &Arc<BlockHandle>, next: &BlockIdExt) -> Result<()> {
         log::trace!("store_block_next1 {}", handle.id());
-        if !handle.next1_inited() {
+        if !handle.has_next1() {
             let value = bincode::serialize(&convert_block_id_ext_blk2api(next))?;
-            self.next_block_db.put(&handle.id().into(), &value)?;
-
-            if !handle.set_next1_inited() {
+            self.next_block_db.put(handle.id(), &value)?;
+            if handle.set_next1() {
                 self.store_block_handle(handle)?;
             }
         }
@@ -454,18 +528,17 @@ impl InternalDb for InternalDbImpl {
 
     fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         log::trace!("load_block_next1 {}", id);
-        let bytes = self.next_block_db.get(&id.into())?;
+        let bytes = self.next_block_db.get(id)?;
         let next = bincode::deserialize::<ton_api::ton::ton_node::blockidext::BlockIdExt>(&bytes)?;
         convert_block_id_ext_api2blk(&next)
     }
 
-    fn store_block_next2(&self, handle: &BlockHandle, next2: &BlockIdExt) -> Result<()> {
+    fn store_block_next2(&self, handle: &Arc<BlockHandle>, next2: &BlockIdExt) -> Result<()> {
         log::trace!("store_block_next2 {}", handle.id());
-        if !handle.next2_inited() {
+        if !handle.has_next2() {
             let value = bincode::serialize(&convert_block_id_ext_blk2api(next2))?;
-            self.next2_block_db.put(&handle.id().into(), &value)?;
-
-            if !handle.set_next2_inited() {
+            self.next2_block_db.put(handle.id(), &value)?;
+            if handle.set_next2() {
                 self.store_block_handle(handle)?;
             }
         }
@@ -474,22 +547,24 @@ impl InternalDb for InternalDbImpl {
 
     fn load_block_next2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         log::trace!("load_block_next2 {}", id);
-        let bytes = self.next2_block_db.get(&id.into())?;
+        let bytes = self.next2_block_db.get(id)?;
         let next2 = bincode::deserialize::<ton_api::ton::ton_node::blockidext::BlockIdExt>(&bytes)?;
         convert_block_id_ext_api2blk(&next2)
     }
 
-    fn store_block_processed_in_ext_db(&self, handle: &BlockHandle) -> Result<()> {
+/*
+    fn store_block_processed_in_ext_db(&self, handle: &Arc<BlockHandle>) -> Result<()> {
         log::trace!("store_block_processed_in_ext_db {}", handle.id());
-        if !handle.set_processed_in_ext_db() {
+        if handle.set_processed_in_ext_db() {
             self.store_block_handle(handle)?;
         }
         Ok(())
     }
+*/
 
-    async fn store_block_applied(&self, handle: &BlockHandle) -> Result<()> {
+    fn store_block_applied(&self, handle: &Arc<BlockHandle>) -> Result<()> {
         log::trace!("store_block_applied {}", handle.id());
-        if !handle.set_applied() {
+        if handle.set_block_applied() {
             self.store_block_handle(&handle)?;
         }
         Ok(())
@@ -498,15 +573,17 @@ impl InternalDb for InternalDbImpl {
     async fn archive_block(&self, id: &BlockIdExt) -> Result<()> {
         log::trace!("archive_block {}", id);
 
-        let handle = self.load_block_handle_impl(id)?;
-        if handle.moved_to_archive() {
+        let handle = self.load_block_handle(id)?.ok_or_else(
+            || error!("Cannot load handle for archiving block {}", id)
+        )?;
+        if handle.is_archived() {
             return Ok(());
         }
 
         self.archive_manager.move_to_archive(
             &handle,
             || {
-                if !handle.set_moved_to_archive() {
+                if handle.set_archived() {
                     self.store_block_handle(&handle)?;
                 }
                 Ok(())
@@ -539,20 +616,18 @@ impl InternalDb for InternalDbImpl {
         &self.archive_manager
     }
 
-    fn index_handle(&self, handle: &BlockHandle) -> Result<()> {
-        if !handle.set_indexed() {
+    fn index_handle(&self, handle: &Arc<BlockHandle>) -> Result<()> {
+        if handle.set_block_indexed() {
             self.block_index_db.add_handle(handle)?;
             self.store_block_handle(&handle)?;
         }
-
         Ok(())
     }
 
-    fn assign_mc_ref_seq_no(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()> {
-        if handle.set_masterchain_ref_seq_no(mc_seq_no) != mc_seq_no {
+    fn assign_mc_ref_seq_no(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<()> {
+        if handle.set_masterchain_ref_seq_no(mc_seq_no)? {
             self.store_block_handle(handle)?;
         }
-
         Ok(())
     }
 

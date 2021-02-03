@@ -1,4 +1,5 @@
-use std::{io::{Write, Cursor}, collections::HashMap, cmp::max, sync::Arc};
+use std::{io::Cursor, collections::HashMap, cmp::max, sync::Arc};
+use std::io::Write;
 use ton_block::{
     Block, BlockIdExt, BlkPrevInfo, Deserializable, ShardIdent, ShardDescr
 };
@@ -77,26 +78,27 @@ impl BlockStuff {
 
     pub fn block(&self) -> &Block { &self.block }
 
-    pub fn id_api(&self) -> ton_api::ton::ton_node::blockidext::BlockIdExt { convert_block_id_ext_blk2api(&self.id) }
+  
     pub fn id(&self) -> &BlockIdExt { &self.id }
 
-    pub fn shard(&self) -> &ShardIdent { self.id.shard() }
 
     pub fn root_cell(&self) -> &Cell { &self.root }
 
     pub fn data(&self) -> &[u8] { &self.data }
 
-    pub fn is_masterchain(&self) -> bool {
-        self.id.shard().is_masterchain()
-    }
+// Unused
+//    pub fn is_masterchain(&self) -> bool {
+//        self.id.shard().is_masterchain()
+//    }
 
     pub fn gen_utime(&self) -> Result<u32> {
         Ok(self.block.read_info()?.gen_utime().0)
     }
 
-    pub fn is_key_block(&self) -> Result<bool> {
-        Ok(self.block.read_info()?.key_block())
-    }
+// Unused
+//    pub fn is_key_block(&self) -> Result<bool> {
+//        Ok(self.block.read_info()?.key_block())
+//    }
 
     pub fn construct_prev_id(&self) -> Result<(BlockIdExt, Option<BlockIdExt>)> {
         let header = self.block.read_info()?;

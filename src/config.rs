@@ -4,10 +4,8 @@ use adnl::{from_slice, client::AdnlClientConfigJson,
     node::{AdnlNodeConfig, AdnlNodeConfigJson},
     server::{AdnlServerConfig, AdnlServerConfigJson}
 };
-use hex::FromHex;
 use std::{
-    collections::HashMap, io::{BufReader}, fs::File,
-    net::{Ipv4Addr, IpAddr, SocketAddr}, path::Path,
+    collections::HashMap, io::{BufReader}, fs::File, path::Path,
     sync::{Arc, atomic::{self, AtomicI32} }
 };
 use ton_api::{
@@ -242,9 +240,8 @@ impl TonNodeConfig {
     pub fn internal_db_path(&self) -> Option<&str> {
         self.internal_db_path.as_ref().map(|path| path.as_str())
     }
-    pub fn set_internal_db_path(&mut self, path: String) {
-        self.internal_db_path.replace(path);
-    }
+    
+  
     pub fn external_db_config(&self) -> Option<ExternalDbConfig> {
         self.external_db_config.clone()
     }
@@ -252,19 +249,17 @@ impl TonNodeConfig {
         &self.test_bundles_config
     }
 
-    pub fn set_port(&mut self, port: u16) {
-        self.port.replace(port);
-    }
  
     pub fn load_global_config(&self) -> Result<TonNodeGlobalConfig> {
-        let name = self.ton_global_config_name.as_ref()
-            .ok_or_else(|| error!("global config informations not found!"))?;
-
+        let name = self.ton_global_config_name.as_ref().ok_or_else(
+            || error!("global config informations not found!")
+        )?;
         let global_config_path = TonNodeConfig::build_path(&self.configs_dir, &name)?;
-
+/*        
         let data = std::fs::read_to_string(global_config_path)
             .map_err(|err| error!("Global config file is not found! : {}", err))?;
-        TonNodeGlobalConfig::from_json(&data)
+*/
+        TonNodeGlobalConfig::from_json_file(global_config_path.as_str())
     }
 
     pub fn remove_all_validator_keys(&mut self) {
@@ -816,11 +811,18 @@ impl KeyRing for NodeConfigHandler {
 }
 
 impl TonNodeGlobalConfig {
+
     /// Constructor from json file
+    pub fn from_json_file(json_file: &str) -> Result<Self> {
+        let ton_node_global_cfg_json = TonNodeGlobalConfigJson::from_json_file(json_file)?;
+        Ok(TonNodeGlobalConfig(ton_node_global_cfg_json))
+    }
+/*
     pub fn from_json(json : &str) -> Result<Self> {
         let ton_node_global_cfg_json = TonNodeGlobalConfigJson::from_json(&json)?;
         Ok(TonNodeGlobalConfig(ton_node_global_cfg_json))
     }
+*/
 
     pub fn zero_state(&self) -> Result<BlockIdExt> {
         self.0.zero_state()
@@ -834,19 +836,16 @@ impl TonNodeGlobalConfig {
         self.0.get_dht_nodes_configs()
     }
 
-    pub fn dht_param_a(&self) -> Result<i32> {
-        self.0.dht.a.ok_or_else(|| error!("Dht param a is not set!"))
-    }
+// Unused
+//    pub fn dht_param_a(&self) -> Result<i32> {
+//        self.0.dht.a.ok_or_else(|| error!("Dht param a is not set!"))
+//    }
 
-    pub fn dht_param_k(&self) -> Result<i32> {
-        self.0.dht.k.ok_or_else(|| error!("Dht param k is not set!"))
-        // let res : Vec<AdnlNodeConfig> = if let Some(ton_node_cfg) = &self.ton_node_global_config_json {
-        //     ton_node_cfg.get_adnl_nodes_configs()?
-        // } else {
-        //     fail!("Global config is not found!")
-        // };
-        // Ok(res)
-    }
+// Unused
+//    pub fn dht_param_k(&self) -> Result<i32> {
+//        self.0.dht.k.ok_or_else(|| error!("Dht param k is not set!"))
+//    }
+
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -945,43 +944,6 @@ struct InitBlock {
     file_hash : Option<String>,
 }
 
-impl Address {
-    pub fn convert_address(&self) -> Result<SocketAddr> {
-       let ip = if let Some(addr) = &self.ip() {
-             IpAddr::V4(Address::convert_ip_addr(addr)?)
-        } else {
-             fail!("IP address not found!");
-        };
-
-        let port = self.port.ok_or_else(|| error!("Port not found!"))?;
-        let addr : SocketAddr = SocketAddr::new(ip, port);
-        Ok(addr)
-    }
-
-    const IP_ADDR_COUNT_FIELDS : usize = 4;
-
-    pub fn convert_ip_addr(intel_format_ip : &i64) -> Result<Ipv4Addr> {
-        let ip_hex = format!("{:08x}", intel_format_ip);
-        let mut ip_hex: Vec<u8> = Vec::from_hex(ip_hex)?;
-
-        ip_hex.reverse();
-        if ip_hex.len() < Address::IP_ADDR_COUNT_FIELDS {
-            fail!("IP address is bad");
-        }
-
-        let address = Ipv4Addr::new(ip_hex[3], ip_hex[2], ip_hex[1], ip_hex[0]);
-         Ok(address)
-    }
-
-    pub fn to_str(&self) -> Result<String> {
-        Ok(self.convert_address()?.to_string())
-    }
-
-    pub fn ip(&self) -> Option<&i64> {
-        self.ip.as_ref()
-    }
-}
-
 pub const PUB_ED25519 : &str = "pub.ed25519";
 
 impl IdDhtNode {
@@ -1009,36 +971,21 @@ impl IdDhtNode {
     }
 }
 
-/*
-impl DhtNode {
-    pub fn convert_to_adnl_node_cfg(&self) -> Result<AdnlNodeConfig> {
-        let key_option = self.id.convert_key()?;
-        //TODO!!!!
-        let address = self.addr_list.addrs[0].to_str()?;
-        let ret = AdnlNodeConfig::from_ip_address_and_key(
-            &address,
-            key_option,
-            NodeNetwork::TAG_DHT_KEY
-        )?;
-        Ok(ret)
-    }
-}
-*/
-
 impl TonNodeGlobalConfigJson {
     
-    pub fn from_json_file(json_file : &str) -> Result<Self> {
+    /// Constructs new configuration from JSON data
+    pub fn from_json_file(json_file: &str) -> Result<Self> {
         let file = File::open(json_file)?;
         let reader = BufReader::new(file);
-        let json_config : TonNodeGlobalConfigJson = serde_json::from_reader(reader)?;
+        let json_config: TonNodeGlobalConfigJson = serde_json::from_reader(reader)?;
         Ok(json_config)
     }
-
-    /// Constructs new configuration from JSON data
-    pub fn from_json(json : &str) -> Result<Self> {
-        let json_config : TonNodeGlobalConfigJson = serde_json::from_str(json)?;
+/*
+    pub fn from_json(json: &str) -> Result<Self> {
+        let json_config: TonNodeGlobalConfigJson = serde_json::from_str(json)?;
         Ok(json_config)
     }
+*/
 
     pub fn get_dht_nodes_configs(&self) -> Result<Vec<DhtNodeConfig>> {
         let mut result = Vec::new();

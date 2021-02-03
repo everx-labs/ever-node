@@ -1,5 +1,5 @@
 use crate::error::NodeError;
-use crate::block::convert_block_id_ext_blk2api;
+//use crate::block::convert_block_id_ext_blk2api;
 
 use std::{io::{Write, Cursor}};
 use ton_block::{
@@ -41,11 +41,6 @@ impl ShardStateStuff {
         Ok(stuff)
     }
 
-    pub fn from_state(shard_state: ShardStateUnsplit) -> Result<Self> {
-        let block_id = BlockIdExt::with_params(shard_state.shard().clone(),
-            shard_state.seq_no(), Default::default(), Default::default());
-        Self::with_state(block_id, shard_state)
-    }
 
     pub fn with_state(block_id: BlockIdExt, shard_state: ShardStateUnsplit) -> Result<Self> {
         let mut stuff = Self::default();
@@ -91,9 +86,11 @@ impl ShardStateStuff {
         Self::new(id, root)
     }
 
-    pub fn shard_state(&self) -> &ShardStateUnsplit { &self.shard_state }
     pub fn state(&self) -> &ShardStateUnsplit { &self.shard_state }
-    pub fn withdraw_state(self) -> ShardStateUnsplit { self.shard_state }
+// Unused
+//    pub fn withdraw_state(self) -> ShardStateUnsplit { 
+//        self.shard_state 
+//    }
     pub fn shard_state_extra(&self) -> Result<&McStateExtra> {
         self.shard_state_extra
             .as_ref()
@@ -105,9 +102,15 @@ impl ShardStateStuff {
 
     pub fn shard(&self) -> &ShardIdent { &self.block_id.shard() }
 
-    pub fn set_shard(&mut self, shard: ShardIdent) { self.block_id.shard_id = shard; }
+// Unused
+//    pub fn set_shard(&mut self, shard: ShardIdent) { 
+//        self.block_id.shard_id = shard; 
+//    }
 
-    pub fn id(&self) -> ton_api::ton::ton_node::blockidext::BlockIdExt { convert_block_id_ext_blk2api(&self.block_id) }
+// Unused
+//    pub fn id(&self) -> ton_api::ton::ton_node::blockidext::BlockIdExt { 
+//        convert_block_id_ext_blk2api(&self.block_id) 
+//    }
 
     pub fn block_id(&self) -> &BlockIdExt { &self.block_id }
 

@@ -61,9 +61,10 @@ impl BlockProofStuff {
     }
 
 
-    pub fn root(&self) -> &Cell {
-        &self.root
-    }
+// Unused
+//    pub fn root(&self) -> &Cell {
+//        &self.root
+//    }
 
     pub fn proof_root(&self) -> &Cell {
         &self.proof.root
@@ -512,7 +513,7 @@ impl BlockProofStuff {
             )));
         }
 
-        let (cur_validator_set, cc_config) = state.shard_state().read_cur_validator_set_and_cc_conf()?;
+        let (cur_validator_set, cc_config) = state.state().read_cur_validator_set_and_cc_conf()?;
 
         let (validators, hash_short) = cur_validator_set.calc_subset(
             &cc_config, 

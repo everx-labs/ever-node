@@ -1,31 +1,30 @@
 use crate::{
-    block::{convert_block_id_ext_api2blk, BlockStuff},
-    block_proof::BlockProofStuff,
-    collator_test_bundle::CollatorTestBundle,
-    config::{KeyRing, NodeConfigHandler},
-    db::{BlockHandle, InternalDb, NodeState},
-    engine::{LastMcBlockId, ShardsClientMcBlockId},
-    engine_traits::EngineOperations,
-    shard_state::ShardStateStuff,
+    block::BlockStuff, block_proof::BlockProofStuff, config::{KeyRing, NodeConfigHandler}, 
+    engine::{LastMcBlockId, ShardsClientMcBlockId}, engine_traits::EngineOperations, 
+    internal_db::{InternalDb, NodeState}, shard_state::ShardStateStuff, 
     validator::validator_utils::validatordescr_to_catchain_node
 };
-use adnl::common::{deserialize, QueryResult, Subscriber, AdnlPeers};
-use adnl::server::{AdnlServer, AdnlServerConfig};
-use std::{
-    convert::TryInto,
-    ops::Deref,
-    sync::Arc,
+use crate::block::convert_block_id_ext_api2blk;
+use crate::collator_test_bundle::CollatorTestBundle;
+use adnl::{
+    common::{deserialize, QueryResult, Subscriber, AdnlPeers}, 
+    server::{AdnlServer, AdnlServerConfig}
 };
+use std::{convert::TryInto, ops::Deref, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use storage::types::BlockHandle;
 use ton_api::ton::{
     self, PublicKey, TLObject,
     engine::validator::{
-        keyhash::KeyHash, onestat::OneStat, 
-        signature::Signature, Success, stats::Stats
+        keyhash::KeyHash, onestat::OneStat, signature::Signature, stats::Stats, Success
     },
-    rpc::engine::validator::ControlQuery,
+    rpc::engine::validator::{
+        AddAdnlId, AddValidatorAdnlAddress, AddValidatorPermanentKey, AddValidatorTempKey, 
+        ControlQuery, ExportPublicKey, GenerateKeyPair, Sign
+    }
 };
-use ton_types::{fail, Result, UInt256};
+use ton_api::ton::rpc::engine::validator::{GetBundle, GetFutureBundle};
 use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent};
+use ton_types::{error, fail, Result, UInt256};
 
 pub(crate) struct DbEngine {
     db: Arc<dyn InternalDb>
@@ -39,17 +38,21 @@ impl DbEngine {
 
 #[async_trait::async_trait]
 impl EngineOperations for DbEngine {
-    fn load_block_handle(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>> {
+    fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
         self.db.load_block_handle(id)
     }
     async fn load_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         self.db.load_block_data(handle).await
     }
-    async fn load_block_proof(&self, handle: &BlockHandle, is_link: bool) -> Result<BlockProofStuff> {
+    async fn load_block_proof(
+        &self, 
+        handle: &Arc<BlockHandle>, 
+        is_link: bool
+    ) -> Result<BlockProofStuff> {
         self.db.load_block_proof(handle, is_link).await
     }
     async fn load_state(&self, block_id: &BlockIdExt) -> Result<ShardStateStuff> {
-        self.db.load_shard_state_dynamic(block_id)
+        self.db.load_shard_state_dynamic(block_id)                    
     }
     async fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seqno: u32) -> Result<Arc<BlockHandle>> {
         self.db.find_block_by_seq_no(acc_pfx, seqno)
@@ -89,11 +92,13 @@ impl ControlServer {
         node_config: Arc<NodeConfigHandler>
     ) -> Result<Self> {
         let ret = Self {
-            adnl: AdnlServer::listen(config, vec![Arc::new(ControlQuerySubscriber::new(engine, key_ring, node_config))]).await? 
+            adnl: AdnlServer::listen(
+                config, 
+                vec![Arc::new(ControlQuerySubscriber::new(engine, key_ring, node_config))]
+            ).await? 
         };
         Ok(ret)
     }
-
     pub fn shutdown(self) {
         self.adnl.shutdown()
     }
@@ -106,12 +111,21 @@ struct ControlQuerySubscriber {
 }
 
 impl ControlQuerySubscriber {
-    fn new(engine: Option<Arc<dyn EngineOperations>>, key_ring: Arc<dyn KeyRing>, config: Arc<NodeConfigHandler>) -> Self {
-        Self {
+    fn new(
+        engine: Option<Arc<dyn EngineOperations>>, 
+        key_ring: Arc<dyn KeyRing>, 
+        config: Arc<NodeConfigHandler>
+    ) -> Self {
+        let ret = Self {
             engine,
             key_ring,
             config
+        };
+        // To get rid of unused engine field warning
+        if ret.engine.is_none() {
+            log::debug!("Running control server without engine access")
         }
+        ret
     }
 
     async fn get_stats(&self) -> Result<Stats> {
@@ -120,9 +134,12 @@ impl ControlQuerySubscriber {
 
             // masterchainblocktime
             let mc_block_id = engine.load_last_applied_mc_block_id().await?;
+            let mc_block_handle = engine.load_block_handle(&mc_block_id)?.ok_or_else(
+                || error!("Cannot load handle for block {}", &mc_block_id)
+            )?;
             stats.0.push(OneStat {
                 key: "masterchainblocktime".to_string(),
-                value: engine.load_block_handle(&mc_block_id)?.gen_utime()?.to_string()
+                value: mc_block_handle.gen_utime()?.to_string()
             });
 
             // masterchainblocknumber
@@ -132,8 +149,8 @@ impl ControlQuerySubscriber {
             });
 
             // timediff
-            let diff = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i32 - 
-                engine.load_block_handle(&mc_block_id)?.gen_utime()? as i32;
+            let diff = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i32 - 
+                mc_block_handle.gen_utime()? as i32;
 
             stats.0.push(OneStat {
                 key: "timediff".to_string(),
@@ -226,62 +243,70 @@ impl Subscriber for ControlQuerySubscriber {
             Ok(query) => deserialize(&query.data[..])?,
             Err(object) => return Ok(QueryResult::Rejected(object))
         };
-        let query = match query.downcast::<ton::rpc::engine::validator::GenerateKeyPair>() {
-            Ok(_) => return QueryResult::consume(self.process_generate_keypair().await?),
+        let query = match query.downcast::<GenerateKeyPair>() {
+            Ok(_) => return QueryResult::consume(
+                self.process_generate_keypair().await?
+            ),
             Err(query) => query
         };
-        let query = match query.downcast::<ton::rpc::engine::validator::ExportPublicKey>() {
-            Ok(query) => {
-                return QueryResult::consume_boxed(self.export_public_key(&query.key_hash.0)?)
-            }
+        let query = match query.downcast::<ExportPublicKey>() {
+            Ok(query) => return QueryResult::consume_boxed(
+                self.export_public_key(&query.key_hash.0)?
+            ),
             Err(query) => query
         };
-        let query = match query.downcast::<ton::rpc::engine::validator::Sign>() {
-            Ok(query) => {
-                return QueryResult::consume(self.process_sign_data(&query.key_hash.0, &query.data)?)
-            }
+        let query = match query.downcast::<Sign>() {
+            Ok(query) => return QueryResult::consume(
+                self.process_sign_data(&query.key_hash.0, &query.data)?
+            ),
             Err(query) => query
         };
-        let query = match query.downcast::<ton::rpc::engine::validator::AddValidatorPermanentKey>() {
-            Ok(query) => {
-                return QueryResult::consume_boxed(
-                    self.add_validator_permanent_key(&query.key_hash.0, query.election_date, query.ttl).await?
-                )
-            }
+        let query = match query.downcast::<AddValidatorPermanentKey>() {
+            Ok(query) => return QueryResult::consume_boxed(
+                self.add_validator_permanent_key(
+                    &query.key_hash.0, query.election_date, query.ttl
+                ).await?
+            ),
             Err(query) => query
         };
-        let query = match query.downcast::<ton::rpc::engine::validator::AddValidatorTempKey>() {
-            Ok(query) => {
-                return QueryResult::consume_boxed(self.add_validator_temp_key(&query.permanent_key_hash.0, &query.key_hash.0, query.ttl)?)
-            }
+        let query = match query.downcast::<AddValidatorTempKey>() {
+            Ok(query) => return QueryResult::consume_boxed(
+                self.add_validator_temp_key(
+                    &query.permanent_key_hash.0, &query.key_hash.0, query.ttl
+                )?
+            ),
             Err(query) => query
         };
-        let query = match query.downcast::<ton::rpc::engine::validator::AddValidatorAdnlAddress>() {
-            Ok(query) => {
-                return QueryResult::consume_boxed(
-                    self.add_validator_adnl_address(&query.permanent_key_hash.0, &query.key_hash.0, query.ttl).await?
-                )
-            }
+        let query = match query.downcast::<AddValidatorAdnlAddress>() {
+            Ok(query) => return QueryResult::consume_boxed(
+                self.add_validator_adnl_address(
+                    &query.permanent_key_hash.0, &query.key_hash.0, query.ttl
+                ).await?
+            ),
             Err(query) => query
         };
-        let query = match query.downcast::<ton::rpc::engine::validator::AddAdnlId>() {
-            Ok(query) => {
-                return QueryResult::consume_boxed(self.add_adnl_address(&query.key_hash.0, query.category)?)
-            }
+        let query = match query.downcast::<AddAdnlId>() {
+            Ok(query) => return QueryResult::consume_boxed(
+                self.add_adnl_address(&query.key_hash.0, query.category)?
+            ),
             Err(query) => query
         };
-        let query = match query.downcast::<ton::rpc::engine::validator::GetBundle>() {
+        let query = match query.downcast::<GetBundle>() {
             Ok(query) => {
                 let block_id = convert_block_id_ext_api2blk(&query.block_id)?;
                 return QueryResult::consume_boxed(self.prepare_bundle(block_id).await?)
-            }
+            },
             Err(query) => query
         };
-        let query = match query.downcast::<ton::rpc::engine::validator::GetFutureBundle>() {
+        let query = match query.downcast::<GetFutureBundle>() {
             Ok(query) => {
-                let prev_block_ids = query.prev_block_ids.iter().filter_map(|id| convert_block_id_ext_api2blk(&id).ok()).collect();
-                return QueryResult::consume_boxed(self.prepare_future_bundle(prev_block_ids).await?)
-            }
+                let prev_block_ids = query.prev_block_ids.iter().filter_map(
+                    |id| convert_block_id_ext_api2blk(&id).ok()
+                ).collect();
+                return QueryResult::consume_boxed(
+                    self.prepare_future_bundle(prev_block_ids).await?
+                )
+            },
             Err(query) => query
         };
         let query = match query.downcast::<ton::rpc::engine::validator::GetStats>() {

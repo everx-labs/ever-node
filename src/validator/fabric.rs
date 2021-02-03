@@ -5,9 +5,8 @@ use std::{
 };
 use super::validator_utils::{validator_query_candidate_to_validator_block_candidate, pairvec_to_cryptopair_vec};
 use crate::{
-    engine_traits::EngineOperations,
-    validator::{collator_sync::Collator, CollatorSettings, validate_query::ValidateQuery},
-    collator_test_bundle::CollatorTestBundle,
+    collator_test_bundle::CollatorTestBundle, engine_traits::EngineOperations, 
+    validator::{collator_sync::Collator, CollatorSettings, validate_query::ValidateQuery}
 };
 use ton_block::{BlockIdExt, ShardIdent, ValidatorSet};
 use ton_types::{Result, UInt256};
@@ -23,6 +22,7 @@ pub async fn run_validate_query(
     engine: Arc<dyn EngineOperations>,
     _timeout: SystemTime,
 ) -> Result<SystemTime> {
+
     let seqno = prev.iter().fold(0, |a, b| u32::max(a, b.seq_no));
     log::info!(
         target: "validator", 
@@ -32,45 +32,9 @@ pub async fn run_validate_query(
         seqno + 1
     );
 
-    if engine.test_bundles_config().validator.is_enable() {
-        let test_bundles_config = &engine.test_bundles_config().validator;
-        let query = ValidateQuery::new(
-            shard.clone(),
-            min_masterchain_block_id.seq_no(),
-            prev.clone(),
-            block.clone(),
-            set,
-            engine.clone(),
-            false,
-            true,
-        );
-        if let Err(err) = query.try_validate().await {
-            let err_str = err.to_string();
-            if test_bundles_config.need_to_build_for(&err_str) {
-                let id = block.block_id.clone();
-                if !CollatorTestBundle::exists(test_bundles_config.path(), &id) {
-                    let path = test_bundles_config.path().to_string();
-                    let engine = engine.clone();
-                    tokio::spawn(async move {
-                        match CollatorTestBundle::build_for_validating_block(
-                            shard, min_masterchain_block_id, prev, block, engine).await {
-                            Err(e) => log::error!("Error while test bundle for {} building: {}", id, e),
-                            Ok(mut b) => {
-                                b.set_notes(err_str);
-                                if let Err(e) = b.save(&path) {
-                                    log::error!("Error while test bundle for {} saving: {}", id, e);
-                                } else {
-                                    log::info!("Built test bundle for {}", id);
-                                }
-                            }
-                        }
-                    });
-                }
-            }
-            return Err(err);
-        }
-    } else {
-        let query = ValidateQuery::new(
+    let test_bundles_config = &engine.test_bundles_config().validator;
+    if !test_bundles_config.is_enable() {
+        ValidateQuery::new(
             shard,
             min_masterchain_block_id.seq_no(),
             prev,
@@ -79,11 +43,54 @@ pub async fn run_validate_query(
             engine,
             false,
             true,
-        );
-        query.try_validate().await?;
+        ).try_validate().await?;
+        return Ok(SystemTime::now())
     }
 
-    Ok(SystemTime::now())
+    let query = ValidateQuery::new(
+        shard.clone(),
+        min_masterchain_block_id.seq_no(),
+        prev.clone(),
+        block.clone(),
+        set,
+        engine.clone(),
+        false,
+        true,
+    );
+
+    if let Err(err) = query.try_validate().await {
+        let err_str = err.to_string();
+        if test_bundles_config.need_to_build_for(&err_str) {
+            let id = block.block_id.clone();
+            if !CollatorTestBundle::exists(test_bundles_config.path(), &id) {
+                let path = test_bundles_config.path().to_string();
+                let engine = engine.clone();
+                tokio::spawn(
+                    async move {
+                        match CollatorTestBundle::build_for_validating_block(
+                            shard, min_masterchain_block_id, prev, block, engine
+                        ).await {
+                            Err(e) => log::error!(
+                                "Error while test bundle for {} building: {}", id, e
+                            ),
+                            Ok(mut b) => {
+                                b.set_notes(err_str);
+                                if let Err(e) = b.save(&path) {
+                                    log::error!("Error while test bundle for {} saving: {}", id, e)
+                                } else {
+                                    log::info!("Built test bundle for {}", id)
+                                }
+                            }
+                        }
+                    }
+                );
+            }
+        }
+        Err(err)
+    } else {
+        Ok(SystemTime::now())
+    }
+
 }
 
 pub async fn run_accept_block_query(

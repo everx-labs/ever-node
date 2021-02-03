@@ -70,9 +70,10 @@ impl ShardAccountStuff {
 
         Ok(())
     }
-    pub fn serialize(&self) -> Result<Cell> {
-        self.shard_acc.serialize()
-    }
+// Unused
+//    pub fn serialize(&self) -> Result<Cell> {
+//        self.shard_acc.serialize()
+//    }
     pub fn update_public_libraries(&self, libraries: &mut Libraries) -> Result<()> {
         let new_libs = self.shard_acc.read_account()?.libraries();
         if new_libs.root() != self.orig_libs.root() {

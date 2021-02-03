@@ -1,27 +1,22 @@
 use crate::{
+    block::BlockStuff, engine_traits::EngineOperations,
+    out_msg_queue::OutMsgQueueInfoStuff, shard_state::ShardStateStuff,
     types::top_block_descr::TopBlockDescrStuff,
-    shard_state::ShardStateStuff,
-    db::BlockHandle,
-    engine_traits::EngineOperations,
-    block::BlockStuff,
-    validator::{accept_block::create_top_shard_block_description, BlockCandidate},
-    out_msg_queue::OutMsgQueueInfoStuff,
+    validator::{
+        accept_block::create_top_shard_block_description, BlockCandidate
+    }
 };
-use ton_types::{UInt256, fail, error, Result, CellType, deserialize_cells_tree};
+use std::{
+    collections::HashMap, convert::{TryFrom, TryInto}, fs::{File, read, write}, 
+    io::Cursor, ops::Deref, sync::{Arc, Weak}, 
+};
+use storage::types::BlockHandle;
 use ton_block::{
     BlockIdExt, Message, ShardIdent, AccountIdPrefixFull, Serializable, MerkleUpdate, TopBlockDescr,
     Deserializable, ValidatorBaseInfo, BlockSignaturesPure, BlockSignatures, HashmapAugType, 
     ShardStateUnsplit, TopBlockDescrSet,
 };
-use std::{
-    convert::{TryFrom, TryInto},
-    sync::{Arc, Weak}, 
-    collections::HashMap, 
-    fs::{File, read, write}, 
-    ops::Deref,
-    io::Cursor,
-};
-
+use ton_types::{UInt256, fail, error, Result, CellType, deserialize_cells_tree};
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct CollatorTestBundleIndexJson {
@@ -283,11 +278,19 @@ impl CollatorTestBundle {
         // prev_blocks & states
         //
         let mut blocks = HashMap::new();
-        let prev1 = engine.load_block(engine.load_block_handle(&prev_blocks_ids[0])?.deref()).await?;
+        let prev1 = engine.load_block(
+            engine.load_block_handle(&prev_blocks_ids[0])?.ok_or_else(
+                || error!("Cannot load handle for prev1 block {}", prev_blocks_ids[0])
+            )?.deref()
+        ).await?;
         states.insert(prev_blocks_ids[0].clone(), engine.load_state(&prev_blocks_ids[0]).await?);
         blocks.insert(prev_blocks_ids[0].clone(), prev1);
         if prev_blocks_ids.len() > 1 {
-            let prev2 = engine.load_block(engine.load_block_handle(&prev_blocks_ids[1])?.deref()).await?;
+            let prev2 = engine.load_block(
+                engine.load_block_handle(&prev_blocks_ids[1])?.ok_or_else(
+                    || error!("Cannot load handle for prev2 block {}", prev_blocks_ids[1])
+                )?.deref()
+            ).await?;
             states.insert(prev_blocks_ids[1].clone(), engine.load_state(&prev_blocks_ids[1]).await?);
             blocks.insert(prev_blocks_ids[1].clone(), prev2);
         }
@@ -427,11 +430,19 @@ impl CollatorTestBundle {
         // prev_blocks & states
         //
         let mut blocks = HashMap::new();
-        let prev1 = engine.load_block(engine.load_block_handle(&prev_blocks_ids[0])?.deref()).await?;
+        let prev1 = engine.load_block(
+            engine.load_block_handle(&prev_blocks_ids[0])?.ok_or_else(
+                || error!("Cannot load handle for prev1 block {}", prev_blocks_ids[0])
+            )?.deref()
+        ).await?;
         states.insert(prev_blocks_ids[0].clone(), engine.load_state(&prev_blocks_ids[0]).await?);
         blocks.insert(prev_blocks_ids[0].clone(), prev1);
         if prev_blocks_ids.len() > 1 {
-            let prev2 = engine.load_block(engine.load_block_handle(&prev_blocks_ids[1])?.deref()).await?;
+            let prev2 = engine.load_block(
+                engine.load_block_handle(&prev_blocks_ids[1])?.ok_or_else(
+                    || error!("Cannot load handle for prev2 block {}", prev_blocks_ids[1])
+                )?.deref()
+            ).await?;
             states.insert(prev_blocks_ids[1].clone(), engine.load_state(&prev_blocks_ids[1]).await?);
             blocks.insert(prev_blocks_ids[1].clone(), prev2);
         }
@@ -509,7 +520,9 @@ impl CollatorTestBundle {
 
         log::info!("Building with ethalon {}", block_id);
 
-        let handle = engine.load_block_handle(block_id)?;
+        let handle = engine.load_block_handle(block_id)?.ok_or_else(
+            || error!("Cannot load handle for block {}", block_id)
+        )?;
         let block = engine.load_block(&handle).await?;
         let info = block.block().read_info()?;
         let extra = block.block().read_extra()?;
@@ -546,7 +559,11 @@ impl CollatorTestBundle {
         let mut top_shard_blocks_ids = vec![];
         let mc_state = engine.load_state(&last_mc_id).await?;
         for shard_block_id in shard_blocks_ids.iter().filter(|id| id.seq_no() != 0) {
-            let block = engine.load_block(engine.load_block_handle(shard_block_id)?.deref()).await?;
+            let block = engine.load_block(
+                engine.load_block_handle(shard_block_id)?.ok_or_else(
+                    || error!("Cannot load handle for shard block {}", shard_block_id)               
+                )?.deref()
+            ).await?;
             let info = block.block().read_info()?;
             let prev_blocks_ids = info.read_prev_ids()?;
             let base_info = ValidatorBaseInfo::with_params(
@@ -610,14 +627,20 @@ impl CollatorTestBundle {
         let mut blocks = HashMap::new();
         let mut prev_blocks_ids = vec!();
         let prev = block.construct_prev_id()?;
-        let prev1 = engine.load_block_handle(&prev.0)?;
+        let prev1 = engine.load_block_handle(&prev.0)?.ok_or_else(
+            || error!("Cannot load handle for prev1 block {}", prev.0)
+        )?;
         prev_blocks_ids.push(prev1.id().clone());
         states.insert(prev1.id().clone(), engine.load_state(prev1.id()).await?);
         if let Ok(block) = engine.load_block(&prev1).await {
             blocks.insert(prev1.id().clone(), block);
         }
         if let Some(prev2) = prev.1 {
-            let prev2 = engine.load_block(engine.load_block_handle(&prev2)?.deref()).await?;
+            let prev2 = engine.load_block(
+                engine.load_block_handle(&prev2)?.ok_or_else(
+                    || error!("Cannot load handle for prev2 block {}", prev2 )
+                )?.deref()
+            ).await?;
             prev_blocks_ids.push(prev2.id().clone());
             states.insert(prev2.id().clone(), engine.load_state(prev2.id()).await?);
             blocks.insert(prev2.id().clone(), prev2);
@@ -937,6 +960,7 @@ impl CollatorTestBundle {
         }
     }
 
+/* UNUSED
     pub fn ethalon_state(&self) -> Result<Option<ShardStateStuff>> {
         if self.index.contains_ethalon {
             Ok(self.states.get(&self.index.id).cloned())
@@ -961,6 +985,7 @@ impl CollatorTestBundle {
             Ok(None)
         }
     }
+*/
 
     pub fn block_id(&self) -> &BlockIdExt { &self.index.id }
     pub fn prev_blocks_ids(&self) -> &Vec<BlockIdExt> { &self.index.prev_blocks }
@@ -997,14 +1022,14 @@ impl EngineOperations for CollatorTestBundle {
     fn now(&self) -> u32 {
         self.index.now
     }
-    fn load_block_handle(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>> {
+    fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
         let handle = BlockHandle::new(id.clone(), self.block_handle_cache.clone());
         if self.blocks.contains_key(id) && *id != self.index.id {
-            handle.set_data_inited();
-            handle.set_state_inited();
-            handle.set_applied();
+            handle.set_data();
+            handle.set_state();
+            handle.set_block_applied();
         }
-        Ok(Arc::new(handle))
+        Ok(Some(Arc::new(handle)))
     }
 
     async fn load_state(&self, block_id: &BlockIdExt) -> Result<ShardStateStuff> {
@@ -1041,14 +1066,16 @@ impl EngineOperations for CollatorTestBundle {
         &self.shard_states_cache
     }
 
-    async fn wait_state(&self, handle: &BlockHandle) -> Result<ShardStateStuff> {
-        self.load_state(handle.id()).await
+    async fn wait_state(&self, id: &BlockIdExt) -> Result<ShardStateStuff> {
+        self.load_state(id).await
     }
 
     async fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seq_no: u32) -> Result<Arc<BlockHandle>> {
         for (id, _block) in self.blocks.iter() {
             if id.seq_no() == seq_no && id.shard().contains_full_prefix(acc_pfx) {
-                return self.load_block_handle(id)
+                return self.load_block_handle(id)?.ok_or_else(
+                    || error!("Cannot load handle for block {}", id)
+                )
             }
         }
         fail!("Block with seq_no {} and acc prefix {} is not found in the bundle", seq_no, acc_pfx);

@@ -1,59 +1,68 @@
-use std::{
-    ops::Deref,
-    sync::Arc,
-    time::Duration,
-};
-use ton_block::{BlockIdExt, ShardIdent, BASE_WORKCHAIN_ID, SHARD_FULL};
-use ton_types::{
-    error, fail, Result,
-};
-
 use crate::{
-    CHECK,
-    block::BlockStuff,
-    block_proof::BlockProofStuff,
-    db::BlockHandle,
-    engine_traits::EngineOperations,
-    shard_state::ShardStateStuff,
+    CHECK, block::BlockStuff, block_proof::BlockProofStuff, engine_traits::EngineOperations, 
+    shard_state::ShardStateStuff
 };
+use std::{ops::Deref, sync::Arc, time::Duration};
+use storage::types::BlockHandle;
+use ton_block::{BlockIdExt, ShardIdent, BASE_WORKCHAIN_ID, SHARD_FULL};
+use ton_types::{error, fail, Result};
 
 /// cold boot entry point
 /// download zero state or block proof link and check it
-async fn run_cold(engine: &dyn EngineOperations) -> Result<(Arc<BlockHandle>, Option<ShardStateStuff>, Option<BlockProofStuff>)> {
+async fn run_cold(
+    engine: &dyn EngineOperations
+) -> Result<(Arc<BlockHandle>, Option<ShardStateStuff>, Option<BlockProofStuff>)> {
     let block_id = engine.init_mc_block_id();
     log::info!(target: "boot", "cold boot start: init_block_id={}", block_id);
     CHECK!(block_id.shard().is_masterchain());
     CHECK!(block_id.seq_no >= engine.get_last_fork_masterchain_seqno());
-    let handle = engine.load_block_handle(&block_id)?;
     if block_id.seq_no() == 0 {
         log::info!(target: "boot", "download zero state {}", block_id);
-        let zero_state = download_zero_state(engine, &handle).await?;
+        let (handle, zero_state) = download_zero_state(engine, &block_id).await?;
         Ok((handle, Some(zero_state), None))
     } else {
         // id should be key block if not it will never sync
         log::info!(target: "boot", "download init block proof link {}", block_id);
-        let proof = if handle.proof_link_inited() || handle.proof_inited() {
-            match engine.load_block_proof(&handle, true).await {
-                Ok(proof) => proof,
-                Err(err) => {
-                    log::warn!(target: "boot", "load_block_proof for init_block {} error: {}", handle.id(), err);
-                    engine.load_block_proof(&handle, false).await?
-                }
-            }
-        } else {
-            loop {
-                match engine.download_block_proof(&block_id, true, true).await {
-                    Ok(proof) => match proof.check_proof_link() {
-                        Ok(_) => {
-                            engine.store_block_proof(&handle, &proof).await?;
-                            break proof
-                        }
-                        Err(err) => log::warn!(target: "boot", "check_proof_link for init_block {} error: {}", handle.id(), err)
+        let handle = if let Some(handle) = engine.load_block_handle(&block_id)? {
+            if handle.has_proof_link() || handle.has_proof() {
+                let proof = match engine.load_block_proof(&handle, true).await {
+                    Ok(proof) => proof,
+                    Err(err) => {
+                        log::warn!(
+                            target: "boot", 
+                            "load_block_proof for init_block {} error: {}", 
+                            handle.id(), err
+                        );
+                        engine.load_block_proof(&handle, false).await?
                     }
-                    Err(err) => log::warn!(target: "boot", "download block proof link for init_block {} error: {}", handle.id(), err)
-                }
-                futures_timer::Delay::new(Duration::from_secs(1)).await;
+                };
+                CHECK!(handle.is_key_block()?);
+                return Ok((handle, None, Some(proof)))
             }
+            Some(handle)
+        } else {
+            None
+        };
+        let (handle, proof) = loop {
+            match engine.download_block_proof(&block_id, true, true).await {
+                Ok(proof) => match proof.check_proof_link() {
+                    Ok(_) => {
+                        let handle = engine.store_block_proof(&block_id, handle, &proof).await?;
+                        break (handle, proof)
+                    },
+                    Err(err) => log::warn!(
+                        target: "boot", 
+                        "check_proof_link for init_block {} error: {}", 
+                        block_id, err
+                    )
+                },
+                Err(err) => log::warn!(
+                    target: "boot", 
+                    "download block proof link for init_block {} error: {}", 
+                    block_id, err
+                )
+            }
+            futures_timer::Delay::new(Duration::from_secs(1)).await;
         };
         CHECK!(handle.is_key_block()?);
         Ok((handle, None, Some(proof)))
@@ -90,8 +99,10 @@ async fn get_key_blocks(
             log::info!(target: "boot", "last key block is {}", block_id);
             for block_id in &ids {
                 let prev_time = handle.gen_utime()?;
-                handle = engine.load_block_handle(block_id)?;
-                let proof = download_key_block_proof(engine, &handle, zero_state, prev_block_proof.as_ref()).await?;
+                let (next_handle, proof) = download_key_block_proof(
+                    engine, block_id, zero_state, prev_block_proof.as_ref()
+                ).await?;
+                handle = next_handle;
                 CHECK!(handle.is_key_block()?);
                 CHECK!(handle.gen_utime()? != 0);
                 if engine.is_persistent_state(handle.gen_utime()?, prev_time) {
@@ -160,43 +171,51 @@ async fn download_base_wc_zerosate(engine: &dyn EngineOperations, zerostate: &Sh
         root_hash: wc.zerostate_root_hash,
         file_hash: wc.zerostate_file_hash,
     };
-    let handle = engine.load_block_handle(&zerostate_id)?;
-    download_zero_state(engine, &handle).await?;
+    download_zero_state(engine, &zerostate_id).await?;
     Ok(())
 }
 
 /// Download persistent master block & state, enumerate shards and download block & state for each
-async fn download_start_blocks_and_states(engine: &dyn EngineOperations, handle: &BlockHandle) -> Result<()> {
-    let init_mc_block = download_block_and_state(engine, handle.id(), handle.id()).await?;
-    CHECK!(handle.state_inited());
-    CHECK!(handle.applied());
+async fn download_start_blocks_and_states(
+    engine: &dyn EngineOperations, 
+    master_id: &BlockIdExt
+) -> Result<()> {
 
-    for (_shard_ident, block_id) in init_mc_block.shards_blocks()? {
-        let shard_handle = engine.load_block_handle(&block_id)?;
-        if shard_handle.id().seq_no() == 0 {
-            download_zero_state(engine, &shard_handle).await?;
+    let (master_handle, init_mc_block) = 
+        download_block_and_state(engine, master_id, master_id).await?;
+    CHECK!(master_handle.has_state());
+    CHECK!(master_handle.is_applied());
+
+    for (_, block_id) in init_mc_block.shards_blocks()? {
+        let shard_handle = if block_id.seq_no() == 0 {
+            download_zero_state(engine, &block_id).await?.0
         } else {
-            download_block_and_state(engine, &block_id, handle.id()).await?;
-        }
-        CHECK!(shard_handle.state_inited());
-        CHECK!(shard_handle.applied());
+            download_block_and_state(engine, &block_id, master_id).await?.0
+        };
+        CHECK!(shard_handle.has_state());
+        CHECK!(shard_handle.is_applied());
     }
-
     Ok(())
+
 }
 
 /// download zero state and store it
-pub(crate) async fn download_zero_state(engine: &dyn EngineOperations, handle: &BlockHandle) -> Result<ShardStateStuff> {
-    if handle.state_inited() {
-        return engine.load_state(handle.id()).await
+pub(crate) async fn download_zero_state(
+    engine: &dyn EngineOperations, 
+    block_id: &BlockIdExt
+) -> Result<(Arc<BlockHandle>, ShardStateStuff)> {
+    if let Some(handle) = engine.load_block_handle(block_id)? {
+        if handle.has_state() {
+            return Ok((handle, engine.load_state(block_id).await?))
+        }
     }
     loop {
-        match engine.download_zerostate(handle.id()).await {
+        match engine.download_zerostate(block_id).await {
             Ok((state, state_bytes)) => {
-                engine.store_zerostate(&handle, &state, &state_bytes).await?;
-                engine.set_applied(handle, 0).await?;
+                let handle = engine.store_zerostate(block_id, &state, &state_bytes).await?;
+                engine.set_applied(&handle, 0).await?;
                 engine.process_full_state_in_ext_db(&state).await?;
-                return Ok(state)
+                return Ok((handle, state))
             }
             Err(err) => log::warn!(target: "boot", "download_zero_state error: {}", err)
         }
@@ -207,15 +226,17 @@ pub(crate) async fn download_zero_state(engine: &dyn EngineOperations, handle: &
 /// download key block proof, check it and store
 async fn download_key_block_proof(
     engine: &dyn EngineOperations,
-    handle: &BlockHandle,
+    block_id: &BlockIdExt,
     zero_state: Option<&ShardStateStuff>,
     prev_block_proof: Option<&BlockProofStuff>,
-) -> Result<BlockProofStuff> {
-    if let Ok(proof) = engine.load_block_proof(handle, false).await {
-        return Ok(proof)
+) -> Result<(Arc<BlockHandle>, BlockProofStuff)> {
+    if let Some(handle) = engine.load_block_handle(block_id)? {
+        if let Ok(proof) = engine.load_block_proof(&handle, false).await {
+            return Ok((handle, proof))
+        }
     }
     loop {
-        let proof = engine.download_block_proof(handle.id(), false, true).await?;
+        let proof = engine.download_block_proof(block_id, false, true).await?;
         let result = if let Some(prev_block_proof) = prev_block_proof {
             proof.check_with_prev_key_block_proof(prev_block_proof)
         } else if let Some(zero_state) = zero_state {
@@ -225,8 +246,8 @@ async fn download_key_block_proof(
         };
         match result {
             Ok(_) => {
-                engine.store_block_proof(&handle, &proof).await?;
-                return Ok(proof)
+                let handle = engine.store_block_proof(block_id, None, &proof).await?;
+                return Ok((handle, proof))
             }
             Err(err) => {
                 log::warn!(target: "boot", "check_proof error: {}", err);
@@ -237,19 +258,25 @@ async fn download_key_block_proof(
 }
 
 /// download any state, check its hash and store it, if need to download block and proof we trust them already
-async fn download_block_and_state(engine: &dyn EngineOperations, block_id: &BlockIdExt, master_id: &BlockIdExt) -> Result<BlockStuff> {
-    let handle = engine.load_block_handle(block_id)?;
-    let block = if !handle.data_inited() {
-        let (block, proof) = engine.download_block(&handle, None).await?;
-        engine.store_block(&handle, &block).await?;
-        if !handle.proof_inited() {
-            engine.store_block_proof(&handle, &proof).await?;
-        }
-        block
+async fn download_block_and_state(
+    engine: &dyn EngineOperations, 
+    block_id: &BlockIdExt, 
+    master_id: &BlockIdExt
+) -> Result<(Arc<BlockHandle>, BlockStuff)> {
+    let handle = engine.load_block_handle(block_id)?.filter(
+        |handle| handle.has_data()
+    );
+    let (block, handle) = if let Some(handle) = handle {
+        (engine.load_block(&handle).await?, handle)
     } else {
-        engine.load_block(&handle).await?
+        let (block, proof) = engine.download_block(block_id, None).await?;
+        let mut handle = engine.store_block(&block).await?;
+        if !handle.has_proof() {
+            handle = engine.store_block_proof(block_id, Some(handle), &proof).await?;
+        }
+        (block, handle)
     };
-    if !handle.state_inited() {
+    if !handle.has_state() {
         let state_update = block.block().read_state_update()?;
         log::info!(target: "boot", "download state {}", handle.id());
         let state = engine.download_state(handle.id(), master_id).await?;
@@ -261,7 +288,7 @@ async fn download_block_and_state(engine: &dyn EngineOperations, block_id: &Bloc
         engine.process_full_state_in_ext_db(&state).await?;
     }
     engine.set_applied(&handle, master_id.seq_no()).await?;
-    Ok(block)
+    Ok((handle, block))
 }
 
 /// Cold load best key block and its state
@@ -275,23 +302,29 @@ pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<BlockIdExt> 
         let key_blocks = get_key_blocks(engine.deref(), handle, zero_state.as_ref(), init_block_proof_link).await?;
         handle = choose_masterchain_state(engine.deref(), key_blocks).await?;
     }
-    if handle.id().seq_no() == 0 {
+    let block_id = handle.id();
+    if block_id.seq_no() == 0 {
         CHECK!(zero_state.is_some());
         download_base_wc_zerosate(engine.deref(), &zero_state.unwrap()).await?;
     } else {
-        download_start_blocks_and_states(engine.deref(), &handle).await?;
+        download_start_blocks_and_states(engine.deref(), block_id).await?;
     }
-    Ok(handle.id().clone())
+    Ok(block_id.clone())
 }
 
 pub async fn warm_boot(engine: Arc<dyn EngineOperations>, mut block_id: BlockIdExt) -> Result<BlockIdExt> {
-    let mut handle = engine.load_block_handle(&block_id)?;
-    while !handle.applied() { // go back to find last applied block
-        CHECK!(handle.state_inited());
-        CHECK!(handle.prev1_inited());
-        block_id = engine.load_block_prev(handle.id())?;
-        handle = engine.load_block_handle(&block_id)?;
-    }
+    let handle = loop {
+        let handle = engine.load_block_handle(&block_id)?.ok_or_else(
+            || error!("Cannot load handle for block {}", block_id)
+        )?;
+        // go back to find last applied block
+        if handle.is_applied() { 
+            break handle
+        }
+        CHECK!(handle.has_state());
+        CHECK!(handle.has_prev1());
+        block_id = engine.load_block_prev1(&block_id)?;
+    };
     log::info!(target: "boot", "last applied block id = {}", &block_id);
     let state = engine.load_state(&block_id).await?;
     let init_block_id = engine.init_mc_block_id();

@@ -1,8 +1,6 @@
 use crate::{
-    block::{BlockStuff, convert_block_id_ext_api2blk},
-    block_proof::BlockProofStuff,
-    engine_traits::EngineOperations,
-    error::NodeError,
+    block::{BlockStuff, convert_block_id_ext_api2blk}, block_proof::BlockProofStuff, 
+    engine_traits::EngineOperations, error::NodeError
 };
 
 use std::{sync::Arc, mem::drop};
@@ -13,7 +11,6 @@ use ton_block::{
 };
 use ton_types::{Result, fail, error, UInt256};
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
-use ton_node_storage::types::BlockHandle;
 
 pub fn start_masterchain_client(engine: Arc<dyn EngineOperations>, last_got_block_id: BlockIdExt) -> Result<JoinHandle<()>> {
     let join_handle = tokio::spawn(async move {
@@ -33,19 +30,21 @@ pub fn start_shards_client(engine: Arc<dyn EngineOperations>, shards_mc_block_id
     Ok(join_handle)
 }
 
-async fn load_master_blocks_cycle(engine: Arc<dyn EngineOperations>, last_got_block_id: BlockIdExt) -> Result<()> {
-    let mut handle = engine.load_block_handle(&last_got_block_id)?;
+async fn load_master_blocks_cycle(
+    engine: Arc<dyn EngineOperations>, 
+    mut last_got_block_id: BlockIdExt
+) -> Result<()> {
     let mut attempt = 0;
     loop {
-        handle = match load_next_master_block(&engine, &handle).await {
-            Ok(h) => {
+        last_got_block_id = match load_next_master_block(&engine, &last_got_block_id).await {
+            Ok(id) => {
                 attempt = 0;
-                h
+                id
             },
             Err(e) => {
                 log::error!(
                     "Error while load and apply next master block, prev: {}: attempt: {}, err: {:?}",
-                    handle.id(),
+                    last_got_block_id,
                     attempt,
                     e
                 );
@@ -57,38 +56,45 @@ async fn load_master_blocks_cycle(engine: Arc<dyn EngineOperations>, last_got_bl
     }
 }
 
-async fn load_next_master_block(engine: &Arc<dyn EngineOperations>, prev_handle: &BlockHandle) -> Result<Arc<BlockHandle>> {
-    log::trace!("load_blocks_cycle: prev block: {}", prev_handle.id());
-    let next_handle = if prev_handle.next1_inited() {
-        let next_block_id = engine.load_block_next1(prev_handle.id()).await?;
-        let next_handle = engine.load_block_handle(&next_block_id)?;
-        if !next_handle.applied() {
-            engine.clone().apply_block(&next_handle, None, next_block_id.seq_no(), false).await?;
+async fn load_next_master_block(
+    engine: &Arc<dyn EngineOperations>, 
+    prev_id: &BlockIdExt
+) -> Result<BlockIdExt> {
+
+    log::trace!("load_blocks_cycle: prev block: {}", prev_id);
+    if let Some(prev_handle) = engine.load_block_handle(prev_id)? {
+        if prev_handle.has_next1() {
+            let next_id = engine.load_block_next1(prev_id).await?;
+            engine.clone().download_and_apply_block(&next_id, next_id.seq_no(), false).await?; 
+            return Ok(next_id)
+        }
+    } else {
+        fail!("Cannot load handle for prev block {}", prev_id)
+    };
+
+    log::trace!("load_blocks_cycle: downloading next block... prev: {}", prev_id);
+    let (block, proof) = engine.download_next_block(prev_id).await?;
+    log::trace!("load_blocks_cycle: got next block: {}", prev_id);
+    if block.id().seq_no != prev_id.seq_no + 1 {
+        fail!("Invalid next master block got: {}, prev: {}", block.id(), prev_id);
+    }
+
+    let prev_state = engine.wait_state(&prev_id).await?;
+    proof.check_with_master_state(&prev_state)?;
+    let mut next_handle = if let Some(next_handle) = engine.load_block_handle(block.id())? {
+        if !next_handle.has_data() {
+            fail!("Unitialized handle detected for block {}", block.id())
         }
         next_handle
     } else {
-        log::trace!("load_blocks_cycle: downloading next block... prev: {}", prev_handle.id());
-        let (block, proof) = engine.download_next_block(prev_handle.id()).await?;
-        log::trace!("load_blocks_cycle: got next block: {}", prev_handle.id());
-
-        if block.id().seq_no != prev_handle.id().seq_no + 1 {
-            fail!("Invalid next master block got: {}, prev: {}", block.id(), prev_handle.id());
-        }
-
-        let next_handle = engine.load_block_handle(block.id())?;
-
-        if !next_handle.proof_inited() {
-            let prev_state = engine.wait_state(&prev_handle).await?;
-            proof.check_with_master_state(&prev_state)?;
-            engine.store_block_proof(&next_handle, &proof).await?;
-        }
-        if !next_handle.data_inited() {
-            engine.store_block(&next_handle, &block).await?;
-        }
-        engine.clone().apply_block(&next_handle, Some(&block), next_handle.id().seq_no(), false).await?;
-        next_handle
+        engine.store_block(&block).await?
     };
-    Ok(next_handle)
+    if !next_handle.has_proof() {
+        next_handle = engine.store_block_proof(block.id(), Some(next_handle), &proof).await?;
+    }
+    engine.clone().apply_block(&next_handle, &block, next_handle.id().seq_no(), false).await?;
+    Ok(block.id().clone())
+
 }
 
 // TODO: We limited this window to 1 thread instead of 2 because of the issue with archives.
@@ -96,9 +102,14 @@ async fn load_next_master_block(engine: &Arc<dyn EngineOperations>, prev_handle:
 //       to mark correctly shard blocks with appropriate mc_seq_no despite of application order.
 const SHARD_CLIENT_WINDOW: usize = 1;
 
-async fn load_shard_blocks_cycle(engine: Arc<dyn EngineOperations>, shards_mc_block_id: BlockIdExt) -> Result<()> {
+async fn load_shard_blocks_cycle(
+    engine: Arc<dyn EngineOperations>, 
+    shards_mc_block_id: BlockIdExt
+) -> Result<()> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(SHARD_CLIENT_WINDOW));
-    let mut mc_handle = engine.load_block_handle(&shards_mc_block_id)?;
+    let mut mc_handle = engine.load_block_handle(&shards_mc_block_id)?.ok_or_else(
+        || error!("Cannot load handle for shard master block {}", shards_mc_block_id)
+    )?;
     loop {
         log::trace!("load_shard_blocks_cycle: mc block: {}", mc_handle.id());
         let r = engine.wait_next_applied_mc_block(&mc_handle).await?;
@@ -124,6 +135,7 @@ pub async fn load_shard_blocks(
     semaphore_permit: tokio::sync::OwnedSemaphorePermit,
     mc_block: &BlockStuff
 ) -> Result<()> {
+
     let mut apply_tasks = Vec::new();
     let mc_seq_no = mc_block.id().seq_no();
     for (shard_ident, shard_block_id) in mc_block.shards_blocks()?.iter() {
@@ -131,26 +143,33 @@ pub async fn load_shard_blocks(
             "process mc block {}, shard block {} {}", 
             mc_block.id(), shard_ident, shard_block_id
         );
-        let shard_block_handle = engine.load_block_handle(shard_block_id)?;
-        if !shard_block_handle.applied() {
-            let engine = Arc::clone(&engine);
-            let apply_task = tokio::spawn(async move {
+        if let Some(shard_block_handle) = engine.load_block_handle(shard_block_id)? {
+            if shard_block_handle.is_applied() {
+                continue;
+            }
+        }
+        let engine = Arc::clone(&engine);
+        let shard_block_id = shard_block_id.clone();
+        let apply_task = tokio::spawn(
+            async move {
                 let mut attempt = 0;
                 log::trace!("load_shard_blocks_cycle: {}, applying...", msg);
-                while let Err(e) = Arc::clone(&engine).apply_block(&shard_block_handle, None, mc_seq_no, false).await {
+                while let Err(e) = Arc::clone(&engine).download_and_apply_block(
+                    &shard_block_id, 
+                    mc_seq_no, 
+                    false
+                ).await {
                     log::error!(
                         "Error while applying shard block (attempt {}) {}: {}",
-                        attempt,
-                        shard_block_handle.id(),
-                        e
+                        attempt, shard_block_id, e
                     );
                     attempt += 1;
                     // TODO make method to ban bad peer who gave bad block
                 }
                 log::trace!("load_shard_blocks_cycle: {}, applied", msg);
-            });
-            apply_tasks.push(apply_task);
-        }
+            }
+        );
+        apply_tasks.push(apply_task);
     }
 
     futures::future::join_all(apply_tasks)
@@ -160,27 +179,28 @@ pub async fn load_shard_blocks(
         .unwrap_or(Ok(()))?;
 
     log::trace!("load_shard_blocks_cycle: processed mc block: {}", mc_block.id());
-
     engine.store_shards_client_mc_block_id(mc_block.id()).await?;
-
     drop(semaphore_permit);                                    	
-
     Ok(())
+
 }
 
 const SHARD_BROADCAST_WINDOW: u32 = 8;
 
-pub async fn process_block_broadcast(engine: &Arc<dyn EngineOperations>, broadcast: &BlockBroadcast) -> Result<()> {
+pub async fn process_block_broadcast(
+    engine: &Arc<dyn EngineOperations>, 
+    broadcast: &BlockBroadcast
+) -> Result<()> {
+
     log::trace!("process_block_broadcast: {}", broadcast.id);
-
     let block_id = convert_block_id_ext_api2blk(&broadcast.id)?;
-    let handle = engine.load_block_handle(&block_id)?;
-
-    if handle.data_inited() {
-        return Ok(());
+    if let Some(handle) = engine.load_block_handle(&block_id)? {
+        if handle.has_data() {
+            return Ok(());
+        }
     }
 
-    let is_master = handle.id().shard().is_masterchain();
+    let is_master = block_id.shard().is_masterchain();
     let proof = BlockProofStuff::deserialize(&block_id, broadcast.proof.0.clone(), !is_master)?;
     let block_info = proof.virtualize_block()?.0.read_info()?;
     let prev_key_block_seqno = block_info.prev_key_block_seqno();
@@ -199,7 +219,7 @@ pub async fn process_block_broadcast(engine: &Arc<dyn EngineOperations>, broadca
     let (validator_set, cc_config) = if prev_key_block_seqno == 0 {
         // ...zerostate
         let zs = engine.load_mc_zero_state().await?;
-        let vs = zs.shard_state().read_cur_validator_set_and_cc_conf()?;
+        let vs = zs.state().read_cur_validator_set_and_cc_conf()?;
         zerostate = Some(zs);
         vs
     } else {
@@ -215,31 +235,30 @@ pub async fn process_block_broadcast(engine: &Arc<dyn EngineOperations>, broadca
     validate_brodcast(broadcast, &block_id, &validator_set, &cc_config)?;
 
     // Build and save block and proof
-    let block = BlockStuff::deserialize_checked(block_id, broadcast.data.0.clone())?;
-    if !handle.proof_inited() {
-        if is_master {
-            if prev_key_block_seqno == 0 {
-                proof.check_with_master_state(zerostate.as_ref().unwrap())?;
-            } else {
-                proof.check_with_prev_key_block_proof(key_block_proof.as_ref().unwrap())?;
-            }
+    if is_master {
+        if prev_key_block_seqno == 0 {
+            proof.check_with_master_state(zerostate.as_ref().unwrap())?;
         } else {
-            proof.check_proof_link()?;
+            proof.check_with_prev_key_block_proof(key_block_proof.as_ref().unwrap())?;
         }
-        engine.store_block_proof(&handle, &proof).await?;
+    } else {
+        proof.check_proof_link()?;
     }
-    if !handle.data_inited() {
-        engine.store_block(&handle, &block).await?;
+    let block = BlockStuff::deserialize_checked(block_id, broadcast.data.0.clone())?;
+    let mut handle = engine.store_block(&block).await?; 
+    if !handle.has_proof() {
+        handle = engine.store_block_proof(block.id(), Some(handle), &proof).await?;
     }
 
     // Apply (only blocks that is not too new for us)
     if block.id().shard().is_masterchain() {
         if block.id().seq_no() == last_applied_mc_block_id.seq_no() + 1 {
-            engine.clone().apply_block(&handle, Some(&block), block.id().seq_no(), false).await?;
+            engine.clone().apply_block(&handle, &block, block.id().seq_no(), false).await?;
         } else {
             log::debug!(
                 "Skipped apply for block broadcast {} because it is too new (last master block: {})",
-                block.id(), last_applied_mc_block_id.seq_no())
+                block.id(), last_applied_mc_block_id.seq_no()
+            )
         }
     } else {
         let master_ref = block
@@ -251,11 +270,12 @@ pub async fn process_block_broadcast(engine: &Arc<dyn EngineOperations>, broadca
             )))?;
         let shards_client_mc_block_id = engine.load_shards_client_mc_block_id().await?;
         if shards_client_mc_block_id.seq_no() + SHARD_BROADCAST_WINDOW >= master_ref.master.seq_no {
-            engine.clone().apply_block(&handle, Some(&block), shards_client_mc_block_id.seq_no(), true).await?;
+            engine.clone().apply_block(&handle, &block, shards_client_mc_block_id.seq_no(), true).await?;
         } else {
             log::debug!(
                 "Skipped pre-apply for block broadcast {} because it refers to master block {}, but shard client is on {}",
-                block.id(), master_ref.master.seq_no, shards_client_mc_block_id.seq_no())
+                block.id(), master_ref.master.seq_no, shards_client_mc_block_id.seq_no()
+            )
         }
     }
     Ok(())

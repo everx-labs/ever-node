@@ -65,37 +65,45 @@ impl FullNodeOverlayService {
     // tonNode.getPrevBlocksDescription next_block:tonNode.blockIdExt limit:int cutoff_seqno:int = tonNode.BlocksDescription;
     // Not supported in t-node
 
-    // tonNode.prepareBlockProof block:tonNode.blockIdExt allow_partial:Bool = tonNode.PreparedProof;
-    async fn prepare_block_proof(&self, query: PrepareBlockProof) -> Result<PreparedProof> {
-        let block_id = (&query.block).try_into()?;
-        let handle = self.engine.load_block_handle(&block_id)?;
-        let allow_partial: bool = query.allow_partial.into();
-        if !handle.proof_inited() && (!allow_partial || !handle.proof_link_inited()) {
+    fn prepare_block_proof_internal(
+        &self, 
+        block_id: BlockIdExt,
+        allow_partial: bool,
+        key_block: bool
+    ) -> Result<PreparedProof> {
+        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+            if key_block && !handle.is_key_block()? {
+                fail!("prepare_key_block_proof: given block is not key");
+            }
+            if !handle.has_proof() && (!allow_partial || !handle.has_proof_link()) {
+                Ok(PreparedProof::TonNode_PreparedProofEmpty)
+            }
+            else if handle.has_proof() && handle.id().shard().is_masterchain() {
+                Ok(PreparedProof::TonNode_PreparedProof)
+            } else {
+                Ok(PreparedProof::TonNode_PreparedProofLink)
+            }
+        } else {
             Ok(PreparedProof::TonNode_PreparedProofEmpty)
         }
-        else if handle.proof_inited() && handle.id().shard().is_masterchain() {
-            Ok(PreparedProof::TonNode_PreparedProof)
-        } else {
-            Ok(PreparedProof::TonNode_PreparedProofLink)
-        } 
+    }
+
+    // tonNode.prepareBlockProof block:tonNode.blockIdExt allow_partial:Bool = tonNode.PreparedProof;
+    async fn prepare_block_proof(&self, query: PrepareBlockProof) -> Result<PreparedProof> {
+        self.prepare_block_proof_internal(
+            (&query.block).try_into()?, 
+            query.allow_partial.into(),
+            false
+        )
     }
 
     // tonNode.prepareKeyBlockProof block:tonNode.blockIdExt allow_partial:Bool = tonNode.PreparedProof;
     async fn prepare_key_block_proof(&self, query: PrepareKeyBlockProof) -> Result<PreparedProof> {
-        let block_id = (&query.block).try_into()?;
-        let handle = self.engine.load_block_handle(&block_id)?;
-        if !handle.is_key_block()? {
-            fail!("prepare_key_block_proof: given block is not key");
-        }
-        let allow_partial: bool = query.allow_partial.into();
-        if !handle.proof_inited() && (!allow_partial || !handle.proof_link_inited()) {
-            Ok(PreparedProof::TonNode_PreparedProofEmpty)
-        }
-        else if handle.proof_inited() && handle.id().shard().is_masterchain() {
-            Ok(PreparedProof::TonNode_PreparedProof)
-        } else {
-            Ok(PreparedProof::TonNode_PreparedProofLink)
-        }
+        self.prepare_block_proof_internal(
+            (&query.block).try_into()?, 
+            query.allow_partial.into(),
+            true
+        )
     }
 
     // tonNode.prepareBlockProofs blocks:(vector tonNode.blockIdExt) allow_partial:Bool = tonNode.PreparedProof;
@@ -107,9 +115,12 @@ impl FullNodeOverlayService {
     // tonNode.prepareBlock block:tonNode.blockIdExt = tonNode.Prepared;
     async fn prepare_block(&self, query: PrepareBlock) -> Result<Prepared> {
         let block_id = (&query.block).try_into()?;
-        let handle = self.engine.load_block_handle(&block_id)?;
-        if handle.data_inited() {
-            Ok(Prepared::TonNode_Prepared)
+        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+            if handle.has_data() {
+                Ok(Prepared::TonNode_Prepared)
+            } else {
+                Ok(Prepared::TonNode_NotFound)
+            }
         } else {
             Ok(Prepared::TonNode_NotFound)
         }
@@ -118,30 +129,28 @@ impl FullNodeOverlayService {
     // tonNode.prepareBlocks blocks:(vector tonNode.blockIdExt) = tonNode.Prepared;
     // Not supported in t-node
 
+    fn prepare_state_internal(&self, block_id: BlockIdExt) -> Result<PreparedState> {
+        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+            Ok(
+                if handle.has_persistent_state() {
+                    PreparedState::TonNode_PreparedState
+                } else {
+                    PreparedState::TonNode_NotFoundState
+                }
+            )
+        } else {
+            Ok(PreparedState::TonNode_NotFoundState)
+        }
+    }
+
     // tonNode.preparePersistentState block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt = tonNode.PreparedState;
     async fn prepare_persistent_state(&self, query: PreparePersistentState) -> Result<PreparedState> {
-        let block_id = (&query.block).try_into()?;
-        let handle = self.engine.load_block_handle(&block_id)?;
-        Ok(
-            if handle.persistent_state_inited() {
-                PreparedState::TonNode_PreparedState
-            } else {
-                PreparedState::TonNode_NotFoundState
-            }
-        )
+        self.prepare_state_internal((&query.block).try_into()?)
     }
 
     // tonNode.prepareZeroState block:tonNode.blockIdExt = tonNode.PreparedState;
     async fn prepare_zero_state(&self, query: PrepareZeroState) -> Result<PreparedState> {
-        let block_id = (&query.block).try_into()?;
-        let handle = self.engine.load_block_handle(&block_id)?;
-        Ok(
-            if handle.persistent_state_inited() {
-                PreparedState::TonNode_PreparedState
-            } else {
-                PreparedState::TonNode_NotFoundState
-            }
-        )
+        self.prepare_state_internal((&query.block).try_into()?)
     }
 
     const NEXT_KEY_BLOCKS_LIMIT: usize = 8;
@@ -213,22 +222,28 @@ impl FullNodeOverlayService {
     // tonNode.downloadNextBlockFull prev_block:tonNode.blockIdExt = tonNode.DataFull;
     async fn download_next_block_full(&self, query: DownloadNextBlockFull) -> Result<DataFull> {
         let block_id = (&query.prev_block).try_into()?;
-        let prev_handle = self.engine.load_block_handle(&block_id)?;
-        if prev_handle.next1_inited() {
-            let next_id = self.engine.load_block_next1(&block_id).await?;
-            let next_handle = self.engine.load_block_handle(&next_id)?;
-            let mut is_link = false;
-            if next_handle.data_inited() && next_handle.proof_or_link_inited(&mut is_link) {
-                let block = self.engine.load_block_raw(&next_handle).await?;
-                let proof = self.engine.load_block_proof_raw(&next_handle, is_link).await?;
-                return Ok(DataFull::TonNode_DataFull(Box::new(
-                    ton_node::datafull::DataFull{
-                        id: next_id.into(),
-                        proof: ton_api::ton::bytes(proof),
-                        block: ton_api::ton::bytes(block),
-                        is_link: if is_link { ton::Bool::BoolTrue } else { ton::Bool::BoolFalse }, 
+        if let Some(prev_handle) = self.engine.load_block_handle(&block_id)? {
+            if prev_handle.has_next1() {
+                let next_id = self.engine.load_block_next1(&block_id).await?;
+                if let Some(next_handle) = self.engine.load_block_handle(&next_id)? {
+                    let mut is_link = false;
+                    if next_handle.has_data() && next_handle.has_proof_or_link(&mut is_link) {
+                        let block = self.engine.load_block_raw(&next_handle).await?;
+                        let proof = self.engine.load_block_proof_raw(&next_handle, is_link).await?;
+                        return Ok(DataFull::TonNode_DataFull(Box::new(
+                            ton_node::datafull::DataFull{
+                                id: next_id.into(),
+                                proof: ton_api::ton::bytes(proof),
+                                block: ton_api::ton::bytes(block),
+                                is_link: if is_link { 
+                                    ton::Bool::BoolTrue 
+                                } else { 
+                                    ton::Bool::BoolFalse 
+                                }
+                            }
+                        )));
                     }
-                )));
+                }
             }
         }
         Ok(DataFull::TonNode_DataFullEmpty)
@@ -237,19 +252,20 @@ impl FullNodeOverlayService {
     // tonNode.downloadBlockFull block:tonNode.blockIdExt = tonNode.DataFull;
     async fn download_block_full(&self, query: DownloadBlockFull) -> Result<DataFull> {
         let block_id = (&query.block).try_into()?;
-        let handle = self.engine.load_block_handle(&block_id)?;
-        let mut is_link = false;
-        if handle.data_inited() && handle.proof_or_link_inited(&mut is_link) {
-            let block = self.engine.load_block_raw(&handle).await?;
-            let proof = self.engine.load_block_proof_raw(&handle, is_link).await?;
-            return Ok(DataFull::TonNode_DataFull(Box::new(
-                ton_node::datafull::DataFull{
-                    id: query.block,
-                    proof: ton_api::ton::bytes(proof),
-                    block: ton_api::ton::bytes(block),
-                    is_link: if is_link { ton::Bool::BoolTrue } else { ton::Bool::BoolFalse }, 
-                }
-            )));
+        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+            let mut is_link = false;
+            if handle.has_data() && handle.has_proof_or_link(&mut is_link) {
+                let block = self.engine.load_block_raw(&handle).await?;
+                let proof = self.engine.load_block_proof_raw(&handle, is_link).await?;
+                return Ok(DataFull::TonNode_DataFull(Box::new(
+                    ton_node::datafull::DataFull{
+                        id: query.block,
+                        proof: ton_api::ton::bytes(proof),
+                        block: ton_api::ton::bytes(block),
+                        is_link: if is_link { ton::Bool::BoolTrue } else { ton::Bool::BoolFalse }
+                    }
+                )))
+            }
         }
         Ok(DataFull::TonNode_DataFullEmpty)
     }
@@ -257,11 +273,12 @@ impl FullNodeOverlayService {
     // tonNode.downloadBlock block:tonNode.blockIdExt = tonNode.Data;
     async fn download_block(&self, query: DownloadBlock) -> Result<Vec<u8>> {
         let block_id = (&query.block).try_into()?;
-        let handle = self.engine.load_block_handle(&block_id)?;
-        if !handle.data_inited() {
-            fail!("Block's data isn't initialized");
+        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+            if handle.has_data() {
+                return Ok(self.engine.load_block_raw(&handle).await?)
+            }
         }
-        Ok(self.engine.load_block_raw(&handle).await?)
+        fail!("Block's data isn't initialized");
     }
 
     // tonNode.downloadBlocks blocks:(vector tonNode.blockIdExt) = tonNode.DataList;
@@ -279,41 +296,63 @@ impl FullNodeOverlayService {
     }
 
     // tonNode.downloadPersistentStateSlice block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt offset:long max_size:long = tonNode.Data;
-    async fn download_persistent_state_slice(&self, query: DownloadPersistentStateSlice) -> Result<Vec<u8>> {
+    async fn download_persistent_state_slice(
+        &self, 
+        query: DownloadPersistentStateSlice
+    ) -> Result<Vec<u8>> {
         let block_id = (&query.block).try_into()?;
-        let handle = self.engine.load_block_handle(&block_id)?;
-        if !handle.persistent_state_inited() {
-            fail!("Shard state {} doesn't have a persistent state", block_id);
+        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+            if handle.has_persistent_state() {
+                let data = self.engine.load_persistent_state_slice(
+                    &handle,
+                    query.offset as u64,
+                    query.max_size as u64
+                ).await?;
+                return Ok(data)
+            }             
         }
-        let data = self.engine.load_persistent_state_slice(
-            &handle,
-            query.offset as u64,
-            query.max_size as u64
-        ).await?;
-        Ok(data)
+        fail!("Shard state {} doesn't have a persistent state", block_id);
     }
 
     // tonNode.downloadZeroState block:tonNode.blockIdExt = tonNode.Data;
     async fn download_zero_state(&self, query: DownloadZeroState) -> Result<Vec<u8>> {
         let block_id = (&query.block).try_into()?;
-        let handle = self.engine.load_block_handle(&block_id)?;
-        if !handle.persistent_state_inited() {
-            fail!("Zero state {} is not inited", block_id);
+        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+            if handle.has_persistent_state() {
+                let size = self.engine.load_persistent_state_size(&block_id).await?;
+                let data = self.engine.load_persistent_state_slice(&handle, 0, size).await?;
+                return Ok(data)
+            }
         }
+        fail!("Zero state {} is not inited", block_id);
+    }
 
-        let size = self.engine.load_persistent_state_size(&block_id).await?;
-        let data = self.engine.load_persistent_state_slice(&handle, 0, size).await?;
-        Ok(data)
+    async fn download_block_proof_internal(
+        &self, 
+        block_id: BlockIdExt, 
+        is_link: bool, 
+        _key_block: bool
+    ) -> Result<Vec<u8>> {
+        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+            if (is_link && handle.has_proof_link()) || (!is_link && handle.has_proof()) {
+                return Ok(self.engine.load_block_proof_raw(&handle, is_link).await?)
+            }
+        }
+        if is_link {
+            fail!("Block's proof link isn't initialized");
+        } else {
+            fail!("Block's proof isn't initialized");
+        }
     }
 
     // tonNode.downloadBlockProof block:tonNode.blockIdExt = tonNode.Data;
     async fn download_block_proof(&self, query: DownloadBlockProof) -> Result<Vec<u8>> {
-        self.download_block_proof_((&query.block).try_into()?, false, false).await
+        self.download_block_proof_internal((&query.block).try_into()?, false, false).await
     }
 
     // tonNode.downloadKeyBlockProof block:tonNode.blockIdExt = tonNode.Data;
     async fn download_key_block_proof(&self, query: DownloadKeyBlockProof) -> Result<Vec<u8>> {
-        self.download_block_proof_((&query.block).try_into()?, false, true).await
+        self.download_block_proof_internal((&query.block).try_into()?, false, true).await
     }
 
     // tonNode.downloadBlockProofs blocks:(vector tonNode.blockIdExt) = tonNode.DataList;
@@ -324,22 +363,15 @@ impl FullNodeOverlayService {
 
     // tonNode.downloadBlockProofLink block:tonNode.blockIdExt = tonNode.Data;
     async fn download_block_proof_link(&self, query: DownloadBlockProofLink) -> Result<Vec<u8>> {
-        self.download_block_proof_((&query.block).try_into()?, true, false).await
+        self.download_block_proof_internal((&query.block).try_into()?, true, false).await
     }
 
     // tonNode.downloadKeyBlockProofLink block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_key_block_proof_link(&self, query: DownloadKeyBlockProofLink) -> Result<Vec<u8>> {
-        self.download_block_proof_((&query.block).try_into()?, true, true).await
-    }
-
-    async fn download_block_proof_(&self, block_id: BlockIdExt, is_link: bool, _key_block: bool) -> Result<Vec<u8>> {
-        let handle = self.engine.load_block_handle(&block_id)?;
-        if is_link && !handle.proof_link_inited() {
-            fail!("Block's proof link isn't initialized");
-        } else if !is_link && !handle.proof_inited() {
-            fail!("Block's proof isn't initialized");
-        }
-        Ok(self.engine.load_block_proof_raw(&handle, is_link).await?)
+    async fn download_key_block_proof_link(
+        &self, 
+        query: DownloadKeyBlockProofLink
+    ) -> Result<Vec<u8>> {
+        self.download_block_proof_internal((&query.block).try_into()?, true, true).await
     }
 
     // tonNode.downloadBlockProofLinks blocks:(vector tonNode.blockIdExt) = tonNode.DataList;
