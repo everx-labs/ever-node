@@ -1,11 +1,10 @@
+use adnl::common::KeyOption;
 use catchain::{PublicKey, BlockHash, CatchainFactory};
+use storage::{db_impl_serializable, db::traits::{DbKey, KvcWriteable}, traits::Serializable};
+use std::{fmt::{Formatter, Display}, io::{Read, Write}, sync::Arc};
+use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{UInt256, Result};
 use validator_session::{ValidatorBlockCandidate, ValidatorBlockId};
-use std::{fmt::{Formatter, Display}, io::{Read, Write}, sync::{Arc}};
-use ton_node_storage::{db_impl_serializable, db::traits::{DbKey, KvcWriteable}, traits::Serializable};
-use ton_node_storage;
-use adnl::common::KeyOption;
-use ton_block::{BlockIdExt, ShardIdent};
 
 #[derive(PartialEq, Eq, Hash)]
 pub struct CandidateDbKey {

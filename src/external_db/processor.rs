@@ -258,7 +258,7 @@ impl<T: WriteData> Processor<T> {
         let block_extra = block.read_extra()?;
         let block_boc1 = if process_block { Some(block_stuff.data().to_vec()) } else { None };
         let block_boc2 = if process_raw_block { Some(block_stuff.data().to_vec()) } else { None };
-        let shard_accounts = state.map(|s| s.shard_state().read_accounts()).transpose()?;
+        let shard_accounts = state.map(|s| s.state().read_accounts()).transpose()?;
 
         let now = std::time::Instant::now();
 
@@ -450,7 +450,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
 
         if self.write_account.enabled() {
             let mut accounts = Vec::new();
-            state.shard_state().read_accounts()?.iterate_objects(|acc: ShardAccount| {
+            state.state().read_accounts()?.iterate_objects(|acc: ShardAccount| {
                 let acc = acc.read_account()?;
                 let record = Self::prepare_account_record(acc)?;
                 accounts.push(record);

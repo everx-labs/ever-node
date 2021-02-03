@@ -4,7 +4,7 @@ use crate::{
 };
 
 #[cfg(not(feature = "local_test"))]
-use std::{ sync::{Arc, atomic::{AtomicUsize, Ordering}} };
+use std::{sync::{Arc, atomic::{AtomicUsize, Ordering}}};
 
 use ton_block::{BlockIdExt};
 #[cfg(not(feature = "local_test"))]
@@ -58,15 +58,14 @@ async fn download_persistent_state_iter(
 
     // Check
     let peer = loop {
-        let attempts = Attempts {
-//            total_limit: 0,
-            limit: 100,
-            count: 0
-        };
+        let attempts = Attempts::with_limit(100);
         match overlay.check_persistent_state(id, master_id, &attempts).await {
-            Err(e) => log::trace!("check_persistent_state {}: {}", id.shard(), e),
-            Ok((false, _)) => log::trace!("download_persistent_state {}: state not found!", id.shard()),
-            Ok((true, peer)) => break peer,
+            Err(e) => 
+                log::trace!("check_persistent_state {}: {}", id.shard(), e),
+            Ok((false, _)) => 
+                log::trace!("download_persistent_state {}: state not found!", id.shard()),
+            Ok((true, peer)) => 
+                break peer,
         }
     };
 
@@ -88,11 +87,7 @@ async fn download_persistent_state_iter(
         let errors = errors.clone();
         let peer = peer.clone();
         download_futures.push(async move {
-            let mut attempts = Attempts {
-//                total_limit: 0,
-                limit: 0,
-                count: 0
-            };
+            let mut attempts = Attempts::with_limit(0);
             loop {
 
                 if offset >= total_size.load(Ordering::Relaxed) {
@@ -103,7 +98,7 @@ async fn download_persistent_state_iter(
                     id, master_id, offset, max_size, Some(peer.clone()), &attempts
                 ).await {
                     Ok(next_bytes) => {
-                        attempts.count = 0;
+                        attempts.reset();
                         let len = next_bytes.len();
                         parts.insert(offset, next_bytes);
                         //if (offset / max_size) % 10 == 0 {
@@ -117,13 +112,15 @@ async fn download_persistent_state_iter(
                     },
                     Err(e) => {
                         errors.fetch_add(1, Ordering::SeqCst);
-                        attempts.count += 1;
-                        log::error!("download_persistent_state_part {}: {}, attempt: {}, total errors: {}",
-                            id.shard(), e, attempts.count, errors.load(Ordering::Relaxed));
-                        if attempts.count > 10 {
+                        let count = attempts.next();
+                        log::error!(
+                            "download_persistent_state_part {}: {}, attempt: {}, total errors: {}",
+                            id.shard(), e, count, errors.load(Ordering::Relaxed)
+                        );
+                        if count > 10 {
                             fail!(
-                                "Error download_persistent_state_part after {} attempts : {}", 
-                                attempts.count, e
+                                "Error download_persistent_state_part after {} attempts: {}", 
+                                count, e
                             )
                         }
                         futures_timer::Delay::new(
@@ -133,6 +130,7 @@ async fn download_persistent_state_iter(
                         ).await;
                     },
                 }
+
             }
         });
         offset += max_size;

@@ -1,20 +1,18 @@
-use std::collections::BTreeMap;
-use std::fmt::Debug;
-use std::sync::Arc;
-
+use crate::{
+    block::{BlockIdExtExtention, BlockStuff}, block_proof::BlockProofStuff, boot,
+    engine_traits::EngineOperations
+};
+use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
+use storage::{
+    archives::{
+        archive_manager::SLICE_SIZE, package::read_package_from, 
+        package_entry_id::PackageEntryId
+    },
+    types::BlockHandle
+};
 use tokio::task::JoinHandle;
 use ton_block::BlockIdExt;
-use ton_types::{fail, Result};
-
-use ton_node_storage::archives::archive_manager::SLICE_SIZE;
-use ton_node_storage::archives::package::read_package_from;
-use ton_node_storage::archives::package_entry_id::PackageEntryId;
-
-use crate::block::{BlockIdExtExtention, BlockStuff};
-use crate::block_proof::BlockProofStuff;
-use crate::boot;
-use crate::db::BlockHandle;
-use crate::engine_traits::EngineOperations;
+use ton_types::{error, fail, Result};
 
 type PreDownloadTask = (u32, JoinHandle<Result<Vec<u8>>>);
 
@@ -202,32 +200,29 @@ async fn read_package(data: Vec<u8>) -> Result<BlockMaps> {
 
 async fn save_block(
     engine: &Arc<dyn EngineOperations>,
-    handle: &Arc<BlockHandle>,
+    block_id: &BlockIdExt,
     entry: &BlocksEntry
-) -> Result<(Arc<BlockStuff>, Arc<BlockProofStuff>)> {
-    log::trace!(target: "sync", "save_block: id = {}", handle.id());
+) -> Result<(Arc<BlockHandle>, Arc<BlockStuff>, Arc<BlockProofStuff>)> {
+    log::trace!(target: "sync", "save_block: id = {}", block_id);
     let block = if let Some(ref block) = entry.block {
         Arc::clone(block)
     } else {
-        fail!("Block not found in archive: {}", handle.id());
+        fail!("Block not found in archive: {}", block_id);
     };
     let proof = if let Some(ref proof) = entry.proof {
         Arc::clone(proof)
     } else {
-        let link_str = if handle.id().shard().is_masterchain() {
+        let link_str = if block_id.shard().is_masterchain() {
             ""
         } else {
             "link"
         };
-        fail!("Proof{} not found in archive: {}", link_str, handle.id());
+        fail!("Proof{} not found in archive: {}", link_str, block_id);
     };
-
     proof.check_proof(engine.as_ref()).await?;
-
-    engine.store_block_proof(&handle, &proof).await?;
-    engine.store_block(&handle, &block).await?;
-
-    Ok((block, proof))
+    let handle = engine.store_block(&block).await?;
+    let handle = engine.store_block_proof(block_id, Some(handle), &proof).await?;
+    Ok((handle, block, proof))
 }
 
 #[derive(Default, Debug)]
@@ -254,7 +249,9 @@ async fn import_mc_blocks(
     maps: &BlockMaps,
     mut last_mc_block_id: &Arc<BlockIdExt>,
 ) -> Result<()> {
+
     for id in maps.mc_blocks_ids.values() {
+
         if id.seq_no() <= last_mc_block_id.seq_no() {
             if id.seq_no() == last_mc_block_id.seq_no() {
                 if **last_mc_block_id != **id {
@@ -264,7 +261,6 @@ async fn import_mc_blocks(
             log::debug!(target: "sync", "Skipped already applied MC block: {}", id);
             continue;
         }
-
         if id.seq_no() != last_mc_block_id.seq_no() + 1 {
             fail!(
                 "There is a hole in the masterchain seq_no! Last applied seq_no = {}, current seq_no = {}",
@@ -274,33 +270,39 @@ async fn import_mc_blocks(
         }
 
         log::debug!(target: "sync", "Importing MC block: {}", id);
-        let handle = engine.load_block_handle(&id)?;
-        if handle.applied() {
-            log::debug!(target: "sync", "Skipped already applied MC block: {}", id);
-        } else {
-            let entry = maps.blocks.get(id)
-                .expect("Inconsistent BlocksMap");
-
-            let (block, _proof) = save_block(engine, &handle, entry).await?;
-
-            log::debug!(target: "sync", "Applying masterchain block: {}...", id);
-            Arc::clone(engine).apply_block(&handle, Some(&block), id.seq_no(), false).await?;
-        }
-
         last_mc_block_id = id;
-    }
+        if let Some(handle) = engine.load_block_handle(&last_mc_block_id)? {
+            if handle.is_applied() {
+                log::debug!(
+                    target: "sync", 
+                    "Skipped already applied MC block: {}", 
+                    last_mc_block_id
+                );
+                continue
+            }
+        } 
 
+        let entry = maps.blocks.get(last_mc_block_id).expect("Inconsistent BlocksMap");
+        let (handle, block, _proof) = save_block(engine, &last_mc_block_id, entry).await?;
+        log::debug!(target: "sync", "Applying masterchain block: {}...", last_mc_block_id);
+        Arc::clone(engine).apply_block(
+            &handle, &block, last_mc_block_id.seq_no(), false
+        ).await?;
+
+    }
+ 
     Ok(())
+
 }
 
 async fn import_shard_blocks(
     engine: &Arc<dyn EngineOperations>,
     maps: Arc<BlockMaps>,
 ) -> Result<()> {
+
     for (id, entry) in maps.blocks.iter() {
         if !id.is_masterchain() {
-            let handle = engine.load_block_handle(id)?;
-            save_block(engine, &handle, entry).await?;
+            save_block(engine, id, entry).await?;
         }
     }
 
@@ -319,7 +321,9 @@ async fn import_shard_blocks(
 
         log::debug!(target: "sync", "Importing shardchain blocks for MC block: {}...", mc_block_id);
 
-        let mc_handle = engine.load_block_handle(&mc_block_id)?;
+        let mc_handle = engine.load_block_handle(&mc_block_id)?.ok_or_else(
+            || error!("Cannot load handle for master block {}", mc_block_id)
+        )?;
         let mc_block = engine.load_block(&mc_handle).await?;
 
         let shard_blocks = mc_block.shards_blocks()?;
@@ -336,15 +340,17 @@ async fn import_shard_blocks(
                     mc_handle.id()
                 );
 
-                let handle = engine.load_block_handle(&id)?;
-                if handle.applied() {
+                let handle = engine.load_block_handle(&id)?.ok_or_else(
+                    || error!("Cannot load handle for shard block {}", id)
+                )?;
+                if handle.is_applied() {
                     log::debug!(target: "sync", "Skipped already applied block: {}", id);
                     return Ok(());
                 }
 
                 if id.seq_no() == 0 {
                     log::info!(target: "sync", "Downloading zerostate: {}...", id);
-                    boot::download_zero_state(engine.as_ref(), &handle).await?;
+                    boot::download_zero_state(engine.as_ref(), &id).await?;
                     return Ok(());
                 }
 
@@ -361,15 +367,19 @@ async fn import_shard_blocks(
                         engine.load_block(&handle).await.ok()
                     },
                 };
-                if block.is_none() {
+                if let Some(block) = block {
+                    Arc::clone(&engine).apply_block(&handle, &block, mc_seq_no, false).await
+                } else {
                     log::warn!(
                         target: "sync",
                         "Shard block is not found either in the package or in the un-applied blocks. \
                         We will try to download it individually: {}",
                         id
                     );
-                }
-                Arc::clone(&engine).apply_block(&handle, block.as_ref(), mc_seq_no, false).await
+                    Arc::clone(&engine).download_and_apply_block(
+                        handle.id(), mc_seq_no, false
+                    ).await
+                } 
             }));
         }
 

@@ -1,40 +1,40 @@
-pub mod block;
-pub mod block_proof;
-pub mod boot;
+mod block;
+mod block_proof;
+mod boot;
+mod collator_test_bundle;
 pub mod config;
-pub mod db;
-pub mod engine;
-pub mod engine_traits;
-pub mod engine_operations;
-pub mod error;
-pub mod full_node;
-pub mod macros;
+mod engine;
+mod engine_traits;
+mod engine_operations;
+mod error;
+mod full_node;
+mod internal_db;
+mod macros;
 pub mod network;
-pub mod out_msg_queue;
-pub mod shard_state;
-pub mod sync;
-pub mod types;
-pub mod validator;
-pub mod shard_blocks;
-pub mod validating_utils;
-pub mod rng;
-pub mod collator_test_bundle;
+mod out_msg_queue;
+mod rng;
+mod shard_blocks;
+mod shard_state;
+mod sync;
+mod types;
+mod validating_utils;
+mod validator;
 
 #[cfg(feature = "tracing")]
-pub mod jaeger;
+mod jaeger;
 
 #[cfg(not(feature = "tracing"))]
-pub mod jaeger {
+mod jaeger {
     pub fn init_jaeger(){}
     pub fn message_from_kafka_received(_kf_key: &[u8]) {}
     pub fn broadcast_sended(_msg_id: String) {}
 }
 
-extern crate lazy_static;
+//extern crate lazy_static;
 
 #[cfg(feature = "external_db")]
 mod external_db;
-pub mod ext_messages;
+mod ext_messages;
 
 use crate::{config::TonNodeConfig, engine_traits::ExternalDb, engine::STATSD, jaeger::init_jaeger};
 use clap;

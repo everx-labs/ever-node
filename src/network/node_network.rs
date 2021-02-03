@@ -1,7 +1,6 @@
 use crate::{
-    config::{NodeConfigHandler, TonNodeGlobalConfig, TonNodeConfig},
-    db::InternalDb,
-    engine_traits::{OverlayOperations, PrivateOverlayOperations},
+    config::{NodeConfigHandler, TonNodeConfig},
+    engine_traits::{OverlayOperations, PrivateOverlayOperations}, internal_db::InternalDb,
     network::{
         catchain_client::CatchainClient, control::ControlServer,
         full_node_client::{NodeClientOverlay, FullNodeOverlayClient},
@@ -10,7 +9,7 @@ use crate::{
     types::awaiters_pool::AwaitersPool,
 };
 use adnl::{
-    common::{KeyId, KeyOption}, node::{AddressCacheIterator, AdnlNode, AdnlNodeConfig}
+    common::{KeyId, KeyOption}, node::{AddressCacheIterator, AdnlNode}
 };
 use catchain::{CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr};
 use dht::DhtNode;
@@ -28,9 +27,6 @@ pub struct NodeNetwork {
     dht: Arc<DhtNode>,
     overlay: Arc<OverlayNode>,
     rldp: Arc<RldpNode>,
-    global_cfg: TonNodeGlobalConfig,
-   // config: TonNodeConfig,
-    db: Arc<dyn InternalDb>,
     masterchain_overlay_short_id: Arc<OverlayShortId>,
     masterchain_overlay_id: OverlayId,
     overlays: Arc<Cache<Arc<OverlayShortId>, Arc<NodeClientOverlay>>>,
@@ -129,11 +125,8 @@ impl NodeNetwork {
             dht,
             overlay,
             rldp,
-            db,
             masterchain_overlay_short_id,
             masterchain_overlay_id,
-            global_cfg: global_config,
-           // config: config,
             overlays: Arc::new(Cache::new()),
             validator_context: validator_context,
             overlay_awaiters: AwaitersPool::new(),
@@ -143,8 +136,8 @@ impl NodeNetwork {
         })
     }
 
-    pub fn global_cfg(&self) -> &TonNodeGlobalConfig {
-        &self.global_cfg
+    pub async fn stop(&self) {
+        self.adnl.stop().await
     }
 
     fn try_add_new_elem<K: Hash + Ord + Clone, T: Clone>(
@@ -182,35 +175,6 @@ impl NodeNetwork {
                 cache.get(id).unwrap().val().clone()
             }
         }
-    }
-
-    pub fn get_peers_from_storage(
-        &self,
-        overlay_id: &Arc<OverlayShortId>
-    ) -> Result<Option<Vec<AdnlNodeConfig>>> {
-        let id = base64::encode(overlay_id.data());
-        let id = self.string_to_static_str(id);
-        let raw_data_peers = match self.db.load_node_state(&id) {
-            Ok(configs) => configs,
-            Err(_) => return Ok(None)
-        };
-        let res_json: Vec<String> = serde_json::from_slice(&raw_data_peers)?;
-        let mut result = vec![];
-
-        for item in res_json.iter() {
-            result.push(
-                AdnlNodeConfig::from_json(item, false)?
-            );
-        }
-        Ok(Some(result))
-    }
-
-    fn string_to_static_str(&self, s: String) -> &'static str {
-        Box::leak(s.into_boxed_str())
-    }
-
-    pub fn local_id(&self) -> Result<Arc<KeyId>> {
-        Ok(self.adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?.id().clone())
     }
 
     fn periodic_store_ip_addr(
@@ -254,6 +218,7 @@ impl NodeNetwork {
             }
         });
     }
+
 /*  
     fn save_peers(
         &self,
@@ -318,9 +283,11 @@ impl NodeNetwork {
     }
 */
 
+/*
     pub fn masterchain_overlay_id(&self) -> &KeyId {
         &self.masterchain_overlay_short_id
     }
+*/
 
     pub fn get_validator_status(&self) -> bool {
         self.config_handler.get_validator_status()

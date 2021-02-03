@@ -40,7 +40,6 @@ pub struct Neighbours {
     start: Instant
 }
 
-pub const DOWNLOAD_NEXT_PRIORITY: u8 = 1;
 pub const PROTO_VERSION: i32 = 2;
 pub const PROTO_CAPABILITIES: i64 = 1;
 pub const STOP_UNRELIABILITY: i32 = 5;
@@ -156,7 +155,6 @@ impl Neighbour {
 }
 
 pub const MAX_NEIGHBOURS: usize = 16;
-pub const ATTEMPTS: u32 = 1;
 
 impl Neighbours {
 

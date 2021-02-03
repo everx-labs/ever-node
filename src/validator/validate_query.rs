@@ -324,8 +324,10 @@ impl ValidateQuery {
         // 5. request masterchain state referred to in the block
         if !base.shard().is_masterchain() {
             // 5.1. request corresponding block handle
-            let handle = self.engine.load_block_handle(mc_data.state.block_id())?;
-            if !self.is_fake && !handle.proof_inited() && handle.id().seq_no() != 0 {
+            let handle = self.engine.load_block_handle(mc_data.state.block_id())?.ok_or_else(
+                || error!("Cannot load handle for masterblock {}", mc_data.state.block_id())
+            )?;
+            if !self.is_fake && !handle.has_proof() && handle.id().seq_no() != 0 {
                 reject_query!("reference masterchain block {} for block {} does not have a valid proof",
                     handle.id(), base.block_id())
             }
@@ -527,14 +529,14 @@ impl ValidateQuery {
         } else {
             self.old_mc_shards.clone()
         };
-        if base.global_id != mc_state.shard_state().global_id() {
+        if base.global_id != mc_state.state().global_id() {
             reject_query!("blockchain global id mismatch: new block has {} while the masterchain configuration expects {}",
-                base.global_id, mc_state.shard_state().global_id())
+                base.global_id, mc_state.state().global_id())
         }
         CHECK!(&base.info, inited);
-        if base.info.vert_seq_no() != mc_state.shard_state().vert_seq_no() {
+        if base.info.vert_seq_no() != mc_state.state().vert_seq_no() {
             reject_query!("vertical seqno mismatch: new block has {} while the masterchain configuration expects {}",
-                base.info.vert_seq_no(), mc_state.shard_state().vert_seq_no())
+                base.info.vert_seq_no(), mc_state.state().vert_seq_no())
         }
         if mc_state_extra.after_key_block {
             self.prev_key_block_seqno = mc_state.block_id().seq_no();
@@ -639,9 +641,9 @@ impl ValidateQuery {
 
     // similar to Collator::unpack_one_last_state()
     fn check_one_prev_state(&self, base: &ValidateBase, ss: &ShardStateStuff) -> Result<()> {
-        if ss.shard_state().vert_seq_no() > base.info.vert_seq_no() {
+        if ss.state().vert_seq_no() > base.info.vert_seq_no() {
             reject_query!("one of previous states {} has vertical seqno {} larger than that of the new block {}",
-                ss.shard_state().id(), ss.shard_state().vert_seq_no(), base.info.vert_seq_no())
+                ss.state().id(), ss.state().vert_seq_no(), base.info.vert_seq_no())
         }
         Ok(())
     }
@@ -799,7 +801,7 @@ impl ValidateQuery {
                 let do_flags = TopBlockDescrMode::FAIL_NEW | TopBlockDescrMode::FAIL_TOO_NEW;
                 let mut res_flags = 0;
                 let chain_len = sh_bd.prevalidate(mc_data.state.block_id(), &mc_data.mc_state_extra,
-                    mc_data.state.shard_state().vert_seq_no(), do_flags, &mut res_flags)
+                    mc_data.state.state().vert_seq_no(), do_flags, &mut res_flags)
                     .map_err(|err| error!("ShardTopBlockDescr for {} is invalid: res_flags={}, err: {}",
                         sh_bd.proof_for(), res_flags, err))?;
                 if chain_len <= 0 || chain_len > 8 {
@@ -1044,8 +1046,8 @@ impl ValidateQuery {
                 false => reject_query!("masterchain catchain seqno unchanged while it had to")
             }
         }
-        let now = base.next_state.shard_state().gen_time();
-        let prev_now = base.prev_state.shard_state().gen_time();
+        let now = base.next_state.state().gen_time();
+        let prev_now = base.prev_state.state().gen_time();
         let ccvc = base.next_state_extra.config.catchain_config()?;
         let cur_validators = base.next_state_extra.config.validator_set()?;
         let lifetime = ccvc.mc_catchain_lifetime;

@@ -73,7 +73,7 @@ struct McData {
 impl McData {
     fn new(mc_state: ShardStateStuff) -> Result<Self> {
 
-        let mc_state_extra = mc_state.shard_state().read_custom()?
+        let mc_state_extra = mc_state.state().read_custom()?
             .ok_or_else(|| error!("Can't read custom field from mc state"))?;
 
         // prev key block
@@ -103,10 +103,10 @@ impl McData {
     fn block_create_stats(&self) -> Option<&BlockCreateStats> { self.mc_state_extra.block_create_stats.as_ref() }
     fn libraries(&self) -> &Libraries { self.state.state().libraries() }
     fn master_ref(&self) -> BlkMasterInfo {
-        let end_lt = self.state.shard_state().gen_lt();
+        let end_lt = self.state.state().gen_lt();
         let master = ExtBlkRef {
             end_lt,
-            seq_no: self.state.shard_state().seq_no(),
+            seq_no: self.state.state().seq_no(),
             root_hash: self.state.block_id().root_hash().clone(),
             file_hash: self.state.block_id().file_hash().clone(),
         };
@@ -1306,7 +1306,7 @@ impl Collator {
         for (i, prev_id) in self.prev_blocks_ids.iter().enumerate() {
             let prev_state = self.engine.load_state(prev_id).await?;
 
-            let end_lt = prev_state.shard_state().gen_lt();
+            let end_lt = prev_state.state().gen_lt();
             let ext_block_ref = ExtBlkRef {
                 end_lt,
                 seq_no: prev_id.seq_no,
@@ -2314,7 +2314,7 @@ impl Collator {
 
         // construct block
         let new_block = Block::with_params(
-            mc_data.state().shard_state().global_id(),
+            mc_data.state().state().global_id(),
             info,
             value_flow,
             state_update,

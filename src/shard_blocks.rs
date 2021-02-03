@@ -3,12 +3,9 @@ use crate::{
     engine_traits::EngineOperations,
     shard_state::ShardStateStuff,
 };
+use std::{io::Cursor, sync::{Arc, atomic::{AtomicU32, Ordering}}};
 use ton_block::{BlockIdExt, TopBlockDescr, Deserializable, BlockSignatures};
-use ton_types::{fail, Result, deserialize_tree_of_cells};
-use std::{
-    io::Cursor,
-    sync::{Arc, atomic::{AtomicU32, Ordering}},
-};
+use ton_types::{error, fail, Result, deserialize_tree_of_cells};
 
 
 pub struct ShardBlocksPool {
@@ -104,11 +101,17 @@ impl ShardBlocksPool {
             }
         }
 
-        if let Ok(mc_block) = engine.load_block_handle(&engine.load_last_applied_mc_block_id().await?) {
-            Ok(self.is_fake || tbds.unwrap().gen_utime() < mc_block.gen_utime()? + 60)
-        } else {
-            log::trace!("add_shard_block too new block {}", id);
-            Ok(false)
+        let last_id = engine.load_last_applied_mc_block_id().await?;
+        match engine.load_block_handle(&last_id)?.ok_or_else(
+            || error!("Cannot load handle for last master block {}", last_id)
+        ) {
+            Ok(mc_block) => Ok(
+                self.is_fake || tbds.unwrap().gen_utime() < mc_block.gen_utime()? + 60
+            ),
+            Err(e) => {
+                log::trace!("add_shard_block failed for block {}, {} (too new?)", id, e);
+                Ok(false)
+            }
         }
     }
 

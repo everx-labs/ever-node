@@ -29,6 +29,7 @@ pub struct CollatorSettings {
     pub max_collate_threads: Option<usize>,
 }
 
+/* UNUSED
 impl CollatorSettings {
     pub fn want_merge() -> Self {
         let mut settings = Self::default();
@@ -41,4 +42,5 @@ impl CollatorSettings {
         settings
     }
 }
+*/
 

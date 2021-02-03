@@ -1,25 +1,19 @@
 use crate::{
-    block::{BlockStuff}, 
-    shard_state::ShardStateStuff,
-    network::{full_node_client::FullNodeOverlayClient},
-    block_proof::BlockProofStuff,
-    db::BlockHandle,
-    types::top_block_descr::TopBlockDescrStuff,
-    ext_messages::create_ext_message,
-    jaeger,
-    config::CollatorTestBundlesGeneralConfig,
+    block::BlockStuff, block_proof::BlockProofStuff, config::CollatorTestBundlesGeneralConfig,
+    ext_messages::create_ext_message, jaeger, network::full_node_client::FullNodeOverlayClient,
+    shard_state::ShardStateStuff, types::top_block_descr::TopBlockDescrStuff
 };
-
 use adnl::common::KeyOption;
-use catchain::{CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr};
-use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+use catchain::{
+    CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, 
+    CatchainOverlayLogReplayListenerPtr
 };
-use ton_types::{fail, Result, UInt256};
 use overlay::{OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId};
-use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, HashmapAugType};
+use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use storage::types::BlockHandle;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
+use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, HashmapAugType};
+use ton_types::{fail, Result, UInt256};
 
 #[async_trait::async_trait]
 pub trait OverlayOperations : Sync + Send {
@@ -94,13 +88,13 @@ pub trait EngineOperations : Sync + Send {
 
     // Block related operations
 
-    fn load_block_handle(&self, id: &BlockIdExt) -> Result<Arc<BlockHandle>> {
+    fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
         unimplemented!()
     }
     async fn load_applied_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         unimplemented!()
     }
-    async fn wait_applied_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
+    async fn wait_applied_block(&self, id: &BlockIdExt) -> Result<(Arc<BlockHandle>, BlockStuff)> {
         unimplemented!()
     }
     async fn load_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
@@ -139,10 +133,24 @@ pub trait EngineOperations : Sync + Send {
     async fn find_block_by_lt(&self, acc_pfx: &AccountIdPrefixFull, lt: u64) -> Result<Arc<BlockHandle>> {
         unimplemented!()
     }
-    async fn apply_block(self: Arc<Self>, handle: &BlockHandle, block: Option<&BlockStuff>, mc_seq_no: u32, pre_apply: bool) -> Result<()> {
+    async fn apply_block(
+        self: Arc<Self>, 
+        handle: &Arc<BlockHandle>, 
+        block: &BlockStuff, 
+        mc_seq_no: u32, 
+        pre_apply: bool
+    ) -> Result<()> {
         unimplemented!()
     }
-    async fn download_block(&self, handle: &BlockHandle, limit: Option<u32>) -> Result<(BlockStuff, BlockProofStuff)> {
+    async fn download_and_apply_block(
+        self: Arc<Self>, 
+        id: &BlockIdExt, 
+        mc_seq_no: u32, 
+        pre_apply: bool
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    async fn download_block(&self, id: &BlockIdExt, limit: Option<u32>) -> Result<(BlockStuff, BlockProofStuff)> {
         unimplemented!()
     }
     async fn download_block_proof(&self, id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff> {
@@ -154,13 +162,18 @@ pub trait EngineOperations : Sync + Send {
     async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, priority: u32) -> Result<Vec<BlockIdExt>> {
         unimplemented!()
     }
-    async fn store_block(&self, handle: &BlockHandle, block: &BlockStuff) -> Result<()> {
+    async fn store_block(&self, block: &BlockStuff) -> Result<Arc<BlockHandle>> {
         unimplemented!()
     }
-    async fn store_block_proof(&self, handle: &BlockHandle, proof: &BlockProofStuff) -> Result<()> {
+    async fn store_block_proof(
+        &self, 
+        id: &BlockIdExt, 
+        handle: Option<Arc<BlockHandle>>, 
+        proof: &BlockProofStuff
+    ) -> Result<Arc<BlockHandle>> {
         unimplemented!()
     }
-    async fn load_block_proof(&self, handle: &BlockHandle, is_link: bool) -> Result<BlockProofStuff> {
+    async fn load_block_proof(&self, handle: &Arc<BlockHandle>, is_link: bool) -> Result<BlockProofStuff> {
         unimplemented!()
     }
     async fn load_block_proof_raw(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>> {
@@ -168,7 +181,7 @@ pub trait EngineOperations : Sync + Send {
     }
     async fn process_block_in_ext_db(
         &self,
-        handle: &BlockHandle,
+        handle: &Arc<BlockHandle>,
         block: &BlockStuff,
         proof: Option<&BlockProofStuff>,
         state: &ShardStateStuff)
@@ -201,13 +214,22 @@ pub trait EngineOperations : Sync + Send {
     ) -> Result<Vec<u8>> {
         unimplemented!()
     }
-    async fn wait_state(&self, handle: &BlockHandle) -> Result<ShardStateStuff> {
+    async fn wait_state(&self, id: &BlockIdExt) -> Result<ShardStateStuff> {
         unimplemented!()
     }
-    async fn store_state(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<()> {
+    async fn store_state(
+        &self, 
+        handle: &Arc<BlockHandle>, 
+        state: &ShardStateStuff
+    ) -> Result<()> {
         unimplemented!()
     }
-    async fn store_zerostate(&self, handle: &BlockHandle, state: &ShardStateStuff, state_bytes: &[u8]) -> Result<()> {
+    async fn store_zerostate(
+        &self, 
+        id: &BlockIdExt, 
+        state: &ShardStateStuff, 
+        state_bytes: &[u8]
+    ) -> Result<Arc<BlockHandle>> {
         unimplemented!()
     }
     async fn process_full_state_in_ext_db(&self, state: &ShardStateStuff)-> Result<()> {
@@ -216,25 +238,25 @@ pub trait EngineOperations : Sync + Send {
 
     // Block next prev links
 
-    fn store_block_prev(&self, handle: &BlockHandle, prev: &BlockIdExt) -> Result<()> {
+    fn store_block_prev1(&self, handle: &Arc<BlockHandle>, prev: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
-    fn load_block_prev(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_prev1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         unimplemented!()
     }
-    fn store_block_prev2(&self, handle: &BlockHandle, prev2: &BlockIdExt) -> Result<()> {
+    fn store_block_prev2(&self, handle: &Arc<BlockHandle>, prev2: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
     fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         unimplemented!()
     }
-    fn store_block_next1(&self, handle: &BlockHandle, next: &BlockIdExt) -> Result<()> {
+    fn store_block_next1(&self, handle: &Arc<BlockHandle>, next: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
     async fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         unimplemented!()
     }
-    fn store_block_next2(&self, handle: &BlockHandle, next2: &BlockIdExt) -> Result<()> {
+    fn store_block_next2(&self, handle: &Arc<BlockHandle>, next2: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
     async fn load_block_next2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
@@ -372,7 +394,7 @@ pub trait EngineOperations : Sync + Send {
 
     // Boot specific operations
 
-    async fn set_applied(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()> {
+    async fn set_applied(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<()> {
         unimplemented!()
     }
 
@@ -388,7 +410,7 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    fn assign_mc_ref_seq_no(&self, handle: &BlockHandle, mc_seq_no: u32) -> Result<()> {
+    fn assign_mc_ref_seq_no(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<()> {
         unimplemented!()
     }
 
@@ -401,7 +423,7 @@ pub trait EngineOperations : Sync + Send {
             return Ok(true)
         }
         let state = self.load_last_applied_mc_state().await?;
-        if seq_no >= state.shard_state().seq_no() {
+        if seq_no >= state.state().seq_no() {
             return Ok(true)
         }
         let block_id = match state.shard_state_extra()?.prev_blocks.get(&seq_no) {

@@ -7,9 +7,9 @@ use std::convert::TryFrom;
 use std::sync::*;
 use std::time::{Duration, SystemTime};
 use futures::stream::*;
-
 use crate::{
     block::BlockStuff,
+    engine::STATSD,
     engine_traits::{EngineOperations, OverlayOperations},
     shard_state::ShardStateStuff,
     validator::{validator_group::{ValidatorGroup, ValidatorGroupStatus},
@@ -29,9 +29,11 @@ use sha2::{Digest, Sha256};
 use tokio::{task::JoinHandle, time::timeout, sync::oneshot, runtime::Runtime };
 use ton_api::IntoBoxed;
 use ton_block::master::{FutureSplitMerge, ShardDescr};
-use ton_block::{CatchainConfig, signature::SigPubKey, ConfigParamEnum, ConsensusConfig, McStateExtra, Serializable, ShardIdent, ValidatorDescr, ValidatorSet, BlockIdExt};
-use ton_types::BuilderData;
-use ton_types::{fail, Result, UInt256};
+use ton_block::{
+    BlockIdExt, CatchainConfig, signature::SigPubKey, ConfigParamEnum, ConsensusConfig, 
+    McStateExtra, Serializable, ShardIdent, ValidatorDescr, ValidatorSet,
+};
+use ton_types::{error, fail, BuilderData, Result, UInt256};
 
 pub fn get_validator_set_id_serialize(
     shard: ShardIdent,
@@ -324,6 +326,8 @@ impl ValidatorManagerImpl {
 
         self.validator_list_status.curr = self.update_single_validator_list(validator_set.list(), "current").await?;
         self.validator_list_status.next = self.update_single_validator_list(next_validator_set.list(), "next").await?;
+        STATSD.gauge("in_current_vset_p34", if self.validator_list_status.curr.is_some() { 1 } else { 0 } as f64);
+        STATSD.gauge("in_next_vset_p36", if self.validator_list_status.next.is_some() { 1 } else { 0 } as f64);
         return Ok(!self.validator_list_status.curr.is_none() || !self.validator_list_status.next.is_none());
     }
 
@@ -569,7 +573,7 @@ impl ValidatorManagerImpl {
         else {
             mc_state_extra.last_key_block.clone().unwrap().seq_no
         };
-        let mc_now = mc_state.shard_state().gen_time();
+        let mc_now = mc_state.state().gen_time();
         let (session_options, opts_hash) = self.compute_session_options(&mc_state_extra).await?;
         let catchain_config = mc_state_extra.config.catchain_config()?;
 
@@ -770,19 +774,25 @@ impl ValidatorManagerImpl {
         let mc_block_id = match self.last_rotation_block_db.get_last_rotation_block_id()? {
             None => {
                 let id = self.engine.load_last_applied_mc_block_id().await?;
-                log::info!(target: "validator",
-                           "Validator manager initialization: last applied block: {}, no last rotation block",
-                           id
+                log::info!(
+                    target: "validator",
+                    "Validator manager initialization: last applied block: {}, no last rotation block",
+                    id
                 );
                 id
             },
             Some(id) => {
-                log::info!(target: "validator", "Validator manager initialization: last rotation block: {}", id);
+                log::info!(
+                    target: "validator", 
+                    "Validator manager initialization: last rotation block: {}", 
+                    id
+                );
                 id
             }
         };
-
-        let mut mc_handle = self.engine.load_block_handle(&mc_block_id)?;
+        let mut mc_handle = self.engine.load_block_handle(&mc_block_id)?.ok_or_else(
+            || error!("Cannot load handle for last master block {}", mc_block_id)
+        )?;
         loop {
             let s = self.engine.load_state(mc_handle.id()).await?;
             log::info!(target: "validator", "Processing masterblock {}", mc_handle.id().seq_no);

@@ -14,10 +14,10 @@ hex = "0.3.1"
 adnl = { git = "https://github.com/tonlabs/ton-labs-adnl", features = ["node"] }
 overlay = { git = "https://github.com/tonlabs/ton-labs-overlay" }
 rldp = { git = "https://github.com/tonlabs/ton-labs-rldp" }
+storage = { path = "../storage" }
 ton_types = { git = "https://github.com/tonlabs/ton-labs-types" }
 ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }
 tokio = { version = "0.2.18", features = ["rt-threaded", "stream", "tcp", "udp", "sync"] }
-ton-node-storage = { git = "https://github.com/tonlabs/ton-labs-node-storage.git" }
 futures = "0.3.4"
 crossbeam = "0.7.3"
 rand = "0.7.3"

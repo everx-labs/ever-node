@@ -4,7 +4,7 @@ use crate::{
     shard_state::ShardStateStuff,
     types::messages::MsgEnqueueStuff,
 };
-use std::iter::Iterator;
+use std::{cmp::max, iter::Iterator};
 use ton_block::{
     BlockIdExt, ShardIdent, Serializable, Deserializable, 
     OutMsgQueueInfo, OutMsgQueue, OutMsgQueueKey, IhrPendingInfo,
@@ -108,8 +108,8 @@ pub struct OutMsgQueueInfoStuff {
 
 impl OutMsgQueueInfoStuff {
     pub fn from_shard_state(state: &ShardStateStuff) -> Result<Self> {
-        let out_queue_info = state.shard_state().read_out_msg_queue_info()?;
-        Self::from_out_queue_info(state.block_id().clone(), out_queue_info, state.shard_state().gen_lt())
+        let out_queue_info = state.state().read_out_msg_queue_info()?;
+        Self::from_out_queue_info(state.block_id().clone(), out_queue_info, state.state().gen_lt())
     }
     fn from_out_queue_info(block_id: BlockIdExt, out_queue_info: OutMsgQueueInfo, end_lt: u64) -> Result<Self> {
         // TODO: comment the next line in the future when the output queues become huge
@@ -154,9 +154,12 @@ impl OutMsgQueueInfoStuff {
             }
             self.entries.push(entry.clone());
         }
-        self.block_id.shard_id = shard;
-        let seq_no = std::cmp::max(self.block_id.seq_no, other.block_id.seq_no);
-        self.block_id = BlockIdExt::new(shard, seq_no);
+        self.block_id = BlockIdExt::with_params(
+            shard, 
+            max(self.block_id.seq_no, other.block_id.seq_no),
+            UInt256::default(),
+            UInt256::default()
+        );
         self.compactify()?;
         Ok(())
     }
@@ -205,7 +208,12 @@ impl OutMsgQueueInfoStuff {
         self.compactify()?;
         self.block_id.shard_id = subshard;
 
-        let block_id = BlockIdExt::new(sibling, self.block_id().seq_no);
+        let block_id = BlockIdExt::with_params(
+            sibling, 
+            self.block_id().seq_no,
+            UInt256::default(),
+            UInt256::default()
+        );
         let mut sibling = OutMsgQueueInfoStuff {
             block_id,
             out_queue,
@@ -248,7 +256,7 @@ impl OutMsgQueueInfoStuff {
                 } else {
                     let state = engine.get_aux_mc_state(mc_seqno)
                         .ok_or_else(|| error!("mastechain state for block {} was not previously cached", mc_seqno))?;
-                    entry.mc_end_lt = state.shard_state().gen_lt();
+                    entry.mc_end_lt = state.state().gen_lt();
                     entry.ref_shards = Some(state.shards()?.clone());
                 };
             }
@@ -325,9 +333,10 @@ impl OutMsgQueueInfoStuff {
         Ok(())
     }
     pub fn entries(&self) -> &Vec<ProcessedUptoStuff> { &self.entries }
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
+// Unused
+//    pub fn is_empty(&self) -> bool {
+//        self.entries.is_empty()
+//    }
     pub fn min_seqno(&self) -> u32 {
         self.min_seqno
     }
@@ -423,7 +432,8 @@ impl OutMsgQueueInfoStuff {
 }
 
 pub struct MsgQueueManager {
-    shard: ShardIdent,
+// Unused
+//    shard: ShardIdent,
     prev_out_queue_info: OutMsgQueueInfoStuff,
     next_out_queue_info: OutMsgQueueInfoStuff,
     neighbors: Vec<OutMsgQueueInfoStuff>
@@ -500,7 +510,8 @@ impl MsgQueueManager {
             neighbor.fix_processed_upto(engine, mc_seqno, 0, None)?;
         }
         Ok(MsgQueueManager {
-            shard,
+        // Unused
+        //    shard,
             prev_out_queue_info,
             next_out_queue_info,
             neighbors,
@@ -754,16 +765,18 @@ impl MsgQueueManager {
     pub fn prev(&self) -> &OutMsgQueueInfoStuff { &self.prev_out_queue_info }
     pub fn next(&self) -> &OutMsgQueueInfoStuff { &self.next_out_queue_info }
     pub fn take_next(&mut self) -> OutMsgQueueInfoStuff { std::mem::take(&mut self.next_out_queue_info) }
-    pub fn shard(&self) -> &ShardIdent { &self.shard }
+// Unused
+//    pub fn shard(&self) -> &ShardIdent { &self.shard }
     pub fn neighbors(&self) -> &Vec<OutMsgQueueInfoStuff> { &self.neighbors }
-    pub fn neighbor(&self, shard: &ShardIdent) -> Option<&OutMsgQueueInfoStuff> {
-        for nb in &self.neighbors {
-            if nb.shard() == shard {
-                return Some(nb)
-            }
-        }
-        None
-    }
+// Unused
+//    pub fn neighbor(&self, shard: &ShardIdent) -> Option<&OutMsgQueueInfoStuff> {
+//        for nb in &self.neighbors {
+//            if nb.shard() == shard {
+//                return Some(nb)
+//            }
+//        }
+//        None
+//    }
 }
 
 #[derive(Eq, PartialEq)]

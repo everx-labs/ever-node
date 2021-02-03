@@ -36,18 +36,23 @@ use ton_types::{fail, error, Result};
 
 #[derive(Debug, Default, Clone)]
 pub struct Attempts {
-//    pub total_limit: u32,
-    pub limit: u32,
-    pub count: u32
+    limit: u32,
+    count: u32
 }
-
+                                                                                                                  
 impl Attempts {
     pub const fn with_limit(limit: u32) -> Self {
         Self {
-//            total_limit: 0,
             limit,
             count: 0,
         }
+    }
+    pub fn next(&mut self) -> u32 {
+        self.count += 1;
+        self.count
+    }
+    pub fn reset(&mut self) {
+        self.count = 0
     }
 }
 
@@ -112,9 +117,11 @@ impl NodeClientOverlay {
         &self.overlay_id
     }
 
+/*
     pub fn overlay(&self) -> &Arc<OverlayNode> {
         &self.overlay
     }
+*/
 
     pub fn peers(&self) -> &Arc<Neighbours> {
         &self.peers

@@ -1,37 +1,32 @@
 use crate::{
-    block::{BlockStuff},
-    engine_traits::EngineOperations,
-    shard_state::ShardStateStuff,
-    db::BlockHandle,
+    block::BlockStuff, engine_traits::EngineOperations, shard_state::ShardStateStuff
 };
-
 use std::{ops::Deref, sync::Arc};
-use ton_types::Result;
+use storage::types::BlockHandle;
+use ton_types::{error, fail, Result};
 use ton_block::BlockIdExt;
 
 pub async fn apply_block(
-    handle: &BlockHandle,
+    handle: &Arc<BlockHandle>,
     block: &BlockStuff,
     mc_seq_no: u32,
     engine: &Arc<dyn EngineOperations>,
     pre_apply: bool,
 ) -> Result<()> {
-    let prev_ids = block.construct_prev_id()?;
-
+    if handle.id() != block.id() {
+        fail!("Block id mismatch in apply block: {} vs {}", handle.id(), block.id())
+    }
+    let prev_ids = block.construct_prev_id()?;    
     check_prev_blocks(&prev_ids, engine, mc_seq_no, pre_apply).await?;
-
-    let shard_state = if handle.state_inited() {
+    let shard_state = if handle.has_state() {
         engine.load_state(handle.id()).await?
     } else {
         calc_shard_state(handle, block, &prev_ids, engine).await?
     };
-
     if !pre_apply {
-        set_next_prev_ids(&handle, block.id(), &prev_ids, engine.deref())?;
-
+        set_next_prev_ids(&handle, &prev_ids, engine.deref())?;
         engine.process_block_in_ext_db(handle, &block, None, &shard_state).await?;
     }
-
     Ok(())
 }
 
@@ -44,21 +39,13 @@ async fn check_prev_blocks(
 ) -> Result<()> {
     match prev_ids {
         (prev1_id, Some(prev2_id)) => {
-            let prev1_handle = engine.load_block_handle(&prev1_id)?;
-            let prev2_handle = engine.load_block_handle(&prev2_id)?;
             let mut apply_prev_futures = Vec::with_capacity(2);
-            let applied1 = if pre_apply { prev1_handle.state_inited() } else { prev1_handle.applied() };
-            if !applied1 {
-                apply_prev_futures.push(
-                    engine.clone().apply_block(&prev1_handle, None, mc_seq_no, pre_apply)
-                );
-            }
-            let applied2 = if pre_apply { prev2_handle.state_inited() } else { prev2_handle.applied() };
-            if !applied2 {
-                apply_prev_futures.push(
-                    engine.clone().apply_block(&prev2_handle, None, mc_seq_no, pre_apply)
-                );
-            }
+            apply_prev_futures.push(
+                engine.clone().download_and_apply_block(&prev1_id, mc_seq_no, pre_apply)
+            );
+            apply_prev_futures.push(
+                engine.clone().download_and_apply_block(&prev2_id, mc_seq_no, pre_apply)
+            );
             futures::future::join_all(apply_prev_futures)
                 .await
                 .into_iter()
@@ -66,11 +53,7 @@ async fn check_prev_blocks(
                 .unwrap_or(Ok(()))?;
         },
         (prev_id, None) => {
-            let prev_handle = engine.load_block_handle(&prev_id)?;
-            let applied = if pre_apply { prev_handle.state_inited() } else { prev_handle.applied() };
-            if !applied {
-                engine.clone().apply_block(&prev_handle, None, mc_seq_no, pre_apply).await?;
-            }
+            engine.clone().download_and_apply_block(&prev_id, mc_seq_no, pre_apply).await?;
         }
     }
     Ok(())
@@ -78,23 +61,22 @@ async fn check_prev_blocks(
 
 // Gets prev block(s) state and applies merkle update from block to calculate new state
 pub async fn calc_shard_state(
-    handle: &BlockHandle,
+    handle: &Arc<BlockHandle>,
     block: &BlockStuff,
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
     engine: &Arc<dyn EngineOperations>
 ) -> Result<ShardStateStuff> {
+
     log::trace!("calc_shard_state: block: {}", block.id());
 
     let prev_ss_root = match prev_ids {
         (prev1, Some(prev2)) => {
-            let ss1 = engine.wait_state(engine.load_block_handle(prev1)?.as_ref()).await?.root_cell().clone();
-            let ss2 = engine.wait_state(engine.load_block_handle(prev2)?.as_ref()).await?.root_cell().clone();
+            let ss1 = engine.wait_state(prev1).await?.root_cell().clone();
+            let ss2 = engine.wait_state(prev2).await?.root_cell().clone();
             ShardStateStuff::construct_split_root(ss1, ss2)?
         },
         (prev, None) => {
-            engine.wait_state(&engine.load_block_handle(&prev)?.as_ref()).await?
-                .root_cell()
-                .clone()
+            engine.wait_state(prev).await?.root_cell().clone()
         }
     };
 
@@ -112,40 +94,43 @@ pub async fn calc_shard_state(
     }).await??;
 
     engine.store_state(handle, &ss).await?;
-
     Ok(ss)
+
 }
 
 // Sets next block link for prev. block and prev. for current one
 pub fn set_next_prev_ids(
-    handle: &BlockHandle,
-    id: &BlockIdExt,
+    handle: &Arc<BlockHandle>,
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
     engine: &dyn EngineOperations
 ) -> Result<()> {
     match prev_ids {
         (prev_id1, Some(prev_id2)) => {
             // After merge
-            let prev_handle1 = engine.load_block_handle(&prev_id1)?;
-            engine.store_block_next1(&prev_handle1, id)?;
-
-            let prev_handle2 = engine.load_block_handle(&prev_id2)?;
-            engine.store_block_next1(&prev_handle2, id)?;
-
-            engine.store_block_prev(handle, &prev_id1)?;
+            let prev_handle1 = engine.load_block_handle(&prev_id1)?.ok_or_else(
+                || error!("Cannot load handle for prev1 block {}", prev_id1)
+            )?;
+            engine.store_block_next1(&prev_handle1, handle.id())?;
+            let prev_handle2 = engine.load_block_handle(&prev_id2)?.ok_or_else(
+                || error!("Cannot load handle for prev2 block {}", prev_id2)
+            )?;
+            engine.store_block_next1(&prev_handle2, handle.id())?;
+            engine.store_block_prev1(handle, &prev_id1)?;
             engine.store_block_prev2(handle, &prev_id2)?;
         },
         (prev_id, None) => {
             // if after split and it is second ("1" branch) shard - set next2 for prev block
             let prev_shard = prev_id.shard().clone();
-            let shard = id.shard().clone();
-            let prev_handle = engine.load_block_handle(&prev_id)?;
-            if prev_shard != shard && prev_shard.split()?.1 == shard {
-                engine.store_block_next2(&prev_handle, id)?;
+            let shard = handle.id().shard().clone();
+            let prev_handle = engine.load_block_handle(&prev_id)?.ok_or_else(
+                || error!("Cannot load handle for prev block {}", prev_id)
+            )?;
+            if (prev_shard != shard) && (prev_shard.split()?.1 == shard) {
+                engine.store_block_next2(&prev_handle, handle.id())?;
             } else {
-                engine.store_block_next1(&prev_handle, id)?;
+                engine.store_block_next1(&prev_handle, handle.id())?;
             }
-            engine.store_block_prev(handle, &prev_id)?;
+            engine.store_block_prev1(handle, &prev_id)?;
         }
     }
     Ok(())
