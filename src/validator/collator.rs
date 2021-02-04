@@ -852,8 +852,9 @@ impl ExecutionManager {
         if let AsyncMessage::Ext(ref msg) = new_msg.deref() {
             if let Err(err) = transaction_res {
                 let msg_id = msg.serialize()?.repr_hash();
-                log::warn!("{} external message {:x} transaction error: {}",
-                    self.collated_block_descr, msg_id, err);
+                let account_id = msg.int_dst_account_id().unwrap_or_default();
+                log::warn!("{}: account {:x} rejected inbound external message {:x} by reason: {}", 
+                    self.collated_block_descr, account_id, msg_id, err);
                 return Ok(())
             }
         }

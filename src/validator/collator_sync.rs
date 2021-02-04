@@ -1737,7 +1737,7 @@ impl Collator {
 
                         // TODO compare this case with t-node
 
-                        log::error!("{}: account {:x} rejected inbound external message {:x} by reason: {}", 
+                        log::warn!("{}: account {:x} rejected inbound external message {:x} by reason: {}", 
                             self.collated_block_descr, account_id, id, err);
                         continue
                     }
