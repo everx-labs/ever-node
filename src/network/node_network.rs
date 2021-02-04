@@ -87,10 +87,10 @@ impl NodeNetwork {
         )?;
 
         let dht_key = adnl.key_by_tag(Self::TAG_DHT_KEY)?;
-        NodeNetwork::periodic_store_ip_addr(dht.clone(), dht_key, None, None);
+        NodeNetwork::periodic_store_ip_addr(dht.clone(), dht_key, None);
 
         let overlay_key = adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?;
-        NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_key, None, None);
+        NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_key, None);
 
         NodeNetwork::find_dht_nodes(dht.clone());
         let control_server_config = config.control_server();
@@ -180,7 +180,6 @@ impl NodeNetwork {
     fn periodic_store_ip_addr(
         dht: Arc<DhtNode>,
         node_key: Arc<KeyOption>,
-        validator_key: Option<Arc<KeyId>>,
         validator_keys: Option<Arc<Cache<Arc<KeyId>, usize>>>)
     {
         tokio::spawn(async move {
@@ -191,11 +190,9 @@ impl NodeNetwork {
                 }
                 delay_for(Duration::from_secs(Self::PERIOD_STORE_IP_ADDRESS)).await;
 
-                if let Some(sets) = validator_keys.clone() {
-                    if let Some(key) = validator_key.clone() {
-                        if sets.get(&key).is_none() {
-                            break;
-                        }
+                if let Some(actual_validator_adnl_keys) = validator_keys.clone() {
+                    if actual_validator_adnl_keys.get(node_key.id()).is_none() {
+                        break;
                     }
                 }
             }
@@ -600,6 +597,24 @@ impl PrivateOverlayOperations for NodeNetwork {
             None => { return Ok(None) }
         };
 
+        let mut store = false;
+
+        let adnl_key = if self.validator_context.validator_adnl_keys.get(local_validator_adnl_key.id()).is_none() {
+            let id = self.adnl.add_key(local_validator_adnl_key, election_id)?;
+            store = true;
+            self.adnl.key_by_id(&id)?
+        } else {
+            self.validator_context.validator_adnl_keys.insert(local_validator_adnl_key.id().clone(), election_id);
+            self.adnl.key_by_id(&local_validator_adnl_key.id().clone())?
+        };
+
+        if store {
+            NodeNetwork::periodic_store_ip_addr(
+                self.dht.clone(),
+                adnl_key.clone(),
+                Some(self.validator_context.validator_adnl_keys.clone())
+            );
+        }
         let mut peers = Vec::new();
         let mut lost_validators = Vec::new();
         let mut peers_ids = Vec::new();
@@ -621,17 +636,6 @@ impl PrivateOverlayOperations for NodeNetwork {
                 }
             }
         }
-
-        let mut store = false;
-
-        let adnl_key = if self.validator_context.validator_adnl_keys.get(local_validator_adnl_key.id()).is_none() {
-            let id = self.adnl.add_key(local_validator_adnl_key, election_id)?;
-            store = true;
-            self.adnl.key_by_id(&id)?
-        
-        } else {
-            self.adnl.key_by_id(&local_validator_adnl_key.id().clone())?
-        };
 
         self.overlay.add_private_peers(adnl_key.id(), peers)?;
         let validator_set_context = ValidatorSetContext {
@@ -655,15 +659,6 @@ impl PrivateOverlayOperations for NodeNetwork {
                 self.validator_context.sets_contexts.clone(),
                 validator_list_id,
                 lost_validators
-            );
-        }
-
-        if store {
-            NodeNetwork::periodic_store_ip_addr(
-                self.dht.clone(),
-                adnl_key,
-                Some(context.validator_key.id().clone()),
-                Some(self.validator_context.validator_adnl_keys.clone())
             );
         }
         Ok(Some(context.validator_key.clone()))

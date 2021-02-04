@@ -1676,12 +1676,12 @@ impl ValidateQuery {
         }
         let trans_cell = in_msg.transaction_cell();
         let msg_env = in_msg.in_msg_envelope_cell();
-        let msg_env_hash = msg_env.map(|cell| cell.repr_hash()).unwrap_or_default();
+        let msg_env_hash = msg_env.clone().map(|cell| cell.repr_hash()).unwrap_or_default();
         let env = in_msg.read_in_msg_envelope()?.unwrap_or_default();
         let msg = in_msg.read_message()?;
         let created_lt = msg.lt().unwrap_or_default();
         // dbg!(&in_msg, &env, &msg);
-        if let Some(trans_cell) = trans_cell {
+        if let Some(trans_cell) = trans_cell.clone() {
             let transaction = Transaction::construct_from_cell(trans_cell.clone())?;
             // check that the transaction reference is valid, and that it points to a Transaction which indeed processes this input message
             Self::is_valid_transaction_ref(base, &transaction, trans_cell.repr_hash())
@@ -2044,7 +2044,7 @@ impl ValidateQuery {
         let msg_env_hash = out_msg.envelope_message_hash().unwrap_or_default();
 
         let trans_cell = out_msg.transaction_cell();
-        if let Some(trans_cell) = trans_cell {
+        if let Some(trans_cell) = trans_cell.clone() {
             let transaction = Transaction::construct_from_cell(trans_cell.clone())?;
             // check that the transaction reference is valid, and that it points to a Transaction which indeed creates this outbound internal message
             Self::is_valid_transaction_ref(base, &transaction, trans_cell.repr_hash())
@@ -2253,7 +2253,7 @@ impl ValidateQuery {
                 // msg_import_tr
                 Some(InMsg::Transit(info)) => {
                     let in_env = info.read_in_message()?;
-                    CHECK!(Some(in_env.message_cell()), msg_cell_opt.as_ref());
+                    CHECK!(Some(in_env.message_cell().clone()), msg_cell_opt);
                     let in_env = info.read_in_message()?;
                     let in_cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, &in_env.cur_addr())?;
                     let in_next_prefix = src_prefix.interpolate_addr_intermediate(&dest_prefix, &in_env.next_addr())?;
@@ -2719,7 +2719,7 @@ impl ValidateQuery {
             }
             CHECK!(in_msg.transaction_cell().is_some());
             if let Some(cell) = in_msg.transaction_cell() {
-                if cell != &trans_root {
+                if cell.clone() != trans_root {
                     reject_query!("InMsg record for inbound message with hash {:x} of transaction {} of account {:x} \
                         refers to a different processing transaction",
                             in_msg_root.repr_hash(), lt, account_addr)
@@ -2764,7 +2764,7 @@ impl ValidateQuery {
                     i, lt, account_addr.to_hex_string(), src.workchain_id, src.address.to_hex_string())
             }
             match out_msg.transaction_cell() {
-                Some(cell) => if cell != &trans_root {
+                Some(cell) => if cell.clone() != trans_root {
                     reject_query!("OutMsg record for outbound message #{} with hash {} of transaction {} \
                         of account {} refers to a different processing transaction",
                             i, out_msg_root.repr_hash().to_hex_string(), lt, account_addr.to_hex_string())

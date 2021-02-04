@@ -127,8 +127,8 @@ impl MsgEnqueueStuff {
     pub fn message_hash(&self) -> UInt256 {
         self.env.message_cell().repr_hash()
     }
-    pub fn message_cell(&self) -> &Cell {
-        self.env.message_cell()
+    pub fn message_cell(&self) -> Cell {
+        self.env.message_cell().clone()
     }
     pub fn message(&self) -> &Message {
         &self.msg

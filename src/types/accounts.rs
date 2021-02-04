@@ -41,8 +41,8 @@ impl ShardAccountStuff {
     pub fn lt(&self) -> Arc<AtomicU64> {
         self.lt.clone()
     }
-    pub fn account_cell(&self) -> &Cell {
-        self.shard_acc.account_cell()
+    pub fn account_cell(&self) -> Cell {
+        self.shard_acc.account_cell().clone()
     }
     pub fn shard_account(&self) -> &ShardAccount {
         &self.shard_acc
