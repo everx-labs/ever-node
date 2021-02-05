@@ -1,5 +1,5 @@
 use crate::{
-    network::full_node_client::{Attempts, FullNodeOverlayClient},
+    network::full_node_client::FullNodeOverlayClient,
     shard_state::ShardStateStuff
 };
 
@@ -17,7 +17,7 @@ pub async fn download_persistent_state(
     master_id: &BlockIdExt,
     overlay: &dyn FullNodeOverlayClient
 ) -> Result<ShardStateStuff> {
-    let bytes = overlay.download_persistent_state_part(id, master_id, 0, 0, None, &Attempts::with_limit(1)).await?;
+    let bytes = overlay.download_persistent_state_part(id, master_id, 0, 0, None).await?;
     ShardStateStuff::deserialize(id.clone(), &bytes)
 }
 
@@ -58,8 +58,7 @@ async fn download_persistent_state_iter(
 
     // Check
     let peer = loop {
-        let attempts = Attempts::with_limit(100);
-        match overlay.check_persistent_state(id, master_id, &attempts).await {
+        match overlay.check_persistent_state(id, master_id).await {
             Err(e) => 
                 log::trace!("check_persistent_state {}: {}", id.shard(), e),
             Ok((false, _)) => 
@@ -87,7 +86,8 @@ async fn download_persistent_state_iter(
         let errors = errors.clone();
         let peer = peer.clone();
         download_futures.push(async move {
-            let mut attempts = Attempts::with_limit(0);
+            let mut peer_attempt = 0;
+            let mut part_attempt = 0;
             loop {
 
                 if offset >= total_size.load(Ordering::Relaxed) {
@@ -95,10 +95,10 @@ async fn download_persistent_state_iter(
                 }
 
                 match overlay.download_persistent_state_part(
-                    id, master_id, offset, max_size, Some(peer.clone()), &attempts
+                    id, master_id, offset, max_size, peer.clone(), peer_attempt
                 ).await {
                     Ok(next_bytes) => {
-                        attempts.reset();
+                        part_attempt = 0;
                         let len = next_bytes.len();
                         parts.insert(offset, next_bytes);
                         //if (offset / max_size) % 10 == 0 {
@@ -112,15 +112,16 @@ async fn download_persistent_state_iter(
                     },
                     Err(e) => {
                         errors.fetch_add(1, Ordering::SeqCst);
-                        let count = attempts.next();
+                        part_attempt += 1;
+                        peer_attempt += 1;
                         log::error!(
                             "download_persistent_state_part {}: {}, attempt: {}, total errors: {}",
-                            id.shard(), e, count, errors.load(Ordering::Relaxed)
+                            id.shard(), e, part_attempt, errors.load(Ordering::Relaxed)
                         );
-                        if count > 10 {
+                        if part_attempt > 10 {
                             fail!(
                                 "Error download_persistent_state_part after {} attempts: {}", 
-                                count, e
+                                part_attempt, e
                             )
                         }
                         futures_timer::Delay::new(
