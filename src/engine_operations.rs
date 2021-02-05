@@ -3,7 +3,7 @@ use crate::{
     config::CollatorTestBundlesGeneralConfig,
     engine::{Engine, LastMcBlockId, ShardsClientMcBlockId, STATSD},
     engine_traits::{EngineOperations, PrivateOverlayOperations}, error::NodeError,
-    internal_db::NodeState, network::full_node_client::Attempts, 
+    internal_db::NodeState,
     shard_state::ShardStateStuff, types::top_block_descr::TopBlockDescrStuff
 };
 use adnl::common::KeyOption;
@@ -412,7 +412,7 @@ impl EngineOperations for Engine {
         _priority: u32
     ) -> Result<Vec<BlockIdExt>> {
         let mc_overlay = self.get_masterchain_overlay().await?;
-        mc_overlay.download_next_key_blocks_ids(block_id, 5, &Attempts::with_limit(10)).await
+        mc_overlay.download_next_key_blocks_ids(block_id, 5).await
     }
 
     async fn set_applied(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<()> {
@@ -451,10 +451,7 @@ impl EngineOperations for Engine {
 
     async fn download_archive(&self, masterchain_seqno: u32) -> Result<Option<Vec<u8>>> {
         let client = self.get_masterchain_overlay().await?;
-        client.download_archive(
-            masterchain_seqno,
-            &Attempts::with_limit(10)
-        ).await
+        client.download_archive(masterchain_seqno).await
     }
 
     fn assign_mc_ref_seq_no(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<()> {

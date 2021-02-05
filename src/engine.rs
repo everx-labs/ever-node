@@ -12,7 +12,7 @@ use crate::{
     },
     internal_db::{InternalDb, InternalDbConfig, InternalDbImpl, NodeState},
     network::{
-        full_node_client::{Attempts, FullNodeOverlayClient},
+        full_node_client::{FullNodeOverlayClient},
         full_node_service::FullNodeOverlayService
     },
     shard_state::ShardStateStuff,
@@ -92,17 +92,16 @@ struct DownloadContext<'a, T> {
 impl <T> DownloadContext<'_, T> {
 
     async fn download(&mut self) -> Result<T> {
-        let mut attempts = Attempts::with_limit(0);
-        let mut count = 0;
+        let mut attempt = 0;
         loop {
-            match self.downloader.try_download(self, &attempts).await {
-                Err(e) => self.log(format!("{}", e).as_str(), count),
-                Ok(None) => self.log("got no_data", count),
+            match self.downloader.try_download(self).await {
+                Err(e) => self.log(format!("{}", e).as_str(), attempt),
+                Ok(None) => self.log("got no_data", attempt),
                 Ok(Some(ret)) => break Ok(ret)
             }
-            count = attempts.next();
+            attempt += 1;
             if let Some(limit) = &self.limit {
-                if &count > limit {
+                if &attempt > limit {
                     fail!("Downloader: out of attempts");
                 }
             }
@@ -113,15 +112,15 @@ impl <T> DownloadContext<'_, T> {
         }
     }
 
-    fn log(&self, msg: &str, count: u32) {
+    fn log(&self, msg: &str, attempt: u32) {
        log::log!(
-           if count > 10 {
+           if attempt > 10 {
                log::Level::Warn
            } else {
                log::Level::Debug
            },
            "{} (attempt {}): id: {}, {}",
-           self.name, count, self.id, msg
+           self.name, attempt, self.id, msg
        )
     }
 
@@ -133,7 +132,6 @@ trait Downloader: Send + Sync {
     async fn try_download(
         &self, 
         context: &DownloadContext<'_, Self::Item>,
-        attempts: &Attempts
     ) -> Result<Option<Self::Item>>;
 }
 
@@ -145,9 +143,8 @@ impl Downloader for BlockDownloader {
     async fn try_download(
         &self, 
         context: &DownloadContext<'_, Self::Item>,
-        attempts: &Attempts
     ) -> Result<Option<Self::Item>> {
-        context.client.download_block_full(context.id, attempts).await        
+        context.client.download_block_full(context.id).await        
     }
 }              
 
@@ -162,13 +159,11 @@ impl Downloader for BlockProofDownloader {
     async fn try_download(
         &self, 
         context: &DownloadContext<'_, Self::Item>,
-        attempts: &Attempts
     ) -> Result<Option<Self::Item>> {
         context.client.download_block_proof(
             context.id, 
             self.is_link, 
             self.key_block, 
-            attempts
         ).await        
     }
 }              
@@ -181,9 +176,8 @@ impl Downloader for NextBlockDownloader {
     async fn try_download(
         &self, 
         context: &DownloadContext<'_, Self::Item>,
-        attempts: &Attempts
     ) -> Result<Option<Self::Item>> {
-        context.client.download_next_block_full(context.id, attempts).await        
+        context.client.download_next_block_full(context.id).await
     }    
 }  
 
@@ -195,9 +189,8 @@ impl Downloader for ZeroStateDownloader {
     async fn try_download(
         &self, 
         context: &DownloadContext<'_, Self::Item>,
-        attempts: &Attempts
     ) -> Result<Option<Self::Item>> {
-        context.client.download_zero_state(context.id, attempts).await
+        context.client.download_zero_state(context.id).await
     }
 }
 
