@@ -152,6 +152,7 @@ async fn choose_masterchain_state(engine: &dyn EngineOperations, mut key_blocks:
                 return Ok(handle)
             } else {
                log::info!(target: "boot", "ignoring: state is expiring shortly: expire_at={}", ttl);
+               return Ok(handle)
             }
         } else {
             log::info!(target: "boot", "ignoring: state is not persistent");
