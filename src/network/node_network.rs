@@ -600,11 +600,11 @@ impl PrivateOverlayOperations for NodeNetwork {
         let mut store = false;
 
         let adnl_key = if self.validator_context.validator_adnl_keys.get(local_validator_adnl_key.id()).is_none() {
+            self.validator_context.validator_adnl_keys.insert(local_validator_adnl_key.id().clone(), election_id);
             let id = self.adnl.add_key(local_validator_adnl_key, election_id)?;
             store = true;
             self.adnl.key_by_id(&id)?
         } else {
-            self.validator_context.validator_adnl_keys.insert(local_validator_adnl_key.id().clone(), election_id);
             self.adnl.key_by_id(&local_validator_adnl_key.id().clone())?
         };
 
