@@ -431,7 +431,7 @@ pub trait EngineOperations : Sync + Send {
             _ => fail!("cannot find masterchain block with seqno {} \
                 to load corresponding state as required", seq_no)
         };
-        self.set_aux_mc_state(&self.load_state(&block_id).await?)
+        self.set_aux_mc_state(&self.wait_state(&block_id).await?)
     }
     fn set_aux_mc_state(&self, state: &ShardStateStuff) -> Result<bool> {
         adnl::common::add_object_to_map_with_update(

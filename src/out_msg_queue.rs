@@ -459,7 +459,7 @@ impl MsgQueueManager {
         log::debug!("got a preliminary list of {} neighbors for {}", neighbor_list.len(), shard);
         for (i, shard) in neighbor_list.iter().enumerate() {
             log::debug!("neighbors #{} ---> {:#}", i + 1, shard.shard());
-            let shard_state = engine.load_state(shard.block_id()).await?;
+            let shard_state = engine.wait_state(shard.block_id()).await?;
             let nb = Self::load_out_queue_info(engine, &shard_state).await?;
             neighbors.push(nb);
         }
