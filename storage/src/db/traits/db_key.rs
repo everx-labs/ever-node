@@ -74,3 +74,13 @@ impl DbKey for U32Key {
         &self.key
     }
 }
+
+impl DbKey for Vec<u8> {
+    fn key_name(&self) -> &'static str {
+        "&[u8]"
+    }
+
+     fn key(&self) -> &[u8] {
+        &self
+    }
+}

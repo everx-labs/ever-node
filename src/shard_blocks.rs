@@ -3,27 +3,59 @@ use crate::{
     engine_traits::EngineOperations,
     shard_state::ShardStateStuff,
 };
-use std::{io::Cursor, sync::{Arc, atomic::{AtomicU32, Ordering}}};
 use ton_block::{BlockIdExt, TopBlockDescr, Deserializable, BlockSignatures};
-use ton_types::{error, fail, Result, deserialize_tree_of_cells};
+use ton_types::{fail, error, Result, deserialize_tree_of_cells};
+use std::{
+    io::Cursor,
+    sync::{Arc, atomic::{AtomicU32, Ordering}},
+    time::Duration,
+    ops::Deref,
+    collections::HashMap,
+};
+use rand::Rng;
 
+
+pub enum StoreAction {
+    Save(TopBlockDescrId, Arc<TopBlockDescrStuff>),
+    Remove(TopBlockDescrId)
+}
 
 pub struct ShardBlocksPool {
     last_mc_seq_no: AtomicU32,
     shard_blocks: lockfree::map::Map<TopBlockDescrId, Arc<TopBlockDescrStuff>>,
+    storage_sender: Option<tokio::sync::mpsc::UnboundedSender<StoreAction>>,
     is_fake: bool,
 }
 
 impl ShardBlocksPool {
 
-    pub fn new() -> Self {
+    pub fn new(shard_blocks: HashMap<TopBlockDescrId, TopBlockDescrStuff>, is_fake: bool)
+    -> (Self, tokio::sync::mpsc::UnboundedReceiver<StoreAction>) {
+        let tsbs = lockfree::map::Map::new();
+        for (k, v) in shard_blocks {
+            tsbs.insert(k, Arc::new(v));
+        }
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        (
+            ShardBlocksPool {
+                last_mc_seq_no: AtomicU32::new(0),
+                shard_blocks: tsbs,
+                storage_sender: Some(sender.clone()),
+                is_fake,
+            },
+            receiver
+        )
+    }
+
+    pub fn fake_without_store()
+    -> Self {
         ShardBlocksPool {
             last_mc_seq_no: AtomicU32::new(0),
             shard_blocks: lockfree::map::Map::new(),
-            is_fake: false,
+            storage_sender: None,
+            is_fake: true,
         }
     }
-
 
     pub async fn add_shard_block(
         &self,
@@ -101,12 +133,16 @@ impl ShardBlocksPool {
             }
         }
 
+        let tbds = tbds.unwrap();
+
+        self.send_to_storage(StoreAction::Save(tbds_id.clone(), tbds.clone()));
+
         let last_id = engine.load_last_applied_mc_block_id().await?;
         match engine.load_block_handle(&last_id)?.ok_or_else(
             || error!("Cannot load handle for last master block {}", last_id)
         ) {
             Ok(mc_block) => Ok(
-                self.is_fake || tbds.unwrap().gen_utime() < mc_block.gen_utime()? + 60
+                self.is_fake || tbds.gen_utime() < mc_block.gen_utime()? + 60
             ),
             Err(e) => {
                 log::trace!("add_shard_block failed for block {}, {} (too new?)", id, e);
@@ -138,6 +174,7 @@ impl ShardBlocksPool {
         for block in self.shard_blocks.iter() {
             if block.val().validate(last_mc_state).is_err() {
                 self.shard_blocks.remove(block.key());
+                self.send_to_storage(StoreAction::Remove(block.key().clone()));
                 removed_list.append(format!("\n{} {}", block.key().cc_seqno, block.key().id));
             }
         }
@@ -145,4 +182,60 @@ impl ShardBlocksPool {
             last_mc_state.block_id(), removed_list.string().unwrap_or_default());
         Ok(())
     }
+
+    fn send_to_storage(&self, action: StoreAction) {
+        if let Some(storage_sender) = self.storage_sender.as_ref() {
+            match storage_sender.send(action) {
+                Ok(_) => log::trace!("ShardBlocksPool::send_to_storage: sent"),
+                Err(_) => log::error!("ShardBlocksPool::send_to_storage: can't send"),
+            }
+        }
+    }
+}
+
+pub fn resend_top_shard_blocks_worker(engine: Arc<dyn EngineOperations>) {
+    tokio::spawn(async move {
+        loop {
+             // 2..3 seconds
+            let delay = rand::thread_rng().gen_range(2000, 3000);
+            futures_timer::Delay::new(Duration::from_millis(delay)).await;
+            match resend_top_shard_blocks(engine.deref()).await {
+                Ok(_) => log::trace!("resend_top_shard_blocks: ok"),
+                Err(e) => log::error!("resend_top_shard_blocks: {:?}", e)
+            }
+        }
+    });
+}
+
+async fn resend_top_shard_blocks(engine: &dyn EngineOperations) -> Result<()> {
+    let id = engine.load_last_applied_mc_block_id().await?;
+    let tsbs = engine.get_shard_blocks(id.seq_no)?;
+    for tsb in tsbs {
+        engine.send_top_shard_block_description(&tsb).await?;
+    }
+    Ok(())
+}
+
+pub fn save_top_shard_blocks_worker(
+    engine: Arc<dyn EngineOperations>,
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<StoreAction>,
+) {
+    tokio::spawn(async move {
+        while let Some(action) = receiver.recv().await {
+            match action {
+                StoreAction::Save(id, tsb) => {
+                    match engine.save_top_shard_block(&id, &tsb) {
+                        Ok(_) => log::trace!("save_top_shard_block {}: OK", id),
+                        Err(e) => log::error!("save_top_shard_block {}: {:?}", id, e),
+                    }
+                }
+                StoreAction::Remove(id) => {
+                    match engine.remove_top_shard_block(&id) {
+                        Ok(_) => log::trace!("remove_top_shard_block {}: OK", id),
+                        Err(e) => log::error!("remove_top_shard_block {}: {:?}", id, e),
+                    }
+                }
+            }
+        }
+    });
 }

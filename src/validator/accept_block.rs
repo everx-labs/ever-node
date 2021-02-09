@@ -128,7 +128,7 @@ pub async fn accept_block(
             let block_id = block.id().clone();
             tokio::spawn(async move {
                 log::trace!(target: "validator", "accept_block: sending shard block description broadcast {}", block_id);
-                if let Err(e) = engine.send_top_shard_block_description(tbd_stuff).await {
+                if let Err(e) = engine.send_top_shard_block_description(&tbd_stuff).await {
                     log::warn!(
                         target: "validator", 
                         "Accept-block {}: error while sending shard block description broadcast: {}",

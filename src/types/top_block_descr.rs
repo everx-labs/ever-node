@@ -3,14 +3,22 @@ use crate::{
     shard_state::ShardStateStuff,
 };
 
-use std::cmp::{max, Ordering, PartialOrd, Ord};
+use std::{
+    fmt,
+    cmp::{max, Ordering, PartialOrd, Ord},
+    io::{Write, Cursor},
+    convert::TryInto,
+};
 use bitflags::bitflags;
 use ton_block::{
     Block, TopBlockDescr, BlockInfo, BlockIdExt, MerkleProof, McShardRecord, McStateExtra,
     Deserializable, HashmapAugType, BlockSignatures, CurrencyCollection, AddSub, ShardIdent,
     Serializable
 };
-use ton_types::{error, Result, fail, Cell, UInt256, cells_serialization::serialize_tree_of_cells};
+use ton_types::{
+    error, Result, fail, Cell, UInt256,
+    cells_serialization::{serialize_tree_of_cells, deserialize_tree_of_cells}
+};
 use ton_api::ton::ton_node::newshardblock::NewShardBlock;
 
 bitflags! {
@@ -126,6 +134,19 @@ impl TopBlockDescrStuff {
         )
     }
 
+    pub fn from_bytes(bytes: &[u8], is_fake: bool)-> Result<Self> {
+        let root = deserialize_tree_of_cells(&mut Cursor::new(&bytes))?;
+        let tbd = TopBlockDescr::construct_from(&mut root.into())?;
+        let id = tbd.proof_for().clone();
+        TopBlockDescrStuff::new(tbd, &id, is_fake)
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut data = Vec::<u8>::new();
+        serialize_tree_of_cells(&self.tbd.write_to_new_cell()?.into(), &mut data)?;
+        Ok(data)
+    }
+
     pub fn gen_utime(&self) -> u32 {
         self.gen_utime
     }
@@ -194,16 +215,13 @@ impl TopBlockDescrStuff {
     }
 
     pub fn new_shard_block(&self) -> Result<NewShardBlock> {
-        let mut data = Vec::<u8>::new();
-        serialize_tree_of_cells(&self.tbd.write_to_new_cell()?.into(), &mut data)?;
-
         let signatures = self.tbd.signatures()
             .ok_or_else(|| error!("There is no signatures in top block descr"))?;
 
         Ok(NewShardBlock {
             block: self.proof_for().clone().into(),
             cc_seqno: signatures.validator_info.catchain_seqno as i32,
-            data: data.into(),
+            data: self.to_bytes()?.into(),
         })
     }
 
@@ -803,6 +821,29 @@ impl TopBlockDescrId {
     pub fn new(id: ShardIdent, cc_seqno: u32) -> Self {
         Self{id, cc_seqno}
     }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let (wc_bytes, rest) = bytes.split_at(std::mem::size_of::<i32>());
+        let (shard_bytes, rest) = rest.split_at(std::mem::size_of::<u64>());
+        let (cc_bytes, _) = rest.split_at(std::mem::size_of::<u32>());
+
+        Ok(Self{
+            id: ShardIdent::with_tagged_prefix(
+                i32::from_le_bytes(wc_bytes.try_into()?),
+                u64::from_le_bytes(shard_bytes.try_into()?),
+            )?,
+            cc_seqno: u32::from_le_bytes(cc_bytes.try_into()?),
+        })
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut writer = Cursor::new(vec!());
+        writer.write_all(&self.id.workchain_id().to_le_bytes())?;
+        writer.write_all(&self.id.shard_prefix_with_tag().to_le_bytes())?;
+        writer.write_all(&self.cc_seqno.to_le_bytes())?;
+        Ok(writer.into_inner())
+    }
+
 }
 
 impl PartialOrd for TopBlockDescrId {
@@ -822,5 +863,11 @@ impl Ord for TopBlockDescrId {
         } else {
             Ordering::Greater
         }
+    }
+}
+
+impl fmt::Display for TopBlockDescrId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "({}, {})", self.id, self.cc_seqno)
     }
 }

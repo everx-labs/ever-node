@@ -1,13 +1,15 @@
 use crate::{
     block::{convert_block_id_ext_blk2api, convert_block_id_ext_api2blk, BlockStuff},
-    block_proof::BlockProofStuff, error::NodeError, shard_state::ShardStateStuff
+    block_proof::BlockProofStuff, error::NodeError, shard_state::ShardStateStuff,
+    types::top_block_descr::{TopBlockDescrId, TopBlockDescrStuff},
 };
-use std::{path::PathBuf, sync::Arc, cmp::min};
+use std::{path::PathBuf, sync::Arc, cmp::min, collections::HashMap};
 use storage::{
     archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId},
     block_handle_db::{BlockHandleDb, BlockHandleStorage}, block_index_db::BlockIndexDb, 
     block_info_db::BlockInfoDb, node_state_db::NodeStateDb, shardstate_db::{GC, ShardStateDb},
-    shardstate_persistent_db::ShardStatePersistentDb, types::{BlockHandle, BlockMeta}
+    shardstate_persistent_db::ShardStatePersistentDb, types::{BlockHandle, BlockMeta},
+    shard_top_blocks_db::ShardTopBlocksDb,
 };
 #[cfg(feature = "read_old_db")]
 use storage::block_db::BlockDb;
@@ -102,6 +104,12 @@ pub trait InternalDb : Sync + Send {
 
     fn index_handle(&self, handle: &Arc<BlockHandle>) -> Result<()>;
     fn assign_mc_ref_seq_no(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<()>;
+
+
+    fn save_top_shard_block(&self, id: &TopBlockDescrId, tsb: &TopBlockDescrStuff) -> Result<()>;
+    fn load_all_top_shard_blocks(&self) -> Result<HashMap<TopBlockDescrId, TopBlockDescrStuff>>;
+    fn load_all_top_shard_blocks_raw(&self) -> Result<HashMap<TopBlockDescrId, Vec<u8>>>;
+    fn remove_top_shard_block(&self, id: &TopBlockDescrId) -> Result<()>;
 }
 
 #[derive(serde::Deserialize)]
@@ -122,6 +130,7 @@ pub struct InternalDbImpl {
     //ss_test_map: lockfree::map::Map<BlockIdExt, ShardStateStuff>,
     shardstate_db_gc: GC,
     archive_manager: Arc<ArchiveManager>,
+    shard_top_blocks_db: ShardTopBlocksDb,
 
     #[cfg(feature = "read_old_db")]
     old_block_db: BlockDb,
@@ -168,6 +177,7 @@ impl InternalDbImpl {
                 //ss_test_map: lockfree::map::Map::new(),
                 shardstate_db_gc,
                 archive_manager,
+                shard_top_blocks_db: ShardTopBlocksDb::with_path(&Self::build_name(&config.db_directory, "shard_top_blocks_db")),
 
                 #[cfg(feature = "read_old_db")]
                 old_block_db: BlockDb::with_path(&Self::build_name(&config.db_directory, "block_db")),
@@ -631,5 +641,37 @@ impl InternalDb for InternalDbImpl {
         Ok(())
     }
 
+    fn save_top_shard_block(&self, id: &TopBlockDescrId, tsb: &TopBlockDescrStuff) -> Result<()> {
+        log::trace!("save_top_shard_block {}", id);
+        self.shard_top_blocks_db.put(&id.to_bytes()?, &tsb.to_bytes()?)
+    }
+
+    fn load_all_top_shard_blocks(&self) -> Result<HashMap<TopBlockDescrId, TopBlockDescrStuff>> {
+        log::trace!("load_all_top_shard_blocks");
+        let mut result = HashMap::<TopBlockDescrId, TopBlockDescrStuff>::new();
+        self.shard_top_blocks_db.for_each(&mut |id_bytes, tsb_bytes| {
+            let id = TopBlockDescrId::from_bytes(&id_bytes)?;
+            let tsb = TopBlockDescrStuff::from_bytes(tsb_bytes, false)?;
+            result.insert(id, tsb);
+            Ok(true)
+        })?;
+        Ok(result)
+    }
+
+    fn load_all_top_shard_blocks_raw(&self) -> Result<HashMap<TopBlockDescrId, Vec<u8>>> {
+        log::trace!("load_all_top_shard_blocks_raw");
+        let mut result = HashMap::<TopBlockDescrId, Vec<u8>>::new();
+        self.shard_top_blocks_db.for_each(&mut |id_bytes, tsb_bytes| {
+            let id = TopBlockDescrId::from_bytes(&id_bytes)?;
+            result.insert(id, tsb_bytes.to_vec());
+            Ok(true)
+        })?;
+        Ok(result)
+    }
+
+    fn remove_top_shard_block(&self, id: &TopBlockDescrId) -> Result<()> {
+        log::trace!("remove_top_shard_block {}", id);
+        self.shard_top_blocks_db.delete(&id.to_bytes()?)
+    }
 }
 

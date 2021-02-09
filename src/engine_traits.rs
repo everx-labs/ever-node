@@ -1,7 +1,12 @@
 use crate::{
-    block::BlockStuff, block_proof::BlockProofStuff, config::CollatorTestBundlesGeneralConfig,
-    ext_messages::create_ext_message, jaeger, network::full_node_client::FullNodeOverlayClient,
-    shard_state::ShardStateStuff, types::top_block_descr::TopBlockDescrStuff
+    block::{BlockStuff}, 
+    shard_state::ShardStateStuff,
+    network::{full_node_client::FullNodeOverlayClient},
+    block_proof::BlockProofStuff,
+    types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
+    ext_messages::create_ext_message,
+    jaeger,
+    config::CollatorTestBundlesGeneralConfig,
 };
 use adnl::common::KeyOption;
 use catchain::{
@@ -274,9 +279,22 @@ pub trait EngineOperations : Sync + Send {
     fn is_validator(&self) -> bool {
         unimplemented!()
     }
+
+    // Top shard blocks
+
     // Get current list of new shard blocks with respect to last mc block.
     // If given mc_seq_no is not equal to last mc seq_no - function fails.
     fn get_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+        unimplemented!()
+    }
+
+    // Save tsb into persistent storage
+    fn save_top_shard_block(&self, id: &TopBlockDescrId, tsb: &TopBlockDescrStuff) -> Result<()> {
+        unimplemented!()
+    }
+
+    // Remove tsb from persistent storage
+    fn remove_top_shard_block(&self, id: &TopBlockDescrId) -> Result<()> {
         unimplemented!()
     }
 
@@ -372,7 +390,7 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    async fn send_top_shard_block_description(&self, tbd: TopBlockDescrStuff) -> Result<()> {
+    async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()> {
         unimplemented!()
     }
 
