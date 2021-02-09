@@ -3,8 +3,8 @@ use crate::{
     config::CollatorTestBundlesGeneralConfig,
     engine::{Engine, LastMcBlockId, ShardsClientMcBlockId, STATSD},
     engine_traits::{EngineOperations, PrivateOverlayOperations}, error::NodeError,
-    internal_db::NodeState,
-    shard_state::ShardStateStuff, types::top_block_descr::TopBlockDescrStuff
+    internal_db::NodeState, 
+    shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
 };
 use adnl::common::KeyOption;
 use catchain::{
@@ -466,7 +466,7 @@ impl EngineOperations for Engine {
         overlay.send_block_broadcast(broadcast).await
     }
 
-    async fn send_top_shard_block_description(&self, tbd: TopBlockDescrStuff) -> Result<()> {
+    async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()> {
         let overlay = self.get_full_node_overlay(
             MASTERCHAIN_ID, //tbd.proof_for().shard().workchain_id(), by t-node all broadcast are sending into masterchain overlay
             SHARD_FULL, //tbd.proof_for().shard().shard_prefix_with_tag()
@@ -522,6 +522,16 @@ impl EngineOperations for Engine {
         self.shard_blocks().get_shard_blocks(mc_seq_no)
     }
 
+    // Save tsb into persistent storage
+    fn save_top_shard_block(&self, id: &TopBlockDescrId, tsb: &TopBlockDescrStuff) -> Result<()> {
+        self.db().save_top_shard_block(id, tsb)
+    }
+
+    // Remove tsb from persistent storage
+    fn remove_top_shard_block(&self, id: &TopBlockDescrId) -> Result<()> {
+        self.db().remove_top_shard_block(id)
+    }
+    
     fn test_bundles_config(&self) -> &CollatorTestBundlesGeneralConfig {
         Engine::test_bundles_config(self)
     }

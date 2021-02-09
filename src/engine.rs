@@ -19,7 +19,7 @@ use crate::{
     types::awaiters_pool::AwaitersPool,
     ext_messages::MessagesPool,
     validator::validator_manager,
-    shard_blocks::ShardBlocksPool,
+    shard_blocks::{ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker},
 };
 #[cfg(feature = "local_test")]
 use crate::network::node_network_stub::NodeNetworkStub;
@@ -33,7 +33,7 @@ use overlay::QueriesConsumer;
 use statsd::client;
 use std::{
     convert::TryInto, ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}},
-    time::Duration,    
+    time::Duration, collections::HashMap,
 };
 #[cfg(feature = "metrics")]
 use std::env;
@@ -223,6 +223,15 @@ impl Engine {
         let network = Arc::new(NodeNetwork::new(general_config, db.clone()).await?);
         network.clone().start().await?;
 
+        let shard_blocks = match db.load_all_top_shard_blocks() {
+            Ok(tsbs) => tsbs,
+            Err(e) => {
+                log::error!("Can't load top shard blocks from db (continue without ones): {:?}", e);
+                HashMap::default()
+            }
+        };
+        let (shard_blocks_pool, shard_blocks_receiver) = ShardBlocksPool::new(shard_blocks, false);
+
         log::info!("Engine is created.");
 
         let engine = Arc::new(Engine {
@@ -239,7 +248,7 @@ impl Engine {
             network: network.clone(),
             aux_mc_shard_states: Default::default(),
             shard_states: Default::default(),
-            shard_blocks: ShardBlocksPool::new(),
+            shard_blocks: shard_blocks_pool,
             last_known_mc_block_seqno: AtomicU32::new(0),
             last_known_keyblock_seqno: AtomicU32::new(0),
             will_validate: AtomicBool::new(false),
@@ -258,6 +267,8 @@ impl Engine {
             &network.calc_overlay_id(BASE_WORKCHAIN_ID, SHARD_FULL)?.0,
             Arc::clone(&full_node_service)
         )?;
+
+        save_top_shard_blocks_worker(engine.clone(), shard_blocks_receiver);
 
         engine.get_full_node_overlay(BASE_WORKCHAIN_ID, SHARD_FULL).await?;
 
@@ -924,6 +935,9 @@ pub async fn run(node_config: TonNodeConfig, zerostate_path: Option<&str>, ext_d
         shards_client_mc_block = ShardsClientMcBlockId::load_from_db(engine.db().deref())
             .and_then(|id| (&id.0).try_into())?;
     }
+
+    // top shard blocks
+    resend_top_shard_blocks_worker(engine.clone());
 
     // blocks download clients
     let _ = start_shards_client(engine.clone(), shards_client_mc_block)?;

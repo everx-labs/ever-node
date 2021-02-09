@@ -37,7 +37,7 @@ use ton_types::{fail, error, Result};
 pub trait FullNodeOverlayClient : Sync + Send {
     async fn broadcast_external_message(&self, msg: &[u8]) -> Result<u32>;
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()>;
-    async fn send_top_shard_block_description(&self, tbd: TopBlockDescrStuff) -> Result<()>;
+    async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()>;
     async fn download_block_proof(&self, block_id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<Option<BlockProofStuff>>;
     async fn download_block_full(&self, id: &BlockIdExt) -> Result<Option<(BlockStuff, BlockProofStuff)>>;
     async fn check_persistent_state(
@@ -238,7 +238,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         Ok(())
     }
     
-    async fn send_top_shard_block_description(&self, tbd: TopBlockDescrStuff) -> Result<()> {
+    async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()> {
         let broadcast = TonNode_NewShardBlockBroadcast(Box::new(
             NewShardBlockBroadcast { block: tbd.new_shard_block()? })
         );

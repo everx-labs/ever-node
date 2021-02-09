@@ -255,7 +255,7 @@ impl ValidateQuery {
         base.created_by = block_candidate.created_by.clone();
         base.prev_blocks_ids = self.prev_blocks_ids.take().unwrap();
         let block_id = block_candidate.block_id.clone();
-        log::info!(target: "validator", "validate query for {:#} started", block_id);
+        log::info!(target: "validate_query", "validate query for {:#} started", block_id);
         if block_id.shard() != self.shard() {
             soft_reject_query!("block candidate belongs to shard {} different from current shard {}",
                 block_id.shard(), self.shard())
@@ -313,7 +313,7 @@ impl ValidateQuery {
 
         // 3. load state(s) corresponding to previous block(s)
         for i in 0..base.prev_blocks_ids.len() {
-            log::debug!(target: "validator", "load state for prev block {} of {} {}", i + 1, base.prev_blocks_ids.len(), base.prev_blocks_ids[i]);
+            log::debug!(target: "validate_query", "load state for prev block {} of {} {}", i + 1, base.prev_blocks_ids.len(), base.prev_blocks_ids[i]);
             let prev_state = self.engine.load_state(&base.prev_blocks_ids[i]).await?;
             if &self.shard == prev_state.shard() && prev_state.state().before_split() {
                 reject_query!("cannot accept new unsplit shardchain block for {} \
@@ -381,7 +381,7 @@ impl ValidateQuery {
         base.value_flow = base.block.block().read_value_flow()?;
 
         if base.info.key_block() {
-            log::info!(target: "validator", "validating key block {}", base.block_id());
+            log::info!(target: "validate_query", "validating key block {}", base.block_id());
         }
         if base.info.start_lt() >= base.info.end_lt() {
             reject_query!("block has start_lt greater than or equal to end_lt")
@@ -436,7 +436,7 @@ impl ValidateQuery {
         match croot.cell_type() {
             CellType::Ordinary => match TopBlockDescrSet::construct_from_cell(croot) {
                 Ok(descr) => if base.top_shard_descr_dict.is_empty() {
-                    log::debug!(target: "validator", "collated datum #{} is a TopBlockDescrSet", idx);
+                    log::debug!(target: "validate_query", "collated datum #{} is a TopBlockDescrSet", idx);
                     base.top_shard_descr_dict = descr;
                     base.top_shard_descr_dict.count(10000)
                         .map_err(|err| error!("invalid TopBlockDescrSet : {}", err))?;
@@ -444,7 +444,7 @@ impl ValidateQuery {
                     reject_query!("duplicate TopBlockDescrSet in collated data")
                 }
                 Err(err) => if let Some(BlockError::InvalidConstructorTag{ t, s: _ }) = err.downcast_ref() {
-                    log::warn!(target: "validator", "collated datum # {} has unknown type (magic {:X}), ignoring", idx, t);
+                    log::warn!(target: "validate_query", "collated datum # {} has unknown type (magic {:X}), ignoring", idx, t);
                 } else {
                     return Err(err)
                 }
@@ -456,7 +456,7 @@ impl ValidateQuery {
                 };
                 let virt_root = merkle_proof.proof.virtualize(1);
                 let virt_root_hash = merkle_proof.hash;
-                log::debug!(target: "validator", "collated datum # {} is a Merkle proof with root hash {:x}",
+                log::debug!(target: "validate_query", "collated datum # {} is a Merkle proof with root hash {:x}",
                     idx, virt_root_hash);
                 if base.virt_roots.insert(virt_root_hash.clone(), virt_root).is_some() {
                     reject_query!("Merkle proof with duplicate virtual root hash {:x}", virt_root_hash);
@@ -486,7 +486,7 @@ impl ValidateQuery {
 
     async fn get_latest_mc_state(&mut self, base: &ValidateBase) -> Result<McData> {
         let mc_state = self.engine.load_last_applied_mc_state().await?;
-        log::debug!(target: "validator", "in ValidateQuery::get_latest_mc_state() {}", mc_state.block_id());
+        log::debug!(target: "validate_query", "in ValidateQuery::get_latest_mc_state() {}", mc_state.block_id());
         if mc_state.state().seq_no() < self.min_mc_seq_no {
             reject_query!("requested to validate a block referring to an unknown future masterchain block {} < {}",
                 mc_state.state().seq_no(), self.min_mc_seq_no)
@@ -507,19 +507,19 @@ impl ValidateQuery {
     }
 
     fn try_unpack_mc_state(&mut self, base: &ValidateBase, mc_state: ShardStateStuff) -> Result<McData> {
-        log::debug!(target: "validator", "unpacking reference masterchain state {}", mc_state.block_id());
+        log::debug!(target: "validate_query", "unpacking reference masterchain state {}", mc_state.block_id());
         let mc_state_extra = mc_state.shard_state_extra()?.clone();
         let config_params = mc_state_extra.config.clone();
         CHECK!(&config_params, inited);
         // ihr_enabled_ = config_params->ihr_enabled();
         self.create_stats_enabled = mc_state_extra.config().has_capability(GlobalCapabilities::CapCreateStatsEnabled);
         if config_params.has_capabilities() && (config_params.capabilities() & !supported_capabilities()) != 0 {
-            log::error!(target: "validator", "block generation capabilities {} have been enabled in global configuration, \
+            log::error!(target: "validate_query", "block generation capabilities {} have been enabled in global configuration, \
                 but we support only {} (upgrade validator software?)",
                     config_params.capabilities(), supported_capabilities());
         }
         if config_params.global_version() > supported_version() {
-            log::error!(target: "validator", "block version {} have been enabled in global configuration, \
+            log::error!(target: "validate_query", "block version {} have been enabled in global configuration, \
                 but we support only {} (upgrade validator software?)",
                     config_params.global_version(), supported_version());
         }
@@ -594,10 +594,10 @@ impl ValidateQuery {
             self.check_one_prev_state(base, &base.prev_states[0])?;
             base.prev_states[0].root_cell().clone()
         };
-        log::debug!(target: "validator", "computing next state");
+        log::debug!(target: "validate_query", "computing next state");
         let next_state_root = base.state_update.apply_for(&prev_state_root)
             .map_err(|err| error!("cannot apply Merkle update from block to compute new state : {}", err))?;
-        log::debug!(target: "validator", "next state computed");
+        log::debug!(target: "validate_query", "next state computed");
         base.next_state = ShardStateStuff::new(base.block_id().clone(), next_state_root.clone())?;
         if base.info.end_lt() != base.next_state.state().gen_lt() {
             reject_query!("new state contains generation lt {} distinct from end_lt {} in block header",
@@ -669,7 +669,7 @@ impl ValidateQuery {
     }
 
     fn unpack_next_state(&self, base: &mut ValidateBase, mc_data: &McData) -> Result<()> {
-        log::debug!(target: "validator", "unpacking new state");
+        log::debug!(target: "validate_query", "unpacking new state");
         CHECK!(&base.next_state, inited);
         if base.next_state.state().gen_time() != base.now() {
             reject_query!("new state of {} claims to have been generated at unixtime {}, but the block header contains {}",
@@ -719,7 +719,7 @@ impl ValidateQuery {
         wc_info: Option<&WorkchainDescr>
     ) -> Result<()> {
         let shard = &info.shard;
-        log::debug!(target: "validator", "checking shard {} in new shard configuration", shard);
+        log::debug!(target: "validate_query", "checking shard {} in new shard configuration", shard);
         if info.descr.next_validator_shard != shard.shard_prefix_with_tag() {
             reject_query!("new shard configuration for shard {} contains different next_validator_shard {}",
                 shard, info.descr.next_validator_shard)
@@ -771,7 +771,7 @@ impl ValidateQuery {
         } else if let Some(old) = old {
             if old.block_id == info.block_id {
                 // shard unchanged ?
-                log::debug!(target: "validator", "shard {} unchanged", shard);
+                log::debug!(target: "validate_query", "shard {} unchanged", shard);
                 if !old.basic_info_equal(&info, true, true) {
                     reject_query!("shard information for block {}  listed in new shard configuration \
                         differs from that present in the old shard configuration for the same block",
@@ -782,7 +782,7 @@ impl ValidateQuery {
                 // ...
             } else {
                 // shard changed, extract and check TopShardBlockDescr from collated data
-                log::debug!(target: "validator", "shard {} changed from {} to {}", shard, old.block_id.seq_no, info.block_id.seq_no);
+                log::debug!(target: "validate_query", "shard {} changed from {} to {}", shard, old.block_id.seq_no, info.block_id.seq_no);
                 if info.descr.reg_mc_seqno != base.block_id().seq_no {
                     reject_query!("shard information for block {} has been updated in the new shard configuration, but it has reg_mc_seqno={} different from that of the current block {}",
                         info.block_id, info.descr.reg_mc_seqno, base.block_id().seq_no)
@@ -849,7 +849,7 @@ impl ValidateQuery {
                 // ...
                 if old.shard.is_parent_for(shard) {
                     // shard has been split
-                    log::debug!(target: "validator", "detected shard split {} -> {}", old.shard, shard);
+                    log::debug!(target: "validate_query", "detected shard split {} -> {}", old.shard, shard);
                     // ...
                 } else if shard.is_parent_for(&old.shard) {
                     // shard has been merged
@@ -858,7 +858,7 @@ impl ValidateQuery {
                             reject_query!("shard {} has been impossibly merged from more than two shards \
                                 {}, {} and others", shard, old.shard(), old2.shard())
                         }
-                        log::debug!(target: "validator", "detected shard merge {} + {} -> {}",
+                        log::debug!(target: "validate_query", "detected shard merge {} + {} -> {}",
                             old.shard(), old2.shard(), shard);
                     } else {
                         // CHECK!(old2.is_some());
@@ -975,7 +975,7 @@ impl ValidateQuery {
         self.update_shard_cc = base.info.key_block()
             || (base.now() / ccvc.shard_catchain_lifetime > prev_now / ccvc.shard_catchain_lifetime);
         if self.update_shard_cc {
-            log::debug!(target: "validator", "catchain_seqno of all shards must be updated");
+            log::debug!(target: "validate_query", "catchain_seqno of all shards must be updated");
         }
 
         let mut wc_id = ton_block::INVALID_WORKCHAIN_ID;
@@ -1018,7 +1018,7 @@ impl ValidateQuery {
     // similar to Collator::register_shard_block_creators
     fn register_shard_block_creators(&mut self, _base: &ValidateBase, creator_list: &Vec<UInt256>) -> Result<()> {
         for x in creator_list {
-            log::debug!(target: "validator", "registering block creator {}", x.to_hex_string());
+            log::debug!(target: "validate_query", "registering block creator {}", x.to_hex_string());
             if !x.is_zero() {
                 *self.block_create_count.entry(x.clone()).or_default() += 1;
             }
@@ -1056,7 +1056,7 @@ impl ValidateQuery {
         let catchain_seqno = new_info.catchain_seqno;
         if is_key_block || (now / lifetime > prev_now / lifetime) {
             cc_updated = true;
-            log::debug!(target: "validator", "increased masterchain catchain seqno to {}", catchain_seqno);
+            log::debug!(target: "validate_query", "increased masterchain catchain seqno to {}", catchain_seqno);
         }
         let (nodes, _hash_short) = cur_validators.calc_subset(
             &ccvc, 
@@ -1075,7 +1075,7 @@ impl ValidateQuery {
             reject_query!("new masterchain validator list hash incorrect hash: expected {}, found {}",
                 new_info.validator_list_hash_short, vlist_hash);
         }
-        log::debug!(target: "validator", "masterchain validator set hash changed from {} to {}",
+        log::debug!(target: "validate_query", "masterchain validator set hash changed from {} to {}",
             old_info.validator_list_hash_short, vlist_hash);
         if new_info.nx_cc_updated != cc_updated & self.update_shard_cc {
             reject_query!("new_info.nx_cc_updated has incorrect value {}", new_info.nx_cc_updated)
@@ -1134,24 +1134,24 @@ impl ValidateQuery {
  */
 
     fn load_block_data(base: &mut ValidateBase) -> Result<()> {
-        log::debug!(target: "validator", "unpacking block structures");
+        log::debug!(target: "validate_query", "unpacking block structures");
         base.in_msg_descr = base.extra.read_in_msg_descr()?;
         base.out_msg_descr = base.extra.read_out_msg_descr()?;
         base.account_blocks = base.extra.read_account_blocks()?;
         // run some hand-written checks from block::tlb::
         // (letmatic tests from block::gen:: have been already run for the entire block)
         // count and validate
-        log::debug!(target: "validator", "validating InMsgDescr");
+        log::debug!(target: "validate_query", "validating InMsgDescr");
         // base.in_msg_descr.count(1000000)?;
-        log::debug!(target: "validator", "validating OutMsgDescr");
+        log::debug!(target: "validate_query", "validating OutMsgDescr");
         // base.out_msg_descr.count(1000000)?;
-        log::debug!(target: "validator", "validating ShardAccountBlocks");
+        log::debug!(target: "validate_query", "validating ShardAccountBlocks");
         // base.account_blocks.count(1000000)?;
         Ok(())
     }
 
     fn precheck_value_flow(base: Arc<ValidateBase>) -> Result<()> {
-        log::debug!(target: "validator", "value flow: {}", base.value_flow);
+        log::debug!(target: "validate_query", "value flow: {}", base.value_flow);
         // if !base.value_flow.validate() {
         //     reject_query!("ValueFlow of block {} is invalid (in-balance is not equal to out-balance)", base.block_id())
         // }
@@ -1250,14 +1250,14 @@ impl ValidateQuery {
             if amount >= amount2 {
                 let mut delta = amount.clone();
                 delta.sub(&amount2)?;
-                log::debug!(target: "validator", "currency #{}: existing {}, required {}, to be minted {}",
+                log::debug!(target: "validate_query", "currency #{}: existing {}, required {}, to be minted {}",
                     curr_id, amount2, amount, delta);
                 to_mint.set_other_ex(curr_id, &delta)?;
             }
             Ok(true)
         }).map_err(|err| error!("error scanning extra currencies to be minted : {}", err))?;
         if !to_mint.is_zero()? {
-            log::debug!(target: "validator", "new currencies to be minted: {}", to_mint);
+            log::debug!(target: "validate_query", "new currencies to be minted: {}", to_mint);
         }
         Ok(to_mint)
     }
@@ -1266,7 +1266,7 @@ impl ValidateQuery {
         old_val_extra: Option<(ShardAccount, DepthBalanceInfo)>,
         new_val_extra: Option<(ShardAccount, DepthBalanceInfo)>
     ) -> Result<bool> {
-        log::debug!(target: "validator", "checking update of account {}", acc_id.to_hex_string());
+        log::debug!(target: "validate_query", "checking update of account {}", acc_id.to_hex_string());
         let acc_blk = base.account_blocks.get(&acc_id)?.ok_or_else(|| error!("the state of account {} \
             changed in the new state with respect to the old state, but the block contains no \
             AccountBlock for this account", acc_id.to_hex_string()))?;
@@ -1326,7 +1326,7 @@ impl ValidateQuery {
     }
 
     fn precheck_account_updates(base: Arc<ValidateBase>) -> Result<()> {
-        log::debug!(target: "validator", "pre-checking all Account updates between the old and the new state");
+        log::debug!(target: "validate_query", "pre-checking all Account updates between the old and the new state");
         // let prev_accounts = base.prev_state_accounts.clone();
         // let next_accounts = base.next_state_accounts.clone();
         base.prev_state_accounts.scan_diff_with_aug(
@@ -1341,7 +1341,7 @@ impl ValidateQuery {
         prev_trans_lt: &mut u64, prev_trans_hash: &mut UInt256, prev_trans_lt_len: &mut u64,
         acc_state_hash: &mut UInt256
     ) -> Result<bool> {
-        log::debug!(target: "validator", "pre-checking Transaction {}", trans_lt);
+        log::debug!(target: "validate_query", "pre-checking Transaction {}", trans_lt);
         let trans = Transaction::construct_from_cell(trans_root.clone())?;
         if &trans.account_addr != acc_id || trans.lt != trans_lt {
             reject_query!("transaction {} of {} claims to be transaction {} of {}",
@@ -1397,7 +1397,7 @@ impl ValidateQuery {
     // NB: could be run in parallel for different accounts
     fn precheck_one_account_block(base: &ValidateBase, acc_id: &UInt256, acc_blk: AccountBlock) -> Result<()> {
         let acc_id = AccountId::from(acc_id.clone());
-        log::debug!(target: "validator", "pre-checking AccountBlock for {}", acc_id.to_hex_string());
+        log::debug!(target: "validate_query", "pre-checking AccountBlock for {}", acc_id.to_hex_string());
         
         if !base.shard().contains_account(acc_id.clone())? {
             reject_query!("new block {} contains AccountBlock for account {} not belonging to the block's shard {}",
@@ -1460,7 +1460,7 @@ impl ValidateQuery {
     }
 
     fn precheck_account_transactions(base: Arc<ValidateBase>, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validator", "pre-checking all AccountBlocks, and all transactions of all accounts");
+        log::debug!(target: "validate_query", "pre-checking all AccountBlocks, and all transactions of all accounts");
         base.account_blocks.iterate_with_keys(|key, acc_blk| {
             let base = base.clone();
             Self::add_task(tasks, move ||
@@ -1500,7 +1500,7 @@ impl ValidateQuery {
         old_value: Option<(EnqueuedMsg, u64)>,
         new_value: Option<(EnqueuedMsg, u64)>
     ) -> Result<()> {
-        log::debug!(target: "validator", "checking update of enqueued outbound message {:x}", out_msg_id);
+        log::debug!(target: "validate_query", "checking update of enqueued outbound message {:x}", out_msg_id);
         CHECK!(old_value.is_some() || new_value.is_some());
         let m_str = if new_value.is_some() && old_value.is_some() {
             reject_query!("EnqueuedMsg with key {} has been changed in the OutMsgQueue, \
@@ -1571,7 +1571,7 @@ impl ValidateQuery {
                     contains a MsgEnvelope distinct from that stored in the new queue", out_msg_id.to_hex_string())
             }
         } else {
-            log::error!(target: "validator", "EnqueuedMsg with key {} has been not changed in the OutMsgQueue", out_msg_id.to_hex_string());
+            log::error!(target: "validate_query", "EnqueuedMsg with key {} has been not changed in the OutMsgQueue", out_msg_id.to_hex_string());
             return Ok(())
         };
         // let msg_env = enq.env;
@@ -1591,7 +1591,7 @@ impl ValidateQuery {
     }
 
     fn precheck_message_queue_update(base: Arc<ValidateBase>, manager: &MsgQueueManager, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validator", "pre-checking the difference between the \
+        log::debug!(target: "validate_query", "pre-checking the difference between the \
             old and the new outbound message queues");
         manager.prev().out_queue().scan_diff_with_aug(
             manager.next().out_queue(),
@@ -1666,7 +1666,7 @@ impl ValidateQuery {
     }
 
     fn check_in_msg(base: &ValidateBase, manager: &MsgQueueManager, key: &UInt256, in_msg: &InMsg) -> Result<()> {
-        log::debug!(target: "validator", "checking InMsg with key {}", key.to_hex_string());
+        log::debug!(target: "validate_query", "checking InMsg with key {}", key.to_hex_string());
         CHECK!(in_msg, inited);
         // initial checks and unpack
         let msg_hash = in_msg.message_cell()?.repr_hash();
@@ -1988,7 +1988,7 @@ impl ValidateQuery {
     }
 
     fn check_in_msg_descr(base: Arc<ValidateBase>, manager: Arc<MsgQueueManager>, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validator", "checking inbound messages listed in InMsgDescr");
+        log::debug!(target: "validate_query", "checking inbound messages listed in InMsgDescr");
         base.in_msg_descr.iterate_with_keys(|key, in_msg| {
             let base = base.clone();
             let manager = manager.clone();
@@ -2026,7 +2026,7 @@ impl ValidateQuery {
 
     // key of Message
     fn check_out_msg(base: &ValidateBase, manager: &MsgQueueManager, key: &UInt256, out_msg: &OutMsg) -> Result<()> {
-        log::debug!(target: "validator", "checking OutMsg with key {}", key.to_hex_string());
+        log::debug!(target: "validate_query", "checking OutMsg with key {}", key.to_hex_string());
         CHECK!(out_msg, inited);
         // initial checks and unpack
         let msg_cell_opt = out_msg.message_cell()?;
@@ -2062,7 +2062,7 @@ impl ValidateQuery {
                         key.to_hex_string(), addr.to_hex_string(),
                         transaction.logical_time(), transaction.account_addr.to_hex_string())
             }
-            // log::debug!(target: "validator", "OutMsg " << key.to_hex_string() + " is indeed a valid outbound message of transaction " << trans_lt
+            // log::debug!(target: "validate_query", "OutMsg " << key.to_hex_string() + " is indeed a valid outbound message of transaction " << trans_lt
             //           of " << trans_addr.to_hex_string();
         }
 
@@ -2220,7 +2220,7 @@ impl ValidateQuery {
             }
             // msg_export_new
             OutMsg::New(_) => {
-                log::debug!(target: "validator", "src: {}, dst: {}, shard: {}", src_prefix, dest_prefix, base.shard());
+                log::debug!(target: "validate_query", "src: {}, dst: {}, shard: {}", src_prefix, dest_prefix, base.shard());
                 // perform hypercube routing for this new message
                 let ia = IntermediateAddress::default();
                 let route_info = src_prefix.perform_hypercube_routing(&dest_prefix, &base.shard(), &ia)
@@ -2236,13 +2236,13 @@ impl ValidateQuery {
                 }
                 CHECK!(base.shard().contains_full_prefix(&src_prefix));
                 if base.shard().contains_full_prefix(&dest_prefix) {
-                    // log::debug!(target: "validator", "(THIS) src=" << src_prefix cur=" << cur_prefix next=" << next_prefix dest=" << dest_prefix route_info=(" << route_info.first << "," << route_info.second << ")";
+                    // log::debug!(target: "validate_query", "(THIS) src=" << src_prefix cur=" << cur_prefix next=" << next_prefix dest=" << dest_prefix route_info=(" << route_info.first << "," << route_info.second << ")";
                     CHECK!(cur_prefix == dest_prefix);
                     CHECK!(next_prefix == dest_prefix);
                     Self::update_min_enqueued_lt_hash(base, header.created_lt, key)?;
                 } else {
                     // sanity check of the implementation of hypercube routing
-                    // log::debug!(target: "validator", "(THAT) src=" << src_prefix cur=" << cur_prefix next=" << next_prefix dest=" << dest_prefix;
+                    // log::debug!(target: "validate_query", "(THAT) src=" << src_prefix cur=" << cur_prefix next=" << next_prefix dest=" << dest_prefix;
                     CHECK!(base.shard().contains_full_prefix(&cur_prefix));
                     CHECK!(!base.shard().contains_full_prefix(&next_prefix));
                 }
@@ -2292,7 +2292,7 @@ impl ValidateQuery {
                         that has not been yet processed by the corresponding neighbor", key.to_hex_string(), next_prefix)
                 }
                 if deliver_lt != info.import_block_lt() {
-                    log::warn!(target: "validator", "msg_export_deq OutMsg entry with key {} claims the dequeued message with next hop {} \
+                    log::warn!(target: "validate_query", "msg_export_deq OutMsg entry with key {} claims the dequeued message with next hop {} \
                         has been delivered in block with end_lt={} while the correct value is {}",
                             key.to_hex_string(), next_prefix, info.import_block_lt(), deliver_lt);
                 }
@@ -2368,7 +2368,7 @@ impl ValidateQuery {
     }
 
     fn check_out_msg_descr(base: Arc<ValidateBase>, manager: Arc<MsgQueueManager>, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validator", "checking outbound messages listed in OutMsgDescr");
+        log::debug!(target: "validate_query", "checking outbound messages listed in OutMsgDescr");
         base.out_msg_descr.iterate_with_keys(|key, out_msg| {
             let base = base.clone();
             let manager = manager.clone();
@@ -2384,7 +2384,7 @@ impl ValidateQuery {
 
     // compare to Collator::update_processed_upto()
     fn check_processed_upto(base: &ValidateBase, manager: &MsgQueueManager, mc_data: &McData) -> Result<()> {
-        log::debug!(target: "validator", "checking ProcessedInfo");
+        log::debug!(target: "validate_query", "checking ProcessedInfo");
         if !manager.next().is_reduced() {
             reject_query!("new ProcessedInfo is not reduced (some entries completely cover other entries)");
         }
@@ -2419,7 +2419,7 @@ impl ValidateQuery {
             claimed_proc_lt = 0;
             claimed_proc_hash = UInt256::from([0; 32]);
         }
-        log::debug!(target: "validator", "ProcessedInfo claims to have processed all inbound messages up to ({},{:x})",
+        log::debug!(target: "validate_query", "ProcessedInfo claims to have processed all inbound messages up to ({},{:x})",
             claimed_proc_lt, claimed_proc_hash);
         if let Some(key_val) = base.result.lt_hash.get(&0) {
             let (proc_lt, proc_hash) = key_val.val();
@@ -2497,7 +2497,7 @@ impl ValidateQuery {
             // (so we cannot assert that out_entry is null)
             // if self.claimed_proc_lt != 0
             //     && (self.claimed_proc_lt < created_lt || (self.claimed_proc_lt == created_lt && self.claimed_proc_hash < key.hash)) {
-            //     log::error!(target: "validator", "internal inconsistency: new ProcessedInfo claims \
+            //     log::error!(target: "validate_query", "internal inconsistency: new ProcessedInfo claims \
             //         to have processed all messages up to ({},{}) but we had somehow already processed a message ({},{}) \
             //         from OutMsgQueue of neighbor {} key {}", self.claimed_proc_lt, self.claimed_proc_hash.to_hex_string(),
             //             created_lt, key.hash.to_hex_string(), nb_block_id, key.to_hex_string());
@@ -2543,7 +2543,7 @@ impl ValidateQuery {
                 let (claimed_proc_lt, claimed_proc_hash) = key_val.val();
                 if claimed_proc_lt != &0
                     && !(claimed_proc_lt < &created_lt || (claimed_proc_lt == &created_lt && claimed_proc_hash < &key.hash)) {
-                    log::error!(target: "validator", "internal inconsistency: new ProcessedInfo claims \
+                    log::error!(target: "validate_query", "internal inconsistency: new ProcessedInfo claims \
                         to have processed all messages up to ({},{:x}), but we somehow have not processed a message ({},{:x}) \
                         from OutMsgQueue of neighbor {} key {:x}",
                             claimed_proc_lt, claimed_proc_hash,
@@ -2557,11 +2557,11 @@ impl ValidateQuery {
 
     // return true if all queues are processed
     fn check_in_queue(base: &ValidateBase, manager: &MsgQueueManager) -> Result<bool> {
-        log::debug!(target: "validator", "check_in_queue len: {}", manager.neighbors().len());
+        log::debug!(target: "validate_query", "check_in_queue len: {}", manager.neighbors().len());
         let mut iter = manager.merge_out_queue_iter(base.shard())?;
         while let Some(k_v) = iter.next() {
             let (msg_key, enq, lt, nb_block_id) = k_v?;
-            log::debug!(target: "validator", "processing inbound message with \
+            log::debug!(target: "validate_query", "processing inbound message with \
                 (lt,hash)=({},{:x}) from neighbor - {}", lt, msg_key.hash, nb_block_id);
             // if (verbosity > 3) {
             //     std::cerr << "inbound message: lt=" << kv->lt from=" << kv->source key=" << kv->key.to_hex_string() msg=";
@@ -2588,7 +2588,7 @@ impl ValidateQuery {
     // similar to Collator::out_msg_queue_cleanup()
     // (but scans new outbound queue instead of the old)
     fn check_delivered_dequeued(base: &ValidateBase, manager: &MsgQueueManager) -> Result<bool> {
-        log::debug!(target: "validator", "scanning new outbound queue and checking delivery status of all messages");
+        log::debug!(target: "validate_query", "scanning new outbound queue and checking delivery status of all messages");
         for nb in manager.neighbors() {
             if !nb.is_disabled() && !nb.can_check_processed() {
                 reject_query!("internal error: no info for checking processed messages from neighbor {}", nb.block_id())
@@ -2596,19 +2596,19 @@ impl ValidateQuery {
         }
         // TODO: warning may be too much messages
         manager.next().out_queue().iterate_with_keys_and_aug(|msg_key, enq, created_lt| {
-            // log::debug!(target: "validator", "key is " << key.to_hex_string(n));
+            // log::debug!(target: "validate_query", "key is " << key.to_hex_string(n));
             let enq = MsgEnqueueStuff::from_enqueue_and_lt(enq, created_lt)?;
             if msg_key.hash != enq.message_hash() {
                 reject_query!("cannot unpack EnqueuedMsg with key {} in the new OutMsgQueue", msg_key.to_hex_string())
             }
-            log::debug!(target: "validator", "scanning outbound message with (lt,hash)=({},{}) enqueued_lt={}",
+            log::debug!(target: "validate_query", "scanning outbound message with (lt,hash)=({},{}) enqueued_lt={}",
                 created_lt, msg_key.hash.to_hex_string(), enq.enqueued_lt());
             for nb in manager.neighbors() {
                 // could look up neighbor with shard containing enq_msg_descr.next_prefix more efficiently
                 // (instead of checking all neighbors)
                 if !nb.is_disabled() && nb.already_processed(&enq)? {
                     // the message has been delivered but not removed from queue!
-                    log::warn!(target: "validator", "outbound queue not cleaned up completely (overfull block?): \
+                    log::warn!(target: "validate_query", "outbound queue not cleaned up completely (overfull block?): \
                         outbound message with (lt,hash)=({},{}) enqueued_lt={} has been already delivered and \
                         processed by neighbor {} but it has not been dequeued in this block and it is still \
                         present in the new outbound queue", created_lt, msg_key.hash.to_hex_string(),
@@ -2617,7 +2617,7 @@ impl ValidateQuery {
                 }
             }
             if created_lt >= base.info.start_lt() {
-                log::debug!(target: "validator", "stop scanning new outbound queue");
+                log::debug!(target: "validate_query", "stop scanning new outbound queue");
                 return Ok(false)
             }
             Ok(true)
@@ -2670,7 +2670,7 @@ impl ValidateQuery {
         is_first: bool,
         is_last: bool
     ) -> Result<bool> {
-        log::debug!(target: "validator", "checking {} transaction {} of account {}",
+        log::debug!(target: "validate_query", "checking {} transaction {} of account {}",
             lt, trans_root.repr_hash().to_hex_string(), account_addr.to_hex_string());
         let trans = Transaction::construct_from_cell(trans_root.clone())?;
         let account_create = account == &Account::AccountNone;
@@ -3014,7 +3014,7 @@ impl ValidateQuery {
     }
 
     fn check_transactions(base: Arc<ValidateBase>, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validator", "checking all transactions");
+        log::debug!(target: "validate_query", "checking all transactions");
         base.account_blocks.iterate_with_keys_and_aug(|account_addr, acc_block, fee| {
             let base = base.clone();
             let (mut account_root, account) = Self::unpack_account(&base, &account_addr)?;
@@ -3043,11 +3043,11 @@ impl ValidateQuery {
         if !base.shard().is_masterchain() {
             return Ok(())
         }
-        log::debug!(target: "validator", "getting the list of special tick-tock smart contracts");
+        log::debug!(target: "validate_query", "getting the list of special tick-tock smart contracts");
         let ticktock_smcs = base.config_params.special_ticktock_smartcontracts(3, &base.prev_state_accounts)?;
-        log::debug!(target: "validator", "have {} tick-tock smart contracts", ticktock_smcs.len());
+        log::debug!(target: "validate_query", "have {} tick-tock smart contracts", ticktock_smcs.len());
         for addr in ticktock_smcs {
-            log::debug!(target: "validator", "special smart contract {} with ticktock={}", addr.0.to_hex_string(), addr.1);
+            log::debug!(target: "validate_query", "special smart contract {} with ticktock={}", addr.0.to_hex_string(), addr.1);
             if base.account_blocks.get(&addr.0)?.is_none() {
                 reject_query!("there are no transactions (and in particular, no tick-tock transactions) \
                     for special smart contract {} with ticktock={}",
@@ -3091,7 +3091,7 @@ impl ValidateQuery {
             _ => reject_query!("wrong type of message")
         };
         let msg_hash = env.message_cell().repr_hash();
-        log::debug!(target: "validator", "checking special message with hash {} and expected amount {}",
+        log::debug!(target: "validate_query", "checking special message with hash {} and expected amount {}",
             msg_hash.to_hex_string(), amount);
         match base.in_msg_descr.get(&msg_hash)? {
             Some(msg) => if &msg != in_msg {
@@ -3208,7 +3208,7 @@ impl ValidateQuery {
     }
 
     fn check_new_state(base: &mut ValidateBase, mc_data: &McData, manager: &MsgQueueManager) -> Result<()> {
-        log::debug!(target: "validator", "checking header of the new shardchain state");
+        log::debug!(target: "validate_query", "checking header of the new shardchain state");
         let my_mc_seqno = if base.shard().is_masterchain() {
             base.block_id().seq_no()
         } else {
@@ -3257,7 +3257,7 @@ impl ValidateQuery {
                 (obtained by summing balances of all accounts in the new state): {}",
                 base.next_state.state().total_balance(), base.value_flow.to_next_blk)
         }
-        log::debug!(target: "validator", "checking total validator fees: new={}+recovered={} == old={}+collected={}",
+        log::debug!(target: "validate_query", "checking total validator fees: new={}+recovered={} == old={}+collected={}",
             base.next_state.state().total_validator_fees(), base.value_flow.recovered,
             base.prev_validator_fees, base.value_flow.fees_collected);
         let mut new = base.value_flow.recovered.clone();
@@ -3326,7 +3326,7 @@ impl ValidateQuery {
         }
         if new_config.important_config_parameters_changed(&old_config, false)? {
             // same as the check in Collator::create_mc_state_extra()
-            log::warn!(target: "validator", "the global configuration changes in block {}", base.block_id());
+            log::warn!(target: "validate_query", "the global configuration changes in block {}", base.block_id());
             if !base.info.key_block() {
                 reject_query!("important parameters in the global configuration have changed, but the block is not marked as a key block")
             }
@@ -3367,7 +3367,7 @@ impl ValidateQuery {
         let want_config_root = match new_accounts.get(&want_cfg_addr) {
             Ok(Some(account)) => account.read_account()?.get_data(),
             _ => {
-                log::warn!(target: "validator", "switching of configuration smart contract did not happen \
+                log::warn!(target: "validate_query", "switching of configuration smart contract did not happen \
                     because the suggested new configuration smart contract {} does not contain a valid configuration",
                         want_cfg_addr.to_hex_string());
                 return Ok(())
@@ -3376,7 +3376,7 @@ impl ValidateQuery {
         // if !base.config_params.valid_config_data(&base.prev_state_extra.config, true, false)? {
         let want_config = ConfigParams::with_address_and_params(want_cfg_addr.clone(), want_config_root);
         if !want_config.valid_config_data(false, None)? {
-            log::warn!(target: "validator", "switching of configuration smart contract did not happen \
+            log::warn!(target: "validate_query", "switching of configuration smart contract did not happen \
                 because the configuration extracted from suggested new configuration smart contract {} \
                 failed to pass per-parameter validity checks, or one of mandatory configuration parameters is missing",
                     want_cfg_addr.to_hex_string());
@@ -3409,7 +3409,7 @@ impl ValidateQuery {
         } else {
             new.expect("check scan_diff for Hashmap").0
         };
-        log::debug!(target: "validator", "prev block id for {} is present", seq_no);
+        log::debug!(target: "validate_query", "prev block id for {} is present", seq_no);
         let (end_lt, block_id, key) = new_val.master_block_id();
         if block_id.seq_no != seq_no {
             reject_query!("new previous blocks dictionary entry with seqno {} in fact describes a block {} with different seqno",
@@ -3440,7 +3440,7 @@ impl ValidateQuery {
             return Ok(())
         }
         let import_created = base.mc_extra.fees().root_extra().create.clone();
-        log::debug!(target: "validator", "checking header of McStateExtra in the new masterchain state");
+        log::debug!(target: "validate_query", "checking header of McStateExtra in the new masterchain state");
         if base.prev_state.state().custom_cell().is_none() {
             reject_query!("previous masterchain state did not contain a McStateExtra")
         }
@@ -3584,7 +3584,7 @@ impl ValidateQuery {
     }
 
     fn check_one_block_creator_update(&self, base: &ValidateBase, key: &UInt256, old: Option<CreatorStats>, new: Option<CreatorStats>) -> Result<bool> {
-        log::debug!(target: "validator", "checking update of CreatorStats for {}", key.to_hex_string());
+        log::debug!(target: "validate_query", "checking update of CreatorStats for {}", key.to_hex_string());
         let (new, new_exists) = match new {
             Some(new) => (new, true),
             None => (CreatorStats::default(), false)
@@ -3610,7 +3610,7 @@ impl ValidateQuery {
 
     // similar to Collator::update_block_creator_stats()
     fn check_block_create_stats(&self, base: &ValidateBase, old: BlockCreateStats, new: BlockCreateStats) -> Result<bool> {
-        log::debug!(target: "validator", "checking all CreatorStats updates between the old and the new state");
+        log::debug!(target: "validate_query", "checking all CreatorStats updates between the old and the new state");
         old.counters.scan_diff(
             &new.counters,
             |key: UInt256, old, new| self.check_one_block_creator_update(base, &key, old, new)
@@ -3655,7 +3655,7 @@ impl ValidateQuery {
     }
 
     fn check_mc_block_extra(base: &ValidateBase, _mc_data: &McData) -> Result<()> {
-        log::debug!(target: "validator", "checking all CreatorStats updates between the old and the new state");
+        log::debug!(target: "validate_query", "checking all CreatorStats updates between the old and the new state");
         if !base.shard().is_masterchain() {
             return Ok(())
         }
@@ -3753,7 +3753,7 @@ impl ValidateQuery {
         )?;
         self.check_utime_lt(&base, &mc_data)?;
         // stage 1
-        // log::debug!(target: "validator", "running letmated validity checks for block candidate {}", base.block_id());
+        // log::debug!(target: "validate_query", "running letmated validity checks for block candidate {}", base.block_id());
         // if (!block::gen::t_Block.validate_ref(1000000, block_root_)) {
         //     reject_query!("block ",  id_ + " failed to pass letmated validity checks");
         // }

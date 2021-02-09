@@ -42,7 +42,7 @@ pub async fn run_validate_query(
             set,
             engine,
             false,
-            true,
+            false,
         ).try_validate().await?;
         return Ok(SystemTime::now())
     }
@@ -55,7 +55,7 @@ pub async fn run_validate_query(
         set,
         engine.clone(),
         false,
-        true,
+        false,
     );
 
     if let Err(err) = query.try_validate().await {
