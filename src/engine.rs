@@ -82,6 +82,7 @@ pub struct Engine {
 
 struct DownloadContext<'a, T> {
     client: Arc<dyn FullNodeOverlayClient>,
+    db: &'a dyn InternalDb,
     downloader: Arc<dyn Downloader<Item = T>>,
     id: &'a BlockIdExt,
     limit: Option<u32>, 
@@ -144,9 +145,18 @@ impl Downloader for BlockDownloader {
         &self, 
         context: &DownloadContext<'_, Self::Item>,
     ) -> Result<Option<Self::Item>> {
-        context.client.download_block_full(context.id).await        
+        if let Some(handle) = context.db.load_block_handle(context.id)? {
+            let mut is_link = false;
+            if handle.has_data() && handle.has_proof_or_link(&mut is_link) {
+                return Ok(Some((
+                    context.db.load_block_data(&handle).await?,
+                    context.db.load_block_proof(&handle, is_link).await?
+                )));
+            }
+        }
+        context.client.download_block_full(context.id).await
     }
-}              
+}
 
 struct BlockProofDownloader {
     is_link: bool,
@@ -160,6 +170,12 @@ impl Downloader for BlockProofDownloader {
         &self, 
         context: &DownloadContext<'_, Self::Item>,
     ) -> Result<Option<Self::Item>> {
+        if let Some(handle) = context.db.load_block_handle(context.id)? {
+            let mut is_link = false;
+            if handle.has_proof_or_link(&mut is_link) {
+                return Ok(Some(context.db.load_block_proof(&handle, is_link).await?));
+            }
+        }
         context.client.download_block_proof(
             context.id, 
             self.is_link, 
@@ -177,6 +193,20 @@ impl Downloader for NextBlockDownloader {
         &self, 
         context: &DownloadContext<'_, Self::Item>,
     ) -> Result<Option<Self::Item>> {
+        if let Some(prev_handle) = context.db.load_block_handle(context.id)? {
+            if prev_handle.has_next1() {
+                let next_id = context.db.load_block_next1(context.id)?;
+                if let Some(next_handle) = context.db.load_block_handle(&next_id)? {
+                    let mut is_link = false;
+                    if next_handle.has_data() && next_handle.has_proof_or_link(&mut is_link) {
+                        return Ok(Some((
+                            context.db.load_block_data(&next_handle).await?,
+                            context.db.load_block_proof(&next_handle, is_link).await?
+                        )));
+                    }
+                }
+            }
+        }
         context.client.download_next_block_full(context.id).await
     }    
 }  
@@ -190,6 +220,14 @@ impl Downloader for ZeroStateDownloader {
         &self, 
         context: &DownloadContext<'_, Self::Item>,
     ) -> Result<Option<Self::Item>> {
+        if let Some(handle) = context.db.load_block_handle(context.id)? {
+            if handle.has_state() {
+                let zs = context.db.load_shard_state_dynamic(context.id)?;
+                let mut data = vec!();
+                zs.write_to(&mut data)?;
+                return Ok(Some((zs, data)));
+            }
+        }
         context.client.download_zero_state(context.id).await
     }
 }
@@ -238,9 +276,9 @@ impl Engine {
             db,
             ext_db,
             overlay_operations: network.clone(),
-            shard_states_awaiters: AwaitersPool::new(),
-            block_applying_awaiters: AwaitersPool::new(),
-            next_block_applying_awaiters: AwaitersPool::new(),
+            shard_states_awaiters: AwaitersPool::with_description("shard_states_awaiters"),
+            block_applying_awaiters: AwaitersPool::with_description("block_applying_awaiters"),
+            next_block_applying_awaiters: AwaitersPool::with_description("next_block_applying_awaiters"),
             external_messages: MessagesPool::new(),
             zero_state_id,
             init_mc_block_id,
@@ -448,7 +486,7 @@ impl Engine {
                     fail!("UNEXPECTED error: master block refers two previous blocks");
                 }
                 let id = handle.id().clone();
-                self.next_block_applying_awaiters.do_or_wait(&prev_id, async move { Ok(id) }).await?;
+                self.next_block_applying_awaiters.do_or_wait(&prev_id, None, async move { Ok(id) }).await?;
             }
 
             log::info!(
@@ -571,6 +609,7 @@ impl Engine {
                 id.shard().workchain_id(),
                 id.shard().shard_prefix_with_tag()
             ).await?,
+            db: self.db.deref(),
             downloader,
             id,
             limit,
@@ -773,7 +812,7 @@ impl Engine {
                         log::trace!("persistent_states_keeper: saving {}", block_id);
                         let now = std::time::Instant::now();
                         
-                        let ss = engine.wait_state(&block_id).await?;
+                        let ss = engine.clone().wait_state(&block_id, None).await?;
                         let handle = engine.load_block_handle(&block_id)?.ok_or_else(
                             || error!("Cannot load handle for PSS keeper shard block {}", block_id)
                         )?;
@@ -784,7 +823,7 @@ impl Engine {
                     };
                 }
             }
-            handle = engine.wait_next_applied_mc_block(&handle).await?.0;
+            handle = engine.wait_next_applied_mc_block(&handle, None).await?.0;
             engine.store_pss_keeper_block_id(handle.id(), ).await?;
         }
     }

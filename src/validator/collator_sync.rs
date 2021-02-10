@@ -3,7 +3,6 @@
 use std::{
     cmp::{min, max},
     collections::{HashMap, HashSet, BinaryHeap},
-    ops::Deref,
     sync::{atomic::{AtomicU64, Ordering}, Arc},
 };
 use crate::{
@@ -1200,7 +1199,7 @@ impl Collator {
     async fn request_neighbor_msg_queues(&self, mc_data: &McData, prev_data: &PrevData, collator_data: &mut CollatorData) -> Result<MsgQueueManager> {
         log::trace!("{}: request_neighbor_msg_queues", self.collated_block_descr);
         MsgQueueManager::init(
-            self.engine.deref(),
+            &self.engine,
             self.shard.clone(),
             collator_data.shards.as_ref().unwrap_or_else(|| mc_data.mc_state_extra.shards()),
             &prev_data.states,

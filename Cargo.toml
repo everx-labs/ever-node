@@ -58,11 +58,11 @@ statsd = { version = "0.14.0", optional = true }
 string-builder = "^0.2.0"
 tokio = { version = "0.2.23", features = ["rt-threaded", "stream", "tcp", "udp", "rt-core", "macros", "fs", "time", "blocking"] }
 
-adnl = { git = "https://github.com/tonlabs/ton-labs-adnl", features = ["client", "node", "server"] }
+adnl = { git = "https://github.com/tonlabs/ton-labs-adnl", features = ["client", "node", "server", "trace"] }
 catchain = { path = "catchain" }
 dht = { git = "https://github.com/tonlabs/ton-labs-dht" }
 lockfree = { git = "https://github.com/tonlabs/lockfree.git" }
-overlay = { git = "https://github.com/tonlabs/ton-labs-overlay" }
+overlay = { git = "https://github.com/tonlabs/ton-labs-overlay", features = ["trace"] }
 rldp = { git = "https://github.com/tonlabs/ton-labs-rldp" }
 storage = { path = "storage" }
 ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }

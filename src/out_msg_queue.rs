@@ -4,7 +4,7 @@ use crate::{
     shard_state::ShardStateStuff,
     types::messages::MsgEnqueueStuff,
 };
-use std::{cmp::max, iter::Iterator};
+use std::{cmp::max, iter::Iterator, sync::Arc, ops::Deref};
 use ton_block::{
     BlockIdExt, ShardIdent, Serializable, Deserializable, 
     OutMsgQueueInfo, OutMsgQueue, OutMsgQueueKey, IhrPendingInfo,
@@ -442,7 +442,7 @@ pub struct MsgQueueManager {
 impl MsgQueueManager {
 
     pub async fn init(
-        engine: &dyn EngineOperations,
+        engine: &Arc<dyn EngineOperations>,
         shard: ShardIdent,
         shards: &ShardHashes,
         prev_states: &Vec<ShardStateStuff>,
@@ -450,7 +450,7 @@ impl MsgQueueManager {
         after_merge: bool,
         after_split: bool,
     ) -> Result<Self> {
-        let last_mc_state = engine.load_last_applied_mc_state().await?;
+        let last_mc_state = engine.clone().load_last_applied_mc_state().await?;
         engine.set_aux_mc_state(&last_mc_state)?;
         let next_mc_end_lt = next_state_opt.map(|state| state.state().gen_lt()).unwrap_or_default();
         log::debug!("request a preliminary list of neighbors for {}", shard);
@@ -459,7 +459,10 @@ impl MsgQueueManager {
         log::debug!("got a preliminary list of {} neighbors for {}", neighbor_list.len(), shard);
         for (i, shard) in neighbor_list.iter().enumerate() {
             log::debug!("neighbors #{} ---> {:#}", i + 1, shard.shard());
-            let shard_state = engine.wait_state(shard.block_id()).await?;
+            
+            // TODO add loop and stop_flag checking
+            let shard_state = engine.clone().wait_state(shard.block_id(), Some(500)).await?;
+            
             let nb = Self::load_out_queue_info(engine, &shard_state).await?;
             neighbors.push(nb);
         }
@@ -503,15 +506,15 @@ impl MsgQueueManager {
             };
         }
 
-        prev_out_queue_info.fix_processed_upto(engine, mc_seqno, 0, None)?;
-        next_out_queue_info.fix_processed_upto(engine, mc_seqno, next_mc_end_lt, Some(shards))?;
+        prev_out_queue_info.fix_processed_upto(engine.deref(), mc_seqno, 0, None)?;
+        next_out_queue_info.fix_processed_upto(engine.deref(), mc_seqno, next_mc_end_lt, Some(shards))?;
 
         for neighbor in &mut neighbors {
-            neighbor.fix_processed_upto(engine, mc_seqno, 0, None)?;
+            neighbor.fix_processed_upto(engine.deref(), mc_seqno, 0, None)?;
         }
         Ok(MsgQueueManager {
-        // Unused
-        //    shard,
+        //Unused
+          // shard,
             prev_out_queue_info,
             next_out_queue_info,
             neighbors,
@@ -519,7 +522,7 @@ impl MsgQueueManager {
     }
 
     pub async fn load_out_queue_info(
-        engine: &dyn EngineOperations,
+        engine: &Arc<dyn EngineOperations>,
         state: &ShardStateStuff,
     ) -> Result<OutMsgQueueInfoStuff> {
         log::debug!("unpacking OutMsgQueueInfo of neighbor {:#}", state.block_id());
@@ -533,7 +536,9 @@ impl MsgQueueManager {
         // .. (have to check the above condition and perform a `break` here) ..
         // ..
         for entry in nb.entries() {
-            engine.request_aux_mc_state(entry.mc_seqno).await?;
+
+            // TODO add loop and stop_flag checking
+            engine.clone().request_aux_mc_state(entry.mc_seqno, Some(500)).await?;
         }
         Ok(nb)
     }

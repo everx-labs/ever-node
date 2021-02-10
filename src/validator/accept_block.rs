@@ -111,7 +111,7 @@ pub async fn accept_block(
         log::debug!(target: "validator", "Applying block {}", id);
         engine.clone().apply_block(&handle, &block, id.seq_no(), false).await?;
     } else {
-        let last_mc_state = choose_mc_state(&block, engine.deref()).await?;
+        let last_mc_state = choose_mc_state(&block, &engine).await?;
 
         if let Some(tbd) = create_top_shard_block_description(
             &block,
@@ -171,7 +171,7 @@ pub async fn accept_block(
 
 async fn choose_mc_state(
     block: &BlockStuff,
-    engine: &dyn EngineOperations
+    engine: &Arc<dyn EngineOperations>
 ) -> Result<ShardStateStuff> {
     let mc_block_id = block.construct_master_id()?;
     let mut last_mc_state = engine.load_last_applied_mc_state().await?;
@@ -184,7 +184,7 @@ async fn choose_mc_state(
             block.id(),
             mc_block_id
         );
-        let new_mc_state = engine.wait_state(&mc_block_id).await?;
+        let new_mc_state = engine.clone().wait_state(&mc_block_id, Some(60_000)).await?;
         new_mc_state
             .shard_state_extra()?
             .prev_blocks

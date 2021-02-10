@@ -129,7 +129,7 @@ impl NodeNetwork {
             masterchain_overlay_id,
             overlays: Arc::new(Cache::new()),
             validator_context: validator_context,
-            overlay_awaiters: AwaitersPool::new(),
+            overlay_awaiters: AwaitersPool::with_description("overlay_awaiters"),
             runtime_handle: tokio::runtime::Handle::current(),
             config_handler: config_handler,
             _control
@@ -545,6 +545,7 @@ impl OverlayOperations for NodeNetwork {
             }
             let overlay_opt = self.overlay_awaiters.do_or_wait(
                 &overlay_id.0.clone(),
+                None,
                 Arc::clone(&self).get_overlay_worker(overlay_id.clone())
             ).await?;
             if let Some(overlay) = overlay_opt {

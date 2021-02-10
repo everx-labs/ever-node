@@ -79,7 +79,7 @@ async fn load_next_master_block(
         fail!("Invalid next master block got: {}, prev: {}", block.id(), prev_id);
     }
 
-    let prev_state = engine.wait_state(&prev_id).await?;
+    let prev_state = engine.clone().wait_state(&prev_id, None).await?;
     proof.check_with_master_state(&prev_state)?;
     let mut next_handle = if let Some(next_handle) = engine.load_block_handle(block.id())? {
         if !next_handle.has_data() {
@@ -112,7 +112,7 @@ async fn load_shard_blocks_cycle(
     )?;
     loop {
         log::trace!("load_shard_blocks_cycle: mc block: {}", mc_handle.id());
-        let r = engine.wait_next_applied_mc_block(&mc_handle).await?;
+        let r = engine.wait_next_applied_mc_block(&mc_handle, None).await?;
         mc_handle = r.0;
         let mc_block = r.1;
 

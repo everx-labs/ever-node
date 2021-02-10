@@ -159,6 +159,7 @@ pub struct CollatorTestBundle {
     block_handle_cache: Arc<lockfree::map::Map<BlockIdExt, Weak<BlockHandle>>>,
 }
 
+#[allow(dead_code)]
 impl CollatorTestBundle {
 
     pub async fn build_with_zero_state(mc_zero_state_name: &str, wc_zero_state_name: &str) -> Result<Self> {
@@ -1066,7 +1067,7 @@ impl EngineOperations for CollatorTestBundle {
         &self.shard_states_cache
     }
 
-    async fn wait_state(&self, id: &BlockIdExt) -> Result<ShardStateStuff> {
+    async fn wait_state(self: Arc<Self>, id: &BlockIdExt, _timeout_ms: Option<u64>) -> Result<ShardStateStuff> {
         self.load_state(id).await
     }
 
