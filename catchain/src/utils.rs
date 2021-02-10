@@ -489,6 +489,7 @@ pub fn add_compute_percentage_metric(
     key: &String,
     value_key: &String,
     total_key: &String,
+    bias: f64,
 ) {
     let value_key = value_key.clone();
     let total_key = total_key.clone();
@@ -496,12 +497,19 @@ pub fn add_compute_percentage_metric(
         if let Some((value, total_value)) =
             get_metrics_counters_pair(metrics, &value_key, &total_key)
         {
-            let percentage = (value as f64) / (total_value as f64);
+            if total_value != 0 {
+                let percentage = (value as f64) / (total_value as f64) + bias;
 
-            return Some(Metric {
-                value: (percentage * MetricsDumper::METRIC_PERCENT_MULTIPLIER) as u64,
-                usage: MetricUsage::Percents,
-            });
+                return Some(Metric {
+                    value: (percentage * MetricsDumper::METRIC_PERCENT_MULTIPLIER) as u64,
+                    usage: MetricUsage::Percents,
+                });
+            } else {
+                return Some(Metric {
+                    value: MetricsDumper::METRIC_PERCENT_MULTIPLIER as u64,
+                    usage: MetricUsage::Percents,
+                });
+            }
         }
 
         None

@@ -1,5 +1,6 @@
 pub use super::*;
 use crate::ton_api::IntoBoxed;
+use catchain::profiling::ResultStatusCounter;
 use rand::rngs::ThreadRng;
 use rand::Rng;
 use std::collections::HashMap;
@@ -76,6 +77,8 @@ pub(crate) struct SessionDescriptionImpl {
     vote_candidate_vectors_instance_counter: CachedInstanceCounter, //instance counter for vote candidate vectors
     round_attempt_vectors_instance_counter: CachedInstanceCounter, //instance counter for round attempt vectors
     old_round_vectors_instance_counter: CachedInstanceCounter, //instance counter for old round vectors
+    persistent_cache_reuse_counter: ResultStatusCounter,       //counter for persistent cache reuse
+    temp_cache_reuse_counter: ResultStatusCounter,             //counter for temp cache reuse
 }
 
 /*
@@ -432,6 +435,10 @@ impl SessionCache for SessionDescriptionImpl {
     }
 
     fn add_cache_entry(&mut self, hash: HashType, cache_entry: CacheEntry, pool: SessionPool) {
+        let reuse_counter = match pool {
+            SessionPool::Persistent => &mut self.persistent_cache_reuse_counter,
+            SessionPool::Temp => &mut self.temp_cache_reuse_counter,
+        };
         let pool = match pool {
             SessionPool::Persistent => &mut self.persistent_objects_cache,
             SessionPool::Temp => &mut self.temp_objects_cache,
@@ -439,6 +446,9 @@ impl SessionCache for SessionDescriptionImpl {
         let cache_index = hash as usize % pool.len();
 
         pool[cache_index] = Some(cache_entry);
+
+        reuse_counter.total_increment();
+        reuse_counter.failure();
     }
 
     fn clear_temp_memory(&mut self) {
@@ -446,6 +456,16 @@ impl SessionCache for SessionDescriptionImpl {
 
         self.temp_objects_cache.clear();
         self.temp_objects_cache.resize(temp_pool_size, None);
+    }
+
+    fn increment_reuse_counter(&mut self, pool: SessionPool) {
+        let reuse_counter = match pool {
+            SessionPool::Persistent => &mut self.persistent_cache_reuse_counter,
+            SessionPool::Temp => &mut self.temp_cache_reuse_counter,
+        };
+
+        reuse_counter.total_increment();
+        reuse_counter.success();
     }
 }
 
@@ -607,6 +627,14 @@ impl SessionDescriptionImpl {
             old_round_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
                 &"old_round_vectors".to_string(),
+            ),
+            temp_cache_reuse_counter: ResultStatusCounter::new(
+                &metrics_receiver,
+                &"temp_cache_reuse".to_owned(),
+            ),
+            persistent_cache_reuse_counter: ResultStatusCounter::new(
+                &metrics_receiver,
+                &"persistent_cache_reuse".to_owned(),
             ),
             metrics_receiver: metrics_receiver,
         };

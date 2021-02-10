@@ -12,6 +12,9 @@ pub trait SessionCache {
     /// Add new cache entry
     fn add_cache_entry(&mut self, hash: HashType, cache_entry: CacheEntry, pool: SessionPool);
 
+    /// Increment reuse counter
+    fn increment_reuse_counter(&mut self, pool: SessionPool);
+
     /// Clear temp pool
     fn clear_temp_memory(&mut self);
 }
@@ -49,9 +52,15 @@ pub trait CacheObject<T: PoolObject + HashableObject> {
         if let Some(ref cache_entry) = &cache.get_cache_entry_by_hash(hash, allow_temp) {
             if let Some(ref ptr) = Self::unwrap_cache_entry(&cache_entry) {
                 if ptr.compare(&value) {
-                    assert!(pool == (*ptr).get_pool() || (*ptr).get_pool() == SessionPool::Persistent);
+                    assert!(
+                        pool == (*ptr).get_pool() || (*ptr).get_pool() == SessionPool::Persistent
+                    );
 
-                    return (*ptr).clone();
+                    let result = (*ptr).clone();
+
+                    cache.increment_reuse_counter(result.get_pool());
+
+                    return result;
                 }
             }
         }
@@ -90,7 +99,6 @@ pub trait CacheObject<T: PoolObject + HashableObject> {
 }
 
 /// Cached instance counter
-#[derive(Clone)]
 pub struct CachedInstanceCounter {
     pool: SessionPool,                            //pool object belongs to
     total_instance_counter: InstanceCounter, //instance counter for all objects (temp + persistent)
@@ -113,20 +121,12 @@ impl CachedInstanceCounter {
         body
     }
 
-    pub fn clone(&self) -> Self {
+    pub fn clone_as_temp(&self) -> Self {
         let body = Self {
-            pool: self.pool,
+            pool: SessionPool::Temp,
             total_instance_counter: self.total_instance_counter.clone(),
-            persistent_instance_counter: if self.pool == SessionPool::Persistent {
-                self.persistent_instance_counter.clone()
-            } else {
-                self.persistent_instance_counter.clone_refs_only()
-            },
-            temp_instance_counter: if self.pool == SessionPool::Temp {
-                self.temp_instance_counter.clone()
-            } else {
-                self.temp_instance_counter.clone_refs_only()
-            },
+            persistent_instance_counter: self.persistent_instance_counter.clone_refs_only(),
+            temp_instance_counter: self.temp_instance_counter.clone(),
         };
 
         body
@@ -143,15 +143,35 @@ impl CachedInstanceCounter {
 
         match self.pool {
             SessionPool::Persistent => {
-                self.temp_instance_counter = self.temp_instance_counter.clone();
-                self.persistent_instance_counter.drop();
+                unreachable!();
             }
             SessionPool::Temp => {
                 self.persistent_instance_counter = self.persistent_instance_counter.clone();
-                self.temp_instance_counter.drop();
+                self.temp_instance_counter.force_drop();
             }
         };
 
         self.pool = pool;
+    }
+}
+
+impl Clone for CachedInstanceCounter {
+    fn clone(&self) -> Self {
+        let body = Self {
+            pool: self.pool,
+            total_instance_counter: self.total_instance_counter.clone(),
+            persistent_instance_counter: if self.pool == SessionPool::Persistent {
+                self.persistent_instance_counter.clone()
+            } else {
+                self.persistent_instance_counter.clone_refs_only()
+            },
+            temp_instance_counter: if self.pool == SessionPool::Temp {
+                self.temp_instance_counter.clone()
+            } else {
+                self.temp_instance_counter.clone_refs_only()
+            },
+        };
+
+        body
     }
 }

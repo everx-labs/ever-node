@@ -6,7 +6,6 @@ use metrics_runtime;
     Instances counter
 */
 
-#[derive(Clone)]
 pub struct InstanceCounter {
     create_counter: metrics_runtime::data::Counter,
     drop_counter: metrics_runtime::data::Counter,
@@ -24,15 +23,6 @@ impl InstanceCounter {
         body
     }
 
-    pub fn clone(&self) -> Self {
-        let mut body = self.clone_refs_only();
-
-        body.need_drop = true;
-        body.create_counter.increment();
-
-        body
-    }
-
     pub fn clone_refs_only(&self) -> Self {
         let body = Self {
             create_counter: self.create_counter.clone(),
@@ -43,11 +33,28 @@ impl InstanceCounter {
         body
     }
 
-    pub fn drop(&mut self) {
+    pub fn force_drop(&mut self) {
         if self.need_drop {
             self.drop_counter.increment();
             self.need_drop = false;
         }
+    }
+}
+
+impl Clone for InstanceCounter {
+    fn clone(&self) -> Self {
+        let mut body = self.clone_refs_only();
+
+        body.need_drop = true;
+        body.create_counter.increment();
+
+        body
+    }
+}
+
+impl Drop for InstanceCounter {
+    fn drop(&mut self) {
+        self.force_drop();
     }
 }
 
