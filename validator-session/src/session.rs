@@ -402,8 +402,22 @@ impl SessionImpl {
             &compute_instance_counter,
         );
         metrics_dumper.add_derivative_metric("session_states.total".to_string());
+        metrics_dumper.add_derivative_metric("old_rounds.total".to_string());
+        metrics_dumper.add_derivative_metric("rounds.total".to_string());
         metrics_dumper.add_derivative_metric("round_attempts.total".to_string());
+        metrics_dumper.add_derivative_metric("block_candidates.total".to_string());
+        metrics_dumper.add_derivative_metric("vote_candidates.total".to_string());
+        metrics_dumper.add_derivative_metric("block_candidates_signatures.total".to_string());
         metrics_dumper.add_derivative_metric("sent_blocks.total".to_string());
+        metrics_dumper.add_derivative_metric("old_round_vectors.total".to_string());
+        metrics_dumper.add_derivative_metric("round_vectors.total".to_string());
+        metrics_dumper.add_derivative_metric("round_attempt_vectors.total".to_string());
+        metrics_dumper.add_derivative_metric("block_candidate_vectors.total".to_string());
+        metrics_dumper.add_derivative_metric("vote_candidate_vectors.total".to_string());
+        metrics_dumper.add_derivative_metric("block_candidate_signature_vectors.total".to_string());
+        metrics_dumper.add_derivative_metric("sent_block_vectors.total".to_string());
+        metrics_dumper.add_derivative_metric("bool_vectors.total".to_string());
+        metrics_dumper.add_derivative_metric("integer_vectors.total".to_string());
 
         metrics_dumper.add_compute_handler(
             "sent_blocks.persistent".to_string(),
@@ -464,8 +478,23 @@ impl SessionImpl {
             &compute_instance_counter,
         );
         metrics_dumper.add_derivative_metric("session_states.persistent".to_string());
+        metrics_dumper.add_derivative_metric("old_rounds.persistent".to_string());
+        metrics_dumper.add_derivative_metric("rounds.persistent".to_string());
         metrics_dumper.add_derivative_metric("round_attempts.persistent".to_string());
+        metrics_dumper.add_derivative_metric("block_candidates.persistent".to_string());
+        metrics_dumper.add_derivative_metric("vote_candidates.persistent".to_string());
+        metrics_dumper.add_derivative_metric("block_candidates_signatures.persistent".to_string());
         metrics_dumper.add_derivative_metric("sent_blocks.persistent".to_string());
+        metrics_dumper.add_derivative_metric("old_round_vectors.persistent".to_string());
+        metrics_dumper.add_derivative_metric("round_vectors.persistent".to_string());
+        metrics_dumper.add_derivative_metric("round_attempt_vectors.persistent".to_string());
+        metrics_dumper.add_derivative_metric("block_candidate_vectors.persistent".to_string());
+        metrics_dumper.add_derivative_metric("vote_candidate_vectors.persistent".to_string());
+        metrics_dumper
+            .add_derivative_metric("block_candidate_signature_vectors.persistent".to_string());
+        metrics_dumper.add_derivative_metric("sent_block_vectors.persistent".to_string());
+        metrics_dumper.add_derivative_metric("bool_vectors.persistent".to_string());
+        metrics_dumper.add_derivative_metric("integer_vectors.persistent".to_string());
 
         metrics_dumper
             .add_compute_handler("sent_blocks.temp".to_string(), &compute_instance_counter);
@@ -515,9 +544,22 @@ impl SessionImpl {
             &compute_instance_counter,
         );
         metrics_dumper.add_derivative_metric("session_states.temp".to_string());
+        metrics_dumper.add_derivative_metric("old_rounds.temp".to_string());
+        metrics_dumper.add_derivative_metric("rounds.temp".to_string());
         metrics_dumper.add_derivative_metric("round_attempts.temp".to_string());
+        metrics_dumper.add_derivative_metric("block_candidates.temp".to_string());
+        metrics_dumper.add_derivative_metric("vote_candidates.temp".to_string());
+        metrics_dumper.add_derivative_metric("block_candidates_signatures.temp".to_string());
         metrics_dumper.add_derivative_metric("sent_blocks.temp".to_string());
-        metrics_dumper.add_derivative_metric("sent_blocks.temp".to_string());
+        metrics_dumper.add_derivative_metric("old_round_vectors.temp".to_string());
+        metrics_dumper.add_derivative_metric("round_vectors.temp".to_string());
+        metrics_dumper.add_derivative_metric("round_attempt_vectors.temp".to_string());
+        metrics_dumper.add_derivative_metric("block_candidate_vectors.temp".to_string());
+        metrics_dumper.add_derivative_metric("vote_candidate_vectors.temp".to_string());
+        metrics_dumper.add_derivative_metric("block_candidate_signature_vectors.temp".to_string());
+        metrics_dumper.add_derivative_metric("sent_block_vectors.temp".to_string());
+        metrics_dumper.add_derivative_metric("bool_vectors.temp".to_string());
+        metrics_dumper.add_derivative_metric("integer_vectors.temp".to_string());
 
         use catchain::utils::add_compute_percentage_metric;
         use catchain::utils::add_compute_result_metric;
@@ -533,19 +575,32 @@ impl SessionImpl {
             &"validator_session_main_loop_load".to_string(),
             &"validator_session_main_loop_overloads".to_string(),
             &"validator_session_main_loop_iterations".to_string(),
+            0.0,
         );
         add_compute_percentage_metric(
             &mut metrics_dumper,
             &"validator_session_callbacks_loop_load".to_string(),
             &"validator_session_callbacks_loop_overloads".to_string(),
             &"validator_session_callbacks_loop_iterations".to_string(),
+            0.0,
         );
 
         add_compute_result_metric(&mut metrics_dumper, &"collate_requests".to_string());
         add_compute_result_metric(&mut metrics_dumper, &"validate_requests".to_string());
         add_compute_result_metric(&mut metrics_dumper, &"commit_requests".to_string());
         add_compute_result_metric(&mut metrics_dumper, &"rldp_queries".to_string());
+        add_compute_result_metric(&mut metrics_dumper, &"temp_cache_reuse".to_string());
+        add_compute_result_metric(&mut metrics_dumper, &"persistent_cache_reuse".to_string());
         metrics_dumper.add_derivative_metric("rldp_queries.total".to_string());
+        metrics_dumper.add_derivative_metric("validate_requests.total".to_string());
+        metrics_dumper.add_derivative_metric("validate_requests.failure".to_string());
+        metrics_dumper.add_derivative_metric("validate_requests.success".to_string());
+        metrics_dumper.add_derivative_metric("collate_requests.total".to_string());
+        metrics_dumper.add_derivative_metric("collate_requests.failure".to_string());
+        metrics_dumper.add_derivative_metric("collate_requests.success".to_string());
+        metrics_dumper.add_derivative_metric("commit_requests.total".to_string());
+        metrics_dumper.add_derivative_metric("commit_requests.failure".to_string());
+        metrics_dumper.add_derivative_metric("commit_requests.success".to_string());
 
         //main loop
 

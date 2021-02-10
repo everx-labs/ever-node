@@ -905,15 +905,31 @@ impl CatchainProcessor {
             &"catchain_main_loop_load".to_string(),
             &"catchain_main_loop_overloads".to_string(),
             &"catchain_main_loop_iterations".to_string(),
+            0.0,
         );
         utils::add_compute_percentage_metric(
             &mut metrics_dumper,
             &"catchain_utility_loop_load".to_string(),
             &"catchain_utility_loop_overloads".to_string(),
             &"catchain_utility_loop_iterations".to_string(),
+            0.0,
         );
         utils::add_compute_result_metric(&mut metrics_dumper, &"receiver_out_queries".to_string());
         utils::add_compute_result_metric(&mut metrics_dumper, &"receiver_in_queries".to_string());
+        utils::add_compute_percentage_metric(
+            &mut metrics_dumper,
+            &"received_blocks_in_duplication".to_string(),
+            &"receiver_in_messages".to_string(),
+            &"received_blocks.create".to_string(),
+            -1.0,
+        );
+        utils::add_compute_percentage_metric(
+            &mut metrics_dumper,
+            &"received_blocks_out_duplication".to_string(),
+            &"receiver_out_messages".to_string(),
+            &"received_blocks.create".to_string(),
+            -1.0,
+        );
 
         //start main loop
 
