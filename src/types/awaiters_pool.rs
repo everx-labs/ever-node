@@ -1,5 +1,6 @@
 use std::{
-    sync::{Arc, atomic::AtomicBool, atomic::Ordering}, fmt::Display, hash::Hash, cmp::Ord
+    sync::{Arc, atomic::AtomicBool, atomic::Ordering}, fmt::Display, hash::Hash, cmp::Ord, 
+    time::Duration
 };
 use ton_types::{Result, error};
 use adnl::common::add_object_to_map;
@@ -24,6 +25,7 @@ impl<R: Clone> OperationAwaiters<R> {
 
 pub struct AwaitersPool<I, R> {
     ops_awaiters: lockfree::map::Map<I, Arc<OperationAwaiters<R>>>,
+    description: &'static str,
 }
 
 impl<I, R> AwaitersPool<I, R> where
@@ -33,12 +35,22 @@ impl<I, R> AwaitersPool<I, R> where
     pub fn new() -> Self {
         Self {
             ops_awaiters: lockfree::map::Map::new(),
+            description: "awaiters pool",
         }
     }
+
+    pub fn with_description(description: &'static str) -> Self {
+        Self {
+            ops_awaiters: lockfree::map::Map::new(),
+            description,
+        }
+    }
+
 
     pub async fn do_or_wait(
         &self,
         id: &I,
+        wait_timeout_ms: Option<u64>,
         operation: impl futures::Future<Output = Result<R>>
     ) -> Result<Option<R>> {
         loop {
@@ -46,7 +58,7 @@ impl<I, R> AwaitersPool<I, R> where
                 if !op_awaiters.1.is_started.swap(true, Ordering::SeqCst) {
                     return Some(self.do_operation(id, operation, &op_awaiters.1).await).transpose()
                 } else {
-                    return self.wait_operation(id, &op_awaiters.1).await
+                    return self.wait_operation(id, wait_timeout_ms, &op_awaiters.1).await
                 }
             } else {
                 let new_awaiters = OperationAwaiters::new(true);
@@ -57,31 +69,38 @@ impl<I, R> AwaitersPool<I, R> where
         }
     }
 
-    pub async fn wait(&self, id: &I) -> Result<Option<R>> {
+    pub async fn wait(&self, id: &I, timeout_ms: Option<u64>) -> Result<Option<R>> {
         loop {
             if let Some(op_awaiters) = self.ops_awaiters.get(id) {
-                return self.wait_operation(id, &op_awaiters.1).await
+                return self.wait_operation(id, timeout_ms, &op_awaiters.1).await
             } else {
                 let new_awaiters = OperationAwaiters::new(false);
                 if add_object_to_map(&self.ops_awaiters, id.clone(), || Ok(new_awaiters.clone()))? {
-                    return self.wait_operation(id, &new_awaiters).await
+                    return self.wait_operation(id, timeout_ms, &new_awaiters).await
                 }
             }
         }
     }
 
-    async fn wait_operation(&self, id: &I, op_awaiters: &OperationAwaiters<R>) -> Result<Option<R>> {
+    async fn wait_operation(&self, id: &I, timeout_ms: Option<u64>, op_awaiters: &OperationAwaiters<R>) -> Result<Option<R>> {
         let mut rx = op_awaiters.rx.clone();
         loop {
-            log::trace!("awaiters pool: wait_operation: waiting... {}", id);
-            let result = rx.recv().await;
+            log::trace!("{}: wait_operation: waiting... {}", self.description, id);
+            
+            let result = if let Some(timeout_ms) = timeout_ms {
+                tokio::time::timeout(Duration::from_millis(timeout_ms), rx.recv()).await
+                    .map_err(|_| error!("{}: timeout {}", self.description, id))?
+            } else {
+                rx.recv().await
+            };
+
             let r = match result {
                 None => return Ok(None),
                 Some(Some(Ok(r))) => Ok(Some(r)),
                 Some(Some(Err(e))) => Err(error!("{}", e)),
                 Some(None) => continue
             };
-            log::trace!("awaiters pool: wait_operation: done {}", id);
+            log::trace!("{}: wait_operation: done {}", self.description, id);
             break r;
         }
     }
@@ -92,9 +111,9 @@ impl<I, R> AwaitersPool<I, R> where
         operation: impl futures::Future<Output = Result<R>>,
         op_awaiters: &OperationAwaiters<R>
     ) -> Result<R> {
-        log::trace!("awaiters pool: do_operation: doing... {}", id);
+        log::trace!("{}: do_operation: doing... {}", self.description, id);
         let result = operation.await;
-        log::trace!("awaiters pool: do_operation: done {}", id);
+        log::trace!("{}: do_operation: done {}", self.description, id);
 
         self.ops_awaiters.remove(id);
 

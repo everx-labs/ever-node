@@ -800,7 +800,7 @@ impl ValidatorManagerImpl {
             self.stats().await;
 
             mc_handle = loop {
-                match timeout(self.config.update_interval, self.engine.wait_next_applied_mc_block(&mc_handle)).await {
+                match timeout(self.config.update_interval, self.engine.wait_next_applied_mc_block(&mc_handle, None)).await {
                     Ok(r_res) => break r_res?.0,
                     Err(tokio::time::Elapsed{..}) => self.stats().await
                 }

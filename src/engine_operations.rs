@@ -80,7 +80,7 @@ impl EngineOperations for Engine {
         self.db().load_block_data_raw(handle).await
     }
 
-    async fn wait_applied_block(&self, id: &BlockIdExt) -> Result<(Arc<BlockHandle>, BlockStuff)> {
+    async fn wait_applied_block(&self, id: &BlockIdExt, timeout_ms: Option<u64>) -> Result<(Arc<BlockHandle>, BlockStuff)> {
         loop {
             if let Some(handle) = self.load_block_handle(id)? {
                 if handle.is_applied() {
@@ -88,13 +88,14 @@ impl EngineOperations for Engine {
                     return Ok((handle, block))
                 }
             }
-            self.block_applying_awaiters().wait(id).await?;
+            self.block_applying_awaiters().wait(id, timeout_ms).await?;
         }
     }
 
     async fn wait_next_applied_mc_block(
         &self, 
-        prev_handle: &BlockHandle
+        prev_handle: &BlockHandle,
+        timeout_ms: Option<u64>
     ) -> Result<(Arc<BlockHandle>, BlockStuff)> {
         if !prev_handle.id().shard().is_masterchain() {
             fail!(NodeError::InvalidArg("`prev_handle` doesn't belong masterchain".to_string()))
@@ -102,9 +103,9 @@ impl EngineOperations for Engine {
         loop {
             if prev_handle.has_next1() {
                 let id = self.load_block_next1(prev_handle.id()).await?;
-                return self.wait_applied_block(&id).await
+                return self.wait_applied_block(&id, timeout_ms).await
             } else {
-                if let Some(id) = self.next_block_applying_awaiters().wait(prev_handle.id()).await? {
+                if let Some(id) = self.next_block_applying_awaiters().wait(prev_handle.id(), timeout_ms).await? {
                     if let Some(handle) = self.load_block_handle(&id)? {
                         let block = self.load_block(&handle).await?;
                         return Ok((handle, block))
@@ -167,6 +168,7 @@ impl EngineOperations for Engine {
         while !((pre_apply && handle.has_state()) || handle.is_applied()) {
             if self.block_applying_awaiters().do_or_wait(
                 handle.id(),
+                None,
                 self.clone().apply_block_worker(handle, block, mc_seq_no, pre_apply)
             ).await?.is_some() {
                 break;
@@ -191,6 +193,7 @@ impl EngineOperations for Engine {
             }
             if self.block_applying_awaiters().do_or_wait(
                 id,
+                None,
                 self.clone().download_and_apply_block_worker(id, mc_seq_no, pre_apply)
             ).await?.is_some() {
                 break
@@ -297,14 +300,22 @@ impl EngineOperations for Engine {
         self.db().load_shard_state_persistent_slice(handle.id(), offset, length).await
     }
 
-    async fn wait_state(&self, id: &BlockIdExt) -> Result<ShardStateStuff> {
+    async fn wait_state(self: Arc<Self>, id: &BlockIdExt, timeout_ms: Option<u64>) -> Result<ShardStateStuff> {
         loop {
             if let Some(handle) = self.load_block_handle(id)? {
                 if handle.has_state() {
                     break self.load_state(id).await
                 }
+            } else {
+                let id1 = id.clone();
+                let engine = self.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = engine.download_and_apply_block(&id1, 0, true).await {
+                        log::error!("Error while pre-apply block (while wait_state) {}: {}", id1, e);
+                    }
+                });
             }
-            if let Some(ss) = self.shard_states_awaiters().wait(id).await? {
+            if let Some(ss) = self.shard_states_awaiters().wait(id, timeout_ms).await? {
                 break Ok(ss)
             }
         }
@@ -317,6 +328,7 @@ impl EngineOperations for Engine {
     ) -> Result<()> {
         self.shard_states_awaiters().do_or_wait(
             state.block_id(),
+            None,
             async { Ok(state.clone()) }
         ).await?;
         if self.shard_states_cache().get(handle.id()).is_none() {

@@ -99,7 +99,7 @@ pub trait EngineOperations : Sync + Send {
     async fn load_applied_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         unimplemented!()
     }
-    async fn wait_applied_block(&self, id: &BlockIdExt) -> Result<(Arc<BlockHandle>, BlockStuff)> {
+    async fn wait_applied_block(&self, id: &BlockIdExt, timeout_ms: Option<u64>) -> Result<(Arc<BlockHandle>, BlockStuff)> {
         unimplemented!()
     }
     async fn load_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
@@ -108,7 +108,7 @@ pub trait EngineOperations : Sync + Send {
     async fn load_block_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
         unimplemented!()
     }
-    async fn wait_next_applied_mc_block(&self, prev_handle: &BlockHandle) -> Result<(Arc<BlockHandle>, BlockStuff)> {
+    async fn wait_next_applied_mc_block(&self, prev_handle: &BlockHandle, timeout_ms: Option<u64>) -> Result<(Arc<BlockHandle>, BlockStuff)> {
         unimplemented!()
     }
     async fn load_last_applied_mc_block(&self) -> Result<BlockStuff> {
@@ -219,7 +219,7 @@ pub trait EngineOperations : Sync + Send {
     ) -> Result<Vec<u8>> {
         unimplemented!()
     }
-    async fn wait_state(&self, id: &BlockIdExt) -> Result<ShardStateStuff> {
+    async fn wait_state(self: Arc<Self>, id: &BlockIdExt, timeout_ms: Option<u64>) -> Result<ShardStateStuff> {
         unimplemented!()
     }
     async fn store_state(
@@ -435,7 +435,7 @@ pub trait EngineOperations : Sync + Send {
     fn aux_mc_shard_states(&self) -> &lockfree::map::Map<u32, ShardStateStuff> {unimplemented!()}
     fn shard_states(&self) -> &lockfree::map::Map<ShardIdent, ShardStateStuff> {unimplemented!()}
 
-    async fn request_aux_mc_state(&self, seq_no: u32) -> Result<bool> {
+    async fn request_aux_mc_state(self: Arc<Self>, seq_no: u32, timeout_ms: Option<u64>) -> Result<bool> {
         log::debug!("requesting mc state for seq_no {}", seq_no);
         if self.aux_mc_shard_states().get(&seq_no).is_some() {
             return Ok(true)
@@ -449,7 +449,7 @@ pub trait EngineOperations : Sync + Send {
             _ => fail!("cannot find masterchain block with seqno {} \
                 to load corresponding state as required", seq_no)
         };
-        self.set_aux_mc_state(&self.wait_state(&block_id).await?)
+        self.set_aux_mc_state(&self.clone().wait_state(&block_id, timeout_ms).await?)
     }
     fn set_aux_mc_state(&self, state: &ShardStateStuff) -> Result<bool> {
         adnl::common::add_object_to_map_with_update(

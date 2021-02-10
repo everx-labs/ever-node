@@ -15,7 +15,7 @@ use crate::{
     },
 };
 use super::BlockCandidate;
-use std::{collections::HashMap, io::Cursor, ops::Deref, sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc}};
+use std::{collections::HashMap, io::Cursor, sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc}};
 use ton_block::{
     AddSub, BlockError, UnixTime32, HashmapAugType, Deserializable, Serializable,
     CurrencyCollection,
@@ -699,7 +699,7 @@ impl ValidateQuery {
 
     async fn init_output_queue_manager(&self, base: &ValidateBase) -> Result<MsgQueueManager> {
         MsgQueueManager::init(
-            self.engine.deref(),
+            &self.engine,
             self.shard().clone(),
             &self.new_mc_shards,
             &base.prev_states,

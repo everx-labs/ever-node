@@ -71,12 +71,12 @@ pub async fn calc_shard_state(
 
     let prev_ss_root = match prev_ids {
         (prev1, Some(prev2)) => {
-            let ss1 = engine.wait_state(prev1).await?.root_cell().clone();
-            let ss2 = engine.wait_state(prev2).await?.root_cell().clone();
+            let ss1 = engine.clone().wait_state(prev1, None).await?.root_cell().clone();
+            let ss2 = engine.clone().wait_state(prev2, None).await?.root_cell().clone();
             ShardStateStuff::construct_split_root(ss1, ss2)?
         },
         (prev, None) => {
-            engine.wait_state(prev).await?.root_cell().clone()
+            engine.clone().wait_state(prev, None).await?.root_cell().clone()
         }
     };
 
