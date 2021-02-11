@@ -1227,6 +1227,9 @@ pub trait SessionProcessor: CompletionHandlerProcessor + fmt::Display {
     /// Set next awake time
     fn set_next_awake_time(&mut self, timestamp: std::time::SystemTime);
 
+    /// Reset next awake time
+    fn reset_next_awake_time(&mut self);
+
     /// Get next awake time
     fn get_next_awake_time(&self) -> std::time::SystemTime;
 
