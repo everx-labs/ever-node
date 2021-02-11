@@ -91,6 +91,10 @@ pub(crate) struct SessionProcessorImpl {
     collates_counter: ResultStatusCounter, //result status counter for collation requests
     commits_counter: ResultStatusCounter, //result status counter for commits requests
     rldp_queries_counter: ResultStatusCounter, //result status counter for RLDP queries
+    preprocess_block_counter: metrics_runtime::data::Counter, //counter for preprocess calls
+    process_blocks_counter: metrics_runtime::data::Counter, //counter for process calls
+    request_new_block_counter: metrics_runtime::data::Counter, //counter for new blocks requesting
+    check_all_counter: metrics_runtime::data::Counter, //counter for check_all calls
 }
 
 /*
@@ -141,11 +145,16 @@ impl SessionProcessor for SessionProcessorImpl {
 
         //do not set next awake point if we will awake earlier in the future
 
-        if self.next_awake_time > now && self.next_awake_time <= timestamp {
+        if self.next_awake_time <= timestamp {
             return;
         }
 
         self.next_awake_time = timestamp;
+    }
+
+    fn reset_next_awake_time(&mut self) {
+        self.next_awake_time =
+            std::time::SystemTime::now() + self.description.opts().catchain_idle_timeout;
     }
 
     fn get_next_awake_time(&self) -> std::time::SystemTime {
@@ -158,6 +167,8 @@ impl SessionProcessor for SessionProcessorImpl {
 
     fn check_all(&mut self) {
         instrument!();
+
+        self.check_all_counter.increment();
 
         //check completion handlers
 
@@ -223,6 +234,8 @@ impl SessionProcessor for SessionProcessorImpl {
         let start_time = SystemTime::now();
 
         trace!("Preprocessing block {}", block);
+
+        self.preprocess_block_counter.increment();
 
         let block_payload_creation_time = block.get_payload().get_creation_time();
 
@@ -474,6 +487,8 @@ impl SessionProcessor for SessionProcessorImpl {
         let start_time = SystemTime::now();
 
         trace!("Processing blocks {:?}", blocks);
+
+        self.process_blocks_counter.increment();
 
         //reset flags
 
@@ -1736,6 +1751,8 @@ impl SessionProcessorImpl {
             }
         }
 
+        self.request_new_block_counter.increment();
+
         self.catchain.request_new_block(block_generation_time);
     }
 
@@ -2877,6 +2894,10 @@ impl SessionProcessorImpl {
             ResultStatusCounter::new(&metrics_receiver, &"commit_requests".to_owned());
         let rldp_queries_counter =
             ResultStatusCounter::new(&metrics_receiver, &"rldp_queries".to_owned());
+        let preprocess_block_counter = metrics_receiver.sink().counter("preprocess_block_calls");
+        let process_blocks_counter = metrics_receiver.sink().counter("process_blocks_calls");
+        let request_new_block_counter = metrics_receiver.sink().counter("request_new_block_calls");
+        let check_all_counter = metrics_receiver.sink().counter("check_all_calls");
 
         //initialize state
 
@@ -2926,6 +2947,10 @@ impl SessionProcessorImpl {
             validates_counter: validates_counter,
             commits_counter: commits_counter,
             rldp_queries_counter: rldp_queries_counter,
+            preprocess_block_counter: preprocess_block_counter,
+            process_blocks_counter: process_blocks_counter,
+            request_new_block_counter: request_new_block_counter,
+            check_all_counter: check_all_counter,
         };
 
         if DEBUG_EVENTS_LOG {

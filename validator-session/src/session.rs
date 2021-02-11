@@ -562,6 +562,7 @@ impl SessionImpl {
         metrics_dumper.add_derivative_metric("integer_vectors.temp".to_string());
 
         use catchain::utils::add_compute_percentage_metric;
+        use catchain::utils::add_compute_relative_metric;
         use catchain::utils::add_compute_result_metric;
 
         metrics_dumper.add_derivative_metric("validator_session_main_loop_iterations".to_string());
@@ -602,6 +603,39 @@ impl SessionImpl {
         metrics_dumper.add_derivative_metric("commit_requests.failure".to_string());
         metrics_dumper.add_derivative_metric("commit_requests.success".to_string());
 
+        metrics_dumper.add_derivative_metric("process_blocks_calls".to_string());
+        metrics_dumper.add_derivative_metric("preprocess_block_calls".to_string());
+        metrics_dumper.add_derivative_metric("request_new_block_calls".to_string());
+        metrics_dumper.add_derivative_metric("check_all_calls".to_string());
+        add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"process_blocks_avg_capacity".to_string(),
+            &"preprocess_block_calls".to_string(),
+            &"process_blocks_calls".to_string(),
+            0.0,
+        );
+        add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"request_new_block_capacity".to_string(),
+            &"preprocess_block_calls".to_string(),
+            &"request_new_block_calls".to_string(),
+            0.0,
+        );
+        add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"iterations_per_check_all".to_string(),
+            &"validator_session_main_loop_iterations".to_string(),
+            &"check_all_calls".to_string(),
+            0.0,
+        );
+        add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"check_all_per_request_new_block".to_string(),
+            &"check_all_calls".to_string(),
+            &"request_new_block_calls".to_string(),
+            0.0,
+        );
+
         //main loop
 
         let mut last_warn_dump_time = std::time::SystemTime::now();
@@ -639,9 +673,7 @@ impl SessionImpl {
 
                 const MAX_TIMEOUT: Duration = Duration::from_secs(2); //such little timeout is needed to check should_stop_flag and thread exiting
 
-                processor
-                    .borrow_mut()
-                    .set_next_awake_time(now + MAX_TIMEOUT);
+                let timeout = std::cmp::min(timeout, MAX_TIMEOUT);
 
                 let task = {
                     instrument!();
@@ -655,14 +687,15 @@ impl SessionImpl {
                     task(&mut *processor.borrow_mut());
                 }
 
-                {
+                //do checks only for next awake time
+
+                if processor.borrow().get_next_awake_time().elapsed().is_ok() {
                     //check & update session state
 
                     instrument!();
                     check_execution_time!(10_000);
 
-                    //todo: only for next awake time
-
+                    processor.borrow_mut().reset_next_awake_time();
                     processor.borrow_mut().check_all();
                 }
             }

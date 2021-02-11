@@ -299,10 +299,12 @@ pub fn deserialize_tl_boxed_object<T: ::ton_api::BoxedDeserialize>(bytes: &RawBu
    metrics
 */
 
+#[derive(Copy, Clone)]
 enum MetricUsage {
     Counter,
     Derivative,
     Percents,
+    Float,
 }
 
 pub struct Metric {
@@ -320,7 +322,7 @@ pub struct MetricsDumper {
 
 impl MetricsDumper {
     pub const METRIC_DERIVATIVE_MULTIPLIER: f64 = 1000000.0;
-    pub const METRIC_PERCENT_MULTIPLIER: f64 = 10000.0;
+    pub const METRIC_FLOAT_MULTIPLIER: f64 = 10000.0;
 
     pub fn add_compute_handler<F>(&mut self, key: String, handler: F)
     where
@@ -412,7 +414,11 @@ impl MetricsDumper {
                 }
                 Percents => format!(
                     "{:.1}%",
-                    (metric.value as f64) / Self::METRIC_PERCENT_MULTIPLIER * 100.0
+                    (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER * 100.0
+                ),
+                Float => format!(
+                    "{:.2}",
+                    (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER
                 ),
             };
 
@@ -491,6 +497,41 @@ pub fn add_compute_percentage_metric(
     total_key: &String,
     bias: f64,
 ) {
+    add_compute_relative_metric_impl(
+        metrics_dumper,
+        key,
+        value_key,
+        total_key,
+        bias,
+        MetricUsage::Percents,
+    );
+}
+
+pub fn add_compute_relative_metric(
+    metrics_dumper: &mut MetricsDumper,
+    key: &String,
+    value_key: &String,
+    total_key: &String,
+    bias: f64,
+) {
+    add_compute_relative_metric_impl(
+        metrics_dumper,
+        key,
+        value_key,
+        total_key,
+        bias,
+        MetricUsage::Float,
+    );
+}
+
+fn add_compute_relative_metric_impl(
+    metrics_dumper: &mut MetricsDumper,
+    key: &String,
+    value_key: &String,
+    total_key: &String,
+    bias: f64,
+    usage: MetricUsage,
+) {
     let value_key = value_key.clone();
     let total_key = total_key.clone();
     metrics_dumper.add_compute_handler(key.to_string(), move |_key, metrics| -> Option<Metric> {
@@ -501,13 +542,8 @@ pub fn add_compute_percentage_metric(
                 let percentage = (value as f64) / (total_value as f64) + bias;
 
                 return Some(Metric {
-                    value: (percentage * MetricsDumper::METRIC_PERCENT_MULTIPLIER) as u64,
-                    usage: MetricUsage::Percents,
-                });
-            } else {
-                return Some(Metric {
-                    value: MetricsDumper::METRIC_PERCENT_MULTIPLIER as u64,
-                    usage: MetricUsage::Percents,
+                    value: (percentage * MetricsDumper::METRIC_FLOAT_MULTIPLIER) as u64,
+                    usage: usage,
                 });
             }
         }
@@ -549,7 +585,7 @@ pub fn compute_result_status_metric(
         let percentage = (value as f64) / (total_value as f64);
 
         return Some(Metric {
-            value: (percentage * MetricsDumper::METRIC_PERCENT_MULTIPLIER) as u64,
+            value: (percentage * MetricsDumper::METRIC_FLOAT_MULTIPLIER) as u64,
             usage: MetricUsage::Percents,
         });
     }
@@ -595,7 +631,7 @@ pub fn compute_result_ignore_metric(
     let percentage = (total_value - reports_count as f64) / (total_value as f64);
 
     Some(Metric {
-        value: (percentage * MetricsDumper::METRIC_PERCENT_MULTIPLIER) as u64,
+        value: (percentage * MetricsDumper::METRIC_FLOAT_MULTIPLIER) as u64,
         usage: MetricUsage::Percents,
     })
 }
