@@ -32,6 +32,7 @@ pub struct Neighbour {
 
 pub struct Neighbours {
     peers: NeighboursCache,
+    all_peers: lockfree::set::Set<Arc<KeyId>>,
     overlay_id: Arc<OverlayShortId>,
     overlay: Arc<OverlayNode>,
     dht: Arc<DhtNode>,
@@ -169,6 +170,7 @@ impl Neighbours {
 
         Ok(Neighbours {
             peers: NeighboursCache::new(start_peers)?,
+            all_peers: lockfree::set::Set::new(),
             dht: dht.clone(),
             overlay: overlay.clone(),
             overlay_id,
@@ -191,6 +193,21 @@ impl Neighbours {
 
     pub fn contains(&self, peer: &Arc<KeyId>) -> bool {
         self.peers.contains(peer)
+    }
+
+    pub fn contains_overlay_peer(&self, id: &Arc<KeyId>) -> bool {
+        self.all_peers.contains(id)
+    }
+
+    pub fn add_overlay_peer(&self, id: Arc<KeyId>) -> Result<()> {
+        if let Err(e) = self.all_peers.insert(id) {
+            fail!("err added peer: {}", e);
+        };
+        Ok(())
+    }
+
+    pub fn remove_overlay_peer(&self, id: &Arc<KeyId>) {
+        self.all_peers.remove(id);
     }
 
     pub fn got_neighbours(&self, peers: Vec<Arc<KeyId>>) -> Result<()> {
@@ -235,6 +252,7 @@ impl Neighbours {
 
                 if is_delete_peer {
                     self.overlay.delete_public_peer(&deleted_peer, &self.overlay_id)?;
+                    self.remove_overlay_peer(&deleted_peer);
                     is_delete_peer = false;
                 }
             } else {
@@ -300,7 +318,11 @@ impl Neighbours {
                     let (ip, _) = DhtNode::find_address(&self.dht, peer_key.id()).await?;
                     log::info!("reload_neighbours: addr peer {}", ip);
                     peers.push(peer_key.id().clone());
-                    self.overlay.add_public_peer(&ip, random_peer, overlay_id)?;
+
+                    if !self.contains_overlay_peer(peer_key.id()) {
+                        self.overlay.add_public_peer(&ip, random_peer, overlay_id)?;
+                        self.add_overlay_peer(peer_key.id().clone())?;
+                    }
                 }
             } else {
                 log::trace!("reload_neighbours: random peers result is None!");

@@ -56,6 +56,7 @@ impl NodeNetwork {
     pub const TAG_DHT_KEY: usize = 1;
     pub const TAG_OVERLAY_KEY: usize = 2;
 
+    const PERIOD_CHECK_OVERLAY_NODES: u64 = 1;
     const PERIOD_STORE_IP_ADDRESS: u64 = 500;   // second
     const PERIOD_START_FIND_DHT_NODE: u64 = 60; // second
 
@@ -214,6 +215,44 @@ impl NodeNetwork {
                 delay_for(Duration::from_secs(Self::PERIOD_STORE_IP_ADDRESS)).await;
             }
         });
+    }
+
+    fn process_overlay_peers(
+        neighbours: Arc<Neighbours>,
+        dht: Arc<DhtNode>,
+        overlay: Arc<OverlayNode>,
+        overlay_id: Arc<OverlayShortId>)
+    {
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = Self::add_overlay_peers(&neighbours, &dht, &overlay, &overlay_id).await {
+                    log::warn!("add_overlay_peers: {}", e);
+                };
+
+                delay_for(Duration::from_secs(Self::PERIOD_CHECK_OVERLAY_NODES)).await;
+            }
+        });
+    }
+
+    async fn add_overlay_peers(
+        neighbours: &Arc<Neighbours>,
+        dht: &Arc<DhtNode>,
+        overlay: &Arc<OverlayNode>,
+        overlay_id: &Arc<OverlayShortId>
+    ) -> Result<()> {
+        let peers = overlay.wait_for_peers(&overlay_id).await?;
+        for peer in peers.iter() {
+            let peer_key = KeyOption::from_tl_public_key(&peer.id)?;
+            if neighbours.contains_overlay_peer(peer_key.id()) {
+                continue;
+            }
+            let (ip, _) = DhtNode::find_address(dht, peer_key.id()).await?;
+            overlay.add_public_peer(&ip, peer, overlay_id)?;
+            neighbours.add_overlay_peer(peer_key.id().clone())?;
+            log::trace!("add_overlay_peers: add overlay peer {:?}, address: {}", peer, ip);
+        }
+        
+        Ok(())
     }
 
 /*  
@@ -407,14 +446,14 @@ impl NodeNetwork {
             log::warn!("No nodes were found in overlay {}", &overlay_id.0);
         }
 
-        let neigbours = Neighbours::new(
+        let neighbours = Neighbours::new(
             &peers,
             &self.dht,
             &self.overlay,
             overlay_id.0.clone()
         )?;
 
-        let peers = Arc::new(neigbours);
+        let peers = Arc::new(neighbours);
 
         let client_overlay = NodeClientOverlay::new(
             overlay_id.0.clone(),
@@ -429,6 +468,7 @@ impl NodeNetwork {
         Neighbours::start_reload(Arc::clone(&peers));
         Neighbours::start_rnd_peers_process(Arc::clone(&peers));
         NodeNetwork::start_update_peers(self.clone(), &client_overlay);
+        NodeNetwork::process_overlay_peers(peers.clone(), self.dht.clone(), self.overlay.clone(), overlay_id.0.clone());
         let result = self.try_add_new_elem(&overlay_id.0, client_overlay, &self.overlays);
 
         Ok(result as Arc<dyn FullNodeOverlayClient>)
