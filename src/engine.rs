@@ -87,7 +87,7 @@ struct DownloadContext<'a, T> {
     id: &'a BlockIdExt,
     limit: Option<u32>, 
     name: &'a str,
-    timeout: Option<(u64, u64)> // (current, max)
+    timeout: Option<(u64, u64, u64)> // (current, multiplier*10, max)
 }
 
 impl <T> DownloadContext<'_, T> {
@@ -106,8 +106,8 @@ impl <T> DownloadContext<'_, T> {
                     fail!("Downloader: out of attempts");
                 }
             }
-            if let Some((current, max)) = &mut self.timeout {
-                *current = (*max).max(*current * 11) / 10;
+            if let Some((current, mult, max)) = &mut self.timeout {
+                *current = (*max).min(*current * *mult / 10);
                 futures_timer::Delay::new(Duration::from_millis(*current)).await;
             }
         }
@@ -268,7 +268,10 @@ impl Engine {
                 HashMap::default()
             }
         };
-        let (shard_blocks_pool, shard_blocks_receiver) = ShardBlocksPool::new(shard_blocks, false);
+        let last_mc_seqno = LastMcBlockId::load_from_db(db.deref())
+            .map(|id| id.0.seqno as u32).unwrap_or_default();
+        let (shard_blocks_pool, shard_blocks_receiver) = 
+            ShardBlocksPool::new(shard_blocks, last_mc_seqno, false);
 
         log::info!("Engine is created.");
 
@@ -423,12 +426,12 @@ impl Engine {
         );
 
         // for pre-apply only 10 attempts, for apply - infinity
-        let attempts = if pre_apply { 
-            Some(10) 
+        let (attempts, timeout) = if pre_apply { 
+            (Some(30), Some((10, 15, 100)))
         } else { 
-            None
+            (None, None)
         };
-        let (block, proof) = self.download_block_worker(id, attempts).await?;
+        let (block, proof) = self.download_block_worker(id, attempts, timeout).await?;
         let downloading_time = now.elapsed().as_millis();
         let now = std::time::Instant::now();
         proof.check_proof(self.deref()).await?;
@@ -602,7 +605,7 @@ impl Engine {
          id: &'a BlockIdExt, 
          limit: Option<u32>,
          name: &'a str,
-         timeout: Option<(u64, u64)>
+         timeout: Option<(u64, u64, u64)>
     ) -> Result<DownloadContext<'a, T>> {
         let ret = DownloadContext {
             client: self.get_full_node_overlay(
@@ -632,21 +635,22 @@ impl Engine {
             prev_id, 
             limit, 
             "download_next_block_worker", 
-            Some((50, 1000))
+            Some((50, 11, 1000))
         ).await?.download().await
     }
 
     pub async fn download_block_worker(
         &self,
         id: &BlockIdExt,
-        limit: Option<u32>
+        limit: Option<u32>,
+        timeout: Option<(u64, u64, u64)>
     ) -> Result<(BlockStuff, BlockProofStuff)> {
         self.create_download_context(
             Arc::new(BlockDownloader),
             id, 
             limit, 
             "download_block_worker", 
-            None
+            timeout
         ).await?.download().await
     }
 
@@ -681,7 +685,7 @@ impl Engine {
             id, 
             limit, 
             "download_zerostate_worker", 
-            Some((10, 3000))
+            Some((10, 12, 3000))
         ).await?.download().await
     }
 
