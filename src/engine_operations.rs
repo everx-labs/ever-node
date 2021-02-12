@@ -216,7 +216,7 @@ impl EngineOperations for Engine {
                 return Ok(ret)
             }
         } 
-        self.download_block_worker(id, limit).await
+        self.download_block_worker(id, limit, None).await
     }
 
     async fn download_block_proof(&self, id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff> {

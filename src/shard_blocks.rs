@@ -29,8 +29,11 @@ pub struct ShardBlocksPool {
 
 impl ShardBlocksPool {
 
-    pub fn new(shard_blocks: HashMap<TopBlockDescrId, TopBlockDescrStuff>, is_fake: bool)
-    -> (Self, tokio::sync::mpsc::UnboundedReceiver<StoreAction>) {
+    pub fn new(
+        shard_blocks: HashMap<TopBlockDescrId, TopBlockDescrStuff>,
+        last_mc_seqno: u32,
+        is_fake: bool
+    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<StoreAction>) {
         let tsbs = lockfree::map::Map::new();
         for (k, v) in shard_blocks {
             tsbs.insert(k, Arc::new(v));
@@ -38,7 +41,7 @@ impl ShardBlocksPool {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         (
             ShardBlocksPool {
-                last_mc_seq_no: AtomicU32::new(0),
+                last_mc_seq_no: AtomicU32::new(last_mc_seqno),
                 shard_blocks: tsbs,
                 storage_sender: Some(sender.clone()),
                 is_fake,
