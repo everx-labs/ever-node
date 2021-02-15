@@ -216,12 +216,8 @@ impl TonNodeConfig {
         Ok(ret)
     }
 
-    pub fn control_server(&self) -> Result<AdnlServerConfig> {
-        if let Some(control_server) = &self.control_server {
-            AdnlServerConfig::from_json_config(control_server)
-        } else {
-            fail!("Control server is not configured")
-        }
+    pub fn control_server(&self) -> Result<Option<AdnlServerConfig>> {
+        self.control_server.as_ref().map(|cs| AdnlServerConfig::from_json_config(cs)).transpose()
     }
 
     pub fn log_config_path(&self) -> Option<String> {
@@ -1160,7 +1156,7 @@ impl ValidatorKeys {
         let mut first = false;
 
         add_object_to_map_with_update(&self.values, key.election_id, |_| {
-            if self.first.compare_and_swap(0, key.election_id, atomic::Ordering::Relaxed) == 0 {
+            if self.first.compare_exchange(0, key.election_id, atomic::Ordering::Relaxed, atomic::Ordering::Relaxed).is_ok() {
                 first = true;
             }
             Ok(Some(key.clone()))

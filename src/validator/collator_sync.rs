@@ -263,7 +263,6 @@ struct CollatorData {
     execute_count: usize,
     out_msg_count: usize,
     in_msg_count: usize,
-    max_in_out: Option<(usize, usize)>,
 }
 
 impl CollatorData {
@@ -319,7 +318,6 @@ impl CollatorData {
             execute_count: 0,
             out_msg_count: 0,
             in_msg_count: 0,
-            max_in_out: None,
             before_split: false,
         };
         Ok(ret)
@@ -403,9 +401,6 @@ impl CollatorData {
     /// put InMsg to block
     fn add_in_msg_to_block(&mut self, in_msg: &InMsg) -> Result<()> {
         self.in_msg_count += 1;
-        if let Some((max_in, max_out)) = self.max_in_out {
-            self.block_full |= (max_in != 0 && max_in <= self.in_msg_count) && (max_out != 0 && max_out <= self.out_msg_count);
-        }
         let msg_cell = in_msg.serialize()?;
         self.in_msgs.insert(in_msg)?;
         self.block_limit_status.register_in_msg_op(&msg_cell, &self.in_msgs_root()?)
@@ -414,9 +409,6 @@ impl CollatorData {
     /// put OutMsg to block
     fn add_out_msg_to_block(&mut self, key: UInt256, out_msg: &OutMsg) -> Result<()> {
         self.out_msg_count += 1;
-        if let Some((max_in, max_out)) = self.max_in_out {
-            self.block_full |= (max_in != 0 && max_in <= self.in_msg_count) && (max_out != 0 && max_out <= self.out_msg_count);
-        }
         let msg_cell = out_msg.serialize()?;
         self.out_msgs.insert_with_key(key, out_msg)?;
         self.block_limit_status.register_out_msg_op(&msg_cell, &self.out_msgs_root()?)

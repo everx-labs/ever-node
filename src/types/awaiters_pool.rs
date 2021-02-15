@@ -32,14 +32,7 @@ impl<I, R> AwaitersPool<I, R> where
     I: Ord + Hash + Clone + Display,
     R: Clone,
 {
-    pub fn new() -> Self {
-        Self {
-            ops_awaiters: lockfree::map::Map::new(),
-            description: "awaiters pool",
-        }
-    }
-
-    pub fn with_description(description: &'static str) -> Self {
+    pub fn new(description: &'static str) -> Self {
         Self {
             ops_awaiters: lockfree::map::Map::new(),
             description,
