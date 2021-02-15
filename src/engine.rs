@@ -12,7 +12,7 @@ use crate::{
     },
     internal_db::{InternalDb, InternalDbConfig, InternalDbImpl, NodeState},
     network::{
-        full_node_client::{FullNodeOverlayClient},
+        full_node_client::FullNodeOverlayClient, control::ControlServer,
         full_node_service::FullNodeOverlayService
     },
     shard_state::ShardStateStuff,
@@ -33,7 +33,7 @@ use overlay::QueriesConsumer;
 use statsd::client;
 use std::{
     convert::TryInto, ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}},
-    time::Duration, collections::HashMap,
+    time::Duration, mem::ManuallyDrop, collections::HashMap,
 };
 #[cfg(feature = "metrics")]
 use std::env;
@@ -45,6 +45,7 @@ use ton_types::{error, Result, fail};
 use ton_api::ton::ton_node::{
     Broadcast, broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}
 };
+use adnl::server::AdnlServerConfig;
 
 define_db_prop!(LastMcBlockId,   "LastMcBlockId",   ton_api::ton::ton_node::blockidext::BlockIdExt);
 define_db_prop!(InitMcBlockId,   "InitMcBlockId",   ton_api::ton::ton_node::blockidext::BlockIdExt);
@@ -258,7 +259,7 @@ impl Engine {
             Arc::new(NodeNetworkStub::new(&general_config, db.clone(), path)?)
         };
         #[cfg(not(feature = "local_test"))]
-        let network = Arc::new(NodeNetwork::new(general_config, db.clone()).await?);
+        let network = Arc::new(NodeNetwork::new(general_config).await?);
         network.clone().start().await?;
 
         let shard_blocks = match db.load_all_top_shard_blocks() {
@@ -279,9 +280,9 @@ impl Engine {
             db,
             ext_db,
             overlay_operations: network.clone(),
-            shard_states_awaiters: AwaitersPool::with_description("shard_states_awaiters"),
-            block_applying_awaiters: AwaitersPool::with_description("block_applying_awaiters"),
-            next_block_applying_awaiters: AwaitersPool::with_description("next_block_applying_awaiters"),
+            shard_states_awaiters: AwaitersPool::new("shard_states_awaiters"),
+            block_applying_awaiters: AwaitersPool::new("block_applying_awaiters"),
+            next_block_applying_awaiters: AwaitersPool::new("next_block_applying_awaiters"),
             external_messages: MessagesPool::new(),
             zero_state_id,
             init_mc_block_id,
@@ -297,18 +298,6 @@ impl Engine {
             shard_states_cache: Default::default(),
         });
 
-        let full_node_service: Arc<dyn QueriesConsumer> = Arc::new(
-            FullNodeOverlayService::new(Arc::clone(&engine) as Arc<dyn EngineOperations>)
-        );
-        network.add_consumer(
-            &network.calc_overlay_id(MASTERCHAIN_ID, SHARD_FULL)?.0,
-            Arc::clone(&full_node_service)
-        )?;
-        network.add_consumer(
-            &network.calc_overlay_id(BASE_WORKCHAIN_ID, SHARD_FULL)?.0,
-            Arc::clone(&full_node_service)
-        )?;
-
         save_top_shard_blocks_worker(engine.clone(), shard_blocks_receiver);
 
         engine.get_full_node_overlay(BASE_WORKCHAIN_ID, SHARD_FULL).await?;
@@ -319,6 +308,8 @@ impl Engine {
     pub fn db(&self) -> &Arc<dyn InternalDb> { &self.db }
 
     pub fn validator_network(&self) -> Arc<dyn PrivateOverlayOperations> { self.network.clone() }
+    
+    pub fn network(&self) -> &NodeNetwork { &self.network }
 
     pub fn ext_db(&self) -> &Vec<Arc<dyn ExternalDb>> { &self.ext_db }
 
@@ -944,33 +935,68 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
     Ok((last_mc_block, shards_client_block, pss_keeper_block))
 }
 
+fn run_full_node_service(engine: Arc<Engine>) -> Result<Arc<FullNodeOverlayService>> {
+    let full_node_service = Arc::new(
+        FullNodeOverlayService::new(Arc::clone(&engine) as Arc<dyn EngineOperations>)
+    );
+    let network = engine.network();
+    network.add_consumer(
+        &network.calc_overlay_id(MASTERCHAIN_ID, SHARD_FULL)?.0,
+        full_node_service.clone() as Arc<dyn QueriesConsumer>
+    )?;
+    network.add_consumer(
+        &network.calc_overlay_id(BASE_WORKCHAIN_ID, SHARD_FULL)?.0,
+        full_node_service.clone() as Arc<dyn QueriesConsumer>
+    )?;
+
+    Ok(full_node_service)
+}
+
+async fn run_control_server(engine: Arc<Engine>, config: AdnlServerConfig) -> Result<ControlServer> {
+    ControlServer::with_config(
+        config,
+        Some(Arc::clone(&engine) as Arc<dyn EngineOperations>),
+        engine.network().config_handler(),
+        engine.network().config_handler()
+    ).await
+}
+
 pub async fn run(node_config: TonNodeConfig, zerostate_path: Option<&str>, ext_db: Vec<Arc<dyn ExternalDb>>, initial_sync_disabled : bool) -> Result<()> {
     log::info!("Engine::run");
 
     let consumer_config = node_config.kafka_consumer_config();
+    let control_server_config = node_config.control_server()?;
 
-    //// Create engine
+    // Create engine
     let engine = Engine::new(node_config, ext_db, initial_sync_disabled).await?;
 
-    //// Boot
+    // Full node's service
+    let _ = run_full_node_service(engine.clone())?;
+
+    // Console service
+    if let Some(config) = control_server_config {
+        let control_server = run_control_server(engine.clone(), config).await?;
+        // Asking the compiler not to drop `control_server`, despite we don't have any link to it.
+        let _ = ManuallyDrop::new(control_server);
+    };
+
+    // Boot
     let (mut last_mc_block, mut shards_client_mc_block, pss_keeper_block) = boot(&engine, zerostate_path).await?;
 
-    //// Start services
+    // Messages from external DB (usually kafka)
     start_external_broadcast_process(engine.clone(), &consumer_config)?;
 
-    // TODO: Temporary disabled GC because of DB corruption. Enable after fix.
-    // Arc::clone(&engine).start_gc_scheduler();
-
-    // broadcasts
+    // Broadcasts (blocks, external messages etc.)
     Arc::clone(&engine).listen_broadcasts(ShardIdent::masterchain()).await?;
     Arc::clone(&engine).listen_broadcasts(ShardIdent::with_tagged_prefix(BASE_WORKCHAIN_ID, SHARD_FULL)?).await?;
 
+    // Saving of persistenr states (for sync)
     let _ = Engine::start_persistent_states_keeper(engine.clone(), pss_keeper_block)?;
 
-    // start validator manager, which will start validator sessions when necessary
+    // Start validator manager, which will start validator sessions when necessary
     start_validator(Arc::clone(&engine));
 
-    // sync by archives
+    // Sync by archives
     if !engine.check_sync().await? {
         crate::sync::start_sync(Arc::clone(&engine) as Arc<dyn EngineOperations>).await?;
         last_mc_block = LastMcBlockId::load_from_db(engine.db().deref())
@@ -1063,6 +1089,7 @@ impl StatsdClient {
     pub fn gauge(&self, _metric_name: &str, _value: f64) {}
     pub fn incr(&self, _metric_name: &str) {}
     pub fn histogram(&self, _metric_name: &str, _value: f64) {}
+    #[cfg(feature = "external_db")]
     pub fn timer(&self, _metric_name: &str, _value: f64) {}
 }
 

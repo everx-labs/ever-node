@@ -1,17 +1,15 @@
 use crate::{
-    block::BlockStuff, block_proof::BlockProofStuff, config::{KeyRing, NodeConfigHandler}, 
-    engine::{LastMcBlockId, ShardsClientMcBlockId}, engine_traits::EngineOperations, 
-    internal_db::{InternalDb, NodeState}, shard_state::ShardStateStuff, 
+    block::convert_block_id_ext_api2blk,
+    collator_test_bundle::CollatorTestBundle,
+    config::{KeyRing, NodeConfigHandler},
+    engine_traits::EngineOperations,
     validator::validator_utils::validatordescr_to_catchain_node
 };
-use crate::block::convert_block_id_ext_api2blk;
-use crate::collator_test_bundle::CollatorTestBundle;
 use adnl::{
-    common::{deserialize, QueryResult, Subscriber, AdnlPeers}, 
+    common::{deserialize, QueryResult, Subscriber, AdnlPeers},
     server::{AdnlServer, AdnlServerConfig}
 };
-use std::{convert::TryInto, ops::Deref, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
-use storage::types::BlockHandle;
+use std::{ops::Deref, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 use ton_api::ton::{
     self, PublicKey, TLObject,
     engine::validator::{
@@ -19,66 +17,11 @@ use ton_api::ton::{
     },
     rpc::engine::validator::{
         AddAdnlId, AddValidatorAdnlAddress, AddValidatorPermanentKey, AddValidatorTempKey, 
-        ControlQuery, ExportPublicKey, GenerateKeyPair, Sign
+        ControlQuery, ExportPublicKey, GenerateKeyPair, Sign, GetBundle, GetFutureBundle,
     }
 };
-use ton_api::ton::rpc::engine::validator::{GetBundle, GetFutureBundle};
-use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent};
-use ton_types::{error, fail, Result, UInt256};
-
-pub(crate) struct DbEngine {
-    db: Arc<dyn InternalDb>
-}
-
-impl DbEngine {
-    pub fn new(db: Arc<dyn InternalDb>) -> Self {
-        Self { db }
-    }
-}
-
-#[async_trait::async_trait]
-impl EngineOperations for DbEngine {
-    fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
-        self.db.load_block_handle(id)
-    }
-    async fn load_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
-        self.db.load_block_data(handle).await
-    }
-    async fn load_block_proof(
-        &self, 
-        handle: &Arc<BlockHandle>, 
-        is_link: bool
-    ) -> Result<BlockProofStuff> {
-        self.db.load_block_proof(handle, is_link).await
-    }
-    async fn load_state(&self, block_id: &BlockIdExt) -> Result<ShardStateStuff> {
-        self.db.load_shard_state_dynamic(block_id)                    
-    }
-    async fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seqno: u32) -> Result<Arc<BlockHandle>> {
-        self.db.find_block_by_seq_no(acc_pfx, seqno)
-    }
-    async fn find_block_by_unix_time(&self, acc_pfx: &AccountIdPrefixFull, utime: u32) -> Result<Arc<BlockHandle>> {
-        self.db.find_block_by_unix_time(acc_pfx, utime)
-    }
-    async fn find_block_by_lt(&self, acc_pfx: &AccountIdPrefixFull, lt: u64) -> Result<Arc<BlockHandle>> {
-        self.db.find_block_by_lt(acc_pfx, lt)
-    }
-    async fn load_last_applied_mc_block_id(&self) -> Result<BlockIdExt> {
-        (&LastMcBlockId::load_from_db(self.db.deref())?.0).try_into()
-    }
-    async fn store_last_applied_mc_block_id(&self, last_mc_block: &BlockIdExt) -> Result<()> {
-        LastMcBlockId(last_mc_block.into()).store_to_db(self.db.deref())
-    }
-    async fn load_last_applied_mc_state(&self) -> Result<ShardStateStuff> {
-        self.load_state(&self.load_last_applied_mc_block_id().await?).await
-    }
-    async fn load_shards_client_mc_block_id(&self) -> Result<BlockIdExt> {
-        (&ShardsClientMcBlockId::load_from_db(self.db.deref())?.0).try_into()
-    }
-    fn get_external_messages(&self, _shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
-        Ok(vec![]) // TODO: need to get real current messages
-    }
-}
+use ton_types::{fail, error, Result};
+use ton_block::BlockIdExt;
 
 pub struct ControlServer {
     adnl: AdnlServer
@@ -233,6 +176,14 @@ impl ControlQuerySubscriber {
         }
         Ok(Success::Engine_Validator_Success)
     }
+    async fn redirect_external_message(&self, message_data: &[u8]) -> Result<Success> {
+        if let Some(engine) = self.engine.as_ref() {
+            engine.redirect_external_message(&message_data).await?;
+            Ok(Success::Engine_Validator_Success)
+        } else {
+            fail!("`engine is not set`")
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -307,6 +258,13 @@ impl Subscriber for ControlQuerySubscriber {
                     self.prepare_future_bundle(prev_block_ids).await?
                 )
             },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::lite_server::SendMessage>() {
+            Ok(query) => {
+                let message_data = query.body.0;
+                return QueryResult::consume_boxed(self.redirect_external_message(&message_data).await?)
+            }
             Err(query) => query
         };
         let query = match query.downcast::<ton::rpc::engine::validator::GetStats>() {

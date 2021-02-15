@@ -1,8 +1,8 @@
 use crate::{
     config::{NodeConfigHandler, TonNodeConfig},
-    engine_traits::{OverlayOperations, PrivateOverlayOperations}, internal_db::InternalDb,
+    engine_traits::{OverlayOperations, PrivateOverlayOperations},
     network::{
-        catchain_client::CatchainClient, control::ControlServer,
+        catchain_client::CatchainClient,
         full_node_client::{NodeClientOverlay, FullNodeOverlayClient},
         neighbours::{self, Neighbours}
     },
@@ -34,7 +34,6 @@ pub struct NodeNetwork {
     overlay_awaiters: AwaitersPool<Arc<OverlayShortId>, Arc<dyn FullNodeOverlayClient>>,
     runtime_handle: tokio::runtime::Handle,
     config_handler: Arc<NodeConfigHandler>,
-    _control: Option<ControlServer>
 }
 
 struct ValidatorContext {
@@ -60,7 +59,7 @@ impl NodeNetwork {
     const PERIOD_STORE_IP_ADDRESS: u64 = 500;   // second
     const PERIOD_START_FIND_DHT_NODE: u64 = 60; // second
 
-    pub async fn new(config: TonNodeConfig, db: Arc<dyn InternalDb>) -> Result<Self> {
+    pub async fn new(config: TonNodeConfig) -> Result<Self> {
         let global_config = config.load_global_config()?;
         let masterchain_zero_state_id = global_config.zero_state()?;
 
@@ -94,23 +93,7 @@ impl NodeNetwork {
         NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_key, None);
 
         NodeNetwork::find_dht_nodes(dht.clone());
-        let control_server_config = config.control_server();
         let config_handler = Arc::new(NodeConfigHandler::new(config)?);
-
-        let _control = match control_server_config {
-            Ok(config) => Some(
-                ControlServer::with_config(
-                    config,
-                    Some(Arc::new(super::control::DbEngine::new(db.clone()))),
-                    config_handler.clone(),
-                    config_handler.clone()
-                ).await?
-            ),
-            Err(e) => {
-                log::warn!("{}", e);
-                None
-            }
-        };
 
      //   let validator_adnl_key = adnl.key_by_tag(Self::TAG_VALIDATOR_ADNL_KEY)?;
      //   NodeNetwork::periodic_store_ip_addr(dht.clone(), validator_adnl_key);
@@ -130,15 +113,18 @@ impl NodeNetwork {
             masterchain_overlay_id,
             overlays: Arc::new(Cache::new()),
             validator_context: validator_context,
-            overlay_awaiters: AwaitersPool::with_description("overlay_awaiters"),
+            overlay_awaiters: AwaitersPool::new("overlay_awaiters"),
             runtime_handle: tokio::runtime::Handle::current(),
-            config_handler: config_handler,
-            _control
+            config_handler,
         })
     }
 
     pub async fn stop(&self) {
         self.adnl.stop().await
+    }
+
+    pub fn config_handler(&self) -> Arc<NodeConfigHandler> {
+        self.config_handler.clone()
     }
 
     fn try_add_new_elem<K: Hash + Ord + Clone, T: Clone>(
@@ -534,14 +520,6 @@ impl NodeNetwork {
             }
         }
         Ok(lost_validators)
-    }
-}
-
-impl Drop for NodeNetwork {
-    fn drop(&mut self) {
-        if let Some(control) = self._control.take() {
-            control.shutdown()
-        }
     }
 }
 

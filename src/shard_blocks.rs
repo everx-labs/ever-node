@@ -50,16 +50,6 @@ impl ShardBlocksPool {
         )
     }
 
-    pub fn fake_without_store()
-    -> Self {
-        ShardBlocksPool {
-            last_mc_seq_no: AtomicU32::new(0),
-            shard_blocks: lockfree::map::Map::new(),
-            storage_sender: None,
-            is_fake: true,
-        }
-    }
-
     pub async fn add_shard_block(
         &self,
         id: &BlockIdExt,

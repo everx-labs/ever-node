@@ -26,6 +26,7 @@ mod jaeger;
 #[cfg(not(feature = "tracing"))]
 mod jaeger {
     pub fn init_jaeger(){}
+    #[cfg(feature = "external_db")]
     pub fn message_from_kafka_received(_kf_key: &[u8]) {}
     pub fn broadcast_sended(_msg_id: String) {}
 }
