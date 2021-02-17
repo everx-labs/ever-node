@@ -19,7 +19,7 @@ where
 
 fn compute_bool_vector_hash(data: &Vec<bool>) -> HashType {
     let elements_count = if data.len() % 32 == 0 {
-        data.len() / 32
+        data.len()
     } else {
         data.len() - data.len() % 32 + 32
     };
