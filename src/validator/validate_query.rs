@@ -309,7 +309,7 @@ impl ValidateQuery {
 
     async fn start_up2(&mut self, base: &mut ValidateBase) -> Result<McData> {
         // 2. learn latest masterchain state and block id
-        let mc_data = self.get_latest_mc_state(base).await?;
+        let mc_data = self.get_ref_mc_state(base).await?;
 
         // 3. load state(s) corresponding to previous block(s)
         for i in 0..base.prev_blocks_ids.len() {
@@ -380,8 +380,10 @@ impl ValidateQuery {
         base.state_update = base.block.block().read_state_update()?;
         base.value_flow = base.block.block().read_value_flow()?;
 
-        if base.info.version() < supported_version() {
-            reject_query!("This block version {} is too old", base.info.version())
+        if let Some(gs) = base.info.gen_software() {
+            if gs.version < supported_version() {
+                reject_query!("This block version {} is too old", base.info.version())
+            }
         }
         if base.info.key_block() {
             log::info!(target: "validate_query", "validating key block {}", base.block_id());
@@ -487,26 +489,30 @@ impl ValidateQuery {
         Ok(())
     }
 
-    async fn get_latest_mc_state(&mut self, base: &ValidateBase) -> Result<McData> {
-        let mc_state = self.engine.load_last_applied_mc_state().await?;
-        log::debug!(target: "validate_query", "in ValidateQuery::get_latest_mc_state() {}", mc_state.block_id());
+    async fn get_ref_mc_state(&mut self, base: &ValidateBase) -> Result<McData> {
+        let mc_state = match base.info.read_master_ref()? {
+            Some(master_ref) => self.engine.load_state(&master_ref.master.master_block_id().1).await?,
+            None => self.engine.load_state(&base.prev_blocks_ids[0]).await?
+        };
+        log::debug!(target: "validate_query", "in ValidateQuery::get_ref_mc_state() {}", mc_state.block_id());
         if mc_state.state().seq_no() < self.min_mc_seq_no {
             reject_query!("requested to validate a block referring to an unknown future masterchain block {} < {}",
                 mc_state.state().seq_no(), self.min_mc_seq_no)
         }
-        self.process_mc_state(base, mc_state)
+        self.try_unpack_mc_state(&base, mc_state)
     }
 
-    fn process_mc_state(&mut self, base: &ValidateBase, mc_state: ShardStateStuff) -> Result<McData> {
-        CHECK!(!base.prev_blocks_ids.is_empty());
-        // if &self.mc_blkid != mc_state.block_id() {
-        //     mc_state.state().read_custom()?.unwrap().prev_blocks.check_block(mc_state.block_id())
-        //     .map_err(|err| error!("attempting to register masterchain state for block {} \
-        //         which is not an ancestor of most recent masterchain block {} : {}",
-        //             mc_state.block_id(), mc_state.block_id(), err))?;
-        // }
-        self.engine.set_aux_mc_state(&mc_state)?;
-        self.try_unpack_mc_state(&base, mc_state)
+    #[allow(dead_code)]
+    fn process_mc_state(&mut self, mc_data: &McData, mc_state: &ShardStateStuff) -> Result<()> {
+        if mc_data.state.block_id() != mc_state.block_id() {
+            if !mc_data.state.has_prev_block(mc_state.block_id())? {
+                reject_query!("attempting to register masterchain state for block {} \
+                    which is not an ancestor of most recent masterchain block {}",
+                        mc_state.block_id(), mc_data.state.block_id())
+            }
+        }
+        self.engine.set_aux_mc_state(mc_state)?;
+        Ok(())
     }
 
     fn try_unpack_mc_state(&mut self, base: &ValidateBase, mc_state: ShardStateStuff) -> Result<McData> {
