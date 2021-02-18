@@ -63,6 +63,7 @@ pub struct Engine {
     shard_states_awaiters: AwaitersPool<BlockIdExt, ShardStateStuff>,
     block_applying_awaiters: AwaitersPool<BlockIdExt, ()>,
     next_block_applying_awaiters: AwaitersPool<BlockIdExt, BlockIdExt>,
+    download_block_awaiters: AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)>,
     external_messages: MessagesPool,
 
     zero_state_id: BlockIdExt,
@@ -283,6 +284,7 @@ impl Engine {
             shard_states_awaiters: AwaitersPool::new("shard_states_awaiters"),
             block_applying_awaiters: AwaitersPool::new("block_applying_awaiters"),
             next_block_applying_awaiters: AwaitersPool::new("next_block_applying_awaiters"),
+            download_block_awaiters: AwaitersPool::new("download_block_awaiters"),
             external_messages: MessagesPool::new(),
             zero_state_id,
             init_mc_block_id,
@@ -358,6 +360,10 @@ impl Engine {
         &self.next_block_applying_awaiters
     }
 
+    pub fn download_block_awaiters(&self) -> &AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)> {
+        &self.download_block_awaiters
+    }
+
     pub fn external_messages(&self) -> &MessagesPool {
         &self.external_messages
     }
@@ -393,52 +399,59 @@ impl Engine {
         pre_apply: bool
     ) -> Result<()> {
 
-        if let Some(handle) = self.load_block_handle(id)? {
-            if handle.is_applied() || pre_apply && handle.has_state() {
+        loop {
+            if let Some(handle) = self.load_block_handle(id)? {
+                if handle.is_applied() || pre_apply && handle.has_state() {
+                    log::trace!(
+                        "download_and_apply_block_worker(pre_apply: {}): block is already applied {}",
+                        pre_apply,
+                        handle.id()
+                    );
+                    return Ok(());
+                }
+                if handle.has_data() {
+                    let block = self.load_block(&handle).await?;
+                    self.apply_block_worker(&handle, &block, mc_seq_no, pre_apply).await?;
+                    return Ok(());
+                }
+            } 
+
+            let now = std::time::Instant::now();
+            log::trace!(
+                "Start downloading block for {}apply... {}",
+                if pre_apply { "pre-" } else { "" },
+                id
+            );
+            // for pre-apply only 10 attempts, for apply - infinity
+            let (attempts, timeout) = if pre_apply { 
+                (Some(30), Some((10, 15, 100)))
+            } else { 
+                (None, None)
+            };
+
+            if let Some((block, proof)) = self.download_block_awaiters().do_or_wait(
+                id,
+                None,
+                self.download_block_worker(id, attempts, timeout)
+            ).await? {
+                let downloading_time = now.elapsed().as_millis();
+
+                let now = std::time::Instant::now();
+                proof.check_proof(self.deref()).await?;
+                let handle = self.store_block(&block).await?;
+                let handle = self.store_block_proof(id, Some(handle), &proof).await?;
+
                 log::trace!(
-                    "download_and_apply_block_worker(pre_apply: {}): block is already applied {}",
-                    pre_apply,
-                    handle.id()
+                    "Downloaded block for {}apply {} TIME download: {}ms, check & save: {}", 
+                    if pre_apply { "pre-" } else { "" }, 
+                    block.id(),
+                    downloading_time, 
+                    now.elapsed().as_millis(),
                 );
-                return Ok(());
+                self.apply_block(&handle, &block, mc_seq_no, pre_apply).await?;
+                return Ok(())
             }
-            if handle.has_data() {
-                let block = self.load_block(&handle).await?;
-                self.apply_block_worker(&handle, &block, mc_seq_no, pre_apply).await?;
-                return Ok(());
-            }
-        } 
-
-        let now = std::time::Instant::now();
-        log::trace!(
-            "Start downloading block for {}apply... {}",
-            if pre_apply { "pre-" } else { "" },
-            id
-        );
-
-        // for pre-apply only 10 attempts, for apply - infinity
-        let (attempts, timeout) = if pre_apply { 
-            (Some(30), Some((10, 15, 100)))
-        } else { 
-            (None, None)
-        };
-        let (block, proof) = self.download_block_worker(id, attempts, timeout).await?;
-        let downloading_time = now.elapsed().as_millis();
-        let now = std::time::Instant::now();
-        proof.check_proof(self.deref()).await?;
-        let handle = self.store_block(&block).await?;
-        let handle = self.store_block_proof(id, Some(handle), &proof).await?;
-
-        log::trace!(
-            "Downloaded block for {}apply {} TIME download: {}ms, check & save: {}", 
-            if pre_apply { "pre-" } else { "" }, 
-            block.id(),
-            downloading_time, 
-            now.elapsed().as_millis(),
-        );
-        self.apply_block_worker(&handle, &block, mc_seq_no, pre_apply).await?;
-        Ok(())
-
+        }
     }
 
     pub async fn apply_block_worker(

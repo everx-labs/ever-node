@@ -380,6 +380,9 @@ impl ValidateQuery {
         base.state_update = base.block.block().read_state_update()?;
         base.value_flow = base.block.block().read_value_flow()?;
 
+        if base.info.version() < supported_version() {
+            reject_query!("This block version {} is too old", base.info.version())
+        }
         if base.info.key_block() {
             log::info!(target: "validate_query", "validating key block {}", base.block_id());
         }
