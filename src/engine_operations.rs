@@ -299,15 +299,14 @@ impl EngineOperations for Engine {
                 if handle.has_state() {
                     break self.load_state(id).await
                 }
-            } else {
-                let id1 = id.clone();
-                let engine = self.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = engine.download_and_apply_block(&id1, 0, true).await {
-                        log::error!("Error while pre-apply block (while wait_state) {}: {}", id1, e);
-                    }
-                });
             }
+            let id1 = id.clone();
+            let engine = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = engine.download_and_apply_block(&id1, 0, true).await {
+                    log::error!("Error while pre-apply block (while wait_state) {}: {}", id1, e);
+                }
+            });
             if let Some(ss) = self.shard_states_awaiters().wait(id, timeout_ms).await? {
                 break Ok(ss)
             }
