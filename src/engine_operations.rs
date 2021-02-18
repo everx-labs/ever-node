@@ -183,23 +183,7 @@ impl EngineOperations for Engine {
         mc_seq_no: u32, 
         pre_apply: bool
     ) -> Result<()> {
-        // if it is pre-apply we are waiting for `state_inited` or `applied`
-        // otherwise - only for applied
-        loop {
-            if let Some(handle) = self.load_block_handle(id)? {
-                if (pre_apply && handle.has_state()) || handle.is_applied() {
-                    break
-                }
-            }
-            if self.block_applying_awaiters().do_or_wait(
-                id,
-                None,
-                self.clone().download_and_apply_block_worker(id, mc_seq_no, pre_apply)
-            ).await?.is_some() {
-                break
-            }
-        }
-        Ok(())
+        self.download_and_apply_block_worker(id, mc_seq_no, pre_apply).await
     }
 
     async fn download_block(
@@ -207,16 +191,25 @@ impl EngineOperations for Engine {
         id: &BlockIdExt, 
         limit: Option<u32>
     ) -> Result<(BlockStuff, BlockProofStuff)> {
-        if let Some(handle) = self.load_block_handle(id)? {
-            if handle.has_data() {
-                let ret = (
-                    self.load_block(&handle).await?,
-                    self.load_block_proof(&handle, !id.shard().is_masterchain()).await?
-                );
-                return Ok(ret)
+        loop {
+            if let Some(handle) = self.load_block_handle(id)? {
+                if handle.has_data() {
+                    let ret = (
+                        self.load_block(&handle).await?,
+                        self.load_block_proof(&handle, !id.shard().is_masterchain()).await?
+                    );
+                    return Ok(ret)
+                }
             }
-        } 
-        self.download_block_worker(id, limit, None).await
+
+            if let Some(data) = self.download_block_awaiters().do_or_wait(
+                id,
+                None,
+                self.download_block_worker(id, limit, None)
+            ).await? {
+                return Ok(data)
+            }
+        }
     }
 
     async fn download_block_proof(&self, id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff> {

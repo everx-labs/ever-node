@@ -326,8 +326,8 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         // Prepare
         let (prepare, peer): (Prepared, _) = self.send_adnl_query(
             PrepareBlock {block: convert_block_id_ext_blk2api(id)},
-            None,
-            Some(Self::TIMEOUT_PREPARE)
+            Some(1),
+            None
         ).await?;
         log::trace!("USE PEER {}, PREPARE {} FINISHED", peer.id(), id);
 
