@@ -506,7 +506,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
     }
 
     async fn download_archive(&self, mc_seq_no: u32) -> Result<Option<Vec<u8>>> {
-        const CHUNK_SIZE: i32 = 1 << 17;
+        const CHUNK_SIZE: i32 = 1 << 20;
         // tonNode.getArchiveInfo masterchain_seqno:int = tonNode.ArchiveInfo;
         let (archive_info, peer) = self.send_adnl_query(
             GetArchiveInfo {
