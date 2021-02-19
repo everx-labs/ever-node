@@ -29,6 +29,7 @@ pub struct CatchainClient {
 }
 
 impl CatchainClient {
+    const TARGET:  &'static str = "catchain_network";
 
     pub fn new(
         runtime_handle: &tokio::runtime::Handle,
@@ -81,7 +82,7 @@ impl CatchainClient {
         }
         self.is_stop.store(true, atomic::Ordering::Relaxed);
         self.consumer.is_stop.store(true, atomic::Ordering::Relaxed);
-        log::info!("Overlay {} stopped.", &self.overlay_id);
+        log::debug!("Overlay {} stopped.", &self.overlay_id);
     }
 
     pub fn catchain_listener(&self) -> &CatchainOverlayListenerPtr {
@@ -110,7 +111,7 @@ impl CatchainClient {
                 return;
             }
             let answer = overlay.message(&receiver, &msg.data().0, &overlay_id).await;
-            log::trace!("<send_message> (overlay: {}, data: {:x}{:x}{:x}{:x}, key_id: {}): {:?}",
+            log::trace!(target: Self::TARGET, "<send_message> (overlay: {}, data: {:x}{:x}{:x}{:x}, key_id: {}): {:?}",
                 &overlay_id, 
                 &msg.data().0[3],
                 &msg.data().0[2],
@@ -141,7 +142,7 @@ impl CatchainClient {
             Some(AdnlNode::calc_timeout(Some(timeout.as_millis() as u64)))
         ).await?;
         let elapsed = now.elapsed();
-        log::trace!("<send_query> result (overlay: {}, data: {:x}{:x}{:x}{:x}, key_id: {}): {:?}({}ms)",
+        log::trace!(target: Self::TARGET, "<send_query> result (overlay: {}, data: {:x}{:x}{:x}{:x}, key_id: {}): {:?}({}ms)",
             &overlay_id, 
             &message.data().0[3],
             &message.data().0[2],
@@ -182,7 +183,9 @@ impl CatchainClient {
             Some(10_000),
             &overlay_id
         ).await;
-        log::info!("result: {:?}", &result);
+
+        
+        log::trace!(target: Self::TARGET, "result status: {}", &result.is_ok());
         let data = result?.ok_or_else(|| error!("asnwer is None!"))?;
 
         let data = catchain::CatchainFactory::create_block_payload(
@@ -207,7 +210,7 @@ impl CatchainClient {
         let listener = catchain_listener.clone();
         runtime_handle.spawn(async move { 
             if let Err(e) = CatchainClient::wait_broadcasts(self1, &overlay_id, overlay, &keys, &listener).await {
-                log::warn!("ERROR: {}", e)
+                log::warn!(target: Self::TARGET, "ERROR: {}", e)
             }
         });
         let overlay_id = private_overlay_id.clone();
@@ -216,7 +219,7 @@ impl CatchainClient {
         let listener = catchain_listener.clone();
         runtime_handle.spawn(async move { 
             if let Err(e) = CatchainClient::wait_catchain_broadcast(self2, &overlay_id, overlay, &keys, &listener).await {
-                log::warn!("ERROR: {}", e)
+                log::warn!(target: Self::TARGET, "ERROR: {}", e)
             }
         });
     }
@@ -238,7 +241,7 @@ impl CatchainClient {
             let message = receiver.wait_for_broadcast(overlay_id).await;
             match message {
                 Ok(message) => {
-                    log::trace!("private overlay broadcast (successed)");
+                    log::trace!(target: Self::TARGET, "private overlay broadcast (successed)");
                    // let src_id = validator_keys.get(&message.1).ok_or_else(|| error!("unknown key!"))?;
                     if let Some(listener) = catchain_listener.upgrade() {
                         listener
@@ -246,7 +249,7 @@ impl CatchainClient {
                     }
                 },
                 Err(e) => {
-                    log::error!("private overlay broadcast err: {}", e);
+                    log::error!(target: Self::TARGET, "private overlay broadcast err: {}", e);
                 },
             };
         }
@@ -271,7 +274,7 @@ impl CatchainClient {
             let message = receiver.wait_for_catchain(overlay_id).await;
             match message {
                 Ok((catchain_block_update, validator_session_block_update, source_id))  => {
-                    log::trace!("private overlay broadcast ValidatorSession_BlockUpdate (successed)");
+                    log::trace!(target: Self::TARGET, "private overlay broadcast ValidatorSession_BlockUpdate (successed)");
                     let vs_block_update = ValidatorSession_BlockUpdate(Box::new(validator_session_block_update));
                     let block_update = Catchain_BlockUpdate(Box::new(catchain_block_update));
                    if let Some(listener) = catchain_listener.upgrade() {
@@ -287,7 +290,7 @@ impl CatchainClient {
                     }
                 },
                 Err(e) => {
-                    log::error!("private overlay broadcast err: {}", e);
+                    log::error!(target: Self::TARGET, "private overlay broadcast err: {}", e);
                 },
             };
         }
@@ -310,12 +313,12 @@ impl CatchainOverlay for CatchainClient {
         let now = Instant::now();
         match self.message(receiver_id, message) {
             Ok(_) => { /*log::trace!("send_message success!");*/ },
-            Err(e) => { log::warn!("send_message err: {:?}", e); }
+            Err(e) => { log::warn!(target: Self::TARGET, "send_message err: {:?}", e); }
         }
 
         let elapsed = now.elapsed();
         if elapsed.as_micros() > 500 {
-            log::trace!("message elapsed: {}", elapsed.as_millis());
+            log::trace!(target: Self::TARGET, "message elapsed: {}", elapsed.as_millis());
         };
     }
 
@@ -328,7 +331,7 @@ impl CatchainOverlay for CatchainClient {
     {
         for receiver_id in receiver_ids.iter() {
             if let Err(e) = self.message(receiver_id, message) {
-                log::error!("send_message err: {:?}", e);
+                log::error!(target: Self::TARGET, "send_message err: {:?}", e);
             }
         }
     }
@@ -351,7 +354,7 @@ impl CatchainOverlay for CatchainClient {
             self.runtime_handle.spawn(async move { 
                 let is_stop = is_stop_state.load(atomic::Ordering::Relaxed);
                 if is_stop {
-                    log::warn!("Overlay {} was stopped!", &overlay_id);
+                    log::warn!(target: Self::TARGET, "Overlay {} was stopped!", &overlay_id);
                     return;
                 }
                 let result = CatchainClient::query(&overlay_id, &overlay, &receiver, timeout, &msg).await;
@@ -383,7 +386,7 @@ impl CatchainOverlay for CatchainClient {
                     &receiver,
                     &msg,
                     max_answer_size).await;
-                log::info!("send_query_via_rldp: {:?}", result);
+                log::info!(target: Self::TARGET, "send_query_via_rldp: {:?}", result);
                 response_callback(result);
             });
     }
@@ -398,7 +401,7 @@ impl CatchainOverlay for CatchainClient {
         self.runtime_handle.spawn(async move {
             let result = overlay.broadcast(&overlay_id, &msg.data().0, Some(&local_validator_key)).await;
 
-            log::trace!("send_broadcast_fec_ex status: {:?}", result);
+            log::trace!(target: Self::TARGET, "send_broadcast_fec_ex status: {:?}", result);
         });
     }
 }
@@ -425,7 +428,7 @@ impl QueriesConsumer for CatchainClientConsumer {
         
         let is_stop = self.is_stop.load(atomic::Ordering::Relaxed);
         if is_stop {
-            log::warn!("Overlay {} was stopped!", &self.overlay_id);
+            log::warn!(target: CatchainClient::TARGET, "Overlay {} was stopped!", &self.overlay_id);
             fail!("Overlay {} was stopped!", &self.overlay_id);
         }
         let now = Instant::now();
@@ -455,13 +458,13 @@ impl QueriesConsumer for CatchainClientConsumer {
             Some(None) => fail!("Answer was not set!"),
             Some(Some(answer)) => answer,
             None => {
-                log::warn!("Waiting returned an internal error (query: {:?})", query);
+                log::warn!(target: CatchainClient::TARGET, "Waiting returned an internal error (query: {:?})", query);
                 fail!("Waiting returned an internal error!");
             }
         };
         if log::log_enabled!(log::Level::Trace) {
             let elapsed = now.elapsed();
-            log::trace!("query elapsed: {}", elapsed.as_millis());
+            log::trace!(target: CatchainClient::TARGET, "query elapsed: {}", elapsed.as_millis());
         };
         res
     }
