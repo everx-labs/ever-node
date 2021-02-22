@@ -16,7 +16,7 @@ use dht::DhtNode;
 use overlay::{OverlayId, OverlayShortId, OverlayNode, QueriesConsumer, PrivateOverlayShortId};
 use rldp::RldpNode;
 use std::{hash::Hash, sync::Arc, time::Duration};
-use tokio::time::delay_for;
+use tokio::time::{delay_for, timeout};
 use ton_types::{Result, error, UInt256};
 use ton_block::BlockIdExt;
 
@@ -468,11 +468,13 @@ impl NodeNetwork {
         validator_list_id: UInt256,
         validators: Vec<CatchainNode>
     ) {
+        let mut is_first_search = true;
         const SLEEP_TIME: u64 = 1;  //secs
         tokio::spawn(async move {
             let mut current_validators = validators;
             loop {
                 match Self::search_validator_keys_round(
+                    is_first_search,
                     local_adnl_id.clone(),
                     dht.clone(),
                     overlay.clone(),
@@ -494,19 +496,34 @@ impl NodeNetwork {
                 if validators_contexts.get(&validator_list_id).is_none() {
                     break;
                 }
+                is_first_search = false;
             }
         });
     }
 
     async fn search_validator_keys_round(
+        is_first_search: bool,
         local_adnl_id: Arc<KeyId>,
         dht: Arc<DhtNode>,
         overlay: Arc<OverlayNode>,
         validators: Vec<CatchainNode>
     ) -> Result<Vec<CatchainNode>> {
+        const SEARCH_TIMEOUT: u64 = 5;
+
         let mut lost_validators = Vec::new();
         for val in validators {
-            let res = DhtNode::find_address(&dht, &val.adnl_id).await;
+            let res = if is_first_search {
+                match timeout(Duration::from_secs(SEARCH_TIMEOUT), DhtNode::find_address(&dht, &val.adnl_id)).await {
+                    Ok(result) => { result },
+                    Err(_) => {
+                        lost_validators.push(val.clone());
+                        log::info!("addr: {:?} skip",  &val.adnl_id);
+                        continue
+                    },
+                }
+            } else {
+                DhtNode::find_address(&dht, &val.adnl_id).await
+            };
 
             match res {
                 Ok((addr, key)) => {
@@ -634,29 +651,24 @@ impl PrivateOverlayOperations for NodeNetwork {
                 Some(self.validator_context.validator_adnl_keys.clone())
             );
         }
-        let mut peers = Vec::new();
         let mut lost_validators = Vec::new();
         let mut peers_ids = Vec::new();
+/*
+        let mut peers_ids: Vec<Arc<KeyId>> = validators.iter().filter_map(|val| {
+            if val.public_key.id() == local_validator_key.id() {
+                None
+            } else {
+                Some(val.adnl_id.clone())
+        }}).collect();*/
 
         for val in validators {
             if val.public_key.id() == local_validator_key.id() {
                 continue;
             }
             peers_ids.push(val.adnl_id.clone());
-
-            match DhtNode::find_address(&self.dht, &val.adnl_id).await {
-                Ok((addr, key)) => {
-                    log::info!("addr: {:?}, key: {:x?}", &addr, &key);
-                    peers.push((addr, key));
-                }
-                Err(e) => {
-                    log::error!("find address failed: {:?}", e);
-                    lost_validators.push(val.clone());
-                }
-            }
+            lost_validators.push(val.clone());
         }
 
-        self.overlay.add_private_peers(adnl_key.id(), peers)?;
         let validator_set_context = ValidatorSetContext {
             validator_peers: peers_ids,
             validator_key: Arc::new(local_validator_key),
