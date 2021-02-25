@@ -784,14 +784,6 @@ impl ReceiverListener for DummyListener {
 
     fn on_blame(&mut self, _receiver: &mut dyn Receiver, _source_id: usize) {}
 
-    fn on_custom_message(
-        &mut self,
-        _receiver: &mut dyn Receiver,
-        _source_public_key_hash: &PublicKeyHash,
-        _data: &BlockPayloadPtr,
-    ) {
-    }
-
     fn on_custom_query(
         &mut self,
         _receiver: &mut dyn Receiver,
@@ -2049,9 +2041,13 @@ impl ReceiverImpl {
 
         if fork_proof.left.height != fork_proof.right.height
             || fork_proof.left.src != fork_proof.right.src
-            || fork_proof.left.data_hash != fork_proof.right.data_hash
+            || fork_proof.left.data_hash == fork_proof.right.data_hash
         {
-            warn!("Incorrect fork blame, not a fork");
+            warn!("Incorrect fork blame, not a fork: {}/{}, {}/{}, {:?}/{:?}",
+                fork_proof.left.height, fork_proof.right.height,
+                fork_proof.left.src, fork_proof.right.src,
+                fork_proof.left.data_hash, fork_proof.right.data_hash
+            );
             return;
         }
 
@@ -2120,22 +2116,6 @@ impl ReceiverImpl {
         check_execution_time!(5000);
         if let Some(listener) = self.listener.upgrade() {
             listener.borrow_mut().on_blame(self, source_id);
-        }
-    }
-
-    #[allow(dead_code)]
-    fn notify_on_custom_message(
-        &mut self,
-        source_public_key_hash: &PublicKeyHash,
-        data: &BlockPayloadPtr,
-    ) {
-        check_execution_time!(5000);
-        instrument!();
-
-        if let Some(listener) = self.listener.upgrade() {
-            listener
-                .borrow_mut()
-                .on_custom_message(self, source_public_key_hash, data);
         }
     }
 

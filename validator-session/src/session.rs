@@ -20,12 +20,10 @@ use std::time::SystemTime;
 
 const MAIN_LOOP_NAME: &str = "VS1"; //validator session main loop short name
 const CALLBACKS_LOOP_NAME: &str = "VS2"; //validator session callbacks loop short name
-const TASK_QUEUE_WARN_TASK_QUEUE_SIZE: usize = 50; //warning level for task queue size
-const TASK_QUEUE_WARN_PROCESSING_LATENCY: Duration = Duration::from_millis(100); //max processing latency
-const TASK_QUEUE_LATENCY_WARN_DUMP_PERIOD: Duration = Duration::from_millis(500); //latency warning dump period
+const TASK_QUEUE_WARN_PROCESSING_LATENCY: Duration = Duration::from_millis(1000); //max processing latency
+const TASK_QUEUE_LATENCY_WARN_DUMP_PERIOD: Duration = Duration::from_millis(2000); //latency warning dump period
 const SESSION_METRICS_DUMP_PERIOD_MS: u64 = 5000; //period of metrics dump
-const MAIN_LOOP_OVERLOADED_QUEUE_SIZE: usize = 10; //queue size for main loop overload indicator
-const CALLBACKS_LOOP_OVERLOADED_QUEUE_SIZE: usize = 10; //queue size for main loop overload indicator
+const SESSION_PROFILING_DUMP_PERIOD_MS: u64 = 30000; //period of profiling dump
 
 /*
 ===================================================================================================
@@ -42,6 +40,9 @@ struct TaskQueueImpl<FuncPtr> {
     name: String,                                                         //queue name
     queue_sender: crossbeam::channel::Sender<Box<TaskDesc<FuncPtr>>>, //queue sender from outer world to the ValidatorSession
     queue_receiver: crossbeam::channel::Receiver<Box<TaskDesc<FuncPtr>>>, //queue receiver from outer world to the ValidatorSession
+    post_counter: metrics_runtime::data::Counter,                         //counter for queue posts
+    pull_counter: metrics_runtime::data::Counter,                         //counter for queue pull
+    is_overloaded: Arc<AtomicBool>, //atomic flag to indicate that queue is overloaded
 }
 
 /*
@@ -52,8 +53,8 @@ impl<FuncPtr> TaskQueue<FuncPtr> for TaskQueueImpl<FuncPtr>
 where
     FuncPtr: Send + 'static,
 {
-    fn len(&self) -> usize {
-        self.queue_receiver.len()
+    fn is_overloaded(&self) -> bool {
+        self.is_overloaded.load(Ordering::Relaxed)
     }
 
     fn post_closure(&self, task: FuncPtr) {
@@ -63,6 +64,8 @@ where
         });
         if let Err(send_error) = self.queue_sender.send(task_desc) {
             error!("ValidatorSession method post closure error: {}", send_error);
+        } else {
+            self.post_counter.increment();
         }
     }
 
@@ -73,24 +76,29 @@ where
     ) -> Option<FuncPtr> {
         match self.queue_receiver.recv_timeout(timeout) {
             Ok(task_desc) => {
-                if let Ok(warn_elapsed) = last_warn_dump_time.elapsed() {
-                    if warn_elapsed > TASK_QUEUE_LATENCY_WARN_DUMP_PERIOD {
-                        let queue_len = self.queue_receiver.len();
-                        if queue_len > TASK_QUEUE_WARN_TASK_QUEUE_SIZE {
-                            warn!("ValidatorSession {} task queue size is {} (expected max level is {})", self.name, queue_len, TASK_QUEUE_WARN_TASK_QUEUE_SIZE);
-                            *last_warn_dump_time = SystemTime::now();
-                        }
-                        let processing_latency = task_desc.creation_time.elapsed().unwrap();
-                        if processing_latency > TASK_QUEUE_WARN_PROCESSING_LATENCY {
+                let processing_latency = task_desc.creation_time.elapsed().unwrap();
+                if processing_latency > TASK_QUEUE_WARN_PROCESSING_LATENCY {
+                    self.is_overloaded.store(true, Ordering::Release);
+
+                    if let Ok(warn_elapsed) = last_warn_dump_time.elapsed() {
+                        if warn_elapsed > TASK_QUEUE_LATENCY_WARN_DUMP_PERIOD {
                             warn!("ValidatorSession {} task queue latency is {:.3}s (expected max latency is {:.3}s)", self.name, processing_latency.as_secs_f64(), TASK_QUEUE_WARN_PROCESSING_LATENCY.as_secs_f64());
                             *last_warn_dump_time = SystemTime::now();
                         }
                     }
+                } else {
+                    self.is_overloaded.store(false, Ordering::Release);
                 }
+
+                self.pull_counter.increment();
 
                 Some(task_desc.task)
             }
-            _ => None,
+            _ => {
+                self.is_overloaded.store(false, Ordering::Release);
+
+                None
+            }
         }
     }
 }
@@ -107,11 +115,22 @@ where
         name: String,
         queue_sender: crossbeam::channel::Sender<Box<TaskDesc<FuncPtr>>>,
         queue_receiver: crossbeam::channel::Receiver<Box<TaskDesc<FuncPtr>>>,
+        metrics_receiver: Arc<metrics_runtime::Receiver>,
     ) -> Self {
+        let pull_counter = metrics_receiver
+            .sink()
+            .counter(format!("{}_queue.pulls", name));
+        let post_counter = metrics_receiver
+            .sink()
+            .counter(format!("{}_queue.posts", name));
+
         Self {
             name: name,
             queue_sender: queue_sender,
             queue_receiver: queue_receiver,
+            pull_counter: pull_counter,
+            post_counter: post_counter,
+            is_overloaded: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -156,12 +175,6 @@ impl CatchainListener for CatchainListenerImpl {
     fn process_broadcast(&self, source_id: PublicKeyHash, data: BlockPayloadPtr) {
         self.post_closure(move |processor: &mut dyn SessionProcessor| {
             processor.process_broadcast(source_id, data);
-        });
-    }
-
-    fn process_message(&self, source_id: PublicKeyHash, data: BlockPayloadPtr) {
-        self.post_closure(move |processor: &mut dyn SessionProcessor| {
-            processor.process_message(source_id, data);
         });
     }
 
@@ -636,10 +649,36 @@ impl SessionImpl {
             0.0,
         );
 
+        metrics_dumper.add_derivative_metric("processing_queue.pulls".to_string());
+        metrics_dumper.add_derivative_metric("processing_queue.posts".to_string());
+        metrics_dumper.add_derivative_metric("callbacks_queue.pulls".to_string());
+        metrics_dumper.add_derivative_metric("callbacks_queue.posts".to_string());
+
+        metrics_dumper.add_compute_handler(
+            "processing_queue".to_string(),
+            &catchain::utils::compute_queue_size_counter,
+        );
+        metrics_dumper.add_compute_handler(
+            "callbacks_queue".to_string(),
+            &catchain::utils::compute_queue_size_counter,
+        );
+
+        metrics_dumper.add_compute_handler(
+            "state_merge_cache_items".to_string(),
+            &catchain::utils::compute_instance_counter,
+        );
+        add_compute_result_metric(&mut metrics_dumper, &"state_merge_cache_reuse".to_string());
+        metrics_dumper.add_compute_handler(
+            "block_update_cache_items".to_string(),
+            &catchain::utils::compute_instance_counter,
+        );
+        add_compute_result_metric(&mut metrics_dumper, &"block_update_cache_reuse".to_string());
+
         //main loop
 
         let mut last_warn_dump_time = std::time::SystemTime::now();
         let mut next_metrics_dump_time = last_warn_dump_time;
+        let mut next_profiling_dump_time = last_warn_dump_time;
 
         loop {
             {
@@ -657,9 +696,7 @@ impl SessionImpl {
 
                 //check overload flag
 
-                let is_overloaded = task_queue.len() >= MAIN_LOOP_OVERLOADED_QUEUE_SIZE;
-
-                if is_overloaded {
+                if task_queue.is_overloaded() {
                     loop_overloads_counter.increment();
                 }
 
@@ -683,6 +720,7 @@ impl SessionImpl {
 
                 if let Some(task) = task {
                     check_execution_time!(100_000);
+                    instrument!();
 
                     task(&mut *processor.borrow_mut());
                 }
@@ -703,6 +741,9 @@ impl SessionImpl {
             //dump metrics
 
             if let Ok(_elapsed) = next_metrics_dump_time.elapsed() {
+                instrument!();
+                check_execution_time!(10_000);
+
                 metrics_dumper.update(&processor.borrow().get_description().get_metrics_receiver());
 
                 if log_enabled!(log::Level::Debug) {
@@ -712,7 +753,19 @@ impl SessionImpl {
                     metrics_dumper.dump(|string| {
                         debug!("{}{}", session_id_str, string);
                     });
+                }
 
+                next_metrics_dump_time = std::time::SystemTime::now()
+                    + Duration::from_millis(SESSION_METRICS_DUMP_PERIOD_MS);
+            }
+
+            //dump profiling
+
+            if let Ok(_elapsed) = next_profiling_dump_time.elapsed() {
+                instrument!();
+                check_execution_time!(100_000);
+
+                if log_enabled!(log::Level::Debug) {
                     let profiling_dump = profiling::Profiler::local_instance()
                         .with(|profiler| profiler.borrow().dump());
 
@@ -723,8 +776,8 @@ impl SessionImpl {
                     );
                 }
 
-                next_metrics_dump_time = std::time::SystemTime::now()
-                    + Duration::from_millis(SESSION_METRICS_DUMP_PERIOD_MS);
+                next_profiling_dump_time = std::time::SystemTime::now()
+                    + Duration::from_millis(SESSION_PROFILING_DUMP_PERIOD_MS);
             }
         }
 
@@ -780,9 +833,7 @@ impl SessionImpl {
 
             //check overload flag
 
-            let is_overloaded = task_queue.len() >= CALLBACKS_LOOP_OVERLOADED_QUEUE_SIZE;
-
-            if is_overloaded {
+            if task_queue.is_overloaded() {
                 loop_overloads_counter.increment();
             }
 
@@ -813,7 +864,9 @@ impl SessionImpl {
         Creation & stop
     */
 
-    pub(crate) fn create_task_queue() -> TaskQueuePtr {
+    pub(crate) fn create_task_queue(
+        metrics_receiver: Arc<metrics_runtime::Receiver>,
+    ) -> TaskQueuePtr {
         type ChannelPair = (
             crossbeam::channel::Sender<Box<TaskDesc<TaskPtr>>>,
             crossbeam::channel::Receiver<Box<TaskDesc<TaskPtr>>>,
@@ -824,12 +877,15 @@ impl SessionImpl {
             "processing".to_string(),
             queue_sender,
             queue_receiver,
+            metrics_receiver,
         ));
 
         task_queue
     }
 
-    pub(crate) fn create_callback_task_queue() -> CallbackTaskQueuePtr {
+    pub(crate) fn create_callback_task_queue(
+        metrics_receiver: Arc<metrics_runtime::Receiver>,
+    ) -> CallbackTaskQueuePtr {
         type ChannelPair = (
             crossbeam::channel::Sender<Box<TaskDesc<CallbackTaskPtr>>>,
             crossbeam::channel::Receiver<Box<TaskDesc<CallbackTaskPtr>>>,
@@ -840,6 +896,7 @@ impl SessionImpl {
             "callbacks".to_string(),
             queue_sender,
             queue_receiver,
+            metrics_receiver,
         ));
 
         task_queue
@@ -870,10 +927,19 @@ impl SessionImpl {
             Duration::from_secs(options.round_attempt_duration.as_secs());
         options.next_candidate_delay = Duration::from_secs(options.next_candidate_delay.as_secs());
 
+        //create metrics receiver
+
+        let metrics_receiver = Arc::new(
+            metrics_runtime::Receiver::builder()
+                .build()
+                .expect("failed to create validator session metrics receiver"),
+        );
+
         //create task queues
 
-        let main_task_queue = Self::create_task_queue();
-        let session_callbacks_task_queue = Self::create_callback_task_queue();
+        let main_task_queue = Self::create_task_queue(metrics_receiver.clone());
+        let session_callbacks_task_queue =
+            Self::create_callback_task_queue(metrics_receiver.clone());
 
         //create catchain
 
@@ -924,12 +990,6 @@ impl SessionImpl {
             _catchain_listener: catchain_listener,
             _activity_node: session_activity_node.clone(),
         };
-
-        let metrics_receiver = Arc::new(
-            metrics_runtime::Receiver::builder()
-                .build()
-                .expect("failed to create validator session metrics receiver"),
-        );
 
         let session = Arc::new(body);
         let stop_flag_for_main_loop = stop_flag.clone();

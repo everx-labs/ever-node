@@ -20,8 +20,8 @@ pub type CompletionHandlerPtr = Box<dyn CompletionHandler>;
 
 /// Task queue
 pub trait TaskQueue<FuncPtr: Send + 'static>: Send + Sync {
-    /// Queue size
-    fn len(&self) -> usize;
+    /// Is queue overloaded
+    fn is_overloaded(&self) -> bool;
 
     /// Post closure (non-generic interface)
     fn post_closure(&self, task: FuncPtr);

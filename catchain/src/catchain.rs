@@ -20,12 +20,10 @@ use std::time::Duration;
 const CATCHAIN_POSTPONED_SEND_TO_OVERLAY: bool = true; //send all queries to overlay using utility thread
 const CATCHAIN_PROCESSING_PERIOD_MS: u64 = 1000; //idle time for catchain timed events in milliseconds
 const CATCHAIN_METRICS_DUMP_PERIOD_MS: u64 = 5000; //time for catchain metrics dump
+const CATCHAIN_PROFILING_DUMP_PERIOD_MS: u64 = 30000; //time for catchain profiling dump
 const CATCHAIN_INFINITE_SEND_PROCESS_TIMEOUT: Duration = Duration::from_secs(3600 * 24 * 3650); //large timeout as a infinite timeout simulation for send process
-const CATCHAIN_WARN_MAIN_TASK_QUEUE_SIZE: usize = 50; //warning level for catchain main queue size
-const CATCHAIN_WARN_UTILITY_TASK_QUEUE_SIZE: usize = 150; //warning level for catchain utility queue size
-const CATCHAIN_WARN_PROCESSING_LATENCY: Duration = Duration::from_millis(100); //max processing latency
-const CATCHAIN_LATENCY_WARN_DUMP_PERIOD: Duration = Duration::from_millis(500); //latency warning dump period
-const CATCHAIN_OVERLOADED_QUEUE_SIZE: usize = 50; //queue size for catchain overload indicator
+const CATCHAIN_WARN_PROCESSING_LATENCY: Duration = Duration::from_millis(1000); //max processing latency
+const CATCHAIN_LATENCY_WARN_DUMP_PERIOD: Duration = Duration::from_millis(2000); //latency warning dump period
 const COMPLETION_HANDLERS_CHECK_PERIOD: Duration = Duration::from_millis(5000); //period of completion handlers checking
 const COMPLETION_HANDLERS_MAX_WAIT_PERIOD: Duration = Duration::from_millis(60000); //max delay for completion handler execution
 const BLOCKS_PROCESSING_STACK_CAPACITY: usize = 1000; //number of blocks in stack for CatchainProcessor::set_processed method
@@ -127,6 +125,10 @@ pub(crate) struct CatchainImpl {
     destroy_db_flag: Arc<AtomicBool>,                 //indicates catchain has to destroy DB
     session_id: SessionId,                            //session ID
     _activity_node: ActivityNodePtr, //activity node for tracing lifetime of this catchain
+    main_thread_post_counter: metrics_runtime::data::Counter, //counter for main queue posts
+    main_thread_pull_counter: metrics_runtime::data::Counter, //counter for main queue pull
+    utility_thread_post_counter: metrics_runtime::data::Counter, //counter for utility queue posts
+    _utility_thread_pull_counter: metrics_runtime::data::Counter, //counter for utility queue pull
 }
 
 /*
@@ -414,23 +416,6 @@ impl ReceiverListener for ReceiverListenerImpl {
     /*
         Network messages transfering from Receiver to Validator Session
     */
-
-    fn on_custom_message(
-        &mut self,
-        _receiver: &mut dyn Receiver,
-        source_public_key_hash: &PublicKeyHash,
-        data: &BlockPayloadPtr,
-    ) {
-        //TODO: call processor directly instead of posting closure
-        if let Some(catchain) = self.catchain.upgrade() {
-            let source_public_key_hash_clone = source_public_key_hash.clone();
-            let data_clone = data.clone();
-
-            catchain.post_closure(move |processor: &mut CatchainProcessor| {
-                processor.on_custom_message(source_public_key_hash_clone, data_clone);
-            });
-        }
-    }
 
     fn on_custom_query(
         &mut self,
@@ -779,18 +764,6 @@ impl CatchainProcessor {
         }
     }
 
-    fn notify_custom_message(
-        &mut self,
-        source_public_key_hash: PublicKeyHash,
-        data: BlockPayloadPtr,
-    ) {
-        check_execution_time!(1000);
-
-        if let Some(listener) = self.catchain_listener.upgrade() {
-            listener.process_message(source_public_key_hash, data);
-        }
-    }
-
     fn notify_custom_query(
         &mut self,
         source_public_key_hash: PublicKeyHash,
@@ -853,6 +826,7 @@ impl CatchainProcessor {
         let loop_overloads_counter = metrics_receiver
             .sink()
             .counter("catchain_main_loop_overloads");
+        let main_thread_pull_counter = catchain.upgrade().unwrap().main_thread_pull_counter.clone();
 
         //create catchain processor
 
@@ -931,12 +905,25 @@ impl CatchainProcessor {
             -1.0,
         );
 
+        metrics_dumper.add_derivative_metric("main_queue.posts".to_string());
+        metrics_dumper.add_derivative_metric("main_queue.pulls".to_string());
+        metrics_dumper.add_derivative_metric("utility_queue.posts".to_string());
+        metrics_dumper.add_derivative_metric("utility_queue.pulls".to_string());
+        metrics_dumper
+            .add_compute_handler("main_queue".to_string(), &utils::compute_queue_size_counter);
+        metrics_dumper.add_compute_handler(
+            "utility_queue".to_string(),
+            &utils::compute_queue_size_counter,
+        );
+
         //start main loop
 
         let mut last_awake = SystemTime::now();
         let mut next_metrics_dump_time = last_awake;
+        let mut next_profiling_dump_time = last_awake;
         let mut last_latency_warn_dump_time = last_awake;
         let mut last_completion_handlers_check_time = last_awake;
+        let mut is_overloaded = false;
 
         loop {
             {
@@ -958,8 +945,6 @@ impl CatchainProcessor {
 
                 //check overload flag
 
-                let is_overloaded = queue_receiver.len() >= CATCHAIN_OVERLOADED_QUEUE_SIZE;
-
                 overloaded_flag.store(is_overloaded, Ordering::SeqCst);
 
                 if is_overloaded {
@@ -973,6 +958,7 @@ impl CatchainProcessor {
                 );
                 processor.set_next_awake_time(processor.next_block_generation_time);
                 processor.set_next_awake_time(next_metrics_dump_time);
+                processor.set_next_awake_time(next_profiling_dump_time);
 
                 let timeout = match processor
                     .receiver
@@ -994,20 +980,18 @@ impl CatchainProcessor {
                     SystemTime::now() + Duration::from_millis(CATCHAIN_PROCESSING_PERIOD_MS),
                 );
 
+                is_overloaded = false;
+
                 if let Ok(task_desc) = task_desc {
-                    if last_latency_warn_dump_time.elapsed().unwrap()
-                        > CATCHAIN_LATENCY_WARN_DUMP_PERIOD
-                    {
-                        let queue_len = queue_receiver.len();
-                        if queue_len > CATCHAIN_WARN_MAIN_TASK_QUEUE_SIZE {
-                            warn!(
-                                "Catchain processing queue size is {} (expected max level is {})",
-                                queue_len, CATCHAIN_WARN_MAIN_TASK_QUEUE_SIZE
-                            );
-                            last_latency_warn_dump_time = SystemTime::now();
-                        }
-                        let processing_latency = task_desc.creation_time.elapsed().unwrap();
-                        if processing_latency > CATCHAIN_WARN_PROCESSING_LATENCY {
+                    main_thread_pull_counter.increment();
+
+                    let processing_latency = task_desc.creation_time.elapsed().unwrap();
+                    if processing_latency > CATCHAIN_WARN_PROCESSING_LATENCY {
+                        is_overloaded = true;
+
+                        if last_latency_warn_dump_time.elapsed().unwrap()
+                            > CATCHAIN_LATENCY_WARN_DUMP_PERIOD
+                        {
                             warn!("Catchain processing latency is {:.3}s (expected max latency is {:.3}s)", processing_latency.as_secs_f64(), CATCHAIN_WARN_PROCESSING_LATENCY.as_secs_f64());
                             last_latency_warn_dump_time = SystemTime::now();
                         }
@@ -1073,6 +1057,9 @@ impl CatchainProcessor {
             //dump metrics
 
             if let Ok(_elapsed) = next_metrics_dump_time.elapsed() {
+                instrument!();
+                check_execution_time!(10_000);
+
                 if log_enabled!(log::Level::Debug) {
                     let receiver = processor.receiver.borrow();
 
@@ -1085,11 +1072,6 @@ impl CatchainProcessor {
                     metrics_dumper.dump(|string| {
                         debug!("{}{}", session_id_str, string);
                     });
-
-                    let profiling_dump = profiling::Profiler::local_instance()
-                        .with(|profiler| profiler.borrow().dump());
-
-                    debug!("Catchain {} profiling: {}", session_id_str, profiling_dump);
 
                     let sources_count = receiver.get_sources_count();
 
@@ -1113,6 +1095,25 @@ impl CatchainProcessor {
                 next_metrics_dump_time =
                     last_awake + Duration::from_millis(CATCHAIN_METRICS_DUMP_PERIOD_MS);
             }
+
+            //dump profiling
+
+            if let Ok(_elapsed) = next_profiling_dump_time.elapsed() {
+                instrument!();
+                check_execution_time!(100_000);
+
+                if log_enabled!(log::Level::Debug) {
+                    let session_id_str = processor.session_id.to_hex_string();
+
+                    let profiling_dump = profiling::Profiler::local_instance()
+                        .with(|profiler| profiler.borrow().dump());
+
+                    debug!("Catchain {} profiling: {}", session_id_str, profiling_dump);
+                }
+
+                next_profiling_dump_time =
+                    last_awake + Duration::from_millis(CATCHAIN_PROFILING_DUMP_PERIOD_MS);
+            }
         }
 
         info!(
@@ -1135,6 +1136,7 @@ impl CatchainProcessor {
         queue_receiver: crossbeam::channel::Receiver<Box<TaskDesc<dyn FnOnce() + Send>>>,
         session_id: SessionId,
         metrics_receiver: Arc<metrics_runtime::Receiver>,
+        utility_thread_pull_counter: metrics_runtime::data::Counter,
     ) {
         info!(
             "Catchain utility loop is started (session_id is {})",
@@ -1158,6 +1160,7 @@ impl CatchainProcessor {
         //session callbacks processing loop
 
         let mut last_latency_warn_dump_time = std::time::SystemTime::now();
+        let mut is_overloaded = false;
 
         loop {
             activity_node.tick();
@@ -1170,8 +1173,6 @@ impl CatchainProcessor {
             }
 
             //check overload flag
-
-            let is_overloaded = queue_receiver.len() >= CATCHAIN_OVERLOADED_QUEUE_SIZE;
 
             overloaded_flag.store(is_overloaded, Ordering::SeqCst);
 
@@ -1189,20 +1190,18 @@ impl CatchainProcessor {
                 queue_receiver.recv_timeout(MAX_TIMEOUT)
             };
 
+            is_overloaded = false;
+
             if let Ok(task_desc) = task_desc {
-                if last_latency_warn_dump_time.elapsed().unwrap()
-                    > CATCHAIN_LATENCY_WARN_DUMP_PERIOD
-                {
-                    let queue_len = queue_receiver.len();
-                    if queue_len > CATCHAIN_WARN_UTILITY_TASK_QUEUE_SIZE {
-                        warn!(
-                            "Catchain utility queue size is {} (expected max level is {})",
-                            queue_len, CATCHAIN_WARN_UTILITY_TASK_QUEUE_SIZE
-                        );
-                        last_latency_warn_dump_time = SystemTime::now();
-                    }
-                    let processing_latency = task_desc.creation_time.elapsed().unwrap();
-                    if processing_latency > CATCHAIN_WARN_PROCESSING_LATENCY {
+                utility_thread_pull_counter.increment();
+
+                let processing_latency = task_desc.creation_time.elapsed().unwrap();
+                if processing_latency > CATCHAIN_WARN_PROCESSING_LATENCY {
+                    is_overloaded = true;
+
+                    if last_latency_warn_dump_time.elapsed().unwrap()
+                        > CATCHAIN_LATENCY_WARN_DUMP_PERIOD
+                    {
                         warn!("Catchain utility processing latency is {:.3}s (expected max latency is {:.3}s)", processing_latency.as_secs_f64(), CATCHAIN_WARN_PROCESSING_LATENCY.as_secs_f64());
                         last_latency_warn_dump_time = SystemTime::now();
                     }
@@ -1787,24 +1786,6 @@ impl CatchainProcessor {
         Network messages transfering from Receiver to Validator Session
     */
 
-    pub fn on_custom_message(
-        &mut self,
-        source_public_key_hash: PublicKeyHash,
-        data: BlockPayloadPtr,
-    ) {
-        instrument!();
-
-        if log_enabled!(log::Level::Trace) {
-            trace!(
-                "CatchainProcessor.on_custom_message: public_key_hash={} payload={:?}",
-                source_public_key_hash,
-                data
-            );
-        }
-
-        self.notify_custom_message(source_public_key_hash, data);
-    }
-
     pub fn on_custom_query(
         &mut self,
         source_public_key_hash: PublicKeyHash,
@@ -2269,6 +2250,8 @@ impl CatchainImpl {
         });
         if let Err(send_error) = self.main_queue_sender.send(task_desc) {
             error!("Catchain method call error: {}", send_error);
+        } else {
+            self.main_thread_post_counter.increment();
         }
     }
 
@@ -2283,6 +2266,8 @@ impl CatchainImpl {
         });
         if let Err(send_error) = self.utility_queue_sender.send(task_desc) {
             error!("Catchain utility method call error: {}", send_error);
+        } else {
+            self.utility_thread_post_counter.increment();
         }
     }
 
@@ -2326,6 +2311,18 @@ impl CatchainImpl {
             "Catchain_{}",
             session_id.to_hex_string()
         ));
+
+        let metrics_receiver = Arc::new(
+            metrics_runtime::Receiver::builder()
+                .build()
+                .expect("failed to create metrics receiver"),
+        );
+
+        let main_thread_post_counter = metrics_receiver.sink().counter("main_queue.posts");
+        let main_thread_pull_counter = metrics_receiver.sink().counter("main_queue.pulls");
+        let utility_thread_post_counter = metrics_receiver.sink().counter("utility_queue.posts");
+        let utility_thread_pull_counter = metrics_receiver.sink().counter("utility_queue.pulls");
+
         let body: CatchainImpl = CatchainImpl {
             main_queue_sender: main_queue_sender,
             utility_queue_sender: utility_queue_sender,
@@ -2337,13 +2334,11 @@ impl CatchainImpl {
             destroy_db_flag: destroy_db_flag.clone(),
             session_id: session_id.clone(),
             _activity_node: catchain_activity_node.clone(),
+            main_thread_post_counter: main_thread_post_counter,
+            main_thread_pull_counter: main_thread_pull_counter,
+            utility_thread_post_counter: utility_thread_post_counter,
+            _utility_thread_pull_counter: utility_thread_pull_counter.clone(),
         };
-
-        let metrics_receiver = Arc::new(
-            metrics_runtime::Receiver::builder()
-                .build()
-                .expect("failed to create metrics receiver"),
-        );
 
         let catchain = Arc::new(body);
         let catchain_weak = Arc::downgrade(&catchain);
@@ -2402,6 +2397,7 @@ impl CatchainImpl {
                     utility_queue_receiver,
                     session_id_clone,
                     metrics_receiver_clone,
+                    utility_thread_pull_counter,
                 );
             });
 

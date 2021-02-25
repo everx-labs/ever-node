@@ -466,17 +466,23 @@ fn get_metrics_counters_pair(
     Some((value1.value, value2.value))
 }
 
-pub fn compute_instance_counter(
+pub fn compute_diff_counter(
     basic_key: &String,
     metrics: &BTreeMap<String, Metric>,
+    add_suffix: &str,
+    sub_suffix: &str,
 ) -> Option<Metric> {
-    let create_key = basic_key.clone() + ".create";
-    let drop_key = basic_key.clone() + ".drop";
+    let create_key = basic_key.clone() + add_suffix;
+    let drop_key = basic_key.clone() + sub_suffix;
 
     if let Some((create_value, drop_value)) =
         get_metrics_counters_pair(metrics, &create_key, &drop_key)
     {
-        let instance_count = create_value - drop_value;
+        let instance_count = if create_value > drop_value {
+            create_value - drop_value
+        } else {
+            0
+        };
 
         return Some(Metric {
             value: instance_count,
@@ -488,6 +494,20 @@ pub fn compute_instance_counter(
         value: 0,
         usage: MetricUsage::Counter,
     })
+}
+
+pub fn compute_instance_counter(
+    basic_key: &String,
+    metrics: &BTreeMap<String, Metric>,
+) -> Option<Metric> {
+    compute_diff_counter(basic_key, metrics, ".create", ".drop")
+}
+
+pub fn compute_queue_size_counter(
+    basic_key: &String,
+    metrics: &BTreeMap<String, Metric>,
+) -> Option<Metric> {
+    compute_diff_counter(basic_key, metrics, ".posts", ".pulls")
 }
 
 pub fn add_compute_percentage_metric(

@@ -11,7 +11,7 @@ use std::time::SystemTime;
     Constants
 */
 
-const PERSISTENT_CACHE_SIZE: usize = 1000000;
+const PERSISTENT_CACHE_SIZE: usize = 10000000;
 const TEMP_CACHE_SIZE: usize = 10000;
 
 /*

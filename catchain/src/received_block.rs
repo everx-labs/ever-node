@@ -717,9 +717,13 @@ impl ReceivedBlockImpl {
 
                     if left.height != right.height
                         || left.src != right.src
-                        || left.data_hash != right.data_hash
+                        || left.data_hash == right.data_hash
                     {
-                        warn!("Incorrect fork blame: not a fork");
+                        warn!("Incorrect fork blame, not a fork: {}/{}, {}/{}, {:?}/{:?}",
+                            left.height, right.height,
+                            left.src, right.src,
+                            left.data_hash, right.data_hash
+                        );
                         self.set_ill(receiver);
                         return;
                     }

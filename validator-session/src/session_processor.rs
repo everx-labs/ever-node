@@ -4,6 +4,7 @@ use super::session_description::SessionDescriptionImpl;
 use crate::task_queue::*;
 use crate::ton_api::IntoBoxed;
 use backtrace::Backtrace;
+use cache::FifoCache;
 use catchain::profiling::check_execution_time;
 use catchain::profiling::instrument;
 use catchain::profiling::ResultStatusCounter;
@@ -33,6 +34,7 @@ const COMPLETION_HANDLERS_CHECK_PERIOD: Duration = Duration::from_millis(5000); 
 const BLOCK_PREPROCESSING_WARN_LATENCY: Duration = Duration::from_millis(100); //max block processing latency
 const BLOCK_PROCESSING_WARN_LATENCY: Duration = Duration::from_millis(200); //max block processing latency
 const MAX_NEXT_BLOCK_WAIT_DELAY: Duration = Duration::from_millis(500); //max next block wait delay
+const WARN_DUMP_PERIOD: Duration = Duration::from_millis(2000); //warning dump period
 
 const STATES_RESERVED_COUNT: usize = 100000; //reserved states count for blocks
 const ROUND_DEBUG_PERIOD: std::time::Duration = Duration::from_secs(15); //round debug time
@@ -48,6 +50,8 @@ type RoundBlockMap = HashMap<u32, BlockCandidateMap>;
 type BlockApproveMap = HashMap<BlockId, (SystemTime, BlockPayloadPtr)>;
 type BlockMap = HashMap<BlockId, BlockPayloadPtr>;
 type BlockSet = HashSet<BlockId>;
+type StateMergeCache = FifoCache<(HashType, HashType), SessionStatePtr>;
+type BlockUpdateCache = FifoCache<u32, SessionStatePtr>;
 
 pub(crate) struct SessionProcessorImpl {
     task_queue: TaskQueuePtr, //task queue for session callbacks
@@ -62,6 +66,8 @@ pub(crate) struct SessionProcessorImpl {
     local_key: PrivateKey,                           //private key for signing
     description: SessionDescriptionImpl,             //session description
     block_to_state_map: Vec<Option<SessionStatePtr>>, //session states
+    state_merge_cache: StateMergeCache,              //cache of merged states
+    block_update_cache: BlockUpdateCache,            //cache of states after block updates
     real_state: SessionStatePtr,                     //real state
     virtual_state: SessionStatePtr,                  //virtual state
     current_round: u32,                              //current round sequence number
@@ -95,6 +101,8 @@ pub(crate) struct SessionProcessorImpl {
     process_blocks_counter: metrics_runtime::data::Counter, //counter for process calls
     request_new_block_counter: metrics_runtime::data::Counter, //counter for new blocks requesting
     check_all_counter: metrics_runtime::data::Counter, //counter for check_all calls
+    last_preprocess_block_warn_dump_time: SystemTime, //last time preprocess block latency warning has been printed
+    last_process_blocks_warn_dump_time: SystemTime, //last time process blocks latency warning has been printed
 }
 
 /*
@@ -169,6 +177,11 @@ impl SessionProcessor for SessionProcessorImpl {
         instrument!();
 
         self.check_all_counter.increment();
+
+        //flush caches
+
+        self.state_merge_cache.flush();
+        self.block_update_cache.flush();
 
         //check completion handlers
 
@@ -246,19 +259,26 @@ impl SessionProcessor for SessionProcessorImpl {
                 if let Ok(block_processing_latency) = block_creation_time.elapsed() {
                     let delivery_issue =
                         block_processing_latency < BLOCK_PREPROCESSING_WARN_LATENCY;
-                    let source_id = block.get_source_id();
-                    let source_public_key_hash =
-                        self.description.get_source_public_key_hash(source_id);
 
-                    warn!("{}: ValidatorSession block payload latency is {:.3}s, block latency is {:.3}s (expected_latency={:.3}s, source=v{:03} ({})): {}",
-                        if delivery_issue { "Delivery time issue" } else { "Preprocessing time issue" }, block_payload_processing_latency.as_secs_f64(), block_processing_latency.as_secs_f64(), BLOCK_PREPROCESSING_WARN_LATENCY.as_secs_f64(),
-                        source_id, source_public_key_hash, &block);
+                    if let Ok(warn_elapsed) = self.last_preprocess_block_warn_dump_time.elapsed() {
+                        if warn_elapsed > WARN_DUMP_PERIOD {
+                            let source_id = block.get_source_id();
+                            let source_public_key_hash =
+                                self.description.get_source_public_key_hash(source_id);
+
+                            warn!("{}: ValidatorSession block payload latency is {:.3}s, block latency is {:.3}s (expected_latency={:.3}s, source=v{:03} ({})): {}",
+                                if delivery_issue { "Delivery time issue" } else { "Preprocessing time issue" }, block_payload_processing_latency.as_secs_f64(), block_processing_latency.as_secs_f64(), BLOCK_PREPROCESSING_WARN_LATENCY.as_secs_f64(),
+                                source_id, source_public_key_hash, &block);
+                            self.last_preprocess_block_warn_dump_time = SystemTime::now();
+                        }
+                    }
                 }
             }
         }
 
         let payload_len = block.get_payload().data().len();
-        let deps_len = block.get_deps().len();
+        let deps = block.get_deps();
+        let deps_len = deps.len();
 
         trace!(
             "...received block with payload: {} bytes, and {} deps",
@@ -266,67 +286,105 @@ impl SessionProcessor for SessionProcessorImpl {
             deps_len
         );
 
-        //merge state
+        //parse payload
 
-        trace!("...prev block is {:?}", block.get_prev());
+        let (block_update, need_actualize_state) =
+            if block.get_payload().data().len() != 0 || deps.len() != 0 {
+                instrument!();
 
-        let mut state = if let Some(prev) = block.get_prev() {
-            self.get_state(&prev).clone()
+                trace!("...parsing incoming block update");
+
+                //try to parse block update
+
+                let block_update: Result<ton::BlockUpdate> =
+                    catchain::utils::deserialize_tl_boxed_object(&block.get_payload().data());
+
+                match block_update.as_ref() {
+                    Ok(block_update) => {
+                        let block_update = block_update.clone().only();
+                        (Some(block_update), true)
+                    }
+                    Err(err) => {
+                        let node_public_key_hash = self
+                            .description
+                            .get_source_public_key_hash(block.get_source_id() as u32)
+                            .clone();
+
+                        warn!(
+                            "Node {} sent a block {:?} which can't be parsed: {:?}",
+                            node_public_key_hash,
+                            block.get_hash(),
+                            err
+                        );
+
+                        (None, true)
+                    }
+                }
+            } else {
+                (None, false)
+            };
+
+        //search for state in block update cache
+
+        let state = if let Some(state) = self.get_state_for_block_update(&block_update) {
+            state
         } else {
-            trace!("...create initial state");
+            //merge state
 
-            SessionFactory::create_state(&mut self.description)
-        };
+            trace!("...prev block is {:?}", block.get_prev());
 
-        trace!("...merge state {:08x?} with dependencies", state.get_hash());
+            let mut state = if let Some(prev) = block.get_prev() {
+                self.get_state(&prev).clone()
+            } else {
+                trace!("...create initial state");
 
-        let deps = block.get_deps();
+                SessionFactory::create_state(&mut self.description)
+            };
 
-        for dep_block in deps {
-            let dep_state = self.get_state(dep_block).clone();
-            let state_hash = state.get_hash();
+            trace!("...merge state {:08x?} with dependencies", state.get_hash());
 
-            state = state.merge(&dep_state, &mut self.description);
+            for dep_block in deps {
+                let dep_state = self.get_state(dep_block).clone();
+                let state_hash = state.get_hash();
 
-            trace!(
-                "...state merged: ({:08x?}, {:08x?}) -> {:08x?}",
-                state_hash,
-                dep_state.get_hash(),
-                state.get_hash()
-            );
-        }
+                state = self.merge_states(&state, &dep_state, false);
 
-        trace!("...merged virtual state is: {:?}", state);
+                trace!(
+                    "...state merged: ({:08x?}, {:08x?}) -> {:08x?}",
+                    state_hash,
+                    dep_state.get_hash(),
+                    state.get_hash()
+                );
+            }
 
-        //dump block before actions applying (for debugging only)
+            trace!("...merged virtual state is: {:?}", state);
 
-        if DEBUG_DUMP_BLOCKS {
-            trace!(
-                "...dump block before actions applying: {:?}",
-                block.get_hash()
-            );
+            //dump block before actions applying (for debugging only)
 
-            self.dump_block(&block);
-        }
+            if DEBUG_DUMP_BLOCKS {
+                trace!(
+                    "...dump block before actions applying: {:?}",
+                    block.get_hash()
+                );
 
-        //apply actions from incoming block & check payload
+                self.dump_block(&block);
+            }
 
-        if block.get_payload().data().len() != 0 || deps.len() != 0 {
-            trace!("...parsing incoming block update");
+            //apply actions from incoming block & check payload
 
-            //try to parse block update
+            let mut block_update_hash = None;
 
-            let block_update: Result<ton::BlockUpdate> =
-                catchain::utils::deserialize_tl_boxed_object(&block.get_payload().data());
-            let node_public_key_hash = self
-                .description
-                .get_source_public_key_hash(block.get_source_id() as u32)
-                .clone();
-            let node_source_id = block.get_source_id() as u32;
+            if need_actualize_state {
+                instrument!();
 
-            match block_update.as_ref() {
-                Ok(block_update) => {
-                    let block_update = block_update.clone().only();
+                let node_public_key_hash = self
+                    .description
+                    .get_source_public_key_hash(block.get_source_id() as u32)
+                    .clone();
+                let node_source_id = block.get_source_id() as u32;
+
+                if let Some(block_update) = block_update {
+                    block_update_hash = Some(block_update.state as u32);
 
                     trace!("...BlockUpdate has been received: {:?}", block_update);
 
@@ -372,33 +430,36 @@ impl SessionProcessor for SessionProcessorImpl {
                         for msg in block_update.actions.iter() {
                             warn!("Node {} sent a block {:?} with hash mismatch: applited action: {:?}", node_public_key_hash, block.get_hash(), msg);
                         }
+                    } else {
+                        state = state.make_all(
+                            &mut self.description,
+                            node_source_id,
+                            state.get_ts(node_source_id),
+                        );
                     }
                 }
-                Err(err) => {
-                    warn!(
-                        "Node {} sent a block {:?} which can't be parsed: {:?}",
-                        node_public_key_hash,
-                        block.get_hash(),
-                        err
-                    );
-
-                    state = state.make_all(
-                        &mut self.description,
-                        node_source_id,
-                        state.get_ts(node_source_id),
-                    );
-                }
             }
-        }
 
-        //update session states
+            //update session states
 
-        trace!(
-            "...move state {:08x?} to persistent memory",
-            state.get_hash()
-        );
+            trace!(
+                "...move state {:08x?} to persistent memory",
+                state.get_hash()
+            );
 
-        state = state.move_to_persistent(&mut self.description);
+            state = state.move_to_persistent(&mut self.description);
+
+            //update cache
+
+            if let Some(block_update_hash) = block_update_hash {
+                self.block_update_cache
+                    .insert(block_update_hash, state.clone());
+            }
+
+            state
+        };
+
+        //set state
 
         self.set_state(&block, state.clone());
 
@@ -423,12 +484,9 @@ impl SessionProcessor for SessionProcessorImpl {
             self.real_state = state.clone();
         }
 
-        let virtual_state_hash = state.get_hash();
+        let virtual_state_hash = self.virtual_state.get_hash();
 
-        self.virtual_state = self
-            .virtual_state
-            .merge(&state.clone(), &mut self.description);
-        self.virtual_state = self.virtual_state.move_to_persistent(&mut self.description);
+        self.virtual_state = self.merge_states(&self.virtual_state.clone(), &state.clone(), true);
 
         trace!(
             "...state merged to virtual state: ({:08x?},{:08x?}) -> {:08x?}",
@@ -503,22 +561,30 @@ impl SessionProcessor for SessionProcessorImpl {
         );
 
         for block in &blocks {
-            let block_payload_creation_time = block.get_payload().get_creation_time();
+            if let Ok(warn_elapsed) = self.last_process_blocks_warn_dump_time.elapsed() {
+                if warn_elapsed > WARN_DUMP_PERIOD {
+                    let block_payload_creation_time = block.get_payload().get_creation_time();
 
-            if let Ok(block_payload_processing_latency) = block_payload_creation_time.elapsed() {
-                if block_payload_processing_latency > BLOCK_PROCESSING_WARN_LATENCY {
-                    let block_creation_time = block.get_creation_time();
+                    if let Ok(block_payload_processing_latency) =
+                        block_payload_creation_time.elapsed()
+                    {
+                        if block_payload_processing_latency > BLOCK_PROCESSING_WARN_LATENCY {
+                            let block_creation_time = block.get_creation_time();
 
-                    if let Ok(block_processing_latency) = block_creation_time.elapsed() {
-                        let delivery_issue =
-                            block_processing_latency < BLOCK_PROCESSING_WARN_LATENCY;
-                        let source_id = block.get_source_id();
-                        let source_public_key_hash =
-                            self.description.get_source_public_key_hash(source_id);
+                            if let Ok(block_processing_latency) = block_creation_time.elapsed() {
+                                let delivery_issue =
+                                    block_processing_latency < BLOCK_PROCESSING_WARN_LATENCY;
+                                let source_id = block.get_source_id();
+                                let source_public_key_hash =
+                                    self.description.get_source_public_key_hash(source_id);
 
-                        warn!("{}: ValidatorSession block payload processing latency is {:.3}s, block processing latency is {:.3}s (expected_latency={:.3}s, source=v{:03} ({})): {}",
-                            if delivery_issue { "Delivery time issue" } else { "Processing time issue" }, block_payload_processing_latency.as_secs_f64(), block_processing_latency.as_secs_f64(), BLOCK_PROCESSING_WARN_LATENCY.as_secs_f64(),
-                            source_id, source_public_key_hash, &block);
+                                warn!("{}: ValidatorSession block payload processing latency is {:.3}s, block processing latency is {:.3}s (expected_latency={:.3}s, source=v{:03} ({})): {}",
+                                    if delivery_issue { "Delivery time issue" } else { "Processing time issue" }, block_payload_processing_latency.as_secs_f64(), block_processing_latency.as_secs_f64(), BLOCK_PROCESSING_WARN_LATENCY.as_secs_f64(),
+                                    source_id, source_public_key_hash, &block);
+
+                                self.last_process_blocks_warn_dump_time = SystemTime::now();
+                            }
+                        }
                     }
                 }
             }
@@ -526,7 +592,7 @@ impl SessionProcessor for SessionProcessorImpl {
             let real_state_hash = self.real_state.get_hash();
             let block_state = self.get_state(&block).clone();
 
-            self.real_state = self.real_state.merge(&block_state, &mut self.description);
+            self.real_state = self.merge_states(&self.real_state.clone(), &block_state, false);
 
             trace!(
                 "...real state merged: ({:08x?}, {:08x?}) -> {:08x?}",
@@ -809,10 +875,8 @@ impl SessionProcessor for SessionProcessorImpl {
             self.virtual_state.get_hash()
         );
 
-        self.virtual_state = self
-            .virtual_state
-            .merge(&self.real_state, &mut self.description);
-        self.virtual_state = self.virtual_state.move_to_persistent(&mut self.description);
+        self.virtual_state =
+            self.merge_states(&self.virtual_state.clone(), &self.real_state.clone(), true);
 
         trace!("...new virtual_state: {:?}", &self.virtual_state);
 
@@ -1088,14 +1152,6 @@ impl SessionProcessor for SessionProcessorImpl {
 
             break;
         }
-    }
-
-    fn process_message(&mut self, source_id: PublicKeyHash, data: BlockPayloadPtr) {
-        trace!(
-            "SessionProcessor::process_message: received message from source {}: {:?}",
-            source_id,
-            data
-        );
     }
 
     fn process_query(
@@ -1466,6 +1522,66 @@ impl SessionProcessorImpl {
 
     fn get_local_key(&self) -> &PrivateKey {
         &self.local_key
+    }
+
+    /*
+        Caches
+    */
+
+    fn get_state_for_block_update(
+        &mut self,
+        block_update: &Option<::ton_api::ton::validator_session::blockupdate::BlockUpdate>,
+    ) -> Option<SessionStatePtr> {
+        if block_update.is_none() {
+            return None;
+        }
+
+        let block_update = block_update.as_ref().unwrap();
+        let block_update_hash = block_update.state as u32;
+
+        if let Some(state) = self.block_update_cache.get(&block_update_hash) {
+            return Some(state.clone());
+        }
+
+        None
+    }
+
+    fn merge_states(
+        &mut self,
+        left: &SessionStatePtr,
+        right: &SessionStatePtr,
+        move_to_persistent: bool,
+    ) -> SessionStatePtr {
+        instrument!();
+
+        let left_hash = left.get_hash();
+        let right_hash = right.get_hash();
+
+        if left_hash == right_hash {
+            return left.clone();
+        }
+
+        let merge_key = (left_hash, right_hash);
+
+        if let Some(state) = self.state_merge_cache.get(&merge_key) {
+            return state.clone();
+        }
+
+        let result = {
+            instrument!();
+
+            let mut result = left.merge(&right, &mut self.description);
+
+            if move_to_persistent {
+                result = result.move_to_persistent(&mut self.description);
+            }
+
+            result
+        };
+
+        self.state_merge_cache.insert(merge_key, result.clone());
+
+        result
     }
 
     /*
@@ -2902,6 +3018,8 @@ impl SessionProcessorImpl {
         //initialize state
 
         let now = SystemTime::now();
+        let state_merge_cache = FifoCache::new("state_merge".to_owned(), metrics_receiver);
+        let block_update_cache = FifoCache::new("block_update".to_owned(), metrics_receiver);
         let initial_state = SessionFactory::create_state(&mut description);
         let initial_state = initial_state.move_to_persistent(&mut description);
 
@@ -2916,6 +3034,8 @@ impl SessionProcessorImpl {
             completion_handlers: HashMap::new(),
             completion_handlers_check_last_time: SystemTime::now(),
             block_to_state_map: Vec::with_capacity(STATES_RESERVED_COUNT),
+            state_merge_cache: state_merge_cache,
+            block_update_cache: block_update_cache,
             catchain_started: false,
             description: description,
             real_state: initial_state.clone(),
@@ -2951,6 +3071,8 @@ impl SessionProcessorImpl {
             process_blocks_counter: process_blocks_counter,
             request_new_block_counter: request_new_block_counter,
             check_all_counter: check_all_counter,
+            last_preprocess_block_warn_dump_time: now,
+            last_process_blocks_warn_dump_time: now,
         };
 
         if DEBUG_EVENTS_LOG {

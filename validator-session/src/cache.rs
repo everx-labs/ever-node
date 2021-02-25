@@ -1,5 +1,7 @@
 pub use super::*;
+use crate::profiling::ResultStatusCounter;
 pub use catchain::InstanceCounter;
+use std::collections::HashMap;
 
 /// Entry entry to be used by cache objects
 pub type CacheEntry = Rc<dyn std::any::Any>;
@@ -173,5 +175,104 @@ impl Clone for CachedInstanceCounter {
         };
 
         body
+    }
+}
+
+/// FIFO cache
+pub(crate) struct FifoCache<Key, Value> {
+    items: HashMap<Key, (Value, std::time::SystemTime, InstanceCounter)>, //cache items
+    items_to_remove: Vec<Key>,                                            //items to remove
+    min_flush_size: usize,                                                //min cache size
+    expiration_time: std::time::Duration, //expiration time for flushing
+    reuse_counter: ResultStatusCounter,   //reuse counter for metrics
+    instance_counter: InstanceCounter,    //cached instances counter
+}
+
+impl<Key, Value> FifoCache<Key, Value>
+where
+    Key: std::cmp::Eq + std::hash::Hash + Clone,
+{
+    pub fn new(name: String, metrics_receiver: &metrics_runtime::Receiver) -> Self {
+        const DEFAULT_FIFO_CACHE_MIN_FLUSH_SIZE: usize = 1000;
+        const DEFAULT_FIFO_CACHE_EXPIRATION_TIME: std::time::Duration =
+            std::time::Duration::from_secs(60);
+
+        Self::new_with_params(
+            name,
+            metrics_receiver,
+            DEFAULT_FIFO_CACHE_MIN_FLUSH_SIZE,
+            DEFAULT_FIFO_CACHE_EXPIRATION_TIME,
+        )
+    }
+
+    pub fn new_with_params(
+        name: String,
+        metrics_receiver: &metrics_runtime::Receiver,
+        min_flush_size: usize,
+        expiration_time: std::time::Duration,
+    ) -> Self {
+        let reuse_counter =
+            ResultStatusCounter::new(&metrics_receiver, &format!("{}_cache_reuse", name));
+        let instance_counter =
+            InstanceCounter::new(&metrics_receiver, &format!("{}_cache_items", name));
+
+        Self {
+            items: HashMap::new(),
+            min_flush_size: min_flush_size,
+            expiration_time: expiration_time,
+            items_to_remove: Vec::with_capacity(min_flush_size),
+            reuse_counter: reuse_counter,
+            instance_counter: instance_counter,
+        }
+    }
+
+    pub fn get(&mut self, key: &Key) -> Option<&Value> {
+        self.reuse_counter.total_increment();
+
+        if let Some(item) = self.items.get_mut(&key) {
+            item.1 = std::time::SystemTime::now();
+
+            self.reuse_counter.success();
+
+            return Some(&item.0);
+        }
+
+        self.reuse_counter.failure();
+
+        None
+    }
+
+    pub fn insert(&mut self, key: Key, value: Value) {
+        self.items.insert(
+            key,
+            (
+                value,
+                std::time::SystemTime::now(),
+                self.instance_counter.clone(),
+            ),
+        );
+    }
+
+    pub fn flush(&mut self) {
+        self.items_to_remove.clear();
+        self.items_to_remove.reserve(self.items.len());
+
+        for (key, item) in self.items.iter() {
+            if let Ok(last_accessed) = item.1.elapsed() {
+                if last_accessed >= self.expiration_time {
+                    self.items_to_remove.push((*key).clone());
+
+                    if self.items.len() - self.items_to_remove.len() < self.min_flush_size {
+                        break;
+                    }
+                }
+            }
+        }
+
+        for key in &self.items_to_remove {
+            self.items.remove(&key);
+        }
+
+        self.items_to_remove.clear();
     }
 }

@@ -779,14 +779,6 @@ pub trait ReceiverListener {
     /// Source blame event
     fn on_blame(&mut self, receiver: &mut dyn Receiver, source_id: usize);
 
-    /// Custom message event
-    fn on_custom_message(
-        &mut self,
-        receiver: &mut dyn Receiver,
-        source_public_key_hash: &PublicKeyHash,
-        data: &BlockPayloadPtr,
-    );
-
     /// Custom query event
     fn on_custom_query(
         &mut self,
@@ -853,9 +845,6 @@ pub trait CatchainListener {
 
     /// Notify about incoming broadcasts
     fn process_broadcast(&self, source_id: PublicKeyHash, data: BlockPayloadPtr);
-
-    /// Notify about incoming message
-    fn process_message(&self, source_id: PublicKeyHash, data: BlockPayloadPtr);
 
     /// Notify about incoming query
     fn process_query(

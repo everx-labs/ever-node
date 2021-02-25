@@ -1207,9 +1207,6 @@ pub trait SessionProcessor: CompletionHandlerProcessor + fmt::Display {
     /// Notify about incoming broadcasts
     fn process_broadcast(&mut self, source_id: PublicKeyHash, data: BlockPayloadPtr);
 
-    /// Notify about incoming message
-    fn process_message(&mut self, source_id: PublicKeyHash, data: BlockPayloadPtr);
-
     /// Notify about incoming query
     fn process_query(
         &mut self,
@@ -1390,13 +1387,15 @@ impl SessionFactory {
     }
 
     /// Create task queue
-    pub fn create_task_queue() -> TaskQueuePtr {
-        session::SessionImpl::create_task_queue()
+    pub fn create_task_queue(metrics_receiver: Arc<metrics_runtime::Receiver>) -> TaskQueuePtr {
+        session::SessionImpl::create_task_queue(metrics_receiver)
     }
 
     /// Create session callbacks task queue
-    pub fn create_callback_task_queue() -> CallbackTaskQueuePtr {
-        session::SessionImpl::create_callback_task_queue()
+    pub fn create_callback_task_queue(
+        metrics_receiver: Arc<metrics_runtime::Receiver>,
+    ) -> CallbackTaskQueuePtr {
+        session::SessionImpl::create_callback_task_queue(metrics_receiver)
     }
 
     /// Create session
