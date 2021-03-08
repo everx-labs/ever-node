@@ -43,7 +43,7 @@ impl ControlServer {
         Ok(ret)
     }
     pub fn shutdown(self) {
-        self.adnl.shutdown()
+        self.adnl.shutdown();
     }
 }
 
