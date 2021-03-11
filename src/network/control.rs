@@ -42,8 +42,8 @@ impl ControlServer {
         };
         Ok(ret)
     }
-    pub fn shutdown(self) {
-        self.adnl.shutdown()
+    pub async fn shutdown(self) {
+        self.adnl.shutdown().await
     }
 }
 
