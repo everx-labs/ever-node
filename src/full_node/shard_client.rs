@@ -117,7 +117,7 @@ async fn load_shard_blocks_cycle(
         let mc_block = r.1;
 
         log::trace!("load_shard_blocks_cycle: waiting semaphore: {}", mc_block.id());
-        let semaphore_permit = Arc::clone(&semaphore).acquire_owned().await;
+        let semaphore_permit = Arc::clone(&semaphore).acquire_owned().await?;
 
         log::trace!("load_shard_blocks_cycle: process next mc block: {}", mc_block.id());
 

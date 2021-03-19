@@ -147,8 +147,6 @@ pub struct CollatorTestBundle {
     blocks: HashMap<BlockIdExt, BlockStuff>,
     candidate: Option<BlockCandidate>,
 
-    aux_mc_shard_states: lockfree::map::Map<u32, ShardStateStuff>,
-    shard_states_cache: lockfree::map::Map<ShardIdent, ShardStateStuff>,
     block_handle_cache: Arc<lockfree::map::Map<BlockIdExt, Weak<BlockHandle>>>,
 }
 
@@ -295,8 +293,6 @@ impl CollatorTestBundle {
             states,
             mc_merkle_updates,
             blocks,
-            aux_mc_shard_states: lockfree::map::Map::new(),
-            shard_states_cache: lockfree::map::Map::new(),
             block_handle_cache: Arc::new(lockfree::map::Map::new()),
             candidate: None,
         })
@@ -442,8 +438,6 @@ impl CollatorTestBundle {
             states,
             mc_merkle_updates,
             blocks,
-            aux_mc_shard_states: lockfree::map::Map::new(),
-            shard_states_cache: lockfree::map::Map::new(),
             block_handle_cache: Arc::new(lockfree::map::Map::new()),
             candidate: Some(candidate),
         })
@@ -650,8 +644,6 @@ impl CollatorTestBundle {
             states,
             mc_merkle_updates,
             blocks,
-            aux_mc_shard_states: lockfree::map::Map::new(),
-            shard_states_cache: lockfree::map::Map::new(),
             block_handle_cache: Arc::new(lockfree::map::Map::new()),
             candidate: None,
         })
@@ -803,14 +795,6 @@ impl EngineOperations for CollatorTestBundle {
         } else {
             fail!("bundle doesn't contain state for block {}", &self.index.last_mc_state)
         }
-    }
-
-    fn aux_mc_shard_states(&self) -> &lockfree::map::Map<u32, ShardStateStuff> {
-        &self.aux_mc_shard_states
-    }
-
-    fn shard_states(&self) -> &lockfree::map::Map<ShardIdent, ShardStateStuff> {
-        &self.shard_states_cache
     }
 
     async fn wait_state(self: Arc<Self>, id: &BlockIdExt, _timeout_ms: Option<u64>) -> Result<ShardStateStuff> {

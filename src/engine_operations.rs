@@ -6,7 +6,7 @@ use crate::{
     internal_db::NodeState, 
     shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
 };
-use adnl::common::KeyOption;
+use adnl::common::{KeyId, KeyOption};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
@@ -30,6 +30,10 @@ impl EngineOperations for Engine {
         validators: &Vec<CatchainNode>
     ) -> Result<Option<Arc<KeyOption>>> {
         self.validator_network().set_validator_list(validator_list_id, validators).await
+    }
+
+    fn activate_validator_list(&self, validator_list_id: UInt256) -> Result<()> {
+        self.network().activate_validator_list(validator_list_id)
     }
 
     async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
@@ -82,13 +86,22 @@ impl EngineOperations for Engine {
 
     async fn wait_applied_block(&self, id: &BlockIdExt, timeout_ms: Option<u64>) -> Result<(Arc<BlockHandle>, BlockStuff)> {
         loop {
+            let is_applied = || {
+                if let Some(handle) = self.load_block_handle(id)? {
+                    Ok(handle.is_applied())
+                } else {
+                    Ok(false)
+                }
+            };
+
             if let Some(handle) = self.load_block_handle(id)? {
                 if handle.is_applied() {
                     let block = self.load_block(&handle).await?;
                     return Ok((handle, block))
                 }
             }
-            self.block_applying_awaiters().wait(id, timeout_ms).await?;
+
+            self.block_applying_awaiters().wait(id, timeout_ms, &is_applied).await?;
         }
     }
 
@@ -105,7 +118,8 @@ impl EngineOperations for Engine {
                 let id = self.load_block_next1(prev_handle.id()).await?;
                 return self.wait_applied_block(&id, timeout_ms).await
             } else {
-                if let Some(id) = self.next_block_applying_awaiters().wait(prev_handle.id(), timeout_ms).await? {
+                if let Some(id) = self.next_block_applying_awaiters()
+                    .wait(prev_handle.id(), timeout_ms, || Ok(prev_handle.has_next1())).await? {
                     if let Some(handle) = self.load_block_handle(&id)? {
                         let block = self.load_block(&handle).await?;
                         return Ok((handle, block))
@@ -220,9 +234,19 @@ impl EngineOperations for Engine {
         self.download_next_block_worker(prev_id, None).await
     }
 
-    async fn download_state(&self, block_id: &BlockIdExt, master_id: &BlockIdExt) -> Result<ShardStateStuff> {
-        let overlay = self.get_full_node_overlay(block_id.shard().workchain_id(), block_id.shard().shard_prefix_with_tag()).await?;
-        crate::full_node::state_helper::download_persistent_state(block_id, master_id, overlay.deref()).await
+    async fn download_state(
+        &self, 
+        block_id: &BlockIdExt, 
+        master_id: &BlockIdExt,
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+    ) -> Result<ShardStateStuff> {
+        let overlay = self.get_full_node_overlay(
+            block_id.shard().workchain_id(), 
+            block_id.shard().shard_prefix_with_tag()
+        ).await?;
+        crate::full_node::state_helper::download_persistent_state(
+            block_id, master_id, overlay.deref(), active_peers
+        ).await
     }
 
     async fn download_zerostate(&self, id: &BlockIdExt) -> Result<(ShardStateStuff, Vec<u8>)> {
@@ -271,11 +295,13 @@ impl EngineOperations for Engine {
     }
 
     async fn load_state(&self, block_id: &BlockIdExt) -> Result<ShardStateStuff> {
-        if let Some (kv) = self.shard_states_cache().get(block_id) {
-            Ok(kv.val().clone())
+        if let Some(state) = self.shard_states_cache().get(block_id) {
+            self.update_shard_states_cache_stat(true);
+            Ok(state)
         } else {
             let state = self.db().load_shard_state_dynamic(block_id)?;
-            self.shard_states_cache().insert(block_id.clone(), state.clone());
+            self.shard_states_cache().set(block_id.clone(), |_| Some(state.clone()))?;
+            self.update_shard_states_cache_stat(false);
             Ok(state)
         }
     }
@@ -295,10 +321,12 @@ impl EngineOperations for Engine {
 
     async fn wait_state(self: Arc<Self>, id: &BlockIdExt, timeout_ms: Option<u64>) -> Result<ShardStateStuff> {
         loop {
-            if let Some(handle) = self.load_block_handle(id)? {
-                if handle.has_state() {
-                    break self.load_state(id).await
-                }
+            let has_state = || {
+                Ok(self.load_block_handle(id)?.map(|h| h.has_state()).unwrap_or(false))
+            };
+
+            if has_state()? {
+                break self.load_state(id).await
             }
             let id1 = id.clone();
             let engine = self.clone();
@@ -307,7 +335,7 @@ impl EngineOperations for Engine {
                     log::error!("Error while pre-apply block (while wait_state) {}: {}", id1, e);
                 }
             });
-            if let Some(ss) = self.shard_states_awaiters().wait(id, timeout_ms).await? {
+            if let Some(ss) = self.shard_states_awaiters().wait(id, timeout_ms, &has_state).await? {
                 break Ok(ss)
             }
         }
@@ -324,7 +352,7 @@ impl EngineOperations for Engine {
             async { Ok(state.clone()) }
         ).await?;
         if self.shard_states_cache().get(handle.id()).is_none() {
-            self.shard_states_cache().insert(handle.id().clone(), state.clone());
+            self.shard_states_cache().set(handle.id().clone(), |_| Some(state.clone()))?;
         }
         self.db().store_shard_state_dynamic(handle, state)
     }
@@ -453,13 +481,13 @@ impl EngineOperations for Engine {
         self.db().archive_manager().get_archive_slice(archive_id, offset, limit).await
     }
 
-    async fn download_archive(&self, masterchain_seqno: u32) -> Result<Option<Vec<u8>>> {
+    async fn download_archive(
+        &self, 
+        masterchain_seqno: u32,
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+    ) -> Result<Option<Vec<u8>>> {
         let client = self.get_masterchain_overlay().await?;
-        client.download_archive(masterchain_seqno).await
-    }
-
-    fn assign_mc_ref_seq_no(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<()> {
-        self.db().assign_mc_ref_seq_no(handle, mc_seq_no)
+        client.download_archive(masterchain_seqno, active_peers).await
     }
 
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()> {
@@ -511,13 +539,6 @@ impl EngineOperations for Engine {
 
     fn complete_external_messages(&self, to_delay: Vec<UInt256>, to_delete: Vec<UInt256>) -> Result<()> {
         self.external_messages().complete_messages(to_delay, to_delete, self.now())
-    }
-
-    fn aux_mc_shard_states(&self) -> &lockfree::map::Map<u32, ShardStateStuff> {
-        Engine::aux_mc_shard_states(self)
-    }
-    fn shard_states(&self) -> &lockfree::map::Map<ShardIdent, ShardStateStuff> {
-        Engine::shard_states(self)
     }
 
     // Get current list of new shard blocks with respect to last mc block.

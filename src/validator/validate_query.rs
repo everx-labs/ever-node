@@ -502,18 +502,17 @@ impl ValidateQuery {
         self.try_unpack_mc_state(&base, mc_state)
     }
 
-    #[allow(dead_code)]
-    fn process_mc_state(&mut self, mc_data: &McData, mc_state: &ShardStateStuff) -> Result<()> {
-        if mc_data.state.block_id() != mc_state.block_id() {
-            if !mc_data.state.has_prev_block(mc_state.block_id())? {
-                reject_query!("attempting to register masterchain state for block {} \
-                    which is not an ancestor of most recent masterchain block {}",
-                        mc_state.block_id(), mc_data.state.block_id())
-            }
-        }
-        self.engine.set_aux_mc_state(mc_state)?;
-        Ok(())
-    }
+    // fn process_mc_state(&mut self, mc_data: &McData, mc_state: &ShardStateStuff) -> Result<()> {
+    //     if mc_data.state.block_id() != mc_state.block_id() {
+    //         if !mc_data.state.has_prev_block(mc_state.block_id())? {
+    //             reject_query!("attempting to register masterchain state for block {} \
+    //                 which is not an ancestor of most recent masterchain block {}",
+    //                     mc_state.block_id(), mc_data.state.block_id())
+    //         }
+    //     }
+    //     self.engine.set_aux_mc_state(mc_state)?;
+    //     Ok(())
+    // }
 
     fn try_unpack_mc_state(&mut self, base: &ValidateBase, mc_state: ShardStateStuff) -> Result<McData> {
         log::debug!(target: "validate_query", "unpacking reference masterchain state {}", mc_state.block_id());

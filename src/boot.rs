@@ -2,6 +2,7 @@ use crate::{
     CHECK, block::BlockStuff, block_proof::BlockProofStuff, engine_traits::EngineOperations, 
     shard_state::ShardStateStuff
 };
+use adnl::common::KeyId;
 use std::{ops::Deref, sync::Arc, time::Duration};
 use storage::types::BlockHandle;
 use ton_block::{BlockIdExt, ShardIdent, BASE_WORKCHAIN_ID, SHARD_FULL};
@@ -182,8 +183,9 @@ async fn download_start_blocks_and_states(
     master_id: &BlockIdExt
 ) -> Result<()> {
 
+    let active_peers = Arc::new(lockfree::set::Set::new());
     let (master_handle, init_mc_block) = 
-        download_block_and_state(engine, master_id, master_id).await?;
+        download_block_and_state(engine, master_id, master_id, &active_peers).await?;
     CHECK!(master_handle.has_state());
     CHECK!(master_handle.is_applied());
 
@@ -191,7 +193,7 @@ async fn download_start_blocks_and_states(
         let shard_handle = if block_id.seq_no() == 0 {
             download_zero_state(engine, &block_id).await?.0
         } else {
-            download_block_and_state(engine, &block_id, master_id).await?.0
+            download_block_and_state(engine, &block_id, master_id, &active_peers).await?.0
         };
         CHECK!(shard_handle.has_state());
         CHECK!(shard_handle.is_applied());
@@ -262,7 +264,8 @@ async fn download_key_block_proof(
 async fn download_block_and_state(
     engine: &dyn EngineOperations, 
     block_id: &BlockIdExt, 
-    master_id: &BlockIdExt
+    master_id: &BlockIdExt,
+    active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
 ) -> Result<(Arc<BlockHandle>, BlockStuff)> {
     let handle = engine.load_block_handle(block_id)?.filter(
         |handle| handle.has_data()
@@ -280,7 +283,7 @@ async fn download_block_and_state(
     if !handle.has_state() {
         let state_update = block.block().read_state_update()?;
         log::info!(target: "boot", "download state {}", handle.id());
-        let state = engine.download_state(handle.id(), master_id).await?;
+        let state = engine.download_state(handle.id(), master_id, active_peers).await?;
         let state_hash = state.root_cell().repr_hash();
         if state_update.new_hash != state_hash {
             fail!("root_hash {} of downloaded state {} is wrong", state_hash.to_hex_string(), handle.id())

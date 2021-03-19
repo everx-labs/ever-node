@@ -4,7 +4,7 @@ use crate::{
     shard_state::ShardStateStuff,
     types::messages::MsgEnqueueStuff,
 };
-use std::{cmp::max, iter::Iterator, sync::Arc, ops::Deref};
+use std::{cmp::max, iter::Iterator, sync::Arc, collections::HashMap};
 use ton_block::{
     BlockIdExt, ShardIdent, Serializable, Deserializable, 
     OutMsgQueueInfo, OutMsgQueue, OutMsgQueueKey, IhrPendingInfo,
@@ -241,10 +241,10 @@ impl OutMsgQueueInfoStuff {
 
     pub fn fix_processed_upto(
         &mut self,
-        engine: &dyn EngineOperations,
         cur_mc_seqno: u32,
         next_mc_end_lt: u64,
-        next_shards: Option<&ShardHashes>
+        next_shards: Option<&ShardHashes>,
+        mc_shard_states: &HashMap<u32, ShardStateStuff>,
     ) -> Result<()> {
         let masterchain = self.shard().is_masterchain();
         for mut entry in &mut self.entries {
@@ -254,7 +254,7 @@ impl OutMsgQueueInfoStuff {
                     entry.mc_end_lt = next_mc_end_lt;
                     entry.ref_shards = next_shards.cloned();
                 } else {
-                    let state = engine.get_aux_mc_state(mc_seqno)
+                    let state = mc_shard_states.get(&mc_seqno)
                         .ok_or_else(|| error!("mastechain state for block {} was not previously cached", mc_seqno))?;
                     entry.mc_end_lt = state.state().gen_lt();
                     entry.ref_shards = Some(state.shards()?.clone());
@@ -436,7 +436,7 @@ pub struct MsgQueueManager {
 //    shard: ShardIdent,
     prev_out_queue_info: OutMsgQueueInfoStuff,
     next_out_queue_info: OutMsgQueueInfoStuff,
-    neighbors: Vec<OutMsgQueueInfoStuff>
+    neighbors: Vec<OutMsgQueueInfoStuff>,
 }
 
 impl MsgQueueManager {
@@ -451,8 +451,17 @@ impl MsgQueueManager {
         after_split: bool,
     ) -> Result<Self> {
         let last_mc_state = engine.clone().load_last_applied_mc_state().await?;
-        engine.set_aux_mc_state(&last_mc_state)?;
-        let next_mc_end_lt = next_state_opt.map(|state| state.state().gen_lt()).unwrap_or_default();
+        let mut mc_shard_states = HashMap::new();
+        mc_shard_states.insert(last_mc_state.block_id().seq_no, last_mc_state.clone());
+        let next_mc_end_lt = match next_state_opt {
+            Some(state) => {
+                if state.shard().is_masterchain() {
+                    mc_shard_states.insert(state.block_id().seq_no(), state.clone());
+                }
+                state.state().gen_lt()
+            }
+            None => 0
+        };
         log::debug!("request a preliminary list of neighbors for {}", shard);
         let neighbor_list = shards.get_neighbours(&shard)?;
         let mut neighbors = vec![];
@@ -463,25 +472,25 @@ impl MsgQueueManager {
             // TODO add loop and stop_flag checking
             let shard_state = engine.clone().wait_state(shard.block_id(), Some(10_000)).await?;
             
-            let nb = Self::load_out_queue_info(engine, &shard_state).await?;
+            let nb = Self::load_out_queue_info(engine, &shard_state, &last_mc_state, &mut mc_shard_states).await?;
             neighbors.push(nb);
         }
         let mc_seqno = last_mc_state.block_id().seq_no();
         if shards.is_empty() || mc_seqno != 0 {
-            let nb = Self::load_out_queue_info(engine, &last_mc_state).await?;
+            let nb = Self::load_out_queue_info(engine, &last_mc_state, &last_mc_state, &mut mc_shard_states).await?;
             neighbors.push(nb);
         }
         let mut next_out_queue_info;
-        let mut prev_out_queue_info = Self::load_out_queue_info(engine, &prev_states[0]).await?;
+        let mut prev_out_queue_info = Self::load_out_queue_info(engine, &prev_states[0], &last_mc_state, &mut mc_shard_states).await?;
         if prev_out_queue_info.block_id().seq_no != 0 {
             if let Some(state) = prev_states.get(1) {
                 CHECK!(after_merge);
-                let merge_out_queue_info = Self::load_out_queue_info(engine, state).await?;
+                let merge_out_queue_info = Self::load_out_queue_info(engine, state, &last_mc_state, &mut mc_shard_states).await?;
                 log::debug!("prepare merge for states {} and {}", prev_out_queue_info.block_id(), merge_out_queue_info.block_id());
                 prev_out_queue_info.merge(&merge_out_queue_info)?;
                 Self::add_trivial_neighbor_after_merge(&mut neighbors, &shard, &prev_out_queue_info, prev_states)?;
                 next_out_queue_info = match next_state_opt {
-                    Some(next_state) => Self::load_out_queue_info(engine, next_state).await?,
+                    Some(next_state) => Self::load_out_queue_info(engine, next_state, &last_mc_state, &mut mc_shard_states).await?,
                     None => prev_out_queue_info.clone()
                 };
             } else if after_split {
@@ -489,28 +498,28 @@ impl MsgQueueManager {
                 let sibling_out_queue_info = prev_out_queue_info.split(shard.clone())?;
                 Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, Some(sibling_out_queue_info), prev_states[0].shard())?;
                 next_out_queue_info = match next_state_opt {
-                    Some(next_state) => Self::load_out_queue_info(engine, next_state).await?,
+                    Some(next_state) => Self::load_out_queue_info(engine, next_state, &last_mc_state, &mut mc_shard_states).await?,
                     None => prev_out_queue_info.clone()
                 };
             } else {
                 Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, None, prev_out_queue_info.shard())?;
                 next_out_queue_info = match next_state_opt {
-                    Some(next_state) => Self::load_out_queue_info(engine, next_state).await?,
+                    Some(next_state) => Self::load_out_queue_info(engine, next_state, &last_mc_state, &mut mc_shard_states).await?,
                     None => prev_out_queue_info.clone()
                 };
             }
         } else {
             next_out_queue_info = match next_state_opt {
-                Some(next_state) => Self::load_out_queue_info(engine, next_state).await?,
+                Some(next_state) => Self::load_out_queue_info(engine, next_state, &last_mc_state, &mut mc_shard_states).await?,
                 None => prev_out_queue_info.clone()
             };
         }
 
-        prev_out_queue_info.fix_processed_upto(engine.deref(), mc_seqno, 0, None)?;
-        next_out_queue_info.fix_processed_upto(engine.deref(), mc_seqno, next_mc_end_lt, Some(shards))?;
+        prev_out_queue_info.fix_processed_upto(mc_seqno, 0, None, &mc_shard_states)?;
+        next_out_queue_info.fix_processed_upto(mc_seqno, next_mc_end_lt, Some(shards), &mc_shard_states)?;
 
         for neighbor in &mut neighbors {
-            neighbor.fix_processed_upto(engine.deref(), mc_seqno, 0, None)?;
+            neighbor.fix_processed_upto(mc_seqno, 0, None, &mc_shard_states)?;
         }
         Ok(MsgQueueManager {
         //Unused
@@ -524,6 +533,8 @@ impl MsgQueueManager {
     pub async fn load_out_queue_info(
         engine: &Arc<dyn EngineOperations>,
         state: &ShardStateStuff,
+        last_mc_state: &ShardStateStuff,
+        mc_shard_states: &mut HashMap<u32, ShardStateStuff>
     ) -> Result<OutMsgQueueInfoStuff> {
         log::debug!("unpacking OutMsgQueueInfo of neighbor {:#}", state.block_id());
         let nb = OutMsgQueueInfoStuff::from_shard_state(&state)?;
@@ -538,7 +549,8 @@ impl MsgQueueManager {
         for entry in nb.entries() {
 
             // TODO add loop and stop_flag checking
-            engine.clone().request_aux_mc_state(entry.mc_seqno, Some(10_000)).await?;
+            Self::request_mc_state(engine, last_mc_state, entry.mc_seqno,
+                Some(10_000), mc_shard_states).await?;
         }
         Ok(nb)
     }
@@ -751,6 +763,30 @@ impl MsgQueueManager {
         Ok(partial)
     }
 
+    async fn request_mc_state(
+        engine: &Arc<dyn EngineOperations>,
+        last_mc_state: &ShardStateStuff,
+        seq_no: u32,
+        timeout_ms: Option<u64>,
+        mc_shard_states: &mut HashMap<u32, ShardStateStuff>,
+    ) -> Result<()> {
+        if !mc_shard_states.contains_key(&seq_no) {
+            let last_mc_seqno = last_mc_state.state().seq_no();
+            if seq_no >= last_mc_seqno {
+                fail!("Requested too new master chain state {}, last is {}", seq_no, last_mc_seqno);
+            }
+            let block_id = match last_mc_state.shard_state_extra()?.prev_blocks.get(&seq_no) {
+                Ok(Some(result)) => result.master_block_id().1,
+                _ => fail!("cannot find previous masterchain block with seqno {} \
+                    to load corresponding state as required", seq_no)
+            };
+            mc_shard_states.insert(
+                seq_no,
+                engine.clone().wait_state(&block_id, timeout_ms).await?
+            );
+        }
+        Ok(())
+    }
 }
 
 impl MsgQueueManager {

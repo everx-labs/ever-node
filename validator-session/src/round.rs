@@ -1735,24 +1735,37 @@ impl RoundStateImpl {
         signatures: &BlockCandidateSignatureVectorPtr,
         attempts: &AttemptVector,
     ) -> HashType {
-        //The mistake below in a naming of fields repeats the mistake in Telegram's node
-        //reference implementation of ValidatorSessionRoundState::create_hash function.
-        //Such mistake is needed to generate the same hash as in Telegram's node
+        if TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG {
+            //The mistake below in a naming of fields repeats the mistake in Telegram's node
+            //reference implementation of ValidatorSessionRoundState::create_hash function.
+            //Such mistake is needed to generate the same hash as in Telegram's node
 
-        crate::utils::compute_hash(ton::hashable::ValidatorSessionRound {
-            locked_round: precommitted_block.get_ton_hash(),
-            locked_block: sequence_number as ton::int,
-            seqno: if precommitted_block.is_some() { 1 } else { 0 },
-            precommitted: match first_attempt.get_ton_hash() {
-                //hack for conversion: u32 -> bool
-                0 => ::ton_api::ton::Bool::BoolFalse,
-                _ => ::ton_api::ton::Bool::BoolTrue,
-            },
-            first_attempt: last_precommit.get_ton_hash(),
-            approved_blocks: sent_blocks.get_ton_hash(),
-            signatures: signatures.get_ton_hash(),
-            attempts: attempts.get_ton_hash(),
-        })
+            crate::utils::compute_hash(ton::hashable::ValidatorSessionRound {
+                locked_round: precommitted_block.get_ton_hash(),
+                locked_block: sequence_number as ton::int,
+                seqno: if precommitted_block.is_some() { 1 } else { 0 },
+                precommitted: match first_attempt.get_ton_hash() {
+                    //hack for conversion: u32 -> bool
+                    0 => ::ton_api::ton::Bool::BoolFalse,
+                    _ => ::ton_api::ton::Bool::BoolTrue,
+                },
+                first_attempt: last_precommit.get_ton_hash(),
+                approved_blocks: sent_blocks.get_ton_hash(),
+                signatures: signatures.get_ton_hash(),
+                attempts: attempts.get_ton_hash(),
+            })
+        } else {
+            crate::utils::compute_hash(ton::hashable::ValidatorSessionRound {
+                locked_round: last_precommit.get_ton_hash(),
+                locked_block: precommitted_block.get_ton_hash(),
+                seqno: sequence_number as ton::int,
+                precommitted: if precommitted_block.is_some() { ::ton_api::ton::Bool::BoolTrue } else { ::ton_api::ton::Bool::BoolFalse },
+                first_attempt: first_attempt.get_ton_hash(),
+                approved_blocks: sent_blocks.get_ton_hash(),
+                signatures: signatures.get_ton_hash(),
+                attempts: attempts.get_ton_hash(),
+            })
+        }
     }
 
     /*

@@ -44,6 +44,7 @@ impl CatchainOverlayManagerImpl {
 }
 
 impl catchain::CatchainOverlayManager for CatchainOverlayManagerImpl {
+
     fn start_overlay(
         &self,
         local_id: &PublicKeyHash,
@@ -53,7 +54,6 @@ impl catchain::CatchainOverlayManager for CatchainOverlayManagerImpl {
         replay_listener: catchain::CatchainOverlayLogReplayListenerPtr,
     ) -> Result<CatchainOverlayPtr> {
         let engine_network = self.network.upgrade().unwrap();
-
         engine_network
             .create_catchain_client(
                 self.validator_list_id.clone(), overlay_short_id, nodes, listener, replay_listener
@@ -70,6 +70,7 @@ impl catchain::CatchainOverlayManager for CatchainOverlayManagerImpl {
 
         engine_network.stop_catchain_client(overlay_short_id);
     }
+
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
@@ -324,7 +325,7 @@ impl ValidatorGroup {
             async move {
                 if let ValidatorGroupStatus::Countdown { start_at: at } = validation_start_status {
                     log::trace!(target: "validator", "Session delay started: {}", self_arc.info().await);
-                    tokio::time::delay_until(at).await;
+                    tokio::time::sleep_until(at).await;
                 }
 
                 let callback = self_arc.make_validator_session_callback();

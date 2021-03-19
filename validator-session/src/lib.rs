@@ -15,6 +15,9 @@ extern crate log;
 #[macro_use]
 extern crate failure;
 
+//const TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG: bool = false; //compatibility with Telegram Node: bug in hashes computation for attempt and round
+const TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG: bool = true; //compatibility with Telegram Node: bug in hashes computation for attempt and round
+
 use std::any::Any;
 use std::cell::RefCell;
 use std::fmt;

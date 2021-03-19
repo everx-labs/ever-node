@@ -58,6 +58,8 @@ pub struct TonNodeConfig {
     external_db_config: Option<ExternalDbConfig>,
     #[serde(default)]
     test_bundles_config: CollatorTestBundlesGeneralConfig,
+    #[serde(default = "default_connectivity_check_config")]
+    connectivity_check_config: ConnectivityCheckBroadcastConfig,
     validator_key_ring: Option<HashMap<String, KeyOptionJson>>,
     #[serde(skip)]
     configs_dir: String,
@@ -139,6 +141,47 @@ impl CollatorTestBundlesConfig {
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
 #[serde(default)]
+pub struct ConnectivityCheckBroadcastConfig {
+    pub enabled: bool,
+    pub long_len: usize,
+    pub short_period_ms: u64,
+    pub long_mult: u8,
+}
+
+pub fn default_connectivity_check_config() -> ConnectivityCheckBroadcastConfig {
+    ConnectivityCheckBroadcastConfig {
+        enabled: true,
+        long_len: 2 * 1024,
+        short_period_ms: 1000,
+        long_mult: 5,
+    }
+}
+
+impl ConnectivityCheckBroadcastConfig {
+    pub const LONG_BCAST_MIN_LEN: usize = 769;
+
+    pub fn check(&self) -> Result<()> {
+        if self.long_len < Self::LONG_BCAST_MIN_LEN {
+            fail!("long_len should be >= {}", Self::LONG_BCAST_MIN_LEN);
+        }
+        if self.short_period_ms == 0 {
+            fail!("short_period_ms can't have zero value");
+        }
+        if self.short_period_ms > 1_000_000 {
+            fail!("short_period_ms should be <= 1_000_000");
+        }
+        if self.short_period_ms < 100 {
+            fail!("short_period_ms should be >= 100");
+        }
+        if self.long_mult == 0 {
+            fail!("long_mult can't have zero value");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
+#[serde(default)]
 pub struct CollatorTestBundlesGeneralConfig {
     pub collator: CollatorTestBundlesConfig,
     pub validator: CollatorTestBundlesConfig,
@@ -200,6 +243,9 @@ impl TonNodeConfig {
                 config
             }
         };
+
+        config_json.connectivity_check_config.check()?;
+
         config_json.configs_dir = configs_dir.to_string();
         config_json.file_name = json_file_name.to_string();
 
@@ -243,6 +289,9 @@ impl TonNodeConfig {
     }
     pub fn test_bundles_config(&self) -> &CollatorTestBundlesGeneralConfig {
         &self.test_bundles_config
+    }
+    pub fn connectivity_check_config(&self) -> &ConnectivityCheckBroadcastConfig {
+        &self.connectivity_check_config
     }
 
  

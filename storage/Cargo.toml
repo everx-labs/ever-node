@@ -20,9 +20,9 @@ serde_derive = "1.0.114"
 sha2 = "^0.8"
 strum = "0.18.0"
 strum_macros = "0.18.0"
-tokio = { version = "0.2.21", features = ["fs", "sync", "time"] }
+tokio = { version = "1.3.0", features = ["fs", "rt-multi-thread"] }
 
-adnl = { git = "https://github.com/tonlabs/ton-labs-adnl" }
+adnl = { version = "0.1", git = "https://github.com/tonlabs/ton-labs-adnl" }
 lockfree = { git = "https://github.com/tonlabs/lockfree.git" }
 ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }
 ton_block = { git = "https://github.com/tonlabs/ton-labs-block" }
@@ -30,7 +30,6 @@ ton_types = { git = "https://github.com/tonlabs/ton-labs-types" }
 
 [dev-dependencies]
 rand = "0.7.3"
-tokio = { version = "0.2.21", features = ["macros"] }
 
 [build-dependencies.cc]
 version = "=1.0.61"

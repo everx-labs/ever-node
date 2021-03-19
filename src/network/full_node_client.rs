@@ -7,10 +7,10 @@ use crate::{
     types::top_block_descr::TopBlockDescrStuff,
 };
 
-use adnl::{common::{serialize, serialize_append}, node::AdnlNode};
+use adnl::{common::{KeyId, serialize, serialize_append}, node::AdnlNode};
 use overlay::{OverlayShortId, OverlayNode};
 use rldp::RldpNode;
-use std::{io::Cursor, time::{Duration, Instant}, sync::Arc};
+use std::{io::Cursor, time::Instant, sync::Arc};
 use ton_api::{BoxedSerialize, BoxedDeserialize, Deserializer, IntoBoxed};
 use ton_api::ton::{
     self, TLObject,
@@ -44,7 +44,8 @@ pub trait FullNodeOverlayClient : Sync + Send {
         &self,
         block_id: &BlockIdExt,
         masterchain_block_id: &BlockIdExt,
-    ) -> Result<(bool, Arc<Neighbour>)>;
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+    ) -> Result<Option<Arc<Neighbour>>>;
     async fn download_persistent_state_part(
         &self,
         block_id: &BlockIdExt,
@@ -57,8 +58,11 @@ pub trait FullNodeOverlayClient : Sync + Send {
     async fn download_zero_state(&self, id: &BlockIdExt) -> Result<Option<(ShardStateStuff, Vec<u8>)>>;
     async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, max_size: i32) -> Result<Vec<BlockIdExt>>;
     async fn download_next_block_full(&self, prev_id: &BlockIdExt) -> Result<Option<(BlockStuff, BlockProofStuff)>>;
-    async fn download_archive(&self, mc_seq_no: u32) -> Result<Option<Vec<u8>>>;
-
+    async fn download_archive(
+        &self, 
+        mc_seq_no: u32,
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+    ) -> Result<Option<Vec<u8>>>;
     async fn wait_broadcast(&self) -> Result<Broadcast>;
 }
 
@@ -89,14 +93,45 @@ impl NodeClientOverlay {
         &self.overlay_id
     }
 
-/*
     pub fn overlay(&self) -> &Arc<OverlayNode> {
         &self.overlay
     }
-*/
 
     pub fn peers(&self) -> &Arc<Neighbours> {
         &self.peers
+    }
+
+    async fn send_adnl_query_to_peer<D: ton_api::AnyBoxedSerialize>(
+        &self, 
+        peer: &Arc<Neighbour>,
+        data: &TLObject,
+        timeout: Option<u64>
+    ) -> Result<Option<D>> {
+
+        log::trace!("USE PEER {}, ADNL REQUEST {:?}", peer.id(), data);
+
+        let now = Instant::now();
+        let timeout = timeout.or(Some(AdnlNode::calc_timeout(peer.roundtrip_adnl())));
+        let answer = self.overlay.query(peer.id(), &data, &self.overlay_id, timeout).await?;
+        let roundtrip = now.elapsed().as_millis() as u64;
+         
+        if let Some(answer) = answer {
+            match answer.downcast::<D>() {
+                Ok(answer) => {
+                    peer.query_success(roundtrip, false);
+                    return Ok(Some(answer))
+                },
+                Err(obj) => {
+                    log::warn!("Wrong answer {:?} to {:?} from {}", obj, data, peer.id())
+                }
+            }
+        } else {
+            log::warn!("No reply to {:?} from {}", data, peer.id())
+        }
+
+        self.peers.update_neighbour_stats(peer.id(), roundtrip, false, false, true)?;
+        Ok(None)
+
     }
 
     // use this function if request size and answer size < 768 bytes (send query via ADNL)
@@ -104,7 +139,8 @@ impl NodeClientOverlay {
         &self, 
         request: T, 
         attempts: Option<u32>,
-        timeout: Option<u64>
+        timeout: Option<u64>,
+        active_peers: Option<&Arc<lockfree::set::Set<Arc<KeyId>>>>
     ) -> Result<(D, Arc<Neighbour>)>
     where
         T: ton_api::AnyBoxedSerialize,
@@ -115,30 +151,26 @@ impl NodeClientOverlay {
         let attempts = attempts.unwrap_or(Self::ADNL_ATTEMPTS);
 
         for _ in 0..attempts {
-
-            let peer = self.peers.choose_neighbour()?.ok_or_else(||error!("neighbour is not found!"))?;
-            log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), data);
-
-            let now = std::time::Instant::now();
-            let timeout = timeout.or(Some(AdnlNode::calc_timeout(peer.roundtrip_adnl())));
-            let answer = self.overlay.query(peer.id(), &data, &self.overlay_id, timeout).await?;
-            let t = now.elapsed();
-         
-            if let Some(answer) = answer {
-                match answer.downcast::<D>() {
-                    Ok(answer) => {
-                        self.peers.update_neighbour_stats(peer.id(), &t, true, false, false)?;
-                        return Ok((answer, peer))
-                    },
-                    Err(obj) => {
-                        log::warn!("Wrong answer {:?} to {:?} from {}", obj, data, peer.id())
-                    }
+            let peer = self.peers.choose_neighbour()?.ok_or_else(
+                ||error!("neighbour is not found!")
+            )?;
+            if let Some(active_peers) = &active_peers {
+                if active_peers.insert(peer.id().clone()).is_err() {
+                    continue;
                 }
-            } else {
-                log::warn!("No reply to {:?} from {}", data, peer.id())
             }
-            self.peers.update_neighbour_stats(peer.id(), &t, false, false, true)?;
-
+            match self.send_adnl_query_to_peer(&peer, &data, timeout).await {
+                Err(e) => {
+                    if let Some(active_peers) = &active_peers {
+                        active_peers.remove(peer.id());
+                    }
+                    return Err(e) 
+                },
+                Ok(Some(answer)) => return Ok((answer, peer)),
+                Ok(None) => if let Some(active_peers) = &active_peers {
+                    active_peers.remove(peer.id());
+                }
+            }
         }
 
         fail!("Cannot send query {:?} in {} attempts", data, attempts)
@@ -154,8 +186,8 @@ impl NodeClientOverlay {
     where
         T: BoxedSerialize + std::fmt::Debug
     {
-        let (answer, peer, elapsed) = self.send_rldp_query(request, peer, attempt).await?;
-        self.peers.update_neighbour_stats(peer.id(), &elapsed, true, true, true)?;
+        let (answer, peer, roundtrip) = self.send_rldp_query(request, peer, attempt).await?;
+        peer.query_success(roundtrip, true);
         Ok(answer)
     }
 
@@ -169,14 +201,14 @@ impl NodeClientOverlay {
         T: BoxedSerialize + std::fmt::Debug,
         D: BoxedDeserialize
     {
-        let (answer, peer, elapsed) = self.send_rldp_query(request, peer, attempt).await?;
+        let (answer, peer, roundtrip) = self.send_rldp_query(request, peer, attempt).await?;
         match Deserializer::new(&mut Cursor::new(answer)).read_boxed() {
             Ok(data) => {
-                self.peers.update_neighbour_stats(peer.id(), &elapsed, true, true, true)?;
+                peer.query_success(roundtrip, true);
                 Ok(data)
             },
             Err(e) => {
-                self.peers.update_neighbour_stats(peer.id(), &elapsed, false, true, true)?;
+                self.peers.update_neighbour_stats(peer.id(), roundtrip, false, true, true)?;
                 fail!(e)
             }
         }
@@ -187,7 +219,7 @@ impl NodeClientOverlay {
         request: &T, 
         peer: Arc<Neighbour>,
         attempt: u32
-    ) -> Result<(Vec<u8>, Arc<Neighbour>, Duration)> 
+    ) -> Result<(Vec<u8>, Arc<Neighbour>, u64)> 
     where 
         T: BoxedSerialize + std::fmt::Debug 
     {
@@ -196,22 +228,19 @@ impl NodeClientOverlay {
         let data = Arc::new(query);
 
         log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request);
-        let now = Instant::now();
-        let answer = self.overlay.query_via_rldp(
+        let (answer, roundtrip) = self.overlay.query_via_rldp(
             &self.rldp,
             peer.id(),
             &data,
             Some(10 * 1024 * 1024),
-            peer.roundtrip_adnl(),
             peer.roundtrip_rldp().map(|t| t + attempt as u64 * Self::TIMEOUT_DELTA),
             &self.overlay_id
         ).await?;
 
-        let elapsed = now.elapsed();
         if let Some(answer) = answer {
-            Ok((answer, peer, elapsed))
+            Ok((answer, peer, roundtrip))
         } else {
-            self.peers.update_neighbour_stats(peer.id(), &elapsed, false, true, true)?;
+            self.peers.update_neighbour_stats(peer.id(), roundtrip, false, true, true)?;
             fail!("No RLDP answer to {:?} from {}", request, peer.id())
         }
     }
@@ -268,7 +297,8 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     allow_partial: is_link.into()
                 },
                 None,
-                Some(Self::TIMEOUT_PREPARE)
+                Some(Self::TIMEOUT_PREPARE),
+                None
             ).await?
         } else {
             self.send_adnl_query(
@@ -277,7 +307,8 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     allow_partial: is_link.into(),
                 },
                 None,
-                Some(Self::TIMEOUT_PREPARE)
+                Some(Self::TIMEOUT_PREPARE),
+                None
             ).await?
         };
 
@@ -327,6 +358,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         let (prepare, peer): (Prepared, _) = self.send_adnl_query(
             PrepareBlock {block: convert_block_id_ext_blk2api(id)},
             Some(1),
+            None,
             None
         ).await?;
         log::trace!("USE PEER {}, PREPARE {} FINISHED", peer.id(), id);
@@ -370,23 +402,24 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         &self,
         block_id: &BlockIdExt,
         masterchain_block_id: &BlockIdExt,
-    ) -> Result<(bool, Arc<Neighbour>)> {
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+    ) -> Result<Option<Arc<Neighbour>>> {
         let (prepare, peer): (PreparedState, _) = self.send_adnl_query(
             TLObject::new(PreparePersistentState {
                 block: convert_block_id_ext_blk2api(block_id),
                 masterchain_block: convert_block_id_ext_blk2api(masterchain_block_id)
             }),
             None,
-            Some(Self::TIMEOUT_PREPARE)
+            Some(Self::TIMEOUT_PREPARE), 
+            Some(active_peers)
         ).await?;
-
-        Ok((
-            match prepare {
-                PreparedState::TonNode_NotFoundState => false,
-                PreparedState::TonNode_PreparedState => true
+        match prepare {
+            PreparedState::TonNode_NotFoundState => {
+                active_peers.remove(peer.id());
+                Ok(None)
             },
-            peer
-        ))
+            PreparedState::TonNode_PreparedState => Ok(Some(peer))
+        }
     }
 
     // tonNode.preparePersistentState block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt = tonNode.PreparedState;
@@ -425,7 +458,8 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                 block: convert_block_id_ext_blk2api(id),
             }),
             None,
-            Some(Self::TIMEOUT_PREPARE)
+            Some(Self::TIMEOUT_PREPARE),
+            None
         ).await?;
 
         // Download
@@ -460,7 +494,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             block: convert_block_id_ext_blk2api(block_id),
             max_size
         };
-        self.send_adnl_query(query, None, None)
+        self.send_adnl_query(query, None, None, None)
             .await
             .and_then(|(ids, _): (KeyBlocks, _)| ids.blocks().iter().try_fold(Vec::new(), |mut vec, id| {
                 vec.push(convert_block_id_ext_api2blk(id)?);
@@ -505,7 +539,12 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         }
     }
 
-    async fn download_archive(&self, mc_seq_no: u32) -> Result<Option<Vec<u8>>> {
+    async fn download_archive(
+        &self, 
+        mc_seq_no: u32,
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+    ) -> Result<Option<Vec<u8>>> {
+
         const CHUNK_SIZE: i32 = 1 << 20;
         // tonNode.getArchiveInfo masterchain_seqno:int = tonNode.ArchiveInfo;
         let (archive_info, peer) = self.send_adnl_query(
@@ -513,11 +552,15 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                 masterchain_seqno: mc_seq_no as i32
             },
             None,
-            Some(Self::TIMEOUT_PREPARE)
+            Some(Self::TIMEOUT_PREPARE),
+            Some(active_peers)
         ).await?;
 
         match archive_info {
-            ArchiveInfo::TonNode_ArchiveNotFound => Ok(None),
+            ArchiveInfo::TonNode_ArchiveNotFound => {
+                active_peers.remove(peer.id());
+                Ok(None)
+            },
             ArchiveInfo::TonNode_ArchiveInfo(info) => {
                 let mut result = Vec::new();
                 let mut offset = 0;
@@ -532,7 +575,8 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                             let actual_size = block_bytes.len() as i32;
                             result.append(&mut block_bytes);
                             if actual_size < CHUNK_SIZE {
-                                return Ok(Some(result));
+                                active_peers.remove(peer.id());
+                                return Ok(Some(result))
                             }
                             offset += actual_size as i64;
                             part_attempt = 0;
@@ -540,19 +584,21 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                         Err(e) => {
                             peer_attempt += 1;
                             part_attempt += 1;
-                            log::error!("download_archive {}: {}, offset: {}, attempt: {}",
-                                info.id, e, offset, part_attempt);
-
+                            log::error!(
+                                "download_archive {}: {}, offset: {}, attempt: {}",
+                                info.id, e, offset, part_attempt
+                            );
                             if part_attempt > 10 {
+                                active_peers.remove(peer.id());
                                 fail!(
                                     "Error download_archive after {} attempts : {}", 
                                     part_attempt, e
                                 )
                             }
                         }
-                    };
+                    }
                 }
-            },
+            }
         }
     }
 

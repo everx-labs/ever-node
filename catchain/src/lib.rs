@@ -322,7 +322,12 @@ pub trait ReceivedBlock: fmt::Display {
     fn get_dep_hashes(&self) -> Vec<BlockHash>;
 
     /// Get several unresolved dependencies for this block
-    fn get_pending_deps(&self, max_deps_count: usize, dep_hashes: &mut Vec<BlockHash>);
+    fn get_pending_deps(
+        &mut self,
+        call_id: u64,
+        max_deps_count: usize,
+        dep_hashes: &mut Vec<BlockHash>,
+    );
 
     /// Initialize block with a payload
     fn initialize(

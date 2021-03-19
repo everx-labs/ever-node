@@ -3,9 +3,9 @@ use crate::{
     shard_state::ShardStateStuff
 };
 
+use adnl::common::KeyId;
 #[cfg(not(feature = "local_test"))]
 use std::{sync::{Arc, atomic::{AtomicUsize, Ordering}}};
-
 use ton_block::{BlockIdExt};
 #[cfg(not(feature = "local_test"))]
 use ton_types::{error, fail};
@@ -25,12 +25,12 @@ pub async fn download_persistent_state(
 pub async fn download_persistent_state(
     id: &BlockIdExt,
     master_id: &BlockIdExt,
-    overlay: &dyn FullNodeOverlayClient
+    overlay: &dyn FullNodeOverlayClient,
+    active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
 ) -> Result<ShardStateStuff> {
     let mut result = None;
-
     for _ in 0..10 {
-        match download_persistent_state_iter(id, master_id, overlay).await {
+        match download_persistent_state_iter(id, master_id, overlay, active_peers).await {
             Err(e) => {
                 log::warn!("download_persistent_state_iter err: {}", e);
                 result = Some(Err(e));
@@ -41,7 +41,6 @@ pub async fn download_persistent_state(
             }
         }
     }
-
     result.ok_or_else(|| error!("internal error!"))?
 }
 
@@ -49,7 +48,8 @@ pub async fn download_persistent_state(
 async fn download_persistent_state_iter(
     id: &BlockIdExt,
     master_id: &BlockIdExt,
-    overlay: &dyn FullNodeOverlayClient
+    overlay: &dyn FullNodeOverlayClient,
+    active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
 ) -> Result<ShardStateStuff> {
 
     if id.seq_no == 0 {
@@ -58,12 +58,12 @@ async fn download_persistent_state_iter(
 
     // Check
     let peer = loop {
-        match overlay.check_persistent_state(id, master_id).await {
+        match overlay.check_persistent_state(id, master_id, active_peers).await {
             Err(e) => 
                 log::trace!("check_persistent_state {}: {}", id.shard(), e),
-            Ok((false, _)) => 
+            Ok(None) => 
                 log::trace!("download_persistent_state {}: state not found!", id.shard()),
-            Ok((true, peer)) => 
+            Ok(Some(peer)) => 
                 break peer,
         }
     };
@@ -74,11 +74,12 @@ async fn download_persistent_state_iter(
 
     let mut offset = 0;
     let parts = Arc::new(lockfree::map::Map::new());
-    let max_size = 65536; // part max size
+    let max_size = 1 << 20; // part max size
     let mut download_futures = vec!();
     let total_size = Arc::new(AtomicUsize::new(usize::max_value()));
     let errors = Arc::new(AtomicUsize::new(0));
     let threads = 3;
+    let peer_drop = peer.clone();
 
     for _ in 0..threads {
         let parts = parts.clone();
@@ -137,13 +138,17 @@ async fn download_persistent_state_iter(
         offset += max_size;
     }
 
-    futures::future::join_all(download_futures)
+    let res = futures::future::join_all(download_futures)
         .await
         .into_iter()
-        .find(|r| r.is_err())
-        .unwrap_or(Ok(()))?;
+        .find(|r| r.is_err());
+    active_peers.remove(peer_drop.id());
+    res.unwrap_or(Ok(()))?;
 
-    log::trace!("download_persistent_state: DOWNLOADED {}ms, id: {}, master_id: {} ", now.elapsed().as_millis(), id, master_id);
+    log::trace!(
+        "download_persistent_state: DOWNLOADED {}ms, id: {}, master_id: {} ", 
+        now.elapsed().as_millis(), id, master_id
+    );
 
     // TODO try to walk map by iterator and fill preallocated vector to speed up this process
     let total_size = total_size.load(Ordering::Relaxed);

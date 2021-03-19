@@ -964,20 +964,30 @@ impl RoundAttemptStateImpl {
         precommitted: &BoolVectorPtr,
         vote_for: &Option<SentBlockPtr>,
     ) -> HashType {
-        //The mistake below in 'vote_for' hash repeats the mistake in Telegram's node
-        //reference implementation of ValidatorSessionRoundAttemptState::create_hash function.
-        //Such mistake is needed to generate the same hash as in Telegram's node
+        if TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG {
+            //The mistake below in 'vote_for' hash repeats the mistake in Telegram's node
+            //reference implementation of ValidatorSessionRoundAttemptState::create_hash function.
+            //Such mistake is needed to generate the same hash as in Telegram's node
 
-        crate::utils::compute_hash(ton::hashable::ValidatorSessionRoundAttempt {
-            seqno: sequence_number as ton::int,
-            votes: votes.get_ton_hash(),
-            precommitted: precommitted.get_ton_hash(),
-            vote_for_inited: vote_for.is_some() as ton::int,
-            vote_for: match vote_for.get_ton_hash() {
-                0 => 0,
-                _ => 1,
-            },
-        })
+            crate::utils::compute_hash(ton::hashable::ValidatorSessionRoundAttempt {
+                seqno: sequence_number as ton::int,
+                votes: votes.get_ton_hash(),
+                precommitted: precommitted.get_ton_hash(),
+                vote_for_inited: vote_for.is_some() as ton::int,
+                vote_for: match vote_for.get_ton_hash() {
+                    0 => 0,
+                    _ => 1,
+                },
+            })
+        } else {
+            crate::utils::compute_hash(ton::hashable::ValidatorSessionRoundAttempt {
+                seqno: sequence_number as ton::int,
+                votes: votes.get_ton_hash(),
+                precommitted: precommitted.get_ton_hash(),
+                vote_for_inited: vote_for.is_some() as ton::int,
+                vote_for: vote_for.get_ton_hash(),
+            })            
+        }
     }
 
     fn new(

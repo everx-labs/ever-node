@@ -2,6 +2,7 @@ use crate::{
     block::{BlockIdExtExtention, BlockStuff}, block_proof::BlockProofStuff, boot,
     engine_traits::EngineOperations
 };
+use adnl::common::{KeyId, Wait};
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 use storage::{
     archives::{
@@ -14,53 +15,168 @@ use tokio::task::JoinHandle;
 use ton_block::BlockIdExt;
 use ton_types::{error, fail, Result};
 
-type PreDownloadTask = (u32, JoinHandle<Result<Vec<u8>>>);
+//type PreDownloadTask = (u32, JoinHandle<Result<Vec<u8>>>);
+
+const TARGET: &str = "sync";
 
 pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> {
-    log::info!(target: "sync", "Started sync");
-    let mut predownload_task = None;
-    while !engine.check_sync().await? {
+
+    fn download(
+        engine: &Arc<dyn EngineOperations>, 
+        wait: &Arc<Wait<(u32, Result<Vec<u8>>)>>, 
+        seq_no: u32,
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+    ) {
+        wait.request();
+        let engine = engine.clone();
+        let wait = wait.clone();
+        let active_peers = active_peers.clone();
+        tokio::spawn(
+            async move {
+                let res = download_archive(engine, seq_no, &active_peers).await;
+                wait.respond(Some((seq_no, res)));
+            }
+        );
+        log::info!(target: TARGET, "Download scheduled for MC seq_no = {}", seq_no);
+    }
+
+    async fn apply(
+        engine: &Arc<dyn EngineOperations>, 
+        seq_no: u32, 
+        last_mc_block_id: &Arc<BlockIdExt>, 
+        data: &Vec<u8>
+    ) -> Result<bool> {
+        log::info!(target: TARGET, "Reading package for MC seq_no = {}", seq_no);
+        let maps = Arc::new(read_package(data).await?);
+        log::info!(
+            target: TARGET,
+            "Package contains {} masterchain blocks, {} blocks overall.",
+            maps.mc_blocks_ids.len(),
+            maps.blocks.len(),
+        );
+        import_package(maps, engine, last_mc_block_id).await?;
+        log::info!(target: TARGET, "Package imported for MC seq_no = {}", seq_no);
+        Ok(true)
+    }
+
+    const MAX_CONCURRENCY: usize = 8;
+
+    log::info!(target: TARGET, "Started sync");
+    let active_peers = Arc::new(lockfree::set::Set::new());
+    let mut queue: Vec<(u32, Option<Vec<u8>>)>  = Vec::new();
+    let (wait, mut reader) = Wait::new();
+    let mut concurrency = 1;
+
+    'check: while !engine.check_sync().await? {
+
+        // Select sync block ID
         let mc_block_id = Arc::new(engine.load_last_applied_mc_block_id().await?);
         let sc_block_id = Arc::new(engine.load_shards_client_mc_block_id().await?);
-        let sync_mc_block_id = if mc_block_id.seq_no() > sc_block_id.seq_no() {
+        let last_mc_block_id = if mc_block_id.seq_no() > sc_block_id.seq_no() {
             Arc::clone(&sc_block_id)
         } else {
             Arc::clone(&mc_block_id)
         };
 
         log::info!(
-            target: "sync",
-            "Last MC block_id for sync = {} (MC = {}, SC = {})",
-            sync_mc_block_id,
-            mc_block_id,
-            sc_block_id,
+            target: TARGET,
+            "Last MC seq_no for sync = {} (MC = {}, SC = {})",
+            last_mc_block_id.seq_no(), mc_block_id, sc_block_id,
         );
-        predownload_task = match download_and_import_package(
-            &engine,
-            &sync_mc_block_id,
-            predownload_task
-        ).await {
-            Ok(predownload_task) => Some(predownload_task),
-            Err(err) => {
-                log::error!(target: "sync", "Error while downloading and applying package: {}", err);
-                None
+
+        // Try to find proper No in queue
+        let mut sync_mc_seq_no = last_mc_block_id.seq_no() + 1;
+        loop {
+            if let Some(index) = queue.iter().position(
+                |(seq_no, data)| (seq_no <= &sync_mc_seq_no) && data.is_some()
+            ) {
+                if let (seq_no, Some(data)) = queue.remove(index) {
+                    match apply(&engine, seq_no, &last_mc_block_id, &data).await {
+                        Ok(true) => continue 'check,
+                        Ok(false) => (),
+                        Err(e) => log::error!(
+                            target: TARGET,
+                            "Cannot apply queued package for MC seq_no = {}: {}",
+                            seq_no, e
+                        )
+                    }
+                } else {
+                    fail!("INTERNAL ERROR: sync queue broken")
+                }
+            } else {
+                break
             }
-        };
+        }
+
+        log::info!(target: TARGET, "Continue sync with MC seq_no {}", sync_mc_seq_no);
+
+        // Otherwise download
+        while !engine.check_sync().await? {
+            while wait.count() < concurrency {
+                if queue.iter().position(|(seq_no, _)| seq_no == &sync_mc_seq_no).is_none() {
+                    queue.push((sync_mc_seq_no, None));
+                    download(&engine, &wait, sync_mc_seq_no, &active_peers);
+                }
+                sync_mc_seq_no += SLICE_SIZE;
+            }
+            match wait.wait(&mut reader, false).await {
+                Some(Some((seq_no, Err(e)))) => {
+                    log::error!(
+                        target: TARGET,
+                        "Error while downloading package seq_no {}: {}",
+                        seq_no, e
+                    );
+                    download(&engine, &wait, seq_no, &active_peers)
+                },
+                Some(Some((seq_no_recv, Ok(data)))) => {
+                    if let Some(index) = queue.iter().position(
+                        |(seq_no_send, _)| seq_no_send == &seq_no_recv
+                    ) {
+                        if seq_no_recv <= last_mc_block_id.seq_no() + 1 {
+                            match apply(&engine, seq_no_recv, &last_mc_block_id, &data).await {
+                                Ok(ok) => {
+                                    queue.remove(index);
+                                    if ok {
+                                        concurrency = MAX_CONCURRENCY;
+                                        break
+                                    } else {
+                                        continue
+                                    }
+                                },
+                                Err(e) => {
+                                    log::error!(
+                                        target: TARGET,
+                                        "Cannot apply downloaded package for MC seq_no = {}: {}",
+                                        seq_no_recv, e
+                                    );
+                                    download(&engine, &wait, seq_no_recv, &active_peers)
+                                }
+                            }
+                        } else {
+                            queue[index] = (seq_no_recv, Some(data))
+                        }
+                    } else {
+                        fail!("INTERNAL ERROR: sync queue broken")
+                    }
+                },
+                _ => fail!("INTERNAL ERROR: sync broken")
+            }
+        }
+
     }
 
-    // TODO: Uncomment, when will tokio support JoinHandle.abort() (probably, in the next version):
-    // if let Some((_seq_no, predownload_task)) = predownload_task {
-    //     predownload_task.abort();
-    // }
-
-    log::info!(target: "sync", "Sync complete");
-
+    log::info!(target: TARGET, "Sync complete");
     Ok(())
+
 }
 
-async fn download_archive(engine: Arc<dyn EngineOperations>, mc_seq_no: u32) -> Result<Vec<u8>> {
+async fn download_archive(
+    engine: Arc<dyn EngineOperations>, 
+    mc_seq_no: u32,
+    active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+) -> Result<Vec<u8>> {
     log::info!(target: "sync", "Requesting archive for MC seq_no = {}", mc_seq_no);
-    match engine.download_archive(mc_seq_no).await {
+    match engine.download_archive(mc_seq_no, active_peers).await {
         Ok(Some(data)) => {
             log::info!(
                 target: "sync",
@@ -68,20 +184,18 @@ async fn download_archive(engine: Arc<dyn EngineOperations>, mc_seq_no: u32) -> 
                 mc_seq_no,
                 data.len()
             );
-        
             return Ok(data)
-        
         },
-        Err(e) => fail!("Download archive failed for MC seq_no = {}, err: {}", mc_seq_no, e),
+        Err(e) => fail!("Download archive failed for MC seq_no = {}, err: {}, count {}", mc_seq_no, e, active_peers.iter().count()),
         _ => fail!("Did`t downloaded archive for MC seq_no = {}", mc_seq_no)
     }
 }
 
+/*
 async fn download_and_import_package(
     engine: &Arc<dyn EngineOperations>,
-    last_mc_block_id: &Arc<BlockIdExt>,
-    predownload_task: Option<PreDownloadTask>,
-) -> Result<PreDownloadTask> {
+    last_mc_block_id: &Arc<BlockIdExt>
+) -> Result<()> {
     let mc_seq_no = last_mc_block_id.seq_no() + 1;
 
     let download_current_task = if let Some((predownload_seq_no, predownload_task)) = predownload_task {
@@ -113,6 +227,7 @@ async fn download_and_import_package(
 
     Ok((predownload_seq_no, download_next_task))
 }
+*/
 
 async fn import_package(
     maps: Arc<BlockMaps>,
@@ -129,7 +244,7 @@ async fn import_package(
     Ok(())
 }
 
-async fn read_package(data: Vec<u8>) -> Result<BlockMaps> {
+async fn read_package(data: &Vec<u8>) -> Result<BlockMaps> {
     let mut maps = BlockMaps::default();
 
     let mut reader = read_package_from(&data[..]).await?;
@@ -291,6 +406,7 @@ async fn import_mc_blocks(
 
     }
  
+    log::debug!(target: TARGET, "Last applied MC seq_no = {}", last_mc_block_id.seq_no());
     Ok(())
 
 }

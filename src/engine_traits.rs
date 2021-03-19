@@ -8,7 +8,7 @@ use crate::{
     jaeger,
     config::CollatorTestBundlesGeneralConfig,
 };
-use adnl::common::KeyOption;
+use adnl::common::{KeyId, KeyOption};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, 
     CatchainOverlayLogReplayListenerPtr
@@ -17,7 +17,7 @@ use overlay::{OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId}
 use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 use storage::types::BlockHandle;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
-use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, HashmapAugType};
+use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent};
 use ton_types::{fail, Result, UInt256};
 
 #[async_trait::async_trait]
@@ -39,6 +39,8 @@ pub trait PrivateOverlayOperations: Sync + Send {
         validator_list_id: UInt256,
         validators: &Vec<CatchainNode>
     ) -> Result<Option<Arc<KeyOption>>>;
+
+    fn activate_validator_list(&self, validator_list_id: UInt256) -> Result<()>;
 
     async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool>;
 
@@ -69,6 +71,10 @@ pub trait EngineOperations : Sync + Send {
         validator_list_id: UInt256,
         validators: &Vec<CatchainNode>
     ) -> Result<Option<Arc<KeyOption>>> {
+        unimplemented!()
+    }
+
+    fn activate_validator_list(&self, validator_list_id: UInt256) -> Result<()> {
         unimplemented!()
     }
 
@@ -196,7 +202,12 @@ pub trait EngineOperations : Sync + Send {
 
     // State related operations
 
-    async fn download_state(&self, block_id: &BlockIdExt, master_id: &BlockIdExt) -> Result<ShardStateStuff> {
+    async fn download_state(
+        &self, 
+        block_id: &BlockIdExt, 
+        master_id: &BlockIdExt,
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+    ) -> Result<ShardStateStuff> {
         unimplemented!()
     }
     async fn download_zerostate(&self, id: &BlockIdExt) -> Result<(ShardStateStuff, Vec<u8>)> {
@@ -424,54 +435,12 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    async fn download_archive(&self, masterchain_seqno: u32) -> Result<Option<Vec<u8>>> {
+    async fn download_archive(
+        &self, 
+        masterchain_seqno: u32,
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+    ) -> Result<Option<Vec<u8>>> {
         unimplemented!()
-    }
-
-    fn assign_mc_ref_seq_no(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<()> {
-        unimplemented!()
-    }
-
-    fn aux_mc_shard_states(&self) -> &lockfree::map::Map<u32, ShardStateStuff> {unimplemented!()}
-    fn shard_states(&self) -> &lockfree::map::Map<ShardIdent, ShardStateStuff> {unimplemented!()}
-
-    async fn request_aux_mc_state(self: Arc<Self>, seq_no: u32, timeout_ms: Option<u64>) -> Result<bool> {
-        log::debug!("requesting mc state for seq_no {}", seq_no);
-        if self.aux_mc_shard_states().get(&seq_no).is_some() {
-            return Ok(true)
-        }
-        let state = self.load_last_applied_mc_state().await?;
-        if seq_no >= state.state().seq_no() {
-            return Ok(true)
-        }
-        let block_id = match state.shard_state_extra()?.prev_blocks.get(&seq_no) {
-            Ok(Some(result)) => result.master_block_id().1,
-            _ => fail!("cannot find masterchain block with seqno {} \
-                to load corresponding state as required", seq_no)
-        };
-        self.set_aux_mc_state(&self.clone().wait_state(&block_id, timeout_ms).await?)
-    }
-    fn set_aux_mc_state(&self, state: &ShardStateStuff) -> Result<bool> {
-        adnl::common::add_object_to_map_with_update(
-            self.aux_mc_shard_states(),
-            state.block_id().seq_no,
-            |other| match other {
-                Some(other) if other.block_id() != state.block_id() => {
-                    fail!("got two masterchain states of same height \
-                        corresponding to different blocks {} and {}",
-                            other.block_id(), state.block_id()
-                    )
-                }
-                Some(_) => Ok(None),
-                _ => Ok(Some(state.clone()))
-            }
-        )
-    }
-    fn get_aux_mc_state(&self, seq_no: u32) -> Option<ShardStateStuff> {
-        self.aux_mc_shard_states().get(&seq_no).map(|k_v| k_v.1.clone())
-    }
-    fn set_shard_state(&self, state: &ShardStateStuff) {
-        self.shard_states().insert(state.shard().clone(), state.clone());
     }
 }
 

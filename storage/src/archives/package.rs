@@ -1,6 +1,6 @@
 use crate::archives::package_entry::{PackageEntry, PKG_ENTRY_HEADER_SIZE};
 use std::{io::SeekFrom, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicU64, Ordering}}};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use ton_types::{error, fail, Result};
 
 
@@ -67,7 +67,7 @@ impl Package {
         self.size.store(new_size, Ordering::SeqCst);
 
         {
-            let mut file = self.open_file().await?;
+            let file = self.open_file().await?;
             let _write_guard = self.write_mutex.lock().await;
             file.set_len(new_size).await?;
         }

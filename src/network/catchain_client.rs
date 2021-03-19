@@ -44,6 +44,7 @@ impl CatchainClient {
 
         let mut keys = HashMap::new();
         let mut peers = Vec::new();
+        let runtime_handle = runtime_handle.clone();
 
         for node in nodes {
             if node.public_key.id() == local_adnl_key.id() {
@@ -58,14 +59,19 @@ impl CatchainClient {
             &overlay_id, &id_local_key
         );
 
-        runtime_handle.block_on(
-            overlay.add_private_overlay(overlay_id, &local_adnl_key, &peers))?;
-
-        let consumer = Arc::new(CatchainClientConsumer::new(overlay_id.clone(), catchain_listener));
+        overlay.add_private_overlay(
+            Some(runtime_handle.clone()), 
+            overlay_id, 
+            &local_adnl_key, 
+            &peers
+        )?;
+        let consumer = Arc::new(
+            CatchainClientConsumer::new(overlay_id.clone(), catchain_listener)
+        );
         overlay.add_consumer(&overlay_id, consumer.clone())?;
 
         Ok(CatchainClient {
-            runtime_handle : runtime_handle.clone(),
+            runtime_handle,
             overlay_id: overlay_id.clone(),
             overlay: overlay.clone(),
             rldp: rldp,
@@ -179,19 +185,19 @@ impl CatchainClient {
             receiver_id,
             &query,
             Some(max_answer_size as i64),
-            Some(5_000),
-            Some(10_000),
+            None,
             &overlay_id
         ).await;
 
         
         log::trace!(target: Self::TARGET, "result status: {}", &result.is_ok());
-        let data = result?.ok_or_else(|| error!("asnwer is None!"))?;
-
+        let (data, _) = result?;
+        let data = data.ok_or_else(|| error!("asnwer is None!"))?;
         let data = catchain::CatchainFactory::create_block_payload(
             ton_api::ton::bytes(data)
         );
         Ok(data)
+
     }
 
     pub fn run_wait_broadcast(

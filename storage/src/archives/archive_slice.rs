@@ -10,7 +10,7 @@ use crate::{
     traits::Serializable, types::BlockHandle
 };
 use std::{borrow::Borrow, hash::Hash, io::SeekFrom, path::PathBuf, sync::Arc};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use ton_api::ton::PublicKey;
 use ton_block::BlockIdExt;
 use ton_types::{error, fail, Result, UInt256};
