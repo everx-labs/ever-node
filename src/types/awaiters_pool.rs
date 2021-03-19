@@ -51,7 +51,7 @@ impl<I, R> AwaitersPool<I, R> where
                 if !op_awaiters.1.is_started.swap(true, Ordering::SeqCst) {
                     return Some(self.do_operation(id, operation, &op_awaiters.1).await).transpose()
                 } else {
-                    return self.wait_operation(id, wait_timeout_ms, &op_awaiters.1).await
+                    return self.wait_operation(id, wait_timeout_ms, &op_awaiters.1, || Ok(false)).await
                 }
             } else {
                 let new_awaiters = OperationAwaiters::new(true);
@@ -62,36 +62,58 @@ impl<I, R> AwaitersPool<I, R> where
         }
     }
 
-    pub async fn wait(&self, id: &I, timeout_ms: Option<u64>) -> Result<Option<R>> {
+    pub async fn wait(
+        &self,
+        id: &I,
+        timeout_ms: Option<u64>,
+        check_complete: impl Fn() -> Result<bool>,
+    ) -> Result<Option<R>> {
         loop {
             if let Some(op_awaiters) = self.ops_awaiters.get(id) {
-                return self.wait_operation(id, timeout_ms, &op_awaiters.1).await
+                return self.wait_operation(id, timeout_ms, &op_awaiters.1, check_complete).await
             } else {
                 let new_awaiters = OperationAwaiters::new(false);
                 if add_object_to_map(&self.ops_awaiters, id.clone(), || Ok(new_awaiters.clone()))? {
-                    return self.wait_operation(id, timeout_ms, &new_awaiters).await
+                    return self.wait_operation(id, timeout_ms, &new_awaiters, check_complete).await
                 }
             }
         }
     }
 
-    async fn wait_operation(&self, id: &I, timeout_ms: Option<u64>, op_awaiters: &OperationAwaiters<R>) -> Result<Option<R>> {
+    async fn wait_operation(
+        &self,
+        id: &I,
+        timeout_ms: Option<u64>,
+        op_awaiters: &OperationAwaiters<R>,
+        check_complete: impl Fn() -> Result<bool>,
+    ) -> Result<Option<R>> {
         let mut rx = op_awaiters.rx.clone();
         loop {
             log::trace!("{}: wait_operation: waiting... {}", self.description, id);
-            
-            let result = if let Some(timeout_ms) = timeout_ms {
-                tokio::time::timeout(Duration::from_millis(timeout_ms), rx.recv()).await
-                    .map_err(|_| error!("{}: timeout {}", self.description, id))?
-            } else {
-                rx.recv().await
-            };
 
-            let r = match result {
-                None => return Ok(None),
-                Some(Some(Ok(r))) => Ok(Some(r)),
-                Some(Some(Err(e))) => Err(error!("{}", e)),
-                Some(None) => continue
+            let result = match tokio::time::timeout(Duration::from_millis(1), rx.changed()).await {
+                Ok(r) => r,
+                Err(_) => {
+                    // Operation might be done before calling `wait_operation` - check it and return
+                    if check_complete()? {
+                        return Ok(None)
+                    }
+                    if let Some(timeout_ms) = timeout_ms {
+                        tokio::time::timeout(Duration::from_millis(timeout_ms), rx.changed()).await
+                            .map_err(|_| error!("{}: timeout {}", self.description, id))?
+                    } else {
+                        rx.changed().await
+                    }
+                }
+            };
+            if result.is_err() {
+                return Ok(None)
+            }
+
+            let r = match &*rx.borrow() {
+                Some(Ok(r)) => Ok(Some(r.clone())),
+                Some(Err(e)) => Err(error!("{}", e)),
+                None => continue
             };
             log::trace!("{}: wait_operation: done {}", self.description, id);
             break r;
@@ -115,7 +137,7 @@ impl<I, R> AwaitersPool<I, R> where
             Err(ref e) => Err(format!("{}", e)), // failure::Error doesn't impl Clone, 
                                                  // so it is impossible to clone full result
         };
-        let _ = op_awaiters.tx.broadcast(Some(r));
+        let _ = op_awaiters.tx.send(Some(r));
         result
     }
 }

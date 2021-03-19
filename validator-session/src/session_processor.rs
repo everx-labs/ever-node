@@ -372,8 +372,6 @@ impl SessionProcessor for SessionProcessorImpl {
 
             //apply actions from incoming block & check payload
 
-            let mut block_update_hash = None;
-
             if need_actualize_state {
                 instrument!();
 
@@ -384,8 +382,6 @@ impl SessionProcessor for SessionProcessorImpl {
                 let node_source_id = block.get_source_id() as u32;
 
                 if let Some(block_update) = block_update {
-                    block_update_hash = Some(block_update.state as u32);
-
                     trace!("...BlockUpdate has been received: {:?}", block_update);
 
                     //apply actions to state
@@ -428,15 +424,21 @@ impl SessionProcessor for SessionProcessorImpl {
               node_public_key_hash, block.get_hash(), state.get_hash(), block_update.state as u32);
 
                         for msg in block_update.actions.iter() {
-                            warn!("Node {} sent a block {:?} with hash mismatch: applited action: {:?}", node_public_key_hash, block.get_hash(), msg);
+                            warn!("Node {} sent a block {:?} with hash mismatch: applied action: {:?}", node_public_key_hash, block.get_hash(), msg);
                         }
-                    } else {
-                        state = state.make_all(
-                            &mut self.description,
-                            node_source_id,
-                            state.get_ts(node_source_id),
-                        );
                     }
+                } else {
+                    warn!(
+                        "Node {} sent a block {:?} which can't be parsed: actualize the state",
+                        node_public_key_hash,
+                        block.get_hash(),
+                    );
+
+                    state = state.make_all(
+                        &mut self.description,
+                        node_source_id,
+                        state.get_ts(node_source_id),
+                    );
                 }
             }
 
@@ -449,11 +451,11 @@ impl SessionProcessor for SessionProcessorImpl {
 
             state = state.move_to_persistent(&mut self.description);
 
-            //update cache
+            if !TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG {
+                //update cache
 
-            if let Some(block_update_hash) = block_update_hash {
                 self.block_update_cache
-                    .insert(block_update_hash, state.clone());
+                    .insert(state.get_hash(), state.clone());
             }
 
             state
@@ -1532,7 +1534,7 @@ impl SessionProcessorImpl {
         &mut self,
         block_update: &Option<::ton_api::ton::validator_session::blockupdate::BlockUpdate>,
     ) -> Option<SessionStatePtr> {
-        if block_update.is_none() {
+        if block_update.is_none() || TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG {
             return None;
         }
 
@@ -1557,14 +1559,16 @@ impl SessionProcessorImpl {
         let left_hash = left.get_hash();
         let right_hash = right.get_hash();
 
-        if left_hash == right_hash {
+        if left_hash == right_hash && !TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG {
             return left.clone();
         }
 
         let merge_key = (left_hash, right_hash);
 
-        if let Some(state) = self.state_merge_cache.get(&merge_key) {
-            return state.clone();
+        if !TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG {
+            if let Some(state) = self.state_merge_cache.get(&merge_key) {
+                return state.clone();
+            }
         }
 
         let result = {
@@ -1579,7 +1583,9 @@ impl SessionProcessorImpl {
             result
         };
 
-        self.state_merge_cache.insert(merge_key, result.clone());
+        if !TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG {
+            self.state_merge_cache.insert(merge_key, result.clone());
+        }
 
         result
     }

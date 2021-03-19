@@ -4,7 +4,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use std::{io::{ErrorKind, SeekFrom}, path::{Path, PathBuf}};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use ton_types::{error, fail, Result};
 
 #[derive(Debug)]

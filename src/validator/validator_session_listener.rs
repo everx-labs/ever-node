@@ -227,7 +227,7 @@ pub async fn process_validation_queue(
                 break 'queue_loop;
             },
             Err(TryRecvError::Empty) => {
-                tokio::time::delay_for(QUEUE_POLLING_DELAY).await;
+                tokio::time::sleep(QUEUE_POLLING_DELAY).await;
                 match (last_action + QUEUE_EMPTY_TOO_LONG).elapsed() {
                     Ok(_) => {
                         log::info!(target: "validator", "Session {}: validation action queue empty", g_info);
@@ -265,7 +265,7 @@ pub async fn process_validation_queue(
                             log::info!(target: "validator", "Validation action {}, {} finished: `{}`", action_str, g_info, res_txt);
                             break
                         },
-                        Err(tokio::time::Elapsed{..}) =>
+                        Err(tokio::time::error::Elapsed{..}) =>
                             log::warn!(target: "validator", "Validation action {}, {} takes {:#?} and not finished",
                                 action_str, g_info, start_time.elapsed().unwrap()
                             )

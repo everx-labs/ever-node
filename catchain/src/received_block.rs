@@ -38,6 +38,7 @@ pub(crate) struct ReceivedBlockImpl {
     last_sending_times: HashMap<PublicKeyHash, std::time::SystemTime>, //last sending time for the source
     serialized_block_with_payload: Option<BlockPayloadPtr>, //serialized block with payload
     _instance_counter: InstanceCounter,                     //received blocks instance counter
+    get_pending_deps_call_id: u64, //unique ID for calling get_pending_deps (to cut off duplications during the blocks graph traverse)
 }
 
 /// Functions which converts public ReceivedBlock to its implementation
@@ -162,7 +163,18 @@ impl ReceivedBlock for ReceivedBlockImpl {
         hashes
     }
 
-    fn get_pending_deps(&self, max_deps_count: usize, dep_hashes: &mut Vec<BlockHash>) {
+    fn get_pending_deps(
+        &mut self,
+        call_id: u64,
+        max_deps_count: usize,
+        dep_hashes: &mut Vec<BlockHash>,
+    ) {
+        if self.get_pending_deps_call_id == call_id {
+            return; //ignore this subgraph because it has been already processed during the current sync
+        }
+
+        self.get_pending_deps_call_id = call_id;
+
         if self.get_height() == 0
             || self.get_state() == ReceivedBlockState::Ill
             || self.is_delivered()
@@ -177,11 +189,13 @@ impl ReceivedBlock for ReceivedBlockImpl {
         }
 
         if let Some(prev) = self.get_prev() {
-            prev.borrow().get_pending_deps(max_deps_count, dep_hashes);
+            prev.borrow_mut()
+                .get_pending_deps(call_id, max_deps_count, dep_hashes);
         }
 
         for it in &self.block_deps {
-            it.borrow().get_pending_deps(max_deps_count, dep_hashes);
+            it.borrow_mut()
+                .get_pending_deps(call_id, max_deps_count, dep_hashes);
         }
     }
 
@@ -719,10 +733,14 @@ impl ReceivedBlockImpl {
                         || left.src != right.src
                         || left.data_hash == right.data_hash
                     {
-                        warn!("Incorrect fork blame, not a fork: {}/{}, {}/{}, {:?}/{:?}",
-                            left.height, right.height,
-                            left.src, right.src,
-                            left.data_hash, right.data_hash
+                        warn!(
+                            "Incorrect fork blame, not a fork: {}/{}, {}/{}, {:?}/{:?}",
+                            left.height,
+                            right.height,
+                            left.src,
+                            right.src,
+                            left.data_hash,
+                            right.data_hash
                         );
                         self.set_ill(receiver);
                         return;
@@ -934,6 +952,7 @@ impl ReceivedBlockImpl {
             last_sending_times: HashMap::new(),
             serialized_block_with_payload: None,
             _instance_counter: instance_counter.clone(),
+            get_pending_deps_call_id: 0,
         }
     }
 

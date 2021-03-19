@@ -1,4 +1,4 @@
-use adnl::common::{KeyId, KeyOption, Query, Wait};
+use adnl::{common::{KeyId, KeyOption, Query, Wait}, node::AdnlNode};
 use crate::engine::STATSD;
 use dht::DhtNode;
 use overlay::{OverlayShortId, OverlayNode};
@@ -9,7 +9,6 @@ use std::{
         self, AtomicBool, AtomicU32, AtomicI32, AtomicU64, AtomicI64
     }
 };
-use tokio::time::delay_for;
 use ton_types::{error, fail, Result};
 use ton_api::ton::{
     TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities
@@ -77,7 +76,7 @@ impl Neighbour {
         &self.id
     }
     
-    pub fn query_success(&self, t: &Duration, is_rldp: bool) {
+    pub fn query_success(&self, roundtrip: u64, is_rldp: bool) {
         loop {
             let old_un = self.unreliability.load(atomic::Ordering::Relaxed);
             if old_un > 0 { 
@@ -96,21 +95,21 @@ impl Neighbour {
             break;
         } 
         if is_rldp {
-            self.update_roundtrip_rldp(t)
+            self.update_roundtrip_rldp(roundtrip)
         } else {
-            self.update_roundtrip_adnl(t)
+            self.update_roundtrip_adnl(roundtrip)
         }
     }
 
-    pub fn query_failed(&self, t: &Duration, is_rldp: bool) {
+    pub fn query_failed(&self, roundtrip: u64, is_rldp: bool) {
         let un = self.unreliability.fetch_add(1, atomic::Ordering::Relaxed) + 1;
         let metric = format!("neghbour.{}.failed", self.id);
         STATSD.incr(&metric);
         log::trace!("query_failed (key_id {}, overlay: ) new value: {}", self.id, un);
         if is_rldp {
-            self.update_roundtrip_rldp(t)
+            self.update_roundtrip_rldp(roundtrip)
         } else {
-            self.update_roundtrip_adnl(t)
+            self.update_roundtrip_adnl(roundtrip)
         }
     }
     
@@ -122,12 +121,12 @@ impl Neighbour {
         Self::roundtrip(&self.roundtrip_rldp)
     }
 
-    pub fn update_roundtrip_adnl(&self, t: &Duration) {
-        Self::set_roundtrip(&self.roundtrip_adnl, t)
+    pub fn update_roundtrip_adnl(&self, roundtrip: u64) {
+        Self::set_roundtrip(&self.roundtrip_adnl, roundtrip)
     }
 
-    pub fn update_roundtrip_rldp(&self, t: &Duration) {
-        Self::set_roundtrip(&self.roundtrip_rldp, t)
+    pub fn update_roundtrip_rldp(&self, roundtrip: u64) {
+        Self::set_roundtrip(&self.roundtrip_rldp, roundtrip)
     }
      
     fn last_ping(&self) -> u64 {
@@ -147,12 +146,17 @@ impl Neighbour {
         self.last_ping.store(elapsed, atomic::Ordering::Relaxed)
     }
 
-    fn set_roundtrip(storage: &AtomicU64, t: &Duration) {
-        let roundtrip = storage.load(atomic::Ordering::Relaxed);
-        let roundtrip = (t.as_millis() as u64 + roundtrip) / 2;
+    fn set_roundtrip(storage: &AtomicU64, roundtrip: u64) {
+        let roundtrip_old = storage.load(atomic::Ordering::Relaxed);
+        let roundtrip = if roundtrip_old > 0 {
+            (roundtrip_old + roundtrip) / 2
+        } else {
+            roundtrip
+        };
         log::trace!("roundtrip new value: {}", roundtrip);
         storage.store(roundtrip, atomic::Ordering::Relaxed);
     }
+
 }
 
 pub const MAX_NEIGHBOURS: usize = 16;
@@ -273,8 +277,7 @@ impl Neighbours {
         tokio::spawn(async move {
             loop {
                 let sleep_time = rand::thread_rng().gen_range(10, 30);
-                delay_for(Duration::from_secs(sleep_time)).await;
-
+                tokio::time::sleep(Duration::from_secs(sleep_time)).await;
                 let res_ping = self.reload().await;
                 match res_ping {
                     Ok(_) => {},
@@ -290,7 +293,7 @@ impl Neighbours {
         tokio::spawn(async move {
             loop {
                 if let Err(e) = self.ping_neighbours().await {
-                    tokio::time::delay_for(Duration::from_millis(500)).await;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                     log::warn!("ERROR: {}", e)
                 }
             }
@@ -345,7 +348,7 @@ impl Neighbours {
             let id = self.overlay_id.clone();
             log::trace!("wait random peers...");
             loop {
-                tokio::time::delay_for(std::time::Duration::from_millis(1000)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                 for peer in self.peers.get_iter() {
                     let answer = receiver.get_random_peers(&peer.id(), &id, None).await;
                     match answer {
@@ -357,7 +360,7 @@ impl Neighbours {
                                 },
                             }
                         },
-                        Err(e) => { log::trace!("call get_random_peers is error: {}", e);}
+                        Err(e) => { log::warn!("call get_random_peers is error: {}", e);}
                     }
                 }
             }
@@ -409,7 +412,13 @@ impl Neighbours {
             if unr <= FAIL_UNRELIABILITY {
                 if node_stat + (node_stat * 0.2 as f64) < peer_stat {
                     if fines_points > 0 {
-                        neighbour.fines_points.fetch_sub(1, atomic::Ordering::Relaxed);
+                        let _ = neighbour.fines_points.fetch_update(
+                            atomic::Ordering::Relaxed, atomic::Ordering::Relaxed, |x| if x > 0 {
+                                Some(x - 1) 
+                            } else {
+                                None 
+                            }
+                        );
                         continue;
                     }
                     neighbour.active_check.store(true, atomic::Ordering::Relaxed);
@@ -435,19 +444,18 @@ impl Neighbours {
     pub fn update_neighbour_stats(
         &self,
         peer: &Arc<KeyId>,
-        t: &Duration,
+        roundtrip: u64,
         success: bool,
         is_rldp: bool,
         is_register: bool
     ) -> Result<()> {
         log::trace!("update_neighbour_stats");
         let it = &self.peers.get(peer);
-
         if let Some(neighbour) = it {
             if success {
-                neighbour.query_success(t, is_rldp);
+                neighbour.query_success(roundtrip, is_rldp);
             } else {
-                neighbour.query_failed(t, is_rldp);
+                neighbour.query_failed(roundtrip, is_rldp);
             }
             if is_register {
                 neighbour.all_attempts.fetch_add(1, atomic::Ordering::Relaxed);
@@ -456,7 +464,6 @@ impl Neighbours {
                     neighbour.fail_attempts.fetch_add(1, atomic::Ordering::Relaxed);
                     self.fail_attempts.fetch_add(1, atomic::Ordering::Relaxed);
                 }
-
                 if neighbour.active_check.load(atomic::Ordering::Relaxed) {
                     if !success {
                         neighbour.fines_points.fetch_add(FINES_POINTS_COUNT, atomic::Ordering::Relaxed);
@@ -472,18 +479,16 @@ impl Neighbours {
     pub fn got_neighbour_capabilities(
         &self, 
         peer: &Arc<KeyId>, 
-        t: &Duration, 
+        roundtrip: u64, 
         capabilities: &Capabilities
     ) -> Result<()> {
         if let Some(it) = &self.peers.get(peer) {
             log::trace!("got_neighbour_capabilities: capabilities: {:?}", capabilities);
-            log::trace!("got_neighbour_capabilities: t: {:?}", t);
+            log::trace!("got_neighbour_capabilities: roundtrip: {} ms", roundtrip);
             it.update_proto_version(capabilities);
-//            it.update_roundtrip(t);
         } else {
             log::trace!("got_neighbour_capabilities: self.identificators not contains peer");
         }
-
         Ok(())
     }
 
@@ -504,14 +509,15 @@ impl Neighbours {
             let peer = if let Some(peer) = self.peers.next_for_ping(&self.start)? {
                 peer
             } else {
-                tokio::time::delay_for(Duration::from_millis(Self::TIMEOUT_PING_MIN)).await;
+                tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MIN)).await;
+                log::trace!("next_for_ping return None");
                 continue
             };
             let last = self.start.elapsed().as_millis() as u64 - peer.last_ping();
             if last < Self::TIMEOUT_PING_MAX {
-                tokio::time::delay_for(Duration::from_millis(Self::TIMEOUT_PING_MAX - last)).await;
+                tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MAX - last)).await;
             } else {
-                tokio::time::delay_for(Duration::from_millis(Self::TIMEOUT_PING_MIN)).await;
+                tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MIN)).await;
             }
             let self_cloned = self.clone();
             let wait_cloned = wait.clone();
@@ -529,30 +535,6 @@ impl Neighbours {
                 count -= 1;     
             }
         }
-/*
-        let total_now = Instant::now();
-        while max_cnt > 0 {
-            let peer = self.peers.next_for_ping()?;
-            let now = Instant::now();
-            let capabilities = self.get_capabilities(&peer.id).await;
-            let t = now.elapsed();
-            match capabilities {
-                Ok(cap) => {
-                    self.update_neighbour_stats(&peer.id, &t, true)?;
-println!("Good caps {}: {}", peer.id, self.overlay_id);
-                    self.got_neighbour_capabilities(&peer.id, &t, &cap)?;
-                }
-                Err(_e) => {
-println!("Bad caps {}: {}", peer.id, self.overlay_id);
-                    self.update_neighbour_stats(&peer.id, &t, false)?;
-                }
-            }
-            max_cnt = max_cnt - 1;
-        };
-        let ret = total_now.elapsed();
-        log::trace!("neighbours pinged: overlay {} time {}", self.overlay_id, ret.as_millis());
-        Ok(ret)
-*/
     }
 
     async fn update_capabilities(self: Arc<Self>, peer: Arc<Neighbour>) -> Result<()> {
@@ -560,20 +542,19 @@ println!("Bad caps {}: {}", peer.id, self.overlay_id);
         peer.set_last_ping(self.start.elapsed().as_millis() as u64); 
         let query = TLObject::new(GetCapabilities);
 log::trace!("Query capabilities from {} {}", peer.id, self.overlay_id);
-        match self.overlay.query(&peer.id, &query, &self.overlay_id, None).await {
+        let timeout = Some(AdnlNode::calc_timeout(peer.roundtrip_adnl()));
+        match self.overlay.query(&peer.id, &query, &self.overlay_id, timeout).await {
             Ok(Some(answer)) => {
                 let caps: Capabilities = Query::parse(answer, &query)?;
                 log::trace!("Got capabilities from {} {}: {:?}", peer.id, self.overlay_id, caps);
-                let elapsed = now.elapsed();
-                self.update_neighbour_stats(&peer.id, &elapsed, true, false, false)?;
+                let roundtrip = now.elapsed().as_millis() as u64;
+                self.update_neighbour_stats(&peer.id, roundtrip, true, false, false)?;
 log::trace!("Good caps {}: {}", peer.id, self.overlay_id);
-                self.got_neighbour_capabilities(&peer.id, &elapsed, &caps)?;
+                self.got_neighbour_capabilities(&peer.id, roundtrip, &caps)?;
                 Ok(())
             },
             _ => {
 log::trace!("Bad caps {}: {}", peer.id, self.overlay_id);
-                let elapsed = now.elapsed();
-                self.update_neighbour_stats(&peer.id, &elapsed, false, false, false)?;
                 fail!("Capabilities were not received from {}", peer.id);
             }
         }
@@ -687,7 +668,7 @@ impl NeighboursCacheCore {
                 fail!("Neighbour index is not found!");
             };
             if let Some(neighbour) = self.values.get(key_id.val()) {
-                next = if next == count - 1 {
+                next = if next >= count - 1 {
                     0   // ping cyclically
                 } else {
                     next + 1
@@ -766,18 +747,20 @@ impl NeighboursCacheCore {
     }
 
     pub fn replace(&self, old: &Arc<KeyId>, new: Arc<KeyId>) -> Result<bool> {
+        log::info!("started replace (old: {}, new: {})", &old, &new);
         let index = if let Some(index) = self.get_index(old) {
             index
         } else {
             failure::bail!("replaced neighbour not found!")
         };
-
+        log::info!("replace func use index: {} (old: {}, new: {})", &index, &old, &new);
         let status_insert = self.insert_ex(new.clone(), true)?;
 
         if status_insert {
             self.indices.insert(index, new);
             self.values.remove(old);
         }
+        log::info!("finish replace (old: {})", &old);
         Ok(status_insert)
     }
 

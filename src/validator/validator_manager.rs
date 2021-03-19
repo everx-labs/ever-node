@@ -240,14 +240,13 @@ struct ValidatorManagerImpl {
 }
 
 impl ValidatorManagerImpl {
+
     pub fn new(engine: Arc<dyn EngineOperations>) -> Self {
-        let rt = tokio::runtime::Builder::new()
-            .threaded_scheduler()
+        let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_stack_size(8 * 1024 * 1024)
             .build()
             .expect("Can't create validator groups runtime");
-
         return ValidatorManagerImpl {
             engine,
             rt: Arc::new(rt),
@@ -325,7 +324,11 @@ impl ValidatorManagerImpl {
         };
 
         self.validator_list_status.curr = self.update_single_validator_list(validator_set.list(), "current").await?;
+        if let Some(id) = self.validator_list_status.curr.as_ref() {
+            self.engine.activate_validator_list(id.clone())?;
+        }
         self.validator_list_status.next = self.update_single_validator_list(next_validator_set.list(), "next").await?;
+
         STATSD.gauge("in_current_vset_p34", if self.validator_list_status.curr.is_some() { 1 } else { 0 } as f64);
         STATSD.gauge("in_next_vset_p36", if self.validator_list_status.next.is_some() { 1 } else { 0 } as f64);
         return Ok(!self.validator_list_status.curr.is_none() || !self.validator_list_status.next.is_none());
@@ -802,7 +805,7 @@ impl ValidatorManagerImpl {
             mc_handle = loop {
                 match timeout(self.config.update_interval, self.engine.wait_next_applied_mc_block(&mc_handle, None)).await {
                     Ok(r_res) => break r_res?.0,
-                    Err(tokio::time::Elapsed{..}) => self.stats().await
+                    Err(tokio::time::error::Elapsed{..}) => self.stats().await
                 }
             };
         }

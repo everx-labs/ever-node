@@ -212,8 +212,7 @@ fn main() {
     
     lazy_static::initialize(&STATSD);
     
-    let mut runtime = tokio::runtime::Builder::new()
-        .threaded_scheduler()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(8 * 1024 * 1024)
         .build()

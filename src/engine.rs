@@ -16,7 +16,7 @@ use crate::{
         full_node_service::FullNodeOverlayService
     },
     shard_state::ShardStateStuff,
-    types::awaiters_pool::AwaitersPool,
+    types::{awaiters_pool::AwaitersPool, lockfree_cache::TimeBasedCache},
     ext_messages::MessagesPool,
     validator::validator_manager,
     shard_blocks::{ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker},
@@ -32,7 +32,7 @@ use overlay::QueriesConsumer;
 #[cfg(feature = "metrics")]
 use statsd::client;
 use std::{
-    convert::TryInto, ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}},
+    convert::TryInto, ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering, AtomicU64}},
     time::Duration, mem::ManuallyDrop, collections::HashMap,
 };
 #[cfg(feature = "metrics")]
@@ -70,8 +70,6 @@ pub struct Engine {
     init_mc_block_id: BlockIdExt,
     initial_sync_disabled: bool,
     network: Arc<NodeNetwork>,
-    aux_mc_shard_states: lockfree::map::Map<u32, ShardStateStuff>,
-    shard_states: lockfree::map::Map<ShardIdent, ShardStateStuff>,
     shard_blocks: ShardBlocksPool,
     last_known_mc_block_seqno: AtomicU32,
     last_known_keyblock_seqno: AtomicU32,
@@ -79,7 +77,9 @@ pub struct Engine {
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
  
-    shard_states_cache: lockfree::map::Map<BlockIdExt, ShardStateStuff>,
+    shard_states_cache: TimeBasedCache<BlockIdExt, ShardStateStuff>,
+    loaded_from_ss_cache: AtomicU64,
+    loaded_ss_total: AtomicU64,
 }
 
 struct DownloadContext<'a, T> {
@@ -111,6 +111,8 @@ impl <T> DownloadContext<'_, T> {
             if let Some((current, mult, max)) = &mut self.timeout {
                 *current = (*max).min(*current * *mult / 10);
                 futures_timer::Delay::new(Duration::from_millis(*current)).await;
+            } else {
+                tokio::task::yield_now().await;
             }
         }
     }
@@ -260,7 +262,7 @@ impl Engine {
             Arc::new(NodeNetworkStub::new(&general_config, db.clone(), path)?)
         };
         #[cfg(not(feature = "local_test"))]
-        let network = Arc::new(NodeNetwork::new(general_config).await?);
+        let network = NodeNetwork::new(general_config).await?;
         network.clone().start().await?;
 
         let shard_blocks = match db.load_all_top_shard_blocks() {
@@ -290,14 +292,14 @@ impl Engine {
             init_mc_block_id,
             initial_sync_disabled,
             network: network.clone(),
-            aux_mc_shard_states: Default::default(),
-            shard_states: Default::default(),
             shard_blocks: shard_blocks_pool,
             last_known_mc_block_seqno: AtomicU32::new(0),
             last_known_keyblock_seqno: AtomicU32::new(0),
             will_validate: AtomicBool::new(false),
             test_bundles_config,
-            shard_states_cache: Default::default(),
+            shard_states_cache: TimeBasedCache::new(120),
+            loaded_from_ss_cache: AtomicU64::new(0),
+            loaded_ss_total: AtomicU64::new(0),
         });
 
         save_top_shard_blocks_worker(engine.clone(), shard_blocks_receiver);
@@ -321,16 +323,19 @@ impl Engine {
 
     pub fn initial_sync_disabled(&self) -> bool {self.initial_sync_disabled}
 
-    pub fn aux_mc_shard_states(&self) -> &lockfree::map::Map<u32, ShardStateStuff> {
-        &self.aux_mc_shard_states
-    }
-
-    pub fn shard_states(&self) -> &lockfree::map::Map<ShardIdent, ShardStateStuff> {
-        &self.shard_states
-    }
-
-    pub fn shard_states_cache(&self) -> &lockfree::map::Map<BlockIdExt, ShardStateStuff> {
+    pub fn shard_states_cache(&self) -> &TimeBasedCache<BlockIdExt, ShardStateStuff> {
         &self.shard_states_cache
+    }
+
+    pub fn update_shard_states_cache_stat(&self, loaded_from_cache: bool) {
+        let loaded_ss_total = self.loaded_ss_total.fetch_add(1, Ordering::Relaxed) + 1;
+        let loaded_from_ss_cache = if loaded_from_cache {
+            self.loaded_from_ss_cache.fetch_add(1, Ordering::Relaxed) + 1
+        } else {
+            self.loaded_from_ss_cache.load(Ordering::Relaxed)
+        };
+        log::trace!("shard_states_cache  total loaded: {}  from cache: {}  use cache: {}%",
+            loaded_ss_total, loaded_from_ss_cache, (100 * loaded_from_ss_cache) / loaded_ss_total);
     }
 
     pub fn set_init_mc_block_id(&self, init_mc_block_id: &BlockIdExt) {
@@ -537,6 +542,9 @@ impl Engine {
                             },
                             Broadcast::TonNode_NewShardBlockBroadcast(broadcast) => {
                                 self.clone().process_new_shard_block_broadcast(broadcast);
+                            },
+                            Broadcast::TonNode_ConnectivityCheckBroadcast(broadcast) => {
+                                self.network.clone().process_connectivity_broadcast(broadcast);
                             },
                         }
                     }
@@ -1039,7 +1047,7 @@ fn start_validator(engine: Arc<Engine>) {
                 }
                 return;
             }
-            tokio::time::delay_for(Duration::from_secs(CHECK_VALIDATOR_TIMEOUT)).await;
+            tokio::time::sleep(Duration::from_secs(CHECK_VALIDATOR_TIMEOUT)).await;
         }
     });
 }

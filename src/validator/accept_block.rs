@@ -15,7 +15,7 @@ use ton_block::{
 };
 use ton_types::{error, Result, fail, UInt256, UsageTree, HashmapType};
 use ton_api::ton::ton_node::{blocksignature::BlockSignature, broadcast::BlockBroadcast};
-use rand::Rng;
+//use rand::Rng;
 
 #[allow(dead_code)]
 pub async fn accept_block(
@@ -99,7 +99,7 @@ pub async fn accept_block(
         &engine
     ).await?;
 
-    let signatures_count = signatures.len();
+    //let signatures_count = signatures.len();
 
     let (proof, signatures) = create_new_proof(&block, &validator_set, signatures)?;
 
@@ -149,10 +149,11 @@ pub async fn accept_block(
         }
     }
 
-    // At least one another node should send block broadcast too
-    let mut rng = rand::thread_rng();
-    let send_block_broadcast = send_block_broadcast || 
-        rng.gen_range(0, 1000) < (1000 / max(1, signatures_count - 1));
+    // There is a problem on protocol level when more the one node sends same broadcast.
+    //// At least one another node should send block broadcast too
+    //let mut rng = rand::thread_rng();
+    //let send_block_broadcast = send_block_broadcast || 
+    //    rng.gen_range(0, 1000) < (1000 / max(1, signatures_count - 1));
 
     if send_block_broadcast {
         let broadcast = build_block_broadcast(&block, validator_set, signatures, proof)?;

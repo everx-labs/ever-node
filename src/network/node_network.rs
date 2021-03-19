@@ -1,5 +1,5 @@
 use crate::{
-    config::{NodeConfigHandler, TonNodeConfig},
+    config::{NodeConfigHandler, TonNodeConfig, ConnectivityCheckBroadcastConfig},
     engine_traits::{OverlayOperations, PrivateOverlayOperations},
     network::{
         catchain_client::CatchainClient,
@@ -9,16 +9,27 @@ use crate::{
     types::awaiters_pool::AwaitersPool,
 };
 use adnl::{
-    common::{KeyId, KeyOption}, node::{AddressCacheIterator, AdnlNode}
+    common::{KeyId, KeyOption, serialize}, node::{AddressCacheIterator, AdnlNode}
 };
 use catchain::{CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr};
 use dht::DhtNode;
 use overlay::{OverlayId, OverlayShortId, OverlayNode, QueriesConsumer, PrivateOverlayShortId};
 use rldp::RldpNode;
-use std::{hash::Hash, sync::Arc, time::Duration};
-use tokio::time::{delay_for, timeout};
-use ton_types::{Result, error, UInt256};
+use std::{
+    hash::Hash, 
+    sync::{Arc, atomic::{AtomicU64, Ordering}}, 
+    time::{Duration, SystemTime},
+    convert::TryInto,
+};
+use ton_types::{Result, fail, error, UInt256};
 use ton_block::BlockIdExt;
+use ton_api::ton::{
+    int256, bytes,
+    ton_node::{
+        broadcast::ConnectivityCheckBroadcast,
+        Broadcast::{TonNode_ConnectivityCheckBroadcast}
+    }
+};
 
 type Cache<K, T> = lockfree::map::Map<K, T>;
 
@@ -34,12 +45,23 @@ pub struct NodeNetwork {
     overlay_awaiters: AwaitersPool<Arc<OverlayShortId>, Arc<dyn FullNodeOverlayClient>>,
     runtime_handle: tokio::runtime::Handle,
     config_handler: Arc<NodeConfigHandler>,
+    connectivity_check_config: ConnectivityCheckBroadcastConfig,
 }
 
 struct ValidatorContext {
     private_overlays: Arc<Cache<Arc<OverlayShortId>, Arc<CatchainClient>>>,
     validator_adnl_keys: Arc<Cache<Arc<KeyId>, usize>>,   //KeyId, tag
     sets_contexts: Arc<Cache<UInt256, ValidatorSetContext>>,
+    current_set: Arc<Cache<u8, UInt256>>, // zeto or one element [0]
+}
+
+#[derive(Default)]
+
+struct ConnectivityStat {
+    last_short_got: AtomicU64,
+    last_short_latency: AtomicU64,
+    last_long_got: AtomicU64,
+    last_long_latency: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -47,7 +69,8 @@ struct ValidatorSetContext {
     validator_peers: Vec<Arc<KeyId>>,
     validator_key: Arc<KeyOption>,
     validator_adnl_key: Arc<KeyOption>,
-    election_id: usize
+    election_id: usize,
+    connectivity_stat: Arc<Cache<Arc<KeyId>, ConnectivityStat>>, // (last short broadcast got, last long -//-)
 }
 
 impl NodeNetwork {
@@ -55,13 +78,17 @@ impl NodeNetwork {
     pub const TAG_DHT_KEY: usize = 1;
     pub const TAG_OVERLAY_KEY: usize = 2;
 
-    const PERIOD_CHECK_OVERLAY_NODES: u64 = 1;
-    const PERIOD_STORE_IP_ADDRESS: u64 = 500;   // second
-    const PERIOD_START_FIND_DHT_NODE: u64 = 60; // second
+    const PERIOD_CHECK_OVERLAY_NODES: u64 = 1;  // seconds
+    const PERIOD_STORE_IP_ADDRESS: u64 = 500;   // seconds
+    const PERIOD_START_FIND_DHT_NODE: u64 = 60; // seconds
+    const PERIOD_UPDATE_PEERS: u64 = 5;         // seconds
 
-    pub async fn new(config: TonNodeConfig) -> Result<Self> {
+    pub async fn new(config: TonNodeConfig) -> Result<Arc<Self>> {
         let global_config = config.load_global_config()?;
         let masterchain_zero_state_id = global_config.zero_state()?;
+        let mut connectivity_check_config = config.connectivity_check_config().clone();
+        connectivity_check_config.enabled = false;
+        let connectivity_check_enabled = connectivity_check_config.enabled;
 
         let adnl = AdnlNode::with_config(config.adnl_node()?).await?;
         let dht = DhtNode::with_adnl_node(adnl.clone(), Self::TAG_DHT_KEY)?;
@@ -102,9 +129,10 @@ impl NodeNetwork {
             private_overlays: Arc::new(Cache::new()),
             validator_adnl_keys: Arc::new(Cache::new()),
             sets_contexts: Arc::new(Cache::new()),
+            current_set: Arc::new(Cache::new()),
         };
 
-        Ok(NodeNetwork {
+        let nn = Arc::new(NodeNetwork {
             adnl,
             dht,
             overlay,
@@ -116,7 +144,15 @@ impl NodeNetwork {
             overlay_awaiters: AwaitersPool::new("overlay_awaiters"),
             runtime_handle: tokio::runtime::Handle::current(),
             config_handler,
-        })
+            connectivity_check_config,
+        });
+
+        if connectivity_check_enabled {
+           Self::connectivity_broadcasts_sender(nn.clone());
+           Self::connectivity_stat_logger(nn.clone());
+        }
+
+        Ok(nn)
     }
 
     pub async fn stop(&self) {
@@ -175,8 +211,7 @@ impl NodeNetwork {
                 if let Err(e) = DhtNode::store_ip_address(&dht, &node_key).await {
                     log::warn!("store ip address is ERROR: {}", e)
                 }
-                delay_for(Duration::from_secs(Self::PERIOD_STORE_IP_ADDRESS)).await;
-
+                tokio::time::sleep(Duration::from_secs(Self::PERIOD_STORE_IP_ADDRESS)).await;
                 if let Some(actual_validator_adnl_keys) = validator_keys.clone() {
                     if actual_validator_adnl_keys.get(node_key.id()).is_none() {
                         break;
@@ -197,8 +232,7 @@ impl NodeNetwork {
             loop {
                 let res = DhtNode::store_overlay_node(&dht, &overay_id, &overlay_node).await;
                 log::info!("overlay_store status: {:?}", res);
-
-                delay_for(Duration::from_secs(Self::PERIOD_STORE_IP_ADDRESS)).await;
+                tokio::time::sleep(Duration::from_secs(Self::PERIOD_STORE_IP_ADDRESS)).await;
             }
         });
     }
@@ -214,8 +248,7 @@ impl NodeNetwork {
                 if let Err(e) = Self::add_overlay_peers(&neighbours, &dht, &overlay, &overlay_id).await {
                     log::warn!("add_overlay_peers: {}", e);
                 };
-
-                delay_for(Duration::from_secs(Self::PERIOD_CHECK_OVERLAY_NODES)).await;
+                tokio::time::sleep(Duration::from_secs(Self::PERIOD_CHECK_OVERLAY_NODES)).await;
             }
         });
     }
@@ -237,7 +270,6 @@ impl NodeNetwork {
             neighbours.add_overlay_peer(peer_key.id().clone())?;
             log::trace!("add_overlay_peers: add overlay peer {:?}, address: {}", peer, ip);
         }
-        
         Ok(())
     }
 
@@ -386,13 +418,12 @@ impl NodeNetwork {
         tokio::spawn(async move {
             loop {
                 let mut iter = None;
-
                 while let Some(id) = dht.get_known_peer(&mut iter) {
                     if let Err(e) = dht.find_dht_nodes(&id).await {
                         log::warn!("find_dht_nodes result: {:?}", e)
                     }
                 }
-                delay_for(Duration::from_secs(Self::PERIOD_START_FIND_DHT_NODE)).await;
+                tokio::time::sleep(Duration::from_secs(Self::PERIOD_START_FIND_DHT_NODE)).await;
             }
         });
     }
@@ -410,7 +441,7 @@ impl NodeNetwork {
                     log::trace!("finish find overlay nodes.");
                     return;
                 }
-                delay_for(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(Self::PERIOD_UPDATE_PEERS)).await;
             }
         });
     }
@@ -420,7 +451,7 @@ impl NodeNetwork {
         overlay_id: (Arc<OverlayShortId>, OverlayId)
     ) -> Result<Arc<dyn FullNodeOverlayClient>> {
 
-        self.overlay.add_shard(&overlay_id.0).await?;
+        self.overlay.add_shard(Some(self.runtime_handle.clone()), &overlay_id.0)?;
 
         let node = self.overlay.get_signed_node(&overlay_id.0)?;
         NodeNetwork::periodic_store_overlay_node(
@@ -491,8 +522,7 @@ impl NodeNetwork {
                 if current_validators.is_empty() {
                     break;
                 }
-                delay_for(Duration::from_secs(SLEEP_TIME)).await;
-
+                tokio::time::sleep(Duration::from_secs(SLEEP_TIME)).await;
                 if validators_contexts.get(&validator_list_id).is_none() {
                     break;
                 }
@@ -508,12 +538,14 @@ impl NodeNetwork {
         overlay: Arc<OverlayNode>,
         validators: Vec<CatchainNode>
     ) -> Result<Vec<CatchainNode>> {
-        const SEARCH_TIMEOUT: u64 = 5;
-
+        const SEARCH_TIMEOUT: u64 = 5;  // seconds
         let mut lost_validators = Vec::new();
         for val in validators {
             let res = if is_first_search {
-                match timeout(Duration::from_secs(SEARCH_TIMEOUT), DhtNode::find_address(&dht, &val.adnl_id)).await {
+                match tokio::time::timeout(
+                    Duration::from_secs(SEARCH_TIMEOUT), 
+                    DhtNode::find_address(&dht, &val.adnl_id)
+                ).await {
                     Ok(result) => { result },
                     Err(_) => {
                         lost_validators.push(val.clone());
@@ -524,7 +556,6 @@ impl NodeNetwork {
             } else {
                 DhtNode::find_address(&dht, &val.adnl_id).await
             };
-
             match res {
                 Ok((addr, key)) => {
                     log::info!("addr: {:?}, key: {:x?}", &addr, &key);
@@ -537,6 +568,137 @@ impl NodeNetwork {
             }
         }
         Ok(lost_validators)
+    }
+
+    fn connectivity_stat_logger(self: Arc<Self>) {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                if let Some(validator_set_context) = self.current_validator_set_context() {
+
+                    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let connectivity_stat = &validator_set_context.val().connectivity_stat;
+                    let mut sb = string_builder::Builder::default();
+                    sb.append(format!(
+                        "\n{:<54} {:>10}  {:>10}",
+                        "adnl id",
+                        "short",
+                        "long"
+                    ));
+                    for guard in connectivity_stat.iter() {
+                        let short = guard.val().last_short_got.load(Ordering::Relaxed);
+                        let short_latency = guard.val().last_short_latency.load(Ordering::Relaxed);
+                        let long = guard.val().last_long_got.load(Ordering::Relaxed);
+                        let long_latency = guard.val().last_long_latency.load(Ordering::Relaxed);
+
+                        let short_diff = if now > short { now - short } else { 0 };
+                        let long_diff = if now > long { now - long } else { 0 };
+                        
+                        sb.append(format!(
+                            "\n{:<54} {:>6},{:>3}  {:>6},{:>3}",
+                            guard.key(),
+                            if short == 0 { "newer".to_string() } else { short_diff.to_string() },
+                            short_latency,
+                            if long == 0 { "newer".to_string() } else { long_diff.to_string() },
+                            long_latency
+                        ));
+                    }
+                    log::info!(
+                        "Public overlay connectivity (last connectivity broadcast got, seconds ago, latency)\n{}",
+                        sb.string().unwrap_or_default()
+                    );
+                }
+            }
+        });
+    }
+
+    pub fn process_connectivity_broadcast(self: Arc<Self>, broadcast: Box<ConnectivityCheckBroadcast>) {
+        if !self.connectivity_check_config.enabled {
+            return;
+        }
+        tokio::spawn(async move {
+            if let Some(validator_set_context) = self.current_validator_set_context() {
+                let pub_key = KeyId::from_data(broadcast.pub_key.0);
+                let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+
+                let u64_size = std::mem::size_of::<u64>();
+                let mut latency = u64::MAX;
+                if broadcast.padding.len() >= u64_size {
+                    if let Ok(b) = broadcast.padding[(broadcast.padding.len() - u64_size)..].try_into() {
+                        let sent = u64::from_le_bytes(b);
+                        latency = if sent > now {
+                            sent - now
+                        } else {
+                            0
+                        };
+                    }
+                }
+                
+                match validator_set_context.val().connectivity_stat.get(&pub_key) {
+                    Some(stat) => {
+                        if broadcast.padding.len() < ConnectivityCheckBroadcastConfig::LONG_BCAST_MIN_LEN {
+                            stat.val().last_short_got.store(now, Ordering::Relaxed);
+                            stat.val().last_short_latency.store(latency, Ordering::Relaxed);
+                        } else {
+                            stat.val().last_long_got.store(now, Ordering::Relaxed);
+                            stat.val().last_long_latency.store(latency, Ordering::Relaxed);
+                        }
+                    }
+                    None => {
+                        log::warn!("process_connectivity_broadcast: unknown key {}", pub_key);
+                    }
+                }
+            }
+        });
+    }
+
+    fn current_validator_set_context<'a>(&'a self) -> Option<lockfree::map::ReadGuard<'a, UInt256, ValidatorSetContext>>  {
+        let id = self.validator_context.current_set.get(&0)?;
+        self.validator_context.sets_contexts.get(id.val())
+    }
+
+    fn connectivity_broadcasts_sender(self: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut big_bc_counter = 0_u8;
+            loop {
+                tokio::time::sleep(
+                    Duration::from_millis(self.connectivity_check_config.short_period_ms)
+                ).await;
+                big_bc_counter += 1;
+
+                if let Some(validator_set_context) = self.current_validator_set_context() {
+                    let key_id = validator_set_context.val().validator_key.id().data();
+                    match self.send_connectivity_broadcast(key_id, vec!()).await {
+                        Ok(n) => log::trace!("Sent short connectivity broadcast ({})", n),
+                        Err(e) => log::warn!("Error while sending short connectivity broadcast: {}", e)
+                    }
+                    if big_bc_counter == self.connectivity_check_config.long_mult {
+                        big_bc_counter = 0;
+                        match self.send_connectivity_broadcast(
+                            key_id, vec!(0xfe; self.connectivity_check_config.long_len)).await
+                        {
+                            Ok(n) => log::trace!("Sent long connectivity broadcast ({})", n),
+                            Err(e) => log::warn!("Error while sending long connectivity broadcast: {}", e)
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    async fn send_connectivity_broadcast(&self, key_id: &[u8; 32], mut padding: Vec<u8>) -> Result<u32> {
+        if let Some(overlay) = self.overlays.get(&self.masterchain_overlay_short_id) {
+            let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+            padding.extend_from_slice(&now.to_le_bytes());
+            let broadcast = TonNode_ConnectivityCheckBroadcast(Box::new(ConnectivityCheckBroadcast {
+                pub_key: int256(key_id.clone()),
+                padding: bytes(padding),
+            }));
+            overlay.val().overlay()
+                .broadcast(&self.masterchain_overlay_short_id, &serialize(&broadcast)?, None).await
+        } else {
+            fail!("There is not masterchain overlay")
+        }
     }
 }
 
@@ -576,7 +738,7 @@ impl OverlayOperations for NodeNetwork {
     ) -> Result<Arc<dyn FullNodeOverlayClient>> {
         loop {
             if let Some(overlay) = self.overlays.get(&overlay_id.0) {
-                return Ok(overlay.val().clone());
+                return Ok(overlay.val().clone() as Arc<dyn FullNodeOverlayClient>);
             }
             let overlay_opt = self.overlay_awaiters.do_or_wait(
                 &overlay_id.0.clone(),
@@ -661,19 +823,23 @@ impl PrivateOverlayOperations for NodeNetwork {
                 Some(val.adnl_id.clone())
         }}).collect();*/
 
+        let connectivity_stat = Arc::new(Cache::new());
+
         for val in validators {
             if val.public_key.id() == local_validator_key.id() {
                 continue;
             }
             peers_ids.push(val.adnl_id.clone());
             lost_validators.push(val.clone());
+            connectivity_stat.insert(val.adnl_id.clone(), Default::default());
         }
 
         let validator_set_context = ValidatorSetContext {
             validator_peers: peers_ids,
             validator_key: Arc::new(local_validator_key),
             validator_adnl_key: adnl_key.clone(),
-            election_id: election_id.clone()
+            election_id: election_id.clone(),
+            connectivity_stat,
         };
 
         let context = self.try_add_new_elem(
@@ -693,6 +859,12 @@ impl PrivateOverlayOperations for NodeNetwork {
             );
         }
         Ok(Some(context.validator_key.clone()))
+    }
+
+    fn activate_validator_list(&self, validator_list_id: UInt256) -> Result<()> {
+        log::trace!("activate_validator_list {}", validator_list_id);
+        self.validator_context.current_set.insert(0, validator_list_id);
+        Ok(())
     }
 
     async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
@@ -730,8 +902,7 @@ impl PrivateOverlayOperations for NodeNetwork {
         listener : CatchainOverlayListenerPtr,
         _log_replay_listener: CatchainOverlayLogReplayListenerPtr
     ) -> Result<Arc<dyn CatchainOverlay + Send>> {
-
-        
+    
         let validator_set_context = self.validator_context.sets_contexts.get(&validator_list_id)
             .ok_or_else(|| error!("bad validator_list_id ({})!", validator_list_id.to_hex_string()))?;
         let adnl_key = self.adnl.key_by_tag(validator_set_context.val().election_id)?;

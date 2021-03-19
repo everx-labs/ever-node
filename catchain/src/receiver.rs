@@ -78,6 +78,7 @@ pub(crate) struct ReceiverImpl {
     next_neighbours_rotate_time: SystemTime, //time to change neighbours
     initial_sync_complete_time: SystemTime, //time to finish initial synchronization
     rng: rand::rngs::ThreadRng,      //random generator
+    get_pending_deps_call_id: u64, //unique ID for calling get_pending_deps (to cut off duplications during the blocks graph traverse)
 }
 
 /// Functions which converts public Receiver to its implementation
@@ -1571,11 +1572,19 @@ impl ReceiverImpl {
         if let Some(first_block) = first_block {
             let mut dep_hashes = Vec::new();
 
-            const MAX_PENDING_DEPS_COUNT: usize = 16;
+            {
+                instrument!();
 
-            first_block
-                .borrow()
-                .get_pending_deps(MAX_PENDING_DEPS_COUNT, &mut dep_hashes);
+                const MAX_PENDING_DEPS_COUNT: usize = 16;
+
+                self.get_pending_deps_call_id += 1;
+
+                first_block.borrow_mut().get_pending_deps(
+                    self.get_pending_deps_call_id,
+                    MAX_PENDING_DEPS_COUNT,
+                    &mut dep_hashes,
+                );
+            }
 
             for dep_hash in dep_hashes {
                 //send getBlock request for each absent hash
@@ -2043,10 +2052,14 @@ impl ReceiverImpl {
             || fork_proof.left.src != fork_proof.right.src
             || fork_proof.left.data_hash == fork_proof.right.data_hash
         {
-            warn!("Incorrect fork blame, not a fork: {}/{}, {}/{}, {:?}/{:?}",
-                fork_proof.left.height, fork_proof.right.height,
-                fork_proof.left.src, fork_proof.right.src,
-                fork_proof.left.data_hash, fork_proof.right.data_hash
+            warn!(
+                "Incorrect fork blame, not a fork: {}/{}, {}/{}, {:?}/{:?}",
+                fork_proof.left.height,
+                fork_proof.right.height,
+                fork_proof.left.src,
+                fork_proof.right.src,
+                fork_proof.left.data_hash,
+                fork_proof.right.data_hash
             );
             return;
         }
@@ -2486,6 +2499,7 @@ impl ReceiverImpl {
             initial_sync_complete_time: now
                 + Duration::from_secs(INFINITE_INITIAL_SYNC_COMPLETE_TIME_SECS),
             rng: rand::thread_rng(),
+            get_pending_deps_call_id: 0,
         };
 
         obj.add_received_block(root_block.clone());
