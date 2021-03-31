@@ -297,7 +297,7 @@ impl Engine {
             last_known_keyblock_seqno: AtomicU32::new(0),
             will_validate: AtomicBool::new(false),
             test_bundles_config,
-            shard_states_cache: TimeBasedCache::new(120),
+            shard_states_cache: TimeBasedCache::new(120, "shard_states_cache".to_string()),
             loaded_from_ss_cache: AtomicU64::new(0),
             loaded_ss_total: AtomicU64::new(0),
         });
@@ -429,7 +429,7 @@ impl Engine {
             );
             // for pre-apply only 10 attempts, for apply - infinity
             let (attempts, timeout) = if pre_apply { 
-                (Some(30), Some((10, 15, 100)))
+                (Some(10), Some((50, 15, 500)))
             } else { 
                 (None, None)
             };
@@ -606,6 +606,7 @@ impl Engine {
         let cc_seqno = broadcast.block.cc_seqno as u32;
         let data = broadcast.block.data.0;
         if self.shard_blocks.add_shard_block(&id, cc_seqno, data, self.deref()).await? {
+            futures_timer::Delay::new(Duration::from_millis(500)).await;
             self.download_and_apply_block(&id, 0, true).await?;
         }
         Ok(())              

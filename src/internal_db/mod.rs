@@ -261,15 +261,18 @@ impl InternalDb for InternalDbImpl {
         block: &BlockStuff
     ) -> Result<Arc<BlockHandle>> {
         log::trace!("store_block_data {}", block.id());
-        let ret = self.create_or_load_block_handle(block.id(), Some(block.block()), None)?;
-        if !ret.has_data() {
-            let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(block.id());
-            self.archive_manager.add_file(&entry_id, block.data().to_vec()).await?;
-            if ret.set_data() {
-                self.store_block_handle(&ret)?;
+        let handle = self.create_or_load_block_handle(block.id(), Some(block.block()), None)?;
+        if !handle.has_data() {
+            let _ = handle.block_file_lock().write().await;
+            if !handle.has_data() {
+                let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(block.id());
+                self.archive_manager.add_file(&entry_id, block.data().to_vec()).await?;
+                if handle.set_data() {
+                    self.store_block_handle(&handle)?;
+                }
             }
         }
-        Ok(ret)
+        Ok(handle) 
     }
 
     async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff> {
@@ -352,25 +355,29 @@ impl InternalDb for InternalDbImpl {
 
             if proof.is_link() {
                 if !handle.has_proof_link() {
-                    let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(id);
-                    self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
-                    if handle.set_proof_link() {
-                        self.store_block_handle(&handle)?;
+                    let _ = handle.proof_file_lock().write().await;
+                    if !handle.has_proof_link() {
+                        let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(id);
+                        self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
+                        if handle.set_proof_link() {
+                            self.store_block_handle(&handle)?;
+                        }
                     }
                 }
             } else {
                 if !handle.has_proof() {
-                    let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Proof(id);
-                    self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
-                    if handle.set_proof() {
-                        self.store_block_handle(&handle)?;
+                    let _lock = handle.proof_file_lock().write().await;
+                    if !handle.has_proof() {
+                        let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Proof(id);
+                        self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
+                        if handle.set_proof() {
+                            self.store_block_handle(&handle)?;
+                        }
                     }
                 }
             }
             Ok(handle)
-
         }
-
     }
 
     async fn load_block_proof(&self, handle: &BlockHandle, is_link: bool) -> Result<BlockProofStuff> {

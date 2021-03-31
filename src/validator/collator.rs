@@ -1297,7 +1297,7 @@ impl Collator {
         let mut prev_states = vec!();
         let mut prev_ext_blocks_refs = vec![];
         for (i, prev_id) in self.prev_blocks_ids.iter().enumerate() {
-            let prev_state = self.engine.clone().wait_state(prev_id, Some(10_000)).await?;
+            let prev_state = self.engine.clone().wait_state(prev_id, Some(1_000)).await?;
 
             let end_lt = prev_state.state().gen_lt();
             let ext_block_ref = ExtBlkRef {

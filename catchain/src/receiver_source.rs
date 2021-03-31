@@ -112,9 +112,10 @@ impl ReceiverSource for ReceiverSourceImpl {
             assert!(block.get_hash() != existing_block.borrow().get_hash());
 
             warn!(
-                "fork found on height {} for source #{}",
+                "fork found on height {} for source #{}: blocks {} and {}",
                 block.get_height(),
-                self.id
+                self.id,
+                block.get_hash().to_hex_string(), existing_block.borrow().get_hash().to_hex_string()
             );
 
             if !self.is_fork_found() {

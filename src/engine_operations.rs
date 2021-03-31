@@ -346,15 +346,16 @@ impl EngineOperations for Engine {
         handle: &Arc<BlockHandle>, 
         state: &ShardStateStuff
     ) -> Result<()> {
+        if self.shard_states_cache().get(handle.id()).is_none() {
+            self.shard_states_cache().set(handle.id().clone(), |_| Some(state.clone()))?;
+        }
+        self.db().store_shard_state_dynamic(handle, state)?;
         self.shard_states_awaiters().do_or_wait(
             state.block_id(),
             None,
             async { Ok(state.clone()) }
         ).await?;
-        if self.shard_states_cache().get(handle.id()).is_none() {
-            self.shard_states_cache().set(handle.id().clone(), |_| Some(state.clone()))?;
-        }
-        self.db().store_shard_state_dynamic(handle, state)
+        Ok(())
     }
 
     async fn store_zerostate(

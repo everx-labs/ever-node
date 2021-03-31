@@ -469,12 +469,13 @@ impl Receiver for ReceiverImpl {
         instrument!();
 
         trace!(
-            "Catchain delivering block {:?} from source={} fork={} height={} custom={}",
+            "Catchain delivering block {:?} from source={} fork={} height={} custom={} deps={:?}",
             block.get_hash(),
             block.get_source_id(),
             block.get_fork_id(),
             block.get_height(),
-            block.is_custom()
+            block.is_custom(),
+            block.get_dep_hashes()
         );
 
         //notify listeners about new block appearance
