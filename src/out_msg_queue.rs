@@ -470,7 +470,7 @@ impl MsgQueueManager {
             log::debug!("neighbors #{} ---> {:#}", i + 1, shard.shard());
             
             // TODO add loop and stop_flag checking
-            let shard_state = engine.clone().wait_state(shard.block_id(), Some(10_000)).await?;
+            let shard_state = engine.clone().wait_state(shard.block_id(), Some(1_000)).await?;
             
             let nb = Self::load_out_queue_info(engine, &shard_state, &last_mc_state, &mut mc_shard_states).await?;
             neighbors.push(nb);

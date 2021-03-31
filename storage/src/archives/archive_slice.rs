@@ -212,7 +212,11 @@ impl ArchiveSlice {
             package_info.package().path(),
             offset
         );
-        package_info.package().read_entry(offset).await
+        let entry = package_info.package().read_entry(offset).await?;
+        if entry.data().len() == 0 {
+            fail!("Read entry ({}) is corrupted! It can't have zero length!", entry_id);
+        }
+        Ok(entry)
     }
 
     pub async fn get_slice(&self, archive_id: u64, offset: u64, limit: u32) -> Result<Vec<u8>> {

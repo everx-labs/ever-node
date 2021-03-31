@@ -9,7 +9,7 @@ use std::{borrow::Borrow, hash::Hash, io::ErrorKind, path::PathBuf, sync::Arc};
 use tokio::io::AsyncWriteExt;
 use ton_api::ton::PublicKey;
 use ton_block::BlockIdExt;
-use ton_types::{error, Result, UInt256};
+use ton_types::{error, fail, Result, UInt256};
 
 
 pub const ARCHIVE_SIZE: usize = 20_000;
@@ -53,6 +53,10 @@ impl ArchiveManager {
     {
         log::debug!(target: "storage", "Saving unapplied file: {}", entry_id);
 
+        if data.len() == 0 {
+            fail!("Added file's ({}) data can't have zero length", entry_id);
+        }
+
         let filename = self.unapplied_dir.join(entry_id.filename_short());
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
@@ -75,8 +79,7 @@ impl ArchiveManager {
         U256: Borrow<UInt256> + Hash,
         PK: Borrow<PublicKey> + Hash
     {
-        handle.temp_lock().read().await;
-
+            
         if handle.is_archived() {
             let package_id = self.get_package_id(get_mc_seq_no(handle)).await?;
             if let Some(ref fd) = self.get_file_desc(package_id, false).await? {
@@ -86,8 +89,14 @@ impl ArchiveManager {
             }
         }
 
-        self.read_temp_file(entry_id).await
-            .map(|(_filename, data)| data)
+        let _ = match &entry_id {
+            PackageEntryId::Block(_) => handle.block_file_lock().read().await,
+            PackageEntryId::Proof(_) => handle.proof_file_lock().read().await,
+            PackageEntryId::ProofLink(_) => handle.proof_file_lock().read().await,
+            _ => fail!("Unsupported package entry")
+        };
+        self.read_temp_file(entry_id).await.map(|(_filename, data)| data)
+
     }
 
     pub async fn move_to_archive(
@@ -95,7 +104,8 @@ impl ArchiveManager {
         handle: &BlockHandle,
         mut on_success: impl FnMut() -> Result<()>,
     ) -> Result<()> {
-        if handle.start_moving_to_archive() {
+
+        if !handle.set_moving_to_archive() {
             return Ok(());
         }
 
@@ -115,13 +125,16 @@ impl ArchiveManager {
         }
 
         let proof_filename = if proof_inited {
+            let _ = handle.proof_file_lock().write().await;
             Some(self.move_file_to_archive(handle, &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Proof(handle.id())).await?)
         } else if prooflink_inited {
+            let _ = handle.proof_file_lock().write().await;
             Some(self.move_file_to_archive(handle, &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::ProofLink(handle.id())).await?)
         } else {
             None
         };
         let block_filename = if data_inited {
+            let _ = handle.block_file_lock().write().await;
             Some(self.move_file_to_archive(handle, &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Block(handle.id())).await?)
         } else {
             None
@@ -129,17 +142,16 @@ impl ArchiveManager {
 
         on_success()?;
 
-        {
-            handle.temp_lock().write().await;
-            if let Some(filename) = proof_filename {
-                tokio::fs::remove_file(filename).await?;
-            }
-            if let Some(filename) = block_filename {
-                tokio::fs::remove_file(filename).await?;
-            }
+        if let Some(filename) = proof_filename {
+            let _ = handle.proof_file_lock().write().await;
+            tokio::fs::remove_file(filename).await?;
         }
-
+        if let Some(filename) = block_filename {
+            let _ = handle.block_file_lock().write().await;
+            tokio::fs::remove_file(filename).await?;
+        }
         Ok(())
+
     }
 
     pub async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
@@ -165,7 +177,6 @@ impl ArchiveManager {
     {
         log::debug!(target: "storage", "Moving entry to archive: {}", entry_id.filename_short());
         let (filename, data) = {
-            handle.temp_lock().read().await;
             self.read_temp_file(entry_id).await?
         };
 
@@ -208,6 +219,9 @@ impl ArchiveManager {
                     error!("Error reading file: {:?}, {}", temp_filename, error)
                 }
             })?;
+        if data.len() == 0 {
+            fail!("Read temp file ({}) is corrupted! It can't have zero length!", entry_id);
+        }
 
         Ok((temp_filename, data))
     }

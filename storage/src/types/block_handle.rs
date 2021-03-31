@@ -1,5 +1,5 @@
 use crate::{block_handle_db::BlockHandleCache, traits::Serializable, types::BlockMeta};
-use std::{io::Write, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+use std::{io::Write, sync::Arc};
 use ton_block::BlockIdExt;
 use ton_types::{fail, Result};
 
@@ -17,14 +17,15 @@ const FLAG_APPLIED: u32              = 1 << 10;
 pub(crate) const FLAG_KEY_BLOCK: u32 = 1 << 11;
 const FLAG_MOVED_TO_ARCHIVE: u32     = 1 << 13;
 const FLAG_INDEXED: u32              = 1 << 14;
+const FLAG_ARCHIVING: u32            = 1 << 16;
 
 /// Meta information related to block
 #[derive(Debug)]
 pub struct BlockHandle {
     id: BlockIdExt,
     meta: BlockMeta,
-    moving_to_archive_started: AtomicBool,
-    temp_lock: tokio::sync::RwLock<()>,
+    block_file_lock: tokio::sync::RwLock<()>,
+    proof_file_lock: tokio::sync::RwLock<()>,
     block_handle_cache: Arc<BlockHandleCache>,
 }
 
@@ -38,8 +39,8 @@ impl BlockHandle {
         Self {
             id,
             meta,
-            moving_to_archive_started: AtomicBool::new(false),
-            temp_lock: tokio::sync::RwLock::new(()),
+            block_file_lock: tokio::sync::RwLock::new(()),
+            proof_file_lock: tokio::sync::RwLock::new(()),
             block_handle_cache
         }
     }
@@ -273,12 +274,16 @@ impl BlockHandle {
 */
     }
 
-    pub fn start_moving_to_archive(&self) -> bool {
-        self.moving_to_archive_started.swap(true, Ordering::SeqCst)
+    pub fn set_moving_to_archive(&self) -> bool {
+        self.set_flag(FLAG_ARCHIVING)
     }
 
-    pub(crate) fn temp_lock(&self) -> &tokio::sync::RwLock<()>  {
-        &self.temp_lock
+    pub fn block_file_lock(&self) -> &tokio::sync::RwLock<()>  {
+        &self.block_file_lock
+    }
+
+    pub fn proof_file_lock(&self) -> &tokio::sync::RwLock<()>  {
+        &self.proof_file_lock
     }
 
 //    #[inline]

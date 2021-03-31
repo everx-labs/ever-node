@@ -63,7 +63,7 @@ catchain = { path = "catchain" }
 dht = { version = "0.1", git = "https://github.com/tonlabs/ton-labs-dht" }
 lockfree = { git = "https://github.com/tonlabs/lockfree.git" }
 overlay = { version = "0.1", git = "https://github.com/tonlabs/ton-labs-overlay", features = ["trace"] }
-rldp = { version = "0.1", git = "https://github.com/tonlabs/ton-labs-rldp" }
+rldp = { version = "0.1", git = "https://github.com/tonlabs/ton-labs-rldp", features = ["trace"] }
 storage = { path = "storage" }
 ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }
 ton_block = { git = "https://github.com/tonlabs/ton-labs-block" }

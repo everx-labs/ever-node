@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, atomic::{AtomicU64, Ordering}},
     hash::Hash,
     marker::Sync,
+    fmt::Display,
 };
 
 pub struct TimeBasedCache<K, V> {
@@ -12,12 +13,12 @@ pub struct TimeBasedCache<K, V> {
 }
 
 impl<K, V> TimeBasedCache<K, V> where 
-    K: 'static + Hash + Ord + Sync + Send,
+    K: 'static + Hash + Ord + Sync + Send + Display,
     V: 'static + Clone + Sync + Send 
 {
-    pub fn new(ttl_sec: u64) -> Self {
+    pub fn new(ttl_sec: u64, name: String) -> Self {
         let map = Arc::new(lockfree::map::Map::new());
-        Self::gc(map.clone(), ttl_sec);
+        Self::gc(map.clone(), ttl_sec, name);
         Self{map}
     }
 
@@ -48,17 +49,21 @@ impl<K, V> TimeBasedCache<K, V> where
         })
     }
 
-    fn gc(map: Arc<lockfree::map::Map<K, (V, AtomicU64)>>, ttl: u64) {
+    fn gc(map: Arc<lockfree::map::Map<K, (V, AtomicU64)>>, ttl: u64, name: String) {
         tokio::spawn(async move{
             loop {
                 futures_timer::Delay::new(Duration::from_millis(ttl * 100)).await;
                 let now = Self::now();
+                let mut len = 0;
                 for guard in map.iter() {
                     let time = guard.val().1.load(Ordering::Relaxed);
                     if now > time && now - time > ttl {
                         map.remove(guard.key());
+                    } else {
+                        len += 1;
                     }
                 }
+                log::trace!("{} capacity: {}", name, len);
             }
         });
     }
