@@ -311,9 +311,6 @@ pub trait EngineOperations : Sync + Send {
 
     // External messages
 
-    fn new_external_message_raw(&self, data: &[u8]) -> Result<()> {
-        unimplemented!()
-    }
     fn new_external_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
         unimplemented!()
     }
@@ -385,6 +382,10 @@ pub trait EngineOperations : Sync + Send {
 
     fn test_bundles_config(&self) -> &CollatorTestBundlesGeneralConfig {
         unimplemented!()
+    }
+
+    fn db_root_dir(&self) -> Result<&str> {
+        Ok("node_db")
     }
 
     // I/O

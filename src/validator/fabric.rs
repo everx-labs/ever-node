@@ -6,11 +6,16 @@ use std::{
 use super::validator_utils::{validator_query_candidate_to_validator_block_candidate, pairvec_to_cryptopair_vec};
 use crate::{
     collator_test_bundle::CollatorTestBundle, engine_traits::EngineOperations, 
-    validator::{collator_sync::Collator, CollatorSettings, validate_query::ValidateQuery}
+    validator::{CollatorSettings, validate_query::ValidateQuery, collator, collator_sync}
 };
 use ton_block::{BlockIdExt, ShardIdent, ValidatorSet};
 use ton_types::{Result, UInt256};
 use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
+
+#[cfg(feature = "metrics")]
+use statsd::client;
+#[cfg(feature = "metrics")]
+use crate::engine::STATSD;
 
 pub async fn run_validate_query(
     shard: ShardIdent,
@@ -32,8 +37,11 @@ pub async fn run_validate_query(
         seqno + 1
     );
 
+    #[cfg(feature = "metrics")]
+    STATSD.incr(&format!("run_validators_{}", shard));
+
     let test_bundles_config = &engine.test_bundles_config().validator;
-    if !test_bundles_config.is_enable() {
+    let validator_result = if !test_bundles_config.is_enable() {
         ValidateQuery::new(
             shard,
             min_masterchain_block_id.seq_no(),
@@ -42,55 +50,67 @@ pub async fn run_validate_query(
             set,
             engine,
             false,
+            cfg!(feature = "async_validator"),
+        ).try_validate().await
+    } else {
+        let query = ValidateQuery::new(
+            shard.clone(),
+            min_masterchain_block_id.seq_no(),
+            prev.clone(),
+            block.clone(),
+            set,
+            engine.clone(),
             false,
-        ).try_validate().await?;
-        return Ok(SystemTime::now())
-    }
-
-    let query = ValidateQuery::new(
-        shard.clone(),
-        min_masterchain_block_id.seq_no(),
-        prev.clone(),
-        block.clone(),
-        set,
-        engine.clone(),
-        false,
-        false,
-    );
-
-    if let Err(err) = query.try_validate().await {
-        let err_str = err.to_string();
-        if test_bundles_config.need_to_build_for(&err_str) {
-            let id = block.block_id.clone();
-            if !CollatorTestBundle::exists(test_bundles_config.path(), &id) {
-                let path = test_bundles_config.path().to_string();
-                let engine = engine.clone();
-                tokio::spawn(
-                    async move {
-                        match CollatorTestBundle::build_for_validating_block(
-                            shard, min_masterchain_block_id, prev, block, engine
-                        ).await {
-                            Err(e) => log::error!(
-                                "Error while test bundle for {} building: {}", id, e
-                            ),
-                            Ok(mut b) => {
-                                b.set_notes(err_str);
-                                if let Err(e) = b.save(&path) {
-                                    log::error!("Error while test bundle for {} saving: {}", id, e)
-                                } else {
-                                    log::info!("Built test bundle for {}", id)
+            cfg!(feature = "async_validator"),
+        );
+        let validator_result = query.try_validate().await;
+        if let Err(err) = &validator_result {
+            let err_str = err.to_string();
+            if test_bundles_config.need_to_build_for(&err_str) {
+                let id = block.block_id.clone();
+                if !CollatorTestBundle::exists(test_bundles_config.path(), &id) {
+                    let path = test_bundles_config.path().to_string();
+                    let engine = engine.clone();
+                    tokio::spawn(
+                        async move {
+                            match CollatorTestBundle::build_for_validating_block(
+                                shard, min_masterchain_block_id, prev, block, engine
+                            ).await {
+                                Err(e) => log::error!(
+                                    "Error while test bundle for {} building: {}", id, e
+                                ),
+                                Ok(mut b) => {
+                                    b.set_notes(err_str);
+                                    if let Err(e) = b.save(&path) {
+                                        log::error!("Error while test bundle for {} saving: {}", id, e)
+                                    } else {
+                                        log::info!("Built test bundle for {}", id)
+                                    }
                                 }
                             }
                         }
-                    }
-                );
+                    );
+                }
             }
-        }
-        Err(err)
-    } else {
-        Ok(SystemTime::now())
-    }
+        };
+        validator_result
+    };
 
+    #[cfg(feature = "metrics")]
+    STATSD.decr(&format!("run_validators_{}", shard));
+
+    match validator_result {
+        Ok(_) => {
+            #[cfg(feature = "metrics")]
+            STATSD.incr(&format!("succeessful_validations_{}", shard));
+            Ok(SystemTime::now())
+        }
+        Err(e) =>  {
+            #[cfg(feature = "metrics")]
+            STATSD.incr(&format!("failed_validations_{}", shard));
+            Err(e)
+        }
+    }
 }
 
 pub async fn run_accept_block_query(
@@ -126,24 +146,52 @@ pub async fn run_collate_query (
     collator_id: PublicKey,
     set: ValidatorSet,
     engine: Arc<dyn EngineOperations>,
-    _timeout: SystemTime,
+    timeout: u32,
 ) -> Result<ValidatorBlockCandidate>
 {
-    let collator = Collator::new(
-        shard,
-        min_masterchain_block_id,
-        prev.clone(),
-        set,
-        UInt256::from(collator_id.pub_key()?),
-        engine.clone(),
-        None,
-        CollatorSettings::default()
-    )?;
-    match collator.collate().await {
+    #[cfg(feature = "metrics")]
+    STATSD.incr(&format!("run_collators_{}", shard));
+
+    let collator_result = if cfg!(feature = "async_collator") {
+        let collator = collator::Collator::new(
+            shard,
+            min_masterchain_block_id,
+            prev.clone(),
+            set,
+            UInt256::from(collator_id.pub_key()?),
+            engine.clone(),
+            None,
+            CollatorSettings::default()
+        )?;
+        collator.collate(timeout).await
+    } else {
+        let collator = collator_sync::Collator::new(
+            shard,
+            min_masterchain_block_id,
+            prev.clone(),
+            set,
+            UInt256::from(collator_id.pub_key()?),
+            engine.clone(),
+            None,
+            CollatorSettings::default()
+        )?;
+        collator.collate().await
+    };
+
+    #[cfg(feature = "metrics")]
+    STATSD.decr(&format!("run_collators_{}", shard));
+
+    match collator_result {
         Ok((candidate, _)) => {
+            #[cfg(feature = "metrics")]
+            STATSD.incr(&format!("succeessful_collations_{}", shard));
+
             return Ok(validator_query_candidate_to_validator_block_candidate(collator_id, candidate))
         }
         Err(err) => {
+            #[cfg(feature = "metrics")]
+            STATSD.incr(&format!("failed_collations_{}", shard));
+
             let test_bundles_config = &engine.test_bundles_config().collator;
             if test_bundles_config.is_enable() {
                 let err_str = err.to_string();

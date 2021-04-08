@@ -119,11 +119,12 @@ impl MessagesPool {
     }
 
 
-    pub fn new_message_raw(&self, data: &[u8], now: u32) -> Result<()> {
+    pub fn new_message_raw(&self, data: &[u8], now: u32) -> Result<UInt256> {
         let (id, message) = create_ext_message(data)?;
         let message = Arc::new(message);
 
-        self.new_message(id, message, now)
+        self.new_message(id.clone(), message, now)?;
+        Ok(id)
     }
 
 

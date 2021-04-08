@@ -36,7 +36,7 @@ use ton_block::{
     InMsgDescr, OutMsgDescr, ShardAccount, ShardAccountBlocks, ShardAccounts,
     Account, AccountBlock, AccountStatus,
     ShardFeeCreated, TransactionDescr, OutMsgQueueKey, BlockLimits,
-    GlobalCapabilities,
+    GlobalCapabilities, TrComputePhase,
 };
 use ton_executor::{
     BlockchainConfig, CalcMsgFwdFees, OrdinaryTransactionExecutor, TickTockTransactionExecutor, 
@@ -47,6 +47,9 @@ use ton_types::{
     deserialize_cells_tree,
     AccountId, Cell, CellType, HashmapType, SliceData, UInt256,
 };
+
+#[cfg(feature = "metrics")]
+use crate::engine::STATSD;
 
 
 // pub const SPLIT_MERGE_DELAY: u32 = 100;        // prepare (delay) split/merge for 100 seconds
@@ -139,6 +142,7 @@ struct ValidateBase {
     // from collated_data
     top_shard_descr_dict: TopBlockDescrSet,
     virt_roots: HashMap<UInt256, Cell>, // never used proofs of processed messages
+    gas_used: Arc<AtomicU64>,
 
     config_params: ConfigParams,
 
@@ -714,6 +718,7 @@ impl ValidateQuery {
             Some(&base.next_state),
             base.after_merge,
             base.after_split,
+            None,
         ).await
     }
 
@@ -2957,6 +2962,9 @@ impl ValidateQuery {
             }
         };
         let mut trans2 = executor.execute(in_msg.as_ref(), account_root, base.now(), base.info.start_lt(), tr_lt, false)?;
+        if let Some(TrComputePhase::Vm(compute_ph)) = descr.compute_phase_ref() {
+            base.gas_used.fetch_add(compute_ph.gas_used.0 as u64, Ordering::Relaxed);
+        }
         // we cannot know prev transaction in executor
         trans2.set_prev_trans_hash(trans.prev_trans_hash());
         trans2.set_prev_trans_lt(trans.prev_trans_lt());
@@ -3796,8 +3804,18 @@ impl ValidateQuery {
         Self::check_mc_block_extra(&base, &mc_data)?;
         self.check_mc_state_extra(&base, &mc_data)?;
 
+        let duration = now.elapsed().as_millis() as u64;
+        let gas_used = base.gas_used.load(Ordering::Relaxed);
+        let ratio = match duration {
+            0 => gas_used,
+            duration => gas_used / duration
+        };
 
-        log::info!("ASYNC VALIDATED {} TIME {}ms", base.block_id(), now.elapsed().as_millis());
+        log::info!("ASYNC VALIDATED {} TIME {}ms GAS_RATE: {}", base.block_id(), duration, ratio);
+
+        #[cfg(feature = "metrics")]
+        STATSD.gauge(&format!("gas_rate_validator_{}", base.block_id().shard()), ratio as f64);
+
         Ok(())
     }
 }

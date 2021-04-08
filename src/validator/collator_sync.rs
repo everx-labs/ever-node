@@ -256,7 +256,7 @@ struct CollatorData {
     overload_history: u64,
     block_full: bool,
 
-    // debug stats to be removed
+    // Block metrics (to report statsd)
     dequeue_count: usize,
     enqueue_count: usize,
     transit_count: usize,
@@ -757,6 +757,22 @@ impl Collator {
             duration,
             ratio,
         );
+
+        #[cfg(feature = "metrics")]
+        crate::validator::collator::report_collation_metrics(
+            &self.shard,
+            collator_data.dequeue_count,
+            collator_data.enqueue_count,
+            collator_data.in_msg_count,
+            collator_data.out_msg_count,
+            collator_data.transit_count,
+            collator_data.execute_count,
+            collator_data.block_limit_status.gas_used(),
+            ratio,
+            candidate.data.len(),
+            duration,
+        );
+
         Ok((candidate, state))
     }
 
@@ -1198,6 +1214,7 @@ impl Collator {
             None,
             self.after_merge,
             self.after_split,
+            None,
         ).await
     }
 

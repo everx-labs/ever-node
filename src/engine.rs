@@ -45,7 +45,7 @@ use ton_types::{error, Result, fail};
 use ton_api::ton::ton_node::{
     Broadcast, broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}
 };
-use adnl::server::AdnlServerConfig;
+use adnl::{common::KeyId, server::AdnlServerConfig};
 
 define_db_prop!(LastMcBlockId,   "LastMcBlockId",   ton_api::ton::ton_node::blockidext::BlockIdExt);
 define_db_prop!(InitMcBlockId,   "InitMcBlockId",   ton_api::ton::ton_node::blockidext::BlockIdExt);
@@ -480,10 +480,6 @@ impl Engine {
         // TODO fix trash with Arc and clone
         apply_block(handle, block, mc_seq_no, &(self.clone() as Arc<dyn EngineOperations>), pre_apply).await?;
 
-        if !pre_apply {
-            self.set_applied(handle, mc_seq_no).await?;
-        }
-
         let ago = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i32 - block.gen_utime()? as i32;
         if block.id().shard().is_masterchain() {
@@ -492,6 +488,8 @@ impl Engine {
                 STATSD.gauge("last_applied_mc_block", block.id().seq_no() as f64);
                 STATSD.gauge("timediff", ago as f64);
                 self.shard_blocks().update_shard_blocks(&self.load_state(block.id()).await?)?;
+
+                self.set_applied(handle, mc_seq_no).await?;
 
                 let (prev_id, prev2_id_opt) = block.construct_prev_id()?;
                 if prev2_id_opt.is_some() {
@@ -508,6 +506,9 @@ impl Engine {
                 ago
             );
         } else {
+            if !pre_apply {
+                self.set_applied(handle, mc_seq_no).await?;
+            }
             log::info!(
                 "{} block {} ref_mc_block: {}, {} seconds old",
                 if pre_apply { "Pre-applied" } else { "Applied" },
@@ -529,19 +530,19 @@ impl Engine {
             loop {
                 match client.wait_broadcast().await {
                     Err(e) => log::error!("Error while wait_broadcast for shard {}: {}", shard_ident, e),
-                    Ok(brodcast) => {
+                    Ok((brodcast, src)) => {
                         match brodcast {
                             Broadcast::TonNode_BlockBroadcast(broadcast) => {
-                                self.clone().process_block_broadcast(broadcast);
+                                self.clone().process_block_broadcast(broadcast, src);
                             },
                             Broadcast::TonNode_ExternalMessageBroadcast(broadcast) => {
-                                self.process_ext_msg_broadcast(broadcast);
+                                self.process_ext_msg_broadcast(broadcast, src);
                             },
                             Broadcast::TonNode_IhrMessageBroadcast(broadcast) => {
-                                log::trace!("TonNode_IhrMessageBroadcast: {:?}", broadcast);
+                                log::trace!("TonNode_IhrMessageBroadcast from {}: {:?}", src, broadcast);
                             },
                             Broadcast::TonNode_NewShardBlockBroadcast(broadcast) => {
-                                self.clone().process_new_shard_block_broadcast(broadcast);
+                                self.clone().process_new_shard_block_broadcast(broadcast, src);
                             },
                             Broadcast::TonNode_ConnectivityCheckBroadcast(broadcast) => {
                                 self.network.clone().process_connectivity_broadcast(broadcast);
@@ -554,47 +555,52 @@ impl Engine {
         Ok(())
     }
 
-    fn process_block_broadcast(self: Arc<Self>, broadcast: Box<BlockBroadcast>) {
+    fn process_block_broadcast(self: Arc<Self>, broadcast: Box<BlockBroadcast>, src: Arc<KeyId>) {
         // because of ALL blocks-broadcasts received in one task - spawn for each block
         log::trace!("Processing block broadcast {}", broadcast.id);
         let engine = self.clone() as Arc<dyn EngineOperations>;
         tokio::spawn(async move {
             if let Err(e) = process_block_broadcast(&engine, &broadcast).await {
-                log::error!("Error while processing block broadcast {}: {}", broadcast.id, e);
+                log::error!("Error while processing block broadcast {} from {}: {}", broadcast.id, src, e);
             } else {
-                log::trace!("Processed block broadcast {}", broadcast.id);
+                log::trace!("Processed block broadcast {} from {}", broadcast.id, src);
             }
         });
     }
 
-    fn process_ext_msg_broadcast(&self, broadcast: Box<ExternalMessageBroadcast>) {
+    fn process_ext_msg_broadcast(&self, broadcast: Box<ExternalMessageBroadcast>, src: Arc<KeyId>) {
         // just add to list
-        log::trace!("Processing ext message broadcast {}bytes", broadcast.message.data.0.len());
-        if let Err(e) = self.new_external_message_raw(&broadcast.message.data.0) {
-            log::debug!("Error while processing ext message broadcast {}bytes: {}",
-                broadcast.message.data.0.len(), e);
+        if !self.is_validator() {
+            log::trace!("Skipped ext message broadcast {}bytes from {}: NOT A VALIDATOR",
+                broadcast.message.data.0.len(), src);
         } else {
-            log::trace!("Processed ext message broadcast {}bytes", broadcast.message.data.0.len());
+            log::trace!("Processing ext message broadcast {}bytes from {}", broadcast.message.data.0.len(), src);
+            match self.external_messages().new_message_raw(&broadcast.message.data.0, self.now()) {
+                Err(e) => log::debug!("Error while processing ext message broadcast {}bytes from {}: {}",
+                    broadcast.message.data.0.len(), src, e),
+                Ok(id) => log::trace!("Processed ext message broadcast {:x} {}bytes from {}",
+                    id, broadcast.message.data.0.len(), src),
+            }
         }
     }
 
-    fn process_new_shard_block_broadcast(self: Arc<Self>, broadcast: Box<NewShardBlockBroadcast>) {
+    fn process_new_shard_block_broadcast(self: Arc<Self>, broadcast: Box<NewShardBlockBroadcast>, src: Arc<KeyId>) {
         let id = broadcast.block.block.clone();
         if self.is_validator() {
-            log::trace!("Processing new shard block broadcast {}", id);
+            log::trace!("Processing new shard block broadcast {} from {}", id, src);
             tokio::spawn(async move {
                 if self.check_sync().await.unwrap_or(false) {
                     if let Err(e) = self.process_new_shard_block(broadcast).await {
-                        log::error!("Error while processing new shard block broadcast {}: {}", id, e);
+                        log::error!("Error while processing new shard block broadcast {} from {}: {}", id, src, e);
                     } else {
-                        log::trace!("Processed new shard block broadcast {}", id);
+                        log::trace!("Processed new shard block broadcast {} from {}", id, src);
                     }
                 } else {
-                    log::trace!("Processing new shard block broadcast {} NO SYNC", id);
+                    log::trace!("Processing new shard block broadcast {} from {} NO SYNC", id, src);
                 }
             });
         } else {
-            log::trace!("Processing new shard block broadcast {} NOT A VALIDATOR", id);
+            log::trace!("Processing new shard block broadcast {} from {} NOT A VALIDATOR", id, src);
         }
     }
 
@@ -1042,7 +1048,7 @@ fn start_validator(engine: Arc<Engine>) {
     tokio::spawn(async move {
         loop {
             if engine.network.get_validator_status() {
-                log::info!("started validator...");
+                log::info!("starting validator...");
                 if let Err(e) = validator_manager::start_validator_manager(engine.clone()) {
                     log::error!("{:?}", e);
                 }

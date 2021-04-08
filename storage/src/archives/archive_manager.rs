@@ -69,6 +69,23 @@ impl ArchiveManager {
         Ok(())
     }
 
+    pub fn check_file<B, U256, PK>(
+        &self,
+        handle: &BlockHandle,
+        entry_id: &PackageEntryId<B, U256, PK>
+    ) -> bool
+    where
+        B: Borrow<BlockIdExt> + Hash,
+        U256: Borrow<UInt256> + Hash,
+        PK: Borrow<PublicKey> + Hash
+    {
+        if handle.is_archived() {
+            true
+        } else {
+            self.unapplied_dir.join(entry_id.filename_short()).exists()
+        }
+    }
+
     pub async fn get_file<B, U256, PK>(
         &self,
         handle: &BlockHandle,
@@ -89,7 +106,7 @@ impl ArchiveManager {
             }
         }
 
-        let _ = match &entry_id {
+        let _lock = match &entry_id {
             PackageEntryId::Block(_) => handle.block_file_lock().read().await,
             PackageEntryId::Proof(_) => handle.proof_file_lock().read().await,
             PackageEntryId::ProofLink(_) => handle.proof_file_lock().read().await,
@@ -125,17 +142,32 @@ impl ArchiveManager {
         }
 
         let proof_filename = if proof_inited {
-            let _ = handle.proof_file_lock().write().await;
-            Some(self.move_file_to_archive(handle, &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Proof(handle.id())).await?)
+            let _lock = handle.proof_file_lock().write().await;
+            Some(
+                self.move_file_to_archive(
+                    handle, 
+                    &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Proof(handle.id())
+                ).await?
+            )
         } else if prooflink_inited {
-            let _ = handle.proof_file_lock().write().await;
-            Some(self.move_file_to_archive(handle, &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::ProofLink(handle.id())).await?)
+            let _lock = handle.proof_file_lock().write().await;
+            Some(
+                self.move_file_to_archive(
+                    handle, 
+                    &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::ProofLink(handle.id())
+                ).await?
+            )
         } else {
             None
         };
         let block_filename = if data_inited {
-            let _ = handle.block_file_lock().write().await;
-            Some(self.move_file_to_archive(handle, &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Block(handle.id())).await?)
+            let _lock = handle.block_file_lock().write().await;
+            Some(
+                self.move_file_to_archive(
+                    handle, 
+                    &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Block(handle.id())
+                ).await?
+            )
         } else {
             None
         };
@@ -143,11 +175,11 @@ impl ArchiveManager {
         on_success()?;
 
         if let Some(filename) = proof_filename {
-            let _ = handle.proof_file_lock().write().await;
+            let _lock = handle.proof_file_lock().write().await;
             tokio::fs::remove_file(filename).await?;
         }
         if let Some(filename) = block_filename {
-            let _ = handle.block_file_lock().write().await;
+            let _lock = handle.block_file_lock().write().await;
             tokio::fs::remove_file(filename).await?;
         }
         Ok(())
@@ -220,7 +252,11 @@ impl ArchiveManager {
                 }
             })?;
         if data.len() == 0 {
-            fail!("Read temp file ({}) is corrupted! It can't have zero length!", entry_id);
+            fail!(
+                "Read temp file {} ({}) is corrupted! It cannot have zero length!", 
+                temp_filename.as_os_str().to_str().unwrap_or("bad path"), 
+                entry_id
+            )
         }
 
         Ok((temp_filename, data))

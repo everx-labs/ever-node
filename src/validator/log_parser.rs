@@ -28,7 +28,7 @@ impl LogParser {
     where T: FromStr, T::Err: std::fmt::Debug
     {
         match self.get_field (name) {
-            None => panic!(format!("Cannot find field `{}`", name)),
+            None => panic!("Cannot find field `{}`", name),
             Some (v) => T::from_str(&v).unwrap()
         }
     }

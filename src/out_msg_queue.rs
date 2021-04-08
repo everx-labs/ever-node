@@ -4,7 +4,10 @@ use crate::{
     shard_state::ShardStateStuff,
     types::messages::MsgEnqueueStuff,
 };
-use std::{cmp::max, iter::Iterator, sync::Arc, collections::HashMap};
+use std::{
+    cmp::max, iter::Iterator, sync::{Arc, atomic::{AtomicBool, Ordering}}, ops::Deref, 
+    collections::HashMap,
+};
 use ton_block::{
     BlockIdExt, ShardIdent, Serializable, Deserializable, 
     OutMsgQueueInfo, OutMsgQueue, OutMsgQueueKey, IhrPendingInfo,
@@ -245,10 +248,12 @@ impl OutMsgQueueInfoStuff {
         next_mc_end_lt: u64,
         next_shards: Option<&ShardHashes>,
         mc_shard_states: &HashMap<u32, ShardStateStuff>,
+        stop_flag: &Option<&AtomicBool>,
     ) -> Result<()> {
         let masterchain = self.shard().is_masterchain();
         for mut entry in &mut self.entries {
             if entry.ref_shards.is_none() {
+                check_stop_flag(stop_flag)?;
                 let mc_seqno = std::cmp::min(entry.mc_seqno, cur_mc_seqno);
                 if next_shards.is_some() && masterchain && entry.mc_seqno == cur_mc_seqno + 1 {
                     entry.mc_end_lt = next_mc_end_lt;
@@ -449,6 +454,7 @@ impl MsgQueueManager {
         next_state_opt: Option<&ShardStateStuff>,
         after_merge: bool,
         after_split: bool,
+        stop_flag: Option<&AtomicBool>,
     ) -> Result<Self> {
         let last_mc_state = engine.clone().load_last_applied_mc_state().await?;
         let mut mc_shard_states = HashMap::new();
@@ -474,6 +480,7 @@ impl MsgQueueManager {
             
             let nb = Self::load_out_queue_info(engine, &shard_state, &last_mc_state, &mut mc_shard_states).await?;
             neighbors.push(nb);
+            check_stop_flag(&stop_flag)?;
         }
         let mc_seqno = last_mc_state.block_id().seq_no();
         if shards.is_empty() || mc_seqno != 0 {
@@ -488,7 +495,7 @@ impl MsgQueueManager {
                 let merge_out_queue_info = Self::load_out_queue_info(engine, state, &last_mc_state, &mut mc_shard_states).await?;
                 log::debug!("prepare merge for states {} and {}", prev_out_queue_info.block_id(), merge_out_queue_info.block_id());
                 prev_out_queue_info.merge(&merge_out_queue_info)?;
-                Self::add_trivial_neighbor_after_merge(&mut neighbors, &shard, &prev_out_queue_info, prev_states)?;
+                Self::add_trivial_neighbor_after_merge(&mut neighbors, &shard, &prev_out_queue_info, prev_states, &stop_flag)?;
                 next_out_queue_info = match next_state_opt {
                     Some(next_state) => Self::load_out_queue_info(engine, next_state, &last_mc_state, &mut mc_shard_states).await?,
                     None => prev_out_queue_info.clone()
@@ -496,13 +503,15 @@ impl MsgQueueManager {
             } else if after_split {
                 log::debug!("prepare split for state {}", prev_out_queue_info.block_id());
                 let sibling_out_queue_info = prev_out_queue_info.split(shard.clone())?;
-                Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, Some(sibling_out_queue_info), prev_states[0].shard())?;
+                Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, 
+                    Some(sibling_out_queue_info), prev_states[0].shard(), &stop_flag)?;
                 next_out_queue_info = match next_state_opt {
                     Some(next_state) => Self::load_out_queue_info(engine, next_state, &last_mc_state, &mut mc_shard_states).await?,
                     None => prev_out_queue_info.clone()
                 };
             } else {
-                Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, None, prev_out_queue_info.shard())?;
+                Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, None, 
+                    prev_out_queue_info.shard(), &stop_flag)?;
                 next_out_queue_info = match next_state_opt {
                     Some(next_state) => Self::load_out_queue_info(engine, next_state, &last_mc_state, &mut mc_shard_states).await?,
                     None => prev_out_queue_info.clone()
@@ -515,11 +524,11 @@ impl MsgQueueManager {
             };
         }
 
-        prev_out_queue_info.fix_processed_upto(mc_seqno, 0, None, &mc_shard_states)?;
-        next_out_queue_info.fix_processed_upto(mc_seqno, next_mc_end_lt, Some(shards), &mc_shard_states)?;
+        prev_out_queue_info.fix_processed_upto(mc_seqno, 0, None, &mc_shard_states, &stop_flag)?;
+        next_out_queue_info.fix_processed_upto(mc_seqno, next_mc_end_lt, Some(shards), &mc_shard_states, &stop_flag)?;
 
         for neighbor in &mut neighbors {
-            neighbor.fix_processed_upto(mc_seqno, 0, None, &mc_shard_states)?;
+            neighbor.fix_processed_upto(mc_seqno, 0, None, &mc_shard_states, &stop_flag)?;
         }
         Ok(MsgQueueManager {
         //Unused
@@ -569,6 +578,7 @@ impl MsgQueueManager {
         shard: &ShardIdent,
         real_out_queue_info: &OutMsgQueueInfoStuff,
         prev_states: &Vec<ShardStateStuff>,
+        stop_flag: &Option<&AtomicBool>,
     ) -> Result<()> {
         log::debug!("in add_trivial_neighbor_after_merge()");
         CHECK!(prev_states.len(), 2);
@@ -596,6 +606,8 @@ impl MsgQueueManager {
                     log::debug!("disabling neighbor #{} : {} \
                         (immediate after-merge adjustment)", i, neighbors[i].block_id());
                 }
+
+                check_stop_flag(stop_flag)?;
             }
         }
         CHECK!(found == 2);
@@ -608,6 +620,7 @@ impl MsgQueueManager {
         real_out_queue_info: &OutMsgQueueInfoStuff,
         sibling_out_queue_info: Option<OutMsgQueueInfoStuff>,
         prev_shard: &ShardIdent,
+        stop_flag: &Option<&AtomicBool>,
     ) -> Result<()> {
         log::debug!("in add_trivial_neighbor()");
         // Possible cases are:
@@ -697,6 +710,8 @@ impl MsgQueueManager {
                 } else {
                     fail!("impossible shard configuration in add_trivial_neighbor()")
                 }
+
+                check_stop_flag(stop_flag)?;
             }
         }
         // dbg!(found, cs);
@@ -924,4 +939,13 @@ impl Iterator for MsgQueueMergerIterator {
     fn next(&mut self) -> Option<Self::Item> {
         self.next_item().transpose()
     }
+}
+
+fn check_stop_flag(stop_flag: &Option<&AtomicBool>) -> Result<()> {
+    if let Some(stop_flag) = stop_flag {
+        if stop_flag.load(Ordering::Relaxed) {
+            fail!("Stop flag was set")
+        }
+    }
+    Ok(())
 }

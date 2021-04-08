@@ -110,6 +110,8 @@ pub trait InternalDb : Sync + Send {
     fn load_all_top_shard_blocks(&self) -> Result<HashMap<TopBlockDescrId, TopBlockDescrStuff>>;
     fn load_all_top_shard_blocks_raw(&self) -> Result<HashMap<TopBlockDescrId, Vec<u8>>>;
     fn remove_top_shard_block(&self, id: &TopBlockDescrId) -> Result<()>;
+
+    fn db_root_dir(&self) -> Result<&str>;
 }
 
 #[derive(serde::Deserialize)]
@@ -138,7 +140,8 @@ pub struct InternalDbImpl {
     old_block_proof_db: BlockInfoDb,
     #[cfg(feature = "read_old_db")]
     old_block_proof_link_db: BlockInfoDb,
-    
+
+    config: InternalDbConfig,
 }
 
 impl InternalDbImpl {
@@ -185,6 +188,8 @@ impl InternalDbImpl {
                 old_block_proof_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_proof_db")),
                 #[cfg(feature = "read_old_db")]
                 old_block_proof_link_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_proof_link_db")),
+
+                config
             }
             // Self {
             //     block_handle_db: BlockInfoDb::in_memory(),
@@ -262,10 +267,10 @@ impl InternalDb for InternalDbImpl {
     ) -> Result<Arc<BlockHandle>> {
         log::trace!("store_block_data {}", block.id());
         let handle = self.create_or_load_block_handle(block.id(), Some(block.block()), None)?;
-        if !handle.has_data() {
-            let _ = handle.block_file_lock().write().await;
-            if !handle.has_data() {
-                let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(block.id());
+        let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(block.id());
+        if !handle.has_data() || !self.archive_manager.check_file(&handle, &entry_id) {
+            let _lock = handle.block_file_lock().write().await;
+            if !handle.has_data() || !self.archive_manager.check_file(&handle, &entry_id) {
                 self.archive_manager.add_file(&entry_id, block.data().to_vec()).await?;
                 if handle.set_data() {
                     self.store_block_handle(&handle)?;
@@ -354,9 +359,14 @@ impl InternalDb for InternalDbImpl {
             };
 
             if proof.is_link() {
-                if !handle.has_proof_link() {
-                    let _ = handle.proof_file_lock().write().await;
-                    if !handle.has_proof_link() {
+                let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(id);
+                if !handle.has_proof_link() || 
+                   !self.archive_manager.check_file(&handle, &entry_id) 
+                {
+                    let _lock = handle.proof_file_lock().write().await;
+                    if !handle.has_proof_link() || 
+                       !self.archive_manager.check_file(&handle, &entry_id) 
+                    {
                         let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(id);
                         self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
                         if handle.set_proof_link() {
@@ -365,9 +375,14 @@ impl InternalDb for InternalDbImpl {
                     }
                 }
             } else {
-                if !handle.has_proof() {
+                let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Proof(id);
+                if !handle.has_proof() || 
+                   !self.archive_manager.check_file(&handle, &entry_id) 
+                {
                     let _lock = handle.proof_file_lock().write().await;
-                    if !handle.has_proof() {
+                    if !handle.has_proof() || 
+                       !self.archive_manager.check_file(&handle, &entry_id) 
+                    {
                         let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Proof(id);
                         self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
                         if handle.set_proof() {
@@ -679,6 +694,10 @@ impl InternalDb for InternalDbImpl {
     fn remove_top_shard_block(&self, id: &TopBlockDescrId) -> Result<()> {
         log::trace!("remove_top_shard_block {}", id);
         self.shard_top_blocks_db.delete(&id.to_bytes()?)
+    }
+
+    fn db_root_dir(&self) -> Result<&str> {
+        Ok(&self.config.db_directory)
     }
 }
 
