@@ -162,7 +162,7 @@ impl ValidatorGroupImpl {
 
         let overlay_manager: CatchainOverlayManagerPtr =
             Arc::new(CatchainOverlayManagerImpl::new(g.engine.validator_network(), g.validator_list_id.clone()));
-        let db_root = "node_db/catchains".to_string();
+        let db_root = format!("{}/catchains", g.engine.db_root_dir()?);
         let db_suffix = "".to_string();
         let allow_unsafe_self_blocks_resync = false;
 
@@ -212,7 +212,7 @@ impl ValidatorGroupImpl {
     }
 
     // Initializes structure
-    pub fn new(shard: ShardIdent, session_id: validator_session::SessionId) -> ValidatorGroupImpl {
+    pub fn new(shard: ShardIdent, session_id: validator_session::SessionId, db_root_dir: &str) -> ValidatorGroupImpl {
         log::info!(target: "validator", "Initializing session {}, shard {}", session_id.to_hex_string(), shard);
 
         ValidatorGroupImpl {
@@ -220,7 +220,7 @@ impl ValidatorGroupImpl {
             min_ts: SystemTime::now(),
             status: ValidatorGroupStatus::Created,
             last_known_round: 0,
-            candidate_db: CandidateDb::new(format!("node_db/candidates/{}", session_id.to_hex_string())),
+            candidate_db: CandidateDb::new(format!("{}/candidates/{}", db_root_dir, session_id.to_hex_string())),
 
             shard,
             session_id,
@@ -290,7 +290,8 @@ impl ValidatorGroup {
         engine: Arc<dyn EngineOperations>,
         allow_unsafe_self_blocks_resync: bool,
     ) -> Self {
-        let group_impl = ValidatorGroupImpl::new(shard.clone(), session_id.clone());
+        let group_impl = ValidatorGroupImpl::new(shard.clone(), session_id.clone(), 
+            engine.db_root_dir().expect("Can't get db_root_dir from engine"));
         let (listener, receiver) = ValidatorSessionListener::create();
 
         ValidatorGroup {
@@ -421,7 +422,7 @@ impl ValidatorGroup {
                     self.local_key.clone(),
                     self.validator_set.clone(),
                     self.engine.clone(),
-                    SystemTime::now() + Duration::new(10, 0),
+                    1000,
                 ).await {
                     Ok(b) => Ok(Arc::new(b)),
                     Err(x) => Err(x)

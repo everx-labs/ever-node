@@ -527,13 +527,6 @@ impl EngineOperations for Engine {
         self.external_messages().new_message(id, message, self.now())
     }
 
-    fn new_external_message_raw(&self, data: &[u8]) -> Result<()> {
-        if !self.is_validator() {
-            return Ok(());
-        }
-        self.external_messages().new_message_raw(data, self.now())
-    }
-
     fn get_external_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
         self.external_messages().get_messages(shard, self.now())
     }
@@ -560,5 +553,9 @@ impl EngineOperations for Engine {
     
     fn test_bundles_config(&self) -> &CollatorTestBundlesGeneralConfig {
         Engine::test_bundles_config(self)
+    }
+
+    fn db_root_dir(&self) -> Result<&str> {
+        self.db().db_root_dir()
     }
 }

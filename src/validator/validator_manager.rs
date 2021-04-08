@@ -247,6 +247,8 @@ impl ValidatorManagerImpl {
             .thread_stack_size(8 * 1024 * 1024)
             .build()
             .expect("Can't create validator groups runtime");
+
+        let db_dir = format!("{}/last_rotation_block", engine.db_root_dir().expect("Can't get db_root_dir from engine"));
         return ValidatorManagerImpl {
             engine,
             rt: Arc::new(rt),
@@ -254,7 +256,7 @@ impl ValidatorManagerImpl {
             validator_list_status: ValidatorListStatus::default(),
             config: ValidatorManagerConfig::default(),
             validation_status: ValidationStatus::Disabled,
-            last_rotation_block_db: LastRotationBlockDb::new("node_db/last_rotation_block".to_string())
+            last_rotation_block_db: LastRotationBlockDb::new(db_dir)
         }
     }
 

@@ -56,7 +56,7 @@ fn init_logger(log_config_path: Option<String>) {
         }
     }
 
-    let level = log::LevelFilter::Trace; 
+    let level = log::LevelFilter::Info; 
     let stdout = log4rs::append::console::ConsoleAppender::builder()
         .target(log4rs::append::console::Target::Stdout)
         .build();
@@ -70,7 +70,7 @@ fn init_logger(log_config_path: Option<String>) {
         .build(
             log4rs::config::Root::builder()
                 .appender("stdout")
-                .build(log::LevelFilter::Trace),
+                .build(log::LevelFilter::Info),
         )
         .unwrap();
 

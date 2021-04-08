@@ -63,7 +63,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
         mc_seq_no: u32,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<Option<Vec<u8>>>;
-    async fn wait_broadcast(&self) -> Result<Broadcast>;
+    async fn wait_broadcast(&self) -> Result<(Broadcast, Arc<KeyId>)>;
 }
 
 #[derive(Clone)]
@@ -602,14 +602,14 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         }
     }
 
-    async fn wait_broadcast(&self) -> Result<Broadcast> {
+    async fn wait_broadcast(&self) -> Result<(Broadcast, Arc<KeyId>)> {
         let receiver = self.overlay.clone();
         let id = self.overlay_id.clone();
         loop {
             match receiver.wait_for_broadcast(&id).await {
-                Ok(data) => {
-                    let answer: Broadcast = Deserializer::new(&mut Cursor::new(data.0)).read_boxed()?;
-                    break Ok(answer)
+                Ok((data, src)) => {
+                    let answer: Broadcast = Deserializer::new(&mut Cursor::new(data)).read_boxed()?;
+                    break Ok((answer, src))
                 }
                 Err(e) => log::error!("broadcast waiting error: {}", e)
             }

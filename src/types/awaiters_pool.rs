@@ -91,20 +91,16 @@ impl<I, R> AwaitersPool<I, R> where
         loop {
             log::trace!("{}: wait_operation: waiting... {}", self.description, id);
 
-            let result = match tokio::time::timeout(Duration::from_millis(1), rx.changed()).await {
-                Ok(r) => r,
-                Err(_) => {
-                    // Operation might be done before calling `wait_operation` - check it and return
-                    if check_complete()? {
-                        return Ok(None)
-                    }
-                    if let Some(timeout_ms) = timeout_ms {
-                        tokio::time::timeout(Duration::from_millis(timeout_ms), rx.changed()).await
-                            .map_err(|_| error!("{}: timeout {}", self.description, id))?
-                    } else {
-                        rx.changed().await
-                    }
-                }
+            let result = if let Ok(result) = tokio::time::timeout(Duration::from_millis(1), rx.changed()).await {
+                result
+            } else if check_complete()? {
+                // Operation might be done before calling `wait_operation` - check it and return
+                return Ok(None)
+            } else if let Some(timeout_ms) = timeout_ms {
+                tokio::time::timeout(Duration::from_millis(timeout_ms), rx.changed()).await
+                    .map_err(|_| error!("{}: timeout {}", self.description, id))?
+            } else {
+                rx.changed().await
             };
             if result.is_err() {
                 return Ok(None)

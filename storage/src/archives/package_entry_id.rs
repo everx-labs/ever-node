@@ -162,7 +162,7 @@ pub trait FromFileName {
 
 impl GetFileName for BlockIdExt {
     fn filename(&self) -> String {
-        format!("({wc_id},{shard_id:016x},{seq_no}):{root_hash:X}:{file_hash:X}",
+        format!("({wc_id},{shard_id:016x},{seq_no}):{root_hash:064X}:{file_hash:064X}",
                 wc_id = self.shard().workchain_id(),
                 shard_id = self.shard().shard_prefix_with_tag(),
                 seq_no = self.seq_no(),
@@ -261,7 +261,7 @@ impl GetFileNameShort for BlockIdExt {
     fn filename_short(&self) -> String {
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
-        format!("{wc_id}_{shard_id:X}_{seq_no}_{hash:X}",
+        format!("{wc_id}_{shard_id:016X}_{seq_no}_{hash:016X}",
                 wc_id = self.shard().workchain_id(),
                 shard_id = self.shard().shard_prefix_with_tag(),
                 seq_no = self.seq_no(),

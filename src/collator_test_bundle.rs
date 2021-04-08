@@ -10,12 +10,16 @@ use std::{
     collections::HashMap, convert::TryFrom, fs::{File, write}, 
     io::Cursor, ops::Deref, sync::{Arc, Weak}, 
 };
+use std::{
+    convert::TryInto, fs::read, 
+};
 use storage::types::BlockHandle;
 use ton_block::{
     BlockIdExt, Message, ShardIdent, AccountIdPrefixFull, Serializable, MerkleUpdate,
     Deserializable, ValidatorBaseInfo, BlockSignaturesPure, BlockSignatures, HashmapAugType, 
     TopBlockDescrSet,
 };
+use ton_block::{ShardStateUnsplit, TopBlockDescr};
 use ton_types::{UInt256, fail, error, Result, CellType, deserialize_cells_tree};
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -137,6 +141,13 @@ impl CollatorTestBundleIndex {
     }
 }
 
+fn construct_from_file<T: Deserializable>(path: &str) -> Result<(T, UInt256, UInt256)> {
+    let bytes = std::fs::read(path)?;
+    let fh = UInt256::calc_file_hash(&bytes);
+    let cell = ton_types::deserialize_tree_of_cells(&mut std::io::Cursor::new(bytes))?;
+    let rh = cell.repr_hash();
+    Ok((T::construct_from_cell(cell)?, fh, rh))
+}
 
 pub struct CollatorTestBundle {
     index: CollatorTestBundleIndex,
@@ -150,6 +161,247 @@ pub struct CollatorTestBundle {
     block_handle_cache: Arc<lockfree::map::Map<BlockIdExt, Weak<BlockHandle>>>,
 }
 
+#[allow(dead_code)]
+impl CollatorTestBundle {
+
+    pub async fn build_with_zero_state(mc_zero_state_name: &str, wc_zero_state_name: &str) -> Result<Self> {
+        log::info!("Building with zerostate from {} and {}", mc_zero_state_name, wc_zero_state_name);
+
+        let (mc_state, mc_fh, mc_rh) = construct_from_file::<ShardStateUnsplit>(mc_zero_state_name)?;
+        let (wc_state, wc_fh, wc_rh) = construct_from_file::<ShardStateUnsplit>(wc_zero_state_name)?;
+
+        let now = std::cmp::max(mc_state.gen_time(), wc_state.gen_time()) + 1;
+
+        let last_mc_state = BlockIdExt::with_params(mc_state.shard().clone(), 0, mc_rh, mc_fh);
+        let mc_state = ShardStateStuff::with_state(last_mc_state.clone(), mc_state)?;
+        let mut states = HashMap::new();
+        states.insert(last_mc_state.clone(), mc_state);
+        
+        let block_id = BlockIdExt::with_params(wc_state.shard().clone(), 0, wc_rh, wc_fh);
+        let wc_state = ShardStateStuff::with_state(block_id.clone(), wc_state)?;
+        states.insert(block_id.clone(), wc_state);
+
+        let prev_blocks = vec![last_mc_state.clone()];
+        let mut id = last_mc_state.clone();
+        id.seq_no += 1;
+
+        let index = CollatorTestBundleIndex {
+            id,
+            top_shard_blocks: vec![],
+            external_messages: vec![],
+            mc_states: vec![last_mc_state.clone()],
+            last_mc_state,
+            min_ref_mc_seqno: 0,
+            neighbors: vec![],
+            prev_blocks,
+            created_by: UInt256::default(),
+            rand_seed: None,
+            now,
+            fake: true,
+            contains_ethalon: false,
+            contains_candidate: false,
+            notes: String::new(),
+        };
+
+
+        Ok(Self {
+            index,
+            top_shard_blocks: Default::default(),
+            external_messages: Default::default(),
+            states,
+            mc_merkle_updates: Default::default(),
+            blocks: Default::default(),
+            block_handle_cache: Arc::new(lockfree::map::Map::new()),
+            candidate: None,
+        })
+    }
+
+    pub fn load(path: &str) -> Result<Self> {
+        if !std::path::Path::new(path).is_dir() {
+            fail!("Directory not found: {}", path);
+        }
+        // 🗂 index
+        let file = std::fs::File::open(format!("{}/index.json", path))?;
+        let index: CollatorTestBundleIndexJson = serde_json::from_reader(file)?;
+        let mut index: CollatorTestBundleIndex = index.try_into()?;
+
+        // ├─📂 top_shard_blocks
+        let mut top_shard_blocks = vec!();
+        for id in index.top_shard_blocks.iter() {
+            let filename = format!("{}/top_shard_blocks/{:x}", path, id.root_hash());
+            let tbd = TopBlockDescr::construct_from_file(filename)?;
+            top_shard_blocks.push(Arc::new(TopBlockDescrStuff::new(tbd, id, index.fake)?));
+        }
+
+        // to add simple external message:
+        // uncomment this block, and change dst address then run test
+        // add id (new filename of message) to external messages in index.json
+        // std::fs::create_dir_all(format!("{}/external_messages", path)).ok();
+        // let src = ton_block::MsgAddressExt::with_extern([0x77; 32].into())?;
+        // let dst = hex::decode("b1219502b825ef2345f49fc9065e485e7f478bddafa63039d00c63e494ab7090")?;
+        // let dst = ton_block::MsgAddressInt::with_standart(None, 0, dst.into())?;
+        // let h = ton_block::ExternalInboundMessageHeader::new(src, dst);
+        // let msg = Message::with_ext_in_header(h);
+        // let id = msg.serialize()?.repr_hash();
+        // let filename = format!("{}/external_messages/{:x}", path, id);
+        // msg.write_to_file(filename)?;
+
+        // ├─📂 external_messages
+        let mut external_messages = vec!();
+        for id in index.external_messages.iter() {
+            let filename = format!("{}/external_messages/{:x}", path, id);
+            external_messages.push((
+                Arc::new(Message::construct_from_file(filename)?),
+                id.clone()
+            ));
+        }
+
+        // ├─📂 states
+        let mut states = HashMap::new();
+
+        // all shardes states
+        for ss_id in index.neighbors.iter().chain(index.prev_blocks.iter()) {
+            let filename = format!("{}/states/{:x}", path, ss_id.root_hash());
+            let ss = if ss_id.seq_no() == 0 {
+                ShardStateStuff::deserialize_zerostate(ss_id.clone(), &read(filename)?)?
+            } else {
+                ShardStateStuff::deserialize(ss_id.clone(), &read(filename)?)?
+            };
+            states.insert(ss_id.clone(), ss);
+
+        }
+        if index.contains_ethalon && !index.id.shard().is_masterchain() {
+            let filename = format!("{}/states/{:x}", path, index.id.root_hash());
+            states.insert(
+                index.id.clone(),
+                ShardStateStuff::deserialize(index.id.clone(), &read(filename)?)?
+            );
+        }
+
+        // oldest mc state is saved full 
+        let oldest_mc_state_id = index.oldest_mc_state();
+        let filename = format!("{}/states/{:x}", path, oldest_mc_state_id.root_hash());
+        let oldest_mc_state = if oldest_mc_state_id.seq_no() == 0 {
+            ShardStateStuff::deserialize_zerostate(oldest_mc_state_id.clone(), &read(filename)?)?
+        } else {
+            ShardStateStuff::deserialize(oldest_mc_state_id.clone(), &read(filename)?)?
+        };
+        let mut prev_state_root = oldest_mc_state.root_cell().clone();
+        states.insert(oldest_mc_state_id.clone(), oldest_mc_state);
+
+        // other states are culculated by merkle updates
+        let mut mc_merkle_updates = HashMap::new();
+        for id in index.mc_states.iter() {
+            if id != &oldest_mc_state_id {
+                let filename = format!("{}/states/mc_merkle_updates/{:x}", path, id.root_hash());
+                mc_merkle_updates.insert(
+                    id.clone(),
+                    MerkleUpdate::construct_from_file(filename)?,
+                );
+            }
+        }
+        index.mc_states.sort_by_key(|id| id.seq_no);
+        for id in index.mc_states.iter() {
+            if id != &oldest_mc_state_id {
+                let mu = mc_merkle_updates.get(id).ok_or_else(|| error!("Can't get merkle update {}", id))?;
+                let new_root = mu.apply_for(&prev_state_root)?;
+                states.insert(id.clone(), ShardStateStuff::new(id.clone(), new_root.clone())?);
+                prev_state_root = new_root;
+            }
+        }
+
+        // ├─📂 blocks
+        let mut blocks = HashMap::new();
+        if index.contains_ethalon {
+            let filename = format!("{}/blocks/{:x}", path, index.id.root_hash());
+            blocks.insert(
+                index.id.clone(),
+                BlockStuff::deserialize(index.id.clone(), read(filename)?)?
+            );
+        }
+        for id in index.prev_blocks.iter() {
+            if id.seq_no() != 0 {
+                let filename = format!("{}/blocks/{:x}", path, id.root_hash());
+                blocks.insert(
+                    id.clone(),
+                    BlockStuff::deserialize(id.clone(), read(filename)?)?
+                );
+            }
+        }
+
+        let candidate = if !index.contains_candidate {
+            None
+        } else {
+            let path = format!("{}/candidate/", path);
+            let data = ton_api::ton::bytes(read(format!("{}/data", path))?);
+            Some(BlockCandidate {
+                block_id: index.id.clone(),
+                collated_file_hash: catchain::utils::get_hash(&data),
+                data: data.0,
+                collated_data: read(format!("{}/collated_data", path))?,
+                created_by: index.created_by.clone(),
+            })
+        };
+
+        Ok(CollatorTestBundle {
+            index,
+            top_shard_blocks,
+            external_messages,
+            states,
+            mc_merkle_updates,
+            blocks,
+            block_handle_cache: Arc::new(lockfree::map::Map::new()),
+            candidate
+        })
+    }
+
+    pub fn ethalon_block(&self) -> Result<Option<BlockStuff>> {
+        if self.index.contains_ethalon {
+            Ok(Some(
+                self.blocks.get(&self.index.id).ok_or_else(|| error!("Index declares contains_ethalon=true but the block is not found"))?.clone()
+            ))
+        } else if let Some(candidate) = self.candidate() {
+            Ok(Some(BlockStuff::new(self.index.id.clone(), candidate.data.clone())?))
+        } else {
+            Ok(None)
+        }
+    }
+
+/* UNUSED
+    pub fn ethalon_state(&self) -> Result<Option<ShardStateStuff>> {
+        if self.index.contains_ethalon {
+            Ok(self.states.get(&self.index.id).cloned())
+        } else if let Some(block) = self.ethalon_block()? {
+            let prev_ss_root = match block.construct_prev_id()? {
+                (prev1, Some(prev2)) => {
+                    let ss1 = self.states.get(&prev1).ok_or_else(|| error!("Prev state is not found"))?.root_cell().clone();
+                    let ss2 = self.states.get(&prev2).ok_or_else(|| error!("Prev state is not found"))?.root_cell().clone();
+                    ShardStateStuff::construct_split_root(ss1, ss2)?
+                },
+                (prev, None) => {
+                    self.states.get(&prev).ok_or_else(|| error!("Prev state is not found"))?.root_cell().clone()
+                }
+            };
+            let merkle_update = block
+                .block()
+                .read_state_update()?;
+            let block_id = block.id().clone();
+            let ss_root = merkle_update.apply_for(&prev_ss_root)?;
+            Ok(Some(ShardStateStuff::new(block_id.clone(), ss_root)?))
+        } else {
+            Ok(None)
+        }
+    }
+*/
+
+    pub fn block_id(&self) -> &BlockIdExt { &self.index.id }
+    pub fn prev_blocks_ids(&self) -> &Vec<BlockIdExt> { &self.index.prev_blocks }
+    pub fn min_ref_mc_seqno(&self) -> u32 { self.index.min_ref_mc_seqno }
+    pub fn created_by(&self) -> &UInt256 { &self.index.created_by }
+    pub fn rand_seed(&self) -> Option<&UInt256> { self.index.rand_seed.as_ref() }
+// UNUSED
+//    pub fn notes(&self) -> &str { &self.index.notes }
+}
 
 impl CollatorTestBundle {
     // build bundle for a collating (just now) block. 
