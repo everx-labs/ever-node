@@ -5,7 +5,7 @@ use crate::{
     types::messages::MsgEnqueueStuff,
 };
 use std::{
-    cmp::max, iter::Iterator, sync::{Arc, atomic::{AtomicBool, Ordering}}, ops::Deref, 
+    cmp::max, iter::Iterator, sync::{Arc, atomic::{AtomicBool, Ordering}},
     collections::HashMap,
 };
 use ton_block::{
@@ -448,6 +448,7 @@ impl MsgQueueManager {
 
     pub async fn init(
         engine: &Arc<dyn EngineOperations>,
+        last_mc_state: &ShardStateStuff,
         shard: ShardIdent,
         shards: &ShardHashes,
         prev_states: &Vec<ShardStateStuff>,
@@ -456,7 +457,6 @@ impl MsgQueueManager {
         after_split: bool,
         stop_flag: Option<&AtomicBool>,
     ) -> Result<Self> {
-        let last_mc_state = engine.clone().load_last_applied_mc_state().await?;
         let mut mc_shard_states = HashMap::new();
         mc_shard_states.insert(last_mc_state.block_id().seq_no, last_mc_state.clone());
         let next_mc_end_lt = match next_state_opt {

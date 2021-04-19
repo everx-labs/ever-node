@@ -20,9 +20,14 @@ pub enum StoreAction {
     Remove(TopBlockDescrId)
 }
 
+struct ShardBlocksPoolItem {
+    pub top_block: Arc<TopBlockDescrStuff>,
+    pub own: bool,
+}
+
 pub struct ShardBlocksPool {
     last_mc_seq_no: AtomicU32,
-    shard_blocks: lockfree::map::Map<TopBlockDescrId, Arc<TopBlockDescrStuff>>,
+    shard_blocks: lockfree::map::Map<TopBlockDescrId, ShardBlocksPoolItem>,
     storage_sender: Option<tokio::sync::mpsc::UnboundedSender<StoreAction>>,
     is_fake: bool,
 }
@@ -35,8 +40,8 @@ impl ShardBlocksPool {
         is_fake: bool
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<StoreAction>) {
         let tsbs = lockfree::map::Map::new();
-        for (k, v) in shard_blocks {
-            tsbs.insert(k, Arc::new(v));
+        for (key, val) in shard_blocks {
+            tsbs.insert(key, ShardBlocksPoolItem { top_block: Arc::new(val), own: false });
         }
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         (
@@ -50,11 +55,33 @@ impl ShardBlocksPool {
         )
     }
 
-    pub async fn add_shard_block(
+    pub async fn add_shard_block_raw(
         &self,
         id: &BlockIdExt,
         cc_seqno: u32,
         data: Vec<u8>,
+        own: bool,
+        engine: &dyn EngineOperations,
+    ) -> Result<bool> {
+        let factory = || {
+            let tbd = if self.is_fake {
+                TopBlockDescr::with_id_and_signatures(id.clone(), BlockSignatures::default())
+            } else {
+                let root = deserialize_tree_of_cells(&mut Cursor::new(&data))?;
+                TopBlockDescr::construct_from(&mut root.into())?
+            };
+            Ok(Arc::new(TopBlockDescrStuff::new(tbd, &id, self.is_fake)?))
+        };
+        self.add_shard_block(id, cc_seqno, factory, own, engine).await
+    }
+
+
+    pub async fn add_shard_block(
+        &self,
+        id: &BlockIdExt,
+        cc_seqno: u32,
+        mut factory: impl FnMut() -> Result<Arc<TopBlockDescrStuff>>,
+        own: bool,
         engine: &dyn EngineOperations,
     ) -> Result<bool> {
 
@@ -67,22 +94,16 @@ impl ShardBlocksPool {
 
             // check for duplication
             if let Some(prev) = self.shard_blocks.get(&tbds_id) {
-                if id.seq_no() <= prev.val().proof_for().seq_no() {
+                if id.seq_no() <= prev.val().top_block.proof_for().seq_no() {
                     log::trace!("add_shard_block duplication  cc_seqno: {}  id: {}  prev: {}", 
-                        cc_seqno, id, prev.val().proof_for());
+                        cc_seqno, id, prev.val().top_block.proof_for());
                     return Ok(false);
                 }
             }
 
             // validate top block descr
             if tbds.is_none() {
-                let tbd = if self.is_fake {
-                    TopBlockDescr::with_id_and_signatures(id.clone(), BlockSignatures::default())
-                } else {
-                    let root = deserialize_tree_of_cells(&mut Cursor::new(&data))?;
-                    TopBlockDescr::construct_from(&mut root.into())?
-                };
-                tbds = Some(Arc::new(TopBlockDescrStuff::new(tbd, &id, self.is_fake)?));
+                tbds = Some(factory()?);
             }
 
             if !self.is_fake {
@@ -90,24 +111,28 @@ impl ShardBlocksPool {
             }
 
             // add
-
-            // TODO use adapters from adnl::common
             // This is so-called "interactive insertion"
-            let result = self.shard_blocks.insert_with(tbds_id.clone(), |_key, prev_gen_val, updated_pair | {
-                if updated_pair.is_some() {
+            let result = self.shard_blocks.insert_with(tbds_id.clone(), |_key, prev, updated | {
+                if let Some((_, val)) = updated {
                     // someone already added the value into map
-                    if id.seq_no() <= updated_pair.unwrap().1.proof_for().seq_no() {
+                    if id.seq_no() <= val.top_block.proof_for().seq_no() {
                         lockfree::map::Preview::Discard
                     } else {
-                        lockfree::map::Preview::New(tbds.as_ref().unwrap().clone())
+                        lockfree::map::Preview::New(ShardBlocksPoolItem { 
+                            top_block: tbds.as_ref().unwrap().clone(),
+                            own 
+                        })
                     }
-                } else if prev_gen_val.is_some() {
+                } else if prev.is_some() {
                     // it is value we inserted just now
                     lockfree::map::Preview::Keep
                 } else {
                     // there is not the value in the map - try to add.
                     // If other thread adding value the same time - the closure will be recalled
-                    lockfree::map::Preview::New(tbds.as_ref().unwrap().clone())
+                    lockfree::map::Preview::New(ShardBlocksPoolItem { 
+                        top_block: tbds.as_ref().unwrap().clone(),
+                        own 
+                    })
                 }
             });
             match result {
@@ -144,16 +169,18 @@ impl ShardBlocksPool {
         }
     }
 
-    pub fn get_shard_blocks(&self, last_mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+    pub fn get_shard_blocks(&self, last_mc_seq_no: u32, only_own: bool) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
         if last_mc_seq_no != self.last_mc_seq_no.load(Ordering::Relaxed) {
             log::error!("get_shard_blocks: Given last_mc_seq_no {} is not actual", last_mc_seq_no);
             fail!("Given last_mc_seq_no {} is not actual {}", last_mc_seq_no, self.last_mc_seq_no.load(Ordering::Relaxed));
         } else {
             let mut returned_list = string_builder::Builder::default();
             let mut blocks = Vec::new();
-            for block in self.shard_blocks.iter() {
-                blocks.push(block.1.clone());
-                returned_list.append(format!("\n{} {}", block.key().cc_seqno, block.key().id));
+            for guard in self.shard_blocks.iter() {
+                if !only_own || guard.val().own {
+                    blocks.push(guard.val().top_block.clone());
+                    returned_list.append(format!("\n{} {}", guard.key().cc_seqno, guard.key().id));
+                }
             }        
             log::trace!("get_shard_blocks last_mc_seq_no {} returned: {}", 
                 last_mc_seq_no, returned_list.string().unwrap_or_default());
@@ -165,7 +192,7 @@ impl ShardBlocksPool {
         self.last_mc_seq_no.store(last_mc_state.block_id().seq_no(), Ordering::Relaxed);
         let mut removed_list = string_builder::Builder::default();
         for block in self.shard_blocks.iter() {
-            if block.val().validate(last_mc_state).is_err() {
+            if block.val().top_block.validate(last_mc_state).is_err() {
                 self.shard_blocks.remove(block.key());
                 self.send_to_storage(StoreAction::Remove(block.key().clone()));
                 removed_list.append(format!("\n{} {}", block.key().cc_seqno, block.key().id));
@@ -202,9 +229,9 @@ pub fn resend_top_shard_blocks_worker(engine: Arc<dyn EngineOperations>) {
 
 async fn resend_top_shard_blocks(engine: &dyn EngineOperations) -> Result<()> {
     let id = engine.load_last_applied_mc_block_id().await?;
-    let tsbs = engine.get_shard_blocks(id.seq_no)?;
+    let tsbs = engine.get_own_shard_blocks(id.seq_no)?;
     for tsb in tsbs {
-        engine.send_top_shard_block_description(&tsb).await?;
+        engine.send_top_shard_block_description(tsb, 0, true).await?;
     }
     Ok(())
 }

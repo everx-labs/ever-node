@@ -11,9 +11,14 @@ use crate::{
 use adnl::{
     common::{KeyId, KeyOption, serialize}, node::{AddressCacheIterator, AdnlNode}
 };
-use catchain::{CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr};
+use catchain::{
+    CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
+};
 use dht::DhtNode;
-use overlay::{OverlayId, OverlayShortId, OverlayNode, QueriesConsumer, PrivateOverlayShortId};
+use overlay::{
+    BroadcastSendInfo, OverlayId, OverlayShortId, OverlayNode, QueriesConsumer, 
+    PrivateOverlayShortId
+};
 use rldp::RldpNode;
 use std::{
     hash::Hash, 
@@ -669,7 +674,7 @@ impl NodeNetwork {
                 if let Some(validator_set_context) = self.current_validator_set_context() {
                     let key_id = validator_set_context.val().validator_key.id().data();
                     match self.send_connectivity_broadcast(key_id, vec!()).await {
-                        Ok(n) => log::trace!("Sent short connectivity broadcast ({})", n),
+                        Ok(info) => log::trace!("Sent short connectivity broadcast ({})", info.send_to),
                         Err(e) => log::warn!("Error while sending short connectivity broadcast: {}", e)
                     }
                     if big_bc_counter == self.connectivity_check_config.long_mult {
@@ -677,7 +682,7 @@ impl NodeNetwork {
                         match self.send_connectivity_broadcast(
                             key_id, vec!(0xfe; self.connectivity_check_config.long_len)).await
                         {
-                            Ok(n) => log::trace!("Sent long connectivity broadcast ({})", n),
+                            Ok(info) => log::trace!("Sent long connectivity broadcast ({})", info.send_to),
                             Err(e) => log::warn!("Error while sending long connectivity broadcast: {}", e)
                         }
                     }
@@ -686,16 +691,28 @@ impl NodeNetwork {
         });
     }
 
-    async fn send_connectivity_broadcast(&self, key_id: &[u8; 32], mut padding: Vec<u8>) -> Result<u32> {
+    async fn send_connectivity_broadcast(
+        &self, 
+        key_id: &[u8; 32], 
+        mut padding: Vec<u8>
+    ) -> Result<BroadcastSendInfo> {
         if let Some(overlay) = self.overlays.get(&self.masterchain_overlay_short_id) {
-            let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             padding.extend_from_slice(&now.to_le_bytes());
-            let broadcast = TonNode_ConnectivityCheckBroadcast(Box::new(ConnectivityCheckBroadcast {
-                pub_key: int256(key_id.clone()),
-                padding: bytes(padding),
-            }));
-            overlay.val().overlay()
-                .broadcast(&self.masterchain_overlay_short_id, &serialize(&broadcast)?, None).await
+            let broadcast = TonNode_ConnectivityCheckBroadcast(Box::new(
+                ConnectivityCheckBroadcast {
+                    pub_key: int256(key_id.clone()),
+                    padding: bytes(padding),
+                }
+            ));
+            overlay.val().overlay().broadcast(
+                &self.masterchain_overlay_short_id, 
+                &serialize(&broadcast)?, 
+                None
+            ).await
         } else {
             fail!("There is not masterchain overlay")
         }

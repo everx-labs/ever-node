@@ -611,7 +611,7 @@ impl Engine {
         let id = (&broadcast.block.block).try_into()?;
         let cc_seqno = broadcast.block.cc_seqno as u32;
         let data = broadcast.block.data.0;
-        if self.shard_blocks.add_shard_block(&id, cc_seqno, data, self.deref()).await? {
+        if self.shard_blocks.add_shard_block_raw(&id, cc_seqno, data, false, self.deref()).await? {
             futures_timer::Delay::new(Duration::from_millis(500)).await;
             self.download_and_apply_block(&id, 0, true).await?;
         }

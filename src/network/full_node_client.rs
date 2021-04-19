@@ -8,7 +8,7 @@ use crate::{
 };
 
 use adnl::{common::{KeyId, serialize, serialize_append}, node::AdnlNode};
-use overlay::{OverlayShortId, OverlayNode};
+use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
 use rldp::RldpNode;
 use std::{io::Cursor, time::Instant, sync::Arc};
 use ton_api::{BoxedSerialize, BoxedDeserialize, Deserializer, IntoBoxed};
@@ -35,7 +35,7 @@ use ton_types::{fail, error, Result};
 
 #[async_trait::async_trait]
 pub trait FullNodeOverlayClient : Sync + Send {
-    async fn broadcast_external_message(&self, msg: &[u8]) -> Result<u32>;
+    async fn broadcast_external_message(&self, msg: &[u8]) -> Result<BroadcastSendInfo>;
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()>;
     async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()>;
     async fn download_block_proof(&self, block_id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<Option<BlockProofStuff>>;
@@ -249,8 +249,7 @@ impl NodeClientOverlay {
 #[async_trait::async_trait]
 impl FullNodeOverlayClient for NodeClientOverlay {
 
-    // Returns number of nodes to broadcast to
-    async fn broadcast_external_message(&self, msg: &[u8]) -> Result<u32>{
+    async fn broadcast_external_message(&self, msg: &[u8]) -> Result<BroadcastSendInfo> {
         let broadcast = ExternalMessageBroadcast {
             message: ExternalMessage {
                 data: ton::bytes(msg.to_vec())
@@ -262,8 +261,15 @@ impl FullNodeOverlayClient for NodeClientOverlay {
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()> {
         let id = broadcast.id.clone();
         let block_bloadcast = TonNode_BlockBroadcast(Box::new(broadcast));
-        let n = self.overlay.broadcast(&self.overlay_id, &serialize(&block_bloadcast)?, None).await?;
-        log::trace!("send_block_broadcast {} (overlay {}) sent to {} nodes", self.overlay_id, id, n);
+        let info = self.overlay.broadcast(
+            &self.overlay_id, 
+            &serialize(&block_bloadcast)?, 
+            None
+        ).await?;
+        log::trace!(
+            "send_block_broadcast {} (overlay {}) sent to {} nodes", 
+            self.overlay_id, id, info.send_to
+        );
         Ok(())
     }
     
@@ -271,8 +277,15 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         let broadcast = TonNode_NewShardBlockBroadcast(Box::new(
             NewShardBlockBroadcast { block: tbd.new_shard_block()? })
         );
-        let n = self.overlay.broadcast(&self.overlay_id, &serialize(&broadcast)?, None).await?;
-        log::trace!("send_top_shard_block_description {} (overlay {}) sent to {} nodes", tbd.proof_for(), self.overlay_id, n);
+        let info = self.overlay.broadcast(
+            &self.overlay_id, 
+            &serialize(&broadcast)?, 
+            None
+        ).await?;
+        log::trace!(
+            "send_top_shard_block_description {} (overlay {}) sent to {} nodes", 
+            tbd.proof_for(), self.overlay_id, info.send_to
+        );
         Ok(())
     }
 
@@ -607,9 +620,11 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         let id = self.overlay_id.clone();
         loop {
             match receiver.wait_for_broadcast(&id).await {
-                Ok((data, src)) => {
-                    let answer: Broadcast = Deserializer::new(&mut Cursor::new(data)).read_boxed()?;
-                    break Ok((answer, src))
+                Ok(info) => {
+                    let answer: Broadcast = Deserializer::new(
+                        &mut Cursor::new(info.data)
+                    ).read_boxed()?;
+                    break Ok((answer, info.recv_from))
                 }
                 Err(e) => log::error!("broadcast waiting error: {}", e)
             }

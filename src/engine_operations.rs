@@ -10,7 +10,7 @@ use adnl::common::{KeyId, KeyOption};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
-use overlay::PrivateOverlayShortId;
+use overlay::{BroadcastSendInfo, PrivateOverlayShortId};
 use std::{sync::Arc, ops::Deref, convert::TryInto};
 use storage::types::BlockHandle;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
@@ -467,11 +467,13 @@ impl EngineOperations for Engine {
         (self as &Engine).set_init_mc_block_id(init_mc_block_id)
     }
 
-    async fn broadcast_to_public_overlay(&self, to: &AccountIdPrefixFull, data: &[u8]) -> Result<u32> {
+    async fn broadcast_to_public_overlay(
+        &self, 
+        to: &AccountIdPrefixFull, 
+        data: &[u8]
+    ) -> Result<BroadcastSendInfo> {
         let overlay = self.get_full_node_overlay(to.workchain_id, to.prefix).await?;
-        let res = overlay.broadcast_external_message(data).await?;
-
-        Ok(res)
+        overlay.broadcast_external_message(data).await
     }
 
     async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
@@ -499,13 +501,26 @@ impl EngineOperations for Engine {
         overlay.send_block_broadcast(broadcast).await
     }
 
-    async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()> {
+    async fn send_top_shard_block_description(
+        &self,
+        tbd: Arc<TopBlockDescrStuff>,
+        cc_seqno: u32,
+        resend: bool,
+    ) -> Result<()> {
         let overlay = self.get_full_node_overlay(
             MASTERCHAIN_ID, //tbd.proof_for().shard().workchain_id(), by t-node all broadcast are sending into masterchain overlay
             SHARD_FULL, //tbd.proof_for().shard().shard_prefix_with_tag()
         ).await?;
 
-        overlay.send_top_shard_block_description(tbd).await
+        if !resend {
+            let id = tbd.proof_for();
+            if let Err(e) = self.shard_blocks().add_shard_block(
+                id, cc_seqno, || Ok(tbd.clone()), false, self.deref()).await {
+                log::error!("Can't add own shard top block {}: {}", id, e);
+            }
+        }
+        
+        overlay.send_top_shard_block_description(&tbd).await
     }
 
     async fn check_sync(&self) -> Result<bool> {
@@ -538,7 +553,10 @@ impl EngineOperations for Engine {
     // Get current list of new shard blocks with respect to last mc block.
     // If given mc_seq_no is not equal to last mc seq_no - function fails.
     fn get_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
-        self.shard_blocks().get_shard_blocks(mc_seq_no)
+        self.shard_blocks().get_shard_blocks(mc_seq_no, false)
+    }
+    fn get_own_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+        self.shard_blocks().get_shard_blocks(mc_seq_no, true)
     }
 
     // Save tsb into persistent storage
