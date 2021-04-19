@@ -124,14 +124,15 @@ pub async fn accept_block(
             engine.deref()
         ).await? {
 
-            let tbd_stuff = TopBlockDescrStuff::new(tbd, block.id(), false)?;
+            let tbd_stuff = Arc::new(TopBlockDescrStuff::new(tbd, block.id(), false)?);
             tbd_stuff.validate(&last_mc_state)?;
 
             let engine = engine.clone();
             let block_id = block.id().clone();
+            let cc_seqno = validator_set.catchain_seqno();
             tokio::spawn(async move {
                 log::trace!(target: "validator", "accept_block: sending shard block description broadcast {}", block_id);
-                if let Err(e) = engine.send_top_shard_block_description(&tbd_stuff).await {
+                if let Err(e) = engine.send_top_shard_block_description(tbd_stuff, cc_seqno, false).await {
                     log::warn!(
                         target: "validator", 
                         "Accept-block {}: error while sending shard block description broadcast: {}",

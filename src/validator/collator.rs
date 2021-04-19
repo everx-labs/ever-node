@@ -1500,6 +1500,7 @@ impl Collator {
         log::trace!("{}: request_neighbor_msg_queues", self.collated_block_descr);
         MsgQueueManager::init(
             &self.engine,
+            mc_data.state(),
             self.shard.clone(),
             collator_data.shards.as_ref().unwrap_or_else(|| mc_data.mc_state_extra.shards()),
             &prev_data.states,

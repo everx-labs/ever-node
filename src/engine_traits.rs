@@ -13,7 +13,9 @@ use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, 
     CatchainOverlayLogReplayListenerPtr
 };
-use overlay::{OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId};
+use overlay::{
+    BroadcastSendInfo, OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId
+};
 use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 use storage::types::BlockHandle;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
@@ -298,6 +300,9 @@ pub trait EngineOperations : Sync + Send {
     fn get_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
         unimplemented!()
     }
+    fn get_own_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+        unimplemented!()
+    }
 
     // Save tsb into persistent storage
     fn save_top_shard_block(&self, id: &TopBlockDescrId, tsb: &TopBlockDescrStuff) -> Result<()> {
@@ -394,7 +399,7 @@ pub trait EngineOperations : Sync + Send {
         &self, 
         to: &AccountIdPrefixFull, 
         data: &[u8]
-    ) -> Result<u32> {
+    ) -> Result<BroadcastSendInfo> {
         unimplemented!()    
     }
 
@@ -402,11 +407,16 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()> {
+    async fn send_top_shard_block_description(
+        &self,
+        tbd: Arc<TopBlockDescrStuff>,
+        cc_seqno: u32,
+        resend: bool,
+    ) -> Result<()> {
         unimplemented!()
     }
 
-    async fn redirect_external_message(&self, message_data: &[u8]) -> Result<u32> {
+    async fn redirect_external_message(&self, message_data: &[u8]) -> Result<BroadcastSendInfo> {
         let (id, message) = create_ext_message(message_data)?;
         let message = Arc::new(message);
         self.new_external_message(id.clone(), message.clone())?;

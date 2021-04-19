@@ -57,7 +57,7 @@ impl KafkaConsumer {
             if let Some(payload) = rdkafka::Message::payload(&borrowed_message) {
                 log::trace!("Processing record, {:?}", payload);
                 match self.engine.redirect_external_message(&payload).await {
-                    Ok(count) => log::trace!("count number of nodes to broadcast to: {}", count),
+                    Ok(info) => log::trace!("count number of nodes to broadcast to: {}", info.send_to),
                     Err(e) => log::error!(
                         "error while processing external message (topic: {}, partition: {}, offset: {}): {:?}",
                         borrowed_message.topic(), borrowed_message.partition(), borrowed_message.offset(), e

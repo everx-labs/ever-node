@@ -709,9 +709,10 @@ impl ValidateQuery {
         Ok(())
     }
 
-    async fn init_output_queue_manager(&self, base: &ValidateBase) -> Result<MsgQueueManager> {
+    async fn init_output_queue_manager(&self, mc_data: &McData, base: &ValidateBase) -> Result<MsgQueueManager> {
         MsgQueueManager::init(
             &self.engine,
+            &mc_data.state,
             self.shard().clone(),
             &self.new_mc_shards,
             &base.prev_states,
@@ -3755,7 +3756,7 @@ impl ValidateQuery {
 
         let (base, mc_data) = self.common_preparation().await?;
 
-        let manager = self.init_output_queue_manager(&base).await?;
+        let manager = self.init_output_queue_manager(&mc_data, &base).await?;
         self.check_shard_layout(&base, &mc_data)?;
         check_cur_validator_set(
             &self.validator_set,

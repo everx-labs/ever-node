@@ -250,8 +250,12 @@ impl CatchainClient {
                     log::trace!(target: Self::TARGET, "private overlay broadcast (successed)");
                    // let src_id = validator_keys.get(&message.1).ok_or_else(|| error!("unknown key!"))?;
                     if let Some(listener) = catchain_listener.upgrade() {
-                        listener
-                            .on_broadcast(message.1/*src_id.clone()*/, &catchain::CatchainFactory::create_block_payload(::ton_api::ton::bytes(message.0)));    // Test id!
+                        listener.on_broadcast(
+                            message.recv_from, 
+                            &catchain::CatchainFactory::create_block_payload(
+                                ::ton_api::ton::bytes(message.data)
+                            )
+                        );    // Test id!
                     }
                 },
                 Err(e) => {
@@ -403,10 +407,8 @@ impl CatchainOverlay for CatchainClient {
         let overlay_id = self.overlay_id.clone();
         let overlay = self.overlay.clone();
         let local_validator_key = self.local_validator_key.clone();
-
         self.runtime_handle.spawn(async move {
             let result = overlay.broadcast(&overlay_id, &msg.data().0, Some(&local_validator_key)).await;
-
             log::trace!(target: Self::TARGET, "send_broadcast_fec_ex status: {:?}", result);
         });
     }
