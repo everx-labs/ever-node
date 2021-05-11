@@ -19,7 +19,9 @@ use crate::{
     types::{awaiters_pool::AwaitersPool, lockfree_cache::TimeBasedCache},
     ext_messages::MessagesPool,
     validator::validator_manager,
-    shard_blocks::{ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker},
+    shard_blocks::{
+        ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker, ShardBlockProcessingResult
+    },
 };
 #[cfg(feature = "local_test")]
 use crate::network::node_network_stub::NodeNetworkStub;
@@ -27,7 +29,12 @@ use crate::network::node_network_stub::NodeNetworkStub;
 use crate::network::node_network::NodeNetwork;
 #[cfg(feature = "external_db")]
 use crate::external_db::kafka_consumer::KafkaConsumer;
-
+#[cfg(feature = "telemetry")]
+use crate::{
+    full_node::telemetry::FullNodeTelemetry,
+    validator::telemetry::CollatorValidatorTelemetry,
+    network::telemetry::FullNodeNetworkTelemetry,
+};
 use overlay::QueriesConsumer;
 #[cfg(feature = "metrics")]
 use statsd::client;
@@ -80,6 +87,15 @@ pub struct Engine {
     shard_states_cache: TimeBasedCache<BlockIdExt, ShardStateStuff>,
     loaded_from_ss_cache: AtomicU64,
     loaded_ss_total: AtomicU64,
+
+    #[cfg(feature = "telemetry")]
+    full_node_telemetry: FullNodeTelemetry,
+    #[cfg(feature = "telemetry")]
+    collator_telemetry: CollatorValidatorTelemetry,
+    #[cfg(feature = "telemetry")]
+    validator_telemetry: CollatorValidatorTelemetry,
+    #[cfg(feature = "telemetry")]
+    full_node_service_telemetry: FullNodeNetworkTelemetry,
 }
 
 struct DownloadContext<'a, T> {
@@ -89,7 +105,9 @@ struct DownloadContext<'a, T> {
     id: &'a BlockIdExt,
     limit: Option<u32>, 
     name: &'a str,
-    timeout: Option<(u64, u64, u64)> // (current, multiplier*10, max)
+    timeout: Option<(u64, u64, u64)>, // (current, multiplier*10, max)
+    #[cfg(feature = "telemetry")]
+    full_node_telemetry: &'a FullNodeTelemetry,
 }
 
 impl <T> DownloadContext<'_, T> {
@@ -158,7 +176,14 @@ impl Downloader for BlockDownloader {
                 )));
             }
         }
-        context.client.download_block_full(context.id).await
+        #[cfg(feature = "telemetry")]
+        context.full_node_telemetry.new_downloading_block_attempt(context.id);
+        let ret = context.client.download_block_full(context.id).await;
+        #[cfg(feature = "telemetry")]
+        if ret.is_ok() { 
+            context.full_node_telemetry.new_downloaded_block(context.id);
+        }
+        ret
     }
 }
 
@@ -300,6 +325,14 @@ impl Engine {
             shard_states_cache: TimeBasedCache::new(120, "shard_states_cache".to_string()),
             loaded_from_ss_cache: AtomicU64::new(0),
             loaded_ss_total: AtomicU64::new(0),
+            #[cfg(feature = "telemetry")]
+            full_node_telemetry: FullNodeTelemetry::new(),
+            #[cfg(feature = "telemetry")]
+            collator_telemetry: CollatorValidatorTelemetry::default(),
+            #[cfg(feature = "telemetry")]
+            validator_telemetry: CollatorValidatorTelemetry::default(),
+            #[cfg(feature = "telemetry")]
+            full_node_service_telemetry: FullNodeNetworkTelemetry::default(),
         });
 
         save_top_shard_blocks_worker(engine.clone(), shard_blocks_receiver);
@@ -397,6 +430,26 @@ impl Engine {
         &self.test_bundles_config
     }
 
+    #[cfg(feature = "telemetry")]
+    pub fn full_node_telemetry(&self) -> &FullNodeTelemetry {
+        &self.full_node_telemetry
+    }
+
+    #[cfg(feature = "telemetry")]
+    pub fn collator_telemetry(&self) -> &CollatorValidatorTelemetry {
+        &self.collator_telemetry
+    }
+
+    #[cfg(feature = "telemetry")]
+    pub fn validator_telemetry(&self) -> &CollatorValidatorTelemetry {
+        &self.validator_telemetry
+    }
+
+    #[cfg(feature = "telemetry")]
+    pub fn full_node_service_telemetry(&self) -> &FullNodeNetworkTelemetry {
+        &self.full_node_service_telemetry
+    }
+
     pub async fn download_and_apply_block_worker(
         self: Arc<Self>, 
         id: &BlockIdExt, 
@@ -443,7 +496,7 @@ impl Engine {
 
                 let now = std::time::Instant::now();
                 proof.check_proof(self.deref()).await?;
-                let handle = self.store_block(&block).await?;
+                let handle = self.store_block(&block).await?.handle;
                 let handle = self.store_block_proof(id, Some(handle), &proof).await?;
 
                 log::trace!(
@@ -590,10 +643,17 @@ impl Engine {
             log::trace!("Processing new shard block broadcast {} from {}", id, src);
             tokio::spawn(async move {
                 if self.check_sync().await.unwrap_or(false) {
-                    if let Err(e) = self.process_new_shard_block(broadcast).await {
-                        log::error!("Error while processing new shard block broadcast {} from {}: {}", id, src, e);
-                    } else {
-                        log::trace!("Processed new shard block broadcast {} from {}", id, src);
+                    match self.clone().process_new_shard_block(broadcast).await {
+                        Err(e) => {
+                            log::error!("Error while processing new shard block broadcast {} from {}: {}", id, src, e);
+                            #[cfg(feature = "telemetry")]
+                            self.full_node_telemetry().bad_top_block_broadcast();
+                        }
+                        Ok(id) => {
+                            log::trace!("Processed new shard block broadcast {} from {}", id, src);
+                            #[cfg(feature = "telemetry")]
+                            self.full_node_telemetry().good_top_block_broadcast(&id);
+                        }
                     }
                 } else {
                     log::trace!("Processing new shard block broadcast {} from {} NO SYNC", id, src);
@@ -607,15 +667,39 @@ impl Engine {
     async fn process_new_shard_block(
         self: Arc<Self>, 
         broadcast: Box<NewShardBlockBroadcast>
-    ) -> Result<()> {
+    ) -> Result<BlockIdExt> {
         let id = (&broadcast.block.block).try_into()?;
         let cc_seqno = broadcast.block.cc_seqno as u32;
         let data = broadcast.block.data.0;
-        if self.shard_blocks.add_shard_block_raw(&id, cc_seqno, data, false, self.deref()).await? {
-            futures_timer::Delay::new(Duration::from_millis(500)).await;
-            self.download_and_apply_block(&id, 0, true).await?;
+
+        // check only
+        if let ShardBlockProcessingResult::MightBeAdded(tbd) = 
+            self.shard_blocks.process_shard_block_raw(&id, cc_seqno, data, false, true, self.deref()).await? {
+
+            // force download and apply afrer timeout
+            let id1 = id.clone();
+            let engine = self.clone();
+            tokio::spawn(async move {
+                futures_timer::Delay::new(Duration::from_millis(1000)).await;
+                if let Err(e) = engine.download_and_apply_block(&id1, 0, true).await {
+                    log::error!("Error in download_and_apply_block after top-block-broadcast {}: {}", id1, e);
+                }
+            });
+
+            // add to list (for collator) only if shard state is awaliable
+            let id = id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = self.clone().wait_state(&id, Some(10_000)).await {
+                    log::error!("Error in wait_state after top-block-broadcast {}: {}", id, e);
+                } else {
+                    if let Err(e) = self.shard_blocks.process_shard_block(
+                        &id, cc_seqno, || Ok(tbd.clone()), false, false, self.deref()).await {
+                        log::error!("Error in process_shard_block after wait_state {}: {}", id, e);
+                    }
+                }
+            });
         }
-        Ok(())              
+        Ok(id)              
     }                  
 
     async fn create_download_context<'a, T>(
@@ -636,7 +720,9 @@ impl Engine {
             id,
             limit,
             name,
-            timeout
+            timeout,
+            #[cfg(feature = "telemetry")]
+            full_node_telemetry: self.full_node_telemetry(),
         };
         Ok(ret)
     }   
@@ -998,6 +1084,9 @@ pub async fn run(node_config: TonNodeConfig, zerostate_path: Option<&str>, ext_d
     // Create engine
     let engine = Engine::new(node_config, ext_db, initial_sync_disabled).await?;
 
+    #[cfg(feature = "telemetry")]
+    telemetry_logger(engine.clone());
+
     // Full node's service
     let _ = run_full_node_service(engine.clone())?;
 
@@ -1059,6 +1148,41 @@ fn start_validator(engine: Arc<Engine>) {
     });
 }
 
+#[cfg(feature = "telemetry")]
+fn telemetry_logger(engine: Arc<Engine>) {
+    const TELEMETRY_TIMEOUT: u64 = 30;
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(TELEMETRY_TIMEOUT)).await;
+            log::debug!(
+                target: "telemetry",
+                "Full node's telemetry:\n{}",
+                engine.full_node_telemetry().report()
+            );
+            log::debug!(
+                target: "telemetry",
+                "Collator's telemetry:\n{}",
+                engine.collator_telemetry().report()
+            );
+            log::debug!(
+                target: "telemetry",
+                "Validator's telemetry:\n{}",
+                engine.validator_telemetry().report()
+            );
+            log::debug!(
+                target: "telemetry",
+                "Full node service's telemetry:\n{}",
+                engine.full_node_service_telemetry().report(TELEMETRY_TIMEOUT)
+            );
+            log::debug!(
+                target: "telemetry",
+                "Full node client's telemetry:\n{}",
+                engine.network.telemetry().report(TELEMETRY_TIMEOUT)
+            );
+        }
+    });
+}
+
 
 #[cfg(not(feature = "external_db"))]
 pub fn start_external_broadcast_process(
@@ -1112,6 +1236,7 @@ lazy_static::lazy_static! {
 pub struct StatsdClient {}
 
 #[cfg(not(feature = "metrics"))]
+#[allow(dead_code)]
 impl StatsdClient {
     pub fn new() -> StatsdClient { StatsdClient{} }
     pub fn gauge(&self, _metric_name: &str, _value: f64) {}

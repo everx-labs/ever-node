@@ -48,7 +48,7 @@ pub async fn run_validate_query(
             prev,
             block,
             set,
-            engine,
+            engine.clone(),
             false,
             cfg!(feature = "async_validator"),
         ).try_validate().await
@@ -108,6 +108,10 @@ pub async fn run_validate_query(
         Err(e) =>  {
             #[cfg(feature = "metrics")]
             STATSD.incr(&format!("failed_validations_{}", shard));
+
+            #[cfg(feature = "telemetry")]
+            engine.validator_telemetry().failed_attempt(&shard, &e.to_string());
+
             Err(e)
         }
     }
@@ -154,7 +158,7 @@ pub async fn run_collate_query (
 
     let collator_result = if cfg!(feature = "async_collator") {
         let collator = collator::Collator::new(
-            shard,
+            shard.clone(),
             min_masterchain_block_id,
             prev.clone(),
             set,
@@ -166,7 +170,7 @@ pub async fn run_collate_query (
         collator.collate(timeout).await
     } else {
         let collator = collator_sync::Collator::new(
-            shard,
+            shard.clone(),
             min_masterchain_block_id,
             prev.clone(),
             set,
@@ -191,10 +195,18 @@ pub async fn run_collate_query (
         Err(err) => {
             #[cfg(feature = "metrics")]
             STATSD.incr(&format!("failed_collations_{}", shard));
-
             let test_bundles_config = &engine.test_bundles_config().collator;
+
+            let err_str = if cfg!(feature = "local_test") || test_bundles_config.is_enable() {
+                err.to_string()
+            } else {
+                String::default()
+            };
+
+            #[cfg(feature = "telemetry")]
+            engine.collator_telemetry().failed_attempt(&shard, &err_str);
+
             if test_bundles_config.is_enable() {
-                let err_str = err.to_string();
                 if test_bundles_config.need_to_build_for(&err_str) {
                     let id = BlockIdExt {
                         shard_id: shard,

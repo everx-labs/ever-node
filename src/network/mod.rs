@@ -6,3 +6,5 @@ pub mod full_node_service;
 #[cfg(feature = "local_test")]
 pub mod node_network_stub;
 pub mod control;
+#[cfg(feature = "telemetry")]
+pub mod telemetry;

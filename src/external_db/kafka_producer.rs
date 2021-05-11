@@ -1,6 +1,8 @@
 use std::time;
 use crate::{external_db::WriteData, config::KafkaProducerConfig};
+use rdkafka::message::OwnedHeaders;
 use ton_types::{Result, fail};
+use chrono::Utc;
 
 pub(super) struct KafkaProducer {
     config: KafkaProducerConfig,
@@ -24,7 +26,7 @@ impl KafkaProducer {
         }
     }
 
-    async fn write_internal(&self, key: Vec<u8>, key_str: String, data: Vec<u8>) -> Result<()> {
+    async fn write_internal(&self, key: Vec<u8>, key_str: String, data: Vec<u8>, ts: Option<i64>) -> Result<()> {
         if !self.enabled() {
             fail!("Producer is disabled");
         }
@@ -54,10 +56,16 @@ impl KafkaProducer {
         loop {
             log::trace!("Producing record, topic: {}, key: {}", self.config.topic, key_str);
             let now = std::time::Instant::now();
+            let (header_name, header_value) = if let Some(timestamp) = ts {
+                    ("raw_block_timestamp", timestamp.to_be_bytes())
+                } else {
+                    ("raw_block_timestamp", [0u8;8])
+                };
             let produce_future = self.producer.as_ref().unwrap().send(
                 rdkafka::producer::FutureRecord::to(&self.config.topic)
                     .key(&key)
-                    .payload(&data),
+                    .payload(&data)
+                    .headers(OwnedHeaders::new().add(header_name, &header_value)),
                 0,
             );
             match produce_future.await {
@@ -85,10 +93,10 @@ impl WriteData for KafkaProducer {
 
     async fn write_raw_data(&self, key: Vec<u8>, data: Vec<u8>) -> Result<()> {
         let key_str = format!("{}", hex::encode(&key));
-        self.write_internal(key, key_str, data).await
+        self.write_internal(key, key_str, data, Some(Utc::now().timestamp())).await
     }
 
     async fn write_data(&self, key: String, data: String) -> Result<()> {
-        self.write_internal(key.clone().into_bytes(), key, data.into_bytes()).await
+        self.write_internal(key.clone().into_bytes(), key, data.into_bytes(), None).await
     }
 }

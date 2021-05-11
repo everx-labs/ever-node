@@ -40,6 +40,11 @@ macro_rules! define_db_prop {
     };
 }
 
+pub struct StoreBlockResult {
+    pub handle: Arc<BlockHandle>,
+    pub first_time: bool,
+}
+
 #[async_trait::async_trait]
 pub trait InternalDb : Sync + Send {
     fn create_or_load_block_handle(
@@ -50,7 +55,7 @@ pub trait InternalDb : Sync + Send {
     ) -> Result<Arc<BlockHandle>>;
     fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>>;
 
-    async fn store_block_data(&self, block: &BlockStuff) -> Result<Arc<BlockHandle>>;
+    async fn store_block_data(&self, block: &BlockStuff) -> Result<StoreBlockResult>;
     async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff>;
     async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>>;
 
@@ -63,7 +68,7 @@ pub trait InternalDb : Sync + Send {
         id: &BlockIdExt, 
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff
-    ) -> Result<Arc<BlockHandle>>;
+    ) -> Result<StoreBlockResult>;
     async fn load_block_proof(&self, handle: &BlockHandle, is_link: bool) -> Result<BlockProofStuff>;
     async fn load_block_proof_raw(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>>;
 
@@ -71,7 +76,7 @@ pub trait InternalDb : Sync + Send {
         &self, 
         handle: &Arc<BlockHandle>, 
         state: &ShardStateStuff
-    ) -> Result<()>;
+    ) -> Result<bool>;
     fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<ShardStateStuff>;
     fn gc_shard_state_dynamic_db(&self) -> Result<usize>;
 
@@ -93,7 +98,7 @@ pub trait InternalDb : Sync + Send {
     fn load_block_next2(&self, id: &BlockIdExt) -> Result<BlockIdExt>;
 
 //    fn store_block_processed_in_ext_db(&self, handle: &Arc<BlockHandle>) -> Result<()>;
-    fn store_block_applied(&self, handle: &Arc<BlockHandle>) -> Result<()>;
+    fn store_block_applied(&self, handle: &Arc<BlockHandle>) -> Result<bool>;
 
     async fn archive_block(&self, id: &BlockIdExt) -> Result<()>;
 
@@ -261,23 +266,22 @@ impl InternalDb for InternalDbImpl {
         self.block_handle_storage.load_handle(id)
     }
 
-    async fn store_block_data(
-        &self, 
-        block: &BlockStuff
-    ) -> Result<Arc<BlockHandle>> {
+    async fn store_block_data(&self, block: &BlockStuff) -> Result<StoreBlockResult> {
         log::trace!("store_block_data {}", block.id());
         let handle = self.create_or_load_block_handle(block.id(), Some(block.block()), None)?;
         let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(block.id());
+        let mut first_time = false;
         if !handle.has_data() || !self.archive_manager.check_file(&handle, &entry_id) {
             let _lock = handle.block_file_lock().write().await;
             if !handle.has_data() || !self.archive_manager.check_file(&handle, &entry_id) {
                 self.archive_manager.add_file(&entry_id, block.data().to_vec()).await?;
                 if handle.set_data() {
                     self.store_block_handle(&handle)?;
+                    first_time = true;
                 }
             }
         }
-        Ok(handle) 
+        Ok(StoreBlockResult{handle, first_time})
     }
 
     async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff> {
@@ -330,7 +334,7 @@ impl InternalDb for InternalDbImpl {
         id: &BlockIdExt,
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff
-    ) -> Result<Arc<BlockHandle>> {
+    ) -> Result<StoreBlockResult> {
 
         if let Some(handle) = &handle {
             if handle.id() != id {
@@ -339,9 +343,9 @@ impl InternalDb for InternalDbImpl {
         }
         if cfg!(feature = "local_test") {
             if let Some(handle) = handle {
-                Ok(handle)
+                Ok(StoreBlockResult{handle, first_time: false})
             } else if let Some(handle) = self.load_block_handle(id)? {
-                Ok(handle)
+                Ok(StoreBlockResult{handle, first_time: false})
             } else {
                 fail!("Cannot load handle for block {} during test", id)
             }
@@ -358,6 +362,7 @@ impl InternalDb for InternalDbImpl {
                 self.create_or_load_block_handle(id, Some(&proof.virtualize_block()?.0), None)?
             };
 
+            let mut first_time = false;
             if proof.is_link() {
                 let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(id);
                 if !handle.has_proof_link() || 
@@ -371,6 +376,7 @@ impl InternalDb for InternalDbImpl {
                         self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
                         if handle.set_proof_link() {
                             self.store_block_handle(&handle)?;
+                            first_time = true;
                         }
                     }
                 }
@@ -387,11 +393,12 @@ impl InternalDb for InternalDbImpl {
                         self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
                         if handle.set_proof() {
                             self.store_block_handle(&handle)?;
+                            first_time = true;
                         }
                     }
                 }
             }
-            Ok(handle)
+            Ok(StoreBlockResult{handle, first_time})
         }
     }
 
@@ -430,7 +437,7 @@ impl InternalDb for InternalDbImpl {
         &self, 
         handle: &Arc<BlockHandle>, 
         state: &ShardStateStuff
-    ) -> Result<()> {
+    ) -> Result<bool> {
         log::trace!("store_shard_state_dynamic {}", state.block_id());
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
@@ -440,9 +447,10 @@ impl InternalDb for InternalDbImpl {
             //self.ss_test_map.insert(state.block_id().clone(), state.clone());
             if handle.set_state() {
                 self.store_block_handle(handle)?;
+                return Ok(true);
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<ShardStateStuff> {
@@ -594,12 +602,14 @@ impl InternalDb for InternalDbImpl {
     }
 */
 
-    fn store_block_applied(&self, handle: &Arc<BlockHandle>) -> Result<()> {
+    fn store_block_applied(&self, handle: &Arc<BlockHandle>) -> Result<bool> {
         log::trace!("store_block_applied {}", handle.id());
         if handle.set_block_applied() {
             self.store_block_handle(&handle)?;
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(())
     }
 
     async fn archive_block(&self, id: &BlockIdExt) -> Result<()> {

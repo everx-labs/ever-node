@@ -1759,7 +1759,11 @@ impl RoundStateImpl {
                 locked_round: last_precommit.get_ton_hash(),
                 locked_block: precommitted_block.get_ton_hash(),
                 seqno: sequence_number as ton::int,
-                precommitted: if precommitted_block.is_some() { ::ton_api::ton::Bool::BoolTrue } else { ::ton_api::ton::Bool::BoolFalse },
+                precommitted: if precommitted_block.is_some() {
+                    ::ton_api::ton::Bool::BoolTrue
+                } else {
+                    ::ton_api::ton::Bool::BoolFalse
+                },
                 first_attempt: first_attempt.get_ton_hash(),
                 approved_blocks: sent_blocks.get_ton_hash(),
                 signatures: signatures.get_ton_hash(),

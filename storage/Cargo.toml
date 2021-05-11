@@ -34,3 +34,6 @@ rand = "0.7.3"
 [build-dependencies.cc]
 version = "=1.0.61"
 features = ["parallel"]
+
+[features]
+telemetry = []

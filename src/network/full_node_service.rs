@@ -431,25 +431,33 @@ impl FullNodeOverlayService {
             match query.downcast::<Q>() {
                 Ok(query) => {
 
-                    let query_str = if log::log_enabled!(log::Level::Trace) {
-                        format!("{:?}", query)
+                    let query_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
+                        format!("{}", std::any::type_name::<Q>())
                     } else {
                         String::default()
                     };
                     log::trace!("consume_query: before consume query {}", query_str);
 
+                    let now = std::time::Instant::now();
                     let answer = match consumer(self, query).await {
                         Ok(answer) => {
+                            let answer = adnl::common::serialize(&answer)?;
                             log::trace!("consume_query: consumed {}", query_str);
+                            #[cfg(feature = "telemetry")]
+                            self.engine.full_node_service_telemetry()
+                                .consumed_query(query_str, true, now.elapsed(), answer.len());
                             answer
                         }
                         Err(e) => {
                             log::trace!("consume_query: consumed {}, error {:?}", query_str, e);
+                            #[cfg(feature = "telemetry")]
+                            self.engine.full_node_service_telemetry()
+                                .consumed_query(query_str, false, now.elapsed(), 0);
                             return Err(e)
                         }
                     };
 
-                    Ok(QueryResult::Consumed(Some(Answer::Object(TLObject::new(answer)))))
+                    Ok(QueryResult::Consumed(Some(Answer::Raw(answer))))
                 },
                 Err(query) => Err(query)
             }
@@ -469,20 +477,27 @@ impl FullNodeOverlayService {
             match query.downcast::<Q>() {
                 Ok(query) => {
 
-                    let query_str = if log::log_enabled!(log::Level::Trace) {
-                        format!("{:?}", query)
+                    let query_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
+                        format!("{}", std::any::type_name::<Q>())
                     } else {
                         String::default()
                     };
                     log::trace!("consume_query_raw: before consume query {}", query_str);
 
+                    let now = std::time::Instant::now();
                     let answer = match consumer(self, query).await {
                         Ok(answer) => {
+                            #[cfg(feature = "telemetry")]
                             log::trace!("consume_query_raw: consumed {}", query_str);
+                            self.engine.full_node_service_telemetry()
+                                .consumed_query(query_str, true, now.elapsed(), answer.len());
                             answer
                         }
                         Err(e) => {
+                            #[cfg(feature = "telemetry")]
                             log::trace!("consume_query_raw: consumed {}, error {:?}", query_str, e);
+                            self.engine.full_node_service_telemetry()
+                                .consumed_query(query_str, false, now.elapsed(), 0);
                             return Err(e)
                         }
                     };

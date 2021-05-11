@@ -274,7 +274,7 @@ async fn download_block_and_state(
         (engine.load_block(&handle).await?, handle)
     } else {
         let (block, proof) = engine.download_block(block_id, None).await?;
-        let mut handle = engine.store_block(&block).await?;
+        let mut handle = engine.store_block(&block).await?.handle;
         if !handle.has_proof() {
             handle = engine.store_block_proof(block_id, Some(handle), &proof).await?;
         }

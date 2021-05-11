@@ -143,6 +143,7 @@ struct ValidateBase {
     top_shard_descr_dict: TopBlockDescrSet,
     virt_roots: HashMap<UInt256, Cell>, // never used proofs of processed messages
     gas_used: Arc<AtomicU64>,
+    transactions_executed: Arc<AtomicU32>,
 
     config_params: ConfigParams,
 
@@ -2966,6 +2967,7 @@ impl ValidateQuery {
         if let Some(TrComputePhase::Vm(compute_ph)) = descr.compute_phase_ref() {
             base.gas_used.fetch_add(compute_ph.gas_used.0 as u64, Ordering::Relaxed);
         }
+        base.transactions_executed.fetch_add(1, Ordering::Relaxed);
         // we cannot know prev transaction in executor
         trans2.set_prev_trans_hash(trans.prev_trans_hash());
         trans2.set_prev_trans_lt(trans.prev_trans_lt());
@@ -3816,6 +3818,15 @@ impl ValidateQuery {
 
         #[cfg(feature = "metrics")]
         STATSD.gauge(&format!("gas_rate_validator_{}", base.block_id().shard()), ratio as f64);
+
+        #[cfg(not(test))]
+        #[cfg(feature = "telemetry")]
+        self.engine.validator_telemetry().succeeded_attempt(
+            &self.shard,
+            now.elapsed(),
+            base.transactions_executed.load(Ordering::Relaxed),
+            gas_used as u32
+        );
 
         Ok(())
     }

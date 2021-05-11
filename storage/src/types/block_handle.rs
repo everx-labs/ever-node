@@ -2,6 +2,8 @@ use crate::{block_handle_db::BlockHandleCache, traits::Serializable, types::Bloc
 use std::{io::Write, sync::Arc};
 use ton_block::BlockIdExt;
 use ton_types::{fail, Result};
+#[cfg(feature = "telemetry")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const FLAG_DATA: u32                 = 1;
 const FLAG_PROOF: u32                = 1 << 1;
@@ -27,6 +29,8 @@ pub struct BlockHandle {
     block_file_lock: tokio::sync::RwLock<()>,
     proof_file_lock: tokio::sync::RwLock<()>,
     block_handle_cache: Arc<BlockHandleCache>,
+    #[cfg(feature = "telemetry")]
+    got_by_broadcast: AtomicBool,
 }
 
 impl BlockHandle {
@@ -41,7 +45,9 @@ impl BlockHandle {
             meta,
             block_file_lock: tokio::sync::RwLock::new(()),
             proof_file_lock: tokio::sync::RwLock::new(()),
-            block_handle_cache
+            block_handle_cache,
+            #[cfg(feature = "telemetry")]
+            got_by_broadcast: AtomicBool::new(false),
         }
     }
 
@@ -300,7 +306,17 @@ impl BlockHandle {
     fn set_flag(&self, flag: u32) -> bool {
         (self.meta.set_flags(flag) & flag) != flag
     }
+}
 
+#[cfg(feature = "telemetry")]
+impl BlockHandle {
+    pub fn set_got_by_broadcast(&self, value: bool) {
+        self.got_by_broadcast.store(value, Ordering::Relaxed);
+    }
+
+    pub fn got_by_broadcast(&self) -> bool {
+        self.got_by_broadcast.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for BlockHandle {

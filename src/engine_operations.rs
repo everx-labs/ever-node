@@ -3,7 +3,7 @@ use crate::{
     config::CollatorTestBundlesGeneralConfig,
     engine::{Engine, LastMcBlockId, ShardsClientMcBlockId, STATSD},
     engine_traits::{EngineOperations, PrivateOverlayOperations}, error::NodeError,
-    internal_db::NodeState, 
+    internal_db::{NodeState, StoreBlockResult}, 
     shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
 };
 use adnl::common::{KeyId, KeyOption};
@@ -16,6 +16,12 @@ use storage::types::BlockHandle;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
 use ton_block::{BlockIdExt, AccountIdPrefixFull, ShardIdent, Message, SHARD_FULL, MASTERCHAIN_ID};
 use ton_types::{fail, error, Result, UInt256};
+#[cfg(feature = "telemetry")]
+use crate::{
+    full_node::telemetry::FullNodeTelemetry,
+    validator::telemetry::CollatorValidatorTelemetry,
+    network::telemetry::FullNodeNetworkTelemetry,
+};
 
 #[async_trait::async_trait]
 impl EngineOperations for Engine {
@@ -253,15 +259,15 @@ impl EngineOperations for Engine {
         self.download_zerostate_worker(id, None).await
     }
 
-    async fn store_block(&self, block: &BlockStuff) -> Result<Arc<BlockHandle>> {
-        let handle = self.db().store_block_data(block).await?;
-        if handle.id().shard().is_masterchain() {
-            if handle.is_key_block()? {
-                self.update_last_known_keyblock_seqno(handle.id().seq_no());
+    async fn store_block(&self, block: &BlockStuff) -> Result<StoreBlockResult> {
+        let store_block_result = self.db().store_block_data(block).await?;
+        if store_block_result.handle.id().shard().is_masterchain() {
+            if store_block_result.handle.is_key_block()? {
+                self.update_last_known_keyblock_seqno(store_block_result.handle.id().seq_no());
             }
-            self.update_last_known_mc_block_seqno(handle.id().seq_no());
+            self.update_last_known_mc_block_seqno(store_block_result.handle.id().seq_no());
         }
-        Ok(handle)
+        Ok(store_block_result)
     }
 
     async fn store_block_proof(
@@ -270,7 +276,8 @@ impl EngineOperations for Engine {
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff
     ) -> Result<Arc<BlockHandle>> {
-        self.db().store_block_proof(id, handle, proof).await
+        let h = self.db().store_block_proof(id, handle, proof).await?.handle;
+        Ok(h)
     }
 
     async fn load_block_proof(
@@ -349,7 +356,10 @@ impl EngineOperations for Engine {
         if self.shard_states_cache().get(handle.id()).is_none() {
             self.shard_states_cache().set(handle.id().clone(), |_| Some(state.clone()))?;
         }
-        self.db().store_shard_state_dynamic(handle, state)?;
+        if self.db().store_shard_state_dynamic(handle, state)? {
+            #[cfg(feature = "telemetry")]
+            self.full_node_telemetry().new_pre_applied_block(handle.got_by_broadcast());
+        }
         self.shard_states_awaiters().do_or_wait(
             state.block_id(),
             None,
@@ -455,7 +465,10 @@ impl EngineOperations for Engine {
         self.db().assign_mc_ref_seq_no(handle, mc_seq_no)?;
         self.db().index_handle(handle)?;
         self.db().archive_block(handle.id()).await?;
-        self.db().store_block_applied(handle)?;
+        if self.db().store_block_applied(handle)? {
+            #[cfg(feature = "telemetry")]
+            self.full_node_telemetry().new_applied_block();
+        }
         Ok(())
     }
 
@@ -498,7 +511,10 @@ impl EngineOperations for Engine {
             MASTERCHAIN_ID, //broadcast.id.workchain, by t-node all broadcast are sending into masterchain overlay
             SHARD_FULL, //broadcast.id.shard as u64
         ).await?;
-        overlay.send_block_broadcast(broadcast).await
+        overlay.send_block_broadcast(broadcast).await?;
+        #[cfg(feature = "telemetry")]
+        self.full_node_telemetry().sent_block_broadcast();
+        Ok(())
     }
 
     async fn send_top_shard_block_description(
@@ -514,13 +530,16 @@ impl EngineOperations for Engine {
 
         if !resend {
             let id = tbd.proof_for();
-            if let Err(e) = self.shard_blocks().add_shard_block(
-                id, cc_seqno, || Ok(tbd.clone()), false, self.deref()).await {
+            if let Err(e) = self.shard_blocks().process_shard_block(
+                id, cc_seqno, || Ok(tbd.clone()), false, false, self.deref()).await {
                 log::error!("Can't add own shard top block {}: {}", id, e);
             }
         }
         
-        overlay.send_top_shard_block_description(&tbd).await
+        overlay.send_top_shard_block_description(&tbd).await?;
+        #[cfg(feature = "telemetry")]
+        self.full_node_telemetry().sent_top_block_broadcast();
+        Ok(())
     }
 
     async fn check_sync(&self) -> Result<bool> {
@@ -575,5 +594,25 @@ impl EngineOperations for Engine {
 
     fn db_root_dir(&self) -> Result<&str> {
         self.db().db_root_dir()
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn full_node_telemetry(&self) -> &FullNodeTelemetry {
+        Engine::full_node_telemetry(self)
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn collator_telemetry(&self) -> &CollatorValidatorTelemetry {
+        Engine::collator_telemetry(self)
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn validator_telemetry(&self) -> &CollatorValidatorTelemetry {
+        Engine::validator_telemetry(self)
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn full_node_service_telemetry(&self) -> &FullNodeNetworkTelemetry {
+        Engine::full_node_service_telemetry(self)
     }
 }

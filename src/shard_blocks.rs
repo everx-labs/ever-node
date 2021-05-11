@@ -4,7 +4,7 @@ use crate::{
     shard_state::ShardStateStuff,
 };
 use ton_block::{BlockIdExt, TopBlockDescr, Deserializable, BlockSignatures};
-use ton_types::{fail, error, Result, deserialize_tree_of_cells};
+use ton_types::{fail, Result, deserialize_tree_of_cells};
 use std::{
     io::Cursor,
     sync::{Arc, atomic::{AtomicU32, Ordering}},
@@ -18,6 +18,11 @@ use rand::Rng;
 pub enum StoreAction {
     Save(TopBlockDescrId, Arc<TopBlockDescrStuff>),
     Remove(TopBlockDescrId)
+}
+
+pub enum ShardBlockProcessingResult {
+    Duplication,
+    MightBeAdded(Arc<TopBlockDescrStuff>)
 }
 
 struct ShardBlocksPoolItem {
@@ -55,14 +60,15 @@ impl ShardBlocksPool {
         )
     }
 
-    pub async fn add_shard_block_raw(
+    pub async fn process_shard_block_raw(
         &self,
         id: &BlockIdExt,
         cc_seqno: u32,
         data: Vec<u8>,
         own: bool,
+        check_only: bool,
         engine: &dyn EngineOperations,
-    ) -> Result<bool> {
+    ) -> Result<ShardBlockProcessingResult> {
         let factory = || {
             let tbd = if self.is_fake {
                 TopBlockDescr::with_id_and_signatures(id.clone(), BlockSignatures::default())
@@ -72,32 +78,32 @@ impl ShardBlocksPool {
             };
             Ok(Arc::new(TopBlockDescrStuff::new(tbd, &id, self.is_fake)?))
         };
-        self.add_shard_block(id, cc_seqno, factory, own, engine).await
+        self.process_shard_block(id, cc_seqno, factory, own, check_only, engine).await
     }
 
-
-    pub async fn add_shard_block(
+    pub async fn process_shard_block(
         &self,
         id: &BlockIdExt,
         cc_seqno: u32,
         mut factory: impl FnMut() -> Result<Arc<TopBlockDescrStuff>>,
         own: bool,
+        check_only: bool,
         engine: &dyn EngineOperations,
-    ) -> Result<bool> {
+    ) -> Result<ShardBlockProcessingResult> {
 
         let tbds_id = TopBlockDescrId::new(id.shard().clone(), cc_seqno);
         let mut tbds = None;
 
         'a: loop {
 
-            log::trace!("add_shard_block iteration  cc_seqno: {}  id: {}", cc_seqno, id);
+            log::trace!("process_shard_block iteration  cc_seqno: {}  id: {}", cc_seqno, id);
 
             // check for duplication
             if let Some(prev) = self.shard_blocks.get(&tbds_id) {
                 if id.seq_no() <= prev.val().top_block.proof_for().seq_no() {
-                    log::trace!("add_shard_block duplication  cc_seqno: {}  id: {}  prev: {}", 
+                    log::trace!("process_shard_block duplication  cc_seqno: {}  id: {}  prev: {}", 
                         cc_seqno, id, prev.val().top_block.proof_for());
-                    return Ok(false);
+                    return Ok(ShardBlockProcessingResult::Duplication);
                 }
             }
 
@@ -108,6 +114,11 @@ impl ShardBlocksPool {
 
             if !self.is_fake {
                 tbds.as_ref().unwrap().validate(&engine.load_last_applied_mc_state().await?)?;
+            }
+
+            if check_only {
+                log::trace!("process_shard_block check only  id: {}", id);
+                break;
             }
 
             // add
@@ -137,11 +148,11 @@ impl ShardBlocksPool {
             });
             match result {
                 lockfree::map::Insertion::Created => {
-                    log::trace!("add_shard_block added  cc_seqno: {}  id: {}", cc_seqno, id);
+                    log::trace!("process_shard_block added  cc_seqno: {}  id: {}", cc_seqno, id);
                     break 'a;
                 },
                 lockfree::map::Insertion::Updated(old) => {
-                    log::trace!("add_shard_block updated  cc_seqno: {}  id: {}  old: {} {}",
+                    log::trace!("process_shard_block updated  cc_seqno: {}  id: {}  old: {} {}",
                         cc_seqno, id, old.key().cc_seqno, old.key().id);
                     break 'a;
                 },
@@ -155,18 +166,7 @@ impl ShardBlocksPool {
 
         self.send_to_storage(StoreAction::Save(tbds_id.clone(), tbds.clone()));
 
-        let last_id = engine.load_last_applied_mc_block_id().await?;
-        match engine.load_block_handle(&last_id)?.ok_or_else(
-            || error!("Cannot load handle for last master block {}", last_id)
-        ) {
-            Ok(mc_block) => Ok(
-                self.is_fake || tbds.gen_utime() < mc_block.gen_utime()? + 60
-            ),
-            Err(e) => {
-                log::trace!("add_shard_block failed for block {}, {} (too new?)", id, e);
-                Ok(false)
-            }
-        }
+        Ok(ShardBlockProcessingResult::MightBeAdded(tbds))
     }
 
     pub fn get_shard_blocks(&self, last_mc_seq_no: u32, only_own: bool) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
