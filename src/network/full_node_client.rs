@@ -10,7 +10,7 @@ use crate::{
 use adnl::{common::{KeyId, serialize, serialize_append}, node::AdnlNode};
 use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
 use rldp::RldpNode;
-use std::{io::Cursor, time::Instant, sync::Arc};
+use std::{io::Cursor, time::Instant, sync::Arc, time::Duration};
 use ton_api::{BoxedSerialize, BoxedDeserialize, Deserializer, IntoBoxed};
 use ton_api::ton::{
     self, TLObject,
@@ -32,6 +32,8 @@ use ton_api::ton::{
 };
 use ton_block::BlockIdExt;
 use ton_types::{fail, error, Result};
+#[cfg(feature = "telemetry")]
+use crate::network::telemetry::FullNodeNetworkTelemetry;
 
 #[async_trait::async_trait]
 pub trait FullNodeOverlayClient : Sync + Send {
@@ -71,22 +73,34 @@ pub struct NodeClientOverlay {
     overlay_id: Arc<OverlayShortId>,
     overlay: Arc<OverlayNode>,
     rldp: Arc<RldpNode>,
-    peers: Arc<Neighbours>
+    peers: Arc<Neighbours>,
+    #[cfg(feature = "telemetry")]
+    telemetry: Arc<FullNodeNetworkTelemetry>,
 }
 
 impl NodeClientOverlay {
 
     const ADNL_ATTEMPTS: u32 = 50;
     const TIMEOUT_PREPARE: u64 = 6000; // Milliseconds
-    const TIMEOUT_DELTA: u64 = 50;     // Milliseconds
+    const TIMEOUT_DELTA: u64 = 50; // Milliseconds
+    const TIMEOUT_NO_NEIGHBOURS: u64 = 1000; // Milliseconds
 
     pub fn new(
         overlay_id: Arc<OverlayShortId>,
         overlay: Arc<OverlayNode>,
         rldp: Arc<RldpNode>,
-        peers: Arc<Neighbours>
+        peers: Arc<Neighbours>,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<FullNodeNetworkTelemetry>,
     ) -> Self {
-        Self{overlay_id, overlay, rldp, peers}
+        Self {
+            overlay_id,
+            overlay,
+            rldp,
+            peers,
+            #[cfg(feature = "telemetry")]
+            telemetry
+        }
     }
 
     pub fn overlay_id(&self) -> &Arc<OverlayShortId> {
@@ -101,31 +115,46 @@ impl NodeClientOverlay {
         &self.peers
     }
 
-    async fn send_adnl_query_to_peer<D: ton_api::AnyBoxedSerialize>(
+    async fn send_adnl_query_to_peer<R, D>(
         &self, 
         peer: &Arc<Neighbour>,
         data: &TLObject,
         timeout: Option<u64>
-    ) -> Result<Option<D>> {
+    ) -> Result<Option<D>>
+    where
+    R: ton_api::AnyBoxedSerialize,
+    D: ton_api::AnyBoxedSerialize
+    {
 
-        log::trace!("USE PEER {}, ADNL REQUEST {:?}", peer.id(), data);
+        let request_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
+            format!("ADNL {}", std::any::type_name::<R>())
+        } else {
+            String::default()
+        };
+        log::trace!("USE PEER {}, {}", peer.id(), request_str);
 
         let now = Instant::now();
         let timeout = timeout.or(Some(AdnlNode::calc_timeout(peer.roundtrip_adnl())));
         let answer = self.overlay.query(peer.id(), &data, &self.overlay_id, timeout).await?;
         let roundtrip = now.elapsed().as_millis() as u64;
-         
+
         if let Some(answer) = answer {
             match answer.downcast::<D>() {
                 Ok(answer) => {
                     peer.query_success(roundtrip, false);
+                    #[cfg(feature = "telemetry")]
+                    self.telemetry.consumed_query(request_str, true, now.elapsed(), 0); // TODO data size (need to patch overlay)
                     return Ok(Some(answer))
                 },
                 Err(obj) => {
+                    #[cfg(feature = "telemetry")]
+                    self.telemetry.consumed_query(request_str, false, now.elapsed(), 0);
                     log::warn!("Wrong answer {:?} to {:?} from {}", obj, data, peer.id())
                 }
             }
         } else {
+            #[cfg(feature = "telemetry")]
+            self.telemetry.consumed_query(request_str, false, now.elapsed(), 0);
             log::warn!("No reply to {:?} from {}", data, peer.id())
         }
 
@@ -135,15 +164,15 @@ impl NodeClientOverlay {
     }
 
     // use this function if request size and answer size < 768 bytes (send query via ADNL)
-    async fn send_adnl_query<T, D>(
+    async fn send_adnl_query<R, D>(
         &self, 
-        request: T, 
+        request: R, 
         attempts: Option<u32>,
         timeout: Option<u64>,
         active_peers: Option<&Arc<lockfree::set::Set<Arc<KeyId>>>>
     ) -> Result<(D, Arc<Neighbour>)>
     where
-        T: ton_api::AnyBoxedSerialize,
+        R: ton_api::AnyBoxedSerialize,
         D: ton_api::AnyBoxedSerialize
     {
 
@@ -151,15 +180,18 @@ impl NodeClientOverlay {
         let attempts = attempts.unwrap_or(Self::ADNL_ATTEMPTS);
 
         for _ in 0..attempts {
-            let peer = self.peers.choose_neighbour()?.ok_or_else(
-                ||error!("neighbour is not found!")
-            )?;
+            let peer = if let Some(p) = self.peers.choose_neighbour()? {
+                p
+            } else {
+                tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_NO_NEIGHBOURS)).await;
+                fail!("neighbour is not found!")
+            };
             if let Some(active_peers) = &active_peers {
                 if active_peers.insert(peer.id().clone()).is_err() {
                     continue;
                 }
             }
-            match self.send_adnl_query_to_peer(&peer, &data, timeout).await {
+            match self.send_adnl_query_to_peer::<R, D>(&peer, &data, timeout).await {
                 Err(e) => {
                     if let Some(active_peers) = &active_peers {
                         active_peers.remove(peer.id());
@@ -227,7 +259,15 @@ impl NodeClientOverlay {
         serialize_append(&mut query, request)?;
         let data = Arc::new(query);
 
-        log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request);
+        let request_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
+            format!("{}", std::any::type_name::<T>())
+        } else {
+            String::default()
+        };
+
+        log::trace!("USE PEER {}, {}", peer.id(), request_str);
+        #[cfg(feature = "telemetry")]
+        let now = Instant::now();
         let (answer, roundtrip) = self.overlay.query_via_rldp(
             &self.rldp,
             peer.id(),
@@ -238,8 +278,12 @@ impl NodeClientOverlay {
         ).await?;
 
         if let Some(answer) = answer {
+            #[cfg(feature = "telemetry")]
+            self.telemetry.consumed_query(request_str, true, now.elapsed(), answer.len());
             Ok((answer, peer, roundtrip))
         } else {
+            #[cfg(feature = "telemetry")]
+            self.telemetry.consumed_query(request_str, false, now.elapsed(), 0);
             self.peers.update_neighbour_stats(peer.id(), roundtrip, false, true, true)?;
             fail!("No RLDP answer to {:?} from {}", request, peer.id())
         }
@@ -526,7 +570,12 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         };
 
         // Set neighbor
-        let peer = self.peers.choose_neighbour()?.ok_or_else(||error!("neighbour is not found!"))?;
+        let peer = if let Some(p) = self.peers.choose_neighbour()? {
+            p
+        } else {
+            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_NO_NEIGHBOURS)).await;
+            fail!("neighbour is not found!")
+        };
         log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request);
         
         // Download

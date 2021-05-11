@@ -773,6 +773,15 @@ impl Collator {
             duration,
         );
 
+        #[cfg(not(test))]
+        #[cfg(feature = "telemetry")]
+        self.engine.collator_telemetry().succeeded_attempt(
+            &self.shard,
+            now.elapsed(),
+            collator_data.execute_count as u32,
+            collator_data.block_limit_status.gas_used()
+        );
+
         Ok((candidate, state))
     }
 

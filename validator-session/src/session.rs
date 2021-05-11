@@ -600,6 +600,7 @@ impl SessionImpl {
         );
 
         add_compute_result_metric(&mut metrics_dumper, &"collate_requests".to_string());
+        add_compute_result_metric(&mut metrics_dumper, &"collate_requests_expire".to_string());
         add_compute_result_metric(&mut metrics_dumper, &"validate_requests".to_string());
         add_compute_result_metric(&mut metrics_dumper, &"commit_requests".to_string());
         add_compute_result_metric(&mut metrics_dumper, &"rldp_queries".to_string());

@@ -1,4 +1,4 @@
-use adnl::{common::{KeyId, KeyOption, Query, Wait}, node::AdnlNode};
+use adnl::{common::{KeyId, KeyOption, Query, Wait}, node::{AdnlNode, AddressCache}};
 use crate::engine::STATSD;
 use dht::DhtNode;
 use overlay::{OverlayShortId, OverlayNode};
@@ -89,7 +89,7 @@ impl Neighbour {
                 ).is_err() {
                     continue;
                 } else {
-                    log::trace!("query_success (key_id {}) new value: {}", self.id, new_un);
+   //                 log::trace!("query_success (key_id {}) new value: {}", self.id, new_un);
                 }
             }
             break;
@@ -102,10 +102,10 @@ impl Neighbour {
     }
 
     pub fn query_failed(&self, roundtrip: u64, is_rldp: bool) {
-        let un = self.unreliability.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+        let _un = self.unreliability.fetch_add(1, atomic::Ordering::Relaxed) + 1;
         let metric = format!("neghbour.{}.failed", self.id);
         STATSD.incr(&metric);
-        log::trace!("query_failed (key_id {}, overlay: ) new value: {}", self.id, un);
+//        log::trace!("query_failed (key_id {}, overlay: ) new value: {}", self.id, un);
         if is_rldp {
             self.update_roundtrip_rldp(roundtrip)
         } else {
@@ -153,7 +153,7 @@ impl Neighbour {
         } else {
             roundtrip
         };
-        log::trace!("roundtrip new value: {}", roundtrip);
+    //    log::trace!("roundtrip new value: {}", roundtrip);
         storage.store(roundtrip, atomic::Ordering::Relaxed);
     }
 
@@ -175,8 +175,8 @@ impl Neighbours {
         Ok(Neighbours {
             peers: NeighboursCache::new(start_peers)?,
             all_peers: lockfree::set::Set::new(),
-            dht: dht.clone(),
             overlay: overlay.clone(),
+            dht: dht.clone(),
             overlay_id,
             fail_attempts: AtomicU64::new(0),
             all_attempts: AtomicU64::new(0),
@@ -214,14 +214,16 @@ impl Neighbours {
         self.all_peers.remove(id);
     }
 
-    pub fn got_neighbours(&self, peers: Vec<Arc<KeyId>>) -> Result<()> {
+    pub fn got_neighbours(&self, peers: AddressCache) -> Result<()> {
         log::trace!("got_neighbours");
         let mut ex = false;
         let mut rng = rand::thread_rng();
         let mut is_delete_peer = false;
 
-        for elem in peers.iter() {
+        let (mut iter, mut current) = peers.first();
+        while let Some(elem) = current {
             if self.contains(&elem) {
+                current = peers.next(&mut iter);
                 continue;
             }
             let count = self.peers.count();
@@ -266,6 +268,7 @@ impl Neighbours {
             if ex {
                 break;
             }
+            current = peers.next(&mut iter);
         }
 
         log::trace!("/got_neighbours");
@@ -273,18 +276,13 @@ impl Neighbours {
     }
 
     pub fn start_reload(self: Arc<Self>) {
-    //    let neighbours = self.clone();
         tokio::spawn(async move {
             loop {
                 let sleep_time = rand::thread_rng().gen_range(10, 30);
                 tokio::time::sleep(Duration::from_secs(sleep_time)).await;
-                let res_ping = self.reload().await;
-                match res_ping {
-                    Ok(_) => {},
-                    Err(e) => {
-                        log::error!("reload neighbours err: {:?}", e);
-                    },
-                };
+                if let Err(e) = self.reload_neighbours(&self.overlay_id).await {
+                    log::warn!("reload neighbours err: {:?}", e);
+                }
             }
         });
     }
@@ -300,44 +298,12 @@ impl Neighbours {
         });
     }
 
-    pub async fn reload(&self) -> Result<()> {
-        self.reload_neighbours(&self.overlay_id).await?;
-        Ok(())
-    }
-
     pub async fn reload_neighbours(&self, overlay_id: &Arc<OverlayShortId>) -> Result<()> {
-        for peer in self.peers.get_iter() {
-            let mut peers: Vec<Arc<KeyId>> = vec![];
-            let random_peers = self.overlay.get_random_peers(&peer.id, overlay_id, None).await?;
-            if let Some(rnd_peers) = random_peers {
-                for random_peer in rnd_peers.iter() {
-                    let peer_key = KeyOption::from_tl_public_key(&random_peer.id)?;
-                    log::trace!("reload_neighbours: peer {}", peer_key.id());
-                    if self.peers.contains(peer_key.id()) {
-                        log::trace!("reload_neighbours: peer contains in identificators");
-                        continue;
-                    }
-                    log::trace!("reload_neighbours start find address: peer {}", peer_key.id());
-                    let (ip, _) = DhtNode::find_address(&self.dht, peer_key.id()).await?;
-                    log::info!("reload_neighbours: addr peer {}", ip);
-                    peers.push(peer_key.id().clone());
-
-                    if !self.contains_overlay_peer(peer_key.id()) {
-                        self.overlay.add_public_peer(&ip, random_peer, overlay_id)?;
-                        self.add_overlay_peer(peer_key.id().clone())?;
-                    }
-                }
-            } else {
-                log::trace!("reload_neighbours: random peers result is None!");
-            }
-            if peers.len() != 0 {
-                self.got_neighbours(peers)?;
-            }
-        }
-/*
-        if peers.len() != 0 {
-            self.got_neighbours(peers)?;
-        }*/
+        log::trace!("start reload_neighbours (overlay: {})", overlay_id);
+        let neighbours_cache = AddressCache::with_limit((MAX_NEIGHBOURS * 2 + 1) as u32);
+        self.overlay.get_cached_random_peers(&neighbours_cache, overlay_id, (MAX_NEIGHBOURS * 2) as u32)?;
+        self.got_neighbours(neighbours_cache)?;
+        log::trace!("finish reload_neighbours (overlay: {})", overlay_id);
         Ok(())
     }
 
@@ -348,19 +314,50 @@ impl Neighbours {
             let id = self.overlay_id.clone();
             log::trace!("wait random peers...");
             loop {
+                let this = self.clone();
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                for peer in self.peers.get_iter() {
-                    let answer = receiver.get_random_peers(&peer.id(), &id, None).await;
-                    match answer {
-                        Ok(peers_opt) => {
-                            match peers_opt {
-                                Some(_peers) => {log::trace!("get_random_peers is some");},
-                                None => {
-                                    log::trace!("get_random_peers is none");
-                                },
+                for peer in this.peers.get_iter() {
+                    match receiver.get_random_peers(&peer.id(), &id, None).await {
+                        Ok(Some(peers)) => {
+                            let mut new_peers = Vec::new();
+
+                            for peer in peers.iter() {
+                                match KeyOption::from_tl_public_key(&peer.id) {
+                                    Ok(peer_key) => {
+                                        if !this.contains_overlay_peer(peer_key.id()) {
+                                            new_peers.push(peer_key.id().clone());
+                                        }
+                                    }, 
+                                    Err(e) => log::warn!("{}",e)
+                                }
+                            }
+                            if new_peers.len() != 0 {
+                                this.clone().add_new_peers(new_peers);
                             }
                         },
-                        Err(e) => { log::warn!("call get_random_peers is error: {}", e);}
+                        Err(e) => { log::warn!("call get_random_peers is error: {}", e);},
+                        _ => {},
+                    }
+                }
+            }
+        });
+    }
+
+    fn add_new_peers(self: Arc<Self>, peers: Vec<Arc<KeyId>>) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            for peer in peers.iter() {
+                log::trace!("add_new_peers: start find address: peer {}", peer);
+                match DhtNode::find_address(&this.dht, peer).await {
+                    Ok((ip, _)) => {
+                        log::info!("add_new_peers: addr peer {}", ip);
+                        if let Err(e) = this.add_overlay_peer(peer.clone()) {
+                            log::warn!("add_new_peers error: {}", e);
+                        }
+                    },
+                    Err(e) => {
+                        log::warn!("add_new_peers: find address error - {}", e);
+                        continue;
                     }
                 }
             }
@@ -398,8 +395,8 @@ impl Neighbours {
             } else if proto_version == PROTO_VERSION && capabilities < PROTO_CAPABILITIES {
                 unr += 2;
             }
-            let stat_name = format!("neighbour.{}.unr", neighbour.id());
-            STATSD.histogram(&stat_name, unr as f64);
+            let stat_name = format!("neighbour.unr.{}", neighbour.id());
+            STATSD.gauge(&stat_name, unr as f64);
             log::trace!(
                 "Neighbour {}, unr {}, rt ADNL {}, rt RLDP {} (all stat: {:.4}, peer stat: {:.4}/{}))",
                 neighbour.id(), unr,
@@ -479,15 +476,15 @@ impl Neighbours {
     pub fn got_neighbour_capabilities(
         &self, 
         peer: &Arc<KeyId>, 
-        roundtrip: u64, 
+        _roundtrip: u64, 
         capabilities: &Capabilities
     ) -> Result<()> {
         if let Some(it) = &self.peers.get(peer) {
-            log::trace!("got_neighbour_capabilities: capabilities: {:?}", capabilities);
-            log::trace!("got_neighbour_capabilities: roundtrip: {} ms", roundtrip);
+  //          log::trace!("got_neighbour_capabilities: capabilities: {:?}", capabilities);
+  //          log::trace!("got_neighbour_capabilities: roundtrip: {} ms", roundtrip);
             it.update_proto_version(capabilities);
-        } else {
-            log::trace!("got_neighbour_capabilities: self.identificators not contains peer");
+  //      } else {
+  //          log::trace!("got_neighbour_capabilities: self.identificators not contains peer");
         }
         Ok(())
     }

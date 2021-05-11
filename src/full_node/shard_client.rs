@@ -87,7 +87,7 @@ async fn load_next_master_block(
         }
         next_handle
     } else {
-        engine.store_block(&block).await?
+        engine.store_block(&block).await?.handle
     };
     if !next_handle.has_proof() {
         next_handle = engine.store_block_proof(block.id(), Some(next_handle), &proof).await?;
@@ -196,9 +196,15 @@ pub async fn process_block_broadcast(
     let block_id = convert_block_id_ext_api2blk(&broadcast.id)?;
     if let Some(handle) = engine.load_block_handle(&block_id)? {
         if handle.has_data() {
+            #[cfg(feature = "telemetry")] {
+                let duplicate = handle.got_by_broadcast();
+                let unneeded = !duplicate;
+                engine.full_node_telemetry().new_block_broadcast(&block_id, duplicate, unneeded);
+            }
             return Ok(());
         }
     }
+    engine.full_node_telemetry().new_block_broadcast(&block_id, false, false);
 
     let is_master = block_id.shard().is_masterchain();
     let proof = BlockProofStuff::deserialize(&block_id, broadcast.proof.0.clone(), !is_master)?;
@@ -245,7 +251,18 @@ pub async fn process_block_broadcast(
         proof.check_proof_link()?;
     }
     let block = BlockStuff::deserialize_checked(block_id, broadcast.data.0.clone())?;
-    let mut handle = engine.store_block(&block).await?; 
+    let mut handle;
+    #[cfg(feature = "telemetry")] {
+        let r = engine.store_block(&block).await?;
+        handle = r.handle;
+        if r.first_time {
+            handle.set_got_by_broadcast(true);
+        }
+    }
+    #[cfg(not(feature = "telemetry"))] {
+        handle = engine.store_block(&block).await?.handle;
+    }
+
     if !handle.has_proof() {
         handle = engine.store_block_proof(block.id(), Some(handle), &proof).await?;
     }

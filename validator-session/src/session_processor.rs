@@ -95,8 +95,9 @@ pub(crate) struct SessionProcessorImpl {
     log_replay_report_current_time: SystemTime, //log replay current time (for reporting)
     validates_counter: ResultStatusCounter, //result status counter for approval requests
     collates_counter: ResultStatusCounter, //result status counter for collation requests
-    commits_counter: ResultStatusCounter, //result status counter for commits requests
-    rldp_queries_counter: ResultStatusCounter, //result status counter for RLDP queries
+    collates_expire_counter: ResultStatusCounter, //result status counter for expired collation requests
+    commits_counter: ResultStatusCounter,         //result status counter for commits requests
+    rldp_queries_counter: ResultStatusCounter,    //result status counter for RLDP queries
     preprocess_block_counter: metrics_runtime::data::Counter, //counter for preprocess calls
     process_blocks_counter: metrics_runtime::data::Counter, //counter for process calls
     request_new_block_counter: metrics_runtime::data::Counter, //counter for new blocks requesting
@@ -1993,6 +1994,9 @@ impl SessionProcessorImpl {
             self.round_started_at + self.description.get_delay(priority as u32)
         };
 
+        let block_generation_time_end =
+            block_generation_time + self.description.opts().next_candidate_delay;
+
         if self.description.is_in_future(block_generation_time) {
             self.set_next_awake_time(block_generation_time);
             return;
@@ -2029,6 +2033,19 @@ impl SessionProcessorImpl {
                 }
 
                 let processor = get_mut_impl(processor);
+
+                if let Ok(offset) = block_generation_time_end.elapsed() {
+                    warn!(
+                        "Block generation time slot has been expired by {:.3}ms at {}({})",
+                        offset.as_secs_f64() * 1000.0,
+                        file!(),
+                        line!()
+                    );
+
+                    processor.collates_expire_counter.success();
+                } else {
+                    processor.collates_expire_counter.failure();
+                }
 
                 match result {
                     Ok(candidate) => {
@@ -2832,6 +2849,7 @@ impl SessionProcessorImpl {
         let listener = self.session_listener.clone();
 
         self.collates_counter.total_increment();
+        self.collates_expire_counter.total_increment();
 
         post_callback_closure(&self.callbacks_task_queue, move || {
             check_execution_time!(5000);
@@ -3010,6 +3028,8 @@ impl SessionProcessorImpl {
 
         let collates_counter =
             ResultStatusCounter::new(&metrics_receiver, &"collate_requests".to_owned());
+        let collates_expire_counter =
+            ResultStatusCounter::new(&metrics_receiver, &"collate_requests_expire".to_owned());
         let validates_counter =
             ResultStatusCounter::new(&metrics_receiver, &"validate_requests".to_owned());
         let commits_counter =
@@ -3070,6 +3090,7 @@ impl SessionProcessorImpl {
             signature: BlockSignature::default(),
             log_replay_report_current_time: std::time::UNIX_EPOCH,
             collates_counter: collates_counter,
+            collates_expire_counter: collates_expire_counter,
             validates_counter: validates_counter,
             commits_counter: commits_counter,
             rldp_queries_counter: rldp_queries_counter,

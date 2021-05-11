@@ -986,7 +986,7 @@ impl RoundAttemptStateImpl {
                 precommitted: precommitted.get_ton_hash(),
                 vote_for_inited: vote_for.is_some() as ton::int,
                 vote_for: vote_for.get_ton_hash(),
-            })            
+            })
         }
     }
 

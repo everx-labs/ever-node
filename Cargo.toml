@@ -64,7 +64,7 @@ dht = { version = "0.1", git = "https://github.com/tonlabs/ton-labs-dht" }
 lockfree = { git = "https://github.com/tonlabs/lockfree.git" }
 overlay = { version = "0.1", git = "https://github.com/tonlabs/ton-labs-overlay", features = ["telemetry"] }
 rldp = { version = "0.1", git = "https://github.com/tonlabs/ton-labs-rldp", features = ["telemetry"] }
-storage = { path = "storage" }
+storage = { path = "storage", features = ["telemetry"] }
 ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }
 ton_block = { git = "https://github.com/tonlabs/ton-labs-block" }
 ton_block_json = { git = "https://github.com/tonlabs/ton-labs-block-json.git" }
@@ -93,6 +93,11 @@ optional = true
 [dev-dependencies]
 
 [features]
-# default = ["async_collator", "async_validator"]
+default = ["telemetry"] 
 external_db = ["rdkafka", "rdkafka-sys"]
 metrics = ["statsd"]
+read_old_db = []
+ci_run = []
+telemetry = []
+async_collator = []
+async_validator = []

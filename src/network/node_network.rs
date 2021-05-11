@@ -35,6 +35,8 @@ use ton_api::ton::{
         Broadcast::{TonNode_ConnectivityCheckBroadcast}
     }
 };
+#[cfg(feature = "telemetry")]
+use crate::network::telemetry::FullNodeNetworkTelemetry;
 
 type Cache<K, T> = lockfree::map::Map<K, T>;
 
@@ -51,6 +53,8 @@ pub struct NodeNetwork {
     runtime_handle: tokio::runtime::Handle,
     config_handler: Arc<NodeConfigHandler>,
     connectivity_check_config: ConnectivityCheckBroadcastConfig,
+    #[cfg(feature = "telemetry")]
+    telemetry: Arc<FullNodeNetworkTelemetry>,
 }
 
 struct ValidatorContext {
@@ -150,6 +154,8 @@ impl NodeNetwork {
             runtime_handle: tokio::runtime::Handle::current(),
             config_handler,
             connectivity_check_config,
+            #[cfg(feature = "telemetry")]
+            telemetry: Arc::new(FullNodeNetworkTelemetry::default()),
         });
 
         if connectivity_check_enabled {
@@ -468,20 +474,16 @@ impl NodeNetwork {
             log::warn!("No nodes were found in overlay {}", &overlay_id.0);
         }
 
-        let neighbours = Neighbours::new(
-            &peers,
-            &self.dht,
-            &self.overlay,
-            overlay_id.0.clone()
-        )?;
-
+        let neighbours = Neighbours::new(&peers, &self.dht, &self.overlay, overlay_id.0.clone())?;
         let peers = Arc::new(neighbours);
 
         let client_overlay = NodeClientOverlay::new(
             overlay_id.0.clone(),
             self.overlay.clone(),
             self.rldp.clone(),
-            Arc::clone(&peers)
+            Arc::clone(&peers),
+            #[cfg(feature = "telemetry")]
+            self.telemetry.clone()
         );
 
         let client_overlay = Arc::new(client_overlay);
@@ -655,6 +657,11 @@ impl NodeNetwork {
                 }
             }
         });
+    }
+
+    #[cfg(feature = "telemetry")]
+    pub fn telemetry(&self) -> &FullNodeNetworkTelemetry {
+        &self.telemetry
     }
 
     fn current_validator_set_context<'a>(&'a self) -> Option<lockfree::map::ReadGuard<'a, UInt256, ValidatorSetContext>>  {
