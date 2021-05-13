@@ -2728,8 +2728,8 @@ impl Collator {
                     &mut stat
                 )?;
                 if !res {
-                    log::trace!("{}: prunning CreatorStats for {:x}", self.collated_block_descr, key);
-                    block_create_stats.counters.remove(&key)?;
+                    log::trace!("{}: prunning CreatorStats for {:x}", self.collated_block_descr, key1);
+                    block_create_stats.counters.remove(&key1)?;
                     removed += 1;
                 } 
                 scanned += 1;
