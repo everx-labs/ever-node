@@ -23,6 +23,12 @@ impl DynamicBocDiff {
             .insert(cell_id, Some(cell));
     }
 
+    pub fn contains_cell(&self, cell_id: &CellId) -> bool {
+        self.diff.read()
+            .expect("Poisoned RwLock")
+            .contains_key(cell_id)
+    }
+
     pub fn delete_cell(&self, cell_id: &CellId) {
         let mut write_guard = self.diff.write()
             .expect("Poisoned RwLock");

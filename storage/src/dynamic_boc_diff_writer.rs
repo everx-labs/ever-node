@@ -46,6 +46,10 @@ impl DynamicBocDiffWriter {
         self.diff.add_cell(cell_id, cell)
     }
 
+    pub fn contains_cell(&self, cell_id: &CellId) -> bool {
+        self.diff.contains_cell(cell_id)
+    }
+
     pub fn delete_cell(&self, cell_id: &CellId) {
         self.diff.delete_cell(cell_id)
     }
