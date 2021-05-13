@@ -94,7 +94,7 @@ impl DynamicBocDb {
         diff_writer: &DynamicBocDiffWriter
     ) -> Result<usize> {
         let cell_id = CellId::new(cell.repr_hash());
-        if cell_db.contains(&cell_id)? {
+        if cell_db.contains(&cell_id)? || diff_writer.contains_cell(&cell_id) {
             return Ok(0);
         }
 
