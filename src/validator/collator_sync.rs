@@ -2475,19 +2475,19 @@ impl Collator {
         let mut removed = 0;
         while scanned < 100 {
             let stat = block_create_stats.counters.find_leaf(&key, false, false, false)?;
-            if let Some((key1, mut stat)) = stat {
+            if let Some((found_key, mut stat)) = stat {
                 let res = self.creator_count_outdated(
-                    &key1,
+                    &found_key,
                     collator_data.gen_utime(),
                     &mut stat
                 )?;
                 if !res {
-                    log::trace!("{}: prunning CreatorStats for {:x}", self.collated_block_descr, key);
-                    block_create_stats.counters.remove(&key)?;
+                    log::trace!("{}: prunning CreatorStats for {:x}", self.collated_block_descr, found_key);
+                    block_create_stats.counters.remove(&found_key)?;
                     removed += 1;
                 } 
                 scanned += 1;
-                key = key1;
+                key = found_key;
             } else {
                 break;
             }
