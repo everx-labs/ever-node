@@ -2669,7 +2669,7 @@ impl ValidateQuery {
                 Ok((shard_acc.account_cell().clone(), new_acc))
             }
             None => {
-                let new_acc = Account::AccountNone;
+                let new_acc = Account::default();
                 Ok((new_acc.serialize()?, new_acc))
             }
         }
@@ -2688,7 +2688,7 @@ impl ValidateQuery {
         log::debug!(target: "validate_query", "checking {} transaction {} of account {}",
             lt, trans_root.repr_hash().to_hex_string(), account_addr.to_hex_string());
         let trans = Transaction::construct_from_cell(trans_root.clone())?;
-        let account_create = account == &Account::AccountNone;
+        let account_create = account.is_none();
 
         // check input message
         let mut money_imported = CurrencyCollection::default();
