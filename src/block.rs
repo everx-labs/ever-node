@@ -1,9 +1,10 @@
 use std::{io::Cursor, collections::HashMap, cmp::max, sync::Arc};
 use std::io::Write;
 use ton_block::{
-    Block, BlockIdExt, BlkPrevInfo, Deserializable, ShardIdent, ShardDescr
+    Block, BlockIdExt, BlkPrevInfo, Deserializable, ShardIdent, ShardDescr, AccountBlock,
+    HashmapAugType
 };
-use ton_types::{Cell, Result, types::UInt256, deserialize_tree_of_cells, error, fail};
+use ton_types::{Cell, Result, types::UInt256, deserialize_tree_of_cells, error, fail, HashmapType};
 
 
 
@@ -181,6 +182,18 @@ impl BlockStuff {
             })?;
 
         Ok(shards)
+    }
+
+    pub fn calculate_tr_count(&self) -> Result<usize> {
+        let now = std::time::Instant::now();
+        let mut tr_count = 0;
+
+        self.block.read_extra()?.read_account_blocks()?.iterate_objects(|account_block: AccountBlock| {
+            tr_count += account_block.transactions().len()?;
+            Ok(true)
+        })?;
+        log::trace!("calculate_tr_count: transactions {}, TIME: {}ms, block: {}", tr_count, now.elapsed().as_millis(), self.id());
+        Ok(tr_count)
     }
 }
 

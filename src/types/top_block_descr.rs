@@ -178,6 +178,13 @@ impl TopBlockDescrStuff {
         self.chain_blk_ids.len()
     }
 
+    pub fn top_block_mc_seqno(&self) -> Result<u32> {
+        let merkle_proof = MerkleProof::construct_from(&mut (&self.tbd.chain()[0]).into())?;
+        let block_virt_root = merkle_proof.proof.clone().virtualize(1);
+        let block = Block::construct_from(&mut block_virt_root.into())?;
+        Ok(block.read_info()?.read_master_id()?.seq_no)
+    }
+
     pub fn get_prev_descr(&self, pos: usize, sum_cnt: usize) -> Result<McShardRecord> {
         if pos >= self.size() || sum_cnt > self.size() || (pos + sum_cnt) > self.size() {
             fail!("Invalid arguments")

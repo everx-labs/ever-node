@@ -21,6 +21,25 @@ const TARGET: &str = "sync";
 
 pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> {
 
+    async fn apply(
+        engine: &Arc<dyn EngineOperations>, 
+        seq_no: u32, 
+        last_mc_block_id: &Arc<BlockIdExt>, 
+        data: &Vec<u8>
+    ) -> Result<bool> {
+        log::info!(target: TARGET, "Reading package for MC seq_no = {}", seq_no);
+        let maps = Arc::new(read_package(data).await?);
+        log::info!(
+            target: TARGET,
+            "Package contains {} masterchain blocks, {} blocks overall.",
+            maps.mc_blocks_ids.len(),
+            maps.blocks.len(),
+        );
+        import_package(maps, engine, last_mc_block_id).await?;
+        log::info!(target: TARGET, "Package imported for MC seq_no = {}", seq_no);
+        Ok(true)
+    }
+
     fn download(
         engine: &Arc<dyn EngineOperations>, 
         wait: &Arc<Wait<(u32, Result<Option<Vec<u8>>>)>>, 
@@ -40,23 +59,86 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
         log::info!(target: TARGET, "Download scheduled for MC seq_no = {}", seq_no);
     }
 
-    async fn apply(
+    async fn force_redownload(
         engine: &Arc<dyn EngineOperations>, 
-        seq_no: u32, 
-        last_mc_block_id: &Arc<BlockIdExt>, 
-        data: &Vec<u8>
-    ) -> Result<bool> {
-        log::info!(target: TARGET, "Reading package for MC seq_no = {}", seq_no);
-        let maps = Arc::new(read_package(data).await?);
-        log::info!(
-            target: TARGET,
-            "Package contains {} masterchain blocks, {} blocks overall.",
-            maps.mc_blocks_ids.len(),
-            maps.blocks.len(),
-        );
-        import_package(maps, engine, last_mc_block_id).await?;
-        log::info!(target: TARGET, "Package imported for MC seq_no = {}", seq_no);
-        Ok(true)
+        wait: &Arc<Wait<(u32, Result<Option<Vec<u8>>>)>>, 
+        queue: &mut Vec<(u32, ArchiveStatus)>,
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+    ) -> Result<()> {
+        // Find latest downloaded archive
+        let mut latest = None;
+        for (seq_no, status) in queue.iter_mut() {
+            if let ArchiveStatus::Downloaded(_) = status {
+                if let Some(latest) = latest {
+                    if latest >= *seq_no {
+                        continue
+                    }
+                }
+                latest = Some(*seq_no)
+            }
+        }
+        // Redownload previous not found ones 
+        if let Some(latest) = latest {
+            for (seq_no, status) in queue.iter_mut() {
+                if let ArchiveStatus::NotFound = status {
+                    if latest <= *seq_no {
+                        continue
+                    }
+                    *status = ArchiveStatus::Downloading;
+                    download(engine, wait, *seq_no, active_peers)
+                }
+            }
+        }
+        // Redownload earliest not found if only not found remained
+        if !engine.check_sync().await? {
+            let mut earliest = None;
+            for (seq_no, status) in queue.iter_mut() {
+                if let ArchiveStatus::NotFound = status {
+                    if let Some(earliest) = earliest {
+                        if earliest <= *seq_no {
+                            continue
+                        }
+                    }
+                    earliest = Some(*seq_no)
+                } else {
+                    // There is another status
+                    return Ok(())
+                }
+            }
+            if let Some(earliest) = earliest {
+                for (seq_no, status) in queue.iter_mut() {
+                    if earliest == *seq_no {
+                        *status = ArchiveStatus::Downloading;
+                        download(engine, wait, *seq_no, active_peers);
+                        break
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn new_downloads(
+        engine: &Arc<dyn EngineOperations>, 
+        wait: &Arc<Wait<(u32, Result<Option<Vec<u8>>>)>>, 
+        queue: &mut Vec<(u32, ArchiveStatus)>,
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+        mut sync_mc_seq_no: u32,
+        concurrency: usize
+    ) -> Result<()> {
+        force_redownload(engine, wait, queue, active_peers).await?;
+        while wait.count() < concurrency {
+            if queue.iter().count() > concurrency {
+                // Do not download too much in advance due to possible OOM
+                break
+            } 
+            if queue.iter().position(|(seq_no, _)| seq_no == &sync_mc_seq_no).is_none() {
+                queue.push((sync_mc_seq_no, ArchiveStatus::Downloading));
+                download(engine, wait, sync_mc_seq_no, active_peers);
+            }
+            sync_mc_seq_no += SLICE_SIZE;
+        }
+        Ok(())
     }
 
     enum ArchiveStatus {
@@ -91,8 +173,11 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
         );
 
         // Try to find proper # in queue
-        let mut sync_mc_seq_no = last_mc_block_id.seq_no() + 1;
+        let sync_mc_seq_no = last_mc_block_id.seq_no() + 1;
         loop {
+            new_downloads(
+                &engine, &wait, &mut queue, &active_peers, sync_mc_seq_no, concurrency
+            ).await?;
             if let Some(index) = queue.iter().position(
                 |(seq_no, status)| match status {
                     ArchiveStatus::Downloaded(_) => seq_no <= &sync_mc_seq_no,
@@ -121,6 +206,10 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
 
         // Otherwise download
         while !engine.check_sync().await? {
+            new_downloads(
+                &engine, &wait, &mut queue, &active_peers, sync_mc_seq_no, concurrency
+            ).await?;
+/*
             while wait.count() < concurrency {
                 if queue.iter().count() > concurrency {
                     // Do not download too much in advance due to possible OOM
@@ -132,6 +221,7 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
                 }
                 sync_mc_seq_no += SLICE_SIZE;
             }
+*/
             match wait.wait(&mut reader, false).await {
                 Some(Some((seq_no, Err(e)))) => {
                     log::error!(
@@ -149,6 +239,7 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
                         }
                     ) {
                         if let Some(data) = data {
+/*
                             // Redownload all previously not found archives
                             for (seq_no, status) in queue.iter_mut() {
                                 if let ArchiveStatus::NotFound = status {
@@ -158,6 +249,7 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
                                     }
                                 }
                             }
+*/
                             if seq_no_recv <= last_mc_block_id.seq_no() + 1 {
                                 match apply(&engine, seq_no_recv, &last_mc_block_id, &data).await {
                                     Ok(ok) => {
@@ -179,9 +271,13 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
                             } else {
                                 let (_, status) = &mut queue[index];
                                 *status = ArchiveStatus::Downloaded(data);
+                                force_redownload(&engine, &wait, &mut queue, &active_peers).await?;
                             }
-                        } else { 
-                            if queue.iter().position(
+                        } else {
+                            let (_, status) = &mut queue[index];
+                            *status = ArchiveStatus::NotFound;
+                            force_redownload(&engine, &wait, &mut queue, &active_peers).await?;
+/*                            if queue.iter().position(
                                 |(seq_no, status)| match status {
                                     ArchiveStatus::Downloaded(_) => seq_no > &seq_no_recv,
                                     _ => false
@@ -194,6 +290,7 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
                                 let (_, status) = &mut queue[index];
                                 *status = ArchiveStatus::NotFound;
                             }
+*/
                         }
                     } else {
                         fail!("INTERNAL ERROR: sync queue broken")

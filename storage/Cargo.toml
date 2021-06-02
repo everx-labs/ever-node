@@ -22,7 +22,7 @@ strum = "0.18.0"
 strum_macros = "0.18.0"
 tokio = { version = "1.3.0", features = ["fs", "rt-multi-thread"] }
 
-adnl = { version = "0.1", git = "https://github.com/tonlabs/ton-labs-adnl" }
+adnl = { git = "https://github.com/tonlabs/ton-labs-adnl" }
 lockfree = { git = "https://github.com/tonlabs/lockfree.git" }
 ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }
 ton_block = { git = "https://github.com/tonlabs/ton-labs-block" }

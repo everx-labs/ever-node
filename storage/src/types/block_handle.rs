@@ -252,7 +252,12 @@ impl BlockHandle {
         } else if prev == masterchain_ref_seq_no {
             Ok(false)
         } else {
-            fail!("INTERNAL ERROR: set different masterchain ref seqno")
+            fail!(
+                "INTERNAL ERROR: set different masterchain ref seqno for block {}: {} -> {}",
+                self.id,
+                prev,
+                masterchain_ref_seq_no
+            )
         }
     }
 

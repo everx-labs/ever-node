@@ -24,7 +24,6 @@ use ton_api::ton::{
     },
     ton_node::{ 
         ArchiveInfo, Broadcast, 
-        Broadcast::{TonNode_BlockBroadcast, TonNode_NewShardBlockBroadcast}, 
         DataFull, KeyBlocks, Prepared, PreparedProof, PreparedState, 
         broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}, 
         externalmessage::ExternalMessage, 
@@ -304,10 +303,9 @@ impl FullNodeOverlayClient for NodeClientOverlay {
 
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()> {
         let id = broadcast.id.clone();
-        let block_bloadcast = TonNode_BlockBroadcast(Box::new(broadcast));
         let info = self.overlay.broadcast(
             &self.overlay_id, 
-            &serialize(&block_bloadcast)?, 
+            &serialize(&broadcast.into_boxed())?, 
             None
         ).await?;
         log::trace!(
@@ -318,12 +316,10 @@ impl FullNodeOverlayClient for NodeClientOverlay {
     }
     
     async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()> {
-        let broadcast = TonNode_NewShardBlockBroadcast(Box::new(
-            NewShardBlockBroadcast { block: tbd.new_shard_block()? })
-        );
+        let broadcast = NewShardBlockBroadcast { block: tbd.new_shard_block()? };
         let info = self.overlay.broadcast(
             &self.overlay_id, 
-            &serialize(&broadcast)?, 
+            &serialize(&broadcast.into_boxed())?, 
             None
         ).await?;
         log::trace!(
@@ -607,7 +603,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<Option<Vec<u8>>> {
 
-        const CHUNK_SIZE: i32 = 1 << 20;
+        const CHUNK_SIZE: i32 = 1 << 21;
         // tonNode.getArchiveInfo masterchain_seqno:int = tonNode.ArchiveInfo;
         let (archive_info, peer) = self.send_adnl_query(
             GetArchiveInfo {

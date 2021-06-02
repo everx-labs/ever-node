@@ -262,29 +262,32 @@ impl CollatorTestBundle {
         // all shardes states
         for ss_id in index.neighbors.iter().chain(index.prev_blocks.iter()) {
             let filename = format!("{}/states/{:x}", path, ss_id.root_hash());
+            let data = read(&filename).map_err(|_| error!("cannot read file {}", filename))?;
             let ss = if ss_id.seq_no() == 0 {
-                ShardStateStuff::deserialize_zerostate(ss_id.clone(), &read(filename)?)?
+                ShardStateStuff::deserialize_zerostate(ss_id.clone(), &data)?
             } else {
-                ShardStateStuff::deserialize(ss_id.clone(), &read(filename)?)?
+                ShardStateStuff::deserialize(ss_id.clone(), &data)?
             };
             states.insert(ss_id.clone(), ss);
 
         }
         if index.contains_ethalon && !index.id.shard().is_masterchain() {
             let filename = format!("{}/states/{:x}", path, index.id.root_hash());
+            let data = read(&filename).map_err(|_| error!("cannot read file {}", filename))?;
             states.insert(
                 index.id.clone(),
-                ShardStateStuff::deserialize(index.id.clone(), &read(filename)?)?
+                ShardStateStuff::deserialize(index.id.clone(), &data)?
             );
         }
 
         // oldest mc state is saved full 
         let oldest_mc_state_id = index.oldest_mc_state();
         let filename = format!("{}/states/{:x}", path, oldest_mc_state_id.root_hash());
+        let data = read(&filename).map_err(|_| error!("cannot read file {}", filename))?;
         let oldest_mc_state = if oldest_mc_state_id.seq_no() == 0 {
-            ShardStateStuff::deserialize_zerostate(oldest_mc_state_id.clone(), &read(filename)?)?
+            ShardStateStuff::deserialize_zerostate(oldest_mc_state_id.clone(), &data)?
         } else {
-            ShardStateStuff::deserialize(oldest_mc_state_id.clone(), &read(filename)?)?
+            ShardStateStuff::deserialize(oldest_mc_state_id.clone(), &data)?
         };
         let mut prev_state_root = oldest_mc_state.root_cell().clone();
         states.insert(oldest_mc_state_id.clone(), oldest_mc_state);
@@ -314,17 +317,19 @@ impl CollatorTestBundle {
         let mut blocks = HashMap::new();
         if index.contains_ethalon {
             let filename = format!("{}/blocks/{:x}", path, index.id.root_hash());
+            let data = read(&filename).map_err(|_| error!("cannot read file {}", filename))?;
             blocks.insert(
                 index.id.clone(),
-                BlockStuff::deserialize(index.id.clone(), read(filename)?)?
+                BlockStuff::deserialize(index.id.clone(), data)?
             );
         }
         for id in index.prev_blocks.iter() {
             if id.seq_no() != 0 {
                 let filename = format!("{}/blocks/{:x}", path, id.root_hash());
+                let data = read(&filename).map_err(|_| error!("cannot read file {}", filename))?;
                 blocks.insert(
                     id.clone(),
-                    BlockStuff::deserialize(id.clone(), read(filename)?)?
+                    BlockStuff::deserialize(id.clone(), data)?
                 );
             }
         }
@@ -1049,7 +1054,12 @@ impl EngineOperations for CollatorTestBundle {
         }
     }
 
-    async fn wait_state(self: Arc<Self>, id: &BlockIdExt, _timeout_ms: Option<u64>) -> Result<ShardStateStuff> {
+    async fn wait_state(
+        self: Arc<Self>,
+        id: &BlockIdExt,
+        _timeout_ms: Option<u64>,
+        _allow_block_downloading: bool
+    ) -> Result<ShardStateStuff> {
         self.load_state(id).await
     }
 

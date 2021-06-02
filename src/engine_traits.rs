@@ -161,6 +161,16 @@ pub trait EngineOperations : Sync + Send {
         mc_seq_no: u32, 
         pre_apply: bool
     ) -> Result<()> {
+        self.apply_block_internal(handle, block, mc_seq_no, pre_apply, 0).await
+    }
+    async fn apply_block_internal(
+        self: Arc<Self>, 
+        handle: &Arc<BlockHandle>, 
+        block: &BlockStuff, 
+        mc_seq_no: u32, 
+        pre_apply: bool,
+        recursion_depth: u32
+    ) -> Result<()> {
         unimplemented!()
     }
     async fn download_and_apply_block(
@@ -168,6 +178,15 @@ pub trait EngineOperations : Sync + Send {
         id: &BlockIdExt, 
         mc_seq_no: u32, 
         pre_apply: bool
+    ) -> Result<()> {
+        self.download_and_apply_block_internal(id, mc_seq_no, pre_apply, 0).await
+    }
+    async fn download_and_apply_block_internal(
+        self: Arc<Self>, 
+        id: &BlockIdExt, 
+        mc_seq_no: u32, 
+        pre_apply: bool,
+        recursion_depth: u32
     ) -> Result<()> {
         unimplemented!()
     }
@@ -240,7 +259,12 @@ pub trait EngineOperations : Sync + Send {
     ) -> Result<Vec<u8>> {
         unimplemented!()
     }
-    async fn wait_state(self: Arc<Self>, id: &BlockIdExt, timeout_ms: Option<u64>) -> Result<ShardStateStuff> {
+    async fn wait_state(
+        self: Arc<Self>,
+        id: &BlockIdExt,
+        timeout_ms: Option<u64>,
+        allow_block_downloading: bool
+    ) -> Result<ShardStateStuff> {
         unimplemented!()
     }
     async fn store_state(
@@ -444,7 +468,7 @@ pub trait EngineOperations : Sync + Send {
 
     // Boot specific operations
 
-    async fn set_applied(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<()> {
+    async fn set_applied(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<bool> {
         unimplemented!()
     }
 

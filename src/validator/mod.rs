@@ -9,6 +9,7 @@ pub mod validator_session_listener;
 mod candidate_db;
 pub mod collator;
 pub mod collator_sync;
+#[cfg(feature = "telemetry")]
 pub mod telemetry;
 
 use ton_types::UInt256;

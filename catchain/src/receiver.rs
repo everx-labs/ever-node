@@ -7,6 +7,7 @@ use crate::ton_api::IntoBoxed;
 use rand::Rng;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::convert::TryInto;
 use std::time::Duration;
 use utils::*;
 
@@ -1196,9 +1197,10 @@ impl ReceiverImpl {
         self.db = Some(db.clone());
 
         if let Ok(root_block) = db.get_block(&ZERO_HASH) {
-            let root_block_id_hash: BlockHash = root_block.to_vec().into();
+            let hash: [u8; 32] = root_block.0.try_into().unwrap();
+            let root_block_id_hash: BlockHash = hash.into();
 
-            self.read_db_from(&root_block_id_hash);
+            self.read_db_from(root_block_id_hash);
         } else {
             self.read_db();
         }
@@ -1252,7 +1254,7 @@ impl ReceiverImpl {
         self.set_next_awake_time(self.next_sync_time);
     }
 
-    fn read_db_from(&mut self, id: &BlockHash) {
+    fn read_db_from(&mut self, id: BlockHash) {
         instrument!();
 
         trace!("...reading DB from block {:?}", id);
@@ -1265,8 +1267,7 @@ impl ReceiverImpl {
         self.pending_in_db = 1;
         self.db_root_block = id.clone();
 
-        let block_raw_data = self.db.as_ref().unwrap().get_block(id).unwrap();
-        let id = id.clone();
+        let block_raw_data = self.db.as_ref().unwrap().get_block(&id).unwrap();
 
         task_queue.post_closure(Box::new(move |receiver| {
             get_mut_impl(receiver).read_block_from_db(&id, block_raw_data, task_queue_clone);

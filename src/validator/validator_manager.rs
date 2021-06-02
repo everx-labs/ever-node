@@ -23,15 +23,14 @@ use crate::{
                 candidate_db::LastRotationBlockDb
     }
 };
-use catchain::{CatchainNode, PublicKey, PublicKeyHash};
-use catchain::{utils::serialize_tl_boxed_object, BlockPayloadPtr};
-use sha2::{Digest, Sha256};
-use tokio::{task::JoinHandle, time::timeout, sync::oneshot, runtime::Runtime };
+use catchain::{CatchainNode, PublicKey, PublicKeyHash, BlockPayloadPtr};
+use catchain::utils::serialize_tl_boxed_object;
+use tokio::{task::JoinHandle, time::timeout, sync::oneshot, runtime::Runtime};
 use ton_api::IntoBoxed;
-use ton_block::master::{FutureSplitMerge, ShardDescr};
 use ton_block::{
     BlockIdExt, CatchainConfig, signature::SigPubKey, ConfigParamEnum, ConsensusConfig, 
     McStateExtra, Serializable, ShardIdent, ValidatorDescr, ValidatorSet,
+    FutureSplitMerge, ShardDescr,
 };
 use ton_types::{error, fail, BuilderData, Result, UInt256};
 
@@ -43,10 +42,7 @@ pub fn get_validator_set_id_serialize(
     new_catchain_ids: bool,
     max_vertical_seqno: i32,
 ) -> catchain::RawBuffer {
-    let mut members: ton_api::ton::vector<
-        ton_api::ton::Bare,
-        ton_api::ton::engine::validator::validator::groupmember::GroupMember,
-    > = ton_api::ton::vector::default();
+    let mut members = ton_api::ton::vector::default();
     for n in val_set.list() {
         members.0.push(
             ton_api::ton::engine::validator::validator::groupmember::GroupMember {
@@ -107,18 +103,12 @@ pub fn get_validator_set_id(
         new_catchain_ids,
         max_vertical_seqno,
     );
-    let mut hasher = Sha256::new();
-    hasher.input(&serialized.0);
-    let hash: [u8; 32] = hasher.result().clone().into();
-    hash.into()
+    UInt256::calc_file_hash(&serialized.0)
 }
 
 pub fn get_validator_session_options_hash(opts: &validator_session::SessionOptions) -> UInt256 {
     let serialized = validator_session_options_serialize(opts);
-    let mut hasher = Sha256::new();
-    hasher.input(&serialized.0);
-    let hash: [u8; 32] = hasher.result().clone().into();
-    hash.into()
+    UInt256::calc_file_hash(&serialized.0)
 }
 
 pub fn get_session_options(opts: &ConsensusConfig) -> validator_session::SessionOptions {

@@ -2,7 +2,7 @@ use std::{
     io::Cursor,
     sync::{Arc, atomic::{AtomicU64, Ordering}}
 };
-use ton_block::{Deserializable, ShardIdent, Message, MsgAddressInt};
+use ton_block::{Deserializable, ShardIdent, Message, AccountIdPrefixFull};
 use ton_types::{Result, types::UInt256, deserialize_tree_of_cells, fail};
 
 
@@ -150,14 +150,14 @@ impl MessagesPool {
     pub fn get_messages(&self, shard: &ShardIdent, now: u32) -> Result<Vec<(Arc<Message>, UInt256)>> {
         let mut result = vec!();
         for guard in self.messages.iter() {
-            if let Some(MsgAddressInt::AddrStd(addr_std)) = guard.val().message().dst() {
-                if addr_std.workchain_id as i32 == shard.workchain_id() && 
-                   shard.contains_account(addr_std.address.clone())? {
-                    if guard.val().expired(now) {
-                        self.messages.remove(guard.key());
-                    }
-                    else if guard.val().check_active(now) {
-                        result.push((guard.val().clone_message(), guard.key().clone()));
+            if let Some(dst) = guard.val().message().dst_ref() {
+                if let Ok(prefix) = AccountIdPrefixFull::prefix(dst) {
+                    if shard.contains_full_prefix(&prefix) {
+                        if guard.val().expired(now) {
+                            self.messages.remove(guard.key());
+                        } else if guard.val().check_active(now) {
+                            result.push((guard.val().clone_message(), guard.key().clone()));
+                        }
                     }
                 }
             }

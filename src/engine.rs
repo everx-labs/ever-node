@@ -5,9 +5,10 @@ use crate::{
     config::{TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig},
     engine_traits::{ExternalDb, OverlayOperations, EngineOperations, PrivateOverlayOperations},
     full_node::{
-        apply_block::apply_block,
+        apply_block::{self, apply_block},
         shard_client::{
-            process_block_broadcast, start_masterchain_client, start_shards_client
+            process_block_broadcast, start_masterchain_client, start_shards_client,
+            SHARD_BROADCAST_WINDOW
         },
     },
     internal_db::{InternalDb, InternalDbConfig, InternalDbImpl, NodeState},
@@ -103,7 +104,8 @@ struct DownloadContext<'a, T> {
     db: &'a dyn InternalDb,
     downloader: Arc<dyn Downloader<Item = T>>,
     id: &'a BlockIdExt,
-    limit: Option<u32>, 
+    limit: Option<u32>,
+    log_error_limit: u32,
     name: &'a str,
     timeout: Option<(u64, u64, u64)>, // (current, multiplier*10, max)
     #[cfg(feature = "telemetry")]
@@ -113,7 +115,7 @@ struct DownloadContext<'a, T> {
 impl <T> DownloadContext<'_, T> {
 
     async fn download(&mut self) -> Result<T> {
-        let mut attempt = 0;
+        let mut attempt = 1;
         loop {
             match self.downloader.try_download(self).await {
                 Err(e) => self.log(format!("{}", e).as_str(), attempt),
@@ -137,7 +139,7 @@ impl <T> DownloadContext<'_, T> {
 
     fn log(&self, msg: &str, attempt: u32) {
        log::log!(
-           if attempt > 10 {
+           if attempt > self.log_error_limit {
                log::Level::Warn
            } else {
                log::Level::Debug
@@ -454,8 +456,14 @@ impl Engine {
         self: Arc<Self>, 
         id: &BlockIdExt, 
         mc_seq_no: u32, 
-        pre_apply: bool
+        pre_apply: bool,
+        recursion_depth: u32
     ) -> Result<()> {
+
+        if recursion_depth > apply_block::MAX_RECURSION_DEPTH {
+            fail!("Download and apply block {} - too deep recursion ({} >= {})",
+                id, recursion_depth, apply_block::MAX_RECURSION_DEPTH);
+        }
 
         loop {
             if let Some(handle) = self.load_block_handle(id)? {
@@ -468,8 +476,20 @@ impl Engine {
                     return Ok(());
                 }
                 if handle.has_data() {
-                    let block = self.load_block(&handle).await?;
-                    self.apply_block_worker(&handle, &block, mc_seq_no, pre_apply).await?;
+                    while !((pre_apply && handle.has_state()) || handle.is_applied()) {
+                        let s = self.clone();
+                        if self.block_applying_awaiters().do_or_wait(
+                            handle.id(),
+                            None,
+                            async {
+                                let block = s.load_block(&handle).await?;
+                                s.apply_block_worker(&handle, &block, mc_seq_no, pre_apply, recursion_depth).await?;
+                                Ok(())
+                            }
+                        ).await?.is_some() {
+                            break;
+                        }
+                    }
                     return Ok(());
                 }
             } 
@@ -492,6 +512,11 @@ impl Engine {
                 None,
                 self.download_block_worker(id, attempts, timeout)
             ).await? {
+
+                if self.load_block_handle(id)?.is_some() {
+                    continue;
+                }
+
                 let downloading_time = now.elapsed().as_millis();
 
                 let now = std::time::Instant::now();
@@ -518,6 +543,7 @@ impl Engine {
         block: &BlockStuff,
         mc_seq_no: u32,
         pre_apply: bool,
+        recursion_depth: u32
     ) -> Result<()> {
         if handle.is_applied() || pre_apply && handle.has_state() {
             log::trace!(
@@ -528,13 +554,19 @@ impl Engine {
             return Ok(());
         }
 
+        if recursion_depth > apply_block::MAX_RECURSION_DEPTH {
+            fail!("Apply block {} - too deep recursion ({} >= {})",
+                handle.id(), recursion_depth, apply_block::MAX_RECURSION_DEPTH);
+        }
+
         log::trace!("Start {}applying block... {}", if pre_apply { "pre-" } else { "" }, block.id());
 
         // TODO fix trash with Arc and clone
-        apply_block(handle, block, mc_seq_no, &(self.clone() as Arc<dyn EngineOperations>), pre_apply).await?;
+        apply_block(handle, block, mc_seq_no, &(self.clone() as Arc<dyn EngineOperations>), pre_apply, recursion_depth).await?;
 
+        let gen_utime = block.gen_utime()?;
         let ago = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i32 - block.gen_utime()? as i32;
+            .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i32 - gen_utime as i32;
         if block.id().shard().is_masterchain() {
             if !pre_apply {
                 self.store_last_applied_mc_block_id(block.id()).await?;
@@ -542,7 +574,10 @@ impl Engine {
                 STATSD.gauge("timediff", ago as f64);
                 self.shard_blocks().update_shard_blocks(&self.load_state(block.id()).await?)?;
 
-                self.set_applied(handle, mc_seq_no).await?;
+                if self.set_applied(handle, mc_seq_no).await? {
+                    #[cfg(feature = "telemetry")]
+                    self.full_node_telemetry().submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
+                }
 
                 let (prev_id, prev2_id_opt) = block.construct_prev_id()?;
                 if prev2_id_opt.is_some() {
@@ -560,7 +595,10 @@ impl Engine {
             );
         } else {
             if !pre_apply {
-                self.set_applied(handle, mc_seq_no).await?;
+                if self.set_applied(handle, mc_seq_no).await? {
+                    #[cfg(feature = "telemetry")]
+                    self.full_node_telemetry().submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
+                }
             }
             log::info!(
                 "{} block {} ref_mc_block: {}, {} seconds old",
@@ -676,20 +714,32 @@ impl Engine {
         if let ShardBlockProcessingResult::MightBeAdded(tbd) = 
             self.shard_blocks.process_shard_block_raw(&id, cc_seqno, data, false, true, self.deref()).await? {
 
+            let mc_seqno = tbd.top_block_mc_seqno()?;
+            let shards_client_mc_block_id = self.load_shards_client_mc_block_id().await?;
+            if shards_client_mc_block_id.seq_no() + SHARD_BROADCAST_WINDOW < mc_seqno {
+                log::debug!(
+                    "Skipped new shard block broadcast {} because it refers to master block {}, but shard client is on {}",
+                    id, mc_seqno, shards_client_mc_block_id.seq_no()
+                );
+                return Ok(id);
+            }
+
             // force download and apply afrer timeout
-            let id1 = id.clone();
-            let engine = self.clone();
-            tokio::spawn(async move {
-                futures_timer::Delay::new(Duration::from_millis(1000)).await;
-                if let Err(e) = engine.download_and_apply_block(&id1, 0, true).await {
-                    log::error!("Error in download_and_apply_block after top-block-broadcast {}: {}", id1, e);
-                }
-            });
+            // let id1 = id.clone();
+            // let engine = self.clone();
+            // tokio::spawn(async move {
+            //     futures_timer::Delay::new(Duration::from_millis(10_000)).await;
+            //     if let Err(e) = engine.download_and_apply_block(&id1, 0, true).await {
+            //         log::error!("Error in download_and_apply_block after top-block-broadcast {}: {}", id1, e);
+            //     }
+            // });
 
             // add to list (for collator) only if shard state is awaliable
             let id = id.clone();
             tokio::spawn(async move {
-                if let Err(e) = self.clone().wait_state(&id, Some(10_000)).await {
+                if let Err(e) = self.clone().wait_state(&id, Some(10_000), false).await.or(
+                    self.clone().wait_state(&id, Some(10_000), true).await
+                ) {
                     log::error!("Error in wait_state after top-block-broadcast {}: {}", id, e);
                 } else {
                     if let Err(e) = self.shard_blocks.process_shard_block(
@@ -707,6 +757,7 @@ impl Engine {
          downloader: Arc<dyn Downloader<Item = T>>,
          id: &'a BlockIdExt, 
          limit: Option<u32>,
+         log_error_limit: u32,
          name: &'a str,
          timeout: Option<(u64, u64, u64)>
     ) -> Result<DownloadContext<'a, T>> {
@@ -719,6 +770,7 @@ impl Engine {
             downloader,
             id,
             limit,
+            log_error_limit,
             name,
             timeout,
             #[cfg(feature = "telemetry")]
@@ -738,7 +790,8 @@ impl Engine {
         self.create_download_context(
             Arc::new(NextBlockDownloader),
             prev_id, 
-            limit, 
+            limit,
+            10,
             "download_next_block_worker", 
             Some((50, 11, 1000))
         ).await?.download().await
@@ -753,7 +806,8 @@ impl Engine {
         self.create_download_context(
             Arc::new(BlockDownloader),
             id, 
-            limit, 
+            limit,
+            0,
             "download_block_worker", 
             timeout
         ).await?.download().await
@@ -774,7 +828,8 @@ impl Engine {
                 }
             ),
             id, 
-            limit, 
+            limit,
+            0,
             "download_block_proof_worker", 
             None
         ).await?.download().await
@@ -788,7 +843,8 @@ impl Engine {
         self.create_download_context(
             Arc::new(ZeroStateDownloader),
             id, 
-            limit, 
+            limit,
+            0,
             "download_zerostate_worker", 
             Some((10, 12, 3000))
         ).await?.download().await
@@ -921,7 +977,7 @@ impl Engine {
                         log::trace!("persistent_states_keeper: saving {}", block_id);
                         let now = std::time::Instant::now();
                         
-                        let ss = engine.clone().wait_state(&block_id, None).await?;
+                        let ss = engine.clone().wait_state(&block_id, None, false).await?;
                         let handle = engine.load_block_handle(&block_id)?.ok_or_else(
                             || error!("Cannot load handle for PSS keeper shard block {}", block_id)
                         )?;
@@ -1241,6 +1297,7 @@ impl StatsdClient {
     pub fn new() -> StatsdClient { StatsdClient{} }
     pub fn gauge(&self, _metric_name: &str, _value: f64) {}
     pub fn incr(&self, _metric_name: &str) {}
+    #[allow(dead_code)]
     pub fn histogram(&self, _metric_name: &str, _value: f64) {}
     #[cfg(feature = "external_db")]
     pub fn timer(&self, _metric_name: &str, _value: f64) {}

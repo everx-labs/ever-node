@@ -52,7 +52,13 @@ impl Randbuf {
 }
 */
 
-pub fn secure_bytes (mut orig: &mut Vec<u8>, size: usize){
+pub fn secure_bytes(mut orig: &mut Vec<u8>, size: usize) {
     orig.resize(size, 0 as u8);
     rand_bytes(&mut orig).unwrap();
+}
+
+pub fn secure_256_bits() -> [u8; 32] {
+    let mut buf = [0; 32];
+    rand_bytes(&mut buf).unwrap();
+    buf
 }
