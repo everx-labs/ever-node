@@ -32,7 +32,7 @@ use ton_block::{
     OutMsg,
     Message, MsgEnvelope, EnqueuedMsg, ShardHashes, MerkleProof, StateInitLib,
     KeyMaxLt, LibDescr, Transaction,
-    InMsg, MsgAddressInt, MsgAddressIntOrNone, IntermediateAddress,
+    InMsg, MsgAddressInt, IntermediateAddress,
     InMsgDescr, OutMsgDescr, ShardAccount, ShardAccountBlocks, ShardAccounts,
     Account, AccountBlock, AccountStatus,
     ShardFeeCreated, TransactionDescr, OutMsgQueueKey, BlockLimits,
@@ -108,9 +108,9 @@ impl Default for ValidateResult {
             max_shard_utime: Arc::new(AtomicU32::new(std::u32::MIN)),
             max_shard_lt: Arc::new(AtomicU64::new(std::u64::MIN)),
         };
-        result.lt_hash.insert(0, (std::u64::MIN, UInt256::from([0xFF; 32])));
-        result.lt_hash.insert(1, (std::u64::MAX, UInt256::from([0xFF; 32])));
-        result.lt_hash.insert(2, (std::u64::MAX, UInt256::from([0xFF; 32]))); // claimed_proc_lt_hash
+        result.lt_hash.insert(0, (std::u64::MIN, UInt256::MAX));
+        result.lt_hash.insert(1, (std::u64::MAX, UInt256::MAX));
+        result.lt_hash.insert(2, (std::u64::MAX, UInt256::MAX)); // claimed_proc_lt_hash
         result
     }
 
@@ -419,7 +419,7 @@ impl ValidateQuery {
             reject_query!("after_merge value mismatch in block header")
         }
         base.extra = base.block.block().read_extra()?;
-        if base.created_by != base.extra.created_by() {
+        if &base.created_by != base.extra.created_by() {
             reject_query!("block candidate {} has creator {:x} but the block header contains different value {:x}",
                 base.block_id(), base.created_by, base.extra.created_by())
         }
@@ -1707,7 +1707,7 @@ impl ValidateQuery {
                 reject_query!("InMsg corresponding to inbound message with key {} \
                     refers to transaction that does not process this inbound message", key.to_hex_string())
             }
-            let (_workchain_id, addr) = msg.dst().ok_or_else(|| error!("No dest address"))
+            let (_workchain_id, addr) = msg.dst_ref().ok_or_else(|| error!("No dest address"))
                 .and_then(|addr| addr.extract_std_address(true))?;
             if addr != transaction.account_addr {
                 reject_query!("InMsg corresponding to inbound message with hash {} and destination address {} \
@@ -1719,8 +1719,9 @@ impl ValidateQuery {
             // msg_import_ext$000 msg:^(Message Any) transaction:^Transaction
             // importing an inbound external message
             InMsg::External(_) => {
-                let dst = msg.dst().unwrap_or_default();
-                let dest_prefix = AccountIdPrefixFull::prefix(&dst)?;
+                let dst = msg.dst_ref().ok_or_else(|| error!("destination of inbound external message with hash {:x} \
+                    is an invalid blockchain address", key))?;
+                let dest_prefix = AccountIdPrefixFull::prefix(dst)?;
                 if !dest_prefix.is_valid() {
                     reject_query!("destination of inbound external message with hash {} \
                         is an invalid blockchain address", key.to_hex_string())
@@ -1765,12 +1766,16 @@ impl ValidateQuery {
         let header = msg.int_header().ok_or_else(|| error!("InMsg with key {} is not a msg_import_ext$000, \
             but it does not refer to an inbound internal message", key.to_hex_string()))?;
         // extract source, current, next hop and destination address prefixes
-        let dst = msg.dst().unwrap_or_default();
-        let dest_prefix = AccountIdPrefixFull::checked_prefix(&dst).map_err(|_| error!("destination of inbound \
-            internal message with hash {} is an invalid blockchain address", key.to_hex_string()))?;
-        let src = msg.src().unwrap_or_default();
-        let src_prefix = AccountIdPrefixFull::checked_prefix(&src).map_err(|_| error!("source of inbound \
-            internal message with hash {} is an invalid blockchain address", key.to_hex_string()))?;
+        let dest_prefix = msg.dst_ref()
+            .ok_or_else(|| error!(""))
+            .and_then(|address| AccountIdPrefixFull::checked_prefix(address))
+            .map_err(|_| error!("destination of inbound \
+                internal message with hash {:x} is an invalid blockchain address", key))?;
+        let src_prefix = msg.src_ref()
+            .ok_or_else(|| error!(""))
+            .and_then(|address| AccountIdPrefixFull::checked_prefix(address))
+            .map_err(|_| error!("source of inbound \
+                internal message with hash {:x} is an invalid blockchain address", key))?;
         let cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, &env.cur_addr())?;
         let next_prefix = src_prefix.interpolate_addr_intermediate(&dest_prefix, &env.next_addr())?;
         if !(cur_prefix.is_valid() && next_prefix.is_valid()) {
@@ -1804,10 +1809,11 @@ impl ValidateQuery {
             reject_query!("inbound internal message with hash {} has destination address {}... in this shard, \
                 but it is not processed by a transaction", key.to_hex_string(), dest_prefix)
         }
+        // it already checked in AccountIdPrefixFull::from_address
         // unpack complete destination address if it is inside this shard
-        if trans_cell.is_some() && dst.extract_std_address(true).is_err() {
-            reject_query!("cannot unpack destination address of inbound internal message with hash {}", key.to_hex_string())
-        }
+        // if trans_cell.is_some() && msg.dst_ref().extract_std_address(true).is_err() {
+        //     reject_query!("cannot unpack destination address of inbound internal message with hash {}", key.to_hex_string())
+        // }
         // unpack original forwarding fee
         let orig_fwd_fee = &header.fwd_fee;
         // CHECK!(orig_fwd_fee.is_some());
@@ -2055,7 +2061,7 @@ impl ValidateQuery {
             }
             None => Default::default()
         };
-        let src = msg.src().unwrap_or_default();
+        let src = msg.src_ref().cloned().unwrap_or_default();
         let msg_env_hash = out_msg.envelope_message_hash().unwrap_or_default();
 
         let trans_cell = out_msg.transaction_cell();
@@ -2085,7 +2091,7 @@ impl ValidateQuery {
             // msg_export_ext$000 msg:^(Message Any) transaction:^Transaction = OutMsg;
             // exporting an outbound external message
             OutMsg::External(_) => {
-                let src_prefix = match msg.src() {
+                let src_prefix = match msg.src_ref() {
                     Some(src) => AccountIdPrefixFull::prefix(&src)?,
                     None => reject_query!("source of outbound external message with hash {} \
                         is an invalid blockchain address", key.to_hex_string())
@@ -2432,7 +2438,7 @@ impl ValidateQuery {
             claimed_proc_hash = upd.last_msg_hash;
         } else {
             claimed_proc_lt = 0;
-            claimed_proc_hash = UInt256::from([0; 32]);
+            claimed_proc_hash = UInt256::default();
         }
         log::debug!(target: "validate_query", "ProcessedInfo claims to have processed all inbound messages up to ({},{:x})",
             claimed_proc_lt, claimed_proc_hash);
@@ -2723,12 +2729,12 @@ impl ValidateQuery {
                     has an invalid InMsg record (not one of msg_import_ext, msg_import_fin, msg_import_imm or msg_import_ihr)",
                         in_msg_root.repr_hash().to_hex_string(), lt, account_addr.to_hex_string())
             }
-            let dst = match msg.dst() {
+            let dst = match msg.dst_ref() {
                 Some(MsgAddressInt::AddrStd(dst)) => dst,
                 _ => reject_query!("inbound message with hash {} transaction {} of {} must have std internal destination address",
                     in_msg_root.repr_hash().to_hex_string(), lt, account_addr.to_hex_string())
             };
-            if dst.workchain_id as i32 != base.shard().workchain_id() || &UInt256::from(dst.address.get_bytestring(0)) != account_addr {
+            if dst.workchain_id as i32 != base.shard().workchain_id() || account_addr != dst.address {
                 reject_query!("inbound message of transaction {} of account {} has a different destination address {}:{}",
                     account_addr.to_hex_string(), lt, dst.workchain_id, dst.address.to_hex_string())
             }
@@ -2768,13 +2774,13 @@ impl ValidateQuery {
                     has an invalid OutMsg record (not one of msg_export_ext, msg_export_new or msg_export_imm)",
                         i, out_msg_root.repr_hash().to_hex_string(), lt, account_addr.to_hex_string())
             }
-            let src = match msg.src() {
+            let src = match msg.src_ref() {
                 Some(MsgAddressInt::AddrStd(src)) => src,
                 _ => reject_query!("outbound message #{} with hash {} of transaction {} of account {} \
                     does not have a correct header",
                         i, out_msg_root.repr_hash().to_hex_string(), lt, account_addr.to_hex_string())
             };
-            if src.workchain_id as i32 != base.shard().workchain_id() || &UInt256::from(src.address.get_bytestring(0)) != account_addr {
+            if src.workchain_id as i32 != base.shard().workchain_id() || account_addr != src.address {
                 reject_query!("outbound message #{} of transaction {} of account {} has a different source address {}:{}",
                     i, lt, account_addr.to_hex_string(), src.workchain_id, src.address.to_hex_string())
             }
@@ -2789,7 +2795,7 @@ impl ValidateQuery {
             Ok(true)
         })?;
         // check general transaction data
-        let old_balance = account.get_balance().cloned().unwrap_or_default();
+        let old_balance = account.balance().cloned().unwrap_or_default();
         let descr = trans.read_description()?;
         let split = descr.is_split();
         if split || descr.is_merge() {
@@ -3018,8 +3024,8 @@ impl ValidateQuery {
         _fee: CurrencyCollection
     ) -> Result<()> {
         // CHECK!(account.get_id(), Some(account_addr.as_slice().into()));
-        let min_trans_lt: u64 = acc_block.transactions().get_min(false)?.ok_or_else(|| error!("no minimal transaction"))?.0;
-        let max_trans_lt: u64 = acc_block.transactions().get_max(false)?.ok_or_else(|| error!("no maximal transaction"))?.0;
+        let (min_trans_lt, _) = acc_block.transactions().get_min(false)?.ok_or_else(|| error!("no minimal transaction"))?;
+        let (max_trans_lt, _) = acc_block.transactions().get_max(false)?.ok_or_else(|| error!("no maximal transaction"))?;
         let mut new_account = account.clone();
         acc_block.transactions().iterate_slices_with_keys(|lt, trans| {
             Self::check_one_transaction(base, account_addr, account_root, &mut new_account, lt, trans.reference(0)?,
@@ -3122,8 +3128,10 @@ impl ValidateQuery {
         let msg = env.read_message()?;
         // CHECK!(tlb::unpack(cs, info));  // this has been already checked for all InMsgDescr
         let header = msg.int_header().ok_or_else(|| error!("InMsg of special message with hash {} has wrong header", msg_hash.to_hex_string()))?;
-        let src_prefix = AccountIdPrefixFull::prefix(&msg.src().unwrap_or_default())?;
-        let dst_prefix = AccountIdPrefixFull::prefix(&header.dst)?;
+        let src = msg.src_ref().ok_or_else(|| error!("source address of message {:x} is invalid", env.message_hash()))?;
+        let src_prefix = AccountIdPrefixFull::prefix(src)?;
+        let dst = msg.dst_ref().ok_or_else(|| error!("destination address of message {:x} is invalid", env.message_hash()))?;
+        let dst_prefix = AccountIdPrefixFull::prefix(dst)?;
         // CHECK!(src_prefix.is_valid() && dst_prefix.is_valid());  // we have checked this for all InMsgDescr
         let cur_prefix  = src_prefix.interpolate_addr_intermediate(&dst_prefix, &env.cur_addr())?;
         let next_prefix = src_prefix.interpolate_addr_intermediate(&dst_prefix, &env.next_addr())?;
@@ -3151,8 +3159,8 @@ impl ValidateQuery {
             reject_query!("special message with hash {} carries an incorrect amount {} instead of {} postulated by ValueFlow",
                 msg_hash.to_hex_string(), header.value, amount)
         }
-        let (src, dst) = match (&header.src, &header.dst) {
-            (MsgAddressIntOrNone::Some(MsgAddressInt::AddrStd(ref src)), MsgAddressInt::AddrStd(ref dst)) => (src.clone(), dst.clone()),
+        let (src, dst) = match (&header.src_ref(), &header.dst) {
+            (Some(MsgAddressInt::AddrStd(ref src)), MsgAddressInt::AddrStd(ref dst)) => (src.clone(), dst.clone()),
             _ => reject_query!("cannot unpack source and destination addresses of special message with hash {}", msg_hash.to_hex_string())
         };
         let src_addr = UInt256::construct_from(&mut src.address.clone())?;
@@ -3612,7 +3620,7 @@ impl ValidateQuery {
         let (mc_incr, shard_incr) = if key.is_zero() {
             (!base.created_by.is_zero(), self.block_create_total)
         } else {
-            (base.created_by == key, self.block_create_count.get(key).cloned().unwrap_or(0))
+            (&base.created_by == key, self.block_create_count.get(key).cloned().unwrap_or(0))
         };
         Self::check_counter_update(base, old.mc_blocks(), new.mc_blocks(), mc_incr as u64)
         .map_err(|err| error!("invalid update of created masterchain blocks counter in CreatorStats for \
@@ -3644,7 +3652,7 @@ impl ValidateQuery {
                 reject_query!("invalid update of BlockCreator entry for {}", key.to_hex_string())
             }
         }
-        let key = UInt256::from([0; 32]);
+        let key = UInt256::default();
         let old_val = old.counters.get(&key)?;
         let new_val = new.counters.get(&key)?;
         if new_val.is_none() && (!base.created_by.is_zero() || self.block_create_total != 0) {

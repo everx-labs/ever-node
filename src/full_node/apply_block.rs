@@ -6,18 +6,21 @@ use storage::types::BlockHandle;
 use ton_types::{error, fail, Result};
 use ton_block::BlockIdExt;
 
+pub const MAX_RECURSION_DEPTH: u32 = 16;
+
 pub async fn apply_block(
     handle: &Arc<BlockHandle>,
     block: &BlockStuff,
     mc_seq_no: u32,
     engine: &Arc<dyn EngineOperations>,
     pre_apply: bool,
+    recursion_depth: u32
 ) -> Result<()> {
     if handle.id() != block.id() {
         fail!("Block id mismatch in apply block: {} vs {}", handle.id(), block.id())
     }
     let prev_ids = block.construct_prev_id()?;    
-    check_prev_blocks(&prev_ids, engine, mc_seq_no, pre_apply).await?;
+    check_prev_blocks(&prev_ids, engine, mc_seq_no, pre_apply, recursion_depth).await?;
     let shard_state = if handle.has_state() {
         engine.load_state(handle.id()).await?
     } else {
@@ -36,15 +39,16 @@ async fn check_prev_blocks(
     engine: &Arc<dyn EngineOperations>,
     mc_seq_no: u32,
     pre_apply: bool,
+    recursion_depth: u32
 ) -> Result<()> {
     match prev_ids {
         (prev1_id, Some(prev2_id)) => {
             let mut apply_prev_futures = Vec::with_capacity(2);
             apply_prev_futures.push(
-                engine.clone().download_and_apply_block(&prev1_id, mc_seq_no, pre_apply)
+                engine.clone().download_and_apply_block_internal(&prev1_id, mc_seq_no, pre_apply, recursion_depth + 1)
             );
             apply_prev_futures.push(
-                engine.clone().download_and_apply_block(&prev2_id, mc_seq_no, pre_apply)
+                engine.clone().download_and_apply_block_internal(&prev2_id, mc_seq_no, pre_apply, recursion_depth + 1)
             );
             futures::future::join_all(apply_prev_futures)
                 .await
@@ -53,7 +57,7 @@ async fn check_prev_blocks(
                 .unwrap_or(Ok(()))?;
         },
         (prev_id, None) => {
-            engine.clone().download_and_apply_block(&prev_id, mc_seq_no, pre_apply).await?;
+            engine.clone().download_and_apply_block_internal(&prev_id, mc_seq_no, pre_apply, recursion_depth + 1).await?;
         }
     }
     Ok(())
@@ -71,12 +75,12 @@ pub async fn calc_shard_state(
 
     let prev_ss_root = match prev_ids {
         (prev1, Some(prev2)) => {
-            let ss1 = engine.clone().wait_state(prev1, None).await?.root_cell().clone();
-            let ss2 = engine.clone().wait_state(prev2, None).await?.root_cell().clone();
+            let ss1 = engine.clone().wait_state(prev1, None, true).await?.root_cell().clone();
+            let ss2 = engine.clone().wait_state(prev2, None, true).await?.root_cell().clone();
             ShardStateStuff::construct_split_root(ss1, ss2)?
         },
         (prev, None) => {
-            engine.clone().wait_state(prev, None).await?.root_cell().clone()
+            engine.clone().wait_state(prev, None, true).await?.root_cell().clone()
         }
     };
 
@@ -93,7 +97,10 @@ pub async fn calc_shard_state(
         ShardStateStuff::new(block_id.clone(), ss_root)
     }).await??;
 
+    let now = std::time::Instant::now();
     engine.store_state(handle, &ss).await?;
+    log::trace!("TIME: calc_shard_state: store_state {}ms   {}",
+            now.elapsed().as_millis(), handle.id());
     Ok(ss)
 
 }

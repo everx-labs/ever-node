@@ -1130,7 +1130,7 @@ impl TonNodeGlobalConfigJson {
             .as_ref()
             .ok_or_else(|| error!("Unknown workchain root_hash (of zero_state)!"))?;
                 
-        let root_hash = UInt256::from(base64::decode(&root_hash)?);
+        let root_hash = UInt256::from_str(&root_hash)?;
 
         let file_hash = self
             .validator
@@ -1139,7 +1139,7 @@ impl TonNodeGlobalConfigJson {
             .as_ref()
             .ok_or_else(|| error!("Unknown workchain file_hash (of zero_state)!"))?;
 
-        let file_hash = UInt256::from(base64::decode(&file_hash)?);
+        let file_hash = UInt256::from_str(&file_hash)?;
 
         Ok(BlockIdExt {
             shard_id: ShardIdent::with_tagged_prefix(workchain_id, shard as u64)?,
@@ -1166,11 +1166,11 @@ impl TonNodeGlobalConfigJson {
 
         let root_hash = init_block.root_hash.as_ref()
             .ok_or_else(|| error!("Unknown workchain root_hash (of zero_state)!"))?;
-        let root_hash = UInt256::from(base64::decode(&root_hash)?);
+        let root_hash = UInt256::from_str(&root_hash)?;
 
         let file_hash = init_block.file_hash.as_ref()
             .ok_or_else(|| error!("Unknown workchain file_hash (of zero_state)!"))?;
-        let file_hash = UInt256::from(base64::decode(&file_hash)?);
+        let file_hash = UInt256::from_str(&file_hash)?;
 
         Ok(Some(BlockIdExt {
             shard_id: ShardIdent::with_tagged_prefix(workchain_id, shard as u64)?,

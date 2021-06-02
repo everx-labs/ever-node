@@ -9,12 +9,12 @@ use crate::{
     types::awaiters_pool::AwaitersPool,
 };
 use adnl::{
-    common::{KeyId, KeyOption, serialize}, node::{AddressCacheIterator, AdnlNode}
+    common::{KeyId, KeyOption, serialize}, node::AdnlNode
 };
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
-use dht::DhtNode;
+use dht::{DhtIterator, DhtNode};
 use overlay::{
     BroadcastSendInfo, OverlayId, OverlayShortId, OverlayNode, QueriesConsumer, 
     PrivateOverlayShortId
@@ -28,12 +28,10 @@ use std::{
 };
 use ton_types::{Result, fail, error, UInt256};
 use ton_block::BlockIdExt;
+use ton_api::IntoBoxed;
 use ton_api::ton::{
     int256, bytes,
-    ton_node::{
-        broadcast::ConnectivityCheckBroadcast,
-        Broadcast::{TonNode_ConnectivityCheckBroadcast}
-    }
+    ton_node::broadcast::ConnectivityCheckBroadcast,
 };
 #[cfg(feature = "telemetry")]
 use crate::network::telemetry::FullNodeNetworkTelemetry;
@@ -361,7 +359,7 @@ impl NodeNetwork {
     async fn update_overlay_peers(
         &self, 
         overlay_id: &Arc<OverlayShortId>,
-        iter: &mut Option<AddressCacheIterator>
+        iter: &mut Option<DhtIterator>
     ) -> Result<Vec<Arc<KeyId>>> {
         log::info!("Overlay {} node search in progress...", overlay_id);
         let nodes = DhtNode::find_overlay_nodes(&self.dht, overlay_id, iter).await?;
@@ -379,7 +377,7 @@ impl NodeNetwork {
     async fn update_peers(
         &self, 
         client_overlay: &Arc<NodeClientOverlay>,
-        iter: &mut Option<AddressCacheIterator>
+        iter: &mut Option<DhtIterator>
     ) -> Result<()> {
         let mut peers = self.update_overlay_peers(client_overlay.overlay_id(), iter).await?;
         while let Some(peer) = peers.pop() {
@@ -709,15 +707,13 @@ impl NodeNetwork {
                 .unwrap_or_default()
                 .as_secs();
             padding.extend_from_slice(&now.to_le_bytes());
-            let broadcast = TonNode_ConnectivityCheckBroadcast(Box::new(
-                ConnectivityCheckBroadcast {
-                    pub_key: int256(key_id.clone()),
-                    padding: bytes(padding),
-                }
-            ));
+            let broadcast = ConnectivityCheckBroadcast {
+                pub_key: int256(key_id.clone()),
+                padding: bytes(padding),
+            };
             overlay.val().overlay().broadcast(
                 &self.masterchain_overlay_short_id, 
-                &serialize(&broadcast)?, 
+                &serialize(&broadcast.into_boxed())?, 
                 None
             ).await
         } else {

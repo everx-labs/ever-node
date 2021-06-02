@@ -1645,7 +1645,7 @@ impl CatchainProcessor {
 
         //obtain prev block and remove it block from the top blocks because new block is on top now
 
-        let hash_zero = UInt256::from([0; 32]);
+        let hash_zero = UInt256::default();
         let mut prev_block = None;
 
         if prev != hash_zero

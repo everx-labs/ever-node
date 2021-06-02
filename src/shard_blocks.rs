@@ -207,7 +207,7 @@ impl ShardBlocksPool {
         if let Some(storage_sender) = self.storage_sender.as_ref() {
             match storage_sender.send(action) {
                 Ok(_) => log::trace!("ShardBlocksPool::send_to_storage: sent"),
-                Err(_) => log::error!("ShardBlocksPool::send_to_storage: can't send"),
+                Err(err) => log::error!("ShardBlocksPool::send_to_storage: can't send {}", err),
             }
         }
     }

@@ -65,7 +65,7 @@ impl ShardStateStuff {
             fail!("Wrong zero state's {} file hash", id);
         }
         let root = deserialize_tree_of_cells(&mut Cursor::new(bytes))?;
-        if root.repr_hash() != id.root_hash() {
+        if &root.repr_hash() != id.root_hash() {
             fail!("Wrong zero state's {} root hash", id);
         }
         Self::new(id, root)

@@ -42,7 +42,7 @@ impl StorageCell {
             Reference::NeedToLoad(hash) => hash.clone()
         };
 
-        let cell_id = CellId::from(hash.clone());
+        let cell_id = CellId::new(hash);
         let storage_cell = self.boc_db.load_cell(&cell_id)?;
         self.references.write().expect("Poisoned RwLock")[index] = Reference::Loaded(Arc::clone(&storage_cell));
 
@@ -90,6 +90,10 @@ impl CellImpl for StorageCell {
     fn store_hashes(&self) -> bool {
         self.cell_data.store_hashes()
     }
+
+    fn tree_bits_count(&self) -> u64 { 0 } // TODO
+
+    fn tree_cell_count(&self) -> u64 { 0 } // TODO
 }
 
 fn references_hashes_equal(left: &Vec<Reference>, right: &Vec<Reference>) -> bool {

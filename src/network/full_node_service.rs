@@ -438,6 +438,7 @@ impl FullNodeOverlayService {
                     };
                     log::trace!("consume_query: before consume query {}", query_str);
 
+                    #[cfg(feature = "telemetry")]
                     let now = std::time::Instant::now();
                     let answer = match consumer(self, query).await {
                         Ok(answer) => {
@@ -484,11 +485,13 @@ impl FullNodeOverlayService {
                     };
                     log::trace!("consume_query_raw: before consume query {}", query_str);
 
+                    #[cfg(feature = "telemetry")]
                     let now = std::time::Instant::now();
                     let answer = match consumer(self, query).await {
                         Ok(answer) => {
                             #[cfg(feature = "telemetry")]
                             log::trace!("consume_query_raw: consumed {}", query_str);
+                            #[cfg(feature = "telemetry")]
                             self.engine.full_node_service_telemetry()
                                 .consumed_query(query_str, true, now.elapsed(), answer.len());
                             answer
@@ -496,6 +499,7 @@ impl FullNodeOverlayService {
                         Err(e) => {
                             #[cfg(feature = "telemetry")]
                             log::trace!("consume_query_raw: consumed {}, error {:?}", query_str, e);
+                            #[cfg(feature = "telemetry")]
                             self.engine.full_node_service_telemetry()
                                 .consumed_query(query_str, false, now.elapsed(), 0);
                             return Err(e)

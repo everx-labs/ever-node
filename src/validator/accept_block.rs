@@ -203,7 +203,7 @@ async fn choose_mc_state(
             block.id(),
             mc_block_id
         );
-        let new_mc_state = engine.clone().wait_state(&mc_block_id, Some(60_000)).await?;
+        let new_mc_state = engine.clone().wait_state(&mc_block_id, Some(60_000), true).await?;
         new_mc_state
             .shard_state_extra()?
             .prev_blocks

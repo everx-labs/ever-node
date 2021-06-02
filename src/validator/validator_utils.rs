@@ -7,7 +7,7 @@ use ton_block::{
     },
     ValidatorBaseInfo, ValidatorSet, ValidatorDescr, ShardIdent
 };
-use ton_types::types::UInt256;
+use ton_types::{Result, UInt256};
 use validator_session::SessionNode;
 
 pub fn sigpubkey_to_publickey(k: &SigPubKey) -> PublicKey {
@@ -18,20 +18,20 @@ pub fn sigpubkey_to_publickey(k: &SigPubKey) -> PublicKey {
     ));
 }
 
-pub fn make_cryptosig(s: BlockPayloadPtr) -> ton_types::Result<CryptoSignature> {
+pub fn make_cryptosig(s: BlockPayloadPtr) -> Result<CryptoSignature> {
     return CryptoSignature::from_bytes(s.data().0.as_slice());
 }
 
 pub fn make_cryptosig_pair(
     pair: (PublicKeyHash, BlockPayloadPtr),
-) -> ton_types::Result<CryptoSignaturePair> {
+) -> Result<CryptoSignaturePair> {
     let csig = make_cryptosig(pair.1)?;
     return Ok(CryptoSignaturePair::with_params(pair.0.data().into(), csig));
 }
 
 pub fn pairvec_to_cryptopair_vec(
     vec: Vec<(PublicKeyHash, BlockPayloadPtr)>,
-) -> ton_types::Result<Vec<CryptoSignaturePair>> {
+) -> Result<Vec<CryptoSignaturePair>> {
     return vec.into_iter().
         map(|p| make_cryptosig_pair(p)).
         collect();
@@ -40,7 +40,7 @@ pub fn pairvec_to_cryptopair_vec(
 #[allow(dead_code)]
 pub fn pairvec_to_puresigs(
     pvec: Vec<(PublicKeyHash, BlockPayloadPtr)>,
-) -> ton_types::Result<BlockSignaturesPure> {
+) -> Result<BlockSignaturesPure> {
     let mut pure_sigs = BlockSignaturesPure::new();
     for p in pvec {
         let pair = make_cryptosig_pair(p)?;
@@ -53,7 +53,7 @@ pub fn pairvec_to_puresigs(
 pub fn pairvec_val_to_sigs(
     pvec: Vec<(PublicKeyHash, BlockPayloadPtr)>,
     vset: &ValidatorSet,
-) -> ton_types::Result<BlockSignatures> {
+) -> Result<BlockSignatures> {
     let pure_sigs = pairvec_to_puresigs(pvec)?;
     let vset_catchain_seqno = vset.catchain_seqno();
     let vset_hash = ValidatorSet::calc_subset_hash_short(vset.list(), vset_catchain_seqno)?;
@@ -73,7 +73,7 @@ pub fn hex_to_publickey(key: &str) -> PublicKey {
     ));
 }
 
-pub fn validatordescr_to_catchain_node(descr: &ValidatorDescr) -> ton_types::Result<CatchainNode> {
+pub fn validatordescr_to_catchain_node(descr: &ValidatorDescr) -> Result<CatchainNode> {
     Ok(catchain::CatchainNode {
         adnl_id: get_adnl_id(descr),
         public_key: sigpubkey_to_publickey(&descr.public_key)
@@ -140,10 +140,9 @@ pub fn compute_validator_list_id(list: &Vec<ValidatorDescr>) -> Option<Validator
         for x in list {
             hasher.input(x.compute_node_id_short().as_slice());
         }
-        let hash: [u8; 32] = hasher.result().clone().into();
+        let hash: [u8; 32] = hasher.result().into();
         Some(hash.into())
-    }
-    else {
+    } else {
         None
     }
 }

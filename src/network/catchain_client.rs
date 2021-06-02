@@ -10,9 +10,9 @@ use rldp::RldpNode;
 use std::{
     collections::HashMap, io::Cursor, sync::{Arc, atomic::{self, AtomicBool}}, time::Instant
 };
-use ton_api::{ Deserializer,
-    ton::{ catchain::Update::Catchain_BlockUpdate, ton_node::Broadcast,
-    validator_session::BlockUpdate::ValidatorSession_BlockUpdate, TLObject}
+use ton_api::{
+    Deserializer, IntoBoxed,
+    ton::{ ton_node::Broadcast, TLObject }
 };
 use ton_types::{error, fail, Result};
 
@@ -285,9 +285,9 @@ impl CatchainClient {
             match message {
                 Ok((catchain_block_update, validator_session_block_update, source_id))  => {
                     log::trace!(target: Self::TARGET, "private overlay broadcast ValidatorSession_BlockUpdate (successed)");
-                    let vs_block_update = ValidatorSession_BlockUpdate(Box::new(validator_session_block_update));
-                    let block_update = Catchain_BlockUpdate(Box::new(catchain_block_update));
-                   if let Some(listener) = catchain_listener.upgrade() {
+                    let vs_block_update = validator_session_block_update.into_boxed();
+                    let block_update = catchain_block_update.into_boxed();
+                    if let Some(listener) = catchain_listener.upgrade() {
                                 let mut data: catchain::RawBuffer = catchain::RawBuffer::default();
                                 let mut serializer = ton_api::Serializer::new(&mut data.0);
                                 serializer.write_boxed(&block_update)?;

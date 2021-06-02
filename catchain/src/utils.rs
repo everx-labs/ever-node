@@ -3,7 +3,6 @@ extern crate hex;
 /// Imports
 pub use super::*;
 use crate::ton_api::IntoBoxed;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -81,9 +80,7 @@ pub fn parse_hex_to_array(hex_asm: &str, dst: &mut [u8]) {
 
 pub fn parse_hex_as_int256(hex_asm: &str) -> UInt256 {
     let hex_bytes = parse_hex(&hex_asm);
-    let array = [0; 32];
-    let bytes = &hex_bytes[..array.len()];
-    UInt256::from(bytes)
+    UInt256::from_slice(hex_bytes.as_slice())
 }
 
 pub fn parse_hex_as_bytes(hex_asm: &str) -> ::ton_api::ton::bytes {
@@ -138,17 +135,11 @@ pub fn parse_hex_as_expanded_private_key(hex_asm: &str) -> PrivateKey {
 }
 
 pub fn get_hash(data: &::ton_api::ton::bytes) -> BlockHash {
-    let mut hasher = Sha256::new();
-    hasher.input(&data.0);
-    let result: &[u8] = &hasher.result();
-    UInt256::from(result)
+    UInt256::calc_file_hash(&data.0)
 }
 
 pub fn get_hash_from_block_payload(data: &BlockPayloadPtr) -> BlockHash {
-    let mut hasher = Sha256::new();
-    hasher.input(&data.data().0);
-    let result: &[u8] = &hasher.result();
-    UInt256::from(result)
+    UInt256::calc_file_hash(&data.data().0)
 }
 
 pub fn int256_to_public_key_hash(public_key: &::ton_api::ton::int256) -> PublicKeyHash {
@@ -169,10 +160,7 @@ pub fn get_overlay_id(first_block: &ton_api::ton::catchain::FirstBlock) -> Resul
         name: serialized_first_block.into(),
     };
     let serialized_overlay_id = serialize_tl_boxed_object!(&overlay_id.into_boxed());
-    let mut hasher = Sha256::new();
-    hasher.input(&serialized_overlay_id.0);
-    let hash: [u8; 32] = hasher.result().clone().into();
-    Ok(hash.into())
+    Ok(UInt256::calc_file_hash(&serialized_overlay_id.0))
 }
 
 pub fn get_block_id(
