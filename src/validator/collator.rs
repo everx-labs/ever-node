@@ -239,7 +239,6 @@ struct CollatorData {
     block_create_count: HashMap<UInt256, u64>,
     new_messages: BinaryHeap<NewMessage>, // using for priority queue
     to_delay: Vec<UInt256>, // list of not compleeted external messages
-    complete: Vec<UInt256>, // list of compleeted external messages
     usage_tree: UsageTree,
 
     // determined fields
@@ -303,7 +302,6 @@ impl CollatorData {
             block_create_count: HashMap::new(),
             new_messages: Default::default(),
             to_delay: Default::default(),
-            complete: Default::default(),
             usage_tree,
             gen_utime,
             config,
@@ -606,6 +604,10 @@ impl CollatorData {
 
     fn before_split(&self) -> bool { self.before_split }
     fn set_before_split(&mut self, value: bool) { self.before_split = value }
+
+    fn withdraw_ext_msg_to_delay(&mut self) -> Vec<UInt256> {
+        std::mem::take(&mut self.to_delay)
+    }
 }
 
 struct ExecutionManager {
@@ -827,6 +829,7 @@ impl ExecutionManager {
                 let account_id = msg.int_dst_account_id().unwrap_or_default();
                 log::warn!("{}: account {:x} rejected inbound external message {:x} by reason: {}", 
                     self.collated_block_descr, account_id, msg_id, err);
+                collator_data.to_delay.push(msg_id);
                 return Ok(())
             }
         }
@@ -857,7 +860,6 @@ impl ExecutionManager {
             }
             AsyncMessage::Ext(msg) => {
                 let in_msg = InMsg::external(&msg, &tr)?;
-                collator_data.complete.push(in_msg.message_cell()?.repr_hash());
                 Some(in_msg)
             }
             AsyncMessage::TickTock(_) => None
@@ -2043,11 +2045,15 @@ impl Collator {
                 let msg = AsyncMessage::Ext(msg.deref().clone());
                 exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
             } else {
-                collator_data.to_delay.push(id);
+                // usually node collates more than one shard, the message can belong another one,
+                // so we can't postpone it
+                // (difference with t-node)
+                // collator_data.to_delay.push(id);
             }
             self.check_stop_flag()?;
         }
         exec_manager.wait_transactions(collator_data).await?;
+        self.engine.complete_external_messages(collator_data.withdraw_ext_msg_to_delay(), vec![])?;
         Ok(())
     }
 

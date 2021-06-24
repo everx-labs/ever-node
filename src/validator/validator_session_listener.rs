@@ -38,6 +38,10 @@ pub enum ValidationAction {
         file_hash: BlockHash,
         collated_data_hash: BlockHash,
         callback: ValidatorBlockCandidateCallback
+    },
+    OnSlashingStatistics {
+        round: u32,
+        stat: SlashingValidatorStat,
     }
 }
 
@@ -60,7 +64,9 @@ impl fmt::Display for ValidationAction {
 
             ValidationAction::OnBlockSkipped {round} => write!(f, "OnBlockSkipped round: {}", round),
 
-            ValidationAction::OnGetApprovedCandidate {..} => write!(f, "OnGetApprovedCandidate")
+            ValidationAction::OnGetApprovedCandidate {..} => write!(f, "OnGetApprovedCandidate"),
+
+            ValidationAction::OnSlashingStatistics {round, ..} => write!(f, "OnSlashingStatistics round: {}", round),
         }
     }
 }
@@ -72,7 +78,8 @@ impl ValidationAction {
             ValidationAction::OnCandidate {round, ..} => Some(round),
             ValidationAction::OnBlockCommitted(OnBlockCommitted {round, ..}) => Some(round),
             ValidationAction::OnBlockSkipped {round} => Some(round),
-            ValidationAction::OnGetApprovedCandidate {..} => None
+            ValidationAction::OnGetApprovedCandidate {..} => None,
+            ValidationAction::OnSlashingStatistics {round, ..} => Some(round),
         }
     }
 }
@@ -170,6 +177,16 @@ impl validator_session::SessionListener for ValidatorSessionListener {
                 source, root_hash, file_hash, collated_data_hash, callback
             });
     }
+
+    /// Merge slashing statistics
+    fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat) {
+        log::info!(target: "validator", "SessionListener::on_slashing_statistics, {}", round);
+        self.do_send_general (
+            None,
+            ValidationAction::OnSlashingStatistics {
+                round, stat
+            });
+    }
 }
 
 impl validator_session::CatchainReplayListener for ValidatorSessionListener {
@@ -201,7 +218,10 @@ async fn process_validation_action (action: ValidationAction, g: Arc<ValidatorGr
         ValidationAction::OnBlockSkipped { round } => g.on_block_skipped(round).await,
 
         ValidationAction::OnGetApprovedCandidate { source, root_hash, file_hash, collated_data_hash, callback} =>
-            g.on_get_approved_candidate(source, root_hash, file_hash, collated_data_hash, callback).await
+            g.on_get_approved_candidate(source, root_hash, file_hash, collated_data_hash, callback).await,
+
+        ValidationAction::OnSlashingStatistics { round, stat } =>
+            g.on_slashing_statistics(round, stat)
     }
 }
 

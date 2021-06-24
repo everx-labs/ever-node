@@ -28,6 +28,7 @@ use super::validate_query::*;
 use super::candidate_db::CandidateDb;
 use catchain::CatchainOverlay;
 use failure::Error;
+use crate::validator::slashing::SlashingManagerPtr;
 
 struct CatchainOverlayManagerImpl {
     network: Weak<dyn PrivateOverlayOperations>,
@@ -142,7 +143,7 @@ impl ValidatorGroupImpl {
         min_masterchain_block_id: BlockIdExt,
         min_ts: SystemTime,
         g: Arc<ValidatorGroup>,
-        rt: Arc<Runtime>
+        rt: Arc<Runtime>,
     ) -> Result<()> {
         if self.status != ValidatorGroupStatus::Active {
             let msg = format!("Inactive session cannot be started! {}", self.info());
@@ -276,7 +277,9 @@ pub struct ValidatorGroup {
 
     group_impl: Arc<tokio::sync::Mutex<ValidatorGroupImpl>>,
     callback: Arc<dyn validator_session::SessionListener + Send + Sync>,
-    receiver: Arc<Receiver<ValidationAction>>
+    receiver: Arc<Receiver<ValidationAction>>,
+
+    slashing_manager: SlashingManagerPtr,
 }
 
 impl ValidatorGroup {
@@ -289,6 +292,7 @@ impl ValidatorGroup {
         config: SessionOptions,
         engine: Arc<dyn EngineOperations>,
         allow_unsafe_self_blocks_resync: bool,
+        slashing_manager: SlashingManagerPtr,
     ) -> Self {
         let group_impl = ValidatorGroupImpl::new(shard.clone(), session_id.clone(), 
             engine.db_root_dir().expect("Can't get db_root_dir from engine"));
@@ -306,6 +310,7 @@ impl ValidatorGroup {
             group_impl: Arc::new(tokio::sync::Mutex::new(group_impl)),
             callback: Arc::new(listener),
             receiver: Arc::new(receiver),
+            slashing_manager: slashing_manager,
         }
     }
 
@@ -636,6 +641,12 @@ impl ValidatorGroup {
         };
         log::info!(target: "validator", "SessionListener::on_get_approved_candidate {}, {}", result_txt, self.info().await);
         callback(result);
+    }
+
+    pub fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat) {
+        log::debug!(target: "validator", "SessionListener::on_slashing_statistics round {}, stat {:?}", round, stat);
+
+        self.slashing_manager.update_statistics(&stat);
     }
 }
 

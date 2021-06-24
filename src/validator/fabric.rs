@@ -13,8 +13,6 @@ use ton_types::{Result, UInt256};
 use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
 
 #[cfg(feature = "metrics")]
-use statsd::client;
-#[cfg(feature = "metrics")]
 use crate::engine::STATSD;
 
 pub async fn run_validate_query(

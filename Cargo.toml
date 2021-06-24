@@ -15,7 +15,7 @@
 #
 [package]
 name = "ton_node"
-version = "0.16.7"
+version = "0.5.1"
 edition = "2018"
 
 [workspace]
@@ -43,6 +43,7 @@ lazy_static = "1.4.0"
 log = "0.4"
 log4rs = "1"
 log4rs-rolling-file = "0.2.0"
+num-bigint = "0.2.2"
 openssl = ""
 pretty_assertions = "0.6.1"
 rand = "0.7.3"
@@ -54,6 +55,7 @@ serde = "1.0.105"
 serde_derive = "1.0.105"
 serde_json = "1.0.41"
 sha2 = "^0.8"
+spin = "0.7.1"
 statsd = { version = "0.14.0", optional = true }
 string-builder = "^0.2.0"
 tokio = { version = "1.5.0", features = ["rt-multi-thread"] }
@@ -65,6 +67,7 @@ lockfree = { git = "https://github.com/tonlabs/lockfree.git" }
 overlay = { git = "https://github.com/tonlabs/ton-labs-overlay", features = ["telemetry"] }
 rldp = { git = "https://github.com/tonlabs/ton-labs-rldp", features = ["telemetry"] }
 storage = { path = "storage", features = ["telemetry"] }
+ton_abi = { git = "https://github.com/tonlabs/ton-labs-abi.git" }
 ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }
 ton_block = { git = "https://github.com/tonlabs/ton-labs-block" }
 ton_block_json = { git = "https://github.com/tonlabs/ton-labs-block-json.git" }
@@ -93,9 +96,10 @@ optional = true
 [dev-dependencies]
 
 [features]
-default = ["telemetry"] 
+default = ["telemetry", "slashing"] 
 external_db = ["rdkafka", "rdkafka-sys"]
 metrics = ["statsd"]
+slashing = []
 read_old_db = []
 ci_run = []
 telemetry = []

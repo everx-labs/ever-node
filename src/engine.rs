@@ -478,7 +478,7 @@ impl Engine {
                 if handle.has_data() {
                     while !((pre_apply && handle.has_state()) || handle.is_applied()) {
                         let s = self.clone();
-                        if self.block_applying_awaiters().do_or_wait(
+                        self.block_applying_awaiters().do_or_wait(
                             handle.id(),
                             None,
                             async {
@@ -486,9 +486,7 @@ impl Engine {
                                 s.apply_block_worker(&handle, &block, mc_seq_no, pre_apply, recursion_depth).await?;
                                 Ok(())
                             }
-                        ).await?.is_some() {
-                            break;
-                        }
+                        ).await?;
                     }
                     return Ok(());
                 }
