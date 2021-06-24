@@ -11,6 +11,7 @@ pub mod collator;
 pub mod collator_sync;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
+mod slashing;
 
 use ton_types::UInt256;
 use ton_block::BlockIdExt;

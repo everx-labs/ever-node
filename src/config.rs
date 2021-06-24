@@ -96,6 +96,7 @@ pub struct KafkaProducerConfig {
     pub attempt_timeout_ms: u32,
     pub message_max_size: usize,
     pub big_messages_storage: String,
+    pub external_message_ref_address_pattern: Option<String>
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]

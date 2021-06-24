@@ -34,6 +34,7 @@ mod session;
 mod session_description;
 mod session_processor;
 mod session_state;
+pub mod slashing;
 mod task_queue;
 pub mod utils;
 mod vector;
@@ -235,8 +236,16 @@ pub type SessionListenerPtr = Weak<dyn SessionListener + Send + Sync>;
 /// Validator's weight
 pub type ValidatorWeight = catchain::ValidatorWeight;
 
+/// Slashing validator statistics
+pub type SlashingValidatorStat = slashing::ValidatorStat;
+
+/// Slashing aggregated validator statistics
+pub type SlashingAggregatedValidatorStat = slashing::AggregatedValidatorStat;
+
+/// Slashed node
+pub type SlashedNode = slashing::SlashedNode;
+
 /// Validator session options
-//TODO: get_hash
 #[derive(Clone, Copy, Debug)]
 pub struct SessionOptions {
     /// Catchain processing timeout
@@ -1188,6 +1197,9 @@ pub trait SessionListener {
         collated_data_hash: BlockHash,
         callback: ValidatorBlockCandidateCallback,
     );
+
+    /// Slashing statistics event
+    fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat);
 }
 
 /// Validator session processor

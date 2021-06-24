@@ -22,7 +22,7 @@ use overlay::{
 use rldp::RldpNode;
 use std::{
     hash::Hash, 
-    sync::{Arc, atomic::{AtomicU64, Ordering}}, 
+    sync::{Arc, atomic::{AtomicI32, AtomicU64, Ordering}}, 
     time::{Duration, SystemTime},
     convert::TryInto,
 };
@@ -57,13 +57,13 @@ pub struct NodeNetwork {
 
 struct ValidatorContext {
     private_overlays: Arc<Cache<Arc<OverlayShortId>, Arc<CatchainClient>>>,
-    validator_adnl_keys: Arc<Cache<Arc<KeyId>, usize>>,   //KeyId, tag
+    validator_adnl_keys: Arc<Cache<Arc<KeyId>, (usize, Arc<AtomicI32>)>>,   // KeyId, tag
+    all_validator_peers: Arc<Cache<Arc<KeyId>, Arc<AtomicI32>>>,
     sets_contexts: Arc<Cache<UInt256, ValidatorSetContext>>,
-    current_set: Arc<Cache<u8, UInt256>>, // zeto or one element [0]
+    current_set: Arc<Cache<u8, UInt256>>, // zero or one element [0]
 }
 
 #[derive(Default)]
-
 struct ConnectivityStat {
     last_short_got: AtomicU64,
     last_short_latency: AtomicU64,
@@ -135,6 +135,7 @@ impl NodeNetwork {
         let validator_context = ValidatorContext {
             private_overlays: Arc::new(Cache::new()),
             validator_adnl_keys: Arc::new(Cache::new()),
+            all_validator_peers: Arc::new(Cache::new()),
             sets_contexts: Arc::new(Cache::new()),
             current_set: Arc::new(Cache::new()),
         };
@@ -212,7 +213,7 @@ impl NodeNetwork {
     fn periodic_store_ip_addr(
         dht: Arc<DhtNode>,
         node_key: Arc<KeyOption>,
-        validator_keys: Option<Arc<Cache<Arc<KeyId>, usize>>>)
+        validator_keys: Option<Arc<Cache<Arc<KeyId>, (usize, Arc<AtomicI32>)>>>)
     {
         tokio::spawn(async move {
             let node_key = node_key.clone();
@@ -817,15 +818,21 @@ impl PrivateOverlayOperations for NodeNetwork {
 
         let mut store = false;
 
-        let adnl_key = if self.validator_context.validator_adnl_keys.get(local_validator_adnl_key.id()).is_none() {
-            self.validator_context.validator_adnl_keys.insert(local_validator_adnl_key.id().clone(), election_id);
-            let id = self.adnl.add_key(local_validator_adnl_key, election_id)?;
-            store = true;
-            self.adnl.key_by_id(&id)?
-        } else {
-            self.adnl.key_by_id(&local_validator_adnl_key.id().clone())?
+        let adnl_key = match self.validator_context.validator_adnl_keys.get(local_validator_adnl_key.id()) {
+            None => { 
+                self.validator_context.validator_adnl_keys.insert(
+                    local_validator_adnl_key.id().clone(), 
+                    (election_id, Arc::new(AtomicI32::new(0)))
+                );
+                let id = self.adnl.add_key(local_validator_adnl_key, election_id)?;
+                store = true;
+                self.adnl.key_by_id(&id)?
+            },
+            Some(val) => {
+                val.val().1.fetch_add(1, Ordering::Relaxed);
+                self.adnl.key_by_id(&local_validator_adnl_key.id().clone())?
+            }
         };
-
         if store {
             NodeNetwork::periodic_store_ip_addr(
                 self.dht.clone(),
@@ -878,6 +885,22 @@ impl PrivateOverlayOperations for NodeNetwork {
                 lost_validators
             );
         }
+
+        for peer in context.validator_peers.iter() {
+            match self.validator_context.all_validator_peers.get(peer) {
+                None => { 
+                    self.try_add_new_elem(
+                        peer,
+                        Arc::new(AtomicI32::new(0)),
+                        &self.validator_context.all_validator_peers
+                    );
+                },
+                Some(peer_context) => {
+                    peer_context.val().fetch_add(1, Ordering::Relaxed);
+                }
+            }   
+        }
+
         Ok(Some(context.validator_key.clone()))
     }
 
@@ -892,16 +915,41 @@ impl PrivateOverlayOperations for NodeNetwork {
         let mut status = false;
         if let Some(context) = context {
             let adnl_key = &context.val().validator_adnl_key;
+            let mut removed_peers = Vec::new();
+            let mut removed_peers_from_context = Vec::new();
+
+            for peer in context.val().validator_peers.iter() {
+                match self.validator_context.all_validator_peers.get(peer) {
+                    None => { 
+                        removed_peers.push(peer.clone());
+                    },
+                    Some(peer_context) => {
+                        let val = peer_context.val().fetch_sub(1, Ordering::Relaxed);
+                        if val <= 0 {
+                            removed_peers_from_context.push(peer.clone());
+                            removed_peers.push(peer.clone());
+                        }
+                    }
+                }
+            }
+            for peer in removed_peers_from_context.iter() {
+                self.validator_context.all_validator_peers.remove(peer);
+            }
+
+
             self.overlay.delete_private_peers(
                 adnl_key.id(),
-                &context.val().validator_peers
+                &removed_peers
             )?;
             if self.config_handler.get_validator_key(adnl_key.id()).await.is_none() {
                 // delete adnl key 
                 match self.validator_context.validator_adnl_keys.get(adnl_key.id()) {
                     Some(adnl_key_info) => {
-                        self.adnl.delete_key(adnl_key_info.key(), *adnl_key_info.val())?;
-                        self.validator_context.validator_adnl_keys.remove(adnl_key.id());
+                        let count = adnl_key_info.val().1.fetch_sub(1, Ordering::Relaxed);
+                        if count <= 0 {
+                            self.adnl.delete_key(adnl_key_info.key(), adnl_key_info.val().0.clone())?;
+                            self.validator_context.validator_adnl_keys.remove(adnl_key.id());
+                        }
                     },
                     None => { log::warn!("validator adnl key don`t deleted!"); }
                 }

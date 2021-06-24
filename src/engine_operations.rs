@@ -187,13 +187,11 @@ impl EngineOperations for Engine {
         // if it is pre-apply we are waiting for `state_inited` or `applied`
         // otherwise - only for applied
         while !((pre_apply && handle.has_state()) || handle.is_applied()) {
-            if self.block_applying_awaiters().do_or_wait(
+            self.block_applying_awaiters().do_or_wait(
                 handle.id(),
                 None,
                 self.clone().apply_block_worker(handle, block, mc_seq_no, pre_apply, recursion_depth)
-            ).await?.is_some() {
-                break;
-            }
+            ).await?;
         }
         Ok(())
     }

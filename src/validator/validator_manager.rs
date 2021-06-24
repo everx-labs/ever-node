@@ -20,7 +20,9 @@ use crate::{
                     hex_to_publickey, sigpubkey_to_publickey, get_adnl_id,
                     ValidatorListHash
                 },
-                candidate_db::LastRotationBlockDb
+                candidate_db::LastRotationBlockDb,
+                slashing::SlashingManagerPtr,
+                slashing::SlashingManager,
     }
 };
 use catchain::{CatchainNode, PublicKey, PublicKeyHash, BlockPayloadPtr};
@@ -225,6 +227,7 @@ struct ValidatorManagerImpl {
     validator_list_status: ValidatorListStatus,
     config: ValidatorManagerConfig,
     last_rotation_block_db: LastRotationBlockDb,
+    slashing_manager: SlashingManagerPtr,
 
     validation_status: ValidationStatus,
 }
@@ -246,7 +249,8 @@ impl ValidatorManagerImpl {
             validator_list_status: ValidatorListStatus::default(),
             config: ValidatorManagerConfig::default(),
             validation_status: ValidationStatus::Disabled,
-            last_rotation_block_db: LastRotationBlockDb::new(db_dir)
+            last_rotation_block_db: LastRotationBlockDb::new(db_dir),
+            slashing_manager: SlashingManager::create(),
         }
     }
 
@@ -524,7 +528,8 @@ impl ValidatorManagerImpl {
                             vsubset,
                             session_options,
                             self.engine.clone(),
-                            false
+                            false,
+                            self.slashing_manager.clone(),
                         )));
                     };
 
@@ -737,6 +742,7 @@ impl ValidatorManagerImpl {
                         session_options,
                         self.engine.clone(),
                         false,
+                        self.slashing_manager.clone(),
                     ));
 
                     self.validator_sessions.insert(session_id.clone(), session);
@@ -791,6 +797,11 @@ impl ValidatorManagerImpl {
         loop {
             let s = self.engine.load_state(mc_handle.id()).await?;
             log::info!(target: "validator", "Processing masterblock {}", mc_handle.id().seq_no);
+            #[cfg(feature = "slashing")]
+            if let Some(local_id) = self.validator_list_status.get_local_key() {
+                log::debug!(target: "validator", "Processing slashing masterblock {}", mc_handle.id().seq_no);
+                self.slashing_manager.handle_masterchain_block(&mc_handle, &s, &local_id, &self.engine).await;
+            }
             self.update_shards(s).await?;
             self.stats().await;
 

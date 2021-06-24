@@ -4,6 +4,9 @@ use rdkafka::message::OwnedHeaders;
 use ton_types::{Result, fail};
 use chrono::Utc;
 
+const EXTERNAL_MESSAGE_DATA_HEADER_KEY: &str = "external-message-ref";
+const PATTERN_TO_REPLACE: &str = "{message_filename}";
+
 pub(super) struct KafkaProducer {
     config: KafkaProducerConfig,
     producer: Option<rdkafka::producer::FutureProducer>,
@@ -22,8 +25,71 @@ impl KafkaProducer {
                 .set("message.max.bytes", &config.message_max_size.to_string())
                 .create()?;
 
+            if let Some(pattern) = &config.external_message_ref_address_pattern {
+                if pattern.find(PATTERN_TO_REPLACE).is_none() {
+                    return Err(crate::error::NodeError::InvalidArg("Pattern has no matches to replace".to_owned()).into());
+                }
+            }
+
             Ok(Self { config, producer: Some(producer) } )
         }
+    }
+
+    fn store_oversized(&self, key: &str, data: &[u8]) -> Result<()> {
+        let root = std::path::Path::new(&self.config.big_messages_storage);
+        let dir = root.join(std::path::Path::new(&self.config.topic));
+        let _ = std::fs::create_dir_all(dir.clone());
+        let result = std::fs::write(dir.join(std::path::Path::new(&key)), &data);
+        match &result {
+            Ok(_) => log::error!(
+                "Too big message ({} bytes, limit is {}), saved into {}",
+                data.len(),
+                self.config.message_max_size,
+                dir.join(std::path::Path::new(&key)).to_str().unwrap_or_default()),
+            Err(e) => log::error!(
+                "Too big message ({} bytes, limit is {}), error while saving into {}: {}",
+                data.len(),
+                self.config.message_max_size,
+                dir.join(std::path::Path::new(&key)).to_str().unwrap_or_default(),
+                e)
+        };
+        result.map_err(|err| err.into())
+    }
+
+    async fn process_oversized(&self, key: &str, data: &[u8]) -> Result<()> {
+        self.store_oversized(&key, &data)?;
+        if let Some(pattern) = &self.config.external_message_ref_address_pattern {
+            loop {
+                let path = pattern.replace(PATTERN_TO_REPLACE, &key);
+                let headers = rdkafka::message::OwnedHeaders::new_with_capacity(1)
+                    .add(EXTERNAL_MESSAGE_DATA_HEADER_KEY, &path);
+                let result = self.producer.as_ref().unwrap().send(
+                    rdkafka::producer::FutureRecord::to(&self.config.topic)
+                        .key(&format!("\"{}\"", key))
+                        .headers(headers)
+                        .payload(""),
+                    0,
+                ).await;
+                match result {
+                    Ok(Ok(_)) => {
+                        log::trace!("Produced oversized path record, topic: {}, key: {}", self.config.topic, key);
+                        break;
+                    },
+                    Ok(Err((e, _))) => log::warn!(
+                        "Error while producing oversized path record into kafka, topic: {}, key: {}, error: {}", self.config.topic, key, e
+                    ),
+                    Err(e) => log::warn!(
+                        "Internal error while producing oversized path record into kafka, topic: {}, key: {}, error: {}", self.config.topic, key, e
+                    )
+                }
+                futures_timer::Delay::new(
+                    time::Duration::from_millis(
+                        self.config.attempt_timeout_ms as u64
+                    )
+                ).await;
+            }
+        }
+        Ok(())
     }
 
     async fn write_internal(&self, key: Vec<u8>, key_str: String, data: Vec<u8>, ts: Option<i64>) -> Result<()> {
@@ -34,25 +100,6 @@ impl KafkaProducer {
             fail!("Internal error: producer is enabled but kafka producer instance is None");
         }
 
-        if data.len() > self.config.message_max_size {
-            let root = std::path::Path::new(&self.config.big_messages_storage);
-            let dir = root.join(std::path::Path::new(&self.config.topic));
-            let _ = std::fs::create_dir_all(dir.clone());
-            match std::fs::write(dir.join(std::path::Path::new(&key_str)), &data) {
-                Ok(_) => log::error!(
-                    "Too big message ({} bytes, limit is {}), saved into {}",
-                    data.len(),
-                    self.config.message_max_size,
-                    dir.join(std::path::Path::new(&key_str)).to_str().unwrap_or_default()),
-                Err(e) => log::error!(
-                    "Too big message ({} bytes, limit is {}), error while saving into {}: {}",
-                    data.len(),
-                    self.config.message_max_size,
-                    dir.join(std::path::Path::new(&key_str)).to_str().unwrap_or_default(),
-                    e),
-            };
-            return Ok(());
-        }
         loop {
             log::trace!("Producing record, topic: {}, key: {}", self.config.topic, key_str);
             let now = std::time::Instant::now();
@@ -73,7 +120,15 @@ impl KafkaProducer {
                     log::trace!("Produced record, topic: {}, key: {}, time: {} mcs", self.config.topic, key_str, now.elapsed().as_micros());
                     break;
                 },
-                Ok(Err((e, _))) => log::warn!("Error while producing into kafka, topic: {}, key: {}, error: {}", self.config.topic, key_str, e),
+                Ok(Err((e, _))) => {
+                    match e {
+                        rdkafka::error::KafkaError::MessageProduction(rdkafka::error::RDKafkaError::MessageSizeTooLarge) => {
+                            self.process_oversized(&key_str, &data).await?;
+                            break;
+                        }
+                        _ => log::warn!("Error while producing into kafka, topic: {}, key: {}, error: {}", self.config.topic, key_str, e),
+                    }
+                },
                 Err(e) => log::warn!("Internal error while producing into kafka, topic: {}, key: {}, error: {}", self.config.topic, key_str, e),
             }
             futures_timer::Delay::new(

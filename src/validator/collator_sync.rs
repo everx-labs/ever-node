@@ -1738,7 +1738,6 @@ impl Collator {
         let config = collator_data.config.clone();
         let executor = OrdinaryTransactionExecutor::new(config);
 
-        let mut complete = vec![];
         let mut to_delay = vec![];
         for (msg, id) in ext_messages.drain(..) {
             let header = msg.ext_in_header().ok_or_else(|| error!("message {:x} \
@@ -1750,27 +1749,26 @@ impl Collator {
                 }
                 let (_, account_id) = header.dst.extract_std_address(true)?;
                 let msg_opt = Some(msg.as_ref());
-                let transaction = match self.execute(&executor, account_id.clone(), msg_opt, prev_data, collator_data, req_lt) {
+                match self.execute(&executor, account_id.clone(), msg_opt, prev_data, collator_data, req_lt) {
                     Err(err) => {
-
-                        // TODO compare this case with t-node
-
                         log::warn!("{}: account {:x} rejected inbound external message {:x} by reason: {}", 
                             self.collated_block_descr, account_id, id, err);
-                        continue
+                        to_delay.push(id);
                     }
-                    Ok(transaction) => transaction
+                    Ok(transaction) => {
+                        let in_msg = InMsg::external(&msg, &transaction)?;
+                        collator_data.new_transaction(&transaction, Some(&in_msg))?;
+                    }
                 };
-
-                let in_msg = InMsg::external(&msg, &transaction)?;
-                collator_data.new_transaction(&transaction, Some(&in_msg))?;
-                complete.push(id);
             } else {
-                to_delay.push(id);
+                // usually node collates more than one shard, the message can belong another one,
+                // so we can't postpone it
+                // (difference with t-node)
+                //to_delay.push(id);
             }
         }
-        self.engine.complete_external_messages(to_delay, complete)
-        }
+        self.engine.complete_external_messages(to_delay, vec![])
+    }
 
     fn process_new_messages(
         &self,
