@@ -15,7 +15,7 @@
 #
 [package]
 name = "ton_node"
-version = "0.5.1"
+version = "0.27.1"
 edition = "2018"
 
 [workspace]
@@ -96,12 +96,13 @@ optional = true
 [dev-dependencies]
 
 [features]
-default = ["telemetry", "slashing"] 
+default = ["telemetry", "slashing", "async_collator", "async_validator"] 
 external_db = ["rdkafka", "rdkafka-sys"]
-metrics = ["statsd"]
-slashing = []
-read_old_db = []
-ci_run = []
-telemetry = []
 async_collator = []
 async_validator = []
+ci_run = []
+compression = ["overlay/compression", "rldp/compression"]
+metrics = ["statsd"]
+read_old_db = []
+slashing = []
+telemetry = []

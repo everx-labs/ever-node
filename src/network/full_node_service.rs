@@ -1,5 +1,6 @@
 use crate::{
-    engine_traits::EngineOperations, network::neighbours::{PROTO_CAPABILITIES, PROTO_VERSION}
+    engine_traits::EngineOperations, 
+    network::neighbours::{PROTOCOL_CAPABILITIES, PROTOCOL_VERSION}
 };
 
 use adnl::common::{AdnlPeers, QueryResult, Answer};
@@ -411,8 +412,8 @@ impl FullNodeOverlayService {
     async fn get_capabilities(&self, _query: GetCapabilities) -> Result<Capabilities> {
         Ok(
             ton_node::capabilities::Capabilities {
-                version: PROTO_VERSION,
-                capabilities: PROTO_CAPABILITIES,
+                version: PROTOCOL_VERSION,
+                capabilities: PROTOCOL_CAPABILITIES,
             }.into_boxed()
         )
     }

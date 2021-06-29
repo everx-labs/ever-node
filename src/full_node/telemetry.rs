@@ -10,6 +10,7 @@ const TOP_BLOCK_BCAST_TTL_SEC: usize = 30;
 const DOWNLOADING_BLOCK_TTL_SEC: usize = 300;
 const TPS_PERIOD_1: u64 = 5 * 60; // 5 min
 const TPS_PERIOD_2: u64 = 60; // 1 min
+const TPS_PERIOD_LAG: u64 = 10; // 10 sec
 
 pub struct FullNodeTelemetry {
     // Almost all metrics are zeroed while report creation
@@ -170,7 +171,7 @@ impl FullNodeTelemetry {
 
     pub fn submit_transactions(&self, time: u64, tr_count: usize) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        if now >= time && now - time <= TPS_PERIOD_1 {
+        if now >= time && now - time <= TPS_PERIOD_1 + TPS_PERIOD_LAG {
             adnl::common::add_object_to_map_with_update(
                 &self.transactions,
                 time,
@@ -231,7 +232,7 @@ impl FullNodeTelemetry {
             }
         }
 
-        let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() - TPS_PERIOD_LAG;
         let mut tr_count_1 = 0;
         let mut tr_count_2 = 0;
         for guard in self.transactions.iter() {
