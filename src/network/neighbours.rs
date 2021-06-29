@@ -40,8 +40,11 @@ pub struct Neighbours {
     start: Instant
 }
 
-pub const PROTO_VERSION: i32 = 2;
-pub const PROTO_CAPABILITIES: i64 = 1;
+const CAPABILITY_COMPATIBLE: i64 = 0x01;
+const VERSION_COMPATIBLE: i32 = 2;
+
+pub const PROTOCOL_CAPABILITIES: i64 = CAPABILITY_COMPATIBLE;
+pub const PROTOCOL_VERSION: i32 = VERSION_COMPATIBLE;
 pub const STOP_UNRELIABILITY: i32 = 5;
 pub const FAIL_UNRELIABILITY: i32 = 10;
 
@@ -111,6 +114,10 @@ impl Neighbour {
         } else {
             self.update_roundtrip_adnl(roundtrip)
         }
+    }
+
+    pub fn capabilities(&self) -> i64 {
+        self.capabilities.load(atomic::Ordering::Relaxed)
     }
     
     pub fn roundtrip_adnl(&self) -> Option<u64> {
@@ -379,7 +386,7 @@ impl Neighbours {
         log::trace!("Select neighbour for overlay {}", self.overlay_id);
         for neighbour in self.peers.get_iter() {
             let mut unr = neighbour.unreliability.load(atomic::Ordering::Relaxed);
-            let proto_version = neighbour.proto_version.load(atomic::Ordering::Relaxed);
+            let version = neighbour.proto_version.load(atomic::Ordering::Relaxed);
             let capabilities = neighbour.capabilities.load(atomic::Ordering::Relaxed);
             let roundtrip_rldp = neighbour.roundtrip_rldp.load(atomic::Ordering::Relaxed);
             let roundtrip_adnl = neighbour.roundtrip_adnl.load(atomic::Ordering::Relaxed);
@@ -390,9 +397,9 @@ impl Neighbours {
             if count == 1 {
                 return Ok(Some(neighbour.clone()))
             }
-            if proto_version < PROTO_VERSION {
+            if version < PROTOCOL_VERSION {
                 unr += 4;
-            } else if proto_version == PROTO_VERSION && capabilities < PROTO_CAPABILITIES {
+            } else if (version == PROTOCOL_VERSION) && (capabilities < PROTOCOL_CAPABILITIES) {
                 unr += 2;
             }
             let stat_name = format!("neighbour.unr.{}", neighbour.id());

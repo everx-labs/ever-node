@@ -21,7 +21,6 @@ use ton_block::MsgAddressInt;
 use ton_block::Serializable;
 use ton_types::Result;
 use ton_types::SliceData;
-#[cfg(feature = "metrics")]
 use validator_session::slashing::AggregatedMetric;
 use validator_session::PrivateKey;
 use validator_session::PublicKey;
@@ -187,7 +186,7 @@ impl SlashingManager {
         &self,
         reporter_privkey: &PrivateKey,
         validator_pubkey: &PublicKey,
-        metric_id: validator_session::slashing::AggregatedMetric,
+        metric_id: AggregatedMetric,
         engine: &Arc<dyn EngineOperations>,
         report_fn: &Function,
     ) {

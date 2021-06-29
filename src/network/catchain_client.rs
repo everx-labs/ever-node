@@ -164,7 +164,6 @@ impl CatchainClient {
         Ok(data)
     }
 
-
     async fn query_via_rldp(
         overlay_id: &Arc<PrivateOverlayShortId>,
         overlay: &Arc<OverlayNode>,
@@ -174,12 +173,13 @@ impl CatchainClient {
         message: &BlockPayloadPtr,
         max_answer_size: u64
     )-> Result<BlockPayloadPtr> {
+
         let request: TLObject = Deserializer::new(&mut Cursor::new(&message.data().0)).read_boxed()?;
         let mut query = overlay.get_query_prefix(overlay_id)?;
         //Serializer::new(&mut query).write_bare(&message.0)?;
         serialize_append(&mut query, &request)?;
-
-       // let timeout = timeout.duration_since(SystemTime::now())?.as_millis();
+        
+        // let timeout = timeout.duration_since(SystemTime::now())?.as_millis();
         let result = overlay.query_via_rldp(
             rldp,
             receiver_id,
@@ -188,7 +188,6 @@ impl CatchainClient {
             None,
             &overlay_id
         ).await;
-
         
         log::trace!(target: Self::TARGET, "result status: {}", &result.is_ok());
         let (data, _) = result?;
