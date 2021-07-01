@@ -1,9 +1,11 @@
 use crate::{
-    block::BlockStuff, engine_traits::EngineOperations,
-    out_msg_queue::OutMsgQueueInfoStuff, shard_state::ShardStateStuff,
+    block::BlockStuff,
+    engine_traits::EngineOperations,
+    shard_state::ShardStateStuff,
     types::top_block_descr::TopBlockDescrStuff,
     validator::{
-        accept_block::create_top_shard_block_description, BlockCandidate
+        accept_block::create_top_shard_block_description, BlockCandidate,
+        out_msg_queue::OutMsgQueueInfoStuff,
     }
 };
 use std::{
@@ -448,7 +450,7 @@ impl CollatorTestBundle {
         // neighbors
         //
         let mut neighbors = vec!();
-        let shards = mc_state.shard_state_extra()?.shards();
+        let shards = mc_state.shards()?;
         let neighbor_list = shards.get_neighbours(&shard)?;
         for shard in neighbor_list.iter() {
             states.insert(shard.block_id().clone(), engine.load_state(shard.block_id()).await?);
@@ -598,15 +600,9 @@ impl CollatorTestBundle {
         let mut neighbors = vec!();
         let shards = if shard.is_masterchain() {
             let block = BlockStuff::new(candidate.block_id.clone(), candidate.data.clone())?;
-            block
-                .block()
-                .read_extra()?
-                .read_custom()?
-                .ok_or_else(|| error!("Given block is not a master block."))?
-                .shards()
-                .clone()
+            block.shards()?
         } else {
-            mc_state.shard_state_extra()?.shards().clone()
+            mc_state.shards()?.clone()
         };
         let neighbor_list = shards.get_neighbours(&shard)?;
         for shard in neighbor_list.iter() {
@@ -733,9 +729,8 @@ impl CollatorTestBundle {
         // top shard blocks (fake)
         //
         let mut shard_blocks_ids = vec![];
-        let mc_block_extra = extra.read_custom()?;
-        if let Some(mc_block_extra) = mc_block_extra.as_ref() {
-            mc_block_extra.shards().iterate_shards(|shard_id, descr| {
+        if let Ok(shards) = block.shards() {
+            shards.iterate_shards(|shard_id, descr| {
                 shard_blocks_ids.push(BlockIdExt {
                     shard_id,
                     seq_no: descr.seq_no,
@@ -795,10 +790,9 @@ impl CollatorTestBundle {
         // neighbors
         //
         let mut neighbors = vec!();
-        let shards = if let Some(mc_block_extra) = mc_block_extra.as_ref() {
-            mc_block_extra.shards()
-        } else {
-            mc_state.shard_state_extra()?.shards()
+        let shards = match block.shards() {
+            Ok(shards) => shards,
+            Err(_) => mc_state.shards()?.clone()
         };
 
         let neighbor_list = shards.get_neighbours(block_id.shard())?;

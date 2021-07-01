@@ -267,7 +267,7 @@ impl Engine {
 
     pub async fn new(general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>, initial_sync_disabled : bool) -> Result<Arc<Self>> {
 
-         log::info!("Creating engine...");
+        log::info!("Creating engine...");
 
         let db_directory = general_config.internal_db_path().unwrap_or_else(|| {"node_db"});
         let db_config = InternalDbConfig { db_directory: db_directory.to_string() };
@@ -1002,16 +1002,17 @@ impl Engine {
 }
 
 pub(crate) async fn load_zero_state(engine: &Arc<Engine>, path: &str) -> Result<bool> {
- 
     let zero_id = engine.zero_state_id();
+    log::trace!("loading mc static zero state {} from path {}", zero_id, path);
+
     if let Some(handle) = engine.load_block_handle(zero_id)? {
         if handle.is_applied() {
-            return Ok(false);
+            log::trace!("zero state already applied");
+            return Ok(false)
         }
     }
 
     let (mc_zero_state, mc_zs_bytes) = {
-        log::trace!("loading mc static zero state {}", zero_id);
         let path = format!("{}/{:x}.boc", path, zero_id.file_hash());
         let bytes = tokio::fs::read(&path).await
             .map_err(|err| error!("Cannot read mc zerostate {}: {}", path, err))?;

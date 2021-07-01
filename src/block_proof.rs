@@ -1,10 +1,9 @@
 use ton_block::{
-    Block, BlockProof, BlockIdExt, Deserializable, MerkleProof, BlockInfo, UnixTime32,
+    Block, BlockProof, BlockIdExt, Deserializable, MerkleProof, BlockInfo,
     ValidatorDescr, ValidatorSet, CatchainConfig, AccountIdPrefixFull, Serializable
 };
 use ton_types::{
-    Result, fail, error, dictionary::HashmapType, deserialize_tree_of_cells, serialize_tree_of_cells,
-    Cell
+    Cell, Result, fail, error, HashmapType, deserialize_tree_of_cells, serialize_tree_of_cells,
 };
 
 use crate::{
@@ -71,7 +70,7 @@ impl BlockProofStuff {
         &self.proof.root
     }
 
-    pub fn virtualize_block_root(&self) -> Result<Cell> {
+    pub fn virtualize_block(&self) -> Result<(Block, Cell)> {
         let merkle_proof = MerkleProof::construct_from(&mut self.proof.root.clone().into())?;
         let block_virt_root = merkle_proof.proof.clone().virtualize(1);
         if *self.proof.proof_for.root_hash() != block_virt_root.repr_hash() {
@@ -81,13 +80,15 @@ impl BlockProofStuff {
                 self.proof.proof_for
             )))
         }
-        Ok(block_virt_root)
-    }
-
-    pub fn virtualize_block(&self) -> Result<(Block, ton_api::ton::int256)> {
-        let cell = self.virtualize_block_root()?;
-        let hash = ton_api::ton::int256(cell.repr_hash().as_slice().to_owned());
-        Ok((Block::construct_from(&mut cell.into())?, hash))
+        if block_virt_root.repr_hash() != self.id().root_hash {
+            fail!(NodeError::InvalidData(format!(
+                "proof for block {} contains a Merkle proof with incorrect root hash: expected {:x}, found: {:x} ",
+                self.id(),
+                self.id().root_hash,
+                block_virt_root.repr_hash()
+            )))
+        }
+        Ok((Block::construct_from_cell(block_virt_root.clone())?, block_virt_root))
     }
 
     pub fn is_link(&self) -> bool {
@@ -269,14 +270,14 @@ impl BlockProofStuff {
             )))
         }
 
-        let (virt_block, virt_block_hash) = self.virtualize_block()?;
+        let (virt_block, virt_block_root) = self.virtualize_block()?;
 
-        if &virt_block_hash.0 != self.id().root_hash.as_slice() {
+        if virt_block_root.repr_hash() != self.id().root_hash {
             fail!(NodeError::InvalidData(format!(
                 "proof for block {} contains a Merkle proof with incorrect root hash: expected {}, found: {} ",
                 self.id(),
                 self.id().root_hash,
-                virt_block_hash
+                virt_block_root.repr_hash()
             )))
         }
 
@@ -292,7 +293,7 @@ impl BlockProofStuff {
             )))
         }
 
-        if info.seq_no() != self.id().seq_no as u32 {
+        if info.seq_no() != self.id().seq_no {
             fail!(NodeError::InvalidData(format!(
                 "proof for block {} contains a Merkle proof with seq_no {}, but {} is expected",
                 self.id(),
@@ -399,22 +400,12 @@ impl BlockProofStuff {
                 ))
             })?;
 
-        self.calc_validators_subset(&validator_set, &cc_config, gen_utime)
-    }
-
-    fn calc_validators_subset(
-        &self,
-        validator_set: &ValidatorSet,
-        cc_config: &CatchainConfig,
-        gen_utime: u32
-    ) -> Result<(Vec<ValidatorDescr>, u32)> {
-        
         validator_set.calc_subset(
-            cc_config, 
+            &cc_config,
             self.id().shard().shard_prefix_with_tag(), 
             self.id().shard().workchain_id(), 
             self.proof.signatures.as_ref().map(|s| s.validator_info.catchain_seqno).unwrap_or(0),
-            UnixTime32(gen_utime)
+            gen_utime.into()
         )
     }
 
@@ -521,7 +512,8 @@ impl BlockProofStuff {
             self.id().shard().shard_prefix_with_tag(), 
             self.id().shard().workchain_id(), 
             self.proof.signatures.as_ref().map(|s| s.validator_info.catchain_seqno).unwrap_or(0),
-            block_info.gen_utime())?;
+            block_info.gen_utime()
+        )?;
 
         Ok((validators, hash_short))
     }

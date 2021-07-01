@@ -209,7 +209,8 @@ pub async fn process_block_broadcast(
 
     let is_master = block_id.shard().is_masterchain();
     let proof = BlockProofStuff::deserialize(&block_id, broadcast.proof.0.clone(), !is_master)?;
-    let block_info = proof.virtualize_block()?.0.read_info()?;
+    let (virt_block, _) = proof.virtualize_block()?;
+    let block_info = virt_block.read_info()?;
     let prev_key_block_seqno = block_info.prev_key_block_seqno();
     let last_applied_mc_block_id = engine.load_last_applied_mc_block_id().await?;
     if prev_key_block_seqno > last_applied_mc_block_id.seq_no() {

@@ -359,7 +359,8 @@ impl InternalDb for InternalDbImpl {
             let handle = if let Some(handle) = handle {
                 handle
             } else {
-                self.create_or_load_block_handle(id, Some(&proof.virtualize_block()?.0), None)?
+                let (virt_block, _) = proof.virtualize_block()?;
+                self.create_or_load_block_handle(id, Some(&virt_block), None)?
             };
 
             let mut first_time = false;

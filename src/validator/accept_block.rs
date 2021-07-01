@@ -581,10 +581,11 @@ fn validate_proof_link(
 
 ) -> Result<Vec<BlockIdExt>> {
 
-    let virt_root = proof_link.virtualize_block_root()?;
+    let (virt_block, virt_block_root) = proof_link.virtualize_block()?;
+    let _value_flow = virt_block.read_value_flow()?;
 
     let (_, prev_stuff) = construct_and_check_prev_stuff(
-        &virt_root,
+        &virt_block_root,
         proof_link.id(),
         false
     ).map_err(|e| error!("error in block header in proof link for {}: {}", proof_link.id(), e))?;
@@ -622,9 +623,6 @@ fn validate_proof_link(
         );
     }
 
-    let virt_block = Block::construct_from(&mut virt_root.into())?;
-    let _info = virt_block.read_info()?;
-    let _value_flow = virt_block.read_value_flow()?;
     //let _extra = virt_block.read_block_extra()?;   t-node's comment: "TEMP (uncomment later)"
 
     Ok(prev_stuff.prev)

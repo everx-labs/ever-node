@@ -2,13 +2,14 @@ use crate::{
     block_handle_db::BlockHandleDb, cell_db::CellDb, 
     db::{rocksdb::RocksDb, traits::{DbKey, KvcSnapshotable}},
     dynamic_boc_db::DynamicBocDb, dynamic_boc_diff_writer::DynamicBocDiffWriter,
-    traits::Serializable, types::{CellId, Reference}
+    traits::Serializable, types::{CellId, Reference, StorageCell}
 };
 use fnv::FnvHashSet;
 use std::{
     io::{Cursor, Read, Write}, path::Path, 
     sync::{Arc, atomic::{AtomicU32, Ordering}}
 };
+use std::ops::Deref;
 use ton_block::{BlockIdExt, UnixTime32};
 use ton_types::{Cell, Result};
 
@@ -81,7 +82,7 @@ impl ShardStateDb {
     /// So after store() origin shard state's cells might be dropped.
     pub fn put(&self, id: &BlockIdExt, state_root: Cell) -> Result<()> {
         let cell_id = CellId::from(state_root.repr_hash());
-        self.dynamic_boc_db.save_as_dynamic_boc(state_root)?;
+        self.dynamic_boc_db.save_as_dynamic_boc(state_root.deref())?;
 
         let db_entry = DbEntry::with_params(cell_id, id.clone());
         let mut buf = Vec::new();
@@ -274,6 +275,6 @@ impl GC {
     fn load_cell_references(&self, cell_id: &CellId) -> Result<Vec<Reference>> {
         let slice = self.dynamic_boc_db.cell_db().get(cell_id)?;
 
-        Ok(CellDb::deserialize_cell(slice.as_ref())?.1)
+        StorageCell::deserialize_references(slice.as_ref())
     }
 }

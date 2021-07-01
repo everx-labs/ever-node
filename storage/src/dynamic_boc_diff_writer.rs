@@ -1,6 +1,6 @@
 use crate::{cell_db::CellDb, dynamic_boc_diff::DynamicBocDiff, types::CellId};
 use std::sync::{Arc, RwLock, Weak};
-use ton_types::{Cell, Result};
+use ton_types::Result;
 
 #[derive(Debug)]
 pub(super) struct DynamicBocDiffFactory {
@@ -42,8 +42,8 @@ impl DynamicBocDiffWriter {
         Self { diff }
     }
 
-    pub fn add_cell(&self, cell_id: CellId, cell: Cell) {
-        self.diff.add_cell(cell_id, cell)
+    pub fn add_cell(&self, cell_id: CellId, cell_data: Vec<u8>) {
+        self.diff.add_cell(cell_id, cell_data)
     }
 
     pub fn contains_cell(&self, cell_id: &CellId) -> bool {

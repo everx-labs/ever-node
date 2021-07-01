@@ -11,7 +11,6 @@ mod full_node;
 mod internal_db;
 mod macros;
 pub mod network;
-mod out_msg_queue;
 mod rng;
 mod shard_blocks;
 mod shard_state;
@@ -103,7 +102,6 @@ fn print_build_info() -> String {
         RLDP git commit:             {}\n\
         TON_BLOCK git commit:        {}\n\
         TON_BLOCK_JSON git commit:   {}\n\
-        TON_NODE_STORAGE git commit: {}\n\
         TON_SDK git commit:          {}\n\
         TON_EXECUTOR git commit:     {}\n\
         TON_TL git commit:           {}\n\
@@ -119,7 +117,6 @@ fn print_build_info() -> String {
         std::option_env!("GC_RLDP").unwrap_or("Not set"),
         std::option_env!("GC_TON_BLOCK").unwrap_or("Not set"),
         std::option_env!("GC_TON_BLOCK_JSON").unwrap_or("Not set"),
-        std::option_env!("GC_TON_NODE_STORAGE").unwrap_or("Not set"),
         std::option_env!("GC_TON_SDK").unwrap_or("Not set"),
         std::option_env!("GC_TON_EXECUTOR").unwrap_or("Not set"),
         std::option_env!("GC_TON_TL").unwrap_or("Not set"),

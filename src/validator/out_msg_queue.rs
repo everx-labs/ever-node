@@ -1,7 +1,7 @@
 use crate::{
     CHECK,
     engine_traits::EngineOperations,
-    shard_state::ShardStateStuff,
+    shard_state::{ShardHashesStuff, ShardStateStuff},
     types::messages::MsgEnqueueStuff,
 };
 use std::{
@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
 };
 use ton_block::{
-    BlockIdExt, ShardIdent, Serializable, Deserializable, 
+    BlockIdExt, ShardIdent, Serializable, Deserializable,
     OutMsgQueueInfo, OutMsgQueue, OutMsgQueueKey, IhrPendingInfo,
     ProcessedInfo, ProcessedUpto, ProcessedInfoKey,
     ShardHashes, AccountIdPrefixFull,
@@ -175,7 +175,7 @@ impl OutMsgQueueInfoStuff {
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
             if !subshard.contains_full_prefix(enq.cur_prefix()) {
-                out_queue.set_serialized(key.into(), &slice, &lt)?;
+                out_queue.set_builder_serialized(key.into(), &BuilderData::from_slice(&value), &lt)?;
                 Ok(HashmapFilterResult::Remove)
             } else {
                 Ok(HashmapFilterResult::Accept)
@@ -338,13 +338,7 @@ impl OutMsgQueueInfoStuff {
         Ok(())
     }
     pub fn entries(&self) -> &Vec<ProcessedUptoStuff> { &self.entries }
-// Unused
-//    pub fn is_empty(&self) -> bool {
-//        self.entries.is_empty()
-//    }
-    pub fn min_seqno(&self) -> u32 {
-        self.min_seqno
-    }
+    pub fn min_seqno(&self) -> u32 { self.min_seqno }
     pub fn already_processed(&self, enq: &MsgEnqueueStuff) -> Result<bool> {
         if self.shard().contains_full_prefix(&enq.next_prefix()) {
             for entry in &self.entries {
@@ -469,7 +463,8 @@ impl MsgQueueManager {
             None => 0
         };
         log::debug!("request a preliminary list of neighbors for {}", shard);
-        let neighbor_list = shards.get_neighbours(&shard)?;
+        let shards = ShardHashesStuff::from(shards.clone());
+        let neighbor_list = shards.neighbours_for(&shard)?;
         let mut neighbors = vec![];
         log::debug!("got a preliminary list of {} neighbors for {}", neighbor_list.len(), shard);
         for (i, shard) in neighbor_list.iter().enumerate() {
@@ -525,7 +520,7 @@ impl MsgQueueManager {
         }
 
         prev_out_queue_info.fix_processed_upto(mc_seqno, 0, None, &mc_shard_states, &stop_flag)?;
-        next_out_queue_info.fix_processed_upto(mc_seqno, next_mc_end_lt, Some(shards), &mc_shard_states, &stop_flag)?;
+        next_out_queue_info.fix_processed_upto(mc_seqno, next_mc_end_lt, Some(shards.as_ref()), &mc_shard_states, &stop_flag)?;
 
         for neighbor in &mut neighbors {
             neighbor.fix_processed_upto(mc_seqno, 0, None, &mc_shard_states, &stop_flag)?;
