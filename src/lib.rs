@@ -12,7 +12,6 @@ pub mod full_node;
 pub mod internal_db;
 pub mod macros;
 pub mod network;
-pub mod out_msg_queue;
 pub mod rng;
 pub mod shard_blocks;
 pub mod shard_state;

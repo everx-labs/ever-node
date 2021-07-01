@@ -1,12 +1,13 @@
 use crate::error::NodeError;
-//use crate::block::convert_block_id_ext_blk2api;
-
-use std::{io::{Write, Cursor}};
+use std::io::{Write, Cursor};
 use ton_block::{
-    BlockIdExt, ShardIdent, ShardStateUnsplit, ShardStateSplit, Serializable, Deserializable, 
-    ConfigParams, McStateExtra, ShardHashes, HashmapAugType
+    BlockIdExt, ShardIdent,
+    ShardStateUnsplit, ShardStateSplit,
+    Serializable, Deserializable,
+    ConfigParams, McShardRecord, McStateExtra, ShardDescr, ShardHashes,
+    HashmapAugType, InRefValue, BinTree, BinTreeType, WorkchainDescr,
 };
-use ton_types::{Cell, error, fail, Result, deserialize_tree_of_cells, UInt256};
+use ton_types::{Cell, SliceData, error, fail, Result, deserialize_tree_of_cells, UInt256};
 
 
 /// It is a wrapper around various shard state's representations and properties.
@@ -20,7 +21,7 @@ pub struct ShardStateStuff {
 
 impl ShardStateStuff {
     pub fn new(block_id: BlockIdExt, root: Cell) -> Result<Self> {
-        let shard_state = ShardStateUnsplit::construct_from(&mut root.clone().into())?;
+        let shard_state = ShardStateUnsplit::construct_from_cell(root.clone())?;
         if shard_state.shard() != block_id.shard() {
             fail!(NodeError::InvalidData("State's shard block_id is not equal to given one".to_string()))
         }
@@ -98,6 +99,10 @@ impl ShardStateStuff {
     }
     pub fn shards(&self) -> Result<&ShardHashes> { Ok(self.shard_state_extra()?.shards()) }
 
+    pub fn shard_hashes(&self) -> Result<ShardHashesStuff> {
+        Ok(ShardHashesStuff::from(self.shard_state_extra()?.shards().clone()))
+    }
+
     pub fn root_cell(&self) -> &Cell { &self.root }
 
     pub fn shard(&self) -> &ShardIdent { &self.block_id.shard() }
@@ -135,5 +140,81 @@ impl ShardStateStuff {
             .map(|id| &id.blk_ref().root_hash == block_id.root_hash() && &id.blk_ref().file_hash == block_id.file_hash())
             .unwrap_or_default())
     }
+
+    pub fn workchains(&self) -> Result<Vec<(i32, WorkchainDescr)>> {
+        let mut vec = Vec::new();
+        self.config_params()?.workchains()?.iterate_with_keys(|workchain_id, descr| {
+            vec.push((workchain_id, descr));
+            Ok(true)
+        })?;
+        Ok(vec)
+    }
 }
 
+
+#[derive(Clone, Debug, Default)]
+pub struct ShardHashesStuff {
+    shards: ShardHashes
+}
+
+impl ShardHashesStuff {
+    pub fn for_workchains(&self, workchains: &Vec<i32>) -> Result<Vec<BlockIdExt>> {
+        let mut shards = Vec::new();
+        for workchain_id in workchains {
+            if let Some(InRefValue(bintree)) = self.shards.get(workchain_id)? {
+                bintree.iterate(|prefix, shard_descr| {
+                    let shard_ident = ShardIdent::with_prefix_slice(*workchain_id, prefix)?;
+                    let block_id = BlockIdExt::with_params(shard_ident, shard_descr.seq_no, shard_descr.root_hash, shard_descr.file_hash);
+                    shards.push(block_id);
+                    Ok(true)
+                })?;
+            }
+        }
+        Ok(shards)
+    }
+
+    fn get_shards(bintree: &BinTree<ShardDescr>, _shard: &ShardIdent, workchain_id: i32, vec: &mut Vec<McShardRecord>) -> Result<bool> {
+        bintree.iterate(|prefix, shard_descr| {
+            let shard_ident = ShardIdent::with_prefix_slice(workchain_id, prefix)?;
+            // turn off hypercube routing
+            // if shard.is_neighbor_for(&shard_ident) {}
+            vec.push(McShardRecord::from_shard_descr(shard_ident, shard_descr));
+            Ok(true)
+        })
+    }
+
+    pub fn neighbours_for(&self, shard: &ShardIdent) -> Result<Vec<McShardRecord>> {
+        let mut vec = Vec::new();
+        if shard.is_masterchain() {
+            self.shards.iterate_with_keys(|workchain_id: i32, InRefValue(bintree)| {
+                Self::get_shards(&bintree, shard, workchain_id, &mut vec)
+            })?;
+        } else if let Some(InRefValue(bintree)) = self.shards.get(&shard.workchain_id())? {
+            Self::get_shards(&bintree, shard, shard.workchain_id(), &mut vec)?;
+        }
+        Ok(vec)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.shards.is_empty()
+    }
+}
+
+impl AsRef<ShardHashes> for ShardHashesStuff {
+    fn as_ref(&self) -> &ShardHashes {
+        &self.shards
+    }
+}
+
+impl From<ShardHashes> for ShardHashesStuff {
+    fn from(shards: ShardHashes) -> Self {
+        Self{ shards }
+    }
+}
+
+impl Deserializable for ShardHashesStuff {
+    fn construct_from(slice: &mut SliceData) -> Result<Self> {
+        let shards = ShardHashes::construct_from(slice)?;
+        Ok(Self { shards })
+    }
+}

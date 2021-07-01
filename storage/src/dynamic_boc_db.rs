@@ -6,7 +6,7 @@ use fnv::FnvHashMap;
 use std::{ops::{Deref, DerefMut}, sync::{Arc, RwLock, Weak}};
 //#[cfg(test)]
 //use std::path::Path;
-use ton_types::{Cell, Result};
+use ton_types::{Cell, Result, CellImpl, MAX_LEVEL};
 
 #[derive(Debug)]
 pub struct DynamicBocDb {
@@ -42,11 +42,11 @@ impl DynamicBocDb {
     }
 
     /// Converts tree of cells into DynamicBoc
-    pub fn save_as_dynamic_boc(self: &Arc<Self>, root_cell: Cell) -> Result<usize> {
+    pub fn save_as_dynamic_boc(self: &Arc<Self>, root_cell: &dyn CellImpl) -> Result<usize> {
         let diff_writer = self.diff_factory.construct();
 
         let written_count = self.save_tree_of_cells_recursive(
-            root_cell.clone(),
+            root_cell,
             Arc::clone(&self.db),
             &diff_writer)?;
 
@@ -71,14 +71,14 @@ impl DynamicBocDb {
             .expect("Poisoned RwLock")
             .get(&cell_id)
         {
-            if let Some(ref cell) = Weak::upgrade(&cell) {
-                return Ok(Arc::clone(cell));
+            if let Some(cell) = Weak::upgrade(&cell) {
+                return Ok(cell);
             }
             // Even if the cell is disposed, we will load and store it later,
             // so we don't need to remove garbage here.
         }
         let storage_cell = Arc::new(
-            CellDb::get_cell(&*self.db, &cell_id, Arc::clone(self))?
+            CellDb::get_cell(self.db.deref(), &cell_id, Arc::clone(self))?
         );
         self.cells.write()
             .expect("Poisoned RwLock")
@@ -89,21 +89,21 @@ impl DynamicBocDb {
 
     fn save_tree_of_cells_recursive(
         self: &Arc<Self>,
-        cell: Cell,
+        cell: &dyn CellImpl,
         cell_db: Arc<CellDb>,
         diff_writer: &DynamicBocDiffWriter
     ) -> Result<usize> {
-        let cell_id = CellId::new(cell.repr_hash());
+        let cell_id = CellId::new(cell.hash(MAX_LEVEL));
         if cell_db.contains(&cell_id)? || diff_writer.contains_cell(&cell_id) {
             return Ok(0);
         }
 
-        diff_writer.add_cell(cell_id, cell.clone());
+        diff_writer.add_cell(cell_id, StorageCell::serialize(cell)?);
 
         let mut count = 1;
         for i in 0..cell.references_count() {
             count += self.save_tree_of_cells_recursive(
-                cell.reference(i)?,
+                cell.reference(i)?.deref(),
                 Arc::clone(&cell_db),
                 diff_writer
             )?;

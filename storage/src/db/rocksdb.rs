@@ -32,7 +32,7 @@ impl RocksDb {
 
         Self {
             db: Arc::new(Some(DB::open(&options, path)
-                .expect("Cannot open DB"))),
+                .expect(&format!("Cannot open DB {:?}", pathbuf)))),
             path: pathbuf
         }
     }

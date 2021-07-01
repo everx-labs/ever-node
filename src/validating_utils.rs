@@ -10,11 +10,12 @@ pub fn supported_capabilities() -> u64 {
     GlobalCapabilities::CapCreateStatsEnabled as u64 |
     GlobalCapabilities::CapBounceMsgBody as u64 |
     GlobalCapabilities::CapReportVersion as u64 |
-    GlobalCapabilities::CapShortDequeue as u64
+    GlobalCapabilities::CapShortDequeue as u64 |
+    GlobalCapabilities::CapFastStorageStat as u64
 }
 
 pub fn supported_version() -> u32 {
-    9
+    10
 }
 
 pub fn check_this_shard_mc_info(

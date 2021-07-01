@@ -1,11 +1,12 @@
 use std::{io::Cursor, collections::HashMap, cmp::max, sync::Arc};
 use std::io::Write;
 use ton_block::{
-    Block, BlockIdExt, BlkPrevInfo, Deserializable, ShardIdent, ShardDescr, AccountBlock,
-    HashmapAugType
+    AccountBlock, Block, BlockIdExt, BlkPrevInfo, CatchainConfig, ConfigParams, Deserializable,
+    ShardIdent, ShardDescr, ShardHashes, ValidatorSet, HashmapAugType,
 };
 use ton_types::{Cell, Result, types::UInt256, deserialize_tree_of_cells, error, fail, HashmapType};
 
+use crate::error::NodeError;
 
 
 pub struct BlockPrevStuff {
@@ -82,6 +83,9 @@ impl BlockStuff {
   
     pub fn id(&self) -> &BlockIdExt { &self.id }
 
+    pub fn shard(&self) -> &ShardIdent { 
+        self.id.shard() 
+    }
 
     pub fn root_cell(&self) -> &Cell { &self.root }
 
@@ -162,6 +166,17 @@ impl BlockStuff {
         Ok(())
     }
 
+    pub fn shards(&self) -> Result<ShardHashes> {
+        Ok(self
+            .block()
+            .read_extra()?
+            .read_custom()?
+            .ok_or_else(|| error!("Given block is not a master block."))?
+            .hashes()
+            .clone()
+        )
+    }
+
     pub fn shards_blocks(&self) -> Result<HashMap<ShardIdent, BlockIdExt>> {
         let mut shards = HashMap::new();
         self
@@ -182,6 +197,26 @@ impl BlockStuff {
             })?;
 
         Ok(shards)
+    }
+
+    pub fn config(&self) -> Result<ConfigParams> {
+        self
+            .block()
+            .read_extra()?
+            .read_custom()?
+            .and_then(|custom| custom.config().cloned())
+            .ok_or_else(|| error!(NodeError::InvalidArg(
+                "State doesn't contain `custom` field".to_string()
+            )))
+    }
+
+    pub fn read_cur_validator_set_and_cc_conf(&self) -> Result<(ValidatorSet, CatchainConfig)> {
+        let config = self.config()?;
+
+        Ok((
+            config.validator_set()?,
+            config.catchain_config()?
+        ))
     }
 
     pub fn calculate_tr_count(&self) -> Result<usize> {
@@ -255,13 +290,12 @@ pub fn construct_and_check_prev_stuff(
     fetch_blkid: bool)
 -> Result<(BlockIdExt, BlockPrevStuff)> {
 
-    let block = Block::construct_from(&mut block_root.into())?;
+    let block = Block::construct_from_cell(block_root.clone())?;
     let info = block.read_info()?;
 
     if info.version() != 0 {
         fail!("Block -> info -> version should be zero (found {})", info.version())
     }
-
 
     let out_block_id = if fetch_blkid {
         BlockIdExt {

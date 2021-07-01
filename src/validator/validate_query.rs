@@ -3,10 +3,10 @@ use crate::{
     block::BlockStuff,
     engine_traits::EngineOperations,
     error::NodeError,
-    out_msg_queue::MsgQueueManager,
+    validator::out_msg_queue::MsgQueueManager,
     shard_state::ShardStateStuff,
     types::{
-        messages::MsgEnqueueStuff,
+        messages::{count_matching_bits, perform_hypercube_routing, MsgEnqueueStuff},
         top_block_descr::{TopBlockDescrStuff, Mode as TopBlockDescrMode},
     },
     validating_utils::{
@@ -14,10 +14,10 @@ use crate::{
         supported_version, supported_capabilities,
     },
 };
-use super::BlockCandidate;
+use super::{BlockCandidate, McData};
 use std::{collections::HashMap, io::Cursor, sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc}};
 use ton_block::{
-    AddSub, BlockError, UnixTime32, HashmapAugType, Deserializable, Serializable,
+    AddSub, BlockError, HashmapAugType, Deserializable, Serializable,
     CurrencyCollection,
     ConfigParams, ConfigParamEnum,
     BlockExtra, BlockInfo, BlockIdExt,
@@ -36,7 +36,8 @@ use ton_block::{
     InMsgDescr, OutMsgDescr, ShardAccount, ShardAccountBlocks, ShardAccounts,
     Account, AccountBlock, AccountStatus,
     ShardFeeCreated, TransactionDescr, OutMsgQueueKey, BlockLimits,
-    GlobalCapabilities, TrComputePhase,
+    GlobalCapabilities, TrComputePhase, HashUpdate, Libraries,
+    INVALID_WORKCHAIN_ID, MASTERCHAIN_ID, MAX_SPLIT_DEPTH,
 };
 use ton_executor::{
     BlockchainConfig, CalcMsgFwdFees, OrdinaryTransactionExecutor, TickTockTransactionExecutor, 
@@ -73,16 +74,6 @@ macro_rules! soft_reject_query {
     ($($arg:tt)*) => {
         return Err(failure::Error::from(NodeError::ValidatorSoftReject(format!("=====> {}:{} {}", file!(), line!(), format_args!($($arg)*)))))
     }
-}
-
-struct McData {
-    mc_state_extra: McStateExtra,
-    // prev_key_block_seqno: u32,
-    // prev_key_block: Option<BlockIdExt>,
-    state: ShardStateStuff,
-    config_params: ConfigParams,
-
-    // TODO put here what you need from masterchain state and block and init in `unpack_last_mc_state`
 }
 
 type LibPublisher = (UInt256, UInt256, bool);
@@ -128,6 +119,7 @@ struct ValidateBase {
     // TODO: maybe make some fileds Option
     // data from block_candidate
     config: BlockchainConfig,
+    capabilities: u64,
     block: BlockStuff,
     info: BlockInfo,
     value_flow: ValueFlow,
@@ -194,8 +186,6 @@ pub struct ValidateQuery {
     multythread: bool,
     // previous state can be as two states for merge
     prev_blocks_ids: Option<Vec<BlockIdExt>>,
-    prev_key_block_seqno: u32,
-    prev_key_block: Option<BlockIdExt>,
     old_mc_shards: ShardHashes, // old_shard_conf_
     // master chain state members
     block_limits: BlockLimits,
@@ -234,8 +224,6 @@ impl ValidateQuery {
             is_fake,
             multythread,
             prev_blocks_ids: Some(prev_blocks_ids),
-            prev_key_block_seqno: Default::default(),
-            prev_key_block: Default::default(),
             old_mc_shards: Default::default(),
             block_limits: Default::default(),
             // new state after applying block_candidate
@@ -265,8 +253,8 @@ impl ValidateQuery {
             soft_reject_query!("block candidate belongs to shard {} different from current shard {}",
                 block_id.shard(), self.shard())
         }
-        if !block_id.shard().is_masterchain() && !block_id.shard().is_base_workchain() {
-            soft_reject_query!("can validate block candidates only for masterchain (-1) and base workchain (0)")
+        if !block_id.shard().is_masterchain() && !block_id.shard().is_standard_workchain() {
+            soft_reject_query!("can validate block candidates only for masterchain (-1) and base workchain (0) and standard workchain (1-255)")
         }
         if block_id.shard().is_masterchain() && base.prev_blocks_ids.is_empty() {
             self.min_mc_seq_no = 0
@@ -385,11 +373,6 @@ impl ValidateQuery {
         base.state_update = base.block.block().read_state_update()?;
         base.value_flow = base.block.block().read_value_flow()?;
 
-        if let Some(gs) = base.info.gen_software() {
-            if gs.version < supported_version() {
-                reject_query!("This block version {} is too old", base.info.version())
-            }
-        }
         if base.info.key_block() {
             log::info!(target: "validate_query", "validating key block {}", base.block_id());
         }
@@ -522,10 +505,16 @@ impl ValidateQuery {
     fn try_unpack_mc_state(&mut self, base: &ValidateBase, mc_state: ShardStateStuff) -> Result<McData> {
         log::debug!(target: "validate_query", "unpacking reference masterchain state {}", mc_state.block_id());
         let mc_state_extra = mc_state.shard_state_extra()?.clone();
-        let config_params = mc_state_extra.config.clone();
-        CHECK!(&config_params, inited);
+        let config_params = mc_state_extra.config();
+        CHECK!(config_params, inited);
+        if let Some(gs) = base.info.gen_software() {
+            if gs.version < config_params.global_version() {
+                reject_query!("This block version {} is too old, node_version: {} net version: {}",
+                    gs.version, supported_version(), config_params.global_version())
+            }
+        }
         // ihr_enabled_ = config_params->ihr_enabled();
-        self.create_stats_enabled = mc_state_extra.config().has_capability(GlobalCapabilities::CapCreateStatsEnabled);
+        self.create_stats_enabled = config_params.has_capability(GlobalCapabilities::CapCreateStatsEnabled);
         if config_params.has_capabilities() && (config_params.capabilities() & !supported_capabilities()) != 0 {
             log::error!(target: "validate_query", "block generation capabilities {} have been enabled in global configuration, \
                 but we support only {} (upgrade validator software?)",
@@ -551,20 +540,21 @@ impl ValidateQuery {
             reject_query!("vertical seqno mismatch: new block has {} while the masterchain configuration expects {}",
                 base.info.vert_seq_no(), mc_state.state().vert_seq_no())
         }
+        let (prev_key_block_seqno, prev_key_block);
         if mc_state_extra.after_key_block {
-            self.prev_key_block_seqno = mc_state.block_id().seq_no();
-            self.prev_key_block = Some(mc_state.block_id().clone());
+            prev_key_block_seqno = mc_state.block_id().seq_no();
+            prev_key_block = Some(mc_state.block_id().clone());
         } else if let Some(block_ref) = mc_state_extra.last_key_block.clone() {
-            self.prev_key_block_seqno = block_ref.seq_no;
-            self.prev_key_block = Some(block_ref.master_block_id().1);
+            prev_key_block_seqno = block_ref.seq_no;
+            prev_key_block = Some(block_ref.master_block_id().1);
         } else {
-            self.prev_key_block_seqno = 0;
-            self.prev_key_block = None;
-        }
-        if base.info.prev_key_block_seqno() != self.prev_key_block_seqno {
+            prev_key_block_seqno = 0;
+            prev_key_block = None;
+        };
+        if base.info.prev_key_block_seqno() != prev_key_block_seqno {
             reject_query!("previous key block seqno value in candidate block header is {} \
                 while the correct value corresponding to reference masterchain state {} is {}",
-                    base.info.prev_key_block_seqno(), mc_state.block_id(), self.prev_key_block_seqno)
+                    base.info.prev_key_block_seqno(), mc_state.block_id(), prev_key_block_seqno)
         }
         self.block_limits = config_params.block_limits(base.shard().is_masterchain())?;
         if !base.shard().is_masterchain() {
@@ -584,7 +574,8 @@ impl ValidateQuery {
         Ok(McData {
             mc_state_extra,
             state: mc_state,
-            config_params,
+            prev_key_block_seqno,
+            prev_key_block,
         })
     }
 
@@ -915,7 +906,7 @@ impl ValidateQuery {
         }
         let wc_info = wc_info.expect("in ton node it is a bug");
         let depth = shard.prefix_len();
-        let split_cond = (info.descr.want_split || depth < wc_info.min_split()) && depth < wc_info.max_split() && depth < ton_block::shard::MAX_SPLIT_DEPTH;
+        let split_cond = (info.descr.want_split || depth < wc_info.min_split()) && depth < wc_info.max_split() && depth < MAX_SPLIT_DEPTH;
         let merge_cond = depth > wc_info.min_split() && (info.descr.want_merge || depth > wc_info.max_split())
             && (sibling.map(|s| s.descr.want_merge).unwrap_or_default() || depth > wc_info.max_split());
         if !fsm_inherited && !info.descr().is_fsm_none() {
@@ -993,12 +984,12 @@ impl ValidateQuery {
             log::debug!(target: "validate_query", "catchain_seqno of all shards must be updated");
         }
 
-        let mut wc_id = ton_block::INVALID_WORKCHAIN_ID;
+        let mut wc_id = INVALID_WORKCHAIN_ID;
         let mut wc_info = None;
         self.new_mc_shards.clone().iterate_shards_with_siblings(|shard, descr, sibling| {
             if wc_id != shard.workchain_id() {
                 wc_id = shard.workchain_id();
-                if wc_id == ton_block::INVALID_WORKCHAIN_ID || wc_id == ton_block::MASTERCHAIN_ID {
+                if wc_id == INVALID_WORKCHAIN_ID || wc_id == MASTERCHAIN_ID {
                     reject_query!("new shard configuration contains shards of invalid workchain {}", wc_id)
                 }
                 wc_info = wc_set.get(&wc_id)?;
@@ -1078,7 +1069,7 @@ impl ValidateQuery {
             self.shard.shard_prefix_with_tag(), 
             self.shard.workchain_id(), 
             catchain_seqno,
-            UnixTime32(now)
+            now.into()
         )?;
 
         if nodes.is_empty() {
@@ -1723,8 +1714,8 @@ impl ValidateQuery {
                     is an invalid blockchain address", key))?;
                 let dest_prefix = AccountIdPrefixFull::prefix(dst)?;
                 if !dest_prefix.is_valid() {
-                    reject_query!("destination of inbound external message with hash {} \
-                        is an invalid blockchain address", key.to_hex_string())
+                    reject_query!("destination of inbound external message with hash {:x} \
+                        is an invalid blockchain address", key)
                 }
                 if !base.shard().contains_full_prefix(&dest_prefix) {
                     reject_query!("inbound external message with hash {} has destination address \
@@ -1783,7 +1774,7 @@ impl ValidateQuery {
                 key.to_hex_string())
         }
         // check that next hop is nearer to the destination than the current address
-        if dest_prefix.count_matching_bits(&next_prefix) < dest_prefix.count_matching_bits(&cur_prefix) {
+        if count_matching_bits(&dest_prefix, &next_prefix) < count_matching_bits(&dest_prefix, &cur_prefix) {
             reject_query!("next hop address {}... of inbound internal message with hash {} \
                 is further from its destination {}... than its current address {}...",
                     next_prefix, key.to_hex_string(), dest_prefix, cur_prefix)
@@ -1811,6 +1802,7 @@ impl ValidateQuery {
         }
         // it already checked in AccountIdPrefixFull::from_address
         // unpack complete destination address if it is inside this shard
+        // it already checked in AccountIdPrefixFull::from_address
         // if trans_cell.is_some() && msg.dst_ref().extract_std_address(true).is_err() {
         //     reject_query!("cannot unpack destination address of inbound internal message with hash {}", key.to_hex_string())
         // }
@@ -1836,9 +1828,9 @@ impl ValidateQuery {
                 // msg_import_imm$011 in_msg:^MsgEnvelope transaction:^Transaction fwd_fee:Grams
                 // importing and processing an internal message generated in this very block
                 if cur_prefix != dest_prefix {
-                    reject_query!("inbound internal message with hash {} is a msg_import_imm$011, \
+                    reject_query!("inbound internal message with hash {:x} is a msg_import_imm$011, \
                         but its current address {} is somehow distinct from its final destination {}",
-                            key.to_hex_string(), cur_prefix, dest_prefix)
+                            key, cur_prefix, dest_prefix)
                 }
                 CHECK!(trans_cell.is_some());
                 // check that the message has been created in this very block
@@ -1936,7 +1928,7 @@ impl ValidateQuery {
                 };
                 // perform hypercube routing for this transit message
                 let ia = IntermediateAddress::default();
-                let route_info = next_prefix.perform_hypercube_routing(&dest_prefix, &base.shard(), &ia)
+                let route_info = perform_hypercube_routing(&next_prefix, &dest_prefix, &base.shard(), ia)
                     .map_err(|err| error!("cannot perform (check) hypercube routing for \
                         transit inbound message with hash {}: src={} cur={} next={} dest={}; \
                         our shard is {} : {}", key.to_hex_string(), src_prefix, cur_prefix,
@@ -2136,7 +2128,7 @@ impl ValidateQuery {
                 key.to_hex_string());
         }
         // check that next hop is nearer to the destination than the current address
-        if dest_prefix.count_matching_bits(&next_prefix) < dest_prefix.count_matching_bits(&cur_prefix) {
+        if count_matching_bits(&dest_prefix, &next_prefix) < count_matching_bits(&dest_prefix, &cur_prefix) {
             reject_query!("next hop address {}... of outbound internal message with hash {} \
                 is further from its destination {}... than its current address {}...",
                     next_prefix, key.to_hex_string(), dest_prefix, cur_prefix)
@@ -2244,7 +2236,7 @@ impl ValidateQuery {
                 log::debug!(target: "validate_query", "src: {}, dst: {}, shard: {}", src_prefix, dest_prefix, base.shard());
                 // perform hypercube routing for this new message
                 let ia = IntermediateAddress::default();
-                let route_info = src_prefix.perform_hypercube_routing(&dest_prefix, &base.shard(), &ia)
+                let route_info = perform_hypercube_routing(&src_prefix, &dest_prefix, &base.shard(), ia)
                     .map_err(|err| error!("cannot perform (check) hypercube routing for \
                         new outbound message with hash {} : {}", key.to_hex_string(), err))?;
                 let new_cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, &route_info.0)?;
@@ -2672,7 +2664,7 @@ impl ValidateQuery {
                 if !new_acc.belongs_to_shard(base.shard())? {
                     reject_query!("old state of account {} does not really belong to current shard", addr.to_hex_string())
                 }
-                Ok((shard_acc.account_cell().clone(), new_acc))
+                Ok((shard_acc.account_cell(), new_acc))
             }
             None => {
                 let new_acc = Account::default();
@@ -2683,6 +2675,7 @@ impl ValidateQuery {
 
     fn check_one_transaction(
         base: &ValidateBase,
+        libraries: Libraries,
         account_addr: &UInt256,
         account_root: &mut Cell,
         account: &mut Account,
@@ -2740,7 +2733,7 @@ impl ValidateQuery {
             }
             CHECK!(in_msg.transaction_cell().is_some());
             if let Some(cell) = in_msg.transaction_cell() {
-                if cell.clone() != trans_root {
+                if cell != trans_root {
                     reject_query!("InMsg record for inbound message with hash {:x} of transaction {} of account {:x} \
                         refers to a different processing transaction",
                             in_msg_root.repr_hash(), lt, account_addr)
@@ -2894,10 +2887,11 @@ impl ValidateQuery {
         }
         // check that the original account state has correct hash
         let state_update = trans.read_state_update()?;
-        if state_update.old_hash != account_root.repr_hash() {
+        let old_hash = account_root.repr_hash();
+        if state_update.old_hash != old_hash {
             reject_query!("transaction {} of account {:x} claims that the original \
                 account state hash must be {:x} but the actual value is {:x}",
-                    lt, account_addr, state_update.old_hash, account_root.repr_hash())
+                    lt, account_addr, state_update.old_hash, old_hash)
         }
         // some type-specific checks
         let tr_lt = Arc::new(AtomicU64::new(lt));
@@ -2969,7 +2963,24 @@ impl ValidateQuery {
                 reject_query!("unable to verify split install transaction {} of account {}", lt, account_addr.to_hex_string())
             }
         };
-        let mut trans2 = executor.execute(in_msg.as_ref(), account_root, base.now(), base.info.start_lt(), tr_lt, false)?;
+        let mut trans2 = executor.execute_for_account(in_msg.as_ref(), account, libraries.inner(), base.now(), base.info.start_lt(), tr_lt, false)?;
+        if (base.capabilities & (GlobalCapabilities::CapFastStorageStat as u64)) != 0 {
+            account.update_storage_stat_fast()?; // use new mechanism will be here
+        } else {
+            account.update_storage_stat()?;
+        }
+        let _old_account_root = std::mem::replace(account_root, account.serialize()?);
+        let new_hash = account_root.repr_hash();
+        if state_update.new_hash != new_hash {
+            reject_query!("transaction {} of {:x} is invalid: it claims that the new \
+                account state hash is {:x} but the re-computed value is {:x}",
+                    lt, account_addr, state_update.new_hash, new_hash)
+        }
+        if trans.out_msgs != trans2.out_msgs {
+            reject_query!("transaction {} of {:x} is invalid: it has produced a set of \
+                outbound messages different from that listed in the transaction",
+                    lt, account_addr)
+        }
         if let Some(TrComputePhase::Vm(compute_ph)) = descr.compute_phase_ref() {
             base.gas_used.fetch_add(compute_ph.gas_used.0 as u64, Ordering::Relaxed);
         }
@@ -2977,29 +2988,15 @@ impl ValidateQuery {
         // we cannot know prev transaction in executor
         trans2.set_prev_trans_hash(trans.prev_trans_hash());
         trans2.set_prev_trans_lt(trans.prev_trans_lt());
+        trans2.write_state_update(&HashUpdate::with_hashes(old_hash, new_hash))?;
         let trans2_root = trans2.serialize()?;
-        // ....
-        // check transaction computation by re-doing it
-        // similar to Collator::create_ordinary_transaction() and Collator::create_ticktock_transaction()
-        // ....
         if trans_root != trans2_root {
             reject_query!("re created transaction {} doesn't correspond", lt)
-        }
-        if state_update.new_hash != account_root.repr_hash() {
-            reject_query!("transaction {} of {} is invalid: it claims that the new \
-                account state hash is {} but the re-computed value is {}",
-                    lt, account_addr.to_hex_string(), state_update.new_hash.to_hex_string(), 
-                    account_root.repr_hash().to_hex_string())
-        }
-        if trans.out_msgs != trans2.out_msgs {
-            reject_query!("transaction {} of {} is invalid: it has produced a set of outbound messages different from that listed in the transaction",
-                lt, account_addr.to_hex_string())
         }
         // check new balance and value flow
         let mut left_balance = old_balance.clone();
         left_balance.add(&money_imported)?;
-        let new_account = Account::construct_from_cell(account_root.clone())?;
-        let new_balance = new_account.get_balance().cloned().unwrap_or_default();
+        let new_balance = account.balance().cloned().unwrap_or_default();
         let mut right_balance = new_balance.clone();
         right_balance.add(&money_exported)?;
         right_balance.add(&trans.total_fees)?;
@@ -3010,13 +3007,13 @@ impl ValidateQuery {
                     old_balance.grams, money_imported.grams,
                     new_balance.grams, money_exported.grams, trans.total_fees.grams)
         }
-        *account = new_account;
         Ok(true)
     }
 
     // NB: may be run in parallel for different accounts
     fn check_account_transactions(
         base: &ValidateBase,
+        libraries: Libraries,
         account_addr: &UInt256,
         account_root: &mut Cell,
         account: Account,
@@ -3028,7 +3025,7 @@ impl ValidateQuery {
         let (max_trans_lt, _) = acc_block.transactions().get_max(false)?.ok_or_else(|| error!("no maximal transaction"))?;
         let mut new_account = account.clone();
         acc_block.transactions().iterate_slices_with_keys(|lt, trans| {
-            Self::check_one_transaction(base, account_addr, account_root, &mut new_account, lt, trans.reference(0)?,
+            Self::check_one_transaction(base, libraries.clone(), account_addr, account_root, &mut new_account, lt, trans.reference(0)?,
                 lt == min_trans_lt, lt == max_trans_lt)
         }).map_err(|err| error!("at least one Transaction of account {} is invalid : {}", account_addr.to_hex_string(), err))?;
         if base.shard().is_masterchain() {
@@ -3038,13 +3035,14 @@ impl ValidateQuery {
         }
     }
 
-    fn check_transactions(base: Arc<ValidateBase>, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
+    fn check_transactions(base: Arc<ValidateBase>, libraries: Libraries, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
         log::debug!(target: "validate_query", "checking all transactions");
         base.account_blocks.iterate_with_keys_and_aug(|account_addr, acc_block, fee| {
             let base = base.clone();
+            let libraries = libraries.clone();
             let (mut account_root, account) = Self::unpack_account(&base, &account_addr)?;
             Self::add_task(tasks, move ||
-                Self::check_account_transactions(&base, &account_addr, &mut account_root, account, acc_block, fee)
+                Self::check_account_transactions(&base, libraries, &account_addr, &mut account_root, account, acc_block, fee)
             );
             Ok(true)
         })?;
@@ -3164,7 +3162,7 @@ impl ValidateQuery {
             _ => reject_query!("cannot unpack source and destination addresses of special message with hash {}", msg_hash.to_hex_string())
         };
         let src_addr = UInt256::construct_from(&mut src.address.clone())?;
-        if src.workchain_id as i32 != ton_block::MASTERCHAIN_ID || !src_addr.is_zero() {
+        if src.workchain_id as i32 != MASTERCHAIN_ID || !src_addr.is_zero() {
             reject_query!("special message with hash {} has a non-zero source address {}:{}",
                 msg_hash.to_hex_string(), src.workchain_id, src_addr.to_hex_string())
         }
@@ -3539,13 +3537,13 @@ impl ValidateQuery {
             }
         }
         if let Some(block_ref) = base.next_state_extra.last_key_block.clone() {
-            let key_block_id = Some(block_ref.master_block_id().1);
-            if key_block_id != self.prev_key_block {
+            let key_block_id = block_ref.master_block_id().1;
+            if Some(&key_block_id) != mc_data.prev_key_block() {
                 reject_query!("new masterchain state declares previous key block to be {:?} \
                     but the value computed from previous masterchain state is {:?}",
-                    key_block_id, self.prev_key_block)
+                    key_block_id, mc_data.prev_key_block())
             }
-        } else if let Some(last_key_block) = &self.prev_key_block {
+        } else if let Some(last_key_block) = mc_data.prev_key_block() {
             reject_query!("new masterchain state declares no previous key block, but the block header \
                 announces previous key block seqno {}", last_key_block.seq_no)
         }
@@ -3736,8 +3734,9 @@ impl ValidateQuery {
         self.compute_next_state(&mut base, &mc_data)?;
         self.unpack_prev_state(&mut base)?;
         self.unpack_next_state(&mut base, &mc_data)?;
-        base.config_params = mc_data.config_params.clone();
-        base.config = BlockchainConfig::with_config(mc_data.config_params.clone())?;
+        base.config_params = mc_data.state().config_params()?.clone();
+        base.config = BlockchainConfig::with_config(mc_data.state().config_params()?.clone())?;
+        base.capabilities = base.config_params.capabilities();
         Self::load_block_data(&mut base)?;
         Ok((base, mc_data))
     }
@@ -3772,7 +3771,7 @@ impl ValidateQuery {
             &self.validator_set,
             base.block_id(),
             base.shard(),
-            &mc_data.mc_state_extra,
+            mc_data.mc_state_extra(),
             &self.old_mc_shards,
             &base.config_params,
             base.now(),
@@ -3797,7 +3796,7 @@ impl ValidateQuery {
 
         Self::check_in_msg_descr(base.clone(), manager.clone(), &mut tasks)?;
         Self::check_out_msg_descr(base.clone(), manager.clone(), &mut tasks)?;
-        Self::check_transactions(base.clone(), &mut tasks)?;
+        Self::check_transactions(base.clone(), mc_data.libraries().clone(), &mut tasks)?;
 
         self.run_tasks(tasks).await?;
 

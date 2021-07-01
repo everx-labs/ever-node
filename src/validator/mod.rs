@@ -9,12 +9,17 @@ pub mod validator_session_listener;
 mod candidate_db;
 pub mod collator;
 pub mod collator_sync;
+pub mod out_msg_queue;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 mod slashing;
 
-use ton_types::UInt256;
-use ton_block::BlockIdExt;
+use ton_types::{Result, UInt256, error};
+use ton_block::{
+    BlkMasterInfo, BlockIdExt, ConfigParams, CurrencyCollection,
+    ExtBlkRef, McStateExtra, Libraries,
+};
+use crate::shard_state::ShardStateStuff;
 
 #[derive(Clone, Default, Debug)]
 pub struct BlockCandidate {
@@ -30,6 +35,58 @@ pub struct CollatorSettings {
     pub want_split: Option<bool>,
     pub want_merge: Option<bool>,
     pub max_collate_threads: Option<usize>,
+}
+
+pub struct McData {
+    mc_state_extra: McStateExtra,
+    prev_key_block_seqno: u32,
+    prev_key_block: Option<BlockIdExt>,
+    state: ShardStateStuff,
+
+    // TODO put here what you need from masterchain state and block and init in `unpack_last_mc_state`
+}
+
+impl McData {
+    pub fn new(mc_state: ShardStateStuff) -> Result<Self> {
+
+        let mc_state_extra = mc_state.state().read_custom()?
+            .ok_or_else(|| error!("Can't read custom field from mc state"))?;
+
+        // prev key block
+        let (prev_key_block_seqno, prev_key_block) = if mc_state_extra.after_key_block {
+            (mc_state.block_id().seq_no(), Some(mc_state.block_id().clone()))
+        } else if let Some(block_ref) = mc_state_extra.last_key_block.clone() {
+            (block_ref.seq_no, Some(block_ref.master_block_id().1))
+        } else {
+            (0, None)
+        };
+        Ok(Self{
+            mc_state_extra,
+            prev_key_block,
+            prev_key_block_seqno,
+            state: mc_state
+        })
+    }
+
+    pub fn config(&self) -> &ConfigParams { self.mc_state_extra.config() }
+    pub fn mc_state_extra(&self) -> &McStateExtra { &self.mc_state_extra }
+    pub fn prev_key_block_seqno(&self) -> u32 { self.prev_key_block_seqno }
+    pub fn prev_key_block(&self) -> Option<&BlockIdExt> { self.prev_key_block.as_ref() }
+    pub fn state(&self) -> &ShardStateStuff { &self.state }
+    pub fn vert_seq_no(&self) -> u32 { self.state().state().vert_seq_no() }
+    pub fn get_lt_align(&self) -> u64 { 1000000 }
+    pub fn global_balance(&self) -> &CurrencyCollection { &self.mc_state_extra.global_balance }
+    pub fn libraries(&self) -> &Libraries { self.state.state().libraries() }
+    pub fn master_ref(&self) -> BlkMasterInfo {
+        let end_lt = self.state.state().gen_lt();
+        let master = ExtBlkRef {
+            end_lt,
+            seq_no: self.state.state().seq_no(),
+            root_hash: self.state.block_id().root_hash().clone(),
+            file_hash: self.state.block_id().file_hash().clone(),
+        };
+        BlkMasterInfo { master }
+    }
 }
 
 /* UNUSED

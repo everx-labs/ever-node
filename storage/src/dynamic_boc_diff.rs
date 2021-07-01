@@ -1,12 +1,12 @@
 use crate::{cell_db::CellDb, types::CellId};
 use fnv::FnvHashMap;
 use std::sync::{Arc, RwLock};
-use ton_types::{Cell, Result};
+use ton_types::Result;
 
 #[derive(Debug)]
 pub(super) struct DynamicBocDiff {
     db: Arc<CellDb>,
-    diff: RwLock<FnvHashMap<CellId, Option<Cell>>>,
+    diff: RwLock<FnvHashMap<CellId, Option<Vec<u8>>>>,
 }
 
 impl DynamicBocDiff {
@@ -17,10 +17,10 @@ impl DynamicBocDiff {
         }
     }
 
-    pub fn add_cell(&self, cell_id: CellId, cell: Cell) {
+    pub fn add_cell(&self, cell_id: CellId, cell_data: Vec<u8>) {
         self.diff.write()
             .expect("Poisoned RwLock")
-            .insert(cell_id, Some(cell));
+            .insert(cell_id, Some(cell_data));
     }
 
     pub fn contains_cell(&self, cell_id: &CellId) -> bool {
@@ -40,12 +40,12 @@ impl DynamicBocDiff {
     pub fn apply(self) -> Result<()> {
         let transaction = self.db.begin_transaction()?;
 
-        for (cell_id, cell_opt) in self.diff.write()
+        for (cell_id, cell_data_opt) in self.diff.write()
             .expect("Poisoned RwLock")
             .drain()
         {
-            match cell_opt {
-                Some(cell) => CellDb::put_cell(&*transaction, &cell_id, cell)?,
+            match cell_data_opt {
+                Some(cell_data) => CellDb::put_cell(&*transaction, &cell_id, &cell_data)?,
                 None => transaction.delete(&cell_id),
             }
         }
