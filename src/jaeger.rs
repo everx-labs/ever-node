@@ -13,7 +13,7 @@ use std::{
 };
 
 use ton_types::types::*;
-use ton_types::{Result, fail};
+use ton_types::fail;
 
 #[allow(dead_code)]
 enum LogKind {
@@ -42,7 +42,7 @@ pub fn message_from_kafka_received(kf_key: &[u8]) {
         match JAEGER.lock() {
             Ok(mut helper) => {
                     if msg_id_bytes.len() == 32 {
-                        let msg_id = UInt256::from(msg_id_bytes).to_hex_string();
+                        let msg_id = hex::encode(&msg_id_bytes);
                         helper.send_span(msg_id, "kafka msg received".to_string());
                     } else {
                         log::error!(target: "jaeger", "Corrupted key field in message from q-server");

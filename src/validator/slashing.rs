@@ -253,17 +253,19 @@ impl SlashingManager {
 
         const INTERNAL_CALL: bool = false; //external message
 
-        let body = match report_fn.encode_input(&header, &parameters, INTERNAL_CALL, None) {
+        let result = report_fn.encode_input(&header, &parameters, INTERNAL_CALL, None)
+            .and_then(|builder| builder.into_cell());
+        let body = match result {
             Err(err) => {
                 log::error!(target: "validator", "SlashingManager::slash_validator: failed to encode input: {:?}", err);
-                return;
+                return
             }
-            Ok(result) => result,
+            Ok(result) => result
         };
 
         log::info!(target: "validator", "{}({}): SlashingManager::slash_validator: message body {:?}", file!(), line!(), body);
 
-        let body: SliceData = body.into();
+        let body = SliceData::from(body);
 
         //prepare header of the message
 

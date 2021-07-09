@@ -36,12 +36,12 @@ use ton_block::{
     InMsgDescr, OutMsgDescr, ShardAccount, ShardAccountBlocks, ShardAccounts,
     Account, AccountBlock, AccountStatus,
     ShardFeeCreated, TransactionDescr, OutMsgQueueKey, BlockLimits,
-    GlobalCapabilities, TrComputePhase, HashUpdate, Libraries,
+    GlobalCapabilities, TrComputePhase, Libraries,
     INVALID_WORKCHAIN_ID, MASTERCHAIN_ID, MAX_SPLIT_DEPTH,
 };
 use ton_executor::{
     BlockchainConfig, CalcMsgFwdFees, OrdinaryTransactionExecutor, TickTockTransactionExecutor, 
-    TransactionExecutor
+    TransactionExecutor, ExecuteParams
 };
 use ton_types::{
     Result,
@@ -2963,13 +2963,18 @@ impl ValidateQuery {
                 reject_query!("unable to verify split install transaction {} of account {}", lt, account_addr.to_hex_string())
             }
         };
-        let mut trans2 = executor.execute_for_account(in_msg.as_ref(), account, libraries.inner(), base.now(), base.info.start_lt(), tr_lt, false)?;
-        if (base.capabilities & (GlobalCapabilities::CapFastStorageStat as u64)) != 0 {
-            account.update_storage_stat_fast()?; // use new mechanism will be here
-        } else {
-            account.update_storage_stat()?;
-        }
-        let _old_account_root = std::mem::replace(account_root, account.serialize()?);
+        let params = ExecuteParams {
+            state_libs: libraries.inner(),
+            block_unixtime: base.now(),
+            block_lt: base.info.start_lt(),
+            last_tr_lt: tr_lt,
+            seed_block: base.extra.rand_seed().clone(),
+            debug: false,
+            ..ExecuteParams::default()
+        };
+        let _old_account_root = account_root.clone();
+        let mut trans2 = executor.execute_with_libs_and_params(in_msg.as_ref(), account_root, params)?;
+        *account = Account::construct_from_cell(account_root.clone())?;
         let new_hash = account_root.repr_hash();
         if state_update.new_hash != new_hash {
             reject_query!("transaction {} of {:x} is invalid: it claims that the new \
@@ -2988,7 +2993,6 @@ impl ValidateQuery {
         // we cannot know prev transaction in executor
         trans2.set_prev_trans_hash(trans.prev_trans_hash());
         trans2.set_prev_trans_lt(trans.prev_trans_lt());
-        trans2.write_state_update(&HashUpdate::with_hashes(old_hash, new_hash))?;
         let trans2_root = trans2.serialize()?;
         if trans_root != trans2_root {
             reject_query!("re created transaction {} doesn't correspond", lt)

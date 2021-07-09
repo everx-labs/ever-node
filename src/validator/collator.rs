@@ -38,13 +38,13 @@ use ton_block::{
     OutMsg, OutMsgDescr, OutMsgQueueKey, TopBlockDescrSet,
     ValidatorSet, ShardHashes, CommonMsgInfo, Deserializable,
     GlobalCapabilities, McShardRecord, ShardDescr, FutureSplitMerge, Workchains, WorkchainDescr,
-    CreatorStats, KeyExtBlkRef, KeyMaxLt, ShardStateSplit, GlobalVersion, BlkPrevInfo, Account,
+    CreatorStats, KeyExtBlkRef, KeyMaxLt, ShardStateSplit, GlobalVersion, BlkPrevInfo,
 };
 use ton_executor::{
-    BlockchainConfig, OrdinaryTransactionExecutor, TickTockTransactionExecutor, TransactionExecutor,
+    BlockchainConfig, OrdinaryTransactionExecutor, TickTockTransactionExecutor, TransactionExecutor, ExecuteParams,
 };
 use ton_types::{
-    error, fail, Cell, Result, AccountId, HashmapType, UInt256, UsageTree, HashmapE,
+    error, fail, Cell, Result, AccountId, HashmapType, UInt256, UsageTree,
 };
 use futures::try_join;
 use rand::Rng;
@@ -581,6 +581,8 @@ struct ExecutionManager {
     max_lt: Arc<AtomicU64>,
     // this time is used if account's lt is smaller
     min_lt: Arc<AtomicU64>,
+    // block random seed
+    seed_block: UInt256,
 
     total_trans_duration: Arc<AtomicU64>,
     collated_block_descr: Arc<String>,
@@ -592,6 +594,7 @@ impl ExecutionManager {
     pub fn new(
         gen_utime: u32,
         start_lt: u64,
+        seed_block: UInt256,
         libraries: Libraries,
         config: BlockchainConfig,
         max_collate_threads: usize,
@@ -609,6 +612,7 @@ impl ExecutionManager {
             config,
             start_lt,
             gen_utime,
+            seed_block,
             max_lt: Arc::new(AtomicU64::new(start_lt + 1)),
             min_lt: Arc::new(AtomicU64::new(start_lt + 1)),
             total_trans_duration: Arc::new(AtomicU64::new(0)),
@@ -674,12 +678,12 @@ impl ExecutionManager {
             account_addr,
             accounts,
             Arc::new(AtomicU64::new(self.min_lt.load(Ordering::Relaxed))),
-            self.config.raw_config().capabilities(),
         )?;
 
         let debug = self.debug;
-        let gen_utime = self.gen_utime;
+        let block_unixtime = self.gen_utime;
         let block_lt = self.start_lt;
+        let seed_block = self.seed_block;
         let collated_block_descr = self.collated_block_descr.clone();
         let total_trans_duration = self.total_trans_duration.clone();
         let wait_tr = self.wait_tr.clone();
@@ -696,7 +700,7 @@ impl ExecutionManager {
 
                 shard_acc.lt().fetch_max(min_lt.load(Ordering::Relaxed), Ordering::Relaxed);
                 shard_acc.lt().fetch_max(
-                    shard_acc.account().last_tr_time().unwrap_or_default() + 1, 
+                    shard_acc.last_trans_lt() + 1, 
                     Ordering::Relaxed
                 );
                 shard_acc.lt().fetch_max(
@@ -704,20 +708,26 @@ impl ExecutionManager {
                     Ordering::Relaxed
                 );
 
-                let mut account = shard_acc.account().clone();
-                let lt1 = shard_acc.lt().clone();
+                let mut account_root = shard_acc.account_root();
+                let params = ExecuteParams {
+                    state_libs: libraries.clone(),
+                    block_unixtime,
+                    block_lt,
+                    last_tr_lt: shard_acc.lt(),
+                    seed_block,
+                    debug,
+                    ..ExecuteParams::default()
+                };
                 let new_msg1 = new_msg.clone();
-                let libraries = libraries.clone();
-                let (mut transaction_res, account) = tokio::task::spawn_blocking(move || {
+                let (mut transaction_res, account_root) = tokio::task::spawn_blocking(move || {
                     (
-                        Self::execute_new_message(&new_msg1, lt1, &mut account, libraries,
-                            config, gen_utime, block_lt, debug),
-                        account
+                        Self::execute_new_message(&new_msg1, &mut account_root, config, params),
+                        account_root
                     )
                 }).await?;
 
                 if let Ok(transaction) = transaction_res.as_mut() {
-                    shard_acc.add_transaction(transaction, account)?;
+                    shard_acc.add_transaction(transaction, account_root)?;
                 }
                 let duration = now.elapsed().as_micros() as u64;
                 total_trans_duration.fetch_add(duration, Ordering::Relaxed);
@@ -734,13 +744,9 @@ impl ExecutionManager {
 
     fn execute_new_message(
         new_msg: &AsyncMessage,
-        lt: Arc::<AtomicU64>,
-        account: &mut Account,
-        libraries: HashmapE,
+        account_root: &mut Cell,
         config: BlockchainConfig,
-        gen_utime: u32,
-        block_lt: u64,
-        debug: bool
+        params: ExecuteParams,
     ) -> Result<Transaction> {
         let (executor, msg_opt): (Box<dyn TransactionExecutor>, _) = match new_msg {
             AsyncMessage::Int(enq, _our) => {
@@ -756,7 +762,7 @@ impl ExecutionManager {
                 (Box::new(TickTockTransactionExecutor::new(config, tt.clone())), None)
             }
         };
-        executor.execute_for_account(msg_opt, account, libraries, gen_utime, block_lt, lt, debug)
+        executor.execute_with_libs_and_params(msg_opt, account_root, params)
     }
 
     async fn wait_transaction(&mut self, collator_data: &mut CollatorData) -> Result<()> {
@@ -852,7 +858,7 @@ pub struct Collator {
     collated_block_descr: Arc<String>,
 
     debug: bool,
-    rand_seed: Option<UInt256>,
+    rand_seed: UInt256,
     collator_settings: CollatorSettings,
 
     started: Instant,
@@ -937,6 +943,8 @@ impl Collator {
                     the immediately preceding masterchain block");
             }
         }
+
+        let rand_seed = rand_seed.unwrap_or_else(|| secure_256_bits().into());
 
         Ok(Self {
             new_block_id_part: BlockIdExt {
@@ -1158,6 +1166,7 @@ impl Collator {
         let mut exec_manager = ExecutionManager::new(
             collator_data.gen_utime(),
             collator_data.start_lt()?,
+            self.rand_seed,
             mc_data.libraries().clone(),
             collator_data.config.clone(),
             self.collator_settings.max_collate_threads.unwrap_or(MAX_COLLATE_THREADS),
@@ -1772,7 +1781,7 @@ impl Collator {
         let config_account_id = AccountId::from(mc_data.config().config_addr.clone());
         let fundamental_dict = mc_data.config().fundamental_smc_addr()?;
         for res in &fundamental_dict {
-            let account_id = res?.0.into();
+            let account_id = res?.0.into_cell()?.into();
             self.create_ticktock_transaction(account_id, tock, prev_data, collator_data, 
                 exec_manager).await?;
             self.check_stop_flag()?;
@@ -1827,7 +1836,7 @@ impl Collator {
         }
         log::trace!("{}: create_special_transactions", self.collated_block_descr);
 
-        let account_id = AccountId::from(mc_data.config().fee_collector_address()?.write_to_new_cell()?);
+        let account_id = AccountId::from(mc_data.config().fee_collector_address()?.serialize()?);
         self.create_special_transaction(
             account_id,
             collator_data.value_flow.recovered.clone(),
@@ -1838,7 +1847,7 @@ impl Collator {
         ).await?;
         self.check_stop_flag()?;
 
-        let account_id = AccountId::from(mc_data.config().minter_address()?.write_to_new_cell()?);
+        let account_id = AccountId::from(mc_data.config().minter_address()?.serialize()?);
         self.create_special_transaction(
             account_id,
             collator_data.value_flow.minted.clone(),
@@ -2136,7 +2145,7 @@ impl Collator {
             std::mem::drop(sender);
             let mut shard_acc = handle.await
                 .map_err(|err| error!("account {:x} thread didn't finish: {}", account_id, err))??;
-            let account = shard_acc.account();
+            let account = shard_acc.read_account()?;
             if let Some(addr) = &config_addr {
                 if addr == &account_id {
                     let new_config_root = account
@@ -2281,10 +2290,7 @@ impl Collator {
             }
             extra.write_custom(Some(&mc_block_extra))?;
         }
-        extra.rand_seed = match self.rand_seed.as_ref() {
-            None => secure_256_bits().into(),
-            Some(rand_seed) => rand_seed.clone()
-        };
+        extra.rand_seed = self.rand_seed.clone();
         extra.created_by = self.created_by.clone();
 
         // construct block

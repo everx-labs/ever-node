@@ -175,7 +175,7 @@ impl OutMsgQueueInfoStuff {
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
             if !subshard.contains_full_prefix(enq.cur_prefix()) {
-                out_queue.set_builder_serialized(key.into(), &BuilderData::from_slice(&value), &lt)?;
+                out_queue.set_builder_serialized(key.clone().into_cell()?.into(), &BuilderData::from_slice(&value), &lt)?;
                 Ok(HashmapFilterResult::Remove)
             } else {
                 Ok(HashmapFilterResult::Accept)
@@ -911,7 +911,7 @@ impl MsgQueueMergerIterator {
     fn next_item(&mut self) -> Result<Option<(OutMsgQueueKey, MsgEnqueueStuff, u64, BlockIdExt)>> {
         while let Some(mut root) = self.roots.pop() {
             if root.bit_len == 0 {
-                let key = OutMsgQueueKey::construct_from(&mut root.key.into())?;
+                let key = OutMsgQueueKey::construct_from_cell(root.key.into_cell()?)?;
                 let enq = MsgEnqueueStuff::construct_from(&mut root.cursor, root.lt)?;
                 return Ok(Some((key, enq, root.lt, root.block_id)))
             }

@@ -34,7 +34,7 @@ use crate::external_db::kafka_consumer::KafkaConsumer;
 use crate::{
     full_node::telemetry::FullNodeTelemetry,
     validator::telemetry::CollatorValidatorTelemetry,
-    network::telemetry::FullNodeNetworkTelemetry,
+    network::telemetry::{FullNodeNetworkTelemetry, FullNodeNetworkTelemetryKind},
 };
 use overlay::QueriesConsumer;
 #[cfg(feature = "metrics")]
@@ -119,8 +119,7 @@ impl <T> DownloadContext<'_, T> {
         loop {
             match self.downloader.try_download(self).await {
                 Err(e) => self.log(format!("{}", e).as_str(), attempt),
-                Ok(None) => self.log("got no_data", attempt),
-                Ok(Some(ret)) => break Ok(ret)
+                Ok(ret) => break Ok(ret)
             }
             attempt += 1;
             if let Some(limit) = &self.limit {
@@ -157,7 +156,7 @@ trait Downloader: Send + Sync {
     async fn try_download(
         &self, 
         context: &DownloadContext<'_, Self::Item>,
-    ) -> Result<Option<Self::Item>>;
+    ) -> Result<Self::Item>;
 }
 
 struct BlockDownloader;
@@ -168,14 +167,14 @@ impl Downloader for BlockDownloader {
     async fn try_download(
         &self, 
         context: &DownloadContext<'_, Self::Item>,
-    ) -> Result<Option<Self::Item>> {
+    ) -> Result<Self::Item> {
         if let Some(handle) = context.db.load_block_handle(context.id)? {
             let mut is_link = false;
             if handle.has_data() && handle.has_proof_or_link(&mut is_link) {
-                return Ok(Some((
+                return Ok((
                     context.db.load_block_data(&handle).await?,
                     context.db.load_block_proof(&handle, is_link).await?
-                )));
+                ));
             }
         }
         #[cfg(feature = "telemetry")]
@@ -200,11 +199,11 @@ impl Downloader for BlockProofDownloader {
     async fn try_download(
         &self, 
         context: &DownloadContext<'_, Self::Item>,
-    ) -> Result<Option<Self::Item>> {
+    ) -> Result<Self::Item> {
         if let Some(handle) = context.db.load_block_handle(context.id)? {
             let mut is_link = false;
             if handle.has_proof_or_link(&mut is_link) {
-                return Ok(Some(context.db.load_block_proof(&handle, is_link).await?));
+                return Ok(context.db.load_block_proof(&handle, is_link).await?);
             }
         }
         context.client.download_block_proof(
@@ -223,17 +222,17 @@ impl Downloader for NextBlockDownloader {
     async fn try_download(
         &self, 
         context: &DownloadContext<'_, Self::Item>,
-    ) -> Result<Option<Self::Item>> {
+    ) -> Result<Self::Item> {
         if let Some(prev_handle) = context.db.load_block_handle(context.id)? {
             if prev_handle.has_next1() {
                 let next_id = context.db.load_block_next1(context.id)?;
                 if let Some(next_handle) = context.db.load_block_handle(&next_id)? {
                     let mut is_link = false;
                     if next_handle.has_data() && next_handle.has_proof_or_link(&mut is_link) {
-                        return Ok(Some((
+                        return Ok((
                             context.db.load_block_data(&next_handle).await?,
                             context.db.load_block_proof(&next_handle, is_link).await?
-                        )));
+                        ));
                     }
                 }
             }
@@ -250,13 +249,13 @@ impl Downloader for ZeroStateDownloader {
     async fn try_download(
         &self, 
         context: &DownloadContext<'_, Self::Item>,
-    ) -> Result<Option<Self::Item>> {
+    ) -> Result<Self::Item> {
         if let Some(handle) = context.db.load_block_handle(context.id)? {
             if handle.has_state() {
                 let zs = context.db.load_shard_state_dynamic(context.id)?;
                 let mut data = vec!();
                 zs.write_to(&mut data)?;
-                return Ok(Some((zs, data)));
+                return Ok((zs, data));
             }
         }
         context.client.download_zero_state(context.id).await
@@ -334,7 +333,7 @@ impl Engine {
             #[cfg(feature = "telemetry")]
             validator_telemetry: CollatorValidatorTelemetry::default(),
             #[cfg(feature = "telemetry")]
-            full_node_service_telemetry: FullNodeNetworkTelemetry::default(),
+            full_node_service_telemetry: FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Service),
         });
 
         save_top_shard_blocks_worker(engine.clone(), shard_blocks_receiver);

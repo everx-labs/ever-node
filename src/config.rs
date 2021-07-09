@@ -39,9 +39,6 @@ pub trait KeyRing : Sync + Send  {
     fn sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Vec<u8>>;
 }
 
-pub trait NodeConfigSubscriber: Send + Sync {
-}
-
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct TonNodeConfig {
     log_config_name: Option<String>,
@@ -503,6 +500,16 @@ impl TonNodeConfig {
     }
 }
 
+pub enum ConfigEvent {
+    AddValidatorAdnlKey(Arc<KeyId>, i32),
+    RemoveValidatorAdnlKey(Arc<KeyId>, i32)
+}
+
+#[async_trait::async_trait]
+pub trait NodeConfigSubscriber: Send + Sync {
+    async fn event(&self, sender: ConfigEvent) -> Result<bool>;
+}
+
 #[derive(Debug)]
 enum Task {
     Generate,
@@ -519,26 +526,33 @@ enum Answer {
     GetKey(Option<KeyOption>)
 }
 
+pub struct NodeConfigHandlerContext{
+    reader: tokio::sync::mpsc::UnboundedReceiver<Arc<(Arc<Wait<Answer>>, Task)>>,
+    config: TonNodeConfig,
+}
+
 pub struct NodeConfigHandler {
-    //subscribers: Vec<Arc<dyn NodeConfigSubscriber>>,
+    runtime_handle: tokio::runtime::Handle,
     sender: tokio::sync::mpsc::UnboundedSender<Arc<(Arc<Wait<Answer>>, Task)>>,
     key_ring: Arc<lockfree::map::Map<String, Arc<KeyOption>>>,
     validator_keys: Arc<ValidatorKeys>
 }
 
 impl NodeConfigHandler {
-    pub fn new(config: TonNodeConfig) -> Result<Self> {
+    pub fn create(
+        config: TonNodeConfig,
+        runtime_handle: &tokio::runtime::Handle
+    ) -> Result<(Arc<Self>, NodeConfigHandlerContext)> {
         let (sender, reader) = tokio::sync::mpsc::unbounded_channel();
 
-        let handler = NodeConfigHandler {
-           // subscribers: Vec::new(),
+        let config_handler = Arc::new(NodeConfigHandler {
+            runtime_handle: runtime_handle.clone(),
             sender: sender,
             key_ring: Arc::new(lockfree::map::Map::new()),
             validator_keys: Arc::new(ValidatorKeys::new())
-        };
-        handler.start_sheduler(config.file_name.clone(), config, reader)?;
+        });
 
-        Ok(handler)
+        Ok((config_handler, NodeConfigHandlerContext{reader, config}))
     }
 
     pub fn get_validator_status(&self) -> bool {
@@ -578,6 +592,7 @@ impl NodeConfigHandler {
             wait.clone(), 
             Task::AddValidatorAdnlKey(validator_key_hash.clone(), validator_adnl_key_hash.clone())
         ));
+
         wait.request();
         if let Err(e) = self.sender.send(pushed_task) {
             fail!("Error add_validator_adnl_key: {}", e);
@@ -587,7 +602,6 @@ impl NodeConfigHandler {
             Some(Some(answer)) => answer,
             None => fail!("Waiting returned an internal error!")
         };
-
        let result = match answer {
            Answer::AddValidatorAdnlKey(res) => res,
            _ => fail!("Bad answer (AddValidatorAdnlKey)!"),
@@ -596,7 +610,7 @@ impl NodeConfigHandler {
        result
     }
 
-    pub async fn get_actual_validator_adnl_ids(&self) -> Result<Vec<Arc<KeyId>>> {
+    pub fn get_actual_validator_adnl_ids(&self) -> Result<Vec<Arc<KeyId>>> {
         let adnl_ids = self.validator_keys.get_validator_adnl_ids();
         let mut result = Vec::new();
 
@@ -688,13 +702,28 @@ impl NodeConfigHandler {
     }
 
     fn add_validator_adnl_key_and_save(
+        self: Arc<Self>,
         validator_keys: Arc<ValidatorKeys>,
         config: &mut TonNodeConfig,
         validator_key_hash: &[u8; 32],
-        validator_adnl_key_hash: &[u8; 32]
+        validator_adnl_key_hash: &[u8; 32],
+        subscribers: Vec<Arc<dyn NodeConfigSubscriber>>
     )-> Result<()> {
         let key = config.add_validator_adnl_key(&validator_key_hash, validator_adnl_key_hash)?;
+        let election_id = key.election_id.clone();
         validator_keys.add(key)?;
+
+        let adnl_key_id = KeyId::from_data(from_slice!(validator_adnl_key_hash, 32));
+
+        self.clone().runtime_handle.spawn(async move {
+            for subscriber in subscribers.iter() {
+                if let Err(e) = subscriber.event(
+                    ConfigEvent::AddValidatorAdnlKey(adnl_key_id.clone(), election_id)
+                ).await {
+                    log::warn!("subscriber error: {:?}", e);
+                }
+            }
+        });
         // check validator keys
         Self::revision_validator_keys(validator_keys, config)?;
         config.save_to_file(&config.file_name)?;
@@ -741,7 +770,7 @@ impl NodeConfigHandler {
         None
     }
 
-    fn load_config(&self, config: &TonNodeConfig) -> Result<()>{
+    fn load_config(&self, config: &TonNodeConfig, subscribers: &Vec<Arc<dyn NodeConfigSubscriber>>) -> Result<()>{
         // load key ring
         if let Some(key_ring) = &config.validator_key_ring {
             for (key_id, key) in key_ring.iter() {
@@ -752,12 +781,29 @@ impl NodeConfigHandler {
         }
 
         // load validator keys
-        
         if let Some(validator_keys) = &config.validator_keys {
             for key in validator_keys.iter() {
-               if let Err(e) = self.validator_keys.add(key.clone()) {
-                   log::warn!("fail added key to validator keys map: {}", e);
-               }
+                if let Err(e) = self.validator_keys.add(key.clone()) {
+                    log::warn!("fail added key to validator keys map: {}", e);
+                }
+                match &key.validator_adnl_key_id {
+                    None => { continue; }
+                    Some(validator_adnl_key_id) => {
+                        let adnl_key_id = base64::decode(&validator_adnl_key_id)?;
+                        let adnl_key_id = KeyId::from_data(from_slice!(adnl_key_id, 32));
+                        let election_id = key.election_id;
+                        let subscribers = subscribers.clone();
+                        self.clone().runtime_handle.spawn(async move {
+                            for subscriber in subscribers.iter() {
+                                if let Err(e) = subscriber.event(
+                                    ConfigEvent::AddValidatorAdnlKey(adnl_key_id.clone(), election_id)
+                                ).await {
+                                    log::warn!("subscriber error: {:?}", e);
+                                }
+                            }
+                        });
+                    }
+                }
             }
         }
         Ok(())
@@ -771,20 +817,19 @@ impl NodeConfigHandler {
         Ok(())
     }
 
-    fn start_sheduler(
-        &self,
-        config_name: String,
-        config: TonNodeConfig,
-        reader: tokio::sync::mpsc::UnboundedReceiver<Arc<(Arc<Wait<Answer>>, Task)>>
+    pub fn start_sheduler(
+        self: Arc<Self>,
+        config_handler_context: NodeConfigHandlerContext,
+        subscribers: Vec<Arc<dyn NodeConfigSubscriber>>
     ) -> Result<()> {
-        let mut actual_config = config;
-        let mut reader = reader;
-        let name = config_name.clone();
+        let name = config_handler_context.config.file_name.clone();
+        let mut actual_config = config_handler_context.config;
+        let mut reader = config_handler_context.reader;
         let key_ring = self.key_ring.clone();
         let validator_keys = self.validator_keys.clone();
-        self.load_config(&actual_config)?;
+        self.load_config(&actual_config, &subscribers)?;
         
-        tokio::spawn(async move {
+        self.clone().runtime_handle.spawn(async move {
             while let Some(task) = reader.recv().await {
                 match task.1 {
                     Task::Generate => {
@@ -793,10 +838,12 @@ impl NodeConfigHandler {
                     },
                     Task::AddValidatorAdnlKey(key, adnl_key) => {
                         let result = NodeConfigHandler::add_validator_adnl_key_and_save(
+                            self.clone(),
                             validator_keys.clone(),
                             &mut actual_config,
                             &key,
-                            &adnl_key
+                            &adnl_key,
+                            subscribers.clone()
                         );
                         task.0.respond(Some(Answer::AddValidatorAdnlKey(result)));
                     },

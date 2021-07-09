@@ -47,11 +47,11 @@ impl BlockProofStuff {
                 NodeError::InvalidData(format!("proof for non-masterchain block {}", id))
             )
         }
-        let cell = proof.write_to_new_cell()?.into();
+        let cell = proof.serialize()?.into();
         let mut data = vec!();
         serialize_tree_of_cells(&cell, &mut data)?;
         Ok(Self {
-            root: proof.write_to_new_cell()?.into(),
+            root: proof.serialize()?.into(),
             proof,
             is_link,
             id,

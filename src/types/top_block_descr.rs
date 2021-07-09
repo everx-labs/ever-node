@@ -143,7 +143,7 @@ impl TopBlockDescrStuff {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut data = Vec::<u8>::new();
-        serialize_tree_of_cells(&self.tbd.write_to_new_cell()?.into(), &mut data)?;
+        serialize_tree_of_cells(&self.tbd.serialize()?, &mut data)?;
         Ok(data)
     }
 
