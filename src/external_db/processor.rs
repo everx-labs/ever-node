@@ -17,7 +17,7 @@ use crate::{
 };
 
 lazy_static::lazy_static!(
-    static ref ACCOUNT_NONE_HASH: UInt256 = Cell::from(Account::default().write_to_new_cell().unwrap()).repr_hash();
+    static ref ACCOUNT_NONE_HASH: UInt256 = Account::default().serialize().unwrap().repr_hash();
 );
 
 enum DbRecord {
@@ -153,7 +153,7 @@ impl<T: WriteData> Processor<T> {
     }
 
     fn prepare_account_record(account: Account) -> Result<DbRecord> {
-        let boc = serialize_toc(&account.write_to_new_cell()?.into())?;
+        let boc = serialize_toc(&account.serialize()?.into())?;
         let set = ton_block_json::AccountSerializationSet {
             account,
             proof: None,

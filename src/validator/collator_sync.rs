@@ -38,7 +38,7 @@ use ton_block::{
     CreatorStats, KeyExtBlkRef, KeyMaxLt, ShardStateSplit, GlobalVersion,
 };
 use ton_executor::{
-    BlockchainConfig, OrdinaryTransactionExecutor, TickTockTransactionExecutor, TransactionExecutor
+    BlockchainConfig, OrdinaryTransactionExecutor, TickTockTransactionExecutor, TransactionExecutor, ExecuteParams,
 };
 use ton_types::{
     error, fail, Cell, Result, AccountId, HashmapType, UInt256, HashmapE, UsageTree,
@@ -174,6 +174,7 @@ struct CollatorData {
     gen_utime: u32,
     config: BlockchainConfig,
     collated_block_descr: String,
+    block_seed: UInt256,
 
     // fields, uninitialized by default
     start_lt: Option<u64>,
@@ -221,6 +222,7 @@ impl CollatorData {
         usage_tree: UsageTree,
         libraries: Libraries,
         prev_data: &PrevData,
+        block_seed: UInt256,
         is_masterchain: bool,
         collated_block_descr: String,
 ) -> Result<Self> {
@@ -235,6 +237,7 @@ impl CollatorData {
             shard_top_block_descriptors: Vec::new(),
             block_create_count: HashMap::new(),
             new_messages: Default::default(),
+            block_seed: block_seed,
             usage_tree,
             libraries,
             gen_utime,
@@ -579,7 +582,7 @@ pub struct Collator {
     collated_block_descr: String,
 
     debug: bool,
-    rand_seed: Option<UInt256>,
+    rand_seed: UInt256,
     collator_settings: CollatorSettings,
 }
 
@@ -661,6 +664,7 @@ impl Collator {
             }
         }
 
+        let rand_seed = rand_seed.unwrap_or_else(|| secure_256_bits().into());
         Ok(Self {
             new_block_id_part: BlockIdExt {
                 shard_id: shard.clone(),
@@ -792,7 +796,7 @@ impl Collator {
 
         let now = self.init_utime(&mc_data, &prev_data)?;
         let config = BlockchainConfig::with_config(mc_data.config().clone())?;
-        let mut collator_data = CollatorData::new(now, config, usage_tree, libraries, &prev_data,
+        let mut collator_data = CollatorData::new(now, config, usage_tree, libraries, &prev_data, self.rand_seed,
             is_masterchain, self.collated_block_descr.clone())?;
 
         if !self.shard.is_masterchain() {
@@ -1474,7 +1478,7 @@ impl Collator {
         let fundamental_dict = mc_data.config().fundamental_smc_addr()?;
         let req_lt = collator_data.max_lt()? + 1;
         for res in &fundamental_dict {
-            let account_id = res?.0.into();
+            let account_id = res?.0.into_cell()?.into();
             self.create_ticktock_transaction(account_id, tock, prev_data, collator_data, req_lt)?;
         }
         self.create_ticktock_transaction(config_account_id, tock, prev_data, collator_data, req_lt)?;
@@ -1529,7 +1533,7 @@ impl Collator {
 
         let config = collator_data.config.clone();
         let executor = OrdinaryTransactionExecutor::new(config);
-        let account_id = AccountId::from(mc_data.config().fee_collector_address()?.write_to_new_cell()?);
+        let account_id = AccountId::from(mc_data.config().fee_collector_address()?.serialize()?);
         collator_data.recover_create_msg = self.create_special_transaction(
             account_id,
             collator_data.value_flow.recovered.clone(),
@@ -1538,7 +1542,7 @@ impl Collator {
             collator_data,
         )?;
 
-        let account_id = AccountId::from(mc_data.config().minter_address()?.write_to_new_cell()?);
+        let account_id = AccountId::from(mc_data.config().minter_address()?.serialize()?);
         collator_data.mint_msg = self.create_special_transaction(
             account_id,
             collator_data.value_flow.minted.clone(),
@@ -1782,42 +1786,30 @@ impl Collator {
                 account_id,
                 &prev_data.accounts,
                 Arc::new(AtomicU64::new(collator_data.start_lt()? + 1)),
-                executor.config().raw_config().capabilities()
             )?
         };
-        let mut account = shard_acc.account().clone();
+        let mut account_root = shard_acc.account_root();
         
         shard_acc.lt().fetch_max(req_lt, Ordering::Relaxed);
-        let lt = shard_acc.lt().clone();
-        let libraries = collator_data.libraries.clone().inner();
-
-        let now = std::time::Instant::now();
-        let (mut result, account) = {
-            let lt = lt.clone();
-            let gen_utime = collator_data.gen_utime;
-            let block_lt = collator_data.start_lt()?;
-            let debug = self.debug;
-            (
-                executor.execute_for_account(
-                    msg_opt,
-                    &mut account,
-                    libraries,
-                    gen_utime,
-                    block_lt,
-                    lt,
-                    debug
-                ),
-                account
-            )
+        let params = ExecuteParams {
+            state_libs: collator_data.libraries.clone().inner(),
+            block_unixtime: collator_data.gen_utime,
+            block_lt: collator_data.start_lt()?,
+            last_tr_lt: shard_acc.lt(),
+            seed_block: collator_data.block_seed,
+            debug: self.debug,
+            ..ExecuteParams::default()
         };
+        let now = std::time::Instant::now();
+        let mut result = executor.execute_with_libs_and_params(msg_opt, &mut account_root, params);
         if let Ok(mut transaction) = result.as_mut() {
             let gas = transaction.gas_used().unwrap_or(0);
             log::trace!("{}: GAS: {} TIME: {}ms execute for {}", 
                 self.collated_block_descr, gas, now.elapsed().as_millis(), transaction.logical_time());
 
-            shard_acc.add_transaction(&mut transaction, account)?;
+            shard_acc.add_transaction(&mut transaction, account_root)?;
             // LT of last out message or transaction itself
-            collator_data.update_max_lt(lt.load(Ordering::Relaxed) - 1);
+            collator_data.update_max_lt(shard_acc.lt().load(Ordering::Relaxed) - 1);
         }
         collator_data.update_account(shard_acc);
         result
@@ -2025,10 +2017,7 @@ impl Collator {
             }
             extra.write_custom(Some(&mc_block_extra))?;
         }
-        extra.rand_seed = match self.rand_seed.as_ref() {
-            None => secure_256_bits().into(),
-            Some(rand_seed) => rand_seed.clone()
-        };
+        extra.rand_seed = self.rand_seed.clone();
         extra.created_by = self.created_by.clone();
 
         // construct block
@@ -2110,7 +2099,7 @@ impl Collator {
         let old_config = state_extra.config();
         let (config, is_key_block) = if let Some(config_smc) = collator_data.account(&config_addr.into()) {
             let new_config_root = config_smc
-                .account()
+                .read_account()?
                 .get_data()
                 .ok_or_else(|| error!("Can't extract config's contract data"))?
                 .reference(0)?;

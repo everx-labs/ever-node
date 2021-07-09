@@ -39,8 +39,8 @@ pub trait FullNodeOverlayClient : Sync + Send {
     async fn broadcast_external_message(&self, msg: &[u8]) -> Result<BroadcastSendInfo>;
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()>;
     async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()>;
-    async fn download_block_proof(&self, block_id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<Option<BlockProofStuff>>;
-    async fn download_block_full(&self, id: &BlockIdExt) -> Result<Option<(BlockStuff, BlockProofStuff)>>;
+    async fn download_block_proof(&self, block_id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff>;
+    async fn download_block_full(&self, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
     async fn check_persistent_state(
         &self,
         block_id: &BlockIdExt,
@@ -56,9 +56,9 @@ pub trait FullNodeOverlayClient : Sync + Send {
         peer: Arc<Neighbour>,
         attempt: u32,
     ) -> Result<Vec<u8>>;
-    async fn download_zero_state(&self, id: &BlockIdExt) -> Result<Option<(ShardStateStuff, Vec<u8>)>>;
+    async fn download_zero_state(&self, id: &BlockIdExt) -> Result<(ShardStateStuff, Vec<u8>)>;
     async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, max_size: i32) -> Result<Vec<BlockIdExt>>;
-    async fn download_next_block_full(&self, prev_id: &BlockIdExt) -> Result<Option<(BlockStuff, BlockProofStuff)>>;
+    async fn download_next_block_full(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
     async fn download_archive(
         &self, 
         mc_seq_no: u32,
@@ -227,7 +227,7 @@ impl NodeClientOverlay {
         request: &T,
         peer: Arc<Neighbour>,
         attempt: u32,
-    ) -> Result<D>
+    ) -> Result<(D, Arc<Neighbour>)>
     where
         T: BoxedSerialize + std::fmt::Debug,
         D: BoxedDeserialize
@@ -236,7 +236,7 @@ impl NodeClientOverlay {
         match Deserializer::new(&mut Cursor::new(answer)).read_boxed() {
             Ok(data) => {
                 peer.query_success(roundtrip, true);
-                Ok(data)
+                Ok((data, peer))
             },
             Err(e) => {
                 self.peers.update_neighbour_stats(peer.id(), roundtrip, false, true, true)?;
@@ -341,7 +341,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         block_id: &BlockIdExt, 
         is_link: bool, 
         key_block: bool, 
-    ) -> Result<Option<BlockProofStuff>> {
+    ) -> Result<BlockProofStuff> {
         // Prepare
         let (prepare, good_peer): (PreparedProof, _) = if key_block {
             self.send_adnl_query(
@@ -367,8 +367,10 @@ impl FullNodeOverlayClient for NodeClientOverlay {
 
         // Download
         match prepare {
-            PreparedProof::TonNode_PreparedProofEmpty => Ok(None),
-            PreparedProof::TonNode_PreparedProof => Ok(Some(if key_block {
+            PreparedProof::TonNode_PreparedProofEmpty => {
+                fail!("Got `TonNode_PreparedProofEmpty` from {}", good_peer.id())
+            },
+            PreparedProof::TonNode_PreparedProof => Ok(if key_block {
                 BlockProofStuff::deserialize(block_id, self.send_rldp_query_raw(
                     &DownloadKeyBlockProof { block: convert_block_id_ext_blk2api(block_id) },
                     good_peer,
@@ -380,8 +382,8 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     good_peer,
                     0
                 ).await?, false)?
-            })),
-            PreparedProof::TonNode_PreparedProofLink => Ok(Some(if key_block {
+            }),
+            PreparedProof::TonNode_PreparedProofLink => Ok(if key_block {
                 BlockProofStuff::deserialize(block_id, self.send_rldp_query_raw(
                     &DownloadKeyBlockProofLink { block: convert_block_id_ext_blk2api(block_id), },
                     good_peer,
@@ -393,7 +395,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     good_peer,
                     0
                 ).await?, true)?
-            }))
+            })
         }
     }
 
@@ -406,7 +408,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
     async fn download_block_full(
         &self, 
         id: &BlockIdExt, 
-    ) -> Result<Option<(BlockStuff, BlockProofStuff)>> {
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
         // Prepare
         let (prepare, peer): (Prepared, _) = self.send_adnl_query(
             PrepareBlock {block: convert_block_id_ext_blk2api(id)},
@@ -418,9 +420,9 @@ impl FullNodeOverlayClient for NodeClientOverlay {
 
         // Download
         match prepare {
-            Prepared::TonNode_NotFound => Ok(None),
+            Prepared::TonNode_NotFound => fail!("Got `TonNode_NotFound` from {}", peer.id()),
             Prepared::TonNode_Prepared => {
-                let data_full: DataFull = self.send_rldp_query_typed(
+                let (data_full, _): (DataFull, _) = self.send_rldp_query_typed(
                     &DownloadBlockFull {
                         block: convert_block_id_ext_blk2api(id),
                     },
@@ -430,8 +432,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
 
                 match data_full {
                     DataFull::TonNode_DataFullEmpty => {
-                        log::warn!("prepareBlock receives Prepared, but DownloadBlockFull receives DataFullEmpty");
-                        Ok(None)
+                        fail!("prepareBlock receives Prepared, but DownloadBlockFull receives DataFullEmpty");
                     },
                     DataFull::TonNode_DataFull(data_full) => {
                         if !compare_block_ids(&id, &data_full.id) {
@@ -444,7 +445,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                             data_full.proof.0,
                             data_full.is_link.into())?;
 
-                        Ok(Some((block, proof)))
+                        Ok((block, proof))
                     }
                 }
             }
@@ -504,7 +505,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
     async fn download_zero_state(
         &self, 
         id: &BlockIdExt, 
-    ) -> Result<Option<(ShardStateStuff, Vec<u8>)>> {
+    ) -> Result<(ShardStateStuff, Vec<u8>)> {
         // Prepare
         let (prepare, good_peer): (PreparedState, _) = self.send_adnl_query(
             TLObject::new(PrepareZeroState {
@@ -517,7 +518,9 @@ impl FullNodeOverlayClient for NodeClientOverlay {
 
         // Download
         match prepare {
-            PreparedState::TonNode_NotFoundState => Ok(None),
+            PreparedState::TonNode_NotFoundState => {
+                fail!("Got `TonNode_NotFoundState` from {}", good_peer.id())
+            },
             PreparedState::TonNode_PreparedState => {
                 let state_bytes = self.send_rldp_query_raw(
                     &DownloadZeroState {
@@ -526,12 +529,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     good_peer,
                     0
                 ).await?;
-                Ok(
-                    Some((
-                        ShardStateStuff::deserialize_zerostate(id.clone(), &state_bytes)?,
-                        state_bytes
-                    ))
-                )
+                Ok((ShardStateStuff::deserialize_zerostate(id.clone(), &state_bytes)?, state_bytes))
             }
         }
     }
@@ -559,7 +557,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
     async fn download_next_block_full(
         &self, 
         prev_id: &BlockIdExt, 
-    ) -> Result<Option<(BlockStuff, BlockProofStuff)>> {
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
         
         let request = &DownloadNextBlockFull {
             prev_block: convert_block_id_ext_blk2api(prev_id)
@@ -575,7 +573,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request);
         
         // Download
-        let data_full: DataFull = self.send_rldp_query_typed(
+        let (data_full, peer): (DataFull, _) = self.send_rldp_query_typed(
             request,
             peer,
             0
@@ -583,7 +581,9 @@ impl FullNodeOverlayClient for NodeClientOverlay {
 
         // Parse
         match data_full {
-            DataFull::TonNode_DataFullEmpty => return Ok(None),
+            DataFull::TonNode_DataFullEmpty =>  {
+                fail!("Got `TonNode_DataFullEmpty` from {}", peer.id())
+            },
             DataFull::TonNode_DataFull(data_full) => {
                 let id = convert_block_id_ext_api2blk(&data_full.id)?;
                 let block = BlockStuff::deserialize_checked(id, data_full.block.to_vec())?;
@@ -592,7 +592,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     data_full.proof.to_vec(), 
                     data_full.is_link.clone().into()
                 )?;
-                Ok(Some((block, proof)))
+                Ok((block, proof))
             }
         }
     }

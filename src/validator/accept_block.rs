@@ -394,7 +394,7 @@ pub fn create_new_proof(
     let is_link = !info.shard().is_masterchain();
     let proof = BlockProof {
         proof_for: id.clone(),
-        root: merkle_proof.write_to_new_cell()?.into(),
+        root: merkle_proof.serialize()?,
         signatures: if !is_link { Some(block_signatures.clone()) } else { None }
     };
 

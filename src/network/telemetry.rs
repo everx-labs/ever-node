@@ -15,12 +15,25 @@ struct Query {
     data: AtomicU64,
 }
 
-#[derive(Default)]
+pub enum FullNodeNetworkTelemetryKind {
+    Client,
+    Service
+}
+
 pub struct FullNodeNetworkTelemetry {
-    queries: lockfree::map::Map<String, Query>
+    queries: lockfree::map::Map<String, Query>,
+    kind: FullNodeNetworkTelemetryKind,
 }
 
 impl FullNodeNetworkTelemetry {
+
+    pub fn new(kind: FullNodeNetworkTelemetryKind) -> Self {
+        FullNodeNetworkTelemetry {
+            queries: lockfree::map::Map::default(),
+            kind,
+        }
+    }
+
     pub fn consumed_query(
         &self,
         query: String,
@@ -65,6 +78,10 @@ impl FullNodeNetworkTelemetry {
     pub fn report(&self, update_period_sec: u64) -> String {
         let mut report = string_builder::Builder::default();
         let mut total_data = 0;
+        let prefix = match self.kind {
+            FullNodeNetworkTelemetryKind::Client => "↓", // "download"
+            FullNodeNetworkTelemetryKind::Service => "↑", // "upload"
+        };
         report.append(
             "                                   query       total       bytes  succeded   time: min   avg   max    failed    time: min   avg   max");
         for query in self.queries.iter() {
@@ -87,12 +104,13 @@ impl FullNodeNetworkTelemetry {
             let sucess_time = total_time - fail_time;
             total_data += data;
 
-            if query.key().len() <= 40 {
-                report.append(format!("\n{:>40}", query.key()));
+            if query.key().len() <= 39 {
+                report.append(format!("\n{}{:>39}", prefix, query.key()));
             } else {
                 report.append(format!(
-                    "\n{}..{}", 
-                    query.key().get(..8).unwrap_or_default(),
+                    "\n{}{}..{}",
+                    prefix,
+                    query.key().get(..7).unwrap_or_default(),
                     query.key().get(query.key().len() - 30..).unwrap_or_default(),
                 ));
             }

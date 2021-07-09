@@ -3,7 +3,7 @@ use crate::{
     block_proof::BlockProofStuff, error::NodeError, shard_state::ShardStateStuff,
     types::top_block_descr::{TopBlockDescrId, TopBlockDescrStuff},
 };
-use std::{path::PathBuf, sync::Arc, cmp::min, collections::HashMap};
+use std::{path::PathBuf, sync::Arc, cmp::min, collections::HashMap, time::{Instant, Duration}};
 use storage::{
     archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId},
     block_handle_db::{BlockHandleDb, BlockHandleStorage}, block_index_db::BlockIndexDb, 
@@ -262,12 +262,12 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
-        log::trace!("load_block_handle {}", id);
+        let _tc = TimeChecker::new(format!("load_block_handle {}", id), 10);
         self.block_handle_storage.load_handle(id)
     }
 
     async fn store_block_data(&self, block: &BlockStuff) -> Result<StoreBlockResult> {
-        log::trace!("store_block_data {}", block.id());
+        let _tc = TimeChecker::new(format!("store_block_data {}", block.id()), 100);
         let handle = self.create_or_load_block_handle(block.id(), Some(block.block()), None)?;
         let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(block.id());
         let mut first_time = false;
@@ -285,13 +285,13 @@ impl InternalDb for InternalDbImpl {
     }
 
     async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff> {
-        log::trace!("load_block_data {}", handle.id());
+        let _tc = TimeChecker::new(format!("load_block_data {}", handle.id()), 100);
         let raw_block = self.load_block_data_raw(handle).await?;
         BlockStuff::deserialize(handle.id().clone(), raw_block)
     }
 
     async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
-        log::trace!("load_block_data_raw {}", handle.id());
+        let _tc = TimeChecker::new(format!("load_block_data_raw {}", handle.id()), 100);
         if !handle.has_data() {
             fail!("This block is not stored yet: {:?}", handle);
         }
@@ -306,7 +306,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seq_no: u32) -> Result<Arc<BlockHandle>> {
-        log::trace!("find_block_by_seq_no {} {}", acc_pfx, seq_no);
+        let _tc = TimeChecker::new(format!("find_block_by_seq_no {} {}", acc_pfx, seq_no), 100);
         let id = self.block_index_db.get_block_by_seq_no(acc_pfx, seq_no)?;
         self.load_block_handle(&id)?.ok_or_else(
             || error!("Cannot find handle for block {}", id) 
@@ -314,7 +314,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn find_block_by_unix_time(&self, acc_pfx: &AccountIdPrefixFull, utime: u32) -> Result<Arc<BlockHandle>> {
-        log::trace!("find_block_by_unix_time {} {}", acc_pfx, utime);
+        let _tc = TimeChecker::new(format!("find_block_by_unix_time {} {}", acc_pfx, utime), 100);
         let id = self.block_index_db.get_block_by_ut(acc_pfx, UnixTime32(utime))?;
         self.load_block_handle(&id)?.ok_or_else(
             || error!("Cannot find handle for block {}", id) 
@@ -322,7 +322,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn find_block_by_lt(&self, acc_pfx: &AccountIdPrefixFull, lt: u64) -> Result<Arc<BlockHandle>> {
-        log::trace!("find_block_by_lt {} {}", acc_pfx, lt);
+        let _tc = TimeChecker::new(format!("find_block_by_lt {} {}", acc_pfx, lt), 100);
         let id = self.block_index_db.get_block_by_lt(acc_pfx, lt)?;
         self.load_block_handle(&id)?.ok_or_else(
             || error!("Cannot find handle for block {}", id) 
@@ -351,7 +351,7 @@ impl InternalDb for InternalDbImpl {
             }
         } else {
 
-            log::trace!("store_block_proof {}", proof.id());
+            let _tc = TimeChecker::new(format!("store_block_proof {}", proof.id()), 100);
             if id != proof.id() {
                 fail!(NodeError::InvalidArg("`proof` and `id` mismatch".to_string()))
             }
@@ -404,7 +404,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     async fn load_block_proof(&self, handle: &BlockHandle, is_link: bool) -> Result<BlockProofStuff> {
-        log::trace!("load_block_proof {} {}", if is_link {"link"} else {""}, handle.id());
+        let _tc = TimeChecker::new(format!("load_block_proof {} {}", if is_link {"link"} else {""}, handle.id()), 100);
         let raw_proof = self.load_block_proof_raw(handle, is_link).await?;
         BlockProofStuff::deserialize(handle.id(), raw_proof, is_link)
     }
@@ -439,7 +439,7 @@ impl InternalDb for InternalDbImpl {
         handle: &Arc<BlockHandle>, 
         state: &ShardStateStuff
     ) -> Result<bool> {
-        log::trace!("store_shard_state_dynamic {}", state.block_id());
+        let _tc = TimeChecker::new(format!("store_shard_state_dynamic {}", state.block_id()), 100);
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
@@ -455,7 +455,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<ShardStateStuff> {
-        log::trace!("load_shard_state_dynamic {}", id);
+        let _tc = TimeChecker::new(format!("load_shard_state_dynamic {}", id), 10);
 
         Ok(ShardStateStuff::new(id.clone(), self.shard_state_dynamic_db.get(id)?)?)
     }
@@ -469,7 +469,7 @@ impl InternalDb for InternalDbImpl {
         handle: &Arc<BlockHandle>, 
         state: &ShardStateStuff
     ) -> Result<()> {
-        log::trace!("store_shard_state_persistent {}", state.block_id());
+        let _tc = TimeChecker::new(format!("store_shard_state_persistent {}", state.block_id()), 10_000);
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
@@ -487,7 +487,10 @@ impl InternalDb for InternalDbImpl {
         handle: &Arc<BlockHandle>, 
         state_data: &[u8]
     ) -> Result<()> {
-        log::trace!("store_shard_state_persistent_raw {}", handle.id());
+        let _tc = TimeChecker::new(
+            format!("store_shard_state_persistent_raw {}", handle.id()),
+            state_data.len() as u64 / 1000 + 10
+        );
         if !handle.has_persistent_state() {
             self.shard_state_persistent_db.put(handle.id(), state_data).await?;
             if handle.set_persistent_state() {
@@ -498,7 +501,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     async fn load_shard_state_persistent_slice(&self, id: &BlockIdExt, offset: u64, length: u64) -> Result<Vec<u8>> {
-        log::trace!("load_shard_state_persistent_slice {}", id);
+        let _tc = TimeChecker::new(format!("load_shard_state_persistent_slice {}", id), 100);
         let full_lenth = self.load_shard_state_persistent_size(id).await?;
         if offset > full_lenth {
             fail!("offset is greater than full length");
@@ -513,12 +516,12 @@ impl InternalDb for InternalDbImpl {
     }
 
     async fn load_shard_state_persistent_size(&self, id: &BlockIdExt) -> Result<u64> {
-        log::trace!("load_shard_state_persistent_slice {}", id);
+        let _tc = TimeChecker::new(format!("load_shard_state_persistent_slice {}", id), 10);
         self.shard_state_persistent_db.get_size(id).await
     }
 
     fn store_block_prev1(&self, handle: &Arc<BlockHandle>, prev: &BlockIdExt) -> Result<()> {
-        log::trace!("store_block_prev {}", handle.id());
+        let _tc = TimeChecker::new(format!("store_block_prev {}", handle.id()), 10);
         if !handle.has_prev1() {
             let value = bincode::serialize(&convert_block_id_ext_blk2api(prev))?;
             self.prev_block_db.put(handle.id(), &value)?;
@@ -530,14 +533,14 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn load_block_prev1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
-        log::trace!("load_block_prev {}", id);
+        let _tc = TimeChecker::new(format!("load_block_prev {}", id), 10);
         let bytes = self.prev_block_db.get(id)?;
         let prev = bincode::deserialize::<ton_api::ton::ton_node::blockidext::BlockIdExt>(&bytes)?;
         convert_block_id_ext_api2blk(&prev)
     }
 
     fn store_block_prev2(&self, handle: &Arc<BlockHandle>, prev2: &BlockIdExt) -> Result<()> {
-        log::trace!("store_block_prev2 {}", handle.id());
+        let _tc = TimeChecker::new(format!("store_block_prev2 {}", handle.id()), 10);
         if !handle.has_prev2() {
             let value = bincode::serialize(&convert_block_id_ext_blk2api(prev2))?;
             self.prev2_block_db.put(handle.id(), &value)?;
@@ -549,14 +552,14 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
-        log::trace!("load_block_prev2 {}", id);
+        let _tc = TimeChecker::new(format!("load_block_prev2 {}", id), 10);
         let bytes = self.prev2_block_db.get(id)?;
         let prev2 = bincode::deserialize::<ton_api::ton::ton_node::blockidext::BlockIdExt>(&bytes)?;
         convert_block_id_ext_api2blk(&prev2)
     }
 
     fn store_block_next1(&self, handle: &Arc<BlockHandle>, next: &BlockIdExt) -> Result<()> {
-        log::trace!("store_block_next1 {}", handle.id());
+        let _tc = TimeChecker::new(format!("store_block_next1 {}", handle.id()), 10);
         if !handle.has_next1() {
             let value = bincode::serialize(&convert_block_id_ext_blk2api(next))?;
             self.next_block_db.put(handle.id(), &value)?;
@@ -568,14 +571,14 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
-        log::trace!("load_block_next1 {}", id);
+        let _tc = TimeChecker::new(format!("load_block_next1 {}", id), 10);
         let bytes = self.next_block_db.get(id)?;
         let next = bincode::deserialize::<ton_api::ton::ton_node::blockidext::BlockIdExt>(&bytes)?;
         convert_block_id_ext_api2blk(&next)
     }
 
     fn store_block_next2(&self, handle: &Arc<BlockHandle>, next2: &BlockIdExt) -> Result<()> {
-        log::trace!("store_block_next2 {}", handle.id());
+        let _tc = TimeChecker::new(format!("store_block_next2 {}", handle.id()), 10);
         if !handle.has_next2() {
             let value = bincode::serialize(&convert_block_id_ext_blk2api(next2))?;
             self.next2_block_db.put(handle.id(), &value)?;
@@ -587,7 +590,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn load_block_next2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
-        log::trace!("load_block_next2 {}", id);
+        let _tc = TimeChecker::new(format!("load_block_next2 {}", id), 10);
         let bytes = self.next2_block_db.get(id)?;
         let next2 = bincode::deserialize::<ton_api::ton::ton_node::blockidext::BlockIdExt>(&bytes)?;
         convert_block_id_ext_api2blk(&next2)
@@ -604,7 +607,7 @@ impl InternalDb for InternalDbImpl {
 */
 
     fn store_block_applied(&self, handle: &Arc<BlockHandle>) -> Result<bool> {
-        log::trace!("store_block_applied {}", handle.id());
+        let _tc = TimeChecker::new(format!("store_block_applied {}", handle.id()), 10);
         if handle.set_block_applied() {
             self.store_block_handle(&handle)?;
             Ok(true)
@@ -614,7 +617,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     async fn archive_block(&self, id: &BlockIdExt) -> Result<()> {
-        log::trace!("archive_block {}", id);
+        let _tc = TimeChecker::new(format!("archive_block {}", id), 100);
 
         let handle = self.load_block_handle(id)?.ok_or_else(
             || error!("Cannot load handle for archiving block {}", id)
@@ -644,13 +647,13 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn store_node_state(&self, key: &'static str, value: Vec<u8>) -> Result<()> {
-        log::trace!("store_node_state {}", key);
+        let _tc = TimeChecker::new(format!("store_node_state {}", key), 10);
         self.node_state_db.put(&key, &value)?;
         Ok(())
     }
 
     fn load_node_state(&self, key: &'static str) -> Result<Vec<u8>> {
-        log::trace!("load_node_state {}", key);
+        let _tc = TimeChecker::new(format!("load_node_state {}", key), 10);
         let value = self.node_state_db.get(&key)?;
         Ok(value.as_ref().to_vec()) // TODO try not to copy
     }
@@ -675,12 +678,12 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn save_top_shard_block(&self, id: &TopBlockDescrId, tsb: &TopBlockDescrStuff) -> Result<()> {
-        log::trace!("save_top_shard_block {}", id);
+        let _tc = TimeChecker::new(format!("save_top_shard_block {}", id), 50);
         self.shard_top_blocks_db.put(&id.to_bytes()?, &tsb.to_bytes()?)
     }
 
     fn load_all_top_shard_blocks(&self) -> Result<HashMap<TopBlockDescrId, TopBlockDescrStuff>> {
-        log::trace!("load_all_top_shard_blocks");
+        let _tc = TimeChecker::new(format!("load_all_top_shard_blocks"), 100);
         let mut result = HashMap::<TopBlockDescrId, TopBlockDescrStuff>::new();
         self.shard_top_blocks_db.for_each(&mut |id_bytes, tsb_bytes| {
             let id = TopBlockDescrId::from_bytes(&id_bytes)?;
@@ -692,7 +695,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn load_all_top_shard_blocks_raw(&self) -> Result<HashMap<TopBlockDescrId, Vec<u8>>> {
-        log::trace!("load_all_top_shard_blocks_raw");
+        let _tc = TimeChecker::new(format!("load_all_top_shard_blocks_raw"), 100);
         let mut result = HashMap::<TopBlockDescrId, Vec<u8>>::new();
         self.shard_top_blocks_db.for_each(&mut |id_bytes, tsb_bytes| {
             let id = TopBlockDescrId::from_bytes(&id_bytes)?;
@@ -703,12 +706,42 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn remove_top_shard_block(&self, id: &TopBlockDescrId) -> Result<()> {
-        log::trace!("remove_top_shard_block {}", id);
+        let _tc = TimeChecker::new(format!("remove_top_shard_block {}", id), 50);
         self.shard_top_blocks_db.delete(&id.to_bytes()?)
     }
 
     fn db_root_dir(&self) -> Result<&str> {
         Ok(&self.config.db_directory)
+    }
+}
+
+pub struct TimeChecker {
+    operation: String,
+    threshold: Duration,
+    start: Instant,
+}
+
+impl TimeChecker {
+    pub fn new(operation: String, threshold_ms: u64) -> Self {
+        let start = std::time::Instant::now();
+        log::trace!("{} - started", operation);
+        Self {
+            operation,
+            threshold: Duration::from_millis(threshold_ms),
+            start,
+        }
+    }
+}
+
+impl Drop for TimeChecker {
+    fn drop(&mut self) {
+        let time = self.start.elapsed();
+        if time < self.threshold {
+            log::trace!("{} - finished, TIME: {}", self.operation, time.as_millis());
+        } else {
+            log::warn!("{} - finished too slow, TIME: {}ms, expected: {}ms", 
+                self.operation, time.as_millis(), self.threshold.as_millis());
+        }
     }
 }
 

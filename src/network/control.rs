@@ -101,7 +101,7 @@ impl ControlQuerySubscriber {
             });
 
             // in_current_vset_p34
-            let adnl_ids = self.config.get_actual_validator_adnl_ids().await?;
+            let adnl_ids = self.config.get_actual_validator_adnl_ids()?;
             let mc_state = engine.load_last_applied_mc_state().await?;
             let current = mc_state.config_params()?.validator_set()?.list().iter().any(|val| {
                 match validatordescr_to_catchain_node(val) {
@@ -189,11 +189,12 @@ impl ControlQuerySubscriber {
 #[async_trait::async_trait]
 impl Subscriber for ControlQuerySubscriber {
     async fn try_consume_query(&self, object: TLObject, _peers: &AdnlPeers) -> Result<QueryResult> {
-        log::debug!("recieve object: {:?}", object);
+        log::info!("recieve object (control server): {:?}", object);
         let query = match object.downcast::<ControlQuery>() {
             Ok(query) => deserialize(&query.data[..])?,
             Err(object) => return Ok(QueryResult::Rejected(object))
         };
+        log::info!("query (control server): {:?}", query);
         let query = match query.downcast::<GenerateKeyPair>() {
             Ok(_) => return QueryResult::consume(
                 self.process_generate_keypair().await?
@@ -276,6 +277,7 @@ impl Subscriber for ControlQuerySubscriber {
             },
             Err(query) => query
         };
+        log::warn!("Unsupported ControlQuery (control server): {:?}", query);
         fail!("Unsupported ControlQuery {:?}", query)
     }
 }

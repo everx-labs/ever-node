@@ -1,5 +1,5 @@
 use crate::{
-    config::{NodeConfigHandler, TonNodeConfig, ConnectivityCheckBroadcastConfig},
+    config::{ ConfigEvent, NodeConfigHandler, NodeConfigSubscriber, TonNodeConfig, ConnectivityCheckBroadcastConfig},
     engine_traits::{OverlayOperations, PrivateOverlayOperations},
     network::{
         catchain_client::CatchainClient,
@@ -34,7 +34,7 @@ use ton_api::ton::{
     ton_node::broadcast::ConnectivityCheckBroadcast,
 };
 #[cfg(feature = "telemetry")]
-use crate::network::telemetry::FullNodeNetworkTelemetry;
+use crate::network::telemetry::{FullNodeNetworkTelemetry, FullNodeNetworkTelemetryKind};
 
 type Cache<K, T> = lockfree::map::Map<K, T>;
 
@@ -57,7 +57,7 @@ pub struct NodeNetwork {
 
 struct ValidatorContext {
     private_overlays: Arc<Cache<Arc<OverlayShortId>, Arc<CatchainClient>>>,
-    validator_adnl_keys: Arc<Cache<Arc<KeyId>, (usize, Arc<AtomicI32>)>>,   // KeyId, tag
+    actual_local_adnl_keys: Arc<lockfree::set::Set<Arc<KeyId>>>,
     all_validator_peers: Arc<Cache<Arc<KeyId>, Arc<AtomicI32>>>,
     sets_contexts: Arc<Cache<UInt256, ValidatorSetContext>>,
     current_set: Arc<Cache<u8, UInt256>>, // zero or one element [0]
@@ -127,14 +127,16 @@ impl NodeNetwork {
         NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_key, None);
 
         NodeNetwork::find_dht_nodes(dht.clone());
-        let config_handler = Arc::new(NodeConfigHandler::new(config)?);
+        let (config_handler, config_handler_context) = NodeConfigHandler::create(
+            config, &tokio::runtime::Handle::current()
+        )?;
 
      //   let validator_adnl_key = adnl.key_by_tag(Self::TAG_VALIDATOR_ADNL_KEY)?;
      //   NodeNetwork::periodic_store_ip_addr(dht.clone(), validator_adnl_key);
 
         let validator_context = ValidatorContext {
             private_overlays: Arc::new(Cache::new()),
-            validator_adnl_keys: Arc::new(Cache::new()),
+            actual_local_adnl_keys: Arc::new(lockfree::set::Set::new()),
             all_validator_peers: Arc::new(Cache::new()),
             sets_contexts: Arc::new(Cache::new()),
             current_set: Arc::new(Cache::new()),
@@ -151,11 +153,13 @@ impl NodeNetwork {
             validator_context: validator_context,
             overlay_awaiters: AwaitersPool::new("overlay_awaiters"),
             runtime_handle: tokio::runtime::Handle::current(),
-            config_handler,
+            config_handler: config_handler,
             connectivity_check_config,
             #[cfg(feature = "telemetry")]
-            telemetry: Arc::new(FullNodeNetworkTelemetry::default()),
+            telemetry: Arc::new(FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Client)),
         });
+
+        NodeConfigHandler::start_sheduler(nn.config_handler.clone(), config_handler_context, vec![nn.clone()])?;
 
         if connectivity_check_enabled {
            Self::connectivity_broadcasts_sender(nn.clone());
@@ -213,7 +217,7 @@ impl NodeNetwork {
     fn periodic_store_ip_addr(
         dht: Arc<DhtNode>,
         node_key: Arc<KeyOption>,
-        validator_keys: Option<Arc<Cache<Arc<KeyId>, (usize, Arc<AtomicI32>)>>>)
+        validator_keys: Option<Arc<lockfree::set::Set<Arc<KeyId>>>>)
     {
         tokio::spawn(async move {
             let node_key = node_key.clone();
@@ -224,6 +228,7 @@ impl NodeNetwork {
                 tokio::time::sleep(Duration::from_secs(Self::PERIOD_STORE_IP_ADDRESS)).await;
                 if let Some(actual_validator_adnl_keys) = validator_keys.clone() {
                     if actual_validator_adnl_keys.get(node_key.id()).is_none() {
+                        log::info!("store ip address finish (for key {}).", node_key.id());
                         break;
                     }
                 }
@@ -505,13 +510,11 @@ impl NodeNetwork {
         validator_list_id: UInt256,
         validators: Vec<CatchainNode>
     ) {
-        let mut is_first_search = true;
         const SLEEP_TIME: u64 = 1;  //secs
         tokio::spawn(async move {
             let mut current_validators = validators;
             loop {
                 match Self::search_validator_keys_round(
-                    is_first_search,
                     local_adnl_id.clone(),
                     dht.clone(),
                     overlay.clone(),
@@ -526,45 +529,30 @@ impl NodeNetwork {
                     }
                 }
                 if current_validators.is_empty() {
+                    log::info!("search_validator_keys: finished.");
                     break;
+                } else {
+                    log::info!("search_validator_keys: numbers losted validator keys: {}", current_validators.len());
                 }
                 tokio::time::sleep(Duration::from_secs(SLEEP_TIME)).await;
                 if validators_contexts.get(&validator_list_id).is_none() {
                     break;
                 }
-                is_first_search = false;
             }
         });
     }
 
     async fn search_validator_keys_round(
-        is_first_search: bool,
         local_adnl_id: Arc<KeyId>,
         dht: Arc<DhtNode>,
         overlay: Arc<OverlayNode>,
         validators: Vec<CatchainNode>
     ) -> Result<Vec<CatchainNode>> {
-        const SEARCH_TIMEOUT: u64 = 5;  // seconds
         let mut lost_validators = Vec::new();
         for val in validators {
-            let res = if is_first_search {
-                match tokio::time::timeout(
-                    Duration::from_secs(SEARCH_TIMEOUT), 
-                    DhtNode::find_address(&dht, &val.adnl_id)
-                ).await {
-                    Ok(result) => { result },
-                    Err(_) => {
-                        lost_validators.push(val.clone());
-                        log::info!("addr: {:?} skip",  &val.adnl_id);
-                        continue
-                    },
-                }
-            } else {
-                DhtNode::find_address(&dht, &val.adnl_id).await
-            };
-            match res {
+            match DhtNode::find_address(&dht, &val.adnl_id).await {
                 Ok((addr, key)) => {
-                    log::info!("addr: {:?}, key: {:x?}", &addr, &key);
+                    log::info!("addr found: {:?}, key: {:x?}", &addr, &key);
                     overlay.add_private_peers(&local_adnl_id, vec![(addr, key)])?;
                 }
                 Err(e) => { 
@@ -721,6 +709,34 @@ impl NodeNetwork {
             fail!("There is not masterchain overlay")
         }
     }
+
+    async fn load_and_store_adnl_key(&self, validator_adnl_key_id: Arc<KeyId>, election_id: i32) -> Result<bool> {
+        log::info!("load_and_store_adnl_key (AddValidatorAdnlKey) id: {}.", &validator_adnl_key_id);
+        if self.validator_context.actual_local_adnl_keys.get(&validator_adnl_key_id).is_none() {
+            if let Err(e) = self.validator_context.actual_local_adnl_keys.insert(validator_adnl_key_id.clone()) {
+                log::warn!("load_and_store_adnl_key (AddValidatorAdnlKey) error: {}", e);
+            }
+            match self.config_handler.get_validator_key(&validator_adnl_key_id).await {
+                Some((adnl_key, _)) => {
+                    let id = self.adnl.add_key(adnl_key, election_id as usize)?;
+            
+                    NodeNetwork::periodic_store_ip_addr(
+                        self.dht.clone(),
+                        self.adnl.key_by_id(&id)?,
+                        Some(self.validator_context.actual_local_adnl_keys.clone())
+                    );
+                    log::info!("load_and_store_adnl_key (AddValidatorAdnlKey) id: {} finished.", &validator_adnl_key_id);
+                    return Ok(true);
+                },
+                None => {
+                    fail!("load_and_store_adnl_key (AddValidatorAdnlKey): validator key not found (id: {})!",
+                        &validator_adnl_key_id
+                    );
+                }
+            }
+        }
+        Ok(false)
+    }
 }
 
 #[async_trait::async_trait]
@@ -785,70 +801,41 @@ impl PrivateOverlayOperations for NodeNetwork {
         validator_list_id: UInt256,
         validators: &Vec<CatchainNode>
     ) -> Result<Option<Arc<KeyOption>>> {
-        log::trace!("set_validator_list validator_list_id: {}", validator_list_id);
+        log::trace!("start set_validator_list validator_list_id: {}", &validator_list_id);
 
-        let mut local_validator_key_raw = None;
-        let mut local_validator_adnl_key_raw = None;
-        let mut election_id_raw = None;
-        for validator in validators {
-            if let Some((validator_key, _)) = self.config_handler.get_validator_key(validator.public_key.id()).await {
-                local_validator_key_raw = Some(validator_key);
-                if let Some ((adnl_key, election_id)) = self.config_handler.get_validator_key(&validator.adnl_id).await {
-                    local_validator_adnl_key_raw = Some(adnl_key);
-                    election_id_raw = Some(election_id);
-                }
-                break;
+        let validator_adnl_ids = self.config_handler.get_actual_validator_adnl_ids()?;
+        let local_validator = validators.iter().find_map(|val| {
+            if !validator_adnl_ids.contains(&val.adnl_id) {
+                return None;
             }
-        }
+            Some(val.clone())
+        });
 
-        let local_validator_key: KeyOption = match local_validator_key_raw {
-            Some(key) => { key },
-            None => { return Ok(None) }
-        };
-
-        let local_validator_adnl_key: KeyOption = match local_validator_adnl_key_raw {
-            Some(key) => { key },
-            None => { return Ok(None) }
-        };
-
-        let election_id: usize = match election_id_raw {
-            Some(id) => { id as usize },
-            None => { return Ok(None) }
-        };
-
-        let mut store = false;
-
-        let adnl_key = match self.validator_context.validator_adnl_keys.get(local_validator_adnl_key.id()) {
-            None => { 
-                self.validator_context.validator_adnl_keys.insert(
-                    local_validator_adnl_key.id().clone(), 
-                    (election_id, Arc::new(AtomicI32::new(0)))
-                );
-                let id = self.adnl.add_key(local_validator_adnl_key, election_id)?;
-                store = true;
-                self.adnl.key_by_id(&id)?
+        let (local_validator_key, local_validator_adnl_key, election_id) = match local_validator {
+            Some(validator) => {
+                let validator_key_raw = self.config_handler.get_validator_key(validator.public_key.id()).await;
+                let (validator_key, election_id) = validator_key_raw.ok_or_else(|| error!("validator key not found!"))?;
+                let validator_adnl_key = match self.adnl.key_by_id(&validator.adnl_id) {
+                    Ok(adnl_key) => adnl_key,
+                    Err(e) => {
+                        // adnl key don`t stored in two cases: 
+                        // 1. The first is first elections. Then make storing adnl key and repeat its load.
+                        // 2. The second is internal error. In this case the error will be returned
+                        log::warn!("error load adnl validator key (first attemption): {}", e);
+                        if !self.load_and_store_adnl_key(validator.adnl_id.clone(), election_id).await? {
+                            fail!("don`t load or don`t stored adnl key (id: {})", &validator.adnl_id);
+                        }
+                        self.adnl.key_by_id(&validator.adnl_id)?
+                    }
+                };
+                (validator_key, validator_adnl_key, election_id as usize)
             },
-            Some(val) => {
-                val.val().1.fetch_add(1, Ordering::Relaxed);
-                self.adnl.key_by_id(&local_validator_adnl_key.id().clone())?
-            }
+            None => { return Ok(None); }
         };
-        if store {
-            NodeNetwork::periodic_store_ip_addr(
-                self.dht.clone(),
-                adnl_key.clone(),
-                Some(self.validator_context.validator_adnl_keys.clone())
-            );
-        }
+
+        let mut peers = Vec::new();
         let mut lost_validators = Vec::new();
         let mut peers_ids = Vec::new();
-/*
-        let mut peers_ids: Vec<Arc<KeyId>> = validators.iter().filter_map(|val| {
-            if val.public_key.id() == local_validator_key.id() {
-                None
-            } else {
-                Some(val.adnl_id.clone())
-        }}).collect();*/
 
         let connectivity_stat = Arc::new(Cache::new());
 
@@ -859,12 +846,28 @@ impl PrivateOverlayOperations for NodeNetwork {
             peers_ids.push(val.adnl_id.clone());
             lost_validators.push(val.clone());
             connectivity_stat.insert(val.adnl_id.clone(), Default::default());
+
+            match self.dht.fetch_address(&val.adnl_id).await {
+                Ok(Some((addr, key))) => {
+                    log::info!("addr: {:?}, key: {:x?}", &addr, &key);
+                    peers.push((addr, key));
+                },
+                Ok(None) => {
+                    log::info!("addr: {:?} skipped.", &val.adnl_id);
+                    lost_validators.push(val.clone());
+                },
+                Err(e) => {
+                    log::error!("find address failed: {:?}", e);
+                    lost_validators.push(val.clone());
+                }
+            }
         }
 
+        self.overlay.add_private_peers(local_validator_adnl_key.id(), peers)?;
         let validator_set_context = ValidatorSetContext {
             validator_peers: peers_ids,
             validator_key: Arc::new(local_validator_key),
-            validator_adnl_key: adnl_key.clone(),
+            validator_adnl_key: local_validator_adnl_key.clone(),
             election_id: election_id.clone(),
             connectivity_stat,
         };
@@ -877,7 +880,7 @@ impl PrivateOverlayOperations for NodeNetwork {
 
         if !lost_validators.is_empty() {
             Self::search_validator_keys(
-                adnl_key.id().clone(),
+                local_validator_adnl_key.id().clone(),
                 self.dht.clone(), 
                 self.overlay.clone(),
                 self.validator_context.sets_contexts.clone(),
@@ -900,7 +903,7 @@ impl PrivateOverlayOperations for NodeNetwork {
                 }
             }   
         }
-
+        log::trace!("finish set_validator_list validator_list_id: {}", &validator_list_id);
         Ok(Some(context.validator_key.clone()))
     }
 
@@ -936,24 +939,7 @@ impl PrivateOverlayOperations for NodeNetwork {
                 self.validator_context.all_validator_peers.remove(peer);
             }
 
-
-            self.overlay.delete_private_peers(
-                adnl_key.id(),
-                &removed_peers
-            )?;
-            if self.config_handler.get_validator_key(adnl_key.id()).await.is_none() {
-                // delete adnl key 
-                match self.validator_context.validator_adnl_keys.get(adnl_key.id()) {
-                    Some(adnl_key_info) => {
-                        let count = adnl_key_info.val().1.fetch_sub(1, Ordering::Relaxed);
-                        if count <= 0 {
-                            self.adnl.delete_key(adnl_key_info.key(), adnl_key_info.val().0.clone())?;
-                            self.validator_context.validator_adnl_keys.remove(adnl_key.id());
-                        }
-                    },
-                    None => { log::warn!("validator adnl key don`t deleted!"); }
-                }
-            }
+            self.overlay.delete_private_peers(adnl_key.id(), &removed_peers)?;
             self.validator_context.sets_contexts.remove(&validator_list_id);
             log::trace!("remove validator list (validator key id: {})", &validator_list_id);
             status = true;
@@ -1011,6 +997,24 @@ impl PrivateOverlayOperations for NodeNetwork {
             self.runtime_handle.spawn(async move {
                 client.stop().await;
             });
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl NodeConfigSubscriber for NodeNetwork {
+    async fn event(&self, sender: ConfigEvent) -> Result<bool> {
+        match sender {
+            ConfigEvent::AddValidatorAdnlKey(validator_adnl_key_id, election_id) => {
+                self.load_and_store_adnl_key(validator_adnl_key_id, election_id).await
+            },
+            ConfigEvent::RemoveValidatorAdnlKey(validator_adnl_key_id, election_id) => {
+                log::info!("config event (RemoveValidatorAdnlKey) id: {}.", &validator_adnl_key_id);
+                self.adnl.delete_key(&validator_adnl_key_id, election_id as usize)?;
+                let status = self.validator_context.actual_local_adnl_keys.remove(&validator_adnl_key_id).is_some();
+                log::info!("config event (RemoveValidatorAdnlKey) id: {} finished({}).", &validator_adnl_key_id, &status);
+                return Ok(status);
+            }
         }
     }
 }

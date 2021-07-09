@@ -1,22 +1,20 @@
 use std::sync::{Arc, atomic::AtomicU64};
 use ton_block::{
-    Serializable, ShardAccount, ShardAccounts,
+    Serializable, Deserializable, ShardAccount, ShardAccounts,
     AccountBlock, Transaction, Transactions, HashUpdate, LibDescr,
     Augmentation, HashmapAugType, Libraries, StateInitLib, Account,
-    GlobalCapabilities,
 };
 use ton_types::{Result, AccountId, Cell, HashmapRemover, fail, UInt256};
 
 pub struct ShardAccountStuff {
     account_addr: AccountId,
-    account: Account,
+    account_root: Cell,
     last_trans_hash: UInt256,
     last_trans_lt: u64,
     lt: Arc<AtomicU64>,
     transactions: Transactions,
     state_update: HashUpdate,
     orig_libs: StateInitLib,
-    capabilities: u64,
 }
 
 impl ShardAccountStuff {
@@ -24,40 +22,42 @@ impl ShardAccountStuff {
         account_addr: AccountId,
         accounts: &ShardAccounts,
         lt: Arc<AtomicU64>,
-        capabilities: u64
     ) -> Result<Self> {
         let shard_acc = accounts.account(&account_addr)?.unwrap_or_default();
         let account_hash = shard_acc.account_cell().repr_hash();
-        let account = shard_acc.read_account()?;
+        let account_root = shard_acc.account_cell();
         let last_trans_hash = shard_acc.last_trans_hash().clone();
         let last_trans_lt = shard_acc.last_trans_lt();
         Ok(Self{
             account_addr,
             orig_libs: shard_acc.read_account()?.libraries(),
-            account,
+            account_root,
             last_trans_hash,
             last_trans_lt,
             lt,
             transactions: Transactions::default(),
             state_update: HashUpdate::with_hashes(account_hash.clone(), account_hash),
-            capabilities,
         })
     }
     pub fn update_shard_state(&mut self, new_accounts: &mut ShardAccounts) -> Result<AccountBlock> {
-        if self.account.is_none() {
+        let account = self.read_account()?;
+        if account.is_none() {
             new_accounts.remove(self.account_addr().clone())?;
         } else {
-            let shard_acc = ShardAccount::with_params(&self.account, self.last_trans_hash.clone(), self.last_trans_lt)?;
+            let shard_acc = ShardAccount::with_account_root(self.account_root(), self.last_trans_hash.clone(), self.last_trans_lt);
             let value = shard_acc.write_to_new_cell()?;
-            new_accounts.set_builder_serialized(self.account_addr().clone(), &value, &self.account.aug()?)?;
+            new_accounts.set_builder_serialized(self.account_addr().clone(), &value, &account.aug()?)?;
         }
         AccountBlock::with_params(&self.account_addr, &self.transactions, &self.state_update)
     }
     pub fn lt(&self) -> Arc<AtomicU64> {
         self.lt.clone()
     }
-    pub fn account(&self) -> &Account {
-        &self.account
+    pub fn read_account(&self) -> Result<Account> {
+        Account::construct_from_cell(self.account_root())
+    }
+    pub fn account_root(&self) -> Cell {
+        self.account_root.clone()
     }
     pub fn last_trans_lt(&self) -> u64 {
         self.last_trans_lt
@@ -65,22 +65,13 @@ impl ShardAccountStuff {
     pub fn account_addr(&self) -> &AccountId {
         &self.account_addr
     }
-    pub fn add_transaction(&mut self, transaction: &mut Transaction, account: Account) -> Result<()> {
-        let old_hash = self.state_update.new_hash.clone();
+    pub fn add_transaction(&mut self, transaction: &mut Transaction, account_root: Cell) -> Result<()> {
         transaction.set_prev_trans_hash(self.last_trans_hash.clone());
         transaction.set_prev_trans_lt(self.last_trans_lt);
         // log::trace!("{} {}", self.collated_block_descr, debug_transaction(transaction.clone())?);
 
-        self.account = account;
-        if (self.capabilities & (GlobalCapabilities::CapFastStorageStat as u64)) != 0 {
-            self.account.update_storage_stat_fast()?; // use new mechanism will be here
-        } else {
-            self.account.update_storage_stat()?;
-        }
-        let account_root = self.account.serialize()?;
-        self.state_update.new_hash = account_root.repr_hash();
-        let new_hash = self.state_update.new_hash.clone();
-        transaction.write_state_update(&HashUpdate::with_hashes(old_hash, new_hash))?;
+        self.account_root = account_root;
+        self.state_update.new_hash = self.account_root.repr_hash();
 
         let tr_root = transaction.serialize()?;
         self.last_trans_hash = tr_root.repr_hash();
@@ -95,7 +86,8 @@ impl ShardAccountStuff {
         Ok(())
     }
     pub fn update_public_libraries(&self, libraries: &mut Libraries) -> Result<()> {
-        let new_libs = self.account.libraries();
+        let account = self.read_account()?;
+        let new_libs = account.libraries();
         if new_libs.root() != self.orig_libs.root() {
             new_libs.scan_diff(&self.orig_libs, |key: UInt256, old, new| {
                 let old = old.unwrap_or_default();
