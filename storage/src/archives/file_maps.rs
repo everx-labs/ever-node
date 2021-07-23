@@ -3,7 +3,10 @@ use crate::archives::{
     package_index_db::{PackageIndexDb, PackageIndexEntry}
 };
 use std::{path::{Path, PathBuf}, sync::Arc};
-use ton_types::Result;
+use ton_types::{Result, error};
+use ton_block::BlockIdExt;
+
+use super::ARCHIVE_SLICE_SIZE;
 
 #[derive(Debug)]
 pub struct FileDescription {
@@ -27,6 +30,12 @@ impl FileDescription {
 
     pub const fn archive_slice(&self) -> &Arc<ArchiveSlice> {
         &self.archive_slice
+    }
+
+    async fn destroy(&mut self) -> Result<()> {
+        Arc::get_mut(&mut self.archive_slice)
+            .ok_or_else(|| error!("Unable to get mutable reference to offsets_db"))?
+            .destroy().await
     }
 }
 
@@ -89,6 +98,43 @@ impl FileMap {
         Ok(())
     }
 
+    async fn get_marked_entries(&self, front_for_gc_master_block_id: &BlockIdExt) -> Vec<u32> {
+        let read_guard = self.elements.read().await;
+        let mut marked_packages = Vec::new();
+
+        for file_map_entry in read_guard.iter() {
+            if file_map_entry.value.archive_slice.package_type() == PackageType::Blocks &&
+               file_map_entry.value.archive_slice.archive_id() + ARCHIVE_SLICE_SIZE <= front_for_gc_master_block_id.seq_no() {
+                marked_packages.push(file_map_entry.key.clone());
+            }
+        }
+        marked_packages
+    }
+
+    pub async fn gc(&self, front_for_gc_master_block_id: &BlockIdExt) -> Result<()> {
+        log::info!(target: "storage", "file_maps gc started.");
+        let mut marked_packages = self.get_marked_entries(front_for_gc_master_block_id).await;
+
+        while let Some(key) = marked_packages.pop() {
+            let mut guard = self.elements.write().await;
+            let position = guard.iter().position(|item| item.key == key)
+                .ok_or_else(|| error!("slice not found!"))?;
+            let mut removed_entry = guard.remove(position);
+            match Arc::get_mut(&mut removed_entry.value) {
+                Some(file_description) => {
+                    if let Err(e) = file_description.destroy().await {
+                        log::warn!(target: "storage", "destroy file_description is error: {:?}", e);
+                    }
+                },
+                None => { 
+                    log::warn!(target: "storage", "Unable to get mutable reference to file_description"); 
+                }
+            }
+        }
+        log::info!(target: "storage", "file_maps gc finished.");
+        Ok(())
+    }
+
     pub async fn get(&self, package_id: u32) -> Option<Arc<FileDescription>> {
         let guard = self.elements.read().await;
         guard.binary_search_by(|entry| entry.key.cmp(&package_id))
@@ -113,7 +159,7 @@ impl FileMap {
 
 pub struct FileMaps {
     files: FileMap,
-    // key_files: FileMap,
+    key_files: FileMap,
     // temp_files: FileMap,
 }
 
@@ -122,7 +168,7 @@ impl FileMaps {
         let path = db_root_path.join("file_maps");
         Ok(Self {
             files: FileMap::new(db_root_path, path.join("files"), PackageType::Blocks).await?,
-            // key_files: FileMap::new(db_root_path, path.join("key_files"), PackageType::KeyBlocks).await?,
+            key_files: FileMap::new(db_root_path, path.join("key_files"), PackageType::KeyBlocks).await?,
             // temp_files: FileMap::new(db_root_path, path.join("temp_files"), PackageType::Temp).await?,
         })
     }
@@ -131,10 +177,14 @@ impl FileMaps {
         &self.files
     }
 
+    pub fn key_files(&self) -> &FileMap {
+        &self.key_files
+    }
+
     pub fn get(&self, package_type: PackageType) -> &FileMap {
         match package_type {
-            // PackageType::KeyBlocks => &self.key_files,
-            // PackageType::Temp => &self.temp_files,
+            PackageType::KeyBlocks => &self.key_files,
+            //PackageType::Temp => &self.temp_files,
             PackageType::Blocks => &self.files,
             _ => unimplemented!("{:?}", package_type)
         }

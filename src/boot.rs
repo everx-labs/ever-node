@@ -83,7 +83,7 @@ async fn get_key_blocks(
 ) -> Result<Vec<Arc<BlockHandle>>> {
     let download_new_key_blocks_until = match engine.allow_blockchain_init() {
         true => engine.now() + 60,
-        false => engine.now() + 600
+        false => engine.now() + 1800
     };
     let mut key_blocks = vec!(handle.clone());
     loop {
@@ -120,7 +120,7 @@ async fn get_key_blocks(
             CHECK!(utime < engine.now());
             if (engine.sync_blocks_before() > engine.now() - utime)
                 || (2 * engine.key_block_utime_step() > engine.now() - utime)
-                || (engine.allow_blockchain_init() && download_new_key_blocks_until < engine.now()) {
+                || (/*engine.allow_blockchain_init() && */download_new_key_blocks_until < engine.now()) {
                 return Ok(key_blocks)
             }
         }
@@ -152,7 +152,7 @@ async fn choose_masterchain_state(engine: &dyn EngineOperations, mut key_blocks:
                 log::info!(target: "boot", "best handle is {}", handle.id());
                 return Ok(handle)
             } else {
-               log::info!(target: "boot", "ignoring: state is expiring shortly: expire_at={}", ttl);
+               log::info!(target: "boot", "state is expiring shortly: expire_at={}", ttl);
                return Ok(handle)
             }
         } else {

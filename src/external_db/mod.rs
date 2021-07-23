@@ -31,6 +31,7 @@ pub fn create_external_db(config: ExternalDbConfig) -> Result<Arc<dyn ExternalDb
                     StubProducer{enabled: true},
                     StubProducer{enabled: true},
                     StubProducer{enabled: true},
+                    StubProducer{enabled: true},
                     config.bad_blocks_storage,
                 )
             )
@@ -45,6 +46,7 @@ pub fn create_external_db(config: ExternalDbConfig) -> Result<Arc<dyn ExternalDb
                     KafkaProducer::new(config.transaction_producer)?,
                     KafkaProducer::new(config.account_producer)?,
                     KafkaProducer::new(config.block_proof_producer)?,
+                    KafkaProducer::new(config.chain_range_producer)?,
                     config.bad_blocks_storage,
                 )
             )
