@@ -22,13 +22,13 @@ impl StorageCell {
         assert!(!data.is_empty());
 
         let mut reader = Cursor::new(data);
-        let cell_data = CellData::deserialize(&mut reader)?;
         let references_count = reader.read_byte()?;
         let mut references = Vec::with_capacity(references_count as usize);
         for _ in 0..references_count {
             let hash = UInt256::from(reader.read_u256()?);
             references.push(Reference::NeedToLoad(hash));
         }
+        let cell_data = CellData::deserialize(&mut reader)?;
         let (tree_bits_count, tree_cell_count) = reader
             .read_be_u64()
             .and_then(|first| Ok((first, reader.read_be_u64()?)))
@@ -46,7 +46,6 @@ impl StorageCell {
         assert!(!data.is_empty());
 
         let mut reader = Cursor::new(data);
-        let _cell_data = CellData::deserialize(&mut reader)?; // TODO: add skip
         let references_count = reader.read_byte()?;
         let mut references = Vec::with_capacity(references_count as usize);
         for _ in 0..references_count {
@@ -63,12 +62,13 @@ impl StorageCell {
 
         let mut data = Vec::new();
 
-        cell.cell_data().serialize(&mut data)?;
         data.write(&[references_count])?;
 
         for i in 0..references_count {
             data.write(cell.reference(i as usize)?.repr_hash().as_slice())?;
         }
+
+        cell.cell_data().serialize(&mut data)?;
 
         data.write(&cell.tree_bits_count().to_be_bytes())?;
         data.write(&cell.tree_cell_count().to_be_bytes())?;
