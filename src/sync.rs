@@ -6,7 +6,7 @@ use adnl::common::{KeyId, Wait};
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 use storage::{
     archives::{
-        ARCHIVE_PACKAGE_SIZE, package::read_package_from, 
+        archive_manager::SLICE_SIZE, package::read_package_from, 
         package_entry_id::PackageEntryId
     },
     types::BlockHandle
@@ -136,7 +136,7 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
                 queue.push((sync_mc_seq_no, ArchiveStatus::Downloading));
                 download(engine, wait, sync_mc_seq_no, active_peers);
             }
-            sync_mc_seq_no += ARCHIVE_PACKAGE_SIZE;
+            sync_mc_seq_no += SLICE_SIZE;
         }
         Ok(())
     }
@@ -219,7 +219,7 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
                     queue.push((sync_mc_seq_no, ArchiveStatus::Downloading));
                     download(&engine, &wait, sync_mc_seq_no, &active_peers);
                 }
-                sync_mc_seq_no += ARCHIVE_PACKAGE_SIZE;
+                sync_mc_seq_no += SLICE_SIZE;
             }
 */
             match wait.wait(&mut reader, false).await {
@@ -342,7 +342,7 @@ async fn download_and_import_package(
     let mc_seq_no = last_mc_block_id.seq_no() + 1;
 
     let download_current_task = if let Some((predownload_seq_no, predownload_task)) = predownload_task {
-        if predownload_seq_no <= mc_seq_no && predownload_seq_no + ARCHIVE_PACKAGE_SIZE > mc_seq_no {
+        if predownload_seq_no <= mc_seq_no && predownload_seq_no + SLICE_SIZE > mc_seq_no {
             Some(predownload_task)
         } else {
             None

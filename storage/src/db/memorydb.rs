@@ -152,7 +152,7 @@ impl MemoryDbTransaction {
 }
 
 impl<K: DbKey + Send + Sync> KvcTransaction<K> for MemoryDbTransaction {
-    fn put(&mut self, key: &K, value: &[u8]) {
+    fn put(&self, key: &K, value: &[u8]) {
         self.pending.lock().unwrap().push(
             PendingOperation::Put(
                 Pair {
@@ -163,13 +163,13 @@ impl<K: DbKey + Send + Sync> KvcTransaction<K> for MemoryDbTransaction {
         );
     }
 
-    fn delete(&mut self, key: &K) {
+    fn delete(&self, key: &K) {
         self.pending.lock().unwrap().push(
             PendingOperation::Delete(key.key().to_vec())
         );
     }
 
-    fn clear(&mut self) {
+    fn clear(&self) {
         self.pending.lock().unwrap().clear();
     }
 

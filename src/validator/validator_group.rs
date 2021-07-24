@@ -5,7 +5,6 @@
 
 use std::cmp::max;
 use std::sync::*;
-use std::sync::atomic::{Ordering, AtomicU64};
 use std::time::*;
 use crossbeam_channel::{Sender, Receiver};
 use tokio::{runtime::Runtime, sync::Mutex};
@@ -115,6 +114,7 @@ pub struct ValidatorGroupImpl {
 
     min_masterchain_block_id: Option<BlockIdExt>,
     min_ts: SystemTime,
+
     replay_finished: bool,
     on_generate_slot_invoked: bool,
     on_candidate_invoked: bool,
@@ -280,8 +280,6 @@ pub struct ValidatorGroup {
     receiver: Arc<Receiver<ValidationAction>>,
 
     slashing_manager: SlashingManagerPtr,
-    last_validation_time: AtomicU64,
-    last_collation_time: AtomicU64,
 }
 
 impl ValidatorGroup {
@@ -313,21 +311,7 @@ impl ValidatorGroup {
             callback: Arc::new(listener),
             receiver: Arc::new(receiver),
             slashing_manager: slashing_manager,
-            last_validation_time: AtomicU64::new(0),
-            last_collation_time: AtomicU64::new(0)
         }
-    }
-
-    pub fn shard(&self) -> &ShardIdent {
-        &self.shard
-    }
-
-    pub fn last_validation_time(&self) -> u64 {
-        self.last_validation_time.load(Ordering::Relaxed)
-    }
-
-    pub fn last_collation_time(&self) -> u64 {
-        self.last_collation_time.load(Ordering::Relaxed)
     }
 
     pub fn make_validator_session_callback(&self) -> validator_session::SessionListenerPtr {
@@ -452,13 +436,7 @@ impl ValidatorGroup {
             None => Err(failure::err_msg("Min masterchain block id missing")),
         };
         let result_message = match &result {
-            Ok(x) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
-                self.last_collation_time.fetch_max(now, Ordering::Relaxed);
-
-                format!("Collation successful")
-            },
+            Ok(_x) => format!("Collation successful"),
             Err(x) => format!("Collation failed: `{}`", x),
         };
         log::info!(target: "validator", "SessionListener::on_generate_slot: {}, {}",
@@ -533,15 +511,8 @@ impl ValidatorGroup {
                 );
                 let group_impl = self.group_impl.clone().lock_owned().await;
                 let res = group_impl.candidate_db.save(vb_candidate).await;
-
                 match &res {
-                    Ok(()) => {
-                        self.last_validation_time.fetch_max(
-                            x.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs(),
-                            Ordering::Relaxed
-                        );
-                        format!("Validation successful: finished at {:?}", x)
-                    },
+                    Ok(()) => format!("Validation successful: finished at {:?}", x),
                     Err(x) => format!("Validation successful, db error `{}`", x)
                 }
             },

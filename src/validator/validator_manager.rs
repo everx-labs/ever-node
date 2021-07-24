@@ -367,10 +367,7 @@ impl ValidatorManagerImpl {
                     match session.get_status().await {
                         ValidatorGroupStatus::Stopping => (),
                         ValidatorGroupStatus::Stopped => {
-                            if let Some(group) = self.validator_sessions.remove(id) {
-                                self.engine.validation_status().remove(group.shard());
-                                self.engine.collation_status().remove(group.shard());
-                            }
+                            self.validator_sessions.remove(id);
                         },
                         _ =>
                             if let Err(e) = session.clone().stop(self.rt.clone()).await {
@@ -768,17 +765,9 @@ impl ValidatorManagerImpl {
     pub async fn stats(&mut self) {
         log::info!(target: "validator", "{:32} {}", "session id", "st round shard");
         log::info!(target: "validator", "{:-64}", "");
-
-        // Validation shards statistics
-        for (_, group) in self.validator_sessions.iter() {
+        for (_,group) in self.validator_sessions.iter() {
             log::info!(target: "validator", "{}", group.info().await);
-            let status = group.get_status().await;
-            if status == ValidatorGroupStatus::Active || status == ValidatorGroupStatus::Stopping {
-                self.engine.validation_status().insert(group.shard().clone(), group.last_validation_time());
-                self.engine.collation_status().insert(group.shard().clone(), group.last_collation_time());
-            }
         }
-
         log::info!(target: "validator", "{:-64}", "");
     }
 

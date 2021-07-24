@@ -75,14 +75,6 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    fn validation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
-        unimplemented!()
-    }
-
-    fn collation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
-        unimplemented!()
-    }
-
     // Validator specific operations
     async fn set_validator_list(
         &self, 
@@ -237,13 +229,6 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    async fn process_chain_range_in_ext_db(
-        &self,
-        chain_range: &ChainRange)
-    -> Result<()> {
-        unimplemented!()
-    }
-
     // State related operations
 
     async fn download_state(
@@ -380,16 +365,16 @@ pub trait EngineOperations : Sync + Send {
     }
 
     fn is_persistent_state(&self, block_time: u32, prev_time: u32) -> bool {
-        block_time >> 11 != prev_time >> 11 // 1 << 12 = 4096 ~68 mins
+        block_time >> 17 != prev_time >> 17
     }
 
     fn persistent_state_ttl(&self, block_time: u32) -> u32 {
         if cfg!(feature = "local_test") {
             !0
         } else {
-            let x = block_time >> 11;
+            let x = block_time >> 17;
             debug_assert!(x != 0);
-            block_time + ((1 << 12) << x.trailing_zeros())
+            block_time + ((1 << 18) << x.trailing_zeros())
         }
     }
 
@@ -412,7 +397,7 @@ pub trait EngineOperations : Sync + Send {
         if cfg!(feature = "local_test") {
             !0 >> 2 // allow to sync with test data
         } else {
-            3600 // One hour period 
+            86400 // One day period 
         }
     }
 
@@ -438,10 +423,6 @@ pub trait EngineOperations : Sync + Send {
 
     fn db_root_dir(&self) -> Result<&str> {
         Ok("node_db")
-    }
-
-    fn produce_chain_ranges_enabled(&self) -> bool {
-        unimplemented!()
     }
 
     // I/O
@@ -528,11 +509,6 @@ pub trait EngineOperations : Sync + Send {
     }
 }
 
-pub struct ChainRange {
-    pub master_block: BlockIdExt,
-    pub shard_blocks: Vec<BlockIdExt>
-}
-
 /// External DB should implement this trait and put itself into engine's new function
 #[async_trait::async_trait]
 pub trait ExternalDb : Sync + Send {
@@ -543,6 +519,4 @@ pub trait ExternalDb : Sync + Send {
         state: &ShardStateStuff
     ) -> Result<()>;
     async fn process_full_state(&self, state: &ShardStateStuff) -> Result<()>;
-    fn process_chain_range_enabled(&self) -> bool;
-    async fn process_chain_range(&self, range: &ChainRange) -> Result<()>;
 }

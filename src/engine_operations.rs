@@ -2,9 +2,9 @@ use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, 
     config::CollatorTestBundlesGeneralConfig,
     engine::{Engine, LastMcBlockId, ShardsClientMcBlockId, STATSD},
-    engine_traits::{ChainRange, EngineOperations, PrivateOverlayOperations},
-    error::NodeError, internal_db::{NodeState, StoreBlockResult},
-    shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId}
+    engine_traits::{EngineOperations, PrivateOverlayOperations}, error::NodeError,
+    internal_db::{NodeState, StoreBlockResult}, 
+    shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
 };
 use adnl::common::{KeyId, KeyOption};
 use catchain::{
@@ -40,14 +40,6 @@ impl EngineOperations for Engine {
 
     fn activate_validator_list(&self, validator_list_id: UInt256) -> Result<()> {
         self.network().activate_validator_list(validator_list_id)
-    }
-
-    fn validation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
-        self.validation_status()
-    }
-
-    fn collation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
-        self.collation_status()
     }
 
     async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
@@ -457,14 +449,6 @@ impl EngineOperations for Engine {
         Ok(())
     }
 
-    async fn process_chain_range_in_ext_db(&self, chain_range: &ChainRange) -> Result<()> {
-        for db in self.ext_db() {
-            db.process_chain_range(chain_range).await?;
-        }
-
-        Ok(())
-    }
-
     async fn process_full_state_in_ext_db(&self, state: &ShardStateStuff)-> Result<()> {
         for db in self.ext_db() {
             db.process_full_state(state).await?;
@@ -619,10 +603,6 @@ impl EngineOperations for Engine {
 
     fn db_root_dir(&self) -> Result<&str> {
         self.db().db_root_dir()
-    }
-
-    fn produce_chain_ranges_enabled(&self) -> bool {
-        self.ext_db().iter().any(|ext_db| ext_db.process_chain_range_enabled())
     }
 
     #[cfg(feature = "telemetry")]
