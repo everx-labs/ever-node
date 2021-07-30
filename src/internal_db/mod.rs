@@ -7,7 +7,8 @@ use std::{path::PathBuf, sync::Arc, cmp::min, collections::HashMap, time::{Insta
 use storage::{
     archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId},
     block_handle_db::{BlockHandleDb, BlockHandleStorage}, block_index_db::BlockIndexDb, 
-    block_info_db::BlockInfoDb, node_state_db::NodeStateDb, shardstate_db::{GC, ShardStateDb},
+    block_info_db::BlockInfoDb, node_state_db::NodeStateDb, 
+    shardstate_db::{ShardStateDb, AllowStateGcResolver},
     shardstate_persistent_db::ShardStatePersistentDb, types::{BlockHandle, BlockMeta},
     shard_top_blocks_db::ShardTopBlocksDb,
 };
@@ -16,6 +17,8 @@ use storage::block_db::BlockDb;
 use ton_api::ton::PublicKey;
 use ton_block::{Block, BlockIdExt, AccountIdPrefixFull, UnixTime32};
 use ton_types::{error, fail, Result, UInt256};
+
+pub mod state_gc_resolver;
 
 pub trait NodeState: serde::Serialize + serde::de::DeserializeOwned {
     fn get_key() -> &'static str;
@@ -78,7 +81,7 @@ pub trait InternalDb : Sync + Send {
         state: &ShardStateStuff
     ) -> Result<bool>;
     fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<ShardStateStuff>;
-    fn gc_shard_state_dynamic_db(&self) -> Result<usize>;
+   // fn gc_shard_state_dynamic_db(&self) -> Result<usize>;
 
     async fn store_shard_state_persistent(&self, handle: &Arc<BlockHandle>, state: &ShardStateStuff) -> Result<()>;
     async fn store_shard_state_persistent_raw(&self, handle: &Arc<BlockHandle>, state_data: &[u8]) -> Result<()>;
@@ -133,9 +136,9 @@ pub struct InternalDbImpl {
     next2_block_db: BlockInfoDb,
     node_state_db: NodeStateDb,
     shard_state_persistent_db: ShardStatePersistentDb,
-    shard_state_dynamic_db: ShardStateDb,
+    shard_state_dynamic_db: Arc<ShardStateDb>,
     //ss_test_map: lockfree::map::Map<BlockIdExt, ShardStateStuff>,
-    shardstate_db_gc: GC,
+    //shardstate_db_gc: GC,
     archive_manager: Arc<ArchiveManager>,
     shard_top_blocks_db: ShardTopBlocksDb,
 
@@ -166,49 +169,42 @@ impl InternalDbImpl {
         );
         let shard_state_dynamic_db = ShardStateDb::with_paths(
             &Self::build_name(&config.db_directory, "shardstate_db"),
-            &Self::build_name(&config.db_directory, "cells_db")
-        );
-        let shardstate_db_gc = GC::new(&shard_state_dynamic_db, Arc::clone(&block_handle_db));
+            &Self::build_name(&config.db_directory, "cells_db"),
+            &Self::build_name(&config.db_directory, "cells_db1"),
+        )?;
+        //let shardstate_db_gc = GC::new(&shard_state_dynamic_db, Arc::clone(&block_handle_db))?;
         let archive_manager = Arc::new(ArchiveManager::with_data(Arc::new(PathBuf::from(&config.db_directory))).await?);
-        Ok(
-            Self {
-                block_handle_storage,
-                block_index_db,
-                prev_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "prev1_block_db")),
-                prev2_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "prev2_block_db")),
-                next_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "next1_block_db")),
-                next2_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "next2_block_db")),
-                node_state_db: NodeStateDb::with_path(&Self::build_name(&config.db_directory, "node_state_db")),
-                shard_state_persistent_db: ShardStatePersistentDb::with_path(
-                    &Self::build_name(&config.db_directory, "shard_state_persistent_db")),
-                shard_state_dynamic_db,
-                //ss_test_map: lockfree::map::Map::new(),
-                shardstate_db_gc,
-                archive_manager,
-                shard_top_blocks_db: ShardTopBlocksDb::with_path(&Self::build_name(&config.db_directory, "shard_top_blocks_db")),
+        let db = Self {
+            block_handle_storage,
+            block_index_db,
+            prev_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "prev1_block_db")),
+            prev2_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "prev2_block_db")),
+            next_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "next1_block_db")),
+            next2_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "next2_block_db")),
+            node_state_db: NodeStateDb::with_path(&Self::build_name(&config.db_directory, "node_state_db")),
+            shard_state_persistent_db: ShardStatePersistentDb::with_path(
+                &Self::build_name(&config.db_directory, "shard_state_persistent_db")),
+            shard_state_dynamic_db,
+            //ss_test_map: lockfree::map::Map::new(),
+            //shardstate_db_gc,
+            archive_manager,
+            shard_top_blocks_db: ShardTopBlocksDb::with_path(&Self::build_name(&config.db_directory, "shard_top_blocks_db")),
 
-                #[cfg(feature = "read_old_db")]
-                old_block_db: BlockDb::with_path(&Self::build_name(&config.db_directory, "block_db")),
-                #[cfg(feature = "read_old_db")]
-                old_block_proof_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_proof_db")),
-                #[cfg(feature = "read_old_db")]
-                old_block_proof_link_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_proof_link_db")),
+            #[cfg(feature = "read_old_db")]
+            old_block_db: BlockDb::with_path(&Self::build_name(&config.db_directory, "block_db")),
+            #[cfg(feature = "read_old_db")]
+            old_block_proof_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_proof_db")),
+            #[cfg(feature = "read_old_db")]
+            old_block_proof_link_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_proof_link_db")),
 
-                config
-            }
-            // Self {
-            //     block_handle_db: BlockInfoDb::in_memory(),
-            //     prev_block_db: BlockInfoDb::in_memory(),
-            //     prev2_block_db: BlockInfoDb::in_memory(),
-            //     next_block_db: BlockInfoDb::in_memory(),
-            //     next2_block_db: BlockInfoDb::in_memory(),
-            //     node_state_db: NodeStateDb::with_path(&Self::build_name(&config.db_directory, "node_state_db")),
-            //     shard_state_persistent_db: BlockInfoDb::in_memory(),
-            //     shard_state_dynamic_db: ShardStateDb::in_memory(),
-            //     block_handle_cache: lockfree::map::Map::new(),
-            //     ss_test_map: lockfree::map::Map::new(),
-            // }
-        )
+            config
+        };
+
+        Ok(db)
+    }
+
+    pub fn start_states_gc(&self, resolver: Arc<dyn AllowStateGcResolver>, run_gc_interval: Duration) {
+        self.shard_state_dynamic_db.clone().start_gc(resolver, run_gc_interval)
     }
 
     pub fn build_name(dir: &str, name: &str) -> String {
@@ -267,7 +263,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     async fn store_block_data(&self, block: &BlockStuff) -> Result<StoreBlockResult> {
-        let _tc = TimeChecker::new(format!("store_block_data {}", block.id()), 100);
+        let _tc = TimeChecker::new(format!("store_block_data {}", block.id()), 300);
         let handle = self.create_or_load_block_handle(block.id(), Some(block.block()), None)?;
         let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(block.id());
         let mut first_time = false;
@@ -351,7 +347,7 @@ impl InternalDb for InternalDbImpl {
             }
         } else {
 
-            let _tc = TimeChecker::new(format!("store_block_proof {}", proof.id()), 100);
+            let _tc = TimeChecker::new(format!("store_block_proof {}", proof.id()), 200);
             if id != proof.id() {
                 fail!(NodeError::InvalidArg("`proof` and `id` mismatch".to_string()))
             }
@@ -439,7 +435,7 @@ impl InternalDb for InternalDbImpl {
         handle: &Arc<BlockHandle>, 
         state: &ShardStateStuff
     ) -> Result<bool> {
-        let _tc = TimeChecker::new(format!("store_shard_state_dynamic {}", state.block_id()), 100);
+        let _tc = TimeChecker::new(format!("store_shard_state_dynamic {}", state.block_id()), 300);
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
@@ -460,9 +456,10 @@ impl InternalDb for InternalDbImpl {
         Ok(ShardStateStuff::new(id.clone(), self.shard_state_dynamic_db.get(id)?)?)
     }
 
+    /*
     fn gc_shard_state_dynamic_db(&self) -> Result<usize> {
         self.shardstate_db_gc.collect()
-    }
+    }*/
 
     async fn store_shard_state_persistent(
         &self, 
@@ -501,7 +498,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     async fn load_shard_state_persistent_slice(&self, id: &BlockIdExt, offset: u64, length: u64) -> Result<Vec<u8>> {
-        let _tc = TimeChecker::new(format!("load_shard_state_persistent_slice {}", id), 100);
+        let _tc = TimeChecker::new(format!("load_shard_state_persistent_slice {}", id), 200);
         let full_lenth = self.load_shard_state_persistent_size(id).await?;
         if offset > full_lenth {
             fail!("offset is greater than full length");
@@ -516,7 +513,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     async fn load_shard_state_persistent_size(&self, id: &BlockIdExt) -> Result<u64> {
-        let _tc = TimeChecker::new(format!("load_shard_state_persistent_slice {}", id), 10);
+        let _tc = TimeChecker::new(format!("load_shard_state_persistent_size {}", id), 50);
         self.shard_state_persistent_db.get_size(id).await
     }
 
@@ -617,7 +614,7 @@ impl InternalDb for InternalDbImpl {
     }
 
     async fn archive_block(&self, id: &BlockIdExt) -> Result<()> {
-        let _tc = TimeChecker::new(format!("archive_block {}", id), 100);
+        let _tc = TimeChecker::new(format!("archive_block {}", id), 200);
 
         let handle = self.load_block_handle(id)?.ok_or_else(
             || error!("Cannot load handle for archiving block {}", id)

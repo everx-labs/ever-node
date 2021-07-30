@@ -1,6 +1,6 @@
 use crate::{
     block::{BlockStuff, convert_block_id_ext_api2blk}, block_proof::BlockProofStuff, 
-    engine_traits::EngineOperations, error::NodeError
+    engine_traits::{ChainRange, EngineOperations}, error::NodeError
 };
 
 use std::{sync::Arc, mem::drop};
@@ -83,9 +83,11 @@ async fn load_next_master_block(
     proof.check_with_master_state(&prev_state)?;
     let mut next_handle = if let Some(next_handle) = engine.load_block_handle(block.id())? {
         if !next_handle.has_data() {
-            fail!("Unitialized handle detected for block {}", block.id())
+            log::warn!("Unitialized handle detected for block {}", block.id());
+            engine.store_block(&block).await?.handle
+        } else {
+            next_handle
         }
-        next_handle
     } else {
         engine.store_block(&block).await?.handle
     };
@@ -123,11 +125,54 @@ async fn load_shard_blocks_cycle(
 
         let engine = Arc::clone(&engine);
         tokio::spawn(async move {
-            if let Err(e) = load_shard_blocks(engine, semaphore_permit, &mc_block).await {
+            if let Err(e) = load_shard_blocks(engine.clone(), semaphore_permit, &mc_block).await {
                 log::error!("FATAL!!! Unexpected error in shard blocks processing for mc block {}: {:?}", mc_block.id(), e);
+            }
+
+            if engine.produce_chain_ranges_enabled() {
+                if let Err(err) = produce_chain_range(engine, &mc_block).await {
+                    log::error!("Unexpected error in chain range processing for mc block {}: {:?}", mc_block.id(), err);
+                }
             }
         });
     }
+}
+
+pub async fn produce_chain_range(
+    engine: Arc<dyn EngineOperations>,
+    mc_block: &BlockStuff
+) -> Result<()> {
+    let mut range = ChainRange {
+        master_block: mc_block.id().clone(),
+        shard_blocks: Vec::new(),
+    };
+
+    let prev_master = engine.load_block_prev1(mc_block.id())?;
+    let prev_master = engine.load_block_handle(&prev_master)?
+        .ok_or_else(|| NodeError::InvalidData(format!("Can not load block handle for {}", prev_master)))?;
+    let prev_master = engine.load_block(&prev_master).await?;
+    let prev_master_shards = prev_master.shards_blocks()?;
+
+    let mut blocks: Vec<BlockIdExt> = mc_block.shards_blocks()?.values().cloned().collect();
+
+    while let Some(block_id) = blocks.pop() {
+        let handle = engine.load_block_handle(&block_id)?
+            .ok_or_else(|| NodeError::InvalidData(format!("Can not load block handle for {}", block_id)))?;
+
+        if prev_master_shards.get(handle.id().shard()) != Some(handle.id()) {
+            if handle.has_prev1() {
+                blocks.push(engine.load_block_prev1(&block_id)?);
+            }
+            if handle.has_prev2() {
+                blocks.push(engine.load_block_prev2(&block_id)?);
+            }
+            range.shard_blocks.push(block_id);
+        }
+    }
+
+    engine.process_chain_range_in_ext_db(&range).await?;
+
+    Ok(())
 }
 
 pub async fn load_shard_blocks(
