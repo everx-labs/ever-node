@@ -1,9 +1,8 @@
 use crate::{
-    cell_db::CellDb, /*dynamic_boc_diff_writer::{DynamicBocDiffFactory, DynamicBocDiffWriter},*/
-    types::{CellId, StorageCell},
-    db::traits::KvcTransaction
+    cell_db::CellDb, dynamic_boc_diff_writer::{DynamicBocDiffFactory, DynamicBocDiffWriter},
+    types::{CellId, StorageCell}
 };
-use fnv::{FnvHashMap, FnvHashSet};
+use fnv::FnvHashMap;
 use std::{ops::{Deref, DerefMut}, sync::{Arc, RwLock, Weak}};
 //#[cfg(test)]
 //use std::path::Path;
@@ -13,6 +12,7 @@ use ton_types::{Cell, Result, CellImpl, MAX_LEVEL};
 pub struct DynamicBocDb {
     db: Arc<CellDb>,
     cells: Arc<RwLock<FnvHashMap<CellId, Weak<StorageCell>>>>,
+    diff_factory: DynamicBocDiffFactory,
 }
 
 impl DynamicBocDb {
@@ -29,6 +29,7 @@ impl DynamicBocDb {
         Self {
             db: Arc::clone(&db),
             cells: Arc::new(RwLock::new(FnvHashMap::default())),
+            diff_factory: DynamicBocDiffFactory::new(db),
         }
     }
 
@@ -42,18 +43,14 @@ impl DynamicBocDb {
 
     /// Converts tree of cells into DynamicBoc
     pub fn save_as_dynamic_boc(self: &Arc<Self>, root_cell: &dyn CellImpl) -> Result<usize> {
-        let mut transaction = self.db.begin_transaction()?;
-        let mut visited = FnvHashSet::default();
-
+        let diff_writer = self.diff_factory.construct();
 
         let written_count = self.save_tree_of_cells_recursive(
             root_cell,
             Arc::clone(&self.db),
-            transaction.as_mut(),
-            &mut visited
-        )?;
+            &diff_writer)?;
 
-        transaction.commit()?;
+        diff_writer.apply()?;
 
         Ok(written_count)
     }
@@ -63,6 +60,10 @@ impl DynamicBocDb {
         let storage_cell = self.load_cell(root_cell_id)?;
 
         Ok(Cell::with_cell_impl_arc(storage_cell))
+    }
+
+    pub(super) fn diff_factory(&self) -> &DynamicBocDiffFactory {
+        &self.diff_factory
     }
 
     pub(crate) fn load_cell(self: &Arc<Self>, cell_id: &CellId) -> Result<Arc<StorageCell>> {
@@ -90,28 +91,25 @@ impl DynamicBocDb {
         self: &Arc<Self>,
         cell: &dyn CellImpl,
         cell_db: Arc<CellDb>,
-        transaction: &mut dyn KvcTransaction<CellId>,
-        visited: &mut FnvHashSet<CellId>,
+        diff_writer: &DynamicBocDiffWriter
     ) -> Result<usize> {
         let cell_id = CellId::new(cell.hash(MAX_LEVEL));
-        if visited.contains(&cell_id) || cell_db.contains(&cell_id)? {
-            Ok(0)
-        } else {
-            transaction.put(&cell_id, &StorageCell::serialize(cell)?);
-            visited.insert(cell_id);
-
-            let mut count = 1;
-            for i in 0..cell.references_count() {
-                count += self.save_tree_of_cells_recursive(
-                    cell.reference(i)?.deref(),
-                    Arc::clone(&cell_db),
-                    transaction,
-                    visited
-                )?;
-            }
-
-            Ok(count)
+        if cell_db.contains(&cell_id)? || diff_writer.contains_cell(&cell_id) {
+            return Ok(0);
         }
+
+        diff_writer.add_cell(cell_id, StorageCell::serialize(cell)?);
+
+        let mut count = 1;
+        for i in 0..cell.references_count() {
+            count += self.save_tree_of_cells_recursive(
+                cell.reference(i)?.deref(),
+                Arc::clone(&cell_db),
+                diff_writer
+            )?;
+        }
+
+        Ok(count)
     }
 }
 

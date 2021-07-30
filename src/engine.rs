@@ -3,7 +3,7 @@ use crate::{
     block::{convert_block_id_ext_api2blk, BlockStuff, BlockIdExtExtention},
     block_proof::BlockProofStuff,
     config::{TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig},
-    engine_traits::{ExternalDb, OverlayOperations, EngineOperations, PrivateOverlayOperations, ValidatedBlockStatNode, ValidatedBlockStat},
+    engine_traits::{ExternalDb, OverlayOperations, EngineOperations, PrivateOverlayOperations},
     full_node::{
         apply_block::{self, apply_block},
         shard_client::{
@@ -11,10 +11,7 @@ use crate::{
             SHARD_BROADCAST_WINDOW
         },
     },
-    internal_db::{
-        InternalDb, InternalDbConfig, InternalDbImpl, NodeState,
-        state_gc_resolver::AllowStateGcSmartResolver,
-    },
+    internal_db::{InternalDb, InternalDbConfig, InternalDbImpl, NodeState},
     network::{
         full_node_client::FullNodeOverlayClient, control::ControlServer,
         full_node_service::FullNodeOverlayService
@@ -26,7 +23,6 @@ use crate::{
     shard_blocks::{
         ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker, ShardBlockProcessingResult
     },
-    boot::self
 };
 #[cfg(feature = "local_test")]
 use crate::network::node_network_stub::NodeNetworkStub;
@@ -45,7 +41,7 @@ use overlay::QueriesConsumer;
 use statsd::client;
 use std::{
     convert::TryInto, ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering, AtomicU64}},
-    time::Duration, mem::ManuallyDrop, collections::HashMap, collections::HashSet,
+    time::Duration, mem::ManuallyDrop, collections::HashMap,
 };
 #[cfg(feature = "metrics")]
 use std::env;
@@ -53,12 +49,11 @@ use storage::types::BlockHandle;
 use ton_block::{
     self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL, BASE_WORKCHAIN_ID, ShardDescr
 };
-use ton_types::{error, Result, fail, UInt256};
+use ton_types::{error, Result, fail};
 use ton_api::ton::ton_node::{
     Broadcast, broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}
 };
 use adnl::{common::KeyId, server::AdnlServerConfig};
-use crossbeam_channel::{Sender, Receiver};
 
 define_db_prop!(LastMcBlockId,   "LastMcBlockId",   ton_api::ton::ton_node::blockidext::BlockIdExt);
 define_db_prop!(InitMcBlockId,   "InitMcBlockId",   ton_api::ton::ton_node::blockidext::BlockIdExt);
@@ -68,8 +63,6 @@ define_db_prop!(ClientMcBlockId, "ClientMcBlockId", ton_api::ton::ton_node::bloc
 define_db_prop!(PssKeeperBlockId, "PssKeeperBlockId", ton_api::ton::ton_node::blockidext::BlockIdExt);
 // Last master block all shard blocks listed in was applied
 define_db_prop!(ShardsClientMcBlockId, "ShardsClientMcBlockId", ton_api::ton::ton_node::blockidext::BlockIdExt);
-
-const MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT: usize = 10000; //maximum number of validated block stats entries in engine's queue
 
 pub struct Engine {
     db: Arc<dyn InternalDb>,
@@ -85,7 +78,6 @@ pub struct Engine {
     init_mc_block_id: BlockIdExt,
     initial_sync_disabled: bool,
     network: Arc<NodeNetwork>,
-    archives_life_time: Option<u32>,
     shard_blocks: ShardBlocksPool,
     last_known_mc_block_seqno: AtomicU32,
     last_known_keyblock_seqno: AtomicU32,
@@ -96,12 +88,6 @@ pub struct Engine {
     shard_states_cache: TimeBasedCache<BlockIdExt, ShardStateStuff>,
     loaded_from_ss_cache: AtomicU64,
     loaded_ss_total: AtomicU64,
-
-    state_gc_resolver: Arc<AllowStateGcSmartResolver>,
-    validation_status: lockfree::map::Map<ShardIdent, u64>,
-    collation_status: lockfree::map::Map<ShardIdent, u64>,
-    validated_block_stats_sender: Sender<ValidatedBlockStat>,
-    validated_block_stats_receiver: Receiver<ValidatedBlockStat>,
 
     #[cfg(feature = "telemetry")]
     full_node_telemetry: FullNodeTelemetry,
@@ -282,7 +268,6 @@ impl Engine {
 
         log::info!("Creating engine...");
 
-        let archives_life_time = general_config.gc_archives_life_time_hours();
         let db_directory = general_config.internal_db_path().unwrap_or_else(|| {"node_db"});
         let db_config = InternalDbConfig { db_directory: db_directory.to_string() };
         let db = Arc::new(InternalDbImpl::new(db_config).await?);
@@ -318,12 +303,8 @@ impl Engine {
         let (shard_blocks_pool, shard_blocks_receiver) = 
             ShardBlocksPool::new(shard_blocks, last_mc_seqno, false);
 
-        let state_gc_resolver = Arc::new(AllowStateGcSmartResolver::new());
-        db.start_states_gc(state_gc_resolver.clone(), Duration::from_secs(5));
-
         log::info!("Engine is created.");
 
-        let (validated_block_stats_sender, validated_block_stats_receiver) = crossbeam_channel::bounded(MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT);
         let engine = Arc::new(Engine {
             db,
             ext_db,
@@ -336,7 +317,6 @@ impl Engine {
             zero_state_id,
             init_mc_block_id,
             initial_sync_disabled,
-            archives_life_time: archives_life_time,
             network: network.clone(),
             shard_blocks: shard_blocks_pool,
             last_known_mc_block_seqno: AtomicU32::new(0),
@@ -346,11 +326,6 @@ impl Engine {
             shard_states_cache: TimeBasedCache::new(120, "shard_states_cache".to_string()),
             loaded_from_ss_cache: AtomicU64::new(0),
             loaded_ss_total: AtomicU64::new(0),
-            state_gc_resolver,
-            validation_status: lockfree::map::Map::new(),
-            collation_status: lockfree::map::Map::new(),
-            validated_block_stats_sender,
-            validated_block_stats_receiver,
             #[cfg(feature = "telemetry")]
             full_node_telemetry: FullNodeTelemetry::new(),
             #[cfg(feature = "telemetry")]
@@ -474,14 +449,6 @@ impl Engine {
     #[cfg(feature = "telemetry")]
     pub fn full_node_service_telemetry(&self) -> &FullNodeNetworkTelemetry {
         &self.full_node_service_telemetry
-    }
-
-    pub fn validation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
-        &self.validation_status
-    }
-
-    pub fn collation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
-        &self.collation_status
     }
 
     pub async fn download_and_apply_block_worker(
@@ -615,12 +582,6 @@ impl Engine {
                 }
                 let id = handle.id().clone();
                 self.next_block_applying_awaiters.do_or_wait(&prev_id, None, async move { Ok(id) }).await?;
-
-                // Advance states GC
-                let shards_client = self.load_shards_client_mc_block_id().await?;
-                let pss_keeper: BlockIdExt = (&PssKeeperBlockId::load_from_db(self.db.deref())?.0).try_into()?;
-                let min_id = if shards_client.seq_no() < pss_keeper.seq_no() { shards_client } else { pss_keeper };
-                self.state_gc_resolver.advance(&min_id, self.deref()).await?;
             }
 
             log::info!(
@@ -682,71 +643,6 @@ impl Engine {
         Ok(())
     }
 
-    pub fn validated_block_stats_sender(&self) -> &Sender<ValidatedBlockStat> { &self.validated_block_stats_sender }
-    pub fn validated_block_stats_receiver(&self) -> &Receiver<ValidatedBlockStat> { &self.validated_block_stats_receiver }
-
-    async fn process_validated_block_stats_for_mc(&self, block_id: &BlockIdExt, signing_nodes: &Vec<UInt256>) -> Result<()> {
-        let block_handle = self.load_block_handle(&block_id)?.ok_or_else(|| error!("Cannot load handle for block {}", block_id))?;
-        let mut is_link = false;
-        let created_by = if block_handle.has_proof_or_link(&mut is_link) {
-            let virt_block = self.load_block_proof(&block_handle, is_link).await?.virtualize_block()?.0;
-            let created_by = virt_block.read_extra()?.created_by().clone();
-
-            Some(created_by)
-        } else {
-            None
-        };
-
-        self.process_validated_block_stats(block_id, signing_nodes, created_by.expect("MC should have created_by field")).await
-    }
-
-    async fn process_validated_block_stats(&self, block_id: &BlockIdExt, signing_nodes: &Vec<UInt256>, created_by: UInt256) -> Result<()> {
-        let last_mc_state = self.load_last_applied_mc_state().await?;
-        let last_mc_state_extra = last_mc_state.state().read_custom()?
-            .ok_or_else(|| error!("State for {} doesn't have McStateExtra", last_mc_state.block_id()))?;
-        let cur_validator_set = last_mc_state_extra.config.validator_set()?;
-        let cc_config = last_mc_state_extra.config.catchain_config()?;
-        let shard = block_id.shard().clone();
-        let cc_seqno = if shard.is_masterchain() {
-            last_mc_state_extra.validator_info.catchain_seqno
-        } else {
-            last_mc_state_extra.shards().calc_shard_cc_seqno(&shard)?
-        };
-        let (validators, _hash_short) = cur_validator_set.calc_subset(
-            &cc_config, 
-            shard.shard_prefix_with_tag(), 
-            shard.workchain_id(), 
-            cc_seqno,
-            0.into())?;
-
-        let mut commit_validators = HashSet::new();
-        for node in signing_nodes {
-            commit_validators.insert(node.clone());
-        }
-
-        let mut validated_block_stat_nodes = Vec::new();
-
-        for validator in &validators {
-            let signed = commit_validators.contains(&validator.compute_node_id_short());
-            let collated = created_by == &validator.public_key.key_bytes().into();
-            let validated_block_stat_node = ValidatedBlockStatNode {
-                public_key : validator.public_key.clone(),
-                signed,
-                collated,
-            };
-
-            validated_block_stat_nodes.push(validated_block_stat_node);
-        }
-
-        let validated_block_stat = ValidatedBlockStat {
-            nodes : validated_block_stat_nodes,
-        };
-
-        self.push_validated_block_stat(validated_block_stat)?;
-
-        Ok(())
-    }
-
     fn process_block_broadcast(self: Arc<Self>, broadcast: Box<BlockBroadcast>, src: Arc<KeyId>) {
         // because of ALL blocks-broadcasts received in one task - spawn for each block
         log::trace!("Processing block broadcast {}", broadcast.id);
@@ -756,21 +652,6 @@ impl Engine {
                 log::error!("Error while processing block broadcast {} from {}: {}", broadcast.id, src, e);
             } else {
                 log::trace!("Processed block broadcast {} from {}", broadcast.id, src);
-
-                if let Ok(block_id) = convert_block_id_ext_api2blk(&broadcast.id) {
-                    if block_id.shard().is_masterchain() {
-                        let mut signing_nodes = Vec::new();
-                        for api_sig in broadcast.signatures.iter() {
-                            signing_nodes.push(UInt256::from(&api_sig.who.0));
-                        }
-
-                        if let Err(e) = self.process_validated_block_stats_for_mc(&block_id, &signing_nodes).await {
-                            log::error!("Error while processing block broadcast stats {} from {}: {}", broadcast.id, src, e);        
-                        } else {
-                            log::trace!("Processed block broadcast stats {} from {}", broadcast.id, src);                            
-                        }
-                    }
-                }
             }
         });
     }
@@ -830,7 +711,7 @@ impl Engine {
         if let ShardBlockProcessingResult::MightBeAdded(tbd) = 
             self.shard_blocks.process_shard_block_raw(&id, cc_seqno, data, false, true, self.deref()).await? {
 
-            let (mc_seqno, created_by) = tbd.top_block_mc_seqno_and_creator()?;
+            let mc_seqno = tbd.top_block_mc_seqno()?;
             let shards_client_mc_block_id = self.load_shards_client_mc_block_id().await?;
             if shards_client_mc_block_id.seq_no() + SHARD_BROADCAST_WINDOW < mc_seqno {
                 log::debug!(
@@ -838,24 +719,6 @@ impl Engine {
                     id, mc_seqno, shards_client_mc_block_id.seq_no()
                 );
                 return Ok(id);
-            }
-
-            // fill stats for slashing
-            let mut signing_nodes = Vec::new();
-            if let Some(commit_signatures) = tbd.top_block_descr().signatures() {
-                use ton_types::HashmapType;
-                commit_signatures.pure_signatures.signatures().iterate_slices(|ref mut _key, ref mut slice| {
-                    use ton_block::Deserializable;
-                    let sign = ton_block::CryptoSignaturePair::construct_from(slice)?;
-                    signing_nodes.push(sign.node_id_short.clone());
-                    Ok(true)
-                })?;
-            }
-
-            if let Err(e) = self.process_validated_block_stats(&id, &signing_nodes, created_by).await {
-                log::error!("Error while processing shard block broadcast stats {}: {}", id, e);
-            } else {
-                log::trace!("Processed shard block broadcast stats {}", id);
             }
 
             // force download and apply afrer timeout
@@ -1040,7 +903,7 @@ impl Engine {
     }
 */
 
-    pub async fn store_pss_keeper_block_id(&self, id: &BlockIdExt) -> Result<()> {
+    async fn store_pss_keeper_block_id(&self, id: &BlockIdExt) -> Result<()> {
         PssKeeperBlockId(id.into()).store_to_db(self.db().deref())
     }
 
@@ -1067,8 +930,8 @@ impl Engine {
             || error!("Cannot load handle for PSS keeper block {}", pss_keeper_block)
         )?;
         loop {
-            let mc_state = engine.load_state(handle.id()).await?;
             if handle.is_key_block()? {
+                let mc_state = engine.load_state(handle.id()).await?;
                 let is_persistent_state = if handle.id().seq_no() == 0 {
                     false // zerostate are saved another way (see boot)
                 } else {
@@ -1083,8 +946,7 @@ impl Engine {
                         let prev_handle = engine.load_block_handle(&block_id)?.ok_or_else(
                             || error!("Cannot load handle for PSS keeper prev key block {}", block_id)
                         )?;
-                        engine.is_persistent_state(handle.gen_utime()?, prev_handle.gen_utime()?,
-                            boot::PSS_PERIOD_BITS)
+                        engine.is_persistent_state(handle.gen_utime()?, prev_handle.gen_utime()?)
                     } else {
                         false
                     }
@@ -1122,89 +984,10 @@ impl Engine {
                             handle.id(), now.elapsed().as_millis());
                     };
                 }
-                if let Err(e) = Self::check_gc_for_archives(&engine, &handle, &mc_state).await {
-                    log::warn!("Error (archive_manager gc): {:?}", e);
-                }
             }
             handle = engine.wait_next_applied_mc_block(&handle, None).await?.0;
-            engine.store_pss_keeper_block_id(handle.id()).await?;
+            engine.store_pss_keeper_block_id(handle.id(), ).await?;
         }
-    }
-
-    async fn check_gc_for_archives(
-        engine: &Arc<Engine>,
-        curr_block_handle: &Arc<BlockHandle>,
-        mc_state: &ShardStateStuff
-    ) -> Result<()> {
-        let mut prev_pss_block = None;
-        let mut prev_prev_pss_block = None;
-        let mut handle = curr_block_handle.clone();
-        let mut check_date = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
-
-        match &engine.archives_life_time {
-            None => return Ok(()),
-            Some(life_time) => {
-                match check_date.checked_sub(Duration::from_secs((life_time * 3600) as u64)) {
-                    Some(date) => {
-                        log::info!("archive gc: checked date {}.", &date.as_secs());
-                        check_date = date
-                    },
-                    None => {
-                        log::info!("archive gc: life_time in config is bad, actual checked date: {}",
-                            &check_date.as_secs()
-                        );
-                    }
-                }
-            }
-        }
-
-        loop {
-            if handle.id().seq_no() == 0 {
-                return Ok(());
-            }
-
-            if let Some(prev_key_block_id) =
-                mc_state.shard_state_extra()?.prev_blocks.get_prev_key_block(handle.id().seq_no() - 1)? {
-
-                let block_id = BlockIdExt {
-                    shard_id: ShardIdent::masterchain(),
-                    seq_no: prev_key_block_id.seq_no,
-                    root_hash: prev_key_block_id.root_hash,
-                    file_hash: prev_key_block_id.file_hash
-                };
-                let prev_handle = engine.load_block_handle(&block_id)?.ok_or_else(
-                    || error!("Cannot load handle for PSS keeper prev key block {}", block_id)
-                )?;
-                if engine.is_persistent_state(curr_block_handle.gen_utime()?, 
-                   prev_handle.gen_utime()?, boot::PSS_PERIOD_BITS) {
-                    prev_prev_pss_block = prev_pss_block;
-                    prev_pss_block = Some(prev_handle.clone());
-                }
-                handle = prev_handle;
-
-                if let Some(pss_block) = &prev_prev_pss_block {
-                    let gen_time = pss_block.gen_utime()? as u64;
-                    let check_date = check_date.as_secs();
-                    if gen_time < check_date {
-                        log::info!(
-                            "gc for archives: found block (gen time: {}, seq_no: {}), check date: {}",
-                            &gen_time, pss_block.id().seq_no(), &check_date
-                        );
-                        break;
-                    }
-                }
-            } else {
-                return Ok(());
-            }
-
-            if let Some(gc_marked_block) = &prev_prev_pss_block {
-                log::info!("start gc for archives..");
-                engine.db.archive_manager().gc(&gc_marked_block.id()).await;
-                log::info!("finish gc for archives.");
-                break;
-            }
-        }
-        Ok(())
     }
 
     pub async fn store_persistent_state_attempts(&self, handle: &Arc<BlockHandle>, ss: &ShardStateStuff) {
@@ -1278,7 +1061,7 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
     let mut result = LastMcBlockId::load_from_db(engine.db().deref())
         .and_then(|id| (&id.0).try_into());
     if let Ok(id) = result {
-        result = boot::warm_boot(engine.clone(), id).await;
+        result = crate::boot::warm_boot(engine.clone(), id).await;
     }/* else {
         let res = engine.overlay_operations.get_peers_count(engine.zero_state_id()).await?;
         if res == 0 { 
@@ -1290,7 +1073,7 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
         Ok(id) => id,
         Err(err) => {
             log::warn!("error before cold boot: {}", err);
-            let id = boot::cold_boot(engine.clone()).await?;
+            let id = crate::boot::cold_boot(engine.clone()).await?;
             engine.store_last_applied_mc_block_id(&id).await?;
             id
         }
@@ -1386,7 +1169,7 @@ pub async fn run(node_config: TonNodeConfig, zerostate_path: Option<&str>, ext_d
 
     // Sync by archives
     if !engine.check_sync().await? {
-        crate::sync::start_sync(Arc::clone(&engine) as Arc<dyn EngineOperations>, None).await?;
+        crate::sync::start_sync(Arc::clone(&engine) as Arc<dyn EngineOperations>).await?;
         last_mc_block = LastMcBlockId::load_from_db(engine.db().deref())
             .and_then(|id| (&id.0).try_into())?;
         shards_client_mc_block = ShardsClientMcBlockId::load_from_db(engine.db().deref())

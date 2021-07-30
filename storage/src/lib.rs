@@ -7,6 +7,8 @@ pub mod catchain_persistent_db;
 mod cell_db;
 pub mod db;
 mod dynamic_boc_db;
+mod dynamic_boc_diff;
+mod dynamic_boc_diff_writer;
 mod error;
 mod lt_db;
 mod lt_desc_db;
@@ -17,5 +19,3 @@ pub mod shardstate_persistent_db;
 pub mod traits;
 pub mod types;
 pub mod shard_top_blocks_db;
-
-pub(crate) const TARGET: &str = "storage";
