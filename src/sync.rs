@@ -6,7 +6,7 @@ use adnl::common::{KeyId, Wait};
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 use storage::{
     archives::{
-        archive_manager::SLICE_SIZE, package::read_package_from, 
+        ARCHIVE_PACKAGE_SIZE, package::read_package_from, 
         package_entry_id::PackageEntryId
     },
     types::BlockHandle
@@ -19,7 +19,15 @@ use ton_types::{error, fail, Result};
 
 const TARGET: &str = "sync";
 
-pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> {
+#[async_trait::async_trait]
+pub trait StopSyncChecker {
+    async fn check(&self, engine: &Arc<dyn EngineOperations>) -> bool;
+}
+
+pub(crate) async fn start_sync(
+    engine: Arc<dyn EngineOperations>,
+    check_stop_sync: Option<&dyn StopSyncChecker>,
+) -> Result<()> {
 
     async fn apply(
         engine: &Arc<dyn EngineOperations>, 
@@ -136,7 +144,7 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
                 queue.push((sync_mc_seq_no, ArchiveStatus::Downloading));
                 download(engine, wait, sync_mc_seq_no, active_peers);
             }
-            sync_mc_seq_no += SLICE_SIZE;
+            sync_mc_seq_no += ARCHIVE_PACKAGE_SIZE;
         }
         Ok(())
     }
@@ -156,6 +164,13 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
     let mut concurrency = 1;
 
     'check: while !engine.check_sync().await? {
+
+        if let Some(check_stop_sync) = check_stop_sync.as_ref() {
+            if check_stop_sync.check(&engine).await {
+                log::info!(target: TARGET, "Sync is managed to stop");
+                return Ok(())
+            }
+        }
 
         // Select sync block ID
         let mc_block_id = Arc::new(engine.load_last_applied_mc_block_id().await?);
@@ -219,7 +234,7 @@ pub(crate) async fn start_sync(engine: Arc<dyn EngineOperations>) -> Result<()> 
                     queue.push((sync_mc_seq_no, ArchiveStatus::Downloading));
                     download(&engine, &wait, sync_mc_seq_no, &active_peers);
                 }
-                sync_mc_seq_no += SLICE_SIZE;
+                sync_mc_seq_no += ARCHIVE_PACKAGE_SIZE;
             }
 */
             match wait.wait(&mut reader, false).await {
@@ -342,7 +357,7 @@ async fn download_and_import_package(
     let mc_seq_no = last_mc_block_id.seq_no() + 1;
 
     let download_current_task = if let Some((predownload_seq_no, predownload_task)) = predownload_task {
-        if predownload_seq_no <= mc_seq_no && predownload_seq_no + SLICE_SIZE > mc_seq_no {
+        if predownload_seq_no <= mc_seq_no && predownload_seq_no + ARCHIVE_PACKAGE_SIZE > mc_seq_no {
             Some(predownload_task)
         } else {
             None

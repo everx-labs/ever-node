@@ -57,6 +57,7 @@ pub struct TonNodeConfig {
     test_bundles_config: CollatorTestBundlesGeneralConfig,
     #[serde(default = "default_connectivity_check_config")]
     connectivity_check_config: ConnectivityCheckBroadcastConfig,
+    gc: Option<GC>,
     validator_key_ring: Option<HashMap<String, KeyOptionJson>>,
     #[serde(skip)]
     configs_dir: String,
@@ -84,6 +85,12 @@ pub struct KafkaConsumerConfig {
     pub run_attempt_timeout_ms: u32
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Default, Debug, Clone)]
+pub struct GC {
+    enable_for_archives: bool,
+    archives_life_time_hours: Option<u32> // Hours
+}
+
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
 pub struct KafkaProducerConfig {
     pub enabled: bool,
@@ -105,6 +112,7 @@ pub struct ExternalDbConfig {
     pub transaction_producer: KafkaProducerConfig,
     pub account_producer: KafkaProducerConfig,
     pub block_proof_producer: KafkaProducerConfig,
+    pub chain_range_producer: KafkaProducerConfig,
     pub bad_blocks_storage: String,
 }
 
@@ -271,6 +279,21 @@ impl TonNodeConfig {
             }
         }
         None
+    }
+
+    pub fn gc_archives_life_time_hours(&self) -> Option<u32> {
+        match &self.gc {
+            Some(gc) => {
+                if !gc.enable_for_archives {
+                    return None;
+                }
+                match gc.archives_life_time_hours {
+                    Some(life_time) => return Some(life_time),
+                    None => return Some(0)
+                }
+            },
+            None => None
+        }
     }
 
     pub fn kafka_consumer_config(&self) -> Option<KafkaConsumerConfig> {
