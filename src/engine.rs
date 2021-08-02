@@ -22,7 +22,7 @@ use crate::{
     shard_state::ShardStateStuff,
     types::{awaiters_pool::AwaitersPool, lockfree_cache::TimeBasedCache},
     ext_messages::MessagesPool,
-    validator::validator_manager,
+    validator::{validator_manager, candidate_db::LastRotationBlockDb},
     shard_blocks::{
         ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker, ShardBlockProcessingResult
     },
@@ -53,7 +53,7 @@ use storage::types::BlockHandle;
 use ton_block::{
     self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL, BASE_WORKCHAIN_ID, ShardDescr
 };
-use ton_types::{error, Result, fail, UInt256};
+use ton_types::{error, fail, Result, UInt256};
 use ton_api::ton::ton_node::{
     Broadcast, broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}
 };
@@ -111,6 +111,8 @@ pub struct Engine {
     validator_telemetry: CollatorValidatorTelemetry,
     #[cfg(feature = "telemetry")]
     full_node_service_telemetry: FullNodeNetworkTelemetry,
+
+    last_rotation_block_db: LastRotationBlockDb, // TODO use node-state DB instead
 }
 
 struct DownloadContext<'a, T> {
@@ -283,8 +285,9 @@ impl Engine {
         log::info!("Creating engine...");
 
         let archives_life_time = general_config.gc_archives_life_time_hours();
-        let db_directory = general_config.internal_db_path().unwrap_or_else(|| {"node_db"});
-        let db_config = InternalDbConfig { db_directory: db_directory.to_string() };
+        let db_directory = general_config.internal_db_path().unwrap_or_else(|| {"node_db"}).to_string();
+        let last_rotation_block_db = LastRotationBlockDb::new(db_directory.clone());
+        let db_config = InternalDbConfig { db_directory };
         let db = Arc::new(InternalDbImpl::new(db_config).await?);
         let global_config = general_config.load_global_config()?;
         let test_bundles_config = general_config.test_bundles_config().clone();
@@ -359,6 +362,7 @@ impl Engine {
             validator_telemetry: CollatorValidatorTelemetry::default(),
             #[cfg(feature = "telemetry")]
             full_node_service_telemetry: FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Service),
+            last_rotation_block_db,
         });
 
         save_top_shard_blocks_worker(engine.clone(), shard_blocks_receiver);
@@ -371,7 +375,7 @@ impl Engine {
     pub fn db(&self) -> &Arc<dyn InternalDb> { &self.db }
 
     pub fn validator_network(&self) -> Arc<dyn PrivateOverlayOperations> { self.network.clone() }
-    
+
     pub fn network(&self) -> &NodeNetwork { &self.network }
 
     pub fn ext_db(&self) -> &Vec<Arc<dyn ExternalDb>> { &self.ext_db }
@@ -482,6 +486,10 @@ impl Engine {
 
     pub fn collation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
         &self.collation_status
+    }
+
+    pub fn last_rotation_block_db(&self) -> &LastRotationBlockDb {
+        &self.last_rotation_block_db
     }
 
     pub async fn download_and_apply_block_worker(
@@ -619,7 +627,10 @@ impl Engine {
                 // Advance states GC
                 let shards_client = self.load_shards_client_mc_block_id().await?;
                 let pss_keeper: BlockIdExt = (&PssKeeperBlockId::load_from_db(self.db.deref())?.0).try_into()?;
-                let min_id = if shards_client.seq_no() < pss_keeper.seq_no() { shards_client } else { pss_keeper };
+                let mut min_id = if shards_client.seq_no() < pss_keeper.seq_no() { shards_client } else { pss_keeper };
+                if let Some(id) = self.get_last_rotation_block_id()? {
+                    min_id = if min_id.seq_no() < id.seq_no() { min_id } else { id };
+                }
                 self.state_gc_resolver.advance(&min_id, self.deref()).await?;
             }
 
@@ -688,19 +699,17 @@ impl Engine {
     async fn process_validated_block_stats_for_mc(&self, block_id: &BlockIdExt, signing_nodes: &Vec<UInt256>) -> Result<()> {
         let block_handle = self.load_block_handle(&block_id)?.ok_or_else(|| error!("Cannot load handle for block {}", block_id))?;
         let mut is_link = false;
-        let created_by = if block_handle.has_proof_or_link(&mut is_link) {
-            let virt_block = self.load_block_proof(&block_handle, is_link).await?.virtualize_block()?.0;
-            let created_by = virt_block.read_extra()?.created_by().clone();
-
-            Some(created_by)
+        if block_handle.has_proof_or_link(&mut is_link) {
+            let (virt_block, _) = self.load_block_proof(&block_handle, is_link).await?.virtualize_block()?;
+            let extra = virt_block.read_extra()?;
+            let created_by = extra.created_by();
+            self.process_validated_block_stats(block_id, signing_nodes, created_by).await
         } else {
-            None
-        };
-
-        self.process_validated_block_stats(block_id, signing_nodes, created_by.expect("MC should have created_by field")).await
+            Ok(())
+        }
     }
 
-    async fn process_validated_block_stats(&self, block_id: &BlockIdExt, signing_nodes: &Vec<UInt256>, created_by: UInt256) -> Result<()> {
+    async fn process_validated_block_stats(&self, block_id: &BlockIdExt, signing_nodes: &Vec<UInt256>, created_by: &UInt256) -> Result<()> {
         let last_mc_state = self.load_last_applied_mc_state().await?;
         let last_mc_state_extra = last_mc_state.state().read_custom()?
             .ok_or_else(|| error!("State for {} doesn't have McStateExtra", last_mc_state.block_id()))?;
@@ -728,9 +737,9 @@ impl Engine {
 
         for validator in &validators {
             let signed = commit_validators.contains(&validator.compute_node_id_short());
-            let collated = created_by == &validator.public_key.key_bytes().into();
+            let collated = &validator.public_key == created_by;
             let validated_block_stat_node = ValidatedBlockStatNode {
-                public_key : validator.public_key.clone(),
+                public_key: validator.public_key.clone(),
                 signed,
                 collated,
             };
@@ -852,7 +861,7 @@ impl Engine {
                 })?;
             }
 
-            if let Err(e) = self.process_validated_block_stats(&id, &signing_nodes, created_by).await {
+            if let Err(e) = self.process_validated_block_stats(&id, &signing_nodes, &created_by).await {
                 log::error!("Error while processing shard block broadcast stats {}: {}", id, e);
             } else {
                 log::trace!("Processed shard block broadcast stats {}", id);

@@ -4,7 +4,7 @@ use crate::{
     engine::{Engine, LastMcBlockId, ShardsClientMcBlockId, STATSD},
     engine_traits::{ChainRange, EngineOperations, PrivateOverlayOperations, ValidatedBlockStat},
     error::NodeError, internal_db::{NodeState, StoreBlockResult},
-    shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId}
+    shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
 };
 use adnl::common::{KeyId, KeyOption};
 use catchain::{
@@ -653,5 +653,26 @@ impl EngineOperations for Engine {
     fn pop_validated_block_stat(&self) -> Result<ValidatedBlockStat> {
         let result = self.validated_block_stats_receiver().try_recv()?;
         Ok(result)
+    }
+
+    fn get_last_rotation_block_id(&self) -> Result<Option<BlockIdExt>> {
+        self
+            .last_rotation_block_db()
+            .get_last_rotation_block_id()
+            .map_err(|e| error!("Can't get last rotation block id: {}", e))
+    }
+
+    fn set_last_rotation_block_id(&self, info: &BlockIdExt) -> Result<()> {
+        self
+            .last_rotation_block_db()
+            .set_last_rotation_block_id(info)
+            .map_err(|e| error!("Can't set last rotation block id: {}", e))
+    }
+
+    fn clear_last_rotation_block_id(&self) -> Result<()> {
+        self
+            .last_rotation_block_db()
+            .clear_last_rotation_block_id()
+            .map_err(|e| error!("Can't clear last rotation block id: {}", e))
     }
 }
