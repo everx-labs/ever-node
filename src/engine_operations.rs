@@ -2,8 +2,8 @@ use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, 
     config::CollatorTestBundlesGeneralConfig,
     engine::{Engine, LastMcBlockId, ShardsClientMcBlockId, STATSD},
-    engine_traits::{EngineOperations, PrivateOverlayOperations}, error::NodeError,
-    internal_db::{NodeState, StoreBlockResult}, 
+    engine_traits::{ChainRange, EngineOperations, PrivateOverlayOperations, ValidatedBlockStat},
+    error::NodeError, internal_db::{NodeState, StoreBlockResult},
     shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
 };
 use adnl::common::{KeyId, KeyOption};
@@ -40,6 +40,14 @@ impl EngineOperations for Engine {
 
     fn activate_validator_list(&self, validator_list_id: UInt256) -> Result<()> {
         self.network().activate_validator_list(validator_list_id)
+    }
+
+    fn validation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
+        self.validation_status()
+    }
+
+    fn collation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
+        self.collation_status()
     }
 
     async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
@@ -449,6 +457,14 @@ impl EngineOperations for Engine {
         Ok(())
     }
 
+    async fn process_chain_range_in_ext_db(&self, chain_range: &ChainRange) -> Result<()> {
+        for db in self.ext_db() {
+            db.process_chain_range(chain_range).await?;
+        }
+
+        Ok(())
+    }
+
     async fn process_full_state_in_ext_db(&self, state: &ShardStateStuff)-> Result<()> {
         for db in self.ext_db() {
             db.process_full_state(state).await?;
@@ -605,6 +621,10 @@ impl EngineOperations for Engine {
         self.db().db_root_dir()
     }
 
+    fn produce_chain_ranges_enabled(&self) -> bool {
+        self.ext_db().iter().any(|ext_db| ext_db.process_chain_range_enabled())
+    }
+
     #[cfg(feature = "telemetry")]
     fn full_node_telemetry(&self) -> &FullNodeTelemetry {
         Engine::full_node_telemetry(self)
@@ -623,5 +643,36 @@ impl EngineOperations for Engine {
     #[cfg(feature = "telemetry")]
     fn full_node_service_telemetry(&self) -> &FullNodeNetworkTelemetry {
         Engine::full_node_service_telemetry(self)
+    }
+
+    fn push_validated_block_stat(&self, stat : ValidatedBlockStat) -> Result<()> {
+        self.validated_block_stats_sender().try_send(stat)?;
+        Ok(())
+    }
+
+    fn pop_validated_block_stat(&self) -> Result<ValidatedBlockStat> {
+        let result = self.validated_block_stats_receiver().try_recv()?;
+        Ok(result)
+    }
+
+    fn get_last_rotation_block_id(&self) -> Result<Option<BlockIdExt>> {
+        self
+            .last_rotation_block_db()
+            .get_last_rotation_block_id()
+            .map_err(|e| error!("Can't get last rotation block id: {}", e))
+    }
+
+    fn set_last_rotation_block_id(&self, info: &BlockIdExt) -> Result<()> {
+        self
+            .last_rotation_block_db()
+            .set_last_rotation_block_id(info)
+            .map_err(|e| error!("Can't set last rotation block id: {}", e))
+    }
+
+    fn clear_last_rotation_block_id(&self) -> Result<()> {
+        self
+            .last_rotation_block_db()
+            .clear_last_rotation_block_id()
+            .map_err(|e| error!("Can't clear last rotation block id: {}", e))
     }
 }

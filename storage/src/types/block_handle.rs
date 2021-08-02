@@ -19,6 +19,8 @@ const FLAG_APPLIED: u32              = 1 << 10;
 pub(crate) const FLAG_KEY_BLOCK: u32 = 1 << 11;
 const FLAG_MOVED_TO_ARCHIVE: u32     = 1 << 13;
 const FLAG_INDEXED: u32              = 1 << 14;
+
+// not serializing flags
 const FLAG_ARCHIVING: u32            = 1 << 16;
 
 /// Meta information related to block

@@ -8,6 +8,9 @@ use storage::types::BlockHandle;
 use ton_block::{BlockIdExt, ShardIdent, BASE_WORKCHAIN_ID, SHARD_FULL};
 use ton_types::{error, fail, Result};
 
+pub const PSS_PERIOD_BITS_CLASSIC: u32 = 17;
+pub const PSS_PERIOD_BITS: u32 = 11;
+
 /// cold boot entry point
 /// download zero state or block proof link and check it
 async fn run_cold(
@@ -99,16 +102,16 @@ async fn get_key_blocks(
         if let Some(block_id) = ids.last() {
             log::info!(target: "boot", "last key block is {}", block_id);
             for block_id in &ids {
-                let prev_time = handle.gen_utime()?;
+                //let prev_time = handle.gen_utime()?;
                 let (next_handle, proof) = download_key_block_proof(
                     engine, block_id, zero_state, prev_block_proof.as_ref()
                 ).await?;
                 handle = next_handle;
                 CHECK!(handle.is_key_block()?);
                 CHECK!(handle.gen_utime()? != 0);
-                if engine.is_persistent_state(handle.gen_utime()?, prev_time) {
-                    engine.set_init_mc_block_id(block_id);
-                }
+                // if engine.is_persistent_state(handle.gen_utime()?, prev_time) {
+                //     engine.set_init_mc_block_id(block_id);
+                // }
                 key_blocks.push(handle.clone());
                 prev_block_proof = Some(proof);
             }
@@ -120,7 +123,7 @@ async fn get_key_blocks(
             CHECK!(utime < engine.now());
             if (engine.sync_blocks_before() > engine.now() - utime)
                 || (2 * engine.key_block_utime_step() > engine.now() - utime)
-                || (engine.allow_blockchain_init() && download_new_key_blocks_until < engine.now()) {
+                || (/*engine.allow_blockchain_init() && */download_new_key_blocks_until < engine.now()) {
                 return Ok(key_blocks)
             }
         }
@@ -128,7 +131,11 @@ async fn get_key_blocks(
 }
 
 /// choose correct masterchain state
-async fn choose_masterchain_state(engine: &dyn EngineOperations, mut key_blocks: Vec<Arc<BlockHandle>>) -> Result<Arc<BlockHandle>> {
+async fn choose_masterchain_state(
+    engine: &dyn EngineOperations,
+    mut key_blocks: Vec<Arc<BlockHandle>>,
+    pss_period_bits: u32,
+) -> Result<Arc<BlockHandle>> {
     while let Some(handle) = key_blocks.pop() {
         let utime = handle.gen_utime()?;
         let ptime = if let Some(handle) = key_blocks.last() {
@@ -138,21 +145,21 @@ async fn choose_masterchain_state(engine: &dyn EngineOperations, mut key_blocks:
         };
         log::info!(target: "boot", "key block candidate: seqno={} \
             is_persistent={} ttl={} syncbefore={}", handle.id().seq_no(),
-                ptime == 0 || engine.is_persistent_state(utime, ptime),
-                engine.persistent_state_ttl(utime),
+                ptime == 0 || engine.is_persistent_state(utime, ptime, pss_period_bits),
+                engine.persistent_state_ttl(utime, pss_period_bits),
                 engine.sync_blocks_before());
         if engine.sync_blocks_before() > engine.now() - utime {
             log::info!(target: "boot", "ignoring: too new block");
             continue;
         }
-        if ptime == 0 || engine.is_persistent_state(utime, ptime) {
-            let ttl = engine.persistent_state_ttl(utime);
+        if ptime == 0 || engine.is_persistent_state(utime, ptime, pss_period_bits) {
+            let ttl = engine.persistent_state_ttl(utime, pss_period_bits);
             let time_to_download = 3600; 
             if ttl > engine.now() + time_to_download {
                 log::info!(target: "boot", "best handle is {}", handle.id());
                 return Ok(handle)
             } else {
-               log::info!(target: "boot", "ignoring: state is expiring shortly: expire_at={}", ttl);
+               log::info!(target: "boot", "state is expiring shortly: expire_at={}", ttl);
                return Ok(handle)
             }
         } else {
@@ -302,18 +309,29 @@ pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<BlockIdExt> 
     // engine.get_hardforks();
     // engine.update_hardforks();
     let (mut handle, zero_state, init_block_proof_link) = run_cold(engine.deref()).await?;
-    if !engine.initial_sync_disabled() {
-        let key_blocks = get_key_blocks(engine.deref(), handle, zero_state.as_ref(), init_block_proof_link).await?;
-        handle = choose_masterchain_state(engine.deref(), key_blocks).await?;
+    
+    let key_blocks = get_key_blocks(engine.deref(), handle, zero_state.as_ref(), init_block_proof_link).await?;
+    
+    for pss_period_bits in &[PSS_PERIOD_BITS, PSS_PERIOD_BITS_CLASSIC] {
+
+        handle = choose_masterchain_state(engine.deref(), key_blocks.clone(), *pss_period_bits).await?;
+
+        if handle.id().seq_no() == 0 {
+            CHECK!(zero_state.is_some());
+            download_base_wc_zerosate(engine.deref(), zero_state.as_ref().unwrap()).await?;
+            return Ok(handle.id().clone());
+        } else {
+            let r = download_start_blocks_and_states(engine.deref(), handle.id()).await;
+            if r.is_err() {
+                if *pss_period_bits == PSS_PERIOD_BITS_CLASSIC {
+                    r?;
+                }
+            } else {
+                return Ok(handle.id().clone());
+            }
+        }
     }
-    let block_id = handle.id();
-    if block_id.seq_no() == 0 {
-        CHECK!(zero_state.is_some());
-        download_base_wc_zerosate(engine.deref(), &zero_state.unwrap()).await?;
-    } else {
-        download_start_blocks_and_states(engine.deref(), block_id).await?;
-    }
-    Ok(block_id.clone())
+    unreachable!()
 }
 
 pub async fn warm_boot(engine: Arc<dyn EngineOperations>, mut block_id: BlockIdExt) -> Result<BlockIdExt> {
