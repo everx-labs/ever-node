@@ -128,7 +128,7 @@ impl NodeNetwork {
 
         NodeNetwork::find_dht_nodes(dht.clone());
         let (config_handler, config_handler_context) = NodeConfigHandler::create(
-            config, &tokio::runtime::Handle::current()
+            config, tokio::runtime::Handle::current()
         )?;
 
      //   let validator_adnl_key = adnl.key_by_tag(Self::TAG_VALIDATOR_ADNL_KEY)?;

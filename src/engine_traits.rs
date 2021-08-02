@@ -349,6 +349,18 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
+    fn get_last_rotation_block_id(&self) -> Result<Option<BlockIdExt>> {
+        unimplemented!()
+    }
+
+    fn set_last_rotation_block_id(&self, info: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn clear_last_rotation_block_id(&self) -> Result<()> {
+        unimplemented!()
+    }
+
     // Top shard blocks
 
     // Get current list of new shard blocks with respect to last mc block.
