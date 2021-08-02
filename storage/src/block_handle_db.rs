@@ -1,6 +1,6 @@
 use crate::{
     db_impl_serializable, db::traits::KvcWriteable, traits::Serializable, 
-    types::{BlockHandle, BlockMeta}, TARGET,
+    types::{BlockHandle, BlockMeta}
 };
 use adnl::common::add_object_to_map;
 use std::{fmt::Debug, sync::{Arc, Weak}};
@@ -9,6 +9,8 @@ use ton_types::Result;
 
 
 db_impl_serializable!(BlockHandleDb, KvcWriteable, BlockIdExt, BlockMeta);
+
+const TARGET: &str = "storage";
 
 pub(crate) type BlockHandleCache = lockfree::map::Map<BlockIdExt, Weak<BlockHandle>>;
 pub struct BlockHandleStorage {

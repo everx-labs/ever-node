@@ -1987,17 +1987,6 @@ impl Collator {
             log::trace!("{}: skipping processing of inbound external messages", self.collated_block_descr);
             return Ok(())
         }
-
-        //LK temporary: check external messaging delivery
-        {
-            use rand::thread_rng;
-            use rand::seq::SliceRandom;
-            let mut rng = thread_rng();
-            ext_messages.shuffle(&mut rng);
-            log::debug!("{}: try to process {} external messages", self.collated_block_descr, ext_messages.len());
-        }
-        //LK temporary end
-
         log::trace!("{}: process_inbound_external_messages", self.collated_block_descr);
         for (msg, id) in ext_messages.drain(..) {
             let header = msg.ext_in_header().ok_or_else(|| error!("message {:x} \

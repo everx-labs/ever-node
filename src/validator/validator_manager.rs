@@ -226,6 +226,7 @@ struct ValidatorManagerImpl {
     validator_sessions: HashMap<UInt256, Arc<ValidatorGroup>>, // Sessions: both actual (started) and future
     validator_list_status: ValidatorListStatus,
     config: ValidatorManagerConfig,
+    last_rotation_block_db: LastRotationBlockDb,
     slashing_manager: SlashingManagerPtr,
 
     validation_status: ValidationStatus,
@@ -240,6 +241,7 @@ impl ValidatorManagerImpl {
             .build()
             .expect("Can't create validator groups runtime");
 
+        let db_dir = format!("{}/last_rotation_block", engine.db_root_dir().expect("Can't get db_root_dir from engine"));
         return ValidatorManagerImpl {
             engine,
             rt: Arc::new(rt),
@@ -247,6 +249,7 @@ impl ValidatorManagerImpl {
             validator_list_status: ValidatorListStatus::default(),
             config: ValidatorManagerConfig::default(),
             validation_status: ValidationStatus::Disabled,
+            last_rotation_block_db: LastRotationBlockDb::new(db_dir),
             slashing_manager: SlashingManager::create(),
         }
     }
@@ -364,10 +367,7 @@ impl ValidatorManagerImpl {
                     match session.get_status().await {
                         ValidatorGroupStatus::Stopping => (),
                         ValidatorGroupStatus::Stopped => {
-                            if let Some(group) = self.validator_sessions.remove(id) {
-                                self.engine.validation_status().remove(group.shard());
-                                self.engine.collation_status().remove(group.shard());
-                            }
+                            self.validator_sessions.remove(id);
                         },
                         _ =>
                             if let Err(e) = session.clone().stop(self.rt.clone()).await {
@@ -441,7 +441,7 @@ impl ValidatorManagerImpl {
             self.validator_sessions.keys().cloned().collect();
         self.stop_and_remove_sessions(&existing_validator_sessions).await;
         self.engine.set_will_validate(false);
-        self.engine.clear_last_rotation_block_id()?;
+        self.last_rotation_block_db.clear_last_rotation_block_id()?;
         log::info!(target: "validator", "All sessions were removed, validation disabled");
         Ok(())
     }
@@ -752,7 +752,7 @@ impl ValidatorManagerImpl {
 
         if rotate_all_shards(&mc_state_extra) {
             log::info!(target: "validator", "New last rotation block: {}", last_masterchain_block);
-            self.engine.set_last_rotation_block_id(last_masterchain_block)?;
+            self.last_rotation_block_db.set_last_rotation_block_id(last_masterchain_block)?;
         }
         log::trace!(target: "validator", "starting stop&remove");
         self.stop_and_remove_sessions(&gc_validator_sessions).await;
@@ -765,22 +765,14 @@ impl ValidatorManagerImpl {
     pub async fn stats(&mut self) {
         log::info!(target: "validator", "{:32} {}", "session id", "st round shard");
         log::info!(target: "validator", "{:-64}", "");
-
-        // Validation shards statistics
-        for (_, group) in self.validator_sessions.iter() {
+        for (_,group) in self.validator_sessions.iter() {
             log::info!(target: "validator", "{}", group.info().await);
-            let status = group.get_status().await;
-            if status == ValidatorGroupStatus::Active || status == ValidatorGroupStatus::Stopping {
-                self.engine.validation_status().insert(group.shard().clone(), group.last_validation_time());
-                self.engine.collation_status().insert(group.shard().clone(), group.last_collation_time());
-            }
         }
-
         log::info!(target: "validator", "{:-64}", "");
     }
 
     pub async fn invoke(&mut self) -> Result<()> {
-        let mc_block_id = match self.engine.get_last_rotation_block_id()? {
+        let mc_block_id = match self.last_rotation_block_db.get_last_rotation_block_id()? {
             None => {
                 let id = self.engine.load_last_applied_mc_block_id().await?;
                 log::info!(

@@ -6,7 +6,7 @@ mod validator_group;
 pub mod validator_utils;
 pub mod validator_manager;
 pub mod validator_session_listener;
-pub mod candidate_db;
+mod candidate_db;
 pub mod collator;
 pub mod collator_sync;
 pub mod out_msg_queue;

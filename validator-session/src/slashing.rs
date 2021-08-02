@@ -2,12 +2,6 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt;
 
-/// Minimum number of samples for slashing computation
-pub const MIN_NUMBER_OF_SAMPLES_FOR_SLASHING : usize = 30;
-
-/// Minimum non-slashable participation level
-pub const MIN_NON_SLASHING_SCORE : f64 = 0.8;
-
 /// Public key hash
 pub type PublicKeyHash = ::catchain::PublicKeyHash;
 
@@ -15,7 +9,7 @@ pub type PublicKeyHash = ::catchain::PublicKeyHash;
 pub type PublicKey = ::catchain::PublicKey;
 
 /// Session statistics metric
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 #[repr(usize)]
 pub enum Metric {
     /// Total rounds count
@@ -32,15 +26,6 @@ pub enum Metric {
 
     /// Commits count
     CommitsCount,
-
-    /// Total rounds count (computed on apply level)
-    ApplyLevelTotalBlocksCount,
-
-    /// Total approved collations count (computed on apply level)
-    ApplyLevelCollationsCount,
-
-    /// Total commits count (computed on apply level)
-    ApplyLevelCommitsCount,
 
     /// Number of metrics
     MetricsCount,
@@ -144,9 +129,9 @@ impl ValidatorStat {
 }
 
 /// Session statistics aggregated metric
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 #[repr(usize)]
-pub enum AggregatedMetric {   
+pub enum AggregatedMetric {
     /// Collations participation
     CollationsParticipation,
 
@@ -155,12 +140,6 @@ pub enum AggregatedMetric {
 
     /// Commits participation
     CommitsParticipation,
-
-    /// Collations participation (computed on apply level)
-    ApplyLevelCollationsParticipation,
-
-    /// Commits participation (computed on apply level)
-    ApplyLevelCommitsParticipation,
 
     /// Number of metrics
     AggregatedMetricsCount,
@@ -172,9 +151,6 @@ pub struct AggregatedNode {
     /// Node public key
     pub public_key: PublicKey,
 
-    /// Source node
-    pub node : Node,
-
     /// Aggregated statistics metrics
     pub metrics: [f64; AggregatedMetric::AggregatedMetricsCount as usize],
 }
@@ -184,7 +160,6 @@ impl AggregatedNode {
     pub fn new(entry: &Node) -> Self {
         let mut result = Self {
             public_key: entry.public_key.clone(),
-            node: entry.clone(),
             metrics: [0.0; AggregatedMetric::AggregatedMetricsCount as usize],
         };
 
@@ -204,16 +179,6 @@ impl AggregatedNode {
                 (entry.metrics[ApprovalsCount as usize] as f64) / rounds_count;
             result.metrics[CommitsParticipation as usize] =
                 (entry.metrics[CommitsCount as usize] as f64) / rounds_count;
-        }
-
-        let apply_blocks_count = entry.metrics[ApplyLevelTotalBlocksCount as usize] as f64;
-
-        if apply_blocks_count > 0.0 {
-            let apply_collations_count = entry.metrics[ApplyLevelCollationsCount as usize] as f64;
-            let apply_commits_count = entry.metrics[ApplyLevelCommitsCount as usize] as f64;
-
-            result.metrics[ApplyLevelCollationsParticipation as usize] = apply_collations_count / apply_blocks_count;
-            result.metrics[ApplyLevelCommitsParticipation as usize] = apply_commits_count / apply_blocks_count;
         }
 
         result
@@ -288,34 +253,13 @@ impl AggregatedValidatorStat {
 
         for (_pub_key_hash, entry) in &validators_stat {
             for (metric_id, metric_norm) in metrics_params.iter().enumerate() {
-                use AggregatedMetric::*;
-                use Metric::*;
-
-                let metric_id = unsafe { ::std::mem::transmute(metric_id) };
-                let rounds_count = entry.node.metrics[TotalRoundsCount as usize];
-                let collation_rounds_count = entry.node.metrics[TotalCollationRoundsCount as usize];
-                let apply_blocks_count = entry.node.metrics[ApplyLevelTotalBlocksCount as usize];
-
-                match metric_id {
-                    CollationsParticipation => if collation_rounds_count < MIN_NUMBER_OF_SAMPLES_FOR_SLASHING { continue },
-                    ApprovalsParticipation | CommitsParticipation => if rounds_count < MIN_NUMBER_OF_SAMPLES_FOR_SLASHING { continue },
-                    ApplyLevelCollationsParticipation | ApplyLevelCommitsParticipation => if apply_blocks_count < MIN_NUMBER_OF_SAMPLES_FOR_SLASHING { continue },
-                    AggregatedMetricsCount => {},
-                }
-
-                let score = entry.metrics[metric_id as usize];
-
-                if score >= metric_norm.min_confidence_value {
-                    continue;
-                }
-
-                if score >= MIN_NON_SLASHING_SCORE {
+                if entry.metrics[metric_id] >= metric_norm.min_confidence_value {
                     continue;
                 }
 
                 slashed_validators.push(SlashedNode {
                     public_key: entry.public_key.clone(),
-                    metric_id: metric_id,
+                    metric_id: unsafe { ::std::mem::transmute(metric_id) },
                 });
             }
         }

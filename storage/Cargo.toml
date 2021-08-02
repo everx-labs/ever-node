@@ -30,7 +30,6 @@ ton_types = { git = "https://github.com/tonlabs/ton-labs-types" }
 
 [dev-dependencies]
 rand = "0.7.3"
-log4rs = "1"
 
 [build-dependencies.cc]
 version = "=1.0.61"

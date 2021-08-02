@@ -17,14 +17,6 @@ mod package_entry_meta_db;
 mod package_entry_meta;
 mod package_id;
 
-pub const ARCHIVE_SIZE: u32 = 100_000;
-pub const ARCHIVE_SLICE_SIZE: u32 = 20_000;
-pub const ARCHIVE_PACKAGE_SIZE: u32 = 100;
-
-pub const KEY_ARCHIVE_SIZE: u32 = 10_000_000;
-pub const KEY_ARCHIVE_SLICE_SIZE: u32 = 2_000_000;
-pub const KEY_ARCHIVE_PACKAGE_SIZE: u32 = 200_000;
-
 fn get_mc_seq_no_opt(block_handle: Option<&BlockHandle>) -> u32 {
     if let Some(handle) = block_handle {
         get_mc_seq_no(handle)

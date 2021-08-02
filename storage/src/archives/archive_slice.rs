@@ -1,6 +1,6 @@
 use crate::{
     archives::{
-        get_mc_seq_no_opt, ARCHIVE_PACKAGE_SIZE, KEY_ARCHIVE_PACKAGE_SIZE, package::Package,
+        get_mc_seq_no_opt, archive_manager::SLICE_SIZE, package::Package,
         package_entry::PackageEntry, package_entry_id::{GetFileName, PackageEntryId},
         package_entry_meta::PackageEntryMeta, package_entry_meta_db::PackageEntryMetaDb,
         package_id::{PackageId, PackageType}, package_info::PackageInfo,
@@ -47,18 +47,13 @@ impl ArchiveSlice {
         let offsets_db = Arc::new(PackageOffsetsDb::with_path(index_path.join("offsets_db")));
         let package_status_db = Arc::new(PackageStatusDb::with_path(index_path.join("status_db")));
 
-        let slice_size = match package_type {
-            PackageType::KeyBlocks => KEY_ARCHIVE_PACKAGE_SIZE,
-            _ => ARCHIVE_PACKAGE_SIZE,
-        };
-
         let mut archive_slice = Self {
             archive_id,
             packages: tokio::sync::RwLock::new(Vec::new()),
             db_root_path,
             index_path,
             sliced_mode: false,
-            slice_size,
+            slice_size: SLICE_SIZE,
             package_type,
             finalized,
             index_db: Arc::clone(&index_db),
@@ -92,7 +87,7 @@ impl ArchiveSlice {
                 archive_slice.sliced_mode = true;
 
                 {
-                    let mut transaction = package_status_db.begin_transaction()?;
+                    let transaction = package_status_db.begin_transaction()?;
 
                     transaction.put(&PackageStatusKey::SlicedMode, true.to_vec()?.as_slice());
                     transaction.put(&PackageStatusKey::TotalSlices, 1u32.to_vec()?.as_slice());
@@ -107,7 +102,7 @@ impl ArchiveSlice {
                     .push(archive_slice.new_package(0, archive_id, 0, DEFAULT_PKG_VERSION).await?);
             } else {
                 {
-                    let mut transaction = package_status_db.begin_transaction()?;
+                    let transaction = package_status_db.begin_transaction()?;
 
                     transaction.put(&PackageStatusKey::SlicedMode, false.to_vec()?.as_slice());
                     transaction.put(&PackageStatusKey::NonSlicedSize, 0u64.to_vec()?.as_slice());
@@ -123,11 +118,8 @@ impl ArchiveSlice {
         Ok(archive_slice)
     }
 
-    pub fn package_type(&self) -> PackageType {
-        self.package_type
-    }
-
-    pub async fn destroy(&mut self) -> Result<()> {
+    #[allow(dead_code)]
+    pub async fn destroy(mut self) -> Result<()> {
         for pi in self.packages.write().await.drain(..) {
             let path = Arc::clone(pi.package().path());
             drop(pi);
@@ -144,13 +136,9 @@ impl ArchiveSlice {
             .ok_or_else(|| error!("Unable to get mutable reference to package_status_db"))?
             .destroy()?;
 
-        tokio::fs::remove_dir_all(&self.index_path).await?;
+        tokio::fs::remove_dir_all(self.index_path).await?;
 
         Ok(())
-    }
-
-    pub fn archive_id(&self) -> u32 {
-        self.archive_id
     }
 
     pub async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
@@ -170,7 +158,7 @@ impl ArchiveSlice {
         None
     }
 
-    pub async fn add_file<B, U256, PK>(&self, block_handle: Option<&BlockHandle>, entry_id: &PackageEntryId<B, U256, PK>, data: Vec<u8>) -> Result<Vec<u8>>
+    pub async fn add_file<B, U256, PK>(&self, block_handle: Option<&BlockHandle>, entry_id: &PackageEntryId<B, U256, PK>, data: Vec<u8>) -> Result<()>
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
@@ -178,7 +166,7 @@ impl ArchiveSlice {
     {
         let offset_key = entry_id.into();
         if self.offsets_db.contains(&offset_key)? {
-            return Ok(data);
+            return Ok(());
         }
 
         let package_info = self.choose_package(get_mc_seq_no_opt(block_handle), true).await?;
@@ -188,7 +176,7 @@ impl ArchiveSlice {
         let idx = if self.sliced_mode {
             package_info.idx()
         } else {
-            //assert_ne!(package_info.idx(), 0);
+            assert_ne!(package_info.idx(), 0);
             u32::max_value()
         };
 
@@ -199,9 +187,7 @@ impl ArchiveSlice {
                 self.index_db.put_value(&idx.into(), meta)?;
                 self.offsets_db.put_value(&offset_key, offset)
             }
-        ).await?;
-
-        Ok(entry.take_data())
+        ).await
     }
 
     pub async fn get_file<B, U256, PK>(

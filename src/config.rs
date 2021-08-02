@@ -1,7 +1,4 @@
-use crate::{
-    network::node_network::NodeNetwork,
-    validator::validator_utils::mine_key_for_workchain,
-};
+use crate::{network::node_network::NodeNetwork};
 use adnl::{from_slice, client::AdnlClientConfigJson,
     common::{add_object_to_map_with_update, KeyId, KeyOption, KeyOptionJson, Wait},
     node::{AdnlNodeConfig, AdnlNodeConfigJson},
@@ -18,7 +15,7 @@ use ton_api::{
         dht::node::Node as DhtNodeConfig, pub_::publickey::Ed25519
     }
 };
-use ton_block::{BlockIdExt, ShardIdent, ValidatorSet};
+use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256};
 
 #[macro_export]
@@ -46,8 +43,6 @@ pub trait KeyRing : Sync + Send  {
 pub struct TonNodeConfig {
     log_config_name: Option<String>,
     ton_global_config_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    workchain: Option<i32>,
     internal_db_path: Option<String>,
     #[serde(skip_serializing)]
     ip_address: Option<String>,
@@ -62,7 +57,6 @@ pub struct TonNodeConfig {
     test_bundles_config: CollatorTestBundlesGeneralConfig,
     #[serde(default = "default_connectivity_check_config")]
     connectivity_check_config: ConnectivityCheckBroadcastConfig,
-    gc: Option<GC>,
     validator_key_ring: Option<HashMap<String, KeyOptionJson>>,
     #[serde(skip)]
     configs_dir: String,
@@ -90,12 +84,6 @@ pub struct KafkaConsumerConfig {
     pub run_attempt_timeout_ms: u32
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Default, Debug, Clone)]
-pub struct GC {
-    enable_for_archives: bool,
-    archives_life_time_hours: Option<u32> // Hours
-}
-
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
 pub struct KafkaProducerConfig {
     pub enabled: bool,
@@ -117,7 +105,6 @@ pub struct ExternalDbConfig {
     pub transaction_producer: KafkaProducerConfig,
     pub account_producer: KafkaProducerConfig,
     pub block_proof_producer: KafkaProducerConfig,
-    pub chain_range_producer: KafkaProducerConfig,
     pub bad_blocks_storage: String,
 }
 
@@ -201,12 +188,9 @@ pub struct CollatorTestBundlesGeneralConfig {
 const LOCAL_HOST: &str = "127.0.0.1";
 
 impl TonNodeConfig {
-    pub fn workchain_id(&self) -> Option<i32> {
-        self.workchain
-    }
     pub fn from_file(
-        configs_dir: &str,
-        json_file_name: &str,
+        configs_dir: &str, 
+        json_file_name: &str, 
         adnl_config: Option<AdnlNodeConfigJson>,
         default_config_name: &str,
         client_console_key: Option<String>
@@ -223,12 +207,12 @@ impl TonNodeConfig {
                     println!("Can't generate console_config.json: delete config.json before");
                 }
                 config
-            }
+            },
             Err(_) => {
                 // generate new config from default_config
-                let path = TonNodeConfig::build_path(configs_dir, default_config_name)?;
-                let default_config_file = File::open(&path)
-                    .map_err(|err| error!("Can`t open {}: {}", path, err))?;
+                let default_config_file = File::open(
+                    TonNodeConfig::build_path(configs_dir, default_config_name)?
+                ).map_err(|err| error!("Can`t open {}: {}", default_config_name, err))?;
 
                 let reader = BufReader::new(default_config_file);
                 let mut config: TonNodeConfig = serde_json::from_reader(reader)?;
@@ -277,10 +261,7 @@ impl TonNodeConfig {
     }
 
     pub fn control_server(&self) -> Result<Option<AdnlServerConfig>> {
-        match &self.control_server {
-            Some(cs) => Ok(Some(AdnlServerConfig::from_json_config(cs)?)),
-            None => Ok(None)
-        }
+        self.control_server.as_ref().map(|cs| AdnlServerConfig::from_json_config(cs)).transpose()
     }
 
     pub fn log_config_path(&self) -> Option<String> {
@@ -290,21 +271,6 @@ impl TonNodeConfig {
             }
         }
         None
-    }
-
-    pub fn gc_archives_life_time_hours(&self) -> Option<u32> {
-        match &self.gc {
-            Some(gc) => {
-                if !gc.enable_for_archives {
-                    return None;
-                }
-                match gc.archives_life_time_hours {
-                    Some(life_time) => return Some(life_time),
-                    None => return Some(0)
-                }
-            },
-            None => None
-        }
     }
 
     pub fn kafka_consumer_config(&self) -> Option<KafkaConsumerConfig> {
@@ -329,7 +295,7 @@ impl TonNodeConfig {
  
     pub fn load_global_config(&self) -> Result<TonNodeGlobalConfig> {
         let name = self.ton_global_config_name.as_ref().ok_or_else(
-            || error!("global config information not found in config.json!")
+            || error!("global config informations not found!")
         )?;
         let global_config_path = TonNodeConfig::build_path(&self.configs_dir, &name)?;
 /*        
@@ -445,10 +411,18 @@ impl TonNodeConfig {
     }
 
     fn generate_and_save_keys(&mut self) -> Result<([u8; 32], Arc<KeyOption>)> {
-        let (private, public) = mine_key_for_workchain(self.workchain);
+        let (private, public) = KeyOption::with_type_id(KeyOption::KEY_ED25519)?;
         let key_id = public.id().data();
-        let key_ring = self.validator_key_ring.get_or_insert_with(|| HashMap::new());
-        key_ring.insert(base64::encode(key_id), private);
+        match &mut self.validator_key_ring {
+            Some(key_ring) => {
+                key_ring.insert(base64::encode(key_id), private);
+            },
+            None => {
+                let mut key_ring = HashMap::new();
+                key_ring.insert(base64::encode(key_id), private);
+                self.validator_key_ring = Some(key_ring);
+            }
+        };
         Ok((key_id.clone(), Arc::new(public)))
     }
 
@@ -465,7 +439,7 @@ impl TonNodeConfig {
 
     fn add_validator_key(&mut self, key_id: &[u8; 32], election_id: i32) -> Result<ValidatorKeysJson> {
         let key_info = ValidatorKeysJson {
-            election_id,
+            election_id: election_id,
             validator_key_id: base64::encode(key_id),
             validator_adnl_key_id: None
         };
@@ -541,18 +515,18 @@ enum Task {
     Generate,
     AddValidatorKey([u8; 32], i32),
     AddValidatorAdnlKey([u8; 32], [u8; 32]),
-    GetKey([u8; 32]),
-    StoreWorkchainId(i32),
+    GetKey([u8; 32])
 }
 
 #[derive(Debug)]
 enum Answer {
     Generate(Result<[u8; 32]>),
-    GetKey(Option<KeyOption>),
-    Result(Result<()>),
+    AddValidatorKey(Result<()>),
+    AddValidatorAdnlKey(Result<()>),
+    GetKey(Option<KeyOption>)
 }
 
-pub struct NodeConfigHandlerContext {
+pub struct NodeConfigHandlerContext{
     reader: tokio::sync::mpsc::UnboundedReceiver<Arc<(Arc<Wait<Answer>>, Task)>>,
     config: TonNodeConfig,
 }
@@ -561,20 +535,21 @@ pub struct NodeConfigHandler {
     runtime_handle: tokio::runtime::Handle,
     sender: tokio::sync::mpsc::UnboundedSender<Arc<(Arc<Wait<Answer>>, Task)>>,
     key_ring: Arc<lockfree::map::Map<String, Arc<KeyOption>>>,
-    validator_keys: Arc<ValidatorKeys>,
+    validator_keys: Arc<ValidatorKeys>
 }
 
 impl NodeConfigHandler {
     pub fn create(
         config: TonNodeConfig,
-        runtime_handle: tokio::runtime::Handle
+        runtime_handle: &tokio::runtime::Handle
     ) -> Result<(Arc<Self>, NodeConfigHandlerContext)> {
         let (sender, reader) = tokio::sync::mpsc::unbounded_channel();
+
         let config_handler = Arc::new(NodeConfigHandler {
-            runtime_handle,
-            sender,
+            runtime_handle: runtime_handle.clone(),
+            sender: sender,
             key_ring: Arc::new(lockfree::map::Map::new()),
-            validator_keys: Arc::new(ValidatorKeys::new()),
+            validator_keys: Arc::new(ValidatorKeys::new())
         });
 
         Ok((config_handler, NodeConfigHandlerContext{reader, config}))
@@ -593,12 +568,18 @@ impl NodeConfigHandler {
         if let Err(e) = self.sender.send(pushed_task) {
             fail!("Error add_validator_key: {}", e);
         }
-        match wait.wait(&mut queue_reader, true).await {
+        let answer = match wait.wait(&mut queue_reader, true).await {
             Some(None) => fail!("Answer was not set!"),
-            Some(Some(Answer::Result(result))) => result,
-            Some(Some(_)) => fail!("Bad answer (AddValidatorKey)!"),
+            Some(Some(answer)) => answer,
             None => fail!("Waiting returned an internal error!")
-        }
+        };
+
+        let result = match answer {
+            Answer::AddValidatorKey(res) => res,
+            _ => fail!("Bad answer (AddValidatorKey)!"),
+        };
+
+        result
     }
 
     pub async fn add_validator_adnl_key(
@@ -616,57 +597,17 @@ impl NodeConfigHandler {
         if let Err(e) = self.sender.send(pushed_task) {
             fail!("Error add_validator_adnl_key: {}", e);
         }
-        match wait.wait(&mut queue_reader, true).await {
+        let answer = match wait.wait(&mut queue_reader, true).await {
             Some(None) => fail!("Answer was not set!"),
-            Some(Some(Answer::Result(result))) => result,
-            Some(Some(_)) => fail!("Bad answer (AddValidatorAdnlKey)!"),
+            Some(Some(answer)) => answer,
             None => fail!("Waiting returned an internal error!")
-        }
-    }
+        };
+       let result = match answer {
+           Answer::AddValidatorAdnlKey(res) => res,
+           _ => fail!("Bad answer (AddValidatorAdnlKey)!"),
+       };
 
-    pub fn store_workchain(&self, workchain_id: i32) {
-        let (wait, _) = Wait::new();
-        let pushed_task = Arc::new((wait.clone(), Task::StoreWorkchainId(workchain_id)));
-        wait.request();
-        if let Err(e) = self.sender.send(pushed_task) {
-            log::warn!("Problem store workchain_id: {}", e);
-        }
-    }
-
-    /// returns validator's public key
-    pub fn get_current_validator_key(&self, vset: &ValidatorSet) -> Option<[u8; 32]> {
-        // search by adnl_id in validator_keys first
-        for id_key in self.validator_keys.values.iter() {
-            if let Some(adnl_id) = id_key.1.validator_adnl_key_id.as_ref() {
-                match UInt256::from_str(adnl_id) {
-                    Ok(adnl_id) => {
-                        let pub_key_opt = vset.list().iter().find_map(|descr| {
-                            if descr.adnl_addr == Some(adnl_id) {
-                                Some(descr.public_key.key_bytes().clone())
-                            } else {
-                                None
-                            }
-                        });
-                        if let Some(pub_key) = pub_key_opt.as_ref() {
-                            log::info!("get_current_validator_key returns pub_key {}", hex::encode(pub_key));
-                            return pub_key_opt
-                        }
-                    }
-                    Err(err) => log::warn!("adnl_id error: {}", err)
-                }
-            }
-        }
-        // then search by key_id from vset in keyring
-        for descr in vset.list().iter() {
-            let key_id = base64::encode(descr.compute_node_id_short().as_slice());
-            let pub_key_found = self.key_ring.iter().position(|k_v| k_v.0 == key_id).is_some();
-            if pub_key_found {
-                log::info!("get_current_validator_key returns pub_key {}", hex::encode(descr.public_key.key_bytes()));
-                return Some(descr.public_key.key_bytes().clone())
-            }
-        }
-        log::warn!("get_current_validator_key key not found");
-        None
+       result
     }
 
     pub fn get_actual_validator_adnl_ids(&self) -> Result<Vec<Arc<KeyId>>> {
@@ -704,10 +645,17 @@ impl NodeConfigHandler {
             log::warn!("Error get_key_raw {}", e);
             return None;
         }
-        match wait.wait(&mut queue_reader, true).await {
-            Some(Some(Answer::GetKey(key))) => key,
+        let answer = match wait.wait(&mut queue_reader, true).await {
+            Some(Some(answer)) => answer,
             _ => return None
-        }
+        };
+
+       let result = match answer {
+           Answer::GetKey(key) => key,
+           _ => None,
+       };
+
+       result
     }
 
     fn generate_and_save(
@@ -883,11 +831,11 @@ impl NodeConfigHandler {
         
         self.clone().runtime_handle.spawn(async move {
             while let Some(task) = reader.recv().await {
-                let answer = match task.1 {
+                match task.1 {
                     Task::Generate => {
                         let result = NodeConfigHandler::generate_and_save(&key_ring, &mut actual_config, &name);
-                        Answer::Generate(result)
-                    }
+                        task.0.respond(Some(Answer::Generate(result)));
+                    },
                     Task::AddValidatorAdnlKey(key, adnl_key) => {
                         let result = NodeConfigHandler::add_validator_adnl_key_and_save(
                             self.clone(),
@@ -897,25 +845,19 @@ impl NodeConfigHandler {
                             &adnl_key,
                             subscribers.clone()
                         );
-                        Answer::Result(result)
-                    }
+                        task.0.respond(Some(Answer::AddValidatorAdnlKey(result)));
+                    },
                     Task::AddValidatorKey(key, election_id) => {
                         let result = NodeConfigHandler::add_validator_key_and_save(
                             validator_keys.clone(), &mut actual_config, &key, election_id
                         );
-                        Answer::Result(result)
-                    }
+                        task.0.respond(Some(Answer::AddValidatorKey(result)));
+                    }, 
                     Task::GetKey(key_data) => {
                         let result = NodeConfigHandler::get_key(&actual_config, key_data);
-                        Answer::GetKey(result)
+                        task.0.respond(Some(Answer::GetKey(result))); 
                     }
-                    Task::StoreWorkchainId(workchain_id) => {
-                        actual_config.workchain = Some(workchain_id);
-                        let result = actual_config.save_to_file(&name);
-                        Answer::Result(result)
-                    }
-                };
-                task.0.respond(Some(answer));
+                }
             }
             reader.close();
         });
@@ -932,12 +874,18 @@ impl KeyRing for NodeConfigHandler {
         if let Err(e) = self.sender.send(pushed_task) {
             fail!("Error generate: {}", e);
         }
-        match wait.wait(&mut queue_reader, true).await {
+        let answer = match wait.wait(&mut queue_reader, true).await {
             Some(None) => fail!("Answer was not set!"),
-            Some(Some(Answer::Generate(result))) => result,
-            Some(Some(_)) => fail!("Bad answer (Generate)!"),
+            Some(Some(answer)) => answer,
             None => fail!("Waiting returned an internal error!")
-        }
+        };
+
+       let result = match answer {
+           Answer::Generate(res) => res,
+           _ => fail!("Bad answer (Generate)!")
+       };
+
+       result
     }
 
     fn sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Vec<u8>> {
@@ -1120,13 +1068,10 @@ impl TonNodeGlobalConfigJson {
     
     /// Constructs new configuration from JSON data
     pub fn from_json_file(json_file: &str) -> Result<Self> {
-        match File::open(json_file) {
-            Ok(file) => {
-                let reader = BufReader::new(file);
-                Ok(serde_json::from_reader(reader)?)
-            }
-            Err(err) => fail!("cannot open file {} : {}", json_file, err)
-        }
+        let file = File::open(json_file)?;
+        let reader = BufReader::new(file);
+        let json_config: TonNodeGlobalConfigJson = serde_json::from_reader(reader)?;
+        Ok(json_config)
     }
 /*
     pub fn from_json(json: &str) -> Result<Self> {

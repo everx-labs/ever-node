@@ -2,7 +2,7 @@ use crate::db::traits::DbKey;
 use std::fmt::{Display, Formatter, Debug};
 use ton_types::types::UInt256;
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CellId {
     hash: UInt256,
 }

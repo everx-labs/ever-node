@@ -126,43 +126,6 @@ impl ControlQuerySubscriber {
                 value: next.to_string()
             });
 
-            // validation_stats
-            let validation_stats = engine.validation_status();
-
-            let mut stat = String::new();
-            let ago = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-
-            for item in validation_stats.iter() {
-                stat.push_str("shard: ");
-                stat.push_str(&item.key().to_string()); 
-                stat.push_str(" - ");
-                stat.push_str(&(ago - item.val()).to_string());
-                stat.push_str("sec ago.");
-                stat.push_str("\n");
-            }
-
-            stats.0.push(OneStat {
-                key: "validation_stats".to_string(), 
-                value: stat.to_string()
-            });
-
-            // collation_stats
-            let mut stat = String::new();
-            let collation_stats = engine.collation_status();
-            for item in collation_stats.iter() {
-                stat.push_str("shard: ");
-                stat.push_str(&item.key().to_string()); 
-                stat.push_str(" - ");
-                stat.push_str(&(ago - item.val()).to_string());
-                stat.push_str("sec ago.");
-                stat.push_str("\n");
-            }
-
-            stats.0.push(OneStat {
-                key: "collation_stats".to_string(), 
-                value: stat.to_string()
-            });
-
             Ok(Stats {stats: stats})
         } else {
             fail!("Engine was not set!");
