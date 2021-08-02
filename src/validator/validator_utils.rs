@@ -1,3 +1,4 @@
+use adnl::common::{KeyOption, KeyOptionJson};
 use catchain::{BlockPayloadPtr, PublicKey, PublicKeyHash, CatchainNode};
 use std::sync::*;
 use sha2::{Digest, Sha256};
@@ -9,6 +10,7 @@ use ton_block::{
 };
 use ton_types::{Result, UInt256};
 use validator_session::SessionNode;
+
 
 pub fn sigpubkey_to_publickey(k: &SigPubKey) -> PublicKey {
     let public_key_bytes = k.key_bytes();
@@ -144,5 +146,19 @@ pub fn compute_validator_list_id(list: &Vec<ValidatorDescr>) -> Option<Validator
         Some(hash.into())
     } else {
         None
+    }
+}
+
+fn calc_workchain_id_by_adnl_id(adnl_id: &[u8]) -> i32 {
+    (adnl_id[0] % 32) as i32 - 1
+}
+
+pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (KeyOptionJson, KeyOption) {
+    loop {
+        if let Ok((private, public)) = KeyOption::with_type_id(KeyOption::KEY_ED25519) {
+            if id_opt.is_none() || Some(calc_workchain_id_by_adnl_id(public.id().data())) == id_opt {
+                return (private, public)
+            }
+        }
     }
 }

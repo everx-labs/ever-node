@@ -80,13 +80,13 @@ pub trait KvcTransactional<K: DbKey + Send + Sync>: KvcSnapshotable<K> {
 /// on destroy, if not committed.
 pub trait KvcTransaction<K: DbKey + Send + Sync> {
     /// Adds put operation into transaction (batch)
-    fn put(&self, key: &K, value: &[u8]);
+    fn put(&mut self, key: &K, value: &[u8]);
 
     /// Adds delete operation into transaction (batch)
-    fn delete(&self, key: &K);
+    fn delete(&mut self, key: &K);
 
     /// Removes all pending operations from transaction (batch)
-    fn clear(&self);
+    fn clear(&mut self);
 
     /// Commits the transaction (batch)
     fn commit(self: Box<Self>) -> Result<()>;
