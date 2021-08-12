@@ -12,6 +12,7 @@ futures = "0.3.4"
 hex = "0.4.2"
 lazy_static = "1.4.0"
 log = "0.4.11"
+log4rs = "1"
 rocksdb = "0.15.0"
 regex = "1.3.9"
 serde = "1.0.114"
@@ -21,6 +22,7 @@ sha2 = "^0.8"
 strum = "0.18.0"
 strum_macros = "0.18.0"
 tokio = { version = "1.3.0", features = ["fs", "rt-multi-thread"] }
+rand = "0.7.3"
 
 adnl = { git = "https://github.com/tonlabs/ton-labs-adnl" }
 lockfree = { git = "https://github.com/tonlabs/lockfree.git" }
@@ -29,7 +31,6 @@ ton_block = { git = "https://github.com/tonlabs/ton-labs-block" }
 ton_types = { git = "https://github.com/tonlabs/ton-labs-types" }
 
 [dev-dependencies]
-rand = "0.7.3"
 log4rs = "1"
 
 [build-dependencies.cc]

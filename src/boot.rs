@@ -5,7 +5,7 @@ use crate::{
 use adnl::common::KeyId;
 use std::{ops::Deref, sync::Arc, time::Duration};
 use storage::types::BlockHandle;
-use ton_block::{BlockIdExt, ShardIdent, BASE_WORKCHAIN_ID, SHARD_FULL};
+use ton_block::{BlockIdExt, ShardIdent, SHARD_FULL};
 use ton_types::{error, fail, Result};
 
 pub const PSS_PERIOD_BITS_CLASSIC: u32 = 17;
@@ -21,7 +21,6 @@ async fn run_cold(
     CHECK!(block_id.shard().is_masterchain());
     CHECK!(block_id.seq_no >= engine.get_last_fork_masterchain_seqno());
     if block_id.seq_no() == 0 {
-        log::info!(target: "boot", "download zero state {}", block_id);
         let (handle, zero_state) = download_zero_state(engine, &block_id).await?;
         Ok((handle, Some(zero_state), None))
     } else {
@@ -51,7 +50,14 @@ async fn run_cold(
             match engine.download_block_proof(&block_id, true, true).await {
                 Ok(proof) => match proof.check_proof_link() {
                     Ok(_) => {
-                        let handle = engine.store_block_proof(&block_id, handle, &proof).await?;
+                        let handle = engine.store_block_proof(&block_id, handle, &proof).await? 
+                            .as_non_created()
+                            .ok_or_else( 
+                                || error!(
+                                    "INTERNAL ERROR: Bad result in store block {} proof", 
+                                    block_id
+                                )
+                            )?;
                         break (handle, proof)
                     },
                     Err(err) => log::warn!(
@@ -170,17 +176,18 @@ async fn choose_masterchain_state(
     fail!("Cannot boot node")
 }
 
-/// Download zerostate for base workchain
-async fn download_base_wc_zerosate(engine: &dyn EngineOperations, zerostate: &ShardStateStuff) -> Result<()> {
-    let cp12 = zerostate.config_params()?.workchains()?;
-    let wc = cp12.get(&0)?.ok_or_else(|| error!("No description for base workchain"))?;
-    let zerostate_id = BlockIdExt {
-        shard_id: ShardIdent::with_tagged_prefix(BASE_WORKCHAIN_ID, SHARD_FULL)?,
-        seq_no: 0,
-        root_hash: wc.zerostate_root_hash,
-        file_hash: wc.zerostate_file_hash,
-    };
-    download_zero_state(engine, &zerostate_id).await?;
+/// Download zerostate for all workchains
+async fn download_wc_zerosates(engine: &dyn EngineOperations, zerostate: &ShardStateStuff) -> Result<()> {
+    let workchains = zerostate.workchains()?;
+    for (workchian_id, wc) in workchains {
+        let zerostate_id = BlockIdExt {
+            shard_id: ShardIdent::with_tagged_prefix(workchian_id, SHARD_FULL)?,
+            seq_no: 0,
+            root_hash: wc.zerostate_root_hash,
+            file_hash: wc.zerostate_file_hash,
+        };
+        download_zero_state(engine, &zerostate_id).await?;
+    }
     Ok(())
 }
 
@@ -219,6 +226,7 @@ pub(crate) async fn download_zero_state(
             return Ok((handle, engine.load_state(block_id).await?))
         }
     }
+    log::info!(target: "boot", "download zero state {}", block_id);
     loop {
         match engine.download_zerostate(block_id).await {
             Ok((state, state_bytes)) => {
@@ -256,7 +264,11 @@ async fn download_key_block_proof(
         };
         match result {
             Ok(_) => {
-                let handle = engine.store_block_proof(block_id, None, &proof).await?;
+                let handle = engine.store_block_proof(block_id, None, &proof).await?
+                    .as_non_created()
+                    .ok_or_else(
+                        || error!("INTERNAL ERROR: Bad result in store block {} proof", block_id)
+                    )?;
                 return Ok((handle, proof))
             }
             Err(err) => {
@@ -275,15 +287,24 @@ async fn download_block_and_state(
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
 ) -> Result<(Arc<BlockHandle>, BlockStuff)> {
     let handle = engine.load_block_handle(block_id)?.filter(
-        |handle| handle.has_data()
+        |handle| handle.has_data() && (handle.has_proof() || handle.has_proof_link())
     );
     let (block, handle) = if let Some(handle) = handle {
         (engine.load_block(&handle).await?, handle)
     } else {
         let (block, proof) = engine.download_block(block_id, None).await?;
-        let mut handle = engine.store_block(&block).await?.handle;
+        let mut handle = engine.store_block(&block).await?.as_non_created().ok_or_else(
+            || error!("INTERNAL ERROR: mismatch in block {} store result during boot", block_id)
+        )?;
         if !handle.has_proof() {
-            handle = engine.store_block_proof(block_id, Some(handle), &proof).await?;
+            handle = engine.store_block_proof(block_id, Some(handle), &proof).await?
+                .as_non_created()
+                .ok_or_else(
+                    || error!(
+                        "INTERNAL ERROR: mismatch in block {} proof store result during boot",
+                        block_id
+                    )
+                )?;
         }
         (block, handle)
     };
@@ -318,7 +339,7 @@ pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<BlockIdExt> 
 
         if handle.id().seq_no() == 0 {
             CHECK!(zero_state.is_some());
-            download_base_wc_zerosate(engine.deref(), zero_state.as_ref().unwrap()).await?;
+            download_wc_zerosates(engine.deref(), zero_state.as_ref().unwrap()).await?;
             return Ok(handle.id().clone());
         } else {
             let r = download_start_blocks_and_states(engine.deref(), handle.id()).await;
@@ -334,7 +355,11 @@ pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<BlockIdExt> 
     unreachable!()
 }
 
-pub async fn warm_boot(engine: Arc<dyn EngineOperations>, mut block_id: BlockIdExt) -> Result<BlockIdExt> {
+pub async fn warm_boot(
+    engine: Arc<dyn EngineOperations>, 
+    block_id: Arc<BlockIdExt>
+) -> Result<BlockIdExt> {
+    let mut block_id = block_id.deref().clone();
     let handle = loop {
         let handle = engine.load_block_handle(&block_id)?.ok_or_else(
             || error!("Cannot load handle for block {}", block_id)

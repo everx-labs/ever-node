@@ -18,13 +18,28 @@ pub trait Kvc: Debug + Send + Sync {
 
 /// Trait for readable key-value collections
 pub trait KvcReadable<K: DbKey + Send + Sync>: Kvc {
+
+    /// Get meta information (like DB name or something)
+    fn get_meta(&self) -> &str {
+        ""
+    }
+
     /// Tries to get value from collection by the key; returns Ok(None) if the key not found
     fn try_get(&self, key: &K) -> Result<Option<DbSlice>>;
 
     /// Gets value from collection by the key
     fn get(&self, key: &K) -> Result<DbSlice> {
-        self.try_get(key)?
-            .ok_or_else(|| StorageError::KeyNotFound(key.key_name(), key.as_string()).into())
+        self.try_get(key)?.ok_or_else(
+            || {
+                let meta = self.get_meta();
+                let what = if meta.is_empty() {
+                    key.as_string()
+                } else {
+                    format!("{} ({})", key.as_string(), meta)
+                };
+                StorageError::KeyNotFound(key.key_name(), what).into()
+            }
+        )
     }
 
     /// Gets slice with given size starting from given offset from collection by the key

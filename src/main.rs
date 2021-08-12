@@ -82,11 +82,11 @@ fn init_logger(log_config_path: Option<String>) {
 fn log_version() {
     log::info!(
         "Execute {:?}\nCOMMIT_ID: {:?}\nBUILD_DATE: {:?}\nCOMMIT_DATE: {:?}\nGIT_BRANCH: {:?}\n", // RUST_VERSION:{}\n
-        std::option_env!("CARGO_PKG_VERSION"),
-        std::option_env!("BUILD_GIT_COMMIT"),
-        std::option_env!("BUILD_TIME"),
-        std::option_env!("BUILD_GIT_DATE"),
-        std::option_env!("BUILD_GIT_BRANCH"),
+        std::option_env!("CARGO_PKG_VERSION").unwrap_or("Not set"),
+        std::option_env!("BUILD_GIT_COMMIT").unwrap_or("Not set"),
+        std::option_env!("BUILD_TIME").unwrap_or("Not set"),
+        std::option_env!("BUILD_GIT_DATE").unwrap_or("Not set"),
+        std::option_env!("BUILD_GIT_BRANCH").unwrap_or("Not set"),
         //std::env!("BUILD_RUST_VERSION") // TODO
     );
 }
@@ -131,7 +131,8 @@ fn print_build_info() -> String {
 fn start_external_db(config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>> {
     Ok(vec!(
         external_db::create_external_db(
-            config.external_db_config().ok_or_else(|| error!("Can't load external database config!"))?
+            config.external_db_config().ok_or_else(|| error!("Can't load external database config!"))?,
+            config.front_workchain_ids()
         )?
     ))
 }
@@ -156,22 +157,23 @@ fn main() {
     let app = clap::App::new("TON node")
         .arg(clap::Arg::with_name("zerostate")
             .short("z")
-            .long("--zerostate")
+            .long("zerostate")
             .value_name("zerostate"))
         .arg(clap::Arg::with_name("config")
             .short("c")
-            .long("--configs")
+            .long("configs")
             .value_name("config")
             .default_value("./"))
         .arg(clap::Arg::with_name("console_key")
             .short("k")
-            .long("--ckey")
+            .long("ckey")
             .value_name("console_key")
             .help("use console key in json format"))
         .arg(clap::Arg::with_name("initial_sync_disabled")
             .short("i")
-            .long("--initial-sync-disabled"))
-            .help("use this flag to sync from zero_state");
+            .long("initial-sync-disabled")
+            .value_name("initial sync disable flag")
+            .help("use this flag to sync from zero_state"));
 
     let matches = app.get_matches();
 

@@ -173,8 +173,16 @@ pub(crate) async fn start_sync(
         }
 
         // Select sync block ID
-        let mc_block_id = Arc::new(engine.load_last_applied_mc_block_id().await?);
-        let sc_block_id = Arc::new(engine.load_shards_client_mc_block_id().await?);
+        let mc_block_id = if let Some(id) = engine.load_last_applied_mc_block_id()? {
+            id
+        } else {
+            fail!("INTERNAL ERROR: No last applied MC block in sync")
+        };
+        let sc_block_id = if let Some(id) = engine.load_shard_client_mc_block_id()? {
+            id
+        } else {
+            fail!("INTERNAL ERROR: No shard client MC block in sync")
+        };
         let last_mc_block_id = if mc_block_id.seq_no() > sc_block_id.seq_no() {
             Arc::clone(&sc_block_id)
         } else {
@@ -493,8 +501,17 @@ async fn save_block(
         fail!("Proof{} not found in archive: {}", link_str, block_id);
     };
     proof.check_proof(engine.as_ref()).await?;
-    let handle = engine.store_block(&block).await?.handle;
-    let handle = engine.store_block_proof(block_id, Some(handle), &proof).await?;
+    let handle = engine.store_block(&block).await?.as_non_created().ok_or_else(
+        || error!("INTERNAL ERROR: mismatch in block {} store result during sync", block_id)
+    )?;
+    let handle = engine.store_block_proof(block_id, Some(handle), &proof).await?
+        .as_non_created()
+        .ok_or_else(
+            || error!(
+                "INTERNAL ERROR: mismatch in block {} proof store result during sync", 
+                block_id
+            )
+        )?;
     Ok((handle, block, proof))
 }
 
@@ -520,7 +537,7 @@ async fn wait_for(tasks: Vec<JoinHandle<Result<()>>>) -> Result<()> {
 async fn import_mc_blocks(
     engine: &Arc<dyn EngineOperations>,
     maps: &BlockMaps,
-    mut last_mc_block_id: &Arc<BlockIdExt>,
+    mut last_mc_block_id: &Arc<BlockIdExt>
 ) -> Result<()> {
 
     for id in maps.mc_blocks_ids.values() {
@@ -580,11 +597,15 @@ async fn import_shard_blocks(
         }
     }
 
-    let mut last_applied_mc_block_id =
-        Arc::new(engine.load_shards_client_mc_block_id().await?);
+    let mut shard_client_mc_block_id = 
+        if let Some(id) = engine.load_shard_client_mc_block_id()? {
+            id
+        } else {
+            fail!("INTERNAL ERROR: No shard client MC block set in sync")
+        };
     for mc_block_id in maps.mc_blocks_ids.values() {
         let mc_seq_no = mc_block_id.seq_no();
-        if mc_seq_no <= last_applied_mc_block_id.seq_no() {
+        if mc_seq_no <= shard_client_mc_block_id.seq_no() {
             log::debug!(
                 target: "sync",
                 "Skipped shardchain blocks for already appplied MC block: {}",
@@ -659,8 +680,8 @@ async fn import_shard_blocks(
 
         wait_for(tasks).await?;
 
-        last_applied_mc_block_id = Arc::clone(mc_block_id);
-        engine.store_shards_client_mc_block_id(&mc_block_id).await?;
+        shard_client_mc_block_id = Arc::clone(mc_block_id);
+        engine.save_shard_client_mc_block_id(&mc_block_id)?;
     }
 
     Ok(())

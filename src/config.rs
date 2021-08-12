@@ -18,8 +18,9 @@ use ton_api::{
         dht::node::Node as DhtNodeConfig, pub_::publickey::Ed25519
     }
 };
-use ton_block::{BlockIdExt, ShardIdent, ValidatorSet};
+use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, BASE_WORKCHAIN_ID, MASTERCHAIN_ID};
 use ton_types::{error, fail, Result, UInt256};
+
 
 #[macro_export]
 macro_rules! key_option_public_key {
@@ -42,6 +43,8 @@ pub trait KeyRing : Sync + Send  {
     fn sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Vec<u8>>;
 }
 
+pub fn default_cells_gc_interval_ms() -> u32 { 900_000 }
+
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct TonNodeConfig {
     log_config_name: Option<String>,
@@ -49,9 +52,13 @@ pub struct TonNodeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     workchain: Option<i32>,
     internal_db_path: Option<String>,
+    #[serde(default = "default_cells_gc_interval_ms")]
+    cells_gc_interval_ms: u32,
     #[serde(skip_serializing)]
     ip_address: Option<String>,
     adnl_node: Option<AdnlNodeConfigJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extensions: Option<NodeExtensions>,
     validator_keys: Option<Vec<ValidatorKeysJson>>,
     #[serde(skip_serializing)]
     control_server_port: Option<u16>,
@@ -73,6 +80,12 @@ pub struct TonNodeConfig {
 }
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct NodeExtensions {
+    #[serde(default)]
+    pub disable_broadcast_retransmit: bool
+}
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 struct ValidatorKeysJson {
@@ -201,6 +214,12 @@ pub struct CollatorTestBundlesGeneralConfig {
 const LOCAL_HOST: &str = "127.0.0.1";
 
 impl TonNodeConfig {
+    pub fn front_workchain_ids(&self) -> Vec<i32> {
+        match self.workchain {
+            None | Some(0) | Some(-1) => vec![MASTERCHAIN_ID, BASE_WORKCHAIN_ID],
+            Some(workchain_id) => vec![workchain_id]
+        }
+    }
     pub fn workchain_id(&self) -> Option<i32> {
         self.workchain
     }
@@ -314,6 +333,10 @@ impl TonNodeConfig {
     pub fn internal_db_path(&self) -> Option<&str> {
         self.internal_db_path.as_ref().map(|path| path.as_str())
     }
+
+    pub fn cells_gc_interval_ms(&self) -> u32 {
+        self.cells_gc_interval_ms
+    }
     
   
     pub fn external_db_config(&self) -> Option<ExternalDbConfig> {
@@ -324,6 +347,9 @@ impl TonNodeConfig {
     }
     pub fn connectivity_check_config(&self) -> &ConnectivityCheckBroadcastConfig {
         &self.connectivity_check_config
+    }
+    pub fn extensions(&self) -> Option<&NodeExtensions> {
+        self.extensions.as_ref()
     }
 
  
@@ -543,6 +569,7 @@ enum Task {
     AddValidatorAdnlKey([u8; 32], [u8; 32]),
     GetKey([u8; 32]),
     StoreWorkchainId(i32),
+    StoreStatesGcInterval(u32),
 }
 
 #[derive(Debug)]
@@ -562,6 +589,7 @@ pub struct NodeConfigHandler {
     sender: tokio::sync::mpsc::UnboundedSender<Arc<(Arc<Wait<Answer>>, Task)>>,
     key_ring: Arc<lockfree::map::Map<String, Arc<KeyOption>>>,
     validator_keys: Arc<ValidatorKeys>,
+    workchain_id: Option<i32>,
 }
 
 impl NodeConfigHandler {
@@ -575,6 +603,7 @@ impl NodeConfigHandler {
             sender,
             key_ring: Arc::new(lockfree::map::Map::new()),
             validator_keys: Arc::new(ValidatorKeys::new()),
+            workchain_id: config.workchain,
         });
 
         Ok((config_handler, NodeConfigHandlerContext{reader, config}))
@@ -633,6 +662,15 @@ impl NodeConfigHandler {
         }
     }
 
+    pub fn store_states_gc_interval(&self, interval: u32) {
+        let (wait, _) = Wait::new();
+        let pushed_task = Arc::new((wait.clone(), Task::StoreStatesGcInterval(interval)));
+        wait.request();
+        if let Err(e) = self.sender.send(pushed_task) {
+            log::warn!("Problem store store states gc interval: {}", e);
+        }
+    }
+
     /// returns validator's public key
     pub fn get_current_validator_key(&self, vset: &ValidatorSet) -> Option<[u8; 32]> {
         // search by adnl_id in validator_keys first
@@ -667,6 +705,10 @@ impl NodeConfigHandler {
         }
         log::warn!("get_current_validator_key key not found");
         None
+    }
+
+    pub fn workchain_id(&self) -> Option<i32> {
+        self.workchain_id
     }
 
     pub fn get_actual_validator_adnl_ids(&self) -> Result<Vec<Arc<KeyId>>> {
@@ -911,6 +953,11 @@ impl NodeConfigHandler {
                     }
                     Task::StoreWorkchainId(workchain_id) => {
                         actual_config.workchain = Some(workchain_id);
+                        let result = actual_config.save_to_file(&name);
+                        Answer::Result(result)
+                    }
+                    Task::StoreStatesGcInterval(interval) => {
+                        actual_config.cells_gc_interval_ms = interval;
                         let result = actual_config.save_to_file(&name);
                         Answer::Result(result)
                     }

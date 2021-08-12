@@ -66,6 +66,11 @@ impl Kvc for RocksDb {
 
 /// Implementation of readable key-value collection for RocksDB. Actual implementation is blocking.
 impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDb {
+
+    fn get_meta(&self) -> &str {
+        self.path.to_str().unwrap_or_default()
+    }
+
     fn try_get(&self, key: &K) -> Result<Option<DbSlice>> {
         Ok(self.db()?.get_pinned(key.key())?
             .map(|value| value.into()))
@@ -79,6 +84,7 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDb {
         }
         Ok(true)
     }
+
 }
 
 /// Implementation of writable key-value collection for RocksDB. Actual implementation is blocking.

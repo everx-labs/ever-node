@@ -1,13 +1,11 @@
 use crate::{
-    block::{BlockStuff}, 
+    block::{BlockStuff}, config::CollatorTestBundlesGeneralConfig, internal_db::BlockResult,
     shard_state::ShardStateStuff,
     network::{full_node_client::FullNodeOverlayClient},
     block_proof::BlockProofStuff,
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
     ext_messages::create_ext_message,
     jaeger,
-    config::CollatorTestBundlesGeneralConfig,
-    internal_db::StoreBlockResult,
 };
 use adnl::common::{KeyId, KeyOption};
 use catchain::{
@@ -80,6 +78,10 @@ pub trait PrivateOverlayOperations: Sync + Send {
 #[allow(unused)]
 pub trait EngineOperations : Sync + Send {
 
+    async fn processed_workchain(&self) -> Result<(bool, i32)> { Ok((true, 0)) }
+
+    fn get_validator_status(&self) -> bool { unimplemented!() }
+
     fn validator_network(&self) -> Arc<dyn PrivateOverlayOperations> {
         unimplemented!()
     }
@@ -147,19 +149,25 @@ pub trait EngineOperations : Sync + Send {
     async fn load_last_applied_mc_block(&self) -> Result<BlockStuff> {
         unimplemented!()
     }
-    async fn load_last_applied_mc_block_id(&self) -> Result<BlockIdExt> {
+    fn load_last_applied_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
         unimplemented!()
     }
-    async fn store_last_applied_mc_block_id(&self, last_mc_block: &BlockIdExt) -> Result<()> {
+    fn save_last_applied_mc_block_id(&self, last_mc_block: &BlockIdExt) -> Result<()> {
         unimplemented!()
+    }
+    async fn load_last_applied_mc_state_or_zerostate(&self) -> Result<ShardStateStuff> {
+        match self.load_last_applied_mc_block_id()? {
+            Some(block_id) => self.load_state(&block_id).await,
+            None => self.load_mc_zero_state().await
+        }
     }
     async fn load_last_applied_mc_state(&self) -> Result<ShardStateStuff> {
         unimplemented!()
     }
-    async fn load_shards_client_mc_block_id(&self) -> Result<BlockIdExt> {
+    fn load_shard_client_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
         unimplemented!()
     }
-    async fn store_shards_client_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
+    fn save_shard_client_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
     async fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seqno: u32) -> Result<Arc<BlockHandle>> {
@@ -219,7 +227,10 @@ pub trait EngineOperations : Sync + Send {
     async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, priority: u32) -> Result<Vec<BlockIdExt>> {
         unimplemented!()
     }
-    async fn store_block(&self, block: &BlockStuff) -> Result<StoreBlockResult> {
+    async fn store_block(
+        &self, 
+        block: &BlockStuff
+    ) -> Result<BlockResult> {
         unimplemented!()
     }
     async fn store_block_proof(
@@ -227,7 +238,7 @@ pub trait EngineOperations : Sync + Send {
         id: &BlockIdExt, 
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff
-    ) -> Result<Arc<BlockHandle>> {
+    ) -> Result<BlockResult> {
         unimplemented!()
     }
     async fn load_block_proof(&self, handle: &Arc<BlockHandle>, is_link: bool) -> Result<BlockProofStuff> {
@@ -449,7 +460,7 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    fn set_init_mc_block_id(&self, _init_block_id: &BlockIdExt) {
+    fn save_init_mc_block_id(&self, _init_block_id: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
 
@@ -462,6 +473,10 @@ pub trait EngineOperations : Sync + Send {
     }
 
     fn produce_chain_ranges_enabled(&self) -> bool {
+        unimplemented!()
+    }
+
+    fn adjust_states_gc_interval(&self, interval_ms: u32) {
         unimplemented!()
     }
 
@@ -508,7 +523,11 @@ pub trait EngineOperations : Sync + Send {
 
     // Boot specific operations
 
-    async fn set_applied(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<bool> {
+    async fn set_applied(
+        &self, 
+        handle: &Arc<BlockHandle>, 
+        mc_seq_no: u32
+    ) -> Result<bool> {
         unimplemented!()
     }
 
