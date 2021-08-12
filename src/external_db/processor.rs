@@ -2,7 +2,7 @@ use std::{collections::hash_set::HashSet};
 use ton_block::{
     Account, InMsg, OutMsg, Deserializable, Serializable, MessageProcessingStatus, Transaction,
     TransactionProcessingStatus, BlockProcessingStatus, Block, BlockProof, HashmapAugType,
-    AccountBlock, ShardAccount
+    AccountBlock, ShardAccount,
 };
 use ton_types::{
     cells_serialization::serialize_toc,
@@ -52,6 +52,7 @@ pub(super) struct Processor<T: WriteData> {
     write_block_proof: T,
     write_chain_range: T,
     bad_blocks_storage: String,
+    front_workchain_ids: Vec<i32>, // write only this workchain, or write all if None
 }
 
 impl<T: WriteData> Processor<T> {
@@ -64,9 +65,12 @@ impl<T: WriteData> Processor<T> {
         write_account: T,
         write_block_proof: T,
         write_chain_range: T,
-        bad_blocks_storage: String) 
+        bad_blocks_storage: String,
+        front_workchain_ids: Vec<i32>,
+    ) 
     -> Self {
-        Processor{ 
+        log::trace!("Processor::new workchains {:?}", front_workchain_ids);
+        Processor {
             write_block,
             write_raw_block,
             write_message,
@@ -75,7 +79,16 @@ impl<T: WriteData> Processor<T> {
             write_block_proof,
             write_chain_range,
             bad_blocks_storage,
+            front_workchain_ids,
         }
+    }
+
+    fn process_workchain(&self, workchain_id: i32) -> bool {
+        self
+            .front_workchain_ids
+            .iter()
+            .position(|id| id == &workchain_id)
+            .is_some()
     }
 
     fn prepare_in_message_record(
@@ -269,6 +282,10 @@ impl<T: WriteData> Processor<T> {
         add_proof: bool,
      ) -> Result<()> {
 
+        log::trace!("Processor block_stuff.id {}", block_stuff.id());
+        if !self.process_workchain(block_stuff.shard().workchain_id()) {
+            return Ok(())
+        }
         let process_block = self.write_block.enabled();
         let process_raw_block = self.write_raw_block.enabled();
         let process_message = self.write_message.enabled();
@@ -471,6 +488,10 @@ impl<T: WriteData> ExternalDb for Processor<T> {
     async fn process_full_state(&self, state: &ShardStateStuff) -> Result<()> {
         let now = std::time::Instant::now();
         log::trace!("process_full_state {} ...", state.block_id());
+
+        if !self.process_workchain(state.block_id().shard().workchain_id()) {
+            return Ok(())
+        }
 
         if self.write_account.enabled() {
             let mut accounts = Vec::new();

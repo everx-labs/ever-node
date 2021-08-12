@@ -12,6 +12,7 @@ pub mod collator_sync;
 pub mod out_msg_queue;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
+#[cfg(feature = "slashing")]
 mod slashing;
 
 use ton_types::{Result, UInt256, error};

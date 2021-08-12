@@ -32,18 +32,27 @@ impl AllowStateGcSmartResolver {
         let mc_state = engine.load_state(mc_block_id).await?;
         let new_min_ref_mc_seqno = mc_state.state().min_ref_mc_seqno();
         let old_min_ref_mc_seqno = self.min_ref_mc_block.fetch_max(new_min_ref_mc_seqno, Ordering::Relaxed);
+
+        log::trace!(
+            "AllowStateGcSmartResolver::advance:  new_min_ref_mc_seqno {}  old_min_ref_mc_seqno {}",
+            new_min_ref_mc_seqno, old_min_ref_mc_seqno,
+        );
+
         if new_min_ref_mc_seqno > old_min_ref_mc_seqno {
-            log::trace!(
-                "AllowStateGcSmartResolver::advance: updated min_ref_mc_block {} -> {}",
-                old_min_ref_mc_seqno, new_min_ref_mc_seqno
+            log::info!(
+                "AllowStateGcSmartResolver::advance: updated min_ref_mc_block {} -> {}, mc_block_id: {}",
+                old_min_ref_mc_seqno, new_min_ref_mc_seqno, mc_block_id,
             );
 
             let mc_pfx = AccountIdPrefixFull::any_masterchain();
             let handle = engine.find_block_by_seq_no(&mc_pfx, new_min_ref_mc_seqno).await?;
             let min_mc_state = engine.load_state(handle.id()).await?;
 
-            let workchains = min_mc_state.workchains()?.into_iter().map(|(id, _)| id).collect();
-            let top_blocks = min_mc_state.shard_hashes()?.top_blocks(&workchains)?;
+            // TODO: I don't know which code is correct
+            let (_masterchain, workchain_id) = engine.processed_workchain().await?;
+            let top_blocks = min_mc_state.shard_hashes()?.top_blocks(&[workchain_id])?;
+            // let workchains = min_mc_state.workchains()?.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+            // let top_blocks = min_mc_state.shard_hashes()?.top_blocks(&workchains)?;
             let mut actual_shardes = HashSet::new();
             for id in top_blocks {
                 add_object_to_map_with_update(
@@ -52,14 +61,14 @@ impl AllowStateGcSmartResolver {
                     |found| if let Some(a) = found {
                         let old_val = a.fetch_max(id.seq_no(), Ordering::Relaxed);
                         if old_val != id.seq_no() {
-                            log::trace!(
+                            log::info!(
                                 "AllowStateGcSmartResolver::advance: updated min actual state for shard {}: {} -> {}",
                                 id.shard(), old_val, id.seq_no()
                             );
                         }
                         Ok(None)
                     } else {
-                        log::trace!(
+                        log::info!(
                             "AllowStateGcSmartResolver::advance: added min actual state for shard {}: {}",
                             id.shard(), id.seq_no()
                         );
@@ -72,7 +81,7 @@ impl AllowStateGcSmartResolver {
             for kv in self.min_actual_ss.iter() {
                 if !actual_shardes.contains(kv.key()) {
                     self.min_actual_ss.remove(kv.key());
-                    log::trace!(
+                    log::info!(
                         "AllowStateGcSmartResolver::advance: removed shard {}", kv.key()
                     );
                 }

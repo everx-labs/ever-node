@@ -191,8 +191,8 @@ impl CatchainOverlayListener for OverlayListenerImpl {
             }
 
             let err_message = format!(
-                "Catchain {} is overloaded. Skip query from ADNL ID {}",
-                catchain.session_id.to_hex_string(),
+                "Catchain {:x} is overloaded. Skip query from ADNL ID {}",
+                catchain.session_id,
                 adnl_id
             );
 
@@ -813,10 +813,7 @@ impl CatchainProcessor {
         catchain_activity_node: ActivityNodePtr,
         metrics_receiver: Arc<metrics_runtime::Receiver>,
     ) {
-        info!(
-            "Catchain main loop is started (session_id is {})",
-            session_id.to_hex_string()
-        );
+        info!("Catchain main loop is started (session_id is {:x})", session_id);
 
         //configure metrics
 
@@ -1067,7 +1064,7 @@ impl CatchainProcessor {
 
                     let session_id_str = processor.session_id.to_hex_string();
 
-                    debug!("Catchain {} metrics:", processor.session_id.to_hex_string());
+                    debug!("Catchain {:x} metrics:", processor.session_id);
 
                     metrics_dumper.dump(|string| {
                         debug!("{}{}", session_id_str, string);
@@ -1103,12 +1100,10 @@ impl CatchainProcessor {
                 check_execution_time!(100_000);
 
                 if log_enabled!(log::Level::Debug) {
-                    let session_id_str = processor.session_id.to_hex_string();
-
                     let profiling_dump = profiling::Profiler::local_instance()
                         .with(|profiler| profiler.borrow().dump());
 
-                    debug!("Catchain {} profiling: {}", session_id_str, profiling_dump);
+                    debug!("Catchain {:x} profiling: {}", processor.session_id, profiling_dump);
                 }
 
                 next_profiling_dump_time =
@@ -1116,10 +1111,7 @@ impl CatchainProcessor {
             }
         }
 
-        info!(
-            "Catchain main loop is finished (session_id is {})",
-            session_id.to_hex_string()
-        );
+        info!("Catchain main loop is finished (session_id is {:x})", session_id);
 
         overloaded_flag.store(false, Ordering::SeqCst);
         is_stopped_flag.store(true, Ordering::SeqCst);
@@ -1138,15 +1130,10 @@ impl CatchainProcessor {
         metrics_receiver: Arc<metrics_runtime::Receiver>,
         utility_thread_pull_counter: metrics_runtime::data::Counter,
     ) {
-        info!(
-            "Catchain utility loop is started (session_id is {})",
-            session_id.to_hex_string()
-        );
+        info!("Catchain utility loop is started (session_id is {:x})", session_id);
 
-        let activity_node = catchain::CatchainFactory::create_activity_node(format!(
-            "CatchainUtility_{}",
-            session_id.to_hex_string()
-        ));
+        let name = format!("CatchainUtility_{:x}", session_id);
+        let activity_node = catchain::CatchainFactory::create_activity_node(name);
 
         //configure metrics
 
@@ -1218,10 +1205,7 @@ impl CatchainProcessor {
 
         //finishing routines
 
-        info!(
-            "Catchain utility loop is finished (session_id is {})",
-            session_id.to_hex_string()
-        );
+        info!("Catchain utility loop is finished (session_id is {:x})", session_id);
 
         overloaded_flag.store(false, Ordering::SeqCst);
         is_stopped_flag.store(true, Ordering::SeqCst);
@@ -1507,11 +1491,11 @@ impl CatchainProcessor {
 
         if log_enabled!(log::Level::Debug) {
             debug!(
-                "Receive message from overlay for source: size={}, payload={}, source={}, session_id={}, timestamp={:?}",
+                "Receive message from overlay for source: size={}, payload={}, source={}, session_id={:x}, timestamp={:?}",
                 bytes.len(),
                 &hex::encode(&bytes),
                 &hex::encode(adnl_id.data()),
-                self.session_id.to_hex_string(),
+                self.session_id,
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("Time went backwards").as_millis(),
             );
         }
@@ -1531,11 +1515,11 @@ impl CatchainProcessor {
 
         if log_enabled!(log::Level::Debug) {
             debug!(
-                "Receive broadcast from overlay for source: size={}, payload={}, source={}, session_id={}, timestamp={:?}",
+                "Receive broadcast from overlay for source: size={}, payload={}, source={}, session_id={:x}, timestamp={:?}",
                 data.data().len(),
                 &hex::encode(&data.data().as_ref()),
                 &hex::encode(source_key_hash.data()),
-                self.session_id.to_hex_string(),
+                self.session_id,
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("Time went backwards").as_millis(),
             );
         }
@@ -1632,8 +1616,8 @@ impl CatchainProcessor {
         instrument!();
 
         trace!(
-            "New catchain block {} (source_id={}, fork={}, height={})",
-            hash.to_hex_string(),
+            "New catchain block {:x} (source_id={}, fork={}, height={})",
+            hash,
             source_id,
             fork_id,
             height
@@ -1955,8 +1939,8 @@ impl CatchainProcessor {
         )?;
 
         debug!(
-            "CatchainProcessor: starting up overlay for session {} with ID {:?}, short_id {}",
-            session_id.to_hex_string(),
+            "CatchainProcessor: starting up overlay for session {:x} with ID {:x}, short_id {}",
+            session_id,
             overlay_id,
             overlay_short_id
         );
@@ -2158,20 +2142,14 @@ impl Catchain for CatchainImpl {
                 break;
             }
 
-            info!(
-                "...waiting for Catchain threads (session_id is {})",
-                self.session_id.to_hex_string()
-            );
+            info!("...waiting for Catchain threads (session_id is {:x})", self.session_id);
 
             const CHECKING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 
             std::thread::sleep(CHECKING_INTERVAL);
         }
 
-        info!(
-            "Catchain has been stopped (session_id is {})",
-            self.session_id.to_hex_string()
-        );
+        info!("Catchain has been stopped (session_id is {:x})", self.session_id);
     }
 
     /*
@@ -2307,10 +2285,9 @@ impl CatchainImpl {
         let utility_thread_is_stopped_flag = Arc::new(AtomicBool::new(false));
         let main_thread_overloaded_flag = Arc::new(AtomicBool::new(false));
         let utility_thread_overloaded_flag = Arc::new(AtomicBool::new(false));
-        let catchain_activity_node = CatchainFactory::create_activity_node(format!(
-            "Catchain_{}",
-            session_id.to_hex_string()
-        ));
+        let catchain_activity_node = CatchainFactory::create_activity_node(
+            format!("Catchain_{:x}", session_id)
+        );
 
         let metrics_receiver = Arc::new(
             metrics_runtime::Receiver::builder()
@@ -2324,8 +2301,8 @@ impl CatchainImpl {
         let utility_thread_pull_counter = metrics_receiver.sink().counter("utility_queue.pulls");
 
         let body: CatchainImpl = CatchainImpl {
-            main_queue_sender: main_queue_sender,
-            utility_queue_sender: utility_queue_sender,
+            main_queue_sender,
+            utility_queue_sender,
             should_stop_flag: should_stop_flag.clone(),
             main_thread_is_stopped_flag: main_thread_is_stopped_flag.clone(),
             utility_thread_is_stopped_flag: utility_thread_is_stopped_flag.clone(),
@@ -2334,9 +2311,9 @@ impl CatchainImpl {
             destroy_db_flag: destroy_db_flag.clone(),
             session_id: session_id.clone(),
             _activity_node: catchain_activity_node.clone(),
-            main_thread_post_counter: main_thread_post_counter,
-            main_thread_pull_counter: main_thread_pull_counter,
-            utility_thread_post_counter: utility_thread_post_counter,
+            main_thread_post_counter,
+            main_thread_pull_counter,
+            utility_thread_post_counter,
             _utility_thread_pull_counter: utility_thread_pull_counter.clone(),
         };
 
@@ -2353,11 +2330,7 @@ impl CatchainImpl {
         let session_id_clone = session_id.clone();
         let metrics_receiver_clone = metrics_receiver.clone();
         let _main_thread = std::thread::Builder::new()
-            .name(format!(
-                "{}:{}",
-                MAIN_LOOP_NAME.to_string(),
-                session_id.to_hex_string()
-            ))
+            .name(format!("{}:{:x}", MAIN_LOOP_NAME, session_id))
             .stack_size(CATCHAIN_MAIN_LOOP_THREAD_STACK_SIZE)
             .spawn(move || {
                 CatchainProcessor::main_loop(
@@ -2384,11 +2357,7 @@ impl CatchainImpl {
 
         let stop_flag_for_utility_loop = should_stop_flag.clone();
         let _utility_thread = std::thread::Builder::new()
-            .name(format!(
-                "{}:{}",
-                UTILITY_LOOP_NAME.to_string(),
-                session_id_clone.to_hex_string()
-            ))
+            .name(format!("{}:{}", UTILITY_LOOP_NAME, session_id_clone))
             .spawn(move || {
                 CatchainProcessor::utility_loop(
                     stop_flag_for_utility_loop,
