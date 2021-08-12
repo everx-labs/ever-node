@@ -11,6 +11,7 @@ use crate::{
     error::NodeError,
     shard_state::ShardStateStuff,
     engine_traits::EngineOperations,
+    validator::validator_utils::{calc_subset_for_workchain, check_crypto_signatures},
 };
 
 
@@ -377,6 +378,9 @@ impl BlockProofStuff {
             let _val_set = config.config(i_config)?;
         }
         let _catchain_config = config.config(28)?;
+        if let Err(e) = config.workchains() {
+            log::warn!("{}", e);
+        }
 
         Ok(())
     }
@@ -400,7 +404,16 @@ impl BlockProofStuff {
                 ))
             })?;
 
-        validator_set.calc_subset(
+        let config = virt_key_block
+            .read_extra()?
+            .read_custom()?
+            .and_then(|custom| custom.config().cloned())
+            .ok_or_else(|| error!(NodeError::InvalidArg(
+                "State doesn't contain `custom` field".to_string()
+            )))?;
+        calc_subset_for_workchain(
+            &validator_set,
+            &config,
             &cc_config,
             self.id().shard().shard_prefix_with_tag(), 
             self.id().shard().workchain_id(), 
@@ -445,7 +458,7 @@ impl BlockProofStuff {
             &self.id.file_hash
         );
         let total_weight: u64 = validators_list.iter().map(|v| v.weight).sum();
-        let weight = signatures.pure_signatures.check_signatures(validators_list, &checked_data)
+        let weight = check_crypto_signatures(&signatures.pure_signatures, &validators_list, &checked_data)
             .map_err(|err| { 
                 NodeError::InvalidData(
                     format!("Proof for {}: error while check signatures: {}", self.id(), err)
@@ -507,7 +520,9 @@ impl BlockProofStuff {
 
         let (cur_validator_set, cc_config) = state.state().read_cur_validator_set_and_cc_conf()?;
 
-        let (validators, hash_short) = cur_validator_set.calc_subset(
+        let (validators, hash_short) = calc_subset_for_workchain(
+            &cur_validator_set,
+            state.config_params()?,
             &cc_config, 
             self.id().shard().shard_prefix_with_tag(), 
             self.id().shard().workchain_id(), 
