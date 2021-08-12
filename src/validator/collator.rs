@@ -26,7 +26,7 @@ use crate::{
     },
     rng::random::secure_256_bits,
 };
-use super::{BlockCandidate, CollatorSettings, McData};
+use super::{BlockCandidate, CollatorSettings, McData, validator_utils::calc_subset_for_workchain};
 use ton_block::{
     AddSub, BlockExtra, BlockIdExt, ExtBlkRef,
     Block, BlockInfo, CurrencyCollection, Grams, HashmapAugType, Libraries,
@@ -695,7 +695,6 @@ impl ExecutionManager {
         let handle = tokio::spawn(async move {
             while let Some(new_msg) = receiver.recv().await {
                 log::trace!("{}: new message for {:x}", collated_block_descr, shard_acc.account_addr());
-                let now = std::time::Instant::now();
                 let config = config.clone(); // TODO: use Arc
 
                 shard_acc.lt().fetch_max(min_lt.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -719,17 +718,18 @@ impl ExecutionManager {
                     ..ExecuteParams::default()
                 };
                 let new_msg1 = new_msg.clone();
-                let (mut transaction_res, account_root) = tokio::task::spawn_blocking(move || {
+                let (mut transaction_res, account_root, duration) = tokio::task::spawn_blocking(move || {
+                    let now = std::time::Instant::now();
                     (
                         Self::execute_new_message(&new_msg1, &mut account_root, config, params),
-                        account_root
+                        account_root,
+                        now.elapsed().as_micros() as u64
                     )
                 }).await?;
 
                 if let Ok(transaction) = transaction_res.as_mut() {
                     shard_acc.add_transaction(transaction, account_root)?;
                 }
-                let duration = now.elapsed().as_micros() as u64;
                 total_trans_duration.fetch_add(duration, Ordering::Relaxed);
                 log::trace!("{}: account {:x} TIME execute {}μ;", 
                     collated_block_descr, shard_acc.account_addr(), duration);
@@ -900,7 +900,7 @@ impl Collator {
 
         // check inputs
 
-        if !shard.is_masterchain() && !shard.is_base_workchain() {
+        if !shard.is_masterchain() && !shard.is_standard_workchain() {
             fail!("Collator can create block candidates only for masterchain (-1) and base workchain (0)")
         }
         if shard.is_masterchain() && !shard.is_masterchain_ext() {
@@ -1373,11 +1373,11 @@ impl Collator {
     }
 
     fn init_utime(&self, mc_data: &McData, prev_data: &PrevData) -> Result<u32> {
-        log::trace!("{}: init_utime", self.collated_block_descr);
 
         // consider unixtime and lt from previous block(s) of the same shardchain
         let prev_now = prev_data.prev_state_utime();
         let prev = max(mc_data.state().state().gen_time(), prev_now);
+        log::trace!("{}: init_utime prev_time: {}", self.collated_block_descr, prev);
         Ok(max(prev + 1, self.engine.now()))
     }
 
@@ -1987,6 +1987,17 @@ impl Collator {
             log::trace!("{}: skipping processing of inbound external messages", self.collated_block_descr);
             return Ok(())
         }
+
+        //LK temporary: check external messaging delivery
+        {
+            use rand::thread_rng;
+            use rand::seq::SliceRandom;
+            let mut rng = thread_rng();
+            ext_messages.shuffle(&mut rng);
+            log::debug!("{}: try to process {} external messages", self.collated_block_descr, ext_messages.len());
+        }
+        //LK temporary end
+
         log::trace!("{}: process_inbound_external_messages", self.collated_block_descr);
         for (msg, id) in ext_messages.drain(..) {
             let header = msg.ext_in_header().ok_or_else(|| error!("message {:x} \
@@ -2329,7 +2340,7 @@ impl Collator {
             created_by: self.created_by.clone(),
         };
         log::trace!(
-            "{} dequeue_count: {}, enqueue_count: {}, in_msg_count: {}, out_msg_count: {},\
+            "{}: dequeue_count: {}, enqueue_count: {}, in_msg_count: {}, out_msg_count: {},\
             execute_count: {}, transit_count: {}",
             self.collated_block_descr, collator_data.dequeue_count, collator_data.enqueue_count,
             collator_data.in_msg_count, collator_data.out_msg_count, collator_data.execute_count,
@@ -2411,7 +2422,9 @@ impl Collator {
             log::debug!("{}: increased masterchain catchain seqno to {}",
                 self.collated_block_descr, validator_info.catchain_seqno);
         }
-        let (validators, _hash_short) = cur_validators.calc_subset(
+        let (validators, _hash_short) = calc_subset_for_workchain(
+            &cur_validators,
+            &config,
             &ccvc, 
             self.shard.shard_prefix_with_tag(), 
             self.shard.workchain_id(), 

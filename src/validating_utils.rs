@@ -1,7 +1,7 @@
-use crate::CHECK;
+use crate::validator::validator_utils::compute_validator_set_cc;
 use ton_block::{
     ShardIdent, BlockIdExt, ConfigParams, McStateExtra, ShardHashes, ValidatorSet, McShardRecord,
-    FutureSplitMerge, INVALID_WORKCHAIN_ID, MASTERCHAIN_ID, GlobalCapabilities
+    FutureSplitMerge, INVALID_WORKCHAIN_ID, MASTERCHAIN_ID, GlobalCapabilities,
 };
 use ton_types::{fail, error, Result};
 use std::{collections::HashSet, cmp::max};
@@ -210,7 +210,7 @@ pub fn check_cur_validator_set(
     } else {
         old_mc_shards.calc_shard_cc_seqno(&shard)?
     };
-    let nodes = config_params.compute_validator_set_cc(&shard, now, cc_seqno_from_state, &mut cc_seqno_with_delta)?;
+    let nodes = compute_validator_set_cc(config_params, &shard, now, cc_seqno_from_state, &mut cc_seqno_with_delta)?;
     if nodes.is_empty() {
         fail!("Cannot compute masterchain validator set from old masterchain state")
     }
@@ -221,12 +221,12 @@ pub fn check_cur_validator_set(
     }
 
     // TODO: check compute_validator_set
-    let nodes = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno_with_delta, nodes)?.list().clone();
+    let nodes_set = ValidatorSet::new(0, 0, 0, nodes)?;
     let export_nodes = validator_set.list();
     // log::debug!(target: "validator", "block candidate validator set {:?}", export_nodes);
     // log::debug!(target: "validator", "current validator set {:?}", nodes);
-    CHECK!(export_nodes, &nodes);
-    if export_nodes != &nodes /* && !is_fake */ {
+    // CHECK!(export_nodes, &nodes);
+    if export_nodes != nodes_set.list() /* && !is_fake */ {
         fail!("current validator set mismatch: this validator set is not \
             entitled to create block {}", block_id)
     }

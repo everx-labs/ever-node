@@ -8,8 +8,11 @@ pub type PublicKeyHash = ::catchain::PublicKeyHash;
 /// Public key
 pub type PublicKey = ::catchain::PublicKey;
 
+/// Slashing params
+pub type SlashingConfig = ::ton_block::SlashingConfig;
+
 /// Session statistics metric
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[repr(usize)]
 pub enum Metric {
     /// Total rounds count
@@ -26,6 +29,15 @@ pub enum Metric {
 
     /// Commits count
     CommitsCount,
+
+    /// Total rounds count (computed on apply level)
+    ApplyLevelTotalBlocksCount,
+
+    /// Total approved collations count (computed on apply level)
+    ApplyLevelCollationsCount,
+
+    /// Total commits count (computed on apply level)
+    ApplyLevelCommitsCount,
 
     /// Number of metrics
     MetricsCount,
@@ -74,7 +86,12 @@ impl Node {
 
 impl fmt::Debug for Node {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Node(public_key_hash={}, metrics={:?})", self.public_key.id(), self.metrics)
+        write!(
+            f,
+            "Node(public_key_hash={}, metrics={:?})",
+            self.public_key.id(),
+            self.metrics
+        )
     }
 }
 
@@ -123,13 +140,13 @@ impl ValidatorStat {
     }
 
     /// Aggregate metrics
-    pub fn aggregate(&self, confidence_z: f64) -> AggregatedValidatorStat {
-        AggregatedValidatorStat::new(self, confidence_z)
+    pub fn aggregate(&self, params: &SlashingConfig) -> AggregatedValidatorStat {
+        AggregatedValidatorStat::new(self, params)
     }
 }
 
 /// Session statistics aggregated metric
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[repr(usize)]
 pub enum AggregatedMetric {
     /// Collations participation
@@ -141,6 +158,18 @@ pub enum AggregatedMetric {
     /// Commits participation
     CommitsParticipation,
 
+    /// Collations participation (computed on apply level)
+    ApplyLevelCollationsParticipation,
+
+    /// Commits participation (computed on apply level)
+    ApplyLevelCommitsParticipation,
+
+    /// Aggregated validator score
+    ValidationScore,
+
+    /// Aggregated slashing score
+    SlashingScore,
+
     /// Number of metrics
     AggregatedMetricsCount,
 }
@@ -151,15 +180,19 @@ pub struct AggregatedNode {
     /// Node public key
     pub public_key: PublicKey,
 
+    /// Source node
+    pub node: Node,
+
     /// Aggregated statistics metrics
     pub metrics: [f64; AggregatedMetric::AggregatedMetricsCount as usize],
 }
 
 impl AggregatedNode {
     /// Create new aggregated entry
-    pub fn new(entry: &Node) -> Self {
+    pub fn new(entry: &Node, config: &SlashingConfig) -> Self {
         let mut result = Self {
             public_key: entry.public_key.clone(),
+            node: entry.clone(),
             metrics: [0.0; AggregatedMetric::AggregatedMetricsCount as usize],
         };
 
@@ -181,13 +214,42 @@ impl AggregatedNode {
                 (entry.metrics[CommitsCount as usize] as f64) / rounds_count;
         }
 
+        let apply_blocks_count = entry.metrics[ApplyLevelTotalBlocksCount as usize] as f64;
+
+        if apply_blocks_count > 0.0 {
+            let apply_collations_count = entry.metrics[ApplyLevelCollationsCount as usize] as f64;
+            let apply_commits_count = entry.metrics[ApplyLevelCommitsCount as usize] as f64;
+
+            result.metrics[ApplyLevelCollationsParticipation as usize] =
+                apply_collations_count / apply_blocks_count;
+            result.metrics[ApplyLevelCommitsParticipation as usize] =
+                apply_commits_count / apply_blocks_count;
+        }
+
+        let total_weight = (config.signing_score_weight + config.collations_score_weight) as f64;
+        let signing_weight = config.signing_score_weight as f64 / total_weight;
+        let collations_weight = config.collations_score_weight as f64 / total_weight;
+
+        let validation_score = collations_weight
+            * result.metrics[ApplyLevelCollationsParticipation as usize]
+            + signing_weight * result.metrics[ApplyLevelCommitsParticipation as usize];
+        let slashing_score = 1.0 - validation_score;
+
+        result.metrics[ValidationScore as usize] = validation_score;
+        result.metrics[SlashingScore as usize] = slashing_score;
+
         result
     }
 }
 
 impl fmt::Debug for AggregatedNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "AggregatedNode(public_key_hash={}, metrics={:?})", self.public_key.id(), self.metrics)
+        write!(
+            f,
+            "AggregatedNode(public_key_hash={}, metrics={:?})",
+            self.public_key.id(),
+            self.metrics
+        )
     }
 }
 
@@ -219,7 +281,12 @@ pub struct SlashedNode {
 
 impl fmt::Debug for SlashedNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SlashedNode(public_key_hash={}, metric_id={:?})", self.public_key.id(), self.metric_id)
+        write!(
+            f,
+            "SlashedNode(public_key_hash={}, metric_id={:?})",
+            self.public_key.id(),
+            self.metric_id
+        )
     }
 }
 
@@ -238,12 +305,17 @@ pub struct AggregatedValidatorStat {
 
 impl AggregatedValidatorStat {
     /// Create new aggregated statistics
-    pub fn new(stat: &ValidatorStat, confidence_z: f64) -> Self {
+    pub fn new(stat: &ValidatorStat, config: &SlashingConfig) -> Self {
+        let confidence_z: f64 =
+            (config.z_param_numerator as f64) / (config.z_param_denominator as f64);
+        let min_slashing_protection_score: f64 =
+            config.min_slashing_protection_score as f64 / 100.0;
+        let min_samples_count = config.min_samples_count;
         let validators_stat: HashMap<PublicKeyHash, AggregatedNode> = stat
             .validators_stat
             .clone()
             .into_iter()
-            .map(|(pub_key_hash, entry)| (pub_key_hash, AggregatedNode::new(&entry)))
+            .map(|(pub_key_hash, entry)| (pub_key_hash, AggregatedNode::new(&entry, config)))
             .collect();
         let metrics_params: Vec<AggregatedMetricParams> = (0
             ..AggregatedMetric::AggregatedMetricsCount as usize)
@@ -253,9 +325,32 @@ impl AggregatedValidatorStat {
 
         for (_pub_key_hash, entry) in &validators_stat {
             for (metric_id, metric_norm) in metrics_params.iter().enumerate() {
-                if entry.metrics[metric_id] >= metric_norm.min_confidence_value {
+                use AggregatedMetric::*;
+                use Metric::*;
+
+                if metric_id != ValidationScore as usize {
                     continue;
                 }
+
+                let apply_blocks_count =
+                    entry.node.metrics[ApplyLevelTotalBlocksCount as usize] as u32;
+
+                if apply_blocks_count < min_samples_count {
+                    continue;
+                }
+
+                let score = entry.metrics[metric_id];
+
+                if score >= metric_norm.min_confidence_value {
+                    continue;
+                }
+
+                if score >= min_slashing_protection_score {
+                    continue;
+                }
+
+                debug!("Add validator {} to slashed list because of score {:.4} with protection level {:.2} and min confidence level {:.4}",
+                    &hex::encode(entry.public_key.pub_key().expect("PublicKey is assigned")), score, min_slashing_protection_score, metric_norm.min_confidence_value);
 
                 slashed_validators.push(SlashedNode {
                     public_key: entry.public_key.clone(),

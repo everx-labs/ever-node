@@ -23,7 +23,7 @@ use crate::{
     },
     rng::random::secure_256_bits,
 };
-use super::{BlockCandidate, CollatorSettings, McData};
+use super::{BlockCandidate, CollatorSettings, McData, validator_utils::calc_subset_for_workchain};
 use ton_block::{
     AddSub, BlockExtra, BlockIdExt, BlkPrevInfo, ExtBlkRef, GetRepresentationHash,
     Block, BlockInfo, CurrencyCollection, Grams, HashmapAugType, Libraries,
@@ -620,7 +620,7 @@ impl Collator {
 
         // check inputs
 
-        if !shard.is_masterchain() && !shard.is_base_workchain() {
+        if !shard.is_masterchain() && !shard.is_standard_workchain() {
             fail!("Collator can create block candidates only for masterchain (-1) and base workchain (0)")
         }
         if shard.is_masterchain() && !shard.is_masterchain_ext() {
@@ -1068,11 +1068,10 @@ impl Collator {
     }
 
     fn init_utime(&self, mc_data: &McData, prev_data: &PrevData) -> Result<u32> {
-        log::trace!("{}: init_utime", self.collated_block_descr);
-
         // consider unixtime and lt from previous block(s) of the same shardchain
         let prev_now = prev_data.prev_state_utime();
         let prev = max(mc_data.state().state().gen_time(), prev_now);
+        log::trace!("{}: init_utime prev_time: {}", self.collated_block_descr, prev);
         Ok(max(prev + 1, self.engine.now()))
     }
 
@@ -2145,12 +2144,14 @@ impl Collator {
             log::debug!("{}: increased masterchain catchain seqno to {}",
                 self.collated_block_descr, validator_info.catchain_seqno);
         }
-        let (validators, _hash_short) = cur_validators.calc_subset(
+        let (validators, _hash_short) = calc_subset_for_workchain(
+            &cur_validators,
+            &config,
             &ccvc, 
             self.shard.shard_prefix_with_tag(), 
             self.shard.workchain_id(), 
             validator_info.catchain_seqno,
-            UnixTime32(now)
+            now.into()
         )?;
         // t-node calculates subset with valid catchain_seqno and then subset_hash_short with zero one...
         let hash_short = ValidatorSet::calc_subset_hash_short(&validators, 0)?; 

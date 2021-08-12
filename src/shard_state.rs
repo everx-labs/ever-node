@@ -2,7 +2,7 @@ use crate::error::NodeError;
 use std::io::{Write, Cursor};
 use ton_block::{
     BlockIdExt, ShardIdent,
-    ShardStateUnsplit, ShardStateSplit,
+    ShardStateUnsplit, ShardStateSplit, ValidatorSet, CatchainConfig,
     Serializable, Deserializable,
     ConfigParams, McShardRecord, McStateExtra, ShardDescr, ShardHashes,
     HashmapAugType, InRefValue, BinTree, BinTreeType, WorkchainDescr,
@@ -149,6 +149,10 @@ impl ShardStateStuff {
         })?;
         Ok(vec)
     }
+
+    pub fn read_cur_validator_set_and_cc_conf(&self) -> Result<(ValidatorSet, CatchainConfig)> {
+        self.config_params()?.read_cur_validator_set_and_cc_conf()
+    }
 }
 
 
@@ -158,7 +162,7 @@ pub struct ShardHashesStuff {
 }
 
 impl ShardHashesStuff {
-    pub fn for_workchains(&self, workchains: &Vec<i32>) -> Result<Vec<BlockIdExt>> {
+    pub fn top_blocks(&self, workchains: &[i32]) -> Result<Vec<BlockIdExt>> {
         let mut shards = Vec::new();
         for workchain_id in workchains {
             if let Some(InRefValue(bintree)) = self.shards.get(workchain_id)? {
@@ -183,14 +187,10 @@ impl ShardHashesStuff {
         })
     }
 
-    pub fn neighbours_for(&self, shard: &ShardIdent) -> Result<Vec<McShardRecord>> {
+    pub fn neighbours_for(&self, shard: &ShardIdent, workchain_id: i32) -> Result<Vec<McShardRecord>> {
         let mut vec = Vec::new();
-        if shard.is_masterchain() {
-            self.shards.iterate_with_keys(|workchain_id: i32, InRefValue(bintree)| {
-                Self::get_shards(&bintree, shard, workchain_id, &mut vec)
-            })?;
-        } else if let Some(InRefValue(bintree)) = self.shards.get(&shard.workchain_id())? {
-            Self::get_shards(&bintree, shard, shard.workchain_id(), &mut vec)?;
+        if let Some(InRefValue(bintree)) = self.shards.get(&workchain_id)? {
+            Self::get_shards(&bintree, shard, workchain_id, &mut vec)?;
         }
         Ok(vec)
     }

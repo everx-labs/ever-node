@@ -34,6 +34,7 @@ pub async fn download_persistent_state(
             Err(e) => {
                 log::warn!("download_persistent_state_iter err: {}", e);
                 result = Some(Err(e));
+                futures_timer::Delay::new(std::time::Duration::from_millis(1000)).await;
                 continue;
             },
             Ok(res) => { 
@@ -57,16 +58,19 @@ async fn download_persistent_state_iter(
     }
 
     // Check
-    let peer = loop {
+    let mut peer = None;
+    for _ in 0..10 {
         match overlay.check_persistent_state(id, master_id, active_peers).await {
             Err(e) => 
                 log::trace!("check_persistent_state {}: {}", id.shard(), e),
             Ok(None) => 
                 log::trace!("download_persistent_state {}: state not found!", id.shard()),
-            Ok(Some(peer)) => 
-                break peer,
+            Ok(p) => 
+                peer = p,
         }
+        futures_timer::Delay::new(std::time::Duration::from_millis(100)).await;
     };
+    let peer = peer.ok_or_else(|| error!("Can't find peer to load persistent state"))?;
 
     // Download
     log::trace!("download_persistent_state: start: id: {}, master_id: {}", id, master_id);
@@ -125,11 +129,7 @@ async fn download_persistent_state_iter(
                                 part_attempt, e
                             )
                         }
-                        futures_timer::Delay::new(
-                            std::time::Duration::from_millis(
-                                100_u64
-                            )
-                        ).await;
+                        futures_timer::Delay::new(std::time::Duration::from_millis(100)).await;
                     },
                 }
 
