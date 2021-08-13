@@ -18,28 +18,13 @@ pub trait Kvc: Debug + Send + Sync {
 
 /// Trait for readable key-value collections
 pub trait KvcReadable<K: DbKey + Send + Sync>: Kvc {
-
-    /// Get meta information (like DB name or something)
-    fn get_meta(&self) -> &str {
-        ""
-    }
-
     /// Tries to get value from collection by the key; returns Ok(None) if the key not found
     fn try_get(&self, key: &K) -> Result<Option<DbSlice>>;
 
     /// Gets value from collection by the key
     fn get(&self, key: &K) -> Result<DbSlice> {
-        self.try_get(key)?.ok_or_else(
-            || {
-                let meta = self.get_meta();
-                let what = if meta.is_empty() {
-                    key.as_string()
-                } else {
-                    format!("{} ({})", key.as_string(), meta)
-                };
-                StorageError::KeyNotFound(key.key_name(), what).into()
-            }
-        )
+        self.try_get(key)?
+            .ok_or_else(|| StorageError::KeyNotFound(key.key_name(), key.as_string()).into())
     }
 
     /// Gets slice with given size starting from given offset from collection by the key
@@ -95,13 +80,13 @@ pub trait KvcTransactional<K: DbKey + Send + Sync>: KvcSnapshotable<K> {
 /// on destroy, if not committed.
 pub trait KvcTransaction<K: DbKey + Send + Sync> {
     /// Adds put operation into transaction (batch)
-    fn put(&mut self, key: &K, value: &[u8]);
+    fn put(&self, key: &K, value: &[u8]);
 
     /// Adds delete operation into transaction (batch)
-    fn delete(&mut self, key: &K);
+    fn delete(&self, key: &K);
 
     /// Removes all pending operations from transaction (batch)
-    fn clear(&mut self);
+    fn clear(&self);
 
     /// Commits the transaction (batch)
     fn commit(self: Box<Self>) -> Result<()>;

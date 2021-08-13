@@ -3,14 +3,12 @@ use crate::{
     network::neighbours::{PROTOCOL_CAPABILITIES, PROTOCOL_VERSION}
 };
 
-use adnl::common::{
-    AdnlPeers, Answer, QueryResult, tag_from_boxed_type, tag_from_object, TaggedByteVec, TaggedObject
-};
+use adnl::common::{AdnlPeers, QueryResult, Answer};
 use overlay::QueriesConsumer;
 use std::{sync::Arc, convert::TryInto, cmp::min, fmt::Debug};
 use ton_api::{BoxedSerialize};
 use ton_api::{
-    AnyBoxedSerialize, IntoBoxed, 
+    IntoBoxed, AnyBoxedSerialize,
     ton::{
         self, TLObject, Vector,
         rpc::{
@@ -26,9 +24,9 @@ use ton_api::{
         },
         ton_node::{
             self,
-            ArchiveInfo as ArchiveInfoBoxed, BlockDescription, Capabilities as CapabilitiesBoxed, 
-            DataFull as DataFullBoxed, KeyBlocks, Prepared, PreparedProof, PreparedState,
-            archiveinfo::ArchiveInfo, capabilities::Capabilities, datafull::DataFull
+            ArchiveInfo, BlockDescription, DataFull, KeyBlocks,
+            Prepared, PreparedProof, PreparedState, Capabilities,
+
         }
     }
 };
@@ -36,30 +34,16 @@ use ton_block::BlockIdExt;
 use ton_types::{fail, Result};
 
 pub struct FullNodeOverlayService {
-    engine: Arc<dyn EngineOperations>,
-    #[cfg(feature = "telemetry")]
-    tag_capabilities: u32,
-    #[cfg(feature = "telemetry")]
-    tag_key_blocks: u32
+    engine: Arc<dyn EngineOperations>
 }
 
 impl FullNodeOverlayService {
-
     pub fn new(engine: Arc<dyn EngineOperations>) -> Self {
-        Self{
-            engine,
-            #[cfg(feature = "telemetry")]
-            tag_capabilities: tag_from_boxed_type::<CapabilitiesBoxed>(),
-            #[cfg(feature = "telemetry")]
-            tag_key_blocks: tag_from_boxed_type::<KeyBlocks>(),
-        }
+        Self{engine}
     }
 
     // tonNode.getNextBlockDescription prev_block:tonNode.blockIdExt = tonNode.BlockDescription;
-    async fn get_next_block_description(
-        &self, 
-        query: GetNextBlockDescription
-    ) -> Result<TaggedObject<BlockDescription>> {
+    async fn get_next_block_description(&self, query: GetNextBlockDescription) -> Result<BlockDescription> {
         let prev_id = (&query.prev_block).try_into()?;
         let answer = match self.engine.load_block_next1(&prev_id).await {
             Ok(id) => { 
@@ -72,13 +56,6 @@ impl FullNodeOverlayService {
                 )
             },
             Err(_) => BlockDescription::TonNode_BlockDescriptionEmpty
-        };
-        #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
-        let answer = TaggedObject {
-            object: answer,
-            #[cfg(feature = "telemetry")]
-            tag
         };
         Ok(answer)
     }
@@ -94,37 +71,26 @@ impl FullNodeOverlayService {
         block_id: BlockIdExt,
         allow_partial: bool,
         key_block: bool
-    ) -> Result<TaggedObject<PreparedProof>> {
-        let answer = if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+    ) -> Result<PreparedProof> {
+        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
             if key_block && !handle.is_key_block()? {
                 fail!("prepare_key_block_proof: given block is not key");
             }
             if !handle.has_proof() && (!allow_partial || !handle.has_proof_link()) {
-                PreparedProof::TonNode_PreparedProofEmpty
+                Ok(PreparedProof::TonNode_PreparedProofEmpty)
             }
             else if handle.has_proof() && handle.id().shard().is_masterchain() {
-                PreparedProof::TonNode_PreparedProof
+                Ok(PreparedProof::TonNode_PreparedProof)
             } else {
-                PreparedProof::TonNode_PreparedProofLink
+                Ok(PreparedProof::TonNode_PreparedProofLink)
             }
         } else {
-            PreparedProof::TonNode_PreparedProofEmpty
-        };
-        #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
-        let answer = TaggedObject {
-            object: answer,
-            #[cfg(feature = "telemetry")]
-            tag
-        };
-        Ok(answer)
+            Ok(PreparedProof::TonNode_PreparedProofEmpty)
+        }
     }
 
     // tonNode.prepareBlockProof block:tonNode.blockIdExt allow_partial:Bool = tonNode.PreparedProof;
-    async fn prepare_block_proof(
-        &self, 
-        query: PrepareBlockProof
-    ) -> Result<TaggedObject<PreparedProof>> {
+    async fn prepare_block_proof(&self, query: PrepareBlockProof) -> Result<PreparedProof> {
         self.prepare_block_proof_internal(
             (&query.block).try_into()?, 
             query.allow_partial.into(),
@@ -133,10 +99,7 @@ impl FullNodeOverlayService {
     }
 
     // tonNode.prepareKeyBlockProof block:tonNode.blockIdExt allow_partial:Bool = tonNode.PreparedProof;
-    async fn prepare_key_block_proof(
-        &self, 
-        query: PrepareKeyBlockProof
-    ) -> Result<TaggedObject<PreparedProof>> {
+    async fn prepare_key_block_proof(&self, query: PrepareKeyBlockProof) -> Result<PreparedProof> {
         self.prepare_block_proof_internal(
             (&query.block).try_into()?, 
             query.allow_partial.into(),
@@ -151,66 +114,43 @@ impl FullNodeOverlayService {
     // Not supported in t-node
 
     // tonNode.prepareBlock block:tonNode.blockIdExt = tonNode.Prepared;
-    async fn prepare_block(&self, query: PrepareBlock) -> Result<TaggedObject<Prepared>> {
+    async fn prepare_block(&self, query: PrepareBlock) -> Result<Prepared> {
         let block_id = (&query.block).try_into()?;
-        let answer = if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
             if handle.has_data() {
-                Prepared::TonNode_Prepared
+                Ok(Prepared::TonNode_Prepared)
             } else {
-                Prepared::TonNode_NotFound
+                Ok(Prepared::TonNode_NotFound)
             }
         } else {
-            Prepared::TonNode_NotFound
-        };
-        #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
-        let answer = TaggedObject {
-            object: answer,
-            #[cfg(feature = "telemetry")]
-            tag
-        };
-        Ok(answer)
+            Ok(Prepared::TonNode_NotFound)
+        }
     }
 
     // tonNode.prepareBlocks blocks:(vector tonNode.blockIdExt) = tonNode.Prepared;
     // Not supported in t-node
 
-    fn prepare_state_internal(
-        &self, 
-        block_id: BlockIdExt
-    ) -> Result<TaggedObject<PreparedState>> {
-        let answer = if let Some(handle) = self.engine.load_block_handle(&block_id)? {
-            if handle.has_persistent_state() {
-                PreparedState::TonNode_PreparedState
-            } else {
-                PreparedState::TonNode_NotFoundState
-            }
+    fn prepare_state_internal(&self, block_id: BlockIdExt) -> Result<PreparedState> {
+        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+            Ok(
+                if handle.has_persistent_state() {
+                    PreparedState::TonNode_PreparedState
+                } else {
+                    PreparedState::TonNode_NotFoundState
+                }
+            )
         } else {
-            PreparedState::TonNode_NotFoundState
-        };
-        #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
-        let answer = TaggedObject {
-            object: answer,
-            #[cfg(feature = "telemetry")]
-            tag
-        };
-        Ok(answer)
+            Ok(PreparedState::TonNode_NotFoundState)
+        }
     }
 
     // tonNode.preparePersistentState block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt = tonNode.PreparedState;
-    async fn prepare_persistent_state(
-        &self, 
-        query: PreparePersistentState
-    ) -> Result<TaggedObject<PreparedState>> {
+    async fn prepare_persistent_state(&self, query: PreparePersistentState) -> Result<PreparedState> {
         self.prepare_state_internal((&query.block).try_into()?)
     }
 
     // tonNode.prepareZeroState block:tonNode.blockIdExt = tonNode.PreparedState;
-    async fn prepare_zero_state(
-        &self, 
-        query: PrepareZeroState
-    ) -> Result<TaggedObject<PreparedState>> {
+    async fn prepare_zero_state(&self, query: PrepareZeroState) -> Result<PreparedState> {
         self.prepare_state_internal((&query.block).try_into()?)
     }
 
@@ -265,34 +205,24 @@ impl FullNodeOverlayService {
     }
 
     // tonNode.getNextKeyBlockIds block:tonNode.blockIdExt max_size:int = tonNode.KeyBlocks;
-    async fn get_next_key_block_ids(
-        &self, 
-        query: GetNextKeyBlockIds
-    ) -> Result<TaggedObject<KeyBlocks>> {
+    async fn get_next_key_block_ids(&self, query: GetNextKeyBlockIds) -> Result<KeyBlocks> {
         let start_block_id = (&query.block).try_into()?;
         let limit = min(Self::NEXT_KEY_BLOCKS_LIMIT, query.max_size as usize);
-        let answer = match self.get_next_key_block_ids_(&start_block_id, limit).await {
-            Err(e) => {
-                log::warn!("tonNode.getNextKeyBlockIds: {:?}", e);
-                Self::build_next_key_blocks_answer(vec!(), false, true)
-            },
-            Ok(r) => r
-        };
-        let answer = TaggedObject {
-            object: answer,
-            #[cfg(feature = "telemetry")]
-            tag: self.tag_key_blocks
-        };
-        Ok(answer)
+
+        Ok(
+            match self.get_next_key_block_ids_(&start_block_id, limit).await {
+                Err(e) => {
+                    log::warn!("tonNode.getNextKeyBlockIds: {:?}", e);
+                    Self::build_next_key_blocks_answer(vec!(), false, true)
+                },
+                Ok(r) => r
+            }
+        )
     }
 
     // tonNode.downloadNextBlockFull prev_block:tonNode.blockIdExt = tonNode.DataFull;
-    async fn download_next_block_full(
-        &self, 
-        query: DownloadNextBlockFull
-    ) -> Result<TaggedObject<DataFullBoxed>> {
+    async fn download_next_block_full(&self, query: DownloadNextBlockFull) -> Result<DataFull> {
         let block_id = (&query.prev_block).try_into()?;
-        let mut answer = DataFullBoxed::TonNode_DataFullEmpty;
         if let Some(prev_handle) = self.engine.load_block_handle(&block_id)? {
             if prev_handle.has_next1() {
                 let next_id = self.engine.load_block_next1(&block_id).await?;
@@ -301,71 +231,52 @@ impl FullNodeOverlayService {
                     if next_handle.has_data() && next_handle.has_proof_or_link(&mut is_link) {
                         let block = self.engine.load_block_raw(&next_handle).await?;
                         let proof = self.engine.load_block_proof_raw(&next_handle, is_link).await?;
-                        answer = DataFull {
-                            id: next_id.into(),
-                            proof: ton::bytes(proof),
-                            block: ton::bytes(block),
-                            is_link: if is_link { 
-                                ton::Bool::BoolTrue 
-                            } else { 
-                                ton::Bool::BoolFalse 
+                        return Ok(DataFull::TonNode_DataFull(Box::new(
+                            ton_node::datafull::DataFull{
+                                id: next_id.into(),
+                                proof: ton_api::ton::bytes(proof),
+                                block: ton_api::ton::bytes(block),
+                                is_link: if is_link { 
+                                    ton::Bool::BoolTrue 
+                                } else { 
+                                    ton::Bool::BoolFalse 
+                                }
                             }
-                        }.into_boxed();
+                        )));
                     }
                 }
             }
         }
-        #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
-        let answer = TaggedObject {
-            object: answer,
-            #[cfg(feature = "telemetry")]
-            tag
-        };
-        Ok(answer)
+        Ok(DataFull::TonNode_DataFullEmpty)
     }
 
     // tonNode.downloadBlockFull block:tonNode.blockIdExt = tonNode.DataFull;
-    async fn download_block_full(
-        &self, 
-        query: DownloadBlockFull
-    ) -> Result<TaggedObject<DataFullBoxed>> {
+    async fn download_block_full(&self, query: DownloadBlockFull) -> Result<DataFull> {
         let block_id = (&query.block).try_into()?;
-        let mut answer = DataFullBoxed::TonNode_DataFullEmpty;
         if let Some(handle) = self.engine.load_block_handle(&block_id)? {
             let mut is_link = false;
             if handle.has_data() && handle.has_proof_or_link(&mut is_link) {
                 let block = self.engine.load_block_raw(&handle).await?;
                 let proof = self.engine.load_block_proof_raw(&handle, is_link).await?;
-                answer = DataFull {
-                    id: query.block,
-                    proof: ton_api::ton::bytes(proof),
-                    block: ton_api::ton::bytes(block),
-                    is_link: if is_link { ton::Bool::BoolTrue } else { ton::Bool::BoolFalse }
-                }.into_boxed();
+                return Ok(DataFull::TonNode_DataFull(Box::new(
+                    ton_node::datafull::DataFull{
+                        id: query.block,
+                        proof: ton_api::ton::bytes(proof),
+                        block: ton_api::ton::bytes(block),
+                        is_link: if is_link { ton::Bool::BoolTrue } else { ton::Bool::BoolFalse }
+                    }
+                )))
             }
         }
-        #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
-        let answer = TaggedObject {
-            object: answer,
-            #[cfg(feature = "telemetry")]
-            tag
-        };
-        Ok(answer)
+        Ok(DataFull::TonNode_DataFullEmpty)
     }
 
     // tonNode.downloadBlock block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_block(&self, query: DownloadBlock) -> Result<TaggedByteVec> {
+    async fn download_block(&self, query: DownloadBlock) -> Result<Vec<u8>> {
         let block_id = (&query.block).try_into()?;
         if let Some(handle) = self.engine.load_block_handle(&block_id)? {
             if handle.has_data() {
-                let answer = TaggedByteVec {
-                    object: self.engine.load_block_raw(&handle).await?,
-                    #[cfg(feature = "telemetry")]
-                    tag: 0x8000000A // Raw reply do download block
-                };
-                return Ok(answer)
+                return Ok(self.engine.load_block_raw(&handle).await?)
             }
         }
         fail!("Block's data isn't initialized");
@@ -375,10 +286,7 @@ impl FullNodeOverlayService {
     // Not supported in t-node
 
     // tonNode.downloadPersistentState block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_persistent_state(
-        &self, 
-        query: DownloadPersistentState
-    ) -> Result<TaggedByteVec> {
+    async fn download_persistent_state(&self, query: DownloadPersistentState) -> Result<Vec<u8>> {
         // This request is never called in t-node, because new downloadPersistentStateSlice exists.
         // Because of state is pretty big it is bad idea to send it by one request.
         fail!(
@@ -392,7 +300,7 @@ impl FullNodeOverlayService {
     async fn download_persistent_state_slice(
         &self, 
         query: DownloadPersistentStateSlice
-    ) -> Result<TaggedByteVec> {
+    ) -> Result<Vec<u8>> {
         let block_id = (&query.block).try_into()?;
         if let Some(handle) = self.engine.load_block_handle(&block_id)? {
             if handle.has_persistent_state() {
@@ -401,33 +309,23 @@ impl FullNodeOverlayService {
                     query.offset as u64,
                     query.max_size as u64
                 ).await?;
-                let answer = TaggedByteVec {
-                    object: data,
-                    #[cfg(feature = "telemetry")]
-                    tag: 0x8000000B // Raw reply to download state slice
-                };
-                return Ok(answer)
+                return Ok(data)
             }             
         }
-        fail!("Shard state {} doesn't have a persistent state", block_id)
+        fail!("Shard state {} doesn't have a persistent state", block_id);
     }
 
     // tonNode.downloadZeroState block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_zero_state(&self, query: DownloadZeroState) -> Result<TaggedByteVec> {
+    async fn download_zero_state(&self, query: DownloadZeroState) -> Result<Vec<u8>> {
         let block_id = (&query.block).try_into()?;
         if let Some(handle) = self.engine.load_block_handle(&block_id)? {
             if handle.has_persistent_state() {
                 let size = self.engine.load_persistent_state_size(&block_id).await?;
                 let data = self.engine.load_persistent_state_slice(&handle, 0, size).await?;
-                let answer = TaggedByteVec {
-                    object: data,
-                    #[cfg(feature = "telemetry")]
-                    tag: 0x8000000C // Raw reply to download zero state
-                };
-                return Ok(answer)
+                return Ok(data)
             }
         }
-        fail!("Zero state {} is not inited", block_id)
+        fail!("Zero state {} is not inited", block_id);
     }
 
     async fn download_block_proof_internal(
@@ -435,34 +333,26 @@ impl FullNodeOverlayService {
         block_id: BlockIdExt, 
         is_link: bool, 
         _key_block: bool
-    ) -> Result<TaggedByteVec> {
+    ) -> Result<Vec<u8>> {
         if let Some(handle) = self.engine.load_block_handle(&block_id)? {
             if (is_link && handle.has_proof_link()) || (!is_link && handle.has_proof()) {
-                let answer = TaggedByteVec {
-                    object: self.engine.load_block_proof_raw(&handle, is_link).await?,
-                    #[cfg(feature = "telemetry")]
-                    tag: 0x8000000D // Raw reply to download proof
-                };
-                return Ok(answer)
+                return Ok(self.engine.load_block_proof_raw(&handle, is_link).await?)
             }
         }
         if is_link {
-            fail!("Block's proof link isn't initialized")
+            fail!("Block's proof link isn't initialized");
         } else {
-            fail!("Block's proof isn't initialized")
+            fail!("Block's proof isn't initialized");
         }
     }
 
     // tonNode.downloadBlockProof block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_block_proof(&self, query: DownloadBlockProof) -> Result<TaggedByteVec> {
+    async fn download_block_proof(&self, query: DownloadBlockProof) -> Result<Vec<u8>> {
         self.download_block_proof_internal((&query.block).try_into()?, false, false).await
     }
 
     // tonNode.downloadKeyBlockProof block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_key_block_proof(
-        &self, 
-        query: DownloadKeyBlockProof
-    ) -> Result<TaggedByteVec> {
+    async fn download_key_block_proof(&self, query: DownloadKeyBlockProof) -> Result<Vec<u8>> {
         self.download_block_proof_internal((&query.block).try_into()?, false, true).await
     }
 
@@ -473,10 +363,7 @@ impl FullNodeOverlayService {
     // Not supported in t-node
 
     // tonNode.downloadBlockProofLink block:tonNode.blockIdExt = tonNode.Data;
-    async fn download_block_proof_link(
-        &self, 
-        query: DownloadBlockProofLink
-    ) -> Result<TaggedByteVec> {
+    async fn download_block_proof_link(&self, query: DownloadBlockProofLink) -> Result<Vec<u8>> {
         self.download_block_proof_internal((&query.block).try_into()?, true, false).await
     }
 
@@ -484,7 +371,7 @@ impl FullNodeOverlayService {
     async fn download_key_block_proof_link(
         &self, 
         query: DownloadKeyBlockProofLink
-    ) -> Result<TaggedByteVec> {
+    ) -> Result<Vec<u8>> {
         self.download_block_proof_internal((&query.block).try_into()?, true, true).await
     }
 
@@ -495,64 +382,40 @@ impl FullNodeOverlayService {
     // Not supported in t-node
 
     // tonNode.getArchiveInfo masterchain_seqno:int = tonNode.ArchiveInfo;
-    async fn get_archive_info(
-        &self, 
-        query: GetArchiveInfo
-    ) -> Result<TaggedObject<ArchiveInfoBoxed>> {
-        let mut answer = ArchiveInfoBoxed::TonNode_ArchiveNotFound;
-        if let Some(id) = self.engine.load_last_applied_mc_block_id()? {
-            if query.masterchain_seqno as u32 <= id.seq_no() {
-                if let Some(id) = self.engine.load_shard_client_mc_block_id()? {
-                    if query.masterchain_seqno as u32 <= id.seq_no() {
-                        if let Some(id) = self.engine.get_archive_id(
-                            query.masterchain_seqno as u32
-                        ).await {
-                            answer = ArchiveInfo {
-                                id: id as ton::long
-                            }.into_boxed()
-                        }
+    async fn get_archive_info(&self, query: GetArchiveInfo) -> Result<ArchiveInfo> {
+        if query.masterchain_seqno as u32 > self.engine.load_last_applied_mc_block_id().await?.seq_no()
+            || query.masterchain_seqno as u32 > self.engine.load_shards_client_mc_block_id().await?.seq_no()
+        {
+            return Ok(ArchiveInfo::TonNode_ArchiveNotFound);
+        }
+
+        Ok(if let Some(id) = self.engine.get_archive_id(query.masterchain_seqno as u32).await {
+            ArchiveInfo::TonNode_ArchiveInfo(
+                Box::new(
+                    ton_api::ton::ton_node::archiveinfo::ArchiveInfo {
+                        id: id as ton_api::ton::long
                     }
-                }
-            }
-        }                
-        #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
-        let answer = TaggedObject {
-            object: answer,
-            #[cfg(feature = "telemetry")]
-            tag
-        };
-        Ok(answer)
+                )
+            )
+        } else {
+            ArchiveInfo::TonNode_ArchiveNotFound
+        })
     }
 
     // tonNode.getArchiveSlice archive_id:long offset:long max_size:int = tonNode.Data;
-    async fn get_archive_slice(&self, query: GetArchiveSlice) -> Result<TaggedByteVec> {
-        let answer = TaggedByteVec {
-            object: self.engine.get_archive_slice(
-                query.archive_id as u64, 
-                query.offset as u64, 
-                query.max_size as u32
-            ).await?,
-            #[cfg(feature = "telemetry")]
-            tag: 0x8000000E // Raw reply to download archive slice
-        };
-        Ok(answer)
+    async fn get_archive_slice(&self, query: GetArchiveSlice) -> Result<Vec<u8>> {
+        self.engine.get_archive_slice(
+            query.archive_id as u64, query.offset as u64, query.max_size as u32).await
     }
 
     // tonNode.getCapabilities = tonNode.Capabilities;
-    async fn get_capabilities(
-        &self, 
-        _query: GetCapabilities
-    ) -> Result<TaggedObject<CapabilitiesBoxed>> {
-        let answer = TaggedObject {
-            object: Capabilities {
+    async fn get_capabilities(&self, _query: GetCapabilities) -> Result<Capabilities> {
+        Ok(
+            ton_node::capabilities::Capabilities {
                 version: PROTOCOL_VERSION,
                 capabilities: PROTOCOL_CAPABILITIES,
-            }.into_boxed(),
-            #[cfg(feature = "telemetry")]
-            tag: self.tag_capabilities
-        };
-        Ok(answer)
+            }.into_boxed()
+        )
     }
 
     async fn consume_query<'a, Q, A, F>(
@@ -563,42 +426,39 @@ impl FullNodeOverlayService {
     where
         Q: AnyBoxedSerialize + Debug,
         A: BoxedSerialize + Send + Sync + serde::Serialize + Debug + 'static,
-        F: futures::Future<Output = Result<TaggedObject<A>>>,
+        F: futures::Future<Output = Result<A>>,
     {
         Ok(
             match query.downcast::<Q>() {
                 Ok(query) => {
+
                     let query_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
                         format!("{}", std::any::type_name::<Q>())
                     } else {
                         String::default()
                     };
                     log::trace!("consume_query: before consume query {}", query_str);
+
                     #[cfg(feature = "telemetry")]
                     let now = std::time::Instant::now();
                     let answer = match consumer(self, query).await {
                         Ok(answer) => {
-                            let answer = TaggedByteVec {
-                                object: adnl::common::serialize(&answer.object)?,
-                                #[cfg(feature = "telemetry")]
-                                tag: answer.tag
-                            };    
+                            let answer = adnl::common::serialize(&answer)?;
                             log::trace!("consume_query: consumed {}", query_str);
                             #[cfg(feature = "telemetry")]
-                            self.engine.full_node_service_telemetry().consumed_query(
-                                query_str, true, now.elapsed(), answer.object.len()
-                            );
+                            self.engine.full_node_service_telemetry()
+                                .consumed_query(query_str, true, now.elapsed(), answer.len());
                             answer
                         }
                         Err(e) => {
                             log::trace!("consume_query: consumed {}, error {:?}", query_str, e);
                             #[cfg(feature = "telemetry")]
-                            self.engine.full_node_service_telemetry().consumed_query(
-                                query_str, false, now.elapsed(), 0
-                            );
+                            self.engine.full_node_service_telemetry()
+                                .consumed_query(query_str, false, now.elapsed(), 0);
                             return Err(e)
                         }
                     };
+
                     Ok(QueryResult::Consumed(Some(Answer::Raw(answer))))
                 },
                 Err(query) => Err(query)
@@ -613,17 +473,19 @@ impl FullNodeOverlayService {
     ) -> Result<std::result::Result<QueryResult, TLObject>>
     where
         Q: AnyBoxedSerialize + Debug,
-        F: futures::Future<Output = Result<TaggedByteVec>>,
+        F: futures::Future<Output = Result<Vec<u8>>>,
     {
         Ok(
             match query.downcast::<Q>() {
                 Ok(query) => {
+
                     let query_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
                         format!("{}", std::any::type_name::<Q>())
                     } else {
                         String::default()
                     };
                     log::trace!("consume_query_raw: before consume query {}", query_str);
+
                     #[cfg(feature = "telemetry")]
                     let now = std::time::Instant::now();
                     let answer = match consumer(self, query).await {
@@ -631,28 +493,26 @@ impl FullNodeOverlayService {
                             #[cfg(feature = "telemetry")]
                             log::trace!("consume_query_raw: consumed {}", query_str);
                             #[cfg(feature = "telemetry")]
-                            self.engine.full_node_service_telemetry().consumed_query(
-                                query_str, true, now.elapsed(), answer.object.len()
-                            );
+                            self.engine.full_node_service_telemetry()
+                                .consumed_query(query_str, true, now.elapsed(), answer.len());
                             answer
                         }
                         Err(e) => {
                             #[cfg(feature = "telemetry")]
                             log::trace!("consume_query_raw: consumed {}, error {:?}", query_str, e);
                             #[cfg(feature = "telemetry")]
-                            self.engine.full_node_service_telemetry().consumed_query(
-                                query_str, false, now.elapsed(), 0
-                            );
+                            self.engine.full_node_service_telemetry()
+                                .consumed_query(query_str, false, now.elapsed(), 0);
                             return Err(e)
                         }
                     };
+
                     Ok(QueryResult::Consumed(Some(Answer::Raw(answer))))
                 },
                 Err(query) => Err(query)
             }
         )
     }
-
 }
 
 #[async_trait::async_trait]

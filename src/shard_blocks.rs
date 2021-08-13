@@ -4,8 +4,9 @@ use crate::{
     shard_state::ShardStateStuff,
 };
 use ton_block::{BlockIdExt, TopBlockDescr, Deserializable, BlockSignatures};
-use ton_types::{fail, Result};
+use ton_types::{fail, Result, deserialize_tree_of_cells};
 use std::{
+    io::Cursor,
     sync::{Arc, atomic::{AtomicU32, Ordering}},
     time::Duration,
     ops::Deref,
@@ -72,7 +73,8 @@ impl ShardBlocksPool {
             let tbd = if self.is_fake {
                 TopBlockDescr::with_id_and_signatures(id.clone(), BlockSignatures::default())
             } else {
-                TopBlockDescr::construct_from_bytes(&data)?
+                let root = deserialize_tree_of_cells(&mut Cursor::new(&data))?;
+                TopBlockDescr::construct_from(&mut root.into())?
             };
             Ok(Arc::new(TopBlockDescrStuff::new(tbd, &id, self.is_fake)?))
         };
@@ -226,11 +228,7 @@ pub fn resend_top_shard_blocks_worker(engine: Arc<dyn EngineOperations>) {
 }
 
 async fn resend_top_shard_blocks(engine: &dyn EngineOperations) -> Result<()> {
-    let id = if let Some(id) = engine.load_last_applied_mc_block_id()? {
-        id
-    } else {
-        fail!("INTERNAL ERROR: No last applied MC block after sync")
-    };
+    let id = engine.load_last_applied_mc_block_id().await?;
     let tsbs = engine.get_own_shard_blocks(id.seq_no)?;
     for tsb in tsbs {
         engine.send_top_shard_block_description(tsb, 0, true).await?;

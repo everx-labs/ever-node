@@ -75,17 +75,8 @@ impl ControlQuerySubscriber {
         if let Some(engine) = self.engine.as_ref() {
             let mut stats: ton::vector<ton::Bare, OneStat> = ton::vector::default();
 
-            let mc_block_id = if let Some(id) = engine.load_last_applied_mc_block_id()? {
-                id
-            } else {
-                stats.0.push(OneStat {
-                    key: "masterchainblock".to_string(),
-                    value: "not set".to_string()
-                });
-                return Ok(Stats {stats: stats})
-            };
-
             // masterchainblocktime
+            let mc_block_id = engine.load_last_applied_mc_block_id().await?;
             let mc_block_handle = engine.load_block_handle(&mc_block_id)?.ok_or_else(
                 || error!("Cannot load handle for block {}", &mc_block_id)
             )?;
@@ -135,67 +126,7 @@ impl ControlQuerySubscriber {
                 value: next.to_string()
             });
 
-            let value = match engine.load_last_applied_mc_state_or_zerostate().await {
-                Ok(mc_state) => mc_state.block_id().to_string(),
-                Err(err) => err.to_string()
-            };
-            let key = "last applied masterchain block id".to_string();
-            stats.0.push(OneStat { key, value });
-
-            let value = match engine.processed_workchain().await {
-                Ok((true, _workchain_id)) => "masterchain".to_string(),
-                Ok((false, workchain_id)) => format!("{}", workchain_id),
-                Err(err) => err.to_string()
-            };
-            let key = "processed workchain".to_string();
-            stats.0.push(OneStat { key, value });
-
-            // validation_stats
-            let validation_stats = engine.validation_status();
-
-            let mut stat = String::new();
-            let ago = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-
-            for item in validation_stats.iter() {
-                stat.push_str("shard: ");
-                stat.push_str(&item.key().to_string()); 
-                stat.push_str(" - ");
-                if item.val() == &0 {
-                    stat.push_str("never");
-                } else {
-                    stat.push_str(&(ago - item.val()).to_string());
-                    stat.push_str(" sec ago");
-                }
-                stat.push_str("\n");
-            }
-
-            stats.0.push(OneStat {
-                key: "validation_stats".to_string(), 
-                value: stat.to_string()
-            });
-
-            // collation_stats
-            let mut stat = String::new();
-            let collation_stats = engine.collation_status();
-            for item in collation_stats.iter() {
-                stat.push_str("shard: ");
-                stat.push_str(&item.key().to_string()); 
-                stat.push_str(" - ");
-                if item.val() == &0 {
-                    stat.push_str("never");
-                } else {
-                    stat.push_str(&(ago - item.val()).to_string());
-                    stat.push_str(" sec ago");
-                }
-                stat.push_str("\n");
-            }
-
-            stats.0.push(OneStat {
-                key: "collation_stats".to_string(), 
-                value: stat.to_string()
-            });
-
-            Ok(Stats {stats})
+            Ok(Stats {stats: stats})
         } else {
             fail!("Engine was not set!");
         }
@@ -253,16 +184,6 @@ impl ControlQuerySubscriber {
             fail!("`engine is not set`")
         }
     }
-
-    fn set_states_gc_interval(&self, interval_ms: u32) -> Result<Success> {
-        if let Some(engine) = self.engine.as_ref() {
-            engine.adjust_states_gc_interval(interval_ms);
-            self.config.store_states_gc_interval(interval_ms);
-            Ok(Success::Engine_Validator_Success)
-        } else {
-            fail!("`engine is not set`")
-        }
-    }
 }
 
 #[async_trait::async_trait]
@@ -275,20 +196,20 @@ impl Subscriber for ControlQuerySubscriber {
         };
         log::info!("query (control server): {:?}", query);
         let query = match query.downcast::<GenerateKeyPair>() {
-            Ok(_) => return QueryResult::consume(self.process_generate_keypair().await?, None),
+            Ok(_) => return QueryResult::consume(
+                self.process_generate_keypair().await?
+            ),
             Err(query) => query
         };
         let query = match query.downcast::<ExportPublicKey>() {
             Ok(query) => return QueryResult::consume_boxed(
-                self.export_public_key(&query.key_hash.0)?,
-                None
+                self.export_public_key(&query.key_hash.0)?
             ),
             Err(query) => query
         };
         let query = match query.downcast::<Sign>() {
             Ok(query) => return QueryResult::consume(
-                self.process_sign_data(&query.key_hash.0, &query.data)?,
-                None
+                self.process_sign_data(&query.key_hash.0, &query.data)?
             ),
             Err(query) => query
         };
@@ -296,8 +217,7 @@ impl Subscriber for ControlQuerySubscriber {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_validator_permanent_key(
                     &query.key_hash.0, query.election_date, query.ttl
-                ).await?,
-                None
+                ).await?
             ),
             Err(query) => query
         };
@@ -305,8 +225,7 @@ impl Subscriber for ControlQuerySubscriber {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_validator_temp_key(
                     &query.permanent_key_hash.0, &query.key_hash.0, query.ttl
-                )?,
-                None
+                )?
             ),
             Err(query) => query
         };
@@ -314,22 +233,20 @@ impl Subscriber for ControlQuerySubscriber {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_validator_adnl_address(
                     &query.permanent_key_hash.0, &query.key_hash.0, query.ttl
-                ).await?,
-                None
+                ).await?
             ),
             Err(query) => query
         };
         let query = match query.downcast::<AddAdnlId>() {
             Ok(query) => return QueryResult::consume_boxed(
-                self.add_adnl_address(&query.key_hash.0, query.category)?,
-                None
+                self.add_adnl_address(&query.key_hash.0, query.category)?
             ),
             Err(query) => query
         };
         let query = match query.downcast::<GetBundle>() {
             Ok(query) => {
                 let block_id = convert_block_id_ext_api2blk(&query.block_id)?;
-                return QueryResult::consume_boxed(self.prepare_bundle(block_id).await?, None)
+                return QueryResult::consume_boxed(self.prepare_bundle(block_id).await?)
             },
             Err(query) => query
         };
@@ -339,8 +256,7 @@ impl Subscriber for ControlQuerySubscriber {
                     |id| convert_block_id_ext_api2blk(&id).ok()
                 ).collect();
                 return QueryResult::consume_boxed(
-                    self.prepare_future_bundle(prev_block_ids).await?,
-                    None
+                    self.prepare_future_bundle(prev_block_ids).await?
                 )
             },
             Err(query) => query
@@ -348,10 +264,7 @@ impl Subscriber for ControlQuerySubscriber {
         let query = match query.downcast::<ton::rpc::lite_server::SendMessage>() {
             Ok(query) => {
                 let message_data = query.body.0;
-                return QueryResult::consume_boxed(
-                    self.redirect_external_message(&message_data).await?,
-                    None
-                )
+                return QueryResult::consume_boxed(self.redirect_external_message(&message_data).await?)
             }
             Err(query) => query
         };
@@ -360,17 +273,8 @@ impl Subscriber for ControlQuerySubscriber {
                 return QueryResult::consume_boxed(
                     ton_api::ton::engine::validator::Stats::Engine_Validator_Stats(
                         Box::new(self.get_stats().await?)
-                    ),
-                    None
-                )
+                ))
             },
-            Err(query) => query
-        };
-        let query = match query.downcast::<ton::rpc::engine::validator::SetStatesGcInterval>() {
-            Ok(query) => return QueryResult::consume_boxed(
-                self.set_states_gc_interval(query.interval_ms as u32)?,
-                None
-            ),
             Err(query) => query
         };
         log::warn!("Unsupported ControlQuery (control server): {:?}", query);

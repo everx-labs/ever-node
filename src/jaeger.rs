@@ -36,7 +36,6 @@ pub fn init_jaeger(){
     log::trace!("Jaeger lazy init");
 }
 
-#[cfg(feature = "external_db")]
 pub fn message_from_kafka_received(kf_key: &[u8]) {
     let msg_id_bytes = kf_key[0..32].to_vec();
     tokio::task::spawn_blocking(move || {

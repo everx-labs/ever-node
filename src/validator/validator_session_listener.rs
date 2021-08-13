@@ -1,4 +1,4 @@
-use std::{fmt, time::{Duration, SystemTime, SystemTimeError}, sync::Arc};
+use std::{fmt, time::{*, SystemTime, SystemTimeError}, sync::*};
 use tokio::{time::timeout, runtime::Runtime};
 
 use validator_session::*;
@@ -107,7 +107,7 @@ impl ValidatorSessionListener {
     }
 }
 
-impl SessionListener for ValidatorSessionListener {
+impl validator_session::SessionListener for ValidatorSessionListener {
     /// New block candidate appears -- validate it
     fn on_candidate(
         &self,
@@ -189,7 +189,7 @@ impl SessionListener for ValidatorSessionListener {
     }
 }
 
-impl CatchainReplayListener for ValidatorSessionListener {
+impl validator_session::CatchainReplayListener for ValidatorSessionListener {
     fn replay_started(&self) {
         log::info!(target: "validator", "CatchainReplayListener: started");
     }

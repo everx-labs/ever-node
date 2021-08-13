@@ -464,8 +464,7 @@ impl MsgQueueManager {
         };
         log::debug!("request a preliminary list of neighbors for {}", shard);
         let shards = ShardHashesStuff::from(shards.clone());
-        let (_master, workchain_id) = engine.processed_workchain().await?;
-        let neighbor_list = shards.neighbours_for(&shard, workchain_id)?;
+        let neighbor_list = shards.neighbours_for(&shard)?;
         let mut neighbors = vec![];
         log::debug!("got a preliminary list of {} neighbors for {}", neighbor_list.len(), shard);
         for (i, shard) in neighbor_list.iter().enumerate() {

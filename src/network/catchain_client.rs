@@ -1,23 +1,21 @@
-use adnl::{ 
-    common::{
-        AdnlPeers, Answer, KeyId, KeyOption, QueryResult, serialize, serialize_append, 
-        tag_from_object, TaggedByteSlice, TaggedTlObject, Wait
-    },
-    node::AdnlNode,
+use adnl::{ node::AdnlNode,
+    common::{AdnlPeers, KeyId, KeyOption, QueryResult, serialize, serialize_append, Wait, Answer}
 };
 use overlay::{OverlayNode, PrivateOverlayShortId, QueriesConsumer};
-use catchain::{
-    BlockPayloadPtr, CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr,
+use catchain::{BlockPayloadPtr, CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr,
     ExternalQueryResponseCallback, PublicKeyHash
 };
+
 use rldp::RldpNode;
 use std::{
     collections::HashMap, io::Cursor, sync::{Arc, atomic::{self, AtomicBool}}, time::Instant
 };
 use ton_api::{
-    Deserializer, IntoBoxed, ton::{ ton_node::Broadcast, TLObject }
+    Deserializer, IntoBoxed,
+    ton::{ ton_node::Broadcast, TLObject }
 };
 use ton_types::{error, fail, Result};
+
 
 pub struct CatchainClient {
     runtime_handle : tokio::runtime::Handle,
@@ -111,30 +109,21 @@ impl CatchainClient {
         let msg = message.clone();
         let receiver = receiver_id.clone();
         let is_stop_state = self.is_stop.clone();
+
         self.runtime_handle.spawn(async move {
             let is_stop = is_stop_state.load(atomic::Ordering::Relaxed);
             if is_stop {
                 log::warn!("Overlay {} was stopped!", &overlay_id);
                 return;
             }
-            let buf = &msg.data().0;
-            let tag = if buf.len() < 4 {
-                0 
-            } else {
-                ((buf[3] as u32) << 24) | ((buf[2] as u32) << 16) | 
-                ((buf[1] as u32) <<  8) | ((buf[0] as u32) <<  0)
-            };
-            let msg = TaggedByteSlice {
-                object: buf,
-                #[cfg(feature = "telemetry")]
-                tag: 0x80000001 // Catchain one-way messages 
-            };
-            let answer = overlay.message(&receiver, &msg, &overlay_id).await;
-            log::trace!(
-                target: Self::TARGET, 
-                "<send_message> (overlay: {}, data: {:08x}, key_id: {}): {:?}",
-                &overlay_id, tag, &receiver, &answer
-            );
+            let answer = overlay.message(&receiver, &msg.data().0, &overlay_id).await;
+            log::trace!(target: Self::TARGET, "<send_message> (overlay: {}, data: {:x}{:x}{:x}{:x}, key_id: {}): {:?}",
+                &overlay_id, 
+                &msg.data().0[3],
+                &msg.data().0[2],
+                &msg.data().0[1],
+                &msg.data().0[0], 
+                &receiver, &answer);
         });
         Ok(())
     }
@@ -146,34 +135,32 @@ impl CatchainClient {
         timeout: std::time::Duration,
         message: &BlockPayloadPtr
     ) -> Result<BlockPayloadPtr> {
-        let query: TLObject = Deserializer::new(
-            &mut Cursor::new(&message.data().0)
-        ).read_boxed()?;
-        #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&query);
-        let query = TaggedTlObject {
-            object: query,
-            #[cfg(feature = "telemetry")]
-            tag
-        };
+        let query = Deserializer::new(&mut Cursor::new(&message.data().0)).read_boxed()?;
+        /*log::debug!("<send_query> send (overlay: {}, data: {:x}{:x}{:x}{:x}, key_id: {})", 
+            &overlay_id, 
+            &message.data().0[3],
+            &message.data().0[2],
+            &message.data().0[1],
+            &message.data().0[0],
+            &receiver_id);*/
         let now = Instant::now();
-        let result = overlay.query(
-            &receiver_id, 
-            &query, 
-            overlay_id,
+        let result = overlay.query(&receiver_id, &query, overlay_id,
             Some(AdnlNode::calc_timeout(Some(timeout.as_millis() as u64)))
         ).await?;
         let elapsed = now.elapsed();
-        log::trace!(
-            target: Self::TARGET, 
-            "<send_query> result (overlay: {}, data: {:08x}, key_id: {}): {:?}({}ms)",
-            &overlay_id, tag, &receiver_id, result, elapsed.as_millis()
-        );
+        log::trace!(target: Self::TARGET, "<send_query> result (overlay: {}, data: {:x}{:x}{:x}{:x}, key_id: {}): {:?}({}ms)",
+            &overlay_id, 
+            &message.data().0[3],
+            &message.data().0[2],
+            &message.data().0[1],
+            &message.data().0[0],
+            &receiver_id, result, elapsed.as_millis());
         let result = result.ok_or_else(|| error!("answer is None!"))?;
         let mut data: catchain::RawBuffer = catchain::RawBuffer::default();
         let mut serializer = ton_api::Serializer::new(&mut data.0);
         serializer.write_boxed(&result)?;
         let data = catchain::CatchainFactory::create_block_payload(data);
+
         Ok(data)
     }
 
@@ -186,25 +173,22 @@ impl CatchainClient {
         message: &BlockPayloadPtr,
         max_answer_size: u64
     )-> Result<BlockPayloadPtr> {
-        let query_body: TLObject = Deserializer::new(
-            &mut Cursor::new(&message.data().0)
-        ).read_boxed()?;
+
+        let request: TLObject = Deserializer::new(&mut Cursor::new(&message.data().0)).read_boxed()?;
         let mut query = overlay.get_query_prefix(overlay_id)?;
         //Serializer::new(&mut query).write_bare(&message.0)?;
-        serialize_append(&mut query, &query_body)?;
+        serialize_append(&mut query, &request)?;
+        
         // let timeout = timeout.duration_since(SystemTime::now())?.as_millis();
         let result = overlay.query_via_rldp(
             rldp,
             receiver_id,
-            &TaggedByteSlice {
-                object: &query[..],
-                #[cfg(feature = "telemetry")]
-                tag: tag_from_object(&query_body)
-            },
+            &query,
             Some(max_answer_size as i64),
             None,
             &overlay_id
         ).await;
+        
         log::trace!(target: Self::TARGET, "result status: {}", &result.is_ok());
         let (data, _) = result?;
         let data = data.ok_or_else(|| error!("asnwer is None!"))?;
@@ -212,6 +196,7 @@ impl CatchainClient {
             ton_api::ton::bytes(data)
         );
         Ok(data)
+
     }
 
     pub fn run_wait_broadcast(
@@ -249,8 +234,7 @@ impl CatchainClient {
         overlay_id: &Arc<PrivateOverlayShortId>,
         overlay: Arc<OverlayNode>,
         _validator_keys: &HashMap<Arc<KeyId>, Arc<KeyId>>,
-        catchain_listener: &CatchainOverlayListenerPtr
-    ) -> Result<()> {
+        catchain_listener: &CatchainOverlayListenerPtr) -> Result<()> {
         let receiver = overlay.clone();
         let result: Option<Box<Broadcast>> = None;
         let catchain_listener = catchain_listener.clone();
@@ -422,17 +406,10 @@ impl CatchainOverlay for CatchainClient {
         let overlay_id = self.overlay_id.clone();
         let overlay = self.overlay.clone();
         let local_validator_key = self.local_validator_key.clone();
-        self.runtime_handle.spawn(
-            async move {
-                let msg = TaggedByteSlice {
-                    object: &msg.data().0,
-                    #[cfg(feature = "telemetry")]
-                    tag: 0x80000002 // Catchain broadcast
-                }; 
-                let result = overlay.broadcast(&overlay_id, &msg, Some(&local_validator_key)).await;
-                log::trace!(target: Self::TARGET, "send_broadcast_fec_ex status: {:?}", result);
-            }
-        );
+        self.runtime_handle.spawn(async move {
+            let result = overlay.broadcast(&overlay_id, &msg.data().0, Some(&local_validator_key)).await;
+            log::trace!(target: Self::TARGET, "send_broadcast_fec_ex status: {:?}", result);
+        });
     }
 }
 
@@ -473,20 +450,8 @@ impl QueriesConsumer for CatchainClientConsumer {
                     Box::new(move |result: Result<BlockPayloadPtr> | {
                         let result = match result {
                             Ok(answer) => {
-                                let answer: Result<TLObject> = Deserializer::new(
-                                    &mut Cursor::new(&answer.data().0)
-                                ).read_boxed();
-                                match answer {
-                                    Ok(answer) => { 
-                                        #[cfg(feature = "telemetry")]
-                                        let tag = tag_from_object(&answer);
-                                        let answer = TaggedTlObject {
-                                            object: answer,
-                                            #[cfg(feature = "telemetry")]
-                                            tag
-                                        };
-                                        Ok(QueryResult::Consumed(Some(Answer::Object(answer)))) 
-                                    },
+                                 match Deserializer::new(&mut Cursor::new(answer.data().clone().0)).read_boxed::<TLObject>() {
+                                    Ok(query_result) => { Ok(QueryResult::Consumed(Some(Answer::Object(query_result)))) },
                                     Err(e) => Err(e)
                                 }
                             },
