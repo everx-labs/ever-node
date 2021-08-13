@@ -15,12 +15,12 @@
 #
 [package]
 name = "ton_node"
-version = "0.47.10"
+version = "0.47.15"
 edition = "2018"
 
 [workspace]
 members = [
-    "storage",
+    "storage"
 ]
 
 [dependencies]
@@ -95,7 +95,7 @@ optional = true
 [dev-dependencies]
 
 [features]
-default = ["telemetry", "async_collator", "async_validator"]
+default = ["telemetry", "async_collator", "async_validator", "slashing"]
 external_db = ["rdkafka", "rdkafka-sys"]
 async_collator = []
 async_validator = []

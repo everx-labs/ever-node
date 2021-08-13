@@ -452,8 +452,9 @@ impl CollatorTestBundle {
         // neighbors
         //
         let mut neighbors = vec!();
-        let shards = mc_state.shards()?;
-        let neighbor_list = shards.get_neighbours(&shard)?;
+        let shards = mc_state.shard_hashes()?;
+        let (_master, workchain_id) = engine.processed_workchain().await?;
+        let neighbor_list = shards.neighbours_for(&shard, workchain_id)?;
         for shard in neighbor_list.iter() {
             states.insert(shard.block_id().clone(), engine.load_state(shard.block_id()).await?);
             neighbors.push(shard.block_id().clone());
@@ -602,11 +603,12 @@ impl CollatorTestBundle {
         let mut neighbors = vec!();
         let shards = if shard.is_masterchain() {
             let block = BlockStuff::new(candidate.block_id.clone(), candidate.data.clone())?;
-            block.shards()?
+            block.shard_hashes()?
         } else {
-            mc_state.shards()?.clone()
+            mc_state.shard_hashes()?
         };
-        let neighbor_list = shards.get_neighbours(&shard)?;
+        let (_master, workchain_id) = engine.processed_workchain().await?;
+        let neighbor_list = shards.neighbours_for(&shard, workchain_id)?;
         for shard in neighbor_list.iter() {
             states.insert(shard.block_id().clone(), engine.load_state(shard.block_id()).await?);
             neighbors.push(shard.block_id().clone());
@@ -792,12 +794,13 @@ impl CollatorTestBundle {
         // neighbors
         //
         let mut neighbors = vec!();
-        let shards = match block.shards() {
+        let shards = match block.shard_hashes() {
             Ok(shards) => shards,
-            Err(_) => mc_state.shards()?.clone()
+            Err(_) => mc_state.shard_hashes()?
         };
 
-        let neighbor_list = shards.get_neighbours(block_id.shard())?;
+        let (_master, workchain_id) = engine.processed_workchain().await?;
+        let neighbor_list = shards.neighbours_for(block_id.shard(), workchain_id)?;
         for shard in neighbor_list.iter() {
             states.insert(shard.block_id().clone(), engine.load_state(shard.block_id()).await?);
             neighbors.push(shard.block_id().clone());

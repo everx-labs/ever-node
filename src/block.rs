@@ -188,7 +188,7 @@ impl BlockStuff {
         ))
     }
 
-    pub fn shards_blocks(&self) -> Result<HashMap<ShardIdent, BlockIdExt>> {
+    pub fn shards_blocks(&self, workchain_id: i32) -> Result<HashMap<ShardIdent, BlockIdExt>> {
         let mut shards = HashMap::new();
         self
             .block()
@@ -196,7 +196,7 @@ impl BlockStuff {
             .read_custom()?
             .ok_or_else(|| error!("Given block is not a master block."))?
             .hashes()
-            .iterate_shards(|ident: ShardIdent, descr: ShardDescr| {
+            .iterate_shards_for_workchain(workchain_id, |ident: ShardIdent, descr: ShardDescr| {
                 let last_shard_block = BlockIdExt {
                     shard_id: ident,
                     seq_no: descr.seq_no,
