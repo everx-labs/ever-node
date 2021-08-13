@@ -35,22 +35,20 @@ impl EngineOperations for Engine {
         match self.workchain_id.load(Ordering::Relaxed) {
             INVALID_WORKCHAIN_ID => {
                 if let Ok(mc_state) = self.load_last_applied_mc_state_or_zerostate().await {
-                    let workchains = mc_state.workchains()?;
+                    let config = mc_state.config_params()?;
+                    let workchains = config.workchains()?.export_keys()?;
                     let workchain_id = match workchains.len() {
                         0 => fail!("no workchains in config in {}", mc_state.block_id()),
-                        1 => workchains[0].0,
+                        1 => workchains[0],
                         count => {
-                            match rand::thread_rng().gen_range(0, count as usize + 1) {
+                            //TODO: check gen_range here must be [0..count]
+                            match rand::thread_rng().gen_range(0, count as usize) {
                                 0 => {
-                                    log::info!("random assign for masterchain");
                                     self.workchain_id.store(MASTERCHAIN_ID, Ordering::Relaxed);
                                     self.network().config_handler().store_workchain(MASTERCHAIN_ID);
                                     return Ok((true, BASE_WORKCHAIN_ID))
                                 }
-                                index => {
-                                    log::info!("random assign for workchain {}", workchains[index - 1].0);
-                                    workchains[index - 1].0
-                                }
+                                index => workchains[index - 1]
                             }
                         }
                     };

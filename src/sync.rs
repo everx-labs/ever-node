@@ -597,11 +597,12 @@ async fn import_shard_blocks(
         }
     }
 
-    let mut shard_client_mc_block_id = match engine.load_shard_client_mc_block_id()? {
-        Some(id) => id,
-        None => fail!("INTERNAL ERROR: No shard client MC block set in sync")
-    };
-    let (_master, workchain_id) = engine.processed_workchain().await?;
+    let mut shard_client_mc_block_id = 
+        if let Some(id) = engine.load_shard_client_mc_block_id()? {
+            id
+        } else {
+            fail!("INTERNAL ERROR: No shard client MC block set in sync")
+        };
     for mc_block_id in maps.mc_blocks_ids.values() {
         let mc_seq_no = mc_block_id.seq_no();
         if mc_seq_no <= shard_client_mc_block_id.seq_no() {
@@ -620,7 +621,7 @@ async fn import_shard_blocks(
         )?;
         let mc_block = engine.load_block(&mc_handle).await?;
 
-        let shard_blocks = mc_block.shards_blocks(workchain_id)?;
+        let shard_blocks = mc_block.shards_blocks()?;
         let mut tasks = Vec::with_capacity(shard_blocks.len());
         for (_shard, id) in shard_blocks {
             let engine = Arc::clone(engine);
@@ -644,7 +645,7 @@ async fn import_shard_blocks(
 
                 if id.seq_no() == 0 {
                     log::info!(target: "sync", "Downloading zerostate: {}...", id);
-                    boot::download_zerostate(engine.as_ref(), &id).await?;
+                    boot::download_zero_state(engine.as_ref(), &id).await?;
                     return Ok(());
                 }
 

@@ -1,5 +1,5 @@
 use crate::{
-    block::{convert_block_id_ext_api2blk, convert_block_id_ext_blk2api},
+    block::convert_block_id_ext_api2blk,
     collator_test_bundle::CollatorTestBundle,
     config::{KeyRing, NodeConfigHandler},
     engine_traits::EngineOperations,
@@ -9,21 +9,19 @@ use adnl::{
     common::{deserialize, QueryResult, Subscriber, AdnlPeers},
     server::{AdnlServer, AdnlServerConfig}
 };
-use std::{ops::Deref, sync::Arc, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
+use std::{ops::Deref, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 use ton_api::ton::{
-    self, bytes, PublicKey, TLObject, accountaddress::AccountAddress, raw::fullaccountstate::FullAccountState,
+    self, PublicKey, TLObject,
     engine::validator::{
         keyhash::KeyHash, onestat::OneStat, signature::Signature, stats::Stats, Success
     },
-    lite_server::configinfo::ConfigInfo,
     rpc::engine::validator::{
         AddAdnlId, AddValidatorAdnlAddress, AddValidatorPermanentKey, AddValidatorTempKey, 
-        ControlQuery, ExportPublicKey, GenerateKeyPair, Sign, GetBundle, GetFutureBundle
-    },
+        ControlQuery, ExportPublicKey, GenerateKeyPair, Sign, GetBundle, GetFutureBundle,
+    }
 };
-use ton_types::{fail, error, serialize_tree_of_cells, Result};
-use ton_block::{BlockIdExt, MsgAddressInt, Serializable};
-use ton_block_json::serialize_config_param;
+use ton_types::{fail, error, Result};
+use ton_block::BlockIdExt;
 
 pub struct ControlServer {
     adnl: AdnlServer
@@ -71,71 +69,6 @@ impl ControlQuerySubscriber {
             log::debug!("Running control server without engine access")
         }
         ret
-    }
-
-    async fn get_config_params(&self, param_number: u32) -> Result<ton::lite_server::configinfo::ConfigInfo> {
-        if let Some(engine) = self.engine.as_ref() {
-            let mc_state = engine.load_last_applied_mc_state().await?;
-            let config_params = mc_state.config_params()?;
-            let config_param = serialize_config_param(&config_params, param_number)?;
-            let config_info = ConfigInfo {
-                mode: 0,
-                id: convert_block_id_ext_blk2api(mc_state.block_id()),
-                state_proof: bytes(vec!()),
-                config_proof: bytes(config_param.into_bytes())
-            };
-
-            Ok(config_info)
-        } else {
-            fail!("Engine was not set!");
-        }
-    }
-
-    async fn get_contract_data(&self, address: AccountAddress) -> Result<FullAccountState> {
-        if let Some(engine) = self.engine.as_ref() {
-            let addr = MsgAddressInt::from_str(&address.account_address)?;
-            let mc_state = engine.load_last_applied_mc_state().await?;
-            let shard_account = mc_state
-                .state()
-                .read_accounts()?
-                .account(&addr.address())?
-                .ok_or_else(|| error!("Cannot load account {} from mc_state", &address.account_address))?;
-
-            let account = shard_account.read_account()?;
-
-            let code = account.get_code()
-                .ok_or_else(|| error!("Cannot load code from account {}", &address.account_address))?;
-            let mut raw_code = vec!();
-            serialize_tree_of_cells(&code, &mut raw_code)?;
-
-            let data = account.get_data()
-                .ok_or_else(|| error!("Cannot load data from account {}", &address.account_address))?;
-            let mut raw_data = vec!();
-            serialize_tree_of_cells(&data, &mut raw_data)?;
-
-            /*let frozen_hash = account.frozen_hash()
-                .ok_or_else(|| error!("Cannot load frozen_hash from account {}", &address.account_address))?;
-            let frozen_hash = frozen_hash.as_slice().to_vec();*/
-
-            let transaction_id = ton::internal::transactionid::TransactionId {
-                lt: shard_account.last_trans_lt() as i64,
-                hash: bytes(shard_account.last_trans_hash().as_slice().to_vec()),
-            };
-            let account_state = FullAccountState {
-                balance: 0,
-                code: bytes(raw_code),
-               // data: bytes(raw_data),    // actual data
-                data: bytes(account.write_to_bytes()?),   // fix for elections
-                last_transaction_id: transaction_id,
-                block_id: convert_block_id_ext_blk2api(mc_state.block_id()),
-                frozen_hash: bytes(vec!()),
-                sync_utime: 0
-            };
-
-            Ok(account_state)
-        } else {
-            fail!("Engine was not set!");
-        }
     }
 
     async fn get_stats(&self) -> Result<Stats> {
@@ -420,31 +353,6 @@ impl Subscriber for ControlQuerySubscriber {
                     None
                 )
             }
-            Err(query) => query
-        };
-        let query = match query.downcast::<ton::rpc::raw::GetAccountState>() {
-            Ok(account) => {
-                let address = account.account_address;
-                return QueryResult::consume_boxed(
-                    ton_api::ton::raw::FullAccountState::Raw_FullAccountState(
-                        Box::new(self.get_contract_data(address).await?)
-                    ),
-                    None
-                )
-            },
-            Err(query) => query
-        };
-        let query = match query.downcast::<ton::rpc::lite_server::GetConfigParams>() {
-            Ok(query) => {
-                let param_number = query.param_list.iter().next().ok_or_else(|| error!("Invalid param_number"))?;
-
-                return QueryResult::consume_boxed(
-                    ton::lite_server::ConfigInfo::LiteServer_ConfigInfo(
-                        Box::new(self.get_config_params(*param_number as u32).await?)
-                    ), 
-                    None
-                )
-            },
             Err(query) => query
         };
         let query = match query.downcast::<ton::rpc::engine::validator::GetStats>() {

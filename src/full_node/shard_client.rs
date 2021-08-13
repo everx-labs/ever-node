@@ -158,16 +158,14 @@ pub async fn produce_chain_range(
         master_block: mc_block.id().clone(),
         shard_blocks: Vec::new(),
     };
-    let (_master, workchain_id) = engine.processed_workchain().await?;
 
     let prev_master = engine.load_block_prev1(mc_block.id())?;
     let prev_master = engine.load_block_handle(&prev_master)?
         .ok_or_else(|| NodeError::InvalidData(format!("Can not load block handle for {}", prev_master)))?;
     let prev_master = engine.load_block(&prev_master).await?;
-    let prev_master_shards = prev_master.shards_blocks(workchain_id)?;
+    let prev_master_shards = prev_master.shards_blocks()?;
 
-    let mut blocks: Vec<BlockIdExt> = mc_block.shards_blocks(workchain_id)?.values().cloned().collect();
-    // for new rust let mut blocks: Vec<BlockIdExt> = mc_block.shards_blocks(workchain_id)?.into_values().collect();
+    let mut blocks: Vec<BlockIdExt> = mc_block.shards_blocks()?.values().cloned().collect();
 
     while let Some(block_id) = blocks.pop() {
         let handle = engine.load_block_handle(&block_id)?

@@ -37,7 +37,6 @@ use crate::{
 use crate::{
     block::convert_block_id_ext_api2blk,
     engine_traits::ValidatedBlockStatNode,
-    validator::validator_utils::calc_subset_for_workchain,
 };
 #[cfg(feature = "local_test")]
 use crate::network::node_network_stub::NodeNetworkStub;
@@ -60,8 +59,15 @@ use std::{
 };
 #[cfg(feature = "slashing")]
 use std::collections::HashSet;
+#[cfg(feature = "slashing")]
+use crate::{
+    engine_traits::ValidatedBlockStatNode,
+    validator::validator_utils::calc_subset_for_workchain,
+};
 #[cfg(feature = "metrics")]
 use std::env;
+#[cfg(feature = "slashing")]
+use std::collections::HashSet;
 use storage::types::BlockHandle;
 use ton_block::{
     self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL,
