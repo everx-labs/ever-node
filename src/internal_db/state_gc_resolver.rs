@@ -48,11 +48,8 @@ impl AllowStateGcSmartResolver {
             let handle = engine.find_block_by_seq_no(&mc_pfx, new_min_ref_mc_seqno).await?;
             let min_mc_state = engine.load_state(handle.id()).await?;
 
-            // TODO: I don't know which code is correct
-            let (_masterchain, workchain_id) = engine.processed_workchain().await?;
+            let (_master, workchain_id) = engine.processed_workchain().await?;
             let top_blocks = min_mc_state.shard_hashes()?.top_blocks(&[workchain_id])?;
-            // let workchains = min_mc_state.workchains()?.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
-            // let top_blocks = min_mc_state.shard_hashes()?.top_blocks(&workchains)?;
             let mut actual_shardes = HashSet::new();
             for id in top_blocks {
                 add_object_to_map_with_update(

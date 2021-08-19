@@ -204,6 +204,7 @@ pub fn check_cur_validator_set(
     is_fake: bool,
 ) -> Result<bool> {
     if is_fake { return Ok(true) }
+
     let mut cc_seqno_with_delta = 0; // cc_seqno delta = 0
     let cc_seqno_from_state = if shard.is_masterchain() {
         mc_state_extra.validator_info.catchain_seqno

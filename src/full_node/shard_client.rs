@@ -122,7 +122,7 @@ async fn load_shard_blocks_cycle(
     let mut mc_handle = engine.load_block_handle(&shards_mc_block_id)?.ok_or_else(
         || error!("Cannot load handle for shard master block {}", shards_mc_block_id)
     )?;
-    let (_masterchain, workchain_id) = engine.processed_workchain().await?;
+    let (_master, workchain_id) = engine.processed_workchain().await?;
     loop {
         log::trace!("load_shard_blocks_cycle: mc block: {}", mc_handle.id());
         let r = engine.wait_next_applied_mc_block(&mc_handle, None).await?;

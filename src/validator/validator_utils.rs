@@ -211,7 +211,7 @@ lazy_static::lazy_static! {
     };
 }
 
-pub fn calc_subset_for_workchain(
+pub fn try_calc_subset_for_workchain(
     vset: &ValidatorSet,
     config: &ConfigParams,
     cc_config: &CatchainConfig, 
@@ -219,12 +219,12 @@ pub fn calc_subset_for_workchain(
     workchain_id: i32, 
     cc_seqno: u32,
     _time: UnixTime32,
-) -> Result<(Vec<ValidatorDescr>, u32)> {
+) -> Result<Option<(Vec<ValidatorDescr>, u32)>> {
     // in case on old block proof it doesn't contain workchains in config so 1 by default
     let workchains = config.workchains().unwrap_or_else(|_| SINGLE_WORKCHAIN.clone());
     match workchains.len()? as i32 {
         0 => fail!("workchain description is empty"),
-        1 => vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time),
+        1 => vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time).map(|e| Some(e)),
         count => {
             let mut list = Vec::new();
             for descr in vset.list() {
@@ -240,14 +240,31 @@ pub fn calc_subset_for_workchain(
                     vset.main(),
                     list
                 )?;
-                vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time)
+                vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time).map(|e| Some(e))
             } else {
-                fail!(
-                    "not enough validators {} from total {} for {}:{:016X} cc_seqno: {}",
-                    list.len(), vset.list().len(), workchain_id, shard_pfx, cc_seqno
-                )
+                // not enough validators -- config is ok, but we cannot validate the shard at the moment
+                Ok(None)
             }
         }
+    }
+}
+
+pub fn calc_subset_for_workchain(
+    vset: &ValidatorSet,
+    config: &ConfigParams,
+    cc_config: &CatchainConfig,
+    shard_pfx: u64,
+    workchain_id: i32,
+    cc_seqno: u32,
+    time: UnixTime32,
+) -> Result<(Vec<ValidatorDescr>, u32)> {
+    match try_calc_subset_for_workchain(vset, config, cc_config, shard_pfx, workchain_id, cc_seqno, time)? {
+        Some(x) => Ok(x),
+        None =>
+            fail!(
+                "Not enough validators from total {} for workchain {}:{:016X} cc_seqno: {}",
+                vset.list().len(), workchain_id, shard_pfx, cc_seqno
+            )
     }
 }
 

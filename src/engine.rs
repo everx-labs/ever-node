@@ -921,7 +921,7 @@ impl Engine {
             // });
 
             // add to list (for collator) only if shard state is avaliable
-            let (_masterchain, workchain_id) = self.processed_workchain().await?;
+            let (_master, workchain_id) = self.processed_workchain().await?;
             let id = id.clone();
             tokio::spawn(async move {
                 let mut result = true;
@@ -1173,9 +1173,9 @@ impl Engine {
                         handle.id(), now.elapsed().as_millis());
 
                     let mut shard_blocks = vec!();
-                    let processed_workchain = engine.processed_workchain().await?.1;
+                    let (_master, workchain_id) = engine.processed_workchain().await?;
                     mc_state.shards()?.iterate_shards(|ident, descr| {
-                        if ident.is_masterchain() || ident.workchain_id() == processed_workchain {
+                        if ident.is_masterchain() || ident.workchain_id() == workchain_id {
                             shard_blocks.push(BlockIdExt {
                                 shard_id: ident,
                                 seq_no: descr.seq_no,
@@ -1444,8 +1444,8 @@ pub async fn run(node_config: TonNodeConfig, zerostate_path: Option<&str>, ext_d
     // Boot
     let (mut last_applied_mc_block, mut shard_client_mc_block, pss_keeper_block) = boot(&engine, zerostate_path).await?;
 
-    let (masterchain, workchain_id) = engine.processed_workchain().await?;
-    log::info!("processed masterchain: {} workchain: {}", masterchain, workchain_id);
+    let (master, workchain_id) = engine.processed_workchain().await?;
+    log::info!("processed masterchain: {} workchain: {}", master, workchain_id);
 
     // Broadcasts (blocks, external messages etc.)
     Arc::clone(&engine).listen_broadcasts(ShardIdent::masterchain()).await?;

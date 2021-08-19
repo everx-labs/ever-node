@@ -36,30 +36,34 @@ impl EngineOperations for Engine {
             INVALID_WORKCHAIN_ID => {
                 if let Ok(mc_state) = self.load_last_applied_mc_state_or_zerostate().await {
                     let workchains = mc_state.workchains()?;
-                    let workchain_id = match workchains.len() {
+                    match workchains.len() {
                         0 => fail!("no workchains in config in {}", mc_state.block_id()),
-                        1 => workchains[0].0,
+                        1 => {
+                            log::info!("single workchain configuration - old rules");
+                            let workchain_id = workchains[0].0;
+                            self.workchain_id.store(workchain_id, Ordering::Relaxed);
+                            Ok((false, workchain_id))
+                        }
                         count => {
                             match rand::thread_rng().gen_range(0, count as usize + 1) {
                                 0 => {
                                     log::info!("random assign for masterchain");
                                     self.workchain_id.store(MASTERCHAIN_ID, Ordering::Relaxed);
                                     self.network().config_handler().store_workchain(MASTERCHAIN_ID);
-                                    return Ok((true, BASE_WORKCHAIN_ID))
+                                    Ok((true, BASE_WORKCHAIN_ID))
                                 }
                                 index => {
                                     log::info!("random assign for workchain {}", workchains[index - 1].0);
-                                    workchains[index - 1].0
+                                    let workchain_id = workchains[index - 1].0;
+                                    self.network().config_handler().store_workchain(workchain_id);
+                                    Ok((false, workchain_id))
                                 }
                             }
                         }
-                    };
-                    self.workchain_id.store(workchain_id, Ordering::Relaxed);
-                    self.network().config_handler().store_workchain(workchain_id);
-                    Ok((false, workchain_id))
+                    }
                 } else {
                     log::trace!("mc state was not found so workchains were not determined");
-                    Ok((true, BASE_WORKCHAIN_ID))
+                    Ok((false, BASE_WORKCHAIN_ID))
                 }
             }
             MASTERCHAIN_ID => Ok((true, BASE_WORKCHAIN_ID)),

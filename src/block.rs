@@ -172,7 +172,7 @@ impl BlockStuff {
             .read_extra()?
             .read_custom()?
             .ok_or_else(|| error!("Given block is not a master block."))?
-            .hashes()
+            .shards()
             .clone()
         )
     }
@@ -183,7 +183,7 @@ impl BlockStuff {
             .read_extra()?
             .read_custom()?
             .ok_or_else(|| error!("Given block is not a master block."))?
-            .hashes()
+            .shards()
             .clone()
         ))
     }
@@ -195,7 +195,7 @@ impl BlockStuff {
             .read_extra()?
             .read_custom()?
             .ok_or_else(|| error!("Given block is not a master block."))?
-            .hashes()
+            .shards()
             .iterate_shards_for_workchain(workchain_id, |ident: ShardIdent, descr: ShardDescr| {
                 let last_shard_block = BlockIdExt {
                     shard_id: ident,

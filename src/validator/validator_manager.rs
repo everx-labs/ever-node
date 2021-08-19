@@ -12,7 +12,7 @@ use crate::{
     validator::{
         validator_group::{ValidatorGroup, ValidatorGroupStatus},
         validator_utils::{
-            calc_subset_for_workchain,
+            try_calc_subset_for_workchain,
             validatordescr_to_catchain_node,
             get_shard_name, validatorset_to_string,
             compute_validator_list_id,
@@ -472,7 +472,7 @@ impl ValidatorManagerImpl {
             };
 
             let cc_seqno_delta = cc_seqno_from_state;
-            let subset = calc_subset_for_workchain(
+            let subset = match try_calc_subset_for_workchain(
                 &full_validator_set,
                 &mc_state_extra.config,
                 &catchain_config,
@@ -480,7 +480,14 @@ impl ValidatorManagerImpl {
                 ident.workchain_id(),
                 cc_seqno_delta,
                 mc_now.into(),
-            )?;
+            )? {
+                Some(x) => x,
+                None => {
+                    log::error!(target: "validator", "Cannot compute validator set for workchain {}:{:016X}",
+                        ident.workchain_id(), ident.shard_prefix_with_tag());
+                    continue
+                }
+            };
 
             if let Some(local_id) = self.find_us(&subset.0) {
                 let vsubset = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno_delta, subset.0)?;
@@ -569,6 +576,8 @@ impl ValidatorManagerImpl {
         let mut future_shards: HashSet<ShardIdent> = HashSet::new();
 
         let (master, workchain_id) = self.engine.processed_workchain().await?;
+        new_shards.insert(ShardIdent::masterchain(), vec![last_masterchain_block.clone()]);
+        future_shards.insert(ShardIdent::masterchain());
         if !master {
             mc_state_extra.shards().iterate_shards_for_workchain(workchain_id, |ident: ShardIdent, descr: ShardDescr| {
                 // Add all shards that are effective from now
@@ -645,9 +654,6 @@ impl ValidatorManagerImpl {
 
                 Ok(true)
             })?;
-        } else {
-            new_shards.insert(ShardIdent::masterchain(), vec![last_masterchain_block.clone()]);
-            future_shards.insert(ShardIdent::masterchain());
         }
 
         // Iterate over shards and start all missing sessions
@@ -679,7 +685,7 @@ impl ValidatorManagerImpl {
             } else {
                 &full_validator_set
             };
-            let next_subset = calc_subset_for_workchain(
+            let next_subset = match try_calc_subset_for_workchain(
                 &future_validator_set,
                 &mc_state_extra.config,
                 &catchain_config,
@@ -687,7 +693,14 @@ impl ValidatorManagerImpl {
                 ident.workchain_id(),
                 cc_seqno_from_state + 1,
                 mc_now.into(),
-            )?;
+            )? {
+                Some(x) => x,
+                None => {
+                    log::error!(target: "validator", "Cannot compute validator set for workchain {}:{:016X}",
+                        ident.workchain_id(), ident.shard_prefix_with_tag());
+                    continue
+                }
+            };
 
             if let Some(local_id) = self.find_us(&next_subset.0) {
                 let vnext_subset = ValidatorSet::with_cc_seqno(0, 0, 0, 1, next_subset.0)?;
