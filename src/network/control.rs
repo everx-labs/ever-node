@@ -146,8 +146,8 @@ impl ControlQuerySubscriber {
             let account_state = FullAccountState {
                 balance: 0,
                 code: bytes(raw_code),
-                data: bytes(raw_data),    // actual data
-                //data: bytes(account.write_to_bytes()?),   // fix for elections
+                //data: bytes(raw_data),    // actual data
+                data: bytes(account.write_to_bytes()?),   // fix for elections
                 last_transaction_id: transaction_id,
                 block_id: convert_block_id_ext_blk2api(mc_state.block_id()),
                 //frozen_hash: bytes(vec!()),
