@@ -2,11 +2,15 @@ use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, 
     config::CollatorTestBundlesGeneralConfig,
     engine::{Engine, STATSD},
-    engine_traits::{ChainRange, EngineOperations, PrivateOverlayOperations, ValidatedBlockStat},
+    engine_traits::{
+        ChainRange, EngineOperations, PrivateOverlayOperations, Server, ValidatedBlockStat
+    },
     error::NodeError,
     internal_db::{INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, SHARD_CLIENT_MC_BLOCK, BlockResult},
     shard_state::ShardStateStuff,
-    types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId}
+    types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
+    ext_messages::{create_ext_message, EXT_MESSAGES_TRACE_TARGET},
+    jaeger,
 };
 use adnl::common::{KeyId, KeyOption};
 use catchain::{
@@ -310,14 +314,15 @@ impl EngineOperations for Engine {
         &self, 
         block_id: &BlockIdExt, 
         master_id: &BlockIdExt,
-        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+        attempts: Option<usize>
     ) -> Result<ShardStateStuff> {
         let overlay = self.get_full_node_overlay(
             block_id.shard().workchain_id(), 
             block_id.shard().shard_prefix_with_tag()
         ).await?;
         crate::full_node::state_helper::download_persistent_state(
-            block_id, master_id, overlay.deref(), active_peers
+            block_id, master_id, overlay.deref(), active_peers, attempts
         ).await
     }
 
@@ -424,12 +429,13 @@ impl EngineOperations for Engine {
     async fn store_state(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: &ShardStateStuff
-    ) -> Result<()> {
+        state: ShardStateStuff
+    ) -> Result<ShardStateStuff> {
         if self.shard_states_cache().get(handle.id()).is_none() {
             self.shard_states_cache().set(handle.id().clone(), |_| Some(state.clone()))?;
         }
-        if self.db().store_shard_state_dynamic(handle, state, None)? {
+        let (state, saved) = self.db().store_shard_state_dynamic(handle, state, None)?;
+        if saved {
             #[cfg(feature = "telemetry")]
             self.full_node_telemetry().new_pre_applied_block(handle.got_by_broadcast());
         }
@@ -438,26 +444,25 @@ impl EngineOperations for Engine {
             None,
             async { Ok(state.clone()) }
         ).await?;
-        Ok(())
+        Ok(state)
     }
 
     async fn store_zerostate(
         &self, 
-        id: &BlockIdExt, 
-        state: &ShardStateStuff, 
+        mut state: ShardStateStuff, 
         state_bytes: &[u8]
-    ) -> Result<Arc<BlockHandle>> {
+    ) -> Result<(ShardStateStuff, Arc<BlockHandle>)> {
         let handle = self.db().create_or_load_block_handle(
-            id, 
+            state.block_id(), 
             None, 
             Some(state.state().gen_time()),
             None
         )?.as_non_updated().ok_or_else(
             || error!("INTERNAL ERROR: mismatch in zerostate storing")
         )?;
-        self.store_state(&handle, state).await?;
+        state = self.store_state(&handle, state).await?;
         self.db().store_shard_state_persistent_raw(&handle, state_bytes, None).await?;
-        Ok(handle)
+        Ok((state, handle))
     }
 
     fn store_block_prev1(&self, handle: &Arc<BlockHandle>, prev: &BlockIdExt) -> Result<()> {
@@ -579,6 +584,39 @@ impl EngineOperations for Engine {
     ) -> Result<BroadcastSendInfo> {
         let overlay = self.get_full_node_overlay(to.workchain_id, to.prefix).await?;
         overlay.broadcast_external_message(data).await
+    }
+
+    async fn redirect_external_message(&self, message_data: &[u8]) -> Result<BroadcastSendInfo> {
+        match create_ext_message(message_data) {
+            Err(e) => {
+                let err = format!(
+                    "Can't deserialize external message with len {}: {}",
+                    message_data.len(), e,
+                );
+                log::warn!(target: EXT_MESSAGES_TRACE_TARGET, "{}", &err);
+                fail!("{}", err);
+            }
+            Ok((id, message)) => {
+                match redirect_external_message(self, message, id.clone(), message_data).await {
+                    Err(e) => {
+                        let err = format!(
+                            "Can't redirect external message {:x}: {}",
+                            id, e,
+                        );
+                        log::error!(target: EXT_MESSAGES_TRACE_TARGET, "{}", &err);
+                        fail!("{}", err);
+                    }
+                    Ok(info) => {
+                        log::debug!(
+                            target: EXT_MESSAGES_TRACE_TARGET,
+                            "Redirected external message {:x} to {} nodes by {} packages",
+                            id, info.send_to, info.packets,
+                        );
+                        return Ok(info);
+                    }
+                }
+            }
+        }
     }
 
     async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
@@ -745,5 +783,44 @@ impl EngineOperations for Engine {
 
     fn adjust_states_gc_interval(&self, interval_ms: u32) {
         self.db().adjust_states_gc_interval(interval_ms)
+    }
+
+    fn acquire_stop(&self, mask: u32) {
+        Engine::acquire_stop(self, mask)
+    }
+
+    fn check_stop(&self) -> bool {
+        Engine::check_stop(self)
+    }
+
+    fn release_stop(&self, mask: u32) {
+        Engine::release_stop(self, mask)
+    }
+
+    fn register_server(&self, server: Server) {
+        Engine::register_server(self, server)
+    }
+
+}
+
+async fn redirect_external_message(
+    engine: &dyn EngineOperations, 
+    message: Message, 
+    id: UInt256,
+    message_data: &[u8]
+) -> Result<BroadcastSendInfo> {
+    let message = Arc::new(message);
+    engine.new_external_message(id.clone(), message.clone())?;
+    if let Some(header) = message.ext_in_header() {
+        let res = engine.broadcast_to_public_overlay(
+            &AccountIdPrefixFull::checked_prefix(&header.dst)?,
+            message_data
+        ).await;
+        #[cfg(feature = "telemetry")]
+        engine.full_node_telemetry().sent_ext_msg_broadcast();
+        jaeger::broadcast_sended(id.to_hex_string());
+        res
+    } else {
+        fail!("External message is not properly formatted: {}", message)
     }
 }

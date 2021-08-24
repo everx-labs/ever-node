@@ -6,7 +6,7 @@ use crate::{
     validator::validator_utils::validatordescr_to_catchain_node
 };
 use adnl::{
-    common::{deserialize, QueryResult, Subscriber, AdnlPeers},
+    common::{deserialize, serialize, QueryResult, Subscriber, AdnlPeers},
     server::{AdnlServer, AdnlServerConfig}
 };
 use std::{ops::Deref, sync::Arc, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
@@ -91,17 +91,40 @@ impl ControlQuerySubscriber {
         }
     }
 
-    async fn get_contract_data(&self, address: AccountAddress) -> Result<FullAccountState> {
+    async fn get_account_state(&self, address: AccountAddress, workchain: i32) -> Result<ton_api::ton::data::Data> {
         if let Some(engine) = self.engine.as_ref() {
             let addr = MsgAddressInt::from_str(&address.account_address)?;
             let mc_state = engine.load_last_applied_mc_state().await?;
-            let shard_account = mc_state
+            let mc_account = mc_state
                 .state()
                 .read_accounts()?
-                .account(&addr.address())?
-                .ok_or_else(|| error!("Cannot load account {} from mc_state", &address.account_address))?;
+                .account(&addr.address())?;
+
+            let shard_account = if let Some(account) = mc_account {
+                account
+            } else {
+                let mut raw_account = None;
+
+                for id in mc_state.shard_hashes()?.top_blocks(&[workchain])? {
+                    if !id.shard().contains_account(addr.address().clone())? {
+                        continue;
+                    }
+                    let shard_state = engine.clone().wait_state(&id, Some(1_000), false).await?;
+
+                    raw_account = shard_state.state()
+                        .read_accounts()?
+                        .account(&addr.address())?;
+                    break;
+                }
+                raw_account.ok_or_else(|| error!("Cannot load account {} from mc_state", &address.account_address))?
+            };
+                //.ok_or_else(|| error!("Cannot load account {} from mc_state", &address.account_address))?;
 
             let account = shard_account.read_account()?;
+/*
+            for id in mc_state.shard_hashes()?.top_blocks(&[0])? {
+                id.shard().contains_account(acc_addr)
+            }*/
 
             let code = account.get_code()
                 .ok_or_else(|| error!("Cannot load code from account {}", &address.account_address))?;
@@ -113,9 +136,8 @@ impl ControlQuerySubscriber {
             let mut raw_data = vec!();
             serialize_tree_of_cells(&data, &mut raw_data)?;
 
-            /*let frozen_hash = account.frozen_hash()
-                .ok_or_else(|| error!("Cannot load frozen_hash from account {}", &address.account_address))?;
-            let frozen_hash = frozen_hash.as_slice().to_vec();*/
+            //let frozen_hash = account.frozen_hash().unwrap_or(&UInt256::default());
+            //let frozen_hash = frozen_hash.as_slice().to_vec();
 
             let transaction_id = ton::internal::transactionid::TransactionId {
                 lt: shard_account.last_trans_lt() as i64,
@@ -124,15 +146,22 @@ impl ControlQuerySubscriber {
             let account_state = FullAccountState {
                 balance: 0,
                 code: bytes(raw_code),
-               // data: bytes(raw_data),    // actual data
-                data: bytes(account.write_to_bytes()?),   // fix for elections
+                data: bytes(raw_data),    // actual data
+                //data: bytes(account.write_to_bytes()?),   // fix for elections
                 last_transaction_id: transaction_id,
                 block_id: convert_block_id_ext_blk2api(mc_state.block_id()),
-                frozen_hash: bytes(vec!()),
+                //frozen_hash: bytes(vec!()),
+                frozen_hash: bytes(account.status().write_to_bytes()?),
                 sync_utime: 0
             };
+            let raw_account_state = ton_api::ton::raw::FullAccountState::Raw_FullAccountState(
+                Box::new(account_state)
+            );
+            let account = ton_api::ton::data::Data {
+                bytes: ton_api::secure::SecureBytes::new(serialize(&raw_account_state)?)
+            };
 
-            Ok(account_state)
+            Ok(account)
         } else {
             fail!("Engine was not set!");
         }
@@ -422,12 +451,11 @@ impl Subscriber for ControlQuerySubscriber {
             }
             Err(query) => query
         };
-        let query = match query.downcast::<ton::rpc::raw::GetAccountState>() {
+        let query = match query.downcast::<ton::rpc::raw::GetAccount>() {
             Ok(account) => {
-                let address = account.account_address;
                 return QueryResult::consume_boxed(
-                    ton_api::ton::raw::FullAccountState::Raw_FullAccountState(
-                        Box::new(self.get_contract_data(address).await?)
+                    ton_api::ton::Data::Data(
+                        Box::new(self.get_account_state(account.account_address, account.workchain).await?)
                     ),
                     None
                 )

@@ -15,7 +15,7 @@
 #
 [package]
 name = "ton_node"
-version = "0.47.17"
+version = "0.47.23"
 edition = "2018"
 
 [workspace]
@@ -56,6 +56,7 @@ serde_json = "1.0.64"
 sha2 = "^0.8"
 spin = "0.7.1"
 statsd = { version = "0.14.0", optional = true }
+stream-cancel = "0.8.0"
 string-builder = "^0.2.0"
 tokio = { version = "1.5.0", features = ["rt-multi-thread"] }
 

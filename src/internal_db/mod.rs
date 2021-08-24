@@ -136,9 +136,9 @@ pub trait InternalDb : Sync + Send {
     fn store_shard_state_dynamic(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: &ShardStateStuff,
+        state: ShardStateStuff,
         callback: Option<Arc<dyn Callback>>
-    ) -> Result<bool>;
+    ) -> Result<(ShardStateStuff, bool)>;
     fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<ShardStateStuff>;
    // fn gc_shard_state_dynamic_db(&self) -> Result<usize>;
 
@@ -559,22 +559,23 @@ impl InternalDb for InternalDbImpl {
     fn store_shard_state_dynamic(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: &ShardStateStuff,
+        mut state: ShardStateStuff,
         callback: Option<Arc<dyn Callback>>
-    ) -> Result<bool> {
+    ) -> Result<(ShardStateStuff, bool)> {
         let _tc = TimeChecker::new(format!("store_shard_state_dynamic {}", state.block_id()), 300);
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
         if !handle.has_state() {
-            self.shard_state_dynamic_db.put(state.block_id(), state.root_cell().clone())?;
+            let saved_root = self.shard_state_dynamic_db.put(state.block_id(), state.root_cell().clone())?;
+            state = ShardStateStuff::new(handle.id().clone(), saved_root)?;
             //self.ss_test_map.insert(state.block_id().clone(), state.clone());
             if handle.set_state() {
                 self.store_block_handle(handle, callback)?;
-                return Ok(true);
+                return Ok((state, true));
             }
         }
-        Ok(false)
+        Ok((state, false))
     }
 
     fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<ShardStateStuff> {

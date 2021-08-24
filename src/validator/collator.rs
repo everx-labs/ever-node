@@ -25,6 +25,7 @@ use crate::{
         supported_capabilities,
     },
     rng::random::secure_256_bits,
+    ext_messages::EXT_MESSAGES_TRACE_TARGET,
 };
 use super::{BlockCandidate, CollatorSettings, McData, validator_utils::calc_subset_for_workchain};
 use ton_block::{
@@ -781,13 +782,22 @@ impl ExecutionManager {
         collator_data: &mut CollatorData
     ) -> Result<()> {
         if let AsyncMessage::Ext(ref msg) = new_msg.deref() {
+            let msg_id = msg.serialize()?.repr_hash();
+            let account_id = msg.int_dst_account_id().unwrap_or_default();
             if let Err(err) = transaction_res {
-                let msg_id = msg.serialize()?.repr_hash();
-                let account_id = msg.int_dst_account_id().unwrap_or_default();
-                log::warn!("{}: account {:x} rejected inbound external message {:x} by reason: {}", 
-                    self.collated_block_descr, account_id, msg_id, err);
+                log::warn!(
+                    target: EXT_MESSAGES_TRACE_TARGET,
+                    "{}: account {:x} rejected inbound external message {:x} by reason: {}", 
+                    self.collated_block_descr, account_id, msg_id, err
+                );
                 collator_data.to_delay.push(msg_id);
                 return Ok(())
+            } else {
+                log::debug!(
+                    target: EXT_MESSAGES_TRACE_TARGET,
+                    "{}: account {:x} accepted inbound external message {:x}",
+                    self.collated_block_descr, account_id, msg_id,
+                );
             }
         }
         let tr = transaction_res?;

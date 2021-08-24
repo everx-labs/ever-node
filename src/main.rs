@@ -36,7 +36,9 @@ mod jaeger {
 mod external_db;
 mod ext_messages;
 
-use crate::{config::TonNodeConfig, engine_traits::ExternalDb, engine::STATSD, jaeger::init_jaeger};
+use crate::{
+    config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, STATSD}, jaeger::init_jaeger
+};
 use clap;
 
 #[cfg(feature = "external_db")]
@@ -142,10 +144,13 @@ fn start_external_db(_config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>
     Ok(vec!())
 }
 
-async fn start_engine(config: TonNodeConfig, zerostate_path: Option<&str>, initial_sync_disabled: bool) -> Result<()> {
+async fn start_engine(
+    config: TonNodeConfig, 
+    zerostate_path: Option<&str>, 
+    initial_sync_disabled: bool
+) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
     let external_db = start_external_db(&config)?;
-    crate::engine::run(config, zerostate_path, external_db, initial_sync_disabled).await?;
-    Ok(())
+    crate::engine::run(config, zerostate_path, external_db, initial_sync_disabled).await
 }
 
 const CONFIG_NAME: &str = "config.json";
@@ -220,8 +225,12 @@ fn main() {
     init_jaeger();
     
     runtime.block_on(async move {
-        if let Err(e) = start_engine(config, zerostate_path, initial_sync_disabled).await {
-            log::error!("Can't start node's Engine: {:?}", e);
+        match start_engine(config, zerostate_path, initial_sync_disabled).await {
+            Err(e) => log::error!("Can't start node's Engine: {:?}", e),
+            Ok((engine, join_handle)) => {
+                join_handle.await.ok();
+                engine.stop().await
+            }
         }
     });
 }

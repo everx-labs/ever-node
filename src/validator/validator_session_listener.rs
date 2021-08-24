@@ -1,5 +1,5 @@
 use std::{fmt, time::{Duration, SystemTime, SystemTimeError}, sync::Arc};
-use tokio::{time::timeout, runtime::Runtime};
+use tokio::time::timeout;
 
 use validator_session::*;
 use crate::validator::validator_group::{ValidatorGroup, ValidatorGroupStatus};
@@ -230,9 +230,9 @@ const QUEUE_EMPTY_TOO_LONG: Duration = Duration::from_secs(10);
 const QUEUE_POLLING_DELAY: Duration = Duration::from_millis(10);
 
 pub async fn process_validation_queue(
-        queue: Arc<Receiver<ValidationAction>>,
-        g: Arc<ValidatorGroup>,
-        rt: Arc<Runtime>
+    queue: Arc<Receiver<ValidationAction>>,
+    g: Arc<ValidatorGroup>,
+    rt: tokio::runtime::Handle
 ) {
     let mut cur_round = 0;
     let mut last_action = SystemTime::now();

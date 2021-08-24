@@ -3,7 +3,7 @@ use std::sync::*;
 use std::sync::atomic::{Ordering, AtomicU64};
 use std::time::*;
 use crossbeam_channel::Receiver;
-use tokio::{runtime::Runtime, sync::Mutex};
+use tokio::sync::Mutex;
 
 use crate::engine_traits::{EngineOperations, PrivateOverlayOperations};
 use catchain::utils::get_hash;
@@ -144,7 +144,7 @@ impl ValidatorGroupImpl {
         min_masterchain_block_id: BlockIdExt,
         min_ts: SystemTime,
         g: Arc<ValidatorGroup>,
-        rt: Arc<Runtime>,
+        rt: tokio::runtime::Handle
     ) -> Result<()> {
         self.status = ValidatorGroupStatus::Active;
         if self.status != ValidatorGroupStatus::Active {
@@ -181,7 +181,7 @@ impl ValidatorGroupImpl {
 
         let g_clone = g.clone();
         rt.clone().spawn(async move {
-            process_validation_queue (g_clone.receiver.clone(), g_clone.clone(), rt.clone()).await;
+            process_validation_queue (g_clone.receiver.clone(), g_clone.clone(), rt).await;
         });
 
         log::trace!(target: "validator", "Started session {}, options {:?}, ref.cnt = {}",
@@ -341,31 +341,30 @@ impl ValidatorGroup {
         prev: Vec<BlockIdExt>,
         min_masterchain_block_id: BlockIdExt,
         min_ts: SystemTime,
-        rt: Arc<Runtime>
+        rt: tokio::runtime::Handle
     ) -> Result<()> {
         self.set_status(validation_start_status.clone()).await?;
-
         rt.clone().spawn (
             async move {
                 if let ValidatorGroupStatus::Countdown { start_at } = validation_start_status {
                     log::trace!(target: "validator", "Session delay started: {}", self.info().await);
                     tokio::time::sleep_until(start_at).await;
                 }
-
                 let callback = self.make_validator_session_callback();
                 let mut group_impl = self.group_impl.lock().await;
                 if group_impl.status > ValidatorGroupStatus::Active {
                     log::trace!(target: "validator", "Session deleted before countdown: {}", self.info().await);
-                } else if let Err(e) = group_impl.start(callback, prev, min_masterchain_block_id, min_ts, self.clone(), rt) {
+                } else if let Err(e) = group_impl.start(
+                    callback, prev, min_masterchain_block_id, min_ts, self.clone(), rt
+                ) {
                     log::error!(target: "validator", "{}", e);
                 }
             }
         );
-
         Ok(())
     }
 
-    pub async fn stop(self: Arc<ValidatorGroup>, rt: Arc<Runtime>) -> Result<()> {
+    pub async fn stop(self: Arc<ValidatorGroup>, rt: tokio::runtime::Handle) -> Result<()> {
         self.set_status(ValidatorGroupStatus::Stopping).await?;
         let group_impl = self.group_impl.clone();
         rt.spawn({

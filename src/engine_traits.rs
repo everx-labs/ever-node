@@ -1,11 +1,10 @@
 use crate::{
     block::{BlockStuff}, config::CollatorTestBundlesGeneralConfig, internal_db::BlockResult,
     shard_state::ShardStateStuff,
-    network::{full_node_client::FullNodeOverlayClient},
+    network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
     block_proof::BlockProofStuff,
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
-    ext_messages::create_ext_message,
-    jaeger,
+    
 };
 use adnl::common::{KeyId, KeyOption};
 use catchain::{
@@ -19,7 +18,7 @@ use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 use storage::types::BlockHandle;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
 use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, signature::SigPubKey};
-use ton_types::{fail, Result, UInt256};
+use ton_types::{Result, UInt256};
 #[cfg(feature = "telemetry")]
 use crate::{
     full_node::telemetry::FullNodeTelemetry,
@@ -270,7 +269,8 @@ pub trait EngineOperations : Sync + Send {
         &self, 
         block_id: &BlockIdExt, 
         master_id: &BlockIdExt,
-        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+        attempts: Option<usize>
     ) -> Result<ShardStateStuff> {
         unimplemented!()
     }
@@ -305,16 +305,15 @@ pub trait EngineOperations : Sync + Send {
     async fn store_state(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: &ShardStateStuff
-    ) -> Result<()> {
+        state: ShardStateStuff
+    ) -> Result<ShardStateStuff> {
         unimplemented!()
     }
     async fn store_zerostate(
         &self, 
-        id: &BlockIdExt, 
-        state: &ShardStateStuff, 
+        state: ShardStateStuff, 
         state_bytes: &[u8]
-    ) -> Result<Arc<BlockHandle>> {
+    ) -> Result<(ShardStateStuff, Arc<BlockHandle>)> {
         unimplemented!()
     }
     async fn process_full_state_in_ext_db(&self, state: &ShardStateStuff)-> Result<()> {
@@ -504,21 +503,7 @@ pub trait EngineOperations : Sync + Send {
     }
 
     async fn redirect_external_message(&self, message_data: &[u8]) -> Result<BroadcastSendInfo> {
-        let (id, message) = create_ext_message(message_data)?;
-        let message = Arc::new(message);
-        self.new_external_message(id.clone(), message.clone())?;
-        if let Some(header) = message.ext_in_header() {
-            let res = self.broadcast_to_public_overlay(
-                &AccountIdPrefixFull::checked_prefix(&header.dst)?,
-                message_data
-            ).await;
-            #[cfg(feature = "telemetry")]
-            self.full_node_telemetry().sent_ext_msg_broadcast();
-            jaeger::broadcast_sended(id.to_hex_string());
-            res
-        } else {
-            fail!("External message is not properly formatted: {}", message)
-        }
+        unimplemented!()
     }
 
     // Boot specific operations
@@ -576,6 +561,25 @@ pub trait EngineOperations : Sync + Send {
     fn pop_validated_block_stat(&self) -> Result<ValidatedBlockStat> {
         unimplemented!();
     }
+
+    // Engine stopping
+
+    fn acquire_stop(&self, mask: u32) {
+        unimplemented!();
+    }
+
+    fn check_stop(&self) -> bool {
+        unimplemented!();
+    }
+
+    fn release_stop(&self, mask: u32) {
+        unimplemented!();
+    }
+
+    fn register_server(&self, server: Server) {
+        unimplemented!();
+    }
+
 }
 
 pub struct ChainRange {
@@ -595,4 +599,9 @@ pub trait ExternalDb : Sync + Send {
     async fn process_full_state(&self, state: &ShardStateStuff) -> Result<()>;
     fn process_chain_range_enabled(&self) -> bool;
     async fn process_chain_range(&self, range: &ChainRange) -> Result<()>;
+}
+
+pub enum Server {
+    ControlServer(ControlServer),
+    KafkaConsumer(stream_cancel::Trigger)
 }

@@ -1,6 +1,6 @@
 use crate::{
     block::{BlockStuff, convert_block_id_ext_api2blk}, block_proof::BlockProofStuff, 
-    engine_traits::{ChainRange, EngineOperations},
+    engine::Engine, engine_traits::{ChainRange, EngineOperations},
     error::NodeError,
     validator::validator_utils::{calc_subset_for_workchain, check_crypto_signatures},
 };
@@ -14,20 +14,30 @@ use ton_block::{
 use ton_types::{Result, fail, error, UInt256};
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
 
-pub fn start_masterchain_client(engine: Arc<dyn EngineOperations>, last_got_block_id: BlockIdExt) -> Result<JoinHandle<()>> {
+pub fn start_masterchain_client(
+    engine: Arc<dyn EngineOperations>, 
+    last_got_block_id: BlockIdExt
+) -> Result<JoinHandle<()>> {
     let join_handle = tokio::spawn(async move {
-        if let Err(e) = load_master_blocks_cycle(engine, last_got_block_id).await {
+        engine.acquire_stop(Engine::MASK_SERVICE_MASTERCHAIN_CLIENT);
+        if let Err(e) = load_master_blocks_cycle(engine.clone(), last_got_block_id).await {
             log::error!("FATAL!!! Unexpected error in master blocks loading cycle: {:?}", e);
         }
+        engine.release_stop(Engine::MASK_SERVICE_MASTERCHAIN_CLIENT);
     });
     Ok(join_handle)
 }
 
-pub fn start_shards_client(engine: Arc<dyn EngineOperations>, shards_mc_block_id: BlockIdExt) -> Result<JoinHandle<()>> {
+pub fn start_shards_client(
+    engine: Arc<dyn EngineOperations>, 
+    shards_mc_block_id: BlockIdExt
+) -> Result<JoinHandle<()>> {
     let join_handle = tokio::spawn(async move {
-        if let Err(e) = load_shard_blocks_cycle(engine, shards_mc_block_id).await {
+        engine.acquire_stop(Engine::MASK_SERVICE_SHARDCHAIN_CLIENT);
+        if let Err(e) = load_shard_blocks_cycle(engine.clone(), shards_mc_block_id).await {
             log::error!("FATAL!!! Unexpected error in shards client: {:?}", e);
         }
+        engine.release_stop(Engine::MASK_SERVICE_SHARDCHAIN_CLIENT);
     });
     Ok(join_handle)
 }
@@ -38,6 +48,9 @@ async fn load_master_blocks_cycle(
 ) -> Result<()> {
     let mut attempt = 0;
     loop {
+        if engine.check_stop() {
+            break Ok(())
+        }
         last_got_block_id = match load_next_master_block(&engine, &last_got_block_id).await {
             Ok(id) => {
                 attempt = 0;
@@ -124,6 +137,9 @@ async fn load_shard_blocks_cycle(
     )?;
     let (_master, workchain_id) = engine.processed_workchain().await?;
     loop {
+        if engine.check_stop() {
+            break Ok(())
+        }
         log::trace!("load_shard_blocks_cycle: mc block: {}", mc_handle.id());
         let r = engine.wait_next_applied_mc_block(&mc_handle, None).await?;
         mc_handle = r.0;
@@ -140,7 +156,6 @@ async fn load_shard_blocks_cycle(
             if let Err(e) = load_shard_blocks(engine.clone(), semaphore_permit, &mc_block, shard_ids).await {
                 log::error!("FATAL!!! Unexpected error in shard blocks processing for mc block {}: {:?}", mc_block.id(), e);
             }
-
             if engine.produce_chain_ranges_enabled() {
                 if let Err(err) = produce_chain_range(engine, &mc_block).await {
                     log::error!("Unexpected error in chain range processing for mc block {}: {:?}", mc_block.id(), err);

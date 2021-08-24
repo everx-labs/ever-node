@@ -194,24 +194,24 @@ impl ShardStateDb {
     /// Stores cells from given tree which don't exist in the storage.
     /// Returns root cell which is implemented as StorageCell.
     /// So after store() origin shard state's cells might be dropped.
-    pub fn put(&self, id: &BlockIdExt, state_root: Cell) -> Result<()> {
-        match self.current_dynamic_boc_db_index.load(Ordering::Relaxed) {
+    pub fn put(&self, id: &BlockIdExt, state_root: Cell) -> Result<Cell> {
+        let saved_root = match self.current_dynamic_boc_db_index.load(Ordering::Relaxed) {
             0 => {
                 self.dynamic_boc_db_0_writers.fetch_add(1, Ordering::Relaxed);
                 let r = self.put_internal(id, state_root, &self.dynamic_boc_db_0);
                 self.dynamic_boc_db_0_writers.fetch_sub(1, Ordering::Relaxed);
-                r?;
+                r?
             },
             1 => {
                 self.dynamic_boc_db_1_writers.fetch_add(1, Ordering::Relaxed);
                 let r = self.put_internal(id, state_root, &self.dynamic_boc_db_1);
                 self.dynamic_boc_db_1_writers.fetch_sub(1, Ordering::Relaxed);
-                r?;
+                r?
             },
             _ => fail!("Invalid `current_dynamic_boc_db_index`")
-        }
+        };
 
-        Ok(())
+        Ok(saved_root)
     }
 
     pub fn put_internal(
@@ -219,7 +219,7 @@ impl ShardStateDb {
         id: &BlockIdExt,
         state_root: Cell,
         boc_db: &Arc<DynamicBocDb>
-    ) -> Result<()> {
+    ) -> Result<Cell> {
         let cell_id = CellId::from(state_root.repr_hash());
         
         log::trace!(target: TARGET, "ShardStateDb::put_internal  start  id {}  root_cell_id {}  db_index {}",
@@ -236,7 +236,9 @@ impl ShardStateDb {
         log::trace!(target: TARGET, "ShardStateDb::put_internal  finish  id {}  root_cell_id {}  db_index {}  written: {} cells",
             id, cell_id, boc_db.db_index(), c);
 
-        Ok(())
+        let root_cell = boc_db.load_dynamic_boc(&db_entry.cell_id)?;
+
+        Ok(root_cell)
     }
 
     /// Loads previously stored root cell

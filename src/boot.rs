@@ -10,6 +10,7 @@ use ton_types::{error, fail, Result};
 
 pub const PSS_PERIOD_BITS_CLASSIC: u32 = 17;
 pub const PSS_PERIOD_BITS: u32 = 11;
+const RETRY_MASTER_STATE_DOWNLOAD: usize = 10;
 
 /// cold boot entry point
 /// download zero state or block proof link and check it
@@ -198,8 +199,9 @@ async fn download_start_blocks_and_states(
 ) -> Result<()> {
 
     let active_peers = Arc::new(lockfree::set::Set::new());
-    let (master_handle, init_mc_block) = 
-        download_block_and_state(engine, master_id, master_id, &active_peers).await?;
+    let (master_handle, init_mc_block) = download_block_and_state(
+        engine, master_id, master_id, &active_peers, Some(RETRY_MASTER_STATE_DOWNLOAD)
+    ).await?;
     CHECK!(master_handle.has_state());
     CHECK!(master_handle.is_applied());
 
@@ -208,7 +210,7 @@ async fn download_start_blocks_and_states(
         let shard_handle = if block_id.seq_no() == 0 {
             download_zerostate(engine, &block_id).await?.0
         } else {
-            download_block_and_state(engine, &block_id, master_id, &active_peers).await?.0
+            download_block_and_state(engine, &block_id, master_id, &active_peers, None).await?.0
         };
         CHECK!(shard_handle.has_state());
         CHECK!(shard_handle.is_applied());
@@ -231,7 +233,7 @@ pub(crate) async fn download_zerostate(
     loop {
         match engine.download_zerostate(block_id).await {
             Ok((state, state_bytes)) => {
-                let handle = engine.store_zerostate(block_id, &state, &state_bytes).await?;
+                let (state, handle) = engine.store_zerostate(state, &state_bytes).await?;
                 engine.set_applied(&handle, 0).await?;
                 engine.process_full_state_in_ext_db(&state).await?;
                 return Ok((handle, state))
@@ -285,7 +287,8 @@ async fn download_block_and_state(
     engine: &dyn EngineOperations, 
     block_id: &BlockIdExt, 
     master_id: &BlockIdExt,
-    active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+    active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+    attempts: Option<usize>
 ) -> Result<(Arc<BlockHandle>, BlockStuff)> {
     let handle = engine.load_block_handle(block_id)?.filter(
         |handle| handle.has_data() && (handle.has_proof() || handle.has_proof_link())
@@ -312,12 +315,12 @@ async fn download_block_and_state(
     if !handle.has_state() {
         let state_update = block.block().read_state_update()?;
         log::info!(target: "boot", "download state {}", handle.id());
-        let state = engine.download_state(handle.id(), master_id, active_peers).await?;
+        let state = engine.download_state(handle.id(), master_id, active_peers, attempts).await?;
         let state_hash = state.root_cell().repr_hash();
         if state_update.new_hash != state_hash {
             fail!("root_hash {} of downloaded state {} is wrong", state_hash.to_hex_string(), handle.id())
         }
-        engine.store_state(&handle, &state).await?;
+        let state = engine.store_state(&handle, state).await?;
         engine.process_full_state_in_ext_db(&state).await?;
     }
     engine.set_applied(&handle, master_id.seq_no()).await?;

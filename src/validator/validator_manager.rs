@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime}
 };
 use crate::{
-    engine::STATSD,
+    engine::{Engine, STATSD},
     engine_traits::EngineOperations,
     shard_state::ShardStateStuff,
     validator::{
@@ -24,7 +24,7 @@ use crate::{
 use crate::validator::slashing::{SlashingManager, SlashingManagerPtr};
 use catchain::{CatchainNode, PublicKey};
 use catchain::utils::serialize_tl_boxed_object;
-use tokio::{time::timeout, runtime::Runtime};
+use tokio::time::timeout;
 use ton_api::IntoBoxed;
 use ton_block::{
     BlockIdExt, CatchainConfig, ConfigParamEnum, ConsensusConfig, 
@@ -214,7 +214,7 @@ fn rotate_all_shards(mc_state_extra: &McStateExtra) -> bool {
 
 struct ValidatorManagerImpl {
     engine: Arc<dyn EngineOperations>,
-    rt: Arc<Runtime>,
+    rt: tokio::runtime::Handle,
     validator_sessions: HashMap<UInt256, Arc<ValidatorGroup>>, // Sessions: both actual (started) and future
     validator_list_status: ValidatorListStatus,
     config: ValidatorManagerConfig,
@@ -229,16 +229,17 @@ struct ValidatorManagerImpl {
 
 impl ValidatorManagerImpl {
 
-    fn new(engine: Arc<dyn EngineOperations>) -> Self {
+    fn new(engine: Arc<dyn EngineOperations>, rt: tokio::runtime::Handle) -> Self {
+/*
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_stack_size(8 * 1024 * 1024)
             .build()
             .expect("Can't create validator groups runtime");
-
+*/
         ValidatorManagerImpl {
             engine,
-            rt: Arc::new(rt),
+            rt,
             validator_sessions: HashMap::default(),
             validator_list_status: ValidatorListStatus::default(),
             config: ValidatorManagerConfig::default(),
@@ -483,8 +484,14 @@ impl ValidatorManagerImpl {
             )? {
                 Some(x) => x,
                 None => {
-                    log::error!(target: "validator", "Cannot compute validator set for workchain {}:{:016X}",
-                        ident.workchain_id(), ident.shard_prefix_with_tag());
+                    log::error!(
+                        target: "validator", 
+                        "Cannot compute validator set for workchain {}:{:016X}: less than {} of {}",
+                        catchain_config.shard_validators_num,
+                        full_validator_set.list().len(),
+                        ident.workchain_id(), 
+                        ident.shard_prefix_with_tag()
+                    );
                     continue
                 }
             };
@@ -696,8 +703,14 @@ impl ValidatorManagerImpl {
             )? {
                 Some(x) => x,
                 None => {
-                    log::error!(target: "validator", "Cannot compute validator set for workchain {}:{:016X}",
-                        ident.workchain_id(), ident.shard_prefix_with_tag());
+                    log::error!(
+                        target: "validator", 
+                        "Cannot compute validator set for workchain {}:{:016X}: less than {} of {}",
+                        catchain_config.shard_validators_num,
+                        future_validator_set.list().len(),
+                        ident.workchain_id(), 
+                        ident.shard_prefix_with_tag()
+                    );
                     continue
                 }
             };
@@ -785,6 +798,9 @@ impl ValidatorManagerImpl {
             || error!("Cannot load handle for master block {}", mc_block_id)
         )?;
         loop {
+            if self.engine.check_stop() {
+                return Ok(())
+            }
             let mc_state = self.engine.load_state(mc_handle.id()).await?;
             log::info!(target: "validator", "Processing masterblock {}", mc_handle.id().seq_no);
             #[cfg(feature = "slashing")]
@@ -795,6 +811,9 @@ impl ValidatorManagerImpl {
             self.update_shards(mc_state).await?;
             
             mc_handle = loop {
+                if self.engine.check_stop() {
+                    return Ok(())
+                }
                 self.stats().await;
                 match timeout(self.config.update_interval, self.engine.wait_next_applied_mc_block(&mc_handle, None)).await {
                     Ok(r_res) => break r_res?.0,
@@ -811,14 +830,23 @@ impl ValidatorManagerImpl {
 pub fn start_validator_manager(engine: Arc<dyn EngineOperations>) {
     const CHECK_VALIDATOR_TIMEOUT: u64 = 60;    //secs
     tokio::spawn(async move {
+        engine.acquire_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
         while !engine.get_validator_status() {
+            if engine.check_stop() {
+                engine.release_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
+                return
+            }
             log::trace!("is not a validator");
             tokio::time::sleep(Duration::from_secs(CHECK_VALIDATOR_TIMEOUT)).await;
         }
         log::info!("starting validator manager...");
-        if let Err(e) = ValidatorManagerImpl::new(engine).invoke().await {
+        if let Err(e) = ValidatorManagerImpl::new(
+            engine.clone(), 
+            tokio::runtime::Handle::current()
+        ).invoke().await {
             log::error!(target: "validator", "FATAL!!! Unexpected error in validator manager: {:?}", e);
         }
+        engine.release_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
     });
 }
 

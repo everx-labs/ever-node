@@ -4,8 +4,7 @@ use crate::{
     config::{TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig},
     engine_traits::{
         ExternalDb, EngineOperations,
-        OverlayOperations, PrivateOverlayOperations,
-        ValidatedBlockStat,
+        OverlayOperations, PrivateOverlayOperations, Server, ValidatedBlockStat,
     },
     full_node::{
         apply_block::{self, apply_block},
@@ -25,7 +24,7 @@ use crate::{
     },
     shard_state::ShardStateStuff,
     types::{awaiters_pool::AwaitersPool, lockfree_cache::TimeBasedCache},
-    ext_messages::MessagesPool,
+    ext_messages::{MessagesPool, EXT_MESSAGES_TRACE_TARGET},
     validator::{validator_manager::start_validator_manager, candidate_db::LastRotationBlockDb},
     shard_blocks::{
         ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker, 
@@ -86,6 +85,8 @@ pub struct Engine {
     next_block_applying_awaiters: AwaitersPool<BlockIdExt, BlockIdExt>,
     download_block_awaiters: AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)>,
     external_messages: MessagesPool,
+    servers: lockfree::queue::Queue<Server>,
+    stop: Arc<AtomicU32>,
 
     zero_state_id: BlockIdExt,
     init_mc_block_id: BlockIdExt,
@@ -287,7 +288,24 @@ impl Downloader for ZeroStateDownloader {
 
 impl Engine {
 
-    pub async fn new(general_config: TonNodeConfig, ext_db: Vec<Arc<dyn ExternalDb>>, initial_sync_disabled : bool) -> Result<Arc<Self>> {
+    // Masks for services
+    pub const MASK_SERVICE_KAFKA_CONSUMER: u32                 = 0x0001;
+    pub const MASK_SERVICE_MASTERCHAIN_BROADCAST_LISTENER: u32 = 0x0002;
+    pub const MASK_SERVICE_MASTERCHAIN_CLIENT: u32             = 0x0004;
+    pub const MASK_SERVICE_PSS_KEEPER: u32                     = 0x0008;
+    pub const MASK_SERVICE_SHARDCHAIN_BROADCAST_LISTENER: u32  = 0x0010;
+    pub const MASK_SERVICE_SHARDCHAIN_CLIENT: u32              = 0x0020;
+    pub const MASK_SERVICE_TOP_SHARDBLOCKS_SENDER: u32         = 0x0040;
+    pub const MASK_SERVICE_VALIDATOR_MANAGER: u32              = 0x0080;
+
+    const MASK_STOP: u32 = 0x80000000; 
+    const TIMEOUT_STOP: u64 = 100; // Milliseconds
+
+    pub async fn new(
+        general_config: TonNodeConfig, 
+        ext_db: Vec<Arc<dyn ExternalDb>>, 
+        initial_sync_disabled : bool
+    ) -> Result<Arc<Self>> {
 
         log::info!("Creating engine...");
 
@@ -349,6 +367,8 @@ impl Engine {
             next_block_applying_awaiters: AwaitersPool::new("next_block_applying_awaiters"),
             download_block_awaiters: AwaitersPool::new("download_block_awaiters"),
             external_messages: MessagesPool::new(),
+            servers: lockfree::queue::Queue::new(),
+            stop: Arc::new(AtomicU32::new(0)),
             zero_state_id,
             init_mc_block_id,
             initial_sync_disabled,
@@ -382,6 +402,48 @@ impl Engine {
         save_top_shard_blocks_worker(engine.clone(), shard_blocks_receiver);
 
         Ok(engine)
+    }
+
+    pub async fn stop(&self) {
+        let stopp = self.stop.fetch_or(Self::MASK_STOP, Ordering::Relaxed);
+        log::info!(target: "sync", "Stop count {:04x}", stopp);
+        while let Some(server) = self.servers.pop() {
+            match server {
+                Server::ControlServer(server) => {
+                    log::info!(target: "sync", "Stop control server");
+                    server.shutdown().await
+                },
+                Server::KafkaConsumer(trigger) => {
+                    log::info!(target: "sync", "Stop kafka consumer");
+                    drop(trigger)
+                }
+            }
+        }
+        loop {
+            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_STOP)).await;
+            let stopp = self.stop.load(Ordering::Relaxed) & !Self::MASK_STOP;
+            log::info!(target: "sync", "Stop count update {:04x}", stopp);
+            if (self.stop.load(Ordering::Relaxed) & !Self::MASK_STOP) == 0 {
+                break
+            }
+        }    
+        self.network.stop().await
+    }
+
+    pub fn acquire_stop(&self, mask: u32) {
+        self.stop.fetch_or(mask, Ordering::Relaxed);
+    }
+
+    pub fn check_stop(&self) -> bool {
+        (self.stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 
+    }
+
+    pub fn release_stop(&self, mask: u32) {
+        self.stop.fetch_and(!mask, Ordering::Relaxed);
+    }
+
+    pub fn register_server(&self, server: Server) {
+        self.servers.push(server)
     }
 
     pub fn db(&self) -> &Arc<dyn InternalDb> { &self.db }
@@ -698,14 +760,18 @@ impl Engine {
         Ok(())
     }
 
-    async fn listen_broadcasts(self: Arc<Self>, shard_ident: ShardIdent) -> Result<()> {
+    async fn listen_broadcasts(self: Arc<Self>, shard_ident: ShardIdent, mask: u32) -> Result<()> {
         log::debug!("Started listening overlay for shard {}", shard_ident);
         let client = self.get_full_node_overlay(
             shard_ident.workchain_id(),
             shard_ident.shard_prefix_with_tag()
         ).await?;
         tokio::spawn(async move {
+            self.acquire_stop(mask);
             loop {
+                if self.check_stop() {
+                    break
+                }
                 match client.wait_broadcast().await {
                     Err(e) => log::error!("Error while wait_broadcast for shard {}: {}", shard_ident, e),
                     Ok((brodcast, src)) => {
@@ -729,6 +795,7 @@ impl Engine {
                     }
                 }
             }
+            self.release_stop(mask);
         });
         Ok(())
     }
@@ -826,15 +893,28 @@ impl Engine {
     fn process_ext_msg_broadcast(&self, broadcast: Box<ExternalMessageBroadcast>, src: Arc<KeyId>) {
         // just add to list
         if !self.is_validator() {
-            log::trace!("Skipped ext message broadcast {}bytes from {}: NOT A VALIDATOR",
-                broadcast.message.data.0.len(), src);
+            log::trace!(
+                target: EXT_MESSAGES_TRACE_TARGET,
+                "Skipped ext message broadcast {}bytes from {}: NOT A VALIDATOR",
+                broadcast.message.data.0.len(), src
+            );
         } else {
             log::trace!("Processing ext message broadcast {}bytes from {}", broadcast.message.data.0.len(), src);
             match self.external_messages().new_message_raw(&broadcast.message.data.0, self.now()) {
-                Err(e) => log::debug!("Error while processing ext message broadcast {}bytes from {}: {}",
-                    broadcast.message.data.0.len(), src, e),
-                Ok(id) => log::trace!("Processed ext message broadcast {:x} {}bytes from {}",
-                    id, broadcast.message.data.0.len(), src),
+                Err(e) => {
+                    log::error!(
+                        target: EXT_MESSAGES_TRACE_TARGET,
+                        "Error while processing ext message broadcast {}bytes from {}: {}",
+                        broadcast.message.data.0.len(), src, e
+                    );
+                }
+                Ok(id) => {
+                    log::debug!(
+                        target: EXT_MESSAGES_TRACE_TARGET,
+                        "Processed ext message broadcast {:x} {}bytes from {} (added into collator's queue)",
+                        id, broadcast.message.data.0.len(), src
+                    );
+                }
             }
         }
     }
@@ -1123,15 +1203,17 @@ impl Engine {
     ) -> Result<tokio::task::JoinHandle<()>> {
         log::info!("start_persistent_states_keeper");
         let join_handle = tokio::spawn(async move {
-            if let Err(e) = Self::persistent_states_keeper(engine, pss_keeper_block).await {
+            engine.acquire_stop(Engine::MASK_SERVICE_PSS_KEEPER);
+            if let Err(e) = Self::persistent_states_keeper(&engine, pss_keeper_block).await {
                 log::error!("FATAL!!! Unexpected error in persistent states keeper: {:?}", e);
             }
+            engine.release_stop(Engine::MASK_SERVICE_PSS_KEEPER);
         });
         Ok(join_handle)
     }
 
     pub async fn persistent_states_keeper(
-        engine: Arc<Engine>,
+        engine: &Arc<Engine>,
         pss_keeper_block: BlockIdExt
     ) -> Result<()> {
         if !pss_keeper_block.shard().is_masterchain() {
@@ -1141,6 +1223,9 @@ impl Engine {
             || error!("Cannot load handle for PSS keeper block {}", pss_keeper_block)
         )?;
         loop {
+            if engine.check_stop() {
+                break
+            }
             let mc_state = engine.load_state(handle.id()).await?;
             if handle.is_key_block()? {
                 let is_persistent_state = if handle.id().seq_no() == 0 {
@@ -1186,6 +1271,9 @@ impl Engine {
                         Ok(true)
                     })?;
                     for block_id in shard_blocks {
+                        if engine.check_stop() {
+                            break
+                        }
                         log::trace!("persistent_states_keeper: saving {}", block_id);
                         let now = std::time::Instant::now();
                         
@@ -1199,6 +1287,9 @@ impl Engine {
                             handle.id(), now.elapsed().as_millis());
                     };
                 }
+                if engine.check_stop() {
+                    break
+                }
                 if let Err(e) = Self::check_gc_for_archives(&engine, &handle, &mc_state).await {
                     log::warn!("Error (archive_manager gc): {:?}", e);
                 }
@@ -1206,6 +1297,7 @@ impl Engine {
             handle = engine.wait_next_applied_mc_block(&handle, None).await?.0;
             engine.save_pss_keeper_mc_block_id(handle.id())?;
         }
+        Ok(())
     }
 
     async fn check_gc_for_archives(
@@ -1288,6 +1380,9 @@ impl Engine {
         let mut attempts = 1;
         while let Err(e) = self.db.store_shard_state_persistent(handle, ss, None).await {
             log::error!("CRITICAL Error saving persistent state (attempt: {}): {:?}", attempts, e);
+            if self.check_stop() {
+                break
+            }
             attempts += 1;
             futures_timer::Delay::new(Duration::from_millis(5000)).await;
         }
@@ -1331,11 +1426,11 @@ pub(crate) async fn load_zero_state(engine: &Arc<Engine>, path: &str) -> Result<
         let bytes = tokio::fs::read(&path).await
             .map_err(|err| error!("Cannot read zerostate {}: {}", path, err))?;
         let zs = ShardStateStuff::deserialize_zerostate(id.clone(), &bytes)?;
-        let handle = engine.store_zerostate(&id, &zs, &bytes).await?;
+        let (_, handle) = engine.store_zerostate(zs, &bytes).await?;
         engine.set_applied(&handle, id.seq_no()).await?;
     }
 
-    let handle = engine.store_zerostate(&zero_id, &mc_zero_state, &mc_zs_bytes).await?;
+    let (_, handle) = engine.store_zerostate(mc_zero_state, &mc_zs_bytes).await?;
     engine.set_applied(&handle, zero_id.seq_no()).await?;
     log::trace!("All static zero states had been load");
     return Ok(true)
@@ -1411,7 +1506,13 @@ async fn run_control_server(engine: Arc<Engine>, config: AdnlServerConfig) -> Re
     ).await
 }
 
-pub async fn run(node_config: TonNodeConfig, zerostate_path: Option<&str>, ext_db: Vec<Arc<dyn ExternalDb>>, initial_sync_disabled : bool) -> Result<()> {
+pub async fn run(
+    node_config: TonNodeConfig, 
+    zerostate_path: Option<&str>, 
+    ext_db: Vec<Arc<dyn ExternalDb>>, 
+    initial_sync_disabled : bool
+) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
+
     log::info!("Engine::run");
 
     let consumer_config = node_config.kafka_consumer_config();
@@ -1423,11 +1524,12 @@ pub async fn run(node_config: TonNodeConfig, zerostate_path: Option<&str>, ext_d
     #[cfg(feature = "telemetry")]
     telemetry_logger(engine.clone());
 
-    // Console service - run firt to allow console to connect to generate new keys while node is looking for net
+    // Console service - run first to allow console to connect to generate new keys 
+    // while node is looking for net
     if let Some(config) = control_server_config {
-        let control_server = run_control_server(engine.clone(), config).await?;
-        // Asking the compiler not to drop `control_server`, despite we don't have any link to it.
-        std::mem::forget(control_server);
+        engine.register_server(
+            Server::ControlServer(run_control_server(engine.clone(), config).await?)
+        )
     };
 
     // Messages from external DB (usually kafka)
@@ -1448,9 +1550,15 @@ pub async fn run(node_config: TonNodeConfig, zerostate_path: Option<&str>, ext_d
     log::info!("processed masterchain: {} workchain: {}", master, workchain_id);
 
     // Broadcasts (blocks, external messages etc.)
-    Arc::clone(&engine).listen_broadcasts(ShardIdent::masterchain()).await?;
+    Arc::clone(&engine).listen_broadcasts(
+        ShardIdent::masterchain(),
+        Engine::MASK_SERVICE_MASTERCHAIN_BROADCAST_LISTENER
+    ).await?;
 
-    Arc::clone(&engine).listen_broadcasts(ShardIdent::with_tagged_prefix(workchain_id, SHARD_FULL)?).await?;
+    Arc::clone(&engine).listen_broadcasts(
+        ShardIdent::with_tagged_prefix(workchain_id, SHARD_FULL)?,
+        Engine::MASK_SERVICE_SHARDCHAIN_BROADCAST_LISTENER
+    ).await?;
     let overlay_id = network.calc_overlay_id(workchain_id, SHARD_FULL)?.0;
     network.add_consumer(&overlay_id, full_node_service.clone())?;
     engine.get_full_node_overlay(workchain_id, SHARD_FULL).await?;
@@ -1482,9 +1590,14 @@ pub async fn run(node_config: TonNodeConfig, zerostate_path: Option<&str>, ext_d
     resend_top_shard_blocks_worker(engine.clone());
 
     // blocks download clients
-    let _ = start_shards_client(engine.clone(), shard_client_mc_block)?;
-    let _ = start_masterchain_client(engine, last_applied_mc_block)?.await;   
-    Ok(())
+    let join_shards = start_shards_client(engine.clone(), shard_client_mc_block)?;
+    let join_master = start_masterchain_client(engine.clone(), last_applied_mc_block)?;
+    let join_engine = tokio::spawn(
+        async move {
+            let (_, _) = tokio::join!(join_master, join_shards);
+        }
+    );   
+    Ok((engine, join_engine))
 
 }
 
@@ -1540,12 +1653,14 @@ pub fn start_external_broadcast_process(
     if let Some(consumer_config) = consumer_config {
         let config = consumer_config.clone();
         tokio::spawn(async move {
-            match KafkaConsumer::new(config, engine) {
+            match KafkaConsumer::new(config, engine.clone()) {
                 Ok(consumer) => {
+                    engine.acquire_stop(Engine::MASK_SERVICE_KAFKA_CONSUMER);
                     match consumer.run().await {
                         Ok(_) => {},
                         Err(e) => { log::error!("Kafka listening is failed: {}", e)}
                     }
+                    engine.release_stop(Engine::MASK_SERVICE_KAFKA_CONSUMER);
                 }
                 Err(e) => { log::error!("Start listening kafka is failed: {}", e)}
             }
