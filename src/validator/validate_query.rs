@@ -14,7 +14,7 @@ use crate::{
         supported_version, supported_capabilities,
     },
 };
-use super::{BlockCandidate, McData, validator_utils::calc_subset_for_workchain};
+use super::{BlockCandidate, McData};
 use std::{collections::HashMap, io::Cursor, sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc}};
 use ton_block::{
     AddSub, BlockError, HashmapAugType, Deserializable, Serializable,
@@ -1064,9 +1064,7 @@ impl ValidateQuery {
             cc_updated = true;
             log::debug!(target: "validate_query", "increased masterchain catchain seqno to {}", catchain_seqno);
         }
-        let (nodes, _hash_short) = calc_subset_for_workchain(
-            &cur_validators,
-            &base.next_state_extra.config,
+        let (nodes, _hash_short) = cur_validators.calc_subset(
             &ccvc, 
             self.shard.shard_prefix_with_tag(), 
             self.shard.workchain_id(), 

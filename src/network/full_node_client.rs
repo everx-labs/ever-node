@@ -7,13 +7,7 @@ use crate::{
     types::top_block_descr::TopBlockDescrStuff,
 };
 
-use adnl::{
-    common::{
-        KeyId, serialize, serialize_append, tag_from_boxed_type, tag_from_unboxed_type, 
-        TaggedByteSlice, TaggedObject, TaggedTlObject
-    }, 
-    node::AdnlNode
-};
+use adnl::{common::{KeyId, serialize, serialize_append}, node::AdnlNode};
 use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
 use rldp::RldpNode;
 use std::{io::Cursor, time::Instant, sync::Arc, time::Duration};
@@ -25,8 +19,7 @@ use ton_api::ton::{
             DownloadNextBlockFull, DownloadPersistentStateSlice, DownloadZeroState,
             PreparePersistentState, DownloadBlockProof, DownloadBlockProofLink,
             DownloadKeyBlockProof, DownloadKeyBlockProofLink, PrepareBlock, DownloadBlockFull,
-            PrepareZeroState, GetNextKeyBlockIds, GetArchiveInfo, GetArchiveSlice,
-            PrepareBlockProof, PrepareKeyBlockProof
+            PrepareZeroState, GetNextKeyBlockIds, GetArchiveInfo, GetArchiveSlice
         }
     },
     ton_node::{ 
@@ -82,44 +75,6 @@ pub struct NodeClientOverlay {
     peers: Arc<Neighbours>,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<FullNodeNetworkTelemetry>,
-    #[cfg(feature = "telemetry")]
-    tag_block_broadcast: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_block_full: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_block_proof: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_block_proof_link: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_key_block_proof: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_key_block_proof_link: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_next_block_full: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_persistent_state_slice: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_zero_state: u32,
-    #[cfg(feature = "telemetry")]
-    tag_external_message_broadcast: u32,
-    #[cfg(feature = "telemetry")]
-    tag_get_archive_info: u32,
-    #[cfg(feature = "telemetry")]
-    tag_get_archive_slice: u32,
-    #[cfg(feature = "telemetry")]
-    tag_get_next_key_block_ids: u32,
-    #[cfg(feature = "telemetry")]
-    tag_new_shard_block_broadcast: u32,
-    #[cfg(feature = "telemetry")]
-    tag_prepare_block: u32,
-    #[cfg(feature = "telemetry")]
-    tag_prepare_block_proof: u32,
-    #[cfg(feature = "telemetry")]
-    tag_prepare_key_block_proof: u32,
-    #[cfg(feature = "telemetry")]
-    tag_prepare_persistent_state: u32,
-    #[cfg(feature = "telemetry")]
-    tag_prepare_zero_state: u32
 }
 
 impl NodeClientOverlay {
@@ -143,46 +98,7 @@ impl NodeClientOverlay {
             rldp,
             peers,
             #[cfg(feature = "telemetry")]
-            telemetry,
-            #[cfg(feature = "telemetry")]
-            tag_block_broadcast: tag_from_unboxed_type::<BlockBroadcast>(),
-            #[cfg(feature = "telemetry")]
-            tag_download_block_full: tag_from_boxed_type::<DownloadBlockFull>(),
-            #[cfg(feature = "telemetry")]
-            tag_download_block_proof: tag_from_boxed_type::<DownloadBlockProof>(),
-            #[cfg(feature = "telemetry")]
-            tag_download_block_proof_link: tag_from_boxed_type::<DownloadBlockProofLink>(),
-            #[cfg(feature = "telemetry")]
-            tag_download_key_block_proof: tag_from_boxed_type::<DownloadKeyBlockProof>(),
-            #[cfg(feature = "telemetry")]
-            tag_download_key_block_proof_link: tag_from_boxed_type::<DownloadKeyBlockProofLink>(),
-            #[cfg(feature = "telemetry")]
-            tag_download_next_block_full: tag_from_boxed_type::<DownloadNextBlockFull>(),
-            #[cfg(feature = "telemetry")]
-            tag_download_persistent_state_slice: 
-                tag_from_boxed_type::<DownloadPersistentStateSlice>(),
-            #[cfg(feature = "telemetry")]
-            tag_download_zero_state: tag_from_boxed_type::<DownloadZeroState>(),
-            #[cfg(feature = "telemetry")]
-            tag_external_message_broadcast: tag_from_unboxed_type::<ExternalMessageBroadcast>(),
-            #[cfg(feature = "telemetry")]
-            tag_get_archive_info: tag_from_boxed_type::<GetArchiveInfo>(),
-            #[cfg(feature = "telemetry")]
-            tag_get_archive_slice: tag_from_boxed_type::<GetArchiveSlice>(),
-            #[cfg(feature = "telemetry")]
-            tag_get_next_key_block_ids: tag_from_boxed_type::<GetNextKeyBlockIds>(),
-            #[cfg(feature = "telemetry")]
-            tag_new_shard_block_broadcast: tag_from_unboxed_type::<NewShardBlockBroadcast>(),
-            #[cfg(feature = "telemetry")]
-            tag_prepare_block: tag_from_boxed_type::<PrepareBlock>(),
-            #[cfg(feature = "telemetry")]
-            tag_prepare_block_proof: tag_from_boxed_type::<PrepareBlockProof>(),
-            #[cfg(feature = "telemetry")]
-            tag_prepare_key_block_proof: tag_from_boxed_type::<PrepareKeyBlockProof>(),
-            #[cfg(feature = "telemetry")]
-            tag_prepare_persistent_state: tag_from_boxed_type::<PreparePersistentState>(),
-            #[cfg(feature = "telemetry")]
-            tag_prepare_zero_state: tag_from_boxed_type::<PrepareZeroState>()
+            telemetry
         }
     }
 
@@ -201,12 +117,12 @@ impl NodeClientOverlay {
     async fn send_adnl_query_to_peer<R, D>(
         &self, 
         peer: &Arc<Neighbour>,
-        data: &TaggedTlObject,
+        data: &TLObject,
         timeout: Option<u64>
     ) -> Result<Option<D>>
     where
-        R: ton_api::AnyBoxedSerialize,
-        D: ton_api::AnyBoxedSerialize
+    R: ton_api::AnyBoxedSerialize,
+    D: ton_api::AnyBoxedSerialize
     {
 
         let request_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
@@ -232,13 +148,13 @@ impl NodeClientOverlay {
                 Err(obj) => {
                     #[cfg(feature = "telemetry")]
                     self.telemetry.consumed_query(request_str, false, now.elapsed(), 0);
-                    log::warn!("Wrong answer {:?} to {:?} from {}", obj, data.object, peer.id())
+                    log::warn!("Wrong answer {:?} to {:?} from {}", obj, data, peer.id())
                 }
             }
         } else {
             #[cfg(feature = "telemetry")]
             self.telemetry.consumed_query(request_str, false, now.elapsed(), 0);
-            log::warn!("No reply to {:?} from {}", data.object, peer.id())
+            log::warn!("No reply to {:?} from {}", data, peer.id())
         }
 
         self.peers.update_neighbour_stats(peer.id(), roundtrip, false, false, true)?;
@@ -249,7 +165,7 @@ impl NodeClientOverlay {
     // use this function if request size and answer size < 768 bytes (send query via ADNL)
     async fn send_adnl_query<R, D>(
         &self, 
-        request: TaggedObject<R>, 
+        request: R, 
         attempts: Option<u32>,
         timeout: Option<u64>,
         active_peers: Option<&Arc<lockfree::set::Set<Arc<KeyId>>>>
@@ -259,11 +175,7 @@ impl NodeClientOverlay {
         D: ton_api::AnyBoxedSerialize
     {
 
-        let data = TaggedTlObject {
-            object: TLObject::new(request.object),
-            #[cfg(feature = "telemetry")]
-            tag: request.tag
-        };
+        let data = TLObject::new(request);
         let attempts = attempts.unwrap_or(Self::ADNL_ATTEMPTS);
 
         for _ in 0..attempts {
@@ -292,13 +204,13 @@ impl NodeClientOverlay {
             }
         }
 
-        fail!("Cannot send query {:?} in {} attempts", data.object, attempts)
+        fail!("Cannot send query {:?} in {} attempts", data, attempts)
  
     }
 
     async fn send_rldp_query_raw<T>(
         &self, 
-        request: &TaggedObject<T>,
+        request: &T,
         peer: Arc<Neighbour>,
         attempt: u32,
     ) -> Result<Vec<u8>>
@@ -312,7 +224,7 @@ impl NodeClientOverlay {
 
     async fn send_rldp_query_typed<T, D>(
         &self,
-        request: &TaggedObject<T>,
+        request: &T,
         peer: Arc<Neighbour>,
         attempt: u32,
     ) -> Result<(D, Arc<Neighbour>)>
@@ -335,16 +247,17 @@ impl NodeClientOverlay {
 
     async fn send_rldp_query<T>(
         &self, 
-        request: &TaggedObject<T>, 
+        request: &T, 
         peer: Arc<Neighbour>,
         attempt: u32
     ) -> Result<(Vec<u8>, Arc<Neighbour>, u64)> 
     where 
         T: BoxedSerialize + std::fmt::Debug 
     {
-
         let mut query = self.overlay.get_query_prefix(&self.overlay_id)?;
-        serialize_append(&mut query, &request.object)?;
+        serialize_append(&mut query, request)?;
+        let data = Arc::new(query);
+
         let request_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
             format!("{}", std::any::type_name::<T>())
         } else {
@@ -357,11 +270,7 @@ impl NodeClientOverlay {
         let (answer, roundtrip) = self.overlay.query_via_rldp(
             &self.rldp,
             peer.id(),
-            &TaggedByteSlice {
-                object: &query[..],
-                #[cfg(feature = "telemetry")]
-                tag: request.tag
-            },
+            &data,
             Some(10 * 1024 * 1024),
             peer.roundtrip_rldp().map(|t| t + attempt as u64 * Self::TIMEOUT_DELTA),
             &self.overlay_id
@@ -375,11 +284,9 @@ impl NodeClientOverlay {
             #[cfg(feature = "telemetry")]
             self.telemetry.consumed_query(request_str, false, now.elapsed(), 0);
             self.peers.update_neighbour_stats(peer.id(), roundtrip, false, true, true)?;
-            fail!("No RLDP answer to {:?} from {}", request.object, peer.id())
+            fail!("No RLDP answer to {:?} from {}", request, peer.id())
         }
-
     }
-
 }
 
 #[async_trait::async_trait]
@@ -391,22 +298,16 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                 data: ton::bytes(msg.to_vec())
             }
         }.into_boxed();
-        let broadcast = TaggedByteSlice {
-            object: &serialize(&broadcast)?,
-            #[cfg(feature = "telemetry")]
-            tag: self.tag_external_message_broadcast
-        };
-        self.overlay.broadcast(&self.overlay_id, &broadcast, None).await
+        self.overlay.broadcast(&self.overlay_id, &serialize(&broadcast)?, None).await
     }
 
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()> {
         let id = broadcast.id.clone();
-        let broadcast = TaggedByteSlice {
-            object: &serialize(&broadcast.into_boxed())?,
-            #[cfg(feature = "telemetry")]
-            tag: self.tag_block_broadcast
-        };        
-        let info = self.overlay.broadcast(&self.overlay_id, &broadcast, None).await?;
+        let info = self.overlay.broadcast(
+            &self.overlay_id, 
+            &serialize(&broadcast.into_boxed())?, 
+            None
+        ).await?;
         log::trace!(
             "send_block_broadcast {} (overlay {}) sent to {} nodes", 
             self.overlay_id, id, info.send_to
@@ -415,15 +316,12 @@ impl FullNodeOverlayClient for NodeClientOverlay {
     }
     
     async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()> {
-        let broadcast = NewShardBlockBroadcast { 
-            block: tbd.new_shard_block()? 
-        }.into_boxed();
-        let broadcast = TaggedByteSlice {
-            object: &serialize(&broadcast)?,
-            #[cfg(feature = "telemetry")]
-            tag: self.tag_new_shard_block_broadcast
-        };        
-        let info = self.overlay.broadcast(&self.overlay_id, &broadcast, None).await?;
+        let broadcast = NewShardBlockBroadcast { block: tbd.new_shard_block()? };
+        let info = self.overlay.broadcast(
+            &self.overlay_id, 
+            &serialize(&broadcast.into_boxed())?, 
+            None
+        ).await?;
         log::trace!(
             "send_top_shard_block_description {} (overlay {}) sent to {} nodes", 
             tbd.proof_for(), self.overlay_id, info.send_to
@@ -444,105 +342,35 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         is_link: bool, 
         key_block: bool, 
     ) -> Result<BlockProofStuff> {
-
         // Prepare
         let (prepare, good_peer): (PreparedProof, _) = if key_block {
             self.send_adnl_query(
-                TaggedObject {
-                    object: PrepareKeyBlockProof {
-                        block: convert_block_id_ext_blk2api(block_id),
-                        allow_partial: is_link.into()
-                    },
-                    #[cfg(feature = "telemetry")]
-                    tag: self.tag_prepare_key_block_proof
+                ton_api::ton::rpc::ton_node::PrepareKeyBlockProof {
+                    block: convert_block_id_ext_blk2api(block_id),
+                    allow_partial: is_link.into()
                 },
-                None, 
-                Some(Self::TIMEOUT_PREPARE), 
+                None,
+                Some(Self::TIMEOUT_PREPARE),
                 None
             ).await?
         } else {
             self.send_adnl_query(
-                TaggedObject {
-                    object: PrepareBlockProof {
-                        block: convert_block_id_ext_blk2api(block_id),
-                        allow_partial: is_link.into()
-                    },
-                    #[cfg(feature = "telemetry")]
-                    tag: self.tag_prepare_block_proof
+                ton_api::ton::rpc::ton_node::PrepareBlockProof {
+                    block: convert_block_id_ext_blk2api(block_id),
+                    allow_partial: is_link.into(),
                 },
-                None, 
-                Some(Self::TIMEOUT_PREPARE), 
+                None,
+                Some(Self::TIMEOUT_PREPARE),
                 None
             ).await?
         };
 
         // Download
-        let (proof, is_link) = match prepare {
+        match prepare {
             PreparedProof::TonNode_PreparedProofEmpty => {
                 fail!("Got `TonNode_PreparedProofEmpty` from {}", good_peer.id())
             },
-            PreparedProof::TonNode_PreparedProof => {
-                let proof = if key_block {
-                    self.send_rldp_query_raw(
-                        &TaggedObject {
-                            object: DownloadKeyBlockProof { 
-                                block: convert_block_id_ext_blk2api(block_id) 
-                            },
-                            #[cfg(feature = "telemetry")]
-                            tag: self.tag_download_key_block_proof
-                        },
-                        good_peer,
-                        0
-                    ).await?
-                } else {
-                    self.send_rldp_query_raw(
-                        &TaggedObject {
-                            object: DownloadBlockProof { 
-                                block: convert_block_id_ext_blk2api(block_id) 
-                            },
-                            #[cfg(feature = "telemetry")]
-                            tag: self.tag_download_block_proof
-                        },
-                        good_peer,
-                        0
-                    ).await?
-                };
-                (proof, false)
-            }, 
-            PreparedProof::TonNode_PreparedProofLink => {
-                let proof = if key_block {
-                    self.send_rldp_query_raw(
-                        &TaggedObject {
-                            object: DownloadKeyBlockProofLink { 
-                                block: convert_block_id_ext_blk2api(block_id) 
-                            },
-                            #[cfg(feature = "telemetry")]
-                            tag: self.tag_download_key_block_proof_link
-                        },
-                        good_peer,
-                        0
-                    ).await?
-                } else {
-                    self.send_rldp_query_raw(
-                        &TaggedObject {
-                            object: DownloadBlockProofLink { 
-                                block: convert_block_id_ext_blk2api(block_id) 
-                            },
-                            #[cfg(feature = "telemetry")]
-                            tag: self.tag_download_block_proof_link
-                        },
-                        good_peer,
-                        0
-                    ).await?
-                };
-                (proof, true)
-            }
-        };
-         
-        BlockProofStuff::deserialize(block_id, proof, is_link)
-
-/*
-Ok(if key_block {
+            PreparedProof::TonNode_PreparedProof => Ok(if key_block {
                 BlockProofStuff::deserialize(block_id, self.send_rldp_query_raw(
                     &DownloadKeyBlockProof { block: convert_block_id_ext_blk2api(block_id) },
                     good_peer,
@@ -568,9 +396,7 @@ Ok(if key_block {
                     0
                 ).await?, true)?
             })
-            }
         }
-*/
     }
 
     // tonNode.prepareBlock block:tonNode.blockIdExt = tonNode.Prepared;
@@ -583,16 +409,9 @@ Ok(if key_block {
         &self, 
         id: &BlockIdExt, 
     ) -> Result<(BlockStuff, BlockProofStuff)> {
-
         // Prepare
         let (prepare, peer): (Prepared, _) = self.send_adnl_query(
-            TaggedObject {
-                object: PrepareBlock {
-                    block: convert_block_id_ext_blk2api(id)
-                },
-                #[cfg(feature = "telemetry")]
-                tag: self.tag_prepare_block
-            },
+            PrepareBlock {block: convert_block_id_ext_blk2api(id)},
             Some(1),
             None,
             None
@@ -604,16 +423,13 @@ Ok(if key_block {
             Prepared::TonNode_NotFound => fail!("Got `TonNode_NotFound` from {}", peer.id()),
             Prepared::TonNode_Prepared => {
                 let (data_full, _): (DataFull, _) = self.send_rldp_query_typed(
-                    &TaggedObject {
-                        object: DownloadBlockFull {
-                            block: convert_block_id_ext_blk2api(id),
-                        },
-                        #[cfg(feature = "telemetry")]
-                        tag: self.tag_download_block_full
+                    &DownloadBlockFull {
+                        block: convert_block_id_ext_blk2api(id),
                     },
                     peer,
                     0,
                 ).await?;
+
                 match data_full {
                     DataFull::TonNode_DataFullEmpty => {
                         fail!("prepareBlock receives Prepared, but DownloadBlockFull receives DataFullEmpty");
@@ -622,17 +438,18 @@ Ok(if key_block {
                         if !compare_block_ids(&id, &data_full.id) {
                             fail!("Block with another id was received");
                         }
+
                         let block = BlockStuff::deserialize_checked(id.clone(), data_full.block.0)?;
                         let proof = BlockProofStuff::deserialize(
                             block.id(),
                             data_full.proof.0,
                             data_full.is_link.into())?;
+
                         Ok((block, proof))
                     }
                 }
             }
         }
-
     }
 
     async fn check_persistent_state(
@@ -642,16 +459,10 @@ Ok(if key_block {
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<Option<Arc<Neighbour>>> {
         let (prepare, peer): (PreparedState, _) = self.send_adnl_query(
-            TaggedTlObject {
-                object: TLObject::new(
-                    PreparePersistentState {
-                        block: convert_block_id_ext_blk2api(block_id),
-                        masterchain_block: convert_block_id_ext_blk2api(masterchain_block_id)
-                    }
-                ),
-                #[cfg(feature = "telemetry")]
-                tag: self.tag_prepare_persistent_state
-            },
+            TLObject::new(PreparePersistentState {
+                block: convert_block_id_ext_blk2api(block_id),
+                masterchain_block: convert_block_id_ext_blk2api(masterchain_block_id)
+            }),
             None,
             Some(Self::TIMEOUT_PREPARE), 
             Some(active_peers)
@@ -678,15 +489,11 @@ Ok(if key_block {
         attempt: u32,
     ) -> Result<Vec<u8>> {
         self.send_rldp_query_raw(
-            &TaggedObject {
-                object: DownloadPersistentStateSlice {
-                    block: convert_block_id_ext_blk2api(block_id),
-                    masterchain_block: convert_block_id_ext_blk2api(masterchain_block_id),
-                    offset: offset as i64,
-                    max_size: max_size as i64,
-                },
-                #[cfg(feature = "telemetry")]
-                tag: self.tag_download_persistent_state_slice
+            &DownloadPersistentStateSlice {
+                block: convert_block_id_ext_blk2api(block_id),
+                masterchain_block: convert_block_id_ext_blk2api(masterchain_block_id),
+                offset: offset as i64,
+                max_size: max_size as i64,
             },
             peer,
             attempt
@@ -701,15 +508,9 @@ Ok(if key_block {
     ) -> Result<(ShardStateStuff, Vec<u8>)> {
         // Prepare
         let (prepare, good_peer): (PreparedState, _) = self.send_adnl_query(
-            TaggedTlObject {
-                object: TLObject::new(
-                    PrepareZeroState {
-                        block: convert_block_id_ext_blk2api(id),
-                    }
-                ),
-                #[cfg(feature = "telemetry")]
-                tag: self.tag_prepare_zero_state
-            },
+            TLObject::new(PrepareZeroState {
+                block: convert_block_id_ext_blk2api(id),
+            }),
             None,
             Some(Self::TIMEOUT_PREPARE),
             None
@@ -722,12 +523,8 @@ Ok(if key_block {
             },
             PreparedState::TonNode_PreparedState => {
                 let state_bytes = self.send_rldp_query_raw(
-                    &TaggedObject {
-                        object: DownloadZeroState {
-                            block: convert_block_id_ext_blk2api(id),
-                        },
-                        #[cfg(feature = "telemetry")]
-                        tag: self.tag_download_zero_state
+                    &DownloadZeroState {
+                        block: convert_block_id_ext_blk2api(id),
                     },
                     good_peer,
                     0
@@ -744,13 +541,9 @@ Ok(if key_block {
         block_id: &BlockIdExt, 
         max_size: i32, 
     ) -> Result<Vec<BlockIdExt>> {
-        let query = TaggedObject {
-            object: GetNextKeyBlockIds {
-                block: convert_block_id_ext_blk2api(block_id),
-                max_size
-            },
-            #[cfg(feature = "telemetry")]
-            tag: self.tag_get_next_key_block_ids
+        let query = GetNextKeyBlockIds {
+            block: convert_block_id_ext_blk2api(block_id),
+            max_size
         };
         self.send_adnl_query(query, None, None, None)
             .await
@@ -765,13 +558,9 @@ Ok(if key_block {
         &self, 
         prev_id: &BlockIdExt, 
     ) -> Result<(BlockStuff, BlockProofStuff)> {
-
-        let request = TaggedObject { 
-            object: DownloadNextBlockFull {
-                prev_block: convert_block_id_ext_blk2api(prev_id)
-            },
-            #[cfg(feature = "telemetry")]
-            tag: self.tag_download_next_block_full
+        
+        let request = &DownloadNextBlockFull {
+            prev_block: convert_block_id_ext_blk2api(prev_id)
         };
 
         // Set neighbor
@@ -781,11 +570,11 @@ Ok(if key_block {
             tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_NO_NEIGHBOURS)).await;
             fail!("neighbour is not found!")
         };
-        log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request.object);
+        log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request);
         
         // Download
         let (data_full, peer): (DataFull, _) = self.send_rldp_query_typed(
-            &request,
+            request,
             peer,
             0
         ).await?;
@@ -806,7 +595,6 @@ Ok(if key_block {
                 Ok((block, proof))
             }
         }
-
     }
 
     async fn download_archive(
@@ -818,12 +606,8 @@ Ok(if key_block {
         const CHUNK_SIZE: i32 = 1 << 21;
         // tonNode.getArchiveInfo masterchain_seqno:int = tonNode.ArchiveInfo;
         let (archive_info, peer) = self.send_adnl_query(
-            TaggedObject {
-                object: GetArchiveInfo {
-                    masterchain_seqno: mc_seq_no as i32
-                },
-                #[cfg(feature = "telemetry")]
-                tag: self.tag_get_archive_info
+            GetArchiveInfo {
+                masterchain_seqno: mc_seq_no as i32
             },
             None,
             Some(Self::TIMEOUT_PREPARE),
@@ -841,12 +625,8 @@ Ok(if key_block {
                 let mut part_attempt = 0;
                 let mut peer_attempt = 0;
                 loop {
-                    let slice = TaggedObject {
-                        object: GetArchiveSlice {
-                            archive_id: info.id, offset, max_size: CHUNK_SIZE
-                        },
-                        #[cfg(feature = "telemetry")]
-                        tag: self.tag_get_archive_slice
+                    let slice = GetArchiveSlice {
+                        archive_id: info.id, offset, max_size: CHUNK_SIZE
                     };
                     match self.send_rldp_query_raw(&slice, peer.clone(), peer_attempt).await {
                         Ok(mut block_bytes) => {

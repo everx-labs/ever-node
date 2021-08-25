@@ -1,15 +1,11 @@
 #[cfg(feature = "metrics")]
 use crate::engine::STATSD;
 use crate::engine_traits::EngineOperations;
-use crate::engine_traits::ValidatedBlockStat;
-use crate::engine_traits::ValidatedBlockStatNode;
 use crate::shard_state::ShardStateStuff;
 use crate::validator::UInt256;
-use adnl::common::KeyOption;
 use num_bigint::BigUint;
 use spin::mutex::SpinMutex;
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::Arc;
 use storage::types::BlockHandle;
 use ton_abi::contract::Contract;
@@ -17,14 +13,12 @@ use ton_abi::function::Function;
 use ton_abi::Token;
 use ton_abi::TokenValue;
 use ton_abi::Uint;
-use ton_block::ConfigParamEnum;
 use ton_block::ExternalInboundMessageHeader;
 use ton_block::HashmapAugType;
 use ton_block::Message;
 use ton_block::MsgAddressExt;
 use ton_block::MsgAddressInt;
 use ton_block::Serializable;
-use ton_block::SlashingConfig;
 use ton_types::Result;
 use ton_types::SliceData;
 use validator_session::slashing::AggregatedMetric;
@@ -36,8 +30,11 @@ use validator_session::PublicKeyHash;
 use validator_session::SlashingAggregatedValidatorStat;
 use validator_session::SlashingValidatorStat;
 
+const SLASHING_MC_BLOCKS_COUNT: u32 = 1500; //number of blocks for slashing computations
+const SLASHING_Z_CONFIDENCE: f64 = 2.576; //corresponds to 99% confidence; see https://en.wikipedia.org/wiki/Confidence_interval#Basic_steps for details
 const ELECTOR_ABI: &str = include_str!("Elector.abi.json"); //elector's ABI
 const ELECTOR_REPORT_FUNC_NAME: &str = "report"; //elector slashing report function name
+const SLASHING_RESEND_MC_BLOCKS_PERIOD: u32 = 5; //number for blocks for resending slashing messages
 
 /// Slashing manager pointer
 pub type SlashingManagerPtr = Arc<SlashingManager>;
@@ -45,7 +42,6 @@ pub type SlashingManagerPtr = Arc<SlashingManager>;
 /// Slashing manager
 pub struct SlashingManager {
     manager: SpinMutex<SlashingManagerImpl>,
-    send_messages_block_offset: u32,
 }
 
 /// Internal slashing manager details
@@ -67,12 +63,7 @@ impl SlashingManager {
 
         log::info!(target: "validator", "Use slashing report function '{}' with id={:08X}", ELECTOR_REPORT_FUNC_NAME, report_fn.get_function_id());
 
-        let mut rng = rand::thread_rng();
-
-        use rand::Rng;
-
         Arc::new(SlashingManager {
-            send_messages_block_offset: rng.gen::<u32>(),
             manager: SpinMutex::new(SlashingManagerImpl {
                 stat: SlashingValidatorStat::default(),
                 first_mc_block: 0,
@@ -84,8 +75,7 @@ impl SlashingManager {
 
     /// Update slashing statistics
     pub fn update_statistics(&self, stat: &SlashingValidatorStat) {
-        self.manager.lock().stat.merge(&stat);
-        log::debug!(target: "validator", "{}({}): merge slashing statistics {:?}", file!(), line!(), stat);
+        self.manager.lock().stat.merge(&stat)
     }
 
     /// Is slashing available
@@ -101,37 +91,6 @@ impl SlashingManager {
         false
     }
 
-    /// Get slashing params
-    fn get_slashing_config(mc_state: &ShardStateStuff) -> SlashingConfig {
-        if let Ok(Some(mc_state_extra)) = mc_state.state().read_custom() {
-            if let Ok(config) = mc_state_extra.config.config(40) {
-                if let Some(ConfigParamEnum::ConfigParam40(cc)) = config {
-                    return SlashingConfig {
-                        slashing_period_mc_blocks_count : cc.slashing_config.slashing_period_mc_blocks_count,
-                        resend_mc_blocks_count : cc.slashing_config.resend_mc_blocks_count,
-                        min_samples_count : cc.slashing_config.min_samples_count,
-                        collations_score_weight : cc.slashing_config.collations_score_weight,
-                        signing_score_weight : cc.slashing_config.signing_score_weight,
-                        min_slashing_protection_score : cc.slashing_config.min_slashing_protection_score,
-                        z_param_numerator : cc.slashing_config.z_param_numerator,
-                        z_param_denominator : cc.slashing_config.z_param_denominator,
-                    }
-                }
-            }
-        }
-
-        SlashingConfig {
-            slashing_period_mc_blocks_count: 100,
-            resend_mc_blocks_count: 4,
-            min_samples_count: 30,
-            collations_score_weight: 0,
-            signing_score_weight: 1,
-            min_slashing_protection_score: 70,
-            z_param_numerator: 2326, //98% confidence
-            z_param_denominator: 1000,
-        }
-    }
-
     /// New masterchain block notification
     pub async fn handle_masterchain_block(
         &self,
@@ -140,56 +99,13 @@ impl SlashingManager {
         local_key: &PrivateKey,
         engine: &Arc<dyn EngineOperations>,
     ) {
-        // read slashing params
-
-        let slashing_config = Self::get_slashing_config(mc_state);
-
-        // process queue of received validated block stat events
-
-        while let Ok(validated_block_stat) = engine.pop_validated_block_stat() {
-            log::debug!(target: "validator", "Slashing statistics has been received {:?}", validated_block_stat);
-
-            let mut slashing_stat = SlashingValidatorStat::default();
-
-            for src_node in &validated_block_stat.nodes {
-                use validator_session::slashing;
-
-                let src_public_key_bytes = src_node.public_key.key_bytes();
-                let public_key = Arc::new(KeyOption::from_type_and_public_key(
-                    KeyOption::KEY_ED25519,
-                    src_public_key_bytes,
-                ));
-                let mut dst_node = slashing::Node::new(&public_key);
-
-                dst_node.metrics[slashing::Metric::ApplyLevelTotalBlocksCount as usize] += 1;
-
-                if src_node.collated {
-                    dst_node.metrics[slashing::Metric::ApplyLevelCollationsCount as usize] += 1;
-                }
-
-                if src_node.signed {
-                    dst_node.metrics[slashing::Metric::ApplyLevelCommitsCount as usize] += 1;
-                }
-
-                slashing_stat
-                    .validators_stat
-                    .insert(public_key.id().clone(), dst_node);
-            }
-
-            self.update_statistics(&slashing_stat);
-        }
-
         if !Self::is_slashing_available(mc_state) {
             log::info!(target: "validator", "{}({}): slashing is disabled until the first elections", file!(), line!());
             return;
         }
 
-        // check slashing event
-
         let mc_block_seqno = block.masterchain_ref_seq_no();
-        let remove_delivered_messages_only = (mc_block_seqno + self.send_messages_block_offset)
-            % slashing_config.resend_mc_blocks_count
-            != 0;
+        let remove_delivered_messages_only = mc_block_seqno % SLASHING_RESEND_MC_BLOCKS_PERIOD != 0;
 
         self.resend_messages(engine, block, remove_delivered_messages_only)
             .await;
@@ -200,10 +116,7 @@ impl SlashingManager {
             if manager.first_mc_block == 0 {
                 //initialize slashing statistics for first full interval
 
-                if (mc_block_seqno + self.send_messages_block_offset)
-                    % slashing_config.slashing_period_mc_blocks_count
-                    != 0
-                {
+                if mc_block_seqno % SLASHING_MC_BLOCKS_COUNT != 0 {
                     return;
                 }
 
@@ -215,13 +128,17 @@ impl SlashingManager {
 
             let mc_blocks_count = mc_block_seqno - manager.first_mc_block;
 
-            if mc_blocks_count < slashing_config.slashing_period_mc_blocks_count {
+            //TODO: split slashing intervals by validator set change
+
+            if mc_blocks_count < SLASHING_MC_BLOCKS_COUNT {
                 return;
             }
 
+            //TODO: match MC block seqno with validators set
+
             //compute aggregated slashing statistics
 
-            let aggregated_stat = manager.stat.aggregate(&slashing_config);
+            let aggregated_stat = manager.stat.aggregate(SLASHING_Z_CONFIDENCE);
 
             log::info!(target: "validator", "{}({}): stat={:?}", file!(), line!(), aggregated_stat);
 
@@ -287,18 +204,13 @@ impl SlashingManager {
 
         log::warn!(
             target: "validator",
-            "{}({}): Slash validator {} on metric {:?} by reporter validator {}{}",
+            "{}({}): Slash validator {} on metric {:?} by reporter validator {}",
             file!(),
             line!(),
             hex::encode(&victim_pubkey),
             metric_id,
             hex::encode(&reporter_pubkey),
-            if metric_id != AggregatedMetric::ValidationScore as u8 { " (metric ignored)" } else { "" },
         );
-
-        if metric_id != AggregatedMetric::ValidationScore as u8 {
-            return;
-        }
 
         //compute signature for params
 
@@ -341,15 +253,14 @@ impl SlashingManager {
 
         const INTERNAL_CALL: bool = false; //external message
 
-        let result = report_fn
-            .encode_input(&header, &parameters, INTERNAL_CALL, None)
+        let result = report_fn.encode_input(&header, &parameters, INTERNAL_CALL, None)
             .and_then(|builder| builder.into_cell());
         let body = match result {
             Err(err) => {
                 log::error!(target: "validator", "SlashingManager::slash_validator: failed to encode input: {:?}", err);
-                return;
+                return
             }
-            Ok(result) => result,
+            Ok(result) => result
         };
 
         log::info!(target: "validator", "{}({}): SlashingManager::slash_validator: message body {:?}", file!(), line!(), body);
@@ -393,8 +304,7 @@ impl SlashingManager {
                 if let Err(err) = engine.redirect_external_message(&serialized_message).await {
                     log::warn!(target: "validator", "{}({}): SlashingManager::slash_validator: can't send message: {:?}, error: {:?}", file!(), line!(), message, err);
                 } else {
-                    log::info!(target: "validator", "{}({}): SlashingManager::slash_validator: message: {:?} -> {} has been successfully {}", file!(), line!(), message_id, base64::encode(&serialized_message),
-                        if store_for_resending { "sent" } else { "resent" });
+                    log::info!(target: "validator", "{}({}): SlashingManager::slash_validator: message: {:?} -> {} has been successfully sent", file!(), line!(), message_id, base64::encode(&serialized_message));
                 }
             }
             Err(err) => {
@@ -417,6 +327,7 @@ impl SlashingManager {
         block: &Arc<BlockHandle>,
         remove_only: bool,
     ) {
+        let mut messages = self.manager.lock().slashing_messages.clone();
         let msg_desc = match engine.load_block(block).await {
             Ok(block) => match block.block().read_extra() {
                 Ok(extra) => match extra.read_in_msg_descr() {
@@ -428,7 +339,6 @@ impl SlashingManager {
             _ => None,
         };
 
-        let messages = self.manager.lock().slashing_messages.clone();
         let mut messages_to_remove = Vec::new();
 
         for (message_id, message) in &messages {
@@ -447,14 +357,12 @@ impl SlashingManager {
         }
 
         if !messages_to_remove.is_empty() {
-            let mut manager_lock = self.manager.lock(); //acquire lock
-
             for message_id in messages_to_remove {
                 log::info!(target: "validator", "{}({}): SlashingManager::slash_validator: message: {:?} has been successfully delivered", file!(), line!(), message_id);
-                manager_lock.slashing_messages.remove(&message_id);
+                messages.remove(&message_id);
             }
 
-            //release lock
+            self.manager.lock().slashing_messages = messages;
         }
     }
 
@@ -466,8 +374,19 @@ impl SlashingManager {
         let node = aggregated_stat.get_aggregated_node(reporter_key);
         let (validation_score, slashing_score) = match node {
             Some(node) => {
-                let validation_score = node.metrics[AggregatedMetric::ValidationScore as usize];
-                let slashing_score = node.metrics[AggregatedMetric::SlashingScore as usize];
+                let collation_participation =
+                    node.metrics[AggregatedMetric::CollationsParticipation as usize];
+                let approvals_participation =
+                    node.metrics[AggregatedMetric::ApprovalsParticipation as usize];
+                let commits_participation =
+                    node.metrics[AggregatedMetric::CommitsParticipation as usize];
+                let approvals_weight = 0.2;
+                let commits_weight = 0.3;
+                let collations_weight = 0.5;
+                let validation_score = approvals_weight * approvals_participation
+                    + commits_weight * commits_participation
+                    + collations_weight * collation_participation;
+                let slashing_score = 1.0 - validation_score;
 
                 (validation_score, slashing_score)
             }
@@ -480,21 +399,5 @@ impl SlashingManager {
         pipeline.gauge("slashing_score", slashing_score);
 
         pipeline.send(&STATSD);
-    }
-}
-
-impl fmt::Debug for ValidatedBlockStat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ValidatedBlockStat(nodes=[{:?}])", self.nodes)
-    }
-}
-
-impl fmt::Debug for ValidatedBlockStatNode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ValidatedBlockStatNode(public_key={:?}, collated={:?}, signed={:?})",
-            self.public_key, self.collated, self.signed
-        )
     }
 }

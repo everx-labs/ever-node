@@ -1,12 +1,12 @@
 use std::{io::Cursor, collections::HashMap, cmp::max, sync::Arc};
 use std::io::Write;
 use ton_block::{
-    Block, BlockIdExt, BlkPrevInfo, CatchainConfig, ConfigParams, Deserializable,
+    AccountBlock, Block, BlockIdExt, BlkPrevInfo, CatchainConfig, ConfigParams, Deserializable,
     ShardIdent, ShardDescr, ShardHashes, ValidatorSet, HashmapAugType,
 };
 use ton_types::{Cell, Result, types::UInt256, deserialize_tree_of_cells, error, fail, HashmapType};
 
-use crate::{error::NodeError, shard_state::ShardHashesStuff};
+use crate::error::NodeError;
 
 
 pub struct BlockPrevStuff {
@@ -31,13 +31,13 @@ impl BlockStuff {
     pub fn new(id: BlockIdExt, data: Vec<u8>) -> Result<Self> {
         let file_hash = UInt256::calc_file_hash(&data);
         if file_hash != id.file_hash {
-            fail!("block candidate has invalid file hash: declared {:x}, actual {:x}",
-                id.file_hash, file_hash)
+            fail!("block candidate has invalid file hash: declared {}, actual {}",
+                id.file_hash.to_hex_string(), file_hash.to_hex_string())
         }
         let root = deserialize_tree_of_cells(&mut Cursor::new(&data))?;
         if root.repr_hash() != id.root_hash {
-            fail!("block candidate has invalid root hash: declared {:x}, actual {:x}",
-                id.root_hash, root.repr_hash())
+            fail!("block candidate has invalid root hash: declared {}, actual {}",
+                id.root_hash.to_hex_string(), root.repr_hash().to_hex_string())
         }
         let block = Block::construct_from(&mut root.clone().into())?;
         Ok(Self { id, block, root, data: Arc::new(data) })
@@ -172,31 +172,20 @@ impl BlockStuff {
             .read_extra()?
             .read_custom()?
             .ok_or_else(|| error!("Given block is not a master block."))?
-            .shards()
+            .hashes()
             .clone()
         )
     }
 
-    pub fn shard_hashes(&self) -> Result<ShardHashesStuff> {
-        Ok(ShardHashesStuff::from(self
-            .block()
-            .read_extra()?
-            .read_custom()?
-            .ok_or_else(|| error!("Given block is not a master block."))?
-            .shards()
-            .clone()
-        ))
-    }
-
-    pub fn shards_blocks(&self, workchain_id: i32) -> Result<HashMap<ShardIdent, BlockIdExt>> {
+    pub fn shards_blocks(&self) -> Result<HashMap<ShardIdent, BlockIdExt>> {
         let mut shards = HashMap::new();
         self
             .block()
             .read_extra()?
             .read_custom()?
             .ok_or_else(|| error!("Given block is not a master block."))?
-            .shards()
-            .iterate_shards_for_workchain(workchain_id, |ident: ShardIdent, descr: ShardDescr| {
+            .hashes()
+            .iterate_shards(|ident: ShardIdent, descr: ShardDescr| {
                 let last_shard_block = BlockIdExt {
                     shard_id: ident,
                     seq_no: descr.seq_no,
@@ -222,14 +211,19 @@ impl BlockStuff {
     }
 
     pub fn read_cur_validator_set_and_cc_conf(&self) -> Result<(ValidatorSet, CatchainConfig)> {
-        self.block().read_cur_validator_set_and_cc_conf()
+        let config = self.config()?;
+
+        Ok((
+            config.validator_set()?,
+            config.catchain_config()?
+        ))
     }
 
     pub fn calculate_tr_count(&self) -> Result<usize> {
         let now = std::time::Instant::now();
         let mut tr_count = 0;
 
-        self.block.read_extra()?.read_account_blocks()?.iterate_objects(|account_block| {
+        self.block.read_extra()?.read_account_blocks()?.iterate_objects(|account_block: AccountBlock| {
             tr_count += account_block.transactions().len()?;
             Ok(true)
         })?;
@@ -319,8 +313,9 @@ pub fn construct_and_check_prev_stuff(
         }
         if *id.root_hash() != block_root.repr_hash() {
             fail!(
-                "block header has incorrect root hash: {:x}, but expected: {:x}",
-                    block_root.repr_hash(), id.root_hash()
+                "block header has incorrect root hash: {}, but expected: {}",
+                block_root.repr_hash().to_hex_string(),
+                id.root_hash().to_hex_string()
             )
         }
         BlockIdExt::default()

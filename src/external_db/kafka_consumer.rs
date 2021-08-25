@@ -1,11 +1,11 @@
 use crate::{
-    engine_traits::{EngineOperations, Server}, config::KafkaConsumerConfig, jaeger
+    engine_traits::EngineOperations, config::KafkaConsumerConfig, jaeger
 };
 use futures::StreamExt;
-use rdkafka::{consumer::Consumer, Message};
+use rdkafka::consumer::Consumer;
+use rdkafka::Message;
 use std::sync::Arc;
 use std::time;
-use stream_cancel::StreamExt as StreamCancelExt;
 use ton_types::Result;
 
 pub struct KafkaConsumer {
@@ -20,9 +20,6 @@ impl KafkaConsumer {
 
     pub async fn run(&self) -> Result<()> {
         loop {
-            if self.engine.check_stop() {
-                break Ok(())
-            }
             if let Err(err) = self.run_attempt().await {
                 log::trace!("Error while \"{}\" topic processing: {}",  self.config.topic, err);
                 futures_timer::Delay::new(
@@ -30,8 +27,6 @@ impl KafkaConsumer {
                         self.config.run_attempt_timeout_ms as u64
                     )
                 ).await;
-            } else {
-                break Ok(())
             }
         }
     }
@@ -53,14 +48,8 @@ impl KafkaConsumer {
         consumer.subscribe(&[&self.config.topic])?;
 
         log::trace!("Starting consumer...");
-        let (trigger, tripwire) = stream_cancel::Tripwire::new();
-        let mut message_stream = consumer.start().take_until_if(tripwire);
-        self.engine.register_server(Server::KafkaConsumer(trigger));
-
+        let mut message_stream = consumer.start();
         while let Some(borrowed_message) = message_stream.next().await {
-            if self.engine.check_stop() {
-                break
-            }
             let borrowed_message = borrowed_message?;
             let message_descr = format!("topic: {}, partition: {}, offset: {}", 
                 borrowed_message.topic(), borrowed_message.partition(), borrowed_message.offset());

@@ -6,7 +6,7 @@ use crate::{
 };
 use rocksdb::{DB, IteratorMode, Options, Snapshot, WriteBatch};
 use ton_types::{fail, Result};
-use std::{fmt::{Debug, Formatter}, path::{Path, PathBuf}, sync::Arc};
+use std::{fmt::{Debug, Formatter}, path::{Path, PathBuf}, sync::{Arc, Mutex}};
 
 #[derive(Debug)]
 pub struct RocksDb {
@@ -66,11 +66,6 @@ impl Kvc for RocksDb {
 
 /// Implementation of readable key-value collection for RocksDB. Actual implementation is blocking.
 impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDb {
-
-    fn get_meta(&self) -> &str {
-        self.path.to_str().unwrap_or_default()
-    }
-
     fn try_get(&self, key: &K) -> Result<Option<DbSlice>> {
         Ok(self.db()?.get_pinned(key.key())?
             .map(|value| value.into()))
@@ -84,7 +79,6 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDb {
         }
         Ok(true)
     }
-
 }
 
 /// Implementation of writable key-value collection for RocksDB. Actual implementation is blocking.
@@ -150,7 +144,7 @@ impl<K: DbKey + Send + Sync> KvcTransactional<K> for RocksDb {
 
 pub struct RocksDbTransaction {
     db: Arc<Option<DB>>,
-    batch: WriteBatch,
+    batch: Mutex<WriteBatch>,
 }
 
 /// Implementation of transaction for key-value collection for RocksDB.
@@ -158,27 +152,31 @@ impl RocksDbTransaction {
     fn new(db: Arc<Option<DB>>) -> Self {
         Self {
             db,
-            batch: WriteBatch::default()
+            batch: Mutex::new(WriteBatch::default())
         }
     }
 }
 
 impl<K: DbKey + Send + Sync> KvcTransaction<K> for RocksDbTransaction {
-    fn put(&mut self, key: &K, value: &[u8]) {
-        self.batch.put(key.key(), value);
+    fn put(&self, key: &K, value: &[u8]) {
+        self.batch.lock().unwrap()
+            .put(key.key(), value);
     }
 
-    fn delete(&mut self, key: &K) {
-        self.batch.delete(key.key());
+    fn delete(&self, key: &K) {
+        self.batch.lock().unwrap()
+            .delete(key.key());
     }
 
-    fn clear(&mut self) {
-        self.batch.clear();
+    fn clear(&self) {
+        self.batch.lock().unwrap()
+            .clear();
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
+        let batch = self.batch.into_inner().unwrap();
         if let Some(ref db) = *self.db {
-            db.write(self.batch)
+            db.write(batch)
             .map_err(|err| err.into())
         } else {
             Err(StorageError::DbIsDropped)?
@@ -186,6 +184,6 @@ impl<K: DbKey + Send + Sync> KvcTransaction<K> for RocksDbTransaction {
     }
 
     fn len(&self) -> usize {
-        self.batch.len()
+        self.batch.lock().unwrap().len()
     }
 }

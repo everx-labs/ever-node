@@ -28,7 +28,7 @@ pub async fn apply_block(
     };
     if !pre_apply {
         set_next_prev_ids(&handle, &prev_ids, engine.deref())?;
-        engine.process_block_in_ext_db(handle, &block, None, &shard_state, mc_seq_no).await?;
+        engine.process_block_in_ext_db(handle, &block, None, &shard_state).await?;
     }
     Ok(())
 }
@@ -98,7 +98,7 @@ pub async fn calc_shard_state(
     }).await??;
 
     let now = std::time::Instant::now();
-    let ss = engine.store_state(handle, ss).await?;
+    engine.store_state(handle, &ss).await?;
     log::trace!("TIME: calc_shard_state: store_state {}ms   {}",
             now.elapsed().as_millis(), handle.id());
     Ok(ss)

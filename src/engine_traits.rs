@@ -1,10 +1,13 @@
 use crate::{
-    block::{BlockStuff}, config::CollatorTestBundlesGeneralConfig, internal_db::BlockResult,
+    block::{BlockStuff}, 
     shard_state::ShardStateStuff,
-    network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
+    network::{full_node_client::FullNodeOverlayClient},
     block_proof::BlockProofStuff,
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
-    
+    ext_messages::create_ext_message,
+    jaeger,
+    config::CollatorTestBundlesGeneralConfig,
+    internal_db::StoreBlockResult,
 };
 use adnl::common::{KeyId, KeyOption};
 use catchain::{
@@ -17,8 +20,8 @@ use overlay::{
 use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 use storage::types::BlockHandle;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
-use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, signature::SigPubKey};
-use ton_types::{Result, UInt256};
+use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent};
+use ton_types::{fail, Result, UInt256};
 #[cfg(feature = "telemetry")]
 use crate::{
     full_node::telemetry::FullNodeTelemetry,
@@ -26,15 +29,6 @@ use crate::{
     network::telemetry::FullNodeNetworkTelemetry,
 };
 
-pub struct ValidatedBlockStatNode {
-    pub public_key : SigPubKey,
-    pub signed : bool,
-    pub collated : bool,
-}
-
-pub struct ValidatedBlockStat {
-    pub nodes : Vec<ValidatedBlockStatNode>,
-}
 
 #[async_trait::async_trait]
 pub trait OverlayOperations : Sync + Send {
@@ -77,19 +71,7 @@ pub trait PrivateOverlayOperations: Sync + Send {
 #[allow(unused)]
 pub trait EngineOperations : Sync + Send {
 
-    async fn processed_workchain(&self) -> Result<(bool, i32)> { Ok((true, 0)) }
-
-    fn get_validator_status(&self) -> bool { unimplemented!() }
-
     fn validator_network(&self) -> Arc<dyn PrivateOverlayOperations> {
-        unimplemented!()
-    }
-
-    fn validation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
-        unimplemented!()
-    }
-
-    fn collation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
         unimplemented!()
     }
 
@@ -148,25 +130,19 @@ pub trait EngineOperations : Sync + Send {
     async fn load_last_applied_mc_block(&self) -> Result<BlockStuff> {
         unimplemented!()
     }
-    fn load_last_applied_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+    async fn load_last_applied_mc_block_id(&self) -> Result<BlockIdExt> {
         unimplemented!()
     }
-    fn save_last_applied_mc_block_id(&self, last_mc_block: &BlockIdExt) -> Result<()> {
+    async fn store_last_applied_mc_block_id(&self, last_mc_block: &BlockIdExt) -> Result<()> {
         unimplemented!()
-    }
-    async fn load_last_applied_mc_state_or_zerostate(&self) -> Result<ShardStateStuff> {
-        match self.load_last_applied_mc_block_id()? {
-            Some(block_id) => self.load_state(&block_id).await,
-            None => self.load_mc_zero_state().await
-        }
     }
     async fn load_last_applied_mc_state(&self) -> Result<ShardStateStuff> {
         unimplemented!()
     }
-    fn load_shard_client_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+    async fn load_shards_client_mc_block_id(&self) -> Result<BlockIdExt> {
         unimplemented!()
     }
-    fn save_shard_client_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
+    async fn store_shards_client_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
     async fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seqno: u32) -> Result<Arc<BlockHandle>> {
@@ -226,10 +202,7 @@ pub trait EngineOperations : Sync + Send {
     async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, priority: u32) -> Result<Vec<BlockIdExt>> {
         unimplemented!()
     }
-    async fn store_block(
-        &self, 
-        block: &BlockStuff
-    ) -> Result<BlockResult> {
+    async fn store_block(&self, block: &BlockStuff) -> Result<StoreBlockResult> {
         unimplemented!()
     }
     async fn store_block_proof(
@@ -237,7 +210,7 @@ pub trait EngineOperations : Sync + Send {
         id: &BlockIdExt, 
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff
-    ) -> Result<BlockResult> {
+    ) -> Result<Arc<BlockHandle>> {
         unimplemented!()
     }
     async fn load_block_proof(&self, handle: &Arc<BlockHandle>, is_link: bool) -> Result<BlockProofStuff> {
@@ -251,16 +224,7 @@ pub trait EngineOperations : Sync + Send {
         handle: &Arc<BlockHandle>,
         block: &BlockStuff,
         proof: Option<&BlockProofStuff>,
-        state: &ShardStateStuff,
-        mc_seq_no: u32,
-    )
-    -> Result<()> {
-        unimplemented!()
-    }
-
-    async fn process_chain_range_in_ext_db(
-        &self,
-        chain_range: &ChainRange)
+        state: &ShardStateStuff)
     -> Result<()> {
         unimplemented!()
     }
@@ -271,8 +235,7 @@ pub trait EngineOperations : Sync + Send {
         &self, 
         block_id: &BlockIdExt, 
         master_id: &BlockIdExt,
-        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-        attempts: Option<usize>
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<ShardStateStuff> {
         unimplemented!()
     }
@@ -307,15 +270,16 @@ pub trait EngineOperations : Sync + Send {
     async fn store_state(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: ShardStateStuff
-    ) -> Result<ShardStateStuff> {
+        state: &ShardStateStuff
+    ) -> Result<()> {
         unimplemented!()
     }
     async fn store_zerostate(
         &self, 
-        state: ShardStateStuff, 
+        id: &BlockIdExt, 
+        state: &ShardStateStuff, 
         state_bytes: &[u8]
-    ) -> Result<(ShardStateStuff, Arc<BlockHandle>)> {
+    ) -> Result<Arc<BlockHandle>> {
         unimplemented!()
     }
     async fn process_full_state_in_ext_db(&self, state: &ShardStateStuff)-> Result<()> {
@@ -361,18 +325,6 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    fn get_last_rotation_block_id(&self) -> Result<Option<BlockIdExt>> {
-        unimplemented!()
-    }
-
-    fn set_last_rotation_block_id(&self, info: &BlockIdExt) -> Result<()> {
-        unimplemented!()
-    }
-
-    fn clear_last_rotation_block_id(&self) -> Result<()> {
-        unimplemented!()
-    }
-
     // Top shard blocks
 
     // Get current list of new shard blocks with respect to last mc block.
@@ -412,17 +364,17 @@ pub trait EngineOperations : Sync + Send {
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as u32
     }
 
-    fn is_persistent_state(&self, block_time: u32, prev_time: u32, pss_period_bits: u32) -> bool {
-        block_time >> pss_period_bits != prev_time >> pss_period_bits
+    fn is_persistent_state(&self, block_time: u32, prev_time: u32) -> bool {
+        block_time >> 17 != prev_time >> 17
     }
 
-    fn persistent_state_ttl(&self, block_time: u32, pss_period_bits: u32) -> u32 {
+    fn persistent_state_ttl(&self, block_time: u32) -> u32 {
         if cfg!(feature = "local_test") {
             !0
         } else {
-            let x = block_time >> pss_period_bits;
+            let x = block_time >> 17;
             debug_assert!(x != 0);
-            block_time + ((1 << (pss_period_bits + 1)) << x.trailing_zeros())
+            block_time + ((1 << 18) << x.trailing_zeros())
         }
     }
 
@@ -445,7 +397,7 @@ pub trait EngineOperations : Sync + Send {
         if cfg!(feature = "local_test") {
             !0 >> 2 // allow to sync with test data
         } else {
-            3600 // One hour period 
+            86400 // One day period 
         }
     }
 
@@ -461,7 +413,7 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    fn save_init_mc_block_id(&self, _init_block_id: &BlockIdExt) -> Result<()> {
+    fn set_init_mc_block_id(&self, _init_block_id: &BlockIdExt) {
         unimplemented!()
     }
 
@@ -471,14 +423,6 @@ pub trait EngineOperations : Sync + Send {
 
     fn db_root_dir(&self) -> Result<&str> {
         Ok("node_db")
-    }
-
-    fn produce_chain_ranges_enabled(&self) -> bool {
-        unimplemented!()
-    }
-
-    fn adjust_states_gc_interval(&self, interval_ms: u32) {
-        unimplemented!()
     }
 
     // I/O
@@ -505,16 +449,26 @@ pub trait EngineOperations : Sync + Send {
     }
 
     async fn redirect_external_message(&self, message_data: &[u8]) -> Result<BroadcastSendInfo> {
-        unimplemented!()
+        let (id, message) = create_ext_message(message_data)?;
+        let message = Arc::new(message);
+        self.new_external_message(id.clone(), message.clone())?;
+        if let Some(header) = message.ext_in_header() {
+            let res = self.broadcast_to_public_overlay(
+                &AccountIdPrefixFull::checked_prefix(&header.dst)?,
+                message_data
+            ).await;
+            #[cfg(feature = "telemetry")]
+            self.full_node_telemetry().sent_ext_msg_broadcast();
+            jaeger::broadcast_sended(id.to_hex_string());
+            res
+        } else {
+            fail!("External message is not properly formatted: {}", message)
+        }
     }
 
     // Boot specific operations
 
-    async fn set_applied(
-        &self, 
-        handle: &Arc<BlockHandle>, 
-        mc_seq_no: u32
-    ) -> Result<bool> {
+    async fn set_applied(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<bool> {
         unimplemented!()
     }
 
@@ -553,40 +507,6 @@ pub trait EngineOperations : Sync + Send {
     fn full_node_service_telemetry(&self) -> &FullNodeNetworkTelemetry {
         unimplemented!()
     }
-
-    // Slashing related functions
-
-    fn push_validated_block_stat(&self, stat : ValidatedBlockStat) -> Result<()> {
-        unimplemented!();
-    }
-
-    fn pop_validated_block_stat(&self) -> Result<ValidatedBlockStat> {
-        unimplemented!();
-    }
-
-    // Engine stopping
-
-    fn acquire_stop(&self, mask: u32) {
-        unimplemented!();
-    }
-
-    fn check_stop(&self) -> bool {
-        unimplemented!();
-    }
-
-    fn release_stop(&self, mask: u32) {
-        unimplemented!();
-    }
-
-    fn register_server(&self, server: Server) {
-        unimplemented!();
-    }
-
-}
-
-pub struct ChainRange {
-    pub master_block: BlockIdExt,
-    pub shard_blocks: Vec<BlockIdExt>
 }
 
 /// External DB should implement this trait and put itself into engine's new function
@@ -596,15 +516,7 @@ pub trait ExternalDb : Sync + Send {
         &self,
         block: &BlockStuff,
         proof: Option<&BlockProofStuff>,
-        state: &ShardStateStuff,
-        mc_seq_no: u32,
+        state: &ShardStateStuff
     ) -> Result<()>;
     async fn process_full_state(&self, state: &ShardStateStuff) -> Result<()>;
-    fn process_chain_range_enabled(&self) -> bool;
-    async fn process_chain_range(&self, range: &ChainRange) -> Result<()>;
-}
-
-pub enum Server {
-    ControlServer(ControlServer),
-    KafkaConsumer(stream_cancel::Trigger)
 }

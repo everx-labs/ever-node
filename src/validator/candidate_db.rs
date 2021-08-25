@@ -170,15 +170,15 @@ impl LastRotationBlockDb {
         };
     }
 
-    pub fn get_last_rotation_block_id(&self) -> Result<Option<BlockIdExt>> {
+    pub fn get_last_rotation_block_id(&mut self) -> Result<Option<BlockIdExt>> {
         self.db.try_get_value(&UnitKey{})
     }
 
-    pub fn set_last_rotation_block_id(&self, info: &BlockIdExt) -> Result<()> {
+    pub fn set_last_rotation_block_id(&mut self, info: &BlockIdExt) -> Result<()> {
         self.db.put_value(&UnitKey{}, info)
     }
 
-    pub fn clear_last_rotation_block_id(&self) -> Result<()> {
+    pub fn clear_last_rotation_block_id(&mut self) -> Result<()> {
         self.db.delete(&UnitKey{})
     }
 }

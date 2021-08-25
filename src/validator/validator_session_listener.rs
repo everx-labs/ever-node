@@ -1,5 +1,5 @@
-use std::{fmt, time::{Duration, SystemTime, SystemTimeError}, sync::Arc};
-use tokio::time::timeout;
+use std::{fmt, time::{*, SystemTime, SystemTimeError}, sync::*};
+use tokio::{time::timeout, runtime::Runtime};
 
 use validator_session::*;
 use crate::validator::validator_group::{ValidatorGroup, ValidatorGroupStatus};
@@ -107,7 +107,7 @@ impl ValidatorSessionListener {
     }
 }
 
-impl SessionListener for ValidatorSessionListener {
+impl validator_session::SessionListener for ValidatorSessionListener {
     /// New block candidate appears -- validate it
     fn on_candidate(
         &self,
@@ -189,7 +189,7 @@ impl SessionListener for ValidatorSessionListener {
     }
 }
 
-impl CatchainReplayListener for ValidatorSessionListener {
+impl validator_session::CatchainReplayListener for ValidatorSessionListener {
     fn replay_started(&self) {
         log::info!(target: "validator", "CatchainReplayListener: started");
     }
@@ -230,9 +230,9 @@ const QUEUE_EMPTY_TOO_LONG: Duration = Duration::from_secs(10);
 const QUEUE_POLLING_DELAY: Duration = Duration::from_millis(10);
 
 pub async fn process_validation_queue(
-    queue: Arc<Receiver<ValidationAction>>,
-    g: Arc<ValidatorGroup>,
-    rt: tokio::runtime::Handle
+        queue: Arc<Receiver<ValidationAction>>,
+        g: Arc<ValidatorGroup>,
+        rt: Arc<Runtime>
 ) {
     let mut cur_round = 0;
     let mut last_action = SystemTime::now();

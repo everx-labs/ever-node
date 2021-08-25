@@ -26,18 +26,14 @@ pub async fn download_persistent_state(
     id: &BlockIdExt,
     master_id: &BlockIdExt,
     overlay: &dyn FullNodeOverlayClient,
-    active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-    attempts: Option<usize>
+    active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
 ) -> Result<ShardStateStuff> {
     let mut result = None;
     for _ in 0..10 {
-        match download_persistent_state_iter(
-            id, master_id, overlay, active_peers, attempts.clone()
-        ).await {
+        match download_persistent_state_iter(id, master_id, overlay, active_peers).await {
             Err(e) => {
                 log::warn!("download_persistent_state_iter err: {}", e);
                 result = Some(Err(e));
-                futures_timer::Delay::new(std::time::Duration::from_millis(1000)).await;
                 continue;
             },
             Ok(res) => { 
@@ -53,8 +49,7 @@ async fn download_persistent_state_iter(
     id: &BlockIdExt,
     master_id: &BlockIdExt,
     overlay: &dyn FullNodeOverlayClient,
-    active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-    mut attempts: Option<usize>
+    active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
 ) -> Result<ShardStateStuff> {
 
     if id.seq_no == 0 {
@@ -63,25 +58,18 @@ async fn download_persistent_state_iter(
 
     // Check
     let peer = loop {
-        if let Some(remained) = attempts.as_mut() {
-            if *remained == 0 {
-                fail!("Can't find peer to load persistent state")
-            }
-            *remained -= 1;
-        }
         match overlay.check_persistent_state(id, master_id, active_peers).await {
             Err(e) => 
                 log::trace!("check_persistent_state {}: {}", id.shard(), e),
             Ok(None) => 
                 log::trace!("download_persistent_state {}: state not found!", id.shard()),
-            Ok(Some(p)) => 
-                break p
+            Ok(Some(peer)) => 
+                break peer,
         }
-        futures_timer::Delay::new(std::time::Duration::from_millis(100)).await;
     };
 
     // Download
-    log::info!("download_persistent_state: start: id: {}, master_id: {}", id, master_id);
+    log::trace!("download_persistent_state: start: id: {}, master_id: {}", id, master_id);
     let now = std::time::Instant::now();
 
     let mut offset = 0;
@@ -115,7 +103,7 @@ async fn download_persistent_state_iter(
                         let len = next_bytes.len();
                         parts.insert(offset, next_bytes);
                         //if (offset / max_size) % 10 == 0 {
-                            log::info!("download_persistent_state {}: got part offset: {}", id.shard(), offset);
+                            log::trace!("download_persistent_state {}: got part offset: {}", id.shard(), offset);
                         //}
                         if len < max_size {
                             total_size.store(offset + len, Ordering::Relaxed);
@@ -137,7 +125,11 @@ async fn download_persistent_state_iter(
                                 part_attempt, e
                             )
                         }
-                        futures_timer::Delay::new(std::time::Duration::from_millis(100)).await;
+                        futures_timer::Delay::new(
+                            std::time::Duration::from_millis(
+                                100_u64
+                            )
+                        ).await;
                     },
                 }
 
@@ -153,7 +145,7 @@ async fn download_persistent_state_iter(
     active_peers.remove(peer_drop.id());
     res.unwrap_or(Ok(()))?;
 
-    log::info!(
+    log::trace!(
         "download_persistent_state: DOWNLOADED {}ms, id: {}, master_id: {} ", 
         now.elapsed().as_millis(), id, master_id
     );

@@ -9,7 +9,7 @@ use crate::{
     types::awaiters_pool::AwaitersPool,
 };
 use adnl::{
-    common::{KeyId, KeyOption, serialize, tag_from_unboxed_type, TaggedByteSlice}, node::AdnlNode
+    common::{KeyId, KeyOption, serialize}, node::AdnlNode
 };
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
@@ -53,8 +53,6 @@ pub struct NodeNetwork {
     connectivity_check_config: ConnectivityCheckBroadcastConfig,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<FullNodeNetworkTelemetry>,
-    #[cfg(feature = "telemetry")]
-    tag_connectivity_check_broadcast: u32
 }
 
 struct ValidatorContext {
@@ -106,11 +104,6 @@ impl NodeNetwork {
             masterchain_zero_state_id.file_hash.as_slice(),
             Self::TAG_OVERLAY_KEY
         )?;
-        if let Some(extensions) = config.extensions() {
-            if extensions.disable_broadcast_retransmit {
-                overlay.set_broadcast_retransmit(false)
-            }
-        }
         let rldp = RldpNode::with_adnl_node(adnl.clone(), vec![overlay.clone()])?;
 
         let nodes = global_config.dht_nodes()?;
@@ -135,7 +128,7 @@ impl NodeNetwork {
 
         NodeNetwork::find_dht_nodes(dht.clone());
         let (config_handler, config_handler_context) = NodeConfigHandler::create(
-            config, tokio::runtime::Handle::current()
+            config, &tokio::runtime::Handle::current()
         )?;
 
      //   let validator_adnl_key = adnl.key_by_tag(Self::TAG_VALIDATOR_ADNL_KEY)?;
@@ -163,12 +156,7 @@ impl NodeNetwork {
             config_handler: config_handler,
             connectivity_check_config,
             #[cfg(feature = "telemetry")]
-            telemetry: Arc::new(
-                FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Client)
-            ),
-            #[cfg(feature = "telemetry")]
-            tag_connectivity_check_broadcast: 
-                tag_from_unboxed_type::<ConnectivityCheckBroadcast>()
+            telemetry: Arc::new(FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Client)),
         });
 
         NodeConfigHandler::start_sheduler(nn.config_handler.clone(), config_handler_context, vec![nn.clone()])?;
@@ -294,9 +282,8 @@ impl NodeNetwork {
             }
             let (ip, _) = DhtNode::find_address(dht, peer_key.id()).await?;
             overlay.add_public_peer(&ip, peer, overlay_id)?;
-            if neighbours.add_overlay_peer(peer_key.id().clone()) {
-                log::trace!("add_overlay_peers: add overlay peer {:?}, address: {}", peer, ip);
-            }
+            neighbours.add_overlay_peer(peer_key.id().clone())?;
+            log::trace!("add_overlay_peers: add overlay peer {:?}, address: {}", peer, ip);
         }
         Ok(())
     }
@@ -370,6 +357,10 @@ impl NodeNetwork {
         &self.masterchain_overlay_short_id
     }
 */
+
+    pub fn get_validator_status(&self) -> bool {
+        self.config_handler.get_validator_status()
+    }
 
     async fn update_overlay_peers(
         &self, 
@@ -507,7 +498,7 @@ impl NodeNetwork {
         NodeNetwork::start_update_peers(self.clone(), &client_overlay);
         NodeNetwork::process_overlay_peers(peers.clone(), self.dht.clone(), self.overlay.clone(), overlay_id.0.clone());
         let result = self.try_add_new_elem(&overlay_id.0, client_overlay, &self.overlays);
-        log::info!("Started Overlay {}", &overlay_id.0);
+
         Ok(result as Arc<dyn FullNodeOverlayClient>)
     }
 
@@ -711,11 +702,7 @@ impl NodeNetwork {
             };
             overlay.val().overlay().broadcast(
                 &self.masterchain_overlay_short_id, 
-                &TaggedByteSlice {
-                    object: &serialize(&broadcast.into_boxed())?, 
-                    #[cfg(feature = "telemetry")]
-                    tag: self.tag_connectivity_check_broadcast
-                },
+                &serialize(&broadcast.into_boxed())?, 
                 None
             ).await
         } else {
@@ -771,7 +758,6 @@ impl OverlayOperations for NodeNetwork {
     }
 
     async fn start(self: Arc<Self>) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        log::info!("start network: ip: {}, adnl_id: {}", self.adnl.ip_address(), self.adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?.id());
         AdnlNode::start(
             &self.adnl, 
             vec![self.dht.clone(), 

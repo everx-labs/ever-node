@@ -1,43 +1,31 @@
 use crate::{
     block::{BlockStuff, convert_block_id_ext_api2blk}, block_proof::BlockProofStuff, 
-    engine::Engine, engine_traits::{ChainRange, EngineOperations},
-    error::NodeError,
-    validator::validator_utils::{calc_subset_for_workchain, check_crypto_signatures},
+    engine_traits::EngineOperations, error::NodeError
 };
 
 use std::{sync::Arc, mem::drop};
 use tokio::task::JoinHandle;
 use ton_block::{
     BlockIdExt, BlockSignaturesPure, CryptoSignaturePair, CryptoSignature,
-    AccountIdPrefixFull, ValidatorSet, CatchainConfig, ConfigParams,
+    AccountIdPrefixFull, UnixTime32, ValidatorSet, CatchainConfig,
 };
 use ton_types::{Result, fail, error, UInt256};
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
 
-pub fn start_masterchain_client(
-    engine: Arc<dyn EngineOperations>, 
-    last_got_block_id: BlockIdExt
-) -> Result<JoinHandle<()>> {
+pub fn start_masterchain_client(engine: Arc<dyn EngineOperations>, last_got_block_id: BlockIdExt) -> Result<JoinHandle<()>> {
     let join_handle = tokio::spawn(async move {
-        engine.acquire_stop(Engine::MASK_SERVICE_MASTERCHAIN_CLIENT);
-        if let Err(e) = load_master_blocks_cycle(engine.clone(), last_got_block_id).await {
+        if let Err(e) = load_master_blocks_cycle(engine, last_got_block_id).await {
             log::error!("FATAL!!! Unexpected error in master blocks loading cycle: {:?}", e);
         }
-        engine.release_stop(Engine::MASK_SERVICE_MASTERCHAIN_CLIENT);
     });
     Ok(join_handle)
 }
 
-pub fn start_shards_client(
-    engine: Arc<dyn EngineOperations>, 
-    shards_mc_block_id: BlockIdExt
-) -> Result<JoinHandle<()>> {
+pub fn start_shards_client(engine: Arc<dyn EngineOperations>, shards_mc_block_id: BlockIdExt) -> Result<JoinHandle<()>> {
     let join_handle = tokio::spawn(async move {
-        engine.acquire_stop(Engine::MASK_SERVICE_SHARDCHAIN_CLIENT);
-        if let Err(e) = load_shard_blocks_cycle(engine.clone(), shards_mc_block_id).await {
+        if let Err(e) = load_shard_blocks_cycle(engine, shards_mc_block_id).await {
             log::error!("FATAL!!! Unexpected error in shards client: {:?}", e);
         }
-        engine.release_stop(Engine::MASK_SERVICE_SHARDCHAIN_CLIENT);
     });
     Ok(join_handle)
 }
@@ -48,9 +36,6 @@ async fn load_master_blocks_cycle(
 ) -> Result<()> {
     let mut attempt = 0;
     loop {
-        if engine.check_stop() {
-            break Ok(())
-        }
         last_got_block_id = match load_next_master_block(&engine, &last_got_block_id).await {
             Ok(id) => {
                 attempt = 0;
@@ -96,26 +81,16 @@ async fn load_next_master_block(
 
     let prev_state = engine.clone().wait_state(&prev_id, None, true).await?;
     proof.check_with_master_state(&prev_state)?;
-    let mut next_handle = loop {
-        if let Some(next_handle) = engine.load_block_handle(block.id())? {
-            if !next_handle.has_data() {
-                log::warn!("Unitialized handle detected for block {}", block.id())
-            } else {
-                break next_handle
-            }
+    let mut next_handle = if let Some(next_handle) = engine.load_block_handle(block.id())? {
+        if !next_handle.has_data() {
+            fail!("Unitialized handle detected for block {}", block.id())
         }
-        if let Some(next_handle) = engine.store_block(&block).await?.as_non_created() {
-            break next_handle
-        } else {
-            continue
-        }
+        next_handle
+    } else {
+        engine.store_block(&block).await?.handle
     };
     if !next_handle.has_proof() {
-        next_handle = engine.store_block_proof(block.id(), Some(next_handle), &proof).await?
-            .as_non_created()
-            .ok_or_else(
-                || error!("INTERNAL ERROR: bad result for store block {} proof", block.id())
-            )?;
+        next_handle = engine.store_block_proof(block.id(), Some(next_handle), &proof).await?;
     }
     engine.clone().apply_block(&next_handle, &block, next_handle.id().seq_no(), false).await?;
     Ok(block.id().clone())
@@ -135,16 +110,11 @@ async fn load_shard_blocks_cycle(
     let mut mc_handle = engine.load_block_handle(&shards_mc_block_id)?.ok_or_else(
         || error!("Cannot load handle for shard master block {}", shards_mc_block_id)
     )?;
-    let (_master, workchain_id) = engine.processed_workchain().await?;
     loop {
-        if engine.check_stop() {
-            break Ok(())
-        }
         log::trace!("load_shard_blocks_cycle: mc block: {}", mc_handle.id());
         let r = engine.wait_next_applied_mc_block(&mc_handle, None).await?;
         mc_handle = r.0;
         let mc_block = r.1;
-        let shard_ids = mc_block.shard_hashes()?.top_blocks(&[workchain_id])?;
 
         log::trace!("load_shard_blocks_cycle: waiting semaphore: {}", mc_block.id());
         let semaphore_permit = Arc::clone(&semaphore).acquire_owned().await?;
@@ -153,72 +123,27 @@ async fn load_shard_blocks_cycle(
 
         let engine = Arc::clone(&engine);
         tokio::spawn(async move {
-            if let Err(e) = load_shard_blocks(engine.clone(), semaphore_permit, &mc_block, shard_ids).await {
+            if let Err(e) = load_shard_blocks(engine, semaphore_permit, &mc_block).await {
                 log::error!("FATAL!!! Unexpected error in shard blocks processing for mc block {}: {:?}", mc_block.id(), e);
-            }
-            if engine.produce_chain_ranges_enabled() {
-                if let Err(err) = produce_chain_range(engine, &mc_block).await {
-                    log::error!("Unexpected error in chain range processing for mc block {}: {:?}", mc_block.id(), err);
-                }
             }
         });
     }
 }
 
-pub async fn produce_chain_range(
-    engine: Arc<dyn EngineOperations>,
-    mc_block: &BlockStuff
-) -> Result<()> {
-    let mut range = ChainRange {
-        master_block: mc_block.id().clone(),
-        shard_blocks: Vec::new(),
-    };
-    let (_master, workchain_id) = engine.processed_workchain().await?;
-
-    let prev_master = engine.load_block_prev1(mc_block.id())?;
-    let prev_master = engine.load_block_handle(&prev_master)?
-        .ok_or_else(|| NodeError::InvalidData(format!("Can not load block handle for {}", prev_master)))?;
-    let prev_master = engine.load_block(&prev_master).await?;
-    let prev_master_shards = prev_master.shards_blocks(workchain_id)?;
-
-    let mut blocks: Vec<BlockIdExt> = mc_block.shards_blocks(workchain_id)?.values().cloned().collect();
-    // for new rust let mut blocks: Vec<BlockIdExt> = mc_block.shards_blocks(workchain_id)?.into_values().collect();
-
-    while let Some(block_id) = blocks.pop() {
-        let handle = engine.load_block_handle(&block_id)?
-            .ok_or_else(|| NodeError::InvalidData(format!("Can not load block handle for {}", block_id)))?;
-
-        if prev_master_shards.get(handle.id().shard()) != Some(handle.id()) {
-            if handle.has_prev1() {
-                blocks.push(engine.load_block_prev1(&block_id)?);
-            }
-            if handle.has_prev2() {
-                blocks.push(engine.load_block_prev2(&block_id)?);
-            }
-            range.shard_blocks.push(block_id);
-        }
-    }
-
-    engine.process_chain_range_in_ext_db(&range).await?;
-
-    Ok(())
-}
-
 pub async fn load_shard_blocks(
     engine: Arc<dyn EngineOperations>,
     semaphore_permit: tokio::sync::OwnedSemaphorePermit,
-    mc_block: &BlockStuff,
-    shard_ids: Vec<BlockIdExt>,
+    mc_block: &BlockStuff
 ) -> Result<()> {
 
     let mut apply_tasks = Vec::new();
     let mc_seq_no = mc_block.id().seq_no();
-    for shard_block_id in shard_ids {
+    for (shard_ident, shard_block_id) in mc_block.shards_blocks()?.iter() {
         let msg = format!(
             "process mc block {}, shard block {} {}", 
-            mc_block.id(), shard_block_id.shard(), shard_block_id
+            mc_block.id(), shard_ident, shard_block_id
         );
-        if let Some(shard_block_handle) = engine.load_block_handle(&shard_block_id)? {
+        if let Some(shard_block_handle) = engine.load_block_handle(shard_block_id)? {
             if shard_block_handle.is_applied() {
                 continue;
             }
@@ -254,7 +179,7 @@ pub async fn load_shard_blocks(
         .unwrap_or(Ok(()))?;
 
     log::trace!("load_shard_blocks_cycle: processed mc block: {}", mc_block.id());
-    engine.save_shard_client_mc_block_id(mc_block.id())?;
+    engine.store_shards_client_mc_block_id(mc_block.id()).await?;
     drop(semaphore_permit);                                    	
     Ok(())
 
@@ -287,9 +212,7 @@ pub async fn process_block_broadcast(
     let (virt_block, _) = proof.virtualize_block()?;
     let block_info = virt_block.read_info()?;
     let prev_key_block_seqno = block_info.prev_key_block_seqno();
-    let last_applied_mc_block_id = engine.load_last_applied_mc_block_id()?.ok_or_else(
-        || error!("INTERNAL ERROR: no last applied MC block after sync")
-    )?;
+    let last_applied_mc_block_id = engine.load_last_applied_mc_block_id().await?;
     if prev_key_block_seqno > last_applied_mc_block_id.seq_no() {
         log::debug!(
             "Skipped block broadcast {} because it refers too new key block: {}, but last processed mc block is {})",
@@ -301,12 +224,10 @@ pub async fn process_block_broadcast(
     // get validator set from...
     let mut key_block_proof = None;
     let mut zerostate = None;
-    let config_params;
     let (validator_set, cc_config) = if prev_key_block_seqno == 0 {
         // ...zerostate
         let zs = engine.load_mc_zero_state().await?;
         let vs = zs.state().read_cur_validator_set_and_cc_conf()?;
-        config_params = zs.config_params()?.clone();
         zerostate = Some(zs);
         vs
     } else {
@@ -315,12 +236,11 @@ pub async fn process_block_broadcast(
         let handle = engine.find_block_by_seq_no(&mc_pfx, prev_key_block_seqno).await?;
         let proof = engine.load_block_proof(&handle, false).await?;
         let vs = proof.get_cur_validators_set()?;
-        config_params = engine.load_state(handle.id()).await?.config_params()?.clone();
         key_block_proof = Some(proof);
         vs
     };
 
-    validate_brodcast(broadcast, &config_params, &block_id, &validator_set, &cc_config)?;
+    validate_brodcast(broadcast, &block_id, &validator_set, &cc_config)?;
 
     // Build and save block and proof
     if is_master {
@@ -333,29 +253,20 @@ pub async fn process_block_broadcast(
         proof.check_proof_link()?;
     }
     let block = BlockStuff::deserialize_checked(block_id, broadcast.data.0.clone())?;
-    let mut handle = if let Some(handle) = engine.store_block(&block).await?.as_updated() {
-        handle
-    } else {
-        log::debug!(
-            "Skipped apply for block {} broadcast because block is already in processing",
-            block.id()
-        );
-        return Ok(())
-    };
-    #[cfg(feature = "telemetry")]
-    handle.set_got_by_broadcast(true);
+    let mut handle;
+    #[cfg(feature = "telemetry")] {
+        let r = engine.store_block(&block).await?;
+        handle = r.handle;
+        if r.first_time {
+            handle.set_got_by_broadcast(true);
+        }
+    }
+    #[cfg(not(feature = "telemetry"))] {
+        handle = engine.store_block(&block).await?.handle;
+    }
 
     if !handle.has_proof() {
-        let result = engine.store_block_proof(block.id(), Some(handle), &proof).await?;
-        handle = if let Some(handle) = result.as_updated() {
-            handle
-        } else {
-            log::debug!(
-                "Skipped apply for block {} broadcast because block is already in processing",
-                block.id()
-            );
-            return Ok(())
-        }
+        handle = engine.store_block_proof(block.id(), Some(handle), &proof).await?;
     }
 
     // Apply (only blocks that is not too new for us)
@@ -376,15 +287,13 @@ pub async fn process_block_broadcast(
             .ok_or_else(|| NodeError::InvalidData(format!(
                 "Block {} doesn't contain masterchain block extra", block.id(),
             )))?;
-        let shard_client_mc_block_id = engine.load_shard_client_mc_block_id()?.ok_or_else(
-            || error!("INTERNAL ERROR: No shard client MC block after sync")
-        )?;
-        if shard_client_mc_block_id.seq_no() + SHARD_BROADCAST_WINDOW >= master_ref.master.seq_no {
-            engine.clone().apply_block(&handle, &block, shard_client_mc_block_id.seq_no(), true).await?;
+        let shards_client_mc_block_id = engine.load_shards_client_mc_block_id().await?;
+        if shards_client_mc_block_id.seq_no() + SHARD_BROADCAST_WINDOW >= master_ref.master.seq_no {
+            engine.clone().apply_block(&handle, &block, shards_client_mc_block_id.seq_no(), true).await?;
         } else {
             log::debug!(
                 "Skipped pre-apply for block broadcast {} because it refers to master block {}, but shard client is on {}",
-                block.id(), master_ref.master.seq_no, shard_client_mc_block_id.seq_no()
+                block.id(), master_ref.master.seq_no, shards_client_mc_block_id.seq_no()
             )
         }
     }
@@ -393,22 +302,19 @@ pub async fn process_block_broadcast(
 
 fn validate_brodcast(
     broadcast: &BlockBroadcast,
-    config_params: &ConfigParams,
     block_id: &BlockIdExt,
     validator_set: &ValidatorSet,
     cc_config: &CatchainConfig,
 ) -> Result<()> {
 
     // build validator set
-    let (validators, validators_hash_short) = calc_subset_for_workchain(
-        validator_set,
-        config_params,
+    let (validators, validators_hash_short) = validator_set.calc_subset(
         &cc_config, 
         block_id.shard().shard_prefix_with_tag(), 
         block_id.shard().workchain_id(), 
         broadcast.catchain_seqno as u32,
-        0.into() // TODO: unix time is not realy used in algorithm, but exists in t-node,
-                 // maybe delete it from `calc_subset` parameters?
+        UnixTime32(0) // TODO: unix time is not realy used in algorithm, but exists in t-node,
+                      // maybe delete it from `calc_subset` parameters?
     )?;
 
     if validators_hash_short != broadcast.validator_set_hash as u32 {
@@ -437,10 +343,12 @@ fn validate_brodcast(
         &block_id.file_hash
     );
     let total_weight: u64 = validators.iter().map(|v| v.weight).sum();
-    let weight = check_crypto_signatures(&blk_pure_signatures, &validators, &checked_data)
-        .map_err(|err| NodeError::InvalidData(
-            format!("Bad signatures in broadcast with block {}: {}", block_id, err)
-        ))?;
+    let weight = blk_pure_signatures.check_signatures(validators, &checked_data)
+        .map_err(|err| { 
+            NodeError::InvalidData(
+                format!("Bad signatures in broadcast with block {}: {}", block_id, err)
+            )
+        })?;
 
     if weight * 3 <= total_weight * 2 {
         fail!(NodeError::InvalidData(format!(

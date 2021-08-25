@@ -1,4 +1,4 @@
-use crate::archives::{ARCHIVE_SIZE, KEY_ARCHIVE_SIZE};
+use crate::archives::archive_manager::KEY_ARCHIVE_SIZE;
 use std::{cmp::Ordering, ffi::OsString, path::{Path, PathBuf}};
 use ton_block::UnixTime32;
 
@@ -21,12 +21,18 @@ impl PackageId {
         Self { id, package_type }
     }
 
+    #[allow(dead_code)]
+    pub const fn empty(package_type: PackageType) -> Self {
+        Self::with_values(u32::max_value(), package_type)
+    }
+
     pub const fn for_block(mc_seq_no: u32) -> Self {
         Self::with_values(mc_seq_no, PackageType::Blocks)
     }
 
+    #[allow(dead_code)]
     pub const fn for_key_block(mc_seq_no: u32) -> Self {
-        Self::with_values(mc_seq_no, PackageType::KeyBlocks)
+        Self::with_values(mc_seq_no % KEY_ARCHIVE_SIZE as u32, PackageType::KeyBlocks)
     }
 
     pub const fn for_temp(ts: &UnixTime32) -> Self {
@@ -54,8 +60,8 @@ impl PackageId {
     pub fn path(&self) -> PathBuf {
         match self.package_type {
             PackageType::Temp => "files/packages/".into(),
-            PackageType::KeyBlocks => format!("archive/packages/key{id:03}/", id = self.id / KEY_ARCHIVE_SIZE).into(),
-            PackageType::Blocks => format!("archive/packages/arch{id:04}/", id = self.id / ARCHIVE_SIZE).into(),
+            PackageType::KeyBlocks => format!("archive/packages/key{id:03}/", id = self.id / 1_000_000).into(),
+            PackageType::Blocks => format!("archive/packages/arch{id:04}/", id = self.id / 100_000).into(),
         }
     }
 

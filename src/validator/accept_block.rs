@@ -4,15 +4,14 @@ use crate::{
     block_proof::BlockProofStuff,
     engine_traits::EngineOperations,
     full_node::apply_block::calc_shard_state,
-    types::top_block_descr::TopBlockDescrStuff,
-    validator::validator_utils::check_crypto_signatures,
+    types::top_block_descr::TopBlockDescrStuff
 };
 
 use std::{cmp::max, sync::Arc, ops::Deref};
 use ton_block::{
     Block, TopBlockDescr, BlockIdExt, MerkleProof, McShardRecord, CryptoSignaturePair,
     Deserializable, BlockSignatures, ValidatorSet, BlockProof, Serializable, BlockSignaturesPure,
-    ValidatorBaseInfo                                                                     
+    ValidatorBaseInfo
 };
 use ton_types::{error, Result, fail, UInt256, UsageTree, HashmapType};
 use ton_api::ton::ton_node::{blocksignature::BlockSignature, broadcast::BlockBroadcast};
@@ -68,8 +67,6 @@ pub async fn accept_block(
         None
     }; 
 
-    #[cfg(feature = "telemetry")]
-    let mut block_broadcast = block_opt.is_some();
     let block = match block_opt {
         Some(b) => b,
         None => {
@@ -79,22 +76,20 @@ pub async fn accept_block(
         }
     };
 
-    let mut handle = if let Some(handle) = handle_opt {
-        handle
+    let mut handle;
+    if let Some(h) = handle_opt {
+        handle = h;
     } else {
-        let result = engine.store_block(&block).await?;
-        #[cfg(feature = "telemetry")]
-        if block_broadcast {
-            block_broadcast = result.is_updated();
+        #[cfg(feature = "telemetry")] {
+            let r = engine.store_block(&block).await?;
+            handle = r.handle;
+            if r.first_time {
+                handle.set_got_by_broadcast(true);
+            }
         }
-        let handle = result.as_non_created().ok_or_else(
-            || error!("INTERNAL ERROR: accept for block {} mismatch")
-        )?;
-        #[cfg(feature = "telemetry")]
-        if block_broadcast {
-            handle.set_got_by_broadcast(true);
+        #[cfg(not(feature = "telemetry"))] {
+            handle = engine.store_block(&block).await?.handle
         }
-        handle
     };
 
     // TODO - if signatures is not set - `ValidatorManager::set_block_signatures` ??????
@@ -123,11 +118,7 @@ pub async fn accept_block(
     // handle_->set_unix_time(created_at_);
     // handle_->set_is_key_block(is_key_block_);
 
-    handle = engine.store_block_proof(&id, Some(handle), &proof).await?
-        .as_non_created()
-        .ok_or_else(
-            || error!("INTERNAL ERROR: accept for block {} proof mismatch", id)
-        )?;
+    handle = engine.store_block_proof(&id, Some(handle), &proof).await?;
 
     if id.shard().is_masterchain() {
         log::debug!(target: "validator", "Applying block {}", id);
@@ -351,8 +342,6 @@ pub fn create_new_proof(
             let _val_set = config.config(i_config)?;
         }
         let _catchain_config = config.config(28)?;
-        // MVP for workchains
-        let _workchains = config.workchains()?.export_vector()?;
     }
 
     // finish constructing Merkle proof from visited cells
@@ -389,8 +378,10 @@ pub fn create_new_proof(
         &id.root_hash,
         &id.file_hash
     );
-    let weight = check_crypto_signatures(&block_signatures.pure_signatures, validator_set.list(), &checked_data)
-        .map_err(|e| error!("Error while check signatures for block {}: {}", id, e))?;
+    let weight = block_signatures.pure_signatures.check_signatures(validator_set.list().clone(), &checked_data)
+        .map_err(|e| { 
+                error!("Error while check signatures for block {}: {}", id, e)
+        })?;
 
     block_signatures.pure_signatures.set_weight(weight);
 

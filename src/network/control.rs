@@ -1,32 +1,27 @@
 use crate::{
-    block::{convert_block_id_ext_api2blk, convert_block_id_ext_blk2api},
+    block::convert_block_id_ext_api2blk,
     collator_test_bundle::CollatorTestBundle,
     config::{KeyRing, NodeConfigHandler},
     engine_traits::EngineOperations,
     validator::validator_utils::validatordescr_to_catchain_node
 };
 use adnl::{
-    common::{deserialize, serialize, QueryResult, Subscriber, AdnlPeers},
+    common::{deserialize, QueryResult, Subscriber, AdnlPeers},
     server::{AdnlServer, AdnlServerConfig}
 };
-use std::{ops::Deref, sync::Arc, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
-use ton_api::{
-    ton::{
-        self, bytes, PublicKey, TLObject, accountaddress::AccountAddress, raw::fullaccountstate::FullAccountState,
-        engine::validator::{
-            keyhash::KeyHash, onestat::OneStat, signature::Signature, stats::Stats, Success
-        },
-        lite_server::configinfo::ConfigInfo,
-        rpc::engine::validator::{
-            AddAdnlId, AddValidatorAdnlAddress, AddValidatorPermanentKey, AddValidatorTempKey, 
-            ControlQuery, ExportPublicKey, GenerateKeyPair, Sign, GetBundle, GetFutureBundle
-        },
+use std::{ops::Deref, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use ton_api::ton::{
+    self, PublicKey, TLObject,
+    engine::validator::{
+        keyhash::KeyHash, onestat::OneStat, signature::Signature, stats::Stats, Success
     },
-    IntoBoxed,
+    rpc::engine::validator::{
+        AddAdnlId, AddValidatorAdnlAddress, AddValidatorPermanentKey, AddValidatorTempKey, 
+        ControlQuery, ExportPublicKey, GenerateKeyPair, Sign, GetBundle, GetFutureBundle,
+    }
 };
-use ton_types::{fail, error, Result, serialize_toc};
-use ton_block::{BlockIdExt, MsgAddressInt, Serializable};
-use ton_block_json::serialize_config_param;
+use ton_types::{fail, error, Result};
+use ton_block::BlockIdExt;
 
 pub struct ControlServer {
     adnl: AdnlServer
@@ -76,99 +71,12 @@ impl ControlQuerySubscriber {
         ret
     }
 
-    async fn get_config_params(&self, param_number: u32) -> Result<ton::lite_server::configinfo::ConfigInfo> {
-        if let Some(engine) = self.engine.as_ref() {
-            let mc_state = engine.load_last_applied_mc_state().await?;
-            let config_params = mc_state.config_params()?;
-            let config_param = serialize_config_param(&config_params, param_number)?;
-            let config_info = ConfigInfo {
-                mode: 0,
-                id: convert_block_id_ext_blk2api(mc_state.block_id()),
-                state_proof: bytes(vec!()),
-                config_proof: bytes(config_param.into_bytes())
-            };
-
-            Ok(config_info)
-        } else {
-            fail!("Engine was not set!");
-        }
-    }
-
-    async fn get_account_state(&self, address: AccountAddress, workchain: i32) -> Result<ton_api::ton::data::Data> {
-        if let Some(engine) = self.engine.as_ref() {
-            let addr = MsgAddressInt::from_str(&address.account_address)?;
-            let mc_state = engine.load_last_applied_mc_state().await?;
-            let mc_account = mc_state
-                .state()
-                .read_accounts()?
-                .account(&addr.address())?;
-
-            let shard_account = if let Some(shard_account) = mc_account {
-                shard_account
-            } else {
-                let mut shard_account_opt = None;
-
-                for id in mc_state.shard_hashes()?.top_blocks(&[workchain])? {
-                    if id.shard().contains_account(addr.address().clone())? {
-                        let shard_state = engine.clone().wait_state(&id, Some(1_000), false).await?;
-
-                        shard_account_opt = shard_state.state()
-                            .read_accounts()?
-                            .account(&addr.address())?;
-                        break;
-                    }
-                }
-                shard_account_opt.ok_or_else(|| error!("Cannot load account {} from mc_state", &address.account_address))?
-            };
-
-            let account = shard_account.read_account()?;
-
-            let code = account.get_code()
-                .ok_or_else(|| error!("Cannot load code from account {}", &address.account_address))?;
-
-            //let data = account.get_data()
-            //    .ok_or_else(|| error!("Cannot load data from account {}", &address.account_address))?;
-
-            let transaction_id = ton::internal::transactionid::TransactionId {
-                lt: shard_account.last_trans_lt() as i64,
-                hash: bytes(shard_account.last_trans_hash().as_slice().to_vec()),
-            };
-            let account_state = FullAccountState {
-                balance: 0,
-                code: bytes(serialize_toc(&code)?),
-                //data: bytes(serialize_toc(&data)?),
-                data: bytes(serialize_toc(&shard_account.account_cell())?),
-                last_transaction_id: transaction_id,
-                block_id: convert_block_id_ext_blk2api(mc_state.block_id()),
-                frozen_hash: bytes(account.status().write_to_bytes()?),
-                sync_utime: 0
-            };
-
-            let account = ton_api::ton::data::Data {
-                bytes: ton_api::secure::SecureBytes::new(serialize(&account_state.into_boxed())?)
-            };
-
-            Ok(account)
-        } else {
-            fail!("Engine was not set!");
-        }
-    }
-
     async fn get_stats(&self) -> Result<Stats> {
         if let Some(engine) = self.engine.as_ref() {
             let mut stats: ton::vector<ton::Bare, OneStat> = ton::vector::default();
 
-            let mc_block_id = if let Some(id) = engine.load_last_applied_mc_block_id()? {
-                id
-            } else {
-                stats.0.push(OneStat {
-                    key: "masterchainblock".to_string(),
-                    value: "not set".to_string()
-                });
-                return Ok(Stats {stats: stats})
-            };
-
             // masterchainblocktime
+            let mc_block_id = engine.load_last_applied_mc_block_id().await?;
             let mc_block_handle = engine.load_block_handle(&mc_block_id)?.ok_or_else(
                 || error!("Cannot load handle for block {}", &mc_block_id)
             )?;
@@ -218,67 +126,7 @@ impl ControlQuerySubscriber {
                 value: next.to_string()
             });
 
-            let value = match engine.load_last_applied_mc_state_or_zerostate().await {
-                Ok(mc_state) => mc_state.block_id().to_string(),
-                Err(err) => err.to_string()
-            };
-            let key = "last applied masterchain block id".to_string();
-            stats.0.push(OneStat { key, value });
-
-            let value = match engine.processed_workchain().await {
-                Ok((true, _workchain_id)) => "masterchain".to_string(),
-                Ok((false, workchain_id)) => format!("{}", workchain_id),
-                Err(err) => err.to_string()
-            };
-            let key = "processed workchain".to_string();
-            stats.0.push(OneStat { key, value });
-
-            // validation_stats
-            let validation_stats = engine.validation_status();
-
-            let mut stat = String::new();
-            let ago = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-
-            for item in validation_stats.iter() {
-                stat.push_str("shard: ");
-                stat.push_str(&item.key().to_string()); 
-                stat.push_str(" - ");
-                if item.val() == &0 {
-                    stat.push_str("never");
-                } else {
-                    stat.push_str(&(ago - item.val()).to_string());
-                    stat.push_str(" sec ago");
-                }
-                stat.push_str("\n");
-            }
-
-            stats.0.push(OneStat {
-                key: "validation_stats".to_string(), 
-                value: stat.to_string()
-            });
-
-            // collation_stats
-            let mut stat = String::new();
-            let collation_stats = engine.collation_status();
-            for item in collation_stats.iter() {
-                stat.push_str("shard: ");
-                stat.push_str(&item.key().to_string()); 
-                stat.push_str(" - ");
-                if item.val() == &0 {
-                    stat.push_str("never");
-                } else {
-                    stat.push_str(&(ago - item.val()).to_string());
-                    stat.push_str(" sec ago");
-                }
-                stat.push_str("\n");
-            }
-
-            stats.0.push(OneStat {
-                key: "collation_stats".to_string(), 
-                value: stat.to_string()
-            });
-
-            Ok(Stats {stats})
+            Ok(Stats {stats: stats})
         } else {
             fail!("Engine was not set!");
         }
@@ -336,16 +184,6 @@ impl ControlQuerySubscriber {
             fail!("`engine is not set`")
         }
     }
-
-    fn set_states_gc_interval(&self, interval_ms: u32) -> Result<Success> {
-        if let Some(engine) = self.engine.as_ref() {
-            engine.adjust_states_gc_interval(interval_ms);
-            self.config.store_states_gc_interval(interval_ms);
-            Ok(Success::Engine_Validator_Success)
-        } else {
-            fail!("`engine is not set`")
-        }
-    }
 }
 
 #[async_trait::async_trait]
@@ -358,20 +196,20 @@ impl Subscriber for ControlQuerySubscriber {
         };
         log::info!("query (control server): {:?}", query);
         let query = match query.downcast::<GenerateKeyPair>() {
-            Ok(_) => return QueryResult::consume(self.process_generate_keypair().await?, None),
+            Ok(_) => return QueryResult::consume(
+                self.process_generate_keypair().await?
+            ),
             Err(query) => query
         };
         let query = match query.downcast::<ExportPublicKey>() {
             Ok(query) => return QueryResult::consume_boxed(
-                self.export_public_key(&query.key_hash.0)?,
-                None
+                self.export_public_key(&query.key_hash.0)?
             ),
             Err(query) => query
         };
         let query = match query.downcast::<Sign>() {
             Ok(query) => return QueryResult::consume(
-                self.process_sign_data(&query.key_hash.0, &query.data)?,
-                None
+                self.process_sign_data(&query.key_hash.0, &query.data)?
             ),
             Err(query) => query
         };
@@ -379,8 +217,7 @@ impl Subscriber for ControlQuerySubscriber {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_validator_permanent_key(
                     &query.key_hash.0, query.election_date, query.ttl
-                ).await?,
-                None
+                ).await?
             ),
             Err(query) => query
         };
@@ -388,8 +225,7 @@ impl Subscriber for ControlQuerySubscriber {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_validator_temp_key(
                     &query.permanent_key_hash.0, &query.key_hash.0, query.ttl
-                )?,
-                None
+                )?
             ),
             Err(query) => query
         };
@@ -397,22 +233,20 @@ impl Subscriber for ControlQuerySubscriber {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_validator_adnl_address(
                     &query.permanent_key_hash.0, &query.key_hash.0, query.ttl
-                ).await?,
-                None
+                ).await?
             ),
             Err(query) => query
         };
         let query = match query.downcast::<AddAdnlId>() {
             Ok(query) => return QueryResult::consume_boxed(
-                self.add_adnl_address(&query.key_hash.0, query.category)?,
-                None
+                self.add_adnl_address(&query.key_hash.0, query.category)?
             ),
             Err(query) => query
         };
         let query = match query.downcast::<GetBundle>() {
             Ok(query) => {
                 let block_id = convert_block_id_ext_api2blk(&query.block_id)?;
-                return QueryResult::consume_boxed(self.prepare_bundle(block_id).await?, None)
+                return QueryResult::consume_boxed(self.prepare_bundle(block_id).await?)
             },
             Err(query) => query
         };
@@ -422,8 +256,7 @@ impl Subscriber for ControlQuerySubscriber {
                     |id| convert_block_id_ext_api2blk(&id).ok()
                 ).collect();
                 return QueryResult::consume_boxed(
-                    self.prepare_future_bundle(prev_block_ids).await?,
-                    None
+                    self.prepare_future_bundle(prev_block_ids).await?
                 )
             },
             Err(query) => query
@@ -431,43 +264,17 @@ impl Subscriber for ControlQuerySubscriber {
         let query = match query.downcast::<ton::rpc::lite_server::SendMessage>() {
             Ok(query) => {
                 let message_data = query.body.0;
-                return QueryResult::consume_boxed(
-                    self.redirect_external_message(&message_data).await?,
-                    None
-                )
+                return QueryResult::consume_boxed(self.redirect_external_message(&message_data).await?)
             }
-            Err(query) => query
-        };
-        let query = match query.downcast::<ton::rpc::raw::GetAccount>() {
-            Ok(account) => {
-                let answer = self.get_account_state(account.account_address, account.workchain).await?;
-                return QueryResult::consume_boxed(answer.into_boxed(), None)
-            },
-            Err(query) => query
-        };
-        let query = match query.downcast::<ton::rpc::lite_server::GetConfigParams>() {
-            Ok(query) => {
-                let param_number = query.param_list.iter().next().ok_or_else(|| error!("Invalid param_number"))?;
-                let answer = self.get_config_params(*param_number as u32).await?;
-
-                return QueryResult::consume_boxed(answer.into_boxed(), None)
-            },
             Err(query) => query
         };
         let query = match query.downcast::<ton::rpc::engine::validator::GetStats>() {
             Ok(_) => {
-                let answer = self.get_stats().await?;
-                return QueryResult::consume_boxed(answer.into_boxed(), None)
-            },
-            Err(query) => query
-        };
-        let query = match query.downcast::<ton::rpc::engine::validator::SetStatesGcInterval>() {
-            Ok(query) => {
                 return QueryResult::consume_boxed(
-                    self.set_states_gc_interval(query.interval_ms as u32)?,
-                    None
-                )
-            }
+                    ton_api::ton::engine::validator::Stats::Engine_Validator_Stats(
+                        Box::new(self.get_stats().await?)
+                ))
+            },
             Err(query) => query
         };
         log::warn!("Unsupported ControlQuery (control server): {:?}", query);

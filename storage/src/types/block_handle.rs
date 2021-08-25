@@ -5,23 +5,21 @@ use ton_types::{fail, Result};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const FLAG_DATA: u32                 = 0x00000001;
-const FLAG_PROOF: u32                = 0x00000002;
-const FLAG_PROOF_LINK: u32           = 0x00000004;
+const FLAG_DATA: u32                 = 1;
+const FLAG_PROOF: u32                = 1 << 1;
+const FLAG_PROOF_LINK: u32           = 1 << 2;
 //const FLAG_EXT_DB: u32               = 1 << 3;
-const FLAG_STATE: u32                = 0x00000010;
-const FLAG_PERSISTENT_STATE: u32     = 0x00000020;
-const FLAG_NEXT_1: u32               = 0x00000040;
-const FLAG_NEXT_2: u32               = 0x00000080;
-const FLAG_PREV_1: u32               = 0x00000100;
-const FLAG_PREV_2: u32               = 0x00000200;
-const FLAG_APPLIED: u32              = 0x00000400;
-pub(crate) const FLAG_KEY_BLOCK: u32 = 0x00000800;
-const FLAG_MOVED_TO_ARCHIVE: u32     = 0x00002000;
-const FLAG_INDEXED: u32              = 0x00004000;
-
-// not serializing flags
-const FLAG_ARCHIVING: u32            = 0x00010000;
+const FLAG_STATE: u32                = 1 << 4;
+const FLAG_PERSISTENT_STATE: u32     = 1 << 5;
+const FLAG_NEXT_1: u32               = 1 << 6;
+const FLAG_NEXT_2: u32               = 1 << 7;
+const FLAG_PREV_1: u32               = 1 << 8;
+const FLAG_PREV_2: u32               = 1 << 9;
+const FLAG_APPLIED: u32              = 1 << 10;
+pub(crate) const FLAG_KEY_BLOCK: u32 = 1 << 11;
+const FLAG_MOVED_TO_ARCHIVE: u32     = 1 << 13;
+const FLAG_INDEXED: u32              = 1 << 14;
+const FLAG_ARCHIVING: u32            = 1 << 16;
 
 /// Meta information related to block
 #[derive(Debug)]

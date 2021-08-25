@@ -12,4 +12,3 @@ impl DbKey for BlockIdExt {
         self.root_hash().as_slice()
     }
 }
-
