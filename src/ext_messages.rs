@@ -1,7 +1,4 @@
-use std::{
-    io::Cursor,
-    sync::{Arc, atomic::{AtomicU64, Ordering}}
-};
+use std::{io::Cursor, sync::{Arc, atomic::{AtomicU64, Ordering}}};
 use ton_block::{Deserializable, ShardIdent, Message, AccountIdPrefixFull};
 use ton_types::{Result, types::UInt256, deserialize_tree_of_cells, fail};
 
@@ -10,6 +7,8 @@ const MESSAGE_LIFETIME: u32 = 600; // seconds
 const MESSAGE_MAX_GENERATIONS: u8 = 2;
 const MAX_EXTERNAL_MESSAGE_DEPTH: u16 = 512;
 const MAX_EXTERNAL_MESSAGE_SIZE: usize = 65535;
+
+pub const EXT_MESSAGES_TRACE_TARGET: &str = "ext_messages";
 
 struct MessageKeeper {
     message: Arc<Message>,
@@ -149,31 +148,60 @@ impl MessagesPool {
 
     pub fn get_messages(&self, shard: &ShardIdent, now: u32) -> Result<Vec<(Arc<Message>, UInt256)>> {
         let mut result = vec!();
+        let mut ids = String::new();
         for guard in self.messages.iter() {
             if let Some(dst) = guard.val().message().dst_ref() {
                 if let Ok(prefix) = AccountIdPrefixFull::prefix(dst) {
                     if shard.contains_full_prefix(&prefix) {
                         if guard.val().expired(now) {
+                            log::debug!(
+                                target: EXT_MESSAGES_TRACE_TARGET,
+                                "get_messages: removing external message {:x} because it is expired",
+                                guard.key(),
+                            );
                             self.messages.remove(guard.key());
                         } else if guard.val().check_active(now) {
                             result.push((guard.val().clone_message(), guard.key().clone()));
+                            ids.push_str(&format!("{:x} ", guard.key()));
                         }
                     }
                 }
             }
         }
+
+        log::debug!(
+            target: EXT_MESSAGES_TRACE_TARGET,
+            "get_messages: shard {}, messages: {}",
+            shard, ids
+        );
+
         Ok(result)
     }
 
     pub fn complete_messages(&self, to_delay: Vec<UInt256>, to_delete: Vec<UInt256>, now: u32) -> Result<()> {
         for id in to_delete.iter() {
+            log::debug!(
+                target: EXT_MESSAGES_TRACE_TARGET,
+                "complete_messages: removing external message {:x} while enumerating to_delete list",
+                id,
+            );
             self.messages.remove(id);
         }
         for id in to_delay.iter() {
             if let Some(guard) = self.messages.get(id) {
                 if guard.val().can_postpone() {
+                    log::debug!(
+                        target: EXT_MESSAGES_TRACE_TARGET,
+                        "complete_messages: postponed external message {:x} while enumerating to_delay list",
+                        id,
+                    );
                     guard.val().postpone(now);
                 } else {
+                    log::debug!(
+                        target: EXT_MESSAGES_TRACE_TARGET,
+                        "complete_messages: removing external message {:x} because can't postpone",
+                        id,
+                    );
                     self.messages.remove(id);
                 }
             }

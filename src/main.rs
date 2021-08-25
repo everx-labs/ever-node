@@ -36,7 +36,9 @@ mod jaeger {
 mod external_db;
 mod ext_messages;
 
-use crate::{config::TonNodeConfig, engine_traits::ExternalDb, engine::STATSD, jaeger::init_jaeger};
+use crate::{
+    config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, STATSD}, jaeger::init_jaeger
+};
 use clap;
 
 #[cfg(feature = "external_db")]
@@ -82,11 +84,11 @@ fn init_logger(log_config_path: Option<String>) {
 fn log_version() {
     log::info!(
         "Execute {:?}\nCOMMIT_ID: {:?}\nBUILD_DATE: {:?}\nCOMMIT_DATE: {:?}\nGIT_BRANCH: {:?}\n", // RUST_VERSION:{}\n
-        std::option_env!("CARGO_PKG_VERSION"),
-        std::option_env!("BUILD_GIT_COMMIT"),
-        std::option_env!("BUILD_TIME"),
-        std::option_env!("BUILD_GIT_DATE"),
-        std::option_env!("BUILD_GIT_BRANCH"),
+        std::option_env!("CARGO_PKG_VERSION").unwrap_or("Not set"),
+        std::option_env!("BUILD_GIT_COMMIT").unwrap_or("Not set"),
+        std::option_env!("BUILD_TIME").unwrap_or("Not set"),
+        std::option_env!("BUILD_GIT_DATE").unwrap_or("Not set"),
+        std::option_env!("BUILD_GIT_BRANCH").unwrap_or("Not set"),
         //std::env!("BUILD_RUST_VERSION") // TODO
     );
 }
@@ -131,7 +133,8 @@ fn print_build_info() -> String {
 fn start_external_db(config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>> {
     Ok(vec!(
         external_db::create_external_db(
-            config.external_db_config().ok_or_else(|| error!("Can't load external database config!"))?
+            config.external_db_config().ok_or_else(|| error!("Can't load external database config!"))?,
+            config.front_workchain_ids()
         )?
     ))
 }
@@ -141,10 +144,20 @@ fn start_external_db(_config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>
     Ok(vec!())
 }
 
-async fn start_engine(config: TonNodeConfig, zerostate_path: Option<&str>, initial_sync_disabled: bool) -> Result<()> {
+async fn start_engine(
+    config: TonNodeConfig, 
+    zerostate_path: Option<&str>, 
+    validator_runtime: tokio::runtime::Handle, 
+    initial_sync_disabled: bool
+) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
     let external_db = start_external_db(&config)?;
-    crate::engine::run(config, zerostate_path, external_db, initial_sync_disabled).await?;
-    Ok(())
+    crate::engine::run(
+        config, 
+        zerostate_path, 
+        external_db, 
+        validator_runtime, 
+        initial_sync_disabled
+    ).await
 }
 
 const CONFIG_NAME: &str = "config.json";
@@ -156,22 +169,23 @@ fn main() {
     let app = clap::App::new("TON node")
         .arg(clap::Arg::with_name("zerostate")
             .short("z")
-            .long("--zerostate")
+            .long("zerostate")
             .value_name("zerostate"))
         .arg(clap::Arg::with_name("config")
             .short("c")
-            .long("--configs")
+            .long("configs")
             .value_name("config")
             .default_value("./"))
         .arg(clap::Arg::with_name("console_key")
             .short("k")
-            .long("--ckey")
+            .long("ckey")
             .value_name("console_key")
             .help("use console key in json format"))
         .arg(clap::Arg::with_name("initial_sync_disabled")
             .short("i")
-            .long("--initial-sync-disabled"))
-            .help("use this flag to sync from zero_state");
+            .long("initial-sync-disabled")
+            .value_name("initial sync disable flag")
+            .help("use this flag to sync from zero_state"));
 
     let matches = app.get_matches();
 
@@ -213,13 +227,27 @@ fn main() {
         .enable_all()
         .thread_stack_size(8 * 1024 * 1024)
         .build()
-        .expect("Can't create tokio runtime");
+        .expect("Can't create Engine tokio runtime");
+    let validator_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(8 * 1024 * 1024)
+        .build()
+        .expect("Can't create Validator tokio runtime");
 
     init_jaeger();
     
     runtime.block_on(async move {
-        if let Err(e) = start_engine(config, zerostate_path, initial_sync_disabled).await {
-            log::error!("Can't start node's Engine: {:?}", e);
+        match start_engine(
+            config, 
+            zerostate_path, 
+            validator_runtime.handle().clone(), 
+            initial_sync_disabled
+        ).await {
+            Err(e) => log::error!("Can't start node's Engine: {:?}", e),
+            Ok((engine, join_handle)) => {
+                join_handle.await.ok();
+                engine.stop().await
+            }
         }
     });
 }
