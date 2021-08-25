@@ -28,7 +28,7 @@ pub async fn apply_block(
     };
     if !pre_apply {
         set_next_prev_ids(&handle, &prev_ids, engine.deref())?;
-        engine.process_block_in_ext_db(handle, &block, None, &shard_state).await?;
+        engine.process_block_in_ext_db(handle, &block, None, &shard_state, mc_seq_no).await?;
     }
     Ok(())
 }

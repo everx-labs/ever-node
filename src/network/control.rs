@@ -10,18 +10,21 @@ use adnl::{
     server::{AdnlServer, AdnlServerConfig}
 };
 use std::{ops::Deref, sync::Arc, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
-use ton_api::ton::{
-    self, bytes, PublicKey, TLObject, accountaddress::AccountAddress, raw::fullaccountstate::FullAccountState,
-    engine::validator::{
-        keyhash::KeyHash, onestat::OneStat, signature::Signature, stats::Stats, Success
+use ton_api::{
+    ton::{
+        self, bytes, PublicKey, TLObject, accountaddress::AccountAddress, raw::fullaccountstate::FullAccountState,
+        engine::validator::{
+            keyhash::KeyHash, onestat::OneStat, signature::Signature, stats::Stats, Success
+        },
+        lite_server::configinfo::ConfigInfo,
+        rpc::engine::validator::{
+            AddAdnlId, AddValidatorAdnlAddress, AddValidatorPermanentKey, AddValidatorTempKey, 
+            ControlQuery, ExportPublicKey, GenerateKeyPair, Sign, GetBundle, GetFutureBundle
+        },
     },
-    lite_server::configinfo::ConfigInfo,
-    rpc::engine::validator::{
-        AddAdnlId, AddValidatorAdnlAddress, AddValidatorPermanentKey, AddValidatorTempKey, 
-        ControlQuery, ExportPublicKey, GenerateKeyPair, Sign, GetBundle, GetFutureBundle
-    },
+    IntoBoxed,
 };
-use ton_types::{fail, error, serialize_tree_of_cells, Result};
+use ton_types::{fail, error, Result, serialize_toc};
 use ton_block::{BlockIdExt, MsgAddressInt, Serializable};
 use ton_block_json::serialize_config_param;
 
@@ -100,44 +103,31 @@ impl ControlQuerySubscriber {
                 .read_accounts()?
                 .account(&addr.address())?;
 
-            let shard_account = if let Some(account) = mc_account {
-                account
+            let shard_account = if let Some(shard_account) = mc_account {
+                shard_account
             } else {
-                let mut raw_account = None;
+                let mut shard_account_opt = None;
 
                 for id in mc_state.shard_hashes()?.top_blocks(&[workchain])? {
-                    if !id.shard().contains_account(addr.address().clone())? {
-                        continue;
-                    }
-                    let shard_state = engine.clone().wait_state(&id, Some(1_000), false).await?;
+                    if id.shard().contains_account(addr.address().clone())? {
+                        let shard_state = engine.clone().wait_state(&id, Some(1_000), false).await?;
 
-                    raw_account = shard_state.state()
-                        .read_accounts()?
-                        .account(&addr.address())?;
-                    break;
+                        shard_account_opt = shard_state.state()
+                            .read_accounts()?
+                            .account(&addr.address())?;
+                        break;
+                    }
                 }
-                raw_account.ok_or_else(|| error!("Cannot load account {} from mc_state", &address.account_address))?
+                shard_account_opt.ok_or_else(|| error!("Cannot load account {} from mc_state", &address.account_address))?
             };
-                //.ok_or_else(|| error!("Cannot load account {} from mc_state", &address.account_address))?;
 
             let account = shard_account.read_account()?;
-/*
-            for id in mc_state.shard_hashes()?.top_blocks(&[0])? {
-                id.shard().contains_account(acc_addr)
-            }*/
 
             let code = account.get_code()
                 .ok_or_else(|| error!("Cannot load code from account {}", &address.account_address))?;
-            let mut raw_code = vec!();
-            serialize_tree_of_cells(&code, &mut raw_code)?;
 
-            let data = account.get_data()
-                .ok_or_else(|| error!("Cannot load data from account {}", &address.account_address))?;
-            let mut raw_data = vec!();
-            serialize_tree_of_cells(&data, &mut raw_data)?;
-
-            //let frozen_hash = account.frozen_hash().unwrap_or(&UInt256::default());
-            //let frozen_hash = frozen_hash.as_slice().to_vec();
+            //let data = account.get_data()
+            //    .ok_or_else(|| error!("Cannot load data from account {}", &address.account_address))?;
 
             let transaction_id = ton::internal::transactionid::TransactionId {
                 lt: shard_account.last_trans_lt() as i64,
@@ -145,20 +135,17 @@ impl ControlQuerySubscriber {
             };
             let account_state = FullAccountState {
                 balance: 0,
-                code: bytes(raw_code),
-                //data: bytes(raw_data),    // actual data
-                data: bytes(account.write_to_bytes()?),   // fix for elections
+                code: bytes(serialize_toc(&code)?),
+                //data: bytes(serialize_toc(&data)?),
+                data: bytes(serialize_toc(&shard_account.account_cell())?),
                 last_transaction_id: transaction_id,
                 block_id: convert_block_id_ext_blk2api(mc_state.block_id()),
-                //frozen_hash: bytes(vec!()),
                 frozen_hash: bytes(account.status().write_to_bytes()?),
                 sync_utime: 0
             };
-            let raw_account_state = ton_api::ton::raw::FullAccountState::Raw_FullAccountState(
-                Box::new(account_state)
-            );
+
             let account = ton_api::ton::data::Data {
-                bytes: ton_api::secure::SecureBytes::new(serialize(&raw_account_state)?)
+                bytes: ton_api::secure::SecureBytes::new(serialize(&account_state.into_boxed())?)
             };
 
             Ok(account)
@@ -453,44 +440,34 @@ impl Subscriber for ControlQuerySubscriber {
         };
         let query = match query.downcast::<ton::rpc::raw::GetAccount>() {
             Ok(account) => {
-                return QueryResult::consume_boxed(
-                    ton_api::ton::Data::Data(
-                        Box::new(self.get_account_state(account.account_address, account.workchain).await?)
-                    ),
-                    None
-                )
+                let answer = self.get_account_state(account.account_address, account.workchain).await?;
+                return QueryResult::consume_boxed(answer.into_boxed(), None)
             },
             Err(query) => query
         };
         let query = match query.downcast::<ton::rpc::lite_server::GetConfigParams>() {
             Ok(query) => {
                 let param_number = query.param_list.iter().next().ok_or_else(|| error!("Invalid param_number"))?;
+                let answer = self.get_config_params(*param_number as u32).await?;
 
-                return QueryResult::consume_boxed(
-                    ton::lite_server::ConfigInfo::LiteServer_ConfigInfo(
-                        Box::new(self.get_config_params(*param_number as u32).await?)
-                    ), 
-                    None
-                )
+                return QueryResult::consume_boxed(answer.into_boxed(), None)
             },
             Err(query) => query
         };
         let query = match query.downcast::<ton::rpc::engine::validator::GetStats>() {
             Ok(_) => {
-                return QueryResult::consume_boxed(
-                    ton_api::ton::engine::validator::Stats::Engine_Validator_Stats(
-                        Box::new(self.get_stats().await?)
-                    ),
-                    None
-                )
+                let answer = self.get_stats().await?;
+                return QueryResult::consume_boxed(answer.into_boxed(), None)
             },
             Err(query) => query
         };
         let query = match query.downcast::<ton::rpc::engine::validator::SetStatesGcInterval>() {
-            Ok(query) => return QueryResult::consume_boxed(
-                self.set_states_gc_interval(query.interval_ms as u32)?,
-                None
-            ),
+            Ok(query) => {
+                return QueryResult::consume_boxed(
+                    self.set_states_gc_interval(query.interval_ms as u32)?,
+                    None
+                )
+            }
             Err(query) => query
         };
         log::warn!("Unsupported ControlQuery (control server): {:?}", query);

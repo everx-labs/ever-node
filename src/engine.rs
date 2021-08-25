@@ -289,6 +289,7 @@ impl Downloader for ZeroStateDownloader {
 impl Engine {
 
     // Masks for services
+    #[cfg(feature = "external_db")]
     pub const MASK_SERVICE_KAFKA_CONSUMER: u32                 = 0x0001;
     pub const MASK_SERVICE_MASTERCHAIN_BROADCAST_LISTENER: u32 = 0x0002;
     pub const MASK_SERVICE_MASTERCHAIN_CLIENT: u32             = 0x0004;
@@ -1509,7 +1510,8 @@ async fn run_control_server(engine: Arc<Engine>, config: AdnlServerConfig) -> Re
 pub async fn run(
     node_config: TonNodeConfig, 
     zerostate_path: Option<&str>, 
-    ext_db: Vec<Arc<dyn ExternalDb>>, 
+    ext_db: Vec<Arc<dyn ExternalDb>>,
+    validator_runtime: tokio::runtime::Handle, 
     initial_sync_disabled : bool
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
 
@@ -1567,7 +1569,10 @@ pub async fn run(
     let _ = Engine::start_persistent_states_keeper(engine.clone(), pss_keeper_block)?;
 
     // Start validator manager, which will start validator sessions when necessary
-    start_validator_manager(Arc::clone(&engine) as Arc<dyn EngineOperations>);
+    start_validator_manager(
+        Arc::clone(&engine) as Arc<dyn EngineOperations>,
+        validator_runtime
+    );
 
     // Sync by archives
     if !engine.check_sync().await? {

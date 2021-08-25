@@ -251,7 +251,9 @@ pub trait EngineOperations : Sync + Send {
         handle: &Arc<BlockHandle>,
         block: &BlockStuff,
         proof: Option<&BlockProofStuff>,
-        state: &ShardStateStuff)
+        state: &ShardStateStuff,
+        mc_seq_no: u32,
+    )
     -> Result<()> {
         unimplemented!()
     }
@@ -594,7 +596,8 @@ pub trait ExternalDb : Sync + Send {
         &self,
         block: &BlockStuff,
         proof: Option<&BlockProofStuff>,
-        state: &ShardStateStuff
+        state: &ShardStateStuff,
+        mc_seq_no: u32,
     ) -> Result<()>;
     async fn process_full_state(&self, state: &ShardStateStuff) -> Result<()>;
     fn process_chain_range_enabled(&self) -> bool;

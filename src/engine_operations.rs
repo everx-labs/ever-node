@@ -502,7 +502,9 @@ impl EngineOperations for Engine {
         handle: &Arc<BlockHandle>,
         block: &BlockStuff,
         proof: Option<&BlockProofStuff>,
-        state: &ShardStateStuff)
+        state: &ShardStateStuff,
+        mc_seq_no: u32,
+    )
     -> Result<()> {
         if self.ext_db().len() > 0 {
             if proof.is_some() && !handle.id().shard().is_masterchain() {
@@ -511,11 +513,11 @@ impl EngineOperations for Engine {
             if proof.is_none() && handle.id().shard().is_masterchain() {
                 let proof = self.load_block_proof(handle, false).await?;
                 for db in self.ext_db() {
-                    db.process_block(block, Some(&proof), state).await?;
+                    db.process_block(block, Some(&proof), state, mc_seq_no).await?;
                 }
             } else {
                 for db in self.ext_db() {
-                    db.process_block(block, proof, state).await?;
+                    db.process_block(block, proof, state, mc_seq_no).await?;
                 }
             }
         }

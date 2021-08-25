@@ -827,9 +827,12 @@ impl ValidatorManagerImpl {
 }
 
 /// main entry point to validation process
-pub fn start_validator_manager(engine: Arc<dyn EngineOperations>) {
+pub fn start_validator_manager(
+    engine: Arc<dyn EngineOperations>,
+    runtime: tokio::runtime::Handle
+) {
     const CHECK_VALIDATOR_TIMEOUT: u64 = 60;    //secs
-    tokio::spawn(async move {
+    runtime.clone().spawn(async move {
         engine.acquire_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
         while !engine.get_validator_status() {
             if engine.check_stop() {
@@ -840,11 +843,12 @@ pub fn start_validator_manager(engine: Arc<dyn EngineOperations>) {
             tokio::time::sleep(Duration::from_secs(CHECK_VALIDATOR_TIMEOUT)).await;
         }
         log::info!("starting validator manager...");
-        if let Err(e) = ValidatorManagerImpl::new(
-            engine.clone(), 
-            tokio::runtime::Handle::current()
-        ).invoke().await {
-            log::error!(target: "validator", "FATAL!!! Unexpected error in validator manager: {:?}", e);
+        if let Err(e) = ValidatorManagerImpl::new(engine.clone(), runtime).invoke().await {
+            log::error!(
+                target: "validator", 
+                "FATAL!!! Unexpected error in validator manager: {:?}",
+                e
+            );
         }
         engine.release_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
     });
