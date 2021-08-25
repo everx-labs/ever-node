@@ -147,10 +147,17 @@ fn start_external_db(_config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>
 async fn start_engine(
     config: TonNodeConfig, 
     zerostate_path: Option<&str>, 
+    validator_runtime: tokio::runtime::Handle, 
     initial_sync_disabled: bool
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
     let external_db = start_external_db(&config)?;
-    crate::engine::run(config, zerostate_path, external_db, initial_sync_disabled).await
+    crate::engine::run(
+        config, 
+        zerostate_path, 
+        external_db, 
+        validator_runtime, 
+        initial_sync_disabled
+    ).await
 }
 
 const CONFIG_NAME: &str = "config.json";
@@ -220,12 +227,22 @@ fn main() {
         .enable_all()
         .thread_stack_size(8 * 1024 * 1024)
         .build()
-        .expect("Can't create tokio runtime");
+        .expect("Can't create Engine tokio runtime");
+    let validator_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(8 * 1024 * 1024)
+        .build()
+        .expect("Can't create Validator tokio runtime");
 
     init_jaeger();
     
     runtime.block_on(async move {
-        match start_engine(config, zerostate_path, initial_sync_disabled).await {
+        match start_engine(
+            config, 
+            zerostate_path, 
+            validator_runtime.handle().clone(), 
+            initial_sync_disabled
+        ).await {
             Err(e) => log::error!("Can't start node's Engine: {:?}", e),
             Ok((engine, join_handle)) => {
                 join_handle.await.ok();
