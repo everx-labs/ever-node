@@ -1,6 +1,7 @@
 use crate::{
-    block::{construct_and_check_prev_stuff},
+    block::construct_and_check_prev_stuff,
     shard_state::ShardStateStuff,
+    validator::validator_utils::{calc_subset_for_workchain, check_crypto_signatures},
 };
 
 use std::{
@@ -183,6 +184,13 @@ impl TopBlockDescrStuff {
         let block_virt_root = merkle_proof.proof.clone().virtualize(1);
         let block = Block::construct_from(&mut block_virt_root.into())?;
         Ok(block.read_info()?.read_master_id()?.seq_no)
+    }
+
+    pub fn top_block_mc_seqno_and_creator(&self) -> Result<(u32, UInt256)> {
+        let merkle_proof = MerkleProof::construct_from(&mut (&self.tbd.chain()[0]).into())?;
+        let block_virt_root = merkle_proof.proof.clone().virtualize(1);
+        let block = Block::construct_from(&mut block_virt_root.into())?;
+        Ok((block.read_info()?.read_master_id()?.seq_no, block.read_extra()?.created_by().clone()))
     }
 
     pub fn get_prev_descr(&self, pos: usize, sum_cnt: usize) -> Result<McShardRecord> {
@@ -690,7 +698,9 @@ impl TopBlockDescrStuff {
         let cc_seqno = last_mc_state_extra.shards().calc_shard_cc_seqno(self.proof_for().shard())?;
 
         let mut vset_ok = false;
-        let (mut validators, mut hash_short) = cur_validator_set.calc_subset(
+        let (mut validators, mut hash_short) = calc_subset_for_workchain(
+            &cur_validator_set,
+            &last_mc_state_extra.config,
             &cc_config, 
             self.proof_for().shard().shard_prefix_with_tag(), 
             self.proof_for().shard().workchain_id(), 
@@ -713,7 +723,9 @@ impl TopBlockDescrStuff {
             vset_ok = true;
         } else if mode.intersects(Mode::ALLOW_NEXT_VSET) {
             let next_validator_set = last_mc_state_extra.config.next_validator_set()?;
-            let (next_validators, next_hash_short) = next_validator_set.calc_subset(
+            let (next_validators, next_hash_short) = calc_subset_for_workchain(
+                &next_validator_set,
+                &last_mc_state_extra.config,
                 &cc_config, 
                 self.proof_for().shard().shard_prefix_with_tag(), 
                 self.proof_for().shard().workchain_id(), 
@@ -759,7 +771,7 @@ impl TopBlockDescrStuff {
             &self.proof_for().file_hash
         );
         let total_weight: u64 = validators.iter().map(|v| v.weight).sum();
-        let weight = match signatures.pure_signatures.check_signatures(validators, &checked_data) {
+        let weight = match check_crypto_signatures(&signatures.pure_signatures, &validators, &checked_data) {
             Err(err) => {
                 *res_flags |= 0x21;
                 fail!(

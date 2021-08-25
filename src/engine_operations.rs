@@ -1,20 +1,30 @@
 use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, 
     config::CollatorTestBundlesGeneralConfig,
-    engine::{Engine, LastMcBlockId, ShardsClientMcBlockId, STATSD},
-    engine_traits::{EngineOperations, PrivateOverlayOperations}, error::NodeError,
-    internal_db::{NodeState, StoreBlockResult}, 
-    shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
+    engine::{Engine, STATSD},
+    engine_traits::{
+        ChainRange, EngineOperations, PrivateOverlayOperations, Server, ValidatedBlockStat
+    },
+    error::NodeError,
+    internal_db::{INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, SHARD_CLIENT_MC_BLOCK, BlockResult},
+    shard_state::ShardStateStuff,
+    types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
+    ext_messages::{create_ext_message, EXT_MESSAGES_TRACE_TARGET},
+    jaeger,
 };
 use adnl::common::{KeyId, KeyOption};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
 use overlay::{BroadcastSendInfo, PrivateOverlayShortId};
-use std::{sync::Arc, ops::Deref, convert::TryInto};
+use rand::Rng;
+use std::{sync::{atomic::Ordering, Arc}, ops::Deref};
 use storage::types::BlockHandle;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
-use ton_block::{BlockIdExt, AccountIdPrefixFull, ShardIdent, Message, SHARD_FULL, MASTERCHAIN_ID};
+use ton_block::{
+    MASTERCHAIN_ID, INVALID_WORKCHAIN_ID, BASE_WORKCHAIN_ID, SHARD_FULL,
+    BlockIdExt, AccountIdPrefixFull, ShardIdent, Message,
+};
 use ton_types::{fail, error, Result, UInt256};
 #[cfg(feature = "telemetry")]
 use crate::{
@@ -25,6 +35,49 @@ use crate::{
 
 #[async_trait::async_trait]
 impl EngineOperations for Engine {
+    async fn processed_workchain(&self) -> Result<(bool, i32)> {
+        match self.workchain_id.load(Ordering::Relaxed) {
+            INVALID_WORKCHAIN_ID => {
+                if let Ok(mc_state) = self.load_last_applied_mc_state_or_zerostate().await {
+                    let workchains = mc_state.workchains()?;
+                    match workchains.len() {
+                        0 => fail!("no workchains in config in {}", mc_state.block_id()),
+                        1 => {
+                            log::info!("single workchain configuration - old rules");
+                            let workchain_id = workchains[0].0;
+                            self.workchain_id.store(workchain_id, Ordering::Relaxed);
+                            Ok((false, workchain_id))
+                        }
+                        count => {
+                            match rand::thread_rng().gen_range(0, count as usize + 1) {
+                                0 => {
+                                    log::info!("random assign for masterchain");
+                                    self.workchain_id.store(MASTERCHAIN_ID, Ordering::Relaxed);
+                                    self.network().config_handler().store_workchain(MASTERCHAIN_ID);
+                                    Ok((true, BASE_WORKCHAIN_ID))
+                                }
+                                index => {
+                                    log::info!("random assign for workchain {}", workchains[index - 1].0);
+                                    let workchain_id = workchains[index - 1].0;
+                                    self.network().config_handler().store_workchain(workchain_id);
+                                    Ok((false, workchain_id))
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    log::trace!("mc state was not found so workchains were not determined");
+                    Ok((false, BASE_WORKCHAIN_ID))
+                }
+            }
+            MASTERCHAIN_ID => Ok((true, BASE_WORKCHAIN_ID)),
+            workchain_id => Ok((false, workchain_id))
+        }
+    }
+
+    fn get_validator_status(&self) -> bool {
+        self.network.config_handler().get_validator_status()
+    }
 
     fn validator_network(&self) -> Arc<dyn PrivateOverlayOperations> {
         Engine::validator_network(self)
@@ -40,6 +93,14 @@ impl EngineOperations for Engine {
 
     fn activate_validator_list(&self, validator_list_id: UInt256) -> Result<()> {
         self.network().activate_validator_list(validator_list_id)
+    }
+
+    fn validation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
+        self.validation_status()
+    }
+
+    fn collation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
+        self.collation_status()
     }
 
     async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
@@ -148,7 +209,11 @@ impl EngineOperations for Engine {
     }
 
     async fn load_last_applied_mc_block(&self) -> Result<BlockStuff> {
-        let block_id = &self.load_last_applied_mc_block_id().await?;
+        let block_id = if let Some(id) = self.load_last_applied_mc_block_id()? {
+            id
+        } else {
+            fail!("INTERNAL ERROR: No last applied MC block set")
+        };
         let handle = self.load_block_handle(&block_id)?.ok_or_else(
             || error!("Cannot load handle for last applied master block {}", block_id)
         )?;
@@ -156,24 +221,29 @@ impl EngineOperations for Engine {
     }
 
     async fn load_last_applied_mc_state(&self) -> Result<ShardStateStuff> {
-        self.load_state(&self.load_last_applied_mc_block_id().await?).await
+        let block_id = if let Some(id) = self.load_last_applied_mc_block_id()? {
+            id
+        } else {
+            fail!("INTERNAL ERROR: No last applied MC block set")
+        };
+        self.load_state(&block_id).await
     }
 
-    async fn load_last_applied_mc_block_id(&self) -> Result<BlockIdExt> {
-        (&LastMcBlockId::load_from_db(self.db().deref())?.0).try_into()
+    fn load_last_applied_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+        self.db().load_node_state(LAST_APPLIED_MC_BLOCK)
     }
 
-    async fn store_last_applied_mc_block_id(&self, last_mc_block: &BlockIdExt) -> Result<()> {
-        LastMcBlockId(last_mc_block.into()).store_to_db(self.db().deref())
+    fn save_last_applied_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
+        self.db().save_node_state(LAST_APPLIED_MC_BLOCK, id)
     }
 
-    async fn load_shards_client_mc_block_id(&self) -> Result<BlockIdExt> {
-        (&ShardsClientMcBlockId::load_from_db(self.db().deref())?.0).try_into()
+    fn load_shard_client_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+        self.db().load_node_state(SHARD_CLIENT_MC_BLOCK)
     }
 
-    async fn store_shards_client_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
+    fn save_shard_client_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
         STATSD.gauge("shards_client_mc_block", id.seq_no() as f64);
-        ShardsClientMcBlockId(id.into()).store_to_db(self.db().deref())
+        self.db().save_node_state(SHARD_CLIENT_MC_BLOCK, id)
     }
 
     async fn apply_block_internal(
@@ -244,14 +314,15 @@ impl EngineOperations for Engine {
         &self, 
         block_id: &BlockIdExt, 
         master_id: &BlockIdExt,
-        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+        attempts: Option<usize>
     ) -> Result<ShardStateStuff> {
         let overlay = self.get_full_node_overlay(
             block_id.shard().workchain_id(), 
             block_id.shard().shard_prefix_with_tag()
         ).await?;
         crate::full_node::state_helper::download_persistent_state(
-            block_id, master_id, overlay.deref(), active_peers
+            block_id, master_id, overlay.deref(), active_peers, attempts
         ).await
     }
 
@@ -259,25 +330,28 @@ impl EngineOperations for Engine {
         self.download_zerostate_worker(id, None).await
     }
 
-    async fn store_block(&self, block: &BlockStuff) -> Result<StoreBlockResult> {
-        let store_block_result = self.db().store_block_data(block).await?;
-        if store_block_result.handle.id().shard().is_masterchain() {
-            if store_block_result.handle.is_key_block()? {
-                self.update_last_known_keyblock_seqno(store_block_result.handle.id().seq_no());
+    async fn store_block(&self, block: &BlockStuff) -> Result<BlockResult> {
+        let result = self.db().store_block_data(block, None).await?;
+        if let Some(handle) = result.clone().as_updated() {
+            let id = block.id();
+            if id.shard().is_masterchain() {
+                let seq_no = id.seq_no();
+                if handle.is_key_block()? {
+                    self.update_last_known_keyblock_seqno(seq_no);
+                }
+                self.update_last_known_mc_block_seqno(seq_no);
             }
-            self.update_last_known_mc_block_seqno(store_block_result.handle.id().seq_no());
         }
-        Ok(store_block_result)
+        Ok(result)
     }
 
     async fn store_block_proof(
         &self, 
         id: &BlockIdExt,
         handle: Option<Arc<BlockHandle>>, 
-        proof: &BlockProofStuff
-    ) -> Result<Arc<BlockHandle>> {
-        let h = self.db().store_block_proof(id, handle, proof).await?.handle;
-        Ok(h)
+        proof: &BlockProofStuff,
+    ) -> Result<BlockResult> {
+        self.db().store_block_proof(id, handle, proof, None).await
     }
 
     async fn load_block_proof(
@@ -294,11 +368,8 @@ impl EngineOperations for Engine {
     }
 
     async fn load_mc_zero_state(&self) -> Result<ShardStateStuff> {
-        let id = self.zero_state_id();
-        let len = self.db().load_shard_state_persistent_size(id).await?;
-        let data = self.db().load_shard_state_persistent_slice(id, 0, len).await?;
-
-        ShardStateStuff::deserialize_zerostate(self.zero_state_id().clone(), &data)
+        let block_id = self.zero_state_id();
+        self.load_state(block_id).await
     }
 
     async fn load_state(&self, block_id: &BlockIdExt) -> Result<ShardStateStuff> {
@@ -358,12 +429,13 @@ impl EngineOperations for Engine {
     async fn store_state(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: &ShardStateStuff
-    ) -> Result<()> {
+        state: ShardStateStuff
+    ) -> Result<ShardStateStuff> {
         if self.shard_states_cache().get(handle.id()).is_none() {
             self.shard_states_cache().set(handle.id().clone(), |_| Some(state.clone()))?;
         }
-        if self.db().store_shard_state_dynamic(handle, state)? {
+        let (state, saved) = self.db().store_shard_state_dynamic(handle, state, None)?;
+        if saved {
             #[cfg(feature = "telemetry")]
             self.full_node_telemetry().new_pre_applied_block(handle.got_by_broadcast());
         }
@@ -372,27 +444,29 @@ impl EngineOperations for Engine {
             None,
             async { Ok(state.clone()) }
         ).await?;
-        Ok(())
+        Ok(state)
     }
 
     async fn store_zerostate(
         &self, 
-        id: &BlockIdExt, 
-        state: &ShardStateStuff, 
+        mut state: ShardStateStuff, 
         state_bytes: &[u8]
-    ) -> Result<Arc<BlockHandle>> {
+    ) -> Result<(ShardStateStuff, Arc<BlockHandle>)> {
         let handle = self.db().create_or_load_block_handle(
-            id, 
+            state.block_id(), 
             None, 
-            Some(state.state().gen_time())
+            Some(state.state().gen_time()),
+            None
+        )?.as_non_updated().ok_or_else(
+            || error!("INTERNAL ERROR: mismatch in zerostate storing")
         )?;
-        self.store_state(&handle, state).await?;
-        self.db().store_shard_state_persistent_raw(&handle, state_bytes).await?;
-        Ok(handle)
+        state = self.store_state(&handle, state).await?;
+        self.db().store_shard_state_persistent_raw(&handle, state_bytes, None).await?;
+        Ok((state, handle))
     }
 
     fn store_block_prev1(&self, handle: &Arc<BlockHandle>, prev: &BlockIdExt) -> Result<()> {
-        self.db().store_block_prev1(handle, prev)
+        self.db().store_block_prev1(handle, prev, None)
     }
 
     fn load_block_prev1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
@@ -400,7 +474,7 @@ impl EngineOperations for Engine {
     }
 
     fn store_block_prev2(&self, handle: &Arc<BlockHandle>, prev2: &BlockIdExt) -> Result<()> {
-        self.db().store_block_prev2(handle, prev2)
+        self.db().store_block_prev2(handle, prev2, None)
     }
 
     fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
@@ -408,7 +482,7 @@ impl EngineOperations for Engine {
     }
 
     fn store_block_next1(&self, handle: &Arc<BlockHandle>, next: &BlockIdExt) -> Result<()> {
-        self.db().store_block_next1(handle, next)
+        self.db().store_block_next1(handle, next, None)
     }
 
     async fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
@@ -416,7 +490,7 @@ impl EngineOperations for Engine {
     }
 
     fn store_block_next2(&self, handle: &Arc<BlockHandle>, next2: &BlockIdExt) -> Result<()> {
-        self.db().store_block_next2(handle, next2)
+        self.db().store_block_next2(handle, next2, None)
     }
 
     async fn load_block_next2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
@@ -428,7 +502,9 @@ impl EngineOperations for Engine {
         handle: &Arc<BlockHandle>,
         block: &BlockStuff,
         proof: Option<&BlockProofStuff>,
-        state: &ShardStateStuff)
+        state: &ShardStateStuff,
+        mc_seq_no: u32,
+    )
     -> Result<()> {
         if self.ext_db().len() > 0 {
             if proof.is_some() && !handle.id().shard().is_masterchain() {
@@ -437,15 +513,23 @@ impl EngineOperations for Engine {
             if proof.is_none() && handle.id().shard().is_masterchain() {
                 let proof = self.load_block_proof(handle, false).await?;
                 for db in self.ext_db() {
-                    db.process_block(block, Some(&proof), state).await?;
+                    db.process_block(block, Some(&proof), state, mc_seq_no).await?;
                 }
             } else {
                 for db in self.ext_db() {
-                    db.process_block(block, proof, state).await?;
+                    db.process_block(block, proof, state, mc_seq_no).await?;
                 }
             }
         }
 //        self.db().store_block_processed_in_ext_db(handle)?;
+        Ok(())
+    }
+
+    async fn process_chain_range_in_ext_db(&self, chain_range: &ChainRange) -> Result<()> {
+        for db in self.ext_db() {
+            db.process_chain_range(chain_range).await?;
+        }
+
         Ok(())
     }
 
@@ -465,14 +549,18 @@ impl EngineOperations for Engine {
         mc_overlay.download_next_key_blocks_ids(block_id, 5).await
     }
 
-    async fn set_applied(&self, handle: &Arc<BlockHandle>, mc_seq_no: u32) -> Result<bool> {
+    async fn set_applied(
+        &self, 
+        handle: &Arc<BlockHandle>, 
+        mc_seq_no: u32
+    ) -> Result<bool> {
         if handle.is_applied() {
             return Ok(false);
         }
-        self.db().assign_mc_ref_seq_no(handle, mc_seq_no)?;
-        self.db().index_handle(handle)?;
-        self.db().archive_block(handle.id()).await?;
-        if self.db().store_block_applied(handle)? {
+        self.db().assign_mc_ref_seq_no(handle, mc_seq_no, None)?;
+        self.db().index_handle(handle, None)?;
+        self.db().archive_block(handle.id(), None).await?;
+        if self.db().store_block_applied(handle, None)? {
             #[cfg(feature = "telemetry")]
             self.full_node_telemetry().new_applied_block();
             Ok(true)
@@ -483,10 +571,12 @@ impl EngineOperations for Engine {
 
     fn initial_sync_disabled(&self) -> bool { Engine::initial_sync_disabled(self) }
 
-    fn init_mc_block_id(&self) -> &BlockIdExt { (self as &Engine).init_mc_block_id() }
+    fn init_mc_block_id(&self) -> &BlockIdExt { 
+        (self as &Engine).init_mc_block_id() 
+    }
 
-    fn set_init_mc_block_id(&self, init_mc_block_id: &BlockIdExt) {
-        (self as &Engine).set_init_mc_block_id(init_mc_block_id)
+    fn save_init_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
+        self.db().save_node_state(INITIAL_MC_BLOCK, id)
     }
 
     async fn broadcast_to_public_overlay(
@@ -496,6 +586,39 @@ impl EngineOperations for Engine {
     ) -> Result<BroadcastSendInfo> {
         let overlay = self.get_full_node_overlay(to.workchain_id, to.prefix).await?;
         overlay.broadcast_external_message(data).await
+    }
+
+    async fn redirect_external_message(&self, message_data: &[u8]) -> Result<BroadcastSendInfo> {
+        match create_ext_message(message_data) {
+            Err(e) => {
+                let err = format!(
+                    "Can't deserialize external message with len {}: {}",
+                    message_data.len(), e,
+                );
+                log::warn!(target: EXT_MESSAGES_TRACE_TARGET, "{}", &err);
+                fail!("{}", err);
+            }
+            Ok((id, message)) => {
+                match redirect_external_message(self, message, id.clone(), message_data).await {
+                    Err(e) => {
+                        let err = format!(
+                            "Can't redirect external message {:x}: {}",
+                            id, e,
+                        );
+                        log::error!(target: EXT_MESSAGES_TRACE_TARGET, "{}", &err);
+                        fail!("{}", err);
+                    }
+                    Ok(info) => {
+                        log::debug!(
+                            target: EXT_MESSAGES_TRACE_TARGET,
+                            "Redirected external message {:x} to {} nodes by {} packages",
+                            id, info.send_to, info.packets,
+                        );
+                        return Ok(info);
+                    }
+                }
+            }
+        }
     }
 
     async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
@@ -517,7 +640,7 @@ impl EngineOperations for Engine {
 
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()> {
         let overlay = self.get_full_node_overlay(
-            MASTERCHAIN_ID, //broadcast.id.workchain, by t-node all broadcast are sending into masterchain overlay
+            broadcast.id.workchain,
             SHARD_FULL, //broadcast.id.shard as u64
         ).await?;
         overlay.send_block_broadcast(broadcast).await?;
@@ -533,7 +656,7 @@ impl EngineOperations for Engine {
         resend: bool,
     ) -> Result<()> {
         let overlay = self.get_full_node_overlay(
-            MASTERCHAIN_ID, //tbd.proof_for().shard().workchain_id(), by t-node all broadcast are sending into masterchain overlay
+            MASTERCHAIN_ID, // tbd.proof_for().shard().workchain_id(),
             SHARD_FULL, //tbd.proof_for().shard().shard_prefix_with_tag()
         ).await?;
 
@@ -605,6 +728,10 @@ impl EngineOperations for Engine {
         self.db().db_root_dir()
     }
 
+    fn produce_chain_ranges_enabled(&self) -> bool {
+        self.ext_db().iter().any(|ext_db| ext_db.process_chain_range_enabled())
+    }
+
     #[cfg(feature = "telemetry")]
     fn full_node_telemetry(&self) -> &FullNodeTelemetry {
         Engine::full_node_telemetry(self)
@@ -623,5 +750,79 @@ impl EngineOperations for Engine {
     #[cfg(feature = "telemetry")]
     fn full_node_service_telemetry(&self) -> &FullNodeNetworkTelemetry {
         Engine::full_node_service_telemetry(self)
+    }
+
+    fn push_validated_block_stat(&self, stat: ValidatedBlockStat) -> Result<()> {
+        self.validated_block_stats_sender().try_send(stat)?;
+        Ok(())
+    }
+
+    fn pop_validated_block_stat(&self) -> Result<ValidatedBlockStat> {
+        let result = self.validated_block_stats_receiver().try_recv()?;
+        Ok(result)
+    }
+
+    fn get_last_rotation_block_id(&self) -> Result<Option<BlockIdExt>> {
+        self
+            .last_rotation_block_db()
+            .get_last_rotation_block_id()
+            .map_err(|e| error!("Can't get last rotation block id: {}", e))
+    }
+
+    fn set_last_rotation_block_id(&self, info: &BlockIdExt) -> Result<()> {
+        self
+            .last_rotation_block_db()
+            .set_last_rotation_block_id(info)
+            .map_err(|e| error!("Can't set last rotation block id: {}", e))
+    }
+
+    fn clear_last_rotation_block_id(&self) -> Result<()> {
+        self
+            .last_rotation_block_db()
+            .clear_last_rotation_block_id()
+            .map_err(|e| error!("Can't clear last rotation block id: {}", e))
+    }
+
+    fn adjust_states_gc_interval(&self, interval_ms: u32) {
+        self.db().adjust_states_gc_interval(interval_ms)
+    }
+
+    fn acquire_stop(&self, mask: u32) {
+        Engine::acquire_stop(self, mask)
+    }
+
+    fn check_stop(&self) -> bool {
+        Engine::check_stop(self)
+    }
+
+    fn release_stop(&self, mask: u32) {
+        Engine::release_stop(self, mask)
+    }
+
+    fn register_server(&self, server: Server) {
+        Engine::register_server(self, server)
+    }
+
+}
+
+async fn redirect_external_message(
+    engine: &dyn EngineOperations, 
+    message: Message, 
+    id: UInt256,
+    message_data: &[u8]
+) -> Result<BroadcastSendInfo> {
+    let message = Arc::new(message);
+    engine.new_external_message(id.clone(), message.clone())?;
+    if let Some(header) = message.ext_in_header() {
+        let res = engine.broadcast_to_public_overlay(
+            &AccountIdPrefixFull::checked_prefix(&header.dst)?,
+            message_data
+        ).await;
+        #[cfg(feature = "telemetry")]
+        engine.full_node_telemetry().sent_ext_msg_broadcast();
+        jaeger::broadcast_sended(id.to_hex_string());
+        res
+    } else {
+        fail!("External message is not properly formatted: {}", message)
     }
 }

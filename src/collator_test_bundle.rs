@@ -166,22 +166,25 @@ pub struct CollatorTestBundle {
 #[allow(dead_code)]
 impl CollatorTestBundle {
 
-    pub async fn build_with_zero_state(mc_zero_state_name: &str, wc_zero_state_name: &str) -> Result<Self> {
-        log::info!("Building with zerostate from {} and {}", mc_zero_state_name, wc_zero_state_name);
+    pub async fn build_with_zero_state(mc_zero_state_name: &str, wc_zero_state_names: &[&str]) -> Result<Self> {
+        log::info!("Building with zerostate from {} and {}", mc_zero_state_name, wc_zero_state_names.join(", "));
 
         let (mc_state, mc_fh, mc_rh) = construct_from_file::<ShardStateUnsplit>(mc_zero_state_name)?;
-        let (wc_state, wc_fh, wc_rh) = construct_from_file::<ShardStateUnsplit>(wc_zero_state_name)?;
-
-        let now = std::cmp::max(mc_state.gen_time(), wc_state.gen_time()) + 1;
-
         let last_mc_state = BlockIdExt::with_params(mc_state.shard().clone(), 0, mc_rh, mc_fh);
         let mc_state = ShardStateStuff::with_state(last_mc_state.clone(), mc_state)?;
+
+        let mut now = mc_state.state().gen_time() + 1;
         let mut states = HashMap::new();
         states.insert(last_mc_state.clone(), mc_state);
-        
-        let block_id = BlockIdExt::with_params(wc_state.shard().clone(), 0, wc_rh, wc_fh);
-        let wc_state = ShardStateStuff::with_state(block_id.clone(), wc_state)?;
-        states.insert(block_id.clone(), wc_state);
+        for wc_zero_state_name in wc_zero_state_names {
+            let (wc_state, wc_fh, wc_rh) = construct_from_file::<ShardStateUnsplit>(wc_zero_state_name)?;
+
+            now = std::cmp::max(now, wc_state.gen_time() + 1);
+
+            let block_id = BlockIdExt::with_params(wc_state.shard().clone(), 0, wc_rh, wc_fh);
+            let wc_state = ShardStateStuff::with_state(block_id.clone(), wc_state)?;
+            states.insert(block_id.clone(), wc_state);
+        }
 
         let prev_blocks = vec![last_mc_state.clone()];
         let mut id = last_mc_state.clone();
@@ -204,7 +207,6 @@ impl CollatorTestBundle {
             contains_candidate: false,
             notes: String::new(),
         };
-
 
         Ok(Self {
             index,
@@ -450,8 +452,9 @@ impl CollatorTestBundle {
         // neighbors
         //
         let mut neighbors = vec!();
-        let shards = mc_state.shards()?;
-        let neighbor_list = shards.get_neighbours(&shard)?;
+        let shards = mc_state.shard_hashes()?;
+        let (_master, workchain_id) = engine.processed_workchain().await?;
+        let neighbor_list = shards.neighbours_for(&shard, workchain_id)?;
         for shard in neighbor_list.iter() {
             states.insert(shard.block_id().clone(), engine.load_state(shard.block_id()).await?);
             neighbors.push(shard.block_id().clone());
@@ -600,11 +603,12 @@ impl CollatorTestBundle {
         let mut neighbors = vec!();
         let shards = if shard.is_masterchain() {
             let block = BlockStuff::new(candidate.block_id.clone(), candidate.data.clone())?;
-            block.shards()?
+            block.shard_hashes()?
         } else {
-            mc_state.shards()?.clone()
+            mc_state.shard_hashes()?
         };
-        let neighbor_list = shards.get_neighbours(&shard)?;
+        let (_master, workchain_id) = engine.processed_workchain().await?;
+        let neighbor_list = shards.neighbours_for(&shard, workchain_id)?;
         for shard in neighbor_list.iter() {
             states.insert(shard.block_id().clone(), engine.load_state(shard.block_id()).await?);
             neighbors.push(shard.block_id().clone());
@@ -790,12 +794,13 @@ impl CollatorTestBundle {
         // neighbors
         //
         let mut neighbors = vec!();
-        let shards = match block.shards() {
+        let shards = match block.shard_hashes() {
             Ok(shards) => shards,
-            Err(_) => mc_state.shards()?.clone()
+            Err(_) => mc_state.shard_hashes()?
         };
 
-        let neighbor_list = shards.get_neighbours(block_id.shard())?;
+        let (_master, workchain_id) = engine.processed_workchain().await?;
+        let neighbor_list = shards.neighbours_for(block_id.shard(), workchain_id)?;
         for shard in neighbor_list.iter() {
             states.insert(shard.block_id().clone(), engine.load_state(shard.block_id()).await?);
             neighbors.push(shard.block_id().clone());

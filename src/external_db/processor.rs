@@ -1,19 +1,21 @@
-use std::collections::hash_set::HashSet;
+use std::{collections::hash_set::HashSet};
 use ton_block::{
     Account, InMsg, OutMsg, Deserializable, Serializable, MessageProcessingStatus, Transaction,
     TransactionProcessingStatus, BlockProcessingStatus, Block, BlockProof, HashmapAugType,
-    AccountBlock, ShardAccount
+    AccountBlock, ShardAccount,
 };
 use ton_types::{
     cells_serialization::serialize_toc,
     types::UInt256,
     AccountId, Cell, Result, SliceData, HashmapType
 };
+use serde::Serialize;
+use chrono::Utc;
 
 use crate::{
-    engine_traits::ExternalDb, block::BlockStuff, shard_state::ShardStateStuff,
-    error::NodeError, external_db::WriteData, block_proof::BlockProofStuff,
-    engine::STATSD
+    block::BlockStuff, block_proof::BlockProofStuff, engine::STATSD,
+    engine_traits::{ChainRange, ExternalDb}, error::NodeError, external_db::WriteData,
+    shard_state::ShardStateStuff
 };
 
 lazy_static::lazy_static!(
@@ -27,7 +29,19 @@ enum DbRecord {
     Account(String, String),
     BlockProof(String, String),
     Block(String, String),
-    RawBlock(Vec<u8>, Vec<u8>)
+    RawBlock(Vec<u8>, Vec<u8>, u32)
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ChainRangeMasterBlock {
+    pub id: String,
+    pub seq_no: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ChainRangeData {
+    pub master_block: ChainRangeMasterBlock,
+    pub shard_blocks_ids: Vec<String>,
 }
 
 pub(super) struct Processor<T: WriteData> {
@@ -37,7 +51,9 @@ pub(super) struct Processor<T: WriteData> {
     write_transaction: T,
     write_account: T,
     write_block_proof: T,
+    write_chain_range: T,
     bad_blocks_storage: String,
+    front_workchain_ids: Vec<i32>, // write only this workchain, or write all if None
 }
 
 impl<T: WriteData> Processor<T> {
@@ -49,9 +65,31 @@ impl<T: WriteData> Processor<T> {
         write_transaction: T,
         write_account: T,
         write_block_proof: T,
-        bad_blocks_storage: String) 
+        write_chain_range: T,
+        bad_blocks_storage: String,
+        front_workchain_ids: Vec<i32>,
+    ) 
     -> Self {
-        Processor{ write_block, write_raw_block, write_message, write_transaction, write_account, write_block_proof, bad_blocks_storage }
+        log::trace!("Processor::new workchains {:?}", front_workchain_ids);
+        Processor {
+            write_block,
+            write_raw_block,
+            write_message,
+            write_transaction,
+            write_account,
+            write_block_proof,
+            write_chain_range,
+            bad_blocks_storage,
+            front_workchain_ids,
+        }
+    }
+
+    fn process_workchain(&self, workchain_id: i32) -> bool {
+        self
+            .front_workchain_ids
+            .iter()
+            .position(|id| id == &workchain_id)
+            .is_some()
     }
 
     fn prepare_in_message_record(
@@ -201,10 +239,12 @@ impl<T: WriteData> Processor<T> {
     fn prepare_raw_block_record(
         block_root: &Cell,
         block_boc: Vec<u8>,
+        mc_seq_no: u32,
     ) -> Result<DbRecord> {
         Ok(DbRecord::RawBlock(
             block_root.repr_hash().as_slice().to_vec(),
-            block_boc
+            block_boc,
+            mc_seq_no,
         ))
     }
 
@@ -242,9 +282,14 @@ impl<T: WriteData> Processor<T> {
         block_stuff: &BlockStuff,
         block_proof: Option<&BlockProofStuff>,
         state: Option<&ShardStateStuff>,
+        mc_seq_no: u32,
         add_proof: bool,
      ) -> Result<()> {
 
+        log::trace!("Processor block_stuff.id {}", block_stuff.id());
+        if !self.process_workchain(block_stuff.shard().workchain_id()) {
+            return Ok(())
+        }
         let process_block = self.write_block.enabled();
         let process_raw_block = self.write_raw_block.enabled();
         let process_message = self.write_message.enabled();
@@ -374,7 +419,7 @@ impl<T: WriteData> Processor<T> {
             if process_raw_block {
                 let now = std::time::Instant::now();
                 db_records.push(
-                    Self::prepare_raw_block_record(&block_root, block_boc2.unwrap())?
+                    Self::prepare_raw_block_record(&block_root, block_boc2.unwrap(), mc_seq_no)?
                 );
                 log::trace!("TIME: raw block {}ms;   {}", now.elapsed().as_millis(), block_id);
             }
@@ -400,20 +445,15 @@ impl<T: WriteData> Processor<T> {
 
         let mut send_tasks = vec!();
         for record in db_records {
-            if let Some(send_task) = match record {
-                DbRecord::Message(key, value) => Some(self.write_message.write_data(key, value)),
-                DbRecord::Transaction(key, value) => Some(self.write_transaction.write_data(key, value)),
-                DbRecord::Account(key, value) => Some(self.write_account.write_data(key, value)),
-                DbRecord::Block(key, value) => Some(self.write_block.write_data(key, value)),
-                DbRecord::RawBlock(key, value) => {
-                    STATSD.histogram("raw_block_size", value.len() as f64);
-                    Some(self.write_raw_block.write_raw_data(key, value))
-                }
-                DbRecord::BlockProof(key, value) => Some(self.write_block_proof.write_data(key, value)),
-                DbRecord::Empty => None
-            } {
-                send_tasks.push(send_task);
-            }
+            match record {
+                DbRecord::Message(key, value) => send_tasks.push(self.write_message.write_data(key, value, None)),
+                DbRecord::Transaction(key, value) => send_tasks.push(self.write_transaction.write_data(key, value, None)),
+                DbRecord::Account(key, value) => send_tasks.push(self.write_account.write_data(key, value, None)),
+                DbRecord::Block(key, value) => send_tasks.push(self.write_block.write_data(key, value, None)),
+                DbRecord::BlockProof(key, value) => send_tasks.push(self.write_block_proof.write_data(key, value, None)),
+                DbRecord::RawBlock(key, value, mc_seq_no) =>  send_tasks.push(Box::pin(self.send_raw_block(key, value, mc_seq_no))),
+                DbRecord::Empty => {}
+            } 
         }
 
         log::trace!("TIME: must be zero {}ms;   {}", now.elapsed().as_millis(), block_stuff.id());
@@ -431,6 +471,14 @@ impl<T: WriteData> Processor<T> {
 
         Ok(())
     }
+
+    async fn send_raw_block(&self, key: Vec<u8>, value: Vec<u8>, mc_seq_no: u32) -> Result<()> {
+        let attributes = [
+            ("mc_seq_no", &mc_seq_no.to_be_bytes()[..]),
+            ("raw_block_timestamp", &Utc::now().timestamp().to_be_bytes()[..])
+        ];
+        self.write_raw_block.write_raw_data(key, value, Some(&attributes)).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -439,14 +487,19 @@ impl<T: WriteData> ExternalDb for Processor<T> {
         &self, 
         block_stuff: &BlockStuff,
         proof: Option<&BlockProofStuff>, 
-        state: &ShardStateStuff
+        state: &ShardStateStuff,
+        mc_seq_no: u32,
     ) -> Result<()> {
-        self.process_block_impl(block_stuff, proof, Some(state), false).await
+        self.process_block_impl(block_stuff, proof, Some(state), mc_seq_no, false).await
     }
 
     async fn process_full_state(&self, state: &ShardStateStuff) -> Result<()> {
         let now = std::time::Instant::now();
         log::trace!("process_full_state {} ...", state.block_id());
+
+        if !self.process_workchain(state.block_id().shard().workchain_id()) {
+            return Ok(())
+        }
 
         if self.write_account.enabled() {
             let mut accounts = Vec::new();
@@ -461,7 +514,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
             futures::future::join_all(
                 accounts.into_iter().map(|r| {
                     match r {
-                        DbRecord::Account(key, value) => self.write_account.write_data(key, value),
+                        DbRecord::Account(key, value) => self.write_account.write_data(key, value, None),
                         _ => unreachable!(),
                     }
                 })
@@ -476,6 +529,35 @@ impl<T: WriteData> ExternalDb for Processor<T> {
         }
 
         log::trace!("TIME: process_full_state {}ms;   {}", now.elapsed().as_millis(), state.block_id());
+        Ok(())
+    }
+
+    fn process_chain_range_enabled(&self) -> bool {
+        self.write_chain_range.enabled()
+    }
+
+    async fn process_chain_range(&self, range: &ChainRange) -> Result<()> {
+        if self.write_chain_range.enabled() {
+            let master_block_id = range.master_block.root_hash().to_hex_string();
+            let mut data = ChainRangeData {
+                master_block: ChainRangeMasterBlock {
+                    id: master_block_id.clone(),
+                    seq_no: range.master_block.seq_no(),
+                },
+                shard_blocks_ids: Vec::new(),
+            };
+
+            for block in &range.shard_blocks {
+                data.shard_blocks_ids.push(block.root_hash().to_hex_string());
+            }
+
+            self.write_chain_range.write_data(
+                format!("\"{}\"", master_block_id),
+                serde_json::to_string(&data)?,
+                None
+            ).await?;
+        }
+
         Ok(())
     }
 }

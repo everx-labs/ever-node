@@ -2,7 +2,6 @@ use std::time;
 use crate::{external_db::WriteData, config::KafkaProducerConfig};
 use rdkafka::message::OwnedHeaders;
 use ton_types::{Result, fail};
-use chrono::Utc;
 
 const EXTERNAL_MESSAGE_DATA_HEADER_KEY: &str = "external-message-ref";
 const PATTERN_TO_REPLACE: &str = "{message_filename}";
@@ -92,7 +91,7 @@ impl KafkaProducer {
         Ok(())
     }
 
-    async fn write_internal(&self, key: Vec<u8>, key_str: String, data: Vec<u8>, ts: Option<i64>) -> Result<()> {
+    async fn write_internal(&self, key: Vec<u8>, key_str: String, data: Vec<u8>, attributes: Option<&[(&str, &[u8])]>) -> Result<()> {
         if !self.enabled() {
             fail!("Producer is disabled");
         }
@@ -103,18 +102,17 @@ impl KafkaProducer {
         loop {
             log::trace!("Producing record, topic: {}, key: {}", self.config.topic, key_str);
             let now = std::time::Instant::now();
-            let (header_name, header_value) = if let Some(timestamp) = ts {
-                    ("raw_block_timestamp", timestamp.to_be_bytes())
-                } else {
-                    ("raw_block_timestamp", [0u8;8])
-                };
-            let produce_future = self.producer.as_ref().unwrap().send(
-                rdkafka::producer::FutureRecord::to(&self.config.topic)
-                    .key(&key)
-                    .payload(&data)
-                    .headers(OwnedHeaders::new().add(header_name, &header_value)),
-                0,
-            );
+            let mut record = rdkafka::producer::FutureRecord::to(&self.config.topic)
+                .key(&key)
+                .payload(&data);
+            if let Some(attributes) = attributes {
+                let mut headers = OwnedHeaders::new();
+                for (name, value) in attributes {
+                    headers = headers.add(*name, *value);
+                }
+                record = record.headers(headers);
+            }
+            let produce_future = self.producer.as_ref().unwrap().send(record, 0);
             match produce_future.await {
                 Ok(Ok(_)) => {
                     log::trace!("Produced record, topic: {}, key: {}, time: {} mcs", self.config.topic, key_str, now.elapsed().as_micros());
@@ -146,12 +144,12 @@ impl WriteData for KafkaProducer {
 
     fn enabled(&self) -> bool { self.config.enabled }
 
-    async fn write_raw_data(&self, key: Vec<u8>, data: Vec<u8>) -> Result<()> {
+    async fn write_raw_data(&self, key: Vec<u8>, data: Vec<u8>, attributes: Option<&[(&str, &[u8])]>) -> Result<()> {
         let key_str = format!("{}", hex::encode(&key));
-        self.write_internal(key, key_str, data, Some(Utc::now().timestamp())).await
+        self.write_internal(key, key_str, data, attributes).await
     }
 
-    async fn write_data(&self, key: String, data: String) -> Result<()> {
-        self.write_internal(key.clone().into_bytes(), key, data.into_bytes(), None).await
+    async fn write_data(&self, key: String, data: String, attributes: Option<&[(&str, &[u8])]>) -> Result<()> {
+        self.write_internal(key.clone().into_bytes(), key, data.into_bytes(), attributes).await
     }
 }

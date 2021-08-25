@@ -1,12 +1,11 @@
 use crate::{
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
-    engine_traits::EngineOperations,
+    engine::Engine, engine_traits::EngineOperations,
     shard_state::ShardStateStuff,
 };
 use ton_block::{BlockIdExt, TopBlockDescr, Deserializable, BlockSignatures};
-use ton_types::{fail, Result, deserialize_tree_of_cells};
+use ton_types::{fail, Result};
 use std::{
-    io::Cursor,
     sync::{Arc, atomic::{AtomicU32, Ordering}},
     time::Duration,
     ops::Deref,
@@ -73,8 +72,7 @@ impl ShardBlocksPool {
             let tbd = if self.is_fake {
                 TopBlockDescr::with_id_and_signatures(id.clone(), BlockSignatures::default())
             } else {
-                let root = deserialize_tree_of_cells(&mut Cursor::new(&data))?;
-                TopBlockDescr::construct_from(&mut root.into())?
+                TopBlockDescr::construct_from_bytes(&data)?
             };
             Ok(Arc::new(TopBlockDescrStuff::new(tbd, &id, self.is_fake)?))
         };
@@ -215,8 +213,12 @@ impl ShardBlocksPool {
 
 pub fn resend_top_shard_blocks_worker(engine: Arc<dyn EngineOperations>) {
     tokio::spawn(async move {
+        engine.acquire_stop(Engine::MASK_SERVICE_TOP_SHARDBLOCKS_SENDER);
         loop {
-             // 2..3 seconds
+            if engine.check_stop() {
+                break
+            }
+            // 2..3 seconds
             let delay = rand::thread_rng().gen_range(2000, 3000);
             futures_timer::Delay::new(Duration::from_millis(delay)).await;
             match resend_top_shard_blocks(engine.deref()).await {
@@ -224,11 +226,16 @@ pub fn resend_top_shard_blocks_worker(engine: Arc<dyn EngineOperations>) {
                 Err(e) => log::error!("resend_top_shard_blocks: {:?}", e)
             }
         }
+        engine.release_stop(Engine::MASK_SERVICE_TOP_SHARDBLOCKS_SENDER);
     });
 }
 
 async fn resend_top_shard_blocks(engine: &dyn EngineOperations) -> Result<()> {
-    let id = engine.load_last_applied_mc_block_id().await?;
+    let id = if let Some(id) = engine.load_last_applied_mc_block_id()? {
+        id
+    } else {
+        fail!("INTERNAL ERROR: No last applied MC block after sync")
+    };
     let tsbs = engine.get_own_shard_blocks(id.seq_no)?;
     for tsb in tsbs {
         engine.send_top_shard_block_description(tsb, 0, true).await?;
@@ -238,7 +245,7 @@ async fn resend_top_shard_blocks(engine: &dyn EngineOperations) -> Result<()> {
 
 pub fn save_top_shard_blocks_worker(
     engine: Arc<dyn EngineOperations>,
-    mut receiver: tokio::sync::mpsc::UnboundedReceiver<StoreAction>,
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<StoreAction>
 ) {
     tokio::spawn(async move {
         while let Some(action) = receiver.recv().await {
