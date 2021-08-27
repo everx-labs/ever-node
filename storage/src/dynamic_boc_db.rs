@@ -5,10 +5,10 @@ use crate::{
     TARGET,
 };
 use fnv::{FnvHashMap, FnvHashSet};
-use std::{ops::{Deref, DerefMut}, sync::{Arc, RwLock, Weak}};
+use std::{ops::{Deref, DerefMut}, sync::{Arc, RwLock, Weak}, thread, time};
 //#[cfg(test)]
 //use std::path::Path;
-use ton_types::{Cell, Result, error, CellImpl, MAX_LEVEL};
+use ton_types::{Cell, Result, CellImpl, MAX_LEVEL};
 
 #[derive(Debug)]
 pub struct DynamicBocDb {
@@ -94,8 +94,14 @@ impl DynamicBocDb {
             false
         };
         let storage_cell = Arc::new(
-            CellDb::get_cell(self.db.deref(), &cell_id, Arc::clone(self))
-                .map_err(|e| error!("Can't load cell  id {}  db_index {}  in_cache {}  error: {}", cell_id, self.db_index, in_cache, e))?
+            match CellDb::get_cell(self.db.deref(), &cell_id, Arc::clone(self)) {
+                Ok(cell) => cell,
+                Err(e) => {
+                    log::error!("Can't load cell  id {}  db_index {}  in_cache {}  error: {}", cell_id, self.db_index, in_cache, e);
+                    thread::sleep(time::Duration::from_millis(2_000));
+                    std::process::exit(0xFF);
+                }
+            }
         );
         self.cells.write()
             .expect("Poisoned RwLock")
