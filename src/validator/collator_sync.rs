@@ -2230,7 +2230,7 @@ impl Collator {
         log::trace!("{}: update_shard_config, (update_cc: {})", self.collated_block_descr, update_cc);
 
         let now = collator_data.gen_utime();
-        let mut min_ref_mc_seqno = u32::max_value();
+        let mut min_ref_mc_seqno = u32::MAX;
         
         
         // TODO iterate_shards_with_siblings_mut when it will be done
