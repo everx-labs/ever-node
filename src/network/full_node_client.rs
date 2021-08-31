@@ -17,23 +17,23 @@ use adnl::{
 use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
 use rldp::RldpNode;
 use std::{io::Cursor, time::Instant, sync::Arc, time::Duration};
-use ton_api::{BoxedSerialize, BoxedDeserialize, Deserializer, IntoBoxed};
-use ton_api::ton::{
-    self, TLObject,
-    rpc::{
-        ton_node::{
+use ton_api::{
+    BoxedSerialize, BoxedDeserialize, Deserializer, IntoBoxed,
+    ton::{
+        self, TLObject, Bool,
+        rpc::ton_node::{
             DownloadNextBlockFull, DownloadPersistentStateSlice, DownloadZeroState,
             PreparePersistentState, DownloadBlockProof, DownloadBlockProofLink,
             DownloadKeyBlockProof, DownloadKeyBlockProofLink, PrepareBlock, DownloadBlockFull,
             PrepareZeroState, GetNextKeyBlockIds, GetArchiveInfo, GetArchiveSlice,
             PrepareBlockProof, PrepareKeyBlockProof
+        },
+        ton_node::{ 
+            ArchiveInfo, Broadcast, 
+            DataFull, KeyBlocks, Prepared, PreparedProof, PreparedState, 
+            broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}, 
+            externalmessage::ExternalMessage, 
         }
-    },
-    ton_node::{ 
-        ArchiveInfo, Broadcast, 
-        DataFull, KeyBlocks, Prepared, PreparedProof, PreparedState, 
-        broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}, 
-        externalmessage::ExternalMessage, 
     }
 };
 use ton_block::BlockIdExt;
@@ -64,7 +64,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
         attempt: u32,
     ) -> Result<Vec<u8>>;
     async fn download_zero_state(&self, id: &BlockIdExt) -> Result<(ShardStateStuff, Vec<u8>)>;
-    async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, max_size: i32) -> Result<Vec<BlockIdExt>>;
+    async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, max_size: i32) -> Result<(Vec<BlockIdExt>, bool)>;
     async fn download_next_block_full(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
     async fn download_archive(
         &self, 
@@ -743,7 +743,7 @@ Ok(if key_block {
         &self, 
         block_id: &BlockIdExt, 
         max_size: i32, 
-    ) -> Result<Vec<BlockIdExt>> {
+    ) -> Result<(Vec<BlockIdExt>, bool)> {
         let query = TaggedObject {
             object: GetNextKeyBlockIds {
                 block: convert_block_id_ext_blk2api(block_id),
@@ -752,14 +752,14 @@ Ok(if key_block {
             #[cfg(feature = "telemetry")]
             tag: self.tag_get_next_key_block_ids
         };
-        self.send_adnl_query(query, None, None, None)
-            .await
-            .and_then(|(ids, _): (KeyBlocks, _)| ids.blocks().iter().try_fold(Vec::new(), |mut vec, id| {
-                vec.push(convert_block_id_ext_api2blk(id)?);
-                Ok(vec)
-            }))
+        let (ids, _): (KeyBlocks, _) = self.send_adnl_query(query, None, None, None).await?;
+        let mut vec = Vec::new();
+        for id in ids.blocks().iter() {
+            vec.push(convert_block_id_ext_api2blk(id)?);
+        }
+        Ok((vec, ids.incomplete() == &Bool::BoolTrue))
     }
-    
+
     // tonNode.downloadNextBlockFull prev_block:tonNode.blockIdExt = tonNode.DataFull;
     async fn download_next_block_full(
         &self, 

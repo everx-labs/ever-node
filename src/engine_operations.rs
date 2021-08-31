@@ -209,24 +209,24 @@ impl EngineOperations for Engine {
     }
 
     async fn load_last_applied_mc_block(&self) -> Result<BlockStuff> {
-        let block_id = if let Some(id) = self.load_last_applied_mc_block_id()? {
-            id
-        } else {
-            fail!("INTERNAL ERROR: No last applied MC block set")
-        };
-        let handle = self.load_block_handle(&block_id)?.ok_or_else(
-            || error!("Cannot load handle for last applied master block {}", block_id)
-        )?;
-        self.load_applied_block(&handle).await
+        match self.load_last_applied_mc_block_id()? {
+            Some(block_id) => {
+                let handle = self.load_block_handle(&block_id)?.ok_or_else(
+                    || error!("Cannot load handle for last applied master block {}", block_id)
+                )?;
+                self.load_applied_block(&handle).await
+            }
+            None => fail!("INTERNAL ERROR: No last applied MC block set")
+        }
     }
 
     async fn load_last_applied_mc_state(&self) -> Result<ShardStateStuff> {
-        let block_id = if let Some(id) = self.load_last_applied_mc_block_id()? {
-            id
-        } else {
-            fail!("INTERNAL ERROR: No last applied MC block set")
-        };
-        self.load_state(&block_id).await
+        match self.load_last_applied_mc_block_id()? {
+            Some(block_id) => {
+                self.load_state(&block_id).await
+            }
+            None => fail!("INTERNAL ERROR: No last applied MC block set")
+        }
     }
 
     fn load_last_applied_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
@@ -431,13 +431,13 @@ impl EngineOperations for Engine {
         handle: &Arc<BlockHandle>, 
         state: ShardStateStuff
     ) -> Result<ShardStateStuff> {
-        if self.shard_states_cache().get(handle.id()).is_none() {
-            self.shard_states_cache().set(handle.id().clone(), |_| Some(state.clone()))?;
-        }
         let (state, saved) = self.db().store_shard_state_dynamic(handle, state, None)?;
         if saved {
             #[cfg(feature = "telemetry")]
             self.full_node_telemetry().new_pre_applied_block(handle.got_by_broadcast());
+        }
+        if self.shard_states_cache().get(handle.id()).is_none() {
+            self.shard_states_cache().set(handle.id().clone(), |_| Some(state.clone()))?;
         }
         self.shard_states_awaiters().do_or_wait(
             state.block_id(),
@@ -544,7 +544,7 @@ impl EngineOperations for Engine {
         &self, 
         block_id: &BlockIdExt, 
         _priority: u32
-    ) -> Result<Vec<BlockIdExt>> {
+    ) -> Result<(Vec<BlockIdExt>, bool)> {
         let mc_overlay = self.get_masterchain_overlay().await?;
         mc_overlay.download_next_key_blocks_ids(block_id, 5).await
     }
@@ -750,6 +750,10 @@ impl EngineOperations for Engine {
     #[cfg(feature = "telemetry")]
     fn full_node_service_telemetry(&self) -> &FullNodeNetworkTelemetry {
         Engine::full_node_service_telemetry(self)
+    }
+
+    fn calc_tps(&self, period: u64) -> Result<u32> {
+        self.tps_counter().calc_tps(period)
     }
 
     fn push_validated_block_stat(&self, stat: ValidatedBlockStat) -> Result<()> {

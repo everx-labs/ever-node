@@ -195,7 +195,7 @@ pub async fn run_collate_query (
             STATSD.incr(&format!("failed_collations_{}", shard));
             let test_bundles_config = &engine.test_bundles_config().collator;
 
-            let err_str = if cfg!(feature = "local_test") || test_bundles_config.is_enable() {
+            let err_str = if test_bundles_config.is_enable() {
                 err.to_string()
             } else {
                 String::default()

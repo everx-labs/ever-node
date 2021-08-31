@@ -8,21 +8,18 @@ use adnl::common::{
 };
 use overlay::QueriesConsumer;
 use std::{sync::Arc, convert::TryInto, cmp::min, fmt::Debug};
-use ton_api::{BoxedSerialize};
 use ton_api::{
-    AnyBoxedSerialize, IntoBoxed, 
+    AnyBoxedSerialize, BoxedSerialize, IntoBoxed,
     ton::{
         self, TLObject, Vector,
-        rpc::{
-            ton_node::{
-                DownloadNextBlockFull, DownloadPersistentStateSlice, DownloadZeroState,
-                PreparePersistentState, GetNextBlockDescription,
-                DownloadBlockProof, DownloadBlockProofLink, DownloadKeyBlockProof, DownloadKeyBlockProofLink,
-                PrepareBlock, DownloadBlock, DownloadBlockFull, GetArchiveInfo,
-                PrepareZeroState, GetNextKeyBlockIds, GetArchiveSlice, 
-                PrepareBlockProof, PrepareKeyBlockProof, DownloadPersistentState, GetCapabilities
+        rpc::ton_node::{
+            DownloadNextBlockFull, DownloadPersistentStateSlice, DownloadZeroState,
+            PreparePersistentState, GetNextBlockDescription,
+            DownloadBlockProof, DownloadBlockProofLink, DownloadKeyBlockProof, DownloadKeyBlockProofLink,
+            PrepareBlock, DownloadBlock, DownloadBlockFull, GetArchiveInfo,
+            PrepareZeroState, GetNextKeyBlockIds, GetArchiveSlice, 
+            PrepareBlockProof, PrepareKeyBlockProof, DownloadPersistentState, GetCapabilities
 
-            }
         },
         ton_node::{
             self,
@@ -222,15 +219,11 @@ impl FullNodeOverlayService {
             .into_iter()
             .map(|id| ton_node::blockidext::BlockIdExt::from(id))
             .collect();
-        KeyBlocks::TonNode_KeyBlocks(
-            Box::new(
-                ton_node::keyblocks::KeyBlocks{
-                    blocks: blocks_vec,
-                    incomplete: incomplete.into(),
-                    error: error.into(),
-                }
-            )
-        )
+        ton_node::keyblocks::KeyBlocks {
+            blocks: blocks_vec,
+            incomplete: incomplete.into(),
+            error: error.into(),
+        }.into_boxed()
     }
 
     async fn get_next_key_block_ids_(
@@ -242,7 +235,18 @@ impl FullNodeOverlayService {
             fail!("Given block {} doesn't belong master chain", start_block_id);
         }
 
-        let last_mc_state = self.engine.load_last_applied_mc_state().await?;
+        let last_mc_state = match self.engine.load_last_applied_mc_block_id()? {
+            Some(block_id) if start_block_id == block_id.as_ref() => {
+                self.engine.load_state(&block_id).await?
+            }
+            _ => {
+                return Ok(ton_node::keyblocks::KeyBlocks {
+                    blocks: Vec::new().into(),
+                    incomplete: false.into(),
+                    error: true.into(),
+                }.into_boxed())
+            }
+        };
         let prev_blocks = &last_mc_state.shard_state_extra()?.prev_blocks;
 
         if start_block_id.seq_no != 0 {

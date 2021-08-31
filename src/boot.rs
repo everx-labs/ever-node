@@ -91,20 +91,17 @@ async fn get_key_blocks(
     zero_state: Option<&ShardStateStuff>,
     mut prev_block_proof: Option<BlockProofStuff>,
 ) -> Result<Vec<Arc<BlockHandle>>> {
-    let download_new_key_blocks_until = match engine.allow_blockchain_init() {
-        true => engine.now() + 60,
-        false => engine.now() + 600
-    };
+    let download_new_key_blocks_until = engine.now() + engine.time_for_blockchain_init();
     let mut key_blocks = vec!(handle.clone());
     loop {
         log::info!(target: "boot", "download_next_key_blocks_ids {}", handle.id());
-        let ids = match engine.download_next_key_blocks_ids(handle.id(), 10).await {
+        let (ids, _incomplete) = match engine.download_next_key_blocks_ids(handle.id(), 10).await {
             Err(err) => {
                 log::warn!(target: "boot", "download_next_key_blocks_ids {}: {}", handle.id(), err);
                 futures_timer::Delay::new(Duration::from_secs(1)).await;
                 continue
             }
-            Ok(ids) => ids
+            Ok(result) => result
         };
         if let Some(block_id) = ids.last() {
             log::info!(target: "boot", "last key block is {}", block_id);
@@ -233,6 +230,7 @@ pub(crate) async fn download_zerostate(
     loop {
         match engine.download_zerostate(block_id).await {
             Ok((state, state_bytes)) => {
+                log::info!(target: "boot", "zero state {} received", block_id);
                 let (state, handle) = engine.store_zerostate(state, &state_bytes).await?;
                 engine.set_applied(&handle, 0).await?;
                 engine.process_full_state_in_ext_db(&state).await?;

@@ -44,7 +44,6 @@ pub struct NodeNetwork {
     overlay: Arc<OverlayNode>,
     rldp: Arc<RldpNode>,
     masterchain_overlay_short_id: Arc<OverlayShortId>,
-    masterchain_overlay_id: OverlayId,
     overlays: Arc<Cache<Arc<OverlayShortId>, Arc<NodeClientOverlay>>>,
     validator_context: ValidatorContext,
     overlay_awaiters: AwaitersPool<Arc<OverlayShortId>, Arc<dyn FullNodeOverlayClient>>,
@@ -118,10 +117,6 @@ impl NodeNetwork {
             dht.add_peer(peer)?;
         }
 
-        let masterchain_overlay_id = overlay.calc_overlay_id(
-            masterchain_zero_state_id.shard().workchain_id(),
-            masterchain_zero_state_id.shard().shard_prefix_with_tag() as i64,
-        )?;
         let masterchain_overlay_short_id = overlay.calc_overlay_short_id(
             masterchain_zero_state_id.shard().workchain_id(),
             masterchain_zero_state_id.shard().shard_prefix_with_tag() as i64,
@@ -155,12 +150,11 @@ impl NodeNetwork {
             overlay,
             rldp,
             masterchain_overlay_short_id,
-            masterchain_overlay_id,
             overlays: Arc::new(Cache::new()),
-            validator_context: validator_context,
+            validator_context,
             overlay_awaiters: AwaitersPool::new("overlay_awaiters"),
             runtime_handle: tokio::runtime::Handle::current(),
-            config_handler: config_handler,
+            config_handler,
             connectivity_check_config,
             #[cfg(feature = "telemetry")]
             telemetry: Arc::new(
@@ -770,17 +764,14 @@ impl OverlayOperations for NodeNetwork {
         Ok(self.update_overlay_peers(&masterchain_overlay_short_id, &mut None).await?.len())
     }
 
-    async fn start(self: Arc<Self>) -> Result<Arc<dyn FullNodeOverlayClient>> {
+    async fn start(&self) -> Result<()> {
         log::info!("start network: ip: {}, adnl_id: {}", self.adnl.ip_address(), self.adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?.id());
         AdnlNode::start(
             &self.adnl, 
             vec![self.dht.clone(), 
                 self.overlay.clone(),
                 self.rldp.clone()]
-        ).await?;
-        Ok(self.clone().get_overlay(
-            (self.masterchain_overlay_short_id.clone(), self.masterchain_overlay_id.clone())
-        ).await?)
+        ).await
     }
 
     async fn get_overlay(

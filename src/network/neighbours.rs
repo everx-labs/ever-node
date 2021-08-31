@@ -306,7 +306,7 @@ impl Neighbours {
             loop {
                 if let Err(e) = self.ping_neighbours().await {
                     tokio::time::sleep(Duration::from_millis(500)).await;
-                    log::warn!("ERROR: {}", e)
+                    log::error!("ping_neighbours: {}", e)
                 }
             }
         });
@@ -503,10 +503,11 @@ impl Neighbours {
         Ok(())
     }
 
-    pub async fn ping_neighbours(self: &Arc<Self>) -> Result<()> {
+    async fn ping_neighbours(self: &Arc<Self>) -> Result<()> {
         let count = self.peers.count();
         if count == 0 {
-            fail!("No peers in overlay {}", self.overlay_id)
+            log::trace!("No peers in overlay {}", self.overlay_id);
+            return Ok(())
         } else {
             log::trace!("neighbours: overlay {} count {}", self.overlay_id, count);
         }

@@ -38,12 +38,16 @@ pub struct ValidatedBlockStat {
 
 #[async_trait::async_trait]
 pub trait OverlayOperations : Sync + Send {
-    async fn start(self: Arc<Self>) -> Result<Arc<dyn FullNodeOverlayClient>>;
+    async fn start(&self) -> Result<()>;
     async fn get_peers_count(&self, masterchain_zero_state_id: &BlockIdExt) -> Result<usize>;
     async fn get_overlay(
         self: Arc<Self>, 
         overlay_id: (Arc<OverlayShortId>, OverlayId)
     ) -> Result<Arc<dyn FullNodeOverlayClient>>;
+    async fn get_masterchain_overlay(self: Arc<Self>) -> Result<Arc<dyn FullNodeOverlayClient>> {
+        let overlay_id = self.calc_overlay_id(ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL)?;
+        self.get_overlay(overlay_id).await
+    }
     fn add_consumer(&self, overlay_id: &Arc<OverlayShortId>, consumer: Arc<dyn QueriesConsumer>) -> Result<()>;
     fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<OverlayShortId>, OverlayId)> ;
 }
@@ -223,7 +227,7 @@ pub trait EngineOperations : Sync + Send {
     async fn download_next_block(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
         unimplemented!()
     }
-    async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, priority: u32) -> Result<Vec<BlockIdExt>> {
+    async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, priority: u32) -> Result<(Vec<BlockIdExt>, bool)> {
         unimplemented!()
     }
     async fn store_block(
@@ -417,13 +421,9 @@ pub trait EngineOperations : Sync + Send {
     }
 
     fn persistent_state_ttl(&self, block_time: u32, pss_period_bits: u32) -> u32 {
-        if cfg!(feature = "local_test") {
-            !0
-        } else {
-            let x = block_time >> pss_period_bits;
-            debug_assert!(x != 0);
-            block_time + ((1 << (pss_period_bits + 1)) << x.trailing_zeros())
-        }
+        let x = block_time >> pss_period_bits;
+        debug_assert!(x != 0);
+        block_time + ((1 << (pss_period_bits + 1)) << x.trailing_zeros())
     }
 
     // Options
@@ -435,18 +435,14 @@ pub trait EngineOperations : Sync + Send {
     // True to allow sync from initial block, but it fail if it is not key block
     fn initial_sync_disabled(&self) -> bool { false } 
 
-    // False to allow infinite init
-    fn allow_blockchain_init(&self) -> bool { false }
+    // time for loading key blocks chain
+    fn time_for_blockchain_init(&self) -> u32 { 600 }
 
     // Time in past to get blocks in
     fn sync_blocks_before(&self) -> u32  { 0 }
 
     fn key_block_utime_step(&self) -> u32 {
-        if cfg!(feature = "local_test") {
-            !0 >> 2 // allow to sync with test data
-        } else {
-            3600 // One hour period 
-        }
+        3600 // One hour period 
     }
 
     fn need_db_truncate(&self) -> bool { false }
@@ -551,6 +547,10 @@ pub trait EngineOperations : Sync + Send {
 
     #[cfg(feature = "telemetry")]
     fn full_node_service_telemetry(&self) -> &FullNodeNetworkTelemetry {
+        unimplemented!()
+    }
+
+    fn calc_tps(&self, period: u64) -> Result<u32> {
         unimplemented!()
     }
 

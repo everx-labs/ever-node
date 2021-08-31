@@ -29,7 +29,7 @@
         "message_producer": {
             "enabled": true,
             "brokers": "kafka",
-            "message_timeout_ms": 100,
+            "message_timeout_ms": 1000,
             "topic": "messages",
             "attempt_timeout_ms": 100,
             "message_max_size": 3000000,
@@ -38,7 +38,7 @@
         "transaction_producer": {
             "enabled": true,
             "brokers": "kafka",
-            "message_timeout_ms": 100,
+            "message_timeout_ms": 1000,
             "topic": "transactions",
             "attempt_timeout_ms": 100,
             "message_max_size": 3000000,
@@ -47,7 +47,7 @@
         "account_producer": {
             "enabled": true,
             "brokers": "kafka",
-            "message_timeout_ms": 100,
+            "message_timeout_ms": 1000,
             "topic": "accounts",
             "attempt_timeout_ms": 100,
             "message_max_size": 3000000,
@@ -56,7 +56,7 @@
         "block_proof_producer": {
             "enabled": true,
             "brokers": "kafka",
-            "message_timeout_ms": 100,
+            "message_timeout_ms": 1000,
             "topic": "blocks_signatures",
             "attempt_timeout_ms": 100,
             "message_max_size": 3000000,

@@ -4,24 +4,10 @@ use crate::{
 };
 
 use adnl::common::KeyId;
-#[cfg(not(feature = "local_test"))]
-use std::{sync::{Arc, atomic::{AtomicUsize, Ordering}}};
-use ton_block::{BlockIdExt};
-#[cfg(not(feature = "local_test"))]
-use ton_types::{error, fail};
-use ton_types::Result;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use ton_block::BlockIdExt;
+use ton_types::{error, fail, Result};
 
-#[cfg(feature = "local_test")]
-pub async fn download_persistent_state(
-    id: &BlockIdExt,
-    master_id: &BlockIdExt,
-    overlay: &dyn FullNodeOverlayClient
-) -> Result<ShardStateStuff> {
-    let bytes = overlay.download_persistent_state_part(id, master_id, 0, 0, None).await?;
-    ShardStateStuff::deserialize(id.clone(), &bytes)
-}
-
-#[cfg(not(feature = "local_test"))]
 pub async fn download_persistent_state(
     id: &BlockIdExt,
     master_id: &BlockIdExt,
@@ -48,7 +34,6 @@ pub async fn download_persistent_state(
     result.ok_or_else(|| error!("internal error!"))?
 }
 
-#[cfg(not(feature = "local_test"))]
 async fn download_persistent_state_iter(
     id: &BlockIdExt,
     master_id: &BlockIdExt,
@@ -93,7 +78,7 @@ async fn download_persistent_state_iter(
     let threads = 3;
     let peer_drop = peer.clone();
 
-    for _ in 0..threads {
+    for thread in 0..threads {
         let parts = parts.clone();
         let total_size = total_size.clone();
         let errors = errors.clone();
@@ -101,15 +86,11 @@ async fn download_persistent_state_iter(
         download_futures.push(async move {
             let mut peer_attempt = 0;
             let mut part_attempt = 0;
-            loop {
-
-                if offset >= total_size.load(Ordering::Relaxed) {
-                    return Ok(());
-                }
-
-                match overlay.download_persistent_state_part(
+            while offset < total_size.load(Ordering::Relaxed) {
+                let result = overlay.download_persistent_state_part(
                     id, master_id, offset, max_size, peer.clone(), peer_attempt
-                ).await {
+                ).await;
+                match result {
                     Ok(next_bytes) => {
                         part_attempt = 0;
                         let len = next_bytes.len();
@@ -118,11 +99,12 @@ async fn download_persistent_state_iter(
                             log::info!("download_persistent_state {}: got part offset: {}", id.shard(), offset);
                         //}
                         if len < max_size {
-                            total_size.store(offset + len, Ordering::Relaxed);
-                            return Ok(());
+                            log::info!("the total length of persistent state {} might be {}", id.shard(), offset + len);
+                            total_size.fetch_min(offset + len, Ordering::Relaxed);
+                            break
                         }
                         offset += max_size * threads;
-                    },
+                    }
                     Err(e) => {
                         errors.fetch_add(1, Ordering::SeqCst);
                         part_attempt += 1;
@@ -138,10 +120,11 @@ async fn download_persistent_state_iter(
                             )
                         }
                         futures_timer::Delay::new(std::time::Duration::from_millis(100)).await;
-                    },
+                    }
                 }
-
             }
+            log::trace!("download_persistent_state {} thread {} finished", id.shard(), thread);
+            Ok(())
         });
         offset += max_size;
     }
@@ -159,6 +142,7 @@ async fn download_persistent_state_iter(
     );
 
     // TODO try to walk map by iterator and fill preallocated vector to speed up this process
+    let now = std::time::Instant::now();
     let total_size = total_size.load(Ordering::Relaxed);
     let mut state_bytes = Vec::with_capacity(total_size);
     let mut i = 0;
@@ -166,6 +150,10 @@ async fn download_persistent_state_iter(
         state_bytes.extend_from_slice(&part.1);
         i += max_size;
     }
+    log::trace!(
+        "download_persistent_state: CONCAT {}ms, id: {}, master_id: {} ", 
+        now.elapsed().as_millis(), id, master_id
+    );
     assert_eq!(total_size, state_bytes.len());
 
     ShardStateStuff::deserialize(id.clone(), &state_bytes)

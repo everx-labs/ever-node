@@ -7,11 +7,13 @@ use crate::{
         OverlayOperations, PrivateOverlayOperations, Server, ValidatedBlockStat,
     },
     full_node::{
+        self,
         apply_block::{self, apply_block},
         shard_client::{
             process_block_broadcast, start_masterchain_client, start_shards_client,
             SHARD_BROADCAST_WINDOW
         },
+        counters::TpsCounter,
     },
     internal_db::{
         InternalDb, InternalDbConfig, InternalDbImpl, 
@@ -38,9 +40,6 @@ use crate::{
     engine_traits::ValidatedBlockStatNode,
     validator::validator_utils::calc_subset_for_workchain,
 };
-#[cfg(feature = "local_test")]
-use crate::network::node_network_stub::NodeNetworkStub;
-#[cfg(not(feature = "local_test"))]
 use crate::network::node_network::NodeNetwork;
 #[cfg(feature = "external_db")]
 use crate::external_db::kafka_consumer::KafkaConsumer;
@@ -119,6 +118,8 @@ pub struct Engine {
     validator_telemetry: CollatorValidatorTelemetry,
     #[cfg(feature = "telemetry")]
     full_node_service_telemetry: FullNodeNetworkTelemetry,
+
+    tps_counter: TpsCounter,
 
     last_rotation_block_db: LastRotationBlockDb, // TODO use node-state DB instead
 }
@@ -329,16 +330,10 @@ impl Engine {
         log::info!("workchain_id from config {}", workchain_id);
         let workchain_id = AtomicI32::new(workchain_id);
 
-        #[cfg(feature = "local_test")]
-        let network = {
-            let path = dirs::home_dir().unwrap().into_os_string().into_string().unwrap();
-            let path = format!("{}/full-node-test", path);
-            Arc::new(NodeNetworkStub::new(&general_config, db.clone(), path)?)
-        };
-        #[cfg(not(feature = "local_test"))]
         let network = NodeNetwork::new(general_config).await?;
-        network.clone().start().await?;
+        network.start().await?;
 
+        log::info!("load_all_top_shard_blocks");
         let shard_blocks = match db.load_all_top_shard_blocks() {
             Ok(tsbs) => tsbs,
             Err(e) => {
@@ -346,6 +341,7 @@ impl Engine {
                 HashMap::default()
             }
         };
+        log::info!("load_node_state");
         let last_mc_seqno = db
             .load_node_state(LAST_APPLIED_MC_BLOCK)?
             .map(|id| id.seq_no as u32)
@@ -353,6 +349,7 @@ impl Engine {
         let (shard_blocks_pool, shard_blocks_receiver) = 
             ShardBlocksPool::new(shard_blocks, last_mc_seqno, false);
 
+        log::info!("start_states_gc");
         let state_gc_resolver = Arc::new(AllowStateGcSmartResolver::new());
         db.start_states_gc(state_gc_resolver.clone());
 
@@ -362,7 +359,7 @@ impl Engine {
         let engine = Arc::new(Engine {
             db,
             ext_db,
-            overlay_operations: network.clone(),
+            overlay_operations: network.clone() as Arc<dyn OverlayOperations>,
             shard_states_awaiters: AwaitersPool::new("shard_states_awaiters"),
             block_applying_awaiters: AwaitersPool::new("block_applying_awaiters"),
             next_block_applying_awaiters: AwaitersPool::new("next_block_applying_awaiters"),
@@ -374,7 +371,7 @@ impl Engine {
             init_mc_block_id,
             initial_sync_disabled,
             archives_life_time,
-            network: network.clone(),
+            network,
             shard_blocks: shard_blocks_pool,
             last_known_mc_block_seqno: AtomicU32::new(0),
             last_known_keyblock_seqno: AtomicU32::new(0),
@@ -397,6 +394,7 @@ impl Engine {
             validator_telemetry: CollatorValidatorTelemetry::default(),
             #[cfg(feature = "telemetry")]
             full_node_service_telemetry: FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Service),
+            tps_counter: TpsCounter::new(),
             last_rotation_block_db,
         });
 
@@ -567,6 +565,10 @@ impl Engine {
         &self.last_rotation_block_db
     }
 
+    pub fn tps_counter(&self) -> &TpsCounter {
+        &self.tps_counter
+    }
+
     pub async fn download_and_apply_block_worker(
         self: Arc<Self>, 
         id: &BlockIdExt, 
@@ -626,8 +628,10 @@ impl Engine {
                 self.download_block_worker(id, attempts, timeout)
             ).await? {
 
-                if self.load_block_handle(id)?.is_some() {
-                    continue;
+                if let Some(handle) = self.load_block_handle(id)? {
+                    if handle.has_data() && (handle.has_proof() || handle.has_proof_link()) {
+                        continue
+                    }
                 }
 
                 let downloading_time = now.elapsed().as_millis();
@@ -696,8 +700,7 @@ impl Engine {
                 self.shard_blocks().update_shard_blocks(&self.load_state(block.id()).await?)?;
 
                 if self.set_applied(handle, mc_seq_no).await? {
-                    #[cfg(feature = "telemetry")]
-                    self.full_node_telemetry().submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
+                    self.tps_counter.submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
                 }
 
                 let (prev_id, prev2_id_opt) = block.construct_prev_id()?;
@@ -746,8 +749,7 @@ impl Engine {
         } else {
             if !pre_apply {
                 if self.set_applied(handle, mc_seq_no).await? {
-                    #[cfg(feature = "telemetry")]
-                    self.full_node_telemetry().submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
+                    self.tps_counter.submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
                 }
             }
             log::info!(
@@ -951,9 +953,15 @@ impl Engine {
         self: Arc<Self>, 
         broadcast: Box<NewShardBlockBroadcast>
     ) -> Result<BlockIdExt> {
-        let id = (&broadcast.block.block).try_into()?;
+        let id: BlockIdExt = (&broadcast.block.block).try_into()?;
         let cc_seqno = broadcast.block.cc_seqno as u32;
         let data = broadcast.block.data.0;
+        let (master, workchain_id) = self.processed_workchain().await?;
+
+        if !master && workchain_id != id.shard().workchain_id() {
+            log::debug!("Skipped new shard block broadcast {} because it is not a processing workchain", id);
+            return Ok(id);
+        }
 
         // check only
         let result = self.shard_blocks.process_shard_block_raw(&id, cc_seqno, data, false, true, self.deref()).await?;
@@ -1002,7 +1010,6 @@ impl Engine {
             // });
 
             // add to list (for collator) only if shard state is avaliable
-            let (_master, workchain_id) = self.processed_workchain().await?;
             let id = id.clone();
             tokio::spawn(async move {
                 let mut result = true;
@@ -1024,9 +1031,8 @@ impl Engine {
                 }
             });
         }
-        Ok(id)              
-
-    }                  
+        Ok(id)
+    }
 
     async fn create_download_context<'a, T>(
          &'a self,
@@ -1529,9 +1535,8 @@ pub async fn run(
     // Console service - run first to allow console to connect to generate new keys 
     // while node is looking for net
     if let Some(config) = control_server_config {
-        engine.register_server(
-            Server::ControlServer(run_control_server(engine.clone(), config).await?)
-        )
+        let server = Server::ControlServer(run_control_server(engine.clone(), config).await?);
+        engine.register_server(server)
     };
 
     // Messages from external DB (usually kafka)
@@ -1612,10 +1617,22 @@ fn telemetry_logger(engine: Arc<Engine>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(TELEMETRY_TIMEOUT)).await;
+            let period = full_node::telemetry::TPS_PERIOD_1;
+            let tps_1 = engine.tps_counter.calc_tps(period)
+                .unwrap_or_else(|e| { 
+                    log::error!("Can't calc tps for {}sec period: {}", period, e);
+                    0
+                });
+            let period = full_node::telemetry::TPS_PERIOD_2;
+            let tps_2 = engine.tps_counter.calc_tps(period)
+                .unwrap_or_else(|e| { 
+                    log::error!("Can't calc tps for {}sec period: {}", period, e);
+                    0
+                });
             log::debug!(
                 target: "telemetry",
                 "Full node's telemetry:\n{}",
-                engine.full_node_telemetry().report()
+                engine.full_node_telemetry().report(tps_1, tps_2)
             );
             log::debug!(
                 target: "telemetry",
