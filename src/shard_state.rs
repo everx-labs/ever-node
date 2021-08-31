@@ -9,7 +9,6 @@ use ton_block::{
 };
 use ton_types::{Cell, SliceData, error, fail, Result, deserialize_tree_of_cells, UInt256};
 
-
 /// It is a wrapper around various shard state's representations and properties.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ShardStateStuff {
@@ -107,6 +106,10 @@ impl ShardStateStuff {
 
     pub fn shard(&self) -> &ShardIdent { &self.block_id.shard() }
 
+    pub fn top_blocks(&self, workchain_id: i32) -> Result<Vec<BlockIdExt>> {
+        self.shard_hashes()?.top_blocks(&[workchain_id])
+    }
+
 // Unused
 //    pub fn set_shard(&mut self, shard: ShardIdent) { 
 //        self.block_id.shard_id = shard; 
@@ -139,6 +142,18 @@ impl ShardStateStuff {
             .prev_blocks.get(&block_id.seq_no())?
             .map(|id| &id.blk_ref().root_hash == block_id.root_hash() && &id.blk_ref().file_hash == block_id.file_hash())
             .unwrap_or_default())
+    }
+
+    pub fn prev_key_block_id(&self) -> BlockIdExt {
+        if let Some(seq_no) = self.block_id().seq_no().checked_sub(1) {
+            if let Ok(extra) = self.shard_state_extra() {
+                if let Ok(Some(id)) = extra.prev_blocks.get_prev_key_block(seq_no) {
+                    return id.master_block_id().1
+                }
+            }
+        }
+        log::error!("prev_key_block_id error for shard_state {}", self.block_id());
+        BlockIdExt::with_params(ShardIdent::masterchain(), 0, UInt256::default(), UInt256::default())
     }
 
     pub fn workchains(&self) -> Result<Vec<(i32, WorkchainDescr)>> {
@@ -218,3 +233,4 @@ impl Deserializable for ShardHashesStuff {
         Ok(Self { shards })
     }
 }
+

@@ -60,7 +60,7 @@ impl BlockStuff {
         Ok(Self{ id, block, root, data: Arc::new(data), })
     }
 
-    #[cfg(any(test, feature = "local_test"))]
+    #[cfg(any(test))]
     pub fn read_from_file(filename: &str) -> Result<Self> {
         let data = std::fs::read(filename)?;
         let file_hash = UInt256::calc_file_hash(&data);

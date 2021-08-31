@@ -1,5 +1,5 @@
 use std::{
-    time::{SystemTime, Instant, UNIX_EPOCH},
+    time::Instant,
     sync::atomic::{AtomicU64, AtomicU32, Ordering},
     cmp::{max, min},
 };
@@ -8,9 +8,10 @@ use ton_block::BlockIdExt;
 const MAX_DOWNLOAD_BLOCK_ATTEMPTS: usize = 10;
 const TOP_BLOCK_BCAST_TTL_SEC: usize = 30;
 const DOWNLOADING_BLOCK_TTL_SEC: usize = 300;
-const TPS_PERIOD_1: u64 = 5 * 60; // 5 min
-const TPS_PERIOD_2: u64 = 60; // 1 min
-const TPS_PERIOD_LAG: u64 = 10; // 10 sec
+
+pub const TPS_PERIOD_1: u64 = 5 * 60; // 5 min
+pub const TPS_PERIOD_2: u64 = 60; // 1 min
+
 
 pub struct FullNodeTelemetry {
     // Almost all metrics are zeroed while report creation
@@ -41,7 +42,6 @@ pub struct FullNodeTelemetry {
     sent_top_block_broadcasts: AtomicU64,
     sent_block_broadcasts: AtomicU64,
     sent_ext_msg_broadcasts: AtomicU64,
-    transactions: lockfree::map::Map<u64, AtomicU32>, // unix time - transactions
 }
 
 impl FullNodeTelemetry {
@@ -72,7 +72,6 @@ impl FullNodeTelemetry {
             sent_top_block_broadcasts: AtomicU64::new(0),
             sent_block_broadcasts: AtomicU64::new(0),
             sent_ext_msg_broadcasts: AtomicU64::new(0),
-            transactions: Default::default(),
         }
     }
 
@@ -169,23 +168,7 @@ impl FullNodeTelemetry {
         self.sent_ext_msg_broadcasts.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn submit_transactions(&self, time: u64, tr_count: usize) {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        if now >= time && now - time <= TPS_PERIOD_1 + TPS_PERIOD_LAG {
-            adnl::common::add_object_to_map_with_update(
-                &self.transactions,
-                time,
-                |found| if let Some(a) = found {
-                    a.fetch_add(tr_count as u32, Ordering::Relaxed);
-                    Ok(None)
-                } else {
-                    Ok(Some(AtomicU32::new(tr_count as u32)))
-                }
-            ).expect("Can't return error");
-        }
-    }
-
-    pub fn report(&self) -> String {
+    pub fn report(&self, tps_1: u32, tps_2: u32) -> String {
 
         // Get and reset statistic
         let applied_blocks = self.applied_blocks.swap(0, Ordering::Relaxed);
@@ -232,24 +215,6 @@ impl FullNodeTelemetry {
             }
         }
 
-        let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() - TPS_PERIOD_LAG;
-        let mut tr_count_1 = 0;
-        let mut tr_count_2 = 0;
-        for guard in self.transactions.iter() {
-            if time > *guard.key() {
-                if time - guard.key() > TPS_PERIOD_1 {
-                    self.transactions.remove(guard.key());
-                } else {
-                    if time - guard.key() <= TPS_PERIOD_1 {
-                        tr_count_1 += guard.val().load(Ordering::Relaxed);
-                    }
-                    if time - guard.key() <= TPS_PERIOD_2 {
-                        tr_count_2 += guard.val().load(Ordering::Relaxed);
-                    }
-                }
-            }
-        }
-
         // Report to statsd
         // TODO
 
@@ -272,11 +237,11 @@ impl FullNodeTelemetry {
         report.append(        "transactions per second\n");
         report.append(format!("    for {:>3.0}sec window   {:>10}\n", 
             TPS_PERIOD_1,
-            tr_count_1 / TPS_PERIOD_1 as u32
+            tps_1
         ));
         report.append(format!("    for {:>3.0}sec window   {:>10}\n", 
             TPS_PERIOD_2,
-            tr_count_2 / TPS_PERIOD_2 as u32
+            tps_2
         ));
 
         report.append(        "***\n");

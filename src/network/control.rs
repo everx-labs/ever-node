@@ -223,6 +223,7 @@ impl ControlQuerySubscriber {
                 Err(err) => err.to_string()
             };
             let key = "last applied masterchain block id".to_string();
+            let value = format!("\"{}\"", value);
             stats.0.push(OneStat { key, value });
 
             let value = match engine.processed_workchain().await {
@@ -249,12 +250,13 @@ impl ControlQuerySubscriber {
                     stat.push_str(&(ago - item.val()).to_string());
                     stat.push_str(" sec ago");
                 }
-                stat.push_str("\n");
+                stat.push_str("\t");
             }
 
+            let value = format!("\"{}\"", stat.to_string()); 
             stats.0.push(OneStat {
                 key: "validation_stats".to_string(), 
-                value: stat.to_string()
+                value: value
             });
 
             // collation_stats
@@ -270,13 +272,30 @@ impl ControlQuerySubscriber {
                     stat.push_str(&(ago - item.val()).to_string());
                     stat.push_str(" sec ago");
                 }
-                stat.push_str("\n");
+                stat.push_str("\t");
             }
 
+            let value = format!("\"{}\"", stat.to_string()); 
             stats.0.push(OneStat {
                 key: "collation_stats".to_string(), 
-                value: stat.to_string()
+                value: value
             });
+
+            // tps_10
+            if let Ok(tps) = engine.calc_tps(10) {
+                stats.0.push(OneStat {
+                    key: "tps_10".to_string(), 
+                    value: tps.to_string()
+                });
+            }
+
+            // tps_300
+            if let Ok(tps) = engine.calc_tps(300) {
+                stats.0.push(OneStat {
+                    key: "tps_300".to_string(), 
+                    value: tps.to_string()
+                });
+            }
 
             Ok(Stats {stats})
         } else {

@@ -487,10 +487,10 @@ impl ValidatorManagerImpl {
                     log::error!(
                         target: "validator", 
                         "Cannot compute validator set for workchain {}:{:016X}: less than {} of {}",
-                        catchain_config.shard_validators_num,
-                        full_validator_set.list().len(),
                         ident.workchain_id(), 
-                        ident.shard_prefix_with_tag()
+                        ident.shard_prefix_with_tag(),
+                        catchain_config.shard_validators_num,
+                        full_validator_set.list().len()
                     );
                     continue
                 }
@@ -706,10 +706,10 @@ impl ValidatorManagerImpl {
                     log::error!(
                         target: "validator", 
                         "Cannot compute validator set for workchain {}:{:016X}: less than {} of {}",
-                        catchain_config.shard_validators_num,
-                        future_validator_set.list().len(),
                         ident.workchain_id(), 
-                        ident.shard_prefix_with_tag()
+                        ident.shard_prefix_with_tag(),
+                        catchain_config.shard_validators_num,
+                        future_validator_set.list().len()
                     );
                     continue
                 }

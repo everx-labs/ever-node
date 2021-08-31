@@ -360,14 +360,13 @@ impl InternalDb for InternalDbImpl {
         } else {
             fail!("Cannot create handle for block {} without data", id)
         };
-        if let Some(handle) = 
-            self.block_handle_storage.create_handle(id.clone(), meta, callback)? {
-                return Ok(BlockResult::with_status(handle, DataStatus::Created))
-            }
-        if let Some(handle) = self.load_block_handle(id)? {
-            return Ok(BlockResult::with_status(handle, DataStatus::Fetched))
+        if let Some(handle) = self.block_handle_storage.create_handle(id.clone(), meta, callback)? {
+            Ok(BlockResult::with_status(handle, DataStatus::Created))
+        } else if let Some(handle) = self.load_block_handle(id)? {
+            Ok(BlockResult::with_status(handle, DataStatus::Fetched))
+        } else {
+            fail!("Cannot create handle for block {}", id)
         }
-        fail!("Cannot create handle for block {}", id)
     }
 
     fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
@@ -459,22 +458,12 @@ impl InternalDb for InternalDbImpl {
                 fail!("Block handle and id mismatch: {} vs {}", handle.id(), id)
             }
         }
-        if cfg!(feature = "local_test") {
-            let handle = if let Some(handle) = handle {
-                handle
-            } else if let Some(handle) = self.load_block_handle(id)? {
-                handle
-            } else {
-                fail!("Cannot load handle for block {} during test", id)
-            };
-            Ok(BlockResult::with_status(handle, DataStatus::Fetched))
-        } else {
-
+        {
             let _tc = TimeChecker::new(format!("store_block_proof {}", proof.id()), 200);
             if id != proof.id() {
                 fail!(NodeError::InvalidArg("`proof` and `id` mismatch".to_string()))
             }
-              
+
             let mut result = if let Some(handle) = handle {
                 BlockResult::with_status(handle, DataStatus::Fetched)
             } else {
@@ -487,11 +476,11 @@ impl InternalDb for InternalDbImpl {
             if proof.is_link() {
                 let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(id);
                 if !handle.has_proof_link() || 
-                   !self.archive_manager.check_file(&handle, &entry_id) 
+                    !self.archive_manager.check_file(&handle, &entry_id) 
                 {
                     let _lock = handle.proof_file_lock().write().await;
                     if !handle.has_proof_link() || 
-                       !self.archive_manager.check_file(&handle, &entry_id) 
+                        !self.archive_manager.check_file(&handle, &entry_id) 
                     {
                         let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(id);
                         self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
@@ -504,11 +493,11 @@ impl InternalDb for InternalDbImpl {
             } else {
                 let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Proof(id);
                 if !handle.has_proof() || 
-                   !self.archive_manager.check_file(&handle, &entry_id) 
+                    !self.archive_manager.check_file(&handle, &entry_id) 
                 {
                     let _lock = handle.proof_file_lock().write().await;
                     if !handle.has_proof() || 
-                       !self.archive_manager.check_file(&handle, &entry_id) 
+                        !self.archive_manager.check_file(&handle, &entry_id) 
                     {
                         let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Proof(id);
                         self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
@@ -520,9 +509,7 @@ impl InternalDb for InternalDbImpl {
                 }
             }
             Ok(result)
-
         }
-
     }
 
     async fn load_block_proof(&self, handle: &BlockHandle, is_link: bool) -> Result<BlockProofStuff> {
@@ -574,6 +561,8 @@ impl InternalDb for InternalDbImpl {
                 self.store_block_handle(handle, callback)?;
                 return Ok((state, true));
             }
+        } else {
+            state = self.load_shard_state_dynamic(handle.id())?;
         }
         Ok((state, false))
     }

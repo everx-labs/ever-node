@@ -150,19 +150,11 @@ impl BlockHandle {
     }
 
     pub fn has_proof(&self) -> bool {
-        if cfg!(feature = "local_test") {
-            true
-        } else {
-            self.is_flag_set(FLAG_PROOF)
-        }
+        self.is_flag_set(FLAG_PROOF)
     }
 
     pub fn has_proof_link(&self) -> bool {
-        if cfg!(feature = "local_test") {
-            true
-        } else {
-            self.is_flag_set(FLAG_PROOF_LINK)
-        }
+        self.is_flag_set(FLAG_PROOF_LINK)
     }
 
     pub fn has_proof_or_link(&self, is_link: &mut bool) -> bool {
