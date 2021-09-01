@@ -97,29 +97,31 @@ impl ControlQuerySubscriber {
     async fn get_account_state(&self, address: AccountAddress, workchain: i32) -> Result<ton_api::ton::data::Data> {
         if let Some(engine) = self.engine.as_ref() {
             let addr = MsgAddressInt::from_str(&address.account_address)?;
-            let mc_state = engine.load_last_applied_mc_state().await?;
-            let mc_account = mc_state
-                .state()
-                .read_accounts()?
-                .account(&addr.address())?;
-
-            let shard_account = if let Some(shard_account) = mc_account {
-                shard_account
+            let mc_state = if addr.is_masterchain() {
+                engine.load_last_applied_mc_state().await?
             } else {
-                let mut shard_account_opt = None;
-
+                let mc_block_id = engine.load_shard_client_mc_block_id()?;
+                let mc_block_id = mc_block_id.ok_or_else(|| error!("shard_client_mc_block_id can`t load!"))?;
+                engine.load_state(&mc_block_id).await?
+            };
+            
+            let state = if addr.is_masterchain() {
+                    mc_state
+            } else {
+                let mut shard_state = None;
                 for id in mc_state.shard_hashes()?.top_blocks(&[workchain])? {
                     if id.shard().contains_account(addr.address().clone())? {
-                        let shard_state = engine.clone().wait_state(&id, Some(1_000), false).await?;
-
-                        shard_account_opt = shard_state.state()
-                            .read_accounts()?
-                            .account(&addr.address())?;
+                        shard_state = engine.load_state(&id).await.ok();
                         break;
                     }
                 }
-                shard_account_opt.ok_or_else(|| error!("Cannot load account {} from mc_state", &address.account_address))?
+                shard_state.ok_or_else(|| error!("Cannot found actual state from account {}", &address.account_address))?
             };
+
+            let shard_account = state.state()
+                .read_accounts()?
+                .account(&addr.address())?
+                .ok_or_else(|| error!("Error load account {} from state", &address.account_address))?;
 
             let account = shard_account.read_account()?;
 
@@ -139,7 +141,7 @@ impl ControlQuerySubscriber {
                 //data: bytes(serialize_toc(&data)?),
                 data: bytes(serialize_toc(&shard_account.account_cell())?),
                 last_transaction_id: transaction_id,
-                block_id: convert_block_id_ext_blk2api(mc_state.block_id()),
+                block_id: convert_block_id_ext_blk2api(state.block_id()),
                 frozen_hash: bytes(account.status().write_to_bytes()?),
                 sync_utime: 0
             };
