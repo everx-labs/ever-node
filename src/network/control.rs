@@ -75,8 +75,17 @@ impl ControlQuerySubscriber {
         if let Some(engine) = self.engine.as_ref() {
             let mut stats: ton::vector<ton::Bare, OneStat> = ton::vector::default();
 
+            let mc_block_id = if let Some(id) = engine.load_last_applied_mc_block_id()? {
+                id
+            } else {
+                stats.0.push(OneStat {
+                    key: "masterchainblock".to_string(),
+                    value: "not set".to_string()
+                });
+                return Ok(Stats {stats: stats})
+            };
+
             // masterchainblocktime
-            let mc_block_id = engine.load_last_applied_mc_block_id().await?;
             let mc_block_handle = engine.load_block_handle(&mc_block_id)?.ok_or_else(
                 || error!("Cannot load handle for block {}", &mc_block_id)
             )?;
@@ -196,20 +205,20 @@ impl Subscriber for ControlQuerySubscriber {
         };
         log::info!("query (control server): {:?}", query);
         let query = match query.downcast::<GenerateKeyPair>() {
-            Ok(_) => return QueryResult::consume(
-                self.process_generate_keypair().await?
-            ),
+            Ok(_) => return QueryResult::consume(self.process_generate_keypair().await?, None),
             Err(query) => query
         };
         let query = match query.downcast::<ExportPublicKey>() {
             Ok(query) => return QueryResult::consume_boxed(
-                self.export_public_key(&query.key_hash.0)?
+                self.export_public_key(&query.key_hash.0)?,
+                None
             ),
             Err(query) => query
         };
         let query = match query.downcast::<Sign>() {
             Ok(query) => return QueryResult::consume(
-                self.process_sign_data(&query.key_hash.0, &query.data)?
+                self.process_sign_data(&query.key_hash.0, &query.data)?,
+                None
             ),
             Err(query) => query
         };
@@ -217,7 +226,8 @@ impl Subscriber for ControlQuerySubscriber {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_validator_permanent_key(
                     &query.key_hash.0, query.election_date, query.ttl
-                ).await?
+                ).await?,
+                None
             ),
             Err(query) => query
         };
@@ -225,7 +235,8 @@ impl Subscriber for ControlQuerySubscriber {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_validator_temp_key(
                     &query.permanent_key_hash.0, &query.key_hash.0, query.ttl
-                )?
+                )?,
+                None
             ),
             Err(query) => query
         };
@@ -233,20 +244,22 @@ impl Subscriber for ControlQuerySubscriber {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_validator_adnl_address(
                     &query.permanent_key_hash.0, &query.key_hash.0, query.ttl
-                ).await?
+                ).await?,
+                None
             ),
             Err(query) => query
         };
         let query = match query.downcast::<AddAdnlId>() {
             Ok(query) => return QueryResult::consume_boxed(
-                self.add_adnl_address(&query.key_hash.0, query.category)?
+                self.add_adnl_address(&query.key_hash.0, query.category)?,
+                None
             ),
             Err(query) => query
         };
         let query = match query.downcast::<GetBundle>() {
             Ok(query) => {
                 let block_id = convert_block_id_ext_api2blk(&query.block_id)?;
-                return QueryResult::consume_boxed(self.prepare_bundle(block_id).await?)
+                return QueryResult::consume_boxed(self.prepare_bundle(block_id).await?, None)
             },
             Err(query) => query
         };
@@ -256,7 +269,8 @@ impl Subscriber for ControlQuerySubscriber {
                     |id| convert_block_id_ext_api2blk(&id).ok()
                 ).collect();
                 return QueryResult::consume_boxed(
-                    self.prepare_future_bundle(prev_block_ids).await?
+                    self.prepare_future_bundle(prev_block_ids).await?,
+                    None
                 )
             },
             Err(query) => query
@@ -264,7 +278,10 @@ impl Subscriber for ControlQuerySubscriber {
         let query = match query.downcast::<ton::rpc::lite_server::SendMessage>() {
             Ok(query) => {
                 let message_data = query.body.0;
-                return QueryResult::consume_boxed(self.redirect_external_message(&message_data).await?)
+                return QueryResult::consume_boxed(
+                    self.redirect_external_message(&message_data).await?,
+                    None
+                )
             }
             Err(query) => query
         };
@@ -273,7 +290,9 @@ impl Subscriber for ControlQuerySubscriber {
                 return QueryResult::consume_boxed(
                     ton_api::ton::engine::validator::Stats::Engine_Validator_Stats(
                         Box::new(self.get_stats().await?)
-                ))
+                    ),
+                    None
+                )
             },
             Err(query) => query
         };

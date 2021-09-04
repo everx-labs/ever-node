@@ -759,7 +759,7 @@ impl TopBlockDescrStuff {
             &self.proof_for().file_hash
         );
         let total_weight: u64 = validators.iter().map(|v| v.weight).sum();
-        let weight = match signatures.pure_signatures.check_signatures(validators, &checked_data) {
+        let weight = match signatures.pure_signatures.check_signatures(&validators, &checked_data) {
             Err(err) => {
                 *res_flags |= 0x21;
                 fail!(

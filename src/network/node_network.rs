@@ -9,7 +9,7 @@ use crate::{
     types::awaiters_pool::AwaitersPool,
 };
 use adnl::{
-    common::{KeyId, KeyOption, serialize}, node::AdnlNode
+    common::{KeyId, KeyOption, serialize, tag_from_unboxed_type, TaggedByteSlice}, node::AdnlNode
 };
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
@@ -53,6 +53,8 @@ pub struct NodeNetwork {
     connectivity_check_config: ConnectivityCheckBroadcastConfig,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<FullNodeNetworkTelemetry>,
+    #[cfg(feature = "telemetry")]
+    tag_connectivity_check_broadcast: u32
 }
 
 struct ValidatorContext {
@@ -156,7 +158,12 @@ impl NodeNetwork {
             config_handler: config_handler,
             connectivity_check_config,
             #[cfg(feature = "telemetry")]
-            telemetry: Arc::new(FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Client)),
+            telemetry: Arc::new(
+                FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Client)
+            ),
+            #[cfg(feature = "telemetry")]
+            tag_connectivity_check_broadcast: 
+                tag_from_unboxed_type::<ConnectivityCheckBroadcast>()
         });
 
         NodeConfigHandler::start_sheduler(nn.config_handler.clone(), config_handler_context, vec![nn.clone()])?;
@@ -702,7 +709,11 @@ impl NodeNetwork {
             };
             overlay.val().overlay().broadcast(
                 &self.masterchain_overlay_short_id, 
-                &serialize(&broadcast.into_boxed())?, 
+                &TaggedByteSlice {
+                    object: &serialize(&broadcast.into_boxed())?, 
+                    #[cfg(feature = "telemetry")]
+                    tag: self.tag_connectivity_check_broadcast
+                },
                 None
             ).await
         } else {

@@ -1,7 +1,8 @@
 use crate::{
     archives::{
         archive_slice::ArchiveSlice, file_maps::{FileDescription, FileMaps}, get_mc_seq_no,
-        package_entry_id::{GetFileNameShort, PackageEntryId}, package_id::PackageId
+        package_entry_id::{GetFileNameShort, PackageEntryId}, package_id::PackageId,
+        ARCHIVE_SLICE_SIZE, KEY_ARCHIVE_PACKAGE_SIZE
     },
     types::BlockHandle
 };
@@ -11,10 +12,6 @@ use ton_api::ton::PublicKey;
 use ton_block::BlockIdExt;
 use ton_types::{error, fail, Result, UInt256};
 
-
-pub const ARCHIVE_SIZE: usize = 20_000;
-pub const KEY_ARCHIVE_SIZE: usize = 200_000;
-pub const SLICE_SIZE: u32 = 100;
 
 pub struct ArchiveManager {
     db_root_path: Arc<PathBuf>,
@@ -98,7 +95,8 @@ impl ArchiveManager {
     {
             
         if handle.is_archived() {
-            let package_id = self.get_package_id(get_mc_seq_no(handle)).await?;
+            let is_key = handle.is_key_block()?;
+            let package_id = self.get_package_id(get_mc_seq_no(handle), is_key).await?;
             if let Some(ref fd) = self.get_file_desc(package_id, false).await? {
                 return Ok(fd.archive_slice()
                     .get_file(Some(handle), entry_id).await?
@@ -144,7 +142,7 @@ impl ArchiveManager {
         let proof_filename = if proof_inited {
             let _lock = handle.proof_file_lock().write().await;
             Some(
-                self.move_file_to_archive(
+                self.move_file_to_archives(
                     handle, 
                     &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Proof(handle.id())
                 ).await?
@@ -152,7 +150,7 @@ impl ArchiveManager {
         } else if prooflink_inited {
             let _lock = handle.proof_file_lock().write().await;
             Some(
-                self.move_file_to_archive(
+                self.move_file_to_archives(
                     handle, 
                     &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::ProofLink(handle.id())
                 ).await?
@@ -163,7 +161,7 @@ impl ArchiveManager {
         let block_filename = if data_inited {
             let _lock = handle.block_file_lock().write().await;
             Some(
-                self.move_file_to_archive(
+                self.move_file_to_archives(
                     handle, 
                     &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Block(handle.id())
                 ).await?
@@ -189,19 +187,34 @@ impl ArchiveManager {
     pub async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
         if let Some(fd) = self.file_maps.files().get_closest(mc_seq_no).await {
             fd.archive_slice().get_archive_id(mc_seq_no).await
+        } else if let Some(key_fd) = self.file_maps.key_files().get_closest(mc_seq_no).await { 
+            key_fd.archive_slice().get_archive_id(mc_seq_no).await
         } else {
             None
         }
     }
 
     pub async fn get_archive_slice(&self, archive_id: u64, offset: u64, limit: u32) -> Result<Vec<u8>> {
-        let fd = self.get_file_desc(PackageId::for_block(archive_id as u32), false).await?
-            .ok_or_else(|| error!("Archive not found"))?;
-
+        let fd = match self.get_file_desc(PackageId::for_block(archive_id as u32), false).await? {
+            Some(file_desc) => file_desc,
+            None => {
+                match self.get_file_desc(PackageId::for_key_block(archive_id as u32 / KEY_ARCHIVE_PACKAGE_SIZE), false).await? {
+                    Some(key_file_desc) => key_file_desc,
+                    None => fail!("Archive not found"),
+                }
+            },
+        };
+            
         fd.archive_slice().get_slice(archive_id, offset, limit).await
     }
 
-    async fn move_file_to_archive<B, U256, PK>(&self, handle: &BlockHandle, entry_id: &PackageEntryId<B, U256, PK>) -> Result<PathBuf>
+    pub async fn gc(&self, front_for_gc_master_block_id: &BlockIdExt) {
+        if let Err(e) = self.file_maps.files().gc(front_for_gc_master_block_id).await {
+            log::info!(target: "storage", "archive_manager gc is error: {:?}", e);
+        }
+    }
+
+    async fn move_file_to_archives<B, U256, PK>(&self, handle: &BlockHandle, entry_id: &PackageEntryId<B, U256, PK>) -> Result<PathBuf>
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
@@ -212,28 +225,45 @@ impl ArchiveManager {
             self.read_temp_file(entry_id).await?
         };
 
-        // TODO: Copy proofs and prooflinks into a corresponding keyblocks archive?
+        let data = self.move_file_to_archive(data, handle, entry_id, false).await?; 
 
+        if handle.is_key_block()? {
+            self.move_file_to_archive(data, handle, entry_id, true).await?; 
+        }
+
+        Ok(filename)
+    }
+
+    async fn move_file_to_archive<B, U256, PK>(
+        &self,
+        data: Vec<u8>,
+        handle: &BlockHandle,
+        entry_id: &PackageEntryId<B, U256, PK>,
+        key_archive: bool,
+    ) -> Result<Vec<u8>>
+    where
+        B: Borrow<BlockIdExt> + Hash,
+        U256: Borrow<UInt256> + Hash,
+        PK: Borrow<PublicKey> + Hash
+    {
         let mc_seq_no = get_mc_seq_no(handle);
+        let key_block = handle.is_key_block()?;
 
-        let is_key = handle.is_key_block()?;
-        let package_id = self.get_package_id_force(mc_seq_no, is_key).await;
+        let package_id = self.get_package_id_force(mc_seq_no, key_archive, key_block).await;
         log::debug!(target: "storage", "PackageId for ({},{},{}) (mc_seq_no = {}, key block = {:?}) is {:?}, path: {:?}",
             handle.id().shard().workchain_id(),
             handle.id().shard().shard_prefix_as_str_with_tag(),
             handle.id().seq_no(),
             mc_seq_no,
-            is_key,
+            key_block,
             package_id,
             package_id.full_path(self.db_root_path.as_ref(), "pack"),
         );
 
-        let fd = self.get_file_desc(package_id,true).await?
+        let fd = self.get_file_desc(package_id, true).await?
             .ok_or_else(|| error!("Expected some value"))?;
 
-        fd.archive_slice().add_file(Some(handle), entry_id, data).await?;
-
-        Ok(filename)
+        fd.archive_slice().add_file(Some(handle), entry_id, data).await
     }
 
     async fn read_temp_file<B, U256, PK>(&self, entry_id: &PackageEntryId<B, U256, PK>) -> Result<(PathBuf, Vec<u8>)>
@@ -264,13 +294,10 @@ impl ArchiveManager {
 
     async fn get_file_desc(&self, id: PackageId, force: bool) -> Result<Option<Arc<FileDescription>>> {
         // TODO: Rewrite logics in order to handle multithreaded adding of packages
-        if let Some(fd) = self.file_maps.get(id.package_type())
-            .get(id.id()).await
-        {
+        if let Some(fd) = self.file_maps.get(id.package_type()).get(id.id()).await {
             if fd.deleted() {
                 return Ok(None);
             }
-
             return Ok(Some(fd));
         }
 
@@ -309,21 +336,31 @@ impl ArchiveManager {
         Ok(fd)
     }
 
-    async fn get_package_id(&self, seq_no: u32) -> Result<PackageId> {
-        Ok(self.file_maps.files().get_closest(seq_no).await
-            .ok_or_else(|| {
-                log::error!(target: "storage", "Package not found for seq_no: {}", seq_no);
-                error!("Package not found for seq_no: {}", seq_no)
-            })?
-            .id()
-            .clone())
+    async fn get_package_id(&self, seq_no: u32, is_key: bool) -> Result<PackageId> {
+        if is_key {
+            Ok(PackageId::for_key_block(seq_no / KEY_ARCHIVE_PACKAGE_SIZE))
+        } else {
+            let id = self.file_maps.files().get_closest(seq_no).await
+                .ok_or_else(|| {
+                    log::error!(target: "storage", "Package not found for seq_no: {}", seq_no);
+                    error!("Package not found for seq_no: {}", seq_no)
+                })?
+                .id()
+                .clone();
+
+            Ok(id)
+        }
     }
 
-    async fn get_package_id_force(&self, mc_seq_no: u32, is_key: bool) -> PackageId {
-        if is_key {
-            PackageId::for_block(mc_seq_no)
+    async fn get_package_id_force(&self, mc_seq_no: u32, key_archive: bool, key_block: bool) -> PackageId {
+        if key_block {
+            if key_archive {
+                PackageId::for_key_block(mc_seq_no / KEY_ARCHIVE_PACKAGE_SIZE)
+            } else {
+                PackageId::for_block(mc_seq_no)
+            }
         } else {
-            let mut package_id = PackageId::for_block(mc_seq_no - (mc_seq_no % ARCHIVE_SIZE as u32));
+            let mut package_id = PackageId::for_block(mc_seq_no - (mc_seq_no % ARCHIVE_SLICE_SIZE as u32));
             if let Some(fd) = self.file_maps.files().get_closest(mc_seq_no).await {
                 let found_package_id = fd.id();
                 if package_id < *found_package_id {

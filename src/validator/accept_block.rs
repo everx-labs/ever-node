@@ -1,17 +1,14 @@
 use crate::{
-    block::{construct_and_check_prev_stuff, BlockStuff},
-    shard_state::ShardStateStuff,
-    block_proof::BlockProofStuff,
-    engine_traits::EngineOperations,
-    full_node::apply_block::calc_shard_state,
-    types::top_block_descr::TopBlockDescrStuff
+    block::{construct_and_check_prev_stuff, BlockStuff}, block_proof::BlockProofStuff,
+    engine_traits::EngineOperations, full_node::apply_block::calc_shard_state,
+    shard_state::ShardStateStuff, types::top_block_descr::TopBlockDescrStuff
 };
 
 use std::{cmp::max, sync::Arc, ops::Deref};
 use ton_block::{
     Block, TopBlockDescr, BlockIdExt, MerkleProof, McShardRecord, CryptoSignaturePair,
     Deserializable, BlockSignatures, ValidatorSet, BlockProof, Serializable, BlockSignaturesPure,
-    ValidatorBaseInfo
+    ValidatorBaseInfo                                                                     
 };
 use ton_types::{error, Result, fail, UInt256, UsageTree, HashmapType};
 use ton_api::ton::ton_node::{blocksignature::BlockSignature, broadcast::BlockBroadcast};
@@ -67,6 +64,8 @@ pub async fn accept_block(
         None
     }; 
 
+    #[cfg(feature = "telemetry")]
+    let mut block_broadcast = block_opt.is_some();
     let block = match block_opt {
         Some(b) => b,
         None => {
@@ -76,20 +75,22 @@ pub async fn accept_block(
         }
     };
 
-    let mut handle;
-    if let Some(h) = handle_opt {
-        handle = h;
+    let mut handle = if let Some(handle) = handle_opt {
+        handle
     } else {
-        #[cfg(feature = "telemetry")] {
-            let r = engine.store_block(&block).await?;
-            handle = r.handle;
-            if r.first_time {
-                handle.set_got_by_broadcast(true);
-            }
+        let result = engine.store_block(&block).await?;
+        #[cfg(feature = "telemetry")]
+        if block_broadcast {
+            block_broadcast = result.is_updated();
         }
-        #[cfg(not(feature = "telemetry"))] {
-            handle = engine.store_block(&block).await?.handle
+        let handle = result.as_non_created().ok_or_else(
+            || error!("INTERNAL ERROR: accept for block {} mismatch")
+        )?;
+        #[cfg(feature = "telemetry")]
+        if block_broadcast {
+            handle.set_got_by_broadcast(true);
         }
+        handle
     };
 
     // TODO - if signatures is not set - `ValidatorManager::set_block_signatures` ??????
@@ -118,7 +119,11 @@ pub async fn accept_block(
     // handle_->set_unix_time(created_at_);
     // handle_->set_is_key_block(is_key_block_);
 
-    handle = engine.store_block_proof(&id, Some(handle), &proof).await?;
+    handle = engine.store_block_proof(&id, Some(handle), &proof).await?
+        .as_non_created()
+        .ok_or_else(
+            || error!("INTERNAL ERROR: accept for block {} proof mismatch", id)
+        )?;
 
     if id.shard().is_masterchain() {
         log::debug!(target: "validator", "Applying block {}", id);
@@ -378,7 +383,7 @@ pub fn create_new_proof(
         &id.root_hash,
         &id.file_hash
     );
-    let weight = block_signatures.pure_signatures.check_signatures(validator_set.list().clone(), &checked_data)
+    let weight = block_signatures.pure_signatures.check_signatures(validator_set.list(), &checked_data)
         .map_err(|e| { 
                 error!("Error while check signatures for block {}: {}", id, e)
         })?;

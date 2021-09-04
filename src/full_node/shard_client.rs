@@ -81,16 +81,26 @@ async fn load_next_master_block(
 
     let prev_state = engine.clone().wait_state(&prev_id, None, true).await?;
     proof.check_with_master_state(&prev_state)?;
-    let mut next_handle = if let Some(next_handle) = engine.load_block_handle(block.id())? {
-        if !next_handle.has_data() {
-            fail!("Unitialized handle detected for block {}", block.id())
+    let mut next_handle = loop {
+        if let Some(next_handle) = engine.load_block_handle(block.id())? {
+            if !next_handle.has_data() {
+                log::warn!("Unitialized handle detected for block {}", block.id())
+            } else {
+                break next_handle
+            }   
         }
-        next_handle
-    } else {
-        engine.store_block(&block).await?.handle
+        if let Some(next_handle) = engine.store_block(&block).await?.as_non_created() {
+            break next_handle
+        } else {
+            continue
+        }
     };
     if !next_handle.has_proof() {
-        next_handle = engine.store_block_proof(block.id(), Some(next_handle), &proof).await?;
+        next_handle = engine.store_block_proof(block.id(), Some(next_handle), &proof).await?
+            .as_non_created()
+            .ok_or_else(
+                || error!("INTERNAL ERROR: bad result for store block {} proof", block.id())
+            )?;
     }
     engine.clone().apply_block(&next_handle, &block, next_handle.id().seq_no(), false).await?;
     Ok(block.id().clone())
@@ -179,7 +189,7 @@ pub async fn load_shard_blocks(
         .unwrap_or(Ok(()))?;
 
     log::trace!("load_shard_blocks_cycle: processed mc block: {}", mc_block.id());
-    engine.store_shards_client_mc_block_id(mc_block.id()).await?;
+    engine.save_shard_client_mc_block_id(mc_block.id())?;
     drop(semaphore_permit);                                    	
     Ok(())
 
@@ -212,7 +222,9 @@ pub async fn process_block_broadcast(
     let (virt_block, _) = proof.virtualize_block()?;
     let block_info = virt_block.read_info()?;
     let prev_key_block_seqno = block_info.prev_key_block_seqno();
-    let last_applied_mc_block_id = engine.load_last_applied_mc_block_id().await?;
+    let last_applied_mc_block_id = engine.load_last_applied_mc_block_id()?.ok_or_else(
+        || error!("INTERNAL ERROR: no last applied MC block after sync")
+    )?;
     if prev_key_block_seqno > last_applied_mc_block_id.seq_no() {
         log::debug!(
             "Skipped block broadcast {} because it refers too new key block: {}, but last processed mc block is {})",
@@ -253,20 +265,29 @@ pub async fn process_block_broadcast(
         proof.check_proof_link()?;
     }
     let block = BlockStuff::deserialize_checked(block_id, broadcast.data.0.clone())?;
-    let mut handle;
-    #[cfg(feature = "telemetry")] {
-        let r = engine.store_block(&block).await?;
-        handle = r.handle;
-        if r.first_time {
-            handle.set_got_by_broadcast(true);
-        }
-    }
-    #[cfg(not(feature = "telemetry"))] {
-        handle = engine.store_block(&block).await?.handle;
-    }
+    let mut handle = if let Some(handle) = engine.store_block(&block).await?.as_updated() {
+        handle
+    } else {
+        log::debug!(
+            "Skipped apply for block {} broadcast because block is already in processing",
+            block.id()
+        );
+        return Ok(())
+    };
+    #[cfg(feature = "telemetry")]
+    handle.set_got_by_broadcast(true);
 
     if !handle.has_proof() {
-        handle = engine.store_block_proof(block.id(), Some(handle), &proof).await?;
+        let result = engine.store_block_proof(block.id(), Some(handle), &proof).await?;
+        handle = if let Some(handle) = result.as_updated() {
+            handle
+        } else {
+            log::debug!(
+                "Skipped apply for block {} broadcast because block is already in processing",
+                block.id()
+            );
+            return Ok(())
+        }
     }
 
     // Apply (only blocks that is not too new for us)
@@ -287,13 +308,15 @@ pub async fn process_block_broadcast(
             .ok_or_else(|| NodeError::InvalidData(format!(
                 "Block {} doesn't contain masterchain block extra", block.id(),
             )))?;
-        let shards_client_mc_block_id = engine.load_shards_client_mc_block_id().await?;
-        if shards_client_mc_block_id.seq_no() + SHARD_BROADCAST_WINDOW >= master_ref.master.seq_no {
-            engine.clone().apply_block(&handle, &block, shards_client_mc_block_id.seq_no(), true).await?;
+        let shard_client_mc_block_id = engine.load_shard_client_mc_block_id()?.ok_or_else(
+            || error!("INTERNAL ERROR: No shard client MC block after sync")
+        )?;
+        if shard_client_mc_block_id.seq_no() + SHARD_BROADCAST_WINDOW >= master_ref.master.seq_no {
+            engine.clone().apply_block(&handle, &block, shard_client_mc_block_id.seq_no(), true).await?;
         } else {
             log::debug!(
                 "Skipped pre-apply for block broadcast {} because it refers to master block {}, but shard client is on {}",
-                block.id(), master_ref.master.seq_no, shards_client_mc_block_id.seq_no()
+                block.id(), master_ref.master.seq_no, shard_client_mc_block_id.seq_no()
             )
         }
     }
@@ -343,7 +366,7 @@ fn validate_brodcast(
         &block_id.file_hash
     );
     let total_weight: u64 = validators.iter().map(|v| v.weight).sum();
-    let weight = blk_pure_signatures.check_signatures(validators, &checked_data)
+    let weight = blk_pure_signatures.check_signatures(&validators, &checked_data)
         .map_err(|err| { 
             NodeError::InvalidData(
                 format!("Bad signatures in broadcast with block {}: {}", block_id, err)

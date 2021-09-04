@@ -1,11 +1,10 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use std::cmp::max;
-use std::collections::{HashMap, HashSet};
-use std::convert::TryFrom;
-use std::sync::*;
-use std::time::{Duration, SystemTime};
+use std::{
+    cmp::max, collections::{HashMap, HashSet}, convert::TryFrom, ops::Deref, sync::*,
+    time::{Duration, SystemTime}
+};
 use futures::stream::*;
 use crate::{
     block::BlockStuff,
@@ -226,7 +225,6 @@ struct ValidatorManagerImpl {
     validator_sessions: HashMap<UInt256, Arc<ValidatorGroup>>, // Sessions: both actual (started) and future
     validator_list_status: ValidatorListStatus,
     config: ValidatorManagerConfig,
-    last_rotation_block_db: LastRotationBlockDb,
     slashing_manager: SlashingManagerPtr,
 
     validation_status: ValidationStatus,
@@ -241,7 +239,6 @@ impl ValidatorManagerImpl {
             .build()
             .expect("Can't create validator groups runtime");
 
-        let db_dir = format!("{}/last_rotation_block", engine.db_root_dir().expect("Can't get db_root_dir from engine"));
         return ValidatorManagerImpl {
             engine,
             rt: Arc::new(rt),
@@ -249,7 +246,6 @@ impl ValidatorManagerImpl {
             validator_list_status: ValidatorListStatus::default(),
             config: ValidatorManagerConfig::default(),
             validation_status: ValidationStatus::Disabled,
-            last_rotation_block_db: LastRotationBlockDb::new(db_dir),
             slashing_manager: SlashingManager::create(),
         }
     }
@@ -441,7 +437,7 @@ impl ValidatorManagerImpl {
             self.validator_sessions.keys().cloned().collect();
         self.stop_and_remove_sessions(&existing_validator_sessions).await;
         self.engine.set_will_validate(false);
-        self.last_rotation_block_db.clear_last_rotation_block_id()?;
+        self.engine.clear_last_rotation_block_id()?;
         log::info!(target: "validator", "All sessions were removed, validation disabled");
         Ok(())
     }
@@ -752,7 +748,7 @@ impl ValidatorManagerImpl {
 
         if rotate_all_shards(&mc_state_extra) {
             log::info!(target: "validator", "New last rotation block: {}", last_masterchain_block);
-            self.last_rotation_block_db.set_last_rotation_block_id(last_masterchain_block)?;
+            self.engine.set_last_rotation_block_id(last_masterchain_block)?;
         }
         log::trace!(target: "validator", "starting stop&remove");
         self.stop_and_remove_sessions(&gc_validator_sessions).await;
@@ -772,20 +768,22 @@ impl ValidatorManagerImpl {
     }
 
     pub async fn invoke(&mut self) -> Result<()> {
-        let mc_block_id = match self.last_rotation_block_db.get_last_rotation_block_id()? {
+        let mc_block_id = match self.engine.get_last_rotation_block_id()? {
             None => {
-                let id = self.engine.load_last_applied_mc_block_id().await?;
+                let id = self.engine.load_last_applied_mc_block_id()?.ok_or_else(
+                    || error!("INTERNAL ERROR: No last applied MC block in validator")
+                )?;
                 log::info!(
                     target: "validator",
-                    "Validator manager initialization: last applied block: {}, no last rotation block",
+                    "Validator manager init: last applied block: {}, no last rotation block",
                     id
                 );
-                id
+                id.deref().clone()
             },
             Some(id) => {
                 log::info!(
                     target: "validator", 
-                    "Validator manager initialization: last rotation block: {}", 
+                    "Validator manager init: last rotation block: {}", 
                     id
                 );
                 id

@@ -48,7 +48,14 @@ async fn run_cold(
             match engine.download_block_proof(&block_id, true, true).await {
                 Ok(proof) => match proof.check_proof_link() {
                     Ok(_) => {
-                        let handle = engine.store_block_proof(&block_id, handle, &proof).await?;
+                        let handle = engine.store_block_proof(&block_id, handle, &proof).await? 
+                            .as_non_created()
+                            .ok_or_else( 
+                                || error!(
+                                    "INTERNAL ERROR: Bad result in store block {} proof", 
+                                    block_id
+                                )
+                            )?;
                         break (handle, proof)
                     },
                     Err(err) => log::warn!(
@@ -107,7 +114,7 @@ async fn get_key_blocks(
                 CHECK!(handle.is_key_block()?);
                 CHECK!(handle.gen_utime()? != 0);
                 if engine.is_persistent_state(handle.gen_utime()?, prev_time) {
-                    engine.set_init_mc_block_id(block_id);
+                    engine.save_init_mc_block_id(block_id)?;
                 }
                 key_blocks.push(handle.clone());
                 prev_block_proof = Some(proof);
@@ -249,7 +256,11 @@ async fn download_key_block_proof(
         };
         match result {
             Ok(_) => {
-                let handle = engine.store_block_proof(block_id, None, &proof).await?;
+                let handle = engine.store_block_proof(block_id, None, &proof).await?
+                    .as_non_created()
+                    .ok_or_else(
+                        || error!("INTERNAL ERROR: Bad result in store block {} proof", block_id)
+                    )?;
                 return Ok((handle, proof))
             }
             Err(err) => {
@@ -268,15 +279,24 @@ async fn download_block_and_state(
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
 ) -> Result<(Arc<BlockHandle>, BlockStuff)> {
     let handle = engine.load_block_handle(block_id)?.filter(
-        |handle| handle.has_data()
+        |handle| handle.has_data() && (handle.has_proof() || handle.has_proof_link())
     );
     let (block, handle) = if let Some(handle) = handle {
         (engine.load_block(&handle).await?, handle)
     } else {
         let (block, proof) = engine.download_block(block_id, None).await?;
-        let mut handle = engine.store_block(&block).await?.handle;
+        let mut handle = engine.store_block(&block).await?.as_non_created().ok_or_else(
+            || error!("INTERNAL ERROR: mismatch in block {} store result during boot", block_id)
+        )?;
         if !handle.has_proof() {
-            handle = engine.store_block_proof(block_id, Some(handle), &proof).await?;
+            handle = engine.store_block_proof(block_id, Some(handle), &proof).await?
+                .as_non_created()
+                .ok_or_else(
+                    || error!(
+                        "INTERNAL ERROR: mismatch in block {} proof store result during boot",
+                        block_id
+                    )
+                )?;
         }
         (block, handle)
     };
@@ -316,7 +336,11 @@ pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<BlockIdExt> 
     Ok(block_id.clone())
 }
 
-pub async fn warm_boot(engine: Arc<dyn EngineOperations>, mut block_id: BlockIdExt) -> Result<BlockIdExt> {
+pub async fn warm_boot(
+    engine: Arc<dyn EngineOperations>, 
+    block_id: Arc<BlockIdExt>
+) -> Result<BlockIdExt> {
+    let mut block_id = block_id.deref().clone();
     let handle = loop {
         let handle = engine.load_block_handle(&block_id)?.ok_or_else(
             || error!("Cannot load handle for block {}", block_id)
