@@ -158,7 +158,7 @@ pub struct ShardHashesStuff {
 }
 
 impl ShardHashesStuff {
-    pub fn for_workchains(&self, workchains: &Vec<i32>) -> Result<Vec<BlockIdExt>> {
+    pub fn top_blocks(&self, workchains: &[i32]) -> Result<Vec<BlockIdExt>> {
         let mut shards = Vec::new();
         for workchain_id in workchains {
             if let Some(InRefValue(bintree)) = self.shards.get(workchain_id)? {

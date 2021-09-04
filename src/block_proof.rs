@@ -445,7 +445,7 @@ impl BlockProofStuff {
             &self.id.file_hash
         );
         let total_weight: u64 = validators_list.iter().map(|v| v.weight).sum();
-        let weight = signatures.pure_signatures.check_signatures(validators_list, &checked_data)
+        let weight = signatures.pure_signatures.check_signatures(&validators_list, &checked_data)
             .map_err(|err| { 
                 NodeError::InvalidData(
                     format!("Proof for {}: error while check signatures: {}", self.id(), err)

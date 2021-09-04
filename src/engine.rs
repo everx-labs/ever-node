@@ -1,7 +1,5 @@
 use crate::{
-    define_db_prop, 
-    block::{convert_block_id_ext_api2blk, BlockStuff, BlockIdExtExtention},
-    block_proof::BlockProofStuff,
+    block::{BlockStuff, BlockIdExtExtention}, block_proof::BlockProofStuff,
     config::{TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig},
     engine_traits::{ExternalDb, OverlayOperations, EngineOperations, PrivateOverlayOperations},
     full_node::{
@@ -11,7 +9,10 @@ use crate::{
             SHARD_BROADCAST_WINDOW
         },
     },
-    internal_db::{InternalDb, InternalDbConfig, InternalDbImpl, NodeState},
+    internal_db::{
+        InternalDb, InternalDbConfig, InternalDbImpl, INITIAL_MC_BLOCK, 
+        LAST_APPLIED_MC_BLOCK, PSS_KEEPER_MC_BLOCK, state_gc_resolver::AllowStateGcSmartResolver,
+    },
     network::{
         full_node_client::FullNodeOverlayClient, control::ControlServer,
         full_node_service::FullNodeOverlayService
@@ -19,9 +20,10 @@ use crate::{
     shard_state::ShardStateStuff,
     types::{awaiters_pool::AwaitersPool, lockfree_cache::TimeBasedCache},
     ext_messages::MessagesPool,
-    validator::validator_manager,
+    validator::{validator_manager, candidate_db::LastRotationBlockDb},
     shard_blocks::{
-        ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker, ShardBlockProcessingResult
+        ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker, 
+        ShardBlockProcessingResult
     },
 };
 #[cfg(feature = "local_test")]
@@ -55,15 +57,6 @@ use ton_api::ton::ton_node::{
 };
 use adnl::{common::KeyId, server::AdnlServerConfig};
 
-define_db_prop!(LastMcBlockId,   "LastMcBlockId",   ton_api::ton::ton_node::blockidext::BlockIdExt);
-define_db_prop!(InitMcBlockId,   "InitMcBlockId",   ton_api::ton::ton_node::blockidext::BlockIdExt);
-define_db_prop!(GcMcBlockId,     "GcMcBlockId",     ton_api::ton::ton_node::blockidext::BlockIdExt);
-define_db_prop!(ClientMcBlockId, "ClientMcBlockId", ton_api::ton::ton_node::blockidext::BlockIdExt);
-// Persistent shard states (master and all shardes) actual for previous master block were saved
-define_db_prop!(PssKeeperBlockId, "PssKeeperBlockId", ton_api::ton::ton_node::blockidext::BlockIdExt);
-// Last master block all shard blocks listed in was applied
-define_db_prop!(ShardsClientMcBlockId, "ShardsClientMcBlockId", ton_api::ton::ton_node::blockidext::BlockIdExt);
-
 pub struct Engine {
     db: Arc<dyn InternalDb>,
     ext_db: Vec<Arc<dyn ExternalDb>>,
@@ -88,6 +81,7 @@ pub struct Engine {
     shard_states_cache: TimeBasedCache<BlockIdExt, ShardStateStuff>,
     loaded_from_ss_cache: AtomicU64,
     loaded_ss_total: AtomicU64,
+    state_gc_resolver: Arc<AllowStateGcSmartResolver>,
 
     #[cfg(feature = "telemetry")]
     full_node_telemetry: FullNodeTelemetry,
@@ -97,6 +91,8 @@ pub struct Engine {
     validator_telemetry: CollatorValidatorTelemetry,
     #[cfg(feature = "telemetry")]
     full_node_service_telemetry: FullNodeNetworkTelemetry,
+
+    last_rotation_block_db: LastRotationBlockDb, // TODO use node-state DB instead
 }
 
 struct DownloadContext<'a, T> {
@@ -268,16 +264,19 @@ impl Engine {
 
         log::info!("Creating engine...");
 
-        let db_directory = general_config.internal_db_path().unwrap_or_else(|| {"node_db"});
-        let db_config = InternalDbConfig { db_directory: db_directory.to_string() };
+        let db_directory = general_config.internal_db_path().unwrap_or_else(|| {"node_db"}).to_string();
+        
+        let cells_gc_interval_ms = general_config.cells_gc_interval_ms();
+        let last_rotation_block_db = LastRotationBlockDb::new(db_directory.clone());
+        let db_config = InternalDbConfig { db_directory, cells_gc_interval_ms };
         let db = Arc::new(InternalDbImpl::new(db_config).await?);
         let global_config = general_config.load_global_config()?;
         let test_bundles_config = general_config.test_bundles_config().clone();
         let zero_state_id = global_config.zero_state().expect("check zero state settings");
         let mut init_mc_block_id = global_config.init_block()?.unwrap_or_else(|| zero_state_id.clone());
-        if let Ok(block_id) = InitMcBlockId::load_from_db(db.deref()) {
-            if block_id.0.seqno > init_mc_block_id.seq_no as i32 {
-                init_mc_block_id = convert_block_id_ext_api2blk(&block_id.0)?;
+        if let Ok(Some(block_id)) = db.load_node_state(INITIAL_MC_BLOCK) {
+            if block_id.seq_no > init_mc_block_id.seq_no {
+                init_mc_block_id = block_id.deref().clone()
             }
         }
 
@@ -298,11 +297,15 @@ impl Engine {
                 HashMap::default()
             }
         };
-        let last_mc_seqno = LastMcBlockId::load_from_db(db.deref())
-            .map(|id| id.0.seqno as u32).unwrap_or_default();
+        let last_mc_seqno = db
+            .load_node_state(LAST_APPLIED_MC_BLOCK)?
+            .map(|id| id.seq_no as u32)
+            .unwrap_or_default();
         let (shard_blocks_pool, shard_blocks_receiver) = 
             ShardBlocksPool::new(shard_blocks, last_mc_seqno, false);
 
+        let state_gc_resolver = Arc::new(AllowStateGcSmartResolver::new());
+        db.start_states_gc(state_gc_resolver.clone());
         log::info!("Engine is created.");
 
         let engine = Arc::new(Engine {
@@ -326,6 +329,7 @@ impl Engine {
             shard_states_cache: TimeBasedCache::new(120, "shard_states_cache".to_string()),
             loaded_from_ss_cache: AtomicU64::new(0),
             loaded_ss_total: AtomicU64::new(0),
+            state_gc_resolver,
             #[cfg(feature = "telemetry")]
             full_node_telemetry: FullNodeTelemetry::new(),
             #[cfg(feature = "telemetry")]
@@ -334,6 +338,7 @@ impl Engine {
             validator_telemetry: CollatorValidatorTelemetry::default(),
             #[cfg(feature = "telemetry")]
             full_node_service_telemetry: FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Service),
+            last_rotation_block_db,
         });
 
         save_top_shard_blocks_worker(engine.clone(), shard_blocks_receiver);
@@ -372,11 +377,11 @@ impl Engine {
             loaded_ss_total, loaded_from_ss_cache, (100 * loaded_from_ss_cache) / loaded_ss_total);
     }
 
-    pub fn set_init_mc_block_id(&self, init_mc_block_id: &BlockIdExt) {
-        InitMcBlockId(
-            ton_api::ton::ton_node::blockidext::BlockIdExt::from(init_mc_block_id)
-        ).store_to_db(self.db().deref()).ok();
+/*
+    pub fn save_init_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
+        self.db.save_node_state(INITIAL_MC_BLOCK, id)
     }
+*/
 
     pub async fn get_masterchain_overlay(&self) -> Result<Arc<dyn FullNodeOverlayClient>> {
         self.get_full_node_overlay(ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL).await
@@ -451,6 +456,10 @@ impl Engine {
         &self.full_node_service_telemetry
     }
 
+    pub fn last_rotation_block_db(&self) -> &LastRotationBlockDb {
+        &self.last_rotation_block_db
+    }
+
     pub async fn download_and_apply_block_worker(
         self: Arc<Self>, 
         id: &BlockIdExt, 
@@ -518,9 +527,16 @@ impl Engine {
 
                 let now = std::time::Instant::now();
                 proof.check_proof(self.deref()).await?;
-                let handle = self.store_block(&block).await?.handle;
+                let handle = self.store_block(&block).await?;
+                let handle = if let Some(handle) = handle.as_non_created() {
+                    handle
+                } else {
+                    continue
+                };
                 let handle = self.store_block_proof(id, Some(handle), &proof).await?;
-
+                let handle = handle.as_non_created().ok_or_else(
+                    || error!("INTERNAL ERROR: bad result for store block {} proof", id)
+                )?;                    
                 log::trace!(
                     "Downloaded block for {}apply {} TIME download: {}ms, check & save: {}", 
                     if pre_apply { "pre-" } else { "" }, 
@@ -530,6 +546,7 @@ impl Engine {
                 );
                 self.apply_block(&handle, &block, mc_seq_no, pre_apply).await?;
                 return Ok(())
+
             }
         }
     }
@@ -566,7 +583,7 @@ impl Engine {
             .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i32 - gen_utime as i32;
         if block.id().shard().is_masterchain() {
             if !pre_apply {
-                self.store_last_applied_mc_block_id(block.id()).await?;
+                self.save_last_applied_mc_block_id(block.id())?;
                 STATSD.gauge("last_applied_mc_block", block.id().seq_no() as f64);
                 STATSD.gauge("timediff", ago as f64);
                 self.shard_blocks().update_shard_blocks(&self.load_state(block.id()).await?)?;
@@ -582,6 +599,35 @@ impl Engine {
                 }
                 let id = handle.id().clone();
                 self.next_block_applying_awaiters.do_or_wait(&prev_id, None, async move { Ok(id) }).await?;
+
+                // Advance states GC
+                let shard_client = self.load_shard_client_mc_block_id()?.ok_or_else(
+                    || error!("INTERNAL ERROR: No shard client MC block id when apply block")
+                )?;
+                let pss_keeper = self.load_pss_keeper_mc_block_id()?.ok_or_else(
+                    || error!("INTERNAL ERROR: No PSS keeper MC block id when apply block")
+                )?;
+                let mut min_id: &BlockIdExt = if shard_client.seq_no() < pss_keeper.seq_no() { 
+                    &shard_client
+                } else { 
+                    &pss_keeper
+                };
+                let last_rotation_block_id = self.get_last_rotation_block_id()?;
+                let mut last_rotation_block_id_str = "none".to_string();
+                if let Some(id) = &last_rotation_block_id {
+                    if min_id.seq_no() > id.seq_no() { 
+                        min_id = &id 
+                    }
+                    last_rotation_block_id_str = format!("{}", id.seq_no())
+                }
+                log::trace!(
+                    "Before state_gc_resolver.advance  shard_client {}  pss_keeper {}  last_rotation_block_id {}  min {}", 
+                    shard_client.seq_no(),
+                    pss_keeper.seq_no(),
+                    last_rotation_block_id_str,
+                    min_id.seq_no()
+                );
+                self.state_gc_resolver.advance(min_id, self.deref()).await?;
             }
 
             log::info!(
@@ -712,11 +758,13 @@ impl Engine {
             self.shard_blocks.process_shard_block_raw(&id, cc_seqno, data, false, true, self.deref()).await? {
 
             let mc_seqno = tbd.top_block_mc_seqno()?;
-            let shards_client_mc_block_id = self.load_shards_client_mc_block_id().await?;
-            if shards_client_mc_block_id.seq_no() + SHARD_BROADCAST_WINDOW < mc_seqno {
+            let shard_client_mc_block_id = self.load_shard_client_mc_block_id()?.ok_or_else(
+                || error!("INTERNAL ERROR: No shard client MC block set after boot")
+            )?;
+            if shard_client_mc_block_id.seq_no() + SHARD_BROADCAST_WINDOW < mc_seqno {
                 log::debug!(
                     "Skipped new shard block broadcast {} because it refers to master block {}, but shard client is on {}",
-                    id, mc_seqno, shards_client_mc_block_id.seq_no()
+                    id, mc_seqno, shard_client_mc_block_id.seq_no()
                 );
                 return Ok(id);
             }
@@ -849,21 +897,29 @@ impl Engine {
 
     pub(crate) async fn check_sync(&self) -> Result<bool> {
 
-        let shards_client = self.load_shards_client_mc_block_id().await?;
-        let last_mc_id = self.load_last_applied_mc_block_id().await?;
-        if shards_client.seq_no() + 16 < last_mc_id.seq_no() {
-            return Ok(false);
+        let last_applied_mc_id = if let Some(id) = self.load_last_applied_mc_block_id()? {
+            id
+        } else {
+            fail!("INTERNAL ERROR: No last applied MC block set after boot")
+        };
+        let shard_client_mc_id = if let Some(id) = self.load_shard_client_mc_block_id()? {
+            id
+        } else {
+            fail!("INTERNAL ERROR: No shard client MC block set after boot")
+        };
+        if shard_client_mc_id.seq_no() + 16 < last_applied_mc_id.seq_no() {
+            return Ok(false)
         }
 
-        let last_mc_handle = self.load_block_handle(&last_mc_id)?.ok_or_else(
-            || error!("Cannot load handle for last masterchain block {}", last_mc_id)
+        let last_mc_handle = self.load_block_handle(&last_applied_mc_id)?.ok_or_else(
+            || error!("Cannot load handle for last masterchain block {}", last_applied_mc_id)
         )?;
         if last_mc_handle.gen_utime()? + 600 > self.now() {
-            return Ok(true);
+            return Ok(true)
         }
 
-        if self.last_known_keyblock_seqno.load(Ordering::Relaxed) > last_mc_id.seq_no() {
-            return Ok(false);
+        if self.last_known_keyblock_seqno.load(Ordering::Relaxed) > last_applied_mc_id.seq_no() {
+            return Ok(false)
         }
 
         // experimental check. t-node doesn't have one
@@ -903,8 +959,12 @@ impl Engine {
     }
 */
 
-    async fn store_pss_keeper_block_id(&self, id: &BlockIdExt) -> Result<()> {
-        PssKeeperBlockId(id.into()).store_to_db(self.db().deref())
+    fn load_pss_keeper_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+        self.db().load_node_state(PSS_KEEPER_MC_BLOCK)
+    }
+
+    pub fn save_pss_keeper_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
+        self.db().save_node_state(PSS_KEEPER_MC_BLOCK, id)
     }
 
     pub fn start_persistent_states_keeper(
@@ -986,13 +1046,13 @@ impl Engine {
                 }
             }
             handle = engine.wait_next_applied_mc_block(&handle, None).await?.0;
-            engine.store_pss_keeper_block_id(handle.id(), ).await?;
+            engine.save_pss_keeper_mc_block_id(handle.id())?;
         }
     }
 
     pub async fn store_persistent_state_attempts(&self, handle: &Arc<BlockHandle>, ss: &ShardStateStuff) {
         let mut attempts = 1;
-        while let Err(e) = self.db.store_shard_state_persistent(handle, ss).await {
+        while let Err(e) = self.db.store_shard_state_persistent(handle, ss, None).await {
             log::error!("CRITICAL Error saving persistent state (attempt: {}): {:?}", attempts, e);
             attempts += 1;
             futures_timer::Delay::new(Duration::from_millis(5000)).await;
@@ -1058,50 +1118,58 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
         load_zero_state(engine, zerostate_path).await?;
     }
 
-    let mut result = LastMcBlockId::load_from_db(engine.db().deref())
-        .and_then(|id| (&id.0).try_into());
-    if let Ok(id) = result {
-        result = crate::boot::warm_boot(engine.clone(), id).await;
-    }/* else {
-        let res = engine.overlay_operations.get_peers_count(engine.zero_state_id()).await?;
-        if res == 0 { 
-            fail!("No nodes were found and no warm_boot");
-        }
-    }*/
+    let result = match engine.load_last_applied_mc_block_id() {
+        Ok(Some(id)) => crate::boot::warm_boot(engine.clone(), id).await,
+        Ok(None) => Err(error!("No last applied MC block, warm boot is not possible")),
+        Err(x) => Err(x)
+    };
+//    }/* else {
+//        let res = engine.overlay_operations.get_peers_count(engine.zero_state_id()).await?;
+//        if res == 0 { 
+//            fail!("No nodes were found and no warm_boot");
+//        }
+//    }*/
 
-    let last_mc_block = match result {
-        Ok(id) => id,
+    let (last_applied_mc_block, cold) = match result {
+        Ok(id) => (id, false),
         Err(err) => {
-            log::warn!("error before cold boot: {}", err);
+            log::warn!("Error before cold boot: {}", err);
             let id = crate::boot::cold_boot(engine.clone()).await?;
-            engine.store_last_applied_mc_block_id(&id).await?;
-            id
+            engine.save_last_applied_mc_block_id(&id)?;
+            (id, true)
         }
     };
 
-    let shards_client_block = match ShardsClientMcBlockId::load_from_db(engine.db().deref()) {
-        Ok(id) => (&id.0).try_into()?,
-        Err(_) => {
-            engine.store_shards_client_mc_block_id(&last_mc_block).await?;
-            log::info!("`ShardsClientMcBlockId` wasn't set - it is inited by `LastMcBlockId`.");
-            last_mc_block.clone()
+    let shard_client_mc_block = match engine.load_shard_client_mc_block_id() {
+        Ok(Some(id)) => id.deref().clone(),
+        _ => {
+            if !cold {
+                fail!("INTERNAL ERROR: No shard client MC block in warm boot")
+            }
+            engine.save_shard_client_mc_block_id(&last_applied_mc_block)?;
+            log::info!("Shard client MC block reset to last applied MC block");
+            last_applied_mc_block.clone()
         }
     };
 
-    let pss_keeper_block = match PssKeeperBlockId::load_from_db(engine.db().deref()) {
-        Ok(id) => (&id.0).try_into()?,
-        Err(_) => {
-            engine.store_pss_keeper_block_id(&last_mc_block).await?;
-            log::info!("`PssKeeperBlockId` wasn't set - it is inited by `LastMcBlockId`.");
-            last_mc_block.clone()
+    let pss_keeper_mc_block = match engine.load_pss_keeper_mc_block_id() {
+        Ok(Some(id)) => id.deref().clone(),
+        _ => {
+            if !cold {
+                fail!("INTERNAL ERROR: No PSS keeper MC block in warm boot")
+            }
+            engine.save_pss_keeper_mc_block_id(&last_applied_mc_block)?;
+            log::info!("PSS keeper MC block reset to last applied MC block");
+            last_applied_mc_block.clone()
         }
     };
 
     log::info!("Boot complete.");
-    log::info!("LastMcBlockId: {}", last_mc_block);
-    log::info!("ShardsClientMcBlockId: {}", shards_client_block);
-    Ok((last_mc_block, shards_client_block, pss_keeper_block))
-}
+    log::info!("LastMcBlockId: {}", last_applied_mc_block);
+    log::info!("ShardsClientMcBlockId: {}", shard_client_mc_block);
+    Ok((last_applied_mc_block, shard_client_mc_block, pss_keeper_mc_block))
+
+}                              
 
 fn run_full_node_service(engine: Arc<Engine>) -> Result<Arc<FullNodeOverlayService>> {
     let full_node_service = Arc::new(
@@ -1152,7 +1220,8 @@ pub async fn run(node_config: TonNodeConfig, zerostate_path: Option<&str>, ext_d
     };
 
     // Boot
-    let (mut last_mc_block, mut shards_client_mc_block, pss_keeper_block) = boot(&engine, zerostate_path).await?;
+    let (mut last_applied_mc_block, mut shard_client_mc_block, pss_keeper_block) = 
+        boot(&engine, zerostate_path).await?;
 
     // Messages from external DB (usually kafka)
     start_external_broadcast_process(engine.clone(), &consumer_config)?;
@@ -1169,21 +1238,23 @@ pub async fn run(node_config: TonNodeConfig, zerostate_path: Option<&str>, ext_d
 
     // Sync by archives
     if !engine.check_sync().await? {
-        crate::sync::start_sync(Arc::clone(&engine) as Arc<dyn EngineOperations>).await?;
-        last_mc_block = LastMcBlockId::load_from_db(engine.db().deref())
-            .and_then(|id| (&id.0).try_into())?;
-        shards_client_mc_block = ShardsClientMcBlockId::load_from_db(engine.db().deref())
-            .and_then(|id| (&id.0).try_into())?;
+        crate::sync::start_sync(Arc::clone(&engine) as Arc<dyn EngineOperations>, None).await?;
+        last_applied_mc_block = engine.load_last_applied_mc_block_id()?.ok_or_else(
+            || error!("INTERNAL ERROR: No last applied MC block after boot")
+        )?.deref().clone();
+        shard_client_mc_block = engine.load_shard_client_mc_block_id()?.ok_or_else(
+            || error!("INTERNAL ERROR: No shard client MC block after boot")
+        )?.deref().clone();
     }
 
     // top shard blocks
     resend_top_shard_blocks_worker(engine.clone());
 
     // blocks download clients
-    let _ = start_shards_client(engine.clone(), shards_client_mc_block)?;
-    let _ = start_masterchain_client(engine, last_mc_block)?.await;
-
+    let _ = start_shards_client(engine.clone(), shard_client_mc_block)?;
+    let _ = start_masterchain_client(engine, last_applied_mc_block)?.await;   
     Ok(())
+
 }
 
 fn start_validator(engine: Arc<Engine>) {

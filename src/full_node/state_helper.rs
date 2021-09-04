@@ -69,7 +69,7 @@ async fn download_persistent_state_iter(
     };
 
     // Download
-    log::trace!("download_persistent_state: start: id: {}, master_id: {}", id, master_id);
+    log::info!("download_persistent_state: start: id: {}, master_id: {}", id, master_id);
     let now = std::time::Instant::now();
 
     let mut offset = 0;
@@ -103,7 +103,7 @@ async fn download_persistent_state_iter(
                         let len = next_bytes.len();
                         parts.insert(offset, next_bytes);
                         //if (offset / max_size) % 10 == 0 {
-                            log::trace!("download_persistent_state {}: got part offset: {}", id.shard(), offset);
+                            log::info!("download_persistent_state {}: got part offset: {}", id.shard(), offset);
                         //}
                         if len < max_size {
                             total_size.store(offset + len, Ordering::Relaxed);
@@ -145,7 +145,7 @@ async fn download_persistent_state_iter(
     active_peers.remove(peer_drop.id());
     res.unwrap_or(Ok(()))?;
 
-    log::trace!(
+    log::info!(
         "download_persistent_state: DOWNLOADED {}ms, id: {}, master_id: {} ", 
         now.elapsed().as_millis(), id, master_id
     );

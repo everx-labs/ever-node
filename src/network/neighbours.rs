@@ -1,4 +1,7 @@
-use adnl::{common::{KeyId, KeyOption, Query, Wait}, node::{AdnlNode, AddressCache}};
+use adnl::{
+    common::{KeyId, KeyOption, Query, tag_from_boxed_type, TaggedTlObject, Wait}, 
+    node::{AdnlNode, AddressCache}
+};
 use crate::engine::STATSD;
 use dht::DhtNode;
 use overlay::{OverlayShortId, OverlayNode};
@@ -10,8 +13,10 @@ use std::{
     }
 };
 use ton_types::{error, fail, Result};
-use ton_api::ton::{
-    TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities
+use ton_api::{
+    ton::{
+       TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities
+    }
 };
 
 #[derive(Debug)]
@@ -37,7 +42,9 @@ pub struct Neighbours {
     dht: Arc<DhtNode>,
     fail_attempts: AtomicU64,
     all_attempts: AtomicU64,
-    start: Instant
+    start: Instant,
+    #[cfg(feature = "telemetry")]
+    tag_get_capabilities: u32
 }
 
 const CAPABILITY_COMPATIBLE: i64 = 0x01;
@@ -177,9 +184,9 @@ impl Neighbours {
         start_peers: &Vec<Arc<KeyId>>,
         dht: &Arc<DhtNode>,
         overlay: &Arc<OverlayNode>,
-        overlay_id: Arc<OverlayShortId>) -> Result<Self> {
-
-        Ok(Neighbours {
+        overlay_id: Arc<OverlayShortId>
+    ) -> Result<Self> {
+        let ret = Neighbours {
             peers: NeighboursCache::new(start_peers)?,
             all_peers: lockfree::set::Set::new(),
             overlay: overlay.clone(),
@@ -187,8 +194,11 @@ impl Neighbours {
             overlay_id,
             fail_attempts: AtomicU64::new(0),
             all_attempts: AtomicU64::new(0),
-            start: Instant::now()
-        })
+            start: Instant::now(),
+            #[cfg(feature = "telemetry")]
+            tag_get_capabilities: tag_from_boxed_type::<GetCapabilities>()
+        };
+        Ok(ret)
     }
 
     pub fn count(&self) -> usize {
@@ -544,22 +554,23 @@ impl Neighbours {
     async fn update_capabilities(self: Arc<Self>, peer: Arc<Neighbour>) -> Result<()> {
         let now = Instant::now();
         peer.set_last_ping(self.start.elapsed().as_millis() as u64); 
-        let query = TLObject::new(GetCapabilities);
-log::trace!("Query capabilities from {} {}", peer.id, self.overlay_id);
+        let query = TaggedTlObject {
+            object: TLObject::new(GetCapabilities),
+            #[cfg(feature = "telemetry")]
+            tag: self.tag_get_capabilities
+        };
         let timeout = Some(AdnlNode::calc_timeout(peer.roundtrip_adnl()));
         match self.overlay.query(&peer.id, &query, &self.overlay_id, timeout).await {
             Ok(Some(answer)) => {
-                let caps: Capabilities = Query::parse(answer, &query)?;
+                let caps: Capabilities = Query::parse(answer, &query.object)?;
                 log::trace!("Got capabilities from {} {}: {:?}", peer.id, self.overlay_id, caps);
                 let roundtrip = now.elapsed().as_millis() as u64;
                 self.update_neighbour_stats(&peer.id, roundtrip, true, false, false)?;
-log::trace!("Good caps {}: {}", peer.id, self.overlay_id);
                 self.got_neighbour_capabilities(&peer.id, roundtrip, &caps)?;
                 Ok(())
             },
             _ => {
-log::trace!("Bad caps {}: {}", peer.id, self.overlay_id);
-                fail!("Capabilities were not received from {}", peer.id);
+                fail!("Capabilities were not received from {} {}", peer.id, self.overlay_id)
             }
         }
     }

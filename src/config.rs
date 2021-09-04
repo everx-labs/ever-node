@@ -39,11 +39,14 @@ pub trait KeyRing : Sync + Send  {
     fn sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Vec<u8>>;
 }
 
+pub fn default_cells_gc_interval_ms() -> u32 { 900_000 }
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct TonNodeConfig {
     log_config_name: Option<String>,
     ton_global_config_name: Option<String>,
     internal_db_path: Option<String>,
+    #[serde(default = "default_cells_gc_interval_ms")]
+    cells_gc_interval_ms: u32,
     #[serde(skip_serializing)]
     ip_address: Option<String>,
     adnl_node: Option<AdnlNodeConfigJson>,
@@ -279,6 +282,10 @@ impl TonNodeConfig {
 
     pub fn internal_db_path(&self) -> Option<&str> {
         self.internal_db_path.as_ref().map(|path| path.as_str())
+    }
+
+    pub fn cells_gc_interval_ms(&self) -> u32 {
+        self.cells_gc_interval_ms
     }
     
   

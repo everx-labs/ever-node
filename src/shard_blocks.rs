@@ -228,7 +228,11 @@ pub fn resend_top_shard_blocks_worker(engine: Arc<dyn EngineOperations>) {
 }
 
 async fn resend_top_shard_blocks(engine: &dyn EngineOperations) -> Result<()> {
-    let id = engine.load_last_applied_mc_block_id().await?;
+    let id = if let Some(id) = engine.load_last_applied_mc_block_id()? {
+        id
+    } else {
+        fail!("INTERNAL ERROR: No last applied MC block after sync")
+    };
     let tsbs = engine.get_own_shard_blocks(id.seq_no)?;
     for tsb in tsbs {
         engine.send_top_shard_block_description(tsb, 0, true).await?;
