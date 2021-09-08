@@ -1100,11 +1100,11 @@ pub(crate) async fn load_zero_state(engine: &Arc<Engine>, path: &str) -> Result<
         let bytes = tokio::fs::read(&path).await
             .map_err(|err| error!("Cannot read zerostate {}: {}", path, err))?;
         let zs = ShardStateStuff::deserialize_zerostate(id.clone(), &bytes)?;
-        let handle = engine.store_zerostate(id, &zs, &bytes).await?;
+        let (_, handle) = engine.store_zerostate(zs, &bytes).await?;
         engine.set_applied(&handle, id.seq_no()).await?;
     }
 
-    let handle = engine.store_zerostate(&zero_id, &mc_zero_state, &mc_zs_bytes).await?;
+    let (_, handle) = engine.store_zerostate(mc_zero_state, &mc_zs_bytes).await?;
     engine.set_applied(&handle, zero_id.seq_no()).await?;
     log::trace!("All static zero states had been load");
     return Ok(true)

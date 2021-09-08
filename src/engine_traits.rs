@@ -271,16 +271,15 @@ pub trait EngineOperations : Sync + Send {
     async fn store_state(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: &ShardStateStuff
-    ) -> Result<()> {
+        state: ShardStateStuff
+    ) -> Result<ShardStateStuff> {
         unimplemented!()
     }
     async fn store_zerostate(
         &self, 
-        id: &BlockIdExt, 
-        state: &ShardStateStuff, 
+        state: ShardStateStuff, 
         state_bytes: &[u8]
-    ) -> Result<Arc<BlockHandle>> {
+    ) -> Result<(ShardStateStuff, Arc<BlockHandle>)> {
         unimplemented!()
     }
     async fn process_full_state_in_ext_db(&self, state: &ShardStateStuff)-> Result<()> {
