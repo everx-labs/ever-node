@@ -222,7 +222,7 @@ pub(crate) async fn download_zero_state(
     loop {
         match engine.download_zerostate(block_id).await {
             Ok((state, state_bytes)) => {
-                let handle = engine.store_zerostate(block_id, &state, &state_bytes).await?;
+                let (state, handle) = engine.store_zerostate(state, &state_bytes).await?;
                 engine.set_applied(&handle, 0).await?;
                 engine.process_full_state_in_ext_db(&state).await?;
                 return Ok((handle, state))
@@ -308,7 +308,7 @@ async fn download_block_and_state(
         if state_update.new_hash != state_hash {
             fail!("root_hash {} of downloaded state {} is wrong", state_hash.to_hex_string(), handle.id())
         }
-        engine.store_state(&handle, &state).await?;
+        let state = engine.store_state(&handle, state).await?;
         engine.process_full_state_in_ext_db(&state).await?;
     }
     engine.set_applied(&handle, master_id.seq_no()).await?;

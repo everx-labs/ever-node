@@ -305,11 +305,8 @@ impl EngineOperations for Engine {
     }
 
     async fn load_mc_zero_state(&self) -> Result<ShardStateStuff> {
-        let id = self.zero_state_id();
-        let len = self.db().load_shard_state_persistent_size(id).await?;
-        let data = self.db().load_shard_state_persistent_slice(id, 0, len).await?;
-
-        ShardStateStuff::deserialize_zerostate(self.zero_state_id().clone(), &data)
+        let block_id = self.zero_state_id();
+        self.load_state(block_id).await
     }
 
     async fn load_state(&self, block_id: &BlockIdExt) -> Result<ShardStateStuff> {
@@ -369,40 +366,40 @@ impl EngineOperations for Engine {
     async fn store_state(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: &ShardStateStuff
-    ) -> Result<()> {
-        if self.shard_states_cache().get(handle.id()).is_none() {
-            self.shard_states_cache().set(handle.id().clone(), |_| Some(state.clone()))?;
-        }
-        if self.db().store_shard_state_dynamic(handle, state, None)? {
+        state: ShardStateStuff
+    ) -> Result<ShardStateStuff> {
+        let (state, saved) = self.db().store_shard_state_dynamic(handle, state, None)?;
+        if saved {
             #[cfg(feature = "telemetry")]
             self.full_node_telemetry().new_pre_applied_block(handle.got_by_broadcast());
+        }
+        if self.shard_states_cache().get(handle.id()).is_none() {
+            self.shard_states_cache().set(handle.id().clone(), |_| Some(state.clone()))?;
         }
         self.shard_states_awaiters().do_or_wait(
             state.block_id(),
             None,
             async { Ok(state.clone()) }
         ).await?;
-        Ok(())
+        Ok(state)
     }
 
     async fn store_zerostate(
         &self, 
-        id: &BlockIdExt, 
-        state: &ShardStateStuff, 
+        mut state: ShardStateStuff, 
         state_bytes: &[u8]
-    ) -> Result<Arc<BlockHandle>> {
+    ) -> Result<(ShardStateStuff, Arc<BlockHandle>)> {
         let handle = self.db().create_or_load_block_handle(
-            id, 
+            state.block_id(), 
             None, 
             Some(state.state().gen_time()),
             None
         )?.as_non_updated().ok_or_else(
             || error!("INTERNAL ERROR: mismatch in zerostate storing")
         )?;
-        self.store_state(&handle, state).await?;
+        state = self.store_state(&handle, state).await?;
         self.db().store_shard_state_persistent_raw(&handle, state_bytes, None).await?;
-        Ok(handle)
+        Ok((state, handle))
     }
 
     fn store_block_prev1(&self, handle: &Arc<BlockHandle>, prev: &BlockIdExt) -> Result<()> {
