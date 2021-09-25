@@ -4,9 +4,16 @@ use crate::{
     network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
     block_proof::BlockProofStuff,
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
-    
 };
+#[cfg(feature = "telemetry")]
+use crate::{
+    full_node::telemetry::FullNodeTelemetry, network::telemetry::FullNodeNetworkTelemetry,
+    validator::telemetry::CollatorValidatorTelemetry,
+};
+
 use adnl::common::{KeyId, KeyOption};
+#[cfg(feature = "telemetry")]
+use adnl::telemetry::Metric;
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, 
     CatchainOverlayLogReplayListenerPtr
@@ -15,16 +22,14 @@ use overlay::{
     BroadcastSendInfo, OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId
 };
 use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
-use storage::types::BlockHandle;
+#[cfg(feature = "telemetry")]
+use std::sync::atomic::AtomicU64;
+use storage::{StorageAlloc, block_handle_db::BlockHandle};
+#[cfg(feature = "telemetry")]
+use storage::StorageTelemetry;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
 use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, signature::SigPubKey};
 use ton_types::{Result, UInt256};
-#[cfg(feature = "telemetry")]
-use crate::{
-    full_node::telemetry::FullNodeTelemetry,
-    validator::telemetry::CollatorValidatorTelemetry,
-    network::telemetry::FullNodeNetworkTelemetry,
-};
 
 pub struct ValidatedBlockStatNode {
     pub public_key : SigPubKey,
@@ -34,6 +39,31 @@ pub struct ValidatedBlockStatNode {
 
 pub struct ValidatedBlockStat {
     pub nodes : Vec<ValidatedBlockStatNode>,
+}
+
+#[cfg(feature = "telemetry")]
+pub struct EngineTelemetry {
+    pub storage: Arc<StorageTelemetry>,
+    pub awaiters: Arc<Metric>,
+    pub catchain_clients: Arc<Metric>,
+    pub overlay_clients: Arc<Metric>,
+    pub peer_stats: Arc<Metric>,
+    pub shard_states: Arc<Metric>,
+    pub top_blocks: Arc<Metric>,
+    pub validator_peers: Arc<Metric>,
+    pub validator_sets: Arc<Metric>
+}
+
+pub struct EngineAlloc {
+    pub storage: Arc<StorageAlloc>,
+    pub awaiters: Arc<AtomicU64>,
+    pub catchain_clients: Arc<AtomicU64>,
+    pub overlay_clients: Arc<AtomicU64>,
+    pub peer_stats: Arc<AtomicU64>,
+    pub shard_states: Arc<AtomicU64>,
+    pub top_blocks: Arc<AtomicU64>,
+    pub validator_peers: Arc<AtomicU64>,
+    pub validator_sets: Arc<AtomicU64>
 }
 
 #[async_trait::async_trait]
@@ -158,13 +188,13 @@ pub trait EngineOperations : Sync + Send {
     fn save_last_applied_mc_block_id(&self, last_mc_block: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
-    async fn load_last_applied_mc_state_or_zerostate(&self) -> Result<ShardStateStuff> {
+    async fn load_last_applied_mc_state_or_zerostate(&self) -> Result<Arc<ShardStateStuff>> {
         match self.load_last_applied_mc_block_id()? {
             Some(block_id) => self.load_state(&block_id).await,
             None => self.load_mc_zero_state().await
         }
     }
-    async fn load_last_applied_mc_state(&self) -> Result<ShardStateStuff> {
+    async fn load_last_applied_mc_state(&self) -> Result<Arc<ShardStateStuff>> {
         unimplemented!()
     }
     fn load_shard_client_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
@@ -255,7 +285,7 @@ pub trait EngineOperations : Sync + Send {
         handle: &Arc<BlockHandle>,
         block: &BlockStuff,
         proof: Option<&BlockProofStuff>,
-        state: &ShardStateStuff,
+        state: &Arc<ShardStateStuff>,
         mc_seq_no: u32,
     )
     -> Result<()> {
@@ -277,16 +307,19 @@ pub trait EngineOperations : Sync + Send {
         master_id: &BlockIdExt,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
         attempts: Option<usize>
-    ) -> Result<ShardStateStuff> {
+    ) -> Result<Arc<ShardStateStuff>> {
         unimplemented!()
     }
-    async fn download_zerostate(&self, id: &BlockIdExt) -> Result<(ShardStateStuff, Vec<u8>)> {
+    async fn download_zerostate(
+        &self, 
+        id: &BlockIdExt
+    ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         unimplemented!()
     }
-    async fn load_mc_zero_state(&self) -> Result<ShardStateStuff> {
+    async fn load_mc_zero_state(&self) -> Result<Arc<ShardStateStuff>> {
         unimplemented!()
     }
-    async fn load_state(&self, block_id: &BlockIdExt) -> Result<ShardStateStuff> {
+    async fn load_state(&self, block_id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
         unimplemented!()
     }
     async fn load_persistent_state_size(&self, block_id: &BlockIdExt) -> Result<u64> {
@@ -305,24 +338,24 @@ pub trait EngineOperations : Sync + Send {
         id: &BlockIdExt,
         timeout_ms: Option<u64>,
         allow_block_downloading: bool
-    ) -> Result<ShardStateStuff> {
+    ) -> Result<Arc<ShardStateStuff>> {
         unimplemented!()
     }
     async fn store_state(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: ShardStateStuff
-    ) -> Result<ShardStateStuff> {
+        state: Arc<ShardStateStuff>
+    ) -> Result<Arc<ShardStateStuff>> {
         unimplemented!()
     }
     async fn store_zerostate(
         &self, 
-        state: ShardStateStuff, 
+        state: Arc<ShardStateStuff>, 
         state_bytes: &[u8]
-    ) -> Result<(ShardStateStuff, Arc<BlockHandle>)> {
+    ) -> Result<(Arc<ShardStateStuff>, Arc<BlockHandle>)> {
         unimplemented!()
     }
-    async fn process_full_state_in_ext_db(&self, state: &ShardStateStuff)-> Result<()> {
+    async fn process_full_state_in_ext_db(&self, state: &Arc<ShardStateStuff>)-> Result<()> {
         unimplemented!()
     }
 
@@ -550,6 +583,15 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
+    #[cfg(feature = "telemetry")]
+    fn engine_telemetry(&self) -> &Arc<EngineTelemetry> {
+        unimplemented!()
+    }
+
+    fn engine_allocated(&self) -> &Arc<EngineAlloc> {
+        unimplemented!()
+    }
+
     fn calc_tps(&self, period: u64) -> Result<u32> {
         unimplemented!()
     }
@@ -596,10 +638,10 @@ pub trait ExternalDb : Sync + Send {
         &self,
         block: &BlockStuff,
         proof: Option<&BlockProofStuff>,
-        state: &ShardStateStuff,
+        state: &Arc<ShardStateStuff>,
         mc_seq_no: u32,
     ) -> Result<()>;
-    async fn process_full_state(&self, state: &ShardStateStuff) -> Result<()>;
+    async fn process_full_state(&self, state: &Arc<ShardStateStuff>) -> Result<()>;
     fn process_chain_range_enabled(&self) -> bool;
     async fn process_chain_range(&self, range: &ChainRange) -> Result<()>;
 }

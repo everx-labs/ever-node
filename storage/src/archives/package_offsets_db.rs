@@ -32,7 +32,7 @@ where
     PK: Borrow<PublicKey> + Hash
 {
     fn from(entry_id: &PackageEntryId<B, U256, PK>) -> Self {
-        Self::from_entry_type(&entry_id)
+        Self::from_entry_type(entry_id)
     }
 }
 

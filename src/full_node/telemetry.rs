@@ -1,3 +1,4 @@
+use adnl::common::{add_unbound_object_to_map, add_unbound_object_to_map_with_update};
 use std::{
     time::Instant,
     sync::atomic::{AtomicU64, AtomicU32, Ordering},
@@ -90,7 +91,7 @@ impl FullNodeTelemetry {
 
     pub fn good_top_block_broadcast(&self, block_id: &BlockIdExt) {
         self.top_block_broadcasts.fetch_add(1, Ordering::Relaxed);
-        if adnl::common::add_object_to_map(
+        if add_unbound_object_to_map(
             &self.last_top_block_broadcasts, block_id.clone(), || Ok(Instant::now())
         ).expect("Can't return error") {
             self.top_block_broadcasts_unic.fetch_add(1, Ordering::Relaxed);
@@ -119,7 +120,7 @@ impl FullNodeTelemetry {
     }
 
     pub fn new_downloading_block_attempt(&self, block_id: &BlockIdExt) {
-        adnl::common::add_object_to_map_with_update(
+        add_unbound_object_to_map_with_update(
             &self.downloading_blocks_attempts,
             block_id.clone(),
             |found| if let Some(a) = found {
@@ -129,8 +130,9 @@ impl FullNodeTelemetry {
                 Ok(Some(AtomicU32::new(1)))
             }
         ).expect("Can't return error");
-        adnl::common::add_object_to_map(&self.downloading_blocks, block_id.clone(), || Ok(Instant::now()))
-            .expect("Can't return error");
+        add_unbound_object_to_map(
+            &self.downloading_blocks, block_id.clone(), || Ok(Instant::now())
+        ).expect("Can't return error");
     }
 
     pub fn new_downloaded_block(&self, block_id: &BlockIdExt) {

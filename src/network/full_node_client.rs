@@ -1,22 +1,27 @@
 use crate::{
     block::{
-        compare_block_ids, convert_block_id_ext_api2blk, convert_block_id_ext_blk2api, BlockStuff
+        compare_block_ids, convert_block_id_ext_api2blk, convert_block_id_ext_blk2api, 
+        BlockStuff
     },
-    block_proof::BlockProofStuff, shard_state::ShardStateStuff,
-    network::neighbours::{Neighbours, Neighbour},
-    types::top_block_descr::TopBlockDescrStuff,
+    block_proof::BlockProofStuff, engine_traits::EngineAlloc, shard_state::ShardStateStuff,
+    network::neighbours::{Neighbours, Neighbour}, types::top_block_descr::TopBlockDescrStuff
 };
+#[cfg(feature = "telemetry")]
+use crate::{engine_traits::EngineTelemetry, network::telemetry::FullNodeNetworkTelemetry};
 
 use adnl::{
+    declare_counted,
     common::{
-        KeyId, serialize, serialize_append, tag_from_boxed_type, tag_from_unboxed_type, 
-        TaggedByteSlice, TaggedObject, TaggedTlObject
+        CountedObject, Counter, KeyId, serialize, serialize_append, tag_from_boxed_type, 
+        tag_from_unboxed_type, TaggedByteSlice, TaggedObject, TaggedTlObject
     }, 
     node::AdnlNode
 };
 use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
 use rldp::RldpNode;
 use std::{io::Cursor, time::Instant, sync::Arc, time::Duration};
+#[cfg(feature = "telemetry")]
+use std::sync::atomic::Ordering;
 use ton_api::{
     BoxedSerialize, BoxedDeserialize, Deserializer, IntoBoxed,
     ton::{
@@ -38,8 +43,6 @@ use ton_api::{
 };
 use ton_block::BlockIdExt;
 use ton_types::{fail, error, Result};
-#[cfg(feature = "telemetry")]
-use crate::network::telemetry::FullNodeNetworkTelemetry;
 
 #[async_trait::async_trait]
 pub trait FullNodeOverlayClient : Sync + Send {
@@ -63,7 +66,10 @@ pub trait FullNodeOverlayClient : Sync + Send {
         peer: Arc<Neighbour>,
         attempt: u32,
     ) -> Result<Vec<u8>>;
-    async fn download_zero_state(&self, id: &BlockIdExt) -> Result<(ShardStateStuff, Vec<u8>)>;
+    async fn download_zero_state(
+        &self, 
+        id: &BlockIdExt
+    ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)>;
     async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, max_size: i32) -> Result<(Vec<BlockIdExt>, bool)>;
     async fn download_next_block_full(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
     async fn download_archive(
@@ -74,53 +80,58 @@ pub trait FullNodeOverlayClient : Sync + Send {
     async fn wait_broadcast(&self) -> Result<(Broadcast, Arc<KeyId>)>;
 }
 
-#[derive(Clone)]
-pub struct NodeClientOverlay {
-    overlay_id: Arc<OverlayShortId>,
-    overlay: Arc<OverlayNode>,
-    rldp: Arc<RldpNode>,
-    peers: Arc<Neighbours>,
-    #[cfg(feature = "telemetry")]
-    telemetry: Arc<FullNodeNetworkTelemetry>,
-    #[cfg(feature = "telemetry")]
-    tag_block_broadcast: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_block_full: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_block_proof: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_block_proof_link: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_key_block_proof: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_key_block_proof_link: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_next_block_full: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_persistent_state_slice: u32,
-    #[cfg(feature = "telemetry")]
-    tag_download_zero_state: u32,
-    #[cfg(feature = "telemetry")]
-    tag_external_message_broadcast: u32,
-    #[cfg(feature = "telemetry")]
-    tag_get_archive_info: u32,
-    #[cfg(feature = "telemetry")]
-    tag_get_archive_slice: u32,
-    #[cfg(feature = "telemetry")]
-    tag_get_next_key_block_ids: u32,
-    #[cfg(feature = "telemetry")]
-    tag_new_shard_block_broadcast: u32,
-    #[cfg(feature = "telemetry")]
-    tag_prepare_block: u32,
-    #[cfg(feature = "telemetry")]
-    tag_prepare_block_proof: u32,
-    #[cfg(feature = "telemetry")]
-    tag_prepare_key_block_proof: u32,
-    #[cfg(feature = "telemetry")]
-    tag_prepare_persistent_state: u32,
-    #[cfg(feature = "telemetry")]
-    tag_prepare_zero_state: u32
-}
+//    #[derive(Clone)]
+declare_counted!(
+    pub struct NodeClientOverlay {
+        overlay_id: Arc<OverlayShortId>,
+        overlay: Arc<OverlayNode>,
+        rldp: Arc<RldpNode>,
+        peers: Arc<Neighbours>,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<FullNodeNetworkTelemetry>,
+        #[cfg(feature = "telemetry")]
+        tag_block_broadcast: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_block_full: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_block_proof: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_block_proof_link: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_key_block_proof: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_key_block_proof_link: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_next_block_full: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_persistent_state_slice: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_zero_state: u32,
+        #[cfg(feature = "telemetry")]
+        tag_external_message_broadcast: u32,
+        #[cfg(feature = "telemetry")]
+        tag_get_archive_info: u32,
+        #[cfg(feature = "telemetry")]
+        tag_get_archive_slice: u32,
+        #[cfg(feature = "telemetry")]
+        tag_get_next_key_block_ids: u32,
+        #[cfg(feature = "telemetry")]
+        tag_new_shard_block_broadcast: u32,
+        #[cfg(feature = "telemetry")]
+        tag_prepare_block: u32,
+        #[cfg(feature = "telemetry")]
+        tag_prepare_block_proof: u32,
+        #[cfg(feature = "telemetry")]
+        tag_prepare_key_block_proof: u32,
+        #[cfg(feature = "telemetry")]
+        tag_prepare_persistent_state: u32,
+        #[cfg(feature = "telemetry")]
+        tag_prepare_zero_state: u32,
+        #[cfg(feature = "telemetry")]
+        engine_telemetry: Arc<EngineTelemetry>,
+        engine_allocated: Arc<EngineAlloc>
+    }
+);
 
 impl NodeClientOverlay {
 
@@ -136,8 +147,11 @@ impl NodeClientOverlay {
         peers: Arc<Neighbours>,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<FullNodeNetworkTelemetry>,
+        #[cfg(feature = "telemetry")]
+        engine_telemetry: Arc<EngineTelemetry>,
+        engine_allocated: Arc<EngineAlloc>
     ) -> Self {
-        Self {
+        let ret = Self {
             overlay_id,
             overlay,
             rldp,
@@ -182,8 +196,17 @@ impl NodeClientOverlay {
             #[cfg(feature = "telemetry")]
             tag_prepare_persistent_state: tag_from_boxed_type::<PreparePersistentState>(),
             #[cfg(feature = "telemetry")]
-            tag_prepare_zero_state: tag_from_boxed_type::<PrepareZeroState>()
-        }
+            tag_prepare_zero_state: tag_from_boxed_type::<PrepareZeroState>(),
+            #[cfg(feature = "telemetry")]
+            engine_telemetry: engine_telemetry.clone(),
+            engine_allocated: engine_allocated.clone(),
+            counter: engine_allocated.overlay_clients.clone().into()
+        };
+        #[cfg(feature = "telemetry")]
+        engine_telemetry.overlay_clients.update(
+            engine_allocated.overlay_clients.load(Ordering::Relaxed)
+        );
+        ret
     }
 
     pub fn overlay_id(&self) -> &Arc<OverlayShortId> {
@@ -698,7 +721,7 @@ Ok(if key_block {
     async fn download_zero_state(
         &self, 
         id: &BlockIdExt, 
-    ) -> Result<(ShardStateStuff, Vec<u8>)> {
+    ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         // Prepare
         let (prepare, good_peer): (PreparedState, _) = self.send_adnl_query(
             TaggedTlObject {
@@ -732,7 +755,14 @@ Ok(if key_block {
                     good_peer,
                     0
                 ).await?;
-                Ok((ShardStateStuff::deserialize_zerostate(id.clone(), &state_bytes)?, state_bytes))
+                let state = ShardStateStuff::deserialize_zerostate(
+                    id.clone(), 
+                    &state_bytes,
+                    #[cfg(feature = "telemetry")]
+                    &self.engine_telemetry,
+                    &self.engine_allocated
+                )?;
+                Ok((state, state_bytes))
             }
         }
     }

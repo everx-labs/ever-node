@@ -1,5 +1,5 @@
 use crate::{
-    network::full_node_client::FullNodeOverlayClient,
+    engine_traits::EngineOperations, network::full_node_client::FullNodeOverlayClient,
     shard_state::ShardStateStuff
 };
 
@@ -12,13 +12,14 @@ pub async fn download_persistent_state(
     id: &BlockIdExt,
     master_id: &BlockIdExt,
     overlay: &dyn FullNodeOverlayClient,
+    engine: &dyn EngineOperations, 
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
     attempts: Option<usize>
-) -> Result<ShardStateStuff> {
+) -> Result<Arc<ShardStateStuff>> {
     let mut result = None;
     for _ in 0..10 {
         match download_persistent_state_iter(
-            id, master_id, overlay, active_peers, attempts.clone()
+            id, master_id, overlay, engine, active_peers, attempts.clone()
         ).await {
             Err(e) => {
                 log::warn!("download_persistent_state_iter err: {}", e);
@@ -38,9 +39,10 @@ async fn download_persistent_state_iter(
     id: &BlockIdExt,
     master_id: &BlockIdExt,
     overlay: &dyn FullNodeOverlayClient,
+    engine: &dyn EngineOperations,
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
     mut attempts: Option<usize>
-) -> Result<ShardStateStuff> {
+) -> Result<Arc<ShardStateStuff>> {
 
     if id.seq_no == 0 {
         fail!("zerostate is not supported");
@@ -156,5 +158,11 @@ async fn download_persistent_state_iter(
     );
     assert_eq!(total_size, state_bytes.len());
 
-    ShardStateStuff::deserialize(id.clone(), &state_bytes)
+    ShardStateStuff::deserialize(
+        id.clone(), 
+        &state_bytes,
+        #[cfg(feature = "telemetry")]
+        engine.engine_telemetry(),
+        engine.engine_allocated()
+    )
 }

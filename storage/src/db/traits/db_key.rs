@@ -80,7 +80,7 @@ impl DbKey for Vec<u8> {
         "&[u8]"
     }
 
-     fn key(&self) -> &[u8] {
-        &self
+    fn key(&self) -> &[u8] {
+        self
     }
 }

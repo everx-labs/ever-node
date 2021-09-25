@@ -1,8 +1,8 @@
 use crate::{
-    lt_db::LtDb, lt_desc_db::LtDescDb, 
-    types::{BlockHandle, LtDbEntry, LtDbKey, LtDesc, ShardIdentKey}
+    block_handle_db::BlockHandle, lt_db::LtDb, lt_desc_db::LtDescDb, 
+    types::{LtDbEntry, LtDbKey, LtDesc, ShardIdentKey}
 };
-use std::{cmp::Ordering::{Greater, Less}, convert::TryInto, path::Path, sync::RwLock};
+use std::{cmp::Ordering, convert::TryInto, path::Path, sync::RwLock};
 use ton_block::{AccountIdPrefixFull, BlockIdExt, MAX_SPLIT_DEPTH, ShardIdent, UnixTime32};
 use ton_types::{fail, Result};
 
@@ -91,7 +91,7 @@ impl BlockIndexDb {
 
             found = true;
 
-            if compare_desc(&lt_desc) == Greater {
+            if compare_desc(&lt_desc) == Ordering::Greater {
                 continue;
             }
 
@@ -113,11 +113,11 @@ impl BlockIndexDb {
                 let entry = self.lt_db.get_value(&lt_db_key)?;
                 let result: BlockIdExt = entry.block_id_ext().try_into()?;
                 match compare_lt_db(&entry) {
-                    Less => {
+                    Ordering::Less => {
                         right_seq_no_opt = Some(result);
                         rb = index;
                     },
-                    Greater => {
+                    Ordering::Greater => {
                         left_seq_no_opt = Some(result);
                         lb = index;
                     },
@@ -152,8 +152,10 @@ impl BlockIndexDb {
             }
         }
 
-        if !exact && block_id_opt.is_some() {
-            return Ok(block_id_opt.unwrap());
+        if !exact {
+            if let Some(block_id) = block_id_opt {
+                return Ok(block_id);
+            }
         }
 
         fail!("Block not found")
@@ -165,9 +167,31 @@ impl BlockIndexDb {
         let lt_desc_db_locked = self.lt_desc_db.write()
             .expect("Poisoned RwLock");
         let index = if let Some(lt_desc) = lt_desc_db_locked.try_get_value(&desc_key)? {
-            match handle.id().seq_no().cmp(&lt_desc.last_seq_no()) {
-                std::cmp::Ordering::Equal => return Ok(()),
-                std::cmp::Ordering::Less => fail!("Block handles seq_no must be written in the ascending order!"),
+            let seq_no = handle.id().seq_no();
+            match seq_no.cmp(&lt_desc.last_seq_no()) {
+                Ordering::Equal => return Ok(()),
+                Ordering::Less => {
+                    drop(lt_desc_db_locked);
+                    let mut index = lt_desc.last_index();
+                    let shard = handle.id().shard();
+                    loop {
+                        if index == 0 {
+                            break
+                        }
+                        index -= 1;
+                        let lt_key = LtDbKey::with_values(shard, index)?;
+                        if let Some(entry) = self.lt_db.try_get_value(&lt_key)? {
+                            match entry.block_id_ext().seqno.cmp(&(seq_no as i32)) {
+                                Ordering::Equal => return Ok(()),
+                                Ordering::Less => break,
+                                _ => ()
+                            }
+                        } else {
+                            break
+                        }
+                    }
+                    fail!("Block handles seq_no must be written in the ascending order!")
+                },
                 _ => lt_desc.last_index() + 1,
             }
         } else {

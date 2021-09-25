@@ -41,8 +41,8 @@ impl From<UInt256> for CellId {
     }
 }
 
-impl Into<UInt256> for CellId {
-    fn into(self) -> UInt256 {
-        self.hash
-    }
-}
+// impl Into<UInt256> for CellId {
+//     fn into(self) -> UInt256 {
+//         self.hash
+//     }
+// }

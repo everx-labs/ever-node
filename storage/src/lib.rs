@@ -18,7 +18,9 @@ pub mod traits;
 pub mod types;
 pub mod shard_top_blocks_db;
 
-use std::time::{Duration, Instant};
+#[cfg(feature = "telemetry")]
+use adnl::telemetry::Metric;
+use std::{sync::{Arc, atomic::AtomicU64}, time::{Duration, Instant}};
 
 pub struct TimeChecker {
     operation: String,
@@ -48,6 +50,17 @@ impl Drop for TimeChecker {
                 self.operation, time.as_millis(), self.threshold.as_millis());
         }
     }
+}
+
+#[cfg(feature = "telemetry")]
+pub struct StorageTelemetry {
+    pub handles: Arc<Metric>,
+    pub storage_cells: Arc<Metric>
+}
+
+pub struct StorageAlloc {
+    pub handles: Arc<AtomicU64>,
+    pub storage_cells: Arc<AtomicU64>
 }
 
 pub(crate) const TARGET: &str = "storage";

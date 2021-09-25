@@ -2,7 +2,7 @@ use crate::{/*error::StorageError,*/ types::StorageCell};
 use std::sync::Arc;
 use ton_types::{types::UInt256/*, Result*/};
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq)]
 pub enum Reference {
     Loaded(Arc<StorageCell>),
     NeedToLoad(UInt256),

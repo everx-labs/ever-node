@@ -1,44 +1,68 @@
+use crate::engine_traits::EngineAlloc;
+#[cfg(feature = "telemetry")]
+use crate::engine_traits::EngineTelemetry;
 use std::{
     sync::{Arc, atomic::AtomicBool, atomic::Ordering}, fmt::Display, hash::Hash, cmp::Ord, 
     time::Duration
 };
 use ton_types::{Result, error};
-use adnl::common::add_object_to_map;
+use adnl::{declare_counted, common::{add_counted_object_to_map, CountedObject, Counter}};
 
 
-struct OperationAwaiters<R> {
-    pub is_started: AtomicBool,
-    pub tx: tokio::sync::watch::Sender<Option<std::result::Result<R, String>>>,
-    pub rx: tokio::sync::watch::Receiver<Option<std::result::Result<R, String>>>,
-}
+declare_counted!(
+    struct OperationAwaiters<R> {
+       is_started: AtomicBool,
+       tx: tokio::sync::watch::Sender<Option<std::result::Result<R, String>>>,
+       rx: tokio::sync::watch::Receiver<Option<std::result::Result<R, String>>>
+   }
+);
 
 impl<R: Clone> OperationAwaiters<R> {
-    fn new(is_started: bool) -> Arc<Self> {
+    fn new(
+        is_started: bool,
+        #[cfg(feature = "telemetry")]
+        telemetry: &Arc<EngineTelemetry>,
+        allocated: &Arc<EngineAlloc>
+    ) -> Arc<Self> {
         let (tx, rx) = tokio::sync::watch::channel(None);
-        Arc::new(Self {
+        let ret = Self {
             is_started: AtomicBool::new(is_started),
             tx,
-            rx
-        })
+            rx,
+            counter: allocated.awaiters.clone().into()
+        };
+        #[cfg(feature = "telemetry")]
+        telemetry.awaiters.update(allocated.awaiters.load(Ordering::Relaxed));
+        Arc::new(ret)
     }
 }
 
 pub struct AwaitersPool<I, R> {
     ops_awaiters: lockfree::map::Map<I, Arc<OperationAwaiters<R>>>,
     description: &'static str,
+    #[cfg(feature = "telemetry")]
+    telemetry: Arc<EngineTelemetry>,
+    allocated: Arc<EngineAlloc>
 }
 
 impl<I, R> AwaitersPool<I, R> where
     I: Ord + Hash + Clone + Display,
     R: Clone,
 {
-    pub fn new(description: &'static str) -> Self {
+    pub fn new(
+        description: &'static str,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<EngineTelemetry>,
+        allocated: Arc<EngineAlloc>
+    ) -> Self {
         Self {
             ops_awaiters: lockfree::map::Map::new(),
             description,
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated
         }
     }
-
 
     pub async fn do_or_wait(
         &self,
@@ -54,8 +78,17 @@ impl<I, R> AwaitersPool<I, R> where
                     return self.wait_operation(id, wait_timeout_ms, &op_awaiters.1, || Ok(false)).await
                 }
             } else {
-                let new_awaiters = OperationAwaiters::new(true);
-                if add_object_to_map(&self.ops_awaiters, id.clone(), || Ok(new_awaiters.clone()))? {
+                let new_awaiters = OperationAwaiters::new(
+                    true,
+                    #[cfg(feature = "telemetry")]
+                    &self.telemetry,
+                    &self.allocated
+                );
+                if add_counted_object_to_map(
+                    &self.ops_awaiters, 
+                    id.clone(), 
+                    || Ok(new_awaiters.clone())
+                )? {
                     return Some(self.do_operation(id, operation, &new_awaiters).await).transpose()
                 }
             }
@@ -72,8 +105,17 @@ impl<I, R> AwaitersPool<I, R> where
             if let Some(op_awaiters) = self.ops_awaiters.get(id) {
                 return self.wait_operation(id, timeout_ms, &op_awaiters.1, check_complete).await
             } else {
-                let new_awaiters = OperationAwaiters::new(false);
-                if add_object_to_map(&self.ops_awaiters, id.clone(), || Ok(new_awaiters.clone()))? {
+                let new_awaiters = OperationAwaiters::new(
+                    false,
+                    #[cfg(feature = "telemetry")]
+                    &self.telemetry,
+                    &self.allocated
+                );
+                if add_counted_object_to_map(
+                    &self.ops_awaiters, 
+                    id.clone(), 
+                    || Ok(new_awaiters.clone())
+                )? {
                     return self.wait_operation(id, timeout_ms, &new_awaiters, check_complete).await
                 }
             }

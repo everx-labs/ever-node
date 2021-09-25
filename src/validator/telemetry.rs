@@ -1,3 +1,4 @@
+use adnl::common::add_unbound_object_to_map_with_update;
 use std::{
     time::Duration,
     sync::atomic::{AtomicU32, Ordering},
@@ -68,7 +69,7 @@ impl CollatorValidatorTelemetry {
         if shard.is_masterchain() {
             self.master.succeeded_attempt(time, transactions, gas);
         } else {
-            adnl::common::add_object_to_map_with_update(
+            add_unbound_object_to_map_with_update(
                 &self.shardes,
                 shard.clone(),
                 |found| if let Some(found) = found {
@@ -87,7 +88,7 @@ impl CollatorValidatorTelemetry {
         if shard.is_masterchain() {
             self.master.failed_attempt(error);
         } else {
-            adnl::common::add_object_to_map_with_update(
+            add_unbound_object_to_map_with_update(
                 &self.shardes,
                 shard.clone(),
                 |found| if let Some(found) = found {

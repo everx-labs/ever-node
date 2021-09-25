@@ -247,7 +247,7 @@ impl OutMsgQueueInfoStuff {
         cur_mc_seqno: u32,
         next_mc_end_lt: u64,
         next_shards: Option<&ShardHashes>,
-        mc_shard_states: &HashMap<u32, ShardStateStuff>,
+        mc_shard_states: &HashMap<u32, Arc<ShardStateStuff>>,
         stop_flag: &Option<&AtomicBool>,
     ) -> Result<()> {
         let masterchain = self.shard().is_masterchain();
@@ -442,11 +442,11 @@ impl MsgQueueManager {
 
     pub async fn init(
         engine: &Arc<dyn EngineOperations>,
-        last_mc_state: &ShardStateStuff,
+        last_mc_state: &Arc<ShardStateStuff>,
         shard: ShardIdent,
         shards: &ShardHashes,
-        prev_states: &Vec<ShardStateStuff>,
-        next_state_opt: Option<&ShardStateStuff>,
+        prev_states: &Vec<Arc<ShardStateStuff>>,
+        next_state_opt: Option<&Arc<ShardStateStuff>>,
         after_merge: bool,
         after_split: bool,
         stop_flag: Option<&AtomicBool>,
@@ -537,9 +537,9 @@ impl MsgQueueManager {
 
     pub async fn load_out_queue_info(
         engine: &Arc<dyn EngineOperations>,
-        state: &ShardStateStuff,
-        last_mc_state: &ShardStateStuff,
-        mc_shard_states: &mut HashMap<u32, ShardStateStuff>
+        state: &Arc<ShardStateStuff>,
+        last_mc_state: &Arc<ShardStateStuff>,
+        mc_shard_states: &mut HashMap<u32, Arc<ShardStateStuff>>
     ) -> Result<OutMsgQueueInfoStuff> {
         log::debug!("unpacking OutMsgQueueInfo of neighbor {:#}", state.block_id());
         let nb = OutMsgQueueInfoStuff::from_shard_state(&state)?;
@@ -573,7 +573,7 @@ impl MsgQueueManager {
         neighbors: &mut Vec<OutMsgQueueInfoStuff>,
         shard: &ShardIdent,
         real_out_queue_info: &OutMsgQueueInfoStuff,
-        prev_states: &Vec<ShardStateStuff>,
+        prev_states: &Vec<Arc<ShardStateStuff>>,
         stop_flag: &Option<&AtomicBool>,
     ) -> Result<()> {
         log::debug!("in add_trivial_neighbor_after_merge()");
@@ -776,10 +776,10 @@ impl MsgQueueManager {
 
     async fn request_mc_state(
         engine: &Arc<dyn EngineOperations>,
-        last_mc_state: &ShardStateStuff,
+        last_mc_state: &Arc<ShardStateStuff>,
         seq_no: u32,
         timeout_ms: Option<u64>,
-        mc_shard_states: &mut HashMap<u32, ShardStateStuff>,
+        mc_shard_states: &mut HashMap<u32, Arc<ShardStateStuff>>,
     ) -> Result<()> {
         if !mc_shard_states.contains_key(&seq_no) {
             let last_mc_seqno = last_mc_state.state().seq_no();

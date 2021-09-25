@@ -85,7 +85,7 @@ macro_rules! db_impl_serializable {
 
             #[allow(dead_code)]
             pub fn get_value(&self, key: &$key_type) -> ton_types::Result<$value_type> {
-                Ok(<$value_type>::from_slice(self.get(key)?.as_ref())?)
+                <$value_type>::from_slice(self.get(key)?.as_ref())
             }
 
             #[allow(dead_code)]

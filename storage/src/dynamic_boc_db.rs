@@ -1,20 +1,32 @@
 use crate::{
-    cell_db::CellDb, /*dynamic_boc_diff_writer::{DynamicBocDiffFactory, DynamicBocDiffWriter},*/
-    types::{CellId, StorageCell},
-    db::traits::KvcTransaction,
-    TARGET,
+    StorageAlloc, cell_db::CellDb, 
+    /*dynamic_boc_diff_writer::{DynamicBocDiffFactory, DynamicBocDiffWriter},*/
+    types::{CellId, StorageCell}, db::traits::KvcTransaction, TARGET,
 };
-use fnv::{FnvHashMap, FnvHashSet};
+#[cfg(feature = "telemetry")]
+use crate::StorageTelemetry;
+use adnl::{declare_counted, common::{CountedObject, Counter}};
 use std::{ops::{Deref, DerefMut}, sync::{Arc, RwLock, Weak}, thread, time};
+#[cfg(feature = "telemetry")]
+use std::sync::atomic::Ordering;
 //#[cfg(test)]
 //use std::path::Path;
 use ton_types::{Cell, Result, CellImpl, MAX_LEVEL};
 
-#[derive(Debug)]
+declare_counted!(
+    pub struct StorageCellObject {
+        object: Weak<StorageCell>
+    }
+);
+
+//#[derive(Debug)]
 pub struct DynamicBocDb {
     db: Arc<CellDb>,
-    cells: Arc<RwLock<FnvHashMap<CellId, Weak<StorageCell>>>>,
+    cells: Arc<RwLock<fnv::FnvHashMap<CellId, StorageCellObject>>>,
     db_index: u32,
+    #[cfg(feature = "telemetry")]
+    telemetry: Arc<StorageTelemetry>,
+    allocated: Arc<StorageAlloc> 
 }
 
 impl DynamicBocDb {
@@ -26,12 +38,21 @@ impl DynamicBocDb {
 */
 
     /// Constructs new instance using given key-value collection implementation
-    pub(crate) fn with_db(db: CellDb, db_index: u32) -> Self {
+    pub(crate) fn with_db(
+        db: CellDb, 
+        db_index: u32,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<StorageTelemetry>,
+        allocated: Arc<StorageAlloc>
+    ) -> Self {
         let db = Arc::new(db);
         Self {
             db: Arc::clone(&db),
-            cells: Arc::new(RwLock::new(FnvHashMap::default())),
+            cells: Arc::new(RwLock::new(fnv::FnvHashMap::default())),
             db_index,
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated
         }
     }
 
@@ -39,7 +60,7 @@ impl DynamicBocDb {
         &self.db
     }
 
-    pub fn cells_map(&self) -> Arc<RwLock<FnvHashMap<CellId, Weak<StorageCell>>>> {
+    pub fn cells_map(&self) -> Arc<RwLock<fnv::FnvHashMap<CellId, StorageCellObject>>> {
         Arc::clone(&self.cells)
     }
 
@@ -50,7 +71,7 @@ impl DynamicBocDb {
     /// Converts tree of cells into DynamicBoc
     pub fn save_as_dynamic_boc(self: &Arc<Self>, root_cell: &dyn CellImpl) -> Result<usize> {
         let mut transaction = self.db.begin_transaction()?;
-        let mut visited = FnvHashSet::default();
+        let mut visited = fnv::FnvHashSet::default();
         let root_id = CellId::new(root_cell.hash(MAX_LEVEL));
 
         let written_count = self.save_tree_of_cells_recursive(
@@ -80,11 +101,14 @@ impl DynamicBocDb {
     pub(crate) fn load_cell(self: &Arc<Self>, cell_id: &CellId) -> Result<Arc<StorageCell>> {
         let in_cache = if let Some(cell) = self.cells.read()
             .expect("Poisoned RwLock")
-            .get(&cell_id)
+            .get(cell_id)
         {
-            if let Some(cell) = Weak::upgrade(&cell) {
-                log::trace!(target: TARGET, "DynamicBocDb::load_cell  from cache  id {}  db_index {}",
-                    cell_id, self.db_index);
+            if let Some(cell) = Weak::upgrade(&cell.object) {
+                log::trace!(
+                    target: TARGET, 
+                    "DynamicBocDb::load_cell  from cache  id {}  db_index {}",
+                    cell_id, self.db_index
+                );
                 return Ok(cell);
             }
             // Even if the cell is disposed, we will load and store it later,
@@ -94,7 +118,7 @@ impl DynamicBocDb {
             false
         };
         let storage_cell = Arc::new(
-            match CellDb::get_cell(self.db.deref(), &cell_id, Arc::clone(self)) {
+            match CellDb::get_cell(self.db.deref(), cell_id, Arc::clone(self)) {
                 Ok(cell) => cell,
                 Err(e) => {
                     log::error!("Can't load cell  id {}  db_index {}  in_cache {}  error: {}", cell_id, self.db_index, in_cache, e);
@@ -103,9 +127,15 @@ impl DynamicBocDb {
                 }
             }
         );
+        let storage_cell_object = StorageCellObject {
+            object: Arc::downgrade(&storage_cell),
+            counter: self.allocated.storage_cells.clone().into()
+        };
+        #[cfg(feature = "telemetry")]
+        self.telemetry.storage_cells.update(self.allocated.storage_cells.load(Ordering::Relaxed));
         self.cells.write()
             .expect("Poisoned RwLock")
-            .insert(cell_id.clone(), Arc::downgrade(&storage_cell));
+            .insert(cell_id.clone(), storage_cell_object);
 
         log::trace!(target: TARGET, "DynamicBocDb::load_cell  from DB  id {}  db_index {}  in_cache {}",
             cell_id, self.db_index, in_cache);
@@ -118,7 +148,7 @@ impl DynamicBocDb {
         cell: &dyn CellImpl,
         cell_db: Arc<CellDb>,
         transaction: &mut dyn KvcTransaction<CellId>,
-        visited: &mut FnvHashSet<CellId>,
+        visited: &mut fnv::FnvHashSet<CellId>,
         root_id: &CellId,
     ) -> Result<usize> {
         let cell_id = CellId::new(cell.hash(MAX_LEVEL));

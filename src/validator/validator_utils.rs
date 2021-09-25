@@ -224,7 +224,7 @@ pub fn try_calc_subset_for_workchain(
     let workchains = config.workchains().unwrap_or_else(|_| SINGLE_WORKCHAIN.clone());
     match workchains.len()? as i32 {
         0 => fail!("workchain description is empty"),
-        1 => vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time).map(|e| Some(e)),
+        1 => Ok(Some(vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time)?)),
         count => {
             let mut list = Vec::new();
             for descr in vset.list() {
@@ -240,7 +240,7 @@ pub fn try_calc_subset_for_workchain(
                     vset.main(),
                     list
                 )?;
-                vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time).map(|e| Some(e))
+                Ok(Some(vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time)?))
             } else {
                 // not enough validators -- config is ok, but we cannot validate the shard at the moment
                 Ok(None)
@@ -277,175 +277,3 @@ pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (KeyOptionJson, KeyOption)
         }
     }
 }
-
-/*
-const ELECTOR_ABI: &str = include_str!("Elector.abi.json"); //elector's ABI
-const ELECTOR_GET_FUNC_NAME: &str = "get"; // elector get function name
-
-#[allow(dead_code)]
-async fn run_tvm_get(account: &Account, client: Arc<ClientContext>, function: &str, input: Value) -> Result<Value> {
-    let address = account
-        .get_addr()
-        .expect("account must be in normal condition")
-        .to_string();
-    let contract = serde_json::from_str::<AbiContract>(&ELECTOR_ABI)?;
-    let abi = Abi::Contract(contract);
-    let result = ton_client::abi::encode_message(client.clone(), ParamsOfEncodeMessage {
-        abi: abi.clone(),
-        address: Some(address),
-        deploy_set: None,
-        call_set: CallSet::some_with_function_and_input(function, input),
-        signer: Signer::None,
-        processing_try_index: None,
-    }).await?;
-    let result = ton_client::tvm::run_tvm(client.clone(), ParamsOfRunTvm {
-        message: result.message,
-        account: base64::encode(&account.write_to_bytes()?),
-        execution_options: None,
-        abi: Some(abi),
-        ..Default::default()
-    }).await?;
-    result
-        .decoded
-        .ok_or_else(|| error!("account didn't return correct result on {}", function))?
-        .output
-        .ok_or_else(|| error!("account didn't return result on {}", function))
-}
-
-// async fn find_elections<F>(elector: &Account, mut select: F) -> Result<HashMap<[u8; 32], u128>>
-// where
-//     F: FnMut(dyn Iterator<Item = (&String, &Value)>) -> Option<(String, Value)> {
-//     let client = Arc::new(ClientContext::new(Default::default())?);
-//     let result = run_tvm_get(elector, client.clone(), ELECTOR_GET_FUNC_NAME, Value::Object(Map::new())).await?;
-//     let elections = select(result
-//         .as_object()
-//         .ok_or_else(|| error!("elector didn't return correct object"))?
-//         .get("past_elections")
-//         .ok_or_else(|| error!("elector returned object without 'past_elections'"))?
-//         .as_object()
-//         .ok_or_else(|| error!("elector returned object with 'past_elections' but it is not a map"))?
-//         .iter()
-//     );
-//     let mut result = HashMap::new();
-//     let validators =  match elections {
-//         Some((_time, value)) => {
-//             value.as_object()
-//             .ok_or_else(|| error!("elector returned object with 'past_elections' as a map but its first element is not a map"))?
-//             .get("frozen_dict")
-//             .ok_or_else(|| error!("elector returned object with 'past_elections' but without 'frozen_dict'"))?
-//             .as_object()
-//             .ok_or_else(|| error!("elector returned object with 'frozen_dict' but it is not a map"))?
-//         }
-//         None => return Ok(result)
-//     };
-//     for (public_key, value) in validators {
-//         let value = value
-//             .as_object()
-//             .ok_or_else(|| error!("'frozen_dict' for public_key {} has value which is not a map", public_key))?
-//             .get("stake")
-//             .ok_or_else(|| error!("'frozen_dict' for public_key {} has not got stake value", public_key))?
-//             .as_str()
-//             .ok_or_else(|| error!("'frozen_dict' for public_key {} has stake value but is is not a string", public_key))?;
-//         let value = u128::from_str(&value)?;
-//         if let Ok(public_key) = hex::decode(&public_key[2..])?.try_into() {
-//             result.insert(public_key, value);
-//         } else {
-//             fail!("public key is not valid {}", public_key)
-//         }
-//     }
-//     Ok(result)
-// }
-
-// pub async fn load_stakes(elector: &Account, election_id: u32) -> Result<HashMap<[u8; 32], u128>> {
-//     let election_id = format!("{}", election_id);
-//     find_elections(elector, |iter| iter.find(|a| a.0 == &election_id)).await
-// }
-
-
-#[allow(dead_code)]
-pub async fn load_stakes_from_elector_by_id(elector: &Account, election_id: u32) -> Result<HashMap<[u8; 32], u128>> {
-    let election_id = format!("{}", election_id);
-    let client = Arc::new(ClientContext::new(Default::default())?);
-    let result = run_tvm_get(elector, client.clone(), ELECTOR_GET_FUNC_NAME, Value::Object(Map::new())).await?;
-    let elections = result
-        .as_object()
-        .ok_or_else(|| error!("elector didn't return correct object"))?
-        .get("past_elections")
-        .ok_or_else(|| error!("elector returned object without 'past_elections'"))?
-        .as_object()
-        .ok_or_else(|| error!("elector returned object with 'past_elections' but it is not a map"))?
-        .iter()
-        .find(|item| item.0 == &election_id);
-    let mut result = HashMap::new();
-    let validators =  match elections {
-        Some((_time, value)) => {
-            value.as_object()
-            .ok_or_else(|| error!("elector returned object with 'past_elections' as a map but its first element is not a map"))?
-            .get("frozen_dict")
-            .ok_or_else(|| error!("elector returned object with 'past_elections' but without 'frozen_dict'"))?
-            .as_object()
-            .ok_or_else(|| error!("elector returned object with 'frozen_dict' but it is not a map"))?
-        }
-        None => return Ok(result)
-    };
-    for (public_key, value) in validators {
-        let value = value
-            .as_object()
-            .ok_or_else(|| error!("'frozen_dict' for public_key {} has value which is not a map", public_key))?
-            .get("stake")
-            .ok_or_else(|| error!("'frozen_dict' for public_key {} has not got stake value", public_key))?
-            .as_str()
-            .ok_or_else(|| error!("'frozen_dict' for public_key {} has stake value but is is not a string", public_key))?;
-        let value = u128::from_str(&value)?;
-        if let Ok(public_key) = hex::decode(&public_key[2..])?.try_into() {
-            result.insert(public_key, value);
-        } else {
-            fail!("public key is not valid {}", public_key)
-        }
-    }
-    Ok(result)
-}
-
-#[allow(dead_code)]
-pub async fn load_last_stakes_from_elector(elector: &Account) -> Result<HashMap<[u8; 32], u128>> {
-    let client = Arc::new(ClientContext::new(Default::default())?);
-    let result = run_tvm_get(elector, client.clone(), ELECTOR_GET_FUNC_NAME, Value::Object(Map::new())).await?;
-    let elections = result
-        .as_object()
-        .ok_or_else(|| error!("elector didn't return correct object"))?
-        .get("past_elections")
-        .ok_or_else(|| error!("elector returned object without 'past_elections'"))?
-        .as_object()
-        .ok_or_else(|| error!("elector returned object with 'past_elections' but it is not a map"))?
-        .iter()
-        .max_by(|a, b| a.0.cmp(&b.0));
-    let validators =  match elections {
-        Some((_time, value)) => {
-            value.as_object()
-            .ok_or_else(|| error!("elector returned object with 'past_elections' as a map but its first element is not a map"))?
-            .get("frozen_dict")
-            .ok_or_else(|| error!("elector returned object with 'past_elections' but without 'frozen_dict'"))?
-            .as_object()
-            .ok_or_else(|| error!("elector returned object with 'frozen_dict' but it is not a map"))?
-        }
-        None => return Ok(HashMap::new())
-    };
-    let mut result = HashMap::new();
-    for (public_key, value) in validators {
-        let value = value
-            .as_object()
-            .ok_or_else(|| error!("'frozen_dict' for public_key {} has value which is not a map", public_key))?
-            .get("stake")
-            .ok_or_else(|| error!("'frozen_dict' for public_key {} has not got stake value", public_key))?
-            .as_str()
-            .ok_or_else(|| error!("'frozen_dict' for public_key {} has stake value but is is not a string", public_key))?;
-        let value = u128::from_str(&value)?;
-        if let Ok(public_key) = hex::decode(&public_key[2..])?.try_into() {
-            result.insert(public_key, value);
-        } else {
-            fail!("public key is not valid {}", public_key)
-        }
-    }
-    Ok(result)
-}
-*/

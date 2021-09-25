@@ -550,7 +550,7 @@ impl ValidatorManagerImpl {
         Ok(())
     }
 
-    async fn update_shards(&mut self, mc_state: ShardStateStuff) -> Result<()> {
+    async fn update_shards(&mut self, mc_state: Arc<ShardStateStuff>) -> Result<()> {
         if !self.update_validator_lists(&mc_state).await? {
             log::info!("Current validator list is empty, validation is disabled.");
             self.disable_validation().await?;
@@ -622,7 +622,7 @@ impl ValidatorManagerImpl {
                         }
                     }
                 } else {
-                    new_shards.insert(ident, vec![top_block]);
+                    new_shards.insert(ident.clone(), vec![top_block]);
                 }
 
                 // Create list of shards which will be effective soon

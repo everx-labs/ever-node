@@ -200,7 +200,7 @@ pub async fn accept_block(
 async fn choose_mc_state(
     block: &BlockStuff,
     engine: &Arc<dyn EngineOperations>
-) -> Result<ShardStateStuff> {
+) -> Result<Arc<ShardStateStuff>> {
     let mc_block_id = block.construct_master_id()?;
     let mut last_mc_state = engine.load_last_applied_mc_state().await?;
 
@@ -413,7 +413,7 @@ pub fn create_new_proof(
 pub async fn create_top_shard_block_description(
     block: &BlockStuff,
     signatures: BlockSignatures,
-    mc_state: &ShardStateStuff,
+    mc_state: &Arc<ShardStateStuff>,
     prev: &Vec<BlockIdExt>,
     engine: &dyn EngineOperations,
 ) -> Result<Option<TopBlockDescr>> {
@@ -480,12 +480,12 @@ fn find_known_ancestors(
                 return Ok(None)
             }
         }
-        Ok(Some(ancestor)) if ancestor.shard == *shard => {
+        Ok(Some(ancestor)) if ancestor.shard() == shard => {
             log::trace!(target: "validator", "found one regular ancestor {}", ancestor.shard());
             oldest_ancestor_seqno = ancestor.block_id().seq_no();
             ancestors.push(ancestor);
         }
-        Ok(Some(ancestor)) if ancestor.shard.is_parent_for(shard) => {
+        Ok(Some(ancestor)) if ancestor.shard().is_parent_for(shard) => {
             log::trace!(target: "validator", "found one parent ancestor {}", ancestor.shard());
             oldest_ancestor_seqno = ancestor.block_id().seq_no();
             ancestors.push(ancestor);

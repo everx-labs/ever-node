@@ -428,7 +428,7 @@ impl ValidatorGroup {
         let result = match mm_block_id {
             Some(mc) => {
                 match run_collate_query (
-                    self.shard,
+                    self.shard.clone(),
                     min_ts,
                     mc.clone(),
                     prev_block_ids,
@@ -476,7 +476,7 @@ impl ValidatorGroup {
             candidate_id, self.info_round(round).await);
 
         let mut candidate = super::BlockCandidate {
-            block_id: BlockIdExt::with_params(self.shard, 0, root_hash, get_hash(&data.data())),
+            block_id: BlockIdExt::with_params(self.shard.clone(), 0, root_hash, get_hash(&data.data())),
             data: data.data().to_vec(),
             collated_file_hash: catchain::utils::get_hash (&collated_data.data()),
             collated_data: collated_data.data().to_vec(),
@@ -492,7 +492,7 @@ impl ValidatorGroup {
                     return;
                 }
                 let next_block_id = match group_impl.create_next_block_id(
-                    candidate.block_id.root_hash, candidate.block_id.file_hash, self.shard
+                    candidate.block_id.root_hash, candidate.block_id.file_hash, self.shard.clone()
                 ) {
                     Err(x) => { log::error!(target: "validator", "{}", x); return },
                     Ok(x) => x
@@ -504,7 +504,7 @@ impl ValidatorGroup {
             match mm_block_id {
                 Some(mc) => {
                     run_validate_query(
-                        self.shard,
+                        self.shard.clone(),
                         min_ts,
                         mc.clone(),
                         prev_block_ids,
@@ -533,10 +533,10 @@ impl ValidatorGroup {
                             Ordering::Relaxed
                         );
                         format!("Validation successful: finished at {:?}", x)
-                    },
+                    }
                     Err(x) => format!("Validation successful, db error `{}`", x)
                 }
-            },
+            }
             Err(x) => format!("Validation failed with verdict `{}`", x),
         };
         self.group_impl.lock().await.on_candidate_invoked = true;
@@ -579,7 +579,7 @@ impl ValidatorGroup {
             };
 
             (
-                match group_impl.create_next_block_id(root_hash, file_hash, self.shard) {
+                match group_impl.create_next_block_id(root_hash, file_hash, self.shard.clone()) {
                     Ok(x) => x,
                     Err(x) => { log::error!(target: "validator", "{}",x); return }
                 },

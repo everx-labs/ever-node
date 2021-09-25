@@ -1,10 +1,12 @@
 use crate::{
-    cell_db::CellDb, 
+    StorageAlloc, cell_db::CellDb, 
     db::{rocksdb::RocksDb, traits::{DbKey, KvcSnapshotable, KvcTransaction}},
     dynamic_boc_db::DynamicBocDb, /*dynamic_boc_diff_writer::DynamicBocDiffWriter,*/
     traits::Serializable, types::{CellId, Reference, StorageCell},
     TARGET,
 };
+#[cfg(feature = "telemetry")]
+use crate::StorageTelemetry;
 use fnv::FnvHashSet;
 use std::{
     io::{Cursor, Read, Write},
@@ -65,11 +67,17 @@ impl ShardStateDb {
         shardstate_db_path: P1,
         cell_db_path: P2,
         cell_db_path_additional: P2,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<StorageTelemetry>,
+        allocated: Arc<StorageAlloc>
     ) -> Result<Arc<Self>> {
         Self::with_dbs(
             Arc::new(RocksDb::with_path(shardstate_db_path)),
             CellDb::with_path(cell_db_path),
             CellDb::with_path(cell_db_path_additional),
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated
         )
     }
 
@@ -78,13 +86,32 @@ impl ShardStateDb {
         shardstate_db: Arc<dyn KvcSnapshotable<BlockIdExt>>,
         cell_db_0: CellDb,
         cell_db_1: CellDb,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<StorageTelemetry>,
+        allocated: Arc<StorageAlloc>
     )-> Result<Arc<Self>> {
         let instance = Arc::new(Self {
             shardstate_db,
             current_dynamic_boc_db_index: AtomicU32::new(0),
-            dynamic_boc_db_0: Arc::new(DynamicBocDb::with_db(cell_db_0, 0)),
+            dynamic_boc_db_0: Arc::new(
+                DynamicBocDb::with_db(
+                    cell_db_0, 
+                    0,
+                    #[cfg(feature = "telemetry")]
+                    telemetry.clone(),
+                    allocated.clone()
+                )
+            ),
             dynamic_boc_db_0_writers: AtomicU32::new(0),
-            dynamic_boc_db_1: Arc::new(DynamicBocDb::with_db(cell_db_1, 1)),
+            dynamic_boc_db_1: Arc::new(
+                DynamicBocDb::with_db(
+                    cell_db_1, 
+                    1,
+                    #[cfg(feature = "telemetry")]
+                    telemetry,
+                    allocated
+                )
+            ),
             dynamic_boc_db_1_writers: AtomicU32::new(0),
         });
         Ok(instance)
@@ -302,7 +329,7 @@ pub async fn gc(
             collected_cells: 0,
             marked_cells,
             roots_to_sweep,
-            marked_roots: marked_roots,
+            marked_roots,
             mark_time,
             sweep_time: Duration::default(),
         })
@@ -328,13 +355,14 @@ pub async fn gc(
         })
     }
 }
+type MarkResult = Result<(FnvHashSet<CellId>, Vec<(BlockIdExt, CellId)>, usize)>;
 
 fn mark(
     shardstate_db: &dyn KvcSnapshotable<BlockIdExt>,
     dynamic_boc_db: &DynamicBocDb,
     gc_resolver: &dyn AllowStateGcResolver,
     gc_utime: UnixTime32
-) -> Result<(FnvHashSet<CellId>, Vec<(BlockIdExt, CellId)>, usize)> {
+) -> MarkResult {
     let mut to_mark = Vec::new();
     let mut to_sweep = Vec::new();
     shardstate_db.for_each(&mut |_key, value| {
@@ -357,7 +385,7 @@ fn mark(
 
     let marked_roots = to_mark.len();
     let mut marked = FnvHashSet::default();
-    if to_sweep.len() > 0 {
+    if !to_sweep.is_empty() {
         for cell_id in to_mark {
             mark_subtree_recursive(dynamic_boc_db, cell_id.clone(), cell_id, &mut marked)?;
         }
@@ -405,7 +433,7 @@ fn sweep(
     to_sweep: Vec<(BlockIdExt, CellId)>,
     marked: FnvHashSet<CellId>,
 ) -> Result<usize> {
-    if to_sweep.len() < 1 {
+    if to_sweep.is_empty() {
         return Ok(0);
     }
 

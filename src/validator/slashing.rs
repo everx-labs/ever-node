@@ -11,7 +11,7 @@ use spin::mutex::SpinMutex;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
-use storage::types::BlockHandle;
+use storage::block_handle_db::BlockHandle;
 use ton_abi::contract::Contract;
 use ton_abi::function::Function;
 use ton_abi::Token;

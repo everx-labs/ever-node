@@ -6,7 +6,7 @@ use ton_types::{
     MAX_LEVEL, MAX_REFERENCES_COUNT
 };
 
-#[derive(Debug)]
+//#[derive(Debug)]
 pub struct StorageCell {
     cell_data: CellData,
     references: RwLock<Vec<Reference>>,
@@ -64,14 +64,14 @@ impl StorageCell {
         let mut data = Vec::new();
 
         cell.cell_data().serialize(&mut data)?;
-        data.write(&[references_count])?;
+        data.write_all(&[references_count])?;
 
         for i in 0..references_count {
-            data.write(cell.reference(i as usize)?.repr_hash().as_slice())?;
+            data.write_all(cell.reference(i as usize)?.repr_hash().as_slice())?;
         }
 
-        data.write(&cell.tree_bits_count().to_be_bytes())?;
-        data.write(&cell.tree_cell_count().to_be_bytes())?;
+        data.write_all(&cell.tree_bits_count().to_be_bytes())?;
+        data.write_all(&cell.tree_cell_count().to_be_bytes())?;
 
         assert!(!data.is_empty());
 
@@ -173,7 +173,7 @@ impl CellImpl for StorageCell {
     }
 }
 
-fn references_hashes_equal(left: &Vec<Reference>, right: &Vec<Reference>) -> bool {
+fn references_hashes_equal(left: &[Reference], right: &[Reference]) -> bool {
     for i in 0..left.len() {
         if left[i].hash() != right[i].hash() {
             return false;

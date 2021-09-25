@@ -1,5 +1,6 @@
 use std::fmt::{self, Display, Formatter};
 use ton_block::{
+    GlobalCapabilities,
     Message, EnqueuedMsg, MsgEnvelope, AccountIdPrefixFull, IntermediateAddress, OutMsgQueueKey,
     Serializable, Deserializable, Grams, ShardIdent, AddSub,
 };
@@ -36,13 +37,13 @@ impl MsgEnvelopeStuff {
             next_prefix,
         })
     }
-    pub fn new(msg: Message, shard: &ShardIdent, fwd_fee: Grams) -> Result<Self> {
+    pub fn new(msg: Message, shard: &ShardIdent, fwd_fee: Grams, use_hypercube: bool) -> Result<Self> {
         let msg_cell = msg.serialize()?;
         let src = msg.src_ref().ok_or_else(|| error!("source address of message {:x} is invalid", msg_cell.repr_hash()))?;
         let src_prefix = AccountIdPrefixFull::prefix(src)?;
         let dst = msg.dst_ref().ok_or_else(|| error!("destination address of message {:x} is invalid", msg_cell.repr_hash()))?;
         let dst_prefix = AccountIdPrefixFull::prefix(dst)?;
-        let (cur_addr, next_addr) = perform_hypercube_routing(&src_prefix, &dst_prefix, shard, IntermediateAddress::default())?;
+        let (cur_addr, next_addr) = perform_hypercube_routing(&src_prefix, &dst_prefix, shard, use_hypercube)?;
         let env = MsgEnvelope::with_routing(
             msg_cell,
             fwd_fee,
@@ -108,7 +109,8 @@ impl MsgEnqueueStuff {
         let transit_fee = fwd_prices.next_fee(&fwd_fee_remaining);
         fwd_fee_remaining.sub(&transit_fee)?;
 
-        let (cur_addr, next_addr) = perform_hypercube_routing(&self.env.next_prefix, &self.env.dst_prefix, shard, IntermediateAddress::default())?;
+        let use_hypercube = !config.has_capability(GlobalCapabilities::CapOffHypercube);
+        let (cur_addr, next_addr) = perform_hypercube_routing(&self.env.next_prefix, &self.env.dst_prefix, shard, use_hypercube)?;
         let cur_prefix  = self.env.next_prefix.interpolate_addr_intermediate(&self.env.dst_prefix, &cur_addr)?;
         let next_prefix = self.env.next_prefix.interpolate_addr_intermediate(&self.env.dst_prefix, &next_addr)?;
         let msg = self.message().clone();
@@ -132,10 +134,10 @@ impl MsgEnqueueStuff {
     /// create enqeue for message
     /// create envelope message
     /// all fee from message
-    pub fn new(msg: Message, shard: &ShardIdent, fwd_fee: Grams) -> Result<Self> {
+    pub fn new(msg: Message, shard: &ShardIdent, fwd_fee: Grams, use_hypercube: bool) -> Result<Self> {
         let created_lt = msg.lt().unwrap_or_default();
         let enqueued_lt = created_lt;
-        let env = MsgEnvelopeStuff::new(msg, shard, fwd_fee)?;
+        let env = MsgEnvelopeStuff::new(msg, shard, fwd_fee, use_hypercube)?;
         let enq = EnqueuedMsg::with_param(enqueued_lt, env.inner())?;
         Ok(Self{
             env,
@@ -220,52 +222,53 @@ pub fn count_matching_bits(this: &AccountIdPrefixFull, other: &AccountIdPrefixFu
 /// Performs Hypercube Routing from src to dest address.
 /// Result: (transit_addr_dest_bits, nh_addr_dest_bits)
 pub fn perform_hypercube_routing(
-    _src: &AccountIdPrefixFull,
+    src: &AccountIdPrefixFull,
     dest: &AccountIdPrefixFull,
     cur_shard: &ShardIdent,
-    ia: IntermediateAddress,
+    use_hypercube: bool,
 ) -> Result<(IntermediateAddress, IntermediateAddress)> {
-    if cur_shard.contains_full_prefix(&dest) {
-        return Ok((IntermediateAddress::full_dest(), IntermediateAddress::full_dest()))
+    if use_hypercube {
+        let transit = src.interpolate_addr_intermediate(dest, &IntermediateAddress::default())?;
+        if !cur_shard.contains_full_prefix(&transit) {
+            fail!("Shard {} must fully contain transit prefix {}", cur_shard, transit)
+        }
+
+        if cur_shard.contains_full_prefix(&dest) {
+            // If destination is in this shard, set cur:=next_hop:=dest
+            return Ok((IntermediateAddress::full_dest(), IntermediateAddress::full_dest()))
+        }
+
+        if transit.is_masterchain() || dest.is_masterchain() {
+            // Route messages to/from masterchain directly
+            return Ok((IntermediateAddress::default(), IntermediateAddress::full_dest()))
+        }
+
+        if transit.workchain_id != dest.workchain_id {
+            return Ok((IntermediateAddress::default(), IntermediateAddress::use_dest_bits(32)?))
+        }
+
+        let prefix = cur_shard.shard_prefix_with_tag();
+        let x = prefix & (prefix - 1);
+        let y = prefix | (prefix - 1);
+        let t = transit.prefix;
+        let q = dest.prefix ^ t;
+        // Top i bits match, next 4 bits differ:
+        let mut i = q.leading_zeros() as u8 & 0xFC;
+        let mut m = u64::max_value() >> i;
+        while i < 60 {
+            m >>= 4;
+            let h = t ^ (q & !m);
+            i += 4;
+            if h < x || h > y {
+                let cur_prefix = IntermediateAddress::use_dest_bits(28 + i)?;
+                let next_prefix = IntermediateAddress::use_dest_bits(32 + i)?;
+                return Ok((cur_prefix, next_prefix))
+            }
+        }
+        fail!("cannot perform hypercube routing from {} to {} via {}", src, dest, cur_shard)
+    } else if cur_shard.contains_full_prefix(&dest) {
+        Ok((IntermediateAddress::full_dest(), IntermediateAddress::full_dest()))
+    } else {
+        Ok((IntermediateAddress::default(), IntermediateAddress::full_dest()))
     }
-    Ok((ia, IntermediateAddress::full_dest()))
-    // turn off hypercube routing
-    // let transit = _src.interpolate_addr_intermediate(dest, &ia)?;
-    // if !cur_shard.contains_full_prefix(&transit) {
-    //     fail!("Shard {} must fully contain transit prefix {}", cur_shard, transit)
-    // }
-
-    // if cur_shard.contains_full_prefix(&dest) {
-    //     // If destination is in this shard, set cur:=next_hop:=dest
-    //     return Ok((IntermediateAddress::full_dest(), IntermediateAddress::full_dest()))
-    // }
-
-    // if transit.is_masterchain() || dest.is_masterchain() {
-    //     // Route messages to/from masterchain directly
-    //     return Ok((ia, IntermediateAddress::full_dest()))
-    // }
-
-    // if transit.workchain_id != dest.workchain_id {
-    //     return Ok((ia, IntermediateAddress::use_dest_bits(32)?))
-    // }
-
-    // let prefix = cur_shard.shard_prefix_with_tag();
-    // let x = prefix & (prefix - 1);
-    // let y = prefix | (prefix - 1);
-    // let t = transit.prefix;
-    // let q = dest.prefix ^ t;
-    // // Top i bits match, next 4 bits differ:
-    // let mut i = q.leading_zeros() as u8 & 0xFC;
-    // let mut m = u64::max_value() >> i;
-    // while i < 60 {
-    //     m >>= 4;
-    //     let h = t ^ (q & !m);
-    //     i += 4;
-    //     if h < x || h > y {
-    //         let cur_prefix = IntermediateAddress::use_dest_bits(28 + i)?;
-    //         let next_prefix = IntermediateAddress::use_dest_bits(32 + i)?;
-    //         return Ok((cur_prefix, next_prefix))
-    //     }
-    // }
-    // fail!("cannot perform hypercube routing from {} to {} via {}", _src, dest, cur_shard)
 }

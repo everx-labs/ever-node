@@ -32,7 +32,7 @@ impl RocksDb {
 
         Self {
             db: Arc::new(Some(DB::open(&options, path)
-                .expect(&format!("Cannot open DB {:?}", pathbuf)))),
+                .unwrap_or_else(|err| panic!("Cannot open DB {:?}: {}", pathbuf, err)))),
             path: pathbuf
         }
     }
@@ -41,7 +41,7 @@ impl RocksDb {
         if let Some(ref db) = *self.db {
             Ok(db)
         } else {
-            Err(StorageError::DbIsDropped)?
+            Err(StorageError::DbIsDropped.into())
         }
     }
 }
@@ -181,11 +181,15 @@ impl<K: DbKey + Send + Sync> KvcTransaction<K> for RocksDbTransaction {
             db.write(self.batch)
             .map_err(|err| err.into())
         } else {
-            Err(StorageError::DbIsDropped)?
+            Err(StorageError::DbIsDropped.into())
         }
     }
 
     fn len(&self) -> usize {
         self.batch.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.batch.is_empty()
     }
 }

@@ -4,7 +4,7 @@ use crate::{
 };
 use adnl::common::KeyId;
 use std::{ops::Deref, sync::Arc, time::Duration};
-use storage::types::BlockHandle;
+use storage::block_handle_db::BlockHandle;
 use ton_block::{BlockIdExt, ShardIdent, SHARD_FULL};
 use ton_types::{error, fail, Result};
 
@@ -16,7 +16,7 @@ const RETRY_MASTER_STATE_DOWNLOAD: usize = 10;
 /// download zero state or block proof link and check it
 async fn run_cold(
     engine: &dyn EngineOperations
-) -> Result<(Arc<BlockHandle>, Option<ShardStateStuff>, Option<BlockProofStuff>)> {
+) -> Result<(Arc<BlockHandle>, Option<Arc<ShardStateStuff>>, Option<BlockProofStuff>)> {
     let block_id = engine.init_mc_block_id();
     log::info!(target: "boot", "cold boot start: init_block_id={}", block_id);
     CHECK!(block_id.shard().is_masterchain());
@@ -88,7 +88,7 @@ async fn run_cold(
 async fn get_key_blocks(
     engine: &dyn EngineOperations,
     mut handle: Arc<BlockHandle>,
-    zero_state: Option<&ShardStateStuff>,
+    zero_state: Option<&Arc<ShardStateStuff>>,
     mut prev_block_proof: Option<BlockProofStuff>,
 ) -> Result<Vec<Arc<BlockHandle>>> {
     let download_new_key_blocks_until = engine.now() + engine.time_for_blockchain_init();
@@ -220,7 +220,7 @@ async fn download_start_blocks_and_states(
 pub(crate) async fn download_zerostate(
     engine: &dyn EngineOperations, 
     block_id: &BlockIdExt
-) -> Result<(Arc<BlockHandle>, ShardStateStuff)> {
+) -> Result<(Arc<BlockHandle>, Arc<ShardStateStuff>)> {
     if let Some(handle) = engine.load_block_handle(block_id)? {
         if handle.has_state() {
             return Ok((handle, engine.load_state(block_id).await?))
@@ -246,7 +246,7 @@ pub(crate) async fn download_zerostate(
 async fn download_key_block_proof(
     engine: &dyn EngineOperations,
     block_id: &BlockIdExt,
-    zero_state: Option<&ShardStateStuff>,
+    zero_state: Option<&Arc<ShardStateStuff>>,
     prev_block_proof: Option<&BlockProofStuff>,
 ) -> Result<(Arc<BlockHandle>, BlockProofStuff)> {
     if let Some(handle) = engine.load_block_handle(block_id)? {
@@ -332,8 +332,9 @@ pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<BlockIdExt> 
     // engine.get_hardforks();
     // engine.update_hardforks();
     let (mut handle, zero_state, init_block_proof_link) = run_cold(engine.deref()).await?;
-    
-    let key_blocks = get_key_blocks(engine.deref(), handle, zero_state.as_ref(), init_block_proof_link).await?;
+    let key_blocks = get_key_blocks(
+        engine.deref(), handle, zero_state.as_ref(), init_block_proof_link
+    ).await?;
     
     for pss_period_bits in &[PSS_PERIOD_BITS, PSS_PERIOD_BITS_CLASSIC] {
 

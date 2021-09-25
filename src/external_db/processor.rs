@@ -1,4 +1,4 @@
-use std::{collections::hash_set::HashSet};
+use std::{collections::hash_set::HashSet, sync::Arc};
 use ton_block::{
     Account, InMsg, OutMsg, Deserializable, Serializable, MessageProcessingStatus, Transaction,
     TransactionProcessingStatus, BlockProcessingStatus, Block, BlockProof, HashmapAugType,
@@ -281,7 +281,7 @@ impl<T: WriteData> Processor<T> {
         &self, 
         block_stuff: &BlockStuff,
         block_proof: Option<&BlockProofStuff>,
-        state: Option<&ShardStateStuff>,
+        state: Option<&Arc<ShardStateStuff>>,
         mc_seq_no: u32,
         add_proof: bool,
      ) -> Result<()> {
@@ -487,13 +487,13 @@ impl<T: WriteData> ExternalDb for Processor<T> {
         &self, 
         block_stuff: &BlockStuff,
         proof: Option<&BlockProofStuff>, 
-        state: &ShardStateStuff,
+        state: &Arc<ShardStateStuff>,
         mc_seq_no: u32,
     ) -> Result<()> {
         self.process_block_impl(block_stuff, proof, Some(state), mc_seq_no, false).await
     }
 
-    async fn process_full_state(&self, state: &ShardStateStuff) -> Result<()> {
+    async fn process_full_state(&self, state: &Arc<ShardStateStuff>) -> Result<()> {
         let now = std::time::Instant::now();
         log::trace!("process_full_state {} ...", state.block_id());
 

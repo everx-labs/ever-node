@@ -3,7 +3,7 @@ use crate::{
     validator::validator_utils::mine_key_for_workchain,
 };
 use adnl::{from_slice, client::AdnlClientConfigJson,
-    common::{add_object_to_map_with_update, KeyId, KeyOption, KeyOptionJson, Wait},
+    common::{add_unbound_object_to_map_with_update, KeyId, KeyOption, KeyOptionJson, Wait},
     node::{AdnlNodeConfig, AdnlNodeConfigJson},
     server::{AdnlServerConfig, AdnlServerConfigJson}
 };
@@ -679,7 +679,7 @@ impl NodeConfigHandler {
                 match UInt256::from_str(adnl_id) {
                     Ok(adnl_id) => {
                         let pub_key_opt = vset.list().iter().find_map(|descr| {
-                            if descr.adnl_addr == Some(adnl_id) {
+                            if descr.adnl_addr.as_ref() == Some(&adnl_id) {
                                 Some(descr.public_key.key_bytes().clone())
                             } else {
                                 None
@@ -1354,12 +1354,18 @@ impl ValidatorKeys {
         // inserted in sorted order
         let mut first = false;
 
-        add_object_to_map_with_update(&self.values, key.election_id, |_| {
-            if self.first.compare_exchange(0, key.election_id, atomic::Ordering::Relaxed, atomic::Ordering::Relaxed).is_ok() {
-                first = true;
+        add_unbound_object_to_map_with_update(
+            &self.values, 
+            key.election_id, 
+            |_| {
+                if self.first.compare_exchange(
+                    0, key.election_id, atomic::Ordering::Relaxed, atomic::Ordering::Relaxed
+                ).is_ok() {
+                    first = true;
+                }
+                Ok(Some(key.clone()))
             }
-            Ok(Some(key.clone()))
-        })?;
+        )?;
 
         if first {
             return Ok(());
@@ -1367,23 +1373,30 @@ impl ValidatorKeys {
 
         let mut current = self.first.load(atomic::Ordering::Relaxed);
         if current > key.election_id {
-            add_object_to_map_with_update(&self.index, key.election_id, |_| {
-                if let Err(prev) = self.first.fetch_update(
-                    atomic::Ordering::Relaxed, atomic::Ordering::Relaxed, |x| {
-                    if x > key.election_id {
-                        Some(key.election_id)
+            add_unbound_object_to_map_with_update(
+                &self.index, 
+                key.election_id, 
+                |_| {
+                    if let Err(prev) = self.first.fetch_update(
+                        atomic::Ordering::Relaxed, 
+                        atomic::Ordering::Relaxed, 
+                        |x| {
+                            if x > key.election_id {
+                                Some(key.election_id)
+                            } else {
+                                None
+                            }
+                        }
+                    ) {
+                        let old = self.index.insert(prev, key.election_id).ok_or_else(
+                            || error!("validator keys collections was broken!")
+                        )?;
+                        Ok(Some(*old.val()))
                     } else {
-                        None
+                        Ok(Some(current))
                     }
-                }) {
-                    let old = self.index.insert(prev, key.election_id).ok_or_else(
-                        || error!("validator keys collections was broken!")
-                    )?;
-                    Ok(Some(*old.val()))
-                } else {
-                    Ok(Some(current))
                 }
-            })?;
+            )?;
             return Ok(());
         } else if current == key.election_id {
             return Ok(())
@@ -1392,10 +1405,14 @@ impl ValidatorKeys {
         loop {
             if let Some(item) = &self.index.get(&current) {
                 if item.val() > &key.election_id {
-                    add_object_to_map_with_update(&self.index, *item.key(), |_| {
-                        self.index.insert(key.election_id, *item.val());
-                        Ok(Some(key.election_id))
-                    })?;
+                    add_unbound_object_to_map_with_update(
+                        &self.index, 
+                        *item.key(), 
+                        |_| {
+                            self.index.insert(key.election_id, *item.val());
+                            Ok(Some(key.election_id))
+                        }
+                    )?;
                     break;
                 } else if item.val() == &key.election_id {
                     break;

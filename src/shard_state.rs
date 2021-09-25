@@ -1,25 +1,37 @@
-use crate::error::NodeError;
-use std::io::{Write, Cursor};
-use ton_block::{
-    BlockIdExt, ShardIdent,
-    ShardStateUnsplit, ShardStateSplit, ValidatorSet, CatchainConfig,
-    Serializable, Deserializable,
-    ConfigParams, McShardRecord, McStateExtra, ShardDescr, ShardHashes,
-    HashmapAugType, InRefValue, BinTree, BinTreeType, WorkchainDescr,
-};
-use ton_types::{Cell, SliceData, error, fail, Result, deserialize_tree_of_cells, UInt256};
+use crate::{engine_traits::EngineAlloc, error::NodeError};
+#[cfg(feature = "telemetry")]
+use crate::engine_traits::EngineTelemetry;
 
-/// It is a wrapper around various shard state's representations and properties.
-#[derive(Debug, Default, Clone, Eq, PartialEq)]
-pub struct ShardStateStuff {
-    block_id: BlockIdExt,
-    shard_state: ShardStateUnsplit,
-    shard_state_extra: Option<McStateExtra>,
-    root: Cell,
-}
+use adnl::{declare_counted, common::{CountedObject, Counter}};
+use std::{io::{Write, Cursor}, sync::{Arc, atomic::Ordering}};
+use ton_block::{
+    BlockIdExt, ShardAccount, ShardIdent, ShardStateUnsplit, ShardStateSplit, ValidatorSet, 
+    CatchainConfig, Serializable, Deserializable, ConfigParams, McShardRecord, 
+    McStateExtra, ShardDescr, ShardHashes, HashmapAugType, InRefValue, BinTree, 
+    BinTreeType, WorkchainDescr,
+};
+use ton_types::{AccountId, Cell, SliceData, error, fail, Result, deserialize_tree_of_cells, UInt256};
+
+//    #[derive(Debug, Default, Clone, Eq, PartialEq)]
+// It is a wrapper around various shard state's representations and properties.
+declare_counted!(
+    pub struct ShardStateStuff {
+        block_id: BlockIdExt,
+        shard_state: ShardStateUnsplit,
+        shard_state_extra: Option<McStateExtra>,
+        root: Cell
+    }
+);
 
 impl ShardStateStuff {
-    pub fn new(block_id: BlockIdExt, root: Cell) -> Result<Self> {
+
+    pub fn from_root_cell(
+        block_id: BlockIdExt, 
+        root: Cell,
+        #[cfg(feature = "telemetry")]
+        telemetry: &EngineTelemetry,
+        allocated: &EngineAlloc
+    ) -> Result<Arc<Self>> {
         let shard_state = ShardStateUnsplit::construct_from_cell(root.clone())?;
         if shard_state.shard() != block_id.shard() {
             fail!(NodeError::InvalidData("State's shard block_id is not equal to given one".to_string()))
@@ -32,23 +44,107 @@ impl ShardStateStuff {
             fail!(
                 NodeError::InvalidData("State's seqno is not equal to given one".to_string())
             )
+
         }
-        let mut stuff = Self::default();
-        stuff.block_id = block_id;
-        stuff.shard_state_extra = shard_state.read_custom()?;
-        stuff.shard_state = shard_state;
-        stuff.root = root;
-        Ok(stuff)
+        Self::with_params(
+            block_id, shard_state, root, 
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated
+        )
     }
 
+    pub fn from_state(
+        block_id: BlockIdExt, 
+        shard_state: ShardStateUnsplit,
+        #[cfg(feature = "telemetry")]
+        telemetry: &EngineTelemetry,
+        allocated: &EngineAlloc
+    ) -> Result<Arc<Self>> {
+        let root = shard_state.serialize()?;
+        Self::with_params(
+            block_id, shard_state, root, 
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated
+        )
+    }
 
-    pub fn with_state(block_id: BlockIdExt, shard_state: ShardStateUnsplit) -> Result<Self> {
-        let mut stuff = Self::default();
-        stuff.block_id = block_id;
-        stuff.root = shard_state.serialize()?;
-        stuff.shard_state = shard_state;
-        stuff.shard_state_extra = stuff.shard_state.read_custom()?;
-        Ok(stuff)
+    pub fn deserialize_zerostate(
+        block_id: BlockIdExt, 
+        bytes: &[u8],
+        #[cfg(feature = "telemetry")]
+        telemetry: &EngineTelemetry,
+        allocated: &EngineAlloc
+    ) -> Result<Arc<Self>> {
+        if block_id.seq_no() != 0 {
+            fail!("Given block id has non-zero seq number");
+        }        
+        let file_hash = UInt256::calc_file_hash(&bytes);
+        if file_hash != block_id.file_hash {
+            fail!("Wrong zero state's {} file hash", block_id);
+        }
+        let root = deserialize_tree_of_cells(&mut Cursor::new(bytes))?;
+        if &root.repr_hash() != block_id.root_hash() {
+            fail!("Wrong zero state's {} root hash", block_id);
+        }
+        Self::from_root_cell(
+            block_id, root, 
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated
+        )
+    }
+
+    pub fn deserialize(
+        block_id: BlockIdExt, 
+        bytes: &[u8],
+        #[cfg(feature = "telemetry")]
+        telemetry: &EngineTelemetry,
+        allocated: &EngineAlloc
+    ) -> Result<Arc<Self>> {
+        if block_id.seq_no() == 0 {
+            fail!("Use `deserialize_zerostate` method for zerostate");
+        }
+        let root = deserialize_tree_of_cells(&mut Cursor::new(bytes))?;
+        #[cfg(feature = "store_copy")]
+        {
+            let path = format!(
+                "./target/replication/states/{}", 
+                block_id.shard().shard_prefix_as_str_with_tag()
+            );
+            std::fs::create_dir_all(&path).ok();
+            std::fs::write(format!("{}/{}", path, block_id.seq_no()), bytes).ok();
+        }
+        Self::from_root_cell(
+            block_id, root, 
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated
+        )
+    }
+
+/*
+*/
+
+    fn with_params(
+        block_id: BlockIdExt,
+        shard_state: ShardStateUnsplit,
+        root: Cell,  
+        #[cfg(feature = "telemetry")]
+        telemetry: &EngineTelemetry,
+        allocated: &EngineAlloc
+    ) -> Result<Arc<Self>> {
+        let ret = Self {
+            block_id,
+            shard_state_extra: shard_state.read_custom()?,
+            shard_state,
+            root,
+            counter: allocated.shard_states.clone().into()
+        };
+        #[cfg(feature = "telemetry")]
+        telemetry.shard_states.update(allocated.shard_states.load(Ordering::Relaxed));
+        Ok(Arc::new(ret))
     }
 
     pub fn construct_split_root(left: Cell, right: Cell) -> Result<Cell> {
@@ -56,37 +152,10 @@ impl ShardStateStuff {
         ss_split.serialize()
     }
 
-    pub fn deserialize_zerostate(id: BlockIdExt, bytes: &[u8]) -> Result<Self> {
-        if id.seq_no() != 0 {
-            fail!("Given id has non-zero seq number");
-        }        
-        let file_hash = UInt256::calc_file_hash(&bytes);
-        if file_hash != id.file_hash {
-            fail!("Wrong zero state's {} file hash", id);
-        }
-        let root = deserialize_tree_of_cells(&mut Cursor::new(bytes))?;
-        if &root.repr_hash() != id.root_hash() {
-            fail!("Wrong zero state's {} root hash", id);
-        }
-        Self::new(id, root)
-    }
-
-    pub fn deserialize(id: BlockIdExt, bytes: &[u8]) -> Result<Self> {
-        if id.seq_no() == 0 {
-            fail!("Use `deserialize_zerostate` method for zerostate");
-        }
-        let root = deserialize_tree_of_cells(&mut Cursor::new(bytes))?;
-        #[cfg(feature = "store_copy")]
-        {
-            let path = format!("./target/replication/states/{}", id.shard().shard_prefix_as_str_with_tag());
-            std::fs::create_dir_all(&path).ok();
-            std::fs::write(format!("{}/{}", path, id.seq_no()), bytes).ok();
-        }
-
-        Self::new(id, root)
-    }
-
     pub fn state(&self) -> &ShardStateUnsplit { &self.shard_state }
+    pub fn shard_account(&self, address: &AccountId) -> Result<Option<ShardAccount>> {
+        self.state().read_accounts()?.account(address)
+    }
 // Unused
 //    pub fn withdraw_state(self) -> ShardStateUnsplit { 
 //        self.shard_state 
@@ -101,7 +170,7 @@ impl ShardStateStuff {
     pub fn shard_hashes(&self) -> Result<ShardHashesStuff> {
         Ok(ShardHashesStuff::from(self.shard_state_extra()?.shards().clone()))
     }
-
+                       
     pub fn root_cell(&self) -> &Cell { &self.root }
 
     pub fn shard(&self) -> &ShardIdent { &self.block_id.shard() }

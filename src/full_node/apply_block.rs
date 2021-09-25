@@ -2,7 +2,7 @@ use crate::{
     block::BlockStuff, engine_traits::EngineOperations, shard_state::ShardStateStuff
 };
 use std::{ops::Deref, sync::Arc};
-use storage::types::BlockHandle;
+use storage::block_handle_db::BlockHandle;
 use ton_types::{error, fail, Result};
 use ton_block::BlockIdExt;
 
@@ -69,7 +69,7 @@ pub async fn calc_shard_state(
     block: &BlockStuff,
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
     engine: &Arc<dyn EngineOperations>
-) -> Result<ShardStateStuff> {
+) -> Result<Arc<ShardStateStuff>> {
 
     log::trace!("calc_shard_state: block: {}", block.id());
 
@@ -84,18 +84,25 @@ pub async fn calc_shard_state(
         }
     };
 
-    let merkle_update = block
-        .block()
-        .read_state_update()?;
+    let merkle_update = block.block().read_state_update()?;
     let block_id = block.id().clone();
+    let engine_cloned = engine.clone();
 
-    let ss = tokio::task::spawn_blocking(move || -> Result<ShardStateStuff> {
-        let now = std::time::Instant::now();
-        let ss_root = merkle_update.apply_for(&prev_ss_root)?;
-        log::trace!("TIME: calc_shard_state: applied Merkle update {}ms   {}",
-            now.elapsed().as_millis(), block_id);
-        ShardStateStuff::new(block_id.clone(), ss_root)
-    }).await??;
+    let ss = tokio::task::spawn_blocking(
+        move || -> Result<Arc<ShardStateStuff>> {
+            let now = std::time::Instant::now();
+            let ss_root = merkle_update.apply_for(&prev_ss_root)?;
+            log::trace!("TIME: calc_shard_state: applied Merkle update {}ms   {}",
+                now.elapsed().as_millis(), block_id);
+            ShardStateStuff::from_root_cell(
+                block_id.clone(), 
+                ss_root,
+                #[cfg(feature = "telemetry")]
+                engine_cloned.engine_telemetry(),
+                engine_cloned.engine_allocated()
+            )
+        }
+    ).await??;
 
     let now = std::time::Instant::now();
     let ss = engine.store_state(handle, ss).await?;

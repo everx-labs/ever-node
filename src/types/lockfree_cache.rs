@@ -1,5 +1,5 @@
 use ton_types::Result;
-use adnl::common::add_object_to_map_with_update;
+use adnl::common::{add_unbound_object_to_map_with_update, CountedObject};
 use std::{
     time::{SystemTime, Duration, UNIX_EPOCH},
     sync::{Arc, atomic::{AtomicU64, Ordering}},
@@ -8,13 +8,13 @@ use std::{
     fmt::Display,
 };
 
-pub struct TimeBasedCache<K, V> {
+pub struct TimeBasedCache<K, V: CountedObject> {
     map: Arc<lockfree::map::Map<K, (V, AtomicU64)>>,
 }
 
 impl<K, V> TimeBasedCache<K, V> where 
     K: 'static + Hash + Ord + Sync + Send + Display,
-    V: 'static + Clone + Sync + Send 
+    V: 'static + Clone + Sync + Send + CountedObject 
 {
     pub fn new(ttl_sec: u64, name: String) -> Self {
         let map = Arc::new(lockfree::map::Map::new());
@@ -30,23 +30,27 @@ impl<K, V> TimeBasedCache<K, V> where
     }
 
     pub fn set(&self, key: K, factory: impl Fn(Option<&V>) -> Option<V>) -> Result<bool> {
-        add_object_to_map_with_update(&self.map, key, |prev| {
-            let now = Self::now();
-            if let Some((v, t)) = prev {
-                if let Some(new) = factory(Some(v)) {
-                    Ok(Some((new, AtomicU64::new(now))))
+        add_unbound_object_to_map_with_update(
+            &self.map, 
+            key, 
+            |prev| {
+                let now = Self::now();
+                if let Some((v, t)) = prev {
+                    if let Some(new) = factory(Some(v)) {
+                        Ok(Some((new, AtomicU64::new(now))))
+                    } else {
+                        t.store(now, Ordering::Relaxed);
+                        Ok(None)
+                    }
                 } else {
-                    t.store(now, Ordering::Relaxed);
-                    Ok(None)
-                }
-            } else {
-                if let Some(new) = factory(None) {
-                    Ok(Some((new, AtomicU64::new(now))))
-                } else {
-                    Ok(None)
+                    if let Some(new) = factory(None) {
+                        Ok(Some((new, AtomicU64::new(now))))
+                    } else {
+                        Ok(None)
+                    }
                 }
             }
-        })
+        )
     }
 
     fn gc(map: Arc<lockfree::map::Map<K, (V, AtomicU64)>>, ttl: u64, name: String) {

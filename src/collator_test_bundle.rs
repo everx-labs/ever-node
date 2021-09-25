@@ -1,21 +1,26 @@
 use crate::{
-    block::BlockStuff,
-    engine_traits::EngineOperations,
-    shard_state::ShardStateStuff,
-    types::top_block_descr::TopBlockDescrStuff,
+    block::BlockStuff, engine_traits::{EngineAlloc, EngineOperations}, 
+    shard_state::ShardStateStuff, types::top_block_descr::TopBlockDescrStuff,
     validator::{
         accept_block::create_top_shard_block_description, BlockCandidate,
         out_msg_queue::OutMsgQueueInfoStuff,
     }
 };
+#[cfg(feature = "telemetry")]
+use crate::engine_traits::EngineTelemetry;
+
+#[cfg(feature = "telemetry")]
+use adnl::telemetry::Metric;
 use std::{
-    collections::HashMap, convert::TryFrom, fs::{File, write}, 
-    io::Cursor, ops::Deref, sync::{Arc, Weak}, 
+    collections::HashMap, convert::{TryFrom, TryInto}, fs::{File, read, write}, 
+    io::Cursor, ops::Deref, sync::{Arc, atomic::AtomicU64} 
 };
-use std::{
-    convert::TryInto, fs::read, 
+use storage::{
+    StorageAlloc, block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage}, 
+    node_state_db::NodeStateDb, types::BlockMeta  
 };
-use storage::types::BlockHandle;
+#[cfg(feature = "telemetry")]
+use storage::StorageTelemetry;
 use ton_block::{
     BlockIdExt, Message, ShardIdent, AccountIdPrefixFull, Serializable, MerkleUpdate,
     Deserializable, ValidatorBaseInfo, BlockSignaturesPure, BlockSignatures, HashmapAugType, 
@@ -151,16 +156,80 @@ fn construct_from_file<T: Deserializable>(path: &str) -> Result<(T, UInt256, UIn
     Ok((T::construct_from_cell(cell)?, fh, rh))
 }
 
+pub fn create_block_handle_storage() -> BlockHandleStorage {
+    BlockHandleStorage::with_dbs(
+        Arc::new(BlockHandleDb::in_memory()),
+        Arc::new(NodeStateDb::in_memory()),
+        #[cfg(feature = "telemetry")]
+        create_storage_telemetry(),
+        create_storage_allocated()
+    )
+}
+
+#[cfg(feature = "telemetry")]
+pub fn create_engine_telemetry() -> Arc<EngineTelemetry> {
+    Arc::new(
+        EngineTelemetry {
+            storage: create_storage_telemetry(),
+            awaiters: Metric::without_totals("", 1),
+            catchain_clients: Metric::without_totals("", 1),
+            overlay_clients: Metric::without_totals("", 1),
+            peer_stats: Metric::without_totals("", 1),
+            shard_states: Metric::without_totals("", 1),
+            top_blocks: Metric::without_totals("", 1),
+            validator_peers: Metric::without_totals("", 1),
+            validator_sets: Metric::without_totals("", 1)
+        }
+    )
+}
+
+pub fn create_engine_allocated() -> Arc<EngineAlloc> {
+    Arc::new(
+        EngineAlloc {
+            storage: create_storage_allocated(),
+            awaiters: Arc::new(AtomicU64::new(0)),
+            catchain_clients: Arc::new(AtomicU64::new(0)),
+            overlay_clients: Arc::new(AtomicU64::new(0)),
+            peer_stats: Arc::new(AtomicU64::new(0)),
+            shard_states: Arc::new(AtomicU64::new(0)),
+            top_blocks: Arc::new(AtomicU64::new(0)),
+            validator_peers: Arc::new(AtomicU64::new(0)),
+            validator_sets: Arc::new(AtomicU64::new(0))
+        }
+    )
+}
+
+#[cfg(feature = "telemetry")]
+fn create_storage_telemetry() -> Arc<StorageTelemetry> {
+    Arc::new(
+        StorageTelemetry {
+            handles: Metric::without_totals("", 1),
+            storage_cells: Metric::without_totals("", 1)
+        }
+    )
+}
+
+fn create_storage_allocated() -> Arc<StorageAlloc> {
+    Arc::new(
+        StorageAlloc {
+            handles: Arc::new(AtomicU64::new(0)),
+            storage_cells: Arc::new(AtomicU64::new(0))
+        }
+    )
+}
+
 pub struct CollatorTestBundle {
     index: CollatorTestBundleIndex,
     top_shard_blocks: Vec<Arc<TopBlockDescrStuff>>,
     external_messages: Vec<(Arc<Message>, UInt256)>,
-    states: HashMap<BlockIdExt, ShardStateStuff>,
+    states: HashMap<BlockIdExt, Arc<ShardStateStuff>>,
     mc_merkle_updates: HashMap<BlockIdExt, MerkleUpdate>,
     blocks: HashMap<BlockIdExt, BlockStuff>,
     candidate: Option<BlockCandidate>,
-
-    block_handle_cache: Arc<lockfree::map::Map<BlockIdExt, Weak<BlockHandle>>>,
+    block_handle_storage: BlockHandleStorage,
+    #[cfg(feature = "telemetry")]
+    telemetry: Arc<EngineTelemetry>,
+    allocated: Arc<EngineAlloc>
 }
 
 #[allow(dead_code)]
@@ -169,20 +238,34 @@ impl CollatorTestBundle {
     pub async fn build_with_zero_state(mc_zero_state_name: &str, wc_zero_state_names: &[&str]) -> Result<Self> {
         log::info!("Building with zerostate from {} and {}", mc_zero_state_name, wc_zero_state_names.join(", "));
 
+        #[cfg(feature = "telemetry")]
+        let telemetry = create_engine_telemetry(); 
+        let allocated = create_engine_allocated();
+
         let (mc_state, mc_fh, mc_rh) = construct_from_file::<ShardStateUnsplit>(mc_zero_state_name)?;
         let last_mc_state = BlockIdExt::with_params(mc_state.shard().clone(), 0, mc_rh, mc_fh);
-        let mc_state = ShardStateStuff::with_state(last_mc_state.clone(), mc_state)?;
+        let mc_state = ShardStateStuff::from_state(
+            last_mc_state.clone(), 
+            mc_state,
+            #[cfg(feature = "telemetry")]
+            &telemetry,
+            &allocated
+        )?;
 
         let mut now = mc_state.state().gen_time() + 1;
         let mut states = HashMap::new();
         states.insert(last_mc_state.clone(), mc_state);
         for wc_zero_state_name in wc_zero_state_names {
             let (wc_state, wc_fh, wc_rh) = construct_from_file::<ShardStateUnsplit>(wc_zero_state_name)?;
-
             now = std::cmp::max(now, wc_state.gen_time() + 1);
-
             let block_id = BlockIdExt::with_params(wc_state.shard().clone(), 0, wc_rh, wc_fh);
-            let wc_state = ShardStateStuff::with_state(block_id.clone(), wc_state)?;
+            let wc_state = ShardStateStuff::from_state(
+                block_id.clone(), 
+                wc_state,
+                #[cfg(feature = "telemetry")]
+                &telemetry,
+                &allocated
+            )?;
             states.insert(block_id.clone(), wc_state);
         }
 
@@ -215,15 +298,24 @@ impl CollatorTestBundle {
             states,
             mc_merkle_updates: Default::default(),
             blocks: Default::default(),
-            block_handle_cache: Arc::new(lockfree::map::Map::new()),
+            block_handle_storage: create_block_handle_storage(),
             candidate: None,
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated
         })
     }
 
     pub fn load(path: &str) -> Result<Self> {
+
         if !std::path::Path::new(path).is_dir() {
             fail!("Directory not found: {}", path);
         }
+
+        #[cfg(feature = "telemetry")]
+        let telemetry = create_engine_telemetry(); 
+        let allocated = create_engine_allocated();
+
         // 🗂 index
         let file = std::fs::File::open(format!("{}/index.json", path))?;
         let index: CollatorTestBundleIndexJson = serde_json::from_reader(file)?;
@@ -268,9 +360,21 @@ impl CollatorTestBundle {
             let filename = format!("{}/states/{:x}", path, ss_id.root_hash());
             let data = read(&filename).map_err(|_| error!("cannot read file {}", filename))?;
             let ss = if ss_id.seq_no() == 0 {
-                ShardStateStuff::deserialize_zerostate(ss_id.clone(), &data)?
+                ShardStateStuff::deserialize_zerostate(
+                    ss_id.clone(), 
+                    &data,
+                    #[cfg(feature = "telemetry")]
+                    &telemetry,
+                    &allocated 
+                )?
             } else {
-                ShardStateStuff::deserialize(ss_id.clone(), &data)?
+                ShardStateStuff::deserialize(
+                    ss_id.clone(), 
+                    &data,
+                    #[cfg(feature = "telemetry")]
+                    &telemetry,
+                    &allocated 
+                )?
             };
             states.insert(ss_id.clone(), ss);
 
@@ -280,7 +384,13 @@ impl CollatorTestBundle {
             let data = read(&filename).map_err(|_| error!("cannot read file {}", filename))?;
             states.insert(
                 index.id.clone(),
-                ShardStateStuff::deserialize(index.id.clone(), &data)?
+                ShardStateStuff::deserialize(
+                    index.id.clone(), 
+                    &data,
+                    #[cfg(feature = "telemetry")]
+                    &telemetry,
+                    &allocated 
+                )?
             );
         }
 
@@ -289,9 +399,21 @@ impl CollatorTestBundle {
         let filename = format!("{}/states/{:x}", path, oldest_mc_state_id.root_hash());
         let data = read(&filename).map_err(|_| error!("cannot read file {}", filename))?;
         let oldest_mc_state = if oldest_mc_state_id.seq_no() == 0 {
-            ShardStateStuff::deserialize_zerostate(oldest_mc_state_id.clone(), &data)?
+            ShardStateStuff::deserialize_zerostate(
+                oldest_mc_state_id.clone(), 
+                &data,
+                #[cfg(feature = "telemetry")]
+                &telemetry,
+                &allocated 
+            )?
         } else {
-            ShardStateStuff::deserialize(oldest_mc_state_id.clone(), &data)?
+            ShardStateStuff::deserialize(
+                oldest_mc_state_id.clone(), 
+                &data,
+                #[cfg(feature = "telemetry")]
+                &telemetry,
+                &allocated 
+            )?
         };
         let mut prev_state_root = oldest_mc_state.root_cell().clone();
         states.insert(oldest_mc_state_id.clone(), oldest_mc_state);
@@ -310,9 +432,20 @@ impl CollatorTestBundle {
         index.mc_states.sort_by_key(|id| id.seq_no);
         for id in index.mc_states.iter() {
             if id != &oldest_mc_state_id {
-                let mu = mc_merkle_updates.get(id).ok_or_else(|| error!("Can't get merkle update {}", id))?;
+                let mu = mc_merkle_updates.get(id).ok_or_else(
+                    || error!("Can't get merkle update {}", id)
+                )?;
                 let new_root = mu.apply_for(&prev_state_root)?;
-                states.insert(id.clone(), ShardStateStuff::new(id.clone(), new_root.clone())?);
+                states.insert(
+                    id.clone(), 
+                    ShardStateStuff::from_root_cell(
+                        id.clone(), 
+                        new_root.clone(),
+                        #[cfg(feature = "telemetry")]
+                        &telemetry,
+                        &allocated 
+                    )?
+                );
                 prev_state_root = new_root;
             }
         }
@@ -359,8 +492,11 @@ impl CollatorTestBundle {
             states,
             mc_merkle_updates,
             blocks,
-            block_handle_cache: Arc::new(lockfree::map::Map::new()),
-            candidate
+            block_handle_storage: create_block_handle_storage(),
+            candidate,
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated 
         })
     }
 
@@ -410,6 +546,7 @@ impl CollatorTestBundle {
     pub fn rand_seed(&self) -> Option<&UInt256> { self.index.rand_seed.as_ref() }
 // UNUSED
 //    pub fn notes(&self) -> &str { &self.index.notes }
+
 }
 
 impl CollatorTestBundle {
@@ -430,7 +567,7 @@ impl CollatorTestBundle {
         // last mc state
         //
         let mc_state = engine.load_last_applied_mc_state().await?;
-        let last_mc_id = mc_state.block_id();
+        let last_mc_id = mc_state.block_id().clone();
         let mut oldest_mc_seq_no = last_mc_id.seq_no();
         let mut newest_mc_seq_no = last_mc_id.seq_no();
 
@@ -461,7 +598,7 @@ impl CollatorTestBundle {
         }
 
         if shards.is_empty() || mc_state.block_id().seq_no() != 0 {
-            states.insert(mc_state.block_id().clone(), mc_state.clone());
+            states.insert(last_mc_id.clone(), mc_state);
         }
         // master blocks's collator uses new neighbours, based on new shaedes config.
         // It is difficult to calculate new config there. So add states for all new shard blocks.
@@ -534,7 +671,7 @@ impl CollatorTestBundle {
             id,
             top_shard_blocks: top_shard_blocks.iter().map(|tsb| tsb.proof_for().clone()).collect(),
             external_messages: external_messages.iter().map(|(_, id)| id.clone()).collect(),
-            last_mc_state: last_mc_id.clone(),
+            last_mc_state: last_mc_id,
             min_ref_mc_seqno: oldest_mc_seq_no,
             mc_states,
             neighbors,
@@ -555,8 +692,11 @@ impl CollatorTestBundle {
             states,
             mc_merkle_updates,
             blocks,
-            block_handle_cache: Arc::new(lockfree::map::Map::new()),
+            block_handle_storage: create_block_handle_storage(),
             candidate: None,
+            #[cfg(feature = "telemetry")]
+            telemetry: create_engine_telemetry(),
+            allocated: create_engine_allocated()
         })
     }
 
@@ -567,7 +707,7 @@ impl CollatorTestBundle {
         _min_masterchain_block_id: BlockIdExt,
         prev_blocks_ids: Vec<BlockIdExt>,
         candidate: BlockCandidate,
-        engine: Arc<dyn EngineOperations>,
+        engine: &dyn EngineOperations,
     ) -> Result<Self> {
 
         log::info!("Building for validating block, candidate: {}", candidate.block_id);
@@ -579,7 +719,7 @@ impl CollatorTestBundle {
         // last mc state
         //
         let mc_state = engine.load_last_applied_mc_state().await?;
-        let last_mc_id = mc_state.block_id();
+        let last_mc_id = mc_state.block_id().clone();
         let mut oldest_mc_seq_no = last_mc_id.seq_no();
         let mut newest_mc_seq_no = last_mc_id.seq_no();
 
@@ -615,7 +755,7 @@ impl CollatorTestBundle {
         }
 
         if shards.is_empty() || mc_state.block_id().seq_no() != 0 {
-            states.insert(mc_state.block_id().clone(), mc_state.clone());
+            states.insert(last_mc_id.clone(), mc_state);
         }
 
         //
@@ -674,7 +814,7 @@ impl CollatorTestBundle {
             id: candidate.block_id.clone(),
             top_shard_blocks: top_shard_blocks.iter().map(|tsb| tsb.proof_for().clone()).collect(),
             external_messages: external_messages.iter().map(|(_, id)| id.clone()).collect(),
-            last_mc_state: last_mc_id.clone(),
+            last_mc_state: last_mc_id,
             min_ref_mc_seqno: oldest_mc_seq_no,
             mc_states,
             neighbors,
@@ -695,8 +835,11 @@ impl CollatorTestBundle {
             states,
             mc_merkle_updates,
             blocks,
-            block_handle_cache: Arc::new(lockfree::map::Map::new()),
+            block_handle_storage: create_block_handle_storage(),
             candidate: Some(candidate),
+            #[cfg(feature = "telemetry")]
+            telemetry: create_engine_telemetry(),
+            allocated: create_engine_allocated()
         })
     }
 
@@ -767,7 +910,7 @@ impl CollatorTestBundle {
                     BlockSignatures::with_params(base_info, signatures),
                     &mc_state, // TODO
                     &prev_blocks_ids,
-                    engine,
+                    engine.deref(),
                 ).await? {
                 let tbd = TopBlockDescrStuff::new(tbd, block_id, true).unwrap();
                 top_shard_blocks_ids.push(tbd.proof_for().clone());
@@ -900,8 +1043,11 @@ impl CollatorTestBundle {
             states,
             mc_merkle_updates,
             blocks,
-            block_handle_cache: Arc::new(lockfree::map::Map::new()),
+            block_handle_storage: create_block_handle_storage(),
             candidate: None,
+            #[cfg(feature = "telemetry")]
+            telemetry: create_engine_telemetry(),
+            allocated: create_engine_allocated()
         })
     }
 
@@ -1014,20 +1160,30 @@ impl CollatorTestBundle {
 // Is used instead full node's engine for run tests
 #[async_trait::async_trait]
 impl EngineOperations for CollatorTestBundle {
+
     fn now(&self) -> u32 {
         self.index.now
     }
+
     fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
-        let handle = BlockHandle::new(id.clone(), self.block_handle_cache.clone());
-        if self.blocks.contains_key(id) && *id != self.index.id {
-            handle.set_data();
-            handle.set_state();
-            handle.set_block_applied();
+        let handle = self.block_handle_storage.create_handle(
+            id.clone(), 
+            BlockMeta::default(), 
+            None
+        )?;
+        if let Some(handle) = handle {
+            if self.blocks.contains_key(id) && (id != &self.index.id) {
+                handle.set_data();
+                handle.set_state();
+                handle.set_block_applied();
+            }
+            Ok(Some(handle))
+        } else {
+            Ok(None)
         }
-        Ok(Some(Arc::new(handle)))
     }
 
-    async fn load_state(&self, block_id: &BlockIdExt) -> Result<ShardStateStuff> {
+    async fn load_state(&self, block_id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
         if *block_id != self.index.id {
             if let Some(s) = self.states.get(block_id) {
                 return Ok(s.clone());
@@ -1045,7 +1201,7 @@ impl EngineOperations for CollatorTestBundle {
         fail!("bundle doesn't contain block {}", handle.id())
     }
 
-    async fn load_last_applied_mc_state(&self) -> Result<ShardStateStuff> {
+    async fn load_last_applied_mc_state(&self) -> Result<Arc<ShardStateStuff>> {
         if let Some(s) = self.states.get(&self.index.last_mc_state) {
             Ok(s.clone())
         } else {
@@ -1058,7 +1214,7 @@ impl EngineOperations for CollatorTestBundle {
         id: &BlockIdExt,
         _timeout_ms: Option<u64>,
         _allow_block_downloading: bool
-    ) -> Result<ShardStateStuff> {
+    ) -> Result<Arc<ShardStateStuff>> {
         self.load_state(id).await
     }
 
@@ -1102,4 +1258,14 @@ impl EngineOperations for CollatorTestBundle {
     fn complete_external_messages(&self, _to_delay: Vec<UInt256>, _to_delete: Vec<UInt256>) -> Result<()> {
         Ok(())
     }
+
+    #[cfg(feature = "telemetry")]
+    fn engine_telemetry(&self) -> &Arc<EngineTelemetry> {
+        &self.telemetry
+    }
+
+    fn engine_allocated(&self) -> &Arc<EngineAlloc> {
+        &self.allocated
+    }
+
 }

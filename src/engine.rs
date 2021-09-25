@@ -3,7 +3,7 @@ use crate::{
     block_proof::BlockProofStuff,
     config::{TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig},
     engine_traits::{
-        ExternalDb, EngineOperations,
+        ExternalDb, EngineAlloc, EngineOperations,
         OverlayOperations, PrivateOverlayOperations, Server, ValidatedBlockStat,
     },
     full_node::{
@@ -45,10 +45,12 @@ use crate::network::node_network::NodeNetwork;
 use crate::external_db::kafka_consumer::KafkaConsumer;
 #[cfg(feature = "telemetry")]
 use crate::{
-    full_node::telemetry::FullNodeTelemetry,
-    validator::telemetry::CollatorValidatorTelemetry,
+    engine_traits::EngineTelemetry, full_node::telemetry::FullNodeTelemetry,
     network::telemetry::{FullNodeNetworkTelemetry, FullNodeNetworkTelemetryKind},
+    validator::telemetry::CollatorValidatorTelemetry,
 };
+#[cfg(feature = "telemetry")]
+use adnl::telemetry::{Metric, TelemetryItem, TelemetryPrinter};
 use overlay::QueriesConsumer;
 #[cfg(feature = "metrics")]
 use statsd::client;
@@ -60,7 +62,9 @@ use std::{
 use std::collections::HashSet;
 #[cfg(feature = "metrics")]
 use std::env;
-use storage::types::BlockHandle;
+use storage::{StorageAlloc, block_handle_db::BlockHandle};
+#[cfg(feature = "telemetry")]
+use storage::StorageTelemetry;
 use ton_block::{
     self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL,
 };
@@ -79,7 +83,7 @@ pub struct Engine {
     db: Arc<dyn InternalDb>,
     ext_db: Vec<Arc<dyn ExternalDb>>,
     overlay_operations: Arc<dyn OverlayOperations>,
-    shard_states_awaiters: AwaitersPool<BlockIdExt, ShardStateStuff>,
+    shard_states_awaiters: AwaitersPool<BlockIdExt, Arc<ShardStateStuff>>,
     block_applying_awaiters: AwaitersPool<BlockIdExt, ()>,
     next_block_applying_awaiters: AwaitersPool<BlockIdExt, BlockIdExt>,
     download_block_awaiters: AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)>,
@@ -99,7 +103,7 @@ pub struct Engine {
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
  
-    shard_states_cache: TimeBasedCache<BlockIdExt, ShardStateStuff>,
+    shard_states_cache: TimeBasedCache<BlockIdExt, Arc<ShardStateStuff>>,
     loaded_from_ss_cache: AtomicU64,
     loaded_ss_total: AtomicU64,
     pub workchain_id: AtomicI32,
@@ -118,6 +122,11 @@ pub struct Engine {
     validator_telemetry: CollatorValidatorTelemetry,
     #[cfg(feature = "telemetry")]
     full_node_service_telemetry: FullNodeNetworkTelemetry,
+    #[cfg(feature = "telemetry")]
+    engine_telemetry: Arc<EngineTelemetry>,
+    engine_allocated: Arc<EngineAlloc>,
+    #[cfg(feature = "telemetry")]
+    telemetry_printer: TelemetryPrinter,
 
     tps_counter: TpsCounter,
 
@@ -270,7 +279,7 @@ struct ZeroStateDownloader;
 
 #[async_trait::async_trait]
 impl Downloader for ZeroStateDownloader {
-    type Item = (ShardStateStuff, Vec<u8>);
+    type Item = (Arc<ShardStateStuff>, Vec<u8>);
     async fn try_download(
         &self, 
         context: &DownloadContext<'_, Self::Item>,
@@ -301,7 +310,8 @@ impl Engine {
     pub const MASK_SERVICE_VALIDATOR_MANAGER: u32              = 0x0080;
 
     const MASK_STOP: u32 = 0x80000000; 
-    const TIMEOUT_STOP: u64 = 100; // Milliseconds
+    const TIMEOUT_STOP_MS: u64 = 100; 
+    const TIMEOUT_TELEMETRY_SEC: u64 = 30;
 
     pub async fn new(
         general_config: TonNodeConfig, 
@@ -311,12 +321,94 @@ impl Engine {
 
         log::info!("Creating engine...");
 
+        #[cfg(feature = "telemetry")] 
+        let (metrics, engine_telemetry) = {
+            let storage_telemetry = Arc::new(
+                StorageTelemetry {
+                    handles: Metric::without_totals(
+                        "Alloc NODE block handles", Self::TIMEOUT_TELEMETRY_SEC
+                    ),
+                    storage_cells: Metric::without_totals(
+                        "Alloc NODE storage cells", Self::TIMEOUT_TELEMETRY_SEC
+                    )
+                }
+            );
+            let engine_telemetry = Arc::new(
+                EngineTelemetry {
+                    storage: storage_telemetry,
+                    awaiters: Metric::without_totals(
+                        "Alloc NODE awaiters", Self::TIMEOUT_TELEMETRY_SEC
+                    ),
+                    catchain_clients: Metric::without_totals(
+                        "Alloc NODE catchains", Self::TIMEOUT_TELEMETRY_SEC
+                    ),
+                    overlay_clients: Metric::without_totals(
+                        "Alloc NODE overlays", Self::TIMEOUT_TELEMETRY_SEC
+                    ),
+                    peer_stats: Metric::without_totals(
+                        "Alloc NODE peer stats", Self::TIMEOUT_TELEMETRY_SEC
+                    ),
+                    shard_states: Metric::without_totals(
+                        "Alloc NODE shard states", Self::TIMEOUT_TELEMETRY_SEC
+                    ),
+                    top_blocks: Metric::without_totals(
+                        "Alloc NODE top blocks", Self::TIMEOUT_TELEMETRY_SEC
+                    ),
+                    validator_peers: Metric::without_totals(
+                        "Alloc NODE validator peers", Self::TIMEOUT_TELEMETRY_SEC
+                    ),
+                    validator_sets: Metric::without_totals(
+                        "Alloc NODE validator sets", Self::TIMEOUT_TELEMETRY_SEC
+                    )
+                }
+            );
+            let metrics = vec![
+                TelemetryItem::Metric(engine_telemetry.storage.handles.clone()),
+                TelemetryItem::Metric(engine_telemetry.storage.storage_cells.clone()),
+                TelemetryItem::Metric(engine_telemetry.awaiters.clone()),
+                TelemetryItem::Metric(engine_telemetry.catchain_clients.clone()),
+                TelemetryItem::Metric(engine_telemetry.overlay_clients.clone()),
+                TelemetryItem::Metric(engine_telemetry.peer_stats.clone()),
+                TelemetryItem::Metric(engine_telemetry.shard_states.clone()),
+                TelemetryItem::Metric(engine_telemetry.top_blocks.clone()),
+                TelemetryItem::Metric(engine_telemetry.validator_peers.clone()),
+                TelemetryItem::Metric(engine_telemetry.validator_sets.clone())
+            ];
+            (metrics, engine_telemetry)
+        };
+        let storage_allocated = Arc::new(
+            StorageAlloc {
+                handles: Arc::new(AtomicU64::new(0)),
+                storage_cells: Arc::new(AtomicU64::new(0))
+            }
+        );
+        let engine_allocated = Arc::new(
+            EngineAlloc {
+                storage: storage_allocated,
+                awaiters: Arc::new(AtomicU64::new(0)),
+                catchain_clients: Arc::new(AtomicU64::new(0)),
+                overlay_clients: Arc::new(AtomicU64::new(0)),
+                peer_stats: Arc::new(AtomicU64::new(0)),
+                shard_states: Arc::new(AtomicU64::new(0)),
+                top_blocks: Arc::new(AtomicU64::new(0)),
+                validator_peers: Arc::new(AtomicU64::new(0)),
+                validator_sets: Arc::new(AtomicU64::new(0))
+            }
+        );
+
         let archives_life_time = general_config.gc_archives_life_time_hours();
         let db_directory = general_config.internal_db_path().unwrap_or_else(|| {"node_db"}).to_string();
         let cells_gc_interval_ms = general_config.cells_gc_interval_ms();
         let last_rotation_block_db = LastRotationBlockDb::new(db_directory.clone());
-        let db_config = InternalDbConfig { db_directory, cells_gc_interval_ms };
-        let db = Arc::new(InternalDbImpl::new(db_config).await?);
+        let db = Arc::new(
+            InternalDbImpl::new(
+                InternalDbConfig { db_directory, cells_gc_interval_ms },
+                #[cfg(feature = "telemetry")]
+                engine_telemetry.clone(),
+                engine_allocated.clone()
+            ).await?
+        );
+
         let global_config = general_config.load_global_config()?;
         let test_bundles_config = general_config.test_bundles_config().clone();
         let zero_state_id = global_config.zero_state().expect("check zero state settings");
@@ -330,7 +422,12 @@ impl Engine {
         log::info!("workchain_id from config {}", workchain_id);
         let workchain_id = AtomicI32::new(workchain_id);
 
-        let network = NodeNetwork::new(general_config).await?;
+        let network = NodeNetwork::new(
+            general_config,
+            #[cfg(feature = "telemetry")]
+            engine_telemetry.clone(),
+            engine_allocated.clone()
+        ).await?;
         network.start().await?;
 
         log::info!("load_all_top_shard_blocks");
@@ -346,8 +443,14 @@ impl Engine {
             .load_node_state(LAST_APPLIED_MC_BLOCK)?
             .map(|id| id.seq_no as u32)
             .unwrap_or_default();
-        let (shard_blocks_pool, shard_blocks_receiver) = 
-            ShardBlocksPool::new(shard_blocks, last_mc_seqno, false);
+        let (shard_blocks_pool, shard_blocks_receiver) = ShardBlocksPool::new(
+            shard_blocks, 
+            last_mc_seqno, 
+            false,
+            #[cfg(feature = "telemetry")]
+            &engine_telemetry,
+            &engine_allocated
+        )?;
 
         log::info!("start_states_gc");
         let state_gc_resolver = Arc::new(AllowStateGcSmartResolver::new());
@@ -355,15 +458,36 @@ impl Engine {
 
         log::info!("Engine is created.");
 
-        let (validated_block_stats_sender, validated_block_stats_receiver) = crossbeam_channel::bounded(MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT);
+        let (validated_block_stats_sender, validated_block_stats_receiver) = 
+            crossbeam_channel::bounded(MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT);
         let engine = Arc::new(Engine {
             db,
             ext_db,
             overlay_operations: network.clone() as Arc<dyn OverlayOperations>,
-            shard_states_awaiters: AwaitersPool::new("shard_states_awaiters"),
-            block_applying_awaiters: AwaitersPool::new("block_applying_awaiters"),
-            next_block_applying_awaiters: AwaitersPool::new("next_block_applying_awaiters"),
-            download_block_awaiters: AwaitersPool::new("download_block_awaiters"),
+            shard_states_awaiters: AwaitersPool::new(
+                "shard_states_awaiters",
+                #[cfg(feature = "telemetry")]
+                engine_telemetry.clone(),
+                engine_allocated.clone()
+            ),
+            block_applying_awaiters: AwaitersPool::new(
+                "block_applying_awaiters",
+                #[cfg(feature = "telemetry")]
+                engine_telemetry.clone(),
+                engine_allocated.clone()
+            ),
+            next_block_applying_awaiters: AwaitersPool::new(
+                "next_block_applying_awaiters",
+                #[cfg(feature = "telemetry")]
+                engine_telemetry.clone(),
+                engine_allocated.clone()
+            ),
+            download_block_awaiters: AwaitersPool::new(
+                "download_block_awaiters",
+                #[cfg(feature = "telemetry")]
+                engine_telemetry.clone(),
+                engine_allocated.clone()
+            ),
             external_messages: MessagesPool::new(),
             servers: lockfree::queue::Queue::new(),
             stop: Arc::new(AtomicU32::new(0)),
@@ -394,6 +518,14 @@ impl Engine {
             validator_telemetry: CollatorValidatorTelemetry::default(),
             #[cfg(feature = "telemetry")]
             full_node_service_telemetry: FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Service),
+            #[cfg(feature = "telemetry")]
+            engine_telemetry,
+            engine_allocated,
+            #[cfg(feature = "telemetry")]
+            telemetry_printer: TelemetryPrinter::with_params(
+                Self::TIMEOUT_TELEMETRY_SEC,
+                metrics
+            ),
             tps_counter: TpsCounter::new(),
             last_rotation_block_db,
         });
@@ -419,7 +551,7 @@ impl Engine {
             }
         }
         loop {
-            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_STOP)).await;
+            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_STOP_MS)).await;
             let stopp = self.stop.load(Ordering::Relaxed) & !Self::MASK_STOP;
             log::info!(target: "sync", "Stop count update {:04x}", stopp);
             if (self.stop.load(Ordering::Relaxed) & !Self::MASK_STOP) == 0 {
@@ -459,7 +591,7 @@ impl Engine {
 
     pub fn initial_sync_disabled(&self) -> bool {self.initial_sync_disabled}
 
-    pub fn shard_states_cache(&self) -> &TimeBasedCache<BlockIdExt, ShardStateStuff> {
+    pub fn shard_states_cache(&self) -> &TimeBasedCache<BlockIdExt, Arc<ShardStateStuff>> {
         &self.shard_states_cache
     }
 
@@ -489,7 +621,7 @@ impl Engine {
         self.overlay_operations.clone().get_overlay(id).await
     }
 
-    pub fn shard_states_awaiters(&self) -> &AwaitersPool<BlockIdExt, ShardStateStuff> {
+    pub fn shard_states_awaiters(&self) -> &AwaitersPool<BlockIdExt, Arc<ShardStateStuff>> {
         &self.shard_states_awaiters
     }
 
@@ -551,6 +683,15 @@ impl Engine {
     #[cfg(feature = "telemetry")]
     pub fn full_node_service_telemetry(&self) -> &FullNodeNetworkTelemetry {
         &self.full_node_service_telemetry
+    }
+
+    #[cfg(feature = "telemetry")]
+    pub fn engine_telemetry(&self) -> &Arc<EngineTelemetry> {
+        &self.engine_telemetry
+    }
+
+    pub fn engine_allocated(&self) -> &Arc<EngineAlloc> {
+        &self.engine_allocated
     }
 
     pub fn validation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
@@ -1121,7 +1262,7 @@ impl Engine {
         &self,
         id: &BlockIdExt,
         limit: Option<u32>
-    ) -> Result<(ShardStateStuff, Vec<u8>)> {
+    ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         self.create_download_context(
             Arc::new(ZeroStateDownloader),
             id, 
@@ -1372,14 +1513,14 @@ impl Engine {
             } else {
                 return Ok(());
             }
-
-            if let Some(gc_marked_block) = &prev_prev_pss_block {
-                log::info!("start gc for archives..");
-                engine.db.archive_manager().gc(&gc_marked_block.id()).await;
-                log::info!("finish gc for archives.");
-                break;
-            }
         }
+
+        if let Some(gc_marked_block) = &prev_prev_pss_block {
+            log::info!("start gc for archives..");
+            engine.db.archive_manager().gc(&gc_marked_block.id()).await;
+            log::info!("finish gc for archives.");
+        }
+
         Ok(())
     }
 
@@ -1412,7 +1553,16 @@ pub(crate) async fn load_zero_state(engine: &Arc<Engine>, path: &str) -> Result<
         let path = format!("{}/{:x}.boc", path, zero_id.file_hash());
         let bytes = tokio::fs::read(&path).await
             .map_err(|err| error!("Cannot read mc zerostate {}: {}", path, err))?;
-        (ShardStateStuff::deserialize_zerostate(zero_id.clone(), &bytes)?, bytes)
+        (
+            ShardStateStuff::deserialize_zerostate(
+                zero_id.clone(), 
+                &bytes,
+                #[cfg(feature = "telemetry")]
+                engine.engine_telemetry(),
+                engine.engine_allocated()
+            )?,
+            bytes
+        )
     };
 
     let workchains = mc_zero_state.workchains()?;
@@ -1432,7 +1582,13 @@ pub(crate) async fn load_zero_state(engine: &Arc<Engine>, path: &str) -> Result<
         let path = format!("{}/{:x}.boc", path, id.file_hash());
         let bytes = tokio::fs::read(&path).await
             .map_err(|err| error!("Cannot read zerostate {}: {}", path, err))?;
-        let zs = ShardStateStuff::deserialize_zerostate(id.clone(), &bytes)?;
+        let zs = ShardStateStuff::deserialize_zerostate(
+            id.clone(), 
+            &bytes,
+            #[cfg(feature = "telemetry")]
+            engine.engine_telemetry(),
+            engine.engine_allocated()
+        )?;
         let (_, handle) = engine.store_zerostate(zs, &bytes).await?;
         engine.set_applied(&handle, id.seq_no()).await?;
     }
@@ -1613,10 +1769,9 @@ pub async fn run(
 
 #[cfg(feature = "telemetry")]
 fn telemetry_logger(engine: Arc<Engine>) {
-    const TELEMETRY_TIMEOUT: u64 = 30;
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(TELEMETRY_TIMEOUT)).await;
+            tokio::time::sleep(Duration::from_secs(Engine::TIMEOUT_TELEMETRY_SEC)).await;
             let period = full_node::telemetry::TPS_PERIOD_1;
             let tps_1 = engine.tps_counter.calc_tps(period)
                 .unwrap_or_else(|e| { 
@@ -1647,13 +1802,44 @@ fn telemetry_logger(engine: Arc<Engine>) {
             log::debug!(
                 target: "telemetry",
                 "Full node service's telemetry:\n{}",
-                engine.full_node_service_telemetry().report(TELEMETRY_TIMEOUT)
+                engine.full_node_service_telemetry().report(Engine::TIMEOUT_TELEMETRY_SEC)
             );
             log::debug!(
                 target: "telemetry",
                 "Full node client's telemetry:\n{}",
-                engine.network.telemetry().report(TELEMETRY_TIMEOUT)
+                engine.network.telemetry().report(Engine::TIMEOUT_TELEMETRY_SEC)
             );
+            engine.engine_telemetry.storage.handles.update(
+                engine.engine_allocated.storage.handles.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.storage.storage_cells.update(
+                engine.engine_allocated.storage.storage_cells.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.awaiters.update(
+                engine.engine_allocated.awaiters.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.catchain_clients.update(
+                engine.engine_allocated.catchain_clients.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.overlay_clients.update(
+                engine.engine_allocated.overlay_clients.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.peer_stats.update(
+                engine.engine_allocated.peer_stats.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.shard_states.update(
+                engine.engine_allocated.shard_states.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.top_blocks.update(
+                engine.engine_allocated.top_blocks.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.validator_peers.update(
+                engine.engine_allocated.validator_peers.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.validator_sets.update(
+                engine.engine_allocated.validator_sets.load(Ordering::Relaxed)
+            );        
+            engine.telemetry_printer.try_print();
         }
     });
 }
