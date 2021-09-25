@@ -1,5 +1,5 @@
 use ton_types::Result;
-use adnl::common::add_object_to_map_with_update;
+use adnl::common::add_unbound_object_to_map_with_update;
 use std::{
     time::{SystemTime, Duration, UNIX_EPOCH},
     sync::{Arc, atomic::{AtomicU64, Ordering}},
@@ -30,7 +30,7 @@ impl<K, V> TimeBasedCache<K, V> where
     }
 
     pub fn set(&self, key: K, factory: impl Fn(Option<&V>) -> Option<V>) -> Result<bool> {
-        add_object_to_map_with_update(&self.map, key, |prev| {
+        add_unbound_object_to_map_with_update(&self.map, key, |prev| {
             let now = Self::now();
             if let Some((v, t)) = prev {
                 if let Some(new) = factory(Some(v)) {

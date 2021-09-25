@@ -3,7 +3,7 @@ use std::{
     time::Duration
 };
 use ton_types::{Result, error};
-use adnl::common::add_object_to_map;
+use adnl::common::add_unbound_object_to_map;
 
 
 struct OperationAwaiters<R> {
@@ -39,7 +39,6 @@ impl<I, R> AwaitersPool<I, R> where
         }
     }
 
-
     pub async fn do_or_wait(
         &self,
         id: &I,
@@ -55,7 +54,7 @@ impl<I, R> AwaitersPool<I, R> where
                 }
             } else {
                 let new_awaiters = OperationAwaiters::new(true);
-                if add_object_to_map(&self.ops_awaiters, id.clone(), || Ok(new_awaiters.clone()))? {
+                if add_unbound_object_to_map(&self.ops_awaiters, id.clone(), || Ok(new_awaiters.clone()))? {
                     return Some(self.do_operation(id, operation, &new_awaiters).await).transpose()
                 }
             }
@@ -73,7 +72,7 @@ impl<I, R> AwaitersPool<I, R> where
                 return self.wait_operation(id, timeout_ms, &op_awaiters.1, check_complete).await
             } else {
                 let new_awaiters = OperationAwaiters::new(false);
-                if add_object_to_map(&self.ops_awaiters, id.clone(), || Ok(new_awaiters.clone()))? {
+                if add_unbound_object_to_map(&self.ops_awaiters, id.clone(), || Ok(new_awaiters.clone()))? {
                     return self.wait_operation(id, timeout_ms, &new_awaiters, check_complete).await
                 }
             }
