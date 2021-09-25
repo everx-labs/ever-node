@@ -15,6 +15,7 @@ use crate::{
     },
 };
 use super::{BlockCandidate, McData, validator_utils::calc_subset_for_workchain};
+use adnl::common::add_unbound_object_to_map_with_update;
 use std::{collections::HashMap, io::Cursor, sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc}};
 use ton_block::{
     AddSub, BlockError, HashmapAugType, Deserializable, Serializable,
@@ -32,7 +33,7 @@ use ton_block::{
     OutMsg,
     Message, MsgEnvelope, EnqueuedMsg, ShardHashes, MerkleProof, StateInitLib,
     KeyMaxLt, LibDescr, Transaction,
-    InMsg, MsgAddressInt, IntermediateAddress,
+    InMsg, MsgAddressInt,
     InMsgDescr, OutMsgDescr, ShardAccount, ShardAccountBlocks, ShardAccounts,
     Account, AccountBlock, AccountStatus,
     ShardFeeCreated, TransactionDescr, OutMsgQueueKey, BlockLimits,
@@ -44,9 +45,8 @@ use ton_executor::{
     TransactionExecutor, ExecuteParams
 };
 use ton_types::{
-    Result,
-    deserialize_cells_tree,
-    AccountId, Cell, CellType, HashmapType, SliceData, UInt256,
+    fail, 
+    AccountId, Cell, CellType, deserialize_cells_tree, HashmapType, Result, SliceData, UInt256
 };
 
 #[cfg(feature = "metrics")]
@@ -139,14 +139,14 @@ struct ValidateBase {
 
     config_params: ConfigParams,
 
-    prev_states: Vec<ShardStateStuff>,
-    prev_state: ShardStateStuff, // TODO: remove
+    prev_states: Vec<Arc<ShardStateStuff>>,
+    prev_state: Option<Arc<ShardStateStuff>>, // TODO: remove
     prev_state_accounts: ShardAccounts,
     prev_state_extra: McStateExtra,
     prev_validator_fees: CurrencyCollection,
 
     // from next_state of masterchain or from global masterchain for workcain
-    next_state: ShardStateStuff,
+    next_state: Option<Arc<ShardStateStuff>>,
     next_state_accounts: ShardAccounts,
     next_state_extra: McStateExtra,
 
@@ -502,7 +502,11 @@ impl ValidateQuery {
     //     Ok(())
     // }
 
-    fn try_unpack_mc_state(&mut self, base: &ValidateBase, mc_state: ShardStateStuff) -> Result<McData> {
+    fn try_unpack_mc_state(
+        &mut self, 
+        base: &ValidateBase, 
+        mc_state: Arc<ShardStateStuff>
+    ) -> Result<McData> {
         log::debug!(target: "validate_query", "unpacking reference masterchain state {}", mc_state.block_id());
         let mc_state_extra = mc_state.shard_state_extra()?.clone();
         let config_params = mc_state_extra.config();
@@ -586,7 +590,8 @@ impl ValidateQuery {
  */
 
     fn compute_next_state(&mut self, base: &mut ValidateBase, mc_data: &McData) -> Result<()> {
-        base.prev_state = base.prev_states[0].clone();
+        let prev_state = base.prev_states[0].clone();
+        base.prev_state = Some(prev_state.clone());
         let prev_state_root = if base.after_merge && base.prev_states.len() == 2 {
             self.check_one_prev_state(base, &base.prev_states[0])?;
             self.check_one_prev_state(base, &base.prev_states[1])?;
@@ -602,29 +607,36 @@ impl ValidateQuery {
         let next_state_root = base.state_update.apply_for(&prev_state_root)
             .map_err(|err| error!("cannot apply Merkle update from block to compute new state : {}", err))?;
         log::debug!(target: "validate_query", "next state computed");
-        base.next_state = ShardStateStuff::new(base.block_id().clone(), next_state_root.clone())?;
-        if base.info.end_lt() != base.next_state.state().gen_lt() {
+        let next_state = ShardStateStuff::from_root_cell(
+            base.block_id().clone(), 
+            next_state_root.clone(),
+            #[cfg(feature = "telemetry")]
+            self.engine.engine_telemetry(),
+            self.engine.engine_allocated()
+        )?;
+        base.next_state = Some(next_state.clone());
+        if base.info.end_lt() != next_state.state().gen_lt() {
             reject_query!("new state contains generation lt {} distinct from end_lt {} in block header",
-                base.next_state.state().gen_lt(), base.info.end_lt())
+                next_state.state().gen_lt(), base.info.end_lt())
         }
-        if base.now() != base.next_state.state().gen_time() {
+        if base.now() != next_state.state().gen_time() {
             reject_query!("new state contains generation time {} distinct from the value {} in block header",
-                base.next_state.state().gen_time(), base.now())
+                next_state.state().gen_time(), base.now())
         }
-        if base.info.before_split() != base.next_state.state().before_split() {
+        if base.info.before_split() != next_state.state().before_split() {
             reject_query!("before_split value mismatch in new state and in block header")
         }
-        if (base.block_id().seq_no != base.next_state.state().seq_no()) || (base.shard() != base.next_state.state().shard()) {
+        if (base.block_id().seq_no != next_state.state().seq_no()) || (base.shard() != next_state.state().shard()) {
             reject_query!("header of new state claims it belongs to block {} instead of {}",
-                base.next_state.state().shard(), base.block_id().shard())
+                next_state.state().shard(), base.block_id().shard())
         }
-        if base.next_state.state().custom_cell().is_some() != base.shard().is_masterchain() {
+        if next_state.state().custom_cell().is_some() != base.shard().is_masterchain() {
             reject_query!("McStateExtra in the new state of a non-masterchain block, or conversely")
         }
         if base.shard().is_masterchain() {
-            base.prev_state_extra = base.prev_state.shard_state_extra()?.clone();
-            base.next_state_extra = base.next_state.shard_state_extra()?.clone();
-            let next_state_extra = base.next_state.shard_state_extra()?;
+            base.prev_state_extra = prev_state.shard_state_extra()?.clone();
+            base.next_state_extra = next_state.shard_state_extra()?.clone();
+            let next_state_extra = next_state.shard_state_extra()?;
             if next_state_extra.shards() != base.mc_extra.shards() {
                 reject_query!("ShardHashes in the new state and in the block differ")
             }
@@ -674,30 +686,44 @@ impl ValidateQuery {
 
     fn unpack_next_state(&self, base: &mut ValidateBase, mc_data: &McData) -> Result<()> {
         log::debug!(target: "validate_query", "unpacking new state");
-        CHECK!(&base.next_state, inited);
-        if base.next_state.state().gen_time() != base.now() {
-            reject_query!("new state of {} claims to have been generated at unixtime {}, but the block header contains {}",
-                base.next_state.state().id(), base.next_state.state().gen_time(), base.info.gen_utime())
+        let next_state = base.next_state.as_ref().ok_or_else(
+            || error!("Next state is not initialized in validator query")
+        )?.state();
+        if next_state.gen_time() != base.now() {
+            reject_query!(
+                "new state of {} claims to have been generated at unixtime {}, \
+                but the block header contains {}",
+                next_state.id(), next_state.gen_time(), base.info.gen_utime()
+            )
         }
-        if base.next_state.state().gen_lt() != base.info.end_lt() {
-            reject_query!("new state of {} claims to have been generated at logical time {}, but the block header contains end lt {}",
-                base.next_state.state().id(), base.next_state.state().gen_lt(), base.info.end_lt())
+        if next_state.gen_lt() != base.info.end_lt() {
+            reject_query!(
+                "new state of {} claims to have been generated at logical time {}, \
+                but the block header contains end lt {}",
+                next_state.id(), next_state.gen_lt(), base.info.end_lt()
+            )
         }
         if !base.shard().is_masterchain() {
-            let mc_blkid = base.next_state.state().master_ref()
-                .ok_or_else(|| error!("new state of {} doesn't have have master ref", base.next_state.state().id()))?
-                .master.clone().master_block_id().1;
+            let mc_blkid = next_state.master_ref().ok_or_else(
+                || error!("new state of {} doesn't have have master ref", next_state.id())
+            )?.master.clone().master_block_id().1;
             if &mc_blkid != mc_data.state.block_id() {
-                reject_query!("new state refers to masterchain block {} different from {} indicated in block header",
-                    mc_blkid, mc_data.state.block_id())
+                reject_query!(
+                    "new state refers to masterchain block {} different from {} \
+                    indicated in block header",
+                    mc_blkid, mc_data.state.block_id()
+                )
             }
         }
-        if base.next_state.state().vert_seq_no() != base.info.vert_seq_no() {
-            reject_query!("new state has vertical seqno {} different from {} declared in the new block header",
-                base.next_state.state().vert_seq_no(), base.info.vert_seq_no())
+        if next_state.vert_seq_no() != base.info.vert_seq_no() {
+            reject_query!(
+                "new state has vertical seqno {} different from {} \
+                declared in the new block header",
+                next_state.vert_seq_no(), base.info.vert_seq_no()
+            )
         }
+        base.next_state_accounts = next_state.read_accounts()?;
         // ...
-        base.next_state_accounts = base.next_state.state().read_accounts()?;
         Ok(())
     }
 
@@ -708,7 +734,7 @@ impl ValidateQuery {
             self.shard().clone(),
             &self.new_mc_shards,
             &base.prev_states,
-            Some(&base.next_state),
+            base.next_state.as_ref(),
             base.after_merge,
             base.after_split,
             None,
@@ -724,7 +750,7 @@ impl ValidateQuery {
         sibling: Option<&McShardRecord>,
         wc_info: Option<&WorkchainDescr>
     ) -> Result<()> {
-        let shard = &info.shard;
+        let shard = info.shard();
         log::debug!(target: "validate_query", "checking shard {} in new shard configuration", shard);
         if info.descr.next_validator_shard != shard.shard_prefix_with_tag() {
             reject_query!("new shard configuration for shard {} contains different next_validator_shard {}",
@@ -853,11 +879,11 @@ impl ValidateQuery {
                 // register shard block creators
                 self.register_shard_block_creators(base, &sh_bd.get_creator_list(chain_len)?)?;
                 // ...
-                if old.shard.is_parent_for(shard) {
+                if old.shard().is_parent_for(shard) {
                     // shard has been split
-                    log::debug!(target: "validate_query", "detected shard split {} -> {}", old.shard, shard);
+                    log::debug!(target: "validate_query", "detected shard split {} -> {}", old.shard(), shard);
                     // ...
-                } else if shard.is_parent_for(&old.shard) {
+                } else if shard.is_parent_for(old.shard()) {
                     // shard has been merged
                     if let Some(old2) = self.old_mc_shards.find_shard(&shard.right_ancestor_mask()?)? {
                         if &old.shard().sibling() != old2.shard() {
@@ -871,13 +897,13 @@ impl ValidateQuery {
                         reject_query!("No plus_one shard") // TODO: check here
                     }
                     // ...
-                } else if shard == &old.shard {
+                } else if shard == old.shard() {
                     // shard updated without split/merge
                     prev = Some(old);
                     // ...
                 } else {
                     reject_query!("new configuration contains shard {} that could not be \
-                        obtained from previously existing shard {}", shard, old.shard);
+                        obtained from previously existing shard {}", shard, old.shard());
                 // ...
                 }
             }
@@ -972,7 +998,9 @@ impl ValidateQuery {
         if !base.shard().is_masterchain() {
             return Ok(())
         }
-        let prev_now = base.prev_state.state().gen_time();
+        let prev_now = base.prev_state.as_ref().ok_or_else(
+            || error!("Prev state is not initialized in validator query")
+        )?.state().gen_time();
         if prev_now > base.now() {
             reject_query!("creation time is not monotonic: {} after {}", base.now(), prev_now)
         }
@@ -1052,8 +1080,12 @@ impl ValidateQuery {
                 false => reject_query!("masterchain catchain seqno unchanged while it had to")
             }
         }
-        let now = base.next_state.state().gen_time();
-        let prev_now = base.prev_state.state().gen_time();
+        let now = base.next_state.as_ref().ok_or_else(
+            || error!("Next state is not initialized in validator query")
+        )?.state().gen_time();
+        let prev_now = base.prev_state.as_ref().ok_or_else(
+            || error!("Prev state is not initialized in validator query")
+        )?.state().gen_time();
         let ccvc = base.next_state_extra.config.catchain_config()?;
         let cur_validators = base.next_state_extra.config.validator_set()?;
         let lifetime = ccvc.mc_catchain_lifetime;
@@ -1613,7 +1645,7 @@ impl ValidateQuery {
     }
 
     fn update_max_processed_lt_hash(base: &ValidateBase, lt: u64, hash: &UInt256) -> Result<bool> {
-        adnl::common::add_object_to_map_with_update(
+        add_unbound_object_to_map_with_update(
             &base.result.lt_hash,
             0,
             |lt_hash| {
@@ -1628,7 +1660,7 @@ impl ValidateQuery {
     }
 
     fn update_min_enqueued_lt_hash(base: &ValidateBase, lt: u64, hash: &UInt256) -> Result<bool> {
-        adnl::common::add_object_to_map_with_update(
+        add_unbound_object_to_map_with_update(
             &base.result.lt_hash,
             1,
             |lt_hash| {
@@ -1929,8 +1961,8 @@ impl ValidateQuery {
                     "usual"
                 };
                 // perform hypercube routing for this transit message
-                let ia = IntermediateAddress::default();
-                let route_info = perform_hypercube_routing(&next_prefix, &dest_prefix, &base.shard(), ia)
+                let use_hypercube = !base.config.has_capability(GlobalCapabilities::CapOffHypercube);
+                let route_info = perform_hypercube_routing(&next_prefix, &dest_prefix, &base.shard(), use_hypercube)
                     .map_err(|err| error!("cannot perform (check) hypercube routing for \
                         transit inbound message with hash {}: src={} cur={} next={} dest={}; \
                         our shard is {} : {}", key.to_hex_string(), src_prefix, cur_prefix,
@@ -2237,8 +2269,8 @@ impl ValidateQuery {
             OutMsg::New(_) => {
                 log::debug!(target: "validate_query", "src: {}, dst: {}, shard: {}", src_prefix, dest_prefix, base.shard());
                 // perform hypercube routing for this new message
-                let ia = IntermediateAddress::default();
-                let route_info = perform_hypercube_routing(&src_prefix, &dest_prefix, &base.shard(), ia)
+                let use_hypercube = !base.config.has_capability(GlobalCapabilities::CapOffHypercube);
+                let route_info = perform_hypercube_routing(&src_prefix, &dest_prefix, &base.shard(), use_hypercube)
                     .map_err(|err| error!("cannot perform (check) hypercube routing for \
                         new outbound message with hash {} : {}", key.to_hex_string(), err))?;
                 let new_cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, &route_info.0)?;
@@ -3219,10 +3251,16 @@ impl ValidateQuery {
 
     fn check_shard_libraries(base: &mut ValidateBase) -> Result<()> {
         let mut lib_publishers2 = vec![];
-        let old = base.prev_state.state().libraries().clone();
-        let new = base.next_state.state().libraries().clone();
-        old.scan_diff(&new, |key: UInt256, old, new| Self::check_one_library_update(key, old, new, &mut lib_publishers2))
-            .map_err(|err| error!("invalid shard libraries dictionary in the new state : {}", err))?;
+        let old = base.prev_state.as_ref().ok_or_else(
+            || error!("Prev state is not initialized in validator query")
+        )?.state().libraries().clone();
+        let new = base.next_state.as_ref().ok_or_else(
+            || error!("Next state is not initialized in validator query")
+        )?.state().libraries().clone();
+        old.scan_diff(
+            &new, 
+            |key: UInt256, old, new| Self::check_one_library_update(key, old, new, &mut lib_publishers2)
+        ).map_err(|err| error!("invalid shard libraries dictionary in the new state : {}", err))?;
 
         if let Some(lib_publishers)  = Arc::get_mut(&mut base.result.lib_publishers) {
             let mut lib_publishers = lib_publishers.collect::<Vec<_>>();
@@ -3240,80 +3278,117 @@ impl ValidateQuery {
 
     fn check_new_state(base: &mut ValidateBase, mc_data: &McData, manager: &MsgQueueManager) -> Result<()> {
         log::debug!(target: "validate_query", "checking header of the new shardchain state");
-        let my_mc_seqno = if base.shard().is_masterchain() {
-            base.block_id().seq_no()
-        } else {
-            mc_data.state.block_id().seq_no()
-        };
-        let min_seq_no = match manager.next().min_seqno() {
-            0 => std::u32::MAX,
-            min_seq_no => min_seq_no
-        };
-        let ref_mc_seqno = std::cmp::min(min_seq_no, std::cmp::min(base.min_shard_ref_mc_seqno(), my_mc_seqno));
-        if base.next_state.state().min_ref_mc_seqno() != ref_mc_seqno {
-            reject_query!("new state of {} has minimal referenced masterchain block seqno {} but the value \
-                computed from all shard references and previous masterchain block reference is {} = min({},{},{})",
-                    base.block_id(), base.next_state.state().min_ref_mc_seqno(), ref_mc_seqno,
-                    my_mc_seqno, base.min_shard_ref_mc_seqno(), min_seq_no)
-        }
-
-        if !base.next_state.state().read_out_msg_queue_info()?.ihr_pending().is_empty() {
-            reject_query!("IhrPendingInfo in the new state of {} is non-empty, \
-                but IHR delivery is now disabled", base.block_id())
-        }
-        // before_split:(## 1) -> checked in unpack_next_state()
-        // accounts:^ShardAccounts -> checked in precheck_account_updates() + other
-        // ^[ overload_history:uint64 underload_history:uint64
-        if base.next_state.state().overload_history() & base.next_state.state().underload_history() & 1 != 0 {
-            reject_query!("lower-order bits both set in the new state's overload_history and underload history \
-                (block cannot be both overloaded and underloaded)")
-        }
-        if base.after_split || base.after_merge {
-            if (base.next_state.state().overload_history() | base.next_state.state().underload_history()) & !1 != 0 {
-                reject_query!("new block is immediately after split or after merge, \
-                    but the old underload or overload history has not been cleared")
+        let prev_state = base.prev_state.as_ref().ok_or_else(
+            || error!("Prev state is not initialized in validator query")
+        )?.state();
+        if let Some(next_state) = &base.next_state {
+            let next_state = next_state.state();
+            let my_mc_seqno = if base.shard().is_masterchain() {
+                base.block_id().seq_no()
+            } else {
+                mc_data.state.block_id().seq_no()
+            };
+            let min_seq_no = match manager.next().min_seqno() {
+                0 => std::u32::MAX,
+                min_seq_no => min_seq_no
+            };
+            let ref_mc_seqno = std::cmp::min(
+                min_seq_no, 
+                std::cmp::min(base.min_shard_ref_mc_seqno(), my_mc_seqno)
+            );
+            if next_state.min_ref_mc_seqno() != ref_mc_seqno {
+                reject_query!(
+                    "new state of {} has minimal referenced masterchain block seqno {} \
+                    but the value computed from all shard references and previous masterchain \
+                    block reference is {} = min({},{},{})",
+                    base.block_id(), next_state.min_ref_mc_seqno(), ref_mc_seqno,
+                    my_mc_seqno, base.min_shard_ref_mc_seqno(), min_seq_no
+                )
+            }            
+            if !next_state.read_out_msg_queue_info()?.ihr_pending().is_empty() {
+                reject_query!(
+                    "IhrPendingInfo in the new state of {} is non-empty, 
+                    but IHR delivery is now disabled", base.block_id()
+                )
+            }
+            // before_split:(## 1) -> checked in unpack_next_state()
+            // accounts:^ShardAccounts -> checked in precheck_account_updates() + other
+            // ^[ overload_history:uint64 underload_history:uint64
+            if next_state.overload_history() & next_state.underload_history() & 1 != 0 {
+                reject_query!(
+                    "lower-order bits both set in the new state's overload_history \
+                    and underload history (block cannot be both overloaded and underloaded)"
+                )
+            }
+            if base.after_split || base.after_merge {
+                if (next_state.overload_history() | next_state.underload_history()) & !1 != 0 {
+                    reject_query!(
+                        "new block is immediately after split or after merge, \
+                        but the old underload or overload history has not been cleared"
+                    )
+                }
+            } else {
+                if (next_state.overload_history() ^ (prev_state.overload_history() << 1)) & !1 != 0 {
+                    reject_query!(
+                        "new overload history {} is not compatible with the old overload history {}",
+                        next_state.overload_history(), prev_state.overload_history()
+                    )
+                }
+                if (next_state.underload_history() ^ (prev_state.underload_history() << 1)) & !1 != 0 {
+                    reject_query!(
+                        "new underload history {}  is not compatible with the old underload history {}",
+                        next_state.underload_history(), prev_state.underload_history()
+                    )
+                }
+            }
+            if next_state.total_balance() != &base.value_flow.to_next_blk {
+                reject_query!(
+                    "new state declares total balance {} different from to_next_blk in value flow \
+                    (obtained by summing balances of all accounts in the new state): {}",
+                    next_state.total_balance(), base.value_flow.to_next_blk
+                )
+            }
+            log::debug!(
+                target: "validate_query", 
+                "checking total validator fees: new={}+recovered={} == old={}+collected={}",
+                next_state.total_validator_fees(), base.value_flow.recovered,
+                base.prev_validator_fees, base.value_flow.fees_collected
+            );
+            let mut new = base.value_flow.recovered.clone();
+            new.add(next_state.total_validator_fees())?;
+            let mut old = base.value_flow.fees_collected.clone();
+            old.add(&base.prev_validator_fees)?;
+            if new != old {
+                reject_query!(
+                    "new state declares total validator fees {} not equal to the sum of \
+                    old total validator fees {} and the fees collected in this block {} \
+                    minus the recovered fees {}",
+                    next_state.total_validator_fees(), &base.prev_validator_fees,
+                    base.value_flow.fees_collected, base.value_flow.recovered
+                )
             }
         } else {
-            if (base.next_state.state().overload_history() ^ (base.prev_state.state().overload_history() << 1)) & !1 != 0 {
-                reject_query!("new overload history {} is not compatible with the old overload history {}",
-                    base.next_state.state().overload_history(), base.prev_state.state().overload_history())
-            }
-            if (base.next_state.state().underload_history() ^ (base.prev_state.state().underload_history() << 1)) & !1 != 0 {
-                reject_query!("new underload history {}  is not compatible with the old underload history {}",
-                    base.next_state.state().underload_history(), base.prev_state.state().underload_history())
-            }
-        }
-        if base.next_state.state().total_balance() != &base.value_flow.to_next_blk {
-            reject_query!("new state declares total balance {} different from to_next_blk in value flow \
-                (obtained by summing balances of all accounts in the new state): {}",
-                base.next_state.state().total_balance(), base.value_flow.to_next_blk)
-        }
-        log::debug!(target: "validate_query", "checking total validator fees: new={}+recovered={} == old={}+collected={}",
-            base.next_state.state().total_validator_fees(), base.value_flow.recovered,
-            base.prev_validator_fees, base.value_flow.fees_collected);
-        let mut new = base.value_flow.recovered.clone();
-        new.add(base.next_state.state().total_validator_fees())?;
-        let mut old = base.value_flow.fees_collected.clone();
-        old.add(&base.prev_validator_fees)?;
-        if new != old {
-            reject_query!("new state declares total validator fees {} \
-                not equal to the sum of old total validator fees {} \
-                and the fees collected in this block {} \
-                minus the recovered fees {}",
-                    base.next_state.state().total_validator_fees(), &base.prev_validator_fees,
-                    base.value_flow.fees_collected, base.value_flow.recovered)
+            fail!("Prev state is not initialized in validator query")
         }
         // libraries:(HashmapE 256 LibDescr)
         if base.shard().is_masterchain() {
-            Self::check_shard_libraries(base)
-                .map_err(|err| error!("the set of public libraries in the new state is invalid : {}", err))?;
-        } else if !base.next_state.state().libraries().is_empty() {
-            reject_query!("new state contains a non-empty public library collection, which is not allowed for non-masterchain blocks")
+            Self::check_shard_libraries(base).map_err(
+                |err| error!("the set of public libraries in the new state is invalid : {}", err)
+            )?;
+        } 
+        let next_state = base.next_state.as_ref().ok_or_else(
+            || error!("Next state is not initialized in validator query")
+        )?.state();
+        if !base.shard().is_masterchain() && !next_state.libraries().is_empty() {
+            reject_query!(
+                "new state contains a non-empty public library collection, \
+                which is not allowed for non-masterchain blocks"
+            )
         }
         // TODO: it seems was tested in unpack_next_state
-        if base.shard().is_masterchain() && base.next_state.state().master_ref().is_some() {
+        if base.shard().is_masterchain() && next_state.master_ref().is_some() {
             reject_query!("new state contains a masterchain block reference (master_ref)")
-        } else if !base.shard().is_masterchain() && base.next_state.state().master_ref().is_none() {
+        } else if !base.shard().is_masterchain() && next_state.master_ref().is_none() {
             reject_query!("new state does not contain a masterchain block reference (master_ref)")
         }
         // custom:(Maybe ^McStateExtra) -> checked in check_mc_state_extra()
@@ -3332,7 +3407,9 @@ impl ValidateQuery {
             reject_query!("new configuration parameters failed to pass per-parameter letmated validity checks, 
                 or one of mandatory configuration parameters is missing")
         }
-        let new_accounts = base.next_state.state().read_accounts()?;
+        let new_accounts = base.next_state.as_ref().ok_or_else(
+            || error!("Next state is not initialized in validator query")
+        )?.state().read_accounts()?;
         let old_config_root = match new_accounts.get(&base.prev_state_extra.config.config_addr)? {
             Some(account) => account.read_account()?.get_data(),
             None => reject_query!("cannot extract configuration from the new state of the (old) configuration smart contract {}",
@@ -3464,18 +3541,30 @@ impl ValidateQuery {
 
     // somewhat similar to Collator::create_mc_state_extra()
     fn check_mc_state_extra(&self, base: &ValidateBase, mc_data: &McData) -> Result<()> {
+        let prev_state = base.prev_state.as_ref().ok_or_else(
+            || error!("Prev state is not initialized in validator query")
+        )?.state();
+        let next_state = base.next_state.as_ref().ok_or_else(
+            || error!("Next state is not initialized in validator query")
+        )?.state();
         if !base.shard().is_masterchain() {
-            if base.next_state.state().custom_cell().is_some() {
-                reject_query!("new state defined by non-masterchain block {} contains a McStateExtra", base.block_id())
+            if next_state.custom_cell().is_some() {
+                reject_query!(
+                    "new state defined by non-masterchain block {} contains a McStateExtra", 
+                    base.block_id()
+                )
             }
             return Ok(())
         }
         let import_created = base.mc_extra.fees().root_extra().create.clone();
-        log::debug!(target: "validate_query", "checking header of McStateExtra in the new masterchain state");
-        if base.prev_state.state().custom_cell().is_none() {
+        log::debug!(
+            target: "validate_query", 
+            "checking header of McStateExtra in the new masterchain state"
+        );
+        if prev_state.custom_cell().is_none() {
             reject_query!("previous masterchain state did not contain a McStateExtra")
         }
-        if base.next_state.state().custom_cell().is_none() {
+        if next_state.custom_cell().is_none() {
             reject_query!("new masterchain state does not contain a McStateExtra")
         }
         // masterchain_state_extra#cc26
@@ -3484,8 +3573,11 @@ impl ValidateQuery {
         Self::check_config_update(base)?;
         // ...
         if base.next_state_extra.block_create_stats.is_some() != self.create_stats_enabled {
-            reject_query!("new McStateExtra has block_create_stats, but active configuration defines create_stats_enabled={}",
-                self.create_stats_enabled)
+            reject_query!(
+                "new McStateExtra has block_create_stats, \
+                but active configuration defines create_stats_enabled={}",
+                self.create_stats_enabled
+            )
         }
         // validator_info:ValidatorInfo
         // (already checked in check_mc_validator_info())
@@ -3497,28 +3589,41 @@ impl ValidateQuery {
         ).map_err(|err| error!("invalid previous block dictionary in the new state : {}", err))?;
         if let Some((seq_no, _)) = base.prev_state_extra.prev_blocks.get_max(false)? {
             if seq_no >= mc_data.state.state().seq_no() {
-                reject_query!("previous block dictionary for the previous state with seqno {} \
+                reject_query!(
+                    "previous block dictionary for the previous state with seqno {} \
                     contains information about 'previous' masterchain block with seqno {}",
-                    mc_data.state.state().seq_no(), seq_no)
+                    mc_data.state.state().seq_no(), seq_no
+                )
             }
         }
-        let (seq_no, _) = base.next_state_extra.prev_blocks.get_max(false)?.ok_or_else(|| error!("new previous blocks \
-            dictionary is empty (at least the immediately previous block should be there)"))?;
+        let (seq_no, _) = base.next_state_extra.prev_blocks.get_max(false)?.ok_or_else(
+            || error!(
+                "new previous blocks dictionary is empty \
+                (at least the immediately previous block should be there)"
+            )
+        )?;
         CHECK!(base.block_id().seq_no == mc_data.state.block_id().seq_no() + 1);
         if seq_no > mc_data.state.state().seq_no() {
-            reject_query!("previous block dictionary for the new state with seqno {} \
+            reject_query!(
+                "previous block dictionary for the new state with seqno {} \
                 contains information about a future masterchain block with seqno {}",
-                base.block_id().seq_no, seq_no)
+                base.block_id().seq_no, seq_no
+            )
         }
         if seq_no != mc_data.state.state().seq_no() {
-            reject_query!("previous block dictionary for the new state of masterchain block {} \
+            reject_query!(
+                "previous block dictionary for the new state of masterchain block {} \
                 does not contain information about immediately previous block with seqno {}",
-                base.block_id(), mc_data.state.state().seq_no())
+                base.block_id(), mc_data.state.state().seq_no()
+            )
         }
         // after_key_block:Bool
         if base.next_state_extra.after_key_block != base.info.key_block() {
-            reject_query!("new McStateExtra has after_key_block={} while the block header claims is_master_state={}",
-                base.next_state_extra.after_key_block, base.info.key_block())
+            reject_query!(
+                "new McStateExtra has after_key_block={} \
+                while the block header claims is_master_state={}",
+                base.next_state_extra.after_key_block, base.info.key_block()
+            )
         }
         if base.prev_state_extra.last_key_block.is_some() && base.next_state_extra.last_key_block.is_none() {
             reject_query!("old McStateExtra had a non-trivial last_key_block, but the new one does not")
@@ -3526,35 +3631,51 @@ impl ValidateQuery {
         if base.next_state_extra.last_key_block == base.prev_state_extra.last_key_block {
             // TODO: check here
             if mc_data.mc_state_extra.after_key_block {
-                reject_query!("last_key_block remains unchanged in the new masterchain state, but the previous block \
-                    is a key block (it should become the new last_key_block)")
+                reject_query!(
+                    "last_key_block remains unchanged in the new masterchain state, but \
+                    the previous block is a key block (it should become the new last_key_block)"
+                )
             }
         } else if base.next_state_extra.last_key_block.is_none() {
-            reject_query!("last_key_block:(Maybe ExtBlkRef) changed in the new state, but it became a nothing$0")
+            reject_query!(
+                "last_key_block:(Maybe ExtBlkRef) changed in the new state, \
+                but it became a nothing$0"
+            )
         } else if let Some(ref last_key_block) = base.next_state_extra.last_key_block {
             let block_id = BlockIdExt::from_ext_blk(last_key_block.clone());
             if block_id != base.prev_blocks_ids[0] || last_key_block.end_lt != mc_data.state.state().gen_lt() {
-                reject_query!("last_key_block has been set in the new masterchain state to {} with lt {}, \
-                    but the only possible value for this update is the previous block {} with lt {}",
-                    block_id, last_key_block.end_lt, base.prev_blocks_ids[0], mc_data.state.state().gen_lt())
+                reject_query!(
+                    "last_key_block has been set in the new masterchain state to {} with lt {}, \
+                    but the only possible value for this update is the previous block {} \
+                    with lt {}", block_id, last_key_block.end_lt, base.prev_blocks_ids[0], 
+                    mc_data.state.state().gen_lt()
+                )
             }
             if !mc_data.mc_state_extra.after_key_block {
-                reject_query!("last_key_block has been updated to the previous block {}, but it is not a key block", block_id)
+                reject_query!(
+                    "last_key_block has been updated to the previous block {}, \
+                    but it is not a key block", block_id
+                )
             }
         }
         if let Some(block_ref) = base.next_state_extra.last_key_block.clone() {
             let key_block_id = block_ref.master_block_id().1;
             if Some(&key_block_id) != mc_data.prev_key_block() {
-                reject_query!("new masterchain state declares previous key block to be {:?} \
+                reject_query!(
+                    "new masterchain state declares previous key block to be {:?} \
                     but the value computed from previous masterchain state is {:?}",
-                    key_block_id, mc_data.prev_key_block())
+                    key_block_id, mc_data.prev_key_block()
+                )
             }
         } else if let Some(last_key_block) = mc_data.prev_key_block() {
-            reject_query!("new masterchain state declares no previous key block, but the block header \
-                announces previous key block seqno {}", last_key_block.seq_no)
+            reject_query!(
+                "new masterchain state declares no previous key block, but the block header \
+                announces previous key block seqno {}", last_key_block.seq_no
+            )
         }
         if let Some(new_block_create_stats) = base.next_state_extra.block_create_stats.clone() {
-            let old_block_create_stats = base.prev_state_extra.block_create_stats.clone().unwrap_or_default();
+            let old_block_create_stats = base.prev_state_extra.block_create_stats
+                .clone().unwrap_or_default();
             if !base.is_fake && !self.check_block_create_stats(base, old_block_create_stats, new_block_create_stats)? {
                 reject_query!("invalid BlockCreateStats update in the new masterchain state")
             }

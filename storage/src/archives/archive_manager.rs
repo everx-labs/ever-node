@@ -1,10 +1,10 @@
 use crate::{
     archives::{
         archive_slice::ArchiveSlice, file_maps::{FileDescription, FileMaps}, get_mc_seq_no,
-        package_entry_id::{GetFileNameShort, PackageEntryId}, package_id::PackageId,
-        ARCHIVE_SLICE_SIZE, KEY_ARCHIVE_PACKAGE_SIZE
+        package_entry::PackageEntry, package_entry_id::{GetFileNameShort, PackageEntryId}, 
+        package_id::PackageId, ARCHIVE_SLICE_SIZE, KEY_ARCHIVE_PACKAGE_SIZE
     },
-    types::BlockHandle
+    block_handle_db::BlockHandle
 };
 use std::{borrow::Borrow, hash::Hash, io::ErrorKind, path::PathBuf, sync::Arc};
 use tokio::io::AsyncWriteExt;
@@ -50,7 +50,7 @@ impl ArchiveManager {
     {
         log::debug!(target: "storage", "Saving unapplied file: {}", entry_id);
 
-        if data.len() == 0 {
+        if data.is_empty() {
             fail!("Added file's ({}) data can't have zero length", entry_id);
         }
 
@@ -95,12 +95,12 @@ impl ArchiveManager {
     {
             
         if handle.is_archived() {
-            let is_key = handle.is_key_block()?;
-            let package_id = self.get_package_id(get_mc_seq_no(handle), is_key).await?;
-            if let Some(ref fd) = self.get_file_desc(package_id, false).await? {
-                return Ok(fd.archive_slice()
-                    .get_file(Some(handle), entry_id).await?
-                    .take_data());
+            if let Some(file) = self.get_package_entry(
+                handle, 
+                entry_id, 
+                handle.is_key_block()?
+            ).await? {
+                return Ok(file.take_data())
             }
         }
 
@@ -141,31 +141,25 @@ impl ArchiveManager {
 
         let proof_filename = if proof_inited {
             let _lock = handle.proof_file_lock().write().await;
-            Some(
-                self.move_file_to_archives(
-                    handle, 
-                    &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Proof(handle.id())
-                ).await?
-            )
+            self.move_file_to_archives(
+                handle, 
+                &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Proof(handle.id())
+            ).await?
         } else if prooflink_inited {
             let _lock = handle.proof_file_lock().write().await;
-            Some(
-                self.move_file_to_archives(
-                    handle, 
-                    &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::ProofLink(handle.id())
-                ).await?
-            )
+            self.move_file_to_archives(
+                handle, 
+                &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::ProofLink(handle.id())
+            ).await?
         } else {
             None
         };
         let block_filename = if data_inited {
             let _lock = handle.block_file_lock().write().await;
-            Some(
-                self.move_file_to_archives(
-                    handle, 
-                    &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Block(handle.id())
-                ).await?
-            )
+            self.move_file_to_archives(
+                handle, 
+                &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Block(handle.id())
+            ).await?
         } else {
             None
         };
@@ -214,7 +208,30 @@ impl ArchiveManager {
         }
     }
 
-    async fn move_file_to_archives<B, U256, PK>(&self, handle: &BlockHandle, entry_id: &PackageEntryId<B, U256, PK>) -> Result<PathBuf>
+    async fn get_package_entry<B, U256, PK>(
+        &self, 
+        handle: &BlockHandle, 
+        entry_id: &PackageEntryId<B, U256, PK>,
+        is_key: bool
+    ) -> Result<Option<PackageEntry>>
+    where
+        B: Borrow<BlockIdExt> + Hash,
+        U256: Borrow<UInt256> + Hash,
+        PK: Borrow<PublicKey> + Hash
+    {
+        let package_id = self.get_package_id(get_mc_seq_no(handle), is_key).await?;
+        if let Some(ref fd) = self.get_file_desc(package_id, false).await? {
+            fd.archive_slice().get_file(Some(handle), entry_id).await
+        } else {
+            Ok(None)
+        }
+    }                   
+
+    async fn move_file_to_archives<B, U256, PK>(
+        &self, 
+        handle: &BlockHandle, 
+        entry_id: &PackageEntryId<B, U256, PK>
+    ) -> Result<Option<PathBuf>>
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
@@ -222,7 +239,18 @@ impl ArchiveManager {
     {
         log::debug!(target: "storage", "Moving entry to archive: {}", entry_id.filename_short());
         let (filename, data) = {
-            self.read_temp_file(entry_id).await?
+            match self.read_temp_file(entry_id).await {
+                Err(e) => {
+                    if self.get_package_entry(handle, entry_id, false).await?.is_none() {
+                        return Err(e)
+                    }
+                    if handle.is_key_block()? && self.get_package_entry(handle, entry_id, true).await?.is_none() {
+                        return Err(e)
+                    }
+                    return Ok(None)
+                }
+                Ok(read) => read
+            }
         };
 
         let data = self.move_file_to_archive(data, handle, entry_id, false).await?; 
@@ -231,7 +259,7 @@ impl ArchiveManager {
             self.move_file_to_archive(data, handle, entry_id, true).await?; 
         }
 
-        Ok(filename)
+        Ok(Some(filename))
     }
 
     async fn move_file_to_archive<B, U256, PK>(
@@ -281,7 +309,7 @@ impl ArchiveManager {
                     error!("Error reading file: {:?}, {}", temp_filename, error)
                 }
             })?;
-        if data.len() == 0 {
+        if data.is_empty() {
             fail!(
                 "Read temp file {} ({}) is corrupted! It cannot have zero length!", 
                 temp_filename.as_os_str().to_str().unwrap_or("bad path"), 

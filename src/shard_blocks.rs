@@ -1,7 +1,15 @@
 use crate::{
-    types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
-    engine::Engine, engine_traits::EngineOperations,
-    shard_state::ShardStateStuff,
+    types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId}, engine::Engine, 
+    engine_traits::{EngineAlloc, EngineOperations},shard_state::ShardStateStuff,
+};
+#[cfg(feature = "telemetry")]
+use crate::engine_traits::EngineTelemetry;
+use adnl::{
+    declare_counted, 
+    common::{
+        add_counted_object_to_map, add_counted_object_to_map_with_update, CountedObject, 
+        Counter
+    }
 };
 use ton_block::{BlockIdExt, TopBlockDescr, Deserializable, BlockSignatures};
 use ton_types::{fail, Result};
@@ -24,10 +32,12 @@ pub enum ShardBlockProcessingResult {
     MightBeAdded(Arc<TopBlockDescrStuff>)
 }
 
-struct ShardBlocksPoolItem {
-    pub top_block: Arc<TopBlockDescrStuff>,
-    pub own: bool,
-}
+declare_counted!(
+    struct ShardBlocksPoolItem {
+        top_block: Arc<TopBlockDescrStuff>,
+        own: bool
+    }
+);
 
 pub struct ShardBlocksPool {
     last_mc_seq_no: AtomicU32,
@@ -41,22 +51,37 @@ impl ShardBlocksPool {
     pub fn new(
         shard_blocks: HashMap<TopBlockDescrId, TopBlockDescrStuff>,
         last_mc_seqno: u32,
-        is_fake: bool
-    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<StoreAction>) {
+        is_fake: bool,
+        #[cfg(feature = "telemetry")]
+        telemetry: &Arc<EngineTelemetry>,
+        allocated: &Arc<EngineAlloc>
+    ) -> Result<(Self, tokio::sync::mpsc::UnboundedReceiver<StoreAction>)> {
         let tsbs = lockfree::map::Map::new();
         for (key, val) in shard_blocks {
-            tsbs.insert(key, ShardBlocksPoolItem { top_block: Arc::new(val), own: false });
+            let val = Arc::new(val);
+            add_counted_object_to_map(  
+                &tsbs,
+                key,
+                || {
+                    let ret = ShardBlocksPoolItem { 
+                        top_block: val.clone(), 
+                        own: false,
+                        counter: allocated.top_blocks.clone().into() 
+                    };
+                    #[cfg(feature = "telemetry")]
+                    telemetry.top_blocks.update(allocated.top_blocks.load(Ordering::Relaxed));
+                    Ok(ret)
+                }
+            )?;
         }
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        (
-            ShardBlocksPool {
-                last_mc_seq_no: AtomicU32::new(last_mc_seqno),
-                shard_blocks: tsbs,
-                storage_sender: Some(sender.clone()),
-                is_fake,
-            },
-            receiver
-        )
+        let ret = ShardBlocksPool {
+            last_mc_seq_no: AtomicU32::new(last_mc_seqno),
+            shard_blocks: tsbs,
+            storage_sender: Some(sender.clone()),
+            is_fake,
+        };
+        Ok((ret, receiver))
     }
 
     pub async fn process_shard_block_raw(
@@ -92,35 +117,78 @@ impl ShardBlocksPool {
         let tbds_id = TopBlockDescrId::new(id.shard().clone(), cc_seqno);
         let mut tbds = None;
 
-        'a: loop {
+        let tbds = loop {
 
-            log::trace!("process_shard_block iteration  cc_seqno: {}  id: {}", cc_seqno, id);
-
+            log::trace!("process_shard_block iteration cc_seqno: {} id: {}", cc_seqno, id);
+            
             // check for duplication
             if let Some(prev) = self.shard_blocks.get(&tbds_id) {
                 if id.seq_no() <= prev.val().top_block.proof_for().seq_no() {
-                    log::trace!("process_shard_block duplication  cc_seqno: {}  id: {}  prev: {}", 
+                    log::trace!("process_shard_block duplication cc_seqno: {} id: {} prev: {}", 
                         cc_seqno, id, prev.val().top_block.proof_for());
                     return Ok(ShardBlockProcessingResult::Duplication);
                 }
             }
 
             // validate top block descr
-            if tbds.is_none() {
-                tbds = Some(factory()?);
-            }
+            let tbds = if let Some(tbds) = &tbds {
+                tbds
+            } else {
+                let ret = factory()?;
+                tbds.get_or_insert_with(|| ret) 
+            };
 
             if !self.is_fake {
-                tbds.as_ref().unwrap().validate(&engine.load_last_applied_mc_state().await?)?;
+                tbds.validate(&engine.load_last_applied_mc_state().await?)?;
             }
 
             if check_only {
                 log::trace!("process_shard_block check only  id: {}", id);
-                break;
+                break tbds.clone();
             }
 
             // add
             // This is so-called "interactive insertion"
+            let mut old = None;
+            let added = add_counted_object_to_map_with_update(
+                &self.shard_blocks,
+                tbds_id.clone(),
+                |found| {
+                    if let Some(found) = found {
+                        // someone already added the value into map
+                        if id.seq_no() <= found.top_block.proof_for().seq_no() {
+                            return Ok(None)
+                        }
+                        old.replace(found.top_block.clone());
+                    } 
+                    let top_blocks = &engine.engine_allocated().top_blocks;
+                    let ret = ShardBlocksPoolItem { 
+                        top_block: tbds.clone(),
+                        own,
+                        counter: top_blocks.clone().into() 
+                    };
+                    #[cfg(feature = "telemetry")]
+                    engine.engine_telemetry().top_blocks.update(
+                        top_blocks.load(Ordering::Relaxed)
+                    );
+                    Ok(Some(ret))
+                }
+            )?;
+            if !added {
+                continue
+            }
+
+            if let Some(old) = old {
+                log::trace!(
+                    "process_shard_block updated cc_seqno: {} id: {} prev: {}",
+                    cc_seqno, id, old.proof_for()
+                )
+            } else {
+                log::trace!("process_shard_block added cc_seqno: {} id: {}", cc_seqno, id)
+            }
+            break tbds.clone()
+
+            /*
             let result = self.shard_blocks.insert_with(tbds_id.clone(), |_key, prev, updated | {
                 if let Some((_, val)) = updated {
                     // someone already added the value into map
@@ -158,13 +226,13 @@ impl ShardBlocksPool {
                     continue;
                 }
             }
-        }
+            */
 
-        let tbds = tbds.unwrap();
+        };
 
         self.send_to_storage(StoreAction::Save(tbds_id.clone(), tbds.clone()));
-
         Ok(ShardBlockProcessingResult::MightBeAdded(tbds))
+
     }
 
     pub fn get_shard_blocks(&self, last_mc_seq_no: u32, only_own: bool) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
@@ -186,7 +254,7 @@ impl ShardBlocksPool {
         }
     }
 
-    pub fn update_shard_blocks(&self, last_mc_state: &ShardStateStuff) -> Result<()> {
+    pub fn update_shard_blocks(&self, last_mc_state: &Arc<ShardStateStuff>) -> Result<()> {
         self.last_mc_seq_no.store(last_mc_state.block_id().seq_no(), Ordering::Relaxed);
         let mut removed_list = string_builder::Builder::default();
         for block in self.shard_blocks.iter() {

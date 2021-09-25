@@ -9,7 +9,7 @@ use storage::{
         ARCHIVE_PACKAGE_SIZE, package::read_package_from, 
         package_entry_id::PackageEntryId
     },
-    types::BlockHandle
+    block_handle_db::BlockHandle
 };
 use tokio::task::JoinHandle;
 use ton_block::BlockIdExt;

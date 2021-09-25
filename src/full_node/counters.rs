@@ -1,3 +1,4 @@
+use adnl::common::add_unbound_object_to_map_with_update;
 use std::{
     time::{SystemTime, UNIX_EPOCH},
     sync::atomic::{AtomicU32, Ordering},
@@ -24,7 +25,7 @@ impl TpsCounter {
     pub fn submit_transactions(&self, block_time: u64, tr_count: usize) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         if now >= block_time && now - block_time <= MAX_TPS_PERIOD_SEC + TPS_PERIOD_LAG {
-            adnl::common::add_object_to_map_with_update(
+            add_unbound_object_to_map_with_update(
                 &self.transactions,
                 block_time,
                 |found| if let Some(a) = found {

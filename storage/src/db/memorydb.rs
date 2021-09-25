@@ -8,10 +8,18 @@ use std::sync::{Arc, Mutex};
 use fnv::FnvHashMap;
 use ton_types::Result;
 
+pub type MemoryDbMap = Arc<Option<Mutex<FnvHashMap<Vec<u8>, Vec<u8>>>>>;
+
 /// In-memory key-value collection
 #[derive(Debug, Clone)]
 pub struct MemoryDb {
-    map: Arc<Option<Mutex<FnvHashMap<Vec<u8>, Vec<u8>>>>>
+    map: MemoryDbMap
+}
+
+impl Default for MemoryDb {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Implementation of in-memory key-value collection
@@ -31,7 +39,7 @@ impl MemoryDb {
         if let Some(ref map) = *self.map {
             Ok(map)
         } else {
-            Err(StorageError::DbIsDropped)?
+            Err(StorageError::DbIsDropped.into())
         }
     }
 }
@@ -137,13 +145,13 @@ enum PendingOperation {
 
 #[derive(Debug)]
 pub struct MemoryDbTransaction {
-    db_map: Arc<Option<Mutex<FnvHashMap<Vec<u8>, Vec<u8>>>>>,
+    db_map: MemoryDbMap,
     pending: Mutex<Vec<PendingOperation>>,
 }
 
 /// Implementation of transaction for MemoryDb.
 impl MemoryDbTransaction {
-    fn new(db_map: Arc<Option<Mutex<FnvHashMap<Vec<u8>, Vec<u8>>>>>) -> Self {
+    fn new(db_map: MemoryDbMap) -> Self {
         Self {
             db_map,
             pending: Mutex::new(Vec::new()),

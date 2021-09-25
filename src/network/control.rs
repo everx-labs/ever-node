@@ -6,13 +6,13 @@ use crate::{
     validator::validator_utils::validatordescr_to_catchain_node
 };
 use adnl::{
-    common::{deserialize, serialize, QueryResult, Subscriber, AdnlPeers},
+    common::{deserialize, QueryResult, Subscriber, AdnlPeers},
     server::{AdnlServer, AdnlServerConfig}
 };
 use std::{ops::Deref, sync::Arc, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
 use ton_api::{
     ton::{
-        self, bytes, PublicKey, TLObject, accountaddress::AccountAddress, raw::fullaccountstate::FullAccountState,
+        self, bytes, PublicKey, TLObject, accountaddress::AccountAddress, raw::shardaccountstate::ShardAccountState,
         engine::validator::{
             keyhash::KeyHash, onestat::OneStat, signature::Signature, stats::Stats, Success
         },
@@ -24,8 +24,8 @@ use ton_api::{
     },
     IntoBoxed,
 };
-use ton_types::{fail, error, Result, serialize_toc};
-use ton_block::{BlockIdExt, MsgAddressInt, Serializable};
+use ton_types::{fail, error, Result, UInt256};
+use ton_block::{generate_test_account_by_init_code_hash, BlockIdExt, MsgAddressInt, ShardAccount, Serializable};
 use ton_block_json::serialize_config_param;
 
 pub struct ControlServer {
@@ -76,233 +76,199 @@ impl ControlQuerySubscriber {
         ret
     }
 
-    async fn get_config_params(&self, param_number: u32) -> Result<ton::lite_server::configinfo::ConfigInfo> {
-        if let Some(engine) = self.engine.as_ref() {
-            let mc_state = engine.load_last_applied_mc_state().await?;
-            let config_params = mc_state.config_params()?;
-            let config_param = serialize_config_param(&config_params, param_number)?;
-            let config_info = ConfigInfo {
-                mode: 0,
-                id: convert_block_id_ext_blk2api(mc_state.block_id()),
-                state_proof: bytes(vec!()),
-                config_proof: bytes(config_param.into_bytes())
-            };
-
-            Ok(config_info)
-        } else {
-            fail!("Engine was not set!");
-        }
+    fn engine(&self) -> Result<&Arc<dyn EngineOperations>> {
+        self.engine.as_ref().ok_or_else(|| error!("Engine was not set!"))
     }
 
-    async fn get_account_state(&self, address: AccountAddress, workchain: i32) -> Result<ton_api::ton::data::Data> {
-        if let Some(engine) = self.engine.as_ref() {
-            let addr = MsgAddressInt::from_str(&address.account_address)?;
-            let mc_state = if addr.is_masterchain() {
+    async fn get_config_params(&self, param_number: u32) -> Result<ton::lite_server::configinfo::ConfigInfo> {
+        let engine = self.engine()?;
+        let mc_state = engine.load_last_applied_mc_state().await?;
+        let config_params = mc_state.config_params()?;
+        let config_param = serialize_config_param(&config_params, param_number)?;
+        let config_info = ConfigInfo {
+            mode: 0,
+            id: convert_block_id_ext_blk2api(mc_state.block_id()),
+            state_proof: ton::bytes(vec!()),
+            config_proof: ton::bytes(config_param.into_bytes())
+        };
+
+        Ok(config_info)
+    }
+
+    fn get_test_account(
+        addr: &MsgAddressInt,
+    ) -> Result<Option<ShardAccount>> {
+        let account = generate_test_account_by_init_code_hash(false);
+        let addr_account = account.get_addr().ok_or_else(|| error!("address from test account not found!"))?;
+
+        let result = if addr_account.to_string() == addr.to_string() {
+            let shard_account = ShardAccount::with_params(&account, UInt256::default(), 0)?;
+            Some(shard_account)
+        } else {
+            None
+        };
+        
+        Ok(result)
+    }
+
+    async fn get_account_state(&self, address: AccountAddress) -> Result<ton_api::ton::raw::ShardAccountState> {
+        let addr = MsgAddressInt::from_str(&address.account_address)?;
+        let shard_account_opt = if let Some(engine) = self.engine.as_ref() {
+            let state = if addr.is_masterchain() {
                 engine.load_last_applied_mc_state().await?
             } else {
                 let mc_block_id = engine.load_shard_client_mc_block_id()?;
-                let mc_block_id = mc_block_id.ok_or_else(|| error!("shard_client_mc_block_id can`t load!"))?;
-                engine.load_state(&mc_block_id).await?
-            };
-            
-            let state = if addr.is_masterchain() {
-                    mc_state
-            } else {
+                let mc_block_id = mc_block_id.ok_or_else(|| error!("Cannot load shard_client_mc_block_id!"))?;
+                let mc_state = engine.load_state(&mc_block_id).await?;
+
                 let mut shard_state = None;
-                for id in mc_state.shard_hashes()?.top_blocks(&[workchain])? {
+                for id in mc_state.top_blocks(addr.workchain_id())? {
                     if id.shard().contains_account(addr.address().clone())? {
                         shard_state = engine.load_state(&id).await.ok();
                         break;
                     }
                 }
-                shard_state.ok_or_else(|| error!("Cannot found actual state from account {}", &address.account_address))?
+                shard_state.ok_or_else(|| error!("Cannot find actual shard for account {}", &address.account_address))?
             };
 
-            let shard_account = state.state()
-                .read_accounts()?
-                .account(&addr.address())?
-                .ok_or_else(|| error!("Error load account {} from state", &address.account_address))?;
-
-            let account = shard_account.read_account()?;
-
-            let code = account.get_code()
-                .ok_or_else(|| error!("Cannot load code from account {}", &address.account_address))?;
-
-            //let data = account.get_data()
-            //    .ok_or_else(|| error!("Cannot load data from account {}", &address.account_address))?;
-
-            let transaction_id = ton::internal::transactionid::TransactionId {
-                lt: shard_account.last_trans_lt() as i64,
-                hash: bytes(shard_account.last_trans_hash().as_slice().to_vec()),
-            };
-            let account_state = FullAccountState {
-                balance: 0,
-                code: bytes(serialize_toc(&code)?),
-                //data: bytes(serialize_toc(&data)?),
-                data: bytes(serialize_toc(&shard_account.account_cell())?),
-                last_transaction_id: transaction_id,
-                block_id: convert_block_id_ext_blk2api(state.block_id()),
-                frozen_hash: bytes(account.status().write_to_bytes()?),
-                sync_utime: 0
-            };
-
-            let account = ton_api::ton::data::Data {
-                bytes: ton_api::secure::SecureBytes::new(serialize(&account_state.into_boxed())?)
-            };
-
-            Ok(account)
+            state.shard_account(&addr.address())?
         } else {
-            fail!("Engine was not set!");
-        }
+            // For test server
+            Self::get_test_account(&addr)?
+        };
+
+        let result = match shard_account_opt {
+            Some(shard_account) => {
+                ShardAccountState {
+                    shard_account: bytes(shard_account.write_to_bytes()?),
+                }.into_boxed()
+            },
+            None => {
+                ton_api::ton::raw::ShardAccountState::Raw_ShardAccountNone
+            }
+        };
+        Ok(result)
+    }
+
+    fn add_stats(stats: &mut Vec<OneStat>, key: impl ToString, value: impl ToString) {
+        stats.push(OneStat {
+            key: key.to_string(),
+            value: value.to_string()
+        })
     }
 
     async fn get_stats(&self) -> Result<Stats> {
-        if let Some(engine) = self.engine.as_ref() {
-            let mut stats: ton::vector<ton::Bare, OneStat> = ton::vector::default();
+        let engine = self.engine()?;
+        let mut stats = Vec::new();
 
-            let mc_block_id = if let Some(id) = engine.load_last_applied_mc_block_id()? {
-                id
-            } else {
-                stats.0.push(OneStat {
-                    key: "masterchainblock".to_string(),
-                    value: "not set".to_string()
-                });
-                return Ok(Stats {stats: stats})
-            };
-
-            // masterchainblocktime
-            let mc_block_handle = engine.load_block_handle(&mc_block_id)?.ok_or_else(
-                || error!("Cannot load handle for block {}", &mc_block_id)
-            )?;
-            stats.0.push(OneStat {
-                key: "masterchainblocktime".to_string(),
-                value: mc_block_handle.gen_utime()?.to_string()
-            });
-
-            // masterchainblocknumber
-            stats.0.push(OneStat {
-                key: "masterchainblocknumber".to_string(),
-                value: mc_block_id.seq_no().to_string()
-            });
-
-            // timediff
-            let diff = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i32 - 
-                mc_block_handle.gen_utime()? as i32;
-
-            stats.0.push(OneStat {
-                key: "timediff".to_string(),
-                value: diff.to_string()
-            });
-
-            // in_current_vset_p34
-            let adnl_ids = self.config.get_actual_validator_adnl_ids()?;
-            let mc_state = engine.load_last_applied_mc_state().await?;
-            let current = mc_state.config_params()?.validator_set()?.list().iter().any(|val| {
-                match validatordescr_to_catchain_node(val) {
-                    Ok(catchain_node) => adnl_ids.contains(&catchain_node.adnl_id),
-                    _ => false
-                }
-            });
-            stats.0.push(OneStat {
-                key: "in_current_vset_p34".to_string(),
-                value: current.to_string()
-            });
-
-            // in_next_vset_p36
-            let next = mc_state.config_params()?.next_validator_set()?.list().iter().any(|val| {
-                match validatordescr_to_catchain_node(val) {
-                    Ok(catchain_node) => adnl_ids.contains(&catchain_node.adnl_id),
-                    _ => false
-                }
-            });
-            stats.0.push(OneStat {
-                key: "in_next_vset_p36".to_string(), 
-                value: next.to_string()
-            });
-
-            let value = match engine.load_last_applied_mc_state_or_zerostate().await {
-                Ok(mc_state) => mc_state.block_id().to_string(),
-                Err(err) => err.to_string()
-            };
-            let key = "last applied masterchain block id".to_string();
-            let value = format!("\"{}\"", value);
-            stats.0.push(OneStat { key, value });
-
-            let value = match engine.processed_workchain().await {
-                Ok((true, _workchain_id)) => "masterchain".to_string(),
-                Ok((false, workchain_id)) => format!("{}", workchain_id),
-                Err(err) => err.to_string()
-            };
-            let key = "processed workchain".to_string();
-            stats.0.push(OneStat { key, value });
-
-            // validation_stats
-            let validation_stats = engine.validation_status();
-
-            let mut stat = String::new();
-            let ago = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-
-            for item in validation_stats.iter() {
-                stat.push_str("shard: ");
-                stat.push_str(&item.key().to_string()); 
-                stat.push_str(" - ");
-                if item.val() == &0 {
-                    stat.push_str("never");
-                } else {
-                    stat.push_str(&(ago - item.val()).to_string());
-                    stat.push_str(" sec ago");
-                }
-                stat.push_str("\t");
-            }
-
-            let value = format!("\"{}\"", stat.to_string()); 
-            stats.0.push(OneStat {
-                key: "validation_stats".to_string(), 
-                value: value
-            });
-
-            // collation_stats
-            let mut stat = String::new();
-            let collation_stats = engine.collation_status();
-            for item in collation_stats.iter() {
-                stat.push_str("shard: ");
-                stat.push_str(&item.key().to_string()); 
-                stat.push_str(" - ");
-                if item.val() == &0 {
-                    stat.push_str("never");
-                } else {
-                    stat.push_str(&(ago - item.val()).to_string());
-                    stat.push_str(" sec ago");
-                }
-                stat.push_str("\t");
-            }
-
-            let value = format!("\"{}\"", stat.to_string()); 
-            stats.0.push(OneStat {
-                key: "collation_stats".to_string(), 
-                value: value
-            });
-
-            // tps_10
-            if let Ok(tps) = engine.calc_tps(10) {
-                stats.0.push(OneStat {
-                    key: "tps_10".to_string(), 
-                    value: tps.to_string()
-                });
-            }
-
-            // tps_300
-            if let Ok(tps) = engine.calc_tps(300) {
-                stats.0.push(OneStat {
-                    key: "tps_300".to_string(), 
-                    value: tps.to_string()
-                });
-            }
-
-            Ok(Stats {stats})
+        let mc_block_id = if let Some(id) = engine.load_last_applied_mc_block_id()? {
+            id
         } else {
-            fail!("Engine was not set!");
+            Self::add_stats(&mut stats, "masterchainblock", "not set");
+            return Ok(Stats {stats: stats.into()})
+        };
+
+        // masterchainblocktime
+        let mc_block_handle = engine.load_block_handle(&mc_block_id)?
+            .ok_or_else(|| error!("Cannot load handle for block {}", &mc_block_id))?;
+        
+        Self::add_stats(&mut stats, "masterchainblocktime", mc_block_handle.gen_utime()?);
+
+        // masterchainblocknumber
+        Self::add_stats(&mut stats, "masterchainblocknumber", mc_block_handle.id().seq_no());
+
+        // timediff
+        let diff = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i32 - 
+            mc_block_handle.gen_utime()? as i32;
+
+        Self::add_stats(&mut stats, "timediff", diff);
+
+        // in_current_vset_p34
+        let adnl_ids = self.config.get_actual_validator_adnl_ids()?;
+        let mc_state = engine.load_last_applied_mc_state().await?;
+        let current = mc_state.config_params()?.validator_set()?.list().iter().any(|val| {
+            match validatordescr_to_catchain_node(val) {
+                Ok(catchain_node) => adnl_ids.contains(&catchain_node.adnl_id),
+                _ => false
+            }
+        });
+        Self::add_stats(&mut stats, "in_current_vset_p34", current);
+
+        // in_next_vset_p36
+        let next = mc_state.config_params()?.next_validator_set()?.list().iter().any(|val| {
+            match validatordescr_to_catchain_node(val) {
+                Ok(catchain_node) => adnl_ids.contains(&catchain_node.adnl_id),
+                _ => false
+            }
+        });
+        Self::add_stats(&mut stats, "in_next_vset_p36", next);
+
+        let value = match engine.load_last_applied_mc_state_or_zerostate().await {
+            Ok(mc_state) => mc_state.block_id().to_string(),
+            Err(err) => err.to_string()
+        };
+        let value = format!("\"{}\"", value);
+        Self::add_stats(&mut stats, "last applied masterchain block id", value);
+
+        let value = match engine.processed_workchain().await {
+            Ok((true, _workchain_id)) => "masterchain".to_string(),
+            Ok((false, workchain_id)) => format!("{}", workchain_id),
+            Err(err) => err.to_string()
+        };
+        Self::add_stats(&mut stats, "processed workchain", value);
+
+        // validation_stats
+        let validation_stats = engine.validation_status();
+
+        let mut stat = String::new();
+        let ago = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+
+        for item in validation_stats.iter() {
+            stat.push_str("shard: ");
+            stat.push_str(&item.key().to_string()); 
+            stat.push_str(" - ");
+            if item.val() == &0 {
+                stat.push_str("never");
+            } else {
+                stat.push_str(&(ago - item.val()).to_string());
+                stat.push_str(" sec ago");
+            }
+            stat.push_str("\t");
         }
+
+        let value = format!("\"{}\"", stat.to_string()); 
+        Self::add_stats(&mut stats, "validation_stats", value);
+
+        // collation_stats
+        let mut stat = String::new();
+        let collation_stats = engine.collation_status();
+        for item in collation_stats.iter() {
+            stat.push_str("shard: ");
+            stat.push_str(&item.key().to_string()); 
+            stat.push_str(" - ");
+            if item.val() == &0 {
+                stat.push_str("never");
+            } else {
+                stat.push_str(&(ago - item.val()).to_string());
+                stat.push_str(" sec ago");
+            }
+            stat.push_str("\t");
+        }
+
+        let value = format!("\"{}\"", stat.to_string()); 
+        Self::add_stats(&mut stats, "collation_stats", value);
+
+        // tps_10
+        if let Ok(tps) = engine.calc_tps(10) {
+            Self::add_stats(&mut stats, "tps_10", tps);
+        }
+
+        // tps_300
+        if let Ok(tps) = engine.calc_tps(300) {
+            Self::add_stats(&mut stats, "tps_300", tps);
+        }
+
+        Ok(Stats {stats: stats.into()})
     }
 
     async fn process_generate_keypair(&self) -> Result<KeyHash> {
@@ -459,10 +425,10 @@ impl Subscriber for ControlQuerySubscriber {
             }
             Err(query) => query
         };
-        let query = match query.downcast::<ton::rpc::raw::GetAccount>() {
+        let query = match query.downcast::<ton::rpc::raw::GetShardAccountState>() {
             Ok(account) => {
-                let answer = self.get_account_state(account.account_address, account.workchain).await?;
-                return QueryResult::consume_boxed(answer.into_boxed(), None)
+                let answer = self.get_account_state(account.account_address).await?;
+                return QueryResult::consume_boxed(answer, None)
             },
             Err(query) => query
         };

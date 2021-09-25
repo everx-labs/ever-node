@@ -1,7 +1,12 @@
-use adnl::{ 
+use crate::engine_traits::EngineAlloc;
+#[cfg(feature = "telemetry")]
+use crate::engine_traits::EngineTelemetry;
+
+use adnl::{
+    declare_counted, 
     common::{
-        AdnlPeers, Answer, KeyId, KeyOption, QueryResult, serialize, serialize_append, 
-        tag_from_object, TaggedByteSlice, TaggedTlObject, Wait
+        AdnlPeers, Answer, CountedObject, Counter, KeyId, KeyOption, QueryResult, 
+        serialize, serialize_append, tag_from_object, TaggedByteSlice, TaggedTlObject, Wait
     },
     node::AdnlNode,
 };
@@ -14,21 +19,25 @@ use rldp::RldpNode;
 use std::{
     collections::HashMap, io::Cursor, sync::{Arc, atomic::{self, AtomicBool}}, time::Instant
 };
+#[cfg(feature = "telemetry")]
+use std::sync::atomic::Ordering;
 use ton_api::{
     Deserializer, IntoBoxed, ton::{ ton_node::Broadcast, TLObject }
 };
 use ton_types::{error, fail, Result};
 
-pub struct CatchainClient {
-    runtime_handle : tokio::runtime::Handle,
-    overlay_id: Arc<PrivateOverlayShortId>,
-    overlay: Arc<OverlayNode>,
-    rldp: Arc<RldpNode>,
-    local_validator_key: Arc<KeyOption>,
-    validator_keys: HashMap<Arc<KeyId>, Arc<KeyId>>,
-    consumer: Arc<CatchainClientConsumer>,
-    is_stop: Arc<AtomicBool>,
-}
+declare_counted!(
+    pub struct CatchainClient {
+        runtime_handle : tokio::runtime::Handle,
+        overlay_id: Arc<PrivateOverlayShortId>,
+        overlay: Arc<OverlayNode>,
+        rldp: Arc<RldpNode>,
+        local_validator_key: Arc<KeyOption>,
+        validator_keys: HashMap<Arc<KeyId>, Arc<KeyId>>,
+        consumer: Arc<CatchainClientConsumer>,
+        is_stop: Arc<AtomicBool>
+    }
+);
 
 impl CatchainClient {
     const TARGET:  &'static str = "catchain_network";
@@ -41,7 +50,10 @@ impl CatchainClient {
         nodes: &Vec<CatchainNode>,
         local_adnl_key: &Arc<KeyOption>,
         local_validator_key: Arc<KeyOption>,
-        catchain_listener: CatchainOverlayListenerPtr
+        catchain_listener: CatchainOverlayListenerPtr,
+        #[cfg(feature = "telemetry")]
+        telemetry: &Arc<EngineTelemetry>,
+        allocated: &Arc<EngineAlloc>
     ) -> Result<Self> {
 
         let mut keys = HashMap::new();
@@ -72,7 +84,7 @@ impl CatchainClient {
         );
         overlay.add_consumer(&overlay_id, consumer.clone())?;
 
-        Ok(CatchainClient {
+        let ret = CatchainClient {
             runtime_handle,
             overlay_id: overlay_id.clone(),
             overlay: overlay.clone(),
@@ -80,8 +92,13 @@ impl CatchainClient {
             local_validator_key: local_validator_key,
             validator_keys: keys,
             consumer: consumer,
-            is_stop: Arc::new(AtomicBool::new(false))
-        })
+            is_stop: Arc::new(AtomicBool::new(false)),
+            counter: allocated.catchain_clients.clone().into()
+        };
+        #[cfg(feature = "telemetry")]
+        telemetry.catchain_clients.update(allocated.catchain_clients.load(Ordering::Relaxed));
+        Ok(ret)
+
     }
 
     pub async fn stop(&self) {

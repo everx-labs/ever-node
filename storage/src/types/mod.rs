@@ -1,5 +1,4 @@
 
-mod block_handle;
 mod block_id;
 mod block_meta;
 mod cell_id;
@@ -13,7 +12,6 @@ mod shard_ident_key;
 mod status_key;
 mod storage_cell;
 
-pub use block_handle::*;
 pub use block_id::*;
 pub use block_meta::*;
 pub use cell_id::*;

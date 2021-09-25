@@ -1,6 +1,9 @@
 use crate::{
-    config::{ ConfigEvent, NodeConfigHandler, NodeConfigSubscriber, TonNodeConfig, ConnectivityCheckBroadcastConfig},
-    engine_traits::{OverlayOperations, PrivateOverlayOperations},
+    config::{ 
+        ConfigEvent, NodeConfigHandler, NodeConfigSubscriber, TonNodeConfig, 
+        ConnectivityCheckBroadcastConfig
+    },
+    engine_traits::{EngineAlloc, OverlayOperations, PrivateOverlayOperations},
     network::{
         catchain_client::CatchainClient,
         full_node_client::{NodeClientOverlay, FullNodeOverlayClient},
@@ -8,8 +11,19 @@ use crate::{
     },
     types::awaiters_pool::AwaitersPool,
 };
+#[cfg(feature = "telemetry")]
+use crate::{
+    engine_traits::EngineTelemetry, 
+    network::telemetry::{FullNodeNetworkTelemetry, FullNodeNetworkTelemetryKind}
+};
+
 use adnl::{
-    common::{KeyId, KeyOption, serialize, tag_from_unboxed_type, TaggedByteSlice}, node::AdnlNode
+    declare_counted, 
+    common::{
+        add_counted_object_to_map, CountedObject, Counter, KeyId, KeyOption, serialize, 
+        tag_from_unboxed_type, TaggedByteSlice
+    }, 
+    node::AdnlNode
 };
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
@@ -33,8 +47,6 @@ use ton_api::ton::{
     int256, bytes,
     ton_node::broadcast::ConnectivityCheckBroadcast,
 };
-#[cfg(feature = "telemetry")]
-use crate::network::telemetry::{FullNodeNetworkTelemetry, FullNodeNetworkTelemetryKind};
 
 type Cache<K, T> = lockfree::map::Map<K, T>;
 
@@ -53,33 +65,46 @@ pub struct NodeNetwork {
     #[cfg(feature = "telemetry")]
     telemetry: Arc<FullNodeNetworkTelemetry>,
     #[cfg(feature = "telemetry")]
-    tag_connectivity_check_broadcast: u32
+    tag_connectivity_check_broadcast: u32,
+    #[cfg(feature = "telemetry")]
+    engine_telemetry: Arc<EngineTelemetry>,
+    engine_allocated: Arc<EngineAlloc>
 }
+
+declare_counted!(
+    struct PeerContext {
+        count: AtomicI32
+    }
+);
 
 struct ValidatorContext {
     private_overlays: Arc<Cache<Arc<OverlayShortId>, Arc<CatchainClient>>>,
     actual_local_adnl_keys: Arc<lockfree::set::Set<Arc<KeyId>>>,
-    all_validator_peers: Arc<Cache<Arc<KeyId>, Arc<AtomicI32>>>,
-    sets_contexts: Arc<Cache<UInt256, ValidatorSetContext>>,
+    all_validator_peers: Arc<Cache<Arc<KeyId>, Arc<PeerContext>>>,
+    sets_contexts: Arc<Cache<UInt256, Arc<ValidatorSetContext>>>,
     current_set: Arc<Cache<u8, UInt256>>, // zero or one element [0]
 }
 
-#[derive(Default)]
-struct ConnectivityStat {
-    last_short_got: AtomicU64,
-    last_short_latency: AtomicU64,
-    last_long_got: AtomicU64,
-    last_long_latency: AtomicU64,
-}
+//#[derive(Default)]
+declare_counted!(
+    struct ConnectivityStat {
+        last_short_got: AtomicU64,
+        last_short_latency: AtomicU64,
+        last_long_got: AtomicU64,
+        last_long_latency: AtomicU64
+    }
+);
 
-#[derive(Clone)]
-struct ValidatorSetContext {
-    validator_peers: Vec<Arc<KeyId>>,
-    validator_key: Arc<KeyOption>,
-    validator_adnl_key: Arc<KeyOption>,
-    election_id: usize,
-    connectivity_stat: Arc<Cache<Arc<KeyId>, ConnectivityStat>>, // (last short broadcast got, last long -//-)
-}
+//    #[derive(Clone)]
+declare_counted!(
+    struct ValidatorSetContext {
+        validator_peers: Vec<Arc<KeyId>>,
+        validator_key: Arc<KeyOption>,
+        validator_adnl_key: Arc<KeyOption>,
+        election_id: usize,
+        connectivity_stat: Arc<Cache<Arc<KeyId>, ConnectivityStat>> // (last short broadcast got, last long -//-)
+    }
+);
 
 impl NodeNetwork {
 
@@ -91,7 +116,13 @@ impl NodeNetwork {
     const PERIOD_START_FIND_DHT_NODE: u64 = 60; // seconds
     const PERIOD_UPDATE_PEERS: u64 = 5;         // seconds
 
-    pub async fn new(config: TonNodeConfig) -> Result<Arc<Self>> {
+    pub async fn new(
+        config: TonNodeConfig,
+        #[cfg(feature = "telemetry")]
+        engine_telemetry: Arc<EngineTelemetry>,
+        engine_allocated: Arc<EngineAlloc> 
+    ) -> Result<Arc<Self>> {
+
         let global_config = config.load_global_config()?;
         let masterchain_zero_state_id = global_config.zero_state()?;
         let mut connectivity_check_config = config.connectivity_check_config().clone();
@@ -152,7 +183,12 @@ impl NodeNetwork {
             masterchain_overlay_short_id,
             overlays: Arc::new(Cache::new()),
             validator_context,
-            overlay_awaiters: AwaitersPool::new("overlay_awaiters"),
+            overlay_awaiters: AwaitersPool::new(
+                "overlay_awaiters",
+                #[cfg(feature = "telemetry")]
+                engine_telemetry.clone(),
+                engine_allocated.clone()
+            ),
             runtime_handle: tokio::runtime::Handle::current(),
             config_handler,
             connectivity_check_config,
@@ -162,7 +198,10 @@ impl NodeNetwork {
             ),
             #[cfg(feature = "telemetry")]
             tag_connectivity_check_broadcast: 
-                tag_from_unboxed_type::<ConnectivityCheckBroadcast>()
+                tag_from_unboxed_type::<ConnectivityCheckBroadcast>(),
+            #[cfg(feature = "telemetry")]
+            engine_telemetry,
+            engine_allocated
         });
 
         NodeConfigHandler::start_sheduler(nn.config_handler.clone(), config_handler_context, vec![nn.clone()])?;
@@ -183,12 +222,23 @@ impl NodeNetwork {
         self.config_handler.clone()
     }
 
-    fn try_add_new_elem<K: Hash + Ord + Clone, T: Clone>(
+    fn try_add_new_elem<K: Hash + Ord + Clone, T: CountedObject>(
         &self,
+        cache: &Arc<Cache<K, Arc<T>>>,
         id: &K,
-        value: T,
-        cache: &Arc<Cache<K, T>>
-    ) -> T {
+        factory: impl FnMut() -> Result<Arc<T>>
+    ) -> Result<Arc<T>> {
+        if let Some(found) = cache.get(id) { 
+            Ok(found.val().clone())
+        } else { 
+            add_counted_object_to_map(cache, id.clone(), factory)?;
+            if let Some(found) = cache.get(id) { 
+                Ok(found.val().clone())
+            } else {
+                fail!("Cannot add element to cache") 
+            } 
+        }
+/*
         let insertion = cache.insert_with(
             id.clone(),
             |_, prev_gen_val, updated_pair | if updated_pair.is_some() {
@@ -218,6 +268,7 @@ impl NodeNetwork {
                 cache.get(id).unwrap().val().clone()
             }
         }
+*/
     }
 
     fn periodic_store_ip_addr(
@@ -458,7 +509,7 @@ impl NodeNetwork {
                 if client_overlay.peers().count() >= neighbours::MAX_NEIGHBOURS {
                     log::trace!("finish find overlay nodes.");
                     return;
-                }
+                } 
                 tokio::time::sleep(Duration::from_secs(Self::PERIOD_UPDATE_PEERS)).await;
             }
         });
@@ -483,33 +534,44 @@ impl NodeNetwork {
 
         let neighbours = Neighbours::new(&peers, &self.dht, &self.overlay, overlay_id.0.clone())?;
         let peers = Arc::new(neighbours);
-
-        let client_overlay = NodeClientOverlay::new(
-            overlay_id.0.clone(),
-            self.overlay.clone(),
-            self.rldp.clone(),
-            Arc::clone(&peers),
-            #[cfg(feature = "telemetry")]
-            self.telemetry.clone()
-        );
-
-        let client_overlay = Arc::new(client_overlay);
+        let client_overlay = self.try_add_new_elem(
+            &self.overlays,
+            &overlay_id.0, 
+            || {
+                let ret = NodeClientOverlay::new(
+                    overlay_id.0.clone(),
+                    self.overlay.clone(),
+                    self.rldp.clone(),
+                    Arc::clone(&peers),
+                    #[cfg(feature = "telemetry")]
+                    self.telemetry.clone(),
+                    #[cfg(feature = "telemetry")]
+                    self.engine_telemetry.clone(),
+                    self.engine_allocated.clone()
+                );
+                Ok(Arc::new(ret))
+            }
+        )?;
 
         Neighbours::start_ping(Arc::clone(&peers));
         Neighbours::start_reload(Arc::clone(&peers));
         Neighbours::start_rnd_peers_process(Arc::clone(&peers));
         NodeNetwork::start_update_peers(self.clone(), &client_overlay);
-        NodeNetwork::process_overlay_peers(peers.clone(), self.dht.clone(), self.overlay.clone(), overlay_id.0.clone());
-        let result = self.try_add_new_elem(&overlay_id.0, client_overlay, &self.overlays);
+        NodeNetwork::process_overlay_peers(
+            peers.clone(), 
+            self.dht.clone(), 
+            self.overlay.clone(), 
+            overlay_id.0.clone()
+        );
         log::info!("Started Overlay {}", &overlay_id.0);
-        Ok(result as Arc<dyn FullNodeOverlayClient>)
+        Ok(client_overlay as Arc<dyn FullNodeOverlayClient>)
     }
 
     fn search_validator_keys(
         local_adnl_id: Arc<KeyId>,
         dht: Arc<DhtNode>,
         overlay: Arc<OverlayNode>,
-        validators_contexts: Arc<Cache<UInt256, ValidatorSetContext>>,
+        validators_contexts: Arc<Cache<UInt256, Arc<ValidatorSetContext>>>,
         validator_list_id: UInt256,
         validators: Vec<CatchainNode>
     ) {
@@ -654,7 +716,9 @@ impl NodeNetwork {
         &self.telemetry
     }
 
-    fn current_validator_set_context<'a>(&'a self) -> Option<lockfree::map::ReadGuard<'a, UInt256, ValidatorSetContext>>  {
+    fn current_validator_set_context<'a>(
+        &'a self
+    ) -> Option<lockfree::map::ReadGuard<'a, UInt256, Arc<ValidatorSetContext>>>  {
         let id = self.validator_context.current_set.get(&0)?;
         self.validator_context.sets_contexts.get(id.val())
     }
@@ -833,7 +897,7 @@ impl PrivateOverlayOperations for NodeNetwork {
                         self.adnl.key_by_id(&validator.adnl_id)?
                     }
                 };
-                (validator_key, validator_adnl_key, election_id as usize)
+                (Arc::new(validator_key), validator_adnl_key, election_id as usize)
             },
             None => { return Ok(None); }
         };
@@ -850,8 +914,24 @@ impl PrivateOverlayOperations for NodeNetwork {
             }
             peers_ids.push(val.adnl_id.clone());
             lost_validators.push(val.clone());
-            connectivity_stat.insert(val.adnl_id.clone(), Default::default());
-
+            add_counted_object_to_map(
+                &connectivity_stat,
+                val.adnl_id.clone(),
+                || {
+                    let ret = ConnectivityStat {
+                        last_short_got: AtomicU64::new(0),
+                        last_short_latency: AtomicU64::new(0),
+                        last_long_got: AtomicU64::new(0),
+                        last_long_latency: AtomicU64::new(0),
+                        counter: self.engine_allocated.peer_stats.clone().into()
+                    };
+                    #[cfg(feature = "telemetry")]
+                    self.engine_telemetry.peer_stats.update(
+                        self.engine_allocated.peer_stats.load(Ordering::Relaxed)
+                    );
+                    Ok(ret)
+                }
+            )?;
             match self.dht.fetch_address(&val.adnl_id).await {
                 Ok(Some((addr, key))) => {
                     log::info!("addr: {:?}, key: {:x?}", &addr, &key);
@@ -869,19 +949,26 @@ impl PrivateOverlayOperations for NodeNetwork {
         }
 
         self.overlay.add_private_peers(local_validator_adnl_key.id(), peers)?;
-        let validator_set_context = ValidatorSetContext {
-            validator_peers: peers_ids,
-            validator_key: Arc::new(local_validator_key),
-            validator_adnl_key: local_validator_adnl_key.clone(),
-            election_id: election_id.clone(),
-            connectivity_stat,
-        };
 
         let context = self.try_add_new_elem(
+            &self.validator_context.sets_contexts,
             &validator_list_id.clone(),
-            validator_set_context,
-            &self.validator_context.sets_contexts
-        );
+            || {
+                let ret = ValidatorSetContext {
+                    validator_peers: peers_ids.clone(),
+                    validator_key: local_validator_key.clone(),
+                    validator_adnl_key: local_validator_adnl_key.clone(),
+                    election_id: election_id.clone(),
+                    connectivity_stat: connectivity_stat.clone(),
+                    counter: self.engine_allocated.validator_sets.clone().into()
+                };
+                #[cfg(feature = "telemetry")]
+                self.engine_telemetry.validator_sets.update(
+                    self.engine_allocated.validator_sets.load(Ordering::Relaxed)
+                );
+                Ok(Arc::new(ret))
+            }
+        )?;
 
         if !lost_validators.is_empty() {
             Self::search_validator_keys(
@@ -889,7 +976,7 @@ impl PrivateOverlayOperations for NodeNetwork {
                 self.dht.clone(), 
                 self.overlay.clone(),
                 self.validator_context.sets_contexts.clone(),
-                validator_list_id,
+                validator_list_id.clone(),
                 lost_validators
             );
         }
@@ -898,13 +985,23 @@ impl PrivateOverlayOperations for NodeNetwork {
             match self.validator_context.all_validator_peers.get(peer) {
                 None => { 
                     self.try_add_new_elem(
+                        &self.validator_context.all_validator_peers,
                         peer,
-                        Arc::new(AtomicI32::new(0)),
-                        &self.validator_context.all_validator_peers
-                    );
+                        || {
+                            let ret = PeerContext {
+                                count: AtomicI32::new(0),
+                                counter: self.engine_allocated.validator_peers.clone().into()
+                            };
+                            #[cfg(feature = "telemetry")]
+                            self.engine_telemetry.validator_peers.update(
+                                self.engine_allocated.validator_peers.load(Ordering::Relaxed)
+                            );
+                            Ok(Arc::new(ret))
+                        }
+                    )?;
                 },
                 Some(peer_context) => {
-                    peer_context.val().fetch_add(1, Ordering::Relaxed);
+                    peer_context.val().count.fetch_add(1, Ordering::Relaxed);
                 }
             }   
         }
@@ -932,7 +1029,7 @@ impl PrivateOverlayOperations for NodeNetwork {
                         removed_peers.push(peer.clone());
                     },
                     Some(peer_context) => {
-                        let val = peer_context.val().fetch_sub(1, Ordering::Relaxed);
+                        let val = peer_context.val().count.fetch_sub(1, Ordering::Relaxed);
                         if val <= 0 {
                             removed_peers_from_context.push(peer.clone());
                             removed_peers.push(peer.clone());
@@ -966,18 +1063,27 @@ impl PrivateOverlayOperations for NodeNetwork {
             .ok_or_else(|| error!("bad validator_list_id ({})!", validator_list_id.to_hex_string()))?;
         let adnl_key = self.adnl.key_by_tag(validator_set_context.val().election_id)?;
 
-        let client = CatchainClient::new(
-            &self.runtime_handle,
+        let client = self.try_add_new_elem(
+            &self.validator_context.private_overlays,
             overlay_short_id,
-            &self.overlay,
-            self.rldp.clone(),
-            nodes_public_keys,
-            &adnl_key,
-            validator_set_context.val().validator_key.clone(),
-            listener
+            || {
+                let ret = CatchainClient::new(
+                    &self.runtime_handle,
+                    overlay_short_id,
+                    &self.overlay,
+                    self.rldp.clone(),
+                    nodes_public_keys,
+                    &adnl_key,
+                    validator_set_context.val().validator_key.clone(),
+                    listener.clone(),
+                    #[cfg(feature = "telemetry")]
+                    &self.engine_telemetry,
+                    &self.engine_allocated
+                )?;
+                Ok(Arc::new(ret))
+            }
         )?;
 
-        let client = Arc::new(client);
         CatchainClient::run_wait_broadcast(
             client.clone(),
             &self.runtime_handle,
@@ -985,14 +1091,7 @@ impl PrivateOverlayOperations for NodeNetwork {
             &self.overlay,
             &client.validator_keys(),
             &client.catchain_listener());
-
-        let result = self.try_add_new_elem(
-            overlay_short_id,
-            client.clone(),
-            &self.validator_context.private_overlays
-        );
-
-        Ok(result  as Arc<dyn CatchainOverlay + Send>)
+        Ok(client as Arc<dyn CatchainOverlay + Send>)
     }
 
     fn stop_catchain_client(&self, overlay_short_id: &Arc<PrivateOverlayShortId>) {

@@ -3,7 +3,8 @@ use crate::{
     config::CollatorTestBundlesGeneralConfig,
     engine::{Engine, STATSD},
     engine_traits::{
-        ChainRange, EngineOperations, PrivateOverlayOperations, Server, ValidatedBlockStat
+        ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, Server, 
+        ValidatedBlockStat
     },
     error::NodeError,
     internal_db::{INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, SHARD_CLIENT_MC_BLOCK, BlockResult},
@@ -12,6 +13,12 @@ use crate::{
     ext_messages::{create_ext_message, EXT_MESSAGES_TRACE_TARGET},
     jaeger,
 };
+#[cfg(feature = "telemetry")]
+use crate::{
+    engine_traits::EngineTelemetry, full_node::telemetry::FullNodeTelemetry, 
+    network::telemetry::FullNodeNetworkTelemetry, validator::telemetry::CollatorValidatorTelemetry
+};
+
 use adnl::common::{KeyId, KeyOption};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
@@ -19,19 +26,13 @@ use catchain::{
 use overlay::{BroadcastSendInfo, PrivateOverlayShortId};
 use rand::Rng;
 use std::{sync::{atomic::Ordering, Arc}, ops::Deref};
-use storage::types::BlockHandle;
+use storage::block_handle_db::BlockHandle;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
 use ton_block::{
     MASTERCHAIN_ID, INVALID_WORKCHAIN_ID, BASE_WORKCHAIN_ID, SHARD_FULL,
     BlockIdExt, AccountIdPrefixFull, ShardIdent, Message,
 };
 use ton_types::{fail, error, Result, UInt256};
-#[cfg(feature = "telemetry")]
-use crate::{
-    full_node::telemetry::FullNodeTelemetry,
-    validator::telemetry::CollatorValidatorTelemetry,
-    network::telemetry::FullNodeNetworkTelemetry,
-};
 
 #[async_trait::async_trait]
 impl EngineOperations for Engine {
@@ -220,7 +221,7 @@ impl EngineOperations for Engine {
         }
     }
 
-    async fn load_last_applied_mc_state(&self) -> Result<ShardStateStuff> {
+    async fn load_last_applied_mc_state(&self) -> Result<Arc<ShardStateStuff>> {
         match self.load_last_applied_mc_block_id()? {
             Some(block_id) => {
                 self.load_state(&block_id).await
@@ -316,17 +317,20 @@ impl EngineOperations for Engine {
         master_id: &BlockIdExt,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
         attempts: Option<usize>
-    ) -> Result<ShardStateStuff> {
+    ) -> Result<Arc<ShardStateStuff>> {
         let overlay = self.get_full_node_overlay(
             block_id.shard().workchain_id(), 
             block_id.shard().shard_prefix_with_tag()
         ).await?;
         crate::full_node::state_helper::download_persistent_state(
-            block_id, master_id, overlay.deref(), active_peers, attempts
+            block_id, master_id, overlay.deref(), self, active_peers, attempts
         ).await
     }
 
-    async fn download_zerostate(&self, id: &BlockIdExt) -> Result<(ShardStateStuff, Vec<u8>)> {
+    async fn download_zerostate(
+        &self, 
+        id: &BlockIdExt
+    ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         self.download_zerostate_worker(id, None).await
     }
 
@@ -367,12 +371,12 @@ impl EngineOperations for Engine {
         self.db().load_block_proof_raw(handle, is_link).await
     }
 
-    async fn load_mc_zero_state(&self) -> Result<ShardStateStuff> {
+    async fn load_mc_zero_state(&self) -> Result<Arc<ShardStateStuff>> {
         let block_id = self.zero_state_id();
         self.load_state(block_id).await
     }
 
-    async fn load_state(&self, block_id: &BlockIdExt) -> Result<ShardStateStuff> {
+    async fn load_state(&self, block_id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
         if let Some(state) = self.shard_states_cache().get(block_id) {
             self.update_shard_states_cache_stat(true);
             Ok(state)
@@ -402,7 +406,7 @@ impl EngineOperations for Engine {
         id: &BlockIdExt,
         timeout_ms: Option<u64>,
         allow_block_downloading: bool
-    ) -> Result<ShardStateStuff> {
+    ) -> Result<Arc<ShardStateStuff>> {
         loop {
             let has_state = || {
                 Ok(self.load_block_handle(id)?.map(|h| h.has_state()).unwrap_or(false))
@@ -429,9 +433,9 @@ impl EngineOperations for Engine {
     async fn store_state(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: ShardStateStuff
-    ) -> Result<ShardStateStuff> {
-        let (state, saved) = self.db().store_shard_state_dynamic(handle, state, None)?;
+        state: Arc<ShardStateStuff>
+    ) -> Result<Arc<ShardStateStuff>> {
+        let (state, saved) = self.db().store_shard_state_dynamic(handle, &state, None)?;
         if saved {
             #[cfg(feature = "telemetry")]
             self.full_node_telemetry().new_pre_applied_block(handle.got_by_broadcast());
@@ -449,9 +453,9 @@ impl EngineOperations for Engine {
 
     async fn store_zerostate(
         &self, 
-        mut state: ShardStateStuff, 
+        mut state: Arc<ShardStateStuff>, 
         state_bytes: &[u8]
-    ) -> Result<(ShardStateStuff, Arc<BlockHandle>)> {
+    ) -> Result<(Arc<ShardStateStuff>, Arc<BlockHandle>)> {
         let handle = self.db().create_or_load_block_handle(
             state.block_id(), 
             None, 
@@ -502,7 +506,7 @@ impl EngineOperations for Engine {
         handle: &Arc<BlockHandle>,
         block: &BlockStuff,
         proof: Option<&BlockProofStuff>,
-        state: &ShardStateStuff,
+        state: &Arc<ShardStateStuff>,
         mc_seq_no: u32,
     )
     -> Result<()> {
@@ -533,7 +537,7 @@ impl EngineOperations for Engine {
         Ok(())
     }
 
-    async fn process_full_state_in_ext_db(&self, state: &ShardStateStuff)-> Result<()> {
+    async fn process_full_state_in_ext_db(&self, state: &Arc<ShardStateStuff>)-> Result<()> {
         for db in self.ext_db() {
             db.process_full_state(state).await?;
         }
@@ -750,6 +754,15 @@ impl EngineOperations for Engine {
     #[cfg(feature = "telemetry")]
     fn full_node_service_telemetry(&self) -> &FullNodeNetworkTelemetry {
         Engine::full_node_service_telemetry(self)
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn engine_telemetry(&self) -> &Arc<EngineTelemetry> {
+        Engine::engine_telemetry(self)
+    }
+
+    fn engine_allocated(&self) -> &Arc<EngineAlloc> {
+        Engine::engine_allocated(self)
     }
 
     fn calc_tps(&self, period: u64) -> Result<u32> {

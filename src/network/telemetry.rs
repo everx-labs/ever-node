@@ -42,7 +42,7 @@ impl FullNodeNetworkTelemetry {
         data: usize,
     ) {
         let time = time.as_millis() as u64;
-        adnl::common::add_object_to_map_with_update(
+        adnl::common::add_unbound_object_to_map_with_update(
             &self.queries,
             query,
             |found| if let Some(found) = found {

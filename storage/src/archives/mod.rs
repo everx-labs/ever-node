@@ -1,4 +1,4 @@
-use crate::types::BlockHandle;
+use crate::block_handle_db::BlockHandle;
 
 mod package_index_db;
 

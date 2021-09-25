@@ -4,13 +4,11 @@ use crate::{
     validator::validator_utils::{calc_subset_for_workchain, check_crypto_signatures},
 };
 
-use std::{
-    fmt,
-    cmp::{max, Ordering, PartialOrd, Ord},
-    io::{Write, Cursor},
-    convert::TryInto,
-};
 use bitflags::bitflags;
+use std::{
+    cmp::{max, Ordering, PartialOrd, Ord}, convert::TryInto, fmt, io::{Write, Cursor},
+    sync::{Arc, atomic::{AtomicI8, self}}
+};
 use ton_block::{
     Block, TopBlockDescr, BlockInfo, BlockIdExt, MerkleProof, McShardRecord, McStateExtra,
     Deserializable, HashmapAugType, BlockSignatures, CurrencyCollection, AddSub, ShardIdent,
@@ -44,6 +42,7 @@ pub struct TopBlockDescrStuff {
     chain_head_prev: Vec<BlockIdExt>,
     creators: Vec<UInt256>,
     is_fake: bool,
+    signarutes_validation_result: AtomicI8, // 0 did not check, -1 bad, 1 good
 }
 
 impl TopBlockDescrStuff {
@@ -131,6 +130,7 @@ impl TopBlockDescrStuff {
                 chain_head_prev,
                 creators,
                 is_fake,
+                signarutes_validation_result: AtomicI8::new(0)
             }
         )
     }
@@ -252,7 +252,7 @@ impl TopBlockDescrStuff {
         self.validate_internal(last_mc_block_id, last_mc_state_extra, vert_seq_no, res_flags, mode)
     }
 
-    pub fn validate(&self, last_mc_state: &ShardStateStuff) -> Result<i32> {
+    pub fn validate(&self, last_mc_state: &Arc<ShardStateStuff>) -> Result<i32> {
         let mut res_flags = 0;
 
         let last_mc_block_id = last_mc_state.block_id();
@@ -761,11 +761,16 @@ impl TopBlockDescrStuff {
         //     return Ok(clen as i32)
         // }
 
-        // if (sig_bad_) {
-        //     return td::Status::Error(
-        //         -666, std::string{"ShardTopBlockDescr for "} + block_id_.to_str() + " does not have valid signatures");
-        // }
-
+        match self.signarutes_validation_result.load(atomic::Ordering::Relaxed) {
+            -1 => fail!("ShardTopBlockDescr for {} has bad signatures (according to cached result)", self.proof_for()),
+            1 => {
+                log::debug!("ShardTopBlockDescr for {} has valid signatures (according to cached result)", self.proof_for());
+                *res_flags |= 0x10;
+                return Ok(clen as i32)
+            }
+            _ => ()
+        }
+        
         let checked_data = Block::build_data_for_sign(
             &self.proof_for().root_hash,
             &self.proof_for().file_hash
@@ -774,6 +779,7 @@ impl TopBlockDescrStuff {
         let weight = match check_crypto_signatures(&signatures.pure_signatures, &validators, &checked_data) {
             Err(err) => {
                 *res_flags |= 0x21;
+                self.signarutes_validation_result.store(-1, atomic::Ordering::Relaxed);
                 fail!(
                     "ShardTopBlockDescr for {} does not have valid signatures: {}",
                     self.proof_for(),
@@ -784,6 +790,7 @@ impl TopBlockDescrStuff {
         };
         if !self.is_fake && weight * 3 <= total_weight * 2 {
             *res_flags |= 0x21;
+            self.signarutes_validation_result.store(-1, atomic::Ordering::Relaxed);
             fail!(
                 "ShardTopBlockDescr for {} has too small signatures weight {} of {}",
                 self.proof_for(),
@@ -794,6 +801,7 @@ impl TopBlockDescrStuff {
 
         // Check weight
         if !self.is_fake && weight != signatures.pure_signatures.weight() {
+            self.signarutes_validation_result.store(-1, atomic::Ordering::Relaxed);
             fail!(
                 "ShardTopBlockDescr for {} has incorrect signature weight {} (actual weight is {})",
                 self.proof_for(),
@@ -801,6 +809,8 @@ impl TopBlockDescrStuff {
                 weight
             );
         }
+
+        self.signarutes_validation_result.store(1, atomic::Ordering::Relaxed);
 
         log::debug!(
             "ShardTopBlockDescr for {} has valid validator signatures of total weight {} out of {}",

@@ -1,8 +1,11 @@
 use crate::{
     block::{convert_block_id_ext_blk2api, convert_block_id_ext_api2blk, BlockStuff},
-    block_proof::BlockProofStuff, error::NodeError, shard_state::ShardStateStuff,
-    types::top_block_descr::{TopBlockDescrId, TopBlockDescrStuff},
+    block_proof::BlockProofStuff, engine_traits::EngineAlloc, error::NodeError, 
+    shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrId, TopBlockDescrStuff}
 };
+#[cfg(feature = "telemetry")]
+use crate::engine_traits::EngineTelemetry;
+
 use std::{
     path::PathBuf, sync::Arc, cmp::min, collections::HashMap,
     sync::atomic::{AtomicU32, Ordering}
@@ -10,11 +13,11 @@ use std::{
 use storage::{
     TimeChecker,
     archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId},
-    block_handle_db::{BlockHandleDb, BlockHandleStorage, Callback}, 
+    block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage, Callback}, 
     block_index_db::BlockIndexDb, block_info_db::BlockInfoDb, node_state_db::NodeStateDb, 
     shardstate_db::{AllowStateGcResolver, ShardStateDb}, 
-    shardstate_persistent_db::ShardStatePersistentDb, 
-    types::{BlockHandle, BlockMeta}, shard_top_blocks_db::ShardTopBlocksDb,
+    shardstate_persistent_db::ShardStatePersistentDb, types::BlockMeta, 
+    shard_top_blocks_db::ShardTopBlocksDb,
 };
 #[cfg(feature = "read_old_db")]
 use storage::block_db::BlockDb;
@@ -136,10 +139,10 @@ pub trait InternalDb : Sync + Send {
     fn store_shard_state_dynamic(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: ShardStateStuff,
+        state: &Arc<ShardStateStuff>,
         callback: Option<Arc<dyn Callback>>
-    ) -> Result<(ShardStateStuff, bool)>;
-    fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<ShardStateStuff>;
+    ) -> Result<(Arc<ShardStateStuff>, bool)>;
+    fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<Arc<ShardStateStuff>>;
    // fn gc_shard_state_dynamic_db(&self) -> Result<usize>;
 
     async fn store_shard_state_persistent(
@@ -259,11 +262,20 @@ pub struct InternalDbImpl {
 
     config: InternalDbConfig,
     cells_gc_interval: Arc<AtomicU32>,
+    #[cfg(feature = "telemetry")]
+    telemetry: Arc<EngineTelemetry>,
+    allocated: Arc<EngineAlloc>
+
 }
 
 impl InternalDbImpl {
 
-    pub async fn new(config: InternalDbConfig) -> Result<Self> {
+    pub async fn new(
+        config: InternalDbConfig,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<EngineTelemetry>,
+        allocated: Arc<EngineAlloc>
+    ) -> Result<Self> {
         let block_index_db = Arc::new(BlockIndexDb::with_paths(
             &Self::build_name(&config.db_directory, "index_db/lt_desc_db"),
             &Self::build_name(&config.db_directory, "index_db/lt_db"),
@@ -279,12 +291,21 @@ impl InternalDbImpl {
             )
         );
         let block_handle_storage = Arc::new(
-            BlockHandleStorage::with_dbs(block_handle_db.clone(), node_state_db)
+            BlockHandleStorage::with_dbs(
+                block_handle_db.clone(), 
+                node_state_db, 
+                #[cfg(feature = "telemetry")]
+                telemetry.storage.clone(),
+                allocated.storage.clone()
+            )
         );
         let shard_state_dynamic_db = ShardStateDb::with_paths(
             &Self::build_name(&config.db_directory, "shardstate_db"),
             &Self::build_name(&config.db_directory, "cells_db"),
             &Self::build_name(&config.db_directory, "cells_db1"),
+            #[cfg(feature = "telemetry")]
+            telemetry.storage.clone(),
+            allocated.storage.clone()
         )?;
         //let shardstate_db_gc = GC::new(&shard_state_dynamic_db, Arc::clone(&block_handle_db))?;
         let archive_manager = Arc::new(ArchiveManager::with_data(Arc::new(PathBuf::from(&config.db_directory))).await?);
@@ -312,6 +333,9 @@ impl InternalDbImpl {
 
             cells_gc_interval: Arc::new(AtomicU32::new(config.cells_gc_interval_ms)),
             config,
+            #[cfg(feature = "telemetry")]
+            telemetry, 
+            allocated
         };
 
         Ok(db)
@@ -544,32 +568,68 @@ impl InternalDb for InternalDbImpl {
     }
 
     fn store_shard_state_dynamic(
-        &self, 
+        &self,
         handle: &Arc<BlockHandle>, 
-        mut state: ShardStateStuff,
+        state: &Arc<ShardStateStuff>,
         callback: Option<Arc<dyn Callback>>
-    ) -> Result<(ShardStateStuff, bool)> {
+    ) -> Result<(Arc<ShardStateStuff>, bool)> {
         let _tc = TimeChecker::new(format!("store_shard_state_dynamic {}", state.block_id()), 300);
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
         if !handle.has_state() {
+            let saved_root = self.shard_state_dynamic_db.put(
+                state.block_id(), 
+                state.root_cell().clone()
+            )?;
+            if handle.set_state() {
+                self.store_block_handle(handle, callback)?;
+                let state = ShardStateStuff::from_root_cell(
+                    handle.id().clone(), 
+                    saved_root,
+                    #[cfg(feature = "telemetry")]
+                    &self.telemetry,
+                    &self.allocated
+                )?;
+                return Ok((state, true));
+            }
+        }
+        Ok((self.load_shard_state_dynamic(handle.id())?, false))
+/*
+        let state = if !handle.has_state() {
             let saved_root = self.shard_state_dynamic_db.put(state.block_id(), state.root_cell().clone())?;
-            state = ShardStateStuff::new(handle.id().clone(), saved_root)?;
+            state = ShardStateStuff::from_root_cell(
+                handle.id().clone(), 
+                saved_root,
+                #[cfg(feature = "telemetry")]
+                &self.telemetry,
+                &self.allocated
+            )?;
             //self.ss_test_map.insert(state.block_id().clone(), state.clone());
             if handle.set_state() {
                 self.store_block_handle(handle, callback)?;
                 return Ok((state, true));
+            } else {
+                state
             }
         } else {
             state = self.load_shard_state_dynamic(handle.id())?;
         }
         Ok((state, false))
+*/
     }
 
-    fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<ShardStateStuff> {
+    fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
         let _tc = TimeChecker::new(format!("load_shard_state_dynamic {}", id), 10);        
-        Ok(ShardStateStuff::new(id.clone(), self.shard_state_dynamic_db.get(id)?)?)
+        Ok(
+            ShardStateStuff::from_root_cell(
+                id.clone(), 
+                self.shard_state_dynamic_db.get(id)?,
+                #[cfg(feature = "telemetry")]
+                &self.telemetry,
+                &self.allocated
+            )?
+        )
     }
 
     /*

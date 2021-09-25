@@ -69,7 +69,7 @@ impl BlockStuff {
         let block = Block::construct_from(&mut root.clone().into())?;
         let block_info = block.read_info()?;
         let id = BlockIdExt {
-            shard_id: *block_info.shard(),
+            shard_id: block_info.shard().clone(),
             seq_no: block_info.seq_no(),
             root_hash: root.repr_hash(),
             file_hash,
@@ -198,7 +198,7 @@ impl BlockStuff {
             .shards()
             .iterate_shards_for_workchain(workchain_id, |ident: ShardIdent, descr: ShardDescr| {
                 let last_shard_block = BlockIdExt {
-                    shard_id: ident,
+                    shard_id: ident.clone(),
                     seq_no: descr.seq_no,
                     root_hash: descr.root_hash,
                     file_hash: descr.file_hash

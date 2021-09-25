@@ -1,7 +1,7 @@
 use storage::shardstate_db::AllowStateGcResolver;
 use ton_block::{BlockIdExt, UnixTime32, ShardIdent, AccountIdPrefixFull};
 use ton_types::Result;
-use adnl::common::add_object_to_map_with_update;
+use adnl::common::add_unbound_object_to_map_with_update;
 use crate::engine_traits::EngineOperations;
 use std::{
     sync::atomic::{AtomicU32, Ordering},
@@ -52,7 +52,7 @@ impl AllowStateGcSmartResolver {
             let top_blocks = min_mc_state.shard_hashes()?.top_blocks(&[workchain_id])?;
             let mut actual_shardes = HashSet::new();
             for id in top_blocks {
-                add_object_to_map_with_update(
+                add_unbound_object_to_map_with_update(
                     &self.min_actual_ss,
                     id.shard().clone(),
                     |found| if let Some(a) = found {

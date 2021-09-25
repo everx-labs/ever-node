@@ -1,4 +1,4 @@
-use crate::{traits::Serializable, types::block_handle};
+use crate::{block_handle_db, traits::Serializable};
 use std::{io::{Read, Write}, sync::atomic::{AtomicU64, Ordering}};
 use ton_block::Block;
 use ton_types::{ByteOrderRead, Result};
@@ -15,7 +15,7 @@ impl BlockMeta {
     pub fn from_block(block: &Block) -> Result<Self> {
         let info = block.read_info()?;
         let flags = if info.key_block() {
-            block_handle::FLAG_KEY_BLOCK
+            block_handle_db::FLAG_KEY_BLOCK
         } else {
             0
         };
@@ -56,7 +56,7 @@ impl BlockMeta {
 impl Serializable for BlockMeta {
 
     fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
-        const FLAG_MASK: u64 = 0x0000FFFF_FFFFFFFF;
+        const FLAG_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
         let flags = self.flags.load(Ordering::Relaxed) & FLAG_MASK;
         writer.write_all(&flags.to_le_bytes())?;
         writer.write_all(&self.gen_utime.to_le_bytes())?;

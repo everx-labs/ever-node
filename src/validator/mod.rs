@@ -15,6 +15,7 @@ pub mod telemetry;
 #[cfg(feature = "slashing")]
 mod slashing;
 
+use std::sync::Arc;
 use ton_types::{Result, UInt256, error};
 use ton_block::{
     BlkMasterInfo, BlockIdExt, ConfigParams, CurrencyCollection,
@@ -42,13 +43,13 @@ pub struct McData {
     mc_state_extra: McStateExtra,
     prev_key_block_seqno: u32,
     prev_key_block: Option<BlockIdExt>,
-    state: ShardStateStuff,
+    state: Arc<ShardStateStuff>
 
     // TODO put here what you need from masterchain state and block and init in `unpack_last_mc_state`
 }
 
 impl McData {
-    pub fn new(mc_state: ShardStateStuff) -> Result<Self> {
+    pub fn new(mc_state: Arc<ShardStateStuff>) -> Result<Self> {
 
         let mc_state_extra = mc_state.state().read_custom()?
             .ok_or_else(|| error!("Can't read custom field from mc state"))?;
@@ -73,7 +74,7 @@ impl McData {
     pub fn mc_state_extra(&self) -> &McStateExtra { &self.mc_state_extra }
     pub fn prev_key_block_seqno(&self) -> u32 { self.prev_key_block_seqno }
     pub fn prev_key_block(&self) -> Option<&BlockIdExt> { self.prev_key_block.as_ref() }
-    pub fn state(&self) -> &ShardStateStuff { &self.state }
+    pub fn state(&self) -> &Arc<ShardStateStuff> { &self.state }
     pub fn vert_seq_no(&self) -> u32 { self.state().state().vert_seq_no() }
     pub fn get_lt_align(&self) -> u64 { 1000000 }
     pub fn global_balance(&self) -> &CurrencyCollection { &self.mc_state_extra.global_balance }

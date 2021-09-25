@@ -111,7 +111,7 @@ impl FileMap {
 
             if elements[i].value.archive_slice.package_type() == PackageType::Blocks &&
                next_id <= front_for_gc_master_block_id.seq_no() {
-                marked_packages.push(elements[i].key.clone());
+                marked_packages.push(elements[i].key);
             }
         }
         marked_packages

@@ -31,13 +31,13 @@ impl FileDb {
         let mut key_str = hex::encode(key);
         let mut result = self.path.clone();
         let mut depth = 1;
-        while depth < PATH_MAX_DEPTH && key_str.len() > 0 {
+        while depth < PATH_MAX_DEPTH && !key_str.is_empty() {
             let remaining = key_str.split_off(std::cmp::min(key_str.len(), PATH_CHUNK_MAX_LEN));
             result = result.join(key_str);
             key_str = remaining;
             depth += 1;
         }
-        if key_str.len() > 0 {
+        if !key_str.is_empty() {
             return result.join(key_str);
         }
         result
@@ -82,7 +82,7 @@ impl<K: DbKey + Send + Sync> KvcReadableAsync<K> for FileDb {
         match tokio::fs::read(path).await {
             Ok(vec) => Ok(Some(DbSlice::Vector(vec))),
             Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err)?
+            Err(err) => Err(err.into())
         }
     }
 

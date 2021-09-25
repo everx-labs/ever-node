@@ -7,7 +7,7 @@ use crate::{
         package_offsets_db::PackageOffsetsDb, package_status_db::PackageStatusDb, 
         package_status_key::PackageStatusKey
     },
-    traits::Serializable, types::BlockHandle
+    traits::Serializable, block_handle_db::BlockHandle
 };
 use std::{borrow::Borrow, hash::Hash, io::SeekFrom, path::PathBuf, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -87,37 +87,35 @@ impl ArchiveSlice {
                 archive_slice.packages.write().await
                     .push(archive_slice.new_package(0, archive_id, size, 0).await?);
             }
-        } else {
-            if package_type == PackageType::Blocks {
-                archive_slice.sliced_mode = true;
+        } else if package_type == PackageType::Blocks {
+            archive_slice.sliced_mode = true;
 
-                {
-                    let mut transaction = package_status_db.begin_transaction()?;
+            {
+                let mut transaction = package_status_db.begin_transaction()?;
 
-                    transaction.put(&PackageStatusKey::SlicedMode, true.to_vec()?.as_slice());
-                    transaction.put(&PackageStatusKey::TotalSlices, 1u32.to_vec()?.as_slice());
-                    transaction.put(&PackageStatusKey::SliceSize, archive_slice.slice_size.to_vec()?.as_slice());
+                transaction.put(&PackageStatusKey::SlicedMode, true.to_vec()?.as_slice());
+                transaction.put(&PackageStatusKey::TotalSlices, 1u32.to_vec()?.as_slice());
+                transaction.put(&PackageStatusKey::SliceSize, archive_slice.slice_size.to_vec()?.as_slice());
 
-                    let meta = PackageEntryMeta::with_data(0, DEFAULT_PKG_VERSION);
-                    index_db.put_value(&0.into(), &meta)?;
-                    transaction.commit()?;
-                }
-
-                archive_slice.packages.write().await
-                    .push(archive_slice.new_package(0, archive_id, 0, DEFAULT_PKG_VERSION).await?);
-            } else {
-                {
-                    let mut transaction = package_status_db.begin_transaction()?;
-
-                    transaction.put(&PackageStatusKey::SlicedMode, false.to_vec()?.as_slice());
-                    transaction.put(&PackageStatusKey::NonSlicedSize, 0u64.to_vec()?.as_slice());
-
-                    transaction.commit()?;
-                }
-
-                archive_slice.packages.write().await
-                    .push(archive_slice.new_package(0, archive_id, 0, 0).await?);
+                let meta = PackageEntryMeta::with_data(0, DEFAULT_PKG_VERSION);
+                index_db.put_value(&0.into(), &meta)?;
+                transaction.commit()?;
             }
+
+            archive_slice.packages.write().await
+                .push(archive_slice.new_package(0, archive_id, 0, DEFAULT_PKG_VERSION).await?);
+        } else {
+            {
+                let mut transaction = package_status_db.begin_transaction()?;
+
+                transaction.put(&PackageStatusKey::SlicedMode, false.to_vec()?.as_slice());
+                transaction.put(&PackageStatusKey::NonSlicedSize, 0u64.to_vec()?.as_slice());
+
+                transaction.commit()?;
+            }
+
+            archive_slice.packages.write().await
+                .push(archive_slice.new_package(0, archive_id, 0, 0).await?);
         }
 
         Ok(archive_slice)
@@ -208,15 +206,18 @@ impl ArchiveSlice {
         &self, 
         block_handle: Option<&BlockHandle>, 
         entry_id: &PackageEntryId<B, U256, PK>
-    ) -> Result<PackageEntry>
+    ) -> Result<Option<PackageEntry>>
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
         PK: Borrow<PublicKey> + Hash
     {
         let offset_key = entry_id.into();
-        let offset = self.offsets_db.try_get_value(&offset_key)?
-            .ok_or_else(|| error!("File is not in archive: {}", entry_id))?;
+        let offset = if let Some(offset) = self.offsets_db.try_get_value(&offset_key)? {
+            offset
+        } else {
+            return Ok(None)
+        };
 
         let package_info = self.choose_package(get_mc_seq_no_opt(block_handle), false).await?;
 
@@ -227,10 +228,10 @@ impl ArchiveSlice {
             offset
         );
         let entry = package_info.package().read_entry(offset).await?;
-        if entry.data().len() == 0 {
+        if entry.data().is_empty() {
             fail!("Read entry ({}) is corrupted! It can't have zero length!", entry_id);
         }
-        Ok(entry)
+        Ok(Some(entry))
     }
 
     pub async fn get_slice(&self, archive_id: u64, offset: u64, limit: u32) -> Result<Vec<u8>> {

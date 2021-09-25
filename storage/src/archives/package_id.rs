@@ -10,7 +10,7 @@ pub enum PackageType {
     Temp
 }
 
-#[derive(Debug, Clone, Hash, Ord, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PackageId {
     id: u32,
     package_type: PackageType,
@@ -85,6 +85,12 @@ impl PackageId {
 impl PartialEq for PackageId {
     fn eq(&self, other: &Self) -> bool {
         self.id() == other.id()
+    }
+}
+
+impl Ord for PackageId {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.id().cmp(&other.id())
     }
 }
 
