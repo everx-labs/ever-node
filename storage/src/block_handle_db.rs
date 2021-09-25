@@ -2,7 +2,7 @@ use crate::{
     TARGET, db_impl_serializable, db::traits::KvcWriteable, node_state_db::NodeStateDb, 
     traits::Serializable, types::{BlockHandle, BlockMeta}
 };
-use adnl::common::{add_object_to_map, add_object_to_map_with_update};
+use adnl::common::{add_unbound_object_to_map, add_unbound_object_to_map_with_update};
 use std::{io::Cursor, sync::{Arc, Weak}};
 use ton_block::BlockIdExt;
 use ton_types::{error, fail, Result};
@@ -103,7 +103,7 @@ impl BlockHandleStorage {
         id: &BlockIdExt
     ) -> Result<Arc<BlockIdExt>> {
         let id = Arc::new(id.clone());
-        if !add_object_to_map_with_update(
+        if !add_unbound_object_to_map_with_update(
             &self.state_cache, 
             key,
             |_| Ok(Some(id.clone()))
@@ -180,7 +180,7 @@ impl BlockHandleStorage {
         store: bool
     ) -> Result<Option<Arc<BlockHandle>>> {
         let ret = Arc::new(BlockHandle::with_values(id.clone(), meta, self.handle_cache.clone()));
-        let added = add_object_to_map(
+        let added = add_unbound_object_to_map(
             &self.handle_cache, 
             id, 
             || Ok(Arc::downgrade(&ret))

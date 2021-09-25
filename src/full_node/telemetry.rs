@@ -91,7 +91,7 @@ impl FullNodeTelemetry {
 
     pub fn good_top_block_broadcast(&self, block_id: &BlockIdExt) {
         self.top_block_broadcasts.fetch_add(1, Ordering::Relaxed);
-        if adnl::common::add_object_to_map(
+        if adnl::common::add_unbound_object_to_map(
             &self.last_top_block_broadcasts, block_id.clone(), || Ok(Instant::now())
         ).expect("Can't return error") {
             self.top_block_broadcasts_unic.fetch_add(1, Ordering::Relaxed);
@@ -120,7 +120,7 @@ impl FullNodeTelemetry {
     }
 
     pub fn new_downloading_block_attempt(&self, block_id: &BlockIdExt) {
-        adnl::common::add_object_to_map_with_update(
+        adnl::common::add_unbound_object_to_map_with_update(
             &self.downloading_blocks_attempts,
             block_id.clone(),
             |found| if let Some(a) = found {
@@ -130,7 +130,7 @@ impl FullNodeTelemetry {
                 Ok(Some(AtomicU32::new(1)))
             }
         ).expect("Can't return error");
-        adnl::common::add_object_to_map(&self.downloading_blocks, block_id.clone(), || Ok(Instant::now()))
+        adnl::common::add_unbound_object_to_map(&self.downloading_blocks, block_id.clone(), || Ok(Instant::now()))
             .expect("Can't return error");
     }
 
@@ -172,7 +172,7 @@ impl FullNodeTelemetry {
     pub fn submit_transactions(&self, time: u64, tr_count: usize) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         if now >= time && now - time <= TPS_PERIOD_1 + TPS_PERIOD_LAG {
-            adnl::common::add_object_to_map_with_update(
+            adnl::common::add_unbound_object_to_map_with_update(
                 &self.transactions,
                 time,
                 |found| if let Some(a) = found {

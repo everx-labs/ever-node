@@ -1611,7 +1611,7 @@ impl ValidateQuery {
     }
 
     fn update_max_processed_lt_hash(base: &ValidateBase, lt: u64, hash: &UInt256) -> Result<bool> {
-        adnl::common::add_object_to_map_with_update(
+        adnl::common::add_unbound_object_to_map_with_update(
             &base.result.lt_hash,
             0,
             |lt_hash| {
@@ -1626,7 +1626,7 @@ impl ValidateQuery {
     }
 
     fn update_min_enqueued_lt_hash(base: &ValidateBase, lt: u64, hash: &UInt256) -> Result<bool> {
-        adnl::common::add_object_to_map_with_update(
+        adnl::common::add_unbound_object_to_map_with_update(
             &base.result.lt_hash,
             1,
             |lt_hash| {
