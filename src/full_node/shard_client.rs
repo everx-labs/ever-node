@@ -7,10 +7,7 @@ use crate::{
 
 use std::{sync::Arc, mem::drop};
 use tokio::task::JoinHandle;
-use ton_block::{
-    BlockIdExt, BlockSignaturesPure, CryptoSignaturePair, CryptoSignature,
-    AccountIdPrefixFull, ValidatorSet, CatchainConfig, ConfigParams,
-};
+use ton_block::{BlockIdExt, BlockSignaturesPure, CryptoSignaturePair, CryptoSignature, ConfigParams};
 use ton_types::{Result, fail, error, UInt256};
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
 
@@ -287,48 +284,23 @@ pub async fn process_block_broadcast(
     let (virt_block, _) = proof.virtualize_block()?;
     let block_info = virt_block.read_info()?;
     let prev_key_block_seqno = block_info.prev_key_block_seqno();
-    let last_applied_mc_block_id = engine.load_last_applied_mc_block_id()?.ok_or_else(
-        || error!("INTERNAL ERROR: no last applied MC block after sync")
+    let last_applied_mc_state = engine.load_last_applied_mc_state_or_zerostate().await.map_err(
+        |e| error!("INTERNAL ERROR: can't load last mc state: {}", e)
     )?;
-    if prev_key_block_seqno > last_applied_mc_block_id.seq_no() {
+    if prev_key_block_seqno > last_applied_mc_state.block_id().seq_no() {
         log::debug!(
             "Skipped block broadcast {} because it refers too new key block: {}, but last processed mc block is {})",
-            block_id, prev_key_block_seqno, last_applied_mc_block_id.seq_no()
+            block_id, prev_key_block_seqno, last_applied_mc_state.block_id().seq_no()
         );
         return Ok(());
     }
 
-    // get validator set from...
-    let mut key_block_proof = None;
-    let mut zerostate = None;
-    let config_params;
-    let (validator_set, cc_config) = if prev_key_block_seqno == 0 {
-        // ...zerostate
-        let zs = engine.load_mc_zero_state().await?;
-        let vs = zs.state().read_cur_validator_set_and_cc_conf()?;
-        config_params = zs.config_params()?.clone();
-        zerostate = Some(zs);
-        vs
-    } else {
-        // ...prev key block
-        let mc_pfx = AccountIdPrefixFull::any_masterchain();
-        let handle = engine.find_block_by_seq_no(&mc_pfx, prev_key_block_seqno).await?;
-        let proof = engine.load_block_proof(&handle, false).await?;
-        let vs = proof.get_cur_validators_set()?;
-        config_params = engine.load_state(handle.id()).await?.config_params()?.clone();
-        key_block_proof = Some(proof);
-        vs
-    };
-
-    validate_brodcast(broadcast, &config_params, &block_id, &validator_set, &cc_config)?;
+    let config_params = last_applied_mc_state.config_params()?;
+    validate_brodcast(broadcast, config_params, &block_id)?;
 
     // Build and save block and proof
     if is_master {
-        if prev_key_block_seqno == 0 {
-            proof.check_with_master_state(zerostate.as_ref().unwrap())?;
-        } else {
-            proof.check_with_prev_key_block_proof(key_block_proof.as_ref().unwrap())?;
-        }
+        proof.check_with_master_state(last_applied_mc_state.as_ref())?;
     } else {
         proof.check_proof_link()?;
     }
@@ -360,12 +332,12 @@ pub async fn process_block_broadcast(
 
     // Apply (only blocks that is not too new for us)
     if block.id().shard().is_masterchain() {
-        if block.id().seq_no() == last_applied_mc_block_id.seq_no() + 1 {
+        if block.id().seq_no() == last_applied_mc_state.block_id().seq_no() + 1 {
             engine.clone().apply_block(&handle, &block, block.id().seq_no(), false).await?;
         } else {
             log::debug!(
                 "Skipped apply for block broadcast {} because it is too new (last master block: {})",
-                block.id(), last_applied_mc_block_id.seq_no()
+                block.id(), last_applied_mc_state.block_id().seq_no()
             )
         }
     } else {
@@ -395,13 +367,14 @@ fn validate_brodcast(
     broadcast: &BlockBroadcast,
     config_params: &ConfigParams,
     block_id: &BlockIdExt,
-    validator_set: &ValidatorSet,
-    cc_config: &CatchainConfig,
 ) -> Result<()> {
+
+    let validator_set = config_params.validator_set()?;
+    let cc_config = config_params.catchain_config()?;
 
     // build validator set
     let (validators, validators_hash_short) = calc_subset_for_workchain(
-        validator_set,
+        &validator_set,
         config_params,
         &cc_config, 
         block_id.shard().shard_prefix_with_tag(), 

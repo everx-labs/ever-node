@@ -54,7 +54,7 @@ impl KafkaConsumer {
 
         log::trace!("Starting consumer...");
         let (trigger, tripwire) = stream_cancel::Tripwire::new();
-        let mut message_stream = consumer.start().take_until_if(tripwire);
+        let mut message_stream = consumer.stream().take_until_if(tripwire);
         self.engine.register_server(Server::KafkaConsumer(trigger));
 
         while let Some(borrowed_message) = message_stream.next().await {
