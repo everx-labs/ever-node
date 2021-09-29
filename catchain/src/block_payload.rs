@@ -41,7 +41,7 @@ impl fmt::Debug for BlockPayloadImpl {
 impl BlockPayloadImpl {
     pub(crate) fn create(data: RawBuffer) -> BlockPayloadPtr {
         Arc::new(Self {
-            data: data,
+            data,
             creation_time: SystemTime::now(),
         })
     }

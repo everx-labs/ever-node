@@ -918,8 +918,8 @@ impl Engine {
                 }
                 match client.wait_broadcast().await {
                     Err(e) => log::error!("Error while wait_broadcast for shard {}: {}", shard_ident, e),
-                    Ok((brodcast, src)) => {
-                        match brodcast {
+                    Ok((broadcast, src)) => {
+                        match broadcast {
                             Broadcast::TonNode_BlockBroadcast(broadcast) => {
                                 self.clone().process_block_broadcast(broadcast, src);
                             }
@@ -1005,7 +1005,7 @@ impl Engine {
         Ok(())
     }
 
-    fn process_block_broadcast(self: Arc<Self>, broadcast: Box<BlockBroadcast>, src: Arc<KeyId>) {
+    fn process_block_broadcast(self: Arc<Self>, broadcast: BlockBroadcast, src: Arc<KeyId>) {
         // because of ALL blocks-broadcasts received in one task - spawn for each block
         log::trace!("Processing block broadcast {}", broadcast.id);
         let engine = self.clone() as Arc<dyn EngineOperations>;
@@ -1034,7 +1034,7 @@ impl Engine {
         });
     }
 
-    fn process_ext_msg_broadcast(&self, broadcast: Box<ExternalMessageBroadcast>, src: Arc<KeyId>) {
+    fn process_ext_msg_broadcast(&self, broadcast: ExternalMessageBroadcast, src: Arc<KeyId>) {
         // just add to list
         if !self.is_validator() {
             log::trace!(
@@ -1063,7 +1063,7 @@ impl Engine {
         }
     }
 
-    fn process_new_shard_block_broadcast(self: Arc<Self>, broadcast: Box<NewShardBlockBroadcast>, src: Arc<KeyId>) {
+    fn process_new_shard_block_broadcast(self: Arc<Self>, broadcast: NewShardBlockBroadcast, src: Arc<KeyId>) {
         let id = broadcast.block.block.clone();
         if self.is_validator() {
             log::trace!("Processing new shard block broadcast {} from {}", id, src);
@@ -1090,10 +1090,7 @@ impl Engine {
         }
     }
 
-    async fn process_new_shard_block(
-        self: Arc<Self>, 
-        broadcast: Box<NewShardBlockBroadcast>
-    ) -> Result<BlockIdExt> {
+    async fn process_new_shard_block(self: Arc<Self>, broadcast: NewShardBlockBroadcast) -> Result<BlockIdExt> {
         let id: BlockIdExt = (&broadcast.block.block).try_into()?;
         let cc_seqno = broadcast.block.cc_seqno as u32;
         let data = broadcast.block.data.0;

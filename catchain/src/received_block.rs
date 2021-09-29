@@ -454,12 +454,9 @@ impl ReceivedBlock for ReceivedBlockImpl {
             deps.push(dep.borrow().export_tl_dep());
         }
 
-        type TonBare = ::ton_api::ton::Bare;
-        type TonDepVector = ::ton_api::ton::vector<TonBare, ton::BlockDep>;
-
         let block_data = ton::BlockData {
             prev: self.get_prev().unwrap().borrow().export_tl_dep(),
-            deps: TonDepVector::from(deps),
+            deps: deps.into(),
         };
 
         let block = ton::Block {

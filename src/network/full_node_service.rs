@@ -9,7 +9,7 @@ use adnl::common::{
 use overlay::QueriesConsumer;
 use std::{sync::Arc, convert::TryInto, cmp::min, fmt::Debug};
 use ton_api::{
-    AnyBoxedSerialize, BoxedSerialize, IntoBoxed,
+    AnyBoxedSerialize, IntoBoxed,
     ton::{
         self, TLObject, Vector,
         rpc::ton_node::{
@@ -59,15 +59,11 @@ impl FullNodeOverlayService {
     ) -> Result<TaggedObject<BlockDescription>> {
         let prev_id = (&query.prev_block).try_into()?;
         let answer = match self.engine.load_block_next1(&prev_id).await {
-            Ok(id) => { 
-                BlockDescription::TonNode_BlockDescription(
-                    Box::new(
-                        ton_node::blockdescription::BlockDescription{
-                            id: id.into()
-                        }
-                    )
-                )
-            },
+            Ok(id) => {
+                ton_node::blockdescription::BlockDescription{
+                    id: id.into()
+                }.into_boxed()
+            }
             Err(_) => BlockDescription::TonNode_BlockDescriptionEmpty
         };
         #[cfg(feature = "telemetry")]
@@ -566,7 +562,7 @@ impl FullNodeOverlayService {
     ) -> Result<std::result::Result<QueryResult, TLObject>>
     where
         Q: AnyBoxedSerialize + Debug,
-        A: BoxedSerialize + Send + Sync + serde::Serialize + Debug + 'static,
+        A: AnyBoxedSerialize,
         F: futures::Future<Output = Result<TaggedObject<A>>>,
     {
         Ok(
