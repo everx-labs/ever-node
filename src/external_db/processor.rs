@@ -1,13 +1,15 @@
-use std::{collections::hash_set::HashSet, sync::Arc};
+use std::{collections::hash_set::HashSet, convert::TryInto, sync::Arc};
 use ton_block::{
-    Account, InMsg, OutMsg, Deserializable, Serializable, MessageProcessingStatus, Transaction,
-    TransactionProcessingStatus, BlockProcessingStatus, Block, BlockProof, HashmapAugType,
-    AccountBlock, ShardAccount,
+    Account, AccountBlock, Block, BlockIdExt,
+    BlockProcessingStatus, BlockProof, Deserializable,
+    HashmapAugType, InMsg, MessageProcessingStatus, OutMsg,
+    Serializable, ShardAccount, Transaction, TransactionProcessingStatus,
 };
 use ton_types::{
     cells_serialization::serialize_toc,
     types::UInt256,
-    AccountId, Cell, Result, SliceData, HashmapType
+    AccountId, Cell, Result, SliceData, HashmapType,
+    fail,
 };
 use serde::Serialize;
 use chrono::Utc;
@@ -26,10 +28,10 @@ enum DbRecord {
     Empty,
     Message(String, String),
     Transaction(String, String),
-    Account(String, String),
-    BlockProof(String, String),
+    Account(String, String, Option<u32>),
+    BlockProof(String, String, Option<u32>),
     Block(String, String),
-    RawBlock(Vec<u8>, Vec<u8>, u32)
+    RawBlock(Vec<u8>, Vec<u8>, u32, Option<u32>)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -90,6 +92,15 @@ impl<T: WriteData> Processor<T> {
             .iter()
             .position(|id| id == &workchain_id)
             .is_some()
+    }
+
+    fn calc_account_partition_key(sharding_depth: u32, mut partitioning_info: SliceData) -> Result<Option<u32>> {
+        if sharding_depth > 0 {
+            let partition_key = partitioning_info.get_next_u32()?;
+            Ok(Some(partition_key >> (32 - sharding_depth)))
+        } else {
+            Ok(None)
+        }
     }
 
     fn prepare_in_message_record(
@@ -190,22 +201,29 @@ impl<T: WriteData> Processor<T> {
         ))
     }
 
-    fn prepare_account_record(account: Account) -> Result<DbRecord> {
+    fn prepare_account_record(account: Account, sharding_depth: u32) -> Result<DbRecord> {
         let boc = serialize_toc(&account.serialize()?.into())?;
+        let account_id = match account.get_id() {
+            Some(id) => id,
+            None => fail!("Account without id in external db processor")
+        };
         let set = ton_block_json::AccountSerializationSet {
             account,
             proof: None,
             boc,
         };
-
+        
+        let partition_key = Self::calc_account_partition_key(sharding_depth, account_id.clone())?;
         let doc = ton_block_json::db_serialize_account("id", &set)?;
         Ok(DbRecord::Account(
             doc["id"].to_string(),
-            format!("{:#}", serde_json::json!(doc))
+            format!("{:#}", serde_json::json!(doc)),
+            partition_key,
         ))
     }
 
-    fn prepare_deleted_account_record(account_id: AccountId, workchain_id: i32) -> Result<DbRecord> {
+    fn prepare_deleted_account_record(account_id: AccountId, workchain_id: i32, sharding_depth: u32) -> Result<DbRecord> {
+        let partition_key = Self::calc_account_partition_key(sharding_depth, account_id.clone())?;
         let set = ton_block_json::DeletedAccountSerializationSet {
             account_id,
             workchain_id
@@ -214,7 +232,8 @@ impl<T: WriteData> Processor<T> {
         let doc = ton_block_json::db_serialize_deleted_account("id", &set)?;
         Ok(DbRecord::Account(
             doc["id"].to_string(),
-            format!("{:#}", serde_json::json!(doc))
+            format!("{:#}", serde_json::json!(doc)),
+            partition_key,
         ))
     }
 
@@ -236,23 +255,38 @@ impl<T: WriteData> Processor<T> {
         ))
     }
 
+    fn get_block_partition_key(
+        block_id: &BlockIdExt,
+        sharding_depth: u32,
+    ) -> Option<u32> {
+        if sharding_depth > 0 {
+            let partitioning_info = u64::from_be_bytes(block_id.root_hash.as_slice()[0..8].try_into().unwrap());
+            Some((partitioning_info >> (64 - sharding_depth)) as u32)
+        } else {
+            None
+        }
+    }
+
     fn prepare_raw_block_record(
-        block_root: &Cell,
+        block_id: &BlockIdExt,
         block_boc: Vec<u8>,
         mc_seq_no: u32,
+        partition_key: Option<u32>,
     ) -> Result<DbRecord> {
         Ok(DbRecord::RawBlock(
-            block_root.repr_hash().as_slice().to_vec(),
+            block_id.root_hash.as_slice().to_vec(),
             block_boc,
             mc_seq_no,
+            partition_key,
         ))
     }
 
-    fn prepare_block_proof_record(proof: &BlockProof) -> Result<DbRecord> {
+    fn prepare_block_proof_record(proof: &BlockProof, partition_key: Option<u32>) -> Result<DbRecord> {
         let doc = ton_block_json::db_serialize_block_proof("id", proof)?;
         Ok(DbRecord::BlockProof(
             doc["id"].to_string(),
-            format!("{:#}", serde_json::json!(doc))
+            format!("{:#}", serde_json::json!(doc)),
+            partition_key,
         ))
     }
 
@@ -304,6 +338,9 @@ impl<T: WriteData> Processor<T> {
         let block_boc1 = if process_block { Some(block_stuff.data().to_vec()) } else { None };
         let block_boc2 = if process_raw_block { Some(block_stuff.data().to_vec()) } else { None };
         let shard_accounts = state.map(|s| s.state().read_accounts()).transpose()?;
+        let accounts_sharding_depth = self.write_account.sharding_depth();
+        let block_proofs_sharding_depth = self.write_block_proof.sharding_depth();
+        let raw_blocks_sharding_depth = self.write_raw_block.sharding_depth();
 
         let now = std::time::Instant::now();
 
@@ -382,11 +419,11 @@ impl<T: WriteData> Processor<T> {
                                     )
                                 )?;
                             let acc = acc.read_account()?;
-                            db_records.push(Self::prepare_account_record(acc)?);
+                            db_records.push(Self::prepare_account_record(acc, accounts_sharding_depth)?);
                         }
                     }
                     for acc_addr in deleted_acc {
-                        db_records.push(Self::prepare_deleted_account_record(acc_addr, workchain_id)?);
+                        db_records.push(Self::prepare_deleted_account_record(acc_addr, workchain_id, accounts_sharding_depth)?);
                     }
                     log::trace!("TIME: accounts {} {}ms;   {}", changed_acc.len(), now.elapsed().as_millis(), block_id);
                     STATSD.timer("accounts_parsing_time", now.elapsed().as_micros() as f64 / 1000f64);
@@ -408,8 +445,9 @@ impl<T: WriteData> Processor<T> {
             if process_block_proof {
                 if let Some(proof) = proof {
                     let now = std::time::Instant::now();
+                    let partition_key = Self::get_block_partition_key(&block_id, block_proofs_sharding_depth);
                     db_records.push(
-                        Self::prepare_block_proof_record(&proof)?
+                        Self::prepare_block_proof_record(&proof, partition_key)?
                     );
                     log::trace!("TIME: block proof {}ms;   {}", now.elapsed().as_millis(), block_id);
                 }
@@ -418,8 +456,9 @@ impl<T: WriteData> Processor<T> {
             // raw block
             if process_raw_block {
                 let now = std::time::Instant::now();
+                let partition_key = Self::get_block_partition_key(&block_id, raw_blocks_sharding_depth);
                 db_records.push(
-                    Self::prepare_raw_block_record(&block_root, block_boc2.unwrap(), mc_seq_no)?
+                    Self::prepare_raw_block_record(&block_id, block_boc2.unwrap(), mc_seq_no, partition_key)?
                 );
                 log::trace!("TIME: raw block {}ms;   {}", now.elapsed().as_millis(), block_id);
             }
@@ -446,12 +485,12 @@ impl<T: WriteData> Processor<T> {
         let mut send_tasks = vec!();
         for record in db_records {
             match record {
-                DbRecord::Message(key, value) => send_tasks.push(self.write_message.write_data(key, value, None)),
-                DbRecord::Transaction(key, value) => send_tasks.push(self.write_transaction.write_data(key, value, None)),
-                DbRecord::Account(key, value) => send_tasks.push(self.write_account.write_data(key, value, None)),
-                DbRecord::Block(key, value) => send_tasks.push(self.write_block.write_data(key, value, None)),
-                DbRecord::BlockProof(key, value) => send_tasks.push(self.write_block_proof.write_data(key, value, None)),
-                DbRecord::RawBlock(key, value, mc_seq_no) =>  send_tasks.push(Box::pin(self.send_raw_block(key, value, mc_seq_no))),
+                DbRecord::Message(key, value) => send_tasks.push(self.write_message.write_data(key, value, None, None)),
+                DbRecord::Transaction(key, value) => send_tasks.push(self.write_transaction.write_data(key, value, None, None)),
+                DbRecord::Account(key, value, partition_key) => send_tasks.push(self.write_account.write_data(key, value, None, partition_key)),
+                DbRecord::Block(key, value) => send_tasks.push(self.write_block.write_data(key, value, None, None)),
+                DbRecord::BlockProof(key, value, partition_key) => send_tasks.push(self.write_block_proof.write_data(key, value, None, partition_key)),
+                DbRecord::RawBlock(key, value, mc_seq_no, partition_key) =>  send_tasks.push(Box::pin(self.send_raw_block(key, value, mc_seq_no, partition_key))),
                 DbRecord::Empty => {}
             } 
         }
@@ -472,12 +511,12 @@ impl<T: WriteData> Processor<T> {
         Ok(())
     }
 
-    async fn send_raw_block(&self, key: Vec<u8>, value: Vec<u8>, mc_seq_no: u32) -> Result<()> {
+    async fn send_raw_block(&self, key: Vec<u8>, value: Vec<u8>, mc_seq_no: u32, partition_key: Option<u32>) -> Result<()> {
         let attributes = [
             ("mc_seq_no", &mc_seq_no.to_be_bytes()[..]),
             ("raw_block_timestamp", &Utc::now().timestamp().to_be_bytes()[..])
         ];
-        self.write_raw_block.write_raw_data(key, value, Some(&attributes)).await
+        self.write_raw_block.write_raw_data(key, value, Some(&attributes), partition_key).await
     }
 }
 
@@ -505,7 +544,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
             let mut accounts = Vec::new();
             state.state().read_accounts()?.iterate_objects(|acc: ShardAccount| {
                 let acc = acc.read_account()?;
-                let record = Self::prepare_account_record(acc)?;
+                let record = Self::prepare_account_record(acc, self.write_account.sharding_depth())?;
                 accounts.push(record);
                 Ok(true)
             })?;
@@ -514,7 +553,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
             futures::future::join_all(
                 accounts.into_iter().map(|r| {
                     match r {
-                        DbRecord::Account(key, value) => self.write_account.write_data(key, value, None),
+                        DbRecord::Account(key, value, partition_key) => self.write_account.write_data(key, value, None, partition_key),
                         _ => unreachable!(),
                     }
                 })
@@ -554,7 +593,8 @@ impl<T: WriteData> ExternalDb for Processor<T> {
             self.write_chain_range.write_data(
                 format!("\"{}\"", master_block_id),
                 serde_json::to_string(&data)?,
-                None
+                None,
+                None,
             ).await?;
         }
 

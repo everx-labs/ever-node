@@ -110,11 +110,20 @@ pub struct GC {
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
+pub struct TopicMask {
+    pub mask: String,
+    pub name: String,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
 pub struct KafkaProducerConfig {
     pub enabled: bool,
     pub brokers: String,
     pub message_timeout_ms: u32,
-    pub topic: String,
+    pub topic: Option<String>,
+    pub sharded_topics: Option<Vec<TopicMask>>,
+    #[serde(default)]
+    pub sharding_depth: u32,
     pub attempt_timeout_ms: u32,
     pub message_max_size: usize,
     pub big_messages_storage: String,

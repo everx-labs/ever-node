@@ -16,8 +16,9 @@ mod stub_producer;
 #[async_trait::async_trait]
 pub trait WriteData : Sync + Send {
     fn enabled(&self) -> bool;
-    async fn write_data(&self, key: String, data: String, attributes: Option<&[(&str, &[u8])]>) -> Result<()>;
-    async fn write_raw_data(&self, key: Vec<u8>, data: Vec<u8>, attributes: Option<&[(&str, &[u8])]>) -> Result<()>;
+    fn sharding_depth(&self) -> u32;
+    async fn write_data(&self, key: String, data: String, attributes: Option<&[(&str, &[u8])]>, partition_key: Option<u32>) -> Result<()>;
+    async fn write_raw_data(&self, key: Vec<u8>, data: Vec<u8>, attributes: Option<&[(&str, &[u8])]>, partition_key: Option<u32>) -> Result<()>;
 }
 
 #[allow(dead_code)]

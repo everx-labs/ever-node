@@ -10,4 +10,6 @@ pub enum NodeError {
     ValidatorReject(String),
     #[fail(display = "{}", 0)]
     ValidatorSoftReject(String),
+    #[fail(display = "{}", 0)]
+    Other(String),
 }
