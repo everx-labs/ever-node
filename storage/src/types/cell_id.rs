@@ -40,9 +40,3 @@ impl From<UInt256> for CellId {
         CellId::new(value)
     }
 }
-
-// impl Into<UInt256> for CellId {
-//     fn into(self) -> UInt256 {
-//         self.hash
-//     }
-// }

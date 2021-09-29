@@ -2150,15 +2150,13 @@ impl SessionProcessorImpl {
             };
         let file_hash = catchain::utils::get_hash_from_block_payload(&data);
         let collated_data_file_hash = catchain::utils::get_hash_from_block_payload(&collated_data);
-        let candidate = Rc::new(Candidate::ValidatorSession_Candidate(Box::new(
-            candidate::Candidate {
-                src: ::ton_api::ton::int256(self.get_local_id().data().clone()),
-                round: round as i32,
-                root_hash: root_hash.clone().into(),
-                data: data.data().clone().0.into(),
-                collated_data: collated_data.data().clone().0.into(),
-            },
-        )));
+        let candidate = Rc::new(candidate::Candidate {
+            src: ::ton_api::ton::int256(self.get_local_id().data().clone()),
+            round: round as i32,
+            root_hash: root_hash.clone().into(),
+            data: data.data().clone().0.into(),
+            collated_data: collated_data.data().clone().0.into(),
+        }.into_boxed());
         let serialized_block = catchain::utils::serialize_tl_boxed_object!(&*candidate);
         let serialized_block = catchain::CatchainFactory::create_block_payload(serialized_block);
         let block_id = self.description.candidate_id(

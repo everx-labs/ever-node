@@ -671,7 +671,7 @@ impl NodeNetwork {
         });
     }
 
-    pub fn process_connectivity_broadcast(self: Arc<Self>, broadcast: Box<ConnectivityCheckBroadcast>) {
+    pub fn process_connectivity_broadcast(self: Arc<Self>, broadcast: ConnectivityCheckBroadcast) {
         if !self.connectivity_check_config.enabled {
             return;
         }
