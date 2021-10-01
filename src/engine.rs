@@ -452,9 +452,9 @@ impl Engine {
             &engine_allocated
         )?;
 
-        log::info!("start_states_gc");
+        //log::info!("start_states_gc");
         let state_gc_resolver = Arc::new(AllowStateGcSmartResolver::new());
-        db.start_states_gc(state_gc_resolver.clone());
+        //db.start_states_gc(state_gc_resolver.clone());
 
         log::info!("Engine is created.");
 
