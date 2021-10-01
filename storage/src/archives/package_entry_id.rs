@@ -11,7 +11,7 @@ use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256};
 
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Hash, PartialEq, Eq)]
 pub enum PackageEntryId<B, U256, PK>
 where
     B: Borrow<BlockIdExt> + Hash,
@@ -27,35 +27,6 @@ where
     Signatures(B),
     Candidate { block_id: B, collated_data_hash: U256, source: PK },
     BlockInfo(B),
-}
-
-impl<B, U256, PK> Hash for PackageEntryId<B, U256, PK>
-where
-    B: Borrow<BlockIdExt> + Hash,
-    U256: Borrow<UInt256> + Hash,
-    PK: Borrow<UInt256> + Hash
-{
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            PackageEntryId::Empty => {}
-            PackageEntryId::Block(b) => b.borrow().hash(state),
-            PackageEntryId::ZeroState(b) => b.borrow().hash(state),
-            PackageEntryId::PersistentState { mc_block_id, block_id } => {
-                mc_block_id.hash(state);
-                block_id.hash(state);
-            },
-            PackageEntryId::Proof(b) => b.borrow().hash(state),
-            PackageEntryId::ProofLink(b) => b.borrow().hash(state),
-            PackageEntryId::Signatures(b) => b.borrow().hash(state),
-            PackageEntryId::Candidate { block_id, collated_data_hash, source } => {
-                block_id.hash(state);
-                collated_data_hash.hash(state);
-                source.hash(state);
-            }
-            PackageEntryId::BlockInfo(b) => b.borrow().hash(state),
-        }
-    }
-
 }
 
 impl PackageEntryId<BlockIdExt, UInt256, UInt256> {

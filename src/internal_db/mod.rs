@@ -340,6 +340,7 @@ impl InternalDbImpl {
         Ok(db)
     }
 
+    #[allow(dead_code)]
     pub fn start_states_gc(&self, resolver: Arc<dyn AllowStateGcResolver>) {
         self.shard_state_dynamic_db.clone().start_gc(resolver, self.cells_gc_interval.clone())
     }
