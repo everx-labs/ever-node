@@ -179,25 +179,21 @@ pub fn get_block_id(
 }
 
 pub fn get_block_dependency_id(block: &ton::BlockDep, receiver: &dyn Receiver) -> ton::BlockId {
-    ::ton_api::ton::catchain::block::Id::Catchain_Block_Id(Box::new(
-        ::ton_api::ton::catchain::block::id::Id {
-            incarnation: receiver.get_incarnation().clone().into(),
-            src: public_key_hash_to_int256(receiver.get_source_public_key_hash(block.src as usize)),
-            height: block.height,
-            data_hash: block.data_hash,
-        },
-    ))
+    ::ton_api::ton::catchain::block::id::Id {
+        incarnation: receiver.get_incarnation().clone().into(),
+        src: public_key_hash_to_int256(receiver.get_source_public_key_hash(block.src as usize)),
+        height: block.height,
+        data_hash: block.data_hash,
+    }.into_boxed()
 }
 
 pub fn get_root_block_id(incarnation: &SessionId) -> ton::BlockId {
-    ::ton_api::ton::catchain::block::Id::Catchain_Block_Id(Box::new(
-        ::ton_api::ton::catchain::block::id::Id {
-            incarnation: incarnation.clone().into(),
-            src: incarnation.clone().into(),
-            height: 0,
-            data_hash: incarnation.clone().into(),
-        },
-    ))
+    ::ton_api::ton::catchain::block::id::Id {
+        incarnation: incarnation.clone().into(),
+        src: incarnation.clone().into(),
+        height: 0,
+        data_hash: incarnation.clone().into(),
+    }.into_boxed()
 }
 
 pub fn get_block_id_hash(id: &ton::BlockId) -> BlockHash {

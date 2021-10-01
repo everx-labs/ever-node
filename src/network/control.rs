@@ -10,6 +10,7 @@ use adnl::{
     server::{AdnlServer, AdnlServerConfig}
 };
 use std::{ops::Deref, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use ton_api::IntoBoxed;
 use ton_api::ton::{
     self, PublicKey, TLObject,
     engine::validator::{
@@ -288,12 +289,10 @@ impl Subscriber for ControlQuerySubscriber {
         let query = match query.downcast::<ton::rpc::engine::validator::GetStats>() {
             Ok(_) => {
                 return QueryResult::consume_boxed(
-                    ton_api::ton::engine::validator::Stats::Engine_Validator_Stats(
-                        Box::new(self.get_stats().await?)
-                    ),
+                    self.get_stats().await?.into_boxed(),
                     None
                 )
-            },
+            }
             Err(query) => query
         };
         log::warn!("Unsupported ControlQuery (control server): {:?}", query);

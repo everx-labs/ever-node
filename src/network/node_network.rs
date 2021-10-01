@@ -613,7 +613,7 @@ impl NodeNetwork {
         });
     }
 
-    pub fn process_connectivity_broadcast(self: Arc<Self>, broadcast: Box<ConnectivityCheckBroadcast>) {
+    pub fn process_connectivity_broadcast(self: Arc<Self>, broadcast: ConnectivityCheckBroadcast) {
         if !self.connectivity_check_config.enabled {
             return;
         }
@@ -895,7 +895,7 @@ impl PrivateOverlayOperations for NodeNetwork {
                 self.dht.clone(), 
                 self.overlay.clone(),
                 self.validator_context.sets_contexts.clone(),
-                validator_list_id,
+                validator_list_id.clone(),
                 lost_validators
             );
         }

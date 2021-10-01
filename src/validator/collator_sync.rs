@@ -796,7 +796,7 @@ impl Collator {
 
         let now = self.init_utime(&mc_data, &prev_data)?;
         let config = BlockchainConfig::with_config(mc_data.config().clone())?;
-        let mut collator_data = CollatorData::new(now, config, usage_tree, libraries, &prev_data, self.rand_seed,
+        let mut collator_data = CollatorData::new(now, config, usage_tree, libraries, &prev_data, self.rand_seed.clone(),
             is_masterchain, self.collated_block_descr.clone())?;
 
         if !self.shard.is_masterchain() {
@@ -1266,7 +1266,7 @@ impl Collator {
             }
             let mut descr = sh_bd.get_top_descr(chain_len)?;
             CHECK!(descr.block_id() == sh_bd.proof_for());
-            let shard = &descr.shard;
+            let shard = descr.shard();
             let start_blks = sh_bd.get_prev_at(chain_len);
             match may_update_shard_block_info(collator_data.shards()?, &descr, &start_blks, lt_limit, Some(&mut shards_updated)) {
                 Err(e) => {
@@ -1796,7 +1796,7 @@ impl Collator {
             block_unixtime: collator_data.gen_utime,
             block_lt: collator_data.start_lt()?,
             last_tr_lt: shard_acc.lt(),
-            seed_block: collator_data.block_seed,
+            seed_block: collator_data.block_seed.clone(),
             debug: self.debug,
             ..ExecuteParams::default()
         };

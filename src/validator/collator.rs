@@ -683,7 +683,7 @@ impl ExecutionManager {
         let debug = self.debug;
         let block_unixtime = self.gen_utime;
         let block_lt = self.start_lt;
-        let seed_block = self.seed_block;
+        let seed_block = self.seed_block.clone();
         let collated_block_descr = self.collated_block_descr.clone();
         let total_trans_duration = self.total_trans_duration.clone();
         let wait_tr = self.wait_tr.clone();
@@ -714,7 +714,7 @@ impl ExecutionManager {
                     block_unixtime,
                     block_lt,
                     last_tr_lt: shard_acc.lt(),
-                    seed_block,
+                    seed_block: seed_block.clone(),
                     debug,
                     ..ExecuteParams::default()
                 };
@@ -1166,7 +1166,7 @@ impl Collator {
         let mut exec_manager = ExecutionManager::new(
             collator_data.gen_utime(),
             collator_data.start_lt()?,
-            self.rand_seed,
+            self.rand_seed.clone(),
             mc_data.libraries().clone(),
             collator_data.config.clone(),
             self.collator_settings.max_collate_threads.unwrap_or(MAX_COLLATE_THREADS),
@@ -1564,7 +1564,7 @@ impl Collator {
             }
             let mut descr = sh_bd.get_top_descr(chain_len)?;
             CHECK!(descr.block_id() == sh_bd.proof_for());
-            let shard = &descr.shard;
+            let shard = descr.shard();
             let start_blks = sh_bd.get_prev_at(chain_len);
             match may_update_shard_block_info(collator_data.shards()?, &descr, &start_blks, lt_limit, Some(&mut shards_updated)) {
                 Err(e) => {

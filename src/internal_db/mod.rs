@@ -18,7 +18,6 @@ use storage::{
 };
 #[cfg(feature = "read_old_db")]
 use storage::block_db::BlockDb;
-use ton_api::ton::PublicKey;
 use ton_block::{Block, BlockIdExt, AccountIdPrefixFull, UnixTime32};
 use ton_types::{error, fail, Result, UInt256};
 
@@ -387,7 +386,7 @@ impl InternalDb for InternalDbImpl {
         let handle = result.clone().as_non_updated().ok_or_else(
             || error!("INTERNAL ERROR: block {} result mismatch in store_block_data {:?}", block.id(), result)
         )?;
-        let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(block.id());
+        let entry_id = PackageEntryId::<_, UInt256, UInt256>::Block(block.id());
         if !handle.has_data() || !self.archive_manager.check_file(&handle, &entry_id) {
             let _lock = handle.block_file_lock().write().await;
             if !handle.has_data() || !self.archive_manager.check_file(&handle, &entry_id) {
@@ -417,7 +416,7 @@ impl InternalDb for InternalDbImpl {
             return Ok(raw_block.to_vec());
         }
         #[cfg(not(feature = "read_old_db"))] {
-            let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Block(handle.id());
+            let entry_id = PackageEntryId::<_, UInt256, UInt256>::Block(handle.id());
             self.archive_manager.get_file(handle, &entry_id).await
         }
     }
@@ -485,7 +484,7 @@ impl InternalDb for InternalDbImpl {
                 || error!("INTERNAL ERROR: block {} result mismatch in store_block_proof", id)
             )?;
             if proof.is_link() {
-                let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(id);
+                let entry_id = PackageEntryId::<_, UInt256, UInt256>::ProofLink(id);
                 if !handle.has_proof_link() || 
                    !self.archive_manager.check_file(&handle, &entry_id) 
                 {
@@ -493,7 +492,7 @@ impl InternalDb for InternalDbImpl {
                     if !handle.has_proof_link() || 
                        !self.archive_manager.check_file(&handle, &entry_id) 
                     {
-                        let entry_id = PackageEntryId::<_, UInt256, PublicKey>::ProofLink(id);
+                        let entry_id = PackageEntryId::<_, UInt256, UInt256>::ProofLink(id);
                         self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
                         if handle.set_proof_link() {
                             self.store_block_handle(&handle, callback)?;
@@ -502,7 +501,7 @@ impl InternalDb for InternalDbImpl {
                     }
                 }
             } else {
-                let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Proof(id);
+                let entry_id = PackageEntryId::<_, UInt256, UInt256>::Proof(id);
                 if !handle.has_proof() || 
                    !self.archive_manager.check_file(&handle, &entry_id) 
                 {
@@ -510,7 +509,7 @@ impl InternalDb for InternalDbImpl {
                     if !handle.has_proof() || 
                        !self.archive_manager.check_file(&handle, &entry_id) 
                     {
-                        let entry_id = PackageEntryId::<_, UInt256, PublicKey>::Proof(id);
+                        let entry_id = PackageEntryId::<_, UInt256, UInt256>::Proof(id);
                         self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
                         if handle.set_proof() {
                             self.store_block_handle(&handle, callback)?;
@@ -546,9 +545,9 @@ impl InternalDb for InternalDbImpl {
     async fn load_block_proof_raw(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>> {
         log::trace!("load_block_proof_raw {} {}", if is_link {"link"} else {""}, handle.id());
         let (entry_id, inited) = if is_link {
-            (PackageEntryId::<_, UInt256, PublicKey>::ProofLink(handle.id()), handle.has_proof_link())
+            (PackageEntryId::<_, UInt256, UInt256>::ProofLink(handle.id()), handle.has_proof_link())
         } else {
-            (PackageEntryId::<_, UInt256, PublicKey>::Proof(handle.id()), handle.has_proof())
+            (PackageEntryId::<_, UInt256, UInt256>::Proof(handle.id()), handle.has_proof())
         };
         if !inited {
             fail!("This proof{} is not in the archive: {:?}", if is_link { "link" } else { "" }, handle);

@@ -8,7 +8,6 @@ use crate::{
 };
 use std::{borrow::Borrow, hash::Hash, io::ErrorKind, path::PathBuf, sync::Arc};
 use tokio::io::AsyncWriteExt;
-use ton_api::ton::PublicKey;
 use ton_block::BlockIdExt;
 use ton_types::{error, fail, Result, UInt256};
 
@@ -46,7 +45,7 @@ impl ArchiveManager {
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
-        PK: Borrow<PublicKey> + Hash
+        PK: Borrow<UInt256> + Hash
     {
         log::debug!(target: "storage", "Saving unapplied file: {}", entry_id);
 
@@ -74,7 +73,7 @@ impl ArchiveManager {
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
-        PK: Borrow<PublicKey> + Hash
+        PK: Borrow<UInt256> + Hash
     {
         if handle.is_archived() {
             true
@@ -91,7 +90,7 @@ impl ArchiveManager {
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
-        PK: Borrow<PublicKey> + Hash
+        PK: Borrow<UInt256> + Hash
     {
             
         if handle.is_archived() {
@@ -144,7 +143,7 @@ impl ArchiveManager {
             Some(
                 self.move_file_to_archives(
                     handle, 
-                    &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Proof(handle.id())
+                    &PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::Proof(handle.id())
                 ).await?
             )
         } else if prooflink_inited {
@@ -152,7 +151,7 @@ impl ArchiveManager {
             Some(
                 self.move_file_to_archives(
                     handle, 
-                    &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::ProofLink(handle.id())
+                    &PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::ProofLink(handle.id())
                 ).await?
             )
         } else {
@@ -163,7 +162,7 @@ impl ArchiveManager {
             Some(
                 self.move_file_to_archives(
                     handle, 
-                    &PackageEntryId::<&BlockIdExt, &UInt256, &PublicKey>::Block(handle.id())
+                    &PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::Block(handle.id())
                 ).await?
             )
         } else {
@@ -218,7 +217,7 @@ impl ArchiveManager {
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
-        PK: Borrow<PublicKey> + Hash
+        PK: Borrow<UInt256> + Hash
     {
         log::debug!(target: "storage", "Moving entry to archive: {}", entry_id.filename_short());
         let (filename, data) = {
@@ -244,7 +243,7 @@ impl ArchiveManager {
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
-        PK: Borrow<PublicKey> + Hash
+        PK: Borrow<UInt256> + Hash
     {
         let mc_seq_no = get_mc_seq_no(handle);
         let key_block = handle.is_key_block()?;
@@ -270,7 +269,7 @@ impl ArchiveManager {
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
-        PK: Borrow<PublicKey> + Hash
+        PK: Borrow<UInt256> + Hash
     {
         let temp_filename = self.unapplied_dir.join(entry_id.filename_short());
         let data = tokio::fs::read(&temp_filename).await

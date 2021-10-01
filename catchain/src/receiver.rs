@@ -964,14 +964,12 @@ impl ReceiverImpl {
         let height = dep.height;
         let data_hash = dep.data_hash;
 
-        ::ton_api::ton::catchain::block::Id::Catchain_Block_Id(Box::new(
-            ::ton_api::ton::catchain::block::id::Id {
-                incarnation: incarnation.into(),
-                src: public_key_hash_to_int256(source_hash),
-                height: height,
-                data_hash: data_hash,
-            },
-        ))
+        ::ton_api::ton::catchain::block::id::Id {
+            incarnation: incarnation.into(),
+            src: public_key_hash_to_int256(source_hash),
+            height,
+            data_hash,
+        }.into_boxed()
     }
 
     fn add_received_block(&mut self, block: ReceivedBlockPtr) {
@@ -1542,7 +1540,7 @@ impl ReceiverImpl {
                                 trace!("GetDifference response: {:?}", difference);
                             }
                             Difference::Catchain_DifferenceFork(difference_fork) => {
-                                get_mut_impl(receiver).got_fork_proof(*difference_fork);
+                                get_mut_impl(receiver).got_fork_proof(difference_fork);
                             }
                         }
                     }
@@ -1896,9 +1894,7 @@ impl ReceiverImpl {
             if block.get_height() != 0 && block.is_initialized() {
                 let response = ::ton_api::ton::catchain::blockresult::BlockResult {
                     block: block.export_tl(),
-                };
-                let response =
-                    ::ton_api::ton::catchain::BlockResult::Catchain_BlockResult(Box::new(response));
+                }.into_boxed();
 
                 return Ok((response, block.get_payload().clone()));
             }

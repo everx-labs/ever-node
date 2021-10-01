@@ -178,6 +178,10 @@ impl CatchainListener for CatchainListenerImpl {
         });
     }
 
+    fn process_message(&self, _source_id: PublicKeyHash, _data: BlockPayloadPtr) {
+        todo!("remove interface or implement it")
+    }
+
     fn process_query(
         &self,
         source_id: PublicKeyHash,

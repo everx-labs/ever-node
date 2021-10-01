@@ -8,9 +8,8 @@ use adnl::common::{
 };
 use overlay::QueriesConsumer;
 use std::{sync::Arc, convert::TryInto, cmp::min, fmt::Debug};
-use ton_api::{BoxedSerialize};
 use ton_api::{
-    AnyBoxedSerialize, IntoBoxed, 
+    AnyBoxedSerialize, IntoBoxed,
     ton::{
         self, TLObject, Vector,
         rpc::{
@@ -63,14 +62,10 @@ impl FullNodeOverlayService {
         let prev_id = (&query.prev_block).try_into()?;
         let answer = match self.engine.load_block_next1(&prev_id).await {
             Ok(id) => { 
-                BlockDescription::TonNode_BlockDescription(
-                    Box::new(
-                        ton_node::blockdescription::BlockDescription{
-                            id: id.into()
-                        }
-                    )
-                )
-            },
+                ton_node::blockdescription::BlockDescription{
+                    id: id.into()
+                }.into_boxed()
+            }
             Err(_) => BlockDescription::TonNode_BlockDescriptionEmpty
         };
         #[cfg(feature = "telemetry")]
@@ -222,15 +217,11 @@ impl FullNodeOverlayService {
             .into_iter()
             .map(|id| ton_node::blockidext::BlockIdExt::from(id))
             .collect();
-        KeyBlocks::TonNode_KeyBlocks(
-            Box::new(
-                ton_node::keyblocks::KeyBlocks{
-                    blocks: blocks_vec,
-                    incomplete: incomplete.into(),
-                    error: error.into(),
-                }
-            )
-        )
+        ton_node::keyblocks::KeyBlocks{
+            blocks: blocks_vec,
+            incomplete: incomplete.into(),
+            error: error.into(),
+        }.into_boxed()
     }
 
     async fn get_next_key_block_ids_(
@@ -562,7 +553,7 @@ impl FullNodeOverlayService {
     ) -> Result<std::result::Result<QueryResult, TLObject>>
     where
         Q: AnyBoxedSerialize + Debug,
-        A: BoxedSerialize + Send + Sync + serde::Serialize + Debug + 'static,
+        A: AnyBoxedSerialize + Debug + 'static,
         F: futures::Future<Output = Result<TaggedObject<A>>>,
     {
         Ok(

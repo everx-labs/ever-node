@@ -626,7 +626,7 @@ impl ValidatorManagerImpl {
                 }
             }
             else {
-                new_shards.insert(ident, vec![top_block]);
+                new_shards.insert(ident.clone(), vec![top_block]);
             }
 
             // Create list of shards which will be effective soon
@@ -634,9 +634,8 @@ impl ValidatorManagerImpl {
             let cur_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
             match descr.split_merge_at {
                 FutureSplitMerge::None => {
-                    future_shards.insert(ident);
-                    ()
-                },
+                    future_shards.insert(ident.clone());
+                }
                 FutureSplitMerge::Split{split_utime: time, interval: _interval} => {
                     if (time as u64) < cur_time + 60 {
                         let lr_shards = ident.split();
@@ -649,10 +648,9 @@ impl ValidatorManagerImpl {
                         }
                     }
                     else {
-                        future_shards.insert(ident);
+                        future_shards.insert(ident.clone());
                     }
-                    ()
-                },
+                }
                 FutureSplitMerge::Merge{merge_utime: time, interval: _interval} => {
                     if (time as u64) < cur_time + 60 {
                         let parent_shard = ident.merge();
@@ -662,9 +660,8 @@ impl ValidatorManagerImpl {
                         }
                     }
                     else {
-                        future_shards.insert(ident);
+                        future_shards.insert(ident.clone());
                     }
-                    ()
                 }
             };
 
