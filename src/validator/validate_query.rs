@@ -724,7 +724,7 @@ impl ValidateQuery {
         sibling: Option<&McShardRecord>,
         wc_info: Option<&WorkchainDescr>
     ) -> Result<()> {
-        let shard = &info.shard;
+        let shard = info.shard();
         log::debug!(target: "validate_query", "checking shard {} in new shard configuration", shard);
         if info.descr.next_validator_shard != shard.shard_prefix_with_tag() {
             reject_query!("new shard configuration for shard {} contains different next_validator_shard {}",
@@ -853,11 +853,11 @@ impl ValidateQuery {
                 // register shard block creators
                 self.register_shard_block_creators(base, &sh_bd.get_creator_list(chain_len)?)?;
                 // ...
-                if old.shard.is_parent_for(shard) {
+                if old.shard().is_parent_for(shard) {
                     // shard has been split
-                    log::debug!(target: "validate_query", "detected shard split {} -> {}", old.shard, shard);
+                    log::debug!(target: "validate_query", "detected shard split {} -> {}", old.shard(), shard);
                     // ...
-                } else if shard.is_parent_for(&old.shard) {
+                } else if shard.is_parent_for(old.shard()) {
                     // shard has been merged
                     if let Some(old2) = self.old_mc_shards.find_shard(&shard.right_ancestor_mask()?)? {
                         if &old.shard().sibling() != old2.shard() {
@@ -871,13 +871,13 @@ impl ValidateQuery {
                         reject_query!("No plus_one shard") // TODO: check here
                     }
                     // ...
-                } else if shard == &old.shard {
+                } else if shard == old.shard() {
                     // shard updated without split/merge
                     prev = Some(old);
                     // ...
                 } else {
                     reject_query!("new configuration contains shard {} that could not be \
-                        obtained from previously existing shard {}", shard, old.shard);
+                        obtained from previously existing shard {}", shard, old.shard());
                 // ...
                 }
             }

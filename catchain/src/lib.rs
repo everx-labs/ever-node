@@ -851,6 +851,9 @@ pub trait CatchainListener {
     /// Notify about incoming broadcasts
     fn process_broadcast(&self, source_id: PublicKeyHash, data: BlockPayloadPtr);
 
+    /// Notify about incoming message
+    fn process_message(&self, source_id: PublicKeyHash, data: BlockPayloadPtr);
+
     /// Notify about incoming query
     fn process_query(
         &self,

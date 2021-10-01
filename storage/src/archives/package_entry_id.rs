@@ -7,7 +7,6 @@ use std::str::FromStr;
 use lazy_static::lazy_static;
 use regex::Regex;
 
-use ton_api::ton::PublicKey;
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256};
 
@@ -17,7 +16,7 @@ pub enum PackageEntryId<B, U256, PK>
 where
     B: Borrow<BlockIdExt> + Hash,
     U256: Borrow<UInt256> + Hash,
-    PK: Borrow<PublicKey> + Hash
+    PK: Borrow<UInt256> + Hash
 {
     Empty,
     Block(B),
@@ -30,9 +29,9 @@ where
     BlockInfo(B),
 }
 
-impl PackageEntryId<BlockIdExt, UInt256, PublicKey> {
+impl PackageEntryId<BlockIdExt, UInt256, UInt256> {
     pub fn from_filename(filename: &str) -> Result<Self> {
-        if filename == PackageEntryId::<BlockIdExt, UInt256, PublicKey>::Empty.filename_prefix() {
+        if filename == PackageEntryId::<BlockIdExt, UInt256, UInt256>::Empty.filename_prefix() {
             return Ok(PackageEntryId::Empty);
         }
 
@@ -101,10 +100,10 @@ impl PackageEntryId<BlockIdExt, UInt256, PublicKey> {
         }
 
         if filename.starts_with(
-            PackageEntryId::<&BlockIdExt, UInt256, PublicKey>::Candidate {
+            PackageEntryId::<&BlockIdExt, UInt256, UInt256>::Candidate {
                 block_id: &dummy,
                 collated_data_hash: UInt256::default(),
-                source: PublicKey::default()
+                source: UInt256::default()
             }.filename_prefix()
         ) {
             fail!("Unsupported from_filename() for PackageEntryId::Candidate");
@@ -113,7 +112,7 @@ impl PackageEntryId<BlockIdExt, UInt256, PublicKey> {
         fail!("Cannot parse filename: {}", filename)
     }
 
-    fn parse_block_ids(filename: &str, dummy: PackageEntryId<&BlockIdExt, UInt256, PublicKey>, count: usize) -> Result<Option<Vec<BlockIdExt>>> {
+    fn parse_block_ids(filename: &str, dummy: PackageEntryId<&BlockIdExt, UInt256, UInt256>, count: usize) -> Result<Option<Vec<BlockIdExt>>> {
         let prefix = dummy.filename_prefix();
         if !filename.starts_with(&(prefix.to_string() + "_")) {
             return Ok(None);
@@ -135,7 +134,7 @@ impl<B, U256, PK> PackageEntryId<B, U256, PK>
 where
     B: Borrow<BlockIdExt> + Hash,
     U256: Borrow<UInt256> + Hash,
-    PK: Borrow<PublicKey> + Hash
+    PK: Borrow<UInt256> + Hash
 {
     fn filename_prefix(&self) -> &'static str {
         match self {
@@ -206,14 +205,9 @@ impl FromFileName for BlockIdExt {
     }
 }
 
-impl GetFileName for PublicKey {
+impl GetFileName for UInt256 {
     fn filename(&self) -> String {
-        match self {
-            PublicKey::Pub_Aes(aes) => base64::encode(&aes.key.0),
-            PublicKey::Pub_Ed25519(ed25519) => base64::encode(&ed25519.key.0),
-            PublicKey::Pub_Overlay(overlay) => base64::encode(&overlay.name.0),
-            PublicKey::Pub_Unenc(unenc) => base64::encode(&unenc.data.0),
-        }
+        base64::encode(self.as_slice())
     }
 }
 
@@ -221,7 +215,7 @@ impl<B, U256, PK> GetFileName for PackageEntryId<B, U256, PK>
 where
     B: Borrow<BlockIdExt> + Hash,
     U256: Borrow<UInt256> + Hash,
-    PK: Borrow<PublicKey> + Hash
+    PK: Borrow<UInt256> + Hash
 {
     fn filename(&self) -> String {
         match self {
@@ -274,7 +268,7 @@ impl<B, U256, PK> GetFileNameShort for PackageEntryId<B, U256, PK>
 where
     B: Borrow<BlockIdExt> + Hash,
     U256: Borrow<UInt256> + Hash,
-    PK: Borrow<PublicKey> + Hash
+    PK: Borrow<UInt256> + Hash
 {
     fn filename_short(&self) -> String {
         match self {
@@ -310,7 +304,7 @@ impl<B, U256, PK> Display for PackageEntryId<B, U256, PK>
 where
     B: Borrow<BlockIdExt> + Hash,
     U256: Borrow<UInt256> + Hash,
-    PK: Borrow<PublicKey> + Hash
+    PK: Borrow<UInt256> + Hash
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.filename().as_str())

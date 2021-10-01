@@ -41,7 +41,7 @@ pub async fn run_validate_query(
     let test_bundles_config = &engine.test_bundles_config().validator;
     let validator_result = if !test_bundles_config.is_enable() {
         ValidateQuery::new(
-            shard,
+            shard.clone(),
             min_masterchain_block_id.seq_no(),
             prev,
             block,
@@ -69,6 +69,7 @@ pub async fn run_validate_query(
                 if !CollatorTestBundle::exists(test_bundles_config.path(), &id) {
                     let path = test_bundles_config.path().to_string();
                     let engine = engine.clone();
+                    let shard = shard.clone();
                     tokio::spawn(
                         async move {
                             match CollatorTestBundle::build_for_validating_block(

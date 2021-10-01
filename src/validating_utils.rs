@@ -142,7 +142,7 @@ pub fn check_this_shard_mc_info(
                         shard, prev_blocks[0], left.block_id(), right.block_id())
             }
         }
-    } else if left.shard.is_parent_for(shard) {
+    } else if left.shard().is_parent_for(shard) {
         // after split
         if !left.descr().before_split {
             fail!("cannot generate new split shardchain block for {} \
@@ -243,7 +243,7 @@ pub fn may_update_shard_block_info(
 
     log::trace!("may_update_shard_block_info new_info.block_id(): {}", new_info.block_id());
 
-    let wc = new_info.shard.workchain_id();
+    let wc = new_info.shard().workchain_id();
     if wc == INVALID_WORKCHAIN_ID || wc == MASTERCHAIN_ID {
         fail!("new top shard block description belongs to an invalid workchain {}", wc)
     }
@@ -257,20 +257,20 @@ pub fn may_update_shard_block_info(
     }
 
 
-    let before_split = old_blkids[0].shard().is_parent_for(&new_info.shard);
+    let before_split = old_blkids[0].shard().is_parent_for(new_info.shard());
     let before_merge = old_blkids.len() == 2;
     if before_merge {
         if old_blkids[0].shard().sibling() != *old_blkids[1].shard() {
             fail!("the two start blocks of a top shard block update must be siblings")
         }
-        if !new_info.shard.is_parent_for(old_blkids[0].shard()) {
+        if !new_info.shard().is_parent_for(old_blkids[0].shard()) {
             fail!(
                 "the two start blocks of a top shard block update do not merge into expected \
                 final shard {}",
                 old_blkids[0].shard()
             )
         }
-    } else if (new_info.shard != *old_blkids[0].shard()) && !before_split {
+    } else if (new_info.shard() != old_blkids[0].shard()) && !before_split {
         fail!(
             "the start block of a top shard block update must either coincide with the final\
             shard or be its parent"

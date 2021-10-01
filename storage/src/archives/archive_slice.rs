@@ -11,7 +11,6 @@ use crate::{
 };
 use std::{borrow::Borrow, hash::Hash, io::SeekFrom, path::PathBuf, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use ton_api::ton::PublicKey;
 use ton_block::BlockIdExt;
 use ton_types::{error, fail, Result, UInt256};
 
@@ -174,7 +173,7 @@ impl ArchiveSlice {
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
-        PK: Borrow<PublicKey> + Hash
+        PK: Borrow<UInt256> + Hash
     {
         let offset_key = entry_id.into();
         if self.offsets_db.contains(&offset_key)? {
@@ -212,7 +211,7 @@ impl ArchiveSlice {
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
-        PK: Borrow<PublicKey> + Hash
+        PK: Borrow<UInt256> + Hash
     {
         let offset_key = entry_id.into();
         let offset = self.offsets_db.try_get_value(&offset_key)?

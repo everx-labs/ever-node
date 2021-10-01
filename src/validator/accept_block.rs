@@ -476,12 +476,12 @@ fn find_known_ancestors(
                 return Ok(None)
             }
         }
-        Ok(Some(ancestor)) if ancestor.shard == *shard => {
+        Ok(Some(ancestor)) if ancestor.shard() == shard => {
             log::trace!(target: "validator", "found one regular ancestor {}", ancestor.shard());
             oldest_ancestor_seqno = ancestor.block_id().seq_no();
             ancestors.push(ancestor);
         }
-        Ok(Some(ancestor)) if ancestor.shard.is_parent_for(shard) => {
+        Ok(Some(ancestor)) if ancestor.shard().is_parent_for(shard) => {
             log::trace!(target: "validator", "found one parent ancestor {}", ancestor.shard());
             oldest_ancestor_seqno = ancestor.block_id().seq_no();
             ancestors.push(ancestor);
