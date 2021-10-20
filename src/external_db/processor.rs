@@ -31,7 +31,7 @@ enum DbRecord {
     Account(String, String, Option<u32>),
     BlockProof(String, String, Option<u32>),
     Block(String, String),
-    RawBlock(Vec<u8>, Vec<u8>, u32, Option<u32>)
+    RawBlock([u8; 32], [u8; 32], Vec<u8>, u32, Option<u32>)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -240,15 +240,17 @@ impl<T: WriteData> Processor<T> {
     fn prepare_block_record(
         block: &Block,
         block_root: &Cell,
-        block_boc: Vec<u8>,
+        boc: &[u8],
+        file_hash: &UInt256
     ) -> Result<DbRecord> {
-        let set = ton_block_json::BlockSerializationSet {
-            block: block.clone(),
-            id: block_root.repr_hash(),
+        let set = ton_block_json::BlockSerializationSetFH {
+            block,
+            id: &block_root.repr_hash(),
             status: BlockProcessingStatus::Finalized,
-            boc: block_boc,
+            boc,
+            file_hash: Some(file_hash),
         };
-        let doc = ton_block_json::db_serialize_block("id", &set)?;
+        let doc = ton_block_json::db_serialize_block("id", set)?;
         Ok(DbRecord::Block(
             doc["id"].to_string(),
             format!("{:#}", serde_json::json!(doc))
@@ -274,7 +276,8 @@ impl<T: WriteData> Processor<T> {
         partition_key: Option<u32>,
     ) -> Result<DbRecord> {
         Ok(DbRecord::RawBlock(
-            block_id.root_hash.as_slice().to_vec(),
+            block_id.root_hash.as_array().clone(),
+            block_id.file_hash.as_array().clone(),
             block_boc,
             mc_seq_no,
             partition_key,
@@ -335,8 +338,7 @@ impl<T: WriteData> Processor<T> {
         let proof = block_proof.map(|p| p.proof().clone());
         let block_root = block_stuff.root_cell().clone();
         let block_extra = block.read_extra()?;
-        let block_boc1 = if process_block { Some(block_stuff.data().to_vec()) } else { None };
-        let block_boc2 = if process_raw_block { Some(block_stuff.data().to_vec()) } else { None };
+        let block_boc = if process_block || process_raw_block { Some(block_stuff.data().to_vec()) } else { None };
         let shard_accounts = state.map(|s| s.state().read_accounts()).transpose()?;
         let accounts_sharding_depth = self.write_account.sharding_depth();
         let block_proofs_sharding_depth = self.write_block_proof.sharding_depth();
@@ -436,7 +438,7 @@ impl<T: WriteData> Processor<T> {
             if process_block {
                 let now = std::time::Instant::now();
                 db_records.push(
-                    Self::prepare_block_record(&block, &block_root, block_boc1.unwrap())?
+                    Self::prepare_block_record(&block, &block_root, block_boc.as_deref().unwrap(), &block_id.file_hash)?
                 );
                 log::trace!("TIME: block {}ms;   {}", now.elapsed().as_millis(), block_id);
             }
@@ -458,7 +460,7 @@ impl<T: WriteData> Processor<T> {
                 let now = std::time::Instant::now();
                 let partition_key = Self::get_block_partition_key(&block_id, raw_blocks_sharding_depth);
                 db_records.push(
-                    Self::prepare_raw_block_record(&block_id, block_boc2.unwrap(), mc_seq_no, partition_key)?
+                    Self::prepare_raw_block_record(&block_id, block_boc.unwrap(), mc_seq_no, partition_key)?
                 );
                 log::trace!("TIME: raw block {}ms;   {}", now.elapsed().as_millis(), block_id);
             }
@@ -490,7 +492,7 @@ impl<T: WriteData> Processor<T> {
                 DbRecord::Account(key, value, partition_key) => send_tasks.push(self.write_account.write_data(key, value, None, partition_key)),
                 DbRecord::Block(key, value) => send_tasks.push(self.write_block.write_data(key, value, None, None)),
                 DbRecord::BlockProof(key, value, partition_key) => send_tasks.push(self.write_block_proof.write_data(key, value, None, partition_key)),
-                DbRecord::RawBlock(key, value, mc_seq_no, partition_key) =>  send_tasks.push(Box::pin(self.send_raw_block(key, value, mc_seq_no, partition_key))),
+                DbRecord::RawBlock(key, file_hash, value, mc_seq_no, partition_key) =>  send_tasks.push(Box::pin(self.send_raw_block(key, value, mc_seq_no, file_hash, partition_key))),
                 DbRecord::Empty => {}
             } 
         }
@@ -511,12 +513,13 @@ impl<T: WriteData> Processor<T> {
         Ok(())
     }
 
-    async fn send_raw_block(&self, key: Vec<u8>, value: Vec<u8>, mc_seq_no: u32, partition_key: Option<u32>) -> Result<()> {
+    async fn send_raw_block(&self, key: [u8; 32], value: Vec<u8>, mc_seq_no: u32, file_hash: [u8; 32], partition_key: Option<u32>) -> Result<()> {
         let attributes = [
             ("mc_seq_no", &mc_seq_no.to_be_bytes()[..]),
-            ("raw_block_timestamp", &Utc::now().timestamp().to_be_bytes()[..])
+            ("raw_block_timestamp", &Utc::now().timestamp().to_be_bytes()[..]),
+            ("file_hash", &file_hash[..]),
         ];
-        self.write_raw_block.write_raw_data(key, value, Some(&attributes), partition_key).await
+        self.write_raw_block.write_raw_data(key.to_vec(), value, Some(&attributes), partition_key).await
     }
 }
 

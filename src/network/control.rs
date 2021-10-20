@@ -25,7 +25,10 @@ use ton_api::{
     IntoBoxed,
 };
 use ton_types::{fail, error, Result, UInt256};
-use ton_block::{generate_test_account_by_init_code_hash, BlockIdExt, MsgAddressInt, ShardAccount, Serializable};
+use ton_block::{
+    generate_test_account_by_init_code_hash, BlockIdExt, ConfigParam0, ConfigParamEnum, ConfigParams,
+    MsgAddressInt, ShardAccount, Serializable
+};
 use ton_block_json::serialize_config_param;
 
 pub struct ControlServer {
@@ -80,6 +83,36 @@ impl ControlQuerySubscriber {
         self.engine.as_ref().ok_or_else(|| error!("Engine was not set!"))
     }
 
+    async fn get_all_config_params(&self) -> Result<ton::lite_server::configinfo::ConfigInfo> {
+
+        let (config_params, block_id) = if let Some(engine) = self.engine.as_ref() {
+            let mc_state = engine.load_last_applied_mc_state().await?;
+            let config_params = mc_state.config_params()?;
+            (config_params.clone(), mc_state.block_id().clone())
+        } else {
+            let test_config_params = self.get_test_all_config_params()?;
+            (test_config_params, BlockIdExt::default())
+        };
+
+        let config_info = ConfigInfo {
+            mode: 0,
+            id: convert_block_id_ext_blk2api(&block_id),
+            state_proof: ton::bytes(vec!()),
+            config_proof: ton::bytes(config_params.write_to_bytes()?)
+        };
+
+        Ok(config_info)
+    }
+
+    fn get_test_all_config_params(&self) -> Result<ConfigParams> {
+        let mut config_param = ConfigParams::new();
+
+        let mut param0 = ConfigParam0::new();
+        param0.config_addr = UInt256::from([1;32]);
+        config_param.set_config(ConfigParamEnum::ConfigParam0(param0))?;
+
+        Ok(config_param)
+    }
     async fn get_config_params(&self, param_number: u32) -> Result<ton::lite_server::configinfo::ConfigInfo> {
         let engine = self.engine()?;
         let mc_state = engine.load_last_applied_mc_state().await?;
@@ -437,6 +470,13 @@ impl Subscriber for ControlQuerySubscriber {
                 let param_number = query.param_list.iter().next().ok_or_else(|| error!("Invalid param_number"))?;
                 let answer = self.get_config_params(*param_number as u32).await?;
 
+                return QueryResult::consume_boxed(answer.into_boxed(), None)
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::lite_server::GetConfigAll>() {
+            Ok(_) => {
+                let answer = self.get_all_config_params().await?;
                 return QueryResult::consume_boxed(answer.into_boxed(), None)
             },
             Err(query) => query

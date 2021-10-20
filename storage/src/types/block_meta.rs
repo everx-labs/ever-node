@@ -43,6 +43,10 @@ impl BlockMeta {
         (self.flags.fetch_or((flags as u64) << 32, Ordering::Relaxed) >> 32) as u32
     }
 
+    pub fn reset_flags(&self, flags: u32) {
+        self.flags.fetch_and((!flags as u64) << 32, Ordering::Relaxed);
+    }
+
     pub fn masterchain_ref_seq_no(&self) -> u32 {
         self.flags.load(Ordering::Relaxed) as u32
     }

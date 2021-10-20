@@ -158,7 +158,7 @@ impl KafkaProducer {
         let _ = std::fs::create_dir_all(dir.clone());
         let result = std::fs::write(dir.join(std::path::Path::new(&key)), &data);
         match &result {
-            Ok(_) => log::error!(
+            Ok(_) => log::warn!(
                 "Too big message ({} bytes, limit is {}), saved into {}",
                 data.len(),
                 self.config.message_max_size,
@@ -189,7 +189,7 @@ impl KafkaProducer {
                 ).await;
                 match result {
                     Ok(_) => {
-                        log::trace!("Produced oversized path record, topic: {}, key: {}", topic, key);
+                        log::info!("Produced oversized path record, topic: {}, key: {}", topic, key);
                         break;
                     },
                     Err((e, _)) => log::warn!(
@@ -202,6 +202,8 @@ impl KafkaProducer {
                     )
                 ).await;
             }
+        } else {
+            log::warn!("Skipped producing oversized path record, topic: {}, key: {}", topic, key);
         }
         Ok(())
     }

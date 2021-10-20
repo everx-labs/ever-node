@@ -205,10 +205,33 @@ impl Downloader for BlockDownloader {
         if let Some(handle) = context.db.load_block_handle(context.id)? {
             let mut is_link = false;
             if handle.has_data() && handle.has_proof_or_link(&mut is_link) {
-                return Ok((
-                    context.db.load_block_data(&handle).await?,
-                    context.db.load_block_proof(&handle, is_link).await?
-                ));
+                let block = match context.db.load_block_data(&handle).await {
+                    Err(e) => if !handle.has_data() {
+                        None
+                    } else {
+                        return Err(e)
+                    },
+                    Ok(block) => Some(block)
+                };
+                let proof = if block.is_none() {
+                    None
+                } else {
+                    match context.db.load_block_proof(&handle, is_link).await {
+                        Err(e) => if is_link && !handle.has_proof_link() {
+                            None
+                        } else if !is_link && !handle.has_proof() {
+                            None
+                        } else {
+                            return Err(e)
+                        },
+                        Ok(proof) => Some(proof)
+                    }
+                };
+                if let Some(block) = block {
+                    if let Some(proof) = proof {
+                        return Ok((block, proof))
+                    }
+                }
             }
         }
         #[cfg(feature = "telemetry")]
@@ -724,6 +747,7 @@ impl Engine {
         }
 
         loop {
+
             if let Some(handle) = self.load_block_handle(id)? {
                 if handle.is_applied() || pre_apply && handle.has_state() {
                     log::trace!(
@@ -736,7 +760,7 @@ impl Engine {
                 if handle.has_data() {
                     while !((pre_apply && handle.has_state()) || handle.is_applied()) {
                         let s = self.clone();
-                        self.block_applying_awaiters().do_or_wait(
+                        let res = self.block_applying_awaiters().do_or_wait(
                             handle.id(),
                             None,
                             async {
@@ -744,9 +768,17 @@ impl Engine {
                                 s.apply_block_worker(&handle, &block, mc_seq_no, pre_apply, recursion_depth).await?;
                                 Ok(())
                             }
-                        ).await?;
+                        ).await;
+                        if res.is_err() {
+                            if !handle.has_data() {
+                                break
+                            }
+                            res?;
+                        }
                     }
-                    return Ok(());
+                    if handle.has_data() {
+                        return Ok(());
+                    }
                 }
             } 
 
@@ -769,11 +801,13 @@ impl Engine {
                 self.download_block_worker(id, attempts, timeout)
             ).await? {
 
+/*
                 if let Some(handle) = self.load_block_handle(id)? {
                     if handle.has_data() && (handle.has_proof() || handle.has_proof_link()) {
                         continue
                     }
                 }
+*/
 
                 let downloading_time = now.elapsed().as_millis();
 

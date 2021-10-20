@@ -146,6 +146,10 @@ impl BlockHandle {
         self.set_flag(FLAG_APPLIED)
     }
 
+    pub fn set_block_indexed(&self) -> bool {
+        self.set_flag(FLAG_INDEXED)
+    }
+
     pub fn id(&self) -> &BlockIdExt {
         &self.id
     }
@@ -154,8 +158,16 @@ impl BlockHandle {
         &self.meta
     }
 
-    pub fn set_block_indexed(&self) -> bool {
-        self.set_flag(FLAG_INDEXED)
+    pub fn reset_data(&self) {
+        self.reset_flag(FLAG_DATA)
+    }
+
+    pub fn reset_proof(&self) {
+        self.reset_flag(FLAG_PROOF)
+    }
+
+    pub fn reset_proof_link(&self) {
+        self.reset_flag(FLAG_PROOF_LINK)
     }
 
     pub fn has_data(&self) -> bool {
@@ -318,6 +330,12 @@ impl BlockHandle {
     fn set_flag(&self, flag: u32) -> bool {
         (self.meta.set_flags(flag) & flag) != flag
     }
+
+    #[inline]
+    fn reset_flag(&self, flag: u32) {
+        self.meta.reset_flags(flag)
+    }
+
 }
 
 #[cfg(feature = "telemetry")]

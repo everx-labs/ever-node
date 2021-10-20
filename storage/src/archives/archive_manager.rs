@@ -109,8 +109,20 @@ impl ArchiveManager {
             PackageEntryId::ProofLink(_) => handle.proof_file_lock().read().await,
             _ => fail!("Unsupported package entry")
         };
-        self.read_temp_file(entry_id).await.map(|(_filename, data)| data)
-
+        self.read_temp_file(entry_id).await
+            .map(|(_filename, data)| data)
+            .map_err(
+                |e| {
+                    match &entry_id {
+                        PackageEntryId::Block(_) => handle.reset_data(),
+                        PackageEntryId::Proof(_) => handle.reset_proof(),
+                        PackageEntryId::ProofLink(_) => handle.reset_proof_link(),
+                        _ => ()
+                    }
+                    log::error!(target: "storage", "Error getting file: {}", e);
+                    e
+                }
+            )
     }
 
     pub async fn move_to_archive(
