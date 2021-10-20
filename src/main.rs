@@ -32,6 +32,24 @@ mod jaeger {
 
 //extern crate lazy_static;
 
+#[cfg(target_os = "linux")]
+use std::os::raw::c_void;
+
+#[cfg(target_os = "linux")]
+#[link(name = "tcmalloc", kind = "dylib")]
+extern "C" {
+    pub fn tc_memalign(alignment: usize, size: usize) -> *mut c_void;
+    pub fn tc_free(ptr: *mut c_void);
+}
+
+#[cfg(target_os = "linux")]
+fn check_tcmalloc() {
+    unsafe {
+        let ptr = tc_memalign(10, 10);
+        tc_free(ptr);
+    }
+}
+
 #[cfg(feature = "external_db")]
 mod external_db;
 mod ext_messages;
@@ -164,6 +182,9 @@ const CONFIG_NAME: &str = "config.json";
 const DEFAULT_CONFIG_NAME: &str = "default_config.json";
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    check_tcmalloc();
+
     println!("{}", print_build_info());
 
     let app = clap::App::new("TON node")
