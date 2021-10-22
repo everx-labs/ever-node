@@ -1,101 +1,92 @@
-#
-# Copyright 2018-2019 TON DEV SOLUTIONS LTD.
-#
-# Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
-# this file except in compliance with the License.  You may obtain a copy of the
-# License at:
-#
-# https://www.ton.dev/licenses
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific TON DEV software governing permissions and limitations
-# under the License.
-#
+
 [package]
-name = "ton_node"
-version = "0.47.83"
-edition = "2018"
+
+name = 'ton_node'
+version = '0.47.83'
+edition = '2018'
 
 [workspace]
+
 members = [
-    "storage"
+	'storage',
 ]
 
 [dependencies]
-async-trait = "0.1.22"
-base64 = "0.11.0"
-bincode = "1.2.1"
-bitflags = "1.2.1"
-crossbeam-channel = "0.4.2"
-clap = "2.33.1"
-chrono = "0.4.10"
-colored = "1.9.3"
-dirs = "2.0.2"
-env_logger = "0.7.1"
-failure = "0.1.6"
-futures = "0.3.1"
-futures-timer = "3.0.1"
-hex = "0.4.1"
-lazy_static = "1.4.0"
-log = "0.4"
-log4rs = "1"
-log4rs-rolling-file = "0.2.0"
-num-bigint = "0.2.2"
-openssl = "0.10.35"
-pretty_assertions = "0.6.1"
-rand = "0.7.3"
-regex = "^1.3.0"
-rocksdb = "0.15.0"
-rustracing = { version = "0.4.0", optional = true }
-rustracing_jaeger = { version = "0.4.1", optional = true }
-serde = "1.0.105"
-serde_derive = "1.0.105"
-serde_json = "1.0.64"
-sha2 = "^0.8"
-spin = "0.7.1"
-statsd = { version = "0.14.0", optional = true }
-stream-cancel = "0.8.0"
-string-builder = "^0.2.0"
-tokio = { version = "1.5.0", features = ["rt-multi-thread"] }
 
-adnl = { git = "https://github.com/tonlabs/ton-labs-adnl", features = ["client", "node", "server"] }
-catchain = { path = "catchain" }
-dht = { git = "https://github.com/tonlabs/ton-labs-dht" }
-lockfree = { git = "https://github.com/tonlabs/lockfree.git" }
-overlay = { git = "https://github.com/tonlabs/ton-labs-overlay" }
-rldp = { git = "https://github.com/tonlabs/ton-labs-rldp" }
-storage = { path = "storage" }
-ton_abi = { git = "https://github.com/tonlabs/ton-labs-abi.git" }
-ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }
-ton_block = { git = "https://github.com/tonlabs/ton-labs-block" }
-ton_block_json = { git = "https://github.com/tonlabs/ton-labs-block-json.git" }
-ton_executor = { git = "https://github.com/tonlabs/ton-labs-executor" }
-ton_types = { git = "https://github.com/tonlabs/ton-labs-types" }
-ton_vm = { git = "https://github.com/tonlabs/ton-labs-vm" }
-validator_session = { path = "validator-session" }
+async-trait = '0.1.22'
+base64 = '0.11.0'
+bincode = '1.2.1'
+bitflags = '1.2.1'
+crossbeam-channel = '0.4.2'
+clap = '2.33.1'
+chrono = '0.4.10'
+colored = '1.9.3'
+dirs = '2.0.2'
+env_logger = '0.7.1'
+failure = '0.1.6'
+futures = '0.3.1'
+futures-timer = '3.0.1'
+hex = '0.4.1'
+lazy_static = '1.4.0'
+log = '0.4'
+log4rs = '1'
+log4rs-rolling-file = '0.2.0'
+num-bigint = '0.2.2'
+openssl = '0.10.35'
+pretty_assertions = '0.6.1'
+rand = '0.7.3'
+regex = '^1.3.0'
+rocksdb = '0.15.0'
+rustracing = { version = '0.4.0', optional = true }
+rustracing_jaeger = { version = '0.4.1', optional = true }
+serde = '1.0.105'
+serde_derive = '1.0.105'
+serde_json = '1.0.64'
+sha2 = '^0.8'
+spin = '0.7.1'
+statsd = { version = '0.14.0', optional = true }
+stream-cancel = '0.8.0'
+string-builder = '^0.2.0'
+tokio = { version = '1.5.0', features = [ 'rt-multi-thread' ] }
+adnl = { git = 'https://github.com/tonlabs/ton-labs-adnl', features = [ 'client', 'node', 'server' ], tag = '0.7.53' }
+catchain = { path = 'catchain' }
+dht = { git = 'https://github.com/tonlabs/ton-labs-dht', tag = '0.5.47' }
+lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
+overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.34' }
+rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.49' }
+storage = { path = 'storage' }
+ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git', tag = '2.1.1' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.110' }
+ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.7.27' }
+ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', tag = '0.6.24' }
+ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.31' }
+ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.10.10' }
+ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.19' }
+validator_session = { path = 'validator-session' }
 
 [target.'cfg(windows)'.dependencies.rdkafka]
-version = "0.26.0"
-features = ["cmake_build"]
+
+version = '0.26.0'
+features = [ 'cmake_build' ]
 optional = true
 
 [target.'cfg(unix)'.dependencies.rdkafka]
-version = "0.26.0"
+
+version = '0.26.0'
 optional = true
 
 [dev-dependencies]
 
 [features]
-default = ["telemetry"]
-validator = ["async_collator", "async_validator", "slashing"]
-external_db = ["rdkafka"]
-async_collator = []
-async_validator = []
-ci_run = []
-compression = ["overlay/compression", "rldp/compression"]
-metrics = ["statsd"]
-read_old_db = []
-slashing = []
-telemetry = ["adnl/telemetry", "dht/telemetry", "rldp/telemetry", "overlay/telemetry", "storage/telemetry"]
+
+default = [ 'telemetry' ]
+validator = [ 'async_collator', 'async_validator', 'slashing' ]
+external_db = [ 'rdkafka' ]
+async_collator = [ ]
+async_validator = [ ]
+ci_run = [ ]
+compression = [ 'overlay/compression', 'rldp/compression' ]
+metrics = [ 'statsd' ]
+read_old_db = [ ]
+slashing = [ ]
+telemetry = [ 'adnl/telemetry', 'dht/telemetry', 'rldp/telemetry', 'overlay/telemetry', 'storage/telemetry' ]
