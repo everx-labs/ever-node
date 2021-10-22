@@ -1,41 +1,46 @@
+
 [package]
-name = "storage"
-version = "0.5.0"
-edition = "2018"
+
+name = 'storage'
+version = '0.5.0'
+edition = '2018'
 
 [dependencies]
-async-trait = "0.1.31"
-base64 = "0.12.2"
-failure = "0.1.6"
-fnv = "1.0.6"
-futures = "0.3.4"
-hex = "0.4.2"
-lazy_static = "1.4.0"
-log = "0.4.11"
-log4rs = "1"
-rocksdb = "0.15.0"
-regex = "1.3.9"
-serde = "1.0.114"
-serde_cbor = "0.11.1"
-serde_derive = "1.0.114"
-sha2 = "^0.8"
-strum = "0.18.0"
-strum_macros = "0.18.0"
-tokio = { version = "1.3.0", features = ["fs", "rt-multi-thread"] }
-rand = "0.7.3"
 
-adnl = { git = "https://github.com/tonlabs/ton-labs-adnl" }
-lockfree = { git = "https://github.com/tonlabs/lockfree.git" }
-ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }
-ton_block = { git = "https://github.com/tonlabs/ton-labs-block" }
-ton_types = { git = "https://github.com/tonlabs/ton-labs-types" }
+async-trait = '0.1.31'
+base64 = '0.12.2'
+failure = '0.1.6'
+fnv = '1.0.6'
+futures = '0.3.4'
+hex = '0.4.2'
+lazy_static = '1.4.0'
+log = '0.4.11'
+log4rs = '1'
+rocksdb = '0.15.0'
+regex = '1.3.9'
+serde = '1.0.114'
+serde_cbor = '0.11.1'
+serde_derive = '1.0.114'
+sha2 = '^0.8'
+strum = '0.18.0'
+strum_macros = '0.18.0'
+tokio = { version = '1.3.0', features = [ 'fs', 'rt-multi-thread' ] }
+rand = '0.7.3'
+adnl = { git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.53' }
+lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.110' }
+ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.7.27' }
+ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.10.10' }
 
 [dev-dependencies]
-log4rs = "1"
+
+log4rs = '1'
 
 [build-dependencies.cc]
-version = "=1.0.61"
-features = ["parallel"]
+
+version = '=1.0.61'
+features = [ 'parallel' ]
 
 [features]
-telemetry = []
+
+telemetry = [ ]
