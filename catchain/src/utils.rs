@@ -99,6 +99,19 @@ pub fn parse_hex_as_public_key(hex_asm: &str) -> PublicKey {
     Arc::new(adnl::common::KeyOption::from_tl_serialized_public_key(&key_slice).unwrap())
 }
 
+pub fn parse_hex_as_public_key_raw(hex_asm: &str) -> PublicKey {
+    assert!(hex_asm.len() == 64);
+    let mut key_slice = [0u8; 32];
+    parse_hex_to_array(hex_asm, &mut key_slice[..]);
+    //TODO: errors processing for key creation
+    Arc::new(
+        adnl::common::KeyOption::from_type_and_public_key(
+            adnl::common::KeyOption::KEY_ED25519,
+            &key_slice
+        )
+    )
+}
+
 pub fn parse_hex_as_public_key_hash(hex_asm: &str) -> PublicKeyHash {
     let mut key_slice: [u8; 32] = [0; 32];
     parse_hex_to_array(hex_asm, &mut key_slice);
@@ -115,10 +128,10 @@ pub fn parse_hex_as_private_key(hex_asm: &str) -> PrivateKey {
     parse_hex_to_array(hex_asm, &mut key_slice[..]);
     //TODO: errors processing for key creation
     assert!(key_slice.len() == 32);
-    let private_key = ed25519_dalek::SecretKey::from_bytes(&key_slice[..32]).unwrap();
+    let private_key = ed25519_dalek::SecretKey::from_bytes(&key_slice).unwrap();
     Arc::new(adnl::common::KeyOption::from_ed25519_secret_key(
         private_key,
-    ))
+    ).unwrap())
 }
 
 pub fn parse_hex_as_expanded_private_key(hex_asm: &str) -> PrivateKey {
@@ -128,10 +141,10 @@ pub fn parse_hex_as_expanded_private_key(hex_asm: &str) -> PrivateKey {
     //TODO: errors processing for key creation
     assert!(key_slice.len() == 64);
     let expanded_private_key =
-        ed25519_dalek::ExpandedSecretKey::from_bytes(&key_slice[..64]).unwrap();
+        ed25519_dalek::ExpandedSecretKey::from_bytes(&key_slice).unwrap();
     Arc::new(adnl::common::KeyOption::from_ed25519_expanded_secret_key(
         expanded_private_key,
-    ))
+    ).unwrap())
 }
 
 pub fn get_hash(data: &::ton_api::ton::bytes) -> BlockHash {

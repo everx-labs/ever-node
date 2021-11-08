@@ -629,7 +629,7 @@ impl Receiver for ReceiverImpl {
             self.synchronize();
 
             let delay = Duration::from_millis(self.rng.gen_range(
-                CATCHAIN_NEIGHBOURS_SYNC_MIN_PERIOD_MS,
+                CATCHAIN_NEIGHBOURS_SYNC_MIN_PERIOD_MS..
                 CATCHAIN_NEIGHBOURS_SYNC_MAX_PERIOD_MS + 1,
             ));
 
@@ -648,7 +648,7 @@ impl Receiver for ReceiverImpl {
             self.choose_neighbours();
 
             let delay = Duration::from_millis(self.rng.gen_range(
-                CATCHAIN_NEIGHBOURS_ROTATE_MIN_PERIOD_MS,
+                CATCHAIN_NEIGHBOURS_ROTATE_MIN_PERIOD_MS..
                 CATCHAIN_NEIGHBOURS_ROTATE_MAX_PERIOD_MS + 1,
             ));
 
@@ -1230,11 +1230,11 @@ impl ReceiverImpl {
 
         self.next_neighbours_rotate_time = now
             + Duration::from_millis(self.rng.gen_range(
-                CATCHAIN_NEIGHBOURS_ROTATE_MIN_PERIOD_MS,
+                CATCHAIN_NEIGHBOURS_ROTATE_MIN_PERIOD_MS..
                 CATCHAIN_NEIGHBOURS_ROTATE_MAX_PERIOD_MS,
             ));
         self.next_sync_time =
-            now + Duration::from_millis(((0.001 * self.rng.gen_range(0.0, 60.0)) * 1000.0) as u64);
+            now + Duration::from_millis(((0.001 * self.rng.gen_range(0.0..60.0)) * 1000.0) as u64);
         self.initial_sync_complete_time = now
             + Duration::from_secs(if self.allow_unsafe_self_blocks_resync {
                 MAX_UNSAFE_INITIAL_SYNC_COMPLETE_TIME_SECS
@@ -1426,7 +1426,6 @@ impl ReceiverImpl {
         //randomly choose max neighbours from sources
 
         let sources_count = self.get_sources_count();
-        let mut rng = self.rng;
         let mut new_neighbours: Vec<usize> = Vec::new();
         let mut items_count = MAX_NEIGHBOURS_COUNT;
 
@@ -1445,20 +1444,16 @@ impl ReceiverImpl {
                 continue;
             }
 
-            let source = self.get_source(i);
-
-            if source.borrow().is_blamed() {
+            if self.get_source(i).borrow().is_blamed() {
                 continue;
             }
 
-            let random_value = rng.gen_range(0, sources_count - i);
-
+            let random_value = self.rng.gen_range(0..sources_count - i);
             if random_value >= items_count {
                 continue;
             }
 
-            new_neighbours.push(i);
-
+            new_neighbours.push(i);            
             items_count -= 1;
         }
 
@@ -1472,11 +1467,10 @@ impl ReceiverImpl {
 
         trace!("Synchronize with other validators");
 
-        let mut rng = self.rng;
         let sources_count = self.get_sources_count();
 
         for _i in 0..MAX_SOURCES_SYNC_ATTEMPS {
-            let source_index = rng.gen_range(0, sources_count);
+            let source_index = self.rng.gen_range(0..sources_count);
             let source = self.get_source(source_index);
 
             if source.borrow().is_blamed() {
@@ -1484,7 +1478,6 @@ impl ReceiverImpl {
             }
 
             self.synchronize_with(source);
-
             break;
         }
     }
@@ -2517,7 +2510,18 @@ impl ReceiverImpl {
         let local_key = parse_hex_as_private_key(
             "0000000000000000000000000000000000000000000000000000000000000000",
         );
-        let ids: Vec<CatchainNode> = Vec::new();
+        let public_key = adnl::common::KeyOption::from_type_and_public_key(
+            adnl::common::KeyOption::KEY_ED25519,
+            local_key.pub_key().unwrap()
+        );
+        let public_key = Arc::new(public_key);
+        let adnl_id = get_public_key_hash(&public_key);
+        let ids = vec![
+            CatchainNode {
+                public_key,
+                adnl_id
+            }
+        ];
         let incarnation = SessionId::default();
         let receiver_listener = ReceiverImpl::create_dummy_listener();
         let db_root = "".to_string();
@@ -2534,6 +2538,7 @@ impl ReceiverImpl {
             allow_unsafe_self_blocks_resync,
             None,
         )
+
     }
 
     pub(crate) fn create(

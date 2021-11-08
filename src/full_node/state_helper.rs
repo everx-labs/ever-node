@@ -15,7 +15,7 @@ pub async fn download_persistent_state(
     engine: &dyn EngineOperations, 
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
     attempts: Option<usize>
-) -> Result<Arc<ShardStateStuff>> {
+) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
     let mut result = None;
     for _ in 0..10 {
         match download_persistent_state_iter(
@@ -42,7 +42,7 @@ async fn download_persistent_state_iter(
     engine: &dyn EngineOperations,
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
     mut attempts: Option<usize>
-) -> Result<Arc<ShardStateStuff>> {
+) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
 
     if id.seq_no == 0 {
         fail!("zerostate is not supported");
@@ -158,11 +158,12 @@ async fn download_persistent_state_iter(
     );
     assert_eq!(total_size, state_bytes.len());
 
-    ShardStateStuff::deserialize(
+    Ok((ShardStateStuff::deserialize(
         id.clone(), 
         &state_bytes,
         #[cfg(feature = "telemetry")]
         engine.engine_telemetry(),
         engine.engine_allocated()
-    )
+    )?,
+    state_bytes))
 }

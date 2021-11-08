@@ -1,5 +1,5 @@
 use storage::shardstate_db::AllowStateGcResolver;
-use ton_block::{BlockIdExt, UnixTime32, ShardIdent, AccountIdPrefixFull};
+use ton_block::{BlockIdExt, ShardIdent, AccountIdPrefixFull};
 use ton_types::Result;
 use adnl::common::add_unbound_object_to_map_with_update;
 use crate::engine_traits::EngineOperations;
@@ -12,14 +12,16 @@ pub struct AllowStateGcSmartResolver {
     last_processed_block: AtomicU32,
     min_ref_mc_block: AtomicU32,
     min_actual_ss: lockfree::map::Map<ShardIdent, AtomicU32>,
+    life_time_sec: u64,
 }
 
 impl AllowStateGcSmartResolver {
-    pub fn new() -> Self {
+    pub fn new(life_time_sec: u64) -> Self {
         Self {
             last_processed_block: AtomicU32::new(0),
             min_ref_mc_block: AtomicU32::new(0),
             min_actual_ss: lockfree::map::Map::new(),
+            life_time_sec,
         }
     }
 
@@ -90,7 +92,10 @@ impl AllowStateGcSmartResolver {
 }
 
 impl AllowStateGcResolver for AllowStateGcSmartResolver {
-    fn allow_state_gc(&self, block_id: &BlockIdExt, _gc_utime: UnixTime32) -> Result<bool> {
+    fn allow_state_gc(&self, block_id: &BlockIdExt, saved_at: u64, gc_utime: u64) -> Result<bool> {
+        if gc_utime > saved_at && gc_utime - saved_at < self.life_time_sec {
+            return Ok(false)
+        }
         if block_id.shard().is_masterchain() {
             if block_id.seq_no() != 0 { // we need zerostate
                 let min_ref_mc_block = self.min_ref_mc_block.load(Ordering::Relaxed);

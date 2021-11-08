@@ -1,16 +1,44 @@
-use crate::archives::{package::Package, package_id::PackageId};
+use crate::{StorageAlloc, archives::{package::Package, package_id::PackageId}};
+#[cfg(feature = "telemetry")]
+use crate::StorageTelemetry;
+use adnl::{declare_counted, common::{CountedObject, Counter}};
+use std::sync::Arc;
+#[cfg(feature = "telemetry")]
+use std::sync::atomic::Ordering;
 
-#[derive(Debug)]
-pub struct PackageInfo {
-    package_id: PackageId,
-    package: Package,
-    idx: u32,
-    version: u32,
-}
+//#[derive(Debug)]
+declare_counted!(
+    pub struct PackageInfo {
+        package_id: PackageId,
+        package: Package,
+        idx: u32,
+        version: u32
+    }
+);
 
 impl PackageInfo {
-    pub const fn with_data(package_id: PackageId, package: Package, idx: u32, version: u32) -> Self {
-        Self { package_id, package, idx, version }
+
+    pub fn with_data(
+        package_id: PackageId, 
+        package: Package, 
+        idx: u32, 
+        version: u32,
+        #[cfg(feature = "telemetry")]
+        telemetry: &Arc<StorageTelemetry>,
+        allocated: &Arc<StorageAlloc>     
+    ) -> Self {
+        let ret = Self { 
+            package_id, 
+            package, 
+            idx, 
+            version,
+            counter: allocated.packages.clone().into() 
+        };
+        #[cfg(feature = "telemetry")]
+        telemetry.packages.update(
+            allocated.packages.load(Ordering::Relaxed)
+        );
+        ret
     }
 
     #[allow(dead_code)]
@@ -29,4 +57,5 @@ impl PackageInfo {
     pub const fn version(&self) -> u32 {
         self.version
     }
+
 }

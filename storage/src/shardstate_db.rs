@@ -13,20 +13,21 @@ use std::{
     ops::Deref, 
     path::Path, 
     sync::{Arc, atomic::{AtomicU32, Ordering}}, 
-    time::{Duration, Instant}
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH}
 };
-use ton_block::{BlockIdExt, UnixTime32};
+use ton_block::BlockIdExt;
 use ton_types::{ByteOrderRead, Cell, Result, fail};
 
 pub(crate) struct DbEntry {
     pub cell_id: CellId,
     pub block_id_ext: BlockIdExt,
-    db_index: u32,
+    pub db_index: u32,
+    pub saved_at: u64,
 }
 
 impl DbEntry {
-    pub fn with_params(cell_id: CellId, block_id_ext: BlockIdExt, db_index: u32) -> Self {
-        Self { cell_id, block_id_ext, db_index }
+    pub fn with_params(cell_id: CellId, block_id_ext: BlockIdExt, db_index: u32, saved_at: u64) -> Self {
+        Self { cell_id, block_id_ext, db_index, saved_at }
     }
 }
 
@@ -35,6 +36,7 @@ impl Serializable for DbEntry {
         writer.write_all(self.cell_id.key())?;
         self.block_id_ext.serialize(writer)?;
         writer.write_all(&self.db_index.to_le_bytes())?;
+        writer.write_all(&self.saved_at.to_le_bytes())?;
         Ok(())
     }
 
@@ -44,8 +46,9 @@ impl Serializable for DbEntry {
         let cell_id = CellId::new(buf.into());
         let block_id_ext = BlockIdExt::deserialize(reader)?;
         let db_index = reader.read_le_u32().unwrap_or(0); // use 0 db by default
+        let saved_at = reader.read_le_u64().unwrap_or(0);
 
-        Ok(Self { cell_id, block_id_ext, db_index })
+        Ok(Self { cell_id, block_id_ext, db_index, saved_at })
     }
 }
 
@@ -120,23 +123,23 @@ impl ShardStateDb {
     pub fn start_gc(
         self: Arc<Self>,
         gc_resolver: Arc<dyn AllowStateGcResolver>,
-        run_interval_adjustable_ms: Arc<AtomicU32>,
+        run_interval_adjustable_sec: Arc<AtomicU32>,
     ) {
         // When test-blockchains deploys all validator-nodes start approx at one time, 
         // so all GC start at one time all nodes. It can reduce whole blockchain's performans,
         // so let's mix start time next way
-        let run_gc_interval = run_interval_adjustable_ms.load(Ordering::Relaxed) as u64;
+        let run_gc_interval = run_interval_adjustable_sec.load(Ordering::Relaxed) as u64;
         let mut rng = rand::thread_rng();
-        let rand_initial_sleep = rand::Rng::gen_range(&mut rng, 0, run_gc_interval);
+        let rand_initial_sleep = rand::Rng::gen_range(&mut rng, 0..run_gc_interval);
 
         tokio::spawn(async move {
 
-            tokio::time::sleep(Duration::from_millis(rand_initial_sleep)).await;
+            tokio::time::sleep(Duration::from_secs(rand_initial_sleep)).await;
 
             let mut last_gc_duration = Duration::from_secs(0);
             loop {
                 let run_gc_interval = 
-                    Duration::from_millis(run_interval_adjustable_ms.load(Ordering::Relaxed) as u64);
+                    Duration::from_secs(run_interval_adjustable_sec.load(Ordering::Relaxed) as u64);
                 if run_gc_interval > last_gc_duration {
                     tokio::time::sleep(run_gc_interval - last_gc_duration).await;
                 }
@@ -254,7 +257,8 @@ impl ShardStateDb {
 
         let c = boc_db.save_as_dynamic_boc(state_root.deref())?;
 
-        let db_entry = DbEntry::with_params(cell_id.clone(), id.clone(), boc_db.db_index());
+        let saved_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let db_entry = DbEntry::with_params(cell_id.clone(), id.clone(), boc_db.db_index(), saved_at);
         let mut buf = Vec::new();
         db_entry.serialize(&mut Cursor::new(&mut buf))?;
 
@@ -288,7 +292,7 @@ impl ShardStateDb {
 }
 
 pub trait AllowStateGcResolver: Send + Sync {
-    fn allow_state_gc(&self, block_id_ext: &BlockIdExt, gc_utime: UnixTime32) -> Result<bool>;
+    fn allow_state_gc(&self, block_id: &BlockIdExt, saved_at: u64, gc_utime: u64) -> Result<bool>;
 }
 
 #[derive(Default)]
@@ -316,7 +320,7 @@ pub async fn gc(
             shardstate_db_.deref(),
             cleaned_boc_db_.deref(),
             gc_resolver_.deref(),
-            UnixTime32::now()
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
         )
     }).await??;
 
@@ -361,7 +365,7 @@ fn mark(
     shardstate_db: &dyn KvcSnapshotable<BlockIdExt>,
     dynamic_boc_db: &DynamicBocDb,
     gc_resolver: &dyn AllowStateGcResolver,
-    gc_utime: UnixTime32
+    gc_time: u64
 ) -> MarkResult {
     let mut to_mark = Vec::new();
     let mut to_sweep = Vec::new();
@@ -370,7 +374,7 @@ fn mark(
         let cell_id = db_entry.cell_id;
         let block_id_ext = db_entry.block_id_ext;
         if db_entry.db_index == dynamic_boc_db.db_index() {
-            if gc_resolver.allow_state_gc(&block_id_ext, gc_utime)? {
+            if gc_resolver.allow_state_gc(&block_id_ext, db_entry.saved_at, gc_time)? {
                 log::trace!(target: TARGET, "mark  to_sweep  block_id {}  cell_id {}  db_index {} ", 
                     block_id_ext, cell_id, dynamic_boc_db.db_index());
                 to_sweep.push((block_id_ext, cell_id));

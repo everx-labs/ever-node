@@ -62,13 +62,13 @@ use std::{
 use std::collections::HashSet;
 #[cfg(feature = "metrics")]
 use std::env;
-use storage::{StorageAlloc, block_handle_db::BlockHandle};
+use storage::{StorageAlloc, block_handle_db::BlockHandle, types::StorageCell};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
 use ton_block::{
     self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL,
 };
-use ton_types::{error, fail, Result};
+use ton_types::{error, fail, Cell, Result};
 #[cfg(feature = "slashing")]
 use ton_types::UInt256;
 use ton_api::ton::ton_node::{
@@ -345,87 +345,19 @@ impl Engine {
         log::info!("Creating engine...");
 
         #[cfg(feature = "telemetry")] 
-        let (metrics, engine_telemetry) = {
-            let storage_telemetry = Arc::new(
-                StorageTelemetry {
-                    handles: Metric::without_totals(
-                        "Alloc NODE block handles", Self::TIMEOUT_TELEMETRY_SEC
-                    ),
-                    storage_cells: Metric::without_totals(
-                        "Alloc NODE storage cells", Self::TIMEOUT_TELEMETRY_SEC
-                    )
-                }
-            );
-            let engine_telemetry = Arc::new(
-                EngineTelemetry {
-                    storage: storage_telemetry,
-                    awaiters: Metric::without_totals(
-                        "Alloc NODE awaiters", Self::TIMEOUT_TELEMETRY_SEC
-                    ),
-                    catchain_clients: Metric::without_totals(
-                        "Alloc NODE catchains", Self::TIMEOUT_TELEMETRY_SEC
-                    ),
-                    overlay_clients: Metric::without_totals(
-                        "Alloc NODE overlays", Self::TIMEOUT_TELEMETRY_SEC
-                    ),
-                    peer_stats: Metric::without_totals(
-                        "Alloc NODE peer stats", Self::TIMEOUT_TELEMETRY_SEC
-                    ),
-                    shard_states: Metric::without_totals(
-                        "Alloc NODE shard states", Self::TIMEOUT_TELEMETRY_SEC
-                    ),
-                    top_blocks: Metric::without_totals(
-                        "Alloc NODE top blocks", Self::TIMEOUT_TELEMETRY_SEC
-                    ),
-                    validator_peers: Metric::without_totals(
-                        "Alloc NODE validator peers", Self::TIMEOUT_TELEMETRY_SEC
-                    ),
-                    validator_sets: Metric::without_totals(
-                        "Alloc NODE validator sets", Self::TIMEOUT_TELEMETRY_SEC
-                    )
-                }
-            );
-            let metrics = vec![
-                TelemetryItem::Metric(engine_telemetry.storage.handles.clone()),
-                TelemetryItem::Metric(engine_telemetry.storage.storage_cells.clone()),
-                TelemetryItem::Metric(engine_telemetry.awaiters.clone()),
-                TelemetryItem::Metric(engine_telemetry.catchain_clients.clone()),
-                TelemetryItem::Metric(engine_telemetry.overlay_clients.clone()),
-                TelemetryItem::Metric(engine_telemetry.peer_stats.clone()),
-                TelemetryItem::Metric(engine_telemetry.shard_states.clone()),
-                TelemetryItem::Metric(engine_telemetry.top_blocks.clone()),
-                TelemetryItem::Metric(engine_telemetry.validator_peers.clone()),
-                TelemetryItem::Metric(engine_telemetry.validator_sets.clone())
-            ];
-            (metrics, engine_telemetry)
-        };
-        let storage_allocated = Arc::new(
-            StorageAlloc {
-                handles: Arc::new(AtomicU64::new(0)),
-                storage_cells: Arc::new(AtomicU64::new(0))
-            }
-        );
-        let engine_allocated = Arc::new(
-            EngineAlloc {
-                storage: storage_allocated,
-                awaiters: Arc::new(AtomicU64::new(0)),
-                catchain_clients: Arc::new(AtomicU64::new(0)),
-                overlay_clients: Arc::new(AtomicU64::new(0)),
-                peer_stats: Arc::new(AtomicU64::new(0)),
-                shard_states: Arc::new(AtomicU64::new(0)),
-                top_blocks: Arc::new(AtomicU64::new(0)),
-                validator_peers: Arc::new(AtomicU64::new(0)),
-                validator_sets: Arc::new(AtomicU64::new(0))
-            }
-        );
-
+        let (metrics, engine_telemetry, engine_allocated) = Self::create_telemetry();
         let archives_life_time = general_config.gc_archives_life_time_hours();
         let db_directory = general_config.internal_db_path().unwrap_or_else(|| {"node_db"}).to_string();
-        let cells_gc_interval_ms = general_config.cells_gc_interval_ms();
+        let gc_interval_sec = general_config.cells_gc_config().gc_interval_sec;
+        let cells_lifetime_sec = general_config.cells_gc_config().cells_lifetime_sec;
         let last_rotation_block_db = LastRotationBlockDb::new(db_directory.clone());
+        let db_config = InternalDbConfig { 
+            db_directory, 
+            cells_gc_interval_sec: gc_interval_sec
+        };
         let db = Arc::new(
             InternalDbImpl::new(
-                InternalDbConfig { db_directory, cells_gc_interval_ms },
+                db_config,
                 #[cfg(feature = "telemetry")]
                 engine_telemetry.clone(),
                 engine_allocated.clone()
@@ -475,9 +407,9 @@ impl Engine {
             &engine_allocated
         )?;
 
-        //log::info!("start_states_gc");
-        let state_gc_resolver = Arc::new(AllowStateGcSmartResolver::new());
-        //db.start_states_gc(state_gc_resolver.clone());
+        log::info!("start_states_gc");
+        let state_gc_resolver = Arc::new(AllowStateGcSmartResolver::new(cells_lifetime_sec));
+        db.start_states_gc(state_gc_resolver.clone());
 
         log::info!("Engine is created.");
 
@@ -981,6 +913,75 @@ impl Engine {
     pub fn validated_block_stats_sender(&self) -> &Sender<ValidatedBlockStat> { &self.validated_block_stats_sender }
     pub fn validated_block_stats_receiver(&self) -> &Receiver<ValidatedBlockStat> { &self.validated_block_stats_receiver }
 
+    #[cfg(feature = "telemetry")] 
+    fn create_telemetry() -> (Vec<TelemetryItem>, Arc<EngineTelemetry>, Arc<EngineAlloc>) {
+
+        fn create_metric(name: &str) -> Arc<Metric> {
+            Metric::without_totals(name, Engine::TIMEOUT_TELEMETRY_SEC)
+        }
+ 
+        let storage_telemetry = Arc::new(
+            StorageTelemetry {
+                file_entries: create_metric("Alloc NODE file entries"),
+                handles: create_metric("Alloc NODE block handles"),
+                packages: create_metric("Alloc NODE packages"),
+                storage_cells: create_metric("Alloc NODE storage cells")
+            }
+        );
+        let engine_telemetry = Arc::new(
+            EngineTelemetry {
+                storage: storage_telemetry,
+                awaiters: create_metric("Alloc NODE awaiters"),
+                catchain_clients: create_metric("Alloc NODE catchains"),
+                cells: create_metric("Alloc NODE cells"),
+                overlay_clients: create_metric("Alloc NODE overlays"),
+                peer_stats: create_metric("Alloc NODE peer stats"),
+                shard_states: create_metric("Alloc NODE shard states"),
+                top_blocks: create_metric("Alloc NODE top blocks"),
+                validator_peers: create_metric("Alloc NODE validator peers"),
+                validator_sets: create_metric("Alloc NODE validator sets")
+            }
+        );
+        let metrics = vec![
+            TelemetryItem::Metric(engine_telemetry.storage.file_entries.clone()),
+            TelemetryItem::Metric(engine_telemetry.storage.handles.clone()),
+            TelemetryItem::Metric(engine_telemetry.storage.packages.clone()),
+            TelemetryItem::Metric(engine_telemetry.storage.storage_cells.clone()),
+            TelemetryItem::Metric(engine_telemetry.awaiters.clone()),
+            TelemetryItem::Metric(engine_telemetry.catchain_clients.clone()),
+            TelemetryItem::Metric(engine_telemetry.cells.clone()),
+            TelemetryItem::Metric(engine_telemetry.overlay_clients.clone()),
+            TelemetryItem::Metric(engine_telemetry.peer_stats.clone()),
+            TelemetryItem::Metric(engine_telemetry.shard_states.clone()),
+            TelemetryItem::Metric(engine_telemetry.top_blocks.clone()),
+            TelemetryItem::Metric(engine_telemetry.validator_peers.clone()),
+            TelemetryItem::Metric(engine_telemetry.validator_sets.clone())
+        ];
+        let storage_allocated = Arc::new(
+            StorageAlloc {
+                file_entries: Arc::new(AtomicU64::new(0)),
+                handles: Arc::new(AtomicU64::new(0)),
+                packages: Arc::new(AtomicU64::new(0)),
+                storage_cells: Arc::new(AtomicU64::new(0))
+            }
+        );
+        let engine_allocated = Arc::new(
+            EngineAlloc {
+                storage: storage_allocated,
+                awaiters: Arc::new(AtomicU64::new(0)),
+                catchain_clients: Arc::new(AtomicU64::new(0)),
+                overlay_clients: Arc::new(AtomicU64::new(0)),
+                peer_stats: Arc::new(AtomicU64::new(0)),
+                shard_states: Arc::new(AtomicU64::new(0)),
+                top_blocks: Arc::new(AtomicU64::new(0)),
+                validator_peers: Arc::new(AtomicU64::new(0)),
+                validator_sets: Arc::new(AtomicU64::new(0))
+            }
+        );
+        (metrics, engine_telemetry, engine_allocated)
+
+    }
+
     #[cfg(feature = "slashing")]
     async fn process_validated_block_stats_for_mc(&self, block_id: &BlockIdExt, signing_nodes: &[UInt256]) -> Result<()> {
         let block_handle = self.load_block_handle(&block_id)?.ok_or_else(|| error!("Cannot load handle for block {}", block_id))?;
@@ -1409,23 +1410,21 @@ impl Engine {
             if handle.is_key_block()? {
                 let is_persistent_state = if handle.id().seq_no() == 0 {
                     false // zerostate are saved another way (see boot)
+                } else if let Some(prev_key_block_id) =
+                    mc_state.shard_state_extra()?.prev_blocks.get_prev_key_block(handle.id().seq_no() - 1)? {
+                    let block_id = BlockIdExt {
+                        shard_id: ShardIdent::masterchain(),
+                        seq_no: prev_key_block_id.seq_no,
+                        root_hash: prev_key_block_id.root_hash,
+                        file_hash: prev_key_block_id.file_hash
+                    };
+                    let prev_handle = engine.load_block_handle(&block_id)?.ok_or_else(
+                        || error!("Cannot load handle for PSS keeper prev key block {}", block_id)
+                    )?;
+                    engine.is_persistent_state(handle.gen_utime()?, prev_handle.gen_utime()?,
+                        boot::PSS_PERIOD_BITS)
                 } else {
-                    if let Some(prev_key_block_id) =
-                        mc_state.shard_state_extra()?.prev_blocks.get_prev_key_block(handle.id().seq_no() - 1)? {
-                        let block_id = BlockIdExt {
-                            shard_id: ShardIdent::masterchain(),
-                            seq_no: prev_key_block_id.seq_no,
-                            root_hash: prev_key_block_id.root_hash,
-                            file_hash: prev_key_block_id.file_hash
-                        };
-                        let prev_handle = engine.load_block_handle(&block_id)?.ok_or_else(
-                            || error!("Cannot load handle for PSS keeper prev key block {}", block_id)
-                        )?;
-                        engine.is_persistent_state(handle.gen_utime()?, prev_handle.gen_utime()?,
-                            boot::PSS_PERIOD_BITS)
-                    } else {
-                        false
-                    }
+                    false
                 };
                 if !is_persistent_state {
                     log::trace!("persistent_states_keeper: skip keyblock (is not persistent) {}", handle.id());
@@ -1801,8 +1800,55 @@ pub async fn run(
 #[cfg(feature = "telemetry")]
 fn telemetry_logger(engine: Arc<Engine>) {
     tokio::spawn(async move {
+        let mut elapsed = 0;
+        let millis = 500;
         loop {
-            tokio::time::sleep(Duration::from_secs(Engine::TIMEOUT_TELEMETRY_SEC)).await;
+            tokio::time::sleep(Duration::from_millis(millis)).await;
+            engine.engine_telemetry.storage.file_entries.update(
+                engine.engine_allocated.storage.file_entries.load(Ordering::Relaxed)
+            );    
+            engine.engine_telemetry.storage.handles.update(
+                engine.engine_allocated.storage.handles.load(Ordering::Relaxed)
+            );    
+            engine.engine_telemetry.storage.packages.update(
+                engine.engine_allocated.storage.packages.load(Ordering::Relaxed)
+            );    
+            engine.engine_telemetry.storage.storage_cells.update(
+                engine.engine_allocated.storage.storage_cells.load(Ordering::Relaxed)
+            );  
+            engine.engine_telemetry.awaiters.update(
+                engine.engine_allocated.awaiters.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.catchain_clients.update(
+                engine.engine_allocated.catchain_clients.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.storage.storage_cells.update(StorageCell::cell_count());
+            engine.engine_telemetry.cells.update(Cell::cell_count()); 
+            engine.engine_telemetry.overlay_clients.update(
+                engine.engine_allocated.overlay_clients.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.peer_stats.update(
+                engine.engine_allocated.peer_stats.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.shard_states.update(
+                engine.engine_allocated.shard_states.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.top_blocks.update(
+                engine.engine_allocated.top_blocks.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.validator_peers.update(
+                engine.engine_allocated.validator_peers.load(Ordering::Relaxed)
+            );        
+            engine.engine_telemetry.validator_sets.update(
+                engine.engine_allocated.validator_sets.load(Ordering::Relaxed)
+            );        
+            engine.telemetry_printer.try_print();
+            elapsed += millis;
+            if elapsed < Engine::TIMEOUT_TELEMETRY_SEC * 1000 {
+                continue
+            } else {
+                elapsed = 0
+            }
             let period = full_node::telemetry::TPS_PERIOD_1;
             let tps_1 = engine.tps_counter.calc_tps(period)
                 .unwrap_or_else(|e| { 
@@ -1840,37 +1886,6 @@ fn telemetry_logger(engine: Arc<Engine>) {
                 "Full node client's telemetry:\n{}",
                 engine.network.telemetry().report(Engine::TIMEOUT_TELEMETRY_SEC)
             );
-            engine.engine_telemetry.storage.handles.update(
-                engine.engine_allocated.storage.handles.load(Ordering::Relaxed)
-            );        
-            engine.engine_telemetry.storage.storage_cells.update(
-                engine.engine_allocated.storage.storage_cells.load(Ordering::Relaxed)
-            );        
-            engine.engine_telemetry.awaiters.update(
-                engine.engine_allocated.awaiters.load(Ordering::Relaxed)
-            );        
-            engine.engine_telemetry.catchain_clients.update(
-                engine.engine_allocated.catchain_clients.load(Ordering::Relaxed)
-            );        
-            engine.engine_telemetry.overlay_clients.update(
-                engine.engine_allocated.overlay_clients.load(Ordering::Relaxed)
-            );        
-            engine.engine_telemetry.peer_stats.update(
-                engine.engine_allocated.peer_stats.load(Ordering::Relaxed)
-            );        
-            engine.engine_telemetry.shard_states.update(
-                engine.engine_allocated.shard_states.load(Ordering::Relaxed)
-            );        
-            engine.engine_telemetry.top_blocks.update(
-                engine.engine_allocated.top_blocks.load(Ordering::Relaxed)
-            );        
-            engine.engine_telemetry.validator_peers.update(
-                engine.engine_allocated.validator_peers.load(Ordering::Relaxed)
-            );        
-            engine.engine_telemetry.validator_sets.update(
-                engine.engine_allocated.validator_sets.load(Ordering::Relaxed)
-            );        
-            engine.telemetry_printer.try_print();
         }
     });
 }

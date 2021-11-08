@@ -54,12 +54,16 @@ impl Drop for TimeChecker {
 
 #[cfg(feature = "telemetry")]
 pub struct StorageTelemetry {
+    pub file_entries: Arc<Metric>,
     pub handles: Arc<Metric>,
+    pub packages: Arc<Metric>,
     pub storage_cells: Arc<Metric>
 }
 
 pub struct StorageAlloc {
+    pub file_entries: Arc<AtomicU64>,
     pub handles: Arc<AtomicU64>,
+    pub packages: Arc<AtomicU64>,
     pub storage_cells: Arc<AtomicU64>
 }
 

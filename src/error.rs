@@ -10,6 +10,8 @@ pub enum NodeError {
     ValidatorReject(String),
     #[fail(display = "{}", 0)]
     ValidatorSoftReject(String),
+    #[cfg(feature = "external_db")]
     #[fail(display = "{}", 0)]
+    #[allow(dead_code)]
     Other(String),
 }

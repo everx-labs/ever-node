@@ -46,6 +46,7 @@ pub struct EngineTelemetry {
     pub storage: Arc<StorageTelemetry>,
     pub awaiters: Arc<Metric>,
     pub catchain_clients: Arc<Metric>,
+    pub cells: Arc<Metric>,
     pub overlay_clients: Arc<Metric>,
     pub peer_stats: Arc<Metric>,
     pub shard_states: Arc<Metric>,
@@ -307,7 +308,7 @@ pub trait EngineOperations : Sync + Send {
         master_id: &BlockIdExt,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
         attempts: Option<usize>
-    ) -> Result<Arc<ShardStateStuff>> {
+    ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         unimplemented!()
     }
     async fn download_zerostate(
@@ -344,7 +345,8 @@ pub trait EngineOperations : Sync + Send {
     async fn store_state(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: Arc<ShardStateStuff>
+        state: Arc<ShardStateStuff>,
+        state_bytes: Option<&[u8]>,
     ) -> Result<Arc<ShardStateStuff>> {
         unimplemented!()
     }
@@ -475,7 +477,7 @@ pub trait EngineOperations : Sync + Send {
     fn sync_blocks_before(&self) -> u32  { 0 }
 
     fn key_block_utime_step(&self) -> u32 {
-        3600 // One hour period 
+        86400 // One day period
     }
 
     fn need_db_truncate(&self) -> bool { false }

@@ -173,6 +173,7 @@ pub fn create_engine_telemetry() -> Arc<EngineTelemetry> {
             storage: create_storage_telemetry(),
             awaiters: Metric::without_totals("", 1),
             catchain_clients: Metric::without_totals("", 1),
+            cells: Metric::without_totals("", 1),
             overlay_clients: Metric::without_totals("", 1),
             peer_stats: Metric::without_totals("", 1),
             shard_states: Metric::without_totals("", 1),
@@ -203,7 +204,9 @@ pub fn create_engine_allocated() -> Arc<EngineAlloc> {
 fn create_storage_telemetry() -> Arc<StorageTelemetry> {
     Arc::new(
         StorageTelemetry {
+            file_entries: Metric::without_totals("", 1),
             handles: Metric::without_totals("", 1),
+            packages: Metric::without_totals("", 1),
             storage_cells: Metric::without_totals("", 1)
         }
     )
@@ -212,7 +215,9 @@ fn create_storage_telemetry() -> Arc<StorageTelemetry> {
 fn create_storage_allocated() -> Arc<StorageAlloc> {
     Arc::new(
         StorageAlloc {
+            file_entries: Arc::new(AtomicU64::new(0)),
             handles: Arc::new(AtomicU64::new(0)),
+            packages: Arc::new(AtomicU64::new(0)),
             storage_cells: Arc::new(AtomicU64::new(0))
         }
     )

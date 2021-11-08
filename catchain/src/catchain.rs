@@ -846,6 +846,8 @@ impl CatchainProcessor {
             Ok(processor) => processor,
             Err(err) => {
                 error!("CatchainProcessor::main_loop: error during creation of CatchainProcessor: {:?}", err);
+                overloaded_flag.store(false, Ordering::SeqCst);
+                is_stopped_flag.store(true, Ordering::SeqCst);
                 return;
             }
         };
@@ -1325,7 +1327,7 @@ impl CatchainProcessor {
     fn remove_random_top_block(&mut self) -> BlockPtr {
         instrument!();
 
-        let random_value = self.rng.gen_range(0, self.top_blocks.len());
+        let random_value = self.rng.gen_range(0..self.top_blocks.len());
         let mut index = 0;
         let mut found_hash: Option<BlockHash> = None;
 

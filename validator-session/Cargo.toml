@@ -1,32 +1,30 @@
-
 [package]
-
-edition = '2018'
-build = '../common/build/build.rs'
-name = 'validator_session'
-version = '0.0.1'
+edition = "2018"
+build = "../common/build/build.rs"
+name = "validator_session"
+version = "0.0.1"
 
 [dependencies]
+# external
+backtrace = "0.3.54"
+crc32c = "0.4.0"
+crossbeam = "0.7.3"
+failure = "0.1"
+hex = "0.4"
+lazy_static = "1.4.0"
+log = "0.4"
+metrics-core = "0.5.2"
+metrics-runtime = "0.13.0"
+rand = "0.8"
+sha2 = "0.9"
 
-catchain = { path = '../catchain' }
-sha2 = '^0.8'
-log = '0.4.8'
-hex = '0.3.1'
-ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.7.27' }
-ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.10.10' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.110' }
-adnl = { git = 'https://github.com/tonlabs/ton-labs-adnl', features = [ 'node' ], tag = '0.7.53' }
-rand = '0.7.3'
-crossbeam = '0.7.3'
-failure = '0.1.1'
-crc32c = '0.4.0'
-lazy_static = '1.4.0'
-metrics-core = '0.5.2'
-metrics-runtime = '0.13.0'
-backtrace = '0.3.54'
+catchain = { path = "../catchain" }
+ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.7.29' }
+ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.10.11' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.111' }
+adnl = { git = 'https://github.com/tonlabs/ton-labs-adnl', features = [ 'node' ], tag = '0.7.55' }
 
 [dev-dependencies]
-
-env_logger = '0.7.1'
-chrono = '0.4.10'
-colored = '1.9.3'
+env_logger = "0.7.1"
+chrono = "0.4.10"
+colored = "1.9.3"

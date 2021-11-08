@@ -8,8 +8,7 @@ use storage::block_handle_db::BlockHandle;
 use ton_block::{BlockIdExt, ShardIdent, SHARD_FULL};
 use ton_types::{error, fail, Result};
 
-pub const PSS_PERIOD_BITS_CLASSIC: u32 = 17;
-pub const PSS_PERIOD_BITS: u32 = 11;
+pub const PSS_PERIOD_BITS: u32 = 17;
 const RETRY_MASTER_STATE_DOWNLOAD: usize = 10;
 
 /// cold boot entry point
@@ -91,7 +90,7 @@ async fn get_key_blocks(
     zero_state: Option<&Arc<ShardStateStuff>>,
     mut prev_block_proof: Option<BlockProofStuff>,
 ) -> Result<Vec<Arc<BlockHandle>>> {
-    let download_new_key_blocks_until = engine.now() + engine.time_for_blockchain_init();
+    let mut download_new_key_blocks_until = engine.now() + engine.time_for_blockchain_init();
     let mut key_blocks = vec!(handle.clone());
     loop {
         log::info!(target: "boot", "download_next_key_blocks_ids {}", handle.id());
@@ -105,6 +104,7 @@ async fn get_key_blocks(
         };
         if let Some(block_id) = ids.last() {
             log::info!(target: "boot", "last key block is {}", block_id);
+            download_new_key_blocks_until = engine.now() + engine.time_for_blockchain_init();
             for block_id in &ids {
                 //let prev_time = handle.gen_utime()?;
                 let (next_handle, proof) = download_key_block_proof(
@@ -313,12 +313,12 @@ async fn download_block_and_state(
     if !handle.has_state() {
         let state_update = block.block().read_state_update()?;
         log::info!(target: "boot", "download state {}", handle.id());
-        let state = engine.download_state(handle.id(), master_id, active_peers, attempts).await?;
+        let (state, data) = engine.download_state(handle.id(), master_id, active_peers, attempts).await?;
         let state_hash = state.root_cell().repr_hash();
         if state_update.new_hash != state_hash {
             fail!("root_hash {} of downloaded state {} is wrong", state_hash.to_hex_string(), handle.id())
         }
-        let state = engine.store_state(&handle, state).await?;
+        let state = engine.store_state(&handle, state, Some(&data)).await?;
         engine.process_full_state_in_ext_db(&state).await?;
     }
     engine.set_applied(&handle, master_id.seq_no()).await?;
@@ -336,27 +336,17 @@ pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<BlockIdExt> 
         engine.deref(), handle, zero_state.as_ref(), init_block_proof_link
     ).await?;
     
-    for pss_period_bits in &[PSS_PERIOD_BITS, PSS_PERIOD_BITS_CLASSIC] {
+    handle = choose_masterchain_state(engine.deref(), key_blocks.clone(), PSS_PERIOD_BITS).await?;
 
-        handle = choose_masterchain_state(engine.deref(), key_blocks.clone(), *pss_period_bits).await?;
-
-        if handle.id().seq_no() == 0 {
-            CHECK!(zero_state.is_some());
-            let (_master, workchain_id) = engine.processed_workchain().await?;
-            download_wc_zerostate(engine.deref(), zero_state.as_ref().unwrap(), workchain_id).await?;
-            return Ok(handle.id().clone());
-        } else {
-            let r = download_start_blocks_and_states(engine.deref(), handle.id()).await;
-            if r.is_err() {
-                if *pss_period_bits == PSS_PERIOD_BITS_CLASSIC {
-                    r?;
-                }
-            } else {
-                return Ok(handle.id().clone());
-            }
-        }
+    if handle.id().seq_no() == 0 {
+        CHECK!(zero_state.is_some());
+        let (_master, workchain_id) = engine.processed_workchain().await?;
+        download_wc_zerostate(engine.deref(), zero_state.as_ref().unwrap(), workchain_id).await?;
+    } else {
+        download_start_blocks_and_states(engine.deref(), handle.id()).await?;
     }
-    unreachable!()
+
+    Ok(handle.id().clone())
 }
 
 pub async fn warm_boot(

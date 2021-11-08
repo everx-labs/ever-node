@@ -2,13 +2,13 @@ use crate::{
     network::node_network::NodeNetwork,
     validator::validator_utils::mine_key_for_workchain,
 };
-use adnl::{from_slice, client::AdnlClientConfigJson,
+use adnl::{
+    client::AdnlClientConfigJson,
     common::{add_unbound_object_to_map_with_update, KeyId, KeyOption, KeyOptionJson, Wait},
-    node::{AdnlNodeConfig, AdnlNodeConfigJson},
-    server::{AdnlServerConfig, AdnlServerConfigJson}
+    node::{AdnlNodeConfig, AdnlNodeConfigJson}, server::{AdnlServerConfig, AdnlServerConfigJson}
 };
 use std::{
-    collections::HashMap, io::{BufReader}, fs::File, path::Path,
+    collections::HashMap, convert::TryInto, fs::File, io::BufReader, path::Path,
     sync::{Arc, atomic::{self, AtomicI32} }
 };
 use ton_api::{
@@ -43,7 +43,17 @@ pub trait KeyRing : Sync + Send  {
     fn sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Vec<u8>>;
 }
 
-pub fn default_cells_gc_interval_ms() -> u32 { 900_000 }
+pub fn default_cells_gc_config() -> CellsGcConfig {
+    CellsGcConfig {
+        gc_interval_sec: 900,
+        cells_lifetime_sec: 1800,
+    }
+}
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct CellsGcConfig {
+    pub gc_interval_sec: u32,
+    pub cells_lifetime_sec: u64,
+}
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct TonNodeConfig {
@@ -52,8 +62,8 @@ pub struct TonNodeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     workchain: Option<i32>,
     internal_db_path: Option<String>,
-    #[serde(default = "default_cells_gc_interval_ms")]
-    cells_gc_interval_ms: u32,
+    #[serde(default = "default_cells_gc_config")]
+    cells_gc_config: CellsGcConfig,
     #[serde(skip_serializing)]
     ip_address: Option<String>,
     adnl_node: Option<AdnlNodeConfigJson>,
@@ -127,7 +137,7 @@ pub struct KafkaProducerConfig {
     pub attempt_timeout_ms: u32,
     pub message_max_size: usize,
     pub big_messages_storage: String,
-    pub external_message_ref_address_pattern: Option<String>
+    pub external_message_ref_address_prefix: Option<String>
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
@@ -343,8 +353,8 @@ impl TonNodeConfig {
         self.internal_db_path.as_ref().map(|path| path.as_str())
     }
 
-    pub fn cells_gc_interval_ms(&self) -> u32 {
-        self.cells_gc_interval_ms
+    pub fn cells_gc_config(&self) -> &CellsGcConfig {
+        &self.cells_gc_config
     }
     
   
@@ -676,7 +686,7 @@ impl NodeConfigHandler {
         let pushed_task = Arc::new((wait.clone(), Task::StoreStatesGcInterval(interval)));
         wait.request();
         if let Err(e) = self.sender.send(pushed_task) {
-            log::warn!("Problem store store states gc interval: {}", e);
+            log::warn!("Problem store states gc interval: {}", e);
         }
     }
 
@@ -726,7 +736,7 @@ impl NodeConfigHandler {
 
         for adnl_id in adnl_ids.iter() {
             let id = base64::decode(adnl_id)?;
-            result.push(KeyId::from_data(from_slice!(id, 32)));
+            result.push(KeyId::from_data(id[..].try_into()?));
         }
         Ok(result)
     }
@@ -816,7 +826,7 @@ impl NodeConfigHandler {
         let election_id = key.election_id.clone();
         validator_keys.add(key)?;
 
-        let adnl_key_id = KeyId::from_data(from_slice!(validator_adnl_key_hash, 32));
+        let adnl_key_id = KeyId::from_data(*validator_adnl_key_hash);
 
         self.clone().runtime_handle.spawn(async move {
             for subscriber in subscribers.iter() {
@@ -873,7 +883,7 @@ impl NodeConfigHandler {
         None
     }
 
-    fn load_config(&self, config: &TonNodeConfig, subscribers: &Vec<Arc<dyn NodeConfigSubscriber>>) -> Result<()>{
+    fn load_config(&self, config: &TonNodeConfig, subscribers: &Vec<Arc<dyn NodeConfigSubscriber>>) -> Result<()> {
         // load key ring
         if let Some(key_ring) = &config.validator_key_ring {
             for (key_id, key) in key_ring.iter() {
@@ -893,7 +903,7 @@ impl NodeConfigHandler {
                     None => { continue; }
                     Some(validator_adnl_key_id) => {
                         let adnl_key_id = base64::decode(&validator_adnl_key_id)?;
-                        let adnl_key_id = KeyId::from_data(from_slice!(adnl_key_id, 32));
+                        let adnl_key_id = KeyId::from_data(adnl_key_id[..].try_into()?);
                         let election_id = key.election_id;
                         let subscribers = subscribers.clone();
                         self.clone().runtime_handle.spawn(async move {
@@ -966,7 +976,7 @@ impl NodeConfigHandler {
                         Answer::Result(result)
                     }
                     Task::StoreStatesGcInterval(interval) => {
-                        actual_config.cells_gc_interval_ms = interval;
+                        actual_config.cells_gc_config.gc_interval_sec = interval;
                         let result = actual_config.save_to_file(&name);
                         Answer::Result(result)
                     }
@@ -1164,10 +1174,8 @@ impl IdDhtNode {
             fail!("No public key!");
         };
 
-        let key = &key[..32];
-        let pub_key = from_slice!(key, 32);
-
-        let ret = KeyOption::from_type_and_public_key(type_id, &pub_key);
+        let pub_key = key[..32].try_into()?;
+        let ret = KeyOption::from_type_and_public_key(type_id, pub_key);
         Ok(ret)
     }
 }

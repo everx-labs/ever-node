@@ -1,14 +1,22 @@
-use crate::archives::{
-    archive_slice::ArchiveSlice, package_id::{PackageId, PackageType},
-    package_index_db::{PackageIndexDb, PackageIndexEntry}
+use crate::{
+    StorageAlloc, 
+    archives::{
+        archive_slice::ArchiveSlice, package_id::{PackageId, PackageType},
+        package_index_db::{PackageIndexDb, PackageIndexEntry}
+    }
 };
+#[cfg(feature = "telemetry")]
+use crate::StorageTelemetry;
+use adnl::{declare_counted, common::{CountedObject, Counter}};
 use std::{path::{Path, PathBuf}, sync::Arc};
+#[cfg(feature = "telemetry")]
+use std::sync::atomic::Ordering;
 use ton_types::{Result, error};
 use ton_block::BlockIdExt;
 
 use super::ARCHIVE_SLICE_SIZE;
 
-#[derive(Debug)]
+//#[derive(Debug)]
 pub struct FileDescription {
     id: PackageId,
     deleted: bool,
@@ -39,20 +47,30 @@ impl FileDescription {
     }
 }
 
-#[derive(Debug)]
-pub struct FileMapEntry {
-    key: u32,
-    value: Arc<FileDescription>,
-}
+//#[derive(Debug)]
+declare_counted!(
+    pub struct FileMapEntry {
+        key: u32,
+        value: Arc<FileDescription>
+    }
+);
 
-#[derive(Debug)]
+//#[derive(Debug)]
 pub struct FileMap {
     storage: PackageIndexDb,
     elements: tokio::sync::RwLock<Vec<FileMapEntry>>,
 }
 
 impl FileMap {
-    pub async fn new(db_root_path: &Arc<PathBuf>, path: impl AsRef<Path>, package_type: PackageType) -> Result<Self> {
+
+    pub async fn new(
+        db_root_path: &Arc<PathBuf>, 
+        path: impl AsRef<Path>, 
+        package_type: PackageType,
+        #[cfg(feature = "telemetry")]
+        telemetry: &Arc<StorageTelemetry>,
+        allocated: &Arc<StorageAlloc>
+    ) -> Result<Self> {
         let storage = PackageIndexDb::with_path(path);
         let mut index_pairs = Vec::new();
 
@@ -70,14 +88,27 @@ impl FileMap {
                 Arc::clone(db_root_path),
                 key,
                 package_type,
-                value.finalized()
+                value.finalized(),
+                #[cfg(feature = "telemetry")]
+                telemetry.clone(),
+                allocated.clone()
             ).await?);
             let value = Arc::new(FileDescription::with_data(
                 PackageId::with_values(key, package_type),
                 archive_slice,
                 value.deleted()
             ));
-            elements.push(FileMapEntry { key, value });
+            elements.push(
+                FileMapEntry { 
+                    key,  
+                    value,
+                    counter: allocated.file_entries.clone().into() 
+                }
+            );
+            #[cfg(feature = "telemetry")]
+            telemetry.file_entries.update(
+                allocated.file_entries.load(Ordering::Relaxed)
+            )
         }
 
         Ok(Self {
@@ -86,15 +117,29 @@ impl FileMap {
         })
     }
 
-    pub async fn put(&self, package_id: u32, file_description: Arc<FileDescription>) -> Result<()> {
-        let entry = FileMapEntry { key: package_id, value: file_description };
+    pub async fn put(
+        &self, 
+        package_id: u32, 
+        file_description: Arc<FileDescription>,
+        #[cfg(feature = "telemetry")]
+        telemetry: &Arc<StorageTelemetry>,
+        allocated: &Arc<StorageAlloc>
+    ) -> Result<()> {
+        let entry = FileMapEntry { 
+            key: package_id, 
+            value: file_description ,
+            counter: allocated.file_entries.clone().into() 
+        };
+        #[cfg(feature = "telemetry")]
+        telemetry.file_entries.update(
+            allocated.file_entries.load(Ordering::Relaxed)
+        );
         let mut guard = self.elements.write().await;
         match guard.binary_search_by(|entry| entry.key.cmp(&package_id)) {
             Ok(index) => guard[index] = entry,
             Err(index) => guard.insert(index, entry),
         }
         self.storage.put_value(&package_id.into(), PackageIndexEntry::new())?;
-
         Ok(())
     }
 
@@ -170,11 +215,31 @@ pub struct FileMaps {
 }
 
 impl FileMaps {
-    pub async fn new(db_root_path: &Arc<PathBuf>) -> Result<Self> {
+
+    pub async fn new(
+        db_root_path: &Arc<PathBuf>,
+        #[cfg(feature = "telemetry")]
+        telemetry: &Arc<StorageTelemetry>,
+        allocated: &Arc<StorageAlloc>
+    ) -> Result<Self> {
         let path = db_root_path.join("file_maps");
         Ok(Self {
-            files: FileMap::new(db_root_path, path.join("files"), PackageType::Blocks).await?,
-            key_files: FileMap::new(db_root_path, path.join("key_files"), PackageType::KeyBlocks).await?,
+            files: FileMap::new(
+                db_root_path, 
+                path.join("files"), 
+                PackageType::Blocks,
+                #[cfg(feature = "telemetry")]
+                telemetry,
+                allocated
+            ).await?,
+            key_files: FileMap::new(
+                db_root_path, 
+                path.join("key_files"), 
+                PackageType::KeyBlocks,
+                #[cfg(feature = "telemetry")]
+                telemetry,
+                allocated
+            ).await?,
             // temp_files: FileMap::new(db_root_path, path.join("temp_files"), PackageType::Temp).await?,
         })
     }
@@ -195,4 +260,5 @@ impl FileMaps {
             _ => unimplemented!("{:?}", package_type)
         }
     }
+
 }
