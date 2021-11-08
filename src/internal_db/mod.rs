@@ -235,7 +235,7 @@ pub trait InternalDb : Sync + Send {
 #[derive(serde::Deserialize)]
 pub struct InternalDbConfig {
     pub db_directory: String,
-    pub cells_gc_interval_ms: u32,
+    pub cells_gc_interval_sec: u32,
 }
 
 pub struct InternalDbImpl {
@@ -307,7 +307,14 @@ impl InternalDbImpl {
             allocated.storage.clone()
         )?;
         //let shardstate_db_gc = GC::new(&shard_state_dynamic_db, Arc::clone(&block_handle_db))?;
-        let archive_manager = Arc::new(ArchiveManager::with_data(Arc::new(PathBuf::from(&config.db_directory))).await?);
+        let archive_manager = Arc::new(
+            ArchiveManager::with_data(
+                Arc::new(PathBuf::from(&config.db_directory)),
+                #[cfg(feature = "telemetry")]
+                telemetry.storage.clone(),
+                allocated.storage.clone()
+            ).await?
+        );
         let db = Self {
             block_handle_storage,
             block_index_db,
@@ -330,7 +337,7 @@ impl InternalDbImpl {
             #[cfg(feature = "read_old_db")]
             old_block_proof_link_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_proof_link_db")),
 
-            cells_gc_interval: Arc::new(AtomicU32::new(config.cells_gc_interval_ms)),
+            cells_gc_interval: Arc::new(AtomicU32::new(config.cells_gc_interval_sec)),
             config,
             #[cfg(feature = "telemetry")]
             telemetry, 
@@ -573,6 +580,7 @@ impl InternalDb for InternalDbImpl {
         state: &Arc<ShardStateStuff>,
         callback: Option<Arc<dyn Callback>>
     ) -> Result<(Arc<ShardStateStuff>, bool)> {
+
         let _tc = TimeChecker::new(format!("store_shard_state_dynamic {}", state.block_id()), 300);
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))

@@ -105,7 +105,7 @@ pub async fn calc_shard_state(
     ).await??;
 
     let now = std::time::Instant::now();
-    let ss = engine.store_state(handle, ss).await?;
+    let ss = engine.store_state(handle, ss, None).await?;
     log::trace!("TIME: calc_shard_state: store_state {}ms   {}",
             now.elapsed().as_millis(), handle.id());
     Ok(ss)

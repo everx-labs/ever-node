@@ -317,7 +317,7 @@ impl EngineOperations for Engine {
         master_id: &BlockIdExt,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
         attempts: Option<usize>
-    ) -> Result<Arc<ShardStateStuff>> {
+    ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         let overlay = self.get_full_node_overlay(
             block_id.shard().workchain_id(), 
             block_id.shard().shard_prefix_with_tag()
@@ -433,7 +433,8 @@ impl EngineOperations for Engine {
     async fn store_state(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: Arc<ShardStateStuff>
+        state: Arc<ShardStateStuff>,
+        state_bytes: Option<&[u8]>,
     ) -> Result<Arc<ShardStateStuff>> {
         let (state, saved) = self.db().store_shard_state_dynamic(handle, &state, None)?;
         if saved {
@@ -448,6 +449,9 @@ impl EngineOperations for Engine {
             None,
             async { Ok(state.clone()) }
         ).await?;
+        if let Some(state_data) = state_bytes {
+            self.db().store_shard_state_persistent_raw(&handle, state_data, None).await?;
+        }
         Ok(state)
     }
 
@@ -464,8 +468,7 @@ impl EngineOperations for Engine {
         )?.as_non_updated().ok_or_else(
             || error!("INTERNAL ERROR: mismatch in zerostate storing")
         )?;
-        state = self.store_state(&handle, state).await?;
-        self.db().store_shard_state_persistent_raw(&handle, state_bytes, None).await?;
+        state = self.store_state(&handle, state, Some(state_bytes)).await?;
         Ok((state, handle))
     }
 

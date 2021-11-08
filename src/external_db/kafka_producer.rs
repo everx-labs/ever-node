@@ -1,4 +1,4 @@
-use std::{iter::FromIterator, collections::{HashMap, HashSet, hash_map::RandomState}, time::{self, Duration}};
+use std::{collections::{HashMap, HashSet, hash_map::RandomState}, iter::FromIterator, time::{self, Duration, SystemTime, UNIX_EPOCH}};
 use crate::{
     config::KafkaProducerConfig,
     error::NodeError,
@@ -8,7 +8,6 @@ use rdkafka::{message::OwnedHeaders, producer::Producer};
 use ton_types::{Result, fail};
 
 const EXTERNAL_MESSAGE_DATA_HEADER_KEY: &str = "external-message-ref";
-const PATTERN_TO_REPLACE: &str = "{message_filename}";
 
 enum TopicConfig {
     Single(String),
@@ -40,12 +39,6 @@ impl KafkaProducer {
                 .create()?;
 
             let topic = Self::init_topic_config(&producer, &config)?;
-
-            if let Some(pattern) = &config.external_message_ref_address_pattern {
-                if pattern.find(PATTERN_TO_REPLACE).is_none() {
-                    return Err(crate::error::NodeError::InvalidArg("Pattern has no matches to replace".to_owned()).into());
-                }
-            }
 
             Ok(Self { config, producer: Some(producer), topic } )
         }
@@ -152,11 +145,14 @@ impl KafkaProducer {
     }
 
 
-    fn store_oversized(&self, key: &str, data: &[u8], topic: &str) -> Result<()> {
+    fn store_oversized(&self, key: &str, data: &[u8], relative_path: &str) -> Result<()> {
         let root = std::path::Path::new(&self.config.big_messages_storage);
-        let dir = root.join(std::path::Path::new(topic));
+        let message_path = root.join(relative_path);
+        let dir = message_path.parent().ok_or_else(|| NodeError::Other(
+            format!("Could not find parent dir for big message path: {:?}", message_path)
+        ))?;
         let _ = std::fs::create_dir_all(dir.clone());
-        let result = std::fs::write(dir.join(std::path::Path::new(&key)), &data);
+        let result = std::fs::write(&message_path, &data);
         match &result {
             Ok(_) => log::warn!(
                 "Too big message ({} bytes, limit is {}), saved into {}",
@@ -173,27 +169,46 @@ impl KafkaProducer {
         result.map_err(|err| err.into())
     }
 
-    async fn process_oversized(&self, key: &str, data: &[u8], topic: &str) -> Result<()> {
-        self.store_oversized(&key, &data, topic)?;
-        if let Some(pattern) = &self.config.external_message_ref_address_pattern {
+    async fn process_oversized(
+        &self,
+        key: &Vec<u8>,
+        key_str: &str,
+        data: &[u8],
+        attributes: Option<&[(&str, &[u8])]>,
+        partition_key: Option<u32>,
+        topic: &str,
+    ) -> Result<()> {
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis().to_string();
+        let relative_path = format!("{}/{}_{}", topic, key_str, timestamp);
+        self.store_oversized(&key_str, &data, &relative_path)?;
+        if let Some(prefix) = &self.config.external_message_ref_address_prefix {
             loop {
-                let path = pattern.replace(PATTERN_TO_REPLACE, &key);
-                let headers = rdkafka::message::OwnedHeaders::new_with_capacity(1)
-                    .add(EXTERNAL_MESSAGE_DATA_HEADER_KEY, &path);
-                let result = self.producer.as_ref().unwrap().send(
-                    rdkafka::producer::FutureRecord::to(topic)
-                        .key(&format!("\"{}\"", key))
-                        .headers(headers)
-                        .payload(""),
-                    None,
-                ).await;
+                let mut headers = OwnedHeaders::new();
+                if let Some(attributes) = attributes {
+                    for (name, value) in attributes {
+                        headers = headers.add(*name, *value);
+                    }
+                }
+                let path = format!("{}{}", prefix, relative_path);
+                headers = headers.add(EXTERNAL_MESSAGE_DATA_HEADER_KEY, &path);
+
+                let mut record = rdkafka::producer::FutureRecord::to(topic)
+                    .key(key)
+                    .payload("")
+                    .headers(headers);
+                if let Some(partition_key) = partition_key {
+                    if let TopicConfig::Single(_) = self.topic {
+                        record = record.partition(partition_key as i32);
+                    }
+                }
+                let result = self.producer.as_ref().unwrap().send(record, None).await;
                 match result {
                     Ok(_) => {
-                        log::info!("Produced oversized path record, topic: {}, key: {}", topic, key);
+                        log::info!("Produced oversized path record, topic: {}, key: {}", topic, key_str);
                         break;
                     },
                     Err((e, _)) => log::warn!(
-                        "Error while producing oversized path record into kafka, topic: {}, key: {}, error: {}", topic, key, e
+                        "Error while producing oversized path record into kafka, topic: {}, key: {}, error: {}", topic, key_str, e
                     ),
                 }
                 futures_timer::Delay::new(
@@ -203,7 +218,7 @@ impl KafkaProducer {
                 ).await;
             }
         } else {
-            log::warn!("Skipped producing oversized path record, topic: {}, key: {}", topic, key);
+            log::warn!("Skipped producing oversized path record, topic: {}, key: {}", topic, key_str);
         }
         Ok(())
     }
@@ -214,7 +229,7 @@ impl KafkaProducer {
         key_str: String,
         data: Vec<u8>,
         attributes: Option<&[(&str, &[u8])]>,
-        partition_key: Option<u32>
+        partition_key: Option<u32>,
     ) -> Result<()> {
         if !self.enabled() {
             fail!("Producer is disabled");
@@ -265,7 +280,7 @@ impl KafkaProducer {
                 Err((e, _)) => {
                     match e.rdkafka_error_code() {
                         Some(rdkafka::types::RDKafkaErrorCode::MessageSizeTooLarge) => {
-                            self.process_oversized(&key_str, &data, &topic).await?;
+                            self.process_oversized(&key, &key_str, &data, attributes,partition_key, &topic).await?;
                             break;
                         }
                         _ => log::warn!("Error while producing into kafka, topic: {}, key: {}, error: {}", topic, key_str, e),

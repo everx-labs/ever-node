@@ -161,9 +161,9 @@ pub fn compute_validator_list_id(list: &[ValidatorDescr]) -> Option<ValidatorLis
     if !list.is_empty() {
         let mut hasher = Sha256::new();
         for x in list {
-            hasher.input(x.compute_node_id_short().as_slice());
+            hasher.update(x.compute_node_id_short().as_slice());
         }
-        let hash: [u8; 32] = hasher.result().into();
+        let hash: [u8; 32] = hasher.finalize().into();
         Some(hash.into())
     } else {
         None

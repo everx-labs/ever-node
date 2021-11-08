@@ -1,4 +1,5 @@
 use crate::{
+    StorageAlloc,
     archives::{
         archive_slice::ArchiveSlice, file_maps::{FileDescription, FileMaps}, get_mc_seq_no,
         package_entry::PackageEntry, package_entry_id::{GetFileNameShort, PackageEntryId}, 
@@ -6,6 +7,8 @@ use crate::{
     },
     block_handle_db::BlockHandle
 };
+#[cfg(feature = "telemetry")]
+use crate::StorageTelemetry;
 use std::{borrow::Borrow, hash::Hash, io::ErrorKind, path::PathBuf, sync::Arc};
 use tokio::io::AsyncWriteExt;
 use ton_block::BlockIdExt;
@@ -16,20 +19,33 @@ pub struct ArchiveManager {
     db_root_path: Arc<PathBuf>,
     unapplied_dir: Arc<PathBuf>,
     file_maps: FileMaps,
+    #[cfg(feature = "telemetry")]
+    telemetry: Arc<StorageTelemetry>,
+    allocated: Arc<StorageAlloc>
 }
 
 impl ArchiveManager {
+
     pub async fn with_data(
         db_root_path: Arc<PathBuf>,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<StorageTelemetry>,
+        allocated: Arc<StorageAlloc>
     ) -> Result<Self> {
-        let file_maps = FileMaps::new(&db_root_path).await?;
+        let file_maps = FileMaps::new(
+            &db_root_path,
+            #[cfg(feature = "telemetry")]
+            &telemetry,
+            &allocated
+        ).await?;
         let unapplied_dir = Arc::new(db_root_path.join("archive").join("unapplied"));
         tokio::fs::create_dir_all(&*unapplied_dir).await?;
-
         Ok(Self {
             db_root_path,
             unapplied_dir,
             file_maps,
+            telemetry,
+            allocated
         })
     }
 
@@ -327,7 +343,6 @@ impl ArchiveManager {
                 entry_id
             )
         }
-
         Ok((temp_filename, data))
     }
 
@@ -339,7 +354,6 @@ impl ArchiveManager {
             }
             return Ok(Some(fd));
         }
-
         if force {
             Ok(Some(self.add_file_desc(id).await?))
         } else {
@@ -351,27 +365,31 @@ impl ArchiveManager {
         // TODO: Rewrite logics in order to handle multithreaded adding of packages
         let file_map = self.file_maps.get(id.package_type());
         assert!(file_map.get(id.id()).await.is_none());
-
         let dir = self.db_root_path.join(id.path());
         tokio::fs::create_dir_all(&dir).await?;
-
         let archive_slice = Arc::new(
             ArchiveSlice::with_data(
                 Arc::clone(&self.db_root_path),
                 id.id(),
                 id.package_type(),
                 false,
+                #[cfg(feature = "telemetry")]
+                self.telemetry.clone(),
+                self.allocated.clone()
             ).await?
         );
-
         let fd = Arc::new(FileDescription::with_data(
             id.clone(),
             archive_slice,
             false
         ));
-
-        file_map.put(id.id(), Arc::clone(&fd)).await?;
-
+        file_map.put(
+            id.id(), 
+            Arc::clone(&fd),
+            #[cfg(feature = "telemetry")]
+            &self.telemetry,
+            &self.allocated
+        ).await?;
         Ok(fd)
     }
 

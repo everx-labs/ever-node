@@ -15,8 +15,13 @@ pub struct StorageCell {
     tree_cell_count: Arc<AtomicU64>,
 }
 
+lazy_static::lazy_static!{
+    static ref CELL_COUNT: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+}
+
 /// Represents Cell for storing in persistent storage
 impl StorageCell {
+
     /// Constructs StorageCell by deserialization
     pub fn deserialize(boc_db: Arc<DynamicBocDb>, data: &[u8]) -> Result<Self> {
         assert!(!data.is_empty());
@@ -33,13 +38,19 @@ impl StorageCell {
             .read_be_u64()
             .and_then(|first| Ok((first, reader.read_be_u64()?)))
             .unwrap_or((0, 0));
-        Ok(Self {
+        let ret = Self {
             cell_data,
             references: RwLock::new(references),
             boc_db,
             tree_bits_count: Arc::new(AtomicU64::new(tree_bits_count)),
             tree_cell_count: Arc::new(AtomicU64::new(tree_cell_count)),
-        })
+        };
+        CELL_COUNT.fetch_add(1, Ordering::Relaxed);
+        Ok(ret)
+    }
+
+    pub fn cell_count() -> u64 {
+        CELL_COUNT.load(Ordering::Relaxed)
     }
 
     pub fn deserialize_references(data: &[u8]) -> Result<Vec<Reference>> {
@@ -184,6 +195,7 @@ fn references_hashes_equal(left: &[Reference], right: &[Reference]) -> bool {
 
 impl Drop for StorageCell {
     fn drop(&mut self) {
+        CELL_COUNT.fetch_sub(1, Ordering::Relaxed);
         self.boc_db.cells_map().write()
             .expect("Poisoned RwLock")
             .remove(&self.id());

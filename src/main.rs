@@ -7,6 +7,9 @@ mod engine;
 mod engine_traits;
 mod engine_operations;
 mod error;
+mod ext_messages;
+#[cfg(feature = "external_db")]
+mod external_db;
 mod full_node;
 mod internal_db;
 mod macros;
@@ -30,10 +33,27 @@ mod jaeger {
     pub fn broadcast_sended(_msg_id: String) {}
 }
 
-//extern crate lazy_static;
+use crate::{
+    config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, STATSD}, 
+    jaeger::init_jaeger
+};
 
+use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::os::raw::c_void;
+#[cfg(feature = "trace_alloc")]
+use std::{
+    alloc::{GlobalAlloc, System, Layout}, sync::atomic::{AtomicBool, AtomicU64, Ordering}, 
+    thread, time::Duration
+};
+#[cfg(feature = "trace_alloc_detail")]
+use std::{
+    fs::File, io::Write, mem::{self, MaybeUninit}, sync::atomic::{AtomicIsize, AtomicUsize}
+};
+#[cfg(feature = "external_db")]
+use ton_types::error;
+use ton_types::Result;
+
 
 #[cfg(target_os = "linux")]
 #[link(name = "tcmalloc", kind = "dylib")]
@@ -50,20 +70,139 @@ fn check_tcmalloc() {
     }
 }
 
-#[cfg(feature = "external_db")]
-mod external_db;
-mod ext_messages;
+#[cfg(feature = "trace_alloc")]
+struct TracingAllocator {
+    count: AtomicU64,
+    allocated: AtomicU64,
+    overhead: AtomicU64
+}
 
-use crate::{
-    config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, STATSD}, jaeger::init_jaeger
+#[cfg(feature = "trace_alloc_detail")]
+struct AllocDetail {
+    start: AtomicUsize,
+    size: AtomicIsize,
+}
+
+#[cfg(feature = "trace_alloc_detail")]
+const SIZE_TRACEBUF: usize = 20000000;
+
+#[cfg(feature = "trace_alloc_detail")]
+lazy_static::lazy_static!{
+    static ref TRACEBUF: [AllocDetail; SIZE_TRACEBUF] = {
+        let mut data: [MaybeUninit<AllocDetail>; SIZE_TRACEBUF] = unsafe {
+            MaybeUninit::uninit().assume_init()
+        };
+        for elem in &mut data[..] {
+            elem.write(
+                AllocDetail {
+                    start: AtomicUsize::new(0),
+                    size: AtomicIsize::new(0)
+                }
+            );
+        }
+        unsafe { mem::transmute::<_, [AllocDetail; SIZE_TRACEBUF]>(data) }
+    };
+    static ref TRACEBUF_HEAD: AtomicUsize = AtomicUsize::new(0);
+    static ref TRACEBUF_TAIL: AtomicUsize = AtomicUsize::new(0);
+}
+
+#[cfg(feature = "trace_alloc")]
+thread_local!(
+    static NOCALC: AtomicBool = AtomicBool::new(false)
+);
+
+#[cfg(feature = "trace_alloc")]
+unsafe impl GlobalAlloc for TracingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ret = System.alloc(layout);
+        self.check_alloc(ret, layout.size());
+        ret
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let ret = System.alloc_zeroed(layout);
+        self.check_alloc(ret, layout.size());
+        ret
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        self.check_dealloc(ptr, layout.size());
+        let ret = System.realloc(ptr, layout, new_size);
+        self.check_alloc(ret, new_size);
+        ret
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        self.check_dealloc(ptr, layout.size());
+        System.dealloc(ptr, layout);
+    }
+}
+
+#[cfg(feature = "trace_alloc")]
+impl TracingAllocator {
+
+    fn check_alloc(&self, _ptr: *mut u8, size: usize) {
+        if NOCALC.with(
+            |f| f.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+        ) {
+            self.allocated.fetch_add(size as u64, Ordering::Relaxed);
+            #[cfg(feature = "trace_alloc_detail")]
+            Self::post_trace(_ptr as usize, size as isize);
+            self.count.fetch_add(1, Ordering::Relaxed);
+            NOCALC.with(|f| f.store(false, Ordering::Relaxed));
+        } else {
+            self.overhead.fetch_add(size as u64, Ordering::Relaxed);
+        }
+    }
+
+    fn check_dealloc(&self, _ptr: *mut u8, size: usize) {
+        if NOCALC.with(
+            |f| f.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+        ) {
+            self.allocated.fetch_sub(size as u64, Ordering::Relaxed);
+            #[cfg(feature = "trace_alloc_detail")]
+            Self::post_trace(_ptr as usize, -(size as isize));
+            self.count.fetch_sub(1, Ordering::Relaxed);
+            NOCALC.with(|f| f.store(false, Ordering::Relaxed));
+        } else {
+            self.overhead.fetch_sub(size as u64, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(feature = "trace_alloc_detail")]
+    fn post_trace(start: usize, size: isize) {
+        loop {
+            let this = TRACEBUF_HEAD.load(Ordering::Relaxed);
+            let next = if this == SIZE_TRACEBUF - 1 {
+                0
+            } else {
+                this + 1
+            };
+            if next == TRACEBUF_TAIL.load(Ordering::Acquire) {
+                thread::yield_now();
+                continue
+            }
+            if TRACEBUF_HEAD.compare_exchange(
+                this, next, Ordering::Relaxed, Ordering::Relaxed
+            ).is_err() {
+                thread::yield_now();
+                continue;
+            }
+            if start == 0 {
+                panic!("ZEROADDR_WRITE")
+            }
+            TRACEBUF[this].start.store(start, Ordering::Relaxed);
+            TRACEBUF[this].size.store(size, Ordering::Release);
+            break
+        }
+    }
+
+}
+
+#[cfg(feature = "trace_alloc")]
+#[global_allocator]
+static GLOBAL: TracingAllocator = TracingAllocator { 
+    count: AtomicU64::new(0),
+    allocated: AtomicU64::new(0),
+    overhead: AtomicU64::new(0)
 };
-use clap;
-
-#[cfg(feature = "external_db")]
-use ton_types::error;
-use ton_types::Result;
-use std::sync::Arc;
-
 
 fn init_logger(log_config_path: Option<String>) {
 
@@ -182,6 +321,7 @@ const CONFIG_NAME: &str = "config.json";
 const DEFAULT_CONFIG_NAME: &str = "default_config.json";
 
 fn main() {
+
     #[cfg(target_os = "linux")]
     check_tcmalloc();
 
@@ -256,6 +396,54 @@ fn main() {
         .expect("Can't create Validator tokio runtime");
 
     init_jaeger();
+
+    #[cfg(feature = "trace_alloc_detail")]
+    thread::spawn(
+        || {
+            let mut file = File::create("trace.bin").unwrap();
+            loop {
+                let this = TRACEBUF_TAIL.load(Ordering::Relaxed);
+                let next = if this == SIZE_TRACEBUF - 1 {
+                    0
+                } else {
+                    this + 1
+                };
+                if this == TRACEBUF_HEAD.load(Ordering::Relaxed) {
+                    thread::yield_now();
+                    continue
+                }
+                let size = TRACEBUF[this].size.load(Ordering::Acquire);
+                if size == 0 {
+                    thread::yield_now();
+                    continue
+                }
+                let start = TRACEBUF[this].start.load(Ordering::Relaxed);
+                if start == 0 {
+                    panic!("ZEROADDR_READ")
+                }
+                file.write_all(&start.to_le_bytes()).ok();
+                file.write_all(&size.to_le_bytes()).ok();
+                TRACEBUF[this].size.store(0, Ordering::Release);
+                TRACEBUF_TAIL.store(next, Ordering::Release);
+            }
+        }
+    );
+
+    #[cfg(feature = "trace_alloc")]
+    thread::spawn(
+        || {
+            loop {
+                thread::sleep(Duration::from_millis(30000));
+                let count = GLOBAL.count.load(Ordering::Relaxed);
+                let allocated = GLOBAL.allocated.load(Ordering::Relaxed);
+                let overhead = GLOBAL.overhead.load(Ordering::Relaxed);
+                log::info!(
+                    "Allocated {} + {} = {} bytes, {} objects", 
+                    allocated, overhead, allocated + overhead, count
+                ); 
+            }
+        }
+    );
     
     runtime.block_on(async move {
         match start_engine(

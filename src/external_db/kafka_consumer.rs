@@ -30,8 +30,6 @@ impl KafkaConsumer {
                         self.config.run_attempt_timeout_ms as u64
                     )
                 ).await;
-            } else {
-                break Ok(())
             }
         }
     }

@@ -1,4 +1,5 @@
 use crate::{
+    StorageAlloc, 
     archives::{
         get_mc_seq_no_opt, ARCHIVE_PACKAGE_SIZE, KEY_ARCHIVE_PACKAGE_SIZE, package::Package,
         package_entry::PackageEntry, package_entry_id::{GetFileName, PackageEntryId},
@@ -9,6 +10,8 @@ use crate::{
     },
     traits::Serializable, block_handle_db::BlockHandle
 };
+#[cfg(feature = "telemetry")]
+use crate::StorageTelemetry;
 use std::{borrow::Borrow, hash::Hash, io::SeekFrom, path::PathBuf, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use ton_block::BlockIdExt;
@@ -17,7 +20,7 @@ use ton_types::{error, fail, Result, UInt256};
 
 const DEFAULT_PKG_VERSION: u32 = 1;
 
-#[derive(Debug)]
+//#[derive(Debug)]
 pub struct ArchiveSlice {
     archive_id: u32,
     packages: tokio::sync::RwLock<Vec<Arc<PackageInfo>>>,
@@ -30,14 +33,21 @@ pub struct ArchiveSlice {
     index_db: Arc<PackageEntryMetaDb>,
     offsets_db: Arc<PackageOffsetsDb>,
     package_status_db: Arc<PackageStatusDb>,
+    #[cfg(feature = "telemetry")]
+    telemetry: Arc<StorageTelemetry>,
+    allocated: Arc<StorageAlloc>
 }
 
 impl ArchiveSlice {
+
     pub async fn with_data(
         db_root_path: Arc<PathBuf>,
         archive_id: u32,
         package_type: PackageType,
         finalized: bool,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<StorageTelemetry>,
+        allocated: Arc<StorageAlloc>
     ) -> Result<Self> {
         let package_id = PackageId::with_values(archive_id, package_type);
         let index_path = package_id.full_path(db_root_path.as_ref(), "index");
@@ -63,6 +73,9 @@ impl ArchiveSlice {
             index_db: Arc::clone(&index_db),
             offsets_db,
             package_status_db: Arc::clone(&package_status_db),
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated
         };
 
         if let Some(sliced_mode) = package_status_db.try_get_value::<bool>(&PackageStatusKey::SlicedMode)? {
@@ -274,7 +287,10 @@ impl ArchiveSlice {
             package_id,
             package,
             idx,
-            version
+            version,
+            #[cfg(feature = "telemetry")]
+            &self.telemetry,
+            &self.allocated
         ));
 
         Ok(pi)

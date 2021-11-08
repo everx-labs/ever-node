@@ -232,7 +232,7 @@ impl FullNodeOverlayService {
         }
 
         let last_mc_state = match self.engine.load_last_applied_mc_block_id()? {
-            Some(block_id) if start_block_id == block_id.as_ref() => {
+            Some(block_id) if start_block_id.seq_no() < block_id.seq_no() => {
                 self.engine.load_state(&block_id).await?
             }
             _ => {
