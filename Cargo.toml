@@ -89,7 +89,7 @@ optional = true
 
 [features]
 default = ["telemetry"]
-validator = ["async_collator", "async_validator", "slashing"]
+validator = ["async_collator", "async_validator"]
 external_db = ["rdkafka"]
 async_collator = []
 async_validator = []
