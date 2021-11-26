@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::archives::package_entry::{PackageEntry, PKG_ENTRY_HEADER_SIZE};
 use std::{io::SeekFrom, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicU64, Ordering}}};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
