@@ -1,14 +1,31 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 pub use super::*;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use storage::catchain_persistent_db::*;
+use std::{
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
+use storage::catchain_persistent_db::CatchainPersistentDb;
 
 /*
     Implementation details for Database
 */
 
 pub struct DatabaseImpl {
-    db_path: String,                                //path to database
     db: CatchainPersistentDb,                       //persistent storage
     put_tx_counter: metrics_runtime::data::Counter, //DB put transactions counter
     get_tx_counter: metrics_runtime::data::Counter, //DB get transactions counter
@@ -24,8 +41,9 @@ impl Database for DatabaseImpl {
         Database management
     */
 
-    fn get_db_path(&self) -> &String {
-        &self.db_path
+    /// Return path to db
+    fn get_db_path(&self) -> &Path {
+        self.db.path()
     }
 
     fn destroy(&self) {
@@ -46,7 +64,7 @@ impl Database for DatabaseImpl {
     }
 
     fn get_block(&self, hash: &BlockHash) -> Result<RawBuffer> {
-        check_execution_time!(10000);
+        check_execution_time!(50000);
         instrument!();
 
         self.get_tx_counter.increment();
@@ -58,7 +76,7 @@ impl Database for DatabaseImpl {
     }
 
     fn put_block(&self, hash: &BlockHash, data: RawBuffer) {
-        check_execution_time!(10000);
+        check_execution_time!(50000);
         instrument!();
 
         self.put_tx_counter.increment();
@@ -70,7 +88,7 @@ impl Database for DatabaseImpl {
     }
 
     fn erase_block(&self, hash: &BlockHash) {
-        check_execution_time!(10000);
+        check_execution_time!(50000);
         instrument!();
 
         match self.db.delete(&hash) {
@@ -91,7 +109,7 @@ impl Drop for DatabaseImpl {
         debug!("Dropping Catchain database...");
 
         if self.destroy_db.load(Ordering::SeqCst) {
-            debug!("Destroying DB at path '{}'", self.db_path);
+            debug!("Destroying DB at path '{}'", self.get_db_path().display());
             self.destroy_database();
         }
 
@@ -105,28 +123,28 @@ impl Drop for DatabaseImpl {
 
 impl DatabaseImpl {
     fn destroy_database(&mut self) {
-        match self.db.destroy() {
-            Err(err) => error!("Database {} destroying error: {:?}", self.db_path, err),
-            _ => (),
+        if let Err(err) = self.db.destroy() {
+            error!("cannot destroy catchain db: {}", err)
         }
     }
 
     pub(crate) fn create(
-        path: &String,
+        path: &str,
+        name: &str,
         metrics_receiver: &metrics_runtime::Receiver,
-    ) -> DatabasePtr {
-        debug!("Creating catchain DB at path '{}'", path);
+    ) -> Result<DatabasePtr> {
+        debug!("Creating catchain table in DB at path '{}'", path);
 
         let put_tx_counter = metrics_receiver.sink().counter("db_put_txs");
         let get_tx_counter = metrics_receiver.sink().counter("db_get_txs");
-        let db = CatchainPersistentDb::with_path(path);
+        let db = CatchainPersistentDb::with_path(path, name)?;
 
-        Arc::new(Self {
-            db_path: path.clone(),
-            db: db,
-            put_tx_counter: put_tx_counter,
-            get_tx_counter: get_tx_counter,
+        let ret = Self {
+            db,
+            put_tx_counter,
+            get_tx_counter,
             destroy_db: Arc::new(AtomicBool::new(false)),
-        })
+        };
+        Ok(Arc::new(ret))
     }
 }

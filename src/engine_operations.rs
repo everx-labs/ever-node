@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, 
     config::CollatorTestBundlesGeneralConfig,
@@ -7,11 +20,15 @@ use crate::{
         ValidatedBlockStat
     },
     error::NodeError,
-    internal_db::{INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, SHARD_CLIENT_MC_BLOCK, BlockResult},
+    internal_db::{
+        INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, LAST_ROTATION_MC_BLOCK, SHARD_CLIENT_MC_BLOCK,
+        BlockResult,
+    },
     shard_state::ShardStateStuff,
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
     ext_messages::{create_ext_message, EXT_MESSAGES_TRACE_TARGET},
     jaeger,
+    validator::candidate_db::CandidateDb,
 };
 #[cfg(feature = "telemetry")]
 use crate::{
@@ -33,6 +50,7 @@ use ton_block::{
     BlockIdExt, AccountIdPrefixFull, ShardIdent, Message,
 };
 use ton_types::{fail, error, Result, UInt256};
+use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
 
 #[async_trait::async_trait]
 impl EngineOperations for Engine {
@@ -94,6 +112,14 @@ impl EngineOperations for Engine {
 
     fn activate_validator_list(&self, validator_list_id: UInt256) -> Result<()> {
         self.network().activate_validator_list(validator_list_id)
+    }
+
+    fn set_sync_status(&self, status: u32) {
+        self.set_sync_status(status);
+    }
+
+    fn get_sync_status(&self) -> u32 {
+        self.get_sync_status()
     }
 
     fn validation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
@@ -231,20 +257,61 @@ impl EngineOperations for Engine {
     }
 
     fn load_last_applied_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
-        self.db().load_node_state(LAST_APPLIED_MC_BLOCK)
+        self.db().load_full_node_state(LAST_APPLIED_MC_BLOCK)
     }
 
     fn save_last_applied_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
-        self.db().save_node_state(LAST_APPLIED_MC_BLOCK, id)
+        self.db().save_full_node_state(LAST_APPLIED_MC_BLOCK, id)
     }
 
     fn load_shard_client_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
-        self.db().load_node_state(SHARD_CLIENT_MC_BLOCK)
+        self.db().load_full_node_state(SHARD_CLIENT_MC_BLOCK)
     }
 
     fn save_shard_client_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
         STATSD.gauge("shards_client_mc_block", id.seq_no() as f64);
-        self.db().save_node_state(SHARD_CLIENT_MC_BLOCK, id)
+        self.db().save_full_node_state(SHARD_CLIENT_MC_BLOCK, id)
+    }
+
+    fn load_last_rotation_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+        self.db().load_validator_state(LAST_ROTATION_MC_BLOCK)
+    }
+
+    fn save_last_rotation_block_id(&self, id: &BlockIdExt) -> Result<()> {
+        self.db().save_validator_state(LAST_ROTATION_MC_BLOCK, id)
+    }
+
+    fn clear_last_rotation_block_id(&self) -> Result<()> {
+        self.db().drop_validator_state(LAST_ROTATION_MC_BLOCK)
+    }
+
+    fn save_block_candidate(
+        &self, 
+        session_id: &SessionId, 
+        candidate: ValidatorBlockCandidate
+    ) -> Result<()> {
+        CandidateDb::with_path(
+            self.db_root_dir()?,
+            &format!("catchains/candidates{:x}", session_id)
+        )?.save(candidate)
+    }
+
+    fn load_block_candidate(
+        &self, 
+        session_id: &SessionId, 
+        root_hash: &BlockHash
+    ) -> Result<Arc<ValidatorBlockCandidate>> {
+        CandidateDb::with_path(
+            self.db_root_dir()?,
+            &format!("catchains/candidates{:x}", session_id)
+        )?.load(root_hash)
+    }
+
+    fn destroy_block_candidates(&self, session_id: &SessionId) -> Result<bool> {
+        CandidateDb::with_path(
+            self.db_root_dir()?,
+            &format!("catchains/candidates{:x}", session_id)
+        )?.destroy()
     }
 
     async fn apply_block_internal(
@@ -583,7 +650,7 @@ impl EngineOperations for Engine {
     }
 
     fn save_init_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
-        self.db().save_node_state(INITIAL_MC_BLOCK, id)
+        self.db().save_full_node_state(INITIAL_MC_BLOCK, id)
     }
 
     async fn broadcast_to_public_overlay(
@@ -780,27 +847,6 @@ impl EngineOperations for Engine {
     fn pop_validated_block_stat(&self) -> Result<ValidatedBlockStat> {
         let result = self.validated_block_stats_receiver().try_recv()?;
         Ok(result)
-    }
-
-    fn get_last_rotation_block_id(&self) -> Result<Option<BlockIdExt>> {
-        self
-            .last_rotation_block_db()
-            .get_last_rotation_block_id()
-            .map_err(|e| error!("Can't get last rotation block id: {}", e))
-    }
-
-    fn set_last_rotation_block_id(&self, info: &BlockIdExt) -> Result<()> {
-        self
-            .last_rotation_block_db()
-            .set_last_rotation_block_id(info)
-            .map_err(|e| error!("Can't set last rotation block id: {}", e))
-    }
-
-    fn clear_last_rotation_block_id(&self) -> Result<()> {
-        self
-            .last_rotation_block_db()
-            .clear_last_rotation_block_id()
-            .map_err(|e| error!("Can't clear last rotation block id: {}", e))
     }
 
     fn adjust_states_gc_interval(&self, interval_ms: u32) {

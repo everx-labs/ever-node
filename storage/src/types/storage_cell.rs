@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{dynamic_boc_db::DynamicBocDb, types::{CellId, Reference}};
 use std::{io::{Cursor, Write}, sync::{Arc, RwLock, atomic::{AtomicU64, Ordering}}};
 use ton_types::{
@@ -11,8 +24,8 @@ pub struct StorageCell {
     cell_data: CellData,
     references: RwLock<Vec<Reference>>,
     boc_db: Arc<DynamicBocDb>,
-    tree_bits_count: Arc<AtomicU64>,
-    tree_cell_count: Arc<AtomicU64>,
+    tree_bits_count: u64,
+    tree_cell_count: u32,
 }
 
 lazy_static::lazy_static!{
@@ -36,14 +49,14 @@ impl StorageCell {
         }
         let (tree_bits_count, tree_cell_count) = reader
             .read_be_u64()
-            .and_then(|first| Ok((first, reader.read_be_u64()?)))
+            .and_then(|first| Ok((first, reader.read_be_u32()?)))
             .unwrap_or((0, 0));
         let ret = Self {
             cell_data,
             references: RwLock::new(references),
             boc_db,
-            tree_bits_count: Arc::new(AtomicU64::new(tree_bits_count)),
-            tree_cell_count: Arc::new(AtomicU64::new(tree_cell_count)),
+            tree_bits_count,
+            tree_cell_count,
         };
         CELL_COUNT.fetch_add(1, Ordering::Relaxed);
         Ok(ret)
@@ -111,25 +124,6 @@ impl StorageCell {
 
         Ok(storage_cell)
     }
-
-    // need to patch database after update
-    #[allow(dead_code)]
-    fn update_tree_stat_if_need(&self) -> Result<()> {
-        if self.tree_cell_count.load(Ordering::Relaxed) == 0 {
-            let mut tree_bits_count = self.cell_data.bit_length() as u64;
-            let mut tree_cell_count = 1;
-            for index in 0..self.references_count() {
-                if let Ok(reference) = self.reference(index) {
-                    tree_bits_count += reference.tree_bits_count();
-                    tree_cell_count += reference.tree_cell_count();
-                }
-            }
-            self.tree_bits_count.store(tree_bits_count, Ordering::Relaxed);
-            self.tree_cell_count.store(tree_cell_count, Ordering::Relaxed);
-            self.boc_db.save_as_dynamic_boc(self)?;
-        }
-        Ok(())
-    }
 }
 
 impl CellImpl for StorageCell {
@@ -174,13 +168,11 @@ impl CellImpl for StorageCell {
     }
 
     fn tree_bits_count(&self) -> u64 {
-        // self.update_tree_stat_if_need().ok();
-        self.tree_bits_count.load(Ordering::Relaxed)
+        self.tree_bits_count
     }
 
     fn tree_cell_count(&self) -> u64 {
-        // self.update_tree_stat_if_need().ok();
-        self.tree_cell_count.load(Ordering::Relaxed)
+        self.tree_cell_count as u64
     }
 }
 

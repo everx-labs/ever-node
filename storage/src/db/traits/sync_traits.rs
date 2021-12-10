@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{db::traits::DbKey, error::StorageError, types::DbSlice};
 use std::{fmt::Debug, sync::Arc};
 use ton_types::Result;
@@ -13,12 +26,11 @@ pub trait Kvc: Debug + Send + Sync {
     }
 
     /// Destroys this key-value collection and underlying database
-    fn destroy(&mut self) -> Result<()>;
+    fn destroy(&mut self) -> Result<bool>;
 }
 
 /// Trait for readable key-value collections
 pub trait KvcReadable<K: DbKey + Send + Sync>: Kvc {
-
     /// Get meta information (like DB name or something)
     fn get_meta(&self) -> &str {
         ""
@@ -29,17 +41,15 @@ pub trait KvcReadable<K: DbKey + Send + Sync>: Kvc {
 
     /// Gets value from collection by the key
     fn get(&self, key: &K) -> Result<DbSlice> {
-        self.try_get(key)?.ok_or_else(
-            || {
-                let meta = self.get_meta();
-                let what = if meta.is_empty() {
-                    key.as_string()
-                } else {
-                    format!("{} ({})", key.as_string(), meta)
-                };
-                StorageError::KeyNotFound(key.key_name(), what).into()
-            }
-        )
+        self.try_get(key)?.ok_or_else(|| {
+            let meta = self.get_meta();
+            let what = if meta.is_empty() {
+                key.as_string()
+            } else {
+                format!("{} ({})", key.as_string(), meta)
+            };
+            StorageError::KeyNotFound(key.key_name(), what).into()
+        })
     }
 
     /// Gets slice with given size starting from given offset from collection by the key
@@ -49,8 +59,8 @@ pub trait KvcReadable<K: DbKey + Send + Sync>: Kvc {
                 return Err(StorageError::OutOfRange.into());
             }
 
-            let mut result = vec![0u8; size as usize];
-            result.copy_from_slice(&value[offset as usize..(offset + size) as usize]);
+            let mut result = Vec::new();
+            result.extend_from_slice(&value[offset as usize..(offset + size) as usize]);
             Ok(result.into())
         })
     }
@@ -85,7 +95,7 @@ pub trait KvcSnapshotable<K: DbKey + Send + Sync>: KvcWriteable<K> {
 }
 
 /// Trait for transactional key-value collections
-pub trait KvcTransactional<K: DbKey + Send + Sync>: KvcSnapshotable<K> {
+pub trait KvcTransactional<K: DbKey + Send + Sync>: KvcWriteable<K> {
     /// Creates new transaction (batch)
     fn begin_transaction(&self) -> Result<Box<dyn KvcTransaction<K>>>;
 }

@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 pub use super::*;
 use crate::ton_api::IntoBoxed;
 
@@ -100,7 +113,7 @@ impl RoundAttemptState for RoundAttemptStateImpl {
     }
 
     fn check_precommit_received_from(&self, src_idx: u32) -> bool {
-        *self.precommitted.at(src_idx as usize)
+        self.precommitted.at(src_idx as usize)
     }
 
     /*
@@ -242,7 +255,7 @@ impl RoundAttemptState for RoundAttemptStateImpl {
                 let mut vote_dump = "".to_string();
 
                 for i in 0..total_nodes_count {
-                    if *voters.at(i as usize) {
+                    if voters.at(i as usize) {
                         votes_weight += desc.get_node_weight(i);
 
                         if vote_dump != "" {
@@ -311,7 +324,7 @@ impl RoundAttemptState for RoundAttemptStateImpl {
         let mut precomitters = "".to_string();
 
         for i in 0..total_nodes_count {
-            if !*self.precommitted.at(i as usize) {
+            if !self.precommitted.at(i as usize) {
                 continue;
             }
 
@@ -973,19 +986,22 @@ impl RoundAttemptStateImpl {
                 seqno: sequence_number as ton::int,
                 votes: votes.get_ton_hash(),
                 precommitted: precommitted.get_ton_hash(),
-                vote_for_inited: vote_for.is_some() as ton::int,
-                vote_for: match vote_for.get_ton_hash() {
-                    0 => 0,
-                    _ => 1,
-                },
+                vote_for: match vote_for {
+                    Some(_) => true,
+                    None => false,
+                } as ton::int,
+                vote_for_inited: match vote_for {
+                    Some(Some(_)) => true,
+                    _ => false,
+                } as ton::int,
             })
         } else {
             crate::utils::compute_hash(ton::hashable::ValidatorSessionRoundAttempt {
                 seqno: sequence_number as ton::int,
                 votes: votes.get_ton_hash(),
                 precommitted: precommitted.get_ton_hash(),
-                vote_for_inited: vote_for.is_some() as ton::int,
                 vote_for: vote_for.get_ton_hash(),
+                vote_for_inited: vote_for.is_some() as ton::int,
             })
         }
     }
@@ -1036,7 +1052,7 @@ impl RoundAttemptStateImpl {
         sequence_number: u32,
     ) -> RoundAttemptStatePtr {
         let precommitted = vec![false; desc.get_total_nodes() as usize];
-        let precommitted = SessionFactory::create_vector(desc, precommitted);
+        let precommitted = SessionFactory::create_bool_vector(desc, precommitted);
 
         Self::create(desc, sequence_number, None, precommitted, None)
     }

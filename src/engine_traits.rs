@@ -1,5 +1,18 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
-    block::{BlockStuff}, config::CollatorTestBundlesGeneralConfig, internal_db::BlockResult,
+    block::BlockStuff, config::CollatorTestBundlesGeneralConfig, internal_db::BlockResult,
     shard_state::ShardStateStuff,
     network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
     block_proof::BlockProofStuff,
@@ -21,15 +34,15 @@ use catchain::{
 use overlay::{
     BroadcastSendInfo, OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId
 };
-use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::{sync::{Arc, atomic::AtomicU64}, time::{SystemTime, UNIX_EPOCH}};
 #[cfg(feature = "telemetry")]
-use std::sync::atomic::AtomicU64;
 use storage::{StorageAlloc, block_handle_db::BlockHandle};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
 use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, signature::SigPubKey};
 use ton_types::{Result, UInt256};
+use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
 
 pub struct ValidatedBlockStatNode {
     pub public_key : SigPubKey,
@@ -145,6 +158,14 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
+    fn set_sync_status(&self, status: u32) {
+        unimplemented!()
+    }
+
+    fn get_sync_status(&self) -> u32 {
+        unimplemented!()
+    }
+
     fn create_catchain_client(
         &self,
         validator_list_id: UInt256,
@@ -202,6 +223,32 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
     fn save_shard_client_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
+    fn load_last_rotation_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+        unimplemented!()
+    }
+    fn save_last_rotation_block_id(&self, info: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
+    fn clear_last_rotation_block_id(&self) -> Result<()> {
+        unimplemented!()
+    }
+    fn save_block_candidate(
+        &self, 
+        session_id: &SessionId, 
+        candidate: ValidatorBlockCandidate
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    fn load_block_candidate(
+        &self, 
+        session_id: &SessionId, 
+        root_hash: &BlockHash
+    ) -> Result<Arc<ValidatorBlockCandidate>> {
+        unimplemented!()
+    }
+    fn destroy_block_candidates(&self, session_id: &SessionId) -> Result<bool> {
         unimplemented!()
     }
     async fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seqno: u32) -> Result<Arc<BlockHandle>> {
@@ -397,18 +444,6 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
     fn is_validator(&self) -> bool {
-        unimplemented!()
-    }
-
-    fn get_last_rotation_block_id(&self) -> Result<Option<BlockIdExt>> {
-        unimplemented!()
-    }
-
-    fn set_last_rotation_block_id(&self, info: &BlockIdExt) -> Result<()> {
-        unimplemented!()
-    }
-
-    fn clear_last_rotation_block_id(&self) -> Result<()> {
         unimplemented!()
     }
 

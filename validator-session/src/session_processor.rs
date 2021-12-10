@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 pub use super::*;
 
 use super::session_description::SessionDescriptionImpl;
@@ -35,6 +48,7 @@ const BLOCK_PREPROCESSING_WARN_LATENCY: Duration = Duration::from_millis(100); /
 const BLOCK_PROCESSING_WARN_LATENCY: Duration = Duration::from_millis(200); //max block processing latency
 const MAX_NEXT_BLOCK_WAIT_DELAY: Duration = Duration::from_millis(500); //max next block wait delay
 const WARN_DUMP_PERIOD: Duration = Duration::from_millis(2000); //warning dump period
+const HANGED_CONSENSUS_UPDATE_TIME: Duration = MAX_NEXT_BLOCK_WAIT_DELAY; //update interval for hanged consensus
 
 const STATES_RESERVED_COUNT: usize = 100000; //reserved states count for blocks
 const ROUND_DEBUG_PERIOD: std::time::Duration = Duration::from_secs(15); //round debug time
@@ -104,7 +118,7 @@ pub(crate) struct SessionProcessorImpl {
     check_all_counter: metrics_runtime::data::Counter, //counter for check_all calls
     last_preprocess_block_warn_dump_time: SystemTime, //last time preprocess block latency warning has been printed
     last_process_blocks_warn_dump_time: SystemTime, //last time process blocks latency warning has been printed
-    slashing_stat: SlashingValidatorStat, //slashing validator statistics
+    slashing_stat: SlashingValidatorStat,           //slashing validator statistics
 }
 
 /*
@@ -192,7 +206,7 @@ impl SessionProcessor for SessionProcessorImpl {
         {
             if completion_handlers_check_elapsed > COMPLETION_HANDLERS_CHECK_PERIOD {
                 instrument!();
-                check_execution_time!(10_000);
+                check_execution_time!(20_000);
 
                 self.check_completion_handlers();
                 self.completion_handlers_check_last_time = std::time::SystemTime::now();
@@ -1716,8 +1730,14 @@ impl SessionProcessorImpl {
                 .real_state
                 .get_committed_block_approve_signatures(self.current_round);
 
-            assert!(src_signatures.is_some(), "Signatures are expected at the round commit phase");
-            assert!(src_approve_signatures.is_some(), "Signatures are expected at the round commit phase");
+            assert!(
+                src_signatures.is_some(),
+                "Signatures are expected at the round commit phase"
+            );
+            assert!(
+                src_approve_signatures.is_some(),
+                "Signatures are expected at the round commit phase"
+            );
 
             let signatures_exporter = |desc: &dyn SessionDescription,
                                        signatures: &BlockCandidateSignatureVectorPtr|
@@ -1741,10 +1761,18 @@ impl SessionProcessorImpl {
                 result
             };
 
-            let signatures =
-                signatures_exporter(&self.description, &src_signatures.as_ref().expect("Signatures are expected at the round commit phase"));
-            let approve_signatures =
-                signatures_exporter(&self.description, &src_approve_signatures.as_ref().expect("Signatures are expected at the round commit phase"));
+            let signatures = signatures_exporter(
+                &self.description,
+                &src_signatures
+                    .as_ref()
+                    .expect("Signatures are expected at the round commit phase"),
+            );
+            let approve_signatures = signatures_exporter(
+                &self.description,
+                &src_approve_signatures
+                    .as_ref()
+                    .expect("Signatures are expected at the round commit phase"),
+            );
 
             assert!(signed_block.is_some()); //because round was finished we expect it has commit at the end, even with empty block
 
@@ -1904,6 +1932,17 @@ impl SessionProcessorImpl {
 
                 if delta_secs > MAX_NEXT_BLOCK_WAIT_DELAY {
                     delta_secs = MAX_NEXT_BLOCK_WAIT_DELAY;
+                }
+
+                let round_duration = self.round_started_at.elapsed();
+
+                if let Ok(round_duration) = round_duration {
+                    if round_duration > ROUND_DEBUG_PERIOD {
+                        trace!("Session {} round #{} is too long (duration is {:.3}s, max expected duration is {:.3}s). Calming down", self.session_id.to_hex_string(), self.real_state.get_current_round_sequence_number(), round_duration.as_secs_f64(),
+                            ROUND_DEBUG_PERIOD.as_secs_f64());
+
+                        delta_secs = HANGED_CONSENSUS_UPDATE_TIME;
+                    }
                 }
 
                 block_generation_time += delta_secs;
@@ -2828,7 +2867,7 @@ impl SessionProcessorImpl {
     */
 
     fn notify_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat) {
-        check_execution_time!(5000);
+        check_execution_time!(20000);
         instrument!();
 
         trace!(
@@ -2838,7 +2877,7 @@ impl SessionProcessorImpl {
         let listener = self.session_listener.clone();
 
         post_callback_closure(&self.callbacks_task_queue, move || {
-            check_execution_time!(5000);
+            check_execution_time!(20000);
 
             if let Some(listener) = listener.upgrade() {
                 trace!("SessionProcessor::notify_session_statistics: on_slashing_statistics start");
@@ -2861,7 +2900,7 @@ impl SessionProcessorImpl {
         collated_data: &BlockPayloadPtr,
         callback: ValidatorBlockCandidateDecisionCallback,
     ) {
-        check_execution_time!(5000);
+        check_execution_time!(20000);
         instrument!();
 
         trace!(
@@ -2877,7 +2916,7 @@ impl SessionProcessorImpl {
         self.validates_counter.total_increment();
 
         post_callback_closure(&self.callbacks_task_queue, move || {
-            check_execution_time!(5000);
+            check_execution_time!(20000);
 
             if let Some(listener) = listener.upgrade() {
                 trace!("SessionProcessor::notify_candidate: on_candidate start");
@@ -2897,7 +2936,7 @@ impl SessionProcessorImpl {
     }
 
     fn notify_generate_slot(&mut self, round: u32, callback: ValidatorBlockCandidateCallback) {
-        check_execution_time!(5000);
+        check_execution_time!(20000);
         instrument!();
 
         trace!(
@@ -2911,7 +2950,7 @@ impl SessionProcessorImpl {
         self.collates_expire_counter.total_increment();
 
         post_callback_closure(&self.callbacks_task_queue, move || {
-            check_execution_time!(5000);
+            check_execution_time!(20000);
 
             if let Some(listener) = listener.upgrade() {
                 trace!("SessionProcessor::notify_generate_slot: on_generate_slot start");
@@ -2933,7 +2972,7 @@ impl SessionProcessorImpl {
         signatures: Vec<(PublicKeyHash, BlockPayloadPtr)>,
         approve_signatures: Vec<(PublicKeyHash, BlockPayloadPtr)>,
     ) {
-        check_execution_time!(5000);
+        check_execution_time!(20000);
         instrument!();
 
         trace!("...post on_block_committed event for further processing");
@@ -2948,7 +2987,7 @@ impl SessionProcessorImpl {
         self.commits_counter.success();
 
         post_callback_closure(&self.callbacks_task_queue, move || {
-            check_execution_time!(5000);
+            check_execution_time!(20000);
 
             if let Some(listener) = listener.upgrade() {
                 trace!("SessionProcessor::notify_block_committed: on_block_committed start");
@@ -2969,7 +3008,7 @@ impl SessionProcessorImpl {
     }
 
     fn notify_block_skipped(&mut self, round: u32) {
-        check_execution_time!(5000);
+        check_execution_time!(20000);
         instrument!();
 
         trace!("...post on_block_skipped event for further processing");
@@ -2980,7 +3019,7 @@ impl SessionProcessorImpl {
         self.commits_counter.failure();
 
         post_callback_closure(&self.callbacks_task_queue, move || {
-            check_execution_time!(5000);
+            check_execution_time!(20000);
 
             if let Some(listener) = listener.upgrade() {
                 trace!("SessionProcessor::notify_block_skipped: on_block_skipped start");
@@ -3000,7 +3039,7 @@ impl SessionProcessorImpl {
         collated_data_hash: &BlockHash,
         callback: ValidatorBlockCandidateCallback,
     ) {
-        check_execution_time!(5000);
+        check_execution_time!(20000);
         instrument!();
 
         trace!("...post get_approved_candidate event for further processing");
@@ -3012,7 +3051,7 @@ impl SessionProcessorImpl {
         let collated_data_hash_clone = collated_data_hash.clone();
 
         post_callback_closure(&self.callbacks_task_queue, move || {
-            check_execution_time!(5000);
+            check_execution_time!(20000);
 
             if let Some(listener) = listener.upgrade() {
                 trace!(
@@ -3081,9 +3120,10 @@ impl SessionProcessorImpl {
         let mut slashing_stat = SlashingValidatorStat::default();
 
         for node in &ids {
-            slashing_stat
-                .validators_stat
-                .insert(node.public_key.id().clone(), slashing::Node::new(&node.public_key));
+            slashing_stat.validators_stat.insert(
+                node.public_key.id().clone(),
+                slashing::Node::new(&node.public_key),
+            );
         }
 
         //create child objects

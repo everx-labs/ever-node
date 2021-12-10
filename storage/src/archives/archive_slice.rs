@@ -1,14 +1,28 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     StorageAlloc, 
     archives::{
-        get_mc_seq_no_opt, ARCHIVE_PACKAGE_SIZE, KEY_ARCHIVE_PACKAGE_SIZE, package::Package,
+        get_mc_seq_no_opt, ARCHIVE_PACKAGE_SIZE, KEY_ARCHIVE_PACKAGE_SIZE,
+        package::Package,
         package_entry::PackageEntry, package_entry_id::{GetFileName, PackageEntryId},
         package_entry_meta::PackageEntryMeta, package_entry_meta_db::PackageEntryMetaDb,
         package_id::{PackageId, PackageType}, package_info::PackageInfo,
         package_offsets_db::PackageOffsetsDb, package_status_db::PackageStatusDb, 
         package_status_key::PackageStatusKey
     },
-    traits::Serializable, block_handle_db::BlockHandle
+    block_handle_db::BlockHandle, db::rocksdb::RocksDb, traits::Serializable
 };
 #[cfg(feature = "telemetry")]
 use crate::StorageTelemetry;
@@ -25,14 +39,13 @@ pub struct ArchiveSlice {
     archive_id: u32,
     packages: tokio::sync::RwLock<Vec<Arc<PackageInfo>>>,
     db_root_path: Arc<PathBuf>,
-    index_path: PathBuf,
     sliced_mode: bool,
     slice_size: u32,
     package_type: PackageType,
     finalized: bool,
-    index_db: Arc<PackageEntryMetaDb>,
-    offsets_db: Arc<PackageOffsetsDb>,
-    package_status_db: Arc<PackageStatusDb>,
+    index_db: PackageEntryMetaDb,
+    offsets_db: PackageOffsetsDb,
+    package_status_db: PackageStatusDb,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<StorageTelemetry>,
     allocated: Arc<StorageAlloc>
@@ -40,7 +53,8 @@ pub struct ArchiveSlice {
 
 impl ArchiveSlice {
 
-    pub async fn with_data(
+    async fn new(
+        db: Arc<RocksDb>,
         db_root_path: Arc<PathBuf>,
         archive_id: u32,
         package_type: PackageType,
@@ -49,88 +63,145 @@ impl ArchiveSlice {
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>
     ) -> Result<Self> {
-        let package_id = PackageId::with_values(archive_id, package_type);
-        let index_path = package_id.full_path(db_root_path.as_ref(), "index");
 
-        let index_db = Arc::new(PackageEntryMetaDb::with_path(index_path.join("entry_meta_db")));
-        let offsets_db = Arc::new(PackageOffsetsDb::with_path(index_path.join("offsets_db")));
-        let package_status_db = Arc::new(PackageStatusDb::with_path(index_path.join("status_db")));
+        std::fs::create_dir_all(db_root_path.join("archive/packages"))
+            .map_err(|err| error!("Cannot create directory: {:?} : {}", db_root_path, err))?;
 
-        let slice_size = match package_type {
-            PackageType::KeyBlocks => KEY_ARCHIVE_PACKAGE_SIZE,
-            _ => ARCHIVE_PACKAGE_SIZE,
+        let (prefix, slice_size, sliced_mode) =  if package_type == PackageType::KeyBlocks {
+            ("key_", KEY_ARCHIVE_PACKAGE_SIZE, false)
+        } else {
+            ("", ARCHIVE_PACKAGE_SIZE, true)
         };
+        let index_db = PackageEntryMetaDb::with_db(
+            db.clone(), 
+            format!("entry_meta_{}db_{}", prefix, archive_id)
+        )?;
+        let offsets_db = PackageOffsetsDb::with_db(
+            db.clone(), 
+            format!("offsets_{}db_{}", prefix, archive_id)
+        )?;
+        let package_status_db = PackageStatusDb::with_db(
+            db.clone(), 
+            format!("status_{}db_{}", prefix, archive_id)
+        )?;
 
-        let mut archive_slice = Self {
+        Ok(Self {
             archive_id,
             packages: tokio::sync::RwLock::new(Vec::new()),
             db_root_path,
-            index_path,
-            sliced_mode: false,
+            sliced_mode,
             slice_size,
             package_type,
             finalized,
-            index_db: Arc::clone(&index_db),
+            index_db,
             offsets_db,
-            package_status_db: Arc::clone(&package_status_db),
+            package_status_db,
             #[cfg(feature = "telemetry")]
             telemetry,
-            allocated
-        };
+            allocated,
+        })
 
-        if let Some(sliced_mode) = package_status_db.try_get_value::<bool>(&PackageStatusKey::SlicedMode)? {
-            archive_slice.sliced_mode = sliced_mode;
-            if sliced_mode {
-                let total_slices = package_status_db.get_value::<u32>(&PackageStatusKey::TotalSlices)?;
-                archive_slice.slice_size = package_status_db.get_value::<u32>(&PackageStatusKey::SliceSize)?;
-                log::debug!(target: "storage", "Read package status for the sliced mode. total_slices: {}, slice_size: {}", total_slices, archive_slice.slice_size);
-                assert!(archive_slice.slice_size > 0);
+    }
 
-                let mut packages = Vec::new();
-                for i in 0..total_slices {
-                    let meta = index_db.get_value(&i.into())?;
-                    log::debug!(target: "storage", "Read slice #{} metadata: {:?}", i, meta);
+    pub async fn new_empty(
+        db: Arc<RocksDb>,
+        db_root_path: Arc<PathBuf>,
+        archive_id: u32,
+        package_type: PackageType,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<StorageTelemetry>,
+        allocated: Arc<StorageAlloc>
+    ) -> Result<Self> {
+        let archive_slice = Self::new(
+            db,
+            db_root_path,
+            archive_id,
+            package_type,
+            false,
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated,
+            ).await?;
+        archive_slice.init().await
+    }
 
-                    packages.push(archive_slice.new_package(i, archive_id + archive_slice.slice_size * i, meta.entry_size(), meta.version()).await?);
-                }
-                archive_slice.packages = tokio::sync::RwLock::new(packages);
-            } else {
-                let size = package_status_db.get_value::<u64>(&PackageStatusKey::NonSlicedSize)?;
-                archive_slice.packages.write().await
-                    .push(archive_slice.new_package(0, archive_id, size, 0).await?);
-            }
-        } else if package_type == PackageType::Blocks {
-            archive_slice.sliced_mode = true;
+    async fn init(self) -> Result<Self> {
+        if self.sliced_mode {
+            let mut transaction = self.package_status_db.begin_transaction()?;
 
-            {
-                let mut transaction = package_status_db.begin_transaction()?;
+            transaction.put(&PackageStatusKey::SlicedMode, true.to_vec()?.as_slice());
+            transaction.put(&PackageStatusKey::TotalSlices, 1u32.to_vec()?.as_slice());
+            transaction.put(&PackageStatusKey::SliceSize, self.slice_size.to_vec()?.as_slice());
 
-                transaction.put(&PackageStatusKey::SlicedMode, true.to_vec()?.as_slice());
-                transaction.put(&PackageStatusKey::TotalSlices, 1u32.to_vec()?.as_slice());
-                transaction.put(&PackageStatusKey::SliceSize, archive_slice.slice_size.to_vec()?.as_slice());
+            let meta = PackageEntryMeta::with_data(0, DEFAULT_PKG_VERSION);
+            self.index_db.put_value(&0.into(), &meta)?;
+            transaction.commit()?;
 
-                let meta = PackageEntryMeta::with_data(0, DEFAULT_PKG_VERSION);
-                index_db.put_value(&0.into(), &meta)?;
-                transaction.commit()?;
-            }
+            assert_eq!(self.index_db.len().unwrap(), 1);
+            assert_eq!(self.package_status_db.len().unwrap(), 3);
 
-            archive_slice.packages.write().await
-                .push(archive_slice.new_package(0, archive_id, 0, DEFAULT_PKG_VERSION).await?);
         } else {
-            {
-                let mut transaction = package_status_db.begin_transaction()?;
+            let mut transaction = self.package_status_db.begin_transaction()?;
 
-                transaction.put(&PackageStatusKey::SlicedMode, false.to_vec()?.as_slice());
-                transaction.put(&PackageStatusKey::NonSlicedSize, 0u64.to_vec()?.as_slice());
+            transaction.put(&PackageStatusKey::SlicedMode, false.to_vec()?.as_slice());
+            transaction.put(&PackageStatusKey::NonSlicedSize, 0u64.to_vec()?.as_slice());
 
-                transaction.commit()?;
-            }
+            transaction.commit()?;
 
-            archive_slice.packages.write().await
-                .push(archive_slice.new_package(0, archive_id, 0, 0).await?);
+            assert_eq!(self.index_db.len().unwrap(), 0);
+            assert_eq!(self.package_status_db.len().unwrap(), 2);
         }
+        self.packages.write().await
+            .push(self.new_package(0, self.archive_id, 0, DEFAULT_PKG_VERSION).await?);
+        Ok(self)
+    }
 
-        Ok(archive_slice)
+    pub async fn with_data(
+        db: Arc<RocksDb>,
+        db_root_path: Arc<PathBuf>,
+        archive_id: u32,
+        package_type: PackageType,
+        finalized: bool,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<StorageTelemetry>,
+        allocated: Arc<StorageAlloc>,
+    ) -> Result<Self> {
+        let archive_slice = Self::new(
+            db,
+            db_root_path,
+            archive_id,
+            package_type,
+            finalized,
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated,
+            ).await?;
+        archive_slice.load().await
+    }
+
+    async fn load(mut self) -> Result<Self> {
+        self.sliced_mode = self.package_status_db.try_get_value::<bool>(&PackageStatusKey::SlicedMode)?
+            .ok_or_else(|| error!("cannot read sliced_mode"))?;
+        if self.sliced_mode {
+            let total_slices = self.package_status_db.get_value::<u32>(&PackageStatusKey::TotalSlices)?;
+            self.slice_size = self.package_status_db.get_value::<u32>(&PackageStatusKey::SliceSize)?;
+            log::debug!(target: "storage", "Read package status for the sliced mode. total_slices: {}, slice_size: {}", total_slices, self.slice_size);
+            assert!(self.slice_size > 0);
+
+            let mut packages = Vec::new();
+            for i in 0..total_slices {
+                let meta = self.index_db.get_value(&i.into())?;
+                log::info!(target: "storage", "Read slice #{} metadata: {:?}", i, meta);
+
+                packages.push(self.new_package(i, self.archive_id + self.slice_size * i, meta.entry_size(), meta.version()).await?);
+            }
+            self.packages = tokio::sync::RwLock::new(packages);
+        } else {
+            let size = self.package_status_db.get_value::<u64>(&PackageStatusKey::NonSlicedSize)?;
+            self.packages.write().await
+                .push(self.new_package(0, self.archive_id, size, 0).await?);
+        }
+        Ok(self)
     }
 
     pub fn package_type(&self) -> PackageType {
@@ -139,22 +210,13 @@ impl ArchiveSlice {
 
     pub async fn destroy(&mut self) -> Result<()> {
         for pi in self.packages.write().await.drain(..) {
-            let path = Arc::clone(pi.package().path());
-            drop(pi);
-            tokio::fs::remove_file(&*path).await?;
+            // TODO: check existance
+            pi.package().destroy().await?;
         }
 
-        Arc::get_mut(&mut self.index_db)
-            .ok_or_else(|| error!("Unable to get mutable reference to index_db"))?
-            .destroy()?;
-        Arc::get_mut(&mut self.offsets_db)
-            .ok_or_else(|| error!("Unable to get mutable reference to offsets_db"))?
-            .destroy()?;
-        Arc::get_mut(&mut self.package_status_db)
-            .ok_or_else(|| error!("Unable to get mutable reference to package_status_db"))?
-            .destroy()?;
-
-        tokio::fs::remove_dir_all(&self.index_path).await?;
+        self.index_db.destroy()?;
+        self.offsets_db.destroy()?;
+        self.package_status_db.destroy()?;
 
         Ok(())
     }
@@ -163,17 +225,29 @@ impl ArchiveSlice {
         self.archive_id
     }
 
+    fn get_index_opt(&self, mc_seq_no: u32) -> Option<u32> {
+        if self.package_type == PackageType::KeyBlocks {
+            (mc_seq_no / KEY_ARCHIVE_PACKAGE_SIZE).checked_sub(self.archive_id).map(|value| value / self.slice_size)
+        } else {
+            mc_seq_no.checked_sub(self.archive_id).map(|value| value / self.slice_size)
+        }
+    }
+
+    fn get_index(&self, mc_seq_no: u32) -> Result<u32> {
+        self.get_index_opt(mc_seq_no)
+            .ok_or_else(|| error!("wrong mc_seq_no {} < {}", mc_seq_no, self.archive_id))
+    }
+
     pub async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
         if !self.sliced_mode {
             return Some(self.archive_id as u64);
         }
 
-        if mc_seq_no >= self.archive_id {
-            let idx = (mc_seq_no - self.archive_id) / self.slice_size;
+        if let Some(idx) = self.get_index_opt(mc_seq_no) {
             let package_count = self.packages.read().await.len() as u32;
             if idx < package_count {
-                let package_id = self.archive_id + self.slice_size * idx;
-                return Some(((package_id as u64) << 32) | (self.archive_id as u64));
+                let mc_seq_no = self.archive_id + self.slice_size * idx;
+                return Some(((mc_seq_no as u64) << 32) | (self.archive_id as u64));
             }
         }
 
@@ -225,10 +299,9 @@ impl ArchiveSlice {
         PK: Borrow<UInt256> + Hash
     {
         let offset_key = entry_id.into();
-        let offset = if let Some(offset) = self.offsets_db.try_get_value(&offset_key)? {
-            offset
-        } else {
-            return Ok(None)
+        let offset = match self.offsets_db.try_get_value(&offset_key)? {
+            Some(offset) => offset,
+            None => return Ok(None)
         };
 
         let package_info = self.choose_package(get_mc_seq_no_opt(block_handle), false).await?;
@@ -236,7 +309,7 @@ impl ArchiveSlice {
         log::debug!(
             target: "storage",
             "Reading package entry: {:?}, offset: {}",
-            package_info.package().path(),
+            package_info.package().get_path(),
             offset
         );
         let entry = package_info.package().read_entry(offset).await?;
@@ -251,9 +324,9 @@ impl ArchiveSlice {
             fail!("Bad archive ID (archive_id = {}, expected {})!", archive_id as u32, self.archive_id);
         }
 
-        let package_id = (archive_id >> 32) as u32;
-        let package_info = self.choose_package(package_id, false).await?;
-        let mut file = tokio::fs::File::open(&**package_info.package().path()).await?;
+        let mc_seq_no = (archive_id >> 32) as u32;
+        let package_info = self.choose_package(mc_seq_no, false).await?;
+        let mut file = tokio::fs::File::open(package_info.package().path()).await?;
         let mut buffer = vec![0; limit as usize];
         file.seek(SeekFrom::Start(offset)).await?;
         let mut buf_offset = 0;
@@ -274,10 +347,12 @@ impl ArchiveSlice {
     async fn new_package(&self, idx: u32, seq_no: u32, size: u64, version: u32) -> Result<Arc<PackageInfo>> {
         log::debug!(target: "storage", "Adding package, seq_no: {}, size: {} bytes, version: {}", seq_no, size, version);
         let package_id = PackageId::with_values(seq_no, self.package_type);
-        let path = Arc::new(package_id.full_path(self.db_root_path.as_ref(), "pack"));
+        let path = package_id.full_path(self.db_root_path.as_path(), "pack");
+        std::fs::create_dir_all(path.parent().unwrap())
+            .map_err(|err| error!("Cannot create directory: {:?} : {}", path.parent(), err))?;
 
-        let package = Package::open(Arc::clone(&path), false, true).await
-            .map_err(|err| error!("Failed to open or create archive \"{}\": {}", path.to_string_lossy(), err))?;
+        let package = Package::open(path.clone(), false, true).await
+            .map_err(|err| error!("Failed to open or create archive \"{}\": {}", path.display(), err))?;
 
         if !self.finalized && version >= DEFAULT_PKG_VERSION {
             package.truncate(size).await?;
@@ -296,23 +371,19 @@ impl ArchiveSlice {
         Ok(pi)
     }
 
-    async fn choose_package(&self, mc_seq_no: u32, force: bool) -> Result<Arc<PackageInfo>> {
+    async fn choose_package(&self, mc_seq_no: u32, force_create: bool) -> Result<Arc<PackageInfo>> {
         if self.package_type != PackageType::Blocks || !self.sliced_mode {
             return Ok(Arc::clone(&self.packages.read().await[0]));
         }
 
-        if mc_seq_no < self.archive_id {
-            fail!("mc_seq_no is too small");
-        }
-
-        let idx = (mc_seq_no - self.archive_id) / self.slice_size;
+        let idx = self.get_index(mc_seq_no)?;
         {
             let mut write_guard = self.packages.write().await;
             let package_count = write_guard.len();
             if (idx as usize) < package_count {
                 Ok(Arc::clone(&write_guard[idx as usize]))
             } else {
-                if !force {
+                if !force_create {
                     fail!("mc_seq_no is too big");
                 }
 
@@ -328,8 +399,8 @@ impl ArchiveSlice {
 
                 if (mc_seq_no - self.archive_id) % self.slice_size != 0 {
                     fail!("Blocks must not be skipped! mc_seq_no = {}, expected = {}",
-                        mc_seq_no,
-                        mc_seq_no - (mc_seq_no - self.archive_id) / self.slice_size
+                    mc_seq_no,
+                    mc_seq_no - (mc_seq_no - self.archive_id) / self.slice_size
                     );
                 }
 
@@ -344,4 +415,37 @@ impl ArchiveSlice {
             }
         }
     }
+
+    /// truncs slice starting from master block_id
+    pub async fn trunc(&mut self, block_id: &BlockIdExt) -> Result<()> {
+        log::info!(target: "storage", "truncating by mc_seq_no: {}, sliced_mode: {}", block_id.seq_no(), self.sliced_mode);
+        let entry_id = &PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::Proof(block_id);
+        let offset_key = entry_id.into();
+        let offset = match self.offsets_db.try_get_value(&offset_key)? {
+            Some(offset) => offset,
+            None => return Ok(())
+        };
+
+        let index = self.get_index_opt(block_id.seq_no())
+            .ok_or_else(|| error!("slice is corrupted sliced_mode: {}, {} < {}", self.sliced_mode, block_id.seq_no(), self.archive_id))?;
+
+        let mut guard = self.packages.write().await;
+        for ref mut package_info in guard.drain(index as usize + 1..) {
+            Arc::get_mut(package_info)
+                .ok_or_else(|| error!("slice incorrect {}", index))?
+                .destroy().await?;
+        }
+
+        if self.sliced_mode {
+            self.package_status_db.put_value(&PackageStatusKey::TotalSlices, index + 1)?;
+        } else {
+            self.package_status_db.put_value(&PackageStatusKey::NonSlicedSize, offset)?;
+        }
+
+        let package_info = guard.last_mut()
+            .ok_or_else(|| error!("slice incorrect {}", index))?;
+
+        package_info.package().truncate(offset).await
+    }
+
 }

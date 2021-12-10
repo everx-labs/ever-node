@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     network::node_network::NodeNetwork,
     validator::validator_utils::mine_key_for_workchain,
@@ -62,6 +75,7 @@ pub struct TonNodeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     workchain: Option<i32>,
     internal_db_path: Option<String>,
+    unsafe_catchain_patches_path: Option<String>,
     #[serde(default = "default_cells_gc_config")]
     cells_gc_config: CellsGcConfig,
     #[serde(skip_serializing)]
@@ -328,6 +342,26 @@ impl TonNodeConfig {
             }
         }
         None
+    }
+
+    pub fn unsafe_catchain_patches_files(&self) -> Vec<String> {
+        let mut result = Vec::new();
+        if let Some(catchain_patches) = &self.unsafe_catchain_patches_path {
+            if let Ok(log_path) = TonNodeConfig::build_path(&self.configs_dir, &catchain_patches) {
+                if let Ok(dir) = std::fs::read_dir(log_path) {
+                    for filename in dir.into_iter() {
+                        if let Ok(fname) = filename {
+                            if let Some(path_str) = fname.path().to_str() {
+                                if path_str.ends_with(".json") {
+                                    result.push(path_str.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        result
     }
 
     pub fn gc_archives_life_time_hours(&self) -> Option<u32> {

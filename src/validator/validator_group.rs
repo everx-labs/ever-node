@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use std::cmp::max;
 use std::sync::*;
 use std::sync::atomic::{Ordering, AtomicU64};
@@ -14,7 +27,7 @@ use validator_session::{
     SessionId, SlashingValidatorStat, SessionPtr, SessionListenerPtr, SessionFactory,
     SessionListener, SessionNode,SessionOptions,
     PublicKey, PublicKeyHash,
-    ValidatorBlockCandidateCallback, ValidatorBlockCandidateDecisionCallback,
+    ValidatorBlockCandidateCallback, ValidatorBlockCandidateDecisionCallback
 };
 use validator_utils::{
     validatordescr_to_session_node,
@@ -27,7 +40,6 @@ use validator_session_listener::{
 
 use super::*;
 use super::fabric::*;
-use super::candidate_db::CandidateDb;
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::SlashingManagerPtr;
 
@@ -111,7 +123,6 @@ pub struct ValidatorGroupImpl {
     shard: ShardIdent,
     session_id: SessionId,
     session_ptr: Option<SessionPtr>,
-    candidate_db: CandidateDb,
 
     min_masterchain_block_id: Option<BlockIdExt>,
     min_ts: SystemTime,
@@ -153,7 +164,7 @@ impl ValidatorGroupImpl {
         log::info!(target: "validator", "Starting session {}", self.info());
 
         self.prev_block_ids = prev;
-        self.min_masterchain_block_id = Some(min_masterchain_block_id);
+        self.min_masterchain_block_id = Some(min_masterchain_block_id.clone());
         self.min_ts = min_ts;
 
         let nodes_res: Result<Vec<SessionNode>> = g.validator_set.list().iter()
@@ -163,18 +174,23 @@ impl ValidatorGroupImpl {
 
         let overlay_manager: CatchainOverlayManagerPtr =
             Arc::new(CatchainOverlayManagerImpl::new(g.engine.validator_network(), g.validator_list_id.clone()));
-        let db_root = format!("{}/catchains", g.engine.db_root_dir()?);
-        let db_suffix = "".to_string();
-        let allow_unsafe_self_blocks_resync = false;
+        let db_path = format!("{}/catchains", g.engine.db_root_dir()?);
+        let db_suffix = format!(
+            "-{}.{}.{}.{}.", 
+            g.shard.workchain_id(), 
+            g.shard.shard_prefix_as_str_with_tag(), 
+            min_masterchain_block_id.seq_no, 
+            g.catchain_seqno
+        );
 
         let session_ptr = SessionFactory::create_session(
             &g.config,
             &g.session_id,
             &nodes,
             &g.local_key,
-            &db_root,
-            &db_suffix,
-            allow_unsafe_self_blocks_resync,
+            db_path,
+            db_suffix,
+            g.allow_unsafe_self_blocks_resync,
             overlay_manager,
             session_listener,
         );
@@ -189,16 +205,11 @@ impl ValidatorGroupImpl {
         );
 
         self.session_ptr = Some(session_ptr);
-        self.candidate_db.start()?;
         return Ok(())
     }
 
     pub fn _session_ptr(&self) -> Option<SessionPtr> {
         return self.session_ptr.clone();
-    }
-
-    pub fn destroy_db(&mut self) -> Result<()> {
-        self.candidate_db.destroy()
     }
 
     pub fn info_round(&self, round: u32) -> String {
@@ -213,7 +224,7 @@ impl ValidatorGroupImpl {
     }
 
     // Initializes structure
-    pub fn new(shard: ShardIdent, session_id: SessionId, db_root_dir: &str) -> ValidatorGroupImpl {
+    pub fn new(shard: ShardIdent, session_id: SessionId) -> ValidatorGroupImpl {
         log::info!(target: "validator", "Initializing session {:x}, shard {}", session_id, shard);
 
         ValidatorGroupImpl {
@@ -221,7 +232,6 @@ impl ValidatorGroupImpl {
             min_ts: SystemTime::now(),
             status: ValidatorGroupStatus::Created,
             last_known_round: 0,
-            candidate_db: CandidateDb::new(format!("{}/candidates/{:x}", db_root_dir, session_id)),
 
             shard,
             session_id,
@@ -265,6 +275,7 @@ pub struct ValidatorGroup {
     local_key: PublicKey,
     config: SessionOptions,
     session_id: SessionId,
+    catchain_seqno: u32,
     validator_list_id: ValidatorListHash,
 
     shard: ShardIdent,
@@ -284,10 +295,12 @@ pub struct ValidatorGroup {
 }
 
 impl ValidatorGroup {
+
     pub fn new(
         shard: ShardIdent,
         local_key: PublicKey,
         session_id: SessionId,
+        catchain_seqno: u32,
         validator_list_id: ValidatorListHash,
         validator_set: ValidatorSet,
         config: SessionOptions,
@@ -296,8 +309,7 @@ impl ValidatorGroup {
         #[cfg(feature = "slashing")]
         slashing_manager: SlashingManagerPtr,
     ) -> Self {
-        let group_impl = ValidatorGroupImpl::new(shard.clone(), session_id.clone(), 
-            engine.db_root_dir().expect("Can't get db_root_dir from engine"));
+        let group_impl = ValidatorGroupImpl::new(shard.clone(), session_id.clone());
         let (listener, receiver) = ValidatorSessionListener::create();
 
         ValidatorGroup {
@@ -305,6 +317,7 @@ impl ValidatorGroup {
             local_key,
             validator_list_id,
             session_id,
+            catchain_seqno,
             validator_set,
             config,
             engine,
@@ -386,7 +399,10 @@ impl ValidatorGroup {
     }
 
     pub async fn destroy_db(&self) -> Result<()> {
-        self.group_impl.lock().await.destroy_db()
+        while !self.engine.destroy_block_candidates(&self.session_id)? {
+            tokio::task::yield_now().await
+        }
+        Ok(())
     }
 
     pub async fn get_status(&self) -> ValidatorGroupStatus {
@@ -406,7 +422,6 @@ impl ValidatorGroup {
     pub fn get_validator_list_id(&self) -> ValidatorListHash {
         self.validator_list_id.clone()
     }
-
 
     pub async fn info_round(&self, round: u32) -> String {
         self.group_impl.lock().await.info_round(round)
@@ -523,10 +538,7 @@ impl ValidatorGroup {
                 let vb_candidate = validator_query_candidate_to_validator_block_candidate(
                     source.clone(), candidate
                 );
-                let group_impl = self.group_impl.lock().await;
-                let res = group_impl.candidate_db.save(vb_candidate).await;
-
-                match &res {
+                match self.engine.save_block_candidate(&self.session_id, vb_candidate) {
                     Ok(()) => {
                         self.last_validation_time.fetch_max(
                             x.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs(),
@@ -636,7 +648,11 @@ impl ValidatorGroup {
     }
 
     pub async fn on_block_skipped(&self, round: u32) {
-        log::info!(target: "validator", "SessionListener::on_block_skipped, {}", self.info_round(round).await);
+        log::info!(
+            target: "validator", 
+            "SessionListener::on_block_skipped, {}", 
+            self.info_round(round).await
+        );
         let mut group_impl = self.group_impl.lock().await;
         if round > group_impl.last_known_round {
             group_impl.last_known_round = round + 1;
@@ -645,31 +661,40 @@ impl ValidatorGroup {
 
     pub async fn on_get_approved_candidate(
         &self,
-        source: PublicKey,
+        _source: PublicKey,
         root_hash: BlockHash,
         file_hash: BlockHash,
-        collated_data_hash: BlockHash,
-        callback: ValidatorBlockCandidateCallback)
-    {
-        log::info!(target: "validator", "SessionListener::on_get_approved_candidate rh {:x}, fh {:x}, {}", root_hash, file_hash, self.info().await);
-        let result = {
-            let group_impl = self.group_impl.lock().await;
-            group_impl.candidate_db.load(source, root_hash, file_hash, collated_data_hash).await
-        };
+        _collated_data_hash: BlockHash,
+        callback: ValidatorBlockCandidateCallback
+    ) {
+        log::info!(
+            target: "validator", 
+            "SessionListener::on_get_approved_candidate rh {:x}, fh {:x}, {}", 
+            root_hash, file_hash, self.info().await
+        );
+        let result = self.engine.load_block_candidate(&self.session_id, &root_hash);
         let result_txt = match &result {
             Ok(_) => format!("Ok"),
             Err(err) => format!("Candidate not found: {}", err)
         };
-        log::info!(target: "validator", "SessionListener::on_get_approved_candidate {}, {}", result_txt, self.info().await);
+        log::info!(
+            target: "validator", 
+            "SessionListener::on_get_approved_candidate {}, {}", 
+            result_txt, self.info().await
+        );
         callback(result);
     }
 
     pub fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat) {
-        log::debug!(target: "validator", "SessionListener::on_slashing_statistics round {}, stat {:?}", round, stat);
-
+        log::debug!(
+            target: "validator", 
+            "SessionListener::on_slashing_statistics round {}, stat {:?}", 
+            round, stat
+        );
         #[cfg(feature = "slashing")]
         self.slashing_manager.update_statistics(&stat);
     }
+
 }
 
 impl Drop for ValidatorGroup {

@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 #[macro_use]
 extern crate lazy_static;
 
@@ -31,21 +44,22 @@ mod receiver;
 mod receiver_source;
 pub mod utils;
 
-use adnl::common::KeyId;
-use adnl::common::KeyOption;
-use adnl::node::AdnlNode;
+use adnl::{
+    common::{KeyId, KeyOption},
+    node::AdnlNode,
+};
 use failure::err_msg;
 pub use overlay::PrivateOverlayShortId;
-pub use profiling::InstanceCounter;
-pub use profiling::ResultStatusCounter;
-use std::any::Any;
-use std::cell::RefCell;
-use std::fmt;
-/// Imports
-use std::rc::Rc;
-use std::rc::Weak;
-use std::sync::Arc;
-use std::time::SystemTime;
+pub use profiling::{InstanceCounter, ResultStatusCounter};
+use std::{
+    any::Any,
+    cell::RefCell,
+    fmt,
+    path::Path,
+    rc::{Rc, Weak},
+    sync::Arc,
+    time::SystemTime,
+};
 use ton_types::types::UInt256;
 
 /// Public key
@@ -225,8 +239,8 @@ pub struct LogReplayOptions {
     /// Optional: replay without delays
     pub replay_without_delays: bool,
 
-    /// Catchain DB root
-    pub db_root: String,
+    /// Catchain DB path
+    pub db_path: String,
 
     /// Catchain DB suffix
     pub db_suffix: String,
@@ -629,7 +643,7 @@ pub trait Block: fmt::Display + fmt::Debug + Send + Sync {
 /// Database for blocks saving
 pub trait Database: Send + Sync {
     /// Return path to db
-    fn get_db_path(&self) -> &String;
+    fn get_db_path(&self) -> &Path;
 
     /// Has block written to DB
     fn is_block_in_db(&self, hash: &BlockHash) -> bool;
@@ -1009,8 +1023,8 @@ impl CatchainFactory {
     }
 
     /// Create dummy receiver for debugging
-    pub fn create_dummy_receiver() -> ReceiverPtr {
-        receiver::ReceiverImpl::create_dummy()
+    pub fn create_dummy_receiver(path: String) -> Result<ReceiverPtr> {
+        receiver::ReceiverImpl::create_dummy(path)
     }
 
     /// Create dummy listener for receiver
@@ -1024,17 +1038,17 @@ impl CatchainFactory {
         incarnation: &SessionId,
         ids: &Vec<CatchainNode>,
         local_key: &PrivateKey,
-        db_root: &String,
-        db_suffix: &String,
+        path: String,
+        db_suffix: String,
         allow_unsafe_self_blocks_resync: bool,
         metrics: Option<Arc<metrics_runtime::Receiver>>,
-    ) -> ReceiverPtr {
+    ) -> Result<ReceiverPtr> {
         receiver::ReceiverImpl::create(
             listener,
             incarnation,
             ids,
             local_key,
-            db_root,
+            path,
             db_suffix,
             allow_unsafe_self_blocks_resync,
             metrics,
@@ -1047,8 +1061,12 @@ impl CatchainFactory {
     }
 
     /// Create Catchain database
-    pub fn create_database(path: &String, metrics: &metrics_runtime::Receiver) -> DatabasePtr {
-        database::DatabaseImpl::create(path, metrics)
+    pub fn create_database(
+        path: String,
+        name: String,
+        metrics: &metrics_runtime::Receiver
+    ) -> Result<DatabasePtr> {
+        database::DatabaseImpl::create(&path, &name, metrics)
     }
 
     /// Create Catchain root object
@@ -1057,8 +1075,8 @@ impl CatchainFactory {
         session_id: &SessionId,
         ids: &Vec<CatchainNode>,
         local_key: &PrivateKey,
-        db_root: &String,
-        db_suffix: &String,
+        path: String,
+        db_suffix: String,
         allow_unsafe_self_blocks_resync: bool,
         overlay_manager: CatchainOverlayManagerPtr,
         listener: CatchainListenerPtr,
@@ -1068,7 +1086,7 @@ impl CatchainFactory {
             session_id,
             ids,
             local_key,
-            db_root,
+            path,
             db_suffix,
             allow_unsafe_self_blocks_resync,
             overlay_manager,

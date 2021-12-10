@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{engine_traits::EngineAlloc, error::NodeError};
 #[cfg(feature = "telemetry")]
 use crate::engine_traits::EngineTelemetry;
@@ -191,6 +204,10 @@ impl ShardStateStuff {
 
     pub fn block_id(&self) -> &BlockIdExt { &self.block_id }
 
+    pub fn seq_no(&self) -> u32 {
+        self.state().seq_no()
+    }
+
     pub fn write_to<T: Write>(&self, dst: &mut T) -> Result<()> {
         ton_types::cells_serialization::serialize_tree_of_cells(&self.root, dst)?;
         Ok(())
@@ -223,6 +240,20 @@ impl ShardStateStuff {
         }
         log::error!("prev_key_block_id error for shard_state {}", self.block_id());
         BlockIdExt::with_params(ShardIdent::masterchain(), 0, UInt256::default(), UInt256::default())
+    }
+
+    pub fn find_block_id(&self, mc_seq_no: u32) -> Result<BlockIdExt> {
+        match self.seq_no().cmp(&mc_seq_no) {
+            std::cmp::Ordering::Equal => Ok(self.block_id().clone()),
+            std::cmp::Ordering::Greater => {
+                let (_end_lt, block_id, _key_block) = self.shard_state_extra()?
+                    .prev_blocks.get(&mc_seq_no)?
+                    .ok_or_else(|| error!("no master block id for {}", mc_seq_no))?
+                    .master_block_id();
+                Ok(block_id)
+            }
+            std::cmp::Ordering::Less => fail!("cannot get block id for future block, because {} < {}", self.seq_no(), mc_seq_no)
+        }
     }
 
     pub fn workchains(&self) -> Result<Vec<(i32, WorkchainDescr)>> {

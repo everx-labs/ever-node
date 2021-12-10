@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 extern crate hex;
 
 /// Imports
@@ -104,12 +117,10 @@ pub fn parse_hex_as_public_key_raw(hex_asm: &str) -> PublicKey {
     let mut key_slice = [0u8; 32];
     parse_hex_to_array(hex_asm, &mut key_slice[..]);
     //TODO: errors processing for key creation
-    Arc::new(
-        adnl::common::KeyOption::from_type_and_public_key(
-            adnl::common::KeyOption::KEY_ED25519,
-            &key_slice
-        )
-    )
+    Arc::new(adnl::common::KeyOption::from_type_and_public_key(
+        adnl::common::KeyOption::KEY_ED25519,
+        &key_slice,
+    ))
 }
 
 pub fn parse_hex_as_public_key_hash(hex_asm: &str) -> PublicKeyHash {
@@ -129,9 +140,7 @@ pub fn parse_hex_as_private_key(hex_asm: &str) -> PrivateKey {
     //TODO: errors processing for key creation
     assert!(key_slice.len() == 32);
     let private_key = ed25519_dalek::SecretKey::from_bytes(&key_slice).unwrap();
-    Arc::new(adnl::common::KeyOption::from_ed25519_secret_key(
-        private_key,
-    ).unwrap())
+    Arc::new(adnl::common::KeyOption::from_ed25519_secret_key(private_key).unwrap())
 }
 
 pub fn parse_hex_as_expanded_private_key(hex_asm: &str) -> PrivateKey {
@@ -140,11 +149,10 @@ pub fn parse_hex_as_expanded_private_key(hex_asm: &str) -> PrivateKey {
     parse_hex_to_array(hex_asm, &mut key_slice[..]);
     //TODO: errors processing for key creation
     assert!(key_slice.len() == 64);
-    let expanded_private_key =
-        ed25519_dalek::ExpandedSecretKey::from_bytes(&key_slice).unwrap();
-    Arc::new(adnl::common::KeyOption::from_ed25519_expanded_secret_key(
-        expanded_private_key,
-    ).unwrap())
+    let expanded_private_key = ed25519_dalek::ExpandedSecretKey::from_bytes(&key_slice).unwrap();
+    Arc::new(
+        adnl::common::KeyOption::from_ed25519_expanded_secret_key(expanded_private_key).unwrap(),
+    )
 }
 
 pub fn get_hash(data: &::ton_api::ton::bytes) -> BlockHash {
@@ -197,7 +205,8 @@ pub fn get_block_dependency_id(block: &ton::BlockDep, receiver: &dyn Receiver) -
         src: public_key_hash_to_int256(receiver.get_source_public_key_hash(block.src as usize)),
         height: block.height,
         data_hash: block.data_hash,
-    }.into_boxed()
+    }
+    .into_boxed()
 }
 
 pub fn get_root_block_id(incarnation: &SessionId) -> ton::BlockId {
@@ -206,7 +215,8 @@ pub fn get_root_block_id(incarnation: &SessionId) -> ton::BlockId {
         src: incarnation.clone().into(),
         height: 0,
         data_hash: incarnation.clone().into(),
-    }.into_boxed()
+    }
+    .into_boxed()
 }
 
 pub fn get_block_id_hash(id: &ton::BlockId) -> BlockHash {

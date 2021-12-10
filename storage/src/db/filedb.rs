@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     db::traits::{DbKey, KvcAsync, KvcReadableAsync, KvcWriteableAsync},
     error::StorageError, types::DbSlice
@@ -67,11 +80,12 @@ impl KvcAsync for FileDb {
         fail!("len() is not supported for FileDb")
     }
 
-    async fn destroy(&mut self) -> Result<()> {
+    async fn destroy(&mut self) -> Result<bool> {
         match tokio::fs::metadata(&self.path).await {
-            Ok(meta) if meta.is_dir() => Ok(tokio::fs::remove_dir_all(&self.path).await?),
-            _ => Ok(())
+            Ok(meta) if meta.is_dir() => tokio::fs::remove_dir_all(&self.path).await?,
+            _ => ()
         }
+        Ok(true)
     }
 }
 

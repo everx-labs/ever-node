@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use self::ton::CatchainSentResponse;
 pub use super::*;
 use crate::profiling::check_execution_time;
@@ -69,7 +82,6 @@ pub(crate) struct ReceiverImpl {
     db: Option<DatabasePtr>,       //database with (BlockHash, Payload)
     read_db: bool,                 //flag to indicate receiver is in reading DB mode
     db_root_block: BlockHash,      //root DB block
-    db_root: String,               //DB root prefix
     db_suffix: String,             //DB name suffix
     allow_unsafe_self_blocks_resync: bool, //indicates we can receive self blocks from other validators
     unsafe_root_block_writing: bool, //indicates we are in the middle of unsafe root block writing
@@ -244,11 +256,16 @@ impl Receiver for ReceiverImpl {
             return;
         }
 
-        let result = self.process_query(&adnl_id, &data);
+        let (processed, result) = self.process_query(&adnl_id, &data);
 
-        if let Ok(result) = result {
-            in_query_status.success();
-            response_callback(Ok(result));
+        if processed {
+            if result.is_ok() {
+                in_query_status.success();
+            } else {
+                in_query_status.failure();
+            }
+
+            response_callback(result);
             return;
         }
 
@@ -629,8 +646,7 @@ impl Receiver for ReceiverImpl {
             self.synchronize();
 
             let delay = Duration::from_millis(self.rng.gen_range(
-                CATCHAIN_NEIGHBOURS_SYNC_MIN_PERIOD_MS..
-                CATCHAIN_NEIGHBOURS_SYNC_MAX_PERIOD_MS + 1,
+                CATCHAIN_NEIGHBOURS_SYNC_MIN_PERIOD_MS..CATCHAIN_NEIGHBOURS_SYNC_MAX_PERIOD_MS + 1,
             ));
 
             self.next_sync_time = now + delay;
@@ -648,8 +664,8 @@ impl Receiver for ReceiverImpl {
             self.choose_neighbours();
 
             let delay = Duration::from_millis(self.rng.gen_range(
-                CATCHAIN_NEIGHBOURS_ROTATE_MIN_PERIOD_MS..
-                CATCHAIN_NEIGHBOURS_ROTATE_MAX_PERIOD_MS + 1,
+                CATCHAIN_NEIGHBOURS_ROTATE_MIN_PERIOD_MS
+                    ..CATCHAIN_NEIGHBOURS_ROTATE_MAX_PERIOD_MS + 1,
             ));
 
             self.next_neighbours_rotate_time = now + delay;
@@ -969,7 +985,8 @@ impl ReceiverImpl {
             src: public_key_hash_to_int256(source_hash),
             height,
             data_hash,
-        }.into_boxed()
+        }
+        .into_boxed()
     }
 
     fn add_received_block(&mut self, block: ReceivedBlockPtr) {
@@ -1172,36 +1189,40 @@ impl ReceiverImpl {
         Receiver blocks DB management
     */
 
-    fn start_up_db(&mut self) {
+    fn start_up_db(&mut self, path: String) -> Result<()> {
         instrument!();
 
         trace!("...starting up DB");
 
         if self.options.debug_disable_db {
             self.read_db();
-            return;
+            return Ok(());
         }
 
+        // we create special table for catchain receiver
         let db = CatchainFactory::create_database(
-            &format!(
-                "{}/catchainreceiver{}{}",
-                self.db_root,
+            path,
+            format!(
+                "catchainreceiver{}{}",
                 self.db_suffix,
                 base64::encode_config(self.incarnation.as_slice(), base64::URL_SAFE),
             ),
             self.get_metrics_receiver(),
-        );
+        )?;
 
         self.db = Some(db.clone());
 
         if let Ok(root_block) = db.get_block(&ZERO_HASH) {
-            let hash: [u8; 32] = root_block.0.try_into().unwrap();
+            let hash: [u8; 32] = root_block
+                .0
+                .try_into()
+                .map_err(|_| ton_types::error!("Cannot convert root block hash"))?;
             let root_block_id_hash: BlockHash = hash.into();
-
             self.read_db_from(root_block_id_hash);
         } else {
             self.read_db();
         }
+        Ok(())
     }
 
     fn read_db(&mut self) {
@@ -1230,8 +1251,7 @@ impl ReceiverImpl {
 
         self.next_neighbours_rotate_time = now
             + Duration::from_millis(self.rng.gen_range(
-                CATCHAIN_NEIGHBOURS_ROTATE_MIN_PERIOD_MS..
-                CATCHAIN_NEIGHBOURS_ROTATE_MAX_PERIOD_MS,
+                CATCHAIN_NEIGHBOURS_ROTATE_MIN_PERIOD_MS..CATCHAIN_NEIGHBOURS_ROTATE_MAX_PERIOD_MS,
             ));
         self.next_sync_time =
             now + Duration::from_millis(((0.001 * self.rng.gen_range(0.0..60.0)) * 1000.0) as u64);
@@ -1453,7 +1473,7 @@ impl ReceiverImpl {
                 continue;
             }
 
-            new_neighbours.push(i);            
+            new_neighbours.push(i);
             items_count -= 1;
         }
 
@@ -1641,7 +1661,7 @@ impl ReceiverImpl {
         &mut self,
         adnl_id: &PublicKeyHash,
         data: &BlockPayloadPtr,
-    ) -> Result<BlockPayloadPtr> {
+    ) -> (bool, Result<BlockPayloadPtr>) {
         instrument!();
 
         trace!("Receiver: received query from {}: {:?}", adnl_id, data);
@@ -1650,19 +1670,24 @@ impl ReceiverImpl {
             .read_boxed::<ton_api::ton::TLObject>()
         {
             Ok(message) => {
-                if message.is::<ton::GetDifferenceRequest>() {
-                    return utils::serialize_query_boxed_response(
-                        self.process_get_difference_query(
-                            adnl_id,
-                            &message.downcast::<ton::GetDifferenceRequest>().unwrap(),
-                            data.get_creation_time().elapsed().unwrap(),
-                        ),
-                    );
-                } else if message.is::<ton::GetBlockRequest>() {
-                    match self.process_get_block_query(
-                        adnl_id,
-                        &message.downcast::<ton::GetBlockRequest>().unwrap(),
-                    ) {
+                let message = match message.downcast::<ton::GetDifferenceRequest>() {
+                    Ok(message) => {
+                        return (
+                            true,
+                            utils::serialize_query_boxed_response(
+                                self.process_get_difference_query(
+                                    adnl_id,
+                                    &message,
+                                    data.get_creation_time().elapsed().unwrap(),
+                                ),
+                            ),
+                        )
+                    }
+                    Err(message) => message,
+                };
+
+                let message = match message.downcast::<ton::GetBlockRequest>() {
+                    Ok(message) => match self.process_get_block_query(adnl_id, &message) {
                         Ok(response) => {
                             let mut ret: RawBuffer = RawBuffer::default();
                             let mut serializer = ton_api::Serializer::new(&mut ret.0);
@@ -1670,32 +1695,44 @@ impl ReceiverImpl {
                             serializer.write_boxed(&response.0).unwrap();
                             serializer.write_bare(response.1.data()).unwrap();
 
-                            return Ok(CatchainFactory::create_block_payload(ret));
+                            return (true, Ok(CatchainFactory::create_block_payload(ret)));
                         }
-                        Err(err) => return Err(err),
+                        Err(err) => return (true, Err(err)),
+                    },
+                    Err(message) => message,
+                };
+
+                let message = match message.downcast::<ton::GetBlocksRequest>() {
+                    Ok(message) => {
+                        return (
+                            true,
+                            utils::serialize_query_boxed_response(
+                                self.process_get_blocks_query(adnl_id, &message),
+                            ),
+                        )
                     }
-                } else if message.is::<ton::GetBlocksRequest>() {
-                    return utils::serialize_query_boxed_response(self.process_get_blocks_query(
-                        adnl_id,
-                        &message.downcast::<ton::GetBlocksRequest>().unwrap(),
-                    ));
-                } else if message.is::<ton::GetBlockHistoryRequest>() {
-                    return utils::serialize_query_boxed_response(
-                        self.process_get_block_history_query(
-                            adnl_id,
-                            &message.downcast::<ton::GetBlockHistoryRequest>().unwrap(),
-                        ),
-                    );
-                } else {
-                    let err = format_err!("unknown query received {:?}", message);
+                    Err(message) => message,
+                };
 
-                    error!("{}", err);
+                let message = match message.downcast::<ton::GetBlockHistoryRequest>() {
+                    Ok(message) => {
+                        return (
+                            true,
+                            utils::serialize_query_boxed_response(
+                                self.process_get_block_history_query(adnl_id, &message),
+                            ),
+                        )
+                    }
+                    Err(message) => message,
+                };
 
-                    return Err(err);
-                }
+                return (
+                    false,
+                    Err(format_err!("unknown query received {:?}", message)),
+                );
             }
             Err(err) => {
-                return Err(err);
+                return (true, Err(err));
             }
         }
     }
@@ -1887,7 +1924,8 @@ impl ReceiverImpl {
             if block.get_height() != 0 && block.is_initialized() {
                 let response = ::ton_api::ton::catchain::blockresult::BlockResult {
                     block: block.export_tl(),
-                }.into_boxed();
+                }
+                .into_boxed();
 
                 return Ok((response, block.get_payload().clone()));
             }
@@ -2069,7 +2107,7 @@ impl ReceiverImpl {
     */
 
     fn notify_on_started(&mut self) {
-        check_execution_time!(5000);
+        check_execution_time!(20000);
 
         if let Some(listener) = self.listener.upgrade() {
             listener.borrow_mut().on_started();
@@ -2087,7 +2125,7 @@ impl ReceiverImpl {
         forks_dep_heights: Vec<BlockHeight>,
         payload: &BlockPayloadPtr,
     ) {
-        check_execution_time!(5000);
+        check_execution_time!(20000);
         instrument!();
 
         if let Some(listener) = self.listener.upgrade() {
@@ -2106,7 +2144,7 @@ impl ReceiverImpl {
     }
 
     fn notify_on_broadcast(&mut self, source_key_hash: &PublicKeyHash, data: &BlockPayloadPtr) {
-        check_execution_time!(5000);
+        check_execution_time!(20000);
         instrument!();
 
         if let Some(listener) = self.listener.upgrade() {
@@ -2117,7 +2155,7 @@ impl ReceiverImpl {
     }
 
     fn notify_on_blame(&mut self, source_id: usize) {
-        check_execution_time!(5000);
+        check_execution_time!(20000);
         if let Some(listener) = self.listener.upgrade() {
             listener.borrow_mut().on_blame(self, source_id);
         }
@@ -2129,7 +2167,7 @@ impl ReceiverImpl {
         data: &BlockPayloadPtr,
         response_promise: ExternalQueryResponseCallback,
     ) {
-        check_execution_time!(5000);
+        check_execution_time!(20000);
         profiling::instrument!();
 
         if let Some(listener) = self.listener.upgrade() {
@@ -2357,11 +2395,11 @@ impl ReceiverImpl {
         incarnation: &SessionId,
         ids: &Vec<CatchainNode>,
         local_key: &PrivateKey,
-        db_root: &String,
-        db_suffix: &String,
+        path: String,
+        db_suffix: String,
         allow_unsafe_self_blocks_resync: bool,
         metrics_receiver: Option<Arc<metrics_runtime::Receiver>>,
-    ) -> Self {
+    ) -> Result<Self> {
         let metrics_receiver = if let Some(metrics_receiver) = metrics_receiver {
             metrics_receiver.clone()
         } else {
@@ -2479,9 +2517,8 @@ impl ReceiverImpl {
             db: None,
             read_db: false,
             db_root_block: ZERO_HASH.clone(),
-            db_root: db_root.clone(),
-            db_suffix: db_suffix.clone(),
-            allow_unsafe_self_blocks_resync: allow_unsafe_self_blocks_resync,
+            db_suffix,
+            allow_unsafe_self_blocks_resync,
             unsafe_root_block_writing: false,
             started: false,
             next_awake_time: now,
@@ -2494,51 +2531,37 @@ impl ReceiverImpl {
         };
 
         obj.add_received_block(root_block.clone());
-
-        obj.start_up_db();
-
+        obj.start_up_db(path)?;
         obj.choose_neighbours();
-
-        obj
+        Ok(obj)
     }
 
     pub(crate) fn create_dummy_listener() -> Rc<RefCell<dyn ReceiverListener>> {
         DummyListener::create()
     }
 
-    pub(crate) fn create_dummy() -> ReceiverPtr {
-        let local_key = parse_hex_as_private_key(
-            "0000000000000000000000000000000000000000000000000000000000000000",
-        );
-        let public_key = adnl::common::KeyOption::from_type_and_public_key(
-            adnl::common::KeyOption::KEY_ED25519,
-            local_key.pub_key().unwrap()
-        );
+    pub(crate) fn create_dummy(path: String) -> Result<ReceiverPtr> {
+        let (_, public_key) = KeyOption::with_type_id(KeyOption::KEY_ED25519)?;
         let public_key = Arc::new(public_key);
-        let adnl_id = get_public_key_hash(&public_key);
-        let ids = vec![
-            CatchainNode {
-                public_key,
-                adnl_id
-            }
-        ];
-        let incarnation = SessionId::default();
+        let ids = vec![CatchainNode {
+            public_key: public_key.clone(),
+            adnl_id: public_key.id().clone(),
+        }];
+        let incarnation = public_key.id().data().clone().into();
         let receiver_listener = ReceiverImpl::create_dummy_listener();
-        let db_root = "".to_string();
-        let db_suffix = "".to_string();
+        let db_suffix = String::new();
         let allow_unsafe_self_blocks_resync = false;
 
         ReceiverImpl::create(
             Rc::downgrade(&receiver_listener),
             &incarnation,
             &ids,
-            &local_key,
-            &db_root,
-            &db_suffix,
+            &public_key,
+            path,
+            db_suffix,
             allow_unsafe_self_blocks_resync,
             None,
         )
-
     }
 
     pub(crate) fn create(
@@ -2546,21 +2569,22 @@ impl ReceiverImpl {
         incarnation: &SessionId,
         ids: &Vec<CatchainNode>,
         local_key: &PrivateKey,
-        db_root: &String,
-        db_suffix: &String,
+        path: String,
+        db_suffix: String,
         allow_unsafe_self_blocks_resync: bool,
         metrics: Option<Arc<metrics_runtime::Receiver>>,
-    ) -> ReceiverPtr {
-        Rc::new(RefCell::new(ReceiverImpl::new(
+    ) -> Result<ReceiverPtr> {
+        let ret = ReceiverImpl::new(
             listener,
             incarnation,
             ids,
             local_key,
-            db_root,
+            path,
             db_suffix,
             allow_unsafe_self_blocks_resync,
             metrics,
-        )))
+        )?;
+        Ok(Rc::new(RefCell::new(ret)))
     }
 
     fn create_block_with_payload(

@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 pub use super::*;
 
 use super::task_queue::*;
@@ -732,7 +745,7 @@ impl SessionImpl {
                     //check & update session state
 
                     instrument!();
-                    check_execution_time!(10_000);
+                    check_execution_time!(20_000);
 
                     processor.borrow_mut().reset_next_awake_time();
                     processor.borrow_mut().check_all();
@@ -743,7 +756,7 @@ impl SessionImpl {
 
             if let Ok(_elapsed) = next_metrics_dump_time.elapsed() {
                 instrument!();
-                check_execution_time!(10_000);
+                check_execution_time!(50_000);
 
                 metrics_dumper.update(&processor.borrow().get_description().get_metrics_receiver());
 
@@ -764,7 +777,7 @@ impl SessionImpl {
 
             if let Ok(_elapsed) = next_profiling_dump_time.elapsed() {
                 instrument!();
-                check_execution_time!(100_000);
+                check_execution_time!(50_000);
 
                 if log_enabled!(log::Level::Debug) {
                     let profiling_dump = profiling::Profiler::local_instance()
@@ -908,8 +921,8 @@ impl SessionImpl {
         session_id: &SessionId,
         ids: &Vec<SessionNode>,
         local_key: &PrivateKey,
-        db_root: &String,
-        db_suffix: &String,
+        path: String,
+        db_suffix: String,
         allow_unsafe_self_blocks_resync: bool,
         overlay_manager: CatchainOverlayManagerPtr,
         listener: SessionListenerPtr,
@@ -963,7 +976,7 @@ impl SessionImpl {
             &session_id.clone(),
             &catchain_nodes,
             &local_key,
-            db_root,
+            path.to_string(),
             db_suffix,
             allow_unsafe_self_blocks_resync,
             overlay_manager,
@@ -1068,7 +1081,7 @@ impl SessionImpl {
             nodes.push(SessionNode {
                 adnl_id: node.adnl_id.clone(),
                 public_key: node.public_key.clone(),
-                weight: weight,
+                weight,
             });
         }
 
@@ -1077,8 +1090,8 @@ impl SessionImpl {
             player.get_session_id(),
             &nodes,
             player.get_local_key(),
-            &log_replay_options.db_root,
-            &log_replay_options.db_suffix,
+            log_replay_options.db_path.clone(),
+            log_replay_options.db_suffix.clone(),
             log_replay_options.allow_unsafe_self_blocks_resync,
             player.get_overlay_manager(replay_listener),
             session_listener,

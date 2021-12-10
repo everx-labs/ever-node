@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     block::{BlockStuff, convert_block_id_ext_api2blk}, block_proof::BlockProofStuff, 
     engine::Engine, engine_traits::{ChainRange, EngineOperations},
@@ -5,7 +18,7 @@ use crate::{
     validator::validator_utils::{calc_subset_for_workchain, check_crypto_signatures},
 };
 
-use std::{sync::Arc, mem::drop};
+use std::{sync::Arc, mem::drop, time::Duration};
 use tokio::task::JoinHandle;
 use ton_block::{BlockIdExt, BlockSignaturesPure, CryptoSignaturePair, CryptoSignature, ConfigParams};
 use ton_types::{Result, fail, error, UInt256};
@@ -17,8 +30,13 @@ pub fn start_masterchain_client(
 ) -> Result<JoinHandle<()>> {
     let join_handle = tokio::spawn(async move {
         engine.acquire_stop(Engine::MASK_SERVICE_MASTERCHAIN_CLIENT);
-        if let Err(e) = load_master_blocks_cycle(engine.clone(), last_got_block_id).await {
-            log::error!("FATAL!!! Unexpected error in master blocks loading cycle: {:?}", e);
+        loop {
+            if let Err(e) = load_master_blocks_cycle(engine.clone(), last_got_block_id.clone()).await {
+                log::error!("Unexpected error in master blocks loading cycle: {:?}", e);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            } else {
+                break;
+            }
         }
         engine.release_stop(Engine::MASK_SERVICE_MASTERCHAIN_CLIENT);
     });
@@ -31,8 +49,13 @@ pub fn start_shards_client(
 ) -> Result<JoinHandle<()>> {
     let join_handle = tokio::spawn(async move {
         engine.acquire_stop(Engine::MASK_SERVICE_SHARDCHAIN_CLIENT);
-        if let Err(e) = load_shard_blocks_cycle(engine.clone(), shards_mc_block_id).await {
-            log::error!("FATAL!!! Unexpected error in shards client: {:?}", e);
+        loop {
+            if let Err(e) = load_shard_blocks_cycle(engine.clone(), &shards_mc_block_id).await {
+                log::error!("Unexpected error in shards client: {:?}", e);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            } else {
+                break;
+            }
         }
         engine.release_stop(Engine::MASK_SERVICE_SHARDCHAIN_CLIENT);
     });
@@ -126,10 +149,10 @@ const SHARD_CLIENT_WINDOW: usize = 1;
 
 async fn load_shard_blocks_cycle(
     engine: Arc<dyn EngineOperations>, 
-    shards_mc_block_id: BlockIdExt
+    shards_mc_block_id: &BlockIdExt
 ) -> Result<()> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(SHARD_CLIENT_WINDOW));
-    let mut mc_handle = engine.load_block_handle(&shards_mc_block_id)?.ok_or_else(
+    let mut mc_handle = engine.load_block_handle(shards_mc_block_id)?.ok_or_else(
         || error!("Cannot load handle for shard master block {}", shards_mc_block_id)
     )?;
     let (_master, workchain_id) = engine.processed_workchain().await?;

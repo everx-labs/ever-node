@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 #[macro_use]
 extern crate lazy_static;
 
@@ -38,6 +51,7 @@ pub mod slashing;
 mod task_queue;
 pub mod utils;
 mod vector;
+mod vector_bool;
 mod vote_candidate;
 
 pub use cache::*;
@@ -190,11 +204,8 @@ pub type BlockCandidatePtr = PoolPtr<dyn BlockCandidate>;
 /// Pointer to BlockCandidateSignature
 pub type BlockCandidateSignaturePtr = Option<PoolPtr<dyn BlockCandidateSignature>>;
 
-/// Vector of bool flags
-pub type BoolVector = dyn Vector<bool>;
-
 /// Pointer to BoolVector
-pub type BoolVectorPtr = PoolPtr<BoolVector>;
+pub type BoolVectorPtr = PoolPtr<dyn BoolVector>;
 
 /// Vector of block candidate signatures
 pub type BlockCandidateSignatureVector = dyn Vector<BlockCandidateSignaturePtr>;
@@ -393,6 +404,29 @@ pub trait VectorWrapper<T: Clone + HashableObject + TypeDesc + MovablePoolObject
         desc: &mut dyn SessionDescription,
         modifier: &Box<dyn Fn(&T) -> T>,
     ) -> Option<PoolPtr<dyn Vector<T>>>;
+}
+
+/// Vector of bools
+pub trait BoolVector: HashableObject + PoolObject + fmt::Display + fmt::Debug {
+    /// Size of vector
+    fn len(&self) -> usize;
+
+    /// Access to an item
+    fn at(&self, index: usize) -> bool;
+
+    /// Change element
+    fn change(
+        &self,
+        desc: &mut dyn SessionDescription,
+        index: usize,
+        value: bool,
+    ) -> PoolPtr<dyn BoolVector>;
+
+    /// Clone object to persistent pool
+    fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn BoolVector>;
+
+    /// Get implementation details object
+    fn get_impl(&self) -> &dyn Any;
 }
 
 /// Sorting predicate for vector items
@@ -1282,6 +1316,14 @@ impl SessionFactory {
         vector::VectorImpl::<T>::create(desc, data)
     }
 
+    /// Create bool vector from rust vector
+    pub fn create_bool_vector(
+        desc: &mut dyn SessionDescription,
+        data: Vec<bool>,
+    ) -> PoolPtr<dyn BoolVector> {
+        vector_bool::BoolVectorImpl::create(desc, data)
+    }
+
     /// Create vector wrapper from rust vector
     pub fn create_vector_wrapper<T>(
         desc: &mut dyn SessionDescription,
@@ -1419,8 +1461,8 @@ impl SessionFactory {
         session_id: &SessionId,
         ids: &Vec<SessionNode>,
         local_key: &PrivateKey,
-        db_root: &String,
-        db_suffix: &String,
+        db_path: String,
+        db_suffix: String,
         allow_unsafe_self_blocks_resync: bool,
         overlay_manager: CatchainOverlayManagerPtr,
         listener: SessionListenerPtr,
@@ -1430,7 +1472,7 @@ impl SessionFactory {
             session_id,
             ids,
             local_key,
-            db_root,
+            db_path,
             db_suffix,
             allow_unsafe_self_blocks_resync,
             overlay_manager,

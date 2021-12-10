@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use storage::shardstate_db::AllowStateGcResolver;
 use ton_block::{BlockIdExt, ShardIdent, AccountIdPrefixFull};
 use ton_types::Result;
@@ -47,42 +60,43 @@ impl AllowStateGcSmartResolver {
             );
 
             let mc_pfx = AccountIdPrefixFull::any_masterchain();
-            let handle = engine.find_block_by_seq_no(&mc_pfx, new_min_ref_mc_seqno).await?;
-            let min_mc_state = engine.load_state(handle.id()).await?;
+            if let Ok(handle) = engine.find_block_by_seq_no(&mc_pfx, new_min_ref_mc_seqno).await {
+                let min_mc_state = engine.load_state(handle.id()).await?;
 
-            let (_master, workchain_id) = engine.processed_workchain().await?;
-            let top_blocks = min_mc_state.shard_hashes()?.top_blocks(&[workchain_id])?;
-            let mut actual_shardes = HashSet::new();
-            for id in top_blocks {
-                add_unbound_object_to_map_with_update(
-                    &self.min_actual_ss,
-                    id.shard().clone(),
-                    |found| if let Some(a) = found {
-                        let old_val = a.fetch_max(id.seq_no(), Ordering::Relaxed);
-                        if old_val != id.seq_no() {
+                let (_master, workchain_id) = engine.processed_workchain().await?;
+                let top_blocks = min_mc_state.shard_hashes()?.top_blocks(&[workchain_id])?;
+                let mut actual_shardes = HashSet::new();
+                for id in top_blocks {
+                    add_unbound_object_to_map_with_update(
+                        &self.min_actual_ss,
+                        id.shard().clone(),
+                        |found| if let Some(a) = found {
+                            let old_val = a.fetch_max(id.seq_no(), Ordering::Relaxed);
+                            if old_val != id.seq_no() {
+                                log::info!(
+                                    "AllowStateGcSmartResolver::advance: updated min actual state for shard {}: {} -> {}",
+                                    id.shard(), old_val, id.seq_no()
+                                );
+                            }
+                            Ok(None)
+                        } else {
                             log::info!(
-                                "AllowStateGcSmartResolver::advance: updated min actual state for shard {}: {} -> {}",
-                                id.shard(), old_val, id.seq_no()
+                                "AllowStateGcSmartResolver::advance: added min actual state for shard {}: {}",
+                                id.shard(), id.seq_no()
                             );
+                            Ok(Some(AtomicU32::new(id.seq_no())))
                         }
-                        Ok(None)
-                    } else {
-                        log::info!(
-                            "AllowStateGcSmartResolver::advance: added min actual state for shard {}: {}",
-                            id.shard(), id.seq_no()
-                        );
-                        Ok(Some(AtomicU32::new(id.seq_no())))
-                    }
-                )?;
-                actual_shardes.insert(id.shard().clone());
-            }
+                    )?;
+                    actual_shardes.insert(id.shard().clone());
+                }
 
-            for kv in self.min_actual_ss.iter() {
-                if !actual_shardes.contains(kv.key()) {
-                    self.min_actual_ss.remove(kv.key());
-                    log::info!(
-                        "AllowStateGcSmartResolver::advance: removed shard {}", kv.key()
-                    );
+                for kv in self.min_actual_ss.iter() {
+                    if !actual_shardes.contains(kv.key()) {
+                        self.min_actual_ss.remove(kv.key());
+                        log::info!(
+                            "AllowStateGcSmartResolver::advance: removed shard {}", kv.key()
+                        );
+                    }
                 }
             }
         }

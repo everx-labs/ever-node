@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     block::{BlockStuff, BlockIdExtExtention},
     block_proof::BlockProofStuff,
@@ -27,7 +40,9 @@ use crate::{
     shard_state::ShardStateStuff,
     types::{awaiters_pool::AwaitersPool, lockfree_cache::TimeBasedCache},
     ext_messages::{MessagesPool, EXT_MESSAGES_TRACE_TARGET},
-    validator::{validator_manager::start_validator_manager, candidate_db::LastRotationBlockDb},
+    validator::{
+        validator_manager::{start_validator_manager, ValidatorManagerConfig},
+    },
     shard_blocks::{
         ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker, 
         ShardBlockProcessingResult
@@ -100,6 +115,7 @@ pub struct Engine {
     last_known_mc_block_seqno: AtomicU32,
     last_known_keyblock_seqno: AtomicU32,
     will_validate: AtomicBool,
+    sync_status: AtomicU32,
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
  
@@ -129,8 +145,6 @@ pub struct Engine {
     telemetry_printer: TelemetryPrinter,
 
     tps_counter: TpsCounter,
-
-    last_rotation_block_db: LastRotationBlockDb, // TODO use node-state DB instead
 }
 
 struct DownloadContext<'a, T> {
@@ -319,6 +333,20 @@ impl Downloader for ZeroStateDownloader {
     }
 }
 
+//
+// TEMP CODE FOR DEVNET (FROM 23 July 2021) COMPATIBILITY
+// In future delete all this code
+//
+lazy_static::lazy_static!{
+    static ref READ_VALUE_FLOW_IN_DEPTH: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
+}
+pub fn read_value_flow_in_full_depth() -> bool {
+    READ_VALUE_FLOW_IN_DEPTH.load(Ordering::Relaxed)
+}
+//
+// end of temp code
+//
+
 impl Engine {
 
     // Masks for services
@@ -329,8 +357,17 @@ impl Engine {
     pub const MASK_SERVICE_PSS_KEEPER: u32                     = 0x0008;
     pub const MASK_SERVICE_SHARDCHAIN_BROADCAST_LISTENER: u32  = 0x0010;
     pub const MASK_SERVICE_SHARDCHAIN_CLIENT: u32              = 0x0020;
-    pub const MASK_SERVICE_TOP_SHARDBLOCKS_SENDER: u32         = 0x0040;
-    pub const MASK_SERVICE_VALIDATOR_MANAGER: u32              = 0x0080;
+    pub const MASK_SERVICE_SHARDSTATE_GC: u32                  = 0x0040;
+    pub const MASK_SERVICE_TOP_SHARDBLOCKS_SENDER: u32         = 0x0080;
+    pub const MASK_SERVICE_VALIDATOR_MANAGER: u32              = 0x0100;
+
+    // Sync status
+    pub const SYNC_STATUS_START_BOOT: u32           = 0x0001;
+    pub const SYNC_STATUS_LOAD_MASTER_STATE: u32    = 0x0002;
+    pub const SYNC_STATUS_LOAD_SHARD_STATES: u32    = 0x0003;
+    pub const SYNC_STATUS_FINISH_BOOT: u32          = 0x0004;
+    pub const SYNC_STATUS_SYNC_BLOCKS: u32          = 0x0005;
+    pub const SYNC_STATUS_FINISH_SYNC: u32          = 0x0006;
 
     const MASK_STOP: u32 = 0x80000000; 
     const TIMEOUT_STOP_MS: u64 = 100; 
@@ -350,7 +387,6 @@ impl Engine {
         let db_directory = general_config.internal_db_path().unwrap_or_else(|| {"node_db"}).to_string();
         let gc_interval_sec = general_config.cells_gc_config().gc_interval_sec;
         let cells_lifetime_sec = general_config.cells_gc_config().cells_lifetime_sec;
-        let last_rotation_block_db = LastRotationBlockDb::new(db_directory.clone());
         let db_config = InternalDbConfig { 
             db_directory, 
             cells_gc_interval_sec: gc_interval_sec
@@ -368,11 +404,26 @@ impl Engine {
         let test_bundles_config = general_config.test_bundles_config().clone();
         let zero_state_id = global_config.zero_state().expect("check zero state settings");
         let mut init_mc_block_id = global_config.init_block()?.unwrap_or_else(|| zero_state_id.clone());
-        if let Ok(Some(block_id)) = db.load_node_state(INITIAL_MC_BLOCK) {
+        if let Ok(Some(block_id)) = db.load_full_node_state(INITIAL_MC_BLOCK) {
             if block_id.seq_no > init_mc_block_id.seq_no {
                 init_mc_block_id = block_id.deref().clone()
             }
         }
+
+
+        //
+        // TEMP CODE FOR DEVNET (FROM 23 July 2021) COMPATIBILITY
+        // In future delete all this code
+        //
+        let devnet_root_hash = ton_types::UInt256::from_str("b2e99a7505eda599aead9f2323ea905fb6ba9e26d261937e9d7c80535f0fb992")?;
+        if *zero_state_id.root_hash() == devnet_root_hash {
+            READ_VALUE_FLOW_IN_DEPTH.store(false, Ordering::Relaxed);
+        }
+        //
+        // end of temp code
+        //
+
+
         let workchain_id = general_config.workchain_id().unwrap_or(ton_block::INVALID_WORKCHAIN_ID);
         log::info!("workchain_id from config {}", workchain_id);
         let workchain_id = AtomicI32::new(workchain_id);
@@ -395,7 +446,7 @@ impl Engine {
         };
         log::info!("load_node_state");
         let last_mc_seqno = db
-            .load_node_state(LAST_APPLIED_MC_BLOCK)?
+            .load_full_node_state(LAST_APPLIED_MC_BLOCK)?
             .map(|id| id.seq_no as u32)
             .unwrap_or_default();
         let (shard_blocks_pool, shard_blocks_receiver) = ShardBlocksPool::new(
@@ -455,6 +506,7 @@ impl Engine {
             last_known_mc_block_seqno: AtomicU32::new(0),
             last_known_keyblock_seqno: AtomicU32::new(0),
             will_validate: AtomicBool::new(false),
+            sync_status: AtomicU32::new(0),
             test_bundles_config,
             shard_states_cache: TimeBasedCache::new(120, "shard_states_cache".to_string()),
             loaded_from_ss_cache: AtomicU64::new(0),
@@ -482,15 +534,15 @@ impl Engine {
                 metrics
             ),
             tps_counter: TpsCounter::new(),
-            last_rotation_block_db,
         });
 
+        engine.acquire_stop(Self::MASK_SERVICE_SHARDSTATE_GC);
         save_top_shard_blocks_worker(engine.clone(), shard_blocks_receiver);
 
         Ok(engine)
     }
 
-    pub async fn stop(&self) {
+    pub async fn stop(self: Arc<Self>) {
         let stopp = self.stop.fetch_or(Self::MASK_STOP, Ordering::Relaxed);
         log::info!(target: "sync", "Stop count {:04x}", stopp);
         while let Some(server) = self.servers.pop() {
@@ -505,6 +557,13 @@ impl Engine {
                 }
             }
         }
+        let engine = self.clone();
+        tokio::spawn(
+            async move {
+                 engine.db.stop_states_gc().await;
+                 engine.release_stop(Self::MASK_SERVICE_SHARDSTATE_GC);
+            }
+        );
         loop {
             tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_STOP_MS)).await;
             let stopp = self.stop.load(Ordering::Relaxed) & !Self::MASK_STOP;
@@ -514,6 +573,14 @@ impl Engine {
             }
         }    
         self.network.stop().await
+    }
+
+    pub fn set_sync_status(&self, status: u32) {
+        self.sync_status.store(status, Ordering::Relaxed);
+    }
+
+    pub fn get_sync_status(&self) -> u32 {
+        self.sync_status.load(Ordering::Relaxed)
     }
 
     pub fn acquire_stop(&self, mask: u32) {
@@ -655,10 +722,6 @@ impl Engine {
 
     pub fn collation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
         &self.collation_status
-    }
-
-    pub fn last_rotation_block_db(&self) -> &LastRotationBlockDb {
-        &self.last_rotation_block_db
     }
 
     pub fn tps_counter(&self) -> &TpsCounter {
@@ -806,45 +869,11 @@ impl Engine {
                 STATSD.gauge("timediff", ago as f64);
                 self.shard_blocks().update_shard_blocks(&self.load_state(block.id()).await?)?;
 
-                if self.set_applied(handle, mc_seq_no).await? {
-                    self.tps_counter.submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
-                }
+                let first_time_applied = self.set_applied(handle, mc_seq_no).await?;
 
-                let (prev_id, prev2_id_opt) = block.construct_prev_id()?;
-                if prev2_id_opt.is_some() {
-                    fail!("UNEXPECTED error: master block refers two previous blocks");
+                if let Err(e) = self.mc_block_post_apply(block, gen_utime, first_time_applied).await {
+                    log::error!("Error after apply block {}: {}", block.id(), e);
                 }
-                let id = handle.id().clone();
-                self.next_block_applying_awaiters.do_or_wait(&prev_id, None, async move { Ok(id) }).await?;
-
-                // Advance states GC
-                let shard_client = self.load_shard_client_mc_block_id()?.ok_or_else(
-                    || error!("INTERNAL ERROR: No shard client MC block id when apply block")
-                )?;
-                let pss_keeper = self.load_pss_keeper_mc_block_id()?.ok_or_else(
-                    || error!("INTERNAL ERROR: No PSS keeper MC block id when apply block")
-                )?;
-                let mut min_id: &BlockIdExt = if shard_client.seq_no() < pss_keeper.seq_no() { 
-                    &shard_client
-                } else { 
-                    &pss_keeper
-                };
-                let last_rotation_block_id = self.get_last_rotation_block_id()?;
-                let mut last_rotation_block_id_str = "none".to_string();
-                if let Some(id) = &last_rotation_block_id {
-                    if min_id.seq_no() > id.seq_no() { 
-                        min_id = &id 
-                    }
-                    last_rotation_block_id_str = format!("{}", id.seq_no())
-                }
-                log::trace!(
-                    "Before state_gc_resolver.advance  shard_client {}  pss_keeper {}  last_rotation_block_id {}  min {}", 
-                    shard_client.seq_no(),
-                    pss_keeper.seq_no(),
-                    last_rotation_block_id_str,
-                    min_id.seq_no()
-                );
-                self.state_gc_resolver.advance(min_id, self.deref()).await?;
             }
 
             log::info!(
@@ -870,6 +899,55 @@ impl Engine {
         Ok(())
     }
 
+    async fn mc_block_post_apply(
+        &self,
+        block: &BlockStuff,
+        gen_utime: u32,
+        first_time_applied: bool
+    ) -> Result<()> {
+
+        if first_time_applied {
+            self.tps_counter.submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
+        }
+
+        let (prev_id, prev2_id_opt) = block.construct_prev_id()?;
+        if prev2_id_opt.is_some() {
+            fail!("UNEXPECTED error: master block refers two previous blocks");
+        }
+        let id = block.id().clone();
+        self.next_block_applying_awaiters.do_or_wait(&prev_id, None, async move { Ok(id) }).await?;
+
+        // Advance states GC
+        let shard_client = self.load_shard_client_mc_block_id()?.ok_or_else(
+            || error!("INTERNAL ERROR: No shard client MC block id when apply block")
+        )?;
+        let pss_keeper = self.load_pss_keeper_mc_block_id()?.ok_or_else(
+            || error!("INTERNAL ERROR: No PSS keeper MC block id when apply block")
+        )?;
+        let mut min_id: &BlockIdExt = if shard_client.seq_no() < pss_keeper.seq_no() { 
+            &shard_client
+        } else { 
+            &pss_keeper
+        };
+        let last_rotation_block_id = self.load_last_rotation_block_id()?;
+        let mut last_rotation_block_id_str = "none".to_string();
+        if let Some(id) = &last_rotation_block_id {
+            if min_id.seq_no() > id.seq_no() { 
+                min_id = &id 
+            }
+            last_rotation_block_id_str = format!("{}", id.seq_no())
+        }
+        log::trace!(
+            "Before state_gc_resolver.advance  shard_client {}  pss_keeper {}  last_rotation_block_id {}  min {}", 
+            shard_client.seq_no(),
+            pss_keeper.seq_no(),
+            last_rotation_block_id_str,
+            min_id.seq_no()
+        );
+        self.state_gc_resolver.advance(min_id, self.deref()).await?;
+        Ok(())
+    }
+
     async fn listen_broadcasts(self: Arc<Self>, shard_ident: ShardIdent, mask: u32) -> Result<()> {
         log::debug!("Started listening overlay for shard {}", shard_ident);
         let client = self.get_full_node_overlay(
@@ -884,7 +962,11 @@ impl Engine {
                 }
                 match client.wait_broadcast().await {
                     Err(e) => log::error!("Error while wait_broadcast for shard {}: {}", shard_ident, e),
-                    Ok((broadcast, src)) => {
+                    Ok(None) => {
+                        log::warn!("wait_broadcast finished.");
+                        break;
+                    },
+                    Ok(Some((broadcast, src))) => {
                         match broadcast {
                             Broadcast::TonNode_BlockBroadcast(broadcast) => {
                                 self.clone().process_block_broadcast(broadcast, src);
@@ -1370,11 +1452,11 @@ impl Engine {
 */
 
     fn load_pss_keeper_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
-        self.db().load_node_state(PSS_KEEPER_MC_BLOCK)
+        self.db().load_full_node_state(PSS_KEEPER_MC_BLOCK)
     }
 
     pub fn save_pss_keeper_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
-        self.db().save_node_state(PSS_KEEPER_MC_BLOCK, id)
+        self.db().save_full_node_state(PSS_KEEPER_MC_BLOCK, id)
     }
 
     pub fn start_persistent_states_keeper(
@@ -1554,6 +1636,20 @@ impl Engine {
         Ok(())
     }
 
+    fn check_finish_sync(self: Arc<Self>) {
+        tokio::spawn(async move {
+            const SLEEP_TIME: u64 = 30;
+            loop {
+                if let Ok(true) = self.check_sync().await {
+                    self.set_sync_status(Engine::SYNC_STATUS_FINISH_SYNC);
+                    return;
+                };
+                tokio::time::sleep(Duration::from_secs(SLEEP_TIME)).await;
+            }
+            
+        });
+    }
+
     pub async fn store_persistent_state_attempts(&self, handle: &Arc<BlockHandle>, ss: &ShardStateStuff) {
         let mut attempts = 1;
         while let Err(e) = self.db.store_shard_state_persistent(handle, ss, None).await {
@@ -1564,6 +1660,36 @@ impl Engine {
             attempts += 1;
             futures_timer::Delay::new(Duration::from_millis(5000)).await;
         }
+    }
+
+    #[allow(dead_code)]
+    pub async fn truncate_database(&self, mc_seq_no: u32) -> Result<()> {
+        let mc_state = self.load_last_applied_mc_state().await?;
+        let block_id = mc_state.find_block_id(mc_seq_no)?;
+        let prev_block_id = self.load_block_prev1(&block_id)?;
+        // check if previous state is present
+        self.load_state(&prev_block_id).await
+            .map_err(|err| error!("no previous block state present for {}", err))?;
+
+        self.db().truncate_database(&block_id).await?;
+        self.save_last_applied_mc_block_id(&prev_block_id)?;
+
+        if let Some(block_id) = self.load_pss_keeper_mc_block_id()? {
+            if block_id.seq_no > prev_block_id.seq_no {
+                self.save_pss_keeper_mc_block_id(&prev_block_id)?;
+            }
+        }
+        if let Some(block_id) = self.load_shard_client_mc_block_id()? {
+            if block_id.seq_no > prev_block_id.seq_no {
+                self.save_shard_client_mc_block_id(&prev_block_id)?;
+            }
+        }
+        if let Some(block_id) = self.load_last_rotation_block_id()? {
+            if block_id.seq_no > prev_block_id.seq_no {
+                self.save_last_rotation_block_id(&prev_block_id)?;
+            }
+        }
+        Ok(())
     }
 
 }
@@ -1632,6 +1758,7 @@ pub(crate) async fn load_zero_state(engine: &Arc<Engine>, path: &str) -> Result<
 
 async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(BlockIdExt, BlockIdExt, BlockIdExt)> {
     log::info!("Booting...");
+    engine.set_sync_status(Engine::SYNC_STATUS_START_BOOT);
 
     if let Some(zerostate_path) = zerostate_path {
         load_zero_state(&engine, zerostate_path).await?;
@@ -1671,7 +1798,7 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
         }
     };
 
-    let pss_keeper_mc_block = match engine.db().load_node_state(PSS_KEEPER_MC_BLOCK) {
+    let pss_keeper_mc_block = match engine.db().load_full_node_state(PSS_KEEPER_MC_BLOCK) {
         Ok(Some(id)) => id.deref().clone(),
         _ => {
             if !cold {
@@ -1683,6 +1810,7 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
         }
     };
 
+    engine.set_sync_status(Engine::SYNC_STATUS_FINISH_BOOT);
     log::info!("Boot complete.");
     log::info!("LastMcBlockId: {}", last_applied_mc_block);
     log::info!("ShardsClientMcBlockId: {}", shard_client_mc_block);
@@ -1700,7 +1828,7 @@ async fn run_control_server(engine: Arc<Engine>, config: AdnlServerConfig) -> Re
 }
 
 pub async fn run(
-    node_config: TonNodeConfig, 
+    node_config: TonNodeConfig,
     zerostate_path: Option<&str>, 
     ext_db: Vec<Arc<dyn ExternalDb>>,
     validator_runtime: tokio::runtime::Handle, 
@@ -1711,6 +1839,7 @@ pub async fn run(
 
     let consumer_config = node_config.kafka_consumer_config();
     let control_server_config = node_config.control_server()?;
+    let vm_config = ValidatorManagerConfig::read_configs(node_config.unsafe_catchain_patches_files());
 
     // Create engine
     let engine = Engine::new(node_config, ext_db, initial_sync_disabled).await?;
@@ -1762,7 +1891,8 @@ pub async fn run(
     // Start validator manager, which will start validator sessions when necessary
     start_validator_manager(
         Arc::clone(&engine) as Arc<dyn EngineOperations>,
-        validator_runtime
+        validator_runtime,
+        vm_config
     );
 
     // Sync by archives
@@ -1773,7 +1903,9 @@ pub async fn run(
         impl crate::sync::StopSyncChecker for FakeSync {
             async fn check(&self, _engine: &Arc<dyn EngineOperations>) -> bool { true }
         }
+
         crate::sync::start_sync(Arc::clone(&engine) as Arc<dyn EngineOperations>, Some(&FakeSync)).await?;
+        
         last_applied_mc_block = engine.load_last_applied_mc_block_id()?.ok_or_else(
             || error!("INTERNAL ERROR: No last applied MC block after boot")
         )?.deref().clone();
@@ -1786,6 +1918,8 @@ pub async fn run(
     resend_top_shard_blocks_worker(engine.clone());
 
     // blocks download clients
+    engine.set_sync_status(Engine::SYNC_STATUS_SYNC_BLOCKS);
+    Engine::check_finish_sync(Arc::clone(&engine));
     let join_shards = start_shards_client(engine.clone(), shard_client_mc_block)?;
     let join_master = start_masterchain_client(engine.clone(), last_applied_mc_block)?;
     let join_engine = tokio::spawn(

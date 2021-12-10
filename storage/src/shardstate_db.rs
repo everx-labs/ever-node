@@ -1,25 +1,39 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     StorageAlloc, cell_db::CellDb, 
-    db::{rocksdb::RocksDb, traits::{DbKey, KvcSnapshotable, KvcTransaction}},
+    db::{rocksdb::RocksDbTable, traits::{DbKey, KvcWriteable, KvcTransaction}},
     dynamic_boc_db::DynamicBocDb, /*dynamic_boc_diff_writer::DynamicBocDiffWriter,*/
     traits::Serializable, types::{CellId, Reference, StorageCell},
     TARGET,
 };
 #[cfg(feature = "telemetry")]
 use crate::StorageTelemetry;
+#[cfg(all(test, feature = "telemetry"))]
+use crate::tests::utils::create_storage_telemetry;
 use fnv::FnvHashSet;
+use crate::db::rocksdb::RocksDb;
 use std::{
-    io::{Cursor, Read, Write},
-    ops::Deref, 
-    path::Path, 
-    sync::{Arc, atomic::{AtomicU32, Ordering}}, 
+    io::{Cursor, Read, Write}, ops::Deref, 
+    sync::{Arc, atomic::{AtomicU8, AtomicU32, Ordering}}, 
     time::{Duration, Instant, SystemTime, UNIX_EPOCH}
 };
 use ton_block::BlockIdExt;
 use ton_types::{ByteOrderRead, Cell, Result, fail};
 
 pub(crate) struct DbEntry {
-    pub cell_id: CellId,
+    pub cell_id: CellId, // TODO: remove this id
     pub block_id_ext: BlockIdExt,
     pub db_index: u32,
     pub saved_at: u64,
@@ -53,71 +67,73 @@ impl Serializable for DbEntry {
 }
 
 pub struct ShardStateDb {
-    shardstate_db: Arc<dyn KvcSnapshotable<BlockIdExt>>,
+    shardstate_db: Arc<dyn KvcWriteable<BlockIdExt>>,
     current_dynamic_boc_db_index: AtomicU32,
     dynamic_boc_db_0: Arc<DynamicBocDb>,
     dynamic_boc_db_0_writers: AtomicU32,
     dynamic_boc_db_1: Arc<DynamicBocDb>,
     dynamic_boc_db_1_writers: AtomicU32,
+    stop: AtomicU8
 }
 
 impl ShardStateDb {
 
+    const MASK_GC_STARTED: u8 = 0x01;
+    const MASK_GC_STOPPED: u8 = 0x80;
+
     /// Constructs new instance using in-memory key-value collections
 
     /// Constructs new instance using RocksDB with given paths
-    pub fn with_paths<P1: AsRef<Path>, P2: Clone + AsRef<Path>>(
-        shardstate_db_path: P1,
-        cell_db_path: P2,
-        cell_db_path_additional: P2,
+    pub fn with_db(
+        db: Arc<RocksDb>,
+        shardstate_db_path: impl ToString,
+        cell_db_path: impl ToString,
+        cell_db_path_additional: impl ToString,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>
     ) -> Result<Arc<Self>> {
-        Self::with_dbs(
-            Arc::new(RocksDb::with_path(shardstate_db_path)),
-            CellDb::with_path(cell_db_path),
-            CellDb::with_path(cell_db_path_additional),
+        let ret = Self::with_dbs(
+            Arc::new(RocksDbTable::with_db(db.clone(), shardstate_db_path)?),
+            CellDb::with_db(db.clone(), cell_db_path)?,
+            CellDb::with_db(db.clone(), cell_db_path_additional)?,
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated
-        )
+        );
+        Ok(ret)
     }
 
     /// Constructs new instance using given key-value collection implementations
     fn with_dbs(
-        shardstate_db: Arc<dyn KvcSnapshotable<BlockIdExt>>,
+        shardstate_db: Arc<dyn KvcWriteable<BlockIdExt>>,
         cell_db_0: CellDb,
         cell_db_1: CellDb,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>
-    )-> Result<Arc<Self>> {
-        let instance = Arc::new(Self {
+    ) -> Arc<Self> {
+        Arc::new(Self {
             shardstate_db,
             current_dynamic_boc_db_index: AtomicU32::new(0),
-            dynamic_boc_db_0: Arc::new(
-                DynamicBocDb::with_db(
-                    cell_db_0, 
-                    0,
-                    #[cfg(feature = "telemetry")]
-                    telemetry.clone(),
-                    allocated.clone()
-                )
-            ),
+            dynamic_boc_db_0: Arc::new(DynamicBocDb::with_db(
+                cell_db_0, 
+                0,
+                #[cfg(feature = "telemetry")]
+                telemetry.clone(),
+                allocated.clone()
+            )),
             dynamic_boc_db_0_writers: AtomicU32::new(0),
-            dynamic_boc_db_1: Arc::new(
-                DynamicBocDb::with_db(
-                    cell_db_1, 
-                    1,
-                    #[cfg(feature = "telemetry")]
-                    telemetry,
-                    allocated
-                )
-            ),
+            dynamic_boc_db_1: Arc::new(DynamicBocDb::with_db(
+                cell_db_1, 
+                1,
+                #[cfg(feature = "telemetry")]
+                telemetry,
+                allocated
+            )),
             dynamic_boc_db_1_writers: AtomicU32::new(0),
-        });
-        Ok(instance)
+            stop: AtomicU8::new(0)
+        })
     }
 
     pub fn start_gc(
@@ -132,16 +148,38 @@ impl ShardStateDb {
         let mut rng = rand::thread_rng();
         let rand_initial_sleep = rand::Rng::gen_range(&mut rng, 0..run_gc_interval);
 
+        self.stop.fetch_or(Self::MASK_GC_STARTED, Ordering::Relaxed);
         tokio::spawn(async move {
 
-            tokio::time::sleep(Duration::from_secs(rand_initial_sleep)).await;
-
+            async fn sleep_nicely(stop: &AtomicU8, sleep_for_sec: u64) -> bool {
+                let start = Instant::now();
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if (stop.load(Ordering::Relaxed) & ShardStateDb::MASK_GC_STOPPED) != 0 {
+                        stop.fetch_and(!ShardStateDb::MASK_GC_STARTED, Ordering::Relaxed);
+                        return false
+                    }
+                    if start.elapsed().as_secs() > sleep_for_sec {
+                        return true
+                    } 
+                }
+            }
+        
+            if !sleep_nicely(&self.stop, rand_initial_sleep).await {
+                return
+            }
+ 
             let mut last_gc_duration = Duration::from_secs(0);
             loop {
                 let run_gc_interval = 
                     Duration::from_secs(run_interval_adjustable_sec.load(Ordering::Relaxed) as u64);
                 if run_gc_interval > last_gc_duration {
-                    tokio::time::sleep(run_gc_interval - last_gc_duration).await;
+                    if !sleep_nicely(
+                        &self.stop, 
+                        (run_gc_interval - last_gc_duration).as_secs()
+                    ).await {
+                        return
+                    }
                 }
 
                 // Take unused db's index
@@ -216,8 +254,18 @@ impl ShardStateDb {
         });
     }
 
+    pub async fn stop_gc(&self) {
+        self.stop.fetch_or(Self::MASK_GC_STOPPED, Ordering::Relaxed);
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if self.stop.load(Ordering::Relaxed) & Self::MASK_GC_STARTED == 0 {
+                break;
+            }
+        }
+    }
+
     /// Returns reference to shardstates database
-    pub fn shardstate_db(&self) -> Arc<dyn KvcSnapshotable<BlockIdExt>> {
+    pub fn shardstate_db(&self) -> Arc<dyn KvcWriteable<BlockIdExt>> {
         Arc::clone(&self.shardstate_db)
     }
 
@@ -263,6 +311,7 @@ impl ShardStateDb {
         db_entry.serialize(&mut Cursor::new(&mut buf))?;
 
         self.shardstate_db.put(id, buf.as_slice())?;
+        // (self.shardstate_db as dyn KvcWriteable::<BlockIdExt>).put(id, buf.as_slice())?;
 
         log::trace!(target: TARGET, "ShardStateDb::put_internal  finish  id {}  root_cell_id {}  db_index {}  written: {} cells",
             id, cell_id, boc_db.db_index(), c);
@@ -274,7 +323,7 @@ impl ShardStateDb {
 
     /// Loads previously stored root cell
     pub fn get(&self, id: &BlockIdExt) -> Result<Cell> {
-        let db_entry = DbEntry::from_slice(self.shardstate_db.get(id)?.as_ref())?;
+        let db_entry = DbEntry::from_slice(&self.shardstate_db.get(id)?)?;
 
         log::trace!(target: TARGET, "ShardStateDb::get  id {}  cell_id {}  db_index {}", 
             id, db_entry.cell_id, db_entry.db_index);
@@ -306,7 +355,7 @@ pub struct GcStatistic {
 }
 
 pub async fn gc(
-    shardstate_db: Arc<dyn KvcSnapshotable<BlockIdExt>>,
+    shardstate_db: Arc<dyn KvcWriteable<BlockIdExt>>,
     cleaned_boc_db: Arc<DynamicBocDb>,
     gc_resolver: Arc<dyn AllowStateGcResolver>,
 ) -> Result<GcStatistic> {
@@ -362,7 +411,7 @@ pub async fn gc(
 type MarkResult = Result<(FnvHashSet<CellId>, Vec<(BlockIdExt, CellId)>, usize)>;
 
 fn mark(
-    shardstate_db: &dyn KvcSnapshotable<BlockIdExt>,
+    shardstate_db: &dyn KvcWriteable<BlockIdExt>,
     dynamic_boc_db: &DynamicBocDb,
     gc_resolver: &dyn AllowStateGcResolver,
     gc_time: u64
@@ -432,7 +481,7 @@ fn mark_subtree_recursive(
 }
 
 fn sweep(
-    shardstate_db: Arc<dyn KvcSnapshotable<BlockIdExt>>,
+    shardstate_db: Arc<dyn KvcWriteable<BlockIdExt>>,
     dynamic_boc_db: Arc<DynamicBocDb>,
     to_sweep: Vec<(BlockIdExt, CellId)>,
     marked: FnvHashSet<CellId>,
@@ -444,9 +493,9 @@ fn sweep(
     let mut deleted_count = 0;
     let mut sweeped = FnvHashSet::default();
 
-    for (block_id, cell_id) in to_sweep {
+    let mut transaction = dynamic_boc_db.begin_transaction()?;
 
-        let mut transaction = dynamic_boc_db.begin_transaction()?;
+    for (block_id, cell_id) in to_sweep {
 
         deleted_count += sweep_cells_recursive(
             dynamic_boc_db.as_ref(),
@@ -458,10 +507,10 @@ fn sweep(
         )?;
         log::trace!(target: TARGET, "GC::sweep  block_id {}", block_id);
 
-        transaction.commit()?;
-
         shardstate_db.delete(&block_id)?;
     }
+
+    transaction.commit()?;
 
     Ok(deleted_count)
 }

@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     block::construct_and_check_prev_stuff,
     shard_state::ShardStateStuff,
@@ -310,6 +323,18 @@ impl TopBlockDescrStuff {
         let block = Block::construct_from(&mut block_virt_root.into())?;
         let info = block.read_info()?;
         let value_flow = block.read_value_flow()?;
+
+        //
+        // TEMP CODE FOR DEVNET (FROM 23 July 2021) COMPATIBILITY
+        // In future delete only if condition, not read_in_full_depth!!!
+        //
+        if crate::engine::read_value_flow_in_full_depth() {
+            value_flow.read_in_full_depth()
+                .map_err(|e| error!("Can't read value flow in full depth: {}", e))?;
+        }
+        //
+        // end of temp code
+        //
 
         if info.version() != 0 {
             fail!("Block -> info -> version should be zero (found {})", info.version())

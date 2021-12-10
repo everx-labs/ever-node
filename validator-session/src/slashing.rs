@@ -1,5 +1,18 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use std::collections::HashMap;
-use std::convert::TryInto;
+// use std::convert::TryInto;
 use std::fmt;
 
 /// Public key hash
@@ -297,7 +310,7 @@ pub struct AggregatedValidatorStat {
     validators_stat: HashMap<PublicKeyHash, AggregatedNode>,
 
     /// Aggregated metric params (like expected value, standard deviation)
-    metrics_params: [AggregatedMetricParams; AggregatedMetric::AggregatedMetricsCount as usize],
+    // metrics_params: [AggregatedMetricParams; AggregatedMetric::AggregatedMetricsCount as usize],
 
     /// Slashed validators list
     slashed_validators: Vec<SlashedNode>,
@@ -360,9 +373,9 @@ impl AggregatedValidatorStat {
         }
 
         Self {
-            metrics_params: metrics_params.as_slice().try_into().unwrap(),
-            validators_stat: validators_stat,
-            slashed_validators: slashed_validators,
+            // metrics_params: metrics_params.as_slice().try_into().unwrap(),
+            validators_stat,
+            slashed_validators,
         }
     }
 

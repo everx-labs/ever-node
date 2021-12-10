@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 pub use super::*;
 
 /*
@@ -53,7 +66,7 @@ impl VoteCandidate for VoteCandidateImpl {
         let mut weight = 0;
 
         for i in 0..desc.get_total_nodes() {
-            if *self.voted_by.at(i as usize) {
+            if self.voted_by.at(i as usize) {
                 weight += desc.get_node_weight(i);
 
                 if weight >= desc.get_cutoff_weight() {
@@ -66,7 +79,7 @@ impl VoteCandidate for VoteCandidateImpl {
     }
 
     fn check_block_is_voted_by(&self, src_idx: u32) -> bool {
-        *self.voted_by.at(src_idx as usize)
+        self.voted_by.at(src_idx as usize)
     }
 
     /*
@@ -98,7 +111,7 @@ impl VoteCandidateWrapper for VoteCandidatePtr {
 
         //if vote from the node exists, do nothing
 
-        if *self_impl.voted_by.at(src_idx as usize) {
+        if self_impl.voted_by.at(src_idx as usize) {
             return self.clone();
         }
 
@@ -262,7 +275,7 @@ impl VoteCandidateImpl {
         block: SentBlockPtr,
     ) -> VoteCandidatePtr {
         let voted_by = vec![false; desc.get_total_nodes() as usize];
-        let voted_by = SessionFactory::create_vector(desc, voted_by);
+        let voted_by = SessionFactory::create_bool_vector(desc, voted_by);
 
         Self::create(desc, block, voted_by)
     }

@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     config::{ 
         ConfigEvent, NodeConfigHandler, NodeConfigSubscriber, TonNodeConfig, 
@@ -68,7 +81,7 @@ pub struct NodeNetwork {
     tag_connectivity_check_broadcast: u32,
     #[cfg(feature = "telemetry")]
     engine_telemetry: Arc<EngineTelemetry>,
-    engine_allocated: Arc<EngineAlloc>
+    engine_allocated: Arc<EngineAlloc>,
 }
 
 declare_counted!(
@@ -214,12 +227,12 @@ impl NodeNetwork {
         Ok(nn)
     }
 
-    pub async fn stop(&self) {
-        self.adnl.stop().await
-    }
-
     pub fn config_handler(&self) -> Arc<NodeConfigHandler> {
         self.config_handler.clone()
+    }
+
+    pub async fn stop(&self) {
+        self.adnl.stop().await
     }
 
     fn try_add_new_elem<K: Hash + Ord + Clone, T: CountedObject>(
@@ -331,17 +344,21 @@ impl NodeNetwork {
         overlay: &Arc<OverlayNode>,
         overlay_id: &Arc<OverlayShortId>
     ) -> Result<()> {
-        let peers = overlay.wait_for_peers(&overlay_id).await?;
-        for peer in peers.iter() {
-            let peer_key = KeyOption::from_tl_public_key(&peer.id)?;
-            if neighbours.contains_overlay_peer(peer_key.id()) {
-                continue;
-            }
-            let (ip, _) = DhtNode::find_address(dht, peer_key.id()).await?;
-            overlay.add_public_peer(&ip, peer, overlay_id)?;
-            if neighbours.add_overlay_peer(peer_key.id().clone()) {
-                log::trace!("add_overlay_peers: add overlay peer {:?}, address: {}", peer, ip);
-            }
+        match overlay.wait_for_peers(&overlay_id).await? {
+            None => {},
+            Some(peers) => {
+                for peer in peers.iter() {
+                    let peer_key = KeyOption::from_tl_public_key(&peer.id)?;
+                    if neighbours.contains_overlay_peer(peer_key.id()) {
+                        continue;
+                    }
+                    let (ip, _) = DhtNode::find_address(dht, peer_key.id()).await?;
+                    overlay.add_public_peer(&ip, peer, overlay_id)?;
+                    if neighbours.add_overlay_peer(peer_key.id().clone()) {
+                        log::trace!("add_overlay_peers: add overlay peer {:?}, address: {}", peer, ip);
+                    }
+                }
+            },
         }
         Ok(())
     }

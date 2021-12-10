@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 pub use super::*;
 
 use overlay::PrivateOverlayShortId;
@@ -21,13 +34,13 @@ const MAIN_LOOP_NAME: &str = "CCLR"; //catchain log replay short thread name
     LogReplayOptions
 */
 
-impl Default for LogReplayOptions {
-    fn default() -> Self {
+impl LogReplayOptions {
+    pub fn with_db(db_path: String) -> Self {
         Self {
             log_file_name: "".to_string(),
             session_id: None,
             replay_without_delays: false,
-            db_root: "./catchains".to_string(),
+            db_path,
             db_suffix: "".to_string(),
             allow_unsafe_self_blocks_resync: false,
         }
@@ -892,8 +905,8 @@ impl LogPlayerImpl {
             player.get_session_id(),
             player.get_nodes(),
             player.get_local_key(),
-            &log_replay_options.db_root,
-            &log_replay_options.db_suffix,
+            log_replay_options.db_path.clone(),
+            log_replay_options.db_suffix.clone(),
             log_replay_options.allow_unsafe_self_blocks_resync,
             player.get_overlay_manager(replay_listener),
             catchain_listener,

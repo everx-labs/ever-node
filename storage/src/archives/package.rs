@@ -1,12 +1,25 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::archives::package_entry::{PackageEntry, PKG_ENTRY_HEADER_SIZE};
-use std::{io::SeekFrom, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicU64, Ordering}}};
+use std::{io::SeekFrom, path::{Path, PathBuf}, sync::atomic::{AtomicU64, Ordering}};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use ton_types::{error, fail, Result};
 
 
 #[derive(Debug)]
 pub struct Package {
-    path: Arc<PathBuf>,
+    path: PathBuf,
     read_only: bool,
     size: AtomicU64,
     write_mutex: tokio::sync::Mutex<()>
@@ -28,8 +41,8 @@ async fn read_header<R: tokio::io::AsyncReadExt + Unpin>(reader: &mut R) -> Resu
 }
 
 impl Package {
-    pub async fn open(path: Arc<PathBuf>, read_only: bool, create: bool) -> Result<Self> {
-        let mut file = Self::open_file_ext(read_only, create, &*path).await?;
+    pub async fn open(path: PathBuf, read_only: bool, create: bool) -> Result<Self> {
+        let mut file = Self::open_file_ext(read_only, create, path.as_path()).await?;
         let mut size = file.metadata().await?.len();
 
         file.seek(SeekFrom::Start(0)).await?;
@@ -57,13 +70,28 @@ impl Package {
         self.size.load(Ordering::SeqCst) - PKG_HEADER_SIZE as u64
     }
 
-    pub const fn path(&self) -> &Arc<PathBuf> {
-        &self.path
+    pub async fn remove(&self) -> Result<()> {
+        debug_assert!(!self.read_only);
+        // TODO: check existance of file
+        tokio::fs::remove_file(self.path.as_path()).await
+            .map_err(|err| error!("destroy package error {}", err))
+    }
+
+    pub fn path(&self) -> &Path {
+        self.path.as_path()
+    }
+
+    pub fn get_path(&self) -> String {
+        self.path.display().to_string()
     }
 
     pub async fn truncate(&self, size: u64) -> Result<()> {
         let new_size = PKG_HEADER_SIZE as u64 + size;
-        log::debug!(target: "storage", "Truncating package, new size: {} bytes", new_size);
+        // let md = tokio::fs::metadata(self.path()).await?;
+        // if md.len() == new_size {
+        //     return Ok(())
+        // }
+        log::debug!(target: "storage", "Truncating package {}, new size: {} bytes", self.path.display(), new_size);
         self.size.store(new_size, Ordering::SeqCst);
 
         {
@@ -120,7 +148,11 @@ impl Package {
     }
 
     async fn open_file(&self) -> Result<tokio::fs::File> {
-        Self::open_file_ext(self.read_only, false, &*self.path).await
+        Self::open_file_ext(self.read_only, false, self.path.as_path()).await
+    }
+
+    pub async fn destroy(&self) -> Result<()> {
+        self.remove().await
     }
 }
 

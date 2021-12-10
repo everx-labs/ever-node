@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     CHECK,
     block::BlockStuff,
@@ -118,7 +131,6 @@ struct ValidateBase {
 
     // TODO: maybe make some fileds Option
     // data from block_candidate
-    config: BlockchainConfig,
     capabilities: u64,
     block: BlockStuff,
     info: BlockInfo,
@@ -1961,7 +1973,7 @@ impl ValidateQuery {
                     "usual"
                 };
                 // perform hypercube routing for this transit message
-                let use_hypercube = !base.config.has_capability(GlobalCapabilities::CapOffHypercube);
+                let use_hypercube = !base.config_params.has_capability(GlobalCapabilities::CapOffHypercube);
                 let route_info = perform_hypercube_routing(&next_prefix, &dest_prefix, &base.shard(), use_hypercube)
                     .map_err(|err| error!("cannot perform (check) hypercube routing for \
                         transit inbound message with hash {}: src={} cur={} next={} dest={}; \
@@ -2000,7 +2012,7 @@ impl ValidateQuery {
                         different from that stored in corresponding OutMsgDescr ({} transit)", key.to_hex_string(), tr_req)
                 }
                 // check the amount of the transit fee
-                let transit_fee = base.config.get_fwd_prices(false).next_fee(env.fwd_fee_remaining());
+                let transit_fee = base.config_params.fwd_prices(false)?.next_fee(env.fwd_fee_remaining());
                 if transit_fee != fwd_fee {
                     reject_query!("InMsg for transit message with hash {} declared collected transit fees \
                         to be {} (deducted from the remaining forwarding fees of {}), but \
@@ -2269,7 +2281,7 @@ impl ValidateQuery {
             OutMsg::New(_) => {
                 log::debug!(target: "validate_query", "src: {}, dst: {}, shard: {}", src_prefix, dest_prefix, base.shard());
                 // perform hypercube routing for this new message
-                let use_hypercube = !base.config.has_capability(GlobalCapabilities::CapOffHypercube);
+                let use_hypercube = !base.config_params.has_capability(GlobalCapabilities::CapOffHypercube);
                 let route_info = perform_hypercube_routing(&src_prefix, &dest_prefix, &base.shard(), use_hypercube)
                     .map_err(|err| error!("cannot perform (check) hypercube routing for \
                         new outbound message with hash {} : {}", key.to_hex_string(), err))?;
@@ -2709,6 +2721,7 @@ impl ValidateQuery {
 
     fn check_one_transaction(
         base: &ValidateBase,
+        config: BlockchainConfig,
         libraries: Libraries,
         account_addr: &UInt256,
         account_root: &mut Cell,
@@ -2935,7 +2948,7 @@ impl ValidateQuery {
                     reject_query!("ordinary transaction {} of account {} has no inbound message",
                         lt, account_addr.to_hex_string())
                 }
-                Box::new(OrdinaryTransactionExecutor::new(base.config.clone()))
+                Box::new(OrdinaryTransactionExecutor::new(config))
             }
             TransactionDescr::Storage(_) => {
                 if trans.in_msg_cell().is_some() {
@@ -2954,7 +2967,7 @@ impl ValidateQuery {
                     reject_query!("{} transaction {} of account {} has an inbound message",
                         if info.tt.is_tock() {"tock"} else {"tick"}, lt, account_addr.to_hex_string())
                 }
-                Box::new(TickTockTransactionExecutor::new(base.config.clone(), info.tt.clone()))
+                Box::new(TickTockTransactionExecutor::new(config, info.tt.clone()))
             }
             TransactionDescr::MergePrepare(_) => {
                 if trans.in_msg_cell().is_some() {
@@ -3034,6 +3047,11 @@ impl ValidateQuery {
         // check new balance and value flow
         let mut left_balance = old_balance.clone();
         left_balance.add(&money_imported)?;
+        if let Some(in_msg) = in_msg {
+            if let Some(header) = in_msg.int_header() {
+                left_balance.grams.add(&header.ihr_fee)?;
+            }
+        }
         let new_balance = account.balance().cloned().unwrap_or_default();
         let mut right_balance = new_balance.clone();
         right_balance.add(&money_exported)?;
@@ -3051,6 +3069,7 @@ impl ValidateQuery {
     // NB: may be run in parallel for different accounts
     fn check_account_transactions(
         base: &ValidateBase,
+        config: BlockchainConfig,
         libraries: Libraries,
         account_addr: &UInt256,
         account_root: &mut Cell,
@@ -3063,8 +3082,18 @@ impl ValidateQuery {
         let (max_trans_lt, _) = acc_block.transactions().get_max(false)?.ok_or_else(|| error!("no maximal transaction"))?;
         let mut new_account = account.clone();
         acc_block.transactions().iterate_slices_with_keys(|lt, trans| {
-            Self::check_one_transaction(base, libraries.clone(), account_addr, account_root, &mut new_account, lt, trans.reference(0)?,
-                lt == min_trans_lt, lt == max_trans_lt)
+            Self::check_one_transaction(
+                base,
+                config.clone(),
+                libraries.clone(),
+                account_addr,
+                account_root,
+                &mut new_account,
+                lt,
+                trans.reference(0)?,
+                lt == min_trans_lt,
+                lt == max_trans_lt
+            )
         }).map_err(|err| error!("at least one Transaction of account {} is invalid : {}", account_addr.to_hex_string(), err))?;
         if base.shard().is_masterchain() {
             Self::scan_account_libraries(base, account.libraries(), new_account.libraries(), account_addr)
@@ -3075,12 +3104,23 @@ impl ValidateQuery {
 
     fn check_transactions(base: Arc<ValidateBase>, libraries: Libraries, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
         log::debug!(target: "validate_query", "checking all transactions");
+        let config = BlockchainConfig::with_config(base.config_params.clone())?;
         base.account_blocks.iterate_with_keys_and_aug(|account_addr, acc_block, fee| {
             let base = base.clone();
             let libraries = libraries.clone();
             let (mut account_root, account) = Self::unpack_account(&base, &account_addr)?;
+            let config = config.clone();
             Self::add_task(tasks, move ||
-                Self::check_account_transactions(&base, libraries, &account_addr, &mut account_root, account, acc_block, fee)
+                Self::check_account_transactions(
+                    &base,
+                    config,
+                    libraries,
+                    &account_addr,
+                    &mut account_root,
+                    account,
+                    acc_block,
+                    fee
+                )
             );
             Ok(true)
         })?;
@@ -3862,7 +3902,6 @@ impl ValidateQuery {
         self.unpack_prev_state(&mut base)?;
         self.unpack_next_state(&mut base, &mc_data)?;
         base.config_params = mc_data.state().config_params()?.clone();
-        base.config = BlockchainConfig::with_config(mc_data.state().config_params()?.clone())?;
         base.capabilities = base.config_params.capabilities();
         Self::load_block_data(&mut base)?;
         Ok((base, mc_data))

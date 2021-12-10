@@ -1,8 +1,23 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     block_handle_db::BlockHandle, lt_db::LtDb, lt_desc_db::LtDescDb, 
     types::{LtDbEntry, LtDbKey, LtDesc, ShardIdentKey}
 };
-use std::{cmp::Ordering, convert::TryInto, path::Path, sync::RwLock};
+use crate::db::rocksdb::RocksDb;
+use std::sync::Arc;
+use std::{cmp::Ordering, convert::TryInto, sync::RwLock};
 use ton_block::{AccountIdPrefixFull, BlockIdExt, MAX_SPLIT_DEPTH, ShardIdent, UnixTime32};
 use ton_types::{fail, Result};
 
@@ -19,14 +34,16 @@ impl BlockIndexDb {
     }
     
 
-    pub fn with_paths(
-        lt_desc_db_path: impl AsRef<Path>,
-        lt_db_path: impl AsRef<Path>,
-    ) -> Self {
-        Self::with_dbs(
-            LtDescDb::with_path(lt_desc_db_path),
-            LtDb::with_path(lt_db_path),
-        )
+    pub fn with_db(
+        db: Arc<RocksDb>,
+        lt_desc_db_path: &str,
+        lt_db_path: &str,
+    ) -> Result<Self> {
+        let ret = Self::with_dbs(
+            LtDescDb::with_db(db.clone(), lt_desc_db_path)?,
+            LtDb::with_db(db, lt_db_path)?,
+        );
+        Ok(ret)
     }
 
 

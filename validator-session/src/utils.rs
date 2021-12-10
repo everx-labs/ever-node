@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 pub use super::*;
 use crate::ton_api::ton::Hashable;
 use crate::ton_api::IntoBoxed;
@@ -8,6 +21,15 @@ use crate::ton_api::IntoBoxed;
 
 pub(crate) fn compute_hash_from_buffer(data: &[u8]) -> HashType {
     crc32c::crc32c(data)
+}
+
+pub(crate) fn compute_hash_from_buffer_u32(data: &[u32]) -> HashType {
+    let (head, body, tail) = unsafe { data.align_to::<u8>() };
+
+    assert!(head.is_empty());
+    assert!(tail.is_empty());
+
+    compute_hash_from_buffer(body)
 }
 
 pub(crate) fn compute_hash_from_bytes(data: &::ton_api::ton::bytes) -> HashType {

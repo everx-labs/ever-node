@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::engine_traits::EngineAlloc;
 #[cfg(feature = "telemetry")]
 use crate::engine_traits::EngineTelemetry;
@@ -107,6 +120,10 @@ impl CatchainClient {
         }
         self.is_stop.store(true, atomic::Ordering::Relaxed);
         self.consumer.is_stop.store(true, atomic::Ordering::Relaxed);
+
+        for worker in self.consumer.worker_waiters.iter() {
+            worker.val().respond(None);
+        }
         log::debug!("Overlay {} stopped.", &self.overlay_id);
     }
 
@@ -278,7 +295,7 @@ impl CatchainClient {
             };
             let message = receiver.wait_for_broadcast(overlay_id).await;
             match message {
-                Ok(message) => {
+                Ok(Some(message)) => {
                     log::trace!(target: Self::TARGET, "private overlay broadcast (successed)");
                    // let src_id = validator_keys.get(&message.1).ok_or_else(|| error!("unknown key!"))?;
                     if let Some(listener) = catchain_listener.upgrade() {
@@ -290,6 +307,7 @@ impl CatchainClient {
                         );    // Test id!
                     }
                 },
+                Ok(None) => { return Ok(()) },
                 Err(e) => {
                     log::error!(target: Self::TARGET, "private overlay broadcast err: {}", e);
                 },
@@ -315,7 +333,7 @@ impl CatchainClient {
             };
             let message = receiver.wait_for_catchain(overlay_id).await;
             match message {
-                Ok((catchain_block_update, validator_session_block_update, source_id))  => {
+                Ok(Some((catchain_block_update, validator_session_block_update, source_id)))  => {
                     log::trace!(target: Self::TARGET, "private overlay broadcast ValidatorSession_BlockUpdate (successed)");
                     let vs_block_update = validator_session_block_update.into_boxed();
                     let block_update = catchain_block_update.into_boxed();
@@ -331,6 +349,7 @@ impl CatchainClient {
                                 &data);
                     }
                 },
+                Ok(None) => { return Ok(())},
                 Err(e) => {
                     log::error!(target: Self::TARGET, "private overlay broadcast err: {}", e);
                 },
@@ -457,14 +476,19 @@ struct CatchainClientConsumer {
     catchain_listener: CatchainOverlayListenerPtr,
     is_stop: AtomicBool,
     overlay_id: Arc<PrivateOverlayShortId>,
+    worker_waiters: lockfree::map::Map<u128, Arc<Wait<Result<QueryResult>>>>
 }
 
 impl CatchainClientConsumer {
-    fn new(overlay_id: Arc<PrivateOverlayShortId>, catchain_listener: CatchainOverlayListenerPtr) -> Self {
+    fn new(
+        overlay_id: Arc<PrivateOverlayShortId>,
+        catchain_listener: CatchainOverlayListenerPtr
+    ) -> Self {
         Self {
             catchain_listener: catchain_listener,
             is_stop: AtomicBool::new(false),
-            overlay_id: overlay_id
+            overlay_id: overlay_id, 
+            worker_waiters: lockfree::map::Map::new()
         }
     }
 }
@@ -479,14 +503,25 @@ impl QueriesConsumer for CatchainClientConsumer {
             fail!("Overlay {} was stopped!", &self.overlay_id);
         }
         let now = Instant::now();
+        let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+
+        let data = match serialize(&query) {
+            Ok(query) => query,
+            Err(e) => { 
+                log::warn!("query is bad: {:?}", e);
+                fail!(e)
+            }
+        };
         let (wait, mut queue_reader) = Wait::new();
+        self.worker_waiters.insert(id.as_nanos(), wait.clone());
+        
         if let Some(listener) = self.catchain_listener.upgrade() {
             let wait = wait.clone();
             wait.request();
             listener
                 .on_query(
                     peers.other().clone(),
-                    &catchain::CatchainFactory::create_block_payload(::ton_api::ton::bytes(serialize(&query)?)),
+                    &catchain::CatchainFactory::create_block_payload(::ton_api::ton::bytes(data)),
                     Box::new(move |result: Result<BlockPayloadPtr> | {
                         let result = match result {
                             Ok(answer) => {
@@ -525,6 +560,7 @@ impl QueriesConsumer for CatchainClientConsumer {
             let elapsed = now.elapsed();
             log::trace!(target: CatchainClient::TARGET, "query elapsed: {}", elapsed.as_millis());
         };
+        self.worker_waiters.remove(&id.as_nanos());
         res
     }
 }

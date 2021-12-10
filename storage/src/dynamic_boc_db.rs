@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     StorageAlloc, cell_db::CellDb, 
     /*dynamic_boc_diff_writer::{DynamicBocDiffFactory, DynamicBocDiffWriter},*/
@@ -5,8 +18,10 @@ use crate::{
 };
 #[cfg(feature = "telemetry")]
 use crate::StorageTelemetry;
+#[cfg(all(test, feature = "telemetry"))]
+use crate::tests::utils::create_storage_telemetry;
 use adnl::{declare_counted, common::{CountedObject, Counter}};
-use std::{ops::{Deref, DerefMut}, sync::{Arc, RwLock, Weak}, thread, time};
+use std::{ops::{Deref, DerefMut}, sync::{Arc, RwLock, Weak}, time};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
 //#[cfg(test)]
@@ -122,7 +137,7 @@ impl DynamicBocDb {
                 Ok(cell) => cell,
                 Err(e) => {
                     log::error!("Can't load cell  id {}  db_index {}  in_cache {}  error: {}", cell_id, self.db_index, in_cache, e);
-                    thread::sleep(time::Duration::from_millis(2_000));
+                    std::thread::sleep(time::Duration::from_millis(2_000));
                     std::process::exit(0xFF);
                 }
             }

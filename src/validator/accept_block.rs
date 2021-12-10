@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     block::{construct_and_check_prev_stuff, BlockStuff},
     shard_state::ShardStateStuff,
@@ -319,7 +332,7 @@ pub fn create_new_proof(
     let _prev_vert_ref = info.read_prev_vert_ref()?;
     let master_ref = info.read_master_ref()?;
     let extra = block.read_extra()?;
-    let _value_flow = block.read_value_flow()?;
+    block.read_value_flow()?.read_in_full_depth()?;
 
 
     // check some header fields, especially shard
@@ -591,7 +604,9 @@ fn validate_proof_link(
 ) -> Result<Vec<BlockIdExt>> {
 
     let (virt_block, virt_block_root) = proof_link.virtualize_block()?;
-    let _value_flow = virt_block.read_value_flow()?;
+    let value_flow = virt_block.read_value_flow()?;
+    value_flow.read_in_full_depth()
+        .map_err(|e| error!("Can't read value flow in full depth: {}", e))?;
 
     let (_, prev_stuff) = construct_and_check_prev_stuff(
         &virt_block_root,

@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     block::{
         compare_block_ids, convert_block_id_ext_api2blk, convert_block_id_ext_blk2api, 
@@ -77,7 +90,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
         mc_seq_no: u32,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<Option<Vec<u8>>>;
-    async fn wait_broadcast(&self) -> Result<(Broadcast, Arc<KeyId>)>;
+    async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>>;
 }
 
 //    #[derive(Clone)]
@@ -910,17 +923,18 @@ Ok(if key_block {
         }
     }
 
-    async fn wait_broadcast(&self) -> Result<(Broadcast, Arc<KeyId>)> {
+    async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>> {
         let receiver = self.overlay.clone();
         let id = self.overlay_id.clone();
         loop {
             match receiver.wait_for_broadcast(&id).await {
-                Ok(info) => {
+                Ok(Some(info)) => {
                     let answer: Broadcast = Deserializer::new(
                         &mut Cursor::new(info.data)
                     ).read_boxed()?;
-                    break Ok((answer, info.recv_from))
-                }
+                    break Ok(Some((answer, info.recv_from)))
+                },
+                Ok(None) => break Ok(None),
                 Err(e) => log::error!("broadcast waiting error: {}", e)
             }
         }

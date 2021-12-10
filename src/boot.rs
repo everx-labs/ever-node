@@ -1,6 +1,19 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     CHECK, block::BlockStuff, block_proof::BlockProofStuff, engine_traits::EngineOperations, 
-    shard_state::ShardStateStuff
+    shard_state::ShardStateStuff, engine::Engine
 };
 use adnl::common::KeyId;
 use std::{ops::Deref, sync::Arc, time::Duration};
@@ -195,6 +208,7 @@ async fn download_start_blocks_and_states(
     master_id: &BlockIdExt
 ) -> Result<()> {
 
+    engine.set_sync_status(Engine::SYNC_STATUS_LOAD_MASTER_STATE);
     let active_peers = Arc::new(lockfree::set::Set::new());
     let (master_handle, init_mc_block) = download_block_and_state(
         engine, master_id, master_id, &active_peers, Some(RETRY_MASTER_STATE_DOWNLOAD)
@@ -203,6 +217,7 @@ async fn download_start_blocks_and_states(
     CHECK!(master_handle.is_applied());
 
     let (_master, workchain_id) = engine.processed_workchain().await?;
+    engine.set_sync_status(Engine::SYNC_STATUS_LOAD_SHARD_STATES);
     for (_, block_id) in init_mc_block.shards_blocks(workchain_id)? {
         let shard_handle = if block_id.seq_no() == 0 {
             download_zerostate(engine, &block_id).await?.0

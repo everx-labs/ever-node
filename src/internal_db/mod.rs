@@ -1,13 +1,26 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     block::{convert_block_id_ext_blk2api, convert_block_id_ext_api2blk, BlockStuff},
     block_proof::BlockProofStuff, engine_traits::EngineAlloc, error::NodeError, 
-    shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrId, TopBlockDescrStuff}
+    shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrId, TopBlockDescrStuff},
 };
 #[cfg(feature = "telemetry")]
 use crate::engine_traits::EngineTelemetry;
 
 use std::{
-    path::PathBuf, sync::Arc, cmp::min, collections::HashMap,
+    path::{Path, PathBuf}, sync::Arc, cmp::min, collections::HashMap,
     sync::atomic::{AtomicU32, Ordering}
 };
 use storage::{
@@ -15,20 +28,22 @@ use storage::{
     archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId},
     block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage, Callback}, 
     block_index_db::BlockIndexDb, block_info_db::BlockInfoDb, node_state_db::NodeStateDb, 
+    db::rocksdb::RocksDb,
     shardstate_db::{AllowStateGcResolver, ShardStateDb}, 
     shardstate_persistent_db::ShardStatePersistentDb, types::BlockMeta, 
     shard_top_blocks_db::ShardTopBlocksDb,
 };
-#[cfg(feature = "read_old_db")]
-use storage::block_db::BlockDb;
 use ton_block::{Block, BlockIdExt, AccountIdPrefixFull, UnixTime32};
 use ton_types::{error, fail, Result, UInt256};
 
-/// Node state keys
-pub(crate) const INITIAL_MC_BLOCK: &str      = "InitMcBlockId";
-pub(crate) const LAST_APPLIED_MC_BLOCK: &str = "LastMcBlockId";
-pub(crate) const PSS_KEEPER_MC_BLOCK: &str   = "PssKeeperBlockId";
-pub(crate) const SHARD_CLIENT_MC_BLOCK: &str = "ShardsClientMcBlockId";
+/// Full node state keys
+pub(crate) const INITIAL_MC_BLOCK: &str       = "InitMcBlockId";
+pub(crate) const LAST_APPLIED_MC_BLOCK: &str  = "LastMcBlockId";
+pub(crate) const PSS_KEEPER_MC_BLOCK: &str    = "PssKeeperBlockId";
+pub(crate) const SHARD_CLIENT_MC_BLOCK: &str  = "ShardsClientMcBlockId";
+
+/// Validator state keys
+pub(crate) const LAST_ROTATION_MC_BLOCK: &str = "LastRotationBlockId";
 
 #[derive(Clone, Debug)]
 pub enum DataStatus {
@@ -204,8 +219,11 @@ pub trait InternalDb : Sync + Send {
         callback: Option<Arc<dyn Callback>>
     ) -> Result<()>;
 
-    fn load_node_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>>;
-    fn save_node_state(&self, key: &'static str, value: &BlockIdExt) -> Result<()>;
+    fn load_full_node_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>>;
+    fn save_full_node_state(&self, key: &'static str, value: &BlockIdExt) -> Result<()>;
+    fn drop_validator_state(&self, key: &'static str) -> Result<()>;
+    fn load_validator_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>>;
+    fn save_validator_state(&self, key: &'static str, value: &BlockIdExt) -> Result<()>;
 
     fn archive_manager(&self) -> &Arc<ArchiveManager>;
 
@@ -230,6 +248,9 @@ pub trait InternalDb : Sync + Send {
     fn db_root_dir(&self) -> Result<&str>;
 
     fn adjust_states_gc_interval(&self, interval_ms: u32);
+    async fn stop_states_gc(&self);
+
+    async fn truncate_database(&self, block_id: &BlockIdExt) -> Result<()>;
 }
 
 #[derive(serde::Deserialize)]
@@ -252,18 +273,11 @@ pub struct InternalDbImpl {
     archive_manager: Arc<ArchiveManager>,
     shard_top_blocks_db: ShardTopBlocksDb,
 
-    #[cfg(feature = "read_old_db")]
-    old_block_db: BlockDb,
-    #[cfg(feature = "read_old_db")]
-    old_block_proof_db: BlockInfoDb,
-    #[cfg(feature = "read_old_db")]
-    old_block_proof_link_db: BlockInfoDb,
-
     config: InternalDbConfig,
     cells_gc_interval: Arc<AtomicU32>,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<EngineTelemetry>,
-    allocated: Arc<EngineAlloc>
+    allocated: Arc<EngineAlloc>,
 
 }
 
@@ -275,33 +289,37 @@ impl InternalDbImpl {
         telemetry: Arc<EngineTelemetry>,
         allocated: Arc<EngineAlloc>
     ) -> Result<Self> {
-        let block_index_db = Arc::new(BlockIndexDb::with_paths(
-            &Self::build_name(&config.db_directory, "index_db/lt_desc_db"),
-            &Self::build_name(&config.db_directory, "index_db/lt_db"),
-        ));
+        let db = RocksDb::with_path(config.db_directory.as_str(), "db");
+        let db_catchain = RocksDb::with_path(config.db_directory.as_str(), "catchains");
+        let block_index_db = Arc::new(BlockIndexDb::with_db(
+            db.clone(),
+            "index_db/lt_desc_db",
+            "index_db/lt_db"
+        )?);
         let block_handle_db = Arc::new(
-            BlockHandleDb::with_path(
-                &Self::build_name(&config.db_directory, "block_handle_db"),
-            )
+            BlockHandleDb::with_db(db.clone(), "block_handle_db")?
         );
-        let node_state_db = Arc::new(
-            NodeStateDb::with_path(
-                &Self::build_name(&config.db_directory, "node_state_db")
-            )
+        let full_node_state_db = Arc::new(
+            NodeStateDb::with_db(db.clone(), "node_state_db")?
+        );
+        let validator_state_db = Arc::new(
+            NodeStateDb::with_db(db_catchain, "validator_state_db")?
         );
         let block_handle_storage = Arc::new(
             BlockHandleStorage::with_dbs(
                 block_handle_db.clone(), 
-                node_state_db, 
+                full_node_state_db, 
+                validator_state_db,
                 #[cfg(feature = "telemetry")]
                 telemetry.storage.clone(),
                 allocated.storage.clone()
             )
         );
-        let shard_state_dynamic_db = ShardStateDb::with_paths(
-            &Self::build_name(&config.db_directory, "shardstate_db"),
-            &Self::build_name(&config.db_directory, "cells_db"),
-            &Self::build_name(&config.db_directory, "cells_db1"),
+        let shard_state_dynamic_db = ShardStateDb::with_db(
+            db.clone(),
+            "shardstate_db",
+            "cells_db",
+            "cells_db1",
             #[cfg(feature = "telemetry")]
             telemetry.storage.clone(),
             allocated.storage.clone()
@@ -309,6 +327,7 @@ impl InternalDbImpl {
         //let shardstate_db_gc = GC::new(&shard_state_dynamic_db, Arc::clone(&block_handle_db))?;
         let archive_manager = Arc::new(
             ArchiveManager::with_data(
+                db.clone(),
                 Arc::new(PathBuf::from(&config.db_directory)),
                 #[cfg(feature = "telemetry")]
                 telemetry.storage.clone(),
@@ -318,24 +337,18 @@ impl InternalDbImpl {
         let db = Self {
             block_handle_storage,
             block_index_db,
-            prev_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "prev1_block_db")),
-            prev2_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "prev2_block_db")),
-            next_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "next1_block_db")),
-            next2_block_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "next2_block_db")),
+            prev_block_db: BlockInfoDb::with_db(db.clone(), "prev1_block_db")?,
+            prev2_block_db: BlockInfoDb::with_db(db.clone(), "prev2_block_db")?,
+            next_block_db: BlockInfoDb::with_db(db.clone(), "next1_block_db")?,
+            next2_block_db: BlockInfoDb::with_db(db.clone(), "next2_block_db")?,
             shard_state_persistent_db: ShardStatePersistentDb::with_path(
-                &Self::build_name(&config.db_directory, "shard_state_persistent_db")),
+                Path::new(config.db_directory.as_str()).join("shard_state_persistent_db")
+            ),
             shard_state_dynamic_db,
             //ss_test_map: lockfree::map::Map::new(),
             //shardstate_db_gc,
             archive_manager,
-            shard_top_blocks_db: ShardTopBlocksDb::with_path(&Self::build_name(&config.db_directory, "shard_top_blocks_db")),
-
-            #[cfg(feature = "read_old_db")]
-            old_block_db: BlockDb::with_path(&Self::build_name(&config.db_directory, "block_db")),
-            #[cfg(feature = "read_old_db")]
-            old_block_proof_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_proof_db")),
-            #[cfg(feature = "read_old_db")]
-            old_block_proof_link_db: BlockInfoDb::with_path(&Self::build_name(&config.db_directory, "block_proof_link_db")),
+            shard_top_blocks_db: ShardTopBlocksDb::with_db(db.clone(), "shard_top_blocks_db")?,
 
             cells_gc_interval: Arc::new(AtomicU32::new(config.cells_gc_interval_sec)),
             config,
@@ -347,13 +360,13 @@ impl InternalDbImpl {
         Ok(db)
     }
 
-    #[allow(dead_code)]
+    //#[allow(dead_code)]                                                                                 /
     pub fn start_states_gc(&self, resolver: Arc<dyn AllowStateGcResolver>) {
         self.shard_state_dynamic_db.clone().start_gc(resolver, self.cells_gc_interval.clone())
     }
 
-    pub fn build_name(dir: &str, name: &str) -> String {
-        format!("{}/{}", dir, name)
+    pub async fn stop_states_gc(&self) {
+        self.shard_state_dynamic_db.stop_gc().await
     }
 
     fn store_block_handle(
@@ -361,7 +374,7 @@ impl InternalDbImpl {
         handle: &Arc<BlockHandle>,
         callback: Option<Arc<dyn Callback>>
     ) -> Result<()> {
-        self.block_handle_storage.store_handle(handle, callback)
+        self.block_handle_storage.save_handle(handle, callback)
     }
 
 }
@@ -442,14 +455,8 @@ impl InternalDb for InternalDbImpl {
         if !handle.has_data() {
             fail!("This block is not stored yet: {:?}", handle);
         }
-        #[cfg(feature = "read_old_db")] {
-            let raw_block = self.old_block_db.get(&handle.id().into())?;
-            return Ok(raw_block.to_vec());
-        }
-        #[cfg(not(feature = "read_old_db"))] {
-            let entry_id = PackageEntryId::<_, UInt256, UInt256>::Block(handle.id());
-            self.archive_manager.get_file(handle, &entry_id).await
-        }
+        let entry_id = PackageEntryId::<_, UInt256, UInt256>::Block(handle.id());
+        self.archive_manager.get_file(handle, &entry_id).await
     }
 
     fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seq_no: u32) -> Result<Arc<BlockHandle>> {
@@ -549,18 +556,6 @@ impl InternalDb for InternalDbImpl {
         BlockProofStuff::deserialize(handle.id(), raw_proof, is_link)
     }
 
-    #[cfg(feature = "read_old_db")]
-    async fn load_block_proof_raw(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>> {
-        log::trace!("load_block_proof_raw {} {}", if is_link {"link"} else {""}, handle.id());
-        let raw_proof = if is_link {
-            self.old_block_proof_link_db.get(&handle.id().into())?
-        } else {
-            self.old_block_proof_db.get(&handle.id().into())?
-        };
-        Ok(raw_proof.to_vec())
-    }
-
-    #[cfg(not(feature = "read_old_db"))]
     async fn load_block_proof_raw(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>> {
         log::trace!("load_block_proof_raw {} {}", if is_link {"link"} else {""}, handle.id());
         let (entry_id, inited) = if is_link {
@@ -853,15 +848,30 @@ impl InternalDb for InternalDbImpl {
         );
         Ok(())
     }
-
-    fn load_node_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>> {
-        let _tc = TimeChecker::new(format!("load_node_state {}", key), 10);
-        self.block_handle_storage.load_state(key)
+    
+    fn load_full_node_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>> {
+        let _tc = TimeChecker::new(format!("load_full_node_state {}", key), 10);
+        self.block_handle_storage.load_full_node_state(key)
     }
 
-    fn save_node_state(&self, key: &'static str, block_id: &BlockIdExt) -> Result<()> {
-        let _tc = TimeChecker::new(format!("store_node_state {}", key), 10);
-        self.block_handle_storage.store_state(key, block_id)
+    fn save_full_node_state(&self, key: &'static str, block_id: &BlockIdExt) -> Result<()> {
+        let _tc = TimeChecker::new(format!("save_full_node_state {}", key), 10);
+        self.block_handle_storage.save_full_node_state(key, block_id)
+    }
+
+    fn drop_validator_state(&self, key: &'static str) -> Result<()> {
+        let _tc = TimeChecker::new(format!("drop_validator_state {}", key), 10);
+        self.block_handle_storage.drop_validator_state(key)
+    }
+
+    fn load_validator_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>> {
+        let _tc = TimeChecker::new(format!("load_validator_state {}", key), 10);
+        self.block_handle_storage.load_validator_state(key)
+    }
+
+    fn save_validator_state(&self, key: &'static str, block_id: &BlockIdExt) -> Result<()> {
+        let _tc = TimeChecker::new(format!("save_validator_state {}", key), 10);
+        self.block_handle_storage.save_validator_state(key, block_id)
     }
 
     fn archive_manager(&self) -> &Arc<ArchiveManager> {
@@ -934,6 +944,14 @@ impl InternalDb for InternalDbImpl {
     fn adjust_states_gc_interval(&self, interval_ms: u32) {
         let prev = self.cells_gc_interval.swap(interval_ms, Ordering::Relaxed);
         log::info!("Adjusted states gc interval {} -> {}", prev, interval_ms);
+    }
+
+    async fn stop_states_gc(&self) {
+        InternalDbImpl::stop_states_gc(self).await
+    }
+
+    async fn truncate_database(&self, block_id: &BlockIdExt) -> Result<()> {
+        self.archive_manager.trunc(block_id).await
     }
 }
 

@@ -1,15 +1,29 @@
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     block::{convert_block_id_ext_api2blk, convert_block_id_ext_blk2api},
     collator_test_bundle::CollatorTestBundle,
     config::{KeyRing, NodeConfigHandler},
-    engine_traits::EngineOperations,
+    engine_traits::EngineOperations, engine::Engine,
     validator::validator_utils::validatordescr_to_catchain_node
 };
 use adnl::{
     common::{deserialize, QueryResult, Subscriber, AdnlPeers},
     server::{AdnlServer, AdnlServerConfig}
 };
-use std::{ops::Deref, sync::Arc, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
+use std::{fmt::Write, ops::Deref, sync::Arc, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
+use serde_json::Map;
 use ton_api::{
     ton::{
         self, bytes, PublicKey, TLObject, accountaddress::AccountAddress, raw::shardaccountstate::ShardAccountState,
@@ -27,7 +41,7 @@ use ton_api::{
 use ton_types::{fail, error, Result, UInt256};
 use ton_block::{
     generate_test_account_by_init_code_hash, BlockIdExt, ConfigParam0, ConfigParamEnum, ConfigParams,
-    MsgAddressInt, ShardAccount, Serializable
+    MsgAddressInt, ShardAccount, Serializable, ShardIdent
 };
 use ton_block_json::serialize_config_param;
 
@@ -183,6 +197,34 @@ impl ControlQuerySubscriber {
         Ok(result)
     }
 
+    fn convert_sync_status(&self, sync_status: u32 ) -> String {
+        match sync_status {
+            Engine::SYNC_STATUS_START_BOOT => "start_boot".to_string(),
+            Engine::SYNC_STATUS_LOAD_MASTER_STATE => "load_master_state".to_string(),
+            Engine::SYNC_STATUS_LOAD_SHARD_STATES => "load_shard_states".to_string(),
+            Engine::SYNC_STATUS_FINISH_BOOT => "finish boot".to_string(),
+            Engine::SYNC_STATUS_SYNC_BLOCKS => "synchronization by blocks".to_string(),
+            Engine::SYNC_STATUS_FINISH_SYNC => "synchronization finished".to_string(),
+            _ => "no set status".to_string()
+        }
+    }
+
+    fn block_id_to_json(&self, block_id: &BlockIdExt) -> Result<String> {
+        let mut root_hash = String::new();
+        write!(root_hash, "{:x}", block_id.root_hash())?;
+        let mut json_map = Map::new();
+
+        let mut file_hash = String::new();
+        write!(file_hash, "{:x}", block_id.file_hash())?;
+
+        json_map.insert("shard".to_string(), block_id.shard().to_string().into());
+        json_map.insert("seq_no".to_string(), block_id.seq_no().into());
+        json_map.insert("rh".to_string(), root_hash.into());
+        json_map.insert("fh".to_string(), file_hash.into());
+
+        Ok(serde_json::to_string(&json_map)?)
+    }
+
     fn add_stats(stats: &mut Vec<OneStat>, key: impl ToString, value: impl ToString) {
         stats.push(OneStat {
             key: key.to_string(),
@@ -190,14 +232,34 @@ impl ControlQuerySubscriber {
         })
     }
 
+    fn statistics_to_json(&self, map: &lockfree::map::Map<ShardIdent, u64>, now: u64) -> Result<String> {
+        let mut json_map = Map::new();
+
+        for item in map.iter() {
+            let info = if *item.val() == 0 {
+                "never".to_string()
+            } else {
+                format!("{} sec ago", now - item.val())
+            };
+            json_map.insert(item.key().to_string(), info.into());
+        }
+        Ok(serde_json::to_string_pretty(&json_map)?)
+    }
+
     async fn get_stats(&self) -> Result<Stats> {
         let engine = self.engine()?;
         let mut stats = Vec::new();
 
+        // sync status
+        let sync_status = engine.get_sync_status();
+        let sync_status = self.convert_sync_status(sync_status);
+        let sync_status = format!("\"{}\"", sync_status);
+        Self::add_stats(&mut stats, "sync_status", sync_status);
+
         let mc_block_id = if let Some(id) = engine.load_last_applied_mc_block_id()? {
             id
         } else {
-            Self::add_stats(&mut stats, "masterchainblock", "not set");
+            Self::add_stats(&mut stats, "masterchainblock", "\"not set\"");
             return Ok(Stats {stats: stats.into()})
         };
 
@@ -237,59 +299,30 @@ impl ControlQuerySubscriber {
         Self::add_stats(&mut stats, "in_next_vset_p36", next);
 
         let value = match engine.load_last_applied_mc_state_or_zerostate().await {
-            Ok(mc_state) => mc_state.block_id().to_string(),
-            Err(err) => err.to_string()
+            Ok(mc_state) => self.block_id_to_json(mc_state.block_id())?,
+            Err(err) => format!("\"{}\"", err.to_string())
         };
-        let value = format!("\"{}\"", value);
-        Self::add_stats(&mut stats, "last applied masterchain block id", value);
+        Self::add_stats(&mut stats, "last_applied_masterchain_block_id", value);
 
         let value = match engine.processed_workchain().await {
             Ok((true, _workchain_id)) => "masterchain".to_string(),
             Ok((false, workchain_id)) => format!("{}", workchain_id),
             Err(err) => err.to_string()
         };
-        Self::add_stats(&mut stats, "processed workchain", value);
+        Self::add_stats(&mut stats, "processed_workchain", value);
 
+        let ago = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
         // validation_stats
         let validation_stats = engine.validation_status();
 
-        let mut stat = String::new();
-        let ago = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-
-        for item in validation_stats.iter() {
-            stat.push_str("shard: ");
-            stat.push_str(&item.key().to_string()); 
-            stat.push_str(" - ");
-            if item.val() == &0 {
-                stat.push_str("never");
-            } else {
-                stat.push_str(&(ago - item.val()).to_string());
-                stat.push_str(" sec ago");
-            }
-            stat.push_str("\t");
-        }
-
-        let value = format!("\"{}\"", stat.to_string()); 
-        Self::add_stats(&mut stats, "validation_stats", value);
+        let validation_stats_json = self.statistics_to_json(&validation_stats, ago)?;
+        Self::add_stats(&mut stats, "validation_stats", validation_stats_json);
 
         // collation_stats
-        let mut stat = String::new();
         let collation_stats = engine.collation_status();
-        for item in collation_stats.iter() {
-            stat.push_str("shard: ");
-            stat.push_str(&item.key().to_string()); 
-            stat.push_str(" - ");
-            if item.val() == &0 {
-                stat.push_str("never");
-            } else {
-                stat.push_str(&(ago - item.val()).to_string());
-                stat.push_str(" sec ago");
-            }
-            stat.push_str("\t");
-        }
 
-        let value = format!("\"{}\"", stat.to_string()); 
-        Self::add_stats(&mut stats, "collation_stats", value);
+        let collation_stats_json = self.statistics_to_json(&collation_stats, ago)?;
+        Self::add_stats(&mut stats, "collation_stats", collation_stats_json);
 
         // tps_10
         if let Ok(tps) = engine.calc_tps(10) {
