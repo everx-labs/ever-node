@@ -837,7 +837,7 @@ impl Collator {
             mc_data.mc_state_extra().shards(),
             mc_data.config(),
             now,
-            false,
+            self.collator_settings.is_fake
         )?;
 
         self.check_utime(&mc_data, &prev_data, &mut collator_data)?;

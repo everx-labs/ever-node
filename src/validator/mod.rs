@@ -50,6 +50,17 @@ pub struct CollatorSettings {
     pub want_split: Option<bool>,
     pub want_merge: Option<bool>,
     pub max_collate_threads: Option<usize>,
+    pub is_fake: bool,
+}
+
+impl CollatorSettings {
+    #[allow(dead_code)]
+    pub fn fake() -> Self {
+        Self {
+            is_fake: true,
+            ..Self::default()
+        }
+    }
 }
 
 pub struct McData {

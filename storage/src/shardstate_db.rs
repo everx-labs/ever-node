@@ -27,30 +27,30 @@ use crate::db::rocksdb::RocksDb;
 use std::{
     io::{Cursor, Read, Write}, ops::Deref, 
     sync::{Arc, atomic::{AtomicU8, AtomicU32, Ordering}}, 
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH}
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use ton_block::BlockIdExt;
 use ton_types::{ByteOrderRead, Cell, Result, fail};
 
 pub(crate) struct DbEntry {
     pub cell_id: CellId, // TODO: remove this id
-    pub block_id_ext: BlockIdExt,
+    pub block_id: BlockIdExt,
     pub db_index: u32,
-    pub saved_at: u64,
+    pub save_utime: u64,
 }
 
 impl DbEntry {
-    pub fn with_params(cell_id: CellId, block_id_ext: BlockIdExt, db_index: u32, saved_at: u64) -> Self {
-        Self { cell_id, block_id_ext, db_index, saved_at }
+    pub fn with_params(cell_id: CellId, block_id: BlockIdExt, db_index: u32, save_utime: u64) -> Self {
+        Self { cell_id, block_id, db_index, save_utime }
     }
 }
 
 impl Serializable for DbEntry {
     fn serialize<T: Write>(&self, writer: &mut T) -> Result<()> {
         writer.write_all(self.cell_id.key())?;
-        self.block_id_ext.serialize(writer)?;
+        self.block_id.serialize(writer)?;
         writer.write_all(&self.db_index.to_le_bytes())?;
-        writer.write_all(&self.saved_at.to_le_bytes())?;
+        writer.write_all(&self.save_utime.to_le_bytes())?;
         Ok(())
     }
 
@@ -58,11 +58,11 @@ impl Serializable for DbEntry {
         let mut buf = [0; 32];
         reader.read_exact(&mut buf)?;
         let cell_id = CellId::new(buf.into());
-        let block_id_ext = BlockIdExt::deserialize(reader)?;
+        let block_id = BlockIdExt::deserialize(reader)?;
         let db_index = reader.read_le_u32().unwrap_or(0); // use 0 db by default
-        let saved_at = reader.read_le_u64().unwrap_or(0);
+        let save_utime = reader.read_le_u64().unwrap_or(0);
 
-        Ok(Self { cell_id, block_id_ext, db_index, saved_at })
+        Ok(Self { cell_id, block_id, db_index, save_utime })
     }
 }
 
@@ -75,6 +75,8 @@ pub struct ShardStateDb {
     dynamic_boc_db_1_writers: AtomicU32,
     stop: AtomicU8
 }
+
+const SHARDSTATES_GC_LAG_SEC: u64 = 300;
 
 impl ShardStateDb {
 
@@ -305,8 +307,8 @@ impl ShardStateDb {
 
         let c = boc_db.save_as_dynamic_boc(state_root.deref())?;
 
-        let saved_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let db_entry = DbEntry::with_params(cell_id.clone(), id.clone(), boc_db.db_index(), saved_at);
+        let save_utime = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let db_entry = DbEntry::with_params(cell_id.clone(), id.clone(), boc_db.db_index(), save_utime);
         let mut buf = Vec::new();
         db_entry.serialize(&mut Cursor::new(&mut buf))?;
 
@@ -341,7 +343,7 @@ impl ShardStateDb {
 }
 
 pub trait AllowStateGcResolver: Send + Sync {
-    fn allow_state_gc(&self, block_id: &BlockIdExt, saved_at: u64, gc_utime: u64) -> Result<bool>;
+    fn allow_state_gc(&self, block_id: &BlockIdExt, save_utime: u64, gc_utime: u64) -> Result<bool>;
 }
 
 #[derive(Default)]
@@ -416,25 +418,50 @@ fn mark(
     gc_resolver: &dyn AllowStateGcResolver,
     gc_time: u64
 ) -> MarkResult {
-    let mut to_mark = Vec::new();
-    let mut to_sweep = Vec::new();
+    // We should leave last states in DB to avoid full state saving when DB will active.
+    // 1) enumerate all roots with their save-time
+    // 2) remember max time and max masterchain root
+    // 3) do not sweep last masterchain root and shardchains roots 
+    //    for last SHARDSTATES_GC_LAG_SEC seconds
+
+    let mut last_mc_seqno = 0;
+    let mut roots = Vec::new();
+    let mut max_shard_utime = 0;
+
     shardstate_db.for_each(&mut |_key, value| {
         let db_entry = DbEntry::from_slice(value)?;
-        let cell_id = db_entry.cell_id;
-        let block_id_ext = db_entry.block_id_ext;
         if db_entry.db_index == dynamic_boc_db.db_index() {
-            if gc_resolver.allow_state_gc(&block_id_ext, db_entry.saved_at, gc_time)? {
-                log::trace!(target: TARGET, "mark  to_sweep  block_id {}  cell_id {}  db_index {} ", 
-                    block_id_ext, cell_id, dynamic_boc_db.db_index());
-                to_sweep.push((block_id_ext, cell_id));
+            if db_entry.block_id.shard().is_masterchain() {
+                if db_entry.block_id.seq_no() > last_mc_seqno {
+                    last_mc_seqno = db_entry.block_id.seq_no();
+                }
             } else {
-                log::trace!(target: TARGET, "mark  to_mark  block_id {}  cell_id {}  db_index {} ", 
-                    block_id_ext, cell_id, dynamic_boc_db.db_index());
-                to_mark.push(cell_id);
+                if db_entry.save_utime > max_shard_utime{
+                    max_shard_utime = db_entry.save_utime;
+                }
             }
+            roots.push(db_entry);
         }
         Ok(true)
     })?;
+
+    let mut to_mark = Vec::new();
+    let mut to_sweep = Vec::new();
+    for root in roots {
+        let is_mc = root.block_id.shard().is_masterchain();
+        if gc_resolver.allow_state_gc(&root.block_id, root.save_utime, gc_time)?
+            && (!is_mc || root.block_id.seq_no() < last_mc_seqno)
+            && (is_mc || root.save_utime + SHARDSTATES_GC_LAG_SEC < max_shard_utime)
+        {
+            log::trace!(target: TARGET, "mark  to_sweep  block_id {}  cell_id {}  db_index {}  utime {}", 
+                root.block_id, root.cell_id, dynamic_boc_db.db_index(), root.save_utime);
+            to_sweep.push((root.block_id, root.cell_id));
+        } else {
+            log::trace!(target: TARGET, "mark  to_mark  block_id {}  cell_id {}  db_index {}  utime {}", 
+                root.block_id, root.cell_id, dynamic_boc_db.db_index(), root.save_utime);
+            to_mark.push(root.cell_id);
+        }
+    }
 
     let marked_roots = to_mark.len();
     let mut marked = FnvHashSet::default();

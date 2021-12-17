@@ -37,10 +37,10 @@ use ton_block::{Block, BlockIdExt, AccountIdPrefixFull, UnixTime32};
 use ton_types::{error, fail, Result, UInt256};
 
 /// Full node state keys
-pub(crate) const INITIAL_MC_BLOCK: &str       = "InitMcBlockId";
-pub(crate) const LAST_APPLIED_MC_BLOCK: &str  = "LastMcBlockId";
-pub(crate) const PSS_KEEPER_MC_BLOCK: &str    = "PssKeeperBlockId";
-pub(crate) const SHARD_CLIENT_MC_BLOCK: &str  = "ShardsClientMcBlockId";
+pub const INITIAL_MC_BLOCK: &str       = "InitMcBlockId";
+pub const LAST_APPLIED_MC_BLOCK: &str  = "LastMcBlockId";
+pub const PSS_KEEPER_MC_BLOCK: &str    = "PssKeeperBlockId";
+pub const SHARD_CLIENT_MC_BLOCK: &str  = "ShardsClientMcBlockId";
 
 /// Validator state keys
 pub(crate) const LAST_ROTATION_MC_BLOCK: &str = "LastRotationBlockId";
