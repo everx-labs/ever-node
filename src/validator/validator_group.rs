@@ -16,7 +16,6 @@ use std::sync::*;
 use std::sync::atomic::{Ordering, AtomicU64};
 use std::time::*;
 use crossbeam_channel::Receiver;
-use tokio::sync::Mutex;
 
 use crate::engine_traits::{EngineOperations, PrivateOverlayOperations};
 use catchain::utils::get_hash;
@@ -42,6 +41,7 @@ use super::*;
 use super::fabric::*;
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::SlashingManagerPtr;
+use crate::validator::mutex_wrapper::MutexWrapper;
 
 struct CatchainOverlayManagerImpl {
     network: Weak<dyn PrivateOverlayOperations>,
@@ -284,7 +284,7 @@ pub struct ValidatorGroup {
     #[allow(dead_code)]
     allow_unsafe_self_blocks_resync: bool,
 
-    group_impl: Arc<Mutex<ValidatorGroupImpl>>,
+    group_impl: Arc<MutexWrapper<ValidatorGroupImpl>>,
     callback: Arc<dyn SessionListener + Send + Sync>,
     receiver: Arc<Receiver<ValidationAction>>,
 
@@ -310,10 +310,11 @@ impl ValidatorGroup {
         slashing_manager: SlashingManagerPtr,
     ) -> Self {
         let group_impl = ValidatorGroupImpl::new(shard.clone(), session_id.clone());
+        let id = format!("Val. group {} {}", shard, session_id);
         let (listener, receiver) = ValidatorSessionListener::create();
 
         ValidatorGroup {
-            shard,
+            shard: shard.clone(),
             local_key,
             validator_list_id,
             session_id,
@@ -322,7 +323,7 @@ impl ValidatorGroup {
             config,
             engine,
             allow_unsafe_self_blocks_resync,
-            group_impl: Arc::new(Mutex::new(group_impl)),
+            group_impl: Arc::new(MutexWrapper::new(group_impl, id)),
             callback: Arc::new(listener),
             receiver: Arc::new(receiver),
             #[cfg(feature = "slashing")]
@@ -364,14 +365,25 @@ impl ValidatorGroup {
                     tokio::time::sleep_until(start_at).await;
                 }
                 let callback = self.make_validator_session_callback();
-                let mut group_impl = self.group_impl.lock().await;
-                if group_impl.status > ValidatorGroupStatus::Active {
-                    log::trace!(target: "validator", "Session deleted before countdown: {}", self.info().await);
-                } else if let Err(e) = group_impl.start(
-                    callback, prev, min_masterchain_block_id, min_ts, self.clone(), rt
-                ) {
-                    log::error!(target: "validator", "{}", e);
-                }
+                self.group_impl.execute_sync(|group_impl|
+                    {
+                        if group_impl.status <= ValidatorGroupStatus::Active {
+                            if let Err(e) = group_impl.start(
+                                callback,
+                                prev,
+                                min_masterchain_block_id,
+                                min_ts,
+                                self.clone(),
+                                rt
+                            )
+                            {
+                                log::error!(target: "validator", "Cannot start group: {}", e);
+                            }
+                        }
+                        else {
+                            log::trace!(target: "validator", "Session deleted before countdown: {}", group_impl.info());
+                        }
+                    }).await;
             }
         );
         Ok(())
@@ -383,10 +395,10 @@ impl ValidatorGroup {
         rt.spawn({
             async move {
                 log::trace!(target: "validator", "Stopping group: {}", self.info().await);
-                let session_ptr = {
-                    let gi = group_impl.lock().await;
-                    gi.session_ptr.clone()
-                };
+                let session_ptr = 
+                    group_impl.execute_sync(|group_impl|
+                        group_impl.session_ptr.clone()
+                    ).await;
                 if let Some(s_ptr) = session_ptr {
                     s_ptr.stop();
                 }
@@ -406,17 +418,17 @@ impl ValidatorGroup {
     }
 
     pub async fn get_status(&self) -> ValidatorGroupStatus {
-        self.group_impl.lock().await.status
+        self.group_impl.execute_sync(|group_impl| group_impl.status).await
     }
 
     pub async fn set_status(&self, status: ValidatorGroupStatus) -> Result<()> {
-        let mut group_impl = self.group_impl.lock().await;
+        self.group_impl.execute_sync(|group_impl|
         if group_impl.status.before(&status) {
             group_impl.status = status;
             Ok(())
         } else {
             fail!("Status cannot retreat, from {} to {}", group_impl.status, status)
-        }
+        }).await
     }
 
     pub fn get_validator_list_id(&self) -> ValidatorListHash {
@@ -424,11 +436,11 @@ impl ValidatorGroup {
     }
 
     pub async fn info_round(&self, round: u32) -> String {
-        self.group_impl.lock().await.info_round(round)
+        self.group_impl.execute_sync(|group_impl| group_impl.info_round(round)).await
     }
 
     pub async fn info (&self) -> String {
-        self.group_impl.lock().await.info()
+        self.group_impl.execute_sync(|group_impl| group_impl.info()).await
     }
 
     pub async fn on_generate_slot(&self, round: u32, callback: ValidatorBlockCandidateCallback) {
@@ -438,7 +450,8 @@ impl ValidatorGroup {
             self.info_round(round).await
         );
 
-        let (_lk_round, prev_block_ids, mm_block_id, min_ts) = self.group_impl.lock().await.update_round (round);
+        let (_lk_round, prev_block_ids, mm_block_id, min_ts) = 
+            self.group_impl.execute_sync(|group_impl| group_impl.update_round (round)).await;
 
         let result = match mm_block_id {
             Some(mc) => {
@@ -471,7 +484,7 @@ impl ValidatorGroup {
         log::info!(target: "validator", "SessionListener::on_generate_slot: {}, {}",
             self.info_round(round).await, result_message
         );
-        self.group_impl.lock().await.on_generate_slot_invoked = true;
+        self.group_impl.execute_sync(|group_impl| group_impl.on_generate_slot_invoked = true).await;
 
         callback(result)
     }
@@ -499,22 +512,21 @@ impl ValidatorGroup {
         };
 
         let result = {
-            let (prev_block_ids, mm_block_id, min_ts) = {
-                let mut group_impl = self.group_impl.lock().await;
-                let (lk_round, prev_block_ids, mm_block_id, min_ts) = group_impl.update_round(round);
-                if round < lk_round {
-                    log::error!(target: "validator", "round {} < self.last_known_round {}", round, lk_round);
-                    return;
-                }
-                let next_block_id = match group_impl.create_next_block_id(
+            let (lk_round, prev_block_ids, mm_block_id, min_ts) =
+                self.group_impl.execute_sync(|group_impl| group_impl.update_round(round)).await;
+            if round < lk_round {
+                log::error!(target: "validator", "round {} < self.last_known_round {}", round, lk_round);
+                return;
+            }
+            let next_block_id = match self.group_impl.execute_sync(|group_impl|
+                group_impl.create_next_block_id(
                     candidate.block_id.root_hash, candidate.block_id.file_hash, self.shard.clone()
-                ) {
-                    Err(x) => { log::error!(target: "validator", "{}", x); return },
-                    Ok(x) => x
-                };
-                candidate.block_id = next_block_id;
-                (prev_block_ids, mm_block_id, min_ts)
+                )
+            ).await {
+                Err(x) => { log::error!(target: "validator", "{}", x); return },
+                Ok(x) => x
             };
+            candidate.block_id = next_block_id;
 
             match mm_block_id {
                 Some(mc) => {
@@ -551,7 +563,7 @@ impl ValidatorGroup {
             }
             Err(x) => format!("Validation failed with verdict `{}`", x),
         };
-        self.group_impl.lock().await.on_candidate_invoked = true;
+        self.group_impl.execute_sync(|group_impl| group_impl.on_candidate_invoked = true).await;
 
         log::info!(target: "validator", "SessionListener::on_candidate: {}, {}, {}",
             candidate_id, self.info_round(round).await, result_message
@@ -584,20 +596,22 @@ impl ValidatorGroup {
             source.id(), data_vec.len(), self.info_round(round).await
         );
 
-        let (next_block_id, prev_block_ids) = {
-            let mut group_impl = self.group_impl.lock().await;
-            if round >= group_impl.last_known_round {
-                group_impl.last_known_round = round + 1;
-            };
+        let (next_block_id, prev_block_ids) = match
+            self.group_impl.execute_sync(|group_impl| {
+                if round >= group_impl.last_known_round {
+                    group_impl.last_known_round = round + 1;
+                };
 
-            (
                 match group_impl.create_next_block_id(root_hash, file_hash, self.shard.clone()) {
-                    Ok(x) => x,
-                    Err(x) => { log::error!(target: "validator", "{}",x); return }
-                },
-                group_impl.prev_block_ids.clone()
-            )
+                    Ok(x) => Ok((x, group_impl.prev_block_ids.clone())),
+                    Err(x) => Err(x)
+                }
+            }).await
+        {
+            Err(x) => { log::error!(target: "validator", "Error creating next block id: {}", x); return },
+            Ok(result) => result
         };
+
 
         log::info!(target: "validator", 
             "SessionListener::on_block_committed: source {}, id {}, data size = {}, {}" ,
@@ -619,9 +633,7 @@ impl ValidatorGroup {
             self.engine.clone(),
         ).await;
 
-        let (result_txt, new_prevs) = {
-            let mut group_impl = self.group_impl.lock().await;
-
+        let (result_txt, new_prevs) = self.group_impl.execute_sync(|group_impl| {
             let result_txt = match result {
                 Ok(()) =>
                     if group_impl.prev_block_ids != prev_block_ids {
@@ -632,10 +644,13 @@ impl ValidatorGroup {
                 Err(x) => format!("Error: {}", x)
                 // TODO: retry block commit
             };
-
+/*
+            let message = group_impl.reliable_queue.make_test_message();
+            group_impl.reliable_queue.send_debug_message(message).await.unwrap();
+*/
             group_impl.prev_block_ids = vec![next_block_id];
             (result_txt, prevs_to_string(&group_impl.prev_block_ids))
-        };
+        }).await;
 
         log::info!(
             target: "validator", 
@@ -653,10 +668,12 @@ impl ValidatorGroup {
             "SessionListener::on_block_skipped, {}", 
             self.info_round(round).await
         );
-        let mut group_impl = self.group_impl.lock().await;
-        if round > group_impl.last_known_round {
-            group_impl.last_known_round = round + 1;
-        }
+
+        self.group_impl.execute_sync(|group_impl|
+            if round > group_impl.last_known_round {
+                group_impl.last_known_round = round + 1;
+            }
+        ).await;
     }
 
     pub async fn on_get_approved_candidate(

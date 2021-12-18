@@ -23,6 +23,7 @@ pub mod candidate_db;
 pub mod collator;
 pub mod collator_sync;
 pub mod out_msg_queue;
+mod mutex_wrapper;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 #[cfg(feature = "slashing")]
