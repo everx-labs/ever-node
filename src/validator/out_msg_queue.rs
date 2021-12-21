@@ -293,6 +293,13 @@ impl OutMsgQueueInfoStuff {
 
     pub fn out_queue(&self) -> &OutMsgQueue { &self.out_queue }
 
+    pub fn forced_fix_out_queue(&mut self) -> Result<()> {
+        if self.out_queue.is_empty() && self.out_queue.root_extra() != &0 {
+            self.out_queue.after_remove()?;
+        }
+        Ok(())
+    }
+
     pub fn message(&self, key: &OutMsgQueueKey) -> Result<Option<MsgEnqueueStuff>> {
         self.out_queue.get_with_aug(&key)?.map(|(enq, lt)| MsgEnqueueStuff::from_enqueue_and_lt(enq, lt)).transpose()
     }
