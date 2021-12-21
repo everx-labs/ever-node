@@ -1182,6 +1182,7 @@ impl Collator {
 
         // copy out msg queue from next state
         collator_data.out_msg_queue_info = output_queue_manager.take_next();
+        collator_data.out_msg_queue_info.forced_fix_out_queue()?;
 
         // compute created / minted / recovered / from_prev_blk
         self.update_value_flow(mc_data, &prev_data, collator_data)?;
