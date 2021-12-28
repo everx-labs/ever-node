@@ -853,9 +853,7 @@ impl ReceivedBlockImpl {
                 bail!("Invalid source (first block) {}", block.src);
             }
 
-            if UInt256::from(block.data_hash.0) != *receiver.get_incarnation()
-                || block.signature.len() != 0
-            {
+            if (&block.data_hash != receiver.get_incarnation()) || (block.signature.len() != 0) {
                 bail!("Invalid first block");
             }
         }
@@ -868,7 +866,7 @@ impl ReceivedBlockImpl {
         block: &ton::Block,
         payload: &BlockPayloadPtr,
     ) -> Result<()> {
-        if UInt256::from(block.incarnation.0) != *receiver.get_incarnation() {
+        if &block.incarnation != receiver.get_incarnation() {
             bail!("Invalid session ID".to_string());
         }
 
@@ -1059,7 +1057,11 @@ impl ReceivedBlockImpl {
         body.incarnation = receiver.get_incarnation().clone();
 
         if log_enabled!(log::Level::Debug) {
-            trace!("...create new block with payload: hash={:?}, source_id={}, height={}, data_hash={:?}, signature={:?}", body.hash, body.source_id, body.height, body.data_hash, body.signature);
+            trace!(
+                "...create new block with payload: \
+                hash={:?}, source_id={}, height={}, data_hash={:?}, signature={:?}", 
+                body.hash, body.source_id, body.height, body.data_hash, body.signature
+            )
         }
 
         let new_block = ReceivedBlockImpl::wrap(&mut Rc::new(RefCell::new(body)));
@@ -1081,7 +1083,7 @@ impl ReceivedBlockImpl {
         let mut body: ReceivedBlockImpl =
             ReceivedBlockImpl::new(receiver.get_received_blocks_instance_counter());
 
-        body.data_hash = UInt256::from(block.data_hash.0);
+        body.data_hash = block.data_hash.clone();
         body.signature = block.signature.clone();
         body.hash = get_block_dependency_hash(block, receiver);
         body.source_id = block.src as usize;
@@ -1089,7 +1091,11 @@ impl ReceivedBlockImpl {
         body.incarnation = receiver.get_incarnation().clone();
 
         if log_enabled!(log::Level::Debug) {
-            trace!("...create new block dependency: hash={:?}, source_id={}, height={}, data_hash={:?}, signature={:?}", body.hash, body.source_id, body.height, body.data_hash, body.signature);
+            trace!(
+                "...create new block dependency: \
+                hash={:?}, source_id={}, height={}, data_hash={:?}, signature={:?}", 
+                body.hash, body.source_id, body.height, body.data_hash, body.signature
+            )
         }
 
         let new_block = ReceivedBlockImpl::wrap(&mut Rc::new(RefCell::new(body)));

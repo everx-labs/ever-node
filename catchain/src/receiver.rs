@@ -311,16 +311,14 @@ impl Receiver for ReceiverImpl {
             }
         }
 
-        if UInt256::from(block.incarnation.0) != self.incarnation {
+        if block.incarnation != self.incarnation {
             let message = format!(
                 "Block from source {} incarnation mismatch: expected {} but received {:?}",
                 adnl_id,
                 self.incarnation.to_hex_string(),
-                UInt256::from(block.incarnation.0)
+                block.incarnation
             );
-
             warn!("{}", message);
-
             return Err(err_msg(message));
         }
 
@@ -967,7 +965,7 @@ impl ReceiverImpl {
 
     fn get_block_id(&self, block: &ton::Block, payload: &RawBuffer) -> ton::BlockId {
         utils::get_block_id(
-            &UInt256::from(block.incarnation.0),
+            &block.incarnation,
             &self.get_source_public_key_hash(block.src as usize),
             block.height,
             payload,
@@ -979,9 +977,8 @@ impl ReceiverImpl {
         let source_hash = self.get_source_public_key_hash(dep.src as usize);
         let height = dep.height;
         let data_hash = dep.data_hash;
-
         ::ton_api::ton::catchain::block::id::Id {
-            incarnation: incarnation.into(),
+            incarnation: incarnation.clone(),
             src: public_key_hash_to_int256(source_hash),
             height,
             data_hash,
@@ -1365,7 +1362,7 @@ impl ReceiverImpl {
 
         let _source = self.get_source(block.src as usize);
 
-        assert!(block.incarnation == self.incarnation.clone().into());
+        assert!(block.incarnation == self.incarnation);
 
         if let Err(err) = self.validate_block_with_payload(&block, &payload) {
             let message = format!(
@@ -1916,7 +1913,7 @@ impl ReceiverImpl {
         trace!("Got GetBlockQuery: {:?}", query);
 
         let block_hash = query.block;
-        let block_result = self.get_block_by_hash(&UInt256::from(block_hash.0));
+        let block_result = self.get_block_by_hash(&block_hash);
 
         if let Some(block_ptr) = block_result {
             let block = block_ptr.borrow();
@@ -1954,7 +1951,7 @@ impl ReceiverImpl {
         let mut response_blocks_count = 0;
 
         for block_hash in &query.blocks.0 {
-            if let Some(block_ptr) = self.get_block_by_hash(&UInt256::from(block_hash.0)) {
+            if let Some(block_ptr) = self.get_block_by_hash(&block_hash) {
                 let mut block = block_ptr.borrow_mut();
 
                 assert!(block.get_payload().data().len() > 0);
@@ -2006,7 +2003,7 @@ impl ReceiverImpl {
 
         let mut response_blocks_count = 0;
 
-        if let Some(block) = self.get_block_by_hash(&UInt256::from(query.block.0)) {
+        if let Some(block) = self.get_block_by_hash(&query.block) {
             //limit height by the requested block height
 
             let block_height = block.borrow().get_height() as i64;
@@ -2025,7 +2022,7 @@ impl ReceiverImpl {
 
                 //terminate loop if the termination block has been found
 
-                if block_terminators.contains(&block.get_hash().into()) {
+                if block_terminators.contains(block.get_hash()) {
                     break;
                 }
 

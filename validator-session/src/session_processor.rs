@@ -14,19 +14,15 @@
 pub use super::*;
 
 use super::session_description::SessionDescriptionImpl;
-use crate::task_queue::*;
-use crate::ton_api::IntoBoxed;
+use crate::{task_queue::*, ton_api::IntoBoxed};
 use backtrace::Backtrace;
 use cache::FifoCache;
-use catchain::profiling::check_execution_time;
-use catchain::profiling::instrument;
-use catchain::profiling::ResultStatusCounter;
-use catchain::BlockPtr;
-use catchain::ExternalQueryResponseCallback;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::time::Duration;
-use std::time::SystemTime;
+use catchain::{
+    BlockPtr, ExternalQueryResponseCallback, 
+    profiling::{check_execution_time, instrument, ResultStatusCounter}
+};
+use std::{collections::{HashMap, HashSet}, time::{Duration, SystemTime}};
+use ton_types::UInt256;
 
 /*
     Constants
@@ -985,7 +981,7 @@ impl SessionProcessor for SessionProcessorImpl {
             use ::ton_api::ton::validator_session::*;
 
             let broadcast = candidate::Candidate {
-              src : ::ton_api::ton::int256(*block_source_id.clone().data()),
+              src : UInt256::with_array(*block_source_id.clone().data()),
               round : round as i32,
               root_hash : block_root_hash.clone().into(),
               data : candidate.data.data().0.clone().into(),
@@ -1061,7 +1057,7 @@ impl SessionProcessor for SessionProcessorImpl {
 
         //check if the candidate was sent from the node which generated block
 
-        if &candidate.src.0 != source_id.data() {
+        if candidate.src.as_slice() != source_id.data() {
             warn!(
                 "Broadcast's {:?} source {:?} mismatches node ID {:?}",
                 data_hash, candidate.src, source_id
@@ -1216,8 +1212,7 @@ impl SessionProcessor for SessionProcessorImpl {
         use adnl::common::KeyId;
 
         let id = self.description.candidate_id(
-            self.description
-                .get_source_index(&KeyId::from_data(message.id.src.0.clone())),
+            self.description.get_source_index(&KeyId::from_data(*message.id.src.as_slice())),
             &message.id.root_hash.into(),
             &message.id.file_hash.into(),
             &message.id.collated_data_file_hash.into(),
@@ -2190,7 +2185,7 @@ impl SessionProcessorImpl {
         let file_hash = catchain::utils::get_hash_from_block_payload(&data);
         let collated_data_file_hash = catchain::utils::get_hash_from_block_payload(&collated_data);
         let candidate = Rc::new(candidate::Candidate {
-            src: ::ton_api::ton::int256(self.get_local_id().data().clone()),
+            src: UInt256::with_array(self.get_local_id().data().clone()),
             round: round as i32,
             root_hash: root_hash.clone().into(),
             data: data.data().clone().0.into(),

@@ -45,7 +45,6 @@ const FLAG_PREV_2: u32               = 0x00000200;
 const FLAG_APPLIED: u32              = 0x00000400;
 pub(crate) const FLAG_KEY_BLOCK: u32 = 0x00000800;
 const FLAG_MOVED_TO_ARCHIVE: u32     = 0x00002000;
-const FLAG_INDEXED: u32              = 0x00004000;
 
 // not serializing flags
 const FLAG_ARCHIVING: u32            = 0x00010000;
@@ -162,10 +161,6 @@ impl BlockHandle {
         self.set_flag(FLAG_APPLIED)
     }
 
-    pub fn set_block_indexed(&self) -> bool {
-        self.set_flag(FLAG_INDEXED)
-    }
-
     pub fn id(&self) -> &BlockIdExt {
         &self.id
     }
@@ -239,10 +234,6 @@ impl BlockHandle {
 
     pub fn is_applied(&self) -> bool {
         self.is_flag_set(FLAG_APPLIED)
-    }
-
-    pub fn is_indexed(&self) -> bool {
-        self.is_flag_set(FLAG_INDEXED)
     }
 
     pub fn gen_lt(&self) -> u64 {

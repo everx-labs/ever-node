@@ -12,16 +12,15 @@
 */
 
 use crate::{
-    block::{BlockStuff, convert_block_id_ext_api2blk}, block_proof::BlockProofStuff, 
-    engine::Engine, engine_traits::{ChainRange, EngineOperations},
-    error::NodeError,
+    block::BlockStuff, block_proof::BlockProofStuff, engine::Engine, 
+    engine_traits::{ChainRange, EngineOperations}, error::NodeError,
     validator::validator_utils::{calc_subset_for_workchain, check_crypto_signatures},
 };
 
 use std::{sync::Arc, mem::drop, time::Duration};
 use tokio::task::JoinHandle;
 use ton_block::{BlockIdExt, BlockSignaturesPure, CryptoSignaturePair, CryptoSignature, ConfigParams};
-use ton_types::{Result, fail, error, UInt256};
+use ton_types::{Result, fail, error};
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
 
 pub fn start_masterchain_client(
@@ -288,22 +287,29 @@ pub async fn process_block_broadcast(
 ) -> Result<()> {
 
     log::trace!("process_block_broadcast: {}", broadcast.id);
-    let block_id = convert_block_id_ext_api2blk(&broadcast.id)?;
-    if let Some(handle) = engine.load_block_handle(&block_id)? {
+    if let Some(handle) = engine.load_block_handle(&broadcast.id)? {
         if handle.has_data() {
             #[cfg(feature = "telemetry")] {
                 let duplicate = handle.got_by_broadcast();
                 let unneeded = !duplicate;
-                engine.full_node_telemetry().new_block_broadcast(&block_id, duplicate, unneeded);
+                engine.full_node_telemetry().new_block_broadcast(
+                    &broadcast.id, 
+                    duplicate, 
+                    unneeded
+                );
             }
             return Ok(());
         }
     }
     #[cfg(feature = "telemetry")]
-    engine.full_node_telemetry().new_block_broadcast(&block_id, false, false);
+    engine.full_node_telemetry().new_block_broadcast(&broadcast.id, false, false);
 
-    let is_master = block_id.shard().is_masterchain();
-    let proof = BlockProofStuff::deserialize(&block_id, broadcast.proof.0.clone(), !is_master)?;
+    let is_master = broadcast.id.shard().is_masterchain();
+    let proof = BlockProofStuff::deserialize(
+        &broadcast.id, 
+        broadcast.proof.0.clone(), 
+        !is_master
+    )?;
     let (virt_block, _) = proof.virtualize_block()?;
     let block_info = virt_block.read_info()?;
     let prev_key_block_seqno = block_info.prev_key_block_seqno();
@@ -312,14 +318,15 @@ pub async fn process_block_broadcast(
     )?;
     if prev_key_block_seqno > last_applied_mc_state.block_id().seq_no() {
         log::debug!(
-            "Skipped block broadcast {} because it refers too new key block: {}, but last processed mc block is {})",
-            block_id, prev_key_block_seqno, last_applied_mc_state.block_id().seq_no()
+            "Skipped block broadcast {} because it refers too new key block: {}, \
+            but last processed mc block is {})",
+            broadcast.id, prev_key_block_seqno, last_applied_mc_state.block_id().seq_no()
         );
         return Ok(());
     }
 
     let config_params = last_applied_mc_state.config_params()?;
-    validate_brodcast(broadcast, config_params, &block_id)?;
+    validate_brodcast(broadcast, config_params, &broadcast.id)?;
 
     // Build and save block and proof
     if is_master {
@@ -327,7 +334,7 @@ pub async fn process_block_broadcast(
     } else {
         proof.check_proof_link()?;
     }
-    let block = BlockStuff::deserialize_checked(block_id, broadcast.data.0.clone())?;
+    let block = BlockStuff::deserialize_checked(broadcast.id.clone(), broadcast.data.0.clone())?;
     let mut handle = if let Some(handle) = engine.store_block(&block).await?.as_updated() {
         handle
     } else {
@@ -384,6 +391,7 @@ pub async fn process_block_broadcast(
         }
     }
     Ok(())
+
 }
 
 fn validate_brodcast(
@@ -421,7 +429,7 @@ fn validate_brodcast(
     for api_sig in broadcast.signatures.iter() {
         blk_pure_signatures.add_sigpair(
             CryptoSignaturePair {
-                node_id_short: UInt256::from(&api_sig.who.0),
+                node_id_short: api_sig.who,
                 sign: CryptoSignature::from_bytes(&api_sig.signature)?,
             }
         );

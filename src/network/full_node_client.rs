@@ -12,12 +12,9 @@
 */
 
 use crate::{
-    block::{
-        compare_block_ids, convert_block_id_ext_api2blk, convert_block_id_ext_blk2api, 
-        BlockStuff
-    },
-    block_proof::BlockProofStuff, engine_traits::EngineAlloc, shard_state::ShardStateStuff,
-    network::neighbours::{Neighbours, Neighbour}, types::top_block_descr::TopBlockDescrStuff
+    block::BlockStuff, block_proof::BlockProofStuff, engine_traits::EngineAlloc, 
+    shard_state::ShardStateStuff, network::neighbours::{Neighbours, Neighbour}, 
+    types::top_block_descr::TopBlockDescrStuff
 };
 #[cfg(feature = "telemetry")]
 use crate::{engine_traits::EngineTelemetry, network::telemetry::FullNodeNetworkTelemetry};
@@ -486,7 +483,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             self.send_adnl_query(
                 TaggedObject {
                     object: PrepareKeyBlockProof {
-                        block: convert_block_id_ext_blk2api(block_id),
+                        block: block_id.clone(),
                         allow_partial: is_link.into()
                     },
                     #[cfg(feature = "telemetry")]
@@ -500,7 +497,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             self.send_adnl_query(
                 TaggedObject {
                     object: PrepareBlockProof {
-                        block: convert_block_id_ext_blk2api(block_id),
+                        block: block_id.clone(),
                         allow_partial: is_link.into()
                     },
                     #[cfg(feature = "telemetry")]
@@ -522,7 +519,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     self.send_rldp_query_raw(
                         &TaggedObject {
                             object: DownloadKeyBlockProof { 
-                                block: convert_block_id_ext_blk2api(block_id) 
+                                block: block_id.clone() 
                             },
                             #[cfg(feature = "telemetry")]
                             tag: self.tag_download_key_block_proof
@@ -534,7 +531,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     self.send_rldp_query_raw(
                         &TaggedObject {
                             object: DownloadBlockProof { 
-                                block: convert_block_id_ext_blk2api(block_id) 
+                                block: block_id.clone() 
                             },
                             #[cfg(feature = "telemetry")]
                             tag: self.tag_download_block_proof
@@ -550,7 +547,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     self.send_rldp_query_raw(
                         &TaggedObject {
                             object: DownloadKeyBlockProofLink { 
-                                block: convert_block_id_ext_blk2api(block_id) 
+                                block: block_id.clone()
                             },
                             #[cfg(feature = "telemetry")]
                             tag: self.tag_download_key_block_proof_link
@@ -562,7 +559,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     self.send_rldp_query_raw(
                         &TaggedObject {
                             object: DownloadBlockProofLink { 
-                                block: convert_block_id_ext_blk2api(block_id) 
+                                block: block_id.clone()
                             },
                             #[cfg(feature = "telemetry")]
                             tag: self.tag_download_block_proof_link
@@ -624,7 +621,7 @@ Ok(if key_block {
         let (prepare, peer): (Prepared, _) = self.send_adnl_query(
             TaggedObject {
                 object: PrepareBlock {
-                    block: convert_block_id_ext_blk2api(id)
+                    block: id.clone()
                 },
                 #[cfg(feature = "telemetry")]
                 tag: self.tag_prepare_block
@@ -642,7 +639,7 @@ Ok(if key_block {
                 let (data_full, _): (DataFull, _) = self.send_rldp_query_typed(
                     &TaggedObject {
                         object: DownloadBlockFull {
-                            block: convert_block_id_ext_blk2api(id),
+                            block: id.clone(),
                         },
                         #[cfg(feature = "telemetry")]
                         tag: self.tag_download_block_full
@@ -655,7 +652,7 @@ Ok(if key_block {
                         fail!("prepareBlock receives Prepared, but DownloadBlockFull receives DataFullEmpty");
                     },
                     DataFull::TonNode_DataFull(data_full) => {
-                        if !compare_block_ids(&id, &data_full.id) {
+                        if id != &data_full.id {
                             fail!("Block with another id was received");
                         }
                         let block = BlockStuff::deserialize_checked(id.clone(), data_full.block.0)?;
@@ -681,8 +678,8 @@ Ok(if key_block {
             TaggedTlObject {
                 object: TLObject::new(
                     PreparePersistentState {
-                        block: convert_block_id_ext_blk2api(block_id),
-                        masterchain_block: convert_block_id_ext_blk2api(masterchain_block_id)
+                        block: block_id.clone(),
+                        masterchain_block: masterchain_block_id.clone()
                     }
                 ),
                 #[cfg(feature = "telemetry")]
@@ -716,8 +713,8 @@ Ok(if key_block {
         self.send_rldp_query_raw(
             &TaggedObject {
                 object: DownloadPersistentStateSlice {
-                    block: convert_block_id_ext_blk2api(block_id),
-                    masterchain_block: convert_block_id_ext_blk2api(masterchain_block_id),
+                    block: block_id.clone(),
+                    masterchain_block: masterchain_block_id.clone(),
                     offset: offset as i64,
                     max_size: max_size as i64,
                 },
@@ -740,7 +737,7 @@ Ok(if key_block {
             TaggedTlObject {
                 object: TLObject::new(
                     PrepareZeroState {
-                        block: convert_block_id_ext_blk2api(id),
+                        block: id.clone()
                     }
                 ),
                 #[cfg(feature = "telemetry")]
@@ -760,7 +757,7 @@ Ok(if key_block {
                 let state_bytes = self.send_rldp_query_raw(
                     &TaggedObject {
                         object: DownloadZeroState {
-                            block: convert_block_id_ext_blk2api(id),
+                            block: id.clone(),
                         },
                         #[cfg(feature = "telemetry")]
                         tag: self.tag_download_zero_state
@@ -789,7 +786,7 @@ Ok(if key_block {
     ) -> Result<(Vec<BlockIdExt>, bool)> {
         let query = TaggedObject {
             object: GetNextKeyBlockIds {
-                block: convert_block_id_ext_blk2api(block_id),
+                block: block_id.clone(),
                 max_size
             },
             #[cfg(feature = "telemetry")]
@@ -798,7 +795,7 @@ Ok(if key_block {
         let (ids, _): (KeyBlocks, _) = self.send_adnl_query(query, None, None, None).await?;
         let mut vec = Vec::new();
         for id in ids.blocks().iter() {
-            vec.push(convert_block_id_ext_api2blk(id)?);
+            vec.push(id.clone());
         }
         Ok((vec, ids.incomplete() == &Bool::BoolTrue))
     }
@@ -811,7 +808,7 @@ Ok(if key_block {
 
         let request = TaggedObject { 
             object: DownloadNextBlockFull {
-                prev_block: convert_block_id_ext_blk2api(prev_id)
+                prev_block: prev_id.clone()
             },
             #[cfg(feature = "telemetry")]
             tag: self.tag_download_next_block_full
@@ -839,8 +836,10 @@ Ok(if key_block {
                 fail!("Got `TonNode_DataFullEmpty` from {}", peer.id())
             },
             DataFull::TonNode_DataFull(data_full) => {
-                let id = convert_block_id_ext_api2blk(&data_full.id)?;
-                let block = BlockStuff::deserialize_checked(id, data_full.block.to_vec())?;
+                let block = BlockStuff::deserialize_checked(
+                    data_full.id.clone(), 
+                    data_full.block.to_vec()
+                )?;
                 let proof = BlockProofStuff::deserialize(
                     block.id(), 
                     data_full.proof.to_vec(), 

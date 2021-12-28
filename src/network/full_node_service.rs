@@ -20,7 +20,7 @@ use adnl::common::{
     AdnlPeers, Answer, QueryResult, tag_from_boxed_type, tag_from_object, TaggedByteVec, TaggedObject
 };
 use overlay::QueriesConsumer;
-use std::{sync::Arc, convert::TryInto, cmp::min, fmt::Debug};
+use std::{cmp::min, fmt::Debug, sync::Arc};
 use ton_api::{
     AnyBoxedSerialize, IntoBoxed,
     ton::{
@@ -70,8 +70,7 @@ impl FullNodeOverlayService {
         &self, 
         query: GetNextBlockDescription
     ) -> Result<TaggedObject<BlockDescription>> {
-        let prev_id = (&query.prev_block).try_into()?;
-        let answer = match self.engine.load_block_next1(&prev_id).await {
+        let answer = match self.engine.load_block_next1(&query.prev_block).await {
             Ok(id) => {
                 ton_node::blockdescription::BlockDescription{
                     id: id.into()
@@ -131,11 +130,7 @@ impl FullNodeOverlayService {
         &self, 
         query: PrepareBlockProof
     ) -> Result<TaggedObject<PreparedProof>> {
-        self.prepare_block_proof_internal(
-            (&query.block).try_into()?, 
-            query.allow_partial.into(),
-            false
-        )
+        self.prepare_block_proof_internal(query.block, query.allow_partial.into(), false)
     }
 
     // tonNode.prepareKeyBlockProof block:tonNode.blockIdExt allow_partial:Bool = tonNode.PreparedProof;
@@ -143,11 +138,7 @@ impl FullNodeOverlayService {
         &self, 
         query: PrepareKeyBlockProof
     ) -> Result<TaggedObject<PreparedProof>> {
-        self.prepare_block_proof_internal(
-            (&query.block).try_into()?, 
-            query.allow_partial.into(),
-            true
-        )
+        self.prepare_block_proof_internal(query.block, query.allow_partial.into(), true)
     }
 
     // tonNode.prepareBlockProofs blocks:(vector tonNode.blockIdExt) allow_partial:Bool = tonNode.PreparedProof;
@@ -158,8 +149,7 @@ impl FullNodeOverlayService {
 
     // tonNode.prepareBlock block:tonNode.blockIdExt = tonNode.Prepared;
     async fn prepare_block(&self, query: PrepareBlock) -> Result<TaggedObject<Prepared>> {
-        let block_id = (&query.block).try_into()?;
-        let answer = if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+        let answer = if let Some(handle) = self.engine.load_block_handle(&query.block)? {
             if handle.has_data() {
                 Prepared::TonNode_Prepared
             } else {
@@ -209,7 +199,7 @@ impl FullNodeOverlayService {
         &self, 
         query: PreparePersistentState
     ) -> Result<TaggedObject<PreparedState>> {
-        self.prepare_state_internal((&query.block).try_into()?)
+        self.prepare_state_internal(query.block)
     }
 
     // tonNode.prepareZeroState block:tonNode.blockIdExt = tonNode.PreparedState;
@@ -217,19 +207,14 @@ impl FullNodeOverlayService {
         &self, 
         query: PrepareZeroState
     ) -> Result<TaggedObject<PreparedState>> {
-        self.prepare_state_internal((&query.block).try_into()?)
+        self.prepare_state_internal(query.block)
     }
 
     const NEXT_KEY_BLOCKS_LIMIT: usize = 8;
 
     fn build_next_key_blocks_answer(blocks: Vec<BlockIdExt>, incomplete: bool, error: bool) -> KeyBlocks {
-        let mut blocks_vec = Vector::default();
-        blocks_vec.0 = blocks
-            .into_iter()
-            .map(|id| ton_node::blockidext::BlockIdExt::from(id))
-            .collect();
         ton_node::keyblocks::KeyBlocks {
-            blocks: blocks_vec,
+            blocks: Vector::from(blocks),
             incomplete: incomplete.into(),
             error: error.into(),
         }.into_boxed()
@@ -282,9 +267,8 @@ impl FullNodeOverlayService {
         &self, 
         query: GetNextKeyBlockIds
     ) -> Result<TaggedObject<KeyBlocks>> {
-        let start_block_id = (&query.block).try_into()?;
         let limit = min(Self::NEXT_KEY_BLOCKS_LIMIT, query.max_size as usize);
-        let answer = match self.get_next_key_block_ids_(&start_block_id, limit).await {
+        let answer = match self.get_next_key_block_ids_(&query.block, limit).await {
             Err(e) => {
                 log::warn!("tonNode.getNextKeyBlockIds: {:?}", e);
                 Self::build_next_key_blocks_answer(vec!(), false, true)
@@ -304,11 +288,10 @@ impl FullNodeOverlayService {
         &self, 
         query: DownloadNextBlockFull
     ) -> Result<TaggedObject<DataFullBoxed>> {
-        let block_id = (&query.prev_block).try_into()?;
         let mut answer = DataFullBoxed::TonNode_DataFullEmpty;
-        if let Some(prev_handle) = self.engine.load_block_handle(&block_id)? {
+        if let Some(prev_handle) = self.engine.load_block_handle(&query.prev_block)? {
             if prev_handle.has_next1() {
-                let next_id = self.engine.load_block_next1(&block_id).await?;
+                let next_id = self.engine.load_block_next1(&query.prev_block).await?;
                 if let Some(next_handle) = self.engine.load_block_handle(&next_id)? {
                     let mut is_link = false;
                     if next_handle.has_data() && next_handle.has_proof_or_link(&mut is_link) {
@@ -343,9 +326,8 @@ impl FullNodeOverlayService {
         &self, 
         query: DownloadBlockFull
     ) -> Result<TaggedObject<DataFullBoxed>> {
-        let block_id = (&query.block).try_into()?;
         let mut answer = DataFullBoxed::TonNode_DataFullEmpty;
-        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+        if let Some(handle) = self.engine.load_block_handle(&query.block)? {
             let mut is_link = false;
             if handle.has_data() && handle.has_proof_or_link(&mut is_link) {
                 let block = self.engine.load_block_raw(&handle).await?;
@@ -370,8 +352,7 @@ impl FullNodeOverlayService {
 
     // tonNode.downloadBlock block:tonNode.blockIdExt = tonNode.Data;
     async fn download_block(&self, query: DownloadBlock) -> Result<TaggedByteVec> {
-        let block_id = (&query.block).try_into()?;
-        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+        if let Some(handle) = self.engine.load_block_handle(&query.block)? {
             if handle.has_data() {
                 let answer = TaggedByteVec {
                     object: self.engine.load_block_raw(&handle).await?,
@@ -406,8 +387,7 @@ impl FullNodeOverlayService {
         &self, 
         query: DownloadPersistentStateSlice
     ) -> Result<TaggedByteVec> {
-        let block_id = (&query.block).try_into()?;
-        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+        if let Some(handle) = self.engine.load_block_handle(&query.block)? {
             if handle.has_persistent_state() {
                 let data = self.engine.load_persistent_state_slice(
                     &handle,
@@ -422,15 +402,14 @@ impl FullNodeOverlayService {
                 return Ok(answer)
             }             
         }
-        fail!("Shard state {} doesn't have a persistent state", block_id)
+        fail!("Shard state {} doesn't have a persistent state", query.block)
     }
 
     // tonNode.downloadZeroState block:tonNode.blockIdExt = tonNode.Data;
     async fn download_zero_state(&self, query: DownloadZeroState) -> Result<TaggedByteVec> {
-        let block_id = (&query.block).try_into()?;
-        if let Some(handle) = self.engine.load_block_handle(&block_id)? {
+        if let Some(handle) = self.engine.load_block_handle(&query.block)? {
             if handle.has_persistent_state() {
-                let size = self.engine.load_persistent_state_size(&block_id).await?;
+                let size = self.engine.load_persistent_state_size(&query.block).await?;
                 let data = self.engine.load_persistent_state_slice(&handle, 0, size).await?;
                 let answer = TaggedByteVec {
                     object: data,
@@ -440,7 +419,7 @@ impl FullNodeOverlayService {
                 return Ok(answer)
             }
         }
-        fail!("Zero state {} is not inited", block_id)
+        fail!("Zero state {} is not inited", query.block)
     }
 
     async fn download_block_proof_internal(
@@ -468,7 +447,7 @@ impl FullNodeOverlayService {
 
     // tonNode.downloadBlockProof block:tonNode.blockIdExt = tonNode.Data;
     async fn download_block_proof(&self, query: DownloadBlockProof) -> Result<TaggedByteVec> {
-        self.download_block_proof_internal((&query.block).try_into()?, false, false).await
+        self.download_block_proof_internal(query.block, false, false).await
     }
 
     // tonNode.downloadKeyBlockProof block:tonNode.blockIdExt = tonNode.Data;
@@ -476,7 +455,7 @@ impl FullNodeOverlayService {
         &self, 
         query: DownloadKeyBlockProof
     ) -> Result<TaggedByteVec> {
-        self.download_block_proof_internal((&query.block).try_into()?, false, true).await
+        self.download_block_proof_internal(query.block, false, true).await
     }
 
     // tonNode.downloadBlockProofs blocks:(vector tonNode.blockIdExt) = tonNode.DataList;
@@ -490,7 +469,7 @@ impl FullNodeOverlayService {
         &self, 
         query: DownloadBlockProofLink
     ) -> Result<TaggedByteVec> {
-        self.download_block_proof_internal((&query.block).try_into()?, true, false).await
+        self.download_block_proof_internal(query.block, true, false).await
     }
 
     // tonNode.downloadKeyBlockProofLink block:tonNode.blockIdExt = tonNode.Data;
@@ -498,7 +477,7 @@ impl FullNodeOverlayService {
         &self, 
         query: DownloadKeyBlockProofLink
     ) -> Result<TaggedByteVec> {
-        self.download_block_proof_internal((&query.block).try_into()?, true, true).await
+        self.download_block_proof_internal(query.block, true, true).await
     }
 
     // tonNode.downloadBlockProofLinks blocks:(vector tonNode.blockIdExt) = tonNode.DataList;

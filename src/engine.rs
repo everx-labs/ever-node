@@ -70,7 +70,7 @@ use overlay::QueriesConsumer;
 #[cfg(feature = "metrics")]
 use statsd::client;
 use std::{
-    convert::TryInto, ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering, AtomicI32, AtomicU64}},
+    ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering, AtomicI32, AtomicU64}},
     time::Duration, collections::HashMap,
 };
 #[cfg(feature = "slashing")]
@@ -1208,7 +1208,7 @@ impl Engine {
     }
 
     async fn process_new_shard_block(self: Arc<Self>, broadcast: NewShardBlockBroadcast) -> Result<BlockIdExt> {
-        let id: BlockIdExt = (&broadcast.block.block).try_into()?;
+        let id = broadcast.block.block;
         let cc_seqno = broadcast.block.cc_seqno as u32;
         let data = broadcast.block.data.0;
         let (master, workchain_id) = self.processed_workchain().await?;

@@ -92,7 +92,6 @@ impl BlockStuff {
 
 
     pub fn block(&self) -> &Block { &self.block }
-
   
     pub fn id(&self) -> &BlockIdExt { &self.id }
 
@@ -258,48 +257,6 @@ impl BlockIdExtExtention for BlockIdExt {
     fn is_masterchain(&self) -> bool {
         self.shard().is_masterchain()
     }
-}
-
-pub fn convert_block_id_ext_api2blk(id: &ton_api::ton::ton_node::blockidext::BlockIdExt) -> Result<BlockIdExt> {
-    Ok(
-        BlockIdExt::with_params(
-            ton_block::ShardIdent::with_tagged_prefix(id.workchain, id.shard as u64)?,
-            id.seqno as u32,
-            UInt256::from(&id.root_hash.0),
-            UInt256::from(&id.file_hash.0),
-        )
-    )
-}
-
-#[allow(dead_code)]
-pub fn convert_block_id_ext_blk2api(id: &BlockIdExt) -> ton_api::ton::ton_node::blockidext::BlockIdExt {
-    ton_api::ton::ton_node::blockidext::BlockIdExt {
-        workchain: id.shard_id.workchain_id(),
-        shard: id.shard_id.shard_prefix_with_tag() as i64, // FIXME: why signed int???
-        seqno: if id.seq_no <= std::i32::MAX as u32 {
-                id.seq_no as i32
-            } else {
-                panic!("too big block seq_no") // FIXME: what to do?
-            },
-        root_hash: ton_api::ton::int256(id.root_hash.as_slice().to_owned()),
-        file_hash: ton_api::ton::int256(id.file_hash.as_slice().to_owned()),
-    }
-}
-
-#[allow(dead_code)]
-pub fn convert_block_id_ext_blk_vec(vec: &Vec<BlockIdExt>) -> Vec<ton_api::ton::ton_node::blockidext::BlockIdExt> {
-    vec.iter().fold(Vec::new(), |mut vec, item| {
-        vec.push(convert_block_id_ext_blk2api(item));
-        vec
-    })
-}
-
-#[allow(dead_code)]
-pub fn compare_block_ids(id: &BlockIdExt, id_api: &ton_api::ton::ton_node::blockidext::BlockIdExt) -> bool {
-    id.shard_id.shard_prefix_with_tag() == id_api.shard as u64
-        && id.shard_id.workchain_id() == id_api.workchain
-        && id.root_hash.as_slice() == &id_api.root_hash.0
-        && id.file_hash.as_slice() == &id_api.file_hash.0
 }
 
 // unpack_block_prev_blk_try in t-node

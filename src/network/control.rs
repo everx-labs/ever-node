@@ -12,10 +12,8 @@
 */
 
 use crate::{
-    block::{convert_block_id_ext_api2blk, convert_block_id_ext_blk2api},
-    collator_test_bundle::CollatorTestBundle,
-    config::{KeyRing, NodeConfigHandler},
-    engine_traits::EngineOperations, engine::Engine,
+    collator_test_bundle::CollatorTestBundle, config::{KeyRing, NodeConfigHandler},
+    engine_traits::EngineOperations, engine::Engine, 
     validator::validator_utils::validatordescr_to_catchain_node
 };
 use adnl::{
@@ -98,7 +96,6 @@ impl ControlQuerySubscriber {
     }
 
     async fn get_all_config_params(&self) -> Result<ton::lite_server::configinfo::ConfigInfo> {
-
         let (config_params, block_id) = if let Some(engine) = self.engine.as_ref() {
             let mc_state = engine.load_last_applied_mc_state().await?;
             let config_params = mc_state.config_params()?;
@@ -106,27 +103,24 @@ impl ControlQuerySubscriber {
         } else {
             let test_config_params = self.get_test_all_config_params()?;
             (test_config_params, BlockIdExt::default())
-        };
-
+        };        
         let config_info = ConfigInfo {
             mode: 0,
-            id: convert_block_id_ext_blk2api(&block_id),
+            id: block_id,
             state_proof: ton::bytes(vec!()),
             config_proof: ton::bytes(config_params.write_to_bytes()?)
         };
-
         Ok(config_info)
     }
 
     fn get_test_all_config_params(&self) -> Result<ConfigParams> {
         let mut config_param = ConfigParams::new();
-
         let mut param0 = ConfigParam0::new();
         param0.config_addr = UInt256::from([1;32]);
         config_param.set_config(ConfigParamEnum::ConfigParam0(param0))?;
-
         Ok(config_param)
     }
+
     async fn get_config_params(&self, param_number: u32) -> Result<ton::lite_server::configinfo::ConfigInfo> {
         let engine = self.engine()?;
         let mc_state = engine.load_last_applied_mc_state().await?;
@@ -134,11 +128,10 @@ impl ControlQuerySubscriber {
         let config_param = serialize_config_param(&config_params, param_number)?;
         let config_info = ConfigInfo {
             mode: 0,
-            id: convert_block_id_ext_blk2api(mc_state.block_id()),
+            id: mc_state.block_id().clone(),
             state_proof: ton::bytes(vec!()),
             config_proof: ton::bytes(config_param.into_bytes())
         };
-
         Ok(config_info)
     }
 
@@ -338,8 +331,10 @@ impl ControlQuerySubscriber {
     }
 
     async fn process_generate_keypair(&self) -> Result<KeyHash> {
-        let key_hash = self.key_ring.generate().await?;
-        Ok(KeyHash {key_hash: ton::int256(key_hash)})
+        let ret = KeyHash {
+            key_hash: UInt256::with_array(self.key_ring.generate().await?)
+        };
+        Ok(ret)
     }
     fn export_public_key(&self, key_hash: &[u8; 32]) -> Result<PublicKey> {
         let private = self.key_ring.find(key_hash)?;
@@ -416,14 +411,14 @@ impl Subscriber for ControlQuerySubscriber {
         };
         let query = match query.downcast::<ExportPublicKey>() {
             Ok(query) => return QueryResult::consume_boxed(
-                self.export_public_key(&query.key_hash.0)?,
+                self.export_public_key(query.key_hash.as_slice())?,
                 None
             ),
             Err(query) => query
         };
         let query = match query.downcast::<Sign>() {
             Ok(query) => return QueryResult::consume(
-                self.process_sign_data(&query.key_hash.0, &query.data)?,
+                self.process_sign_data(query.key_hash.as_slice(), &query.data)?,
                 None
             ),
             Err(query) => query
@@ -431,7 +426,7 @@ impl Subscriber for ControlQuerySubscriber {
         let query = match query.downcast::<AddValidatorPermanentKey>() {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_validator_permanent_key(
-                    &query.key_hash.0, query.election_date, query.ttl
+                    query.key_hash.as_slice(), query.election_date, query.ttl
                 ).await?,
                 None
             ),
@@ -440,7 +435,7 @@ impl Subscriber for ControlQuerySubscriber {
         let query = match query.downcast::<AddValidatorTempKey>() {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_validator_temp_key(
-                    &query.permanent_key_hash.0, &query.key_hash.0, query.ttl
+                    query.permanent_key_hash.as_slice(), query.key_hash.as_slice(), query.ttl
                 )?,
                 None
             ),
@@ -449,7 +444,7 @@ impl Subscriber for ControlQuerySubscriber {
         let query = match query.downcast::<AddValidatorAdnlAddress>() {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_validator_adnl_address(
-                    &query.permanent_key_hash.0, &query.key_hash.0, query.ttl
+                    query.permanent_key_hash.as_slice(), query.key_hash.as_slice(), query.ttl
                 ).await?,
                 None
             ),
@@ -457,22 +452,24 @@ impl Subscriber for ControlQuerySubscriber {
         };
         let query = match query.downcast::<AddAdnlId>() {
             Ok(query) => return QueryResult::consume_boxed(
-                self.add_adnl_address(&query.key_hash.0, query.category)?,
+                self.add_adnl_address(query.key_hash.as_slice(), query.category)?,
                 None
             ),
             Err(query) => query
         };
         let query = match query.downcast::<GetBundle>() {
             Ok(query) => {
-                let block_id = convert_block_id_ext_api2blk(&query.block_id)?;
-                return QueryResult::consume_boxed(self.prepare_bundle(block_id).await?, None)
+                return QueryResult::consume_boxed(
+                    self.prepare_bundle(query.block_id.clone()).await?, 
+                    None
+                )
             },
             Err(query) => query
         };
         let query = match query.downcast::<GetFutureBundle>() {
             Ok(query) => {
-                let prev_block_ids = query.prev_block_ids.iter().filter_map(
-                    |id| convert_block_id_ext_api2blk(&id).ok()
+                let prev_block_ids = query.prev_block_ids.iter().map(
+                    |id| id.clone()
                 ).collect();
                 return QueryResult::consume_boxed(
                     self.prepare_future_bundle(prev_block_ids).await?,

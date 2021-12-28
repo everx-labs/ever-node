@@ -1369,10 +1369,30 @@ impl RoundStateImpl {
             format!("{:?}", &message.reason)
         };
 
+        let (candidate_src, block_id) = if let Some(block) = self.get_candidate(&message.candidate) {
+            let src = block.get_source_index();
+            let candidate_src = format!(
+                "node {} (ADNL ID {})", 
+                desc.get_source_public_key_hash(src),
+                desc.get_source_adnl_id(src)
+            );
+            let block_id = if let Some(sent_block) = block.get_block() {
+                format!("rh {:x}, fh {:x}", sent_block.get_root_hash(), sent_block.get_file_hash())
+            } else {
+                "<unknown>".to_string()
+            };
+            (candidate_src, block_id)
+        } else {
+            ("<unknown>".to_string(), "<unknown>".to_string())
+        };
+
         error!(
-            "Node {} rejected candidate {:?} with reason {}",
+            "Node {} (ADNL ID {}) rejected candidate {:?} ({}) from {} with reason {}",
             desc.get_source_public_key_hash(src_idx),
+            desc.get_source_adnl_id(src_idx),
             message.candidate,
+            block_id,
+            candidate_src,
             reason
         );
 
