@@ -1294,7 +1294,7 @@ impl TonNodeGlobalConfigJson {
             };
             let node = DhtNodeConfig {
                 id: Ed25519 {
-                    key: ton::int256(key.pub_key()?.clone())
+                    key: UInt256::with_array(key.pub_key()?.clone())
                 }.into_boxed(),
                 addr_list,
                 version,

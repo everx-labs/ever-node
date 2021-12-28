@@ -708,24 +708,42 @@ impl Collator {
             self.prev_blocks_ids[0],
             if self.prev_blocks_ids.len() > 1 { format!("{}", self.prev_blocks_ids[1]) } else { "".to_owned() }
         );
-        let now = std::time::Instant::now();
+        let started = std::time::Instant::now();
 
-        let imported_data = self.import_data().await?;
-        let (mc_data, prev_data, mut collator_data) = self.prepare_data(imported_data).await?;
-        let (candidate, state) = self.do_collate(&mc_data, &prev_data, &mut collator_data).await?;
+        let imported_data = self.import_data()
+            .await.map_err(|e| {
+                log::warn!("{}: COLLATION FAILED: TIME: {}ms import_data: {}",
+                    self.collated_block_descr, started.elapsed().as_millis(), e);
+                e
+            })?;
 
-        let duration = now.elapsed().as_millis() as u32;
+        let (mc_data, prev_data, mut collator_data) = self.prepare_data(imported_data)
+            .await.map_err(|e| {
+                log::warn!("{}: COLLATION FAILED: TIME: {}ms prepare_data: {}",
+                    self.collated_block_descr, started.elapsed().as_millis(), e);
+                e
+            })?;
+        
+        let (candidate, state) = self.do_collate(&mc_data, &prev_data, &mut collator_data).await
+            .map_err(|e| {
+                log::warn!("{}: COLLATION FAILED: TIME: {}ms do_collate: {}",
+                    self.collated_block_descr, started.elapsed().as_millis(), e);
+                e
+            })?;
+
+        let duration = started.elapsed().as_millis() as u32;
         let ratio = match duration {
             0 => collator_data.block_limit_status.gas_used(),
             duration => collator_data.block_limit_status.gas_used() / duration
         };
         log::info!(
-            "{}: COLLATED SIZE: {} GAS: {} TIME: {}ms RATIO: {}",
+            "{}: COLLATED SIZE: {} GAS: {} TIME: {}ms RATIO: {} ID: {}",
             self.collated_block_descr,
             candidate.data.len(),
             collator_data.block_limit_status.gas_used(),
             duration,
             ratio,
+            candidate.block_id,
         );
 
         #[cfg(feature = "metrics")]
@@ -747,7 +765,7 @@ impl Collator {
         #[cfg(feature = "telemetry")]
         self.engine.collator_telemetry().succeeded_attempt(
             &self.shard,
-            now.elapsed(),
+            started.elapsed(),
             collator_data.execute_count as u32,
             collator_data.block_limit_status.gas_used()
         );

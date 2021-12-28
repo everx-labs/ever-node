@@ -251,13 +251,7 @@ pub trait EngineOperations : Sync + Send {
     fn destroy_block_candidates(&self, session_id: &SessionId) -> Result<bool> {
         unimplemented!()
     }
-    async fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seqno: u32) -> Result<Arc<BlockHandle>> {
-        unimplemented!()
-    }
-    async fn find_block_by_unix_time(&self, acc_pfx: &AccountIdPrefixFull, utime: u32) -> Result<Arc<BlockHandle>> {
-        unimplemented!()
-    }
-    async fn find_block_by_lt(&self, acc_pfx: &AccountIdPrefixFull, lt: u64) -> Result<Arc<BlockHandle>> {
+    async fn find_mc_block_by_seq_no(&self, seqno: u32) -> Result<Arc<BlockHandle>> {
         unimplemented!()
     }
     async fn apply_block(

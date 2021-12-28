@@ -12,28 +12,26 @@
 */
 
 use crate::{
-    block::{convert_block_id_ext_blk2api, convert_block_id_ext_api2blk, BlockStuff},
-    block_proof::BlockProofStuff, engine_traits::EngineAlloc, error::NodeError, 
+    block::BlockStuff, block_proof::BlockProofStuff, engine_traits::EngineAlloc, error::NodeError,
     shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrId, TopBlockDescrStuff},
 };
 #[cfg(feature = "telemetry")]
 use crate::engine_traits::EngineTelemetry;
 
 use std::{
-    path::{Path, PathBuf}, sync::Arc, cmp::min, collections::HashMap,
-    sync::atomic::{AtomicU32, Ordering}
+    cmp::min, collections::HashMap, io::Cursor, path::{Path, PathBuf}, 
+    sync::{Arc, atomic::{AtomicU32, Ordering}}
 };
 use storage::{
     TimeChecker,
     archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId},
     block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage, Callback}, 
-    block_index_db::BlockIndexDb, block_info_db::BlockInfoDb, node_state_db::NodeStateDb, 
-    db::rocksdb::RocksDb,
+    block_info_db::BlockInfoDb, db::rocksdb::RocksDb, node_state_db::NodeStateDb, 
     shardstate_db::{AllowStateGcResolver, ShardStateDb}, 
     shardstate_persistent_db::ShardStatePersistentDb, types::BlockMeta, 
-    shard_top_blocks_db::ShardTopBlocksDb,
+    shard_top_blocks_db::ShardTopBlocksDb, traits::Serializable
 };
-use ton_block::{Block, BlockIdExt, AccountIdPrefixFull, UnixTime32};
+use ton_block::{Block, BlockIdExt};
 use ton_types::{error, fail, Result, UInt256};
 
 /// Full node state keys
@@ -136,9 +134,7 @@ pub trait InternalDb : Sync + Send {
     async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff>;
     async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>>;
 
-    fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seqno: u32) -> Result<Arc<BlockHandle>>;
-    fn find_block_by_unix_time(&self, acc_pfx: &AccountIdPrefixFull, utime: u32) -> Result<Arc<BlockHandle>>;
-    fn find_block_by_lt(&self, acc_pfx: &AccountIdPrefixFull, lt: u64) -> Result<Arc<BlockHandle>>;
+    fn find_mc_block_by_seq_no(&self, seqno: u32) -> Result<Arc<BlockHandle>>;
 
     async fn store_block_proof(
         &self, 
@@ -227,12 +223,6 @@ pub trait InternalDb : Sync + Send {
 
     fn archive_manager(&self) -> &Arc<ArchiveManager>;
 
-    fn index_handle(
-        &self, 
-        handle: &Arc<BlockHandle>,
-        callback: Option<Arc<dyn Callback>>
-    ) -> Result<()>;
-
     fn assign_mc_ref_seq_no(
         &self, 
         handle: &Arc<BlockHandle>, 
@@ -261,10 +251,9 @@ pub struct InternalDbConfig {
 
 pub struct InternalDbImpl {
     block_handle_storage: Arc<BlockHandleStorage>,
-    block_index_db: Arc<BlockIndexDb>,
-    prev_block_db: BlockInfoDb,
+    prev1_block_db: BlockInfoDb,
     prev2_block_db: BlockInfoDb,
-    next_block_db: BlockInfoDb,
+    next1_block_db: BlockInfoDb,
     next2_block_db: BlockInfoDb,
     shard_state_persistent_db: ShardStatePersistentDb,
     shard_state_dynamic_db: Arc<ShardStateDb>,
@@ -291,11 +280,6 @@ impl InternalDbImpl {
     ) -> Result<Self> {
         let db = RocksDb::with_path(config.db_directory.as_str(), "db");
         let db_catchain = RocksDb::with_path(config.db_directory.as_str(), "catchains");
-        let block_index_db = Arc::new(BlockIndexDb::with_db(
-            db.clone(),
-            "index_db/lt_desc_db",
-            "index_db/lt_db"
-        )?);
         let block_handle_db = Arc::new(
             BlockHandleDb::with_db(db.clone(), "block_handle_db")?
         );
@@ -336,10 +320,9 @@ impl InternalDbImpl {
         );
         let db = Self {
             block_handle_storage,
-            block_index_db,
-            prev_block_db: BlockInfoDb::with_db(db.clone(), "prev1_block_db")?,
+            prev1_block_db: BlockInfoDb::with_db(db.clone(), "prev1_block_db")?,
             prev2_block_db: BlockInfoDb::with_db(db.clone(), "prev2_block_db")?,
-            next_block_db: BlockInfoDb::with_db(db.clone(), "next1_block_db")?,
+            next1_block_db: BlockInfoDb::with_db(db.clone(), "next1_block_db")?,
             next2_block_db: BlockInfoDb::with_db(db.clone(), "next2_block_db")?,
             shard_state_persistent_db: ShardStatePersistentDb::with_path(
                 Path::new(config.db_directory.as_str()).join("shard_state_persistent_db")
@@ -375,6 +358,40 @@ impl InternalDbImpl {
         callback: Option<Arc<dyn Callback>>
     ) -> Result<()> {
         self.block_handle_storage.save_handle(handle, callback)
+    }
+
+    fn load_block_linkage(
+        &self, 
+        id: &BlockIdExt,
+        db: &BlockInfoDb,
+        msg: &str
+    ) -> Result<BlockIdExt> {
+        let _tc = TimeChecker::new(format!("{} {}", msg, id), 10);
+        let bytes = db.get(id)?;
+        let mut cursor = Cursor::new(&bytes);
+        BlockIdExt::deserialize(&mut cursor)
+    }
+
+    fn store_block_linkage(
+        &self, 
+        handle: &Arc<BlockHandle>, 
+        linkage: &BlockIdExt,
+        db: &BlockInfoDb,
+        msg: &str,
+        check_has: impl Fn(&Arc<BlockHandle>) -> bool,
+        check_set: impl Fn(&Arc<BlockHandle>) -> bool,
+        callback: Option<Arc<dyn Callback>>
+    ) -> Result<()> {
+        let _tc = TimeChecker::new(format!("{} {}", msg, handle.id()), 10);
+        if !check_has(handle) {
+            let mut value = Vec::new();
+            linkage.serialize(&mut value)?;
+            db.put(handle.id(), &value)?;
+            if check_set(handle) {
+                self.store_block_handle(handle, callback)?;
+            }
+        }
+        Ok(())
     }
 
 }
@@ -459,28 +476,16 @@ impl InternalDb for InternalDbImpl {
         self.archive_manager.get_file(handle, &entry_id).await
     }
 
-    fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seq_no: u32) -> Result<Arc<BlockHandle>> {
-        let _tc = TimeChecker::new(format!("find_block_by_seq_no {} {}", acc_pfx, seq_no), 100);
-        let id = self.block_index_db.get_block_by_seq_no(acc_pfx, seq_no)?;
+    fn find_mc_block_by_seq_no(&self, seqno: u32) -> Result<Arc<BlockHandle>> {
+        let _tc = TimeChecker::new(format!("find_mc_block_by_seq_no {}", seqno), 100);
+        let last_id = self.load_full_node_state(LAST_APPLIED_MC_BLOCK)?.ok_or_else(
+            || error!("Cannot find MC block {} because no MC blocks applied", seqno)
+        )?;
+        let last_state = self.load_shard_state_dynamic(&last_id)?;
+        let id = last_state.find_block_id(seqno)?;        
         self.load_block_handle(&id)?.ok_or_else(
-            || error!("Cannot find handle for block {}", id) 
-        )
-    }
-
-    fn find_block_by_unix_time(&self, acc_pfx: &AccountIdPrefixFull, utime: u32) -> Result<Arc<BlockHandle>> {
-        let _tc = TimeChecker::new(format!("find_block_by_unix_time {} {}", acc_pfx, utime), 100);
-        let id = self.block_index_db.get_block_by_ut(acc_pfx, UnixTime32(utime))?;
-        self.load_block_handle(&id)?.ok_or_else(
-            || error!("Cannot find handle for block {}", id) 
-        )
-    }
-
-    fn find_block_by_lt(&self, acc_pfx: &AccountIdPrefixFull, lt: u64) -> Result<Arc<BlockHandle>> {
-        let _tc = TimeChecker::new(format!("find_block_by_lt {} {}", acc_pfx, lt), 100);
-        let id = self.block_index_db.get_block_by_lt(acc_pfx, lt)?;
-        self.load_block_handle(&id)?.ok_or_else(
-            || error!("Cannot find handle for block {}", id) 
-        )
+            || error!("Cannot load handle for master block {}", id)
+        )          
     }
 
     async fn store_block_proof(
@@ -704,22 +709,16 @@ impl InternalDb for InternalDbImpl {
         prev: &BlockIdExt,
         callback: Option<Arc<dyn Callback>>
     ) -> Result<()> {
-        let _tc = TimeChecker::new(format!("store_block_prev {}", handle.id()), 10);
-        if !handle.has_prev1() {
-            let value = bincode::serialize(&convert_block_id_ext_blk2api(prev))?;
-            self.prev_block_db.put(handle.id(), &value)?;
-            if handle.set_prev1() {
-                self.store_block_handle(handle, callback)?;
-            }
-        }
-        Ok(())
+        self.store_block_linkage(
+            handle, prev, &self.prev1_block_db, "store_block_prev1", 
+            |handle| handle.has_prev1(),
+            |handle| handle.set_prev1(),
+            callback
+        )
     }
 
     fn load_block_prev1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
-        let _tc = TimeChecker::new(format!("load_block_prev {}", id), 10);
-        let bytes = self.prev_block_db.get(id)?;
-        let prev = bincode::deserialize::<ton_api::ton::ton_node::blockidext::BlockIdExt>(&bytes)?;
-        convert_block_id_ext_api2blk(&prev)
+        self.load_block_linkage(id, &self.prev1_block_db, "load_block_prev1")
     }
 
     fn store_block_prev2(
@@ -728,22 +727,16 @@ impl InternalDb for InternalDbImpl {
         prev2: &BlockIdExt,
         callback: Option<Arc<dyn Callback>>
     ) -> Result<()> {
-        let _tc = TimeChecker::new(format!("store_block_prev2 {}", handle.id()), 10);
-        if !handle.has_prev2() {
-            let value = bincode::serialize(&convert_block_id_ext_blk2api(prev2))?;
-            self.prev2_block_db.put(handle.id(), &value)?;
-            if handle.set_prev2() {
-                self.store_block_handle(handle, callback)?;
-            }
-        }
-        Ok(())
+        self.store_block_linkage(
+            handle, prev2, &self.prev2_block_db, "store_block_prev2", 
+            |handle| handle.has_prev2(),
+            |handle| handle.set_prev2(),
+            callback
+        )
     }
 
     fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
-        let _tc = TimeChecker::new(format!("load_block_prev2 {}", id), 10);
-        let bytes = self.prev2_block_db.get(id)?;
-        let prev2 = bincode::deserialize::<ton_api::ton::ton_node::blockidext::BlockIdExt>(&bytes)?;
-        convert_block_id_ext_api2blk(&prev2)
+        self.load_block_linkage(id, &self.prev2_block_db, "load_block_prev2")
     }
 
     fn store_block_next1(
@@ -752,22 +745,16 @@ impl InternalDb for InternalDbImpl {
         next: &BlockIdExt,
         callback: Option<Arc<dyn Callback>>
     ) -> Result<()> {
-        let _tc = TimeChecker::new(format!("store_block_next1 {}", handle.id()), 10);
-        if !handle.has_next1() {
-            let value = bincode::serialize(&convert_block_id_ext_blk2api(next))?;
-            self.next_block_db.put(handle.id(), &value)?;
-            if handle.set_next1() {
-                self.store_block_handle(handle, callback)?;
-            }
-        }
-        Ok(())
+        self.store_block_linkage(
+            handle, next, &self.next1_block_db, "store_block_next1", 
+            |handle| handle.has_next1(),
+            |handle| handle.set_next1(),
+            callback
+        )
     }
 
     fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
-        let _tc = TimeChecker::new(format!("load_block_next1 {}", id), 10);
-        let bytes = self.next_block_db.get(id)?;
-        let next = bincode::deserialize::<ton_api::ton::ton_node::blockidext::BlockIdExt>(&bytes)?;
-        convert_block_id_ext_api2blk(&next)
+        self.load_block_linkage(id, &self.next1_block_db, "load_block_next1")
     }
 
     fn store_block_next2(
@@ -776,22 +763,16 @@ impl InternalDb for InternalDbImpl {
         next2: &BlockIdExt,
         callback: Option<Arc<dyn Callback>>
     ) -> Result<()> {
-        let _tc = TimeChecker::new(format!("store_block_next2 {}", handle.id()), 10);
-        if !handle.has_next2() {
-            let value = bincode::serialize(&convert_block_id_ext_blk2api(next2))?;
-            self.next2_block_db.put(handle.id(), &value)?;
-            if handle.set_next2() {
-                self.store_block_handle(handle, callback)?;
-            }
-        }
-        Ok(())
+        self.store_block_linkage(
+            handle, next2, &self.next2_block_db, "store_block_next2", 
+            |handle| handle.has_next2(),
+            |handle| handle.set_next2(),
+            callback
+        )
     }
 
     fn load_block_next2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
-        let _tc = TimeChecker::new(format!("load_block_next2 {}", id), 10);
-        let bytes = self.next2_block_db.get(id)?;
-        let next2 = bincode::deserialize::<ton_api::ton::ton_node::blockidext::BlockIdExt>(&bytes)?;
-        convert_block_id_ext_api2blk(&next2)
+        self.load_block_linkage(id, &self.next2_block_db, "load_block_next2")
     }
 
 /*
@@ -876,20 +857,6 @@ impl InternalDb for InternalDbImpl {
 
     fn archive_manager(&self) -> &Arc<ArchiveManager> {
         &self.archive_manager
-    }
-
-    fn index_handle(
-        &self, 
-        handle: &Arc<BlockHandle>,
-        callback: Option<Arc<dyn Callback>>
-    ) -> Result<()> {
-        if !handle.is_indexed() {
-            self.block_index_db.add_handle(handle)?;
-            if handle.set_block_indexed() {
-                self.store_block_handle(&handle, callback)?;
-            }
-        }
-        Ok(())
     }
 
     fn assign_mc_ref_seq_no(

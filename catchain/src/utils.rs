@@ -163,16 +163,16 @@ pub fn get_hash_from_block_payload(data: &BlockPayloadPtr) -> BlockHash {
     UInt256::calc_file_hash(&data.data().0)
 }
 
-pub fn int256_to_public_key_hash(public_key: &::ton_api::ton::int256) -> PublicKeyHash {
-    adnl::common::KeyId::from_data(public_key.0)
+pub fn int256_to_public_key_hash(public_key: &UInt256) -> PublicKeyHash {
+    adnl::common::KeyId::from_data(*public_key.as_slice())
 }
 
 pub fn get_public_key_hash(public_key: &PublicKey) -> PublicKeyHash {
     public_key.id().clone()
 }
 
-pub fn public_key_hash_to_int256(v: &PublicKeyHash) -> ::ton_api::ton::int256 {
-    ::ton_api::ton::int256(*v.data())
+pub fn public_key_hash_to_int256(v: &PublicKeyHash) -> UInt256 {
+    UInt256::with_array(*v.data())
 }
 
 pub fn get_overlay_id(first_block: &ton_api::ton::catchain::FirstBlock) -> Result<SessionId> {

@@ -1947,7 +1947,7 @@ impl CatchainProcessor {
 
         //overlay creation
 
-        let sources_as_int256: Vec<::ton_api::ton::int256> = sources
+        let sources_as_int256: Vec<UInt256> = sources
             .clone()
             .into_iter()
             .map(|key| public_key_hash_to_int256(&key))

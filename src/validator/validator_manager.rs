@@ -58,8 +58,8 @@ fn get_session_id_serialize(
         let node_id = descr.compute_node_id_short();
         let adnl_id = descr.adnl_addr.clone().unwrap_or(node_id.clone());
         ton_api::ton::engine::validator::validator::groupmember::GroupMember {
-            public_key_hash: ton_api::ton::int256(node_id.inner()),
-            adnl: ton_api::ton::int256(adnl_id.inner()),
+            public_key_hash: node_id,
+            adnl: adnl_id,
             weight: descr.weight as i64,
         }
     }).collect::<Vec<_>>();
@@ -73,7 +73,7 @@ fn get_session_id_serialize(
             vertical_seqno: max_vertical_seqno,
             last_key_block_seqno: key_seqno,
             catchain_seqno: val_set.catchain_seqno() as i32,
-            config_hash: ton_api::ton::int256(*opts_hash.as_slice()),
+            config_hash: opts_hash.clone(),
             members: members.into()
         }
         .into_boxed())

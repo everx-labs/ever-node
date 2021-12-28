@@ -47,7 +47,7 @@ use storage::block_handle_db::BlockHandle;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
 use ton_block::{
     MASTERCHAIN_ID, INVALID_WORKCHAIN_ID, BASE_WORKCHAIN_ID, SHARD_FULL,
-    BlockIdExt, AccountIdPrefixFull, ShardIdent, Message,
+    BlockIdExt, AccountIdPrefixFull, ShardIdent, Message
 };
 use ton_types::{fail, error, Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
@@ -223,16 +223,12 @@ impl EngineOperations for Engine {
         }
     }
 
-    async fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seqno: u32) -> Result<Arc<BlockHandle>> {
-        self.db().find_block_by_seq_no(acc_pfx, seqno)
-    }
-
-    async fn find_block_by_unix_time(&self, acc_pfx: &AccountIdPrefixFull, utime: u32) -> Result<Arc<BlockHandle>> {
-        self.db().find_block_by_unix_time(acc_pfx, utime)
-    }
-
-    async fn find_block_by_lt(&self, acc_pfx: &AccountIdPrefixFull, lt: u64) -> Result<Arc<BlockHandle>> {
-        self.db().find_block_by_lt(acc_pfx, lt)
+    async fn find_mc_block_by_seq_no(&self, seqno: u32) -> Result<Arc<BlockHandle>> {
+        let last_state = self.load_last_applied_mc_state_or_zerostate().await?;
+        let id = last_state.find_block_id(seqno)?;        
+        self.load_block_handle(&id)?.ok_or_else(
+            || error!("Cannot load handle for master block {}", id)
+        )    
     }
 
     async fn load_last_applied_mc_block(&self) -> Result<BlockStuff> {
@@ -632,7 +628,6 @@ impl EngineOperations for Engine {
             return Ok(false);
         }
         self.db().assign_mc_ref_seq_no(handle, mc_seq_no, None)?;
-        self.db().index_handle(handle, None)?;
         self.db().archive_block(handle.id(), None).await?;
         if self.db().store_block_applied(handle, None)? {
             #[cfg(feature = "telemetry")]
@@ -714,7 +709,7 @@ impl EngineOperations for Engine {
 
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()> {
         let overlay = self.get_full_node_overlay(
-            broadcast.id.workchain,
+            broadcast.id.shard().workchain_id(),
             SHARD_FULL, //broadcast.id.shard as u64
         ).await?;
         overlay.send_block_broadcast(broadcast).await?;

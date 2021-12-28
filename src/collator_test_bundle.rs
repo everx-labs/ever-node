@@ -35,8 +35,8 @@ use storage::{
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
 use ton_block::{
-    BlockIdExt, Message, ShardIdent, AccountIdPrefixFull, Serializable, MerkleUpdate,
-    Deserializable, ValidatorBaseInfo, BlockSignaturesPure, BlockSignatures, HashmapAugType, 
+    BlockIdExt, Message, ShardIdent, Serializable, MerkleUpdate, Deserializable, 
+    ValidatorBaseInfo, BlockSignaturesPure, BlockSignatures, HashmapAugType, 
     TopBlockDescrSet,
 };
 use ton_block::{ShardStateUnsplit, TopBlockDescr};
@@ -663,16 +663,15 @@ impl CollatorTestBundle {
         }
 
         // mc states and merkle updates
-        let mc_pfx = AccountIdPrefixFull::any_masterchain();
         let oldest_mc_state = engine.load_state(
-            engine.find_block_by_seq_no(&mc_pfx, oldest_mc_seq_no).await?.id()
+            engine.find_mc_block_by_seq_no(oldest_mc_seq_no).await?.id()
         ).await?;
         let mut mc_states = vec!(oldest_mc_state.block_id().clone());
         states.insert(oldest_mc_state.block_id().clone(), oldest_mc_state);
         let mut mc_merkle_updates = HashMap::new();
 
         for mc_seq_no in oldest_mc_seq_no + 1..=newest_mc_seq_no {
-            let handle = engine.find_block_by_seq_no(&mc_pfx, mc_seq_no).await?;
+            let handle = engine.find_mc_block_by_seq_no(mc_seq_no).await?;
             let block = engine.load_block(&handle).await?;
             mc_merkle_updates.insert(block.id().clone(), block.block().read_state_update()?);
             states.insert(block.id().clone(), engine.load_state(block.id()).await?);
@@ -811,16 +810,15 @@ impl CollatorTestBundle {
         }
 
         // mc states and merkle updates
-        let mc_pfx = AccountIdPrefixFull::any_masterchain();
         let oldest_mc_state = engine.load_state(
-            engine.find_block_by_seq_no(&mc_pfx, oldest_mc_seq_no).await?.id()
+            engine.find_mc_block_by_seq_no(oldest_mc_seq_no).await?.id()
         ).await?;
         let mut mc_states = vec!(oldest_mc_state.block_id().clone());
         states.insert(oldest_mc_state.block_id().clone(), oldest_mc_state);
         let mut mc_merkle_updates = HashMap::new();
 
         for mc_seq_no in oldest_mc_seq_no + 1..=newest_mc_seq_no {
-            let handle = engine.find_block_by_seq_no(&mc_pfx, mc_seq_no).await?;
+            let handle = engine.find_mc_block_by_seq_no(mc_seq_no).await?;
             let block = engine.load_block(&handle).await?;
             mc_merkle_updates.insert(block.id().clone(), block.block().read_state_update()?);
             states.insert(block.id().clone(), engine.load_state(block.id()).await?);
@@ -1021,16 +1019,15 @@ impl CollatorTestBundle {
             states.insert(block_id.clone(), engine.load_state(block_id).await?);
         }
         // mc states and merkle updates
-        let mc_pfx = AccountIdPrefixFull::any_masterchain();
         let oldest_mc_state = engine.load_state(
-            engine.find_block_by_seq_no(&mc_pfx, oldest_mc_seq_no).await?.id()
+            engine.find_mc_block_by_seq_no(oldest_mc_seq_no).await?.id()
         ).await?;
         let mut mc_states = vec!(oldest_mc_state.block_id().clone());
         states.insert(oldest_mc_state.block_id().clone(), oldest_mc_state);
         let mut mc_merkle_updates = HashMap::new();
 
         for mc_seq_no in oldest_mc_seq_no + 1..=newest_mc_seq_no {
-            let handle = engine.find_block_by_seq_no(&mc_pfx, mc_seq_no).await?;
+            let handle = engine.find_mc_block_by_seq_no(mc_seq_no).await?;
             let block = engine.load_block(&handle).await?;
             mc_merkle_updates.insert(block.id().clone(), block.block().read_state_update()?);
             states.insert(block.id().clone(), engine.load_state(block.id()).await?);
@@ -1237,15 +1234,16 @@ impl EngineOperations for CollatorTestBundle {
         self.load_state(id).await
     }
 
-    async fn find_block_by_seq_no(&self, acc_pfx: &AccountIdPrefixFull, seq_no: u32) -> Result<Arc<BlockHandle>> {
+    async fn find_mc_block_by_seq_no(&self, seq_no: u32) -> Result<Arc<BlockHandle>> {
         for (id, _block) in self.blocks.iter() {
-            if id.seq_no() == seq_no && id.shard().contains_full_prefix(acc_pfx) {
-                return self.load_block_handle(id)?.ok_or_else(
-                    || error!("Cannot load handle for block {}", id)
-                )
+            if (id.seq_no() != seq_no) || !id.shard().is_masterchain() {
+                continue
             }
+            return self.load_block_handle(id)?.ok_or_else(
+                || error!("Cannot load handle for block {}", id)
+            )
         }
-        fail!("Block with seq_no {} and acc prefix {} is not found in the bundle", seq_no, acc_pfx);
+        fail!("Masterblock with seq_no {} is not found in the bundle", seq_no);
     }
 
     fn get_external_messages(&self, _shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {

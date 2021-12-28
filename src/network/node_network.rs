@@ -56,10 +56,7 @@ use std::{
 use ton_types::{Result, fail, error, UInt256};
 use ton_block::BlockIdExt;
 use ton_api::IntoBoxed;
-use ton_api::ton::{
-    int256, bytes,
-    ton_node::broadcast::ConnectivityCheckBroadcast,
-};
+use ton_api::ton::{bytes, ton_node::broadcast::ConnectivityCheckBroadcast};
 
 type Cache<K, T> = lockfree::map::Map<K, T>;
 
@@ -694,7 +691,7 @@ impl NodeNetwork {
         }
         tokio::spawn(async move {
             if let Some(validator_set_context) = self.current_validator_set_context() {
-                let pub_key = KeyId::from_data(broadcast.pub_key.0);
+                let pub_key = KeyId::from_data(broadcast.pub_key.inner());
                 let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
 
                 let u64_size = std::mem::size_of::<u64>();
@@ -781,7 +778,7 @@ impl NodeNetwork {
                 .as_secs();
             padding.extend_from_slice(&now.to_le_bytes());
             let broadcast = ConnectivityCheckBroadcast {
-                pub_key: int256(key_id.clone()),
+                pub_key: UInt256::with_array(key_id.clone()),
                 padding: bytes(padding),
             };
             overlay.val().overlay().broadcast(

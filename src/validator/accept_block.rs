@@ -666,7 +666,7 @@ fn build_block_broadcast(
         let sign = CryptoSignaturePair::construct_from(slice)?;
         packed_signatures.push(
             BlockSignature {
-                who: ton_api::ton::int256(sign.node_id_short.as_slice().to_owned()),
+                who: UInt256::with_array(*sign.node_id_short.as_slice()),
                 signature: ton_api::ton::bytes(sign.sign.to_bytes().to_vec())
             }
         );
@@ -675,7 +675,7 @@ fn build_block_broadcast(
 
     Ok(
         BlockBroadcast {
-            id: block.id().into(),
+            id: block.id().clone(),
             catchain_seqno: validator_set.catchain_seqno() as i32,
             validator_set_hash: signatures.validator_info.validator_list_hash_short as i32,
             signatures: packed_signatures.into(),

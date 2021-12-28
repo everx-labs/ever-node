@@ -3925,10 +3925,7 @@ impl ValidateQuery {
         Ok(())
     }
 
-    pub async fn try_validate(mut self) -> Result<()> {
-        log::trace!("VALIDATE {}", self.block_candidate.as_ref().unwrap().block_id);
-        let now = std::time::Instant::now();
-
+    async fn validate(&mut self) -> Result<ValidateBase> {
         let (base, mc_data) = self.common_preparation().await?;
 
         let manager = self.init_output_queue_manager(&mc_data, &base).await?;
@@ -3980,13 +3977,30 @@ impl ValidateQuery {
         Self::check_mc_block_extra(&base, &mc_data)?;
         self.check_mc_state_extra(&base, &mc_data)?;
 
+
+
+        Ok(base)
+    }
+
+    pub async fn try_validate(mut self) -> Result<()> {
+        let block_id = self.block_candidate.as_ref().ok_or_else(
+            || error!("INTERNAL ERROR: empty candidate in validate query")
+        )?.block_id.clone();
+        log::trace!("VALIDATE {}", block_id);
+        let now = std::time::Instant::now();
+
+        let result = self.validate().await;
         let duration = now.elapsed().as_millis() as u64;
+        let base = result.map_err(|e| {
+            log::warn!("VALIDATION FAILED {} TIME {}ms ERR {}",block_id, duration, e);
+            e
+        })?;
+
         let gas_used = base.gas_used.load(Ordering::Relaxed);
         let ratio = match duration {
             0 => gas_used,
             duration => gas_used / duration
         };
-
         log::info!("ASYNC VALIDATED {} TIME {}ms GAS_RATE: {}", base.block_id(), duration, ratio);
 
         #[cfg(feature = "metrics")]

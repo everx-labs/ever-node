@@ -14,11 +14,9 @@
 pub use super::*;
 use crate::ton_api::IntoBoxed;
 use catchain::profiling::ResultStatusCounter;
-use rand::rngs::ThreadRng;
-use rand::Rng;
-use std::collections::HashMap;
-use std::time::Duration;
-use std::time::SystemTime;
+use rand::{Rng, rngs::ThreadRng};
+use std::{collections::HashMap, time::{Duration, SystemTime}};
+use ton_types::UInt256;
 
 /*
     Constants
@@ -297,7 +295,7 @@ impl SessionDescription for SessionDescriptionImpl {
         collated_data_file_hash: &BlockHash,
     ) -> BlockId {
         let candidate_id = ::ton_api::ton::validator_session::candidateid::CandidateId {
-            src: ::ton_api::ton::int256(*self.get_source_public_key_hash(src_idx).data()),
+            src: UInt256::with_array(*self.get_source_public_key_hash(src_idx).data()),
             root_hash: root_hash.clone().into(),
             file_hash: file_hash.clone().into(),
             collated_data_file_hash: collated_data_file_hash.clone().into(),

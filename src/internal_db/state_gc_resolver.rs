@@ -12,7 +12,7 @@
 */
 
 use storage::shardstate_db::AllowStateGcResolver;
-use ton_block::{BlockIdExt, ShardIdent, AccountIdPrefixFull};
+use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::Result;
 use adnl::common::add_unbound_object_to_map_with_update;
 use crate::engine_traits::EngineOperations;
@@ -59,8 +59,7 @@ impl AllowStateGcSmartResolver {
                 old_min_ref_mc_seqno, new_min_ref_mc_seqno, mc_block_id,
             );
 
-            let mc_pfx = AccountIdPrefixFull::any_masterchain();
-            if let Ok(handle) = engine.find_block_by_seq_no(&mc_pfx, new_min_ref_mc_seqno).await {
+            if let Ok(handle) = engine.find_mc_block_by_seq_no(new_min_ref_mc_seqno).await {
                 let min_mc_state = engine.load_state(handle.id()).await?;
 
                 let (_master, workchain_id) = engine.processed_workchain().await?;

@@ -1004,9 +1004,27 @@ impl Collator {
         );
         self.init_timeout(timeout_ms);
 
-        let imported_data = self.import_data().await?;
-        let (mc_data, prev_data, mut collator_data) = self.prepare_data(imported_data).await?;
-        let (candidate, state, exec_manager) = self.do_collate(&mc_data, &prev_data, &mut collator_data).await?;
+        let imported_data = self.import_data()
+            .await.map_err(|e| {
+                log::warn!("{}: COLLATION FAILED: TIME: {}ms import_data: {}",
+                    self.collated_block_descr, self.started.elapsed().as_millis(), e);
+                e
+            })?;
+
+        let (mc_data, prev_data, mut collator_data) = self.prepare_data(imported_data)
+            .await.map_err(|e| {
+                log::warn!("{}: COLLATION FAILED: TIME: {}ms prepare_data: {}",
+                    self.collated_block_descr, self.started.elapsed().as_millis(), e);
+                e
+            })?;
+        
+        let (candidate, state, exec_manager) = 
+            self.do_collate(&mc_data, &prev_data, &mut collator_data).await
+            .map_err(|e| {
+                log::warn!("{}: COLLATION FAILED: TIME: {}ms do_collate: {}",
+                    self.collated_block_descr, self.started.elapsed().as_millis(), e);
+                e
+            })?;
 
         let duration = self.started.elapsed().as_millis() as u32;
         let ratio = match duration {
@@ -1014,13 +1032,14 @@ impl Collator {
             duration => collator_data.block_limit_status.gas_used() / duration
         };
         log::info!(
-            "{}: ASYNC COLLATED SIZE: {} GAS: {} TIME: {}ms GAS_RATE: {} TRANS: {}ms",
+            "{}: ASYNC COLLATED SIZE: {} GAS: {} TIME: {}ms GAS_RATE: {} TRANS: {}ms ID: {}",
             self.collated_block_descr,
             candidate.data.len(),
             collator_data.block_limit_status.gas_used(),
             duration,
             ratio,
             exec_manager.total_trans_duration.load(Ordering::Relaxed) / 1000,
+            candidate.block_id,
         );
 
         #[cfg(feature = "metrics")]
