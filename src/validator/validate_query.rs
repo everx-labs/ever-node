@@ -3205,8 +3205,14 @@ impl ValidateQuery {
         // CHECK!(tlb::unpack(cs, info));  // this has been already checked for all InMsgDescr
         let header = msg.int_header().ok_or_else(|| error!("InMsg of special message with hash {} has wrong header", msg_hash.to_hex_string()))?;
         let src = msg.src_ref().ok_or_else(|| error!("source address of message {:x} is invalid", env.message_hash()))?;
+        if src.rewrite_pfx().is_some() {
+            fail!("source address of message {:x} contains anycast info - it is not supported", env.message_hash())
+        }
         let src_prefix = AccountIdPrefixFull::prefix(src)?;
         let dst = msg.dst_ref().ok_or_else(|| error!("destination address of message {:x} is invalid", env.message_hash()))?;
+        if dst.rewrite_pfx().is_some() {
+            fail!("destination address of message {:x} contains anycast info - it is not supported", env.message_hash())
+        }
         let dst_prefix = AccountIdPrefixFull::prefix(dst)?;
         // CHECK!(src_prefix.is_valid() && dst_prefix.is_valid());  // we have checked this for all InMsgDescr
         let cur_prefix  = src_prefix.interpolate_addr_intermediate(&dst_prefix, &env.cur_addr())?;

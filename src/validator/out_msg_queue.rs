@@ -131,7 +131,22 @@ impl OutMsgQueueInfoStuff {
         // TODO: comment the next line in the future when the output queues become huge
         // (do this carefully)
         // out_queue_info.out_queue().count_cells(1000000)?;
-        let out_queue = out_queue_info.out_queue().clone();
+        let mut out_queue = out_queue_info.out_queue().clone();
+
+
+        // Due to the lack of necessary checks shardstate already has an internal message with anycast info.
+        // Due to anycast info the message was added into wrong shardstate's subtree.
+        // Need to delete the message.
+        // Needed checks were added, so this code is only a single patch which might be deleted later.
+        if block_id.seq_no == 20094516 && block_id.shard().shard_prefix_with_tag() == 0x5800000000000000u64 {
+            let key = OutMsgQueueKey::with_workchain_id_and_prefix(
+                0, 
+                0x5777784F96FB1CFFu64,
+                UInt256::from_str("05aa297e3a2e003e1449e1297742d64f188985dc029c620edc84264f9786c0c3").unwrap()
+            );
+            out_queue.remove(key.serialize()?.into()).unwrap();
+        }
+
 
         let ihr_pending = out_queue_info.ihr_pending().clone();
         // unpack ProcessedUptoStuff

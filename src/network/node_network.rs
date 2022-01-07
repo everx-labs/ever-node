@@ -224,6 +224,11 @@ impl NodeNetwork {
         Ok(nn)
     }
 
+    pub fn get_key_id_by_tag(&self, tag: usize) -> Result<Arc<KeyId>> {
+        let key_id = self.adnl.key_by_tag(tag)?;
+        Ok(key_id.id().clone())
+    }
+
     pub fn config_handler(&self) -> Arc<NodeConfigHandler> {
         self.config_handler.clone()
     }
