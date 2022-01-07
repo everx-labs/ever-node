@@ -13,11 +13,11 @@
 
 use crate::{
     collator_test_bundle::CollatorTestBundle, config::{KeyRing, NodeConfigHandler},
-    engine_traits::EngineOperations, engine::Engine, 
+    engine_traits::EngineOperations, engine::Engine, network::node_network::NodeNetwork,
     validator::validator_utils::validatordescr_to_catchain_node
 };
 use adnl::{
-    common::{deserialize, QueryResult, Subscriber, AdnlPeers},
+    common::{deserialize, QueryResult, Subscriber, AdnlPeers, KeyId},
     server::{AdnlServer, AdnlServerConfig}
 };
 use std::{fmt::Write, ops::Deref, sync::Arc, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
@@ -52,12 +52,13 @@ impl ControlServer {
         config: AdnlServerConfig,
         engine: Option<Arc<dyn EngineOperations>>,
         key_ring: Arc<dyn KeyRing>,
-        node_config: Arc<NodeConfigHandler>
+        node_config: Arc<NodeConfigHandler>,
+        network: Option<&NodeNetwork>
     ) -> Result<Self> {
         let ret = Self {
             adnl: AdnlServer::listen(
                 config, 
-                vec![Arc::new(ControlQuerySubscriber::new(engine, key_ring, node_config))]
+                vec![Arc::new(ControlQuerySubscriber::new(engine, key_ring, node_config, network)?)]
             ).await? 
         };
         Ok(ret)
@@ -70,25 +71,33 @@ impl ControlServer {
 struct ControlQuerySubscriber {
     engine: Option<Arc<dyn EngineOperations>>,
     key_ring: Arc<dyn KeyRing>, 
-    config: Arc<NodeConfigHandler>
+    config: Arc<NodeConfigHandler>,
+    public_overlay_adnl_id: Option<Arc<KeyId>>
 }
 
 impl ControlQuerySubscriber {
     fn new(
         engine: Option<Arc<dyn EngineOperations>>, 
         key_ring: Arc<dyn KeyRing>, 
-        config: Arc<NodeConfigHandler>
-    ) -> Self {
+        config: Arc<NodeConfigHandler>,
+        network: Option<&NodeNetwork>,
+    ) -> Result<Self> {
+        let key_id = if let Some (network) = network {
+            Some(network.get_key_id_by_tag(NodeNetwork::TAG_OVERLAY_KEY)?)
+        } else {
+            None
+        };
         let ret = Self {
             engine,
             key_ring,
-            config
+            config,
+            public_overlay_adnl_id: key_id
         };
         // To get rid of unused engine field warning
         if ret.engine.is_none() {
             log::debug!("Running control server without engine access")
         }
-        ret
+        Ok(ret)
     }
 
     fn engine(&self) -> Result<&Arc<dyn EngineOperations>> {
@@ -239,6 +248,16 @@ impl ControlQuerySubscriber {
         Ok(serde_json::to_string_pretty(&json_map)?)
     }
 
+    fn get_shards_time_diff(engine: &Arc<dyn EngineOperations>, now: &i32) -> Result<i32> {
+        let shard_client_mc_block_id = engine.load_shard_client_mc_block_id()?
+            .ok_or_else(|| error!("Cannot load shard_mc_block_id"))?;
+
+        let shard_client_mc_block_handle = engine.load_block_handle(&shard_client_mc_block_id)?
+            .ok_or_else(|| error!("Cannot load handle for block {}", &shard_client_mc_block_id))?;
+
+        Ok(now - shard_client_mc_block_handle.gen_utime()? as i32)
+    }
+
     async fn get_stats(&self) -> Result<Stats> {
         let engine = self.engine()?;
         let mut stats = Vec::new();
@@ -265,18 +284,39 @@ impl ControlQuerySubscriber {
         // masterchainblocknumber
         Self::add_stats(&mut stats, "masterchainblocknumber", mc_block_handle.id().seq_no());
 
+        Self::add_stats(&mut stats, "node_version", format!("\"{}\"", env!("CARGO_PKG_VERSION")));
+        let public_overlay_adnl_id = self.public_overlay_adnl_id.as_ref().ok_or_else(|| 
+            error!("Public overlay key id didn`t set!")
+        )?;
+        Self::add_stats(&mut stats, "public_overlay_key_id", format!("\"{}\"", &public_overlay_adnl_id));
+
         // timediff
-        let diff = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i32 - 
-            mc_block_handle.gen_utime()? as i32;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i32;
+        let diff = now - mc_block_handle.gen_utime()? as i32;
 
         Self::add_stats(&mut stats, "timediff", diff);
+
+        // shards timediff
+        match Self::get_shards_time_diff(engine, &now) {
+            Err(_) => Self::add_stats(&mut stats, "shards_timediff", "\"unknown\""),
+            Ok(shards_timediff) => Self::add_stats(&mut stats, "shards_timediff", shards_timediff),
+        };
 
         // in_current_vset_p34
         let adnl_ids = self.config.get_actual_validator_adnl_ids()?;
         let mc_state = engine.load_last_applied_mc_state().await?;
         let current = mc_state.config_params()?.validator_set()?.list().iter().any(|val| {
             match validatordescr_to_catchain_node(val) {
-                Ok(catchain_node) => adnl_ids.contains(&catchain_node.adnl_id),
+                Ok(catchain_node) => { 
+                    let is_validator = adnl_ids.contains(&catchain_node.adnl_id);
+                    if is_validator {
+                        Self::add_stats(&mut stats, 
+                            "current_vset_p34_adnl_id", 
+                            format!("\"{}\"", &catchain_node.adnl_id)
+                        );
+                    }
+                    is_validator
+                },
                 _ => false
             }
         });
@@ -285,7 +325,16 @@ impl ControlQuerySubscriber {
         // in_next_vset_p36
         let next = mc_state.config_params()?.next_validator_set()?.list().iter().any(|val| {
             match validatordescr_to_catchain_node(val) {
-                Ok(catchain_node) => adnl_ids.contains(&catchain_node.adnl_id),
+                Ok(catchain_node) => { 
+                    let is_validator = adnl_ids.contains(&catchain_node.adnl_id);
+                    if is_validator {
+                        Self::add_stats(&mut stats, 
+                            "next_vset_p36_adnl_id",
+                            format!("\"{}\"", &catchain_node.adnl_id)
+                        );
+                    }
+                    is_validator
+                },
                 _ => false
             }
         });

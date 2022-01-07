@@ -1815,15 +1815,15 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
     log::info!("LastMcBlockId: {}", last_applied_mc_block);
     log::info!("ShardsClientMcBlockId: {}", shard_client_mc_block);
     Ok((last_applied_mc_block, shard_client_mc_block, pss_keeper_mc_block))
-
-}                              
+}
 
 async fn run_control_server(engine: Arc<Engine>, config: AdnlServerConfig) -> Result<ControlServer> {
     ControlServer::with_config(
         config,
         Some(Arc::clone(&engine) as Arc<dyn EngineOperations>),
         engine.network().config_handler(),
-        engine.network().config_handler()
+        engine.network().config_handler(),
+        Some(engine.network().clone())
     ).await
 }
 

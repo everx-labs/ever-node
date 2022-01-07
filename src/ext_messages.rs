@@ -235,12 +235,15 @@ pub fn create_ext_message(data: &[u8]) -> Result<(UInt256, Message)> {
         fail!("External message must have zero level, but has {}", root.level())
     }
     if root.repr_depth() >= MAX_EXTERNAL_MESSAGE_DEPTH {
-        fail!("External message is too deep: {}", root.repr_depth())
+        fail!("External message {:x} is too deep: {}", root.repr_hash(), root.repr_depth())
     }
     let message = Message::construct_from(&mut root.clone().into())?;
-    if let Some(_header) = message.ext_in_header() {
+    if let Some(header) = message.ext_in_header() {
+        if header.dst.rewrite_pfx().is_some() {
+            fail!("External inbound message {:x} contains anycast info - it is not supported", root.repr_hash())
+        }
         Ok((root.repr_hash(), message))
     } else {
-        fail!("External inbound message {} doesn't have proper header", root.repr_hash())
+        fail!("External inbound message {:x} doesn't have proper header", root.repr_hash())
     }
 }
