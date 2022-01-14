@@ -708,6 +708,9 @@ pub trait RoundState: fmt::Display + fmt::Debug + PoolObject + HashableObject {
     /// Get precommitted block
     fn get_precommitted_block(&self) -> Option<SentBlockPtr>;
 
+    /// Does the round have precommitted block
+    fn has_precommitted_block(&self) -> bool;
+
     /// First attempt for the specified validator
     fn get_first_attempt(&self, src_idx: u32) -> u32;
 
@@ -716,6 +719,9 @@ pub trait RoundState: fmt::Display + fmt::Debug + PoolObject + HashableObject {
 
     /// Get block by id
     fn get_block(&self, block_id: &BlockId) -> Option<BlockCandidatePtr>;
+
+    /// Does the round have approved block
+    fn has_approved_block(&self, desc: &dyn SessionDescription) -> bool;
 
     /// Validators which approved the block
     fn get_block_approvers(&self, desc: &dyn SessionDescription, block_id: &BlockId) -> Vec<u32>;
@@ -738,6 +744,9 @@ pub trait RoundState: fmt::Display + fmt::Debug + PoolObject + HashableObject {
 
     /// Check if block was sent by a specific validator
     fn check_block_is_sent_by(&self, src_idx: u32) -> bool;
+
+    /// Does the round have voted block
+    fn has_voted_block(&self, desc: &dyn SessionDescription) -> bool;
 
     /// Check if we need to generate vote for block
     fn check_need_generate_vote_for(
@@ -895,6 +904,9 @@ pub trait SessionState: fmt::Display + fmt::Debug + PoolObject + HashableObject 
     /// Get block by id
     fn get_block(&self, desc: &dyn SessionDescription, block_id: &BlockId) -> Option<SentBlockPtr>;
 
+    /// Does the round have approved block
+    fn has_approved_block(&self, desc: &dyn SessionDescription) -> bool;
+
     /// Block approved by validator
     fn get_blocks_approved_by(
         &self,
@@ -917,6 +929,12 @@ pub trait SessionState: fmt::Display + fmt::Debug + PoolObject + HashableObject 
 
     /// Check if block was sent by a specific validator
     fn check_block_is_sent_by(&self, src_idx: u32) -> bool;
+
+    /// Does the round have precommitted block
+    fn has_precommitted_block(&self) -> bool;
+
+    /// Does the round have voted block
+    fn has_voted_block(&self, desc: &dyn SessionDescription) -> bool;
 
     /// Check if we need to generate vote for block
     fn check_need_generate_vote_for(
@@ -1443,11 +1461,6 @@ impl SessionFactory {
         session_state::SessionStateImpl::create_empty(desc)
     }
 
-    /// Create task queue
-    pub fn create_task_queue(metrics_receiver: Arc<metrics_runtime::Receiver>) -> TaskQueuePtr {
-        session::SessionImpl::create_task_queue(metrics_receiver)
-    }
-
     /// Create session callbacks task queue
     pub fn create_callback_task_queue(
         metrics_receiver: Arc<metrics_runtime::Receiver>,
@@ -1503,7 +1516,7 @@ impl SessionFactory {
         local_key: PrivateKey,
         listener: SessionListenerPtr,
         catchain: CatchainPtr,
-        task_queue: TaskQueuePtr,
+        completion_task_queue: TaskQueuePtr,
         callbacks_task_queue: CallbackTaskQueuePtr,
         session_creation_time: std::time::SystemTime,
         metrics: Option<Arc<metrics_runtime::Receiver>>,
@@ -1515,7 +1528,7 @@ impl SessionFactory {
             local_key,
             listener,
             catchain,
-            task_queue,
+            completion_task_queue,
             callbacks_task_queue,
             session_creation_time,
             metrics,

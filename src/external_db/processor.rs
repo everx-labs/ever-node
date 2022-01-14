@@ -11,7 +11,12 @@
 * limitations under the License.
 */
 
-use std::{collections::hash_set::HashSet, convert::TryInto, sync::Arc};
+use std::{
+    collections::hash_set::HashSet,
+    convert::TryInto,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH}
+};
 use ton_block::{
     Account, AccountBlock, Block, BlockIdExt,
     BlockProcessingStatus, BlockProof, Deserializable,
@@ -25,7 +30,6 @@ use ton_types::{
     fail,
 };
 use serde::Serialize;
-use chrono::Utc;
 
 use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, engine::STATSD,
@@ -527,10 +531,11 @@ impl<T: WriteData> Processor<T> {
     }
 
     async fn send_raw_block(&self, key: [u8; 32], value: Vec<u8>, mc_seq_no: u32, file_hash: [u8; 32], partition_key: Option<u32>) -> Result<()> {
+        let raw_block_timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64;
         let attributes = [
             ("mc_seq_no", &mc_seq_no.to_be_bytes()[..]),
-            ("raw_block_timestamp", &Utc::now().timestamp().to_be_bytes()[..]),
             ("file_hash", &file_hash[..]),
+            ("raw_block_timestamp", &raw_block_timestamp.to_be_bytes()[..]),
         ];
         self.write_raw_block.write_raw_data(key.to_vec(), value, Some(&attributes), partition_key).await
     }

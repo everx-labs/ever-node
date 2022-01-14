@@ -36,6 +36,9 @@ pub trait TaskQueue<FuncPtr: Send + 'static>: Send + Sync {
     /// Is queue overloaded
     fn is_overloaded(&self) -> bool;
 
+    /// Is queue empty
+    fn is_empty(&self) -> bool;
+
     /// Post closure (non-generic interface)
     fn post_closure(&self, task: FuncPtr);
 
@@ -67,8 +70,8 @@ where
 
 /// Completion handler processor
 pub trait CompletionHandlerProcessor {
-    /// Task queue
-    fn get_task_queue(&self) -> &TaskQueuePtr;
+    /// Task queue for completion handlers
+    fn get_completion_task_queue(&self) -> &TaskQueuePtr;
 
     /// Add completion handler
     fn add_completion_handler(&mut self, handler: CompletionHandlerPtr) -> CompletionHandlerId;
@@ -93,7 +96,11 @@ where
     let handler_index = completion_handler_processor.add_completion_handler(Box::new(
         SingleThreadedCompletionHandler::<T>::new(response_callback),
     ));
-    let queue_weak_ptr = Arc::downgrade(&completion_handler_processor.get_task_queue().clone());
+    let queue_weak_ptr = Arc::downgrade(
+        &completion_handler_processor
+            .get_completion_task_queue()
+            .clone(),
+    );
 
     let handler = move |result: Result<T>| {
         if let Some(mut queue) = queue_weak_ptr.upgrade() {

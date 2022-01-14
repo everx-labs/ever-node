@@ -120,6 +120,20 @@ impl RoundState for RoundStateImpl {
         Approval management
     */
 
+    fn has_approved_block(&self, desc: &dyn SessionDescription) -> bool {
+        if self.sent_blocks.is_none() {
+            return false;
+        }
+
+        for block_candidate in self.sent_blocks.as_ref().unwrap().iter() {
+            if block_candidate.check_block_is_approved(desc) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     fn get_block_approvers(&self, desc: &dyn SessionDescription, block_id: &BlockId) -> Vec<u32> {
         let block_ptr = self.get_candidate(block_id);
 
@@ -257,6 +271,16 @@ impl RoundState for RoundStateImpl {
     /*
         Voting management
     */
+
+    fn has_voted_block(&self, desc: &dyn SessionDescription) -> bool {
+        for attempt in self.attempts.get_iter().rev() {
+            if attempt.get_voted_block(desc).is_some() {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     fn check_need_generate_vote_for(
         &self,
@@ -439,6 +463,10 @@ impl RoundState for RoundStateImpl {
     /*
         Precommit management
     */
+
+    fn has_precommitted_block(&self) -> bool {
+        self.precommitted_block.is_some()
+    }
 
     fn get_precommitted_block(&self) -> Option<SentBlockPtr> {
         self.precommitted_block.clone()
@@ -1369,15 +1397,20 @@ impl RoundStateImpl {
             format!("{:?}", &message.reason)
         };
 
-        let (candidate_src, block_id) = if let Some(block) = self.get_candidate(&message.candidate) {
+        let (candidate_src, block_id) = if let Some(block) = self.get_candidate(&message.candidate)
+        {
             let src = block.get_source_index();
             let candidate_src = format!(
-                "node {} (ADNL ID {})", 
+                "node {} (ADNL ID {})",
                 desc.get_source_public_key_hash(src),
                 desc.get_source_adnl_id(src)
             );
             let block_id = if let Some(sent_block) = block.get_block() {
-                format!("rh {:x}, fh {:x}", sent_block.get_root_hash(), sent_block.get_file_hash())
+                format!(
+                    "rh {:x}, fh {:x}",
+                    sent_block.get_root_hash(),
+                    sent_block.get_file_hash()
+                )
             } else {
                 "<unknown>".to_string()
             };

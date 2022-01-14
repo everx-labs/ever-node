@@ -312,6 +312,7 @@ enum MetricUsage {
     Derivative,
     Percents,
     Float,
+    Latency,
 }
 
 pub struct Metric {
@@ -330,6 +331,7 @@ pub struct MetricsDumper {
 impl MetricsDumper {
     pub const METRIC_DERIVATIVE_MULTIPLIER: f64 = 1000000.0;
     pub const METRIC_FLOAT_MULTIPLIER: f64 = 10000.0;
+    pub const METRIC_TIME_MULTIPLIER: f64 = 1000.0;
 
     pub fn add_compute_handler<F>(&mut self, key: String, handler: F)
     where
@@ -343,20 +345,126 @@ impl MetricsDumper {
         self.derivative_metrics.insert(key);
     }
 
+    fn update_histogram(
+        &mut self,
+        metrics: &mut BTreeMap<String, Metric>,
+        mut basic_key: String,
+        mut values: Vec<u64>,
+    ) {
+        let (mut last, mut avg, mut med, mut min, mut max) = if values.len() > 0 {
+            let last = values[values.len() - 1] as f64;
+            let avg = values.iter().sum::<u64>() as f64 / values.len() as f64;
+
+            values.sort();
+
+            let med = values[values.len() / 2] as f64;
+            let min = values[0] as f64;
+            let max = values[values.len() - 1] as f64;
+
+            (last, avg, med, min, max)
+        } else {
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        };
+
+        let mut usage = MetricUsage::Float;
+
+        if let Some(stripped_basic_key) = basic_key.strip_prefix("time:") {
+            basic_key = stripped_basic_key.to_string();
+            usage = MetricUsage::Latency;
+            last /= Self::METRIC_TIME_MULTIPLIER;
+            avg /= Self::METRIC_TIME_MULTIPLIER;
+            med /= Self::METRIC_TIME_MULTIPLIER;
+            min /= Self::METRIC_TIME_MULTIPLIER;
+            max /= Self::METRIC_TIME_MULTIPLIER;
+        }
+
+        metrics.insert(
+            format!("{}.last", basic_key),
+            Metric {
+                value: (last * Self::METRIC_FLOAT_MULTIPLIER) as u64,
+                usage: usage,
+            },
+        );
+        metrics.insert(
+            format!("{}.avg", basic_key),
+            Metric {
+                value: (avg * Self::METRIC_FLOAT_MULTIPLIER) as u64,
+                usage: usage,
+            },
+        );
+        metrics.insert(
+            format!("{}.med", basic_key),
+            Metric {
+                value: (med * Self::METRIC_FLOAT_MULTIPLIER) as u64,
+                usage: usage,
+            },
+        );
+        metrics.insert(
+            format!("{}.min", basic_key),
+            Metric {
+                value: (min * Self::METRIC_FLOAT_MULTIPLIER) as u64,
+                usage: usage,
+            },
+        );
+        metrics.insert(
+            format!("{}.max", basic_key),
+            Metric {
+                value: (max * Self::METRIC_FLOAT_MULTIPLIER) as u64,
+                usage: usage,
+            },
+        );
+        metrics.insert(
+            format!("{}.cnt", basic_key),
+            Metric {
+                value: values.len() as u64,
+                usage: MetricUsage::Counter,
+            },
+        );
+    }
+
     pub fn update(&mut self, metrics_receiver: &metrics_runtime::Receiver) {
         //convert metrics
 
         let mut metrics: BTreeMap<String, Metric> = BTreeMap::new();
 
         for (key, value) in &metrics_receiver.controller().snapshot().into_measurements() {
-            if let metrics_runtime::Measurement::Counter(value) = value {
-                metrics.insert(
-                    key.name().to_string(),
-                    Metric {
-                        value: *value,
-                        usage: MetricUsage::Counter,
-                    },
-                );
+            let key = key.name().to_string();
+
+            match value {
+                metrics_runtime::Measurement::Counter(value) => {
+                    metrics.insert(
+                        key,
+                        Metric {
+                            value: *value,
+                            usage: MetricUsage::Counter,
+                        },
+                    );
+                }
+                metrics_runtime::Measurement::Histogram(value) => {
+                    self.update_histogram(&mut metrics, key, value.decompress());
+                }
+                metrics_runtime::Measurement::Gauge(value) => {
+                    let mut usage = MetricUsage::Counter;
+                    let mut key = key.to_string();
+
+                    if let Some(stripped_basic_key) = key.strip_prefix("percents:") {
+                        usage = MetricUsage::Percents;
+                        key = stripped_basic_key.to_string();
+                    } else {
+                        if let Some(stripped_basic_key) = key.strip_prefix("float:") {
+                            key = stripped_basic_key.to_string();
+                            usage = MetricUsage::Float;
+                        }
+                    }
+
+                    metrics.insert(
+                        key,
+                        Metric {
+                            value: *value as u64,
+                            usage: usage,
+                        },
+                    );
+                }
             }
         }
 
@@ -425,6 +533,10 @@ impl MetricsDumper {
                 ),
                 Float => format!(
                     "{:.2}",
+                    (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER
+                ),
+                Latency => format!(
+                    "{:.3}s",
                     (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER
                 ),
             };

@@ -883,7 +883,12 @@ pub trait Catchain: Send + Sync {
     fn request_new_block(&self, time: SystemTime);
 
     /// Mark block as processed
-    fn processed_block(&self, payload: BlockPayloadPtr);
+    fn processed_block(
+        &self,
+        payload: BlockPayloadPtr,
+        may_be_skipped: bool,
+        enable_batching_mode: bool,
+    );
 
     /// Send broadcast
     fn send_broadcast(&self, payload: BlockPayloadPtr);
@@ -1064,7 +1069,7 @@ impl CatchainFactory {
     pub fn create_database(
         path: String,
         name: String,
-        metrics: &metrics_runtime::Receiver
+        metrics: &metrics_runtime::Receiver,
     ) -> Result<DatabasePtr> {
         database::DatabaseImpl::create(&path, &name, metrics)
     }
