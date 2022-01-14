@@ -8,6 +8,7 @@ members = [ 'storage' ]
 resolver = '2'
 
 [dependencies]
+zeroize_derive = '=1.2.2'
 async-trait = '0.1.22'
 base64 = '0.13'
 bitflags = '1.2.1'
