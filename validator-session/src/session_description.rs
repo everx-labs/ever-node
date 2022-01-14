@@ -14,8 +14,11 @@
 pub use super::*;
 use crate::ton_api::IntoBoxed;
 use catchain::profiling::ResultStatusCounter;
-use rand::{Rng, rngs::ThreadRng};
-use std::{collections::HashMap, time::{Duration, SystemTime}};
+use rand::{rngs::ThreadRng, Rng};
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime},
+};
 use ton_types::UInt256;
 
 /*

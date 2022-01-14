@@ -1059,8 +1059,12 @@ impl ReceivedBlockImpl {
         if log_enabled!(log::Level::Debug) {
             trace!(
                 "...create new block with payload: \
-                hash={:?}, source_id={}, height={}, data_hash={:?}, signature={:?}", 
-                body.hash, body.source_id, body.height, body.data_hash, body.signature
+                hash={:?}, source_id={}, height={}, data_hash={:?}, signature={:?}",
+                body.hash,
+                body.source_id,
+                body.height,
+                body.data_hash,
+                body.signature
             )
         }
 
@@ -1093,8 +1097,12 @@ impl ReceivedBlockImpl {
         if log_enabled!(log::Level::Debug) {
             trace!(
                 "...create new block dependency: \
-                hash={:?}, source_id={}, height={}, data_hash={:?}, signature={:?}", 
-                body.hash, body.source_id, body.height, body.data_hash, body.signature
+                hash={:?}, source_id={}, height={}, data_hash={:?}, signature={:?}",
+                body.hash,
+                body.source_id,
+                body.height,
+                body.data_hash,
+                body.signature
             )
         }
 

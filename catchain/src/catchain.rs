@@ -116,6 +116,10 @@ struct CatchainProcessor {
     current_extra_id: BlockExtraId, //current block extra identifier
     current_time: Option<std::time::SystemTime>, //current time for log replaying
     utility_queue_sender: crossbeam::channel::Sender<Box<TaskDesc<dyn FnOnce() + Send>>>, //queue from outer world to the Catchain utility thread
+    process_blocks_requests_counter: metrics_runtime::data::Counter, //counter for send_process
+    process_blocks_responses_counter: metrics_runtime::data::Counter, //counter for processed_block
+    process_blocks_skip_responses_counter: metrics_runtime::data::Counter, //counter for processed_block with may_be_skipped=true
+    process_blocks_batching_requests_counter: metrics_runtime::data::Counter, //counter for processed_block with batching request
 }
 
 /*
@@ -761,6 +765,8 @@ impl CatchainProcessor {
         check_execution_time!(10000);
 
         if let Some(listener) = self.catchain_listener.upgrade() {
+            self.process_blocks_requests_counter.increment();
+
             listener.process_blocks(blocks);
         }
     }
@@ -892,6 +898,26 @@ impl CatchainProcessor {
         metrics_dumper.add_derivative_metric("catchain_main_loop_overloads".to_string());
         metrics_dumper.add_derivative_metric("catchain_utility_loop_iterations".to_string());
         metrics_dumper.add_derivative_metric("catchain_utility_loop_overloads".to_string());
+
+        metrics_dumper.add_derivative_metric("process_blocks_requests".to_string());
+        metrics_dumper.add_derivative_metric("process_blocks_responses".to_string());
+        metrics_dumper.add_derivative_metric("process_blocks_skip_responses".to_string());
+        metrics_dumper.add_derivative_metric("process_blocks_batching_requests".to_string());
+
+        utils::add_compute_percentage_metric(
+            &mut metrics_dumper,
+            &"process_blocks_skipping".to_string(),
+            &"process_blocks_skip_responses".to_string(),
+            &"process_blocks_responses".to_string(),
+            0.0,
+        );
+        utils::add_compute_percentage_metric(
+            &mut metrics_dumper,
+            &"process_blocks_batching".to_string(),
+            &"process_blocks_batching_requests".to_string(),
+            &"process_blocks_responses".to_string(),
+            0.0,
+        );
 
         utils::add_compute_percentage_metric(
             &mut metrics_dumper,
@@ -1478,35 +1504,80 @@ impl CatchainProcessor {
         }
     }
 
-    fn processed_block(&mut self, payload: BlockPayloadPtr) {
+    fn processed_block(
+        &mut self,
+        payload: BlockPayloadPtr,
+        mut may_be_skipped: bool,
+        enable_batching_mode: bool,
+    ) {
         instrument!();
+
+        self.process_blocks_responses_counter.increment();
 
         assert!(self.receiver_started);
 
-        trace!(
-            "Catchain created block: deps={:?}, payload size is {}",
-            self.process_deps,
-            payload.data().len()
-        );
+        if may_be_skipped && self.top_blocks.len() >= self.sources.len() / 3 {
+            //skip ONLY if we have unprocessed (not merged) top blocks from less than 1/3 of validators
+            //this is needed to reduce number of unprocessed top blocks from other validators in case of hanged consensus
+            may_be_skipped = false;
+        }
 
-        if !self.options.skip_processed_blocks {
-            self.receiver
-                .borrow_mut()
-                .add_block(payload, self.process_deps.drain(..).collect());
+        if !may_be_skipped {
+            trace!(
+                "Catchain created block: deps={:?}, payload size is {}",
+                self.process_deps,
+                payload.data().len()
+            );
+
+            if !self.options.skip_processed_blocks {
+                self.receiver
+                    .borrow_mut()
+                    .add_block(payload, self.process_deps.drain(..).collect());
+            }
+        } else {
+            trace!("Catchain created skip-block: deps={:?}", self.process_deps);
         }
 
         assert!(self.active_process);
 
-        if self.top_blocks.len() > 0 || self.force_process {
+        let batching_mode = if self.force_process {
+            false //do not batch in case if validator session requested to generate block immediately (collator's flow); default flow, same with T-Node
+        } else {
+            if self.top_blocks.len() == 0 {
+                true //batch if we don't have unprocessed (not merged) top blocks from other validators (default flow; same with T-Node)
+            } else {
+                enable_batching_mode //batch if it is requested by a validator session
+            }
+        };
+
+        debug!(
+            "Catchain top blocks: {}{}",
+            self.top_blocks.len(),
+            if enable_batching_mode {
+                " (batching)"
+            } else {
+                ""
+            },
+        );
+
+        if may_be_skipped {
+            self.process_blocks_skip_responses_counter.increment();
+        }
+
+        if !batching_mode {
             self.force_process = false;
 
             self.send_process();
         } else {
             self.active_process = false;
 
+            self.process_blocks_batching_requests_counter.increment();
+
             info!("...catchain finish processing");
 
-            self.notify_finished_processing();
+            if self.top_blocks.len() == 0 {
+                self.notify_finished_processing();
+            }
 
             //force set next block generation time and ignore all earlier wakeups
 
@@ -1972,6 +2043,19 @@ impl CatchainProcessor {
             Arc::downgrade(&overlay_replay_listener),
         )?;
 
+        //configure metrics
+
+        let process_blocks_requests_counter =
+            metrics_receiver.sink().counter("process_blocks_requests");
+        let process_blocks_responses_counter =
+            metrics_receiver.sink().counter("process_blocks_responses");
+        let process_blocks_skip_responses_counter = metrics_receiver
+            .sink()
+            .counter("process_blocks_skip_responses");
+        let process_blocks_batching_requests_counter = metrics_receiver
+            .sink()
+            .counter("process_blocks_batching_requests");
+
         debug!(
             "CatchainProcessor: starting up overlay for session {:x} with ID {:x}, short_id {}",
             session_id, overlay_id, overlay_short_id
@@ -2025,6 +2109,10 @@ impl CatchainProcessor {
             receiver_started: false,
             current_time: None,
             utility_queue_sender: utility_queue_sender,
+            process_blocks_requests_counter,
+            process_blocks_responses_counter,
+            process_blocks_skip_responses_counter,
+            process_blocks_batching_requests_counter,
         };
 
         Ok(body)
@@ -2201,9 +2289,14 @@ impl Catchain for CatchainImpl {
         });
     }
 
-    fn processed_block(&self, payload: BlockPayloadPtr) {
+    fn processed_block(
+        &self,
+        payload: BlockPayloadPtr,
+        may_be_skipped: bool,
+        enable_batching_mode: bool,
+    ) {
         self.post_closure(move |processor: &mut CatchainProcessor| {
-            processor.processed_block(payload);
+            processor.processed_block(payload, may_be_skipped, enable_batching_mode);
         });
     }
 

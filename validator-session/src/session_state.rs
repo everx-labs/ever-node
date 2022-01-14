@@ -108,6 +108,10 @@ impl SessionState for SessionStateImpl {
         Approval management
     */
 
+    fn has_approved_block(&self, desc: &dyn SessionDescription) -> bool {
+        self.current_round.has_approved_block(desc)
+    }
+
     fn get_committed_block_approve_signatures(
         &self,
         sequence_number: u32,
@@ -156,6 +160,14 @@ impl SessionState for SessionStateImpl {
     /*
         Voting management
     */
+
+    fn has_precommitted_block(&self) -> bool {
+        self.current_round.has_precommitted_block()
+    }
+
+    fn has_voted_block(&self, desc: &dyn SessionDescription) -> bool {
+        self.current_round.has_voted_block(desc)
+    }
 
     fn check_need_generate_vote_for(
         &self,

@@ -44,6 +44,22 @@ const SESSION_PROFILING_DUMP_PERIOD_MS: u64 = 30000; //period of profiling dump
 ===================================================================================================
 */
 
+trait DefaultTaskFactory<FuncPtr: Send + 'static> {
+    fn create_default_task() -> FuncPtr;
+}
+
+impl DefaultTaskFactory<TaskPtr> for TaskPtr {
+    fn create_default_task() -> TaskPtr {
+        Box::new(|_processor: &mut dyn SessionProcessor| {})
+    }
+}
+
+impl DefaultTaskFactory<CallbackTaskPtr> for CallbackTaskPtr {
+    fn create_default_task() -> CallbackTaskPtr {
+        Box::new(|| {})
+    }
+}
+
 struct TaskDesc<FuncPtr> {
     task: FuncPtr,                        //closure for execution
     creation_time: std::time::SystemTime, //task creation time
@@ -56,6 +72,7 @@ struct TaskQueueImpl<FuncPtr> {
     post_counter: metrics_runtime::data::Counter,                         //counter for queue posts
     pull_counter: metrics_runtime::data::Counter,                         //counter for queue pull
     is_overloaded: Arc<AtomicBool>, //atomic flag to indicate that queue is overloaded
+    linked_queue: Option<Arc<dyn TaskQueue<FuncPtr>>>, //linked task queue to wake up
 }
 
 /*
@@ -64,10 +81,14 @@ struct TaskQueueImpl<FuncPtr> {
 
 impl<FuncPtr> TaskQueue<FuncPtr> for TaskQueueImpl<FuncPtr>
 where
-    FuncPtr: Send + 'static,
+    FuncPtr: Send + DefaultTaskFactory<FuncPtr> + 'static,
 {
     fn is_overloaded(&self) -> bool {
         self.is_overloaded.load(Ordering::Relaxed)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queue_receiver.is_empty()
     }
 
     fn post_closure(&self, task: FuncPtr) {
@@ -79,6 +100,10 @@ where
             error!("ValidatorSession method post closure error: {}", send_error);
         } else {
             self.post_counter.increment();
+
+            if let Some(ref linked_queue) = &self.linked_queue {
+                linked_queue.post_closure(FuncPtr::create_default_task());
+            }
         }
     }
 
@@ -128,6 +153,7 @@ where
         name: String,
         queue_sender: crossbeam::channel::Sender<Box<TaskDesc<FuncPtr>>>,
         queue_receiver: crossbeam::channel::Receiver<Box<TaskDesc<FuncPtr>>>,
+        linked_queue: Option<Arc<dyn TaskQueue<FuncPtr>>>,
         metrics_receiver: Arc<metrics_runtime::Receiver>,
     ) -> Self {
         let pull_counter = metrics_receiver
@@ -144,6 +170,7 @@ where
             pull_counter: pull_counter,
             post_counter: post_counter,
             is_overloaded: Arc::new(AtomicBool::new(false)),
+            linked_queue,
         }
     }
 }
@@ -240,6 +267,7 @@ pub(crate) struct SessionImpl {
     main_processing_thread_stopped: Arc<AtomicBool>, //atomic flag to indicate that processing thread has been stopped
     session_callbacks_processing_thread_stopped: Arc<AtomicBool>, //atomic flag to indicate that processing thread has been stopped
     _main_task_queue: TaskQueuePtr, //task queue for main thread tasks processing
+    _session_callbacks_responses_task_queue: TaskQueuePtr, //task queue for session callbacks responses processing
     _session_callbacks_task_queue: CallbackTaskQueuePtr, //task queue for session callbacks processing
     catchain: CatchainPtr,                               //catchain session
     session_id: SessionId,
@@ -331,6 +359,7 @@ impl SessionImpl {
         should_stop_flag: Arc<AtomicBool>,
         is_stopped_flag: Arc<AtomicBool>,
         task_queue: TaskQueuePtr,
+        completion_task_queue: TaskQueuePtr,
         callbacks_task_queue: CallbackTaskQueuePtr,
         options: SessionOptions,
         session_id: SessionId,
@@ -366,7 +395,7 @@ impl SessionImpl {
             local_key,
             listener,
             catchain,
-            task_queue.clone(),
+            completion_task_queue.clone(),
             callbacks_task_queue.clone(),
             session_creation_time,
             Some(metrics_receiver),
@@ -611,6 +640,13 @@ impl SessionImpl {
             &"validator_session_callbacks_loop_iterations".to_string(),
             0.0,
         );
+        add_compute_percentage_metric(
+            &mut metrics_dumper,
+            &"active_nodes".to_string(),
+            &"active_weight".to_string(),
+            &"total_weight".to_string(),
+            0.0,
+        );
 
         add_compute_result_metric(&mut metrics_dumper, &"collate_requests".to_string());
         add_compute_result_metric(&mut metrics_dumper, &"collate_requests_expire".to_string());
@@ -662,6 +698,13 @@ impl SessionImpl {
             &"request_new_block_calls".to_string(),
             0.0,
         );
+        add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"candidates_per_round".to_string(),
+            &"sent_blocks.persistent".to_string(),
+            &"commit_requests.total".to_string(),
+            0.0,
+        );
 
         metrics_dumper.add_derivative_metric("processing_queue.pulls".to_string());
         metrics_dumper.add_derivative_metric("processing_queue.posts".to_string());
@@ -693,6 +736,7 @@ impl SessionImpl {
         let mut last_warn_dump_time = std::time::SystemTime::now();
         let mut next_metrics_dump_time = last_warn_dump_time;
         let mut next_profiling_dump_time = last_warn_dump_time;
+        let mut last_unprioritized_closure_pulled = last_warn_dump_time;
 
         loop {
             {
@@ -723,13 +767,23 @@ impl SessionImpl {
                 };
 
                 const MAX_TIMEOUT: Duration = Duration::from_secs(2); //such little timeout is needed to check should_stop_flag and thread exiting
+                const MAX_UNPRIORITIZED_PULLS_TIMEOUT: Duration = Duration::from_secs(2); //max timeout for processing only prioritized events
 
                 let timeout = std::cmp::min(timeout, MAX_TIMEOUT);
 
                 let task = {
                     instrument!();
 
-                    task_queue.pull_closure(timeout, &mut last_warn_dump_time)
+                    if completion_task_queue.is_empty()
+                        || last_unprioritized_closure_pulled.elapsed().unwrap()
+                            > MAX_UNPRIORITIZED_PULLS_TIMEOUT
+                    {
+                        last_unprioritized_closure_pulled = now;
+                        task_queue.pull_closure(timeout, &mut last_warn_dump_time)
+                    } else {
+                        completion_task_queue
+                            .pull_closure(Duration::from_millis(1), &mut last_warn_dump_time)
+                    }
                 };
 
                 if let Some(task) = task {
@@ -879,6 +933,8 @@ impl SessionImpl {
     */
 
     pub(crate) fn create_task_queue(
+        name: String,
+        linked_queue: Option<TaskQueuePtr>,
         metrics_receiver: Arc<metrics_runtime::Receiver>,
     ) -> TaskQueuePtr {
         type ChannelPair = (
@@ -888,9 +944,10 @@ impl SessionImpl {
 
         let (queue_sender, queue_receiver): ChannelPair = crossbeam::crossbeam_channel::unbounded();
         let task_queue: TaskQueuePtr = Arc::new(TaskQueueImpl::<TaskPtr>::new(
-            "processing".to_string(),
+            name,
             queue_sender,
             queue_receiver,
+            linked_queue,
             metrics_receiver,
         ));
 
@@ -910,6 +967,7 @@ impl SessionImpl {
             "callbacks".to_string(),
             queue_sender,
             queue_receiver,
+            None,
             metrics_receiver,
         ));
 
@@ -951,9 +1009,15 @@ impl SessionImpl {
 
         //create task queues
 
-        let main_task_queue = Self::create_task_queue(metrics_receiver.clone());
+        let main_task_queue =
+            Self::create_task_queue("processing".to_string(), None, metrics_receiver.clone());
         let session_callbacks_task_queue =
             Self::create_callback_task_queue(metrics_receiver.clone());
+        let session_callbacks_responses_task_queue = Self::create_task_queue(
+            "prioritized_processing".to_string(),
+            Some(main_task_queue.clone()),
+            metrics_receiver.clone(),
+        );
 
         //create catchain
 
@@ -998,6 +1062,7 @@ impl SessionImpl {
             session_callbacks_processing_thread_stopped:
                 session_callbacks_processing_thread_stopped.clone(),
             _main_task_queue: main_task_queue.clone(),
+            _session_callbacks_responses_task_queue: session_callbacks_responses_task_queue.clone(),
             _session_callbacks_task_queue: session_callbacks_task_queue.clone(),
             catchain: catchain.clone(),
             session_id: session_id.clone(),
@@ -1028,6 +1093,7 @@ impl SessionImpl {
                     stop_flag_for_main_loop,
                     main_processing_thread_stopped,
                     main_task_queue,
+                    session_callbacks_responses_task_queue,
                     session_callbacks_task_queue_for_main_loop,
                     options,
                     session_id_clone,
