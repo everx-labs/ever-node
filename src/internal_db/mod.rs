@@ -17,6 +17,8 @@ use crate::{
 };
 #[cfg(feature = "telemetry")]
 use crate::engine_traits::EngineTelemetry;
+#[cfg(feature = "telemetry")]
+use storage::StorageTelemetry;
 
 use std::{
     cmp::min, collections::HashMap, io::Cursor, path::{Path, PathBuf}, 
@@ -29,10 +31,10 @@ use storage::{
     block_info_db::BlockInfoDb, db::rocksdb::RocksDb, node_state_db::NodeStateDb, 
     shardstate_db::{AllowStateGcResolver, ShardStateDb}, 
     shardstate_persistent_db::ShardStatePersistentDb, types::BlockMeta, 
-    shard_top_blocks_db::ShardTopBlocksDb, traits::Serializable
+    shard_top_blocks_db::ShardTopBlocksDb, StorageAlloc, traits::Serializable,
 };
 use ton_block::{Block, BlockIdExt};
-use ton_types::{error, fail, Result, UInt256};
+use ton_types::{error, fail, Result, UInt256, Cell};
 
 /// Full node state keys
 pub const INITIAL_MC_BLOCK: &str       = "InitMcBlockId";
@@ -114,6 +116,7 @@ impl BlockResult {
 }
 
 pub mod state_gc_resolver;
+pub mod restore;
 
 #[async_trait::async_trait]
 pub trait InternalDb : Sync + Send {
@@ -153,7 +156,13 @@ pub trait InternalDb : Sync + Send {
         callback: Option<Arc<dyn Callback>>
     ) -> Result<(Arc<ShardStateStuff>, bool)>;
     fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<Arc<ShardStateStuff>>;
-   // fn gc_shard_state_dynamic_db(&self) -> Result<usize>;
+
+    fn store_shard_state_dynamic_raw_force(
+        &self,
+        handle: &Arc<BlockHandle>, 
+        state_root: Cell,
+        callback: Option<Arc<dyn Callback>>
+    ) -> Result<Cell>;
 
     async fn store_shard_state_persistent(
         &self, 
@@ -169,6 +178,7 @@ pub trait InternalDb : Sync + Send {
     ) -> Result<()>;
     async fn load_shard_state_persistent_slice(&self, id: &BlockIdExt, offset: u64, length: u64) -> Result<Vec<u8>>;
     async fn load_shard_state_persistent_size(&self, id: &BlockIdExt) -> Result<u64>;
+    async fn load_shard_state_persistent(&self, id: &BlockIdExt) -> Result<Arc<ShardStateStuff>>;
 
     fn store_block_prev1(
         &self, 
@@ -240,7 +250,7 @@ pub trait InternalDb : Sync + Send {
     fn adjust_states_gc_interval(&self, interval_ms: u32);
     async fn stop_states_gc(&self);
 
-    async fn truncate_database(&self, block_id: &BlockIdExt) -> Result<()>;
+    async fn truncate_database(&self, mc_block_id: &BlockIdExt, processed_wc: i32) -> Result<()>;
 }
 
 #[derive(serde::Deserialize)]
@@ -250,6 +260,7 @@ pub struct InternalDbConfig {
 }
 
 pub struct InternalDbImpl {
+    db: Arc<RocksDb>,
     block_handle_storage: Arc<BlockHandleStorage>,
     prev1_block_db: BlockInfoDb,
     prev2_block_db: BlockInfoDb,
@@ -267,7 +278,6 @@ pub struct InternalDbImpl {
     #[cfg(feature = "telemetry")]
     telemetry: Arc<EngineTelemetry>,
     allocated: Arc<EngineAlloc>,
-
 }
 
 impl InternalDbImpl {
@@ -299,11 +309,8 @@ impl InternalDbImpl {
                 allocated.storage.clone()
             )
         );
-        let shard_state_dynamic_db = ShardStateDb::with_db(
+        let shard_state_dynamic_db = Self::create_shard_state_dynamic_db(
             db.clone(),
-            "shardstate_db",
-            "cells_db",
-            "cells_db1",
             #[cfg(feature = "telemetry")]
             telemetry.storage.clone(),
             allocated.storage.clone()
@@ -319,6 +326,7 @@ impl InternalDbImpl {
             ).await?
         );
         let db = Self {
+            db: db.clone(),
             block_handle_storage,
             prev1_block_db: BlockInfoDb::with_db(db.clone(), "prev1_block_db")?,
             prev2_block_db: BlockInfoDb::with_db(db.clone(), "prev2_block_db")?,
@@ -341,6 +349,42 @@ impl InternalDbImpl {
         };
 
         Ok(db)
+    }
+
+    fn create_shard_state_dynamic_db(
+        db: Arc<RocksDb>,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<StorageTelemetry>,
+        allocated: Arc<StorageAlloc>
+    ) -> Result<Arc<ShardStateDb>> {
+        ShardStateDb::with_db(
+            db,
+            "shardstate_db",
+            "cells_db",
+            "cells_db1",
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated
+        )
+    }
+
+    pub fn clean_shard_state_dynamic_db(&mut self) -> Result<()> {
+        if self.shard_state_dynamic_db.is_gc_run() {
+            fail!("It is forbidden to clear shard_state_dynamic_db while cells GC is running")
+        }
+
+        self.db.drop_cf("shardstate_db")?;
+        self.db.drop_cf("cells_db")?;
+        self.db.drop_cf("cells_db1")?;
+
+        self.shard_state_dynamic_db = Self::create_shard_state_dynamic_db(
+            self.db.clone(),
+            #[cfg(feature = "telemetry")]
+            self.telemetry.storage.clone(),
+            self.allocated.storage.clone()
+        )?;
+
+        Ok(())
     }
 
     //#[allow(dead_code)]                                                                                 /
@@ -603,28 +647,18 @@ impl InternalDb for InternalDbImpl {
             }
         }
         Ok((self.load_shard_state_dynamic(handle.id())?, false))
-/*
-        let state = if !handle.has_state() {
-            let saved_root = self.shard_state_dynamic_db.put(state.block_id(), state.root_cell().clone())?;
-            state = ShardStateStuff::from_root_cell(
-                handle.id().clone(), 
-                saved_root,
-                #[cfg(feature = "telemetry")]
-                &self.telemetry,
-                &self.allocated
-            )?;
-            //self.ss_test_map.insert(state.block_id().clone(), state.clone());
-            if handle.set_state() {
-                self.store_block_handle(handle, callback)?;
-                return Ok((state, true));
-            } else {
-                state
-            }
-        } else {
-            state = self.load_shard_state_dynamic(handle.id())?;
-        }
-        Ok((state, false))
-*/
+    }
+
+    fn store_shard_state_dynamic_raw_force(
+        &self,
+        handle: &Arc<BlockHandle>, 
+        state_root: Cell,
+        callback: Option<Arc<dyn Callback>>
+    ) -> Result<Cell> {
+        let _tc = TimeChecker::new(format!("store_shard_state_dynamic_raw_force {}", handle.id()), 300);
+        let saved_root = self.shard_state_dynamic_db.put(handle.id(), state_root)?;
+        self.store_block_handle(handle, callback)?;
+        return Ok(saved_root);
     }
 
     fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
@@ -675,6 +709,9 @@ impl InternalDb for InternalDbImpl {
             state_data.len() as u64 / 1000 + 10
         );
         if !handle.has_persistent_state() {
+
+            // TODO write directly into file without huge vector
+
             self.shard_state_persistent_db.put(handle.id(), state_data).await?;
             if handle.set_persistent_state() {
                 self.store_block_handle(handle, callback)?;
@@ -696,6 +733,22 @@ impl InternalDb for InternalDbImpl {
             let db_slice = self.shard_state_persistent_db.get_slice(id, offset, length).await?;
             Ok(db_slice.to_vec())
         }
+    }
+
+    async fn load_shard_state_persistent(&self, id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
+        let _tc = TimeChecker::new(format!("load_shard_state_persistent {}", id), 200);
+        let full_lenth = self.load_shard_state_persistent_size(id).await?;
+
+        // TODO read directly from file without huge vector
+
+        let slice = self.shard_state_persistent_db.get_slice(id, 0, full_lenth).await?;
+        ShardStateStuff::deserialize(
+            id.clone(),
+            &slice,
+            #[cfg(feature = "telemetry")]
+            &self.telemetry,
+            &self.allocated
+        )
     }
 
     async fn load_shard_state_persistent_size(&self, id: &BlockIdExt) -> Result<u64> {
@@ -917,8 +970,88 @@ impl InternalDb for InternalDbImpl {
         InternalDbImpl::stop_states_gc(self).await
     }
 
-    async fn truncate_database(&self, block_id: &BlockIdExt) -> Result<()> {
-        self.archive_manager.trunc(block_id).await
+    async fn truncate_database(&self, mc_block_id: &BlockIdExt, processed_wc: i32) -> Result<()> {
+        // store shard blocks to truncate
+        let prev_id = self.load_block_prev1(mc_block_id)?;
+        let prev_handle = self.load_block_handle(&prev_id)?
+            .ok_or_else(|| error!("there is no handle for block {}", prev_id))?;
+        let prev_block = self.load_block_data(&prev_handle).await?;
+        let top_blocks = prev_block.shard_hashes()?.top_blocks(&[processed_wc])?;
+
+        // truncate archives
+        self.archive_manager.trunc(mc_block_id, &|id: &BlockIdExt| {
+            if id.shard().is_masterchain() {
+                return id.seq_no() >= mc_block_id.seq_no();
+            } else {
+                for tb in &top_blocks {
+                    if id.shard().intersect_with(tb.shard()) && id.seq_no() > tb.seq_no() {
+                        return true;
+                    }
+                }
+            }
+            false
+        }).await?;
+
+        // truncate handles and prev/next links
+        fn clear_dbs(db: &InternalDbImpl,id: BlockIdExt) {
+            log::trace!("truncate_database: trying to drop handle {}", id);
+            let _ = db.block_handle_storage.drop_handle(id.clone(), None);
+            let _ = db.prev2_block_db.delete(&id);
+            let _ = db.prev1_block_db.delete(&id);
+            let _ = db.next2_block_db.delete(&id);
+            let _ = db.next1_block_db.delete(&id);
+        }
+
+        self.next1_block_db.for_each(&mut |_key, val| {
+            let id = BlockIdExt::deserialize(&mut Cursor::new(&val))?;
+            if id.shard().is_masterchain() && id.seq_no() >= mc_block_id.seq_no() {
+                clear_dbs(self, id);
+            } else {
+                if id.shard().workchain_id() == processed_wc {
+                    for tb in &top_blocks {
+                        if id.shard().intersect_with(tb.shard()) {
+                            if id.seq_no() > tb.seq_no() {
+                                clear_dbs(self, id);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(true)
+        })?;
+        self.next2_block_db.for_each(&mut |_key, val| {
+            let id = BlockIdExt::deserialize(&mut Cursor::new(&val))?;
+            if id.shard().workchain_id() == processed_wc {
+                for tb in &top_blocks {
+                    if id.shard().intersect_with(tb.shard()) {
+                        if id.seq_no() > tb.seq_no() {
+                            clear_dbs(self, id);
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(true)
+        })?;
+
+        // truncate info related with last handles
+        fn clear_last_handle(db: &InternalDbImpl, id: &BlockIdExt) {
+            log::trace!("truncate_database: clear_last_handle {}", id);
+            let _ = db.next1_block_db.delete(id);
+            if let Ok(Some(handle)) = db.load_block_handle(id) {
+                handle.reset_next1();
+                handle.reset_next2();
+                let _ = db.store_block_handle(&handle, None);
+            }
+        }
+
+        clear_last_handle(self, &prev_id);
+        for id in &top_blocks {
+            clear_last_handle(self, &id);
+        }
+
+        Ok(())
     }
 }
 

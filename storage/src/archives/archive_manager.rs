@@ -435,8 +435,8 @@ impl ArchiveManager {
         }
     }
 
-    pub async fn trunc(&self, block_id: &BlockIdExt) -> Result<()> {
-        self.file_maps.trunc(block_id).await
+    pub async fn trunc<F: Fn(&BlockIdExt) -> bool>(&self, block_id: &BlockIdExt, delete_condition: &F) -> Result<()> {
+        self.file_maps.trunc(block_id, delete_condition).await
     }
 
 }

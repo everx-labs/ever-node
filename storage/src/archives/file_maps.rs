@@ -58,8 +58,8 @@ impl FileDescription {
         self.archive_slice.destroy().await
     }
 
-    async fn trunc(&mut self, block_id: &BlockIdExt) -> Result<()> {
-        self.archive_slice.trunc(block_id).await
+    async fn trunc<F: Fn(&BlockIdExt) -> bool>(&mut self, block_id: &BlockIdExt, delete_condition: &F) -> Result<()> {
+        self.archive_slice.trunc(block_id, delete_condition).await
     }
 }
 
@@ -101,7 +101,7 @@ impl FileMap {
 
         let mut elements = Vec::new();
         for (key, value) in index_pairs {
-            let archive_slice = ArchiveSlice::with_data(
+            let archive_slice = match ArchiveSlice::with_data(
                 db.clone(),
                 Arc::clone(db_root_path),
                 key,
@@ -110,7 +110,13 @@ impl FileMap {
                 #[cfg(feature = "telemetry")]
                 telemetry.clone(),
                 allocated.clone()
-            ).await?;
+            ).await {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!(target: "storage", "Can't read archive slice {}: {}", key, e);
+                    continue;
+                }
+            };
             let value = Arc::new(FileDescription::with_data(
                 PackageId::with_values(key, package_type),
                 archive_slice,
@@ -235,7 +241,7 @@ impl FileMap {
         }
     }
 
-    pub async fn trunc(&self, block_id: &BlockIdExt) -> Result<()> {
+    pub async fn trunc<F: Fn(&BlockIdExt) -> bool>(&self, block_id: &BlockIdExt, delete_condition: &F) -> Result<()> {
         let mut guard = self.elements.write().await;
         log::debug!(target: "storage", "Searching for file description (elements count = {})", guard.len());
         // TODO: may be iterate from end
@@ -244,17 +250,24 @@ impl FileMap {
             Err(0) => return Ok(()),
             Err(index) => index - 1
         };
-        for mut entry in guard.drain(index + 1..) {
-            Arc::get_mut(&mut entry.value)
-                .ok_or_else(|| error!("slice incorrect {}", index))?
-                .destroy().await?;
+        if guard.len() > index + 1 {
+            for mut entry in guard.drain(index + 1..) {
+                if let Some(entry) = Arc::get_mut(&mut entry.value) {
+                    if let Err(e) = entry.destroy().await {
+                        log::warn!(target: "storage", "Can't destroy entry {}: {}", index, e);
+                    }
+                } else {
+                    log::warn!(target: "storage", "Can't get_mut entry {}", index);
+                }
+                self.storage.delete(&entry.key.into())?;
+            }
         }
         debug_assert_eq!(guard.len(), index + 1);
         let entry = guard.last_mut().ok_or_else(|| error!("internal error during trunc {}", index))?;
         let fd = Arc::get_mut(&mut entry.value).ok_or_else(|| error!("unable to get FileDescription as mutable"))?;
         // clear finalized flag
         self.storage.put_value(&entry.key.into(), PackageIndexEntry::new())?;
-        fd.trunc(block_id).await
+        fd.trunc(block_id, delete_condition).await
     }
 }
 
@@ -313,8 +326,8 @@ impl FileMaps {
         }
     }
 
-    pub async fn trunc(&self, block_id: &BlockIdExt) -> Result<()> {
-        self.files.trunc(block_id).await?;
-        self.key_files.trunc(block_id).await
+    pub async fn trunc<F: Fn(&BlockIdExt) -> bool>(&self, block_id: &BlockIdExt, delete_condition: &F) -> Result<()> {
+        self.files.trunc(block_id, delete_condition).await?;
+        self.key_files.trunc(block_id, delete_condition).await
     }
 }

@@ -15,7 +15,7 @@ use crate::{
     StorageAlloc, 
     archives::{
         get_mc_seq_no_opt, ARCHIVE_PACKAGE_SIZE, KEY_ARCHIVE_PACKAGE_SIZE,
-        package::Package,
+        package::{Package, read_package_from},
         package_entry::PackageEntry, package_entry_id::{GetFileName, PackageEntryId},
         package_entry_meta::PackageEntryMeta, package_entry_meta_db::PackageEntryMetaDb,
         package_id::{PackageId, PackageType}, package_info::PackageInfo,
@@ -262,7 +262,9 @@ impl ArchiveSlice {
     {
         let offset_key = entry_id.into();
         if self.offsets_db.contains(&offset_key)? {
-            return Ok(data);
+            // afrer DB's truncation it is possible to have some remains in offsets_db
+            log::warn!(target: "storage", 
+                "Entry {} was already presented in offsets_db, it will be rewrite", entry_id);
         }
 
         let package_info = self.choose_package(get_mc_seq_no_opt(block_handle), true).await?;
@@ -417,7 +419,7 @@ impl ArchiveSlice {
     }
 
     /// truncs slice starting from master block_id
-    pub async fn trunc(&mut self, block_id: &BlockIdExt) -> Result<()> {
+    pub async fn trunc<F: Fn(&BlockIdExt) -> bool>(&mut self, block_id: &BlockIdExt, delete_condition: &F) -> Result<()> {
         log::info!(target: "storage", "truncating by mc_seq_no: {}, sliced_mode: {}", block_id.seq_no(), self.sliced_mode);
         let entry_id = &PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::Proof(block_id);
         let offset_key = entry_id.into();
@@ -430,10 +432,12 @@ impl ArchiveSlice {
             .ok_or_else(|| error!("slice is corrupted sliced_mode: {}, {} < {}", self.sliced_mode, block_id.seq_no(), self.archive_id))?;
 
         let mut guard = self.packages.write().await;
-        for ref mut package_info in guard.drain(index as usize + 1..) {
-            Arc::get_mut(package_info)
-                .ok_or_else(|| error!("slice incorrect {}", index))?
-                .destroy().await?;
+        if guard.len() > index as usize + 1 {
+            for ref mut package_info in guard.drain(index as usize + 1..) {
+                Arc::get_mut(package_info)
+                    .ok_or_else(|| error!("slice incorrect {}", index))?
+                    .destroy().await?;
+            }
         }
 
         if self.sliced_mode {
@@ -445,7 +449,73 @@ impl ArchiveSlice {
         let package_info = guard.last_mut()
             .ok_or_else(|| error!("slice incorrect {}", index))?;
 
-        package_info.package().truncate(offset).await
+        if !self.sliced_mode {
+            package_info.package().truncate(offset).await?;
+        } else {
+            // Delete unneeded entries from package by repack.
+            // 1) read all items from package and write it (with condition) into "new" package
+            //      write new offsets and indexes into correspond dbs by the way
+            // 2) rename new package
+            // while old package is not deleted repack might be replay many times (it doesn't use offsets db),
+            // but read form package will fail (offsets db points new package)
+
+            let old_package = package_info.package();
+            let new_name = old_package.get_path() + ".new";
+            log::trace!(target: "storage", "repack package {}", old_package.get_path());
+            let _ = tokio::fs::remove_file(&new_name);
+            let new_package = Package::open(new_name.into(), false, true).await?;
+            let mut old_reader = read_package_from(old_package.open_file().await?).await?;
+            while let Some(entry) = old_reader.next().await? {
+                let entry_id = PackageEntryId::from_filename(entry.filename())?;
+                let id = match &entry_id {
+                    PackageEntryId::Block(id) => id,
+                    PackageEntryId::Proof(id) => id,
+                    PackageEntryId::ProofLink(id) => id,
+                    _ => fail!("Unsupported entry: {:?}", entry_id),
+                };
+                if delete_condition(id) {
+                    log::trace!(target: "storage", "repack package: delete {}", entry_id);
+
+                    let idx = package_info.idx();
+                    let key = idx.into();
+                    if let Err(e) = self.index_db.delete(&key) {
+                        log::warn!("Can't delete {} from index db (slice: {}): {}", idx, self.archive_id, e);
+                    }
+                    let offset_key = (&entry_id).into();
+                    if let Err(e) = self.offsets_db.delete(&offset_key) {
+                        log::warn!("Can't delete {} from offsets db (slice: {}): {}", entry_id, self.archive_id, e);
+                    }
+                } else {
+                    log::trace!(target: "storage", "repack package: repack {}", entry_id);
+
+                    new_package.append_entry(
+                        &entry,
+                        |offset, size| {
+                            let meta = PackageEntryMeta::with_data(size, package_info.version());
+                            let idx = package_info.idx();
+                            log::debug!(
+                                target: "storage", 
+                                "Writing package entry metadata for slice #{}: {:?}, offset: {}",
+                                idx, meta, offset
+                            );
+                            self.index_db.put_value(&idx.into(), meta)?;
+                            let offset_key = (&entry_id).into();
+                            self.offsets_db.put_value(&offset_key, offset)
+                        }
+                    ).await?;
+                }
+            }
+            tokio::fs::rename(new_package.get_path(), old_package.get_path()).await?;
+
+            let name = old_package.get_path().into();
+            let pi = Arc::get_mut(package_info)
+                .ok_or_else(|| error!("can't get mut ptr of package_info"))?;
+            *pi.package_mut() = Package::open(name, false, true).await?;
+
+            log::trace!(target: "storage", "package repacked {}", pi.package().path().display());
+        }
+
+        Ok(())
     }
 
 }

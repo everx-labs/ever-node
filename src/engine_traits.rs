@@ -328,6 +328,7 @@ pub trait EngineOperations : Sync + Send {
         block: &BlockStuff,
         proof: Option<&BlockProofStuff>,
         state: &Arc<ShardStateStuff>,
+        prev_states: (&Arc<ShardStateStuff>, Option<&Arc<ShardStateStuff>>),
         mc_seq_no: u32,
     )
     -> Result<()> {
@@ -670,6 +671,7 @@ pub trait ExternalDb : Sync + Send {
         block: &BlockStuff,
         proof: Option<&BlockProofStuff>,
         state: &Arc<ShardStateStuff>,
+        prev_states: (&Arc<ShardStateStuff>, Option<&Arc<ShardStateStuff>>),
         mc_seq_no: u32,
     ) -> Result<()>;
     async fn process_full_state(&self, state: &Arc<ShardStateStuff>) -> Result<()>;

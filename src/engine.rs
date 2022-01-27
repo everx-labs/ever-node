@@ -31,7 +31,8 @@ use crate::{
     internal_db::{
         InternalDb, InternalDbConfig, InternalDbImpl, 
         INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, PSS_KEEPER_MC_BLOCK,
-        state_gc_resolver::AllowStateGcSmartResolver
+        state_gc_resolver::AllowStateGcSmartResolver, 
+        restore::check_db,
     },
     network::{
         full_node_client::FullNodeOverlayClient, control::ControlServer,
@@ -333,20 +334,6 @@ impl Downloader for ZeroStateDownloader {
     }
 }
 
-//
-// TEMP CODE FOR DEVNET (FROM 23 July 2021) COMPATIBILITY
-// In future delete all this code
-//
-lazy_static::lazy_static!{
-    static ref READ_VALUE_FLOW_IN_DEPTH: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
-}
-pub fn read_value_flow_in_full_depth() -> bool {
-    READ_VALUE_FLOW_IN_DEPTH.load(Ordering::Relaxed)
-}
-//
-// end of temp code
-//
-
 impl Engine {
 
     // Masks for services
@@ -391,14 +378,16 @@ impl Engine {
             db_directory, 
             cells_gc_interval_sec: gc_interval_sec
         };
-        let db = Arc::new(
-            InternalDbImpl::new(
-                db_config,
-                #[cfg(feature = "telemetry")]
-                engine_telemetry.clone(),
-                engine_allocated.clone()
-            ).await?
-        );
+
+        let db = InternalDbImpl::new(
+            db_config,
+            #[cfg(feature = "telemetry")]
+            engine_telemetry.clone(),
+            engine_allocated.clone()
+        ).await?;
+
+        // TODO correct workchain id needed here, but it will be known later
+        let db = Arc::new(check_db(db, 0, general_config.restore_db()).await?);
 
         let global_config = general_config.load_global_config()?;
         let test_bundles_config = general_config.test_bundles_config().clone();
@@ -409,20 +398,6 @@ impl Engine {
                 init_mc_block_id = block_id.deref().clone()
             }
         }
-
-
-        //
-        // TEMP CODE FOR DEVNET (FROM 23 July 2021) COMPATIBILITY
-        // In future delete all this code
-        //
-        let devnet_root_hash = ton_types::UInt256::from_str("b2e99a7505eda599aead9f2323ea905fb6ba9e26d261937e9d7c80535f0fb992")?;
-        if *zero_state_id.root_hash() == devnet_root_hash {
-            READ_VALUE_FLOW_IN_DEPTH.store(false, Ordering::Relaxed);
-        }
-        //
-        // end of temp code
-        //
-
 
         let workchain_id = general_config.workchain_id().unwrap_or(ton_block::INVALID_WORKCHAIN_ID);
         log::info!("workchain_id from config {}", workchain_id);
@@ -542,18 +517,24 @@ impl Engine {
         Ok(engine)
     }
 
-    pub async fn stop(self: Arc<Self>) {
-        let stopp = self.stop.fetch_or(Self::MASK_STOP, Ordering::Relaxed);
-        log::info!(target: "sync", "Stop count {:04x}", stopp);
+    pub fn set_stop(&self) {
+        let stop = self.stop.fetch_or(Self::MASK_STOP, Ordering::Relaxed);
+        Self::log_stop_status(stop);
+    }
+
+    pub async fn wait_stop(self: Arc<Self>) {
+        self.set_stop();
         while let Some(server) = self.servers.pop() {
             match server {
                 Server::ControlServer(server) => {
-                    log::info!(target: "sync", "Stop control server");
-                    server.shutdown().await
+                    log::info!("Stopping control server...");
+                    server.shutdown().await;
+                    log::info!("Stopped control server");
                 },
                 Server::KafkaConsumer(trigger) => {
-                    log::info!(target: "sync", "Stop kafka consumer");
-                    drop(trigger)
+                    log::info!("Stopping kafka consumer...");
+                    drop(trigger);
+                    log::info!("Stopped kafka consumer...");
                 }
             }
         }
@@ -566,13 +547,48 @@ impl Engine {
         );
         loop {
             tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_STOP_MS)).await;
-            let stopp = self.stop.load(Ordering::Relaxed) & !Self::MASK_STOP;
-            log::info!(target: "sync", "Stop count update {:04x}", stopp);
+            let stop = self.stop.load(Ordering::Relaxed) & !Self::MASK_STOP;
+            Self::log_stop_status(stop);
             if (self.stop.load(Ordering::Relaxed) & !Self::MASK_STOP) == 0 {
                 break
             }
-        }    
-        self.network.stop().await
+        }
+        log::info!("Stopping network...");
+        self.network.stop().await;
+        log::info!("Stopped network");
+    }
+
+    pub fn log_stop_status(bitmap: u32) {
+        let mut ss = String::new();
+        #[cfg(feature = "external_db")]
+        if bitmap & Self::MASK_SERVICE_KAFKA_CONSUMER != 0 {
+            ss.push_str("kafka consumer, ");
+        }
+        if bitmap & Self::MASK_SERVICE_MASTERCHAIN_BROADCAST_LISTENER != 0 {
+            ss.push_str("masterchain broadcasts listener, ");
+        }
+        if bitmap & Self::MASK_SERVICE_MASTERCHAIN_CLIENT != 0 {
+            ss.push_str("masterchain client, ");
+        }
+        if bitmap & Self::MASK_SERVICE_PSS_KEEPER != 0 {
+            ss.push_str("persistent states storer, ");
+        }
+        if bitmap & Self::MASK_SERVICE_SHARDCHAIN_BROADCAST_LISTENER != 0 {
+            ss.push_str("shardchains broadcasts listener, ");
+        }
+        if bitmap & Self::MASK_SERVICE_SHARDCHAIN_CLIENT != 0 {
+            ss.push_str("shardchains client, ");
+        }
+        if bitmap & Self::MASK_SERVICE_SHARDSTATE_GC != 0 {
+            ss.push_str("shard states GC, ");
+        }
+        if bitmap & Self::MASK_SERVICE_TOP_SHARDBLOCKS_SENDER != 0 {
+            ss.push_str("top shard blocks sender, ");
+        }
+        if bitmap & Self::MASK_SERVICE_VALIDATOR_MANAGER != 0 {
+            ss.push_str("validator manager, ");
+        }
+        log::warn!("Next services are still stopping ({:04x}): {}", bitmap, ss);
     }
 
     pub fn set_sync_status(&self, status: u32) {
@@ -627,12 +643,6 @@ impl Engine {
         log::trace!("shard_states_cache  total loaded: {}  from cache: {}  use cache: {}%",
             loaded_ss_total, loaded_from_ss_cache, (100 * loaded_from_ss_cache) / loaded_ss_total);
     }
-
-/*
-    pub fn save_init_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
-        self.db.save_node_state(INITIAL_MC_BLOCK, id)
-    }
-*/
 
     pub async fn get_masterchain_overlay(&self) -> Result<Arc<dyn FullNodeOverlayClient>> {
         self.get_full_node_overlay(ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL).await
@@ -796,14 +806,6 @@ impl Engine {
                 self.download_block_worker(id, attempts, timeout)
             ).await? {
 
-/*
-                if let Some(handle) = self.load_block_handle(id)? {
-                    if handle.has_data() && (handle.has_proof() || handle.has_proof_link()) {
-                        continue
-                    }
-                }
-*/
-
                 let downloading_time = now.elapsed().as_millis();
 
                 let now = std::time::Instant::now();
@@ -856,20 +858,25 @@ impl Engine {
 
         log::trace!("Start {}applying block... {}", if pre_apply { "pre-" } else { "" }, block.id());
 
-        // TODO fix trash with Arc and clone
-        apply_block(handle, block, mc_seq_no, &(self.clone() as Arc<dyn EngineOperations>), pre_apply, recursion_depth).await?;
+        apply_block(handle, block, mc_seq_no, &(self.clone() as Arc<dyn EngineOperations>),
+            pre_apply, recursion_depth).await?;
 
         let gen_utime = block.gen_utime()?;
         let ago = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i32 - gen_utime as i32;
         if block.id().shard().is_masterchain() {
             if !pre_apply {
-                self.save_last_applied_mc_block_id(block.id())?;
-                STATSD.gauge("last_applied_mc_block", block.id().seq_no() as f64);
-                STATSD.gauge("timediff", ago as f64);
                 self.shard_blocks().update_shard_blocks(&self.load_state(block.id()).await?)?;
 
-                let first_time_applied = self.set_applied(handle, mc_seq_no).await?;
+                let first_time_applied = self.set_applied(handle, block.id().seq_no()).await?;
+
+                if first_time_applied {
+                    if let Err(e) = self.save_last_applied_mc_block_id(block.id()) {
+                        log::error!("Can't save last applied mc block {}: {}", block.id(), e);
+                    }
+                }
+                STATSD.gauge("last_applied_mc_block", block.id().seq_no() as f64);
+                STATSD.gauge("timediff", ago as f64);
 
                 if let Err(e) = self.mc_block_post_apply(block, gen_utime, first_time_applied).await {
                     log::error!("Error after apply block {}: {}", block.id(), e);
@@ -1211,9 +1218,9 @@ impl Engine {
         let id = broadcast.block.block;
         let cc_seqno = broadcast.block.cc_seqno as u32;
         let data = broadcast.block.data.0;
-        let (master, workchain_id) = self.processed_workchain().await?;
+        let (master, processed_wc) = self.processed_workchain().await?;
 
-        if !master && workchain_id != id.shard().workchain_id() {
+        if !master && processed_wc != id.shard().workchain_id() {
             log::debug!("Skipped new shard block broadcast {} because it is not a processing workchain", id);
             return Ok(id);
         }
@@ -1254,24 +1261,16 @@ impl Engine {
                     log::trace!("Processed shard block broadcast stats {}", id);
                 }
             }
-            // force download and apply afrer timeout
-            // let id1 = id.clone();
-            // let engine = self.clone();
-            // tokio::spawn(async move {
-            //     futures_timer::Delay::new(Duration::from_millis(10_000)).await;
-            //     if let Err(e) = engine.download_and_apply_block(&id1, 0, true).await {
-            //         log::error!("Error in download_and_apply_block after top-block-broadcast {}: {}", id1, e);
-            //     }
-            // });
 
             // add to list (for collator) only if shard state is avaliable
             let id = id.clone();
             tokio::spawn(async move {
                 let mut result = true;
-                // wait for state only for processed workchains
-                if workchain_id == id.shard().workchain_id() {
+                if processed_wc == id.shard().workchain_id() {
+                    // just passively waiting for 10s...
                     if let Err(e) = self.clone().wait_state(&id, Some(10_000), false).await {
                         log::error!("Error in wait_state after top-block-broadcast false {}: {}", id, e);
+                        // ...and then allow to download needed blocks forced
                         if let Err(e) = self.clone().wait_state(&id, Some(10_000), true).await {
                             log::error!("Error in wait_state after top-block-broadcast true {}: {}", id, e);
                             result = false;
@@ -1422,35 +1421,6 @@ impl Engine {
         Ok(self.is_validator())
     }
 
-// Unused temporarily
-/* 
-    pub fn start_gc_scheduler(self: Arc<Self>) -> tokio::task::JoinHandle<()>{
-        log::info!("Starting GC scheduler...");
-
-        let handle = tokio::spawn(async move {
-            loop {
-                log::trace!("Waiting GC...");
-                // 24 hour delay:
-                futures_timer::Delay::new(Duration::from_secs(3600 * 24)).await;
-                let self_cloned = Arc::clone(&self);
-                if let Err(error) = tokio::task::spawn_blocking(move || {
-                    log::info!("Starting GC...");
-                    match self_cloned.db.gc_shard_state_dynamic_db() {
-                        Ok(count) => log::info!("Finished GC. Deleted {} cells.", count),
-                        Err(error) => log::error!("GC: Error occurred during garbage collecting of dynamic BOC: {:?}", error),
-                    }
-                }).await {
-                    log::error!("GC: Failed to start. {:?}", error)
-                }
-            }
-        });
-
-        log::info!("GC scheduler started.");
-
-        handle
-    }
-*/
-
     fn load_pss_keeper_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
         self.db().load_full_node_state(PSS_KEEPER_MC_BLOCK)
     }
@@ -1491,7 +1461,7 @@ impl Engine {
             let mc_state = engine.load_state(handle.id()).await?;
             if handle.is_key_block()? {
                 let is_persistent_state = if handle.id().seq_no() == 0 {
-                    false // zerostate are saved another way (see boot)
+                    false // zerostate is saved another way (see boot)
                 } else if let Some(prev_key_block_id) =
                     mc_state.shard_state_extra()?.prev_blocks.get_prev_key_block(handle.id().seq_no() - 1)? {
                     let block_id = BlockIdExt {
@@ -1671,7 +1641,7 @@ impl Engine {
         self.load_state(&prev_block_id).await
             .map_err(|err| error!("no previous block state present for {}", err))?;
 
-        self.db().truncate_database(&block_id).await?;
+        self.db().truncate_database(&block_id, self.processed_workchain().await?.1).await?;
         self.save_last_applied_mc_block_id(&prev_block_id)?;
 
         if let Some(block_id) = self.load_pss_keeper_mc_block_id()? {
@@ -1769,12 +1739,6 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
         Ok(None) => Err(error!("No last applied MC block, warm boot is not possible")),
         Err(x) => Err(x)
     };
-//    }/* else {
-//        let res = engine.overlay_operations.get_peers_count(engine.zero_state_id()).await?;
-//        if res == 0 { 
-//            fail!("No nodes were found and no warm_boot");
-//        }
-//    }*/
 
     let (last_applied_mc_block, cold) = match result {
         Ok(id) => (id, false),

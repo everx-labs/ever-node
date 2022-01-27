@@ -144,7 +144,8 @@ impl<T: WriteData> Processor<T> {
             status: MessageProcessingStatus::Finalized,
             boc,
             proof,
-            transaction_now
+            transaction_now,
+            ..Default::default()
         };
         let doc = ton_block_json::db_serialize_message("id", &set)?;
         Ok(DbRecord::Message(
@@ -175,7 +176,8 @@ impl<T: WriteData> Processor<T> {
                 status: MessageProcessingStatus::Finalized,
                 boc,
                 proof,
-                transaction_now: None // actual only for inbuound messages
+                transaction_now: None, // actual only for inbuound messages
+                ..Default::default()
             };
             let doc = ton_block_json::db_serialize_message("id", &set)?;
             Ok(DbRecord::Message(
@@ -210,6 +212,7 @@ impl<T: WriteData> Processor<T> {
             workchain_id,
             boc,
             proof,
+            ..Default::default()
         };
         let doc = ton_block_json::db_serialize_transaction("id", &set)?;
         Ok(DbRecord::Transaction(
@@ -218,7 +221,9 @@ impl<T: WriteData> Processor<T> {
         ))
     }
 
-    fn prepare_account_record(account: Account, sharding_depth: u32) -> Result<DbRecord> {
+    fn prepare_account_record(
+        account: Account, prev_account_state: Option<Account>, sharding_depth: u32
+    ) -> Result<DbRecord> {
         let boc = serialize_toc(&account.serialize()?.into())?;
         let account_id = match account.get_id() {
             Some(id) => id,
@@ -226,8 +231,10 @@ impl<T: WriteData> Processor<T> {
         };
         let set = ton_block_json::AccountSerializationSet {
             account,
+            prev_account_state,
             proof: None,
             boc,
+            ..Default::default()
         };
         
         let partition_key = Self::calc_account_partition_key(sharding_depth, account_id.clone())?;
@@ -239,11 +246,15 @@ impl<T: WriteData> Processor<T> {
         ))
     }
 
-    fn prepare_deleted_account_record(account_id: AccountId, workchain_id: i32, sharding_depth: u32) -> Result<DbRecord> {
+    fn prepare_deleted_account_record(
+        account_id: AccountId, workchain_id: i32, sharding_depth: u32, prev_account_state: Option<Account>
+    ) -> Result<DbRecord> {
         let partition_key = Self::calc_account_partition_key(sharding_depth, account_id.clone())?;
         let set = ton_block_json::DeletedAccountSerializationSet {
             account_id,
-            workchain_id
+            workchain_id,
+            prev_account_state,
+            ..Default::default()
         };
 
         let doc = ton_block_json::db_serialize_deleted_account("id", &set)?;
@@ -336,6 +347,7 @@ impl<T: WriteData> Processor<T> {
         block_stuff: &BlockStuff,
         block_proof: Option<&BlockProofStuff>,
         state: Option<&Arc<ShardStateStuff>>,
+        prev_states: Option<(&Arc<ShardStateStuff>, Option<&Arc<ShardStateStuff>>)>,
         mc_seq_no: u32,
         add_proof: bool,
      ) -> Result<()> {
@@ -360,6 +372,14 @@ impl<T: WriteData> Processor<T> {
         let accounts_sharding_depth = self.write_account.sharding_depth();
         let block_proofs_sharding_depth = self.write_block_proof.sharding_depth();
         let raw_blocks_sharding_depth = self.write_raw_block.sharding_depth();
+
+        let (prev_shard_accounts1, prev_shard_accounts2, prev_shard1) = match prev_states {
+            Some((prev1, Some(prev2))) => {
+                (Some(prev1.state().read_accounts()?),  Some(prev2.state().read_accounts()?), prev1.block_id().shard().clone())
+            },
+            Some((prev, None)) => (Some(prev.state().read_accounts()?), None, prev.block_id().shard().clone()),
+            None => (None, None, block_id.shard().clone())
+        };
 
         let now = std::time::Instant::now();
 
@@ -429,6 +449,22 @@ impl<T: WriteData> Processor<T> {
                 if process_account {
                     let now = std::time::Instant::now();
                     if let Some(shard_accounts) = shard_accounts {
+                        let prev_shard_accounts1 = prev_shard_accounts1
+                            .as_ref()
+                            .ok_or_else(|| NodeError::InvalidData("No previous shard state provided".to_string()))?;
+
+                        let get_prev_state = |address: SliceData| -> Result<Option<Account>> {
+                            let prev_acc = if prev_shard1.contains_account(address.clone())? {
+                                prev_shard_accounts1.account(&address)?
+                            } else {
+                                prev_shard_accounts2
+                                    .as_ref()
+                                    .ok_or_else(|| NodeError::InvalidData("No second previous shard state provided".to_string()))?
+                                    .account(&address)?
+                            };
+                            prev_acc.map(|acc| acc.read_account()).transpose()
+                        };
+
                         for acc_addr in changed_acc.iter() {
                             let acc = shard_accounts.account(acc_addr)?
                                 .ok_or_else(|| 
@@ -438,11 +474,17 @@ impl<T: WriteData> Processor<T> {
                                     )
                                 )?;
                             let acc = acc.read_account()?;
-                            db_records.push(Self::prepare_account_record(acc, accounts_sharding_depth)?);
+
+                            let prev_acc = get_prev_state(acc_addr.clone())?;
+                            db_records.push(Self::prepare_account_record(acc, prev_acc, accounts_sharding_depth)?);
                         }
-                    }
-                    for acc_addr in deleted_acc {
-                        db_records.push(Self::prepare_deleted_account_record(acc_addr, workchain_id, accounts_sharding_depth)?);
+
+                        for acc_addr in deleted_acc {
+                            let prev_acc = get_prev_state(acc_addr.clone())?;
+                            db_records.push(Self::prepare_deleted_account_record(
+                                acc_addr, workchain_id, accounts_sharding_depth, prev_acc
+                            )?);
+                        }
                     }
                     log::trace!("TIME: accounts {} {}ms;   {}", changed_acc.len(), now.elapsed().as_millis(), block_id);
                     STATSD.timer("accounts_parsing_time", now.elapsed().as_micros() as f64 / 1000f64);
@@ -548,9 +590,10 @@ impl<T: WriteData> ExternalDb for Processor<T> {
         block_stuff: &BlockStuff,
         proof: Option<&BlockProofStuff>, 
         state: &Arc<ShardStateStuff>,
+        prev_states: (&Arc<ShardStateStuff>, Option<&Arc<ShardStateStuff>>),
         mc_seq_no: u32,
     ) -> Result<()> {
-        self.process_block_impl(block_stuff, proof, Some(state), mc_seq_no, false).await
+        self.process_block_impl(block_stuff, proof, Some(state), Some(prev_states), mc_seq_no, false).await
     }
 
     async fn process_full_state(&self, state: &Arc<ShardStateStuff>) -> Result<()> {
@@ -565,7 +608,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
             let mut accounts = Vec::new();
             state.state().read_accounts()?.iterate_objects(|acc: ShardAccount| {
                 let acc = acc.read_account()?;
-                let record = Self::prepare_account_record(acc, self.write_account.sharding_depth())?;
+                let record = Self::prepare_account_record(acc, None, self.write_account.sharding_depth())?;
                 accounts.push(record);
                 Ok(true)
             })?;

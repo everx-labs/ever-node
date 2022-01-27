@@ -34,14 +34,23 @@ pub async fn apply_block(
     }
     let prev_ids = block.construct_prev_id()?;    
     check_prev_blocks(&prev_ids, engine, mc_seq_no, pre_apply, recursion_depth).await?;
-    let shard_state = if handle.has_state() {
-        engine.load_state(handle.id()).await?
+    let (shard_state, prev_states) = if handle.has_state() {
+        let shard_state = engine.load_state(handle.id()).await?;
+        let prev1 = engine.load_state(&prev_ids.0).await?;
+        let prev2 = if let Some(id) = &prev_ids.1 {
+            Some(engine.load_state(id).await?)
+        } else {
+            None
+        };
+        (shard_state, (prev1, prev2))
     } else {
         calc_shard_state(handle, block, &prev_ids, engine).await?
     };
     if !pre_apply {
         set_next_prev_ids(&handle, &prev_ids, engine.deref())?;
-        engine.process_block_in_ext_db(handle, &block, None, &shard_state, mc_seq_no).await?;
+        engine.process_block_in_ext_db(
+            handle, &block, None, &shard_state, (&prev_states.0, prev_states.1.as_ref()), mc_seq_no
+        ).await?;
     }
     Ok(())
 }
@@ -82,18 +91,42 @@ pub async fn calc_shard_state(
     block: &BlockStuff,
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
     engine: &Arc<dyn EngineOperations>
-) -> Result<Arc<ShardStateStuff>> {
+) -> Result<(Arc<ShardStateStuff>, (Arc<ShardStateStuff>, Option<Arc<ShardStateStuff>>))> {
 
     log::trace!("calc_shard_state: block: {}", block.id());
 
-    let prev_ss_root = match prev_ids {
+    let (prev_ss_root, prev_ss) = match prev_ids {
         (prev1, Some(prev2)) => {
             let ss1 = engine.clone().wait_state(prev1, None, true).await?.root_cell().clone();
             let ss2 = engine.clone().wait_state(prev2, None, true).await?.root_cell().clone();
-            ShardStateStuff::construct_split_root(ss1, ss2)?
+
+            let root = ShardStateStuff::construct_split_root(ss1.clone(), ss2.clone())?;
+            let ss1 = ShardStateStuff::from_root_cell(
+                prev1.clone(), 
+                ss1,
+                #[cfg(feature = "telemetry")]
+                engine.engine_telemetry(),
+                engine.engine_allocated()
+            )?;
+            let ss2 = ShardStateStuff::from_root_cell(
+                prev2.clone(), 
+                ss2,
+                #[cfg(feature = "telemetry")]
+                engine.engine_telemetry(),
+                engine.engine_allocated()
+            )?;
+            (root, (ss1, Some(ss2)))
         },
         (prev, None) => {
-            engine.clone().wait_state(prev, None, true).await?.root_cell().clone()
+            let root = engine.clone().wait_state(prev, None, true).await?.root_cell().clone();
+            let ss = ShardStateStuff::from_root_cell(
+                prev.clone(), 
+                root.clone(),
+                #[cfg(feature = "telemetry")]
+                engine.engine_telemetry(),
+                engine.engine_allocated()
+            )?;
+            (root, (ss, None))
         }
     };
 
@@ -121,7 +154,7 @@ pub async fn calc_shard_state(
     let ss = engine.store_state(handle, ss, None).await?;
     log::trace!("TIME: calc_shard_state: store_state {}ms   {}",
             now.elapsed().as_millis(), handle.id());
-    Ok(ss)
+    Ok((ss, prev_ss))
 
 }
 
