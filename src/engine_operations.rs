@@ -573,6 +573,7 @@ impl EngineOperations for Engine {
         block: &BlockStuff,
         proof: Option<&BlockProofStuff>,
         state: &Arc<ShardStateStuff>,
+        prev_states: (&Arc<ShardStateStuff>, Option<&Arc<ShardStateStuff>>),
         mc_seq_no: u32,
     )
     -> Result<()> {
@@ -583,11 +584,11 @@ impl EngineOperations for Engine {
             if proof.is_none() && handle.id().shard().is_masterchain() {
                 let proof = self.load_block_proof(handle, false).await?;
                 for db in self.ext_db() {
-                    db.process_block(block, Some(&proof), state, mc_seq_no).await?;
+                    db.process_block(block, Some(&proof), state, prev_states, mc_seq_no).await?;
                 }
             } else {
                 for db in self.ext_db() {
-                    db.process_block(block, proof, state, mc_seq_no).await?;
+                    db.process_block(block, proof, state, prev_states, mc_seq_no).await?;
                 }
             }
         }

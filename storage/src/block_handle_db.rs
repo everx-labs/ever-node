@@ -170,15 +170,23 @@ impl BlockHandle {
     }
 
     pub fn reset_data(&self) {
-        self.reset_flag(FLAG_DATA)
+        self.meta.reset(FLAG_DATA, true)
     }
 
     pub fn reset_proof(&self) {
-        self.reset_flag(FLAG_PROOF)
+        self.meta.reset(FLAG_PROOF, true)
     }
 
     pub fn reset_proof_link(&self) {
-        self.reset_flag(FLAG_PROOF_LINK)
+        self.meta.reset(FLAG_PROOF_LINK, true)
+    }
+
+    pub fn reset_next1(&self) {
+        self.meta.reset(FLAG_NEXT_1, false)
+    }
+
+    pub fn reset_next2(&self) {
+        self.meta.reset(FLAG_NEXT_2, false)
     }
 
     pub fn has_data(&self) -> bool {
@@ -337,12 +345,6 @@ impl BlockHandle {
     fn set_flag(&self, flag: u32) -> bool {
         (self.meta.set_flags(flag) & flag) != flag
     }
-
-    #[inline]
-    fn reset_flag(&self, flag: u32) {
-        self.meta.reset_flags(flag)
-    }
-
 }
 
 #[cfg(feature = "telemetry")]
@@ -377,6 +379,7 @@ type BlockHandleCache = lockfree::map::Map<BlockIdExt, HandleObject>;
 #[derive(Debug)]
 pub enum StoreJob {
     SaveHandle(Arc<BlockHandle>),
+    DropHandle(BlockIdExt),
     SaveFullNodeState((&'static str, Arc<BlockIdExt>)),
     SaveValidatorState((&'static str, Arc<BlockIdExt>)),
     DropValidatorState(&'static str)
@@ -445,8 +448,20 @@ impl BlockHandleStorage {
                             if let Err(e) = handle_db.put_value(handle.id(), handle.meta()) {
                                 log::error!(
                                     target: TARGET, 
-                                    "ERROR: {} while storing handle {}", 
+                                    "{} while storing handle {}", 
                                     e, handle.id()
+                                );
+                                false
+                            } else {
+                                true
+                            }
+                        },
+                        StoreJob::DropHandle(id) => {
+                            if let Err(e) = handle_db.delete(&id) {
+                                log::error!(
+                                    target: TARGET, 
+                                    "{} while deleting handle {}", 
+                                    e, id
                                 );
                                 false
                             } else {
@@ -462,7 +477,7 @@ impl BlockHandleStorage {
                             if let Err(e) = result {
                                 log::error!(
                                     target: TARGET, 
-                                    "ERROR: {} while clearing state {}", 
+                                    "{} while clearing state {}", 
                                     e, key
                                 );
                                 false
@@ -485,7 +500,7 @@ impl BlockHandleStorage {
         );
         ret
     }
-  	
+
     pub fn create_handle(
         &self, 
         id: BlockIdExt, 
@@ -562,6 +577,18 @@ impl BlockHandleStorage {
         self.storer.send((StoreJob::SaveValidatorState((key, refid)), None)).map_err(
             |_| error!("Cannot store validator state {}: storer thread dropped", id)
         )
+    }
+
+    pub fn drop_handle(
+        &self, 
+        id: BlockIdExt, 
+        callback: Option<Arc<dyn Callback>>
+    ) -> Result<()> {
+        let _ = self.handle_cache.remove(&id);
+        self.storer.send((StoreJob::DropHandle(id.clone()), callback)).map_err(
+            |_| error!("Cannot drop handle {}: storer thread dropped", id)
+        )?;
+        Ok(())
     }
         
     fn create_handle_and_store(

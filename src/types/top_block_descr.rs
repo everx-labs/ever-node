@@ -323,18 +323,8 @@ impl TopBlockDescrStuff {
         let block = Block::construct_from(&mut block_virt_root.into())?;
         let info = block.read_info()?;
         let value_flow = block.read_value_flow()?;
-
-        //
-        // TEMP CODE FOR DEVNET (FROM 23 July 2021) COMPATIBILITY
-        // In future delete only if condition, not read_in_full_depth!!!
-        //
-        if crate::engine::read_value_flow_in_full_depth() {
-            value_flow.read_in_full_depth()
-                .map_err(|e| error!("Can't read value flow in full depth: {}", e))?;
-        }
-        //
-        // end of temp code
-        //
+        value_flow.read_in_full_depth()
+            .map_err(|e| error!("Can't read value flow in full depth: {}", e))?;
 
         if info.version() != 0 {
             fail!("Block -> info -> version should be zero (found {})", info.version())

@@ -100,7 +100,9 @@ pub struct TonNodeConfig {
     #[serde(skip)]
     port: Option<u16>,
     #[serde(skip)]
-    file_name: String
+    file_name: String,
+    #[serde(default)]
+    restore_db: bool
 }
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
@@ -403,6 +405,9 @@ impl TonNodeConfig {
     }
     pub fn extensions(&self) -> Option<&NodeExtensions> {
         self.extensions.as_ref()
+    }
+    pub fn restore_db(&self) -> bool {
+        self.restore_db
     }
 
  

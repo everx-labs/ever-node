@@ -97,8 +97,8 @@ impl ShardStateDb {
     ) -> Result<Arc<Self>> {
         let ret = Self::with_dbs(
             Arc::new(RocksDbTable::with_db(db.clone(), shardstate_db_path)?),
-            CellDb::with_db(db.clone(), cell_db_path)?,
-            CellDb::with_db(db.clone(), cell_db_path_additional)?,
+            Arc::new(CellDb::with_db(db.clone(), cell_db_path)?),
+            Arc::new(CellDb::with_db(db.clone(), cell_db_path_additional)?),
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated
@@ -109,8 +109,8 @@ impl ShardStateDb {
     /// Constructs new instance using given key-value collection implementations
     fn with_dbs(
         shardstate_db: Arc<dyn KvcWriteable<BlockIdExt>>,
-        cell_db_0: CellDb,
-        cell_db_1: CellDb,
+        cell_db_0: Arc<CellDb>,
+        cell_db_1: Arc<CellDb>,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>
@@ -119,16 +119,18 @@ impl ShardStateDb {
             shardstate_db,
             current_dynamic_boc_db_index: AtomicU32::new(0),
             dynamic_boc_db_0: Arc::new(DynamicBocDb::with_db(
-                cell_db_0, 
+                cell_db_0.clone(), 
                 0,
+                Some(cell_db_1.clone()),
                 #[cfg(feature = "telemetry")]
                 telemetry.clone(),
                 allocated.clone()
             )),
             dynamic_boc_db_0_writers: AtomicU32::new(0),
             dynamic_boc_db_1: Arc::new(DynamicBocDb::with_db(
-                cell_db_1, 
+                cell_db_1,
                 1,
+                Some(cell_db_0),
                 #[cfg(feature = "telemetry")]
                 telemetry,
                 allocated
@@ -260,10 +262,14 @@ impl ShardStateDb {
         self.stop.fetch_or(Self::MASK_GC_STOPPED, Ordering::Relaxed);
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            if self.stop.load(Ordering::Relaxed) & Self::MASK_GC_STARTED == 0 {
+            if !self.is_gc_run() {
                 break;
             }
         }
+    }
+
+    pub fn is_gc_run(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) & Self::MASK_GC_STARTED != 0
     }
 
     /// Returns reference to shardstates database

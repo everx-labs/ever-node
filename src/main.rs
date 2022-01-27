@@ -48,7 +48,7 @@ mod jaeger {
 
 use crate::{
     config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, STATSD}, 
-    jaeger::init_jaeger
+    jaeger::init_jaeger, internal_db::restore::set_graceful_termination,
 };
 
 use std::sync::Arc;
@@ -457,18 +457,36 @@ fn main() {
             }
         }
     );
-    
+
+    let validator_rt_handle = validator_runtime.handle().clone();
     runtime.block_on(async move {
         match start_engine(
             config, 
             zerostate_path, 
-            validator_runtime.handle().clone(), 
+            validator_rt_handle,
             initial_sync_disabled
         ).await {
             Err(e) => log::error!("Can't start node's Engine: {:?}", e),
             Ok((engine, join_handle)) => {
+
+                log::trace!("Engine launched, set SIGINT handler");
+
+                let engine1 = engine.clone();
+                ctrlc::set_handler(move || {
+                    log::warn!("Got SIGINT, starting node's safe stopping...");
+                    engine1.set_stop();
+
+                }).expect("Error setting Ctrl-C (SIGINT) handler");
+
                 join_handle.await.ok();
-                engine.stop().await
+
+                log::warn!("Still safe stopping node...");
+
+                engine.wait_stop().await;
+                
+                log::warn!("Node stopped");
+
+                set_graceful_termination();
             }
         }
     });

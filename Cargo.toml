@@ -1,14 +1,14 @@
 [package]
 edition = '2018'
 name = 'ton_node'
-version = '0.48.22'
+version = '0.49.0'
 
 [workspace]
 members = [ 'storage' ]
 resolver = '2'
 
 [dependencies]
-zeroize_derive = '=1.2.2'
+async-recursion = '0.3.2'
 async-trait = '0.1.22'
 base64 = '0.13'
 bitflags = '1.2.1'
@@ -16,6 +16,7 @@ chrono = '0.4.10'
 clap = '2.33.1'
 colored = '1.9.3'
 crossbeam-channel = '0.4.2'
+ctrlc = '3.2.1'
 dirs = '2.0.2'
 env_logger = '0.7.1'
 failure = '0.1'
@@ -37,7 +38,7 @@ sha2 = '0.9'
 spin = '0.7.1'
 stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.64' }
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.65' }
 catchain = { path = 'catchain' }
 dht = { git = 'https://github.com/tonlabs/ton-labs-dht', tag = '0.5.61' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
@@ -49,12 +50,12 @@ statsd = { optional = true, version = '0.14.0' }
 storage = { path = 'storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
 ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git', tag = '2.1.7' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.117' }
-ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.7.36' }
-ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', tag = '0.6.34' }
-ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.50' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.120' }
+ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.7.37' }
+ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', tag = '0.7.2' }
+ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.52' }
 ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.10.12' }
-ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.29' }
+ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.30' }
 validator_session = { path = 'validator-session' }
 
 [dev-dependencies]

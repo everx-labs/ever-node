@@ -135,7 +135,7 @@ impl Package {
         }
     }
 
-    async fn open_file_ext(
+    pub async fn open_file_ext(
         read_only: bool, 
         create: bool, 
         path: impl AsRef<Path>
@@ -147,7 +147,7 @@ impl Package {
             .open(&path).await?)
     }
 
-    async fn open_file(&self) -> Result<tokio::fs::File> {
+    pub async fn open_file(&self) -> Result<tokio::fs::File> {
         Self::open_file_ext(self.read_only, false, self.path.as_path()).await
     }
 

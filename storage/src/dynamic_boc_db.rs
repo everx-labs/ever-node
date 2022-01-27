@@ -26,7 +26,7 @@ use std::{ops::{Deref, DerefMut}, sync::{Arc, RwLock, Weak}, time};
 use std::sync::atomic::Ordering;
 //#[cfg(test)]
 //use std::path::Path;
-use ton_types::{Cell, Result, CellImpl, MAX_LEVEL};
+use ton_types::{Cell, Result, CellImpl, MAX_LEVEL, fail, error};
 
 declare_counted!(
     pub struct StorageCellObject {
@@ -37,6 +37,7 @@ declare_counted!(
 //#[derive(Debug)]
 pub struct DynamicBocDb {
     db: Arc<CellDb>,
+    another_db: Option<Arc<CellDb>>,
     cells: Arc<RwLock<fnv::FnvHashMap<CellId, StorageCellObject>>>,
     db_index: u32,
     #[cfg(feature = "telemetry")]
@@ -54,17 +55,18 @@ impl DynamicBocDb {
 
     /// Constructs new instance using given key-value collection implementation
     pub(crate) fn with_db(
-        db: CellDb, 
+        db: Arc<CellDb>, 
         db_index: u32,
+        another_db: Option<Arc<CellDb>>,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>
     ) -> Self {
-        let db = Arc::new(db);
         Self {
             db: Arc::clone(&db),
             cells: Arc::new(RwLock::new(fnv::FnvHashMap::default())),
             db_index,
+            another_db,
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated
@@ -91,7 +93,6 @@ impl DynamicBocDb {
 
         let written_count = self.save_tree_of_cells_recursive(
             root_cell,
-            Arc::clone(&self.db),
             transaction.as_mut(),
             &mut visited,
             &root_id
@@ -133,10 +134,10 @@ impl DynamicBocDb {
             false
         };
         let storage_cell = Arc::new(
-            match CellDb::get_cell(self.db.deref(), cell_id, Arc::clone(self)) {
+            match self.load_cell_from_db(cell_id) {
                 Ok(cell) => cell,
                 Err(e) => {
-                    log::error!("Can't load cell  id {}  db_index {}  in_cache {}  error: {}", cell_id, self.db_index, in_cache, e);
+                    log::error!("FATAL! {}", e);
                     std::thread::sleep(time::Duration::from_millis(2_000));
                     std::process::exit(0xFF);
                 }
@@ -158,10 +159,37 @@ impl DynamicBocDb {
         Ok(storage_cell)
     }
 
+    fn load_cell_from_db(self: &Arc<Self>, cell_id: &CellId) -> Result<StorageCell> {
+        match CellDb::get_cell(self.db.deref(), cell_id, Arc::clone(self)) {
+            Ok(cell) => Ok(cell),
+            Err(e) => {
+                if let Some(another_db) = self.another_db.as_ref() {
+                    let cell = CellDb::get_cell(another_db.deref(), cell_id, Arc::clone(self))
+                        .map_err(|e| error!(
+                            "Can't load cell from both dbs  id {}  db_index {} in_cache false  error: {}",
+                            cell_id, self.db_index, e
+                        ))?;
+
+                    // Restore only one cell. If caller requests referenced cell - we will restore it the same way.
+                    self.db.put(&cell_id, &StorageCell::serialize(&cell)?)?;
+
+                    log::warn!("A cell was restored from another db  id {}  db_index {}",
+                        cell_id, self.db_index);
+
+                    Ok(cell)
+                } else {
+                    fail!(
+                        "Can't load cell  id {}  db_index {}  in_cache false  error: {}",
+                        cell_id, self.db_index, e
+                    );
+                }
+            }
+        }
+    }
+
     fn save_tree_of_cells_recursive(
-        self: &Arc<Self>,
+        &self,
         cell: &dyn CellImpl,
-        cell_db: Arc<CellDb>,
         transaction: &mut dyn KvcTransaction<CellId>,
         visited: &mut fnv::FnvHashSet<CellId>,
         root_id: &CellId,
@@ -169,7 +197,7 @@ impl DynamicBocDb {
         let cell_id = CellId::new(cell.hash(MAX_LEVEL));
         if visited.contains(&cell_id) {
             Ok(0)
-        } else if cell_db.contains(&cell_id)? {
+        } else if self.db.contains(&cell_id)? {
             log::trace!(
                 target: TARGET,
                 "DynamicBocDb::save_tree_of_cells_recursive  already in DB  id {}  root_cell_id {}  db_index {}",
@@ -183,7 +211,6 @@ impl DynamicBocDb {
             for i in 0..cell.references_count() {
                 count += self.save_tree_of_cells_recursive(
                     cell.reference(i)?.deref(),
-                    Arc::clone(&cell_db),
                     transaction,
                     visited,
                     root_id

@@ -64,6 +64,10 @@ impl PackageInfo {
         &self.package
     }
 
+    pub fn package_mut(&mut self) -> &mut Package {
+        &mut self.package
+    }
+
     pub const fn idx(&self) -> u32 {
         self.idx
     }

@@ -2642,7 +2642,7 @@ impl Collator {
         shard: &ShardIdent,
         mut info: ShardDescr,
         sibling: Option<&ShardDescr>,
-        wc_info: Option<WorkchainDescr>,
+        wc_info: Option<WorkchainDescr>, // new wc config (with changes made in the current block)
         now: u32,
         mut update_cc: bool
     ) -> Result<Option<ShardDescr>> {
@@ -2664,8 +2664,11 @@ impl Collator {
             if let Some(wc_info) = wc_info {
                 // workchain present in configuration?
                 let depth = shard.prefix_len();
-                if info.is_fsm_none() && (info.want_split || depth < wc_info.min_split()) &&
-                   depth < wc_info.max_split() && depth < 60 {
+                if info.is_fsm_none() &&                                // split/merge is not in progress
+                   (info.want_split || depth < wc_info.min_split()) &&  // shard want splits (because of limits) or min_split was increased ↑ (in current or prev blocks)
+                   depth < wc_info.max_split() &&                       // max_split allows split
+                   depth < 60                                           // hardcoded max max split allows split
+                {
                     // prepare split
                     info.split_merge_at = FutureSplitMerge::Split {
                         split_utime: now + SPLIT_MERGE_DELAY,
@@ -2677,11 +2680,12 @@ impl Collator {
 
                 } else {
                     if let Some(sibling) = sibling {
-                        if info.is_fsm_none() &&
-                           depth > wc_info.min_split() &&
-                          (info.want_merge || depth > wc_info.max_split()) &&
-                          !sibling.before_split && sibling.is_fsm_none() &&
-                          (sibling.want_merge || depth > wc_info.max_split()) {
+                        if info.is_fsm_none() &&                                // split/merge is not in progress
+                           depth > wc_info.min_split() &&                       // current min_split allows merge
+                          (info.want_merge || depth > wc_info.max_split()) &&   // shard wants merge (because of limits) or max_split was decreased ↓ (in current or prev blocks)
+                          !sibling.before_split && sibling.is_fsm_none() &&     // sibling shard is not going to split/merge now
+                          (sibling.want_merge || depth > wc_info.max_split())   // sibling shard want merge or need merge (because of max_split)
+                        {
                             // prepare merge
                             info.split_merge_at = FutureSplitMerge::Merge {
                                 merge_utime: now + SPLIT_MERGE_DELAY,
@@ -2692,12 +2696,13 @@ impl Collator {
                                 self.collated_block_descr, shard, shard.sibling(), info.fsm_utime(),
                                 info.fsm_utime_end());
 
-                        } else if info.is_fsm_merge() &&
-                                  depth > wc_info.min_split() &&
-                                 !sibling.before_split &&
-                                  sibling.is_fsm_merge() &&
-                                  now >= info.fsm_utime() && now >= sibling.fsm_utime() &&
-                                 (depth > wc_info.max_split() || (info.want_merge && sibling.want_merge)) {
+                        } else if info.is_fsm_merge() &&                                               // merge is in progress
+                             depth > wc_info.min_split() &&                                            // min_split allows merge
+                            !sibling.before_split &&                                                   // sibling is not going to split
+                             sibling.is_fsm_merge() &&                                                 // sibling is in merge progress too
+                             now >= info.fsm_utime() && now >= sibling.fsm_utime() &&                  // merge time has come
+                            (depth > wc_info.max_split() || (info.want_merge && sibling.want_merge))   // max_split was decreased or both shardes want merge
+                        {
                             // force merge
                             info.before_merge = true;
                             changed = true;

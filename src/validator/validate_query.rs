@@ -960,8 +960,8 @@ impl ValidateQuery {
                     but split conditions are not met", shard)
             }
             if info.descr().is_fsm_merge() && !merge_cond {
-                reject_query!("announcing future merge for shard {} in new shard configuration, 
-                    but merge conditions are not met", shard)
+                reject_query!("announcing future merge for shard {} in new shard configuration, \
+                    but merge conditions are not met", shard) 
             }
         }
         if info.descr.before_merge {
@@ -1016,8 +1016,8 @@ impl ValidateQuery {
         if prev_now > base.now() {
             reject_query!("creation time is not monotonic: {} after {}", base.now(), prev_now)
         }
-        let ccvc = base.config_params.catchain_config()?;
-        let wc_set = base.config_params.workchains()?;
+        let ccvc = base.next_state_extra.config.catchain_config()?;
+        let wc_set = base.next_state_extra.config.workchains()?;
         self.update_shard_cc = base.info.key_block()
             || (base.now() / ccvc.shard_catchain_lifetime > prev_now / ccvc.shard_catchain_lifetime);
         if self.update_shard_cc {
