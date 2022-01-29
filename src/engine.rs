@@ -371,7 +371,7 @@ impl Engine {
         #[cfg(feature = "telemetry")] 
         let (metrics, engine_telemetry, engine_allocated) = Self::create_telemetry();
         let archives_life_time = general_config.gc_archives_life_time_hours();
-        let db_directory = general_config.internal_db_path().unwrap_or_else(|| {"node_db"}).to_string();
+        let db_directory = general_config.internal_db_path().to_string();
         let gc_interval_sec = general_config.cells_gc_config().gc_interval_sec;
         let cells_lifetime_sec = general_config.cells_gc_config().cells_lifetime_sec;
         let db_config = InternalDbConfig { 

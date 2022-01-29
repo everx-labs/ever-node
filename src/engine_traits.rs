@@ -12,11 +12,10 @@
 */
 
 use crate::{
-    block::BlockStuff, config::CollatorTestBundlesGeneralConfig, internal_db::BlockResult,
-    shard_state::ShardStateStuff,
+    block::BlockStuff, config::CollatorTestBundlesGeneralConfig, 
+    block_proof::BlockProofStuff, config::TonNodeConfig, internal_db::BlockResult,
     network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
-    block_proof::BlockProofStuff,
-    types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
+    shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId}
 };
 #[cfg(feature = "telemetry")]
 use crate::{
@@ -531,7 +530,7 @@ pub trait EngineOperations : Sync + Send {
     }
 
     fn db_root_dir(&self) -> Result<&str> {
-        Ok("node_db")
+        Ok(TonNodeConfig::DEFAULT_DB_ROOT)
     }
 
     fn produce_chain_ranges_enabled(&self) -> bool {

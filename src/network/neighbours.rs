@@ -72,14 +72,14 @@ const FINES_POINTS_COUNT: u32 = 100;
 
 impl Neighbour {
 
-    pub fn new(id : Arc<KeyId>) ->  Result<Self> {
-        Ok (Neighbour {
+    pub fn new(id : Arc<KeyId>, default_rldp_roundtrip: u32) ->  Self {
+        Self {
             id: id,
             last_ping: AtomicU64::new(0),
             proto_version: AtomicI32::new(0),
             capabilities: AtomicI64::new(0),
             roundtrip_adnl: AtomicU64::new(0),
-            roundtrip_rldp: AtomicU64::new(0),
+            roundtrip_rldp: AtomicU64::new(default_rldp_roundtrip as u64),
             all_attempts: AtomicU64::new(0),
             fail_attempts: AtomicU64::new(0),
             fines_points: AtomicU32::new(0),
@@ -87,7 +87,7 @@ impl Neighbour {
             //roundtrip_relax_at: 0,
             //roundtrip_weight: 0.0,
             unreliability: AtomicI32::new(0),
-        })
+        }
     }
 
     pub fn update_proto_version(&self, q: &Capabilities) {
@@ -190,17 +190,20 @@ pub const MAX_NEIGHBOURS: usize = 16;
 
 impl Neighbours {
 
-    const TIMEOUT_PING_MAX: u64 = 1000;  // Milliseconds
-    const TIMEOUT_PING_MIN: u64 = 10;    // Milliseconds
+    const TIMEOUT_PING_MAX: u64 = 1000;         // Milliseconds
+    const TIMEOUT_PING_MIN: u64 = 10;           // Milliseconds
+    const DEFAULT_RLDP_ROUNDTRIP: u32 = 2000;   // Milliseconds
 
     pub fn new(
         start_peers: &Vec<Arc<KeyId>>,
         dht: &Arc<DhtNode>,
         overlay: &Arc<OverlayNode>,
-        overlay_id: Arc<OverlayShortId>
+        overlay_id: Arc<OverlayShortId>,
+        default_rldp_roundtrip: &Option<u32>
     ) -> Result<Self> {
+        let default_rldp_roundtrip = default_rldp_roundtrip.unwrap_or(Self::DEFAULT_RLDP_ROUNDTRIP);
         let ret = Neighbours {
-            peers: NeighboursCache::new(start_peers)?,
+            peers: NeighboursCache::new(start_peers, default_rldp_roundtrip)?,
             all_peers: lockfree::set::Set::new(),
             overlay: overlay.clone(),
             dht: dht.clone(),
@@ -594,8 +597,8 @@ pub struct NeighboursCache {
 }
 
 impl NeighboursCache {
-    pub fn new(start_peers: &Vec<Arc<KeyId>>) -> Result<Self> {
-        let cache = NeighboursCacheCore::new(start_peers)?;
+    pub fn new(start_peers: &Vec<Arc<KeyId>>, default_rldp_roundtrip: u32) -> Result<Self> {
+        let cache = NeighboursCacheCore::new(start_peers, default_rldp_roundtrip)?;
         Ok(NeighboursCache {cache: Arc::new(cache)})
     }
 
@@ -636,16 +639,18 @@ struct NeighboursCacheCore {
     count: AtomicU32, 
     next: AtomicU32,
     indices: lockfree::map::Map<u32, Arc<KeyId>>,
-    values: lockfree::map::Map<Arc<KeyId>, Arc<Neighbour>>
+    values: lockfree::map::Map<Arc<KeyId>, Arc<Neighbour>>,
+    default_rldp_roundtrip: u32
 }
 
 impl NeighboursCacheCore {
-    pub fn new(start_peers: &Vec<Arc<KeyId>>) -> Result<Self> {
+    pub fn new(start_peers: &Vec<Arc<KeyId>>, default_rldp_roundtrip: u32) -> Result<Self> {
         let instance = NeighboursCacheCore {
             count: AtomicU32::new(0),
             next: AtomicU32::new(0),
             indices: lockfree::map::Map::new(),
-            values: lockfree::map::Map::new()
+            values: lockfree::map::Map::new(),
+            default_rldp_roundtrip
         };
 
         let mut index = 0;
@@ -748,7 +753,7 @@ impl NeighboursCacheCore {
                 if is_overflow {
                     lockfree::map::Preview::Discard
                 } else {
-                    lockfree::map::Preview::New(Arc::new(Neighbour::new(peer.clone()).unwrap()))
+                    lockfree::map::Preview::New(Arc::new(Neighbour::new(peer.clone(), self.default_rldp_roundtrip)))
                 }
             }
         );

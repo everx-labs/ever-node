@@ -30,8 +30,8 @@ pub async fn check_db(
     restore_db: bool
 ) -> Result<InternalDbImpl> {
 
-    let unexpected_termination = check_unexpected_termination();
-    let restoring = check_restoring();
+    let unexpected_termination = check_unexpected_termination(&db.config.db_directory);
+    let restoring = check_restoring(&db.config.db_directory);
 
     if unexpected_termination || restoring {
         if !restore_db {
@@ -45,7 +45,7 @@ pub async fn check_db(
                     config is 'false', so restore operation is skipped. Node may work incorrectly.");
             }
         } else {
-            set_restoring()?;
+            set_restoring(&db.config.db_directory)?;
             log::warn!("Previous node run was unexpectedly terminated, \
                 starting check & restore process...");
             match restore_last_applied_mc_block(&db).await {
@@ -65,15 +65,16 @@ pub async fn check_db(
                     std::process::exit(0xFF);
                 }
             }
-            reset_restoring()?;
+            reset_restoring(&db.config.db_directory)?;
         }
     }
-    set_unexpected_termination()?;
+    set_unexpected_termination(&db.config.db_directory)?;
     Ok(db)
 }
 
-pub fn set_graceful_termination() {
-    if let Err(e) = remove_file(UNEXPECTED_TERMINATION_BEACON_FILE) {
+pub fn set_graceful_termination(db_dir: &str) {
+    let path = Path::new(db_dir).join(UNEXPECTED_TERMINATION_BEACON_FILE);
+    if let Err(e) = remove_file(&path) {
         log::error!(
             "set_graceful_termination: can't remove file {}, please do it manually, \
                 otherwice check and restore DB operation will run next start (error: {})",
@@ -83,26 +84,29 @@ pub fn set_graceful_termination() {
     }
 }
 
-fn check_unexpected_termination() -> bool {
-    Path::new(UNEXPECTED_TERMINATION_BEACON_FILE).exists()
+fn check_unexpected_termination(db_dir: &str) -> bool {
+    Path::new(db_dir).join(UNEXPECTED_TERMINATION_BEACON_FILE).as_path().exists()
 }
 
-fn set_unexpected_termination() -> Result<()> {
-    write(UNEXPECTED_TERMINATION_BEACON_FILE, "")?;
+fn set_unexpected_termination(db_dir: &str) -> Result<()> {
+    let path = Path::new(db_dir).join(UNEXPECTED_TERMINATION_BEACON_FILE);
+    write(&path, "")?;
     Ok(())
 }
 
-fn reset_restoring() -> Result<()> {
-    remove_file(RESTORING_BEACON_FILE)?;
+fn reset_restoring(db_dir: &str) -> Result<()> {
+    let path = Path::new(db_dir).join(RESTORING_BEACON_FILE);
+    remove_file(&path)?;
     Ok(())
 }
 
-fn check_restoring() -> bool {
-    Path::new(RESTORING_BEACON_FILE).exists()
+fn check_restoring(db_dir: &str) -> bool {
+    Path::new(db_dir).join(RESTORING_BEACON_FILE).as_path().exists()
 }
 
-fn set_restoring() -> Result<()> {
-    write(RESTORING_BEACON_FILE, "")?;
+fn set_restoring(db_dir: &str) -> Result<()> {
+    let path = Path::new(db_dir).join(RESTORING_BEACON_FILE);
+    write(&path, "")?;
     Ok(())
 }
 

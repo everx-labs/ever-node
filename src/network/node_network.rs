@@ -71,6 +71,7 @@ pub struct NodeNetwork {
     overlay_awaiters: AwaitersPool<Arc<OverlayShortId>, Arc<dyn FullNodeOverlayClient>>,
     runtime_handle: tokio::runtime::Handle,
     config_handler: Arc<NodeConfigHandler>,
+    default_rldp_roundtrip: Option<u32>,
     connectivity_check_config: ConnectivityCheckBroadcastConfig,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<FullNodeNetworkTelemetry>,
@@ -169,6 +170,8 @@ impl NodeNetwork {
         let overlay_key = adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?;
         NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_key, None);
 
+        let default_rldp_roundtrip = config.default_rldp_roundtrip();
+
         NodeNetwork::find_dht_nodes(dht.clone());
         let (config_handler, config_handler_context) = NodeConfigHandler::create(
             config, tokio::runtime::Handle::current()
@@ -201,6 +204,7 @@ impl NodeNetwork {
             ),
             runtime_handle: tokio::runtime::Handle::current(),
             config_handler,
+            default_rldp_roundtrip,
             connectivity_check_config,
             #[cfg(feature = "telemetry")]
             telemetry: Arc::new(
@@ -551,7 +555,14 @@ impl NodeNetwork {
             log::warn!("No nodes were found in overlay {}", &overlay_id.0);
         }
 
-        let neighbours = Neighbours::new(&peers, &self.dht, &self.overlay, overlay_id.0.clone())?;
+        let neighbours = Neighbours::new(
+            &peers,
+            &self.dht,
+            &self.overlay,
+            overlay_id.0.clone(),
+            &self.default_rldp_roundtrip
+        )?;
+
         let peers = Arc::new(neighbours);
         let client_overlay = self.try_add_new_elem(
             &self.overlays,
