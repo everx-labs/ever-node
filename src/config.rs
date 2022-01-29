@@ -89,6 +89,7 @@ pub struct TonNodeConfig {
     control_server: Option<AdnlServerConfigJson>,
     kafka_consumer_config: Option<KafkaConsumerConfig>,
     external_db_config: Option<ExternalDbConfig>,
+    default_rldp_roundtrip_ms: Option<u32>,
     #[serde(default)]
     test_bundles_config: CollatorTestBundlesGeneralConfig,
     #[serde(default = "default_connectivity_check_config")]
@@ -249,6 +250,9 @@ pub struct CollatorTestBundlesGeneralConfig {
 const LOCAL_HOST: &str = "127.0.0.1";
 
 impl TonNodeConfig {
+
+    pub const DEFAULT_DB_ROOT: &'static str = "node_db";    
+
     pub fn front_workchain_ids(&self) -> Vec<i32> {
         match self.workchain {
             None | Some(0) | Some(-1) => vec![MASTERCHAIN_ID, BASE_WORKCHAIN_ID],
@@ -385,8 +389,8 @@ impl TonNodeConfig {
         self.kafka_consumer_config.clone()
     }
 
-    pub fn internal_db_path(&self) -> Option<&str> {
-        self.internal_db_path.as_ref().map(|path| path.as_str())
+    pub fn internal_db_path(&self) -> &str {
+        self.internal_db_path.as_ref().map(|path| path.as_str()).unwrap_or(Self::DEFAULT_DB_ROOT)
     }
 
     pub fn cells_gc_config(&self) -> &CellsGcConfig {
@@ -394,6 +398,10 @@ impl TonNodeConfig {
     }
     
   
+    pub fn default_rldp_roundtrip(&self) -> Option<u32> {
+        self.default_rldp_roundtrip_ms
+    }
+
     pub fn external_db_config(&self) -> Option<ExternalDbConfig> {
         self.external_db_config.clone()
     }

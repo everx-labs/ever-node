@@ -1,15 +1,19 @@
 [package]
 edition = '2018'
 name = 'ton_node'
-version = '0.49.0'
+version = '0.49.3'
+
 
 [workspace]
 members = [ 'storage' ]
 resolver = '2'
 
+[profile]
+release = { debug = true }
+
 [dependencies]
-async-recursion = '0.3.2'
 async-trait = '0.1.22'
+async-recursion = '0.3.2'
 base64 = '0.13'
 bitflags = '1.2.1'
 chrono = '0.4.10'
@@ -58,26 +62,6 @@ ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.10.12'
 ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.30' }
 validator_session = { path = 'validator-session' }
 
-[dev-dependencies]
-
-
-[features]
-async_collator = [  ]
-async_validator = [  ]
-ci_run = [ 'storage/ci_run' ]
-compression = [ 'overlay/compression', 'rldp/compression' ]
-default = [ 'telemetry' ]
-external_db = [ 'rdkafka' ]
-metrics = [ 'statsd' ]
-slashing = [  ]
-telemetry = [ 'adnl/telemetry', 'dht/telemetry', 'rldp/telemetry', 'overlay/telemetry', 'storage/telemetry' ]
-trace_alloc = [  ]
-trace_alloc_detail = [ 'trace_alloc' ]
-validator = [ 'async_collator', 'async_validator' ]
-
-[profile]
-release = { debug = true }
-
 [target.'cfg(unix)'.dependencies.rdkafka]
 optional = true
 version = '0.26.0'
@@ -87,3 +71,24 @@ features = [ 'cmake_build' ]
 optional = true
 version = '0.26.0'
 
+[dev-dependencies]
+
+[features]
+default = [ 'telemetry' ]
+validator = [ 'async_collator', 'async_validator' ]
+external_db = [ 'rdkafka' ]
+async_collator = [  ]
+async_validator = [  ]
+ci_run = [ 'storage/ci_run' ]
+compression = [ 'overlay/compression', 'rldp/compression' ]
+metrics = [ 'statsd' ]
+slashing = [  ]
+telemetry = [
+    'adnl/telemetry',
+    'dht/telemetry',
+    'rldp/telemetry',
+    'overlay/telemetry',
+    'storage/telemetry'
+]
+trace_alloc_detail = [ 'trace_alloc' ]
+trace_alloc = [  ]

@@ -491,7 +491,7 @@ impl ValidateQuery {
 
     async fn get_ref_mc_state(&mut self, base: &ValidateBase) -> Result<McData> {
         let mc_state = match base.info.read_master_ref()? {
-            Some(master_ref) => self.engine.load_state(&master_ref.master.master_block_id().1).await?,
+            Some(master_ref) => (self.engine.clone()).wait_state(&master_ref.master.master_block_id().1, Some(1_000), true).await?,
             None => self.engine.load_state(&base.prev_blocks_ids[0]).await?
         };
         log::debug!(target: "validate_query", "in ValidateQuery::get_ref_mc_state() {}", mc_state.block_id());

@@ -1,7 +1,7 @@
 [package]
-edition = '2018'
 name = 'storage'
 version = '0.5.0'
+edition = '2018'
 
 [dependencies]
 async-trait = '0.1.31'
@@ -21,24 +21,25 @@ serde_derive = '1.0.114'
 sha2 = '0.9'
 strum = '0.18.0'
 strum_macros = '0.18.0'
+tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
+
 adnl = { git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.65' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
 ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.120' }
 ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.7.37' }
 ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.10.12' }
 
-[build-dependencies]
-cc = { features = [ 'parallel' ], version = '=1.0.61' }
+[target.'cfg(windows)'.dependencies.rocksdb]
+git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
+
+[target.'cfg(unix)'.dependencies.rocksdb]
+git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
+features = [ 'jemalloc' ]
+
+[build-dependencies.cc]
+version = '=1.0.61'
+features = [ 'parallel' ]
 
 [features]
 ci_run = [  ]
 telemetry = [  ]
-
-[target.'cfg(unix)'.dependencies.rocksdb]
-features = [ 'jemalloc' ]
-git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
-
-[target.'cfg(windows)'.dependencies.rocksdb]
-git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
-

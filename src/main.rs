@@ -459,6 +459,7 @@ fn main() {
     );
 
     let validator_rt_handle = validator_runtime.handle().clone();
+    let db_dir = config.internal_db_path().to_string();
     runtime.block_on(async move {
         match start_engine(
             config, 
@@ -486,7 +487,7 @@ fn main() {
                 
                 log::warn!("Node stopped");
 
-                set_graceful_termination();
+                set_graceful_termination(&db_dir);
             }
         }
     });
