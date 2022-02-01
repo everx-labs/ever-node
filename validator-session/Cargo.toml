@@ -6,7 +6,7 @@ version = '0.0.1'
 
 [dependencies]
 # domestic
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.65' }
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.66' }
 catchain = { path = '../catchain' }
 storage = { path = '../storage' }
 ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.120' }
