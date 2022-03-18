@@ -11,7 +11,7 @@
 * limitations under the License.
 */
 
-use adnl::common::KeyOption;
+use ever_crypto::Ed25519KeyOption;
 use catchain::{BlockHash, CatchainFactory};
 use storage::{
     db_impl_single,
@@ -52,7 +52,7 @@ pub struct ValidatorBlockCandidateWrapper {
 impl Serializable for ValidatorBlockCandidateWrapper {
     fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
         let candidate = ton_api::ton::db::candidate::Candidate {
-            source : self.candidate.public_key.into_tl_public_key()?,
+            source : self.candidate.public_key.into_public_key_tl()?,
             id : BlockIdExt::with_params(
                 ShardIdent::default(), 0, // Shard & seqno: not needed
                 self.candidate.id.root_hash.clone(),
@@ -69,7 +69,7 @@ impl Serializable for ValidatorBlockCandidateWrapper {
         match ton_api::Deserializer::new(reader).read_bare() {
             Ok(ton_api::ton::db::candidate::Candidate { source, id, data, collated_data }) => {
                 let candidate = ValidatorBlockCandidate {
-                    public_key: Arc::new(KeyOption::from_tl_public_key(&source)?),
+                    public_key: Ed25519KeyOption::from_public_key_tl(&source)?,
                     id: ValidatorBlockId { root_hash: id.root_hash.into(), file_hash: id.file_hash.into() },
                     collated_file_hash: catchain::utils::get_hash(&data),
                     data: CatchainFactory::create_block_payload(data),

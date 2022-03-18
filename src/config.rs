@@ -17,9 +17,10 @@ use crate::{
 };
 use adnl::{
     client::AdnlClientConfigJson,
-    common::{add_unbound_object_to_map_with_update, KeyId, KeyOption, KeyOptionJson, Wait},
+    common::{add_unbound_object_to_map_with_update, Wait},
     node::{AdnlNodeConfig, AdnlNodeConfigJson}, server::{AdnlServerConfig, AdnlServerConfigJson}
 };
+use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson};
 use std::{
     collections::HashMap, convert::TryInto, fs::File, io::BufReader, path::Path,
     sync::{Arc, atomic::{self, AtomicI32} }
@@ -52,20 +53,23 @@ macro_rules! key_option_public_key {
 pub trait KeyRing : Sync + Send  {
     async fn generate(&self) -> Result<[u8; 32]>;
     // find private key in KeyRing by public key hash
-    fn find(&self, key_hash: &[u8; 32]) -> Result<Arc<KeyOption>>;
+    fn find(&self, key_hash: &[u8; 32]) -> Result<Arc<dyn KeyOption>>;
     fn sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Vec<u8>>;
 }
 
-pub fn default_cells_gc_config() -> CellsGcConfig {
-    CellsGcConfig {
-        gc_interval_sec: 900,
-        cells_lifetime_sec: 1800,
-    }
-}
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub struct CellsGcConfig {
     pub gc_interval_sec: u32,
     pub cells_lifetime_sec: u64,
+}
+
+impl Default for CellsGcConfig {
+    fn default() -> Self {
+        CellsGcConfig {
+            gc_interval_sec: 900,
+            cells_lifetime_sec: 1800,
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -76,8 +80,6 @@ pub struct TonNodeConfig {
     workchain: Option<i32>,
     internal_db_path: Option<String>,
     unsafe_catchain_patches_path: Option<String>,
-    #[serde(default = "default_cells_gc_config")]
-    cells_gc_config: CellsGcConfig,
     #[serde(skip_serializing)]
     ip_address: Option<String>,
     adnl_node: Option<AdnlNodeConfigJson>,
@@ -133,7 +135,10 @@ pub struct KafkaConsumerConfig {
 #[derive(serde::Deserialize, serde::Serialize, Default, Debug, Clone)]
 pub struct GC {
     enable_for_archives: bool,
-    archives_life_time_hours: Option<u32> // Hours
+    archives_life_time_hours: Option<u32>, // Hours
+    enable_for_shard_state_persistent: bool,
+    #[serde(default = "CellsGcConfig::default")]
+    cells_gc_config: CellsGcConfig,
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
@@ -299,9 +304,8 @@ impl TonNodeConfig {
                     } else {
                         fail!("IP address is not set in default config")
                     };
-                    let (adnl_config, _) = AdnlNodeConfig::with_ip_address_and_key_type(
+                    let (adnl_config, _) = AdnlNodeConfig::with_ip_address_and_private_key_tags(
                         ip_address, 
-                        KeyOption::KEY_ED25519,
                         vec![NodeNetwork::TAG_DHT_KEY, NodeNetwork::TAG_OVERLAY_KEY]
                     )?;
                     Some(adnl_config)
@@ -327,7 +331,7 @@ impl TonNodeConfig {
     pub fn adnl_node(&self) -> Result<AdnlNodeConfig> {
         let adnl_node = self.adnl_node.as_ref().ok_or_else(|| error!("ADNL node is not configured!"))?;
 
-        let mut ret = AdnlNodeConfig::from_json_config(&adnl_node, true)?;
+        let mut ret = AdnlNodeConfig::from_json_config(&adnl_node)?;
         if let Some(port) = self.port {
             ret.set_port(port)
         }
@@ -393,8 +397,15 @@ impl TonNodeConfig {
         self.internal_db_path.as_ref().map(|path| path.as_str()).unwrap_or(Self::DEFAULT_DB_ROOT)
     }
 
-    pub fn cells_gc_config(&self) -> &CellsGcConfig {
-        &self.cells_gc_config
+    pub fn cells_gc_config(&self) -> CellsGcConfig {
+        match &self.gc {
+            Some(conf) => conf.cells_gc_config.clone(),
+            None => CellsGcConfig::default(),
+        }
+    }
+
+    pub fn enable_shard_state_persistent_gc(&self) -> bool {
+        self.gc.as_ref().map(|c| c.enable_for_shard_state_persistent).unwrap_or(false)
     }
     
   
@@ -448,7 +459,7 @@ impl TonNodeConfig {
             );
             return Ok(());
         };
-        let (server_private_key, server_key) = KeyOption::with_type_id(KeyOption::KEY_ED25519)?;
+        let (server_private_key, server_key) = Ed25519KeyOption::generate_with_json()?;
 
         // generate and save client console template
         let config_file_path = TonNodeConfig::build_path(configs_dir, "console_config.json")?;
@@ -536,12 +547,12 @@ impl TonNodeConfig {
         Ok(())
     }
 
-    fn generate_and_save_keys(&mut self) -> Result<([u8; 32], Arc<KeyOption>)> {
+    fn generate_and_save_keys(&mut self) -> Result<([u8; 32], Arc<dyn KeyOption>)> {
         let (private, public) = mine_key_for_workchain(self.workchain);
         let key_id = public.id().data();
         let key_ring = self.validator_key_ring.get_or_insert_with(|| HashMap::new());
         key_ring.insert(base64::encode(key_id), private);
-        Ok((key_id.clone(), Arc::new(public)))
+        Ok((key_id.clone(), public))
     }
 
     fn is_correct_election_id(&self, election_id: i32) -> bool {
@@ -641,7 +652,7 @@ enum Task {
 #[derive(Debug)]
 enum Answer {
     Generate(Result<[u8; 32]>),
-    GetKey(Option<KeyOption>),
+    GetKey(Option<Arc<dyn KeyOption>>),
     Result(Result<()>),
 }
 
@@ -653,7 +664,7 @@ pub struct NodeConfigHandlerContext {
 pub struct NodeConfigHandler {
     runtime_handle: tokio::runtime::Handle,
     sender: tokio::sync::mpsc::UnboundedSender<Arc<(Arc<Wait<Answer>>, Task)>>,
-    key_ring: Arc<lockfree::map::Map<String, Arc<KeyOption>>>,
+    key_ring: Arc<lockfree::map::Map<String, Arc<dyn KeyOption>>>,
     validator_keys: Arc<ValidatorKeys>,
     workchain_id: Option<i32>,
 }
@@ -788,7 +799,7 @@ impl NodeConfigHandler {
         Ok(result)
     }
 
-    pub async fn get_validator_key(&self, key_id: &Arc<KeyId>) -> Option<(KeyOption, i32)> {
+    pub async fn get_validator_key(&self, key_id: &Arc<KeyId>) -> Option<(Arc<dyn KeyOption>, i32)> {
         match self.validator_keys.get(&base64::encode(key_id.data())) {
             Some(key) => {
                 //       let result = if let Some(key) = self.key_ring.get(&key_id) {
@@ -804,7 +815,7 @@ impl NodeConfigHandler {
         }
     }
 
-    async fn get_key_raw(&self, key_hash: [u8; 32]) -> Option<KeyOption> {
+    async fn get_key_raw(&self, key_hash: [u8; 32]) -> Option<Arc<dyn KeyOption>> {
         let (wait, mut queue_reader) = Wait::new();
         let pushed_task = Arc::new((wait.clone(), Task::GetKey(key_hash)));
         wait.request();
@@ -819,7 +830,7 @@ impl NodeConfigHandler {
     }
 
     fn generate_and_save(
-        key_ring: &Arc<lockfree::map::Map<String, Arc<KeyOption>>>,
+        key_ring: &Arc<lockfree::map::Map<String, Arc<dyn KeyOption>>>,
         config: &mut TonNodeConfig,
         config_name: &str
     ) -> Result<[u8; 32]> {
@@ -918,10 +929,10 @@ impl NodeConfigHandler {
         oldest_validator_key
     }
 
-    fn get_key(config: &TonNodeConfig, key_id: [u8; 32]) -> Option<KeyOption> {
+    fn get_key(config: &TonNodeConfig, key_id: [u8; 32]) -> Option<Arc<dyn KeyOption>> {
         if let Some(validator_key_ring) = &config.validator_key_ring {
             if let Some(key_data)  = validator_key_ring.get(&base64::encode(&key_id)) {
-                match KeyOption::from_private_key(&key_data) {
+                match Ed25519KeyOption::from_private_key_json(&key_data) {
                     Ok(key) => { return Some(key)},
                     _ => return None
                 }
@@ -970,7 +981,7 @@ impl NodeConfigHandler {
     }
 
     fn add_key_to_dynamic_key_ring(&self, key_id: String, key_json: &KeyOptionJson) -> Result<()> {
-        if let Some(key) = self.key_ring.insert(key_id, Arc::new(KeyOption::from_private_key(key_json)?)) {
+        if let Some(key) = self.key_ring.insert(key_id, Ed25519KeyOption::from_private_key_json(key_json)?) {
             log::warn!("Added key was already in key ring collection (id: {})", key.key());
         }
         
@@ -1023,7 +1034,17 @@ impl NodeConfigHandler {
                         Answer::Result(result)
                     }
                     Task::StoreStatesGcInterval(interval) => {
-                        actual_config.cells_gc_config.gc_interval_sec = interval;
+                        if let Some(c) = &mut actual_config.gc {
+                            c.cells_gc_config.gc_interval_sec = interval;
+                        } else {
+                            actual_config.gc = Some(GC {
+                                cells_gc_config: CellsGcConfig {
+                                    gc_interval_sec: interval,
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            });
+                        }
                         let result = actual_config.save_to_file(&name);
                         Answer::Result(result)
                     }
@@ -1059,7 +1080,7 @@ impl KeyRing for NodeConfigHandler {
     }
 
     // find private key in KeyRing by public key hash
-    fn find(&self, key_id: &[u8; 32]) -> Result<Arc<KeyOption>> {
+    fn find(&self, key_id: &[u8; 32]) -> Result<Arc<dyn KeyOption>> {
        let id = base64::encode(key_id);
         match self.key_ring.get(&id) {
             Some(key) => Ok(key.val().clone()),
@@ -1206,12 +1227,10 @@ pub const PUB_ED25519 : &str = "pub.ed25519";
 
 impl IdDhtNode {
 
-    pub fn convert_key(&self) -> Result<KeyOption> {
+    pub fn convert_key(&self) -> Result<Arc<dyn KeyOption>> {
         let type_id = self.type_node.as_ref().ok_or_else(|| error!("Type_node is not set!"))?;
        
-        let type_id = if type_id.eq(PUB_ED25519) {
-            KeyOption::KEY_ED25519
-        } else {
+        if !type_id.eq(PUB_ED25519) {
             fail!("unknown type_node!")
         };
 
@@ -1222,8 +1241,7 @@ impl IdDhtNode {
         };
 
         let pub_key = key[..32].try_into()?;
-        let ret = KeyOption::from_type_and_public_key(type_id, pub_key);
-        Ok(ret)
+        Ok(Ed25519KeyOption::from_public_key(pub_key))
     }
 }
 
@@ -1307,7 +1325,10 @@ impl TonNodeGlobalConfigJson {
             };
             let node = DhtNodeConfig {
                 id: Ed25519 {
-                    key: UInt256::with_array(key.pub_key()?.clone())
+                    key: UInt256::with_array(key
+                        .pub_key()?
+                        .try_into()?
+                    )
                 }.into_boxed(),
                 addr_list,
                 version,

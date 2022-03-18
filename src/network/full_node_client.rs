@@ -21,18 +21,16 @@ use crate::{engine_traits::EngineTelemetry, network::telemetry::FullNodeNetworkT
 
 use adnl::{
     declare_counted,
-    common::{
-        CountedObject, Counter, KeyId, serialize, serialize_append, tag_from_boxed_type, 
-        tag_from_unboxed_type, TaggedByteSlice, TaggedObject, TaggedTlObject
-    }, 
+    common::{CountedObject, Counter,TaggedByteSlice, TaggedObject, TaggedTlObject}, 
     node::AdnlNode
 };
+use ever_crypto::KeyId;
 use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
 use rldp::RldpNode;
 use std::{io::Cursor, time::Instant, sync::Arc, time::Duration};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
-use ton_api::{
+use ton_api::{serialize_boxed, serialize_boxed_append, tag_from_boxed_type, tag_from_bare_type, 
     BoxedSerialize, BoxedDeserialize, Deserializer, IntoBoxed,
     ton::{
         self, TLObject, Bool,
@@ -169,7 +167,7 @@ impl NodeClientOverlay {
             #[cfg(feature = "telemetry")]
             telemetry,
             #[cfg(feature = "telemetry")]
-            tag_block_broadcast: tag_from_unboxed_type::<BlockBroadcast>(),
+            tag_block_broadcast: tag_from_bare_type::<BlockBroadcast>(),
             #[cfg(feature = "telemetry")]
             tag_download_block_full: tag_from_boxed_type::<DownloadBlockFull>(),
             #[cfg(feature = "telemetry")]
@@ -188,7 +186,7 @@ impl NodeClientOverlay {
             #[cfg(feature = "telemetry")]
             tag_download_zero_state: tag_from_boxed_type::<DownloadZeroState>(),
             #[cfg(feature = "telemetry")]
-            tag_external_message_broadcast: tag_from_unboxed_type::<ExternalMessageBroadcast>(),
+            tag_external_message_broadcast: tag_from_bare_type::<ExternalMessageBroadcast>(),
             #[cfg(feature = "telemetry")]
             tag_get_archive_info: tag_from_boxed_type::<GetArchiveInfo>(),
             #[cfg(feature = "telemetry")]
@@ -196,7 +194,7 @@ impl NodeClientOverlay {
             #[cfg(feature = "telemetry")]
             tag_get_next_key_block_ids: tag_from_boxed_type::<GetNextKeyBlockIds>(),
             #[cfg(feature = "telemetry")]
-            tag_new_shard_block_broadcast: tag_from_unboxed_type::<NewShardBlockBroadcast>(),
+            tag_new_shard_block_broadcast: tag_from_bare_type::<NewShardBlockBroadcast>(),
             #[cfg(feature = "telemetry")]
             tag_prepare_block: tag_from_boxed_type::<PrepareBlock>(),
             #[cfg(feature = "telemetry")]
@@ -377,7 +375,7 @@ impl NodeClientOverlay {
     {
 
         let mut query = self.overlay.get_query_prefix(&self.overlay_id)?;
-        serialize_append(&mut query, &request.object)?;
+        serialize_boxed_append(&mut query, &request.object)?;
         let request_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
             format!("{}", std::any::type_name::<T>())
         } else {
@@ -425,7 +423,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             }
         }.into_boxed();
         let broadcast = TaggedByteSlice {
-            object: &serialize(&broadcast)?,
+            object: &serialize_boxed(&broadcast)?,
             #[cfg(feature = "telemetry")]
             tag: self.tag_external_message_broadcast
         };
@@ -435,7 +433,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()> {
         let id = broadcast.id.clone();
         let broadcast = TaggedByteSlice {
-            object: &serialize(&broadcast.into_boxed())?,
+            object: &serialize_boxed(&broadcast.into_boxed())?,
             #[cfg(feature = "telemetry")]
             tag: self.tag_block_broadcast
         };        
@@ -452,7 +450,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             block: tbd.new_shard_block()? 
         }.into_boxed();
         let broadcast = TaggedByteSlice {
-            object: &serialize(&broadcast)?,
+            object: &serialize_boxed(&broadcast)?,
             #[cfg(feature = "telemetry")]
             tag: self.tag_new_shard_block_broadcast
         };        

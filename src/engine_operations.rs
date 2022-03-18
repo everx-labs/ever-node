@@ -36,7 +36,7 @@ use crate::{
     network::telemetry::FullNodeNetworkTelemetry, validator::telemetry::CollatorValidatorTelemetry
 };
 
-use adnl::common::{KeyId, KeyOption};
+use ever_crypto::{KeyId, KeyOption};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
@@ -106,7 +106,7 @@ impl EngineOperations for Engine {
         &self, 
         validator_list_id: UInt256,
         validators: &Vec<CatchainNode>
-    ) -> Result<Option<Arc<KeyOption>>> {
+    ) -> Result<Option<Arc<dyn KeyOption>>> {
         self.validator_network().set_validator_list(validator_list_id, validators).await
     }
 

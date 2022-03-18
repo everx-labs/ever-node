@@ -827,7 +827,7 @@ impl LogPlayerImpl {
 
         assert!(session_desc.node_ids.len() == session_desc.weights.len());
         assert!(session_desc.local_key.is_some());
-        assert!(session_desc.local_key.as_ref().unwrap().pvt_key().is_ok());
+        assert!(session_desc.local_key.as_ref().unwrap().pub_key().is_err());
 
         //create player
 
@@ -870,7 +870,7 @@ impl LogPlayerImpl {
         for session_desc in log_header.session_descs {
             if session_desc.node_ids.len() != session_desc.weights.len()
                 || session_desc.local_key.is_none()
-                || !session_desc.local_key.as_ref().unwrap().pvt_key().is_ok()
+                || !session_desc.local_key.as_ref().unwrap().pub_key().is_err()
             {
                 continue;
             }

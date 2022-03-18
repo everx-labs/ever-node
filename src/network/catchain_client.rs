@@ -18,11 +18,12 @@ use crate::engine_traits::EngineTelemetry;
 use adnl::{
     declare_counted, 
     common::{
-        AdnlPeers, Answer, CountedObject, Counter, KeyId, KeyOption, QueryResult, 
-        serialize, serialize_append, tag_from_object, TaggedByteSlice, TaggedTlObject, Wait
+        AdnlPeers, Answer, CountedObject, Counter, QueryResult, 
+        TaggedByteSlice, TaggedTlObject, Wait
     },
     node::AdnlNode,
 };
+use ever_crypto::{KeyId, KeyOption};
 use overlay::{OverlayNode, PrivateOverlayShortId, QueriesConsumer};
 use catchain::{
     BlockPayloadPtr, CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr,
@@ -34,7 +35,7 @@ use std::{
 };
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
-use ton_api::{
+use ton_api::{serialize_boxed, serialize_boxed_append, tag_from_boxed_object,
     Deserializer, IntoBoxed, ton::{ ton_node::Broadcast, TLObject }
 };
 use ton_types::{error, fail, Result};
@@ -45,7 +46,7 @@ declare_counted!(
         overlay_id: Arc<PrivateOverlayShortId>,
         overlay: Arc<OverlayNode>,
         rldp: Arc<RldpNode>,
-        local_validator_key: Arc<KeyOption>,
+        local_validator_key: Arc<dyn KeyOption>,
         validator_keys: HashMap<Arc<KeyId>, Arc<KeyId>>,
         consumer: Arc<CatchainClientConsumer>,
         is_stop: Arc<AtomicBool>
@@ -61,8 +62,8 @@ impl CatchainClient {
         overlay: &Arc<OverlayNode>,
         rldp: Arc<RldpNode>,
         nodes: &Vec<CatchainNode>,
-        local_adnl_key: &Arc<KeyOption>,
-        local_validator_key: Arc<KeyOption>,
+        local_adnl_key: &Arc<dyn KeyOption>,
+        local_validator_key: Arc<dyn KeyOption>,
         catchain_listener: CatchainOverlayListenerPtr,
         #[cfg(feature = "telemetry")]
         telemetry: &Arc<EngineTelemetry>,
@@ -184,7 +185,7 @@ impl CatchainClient {
             &mut Cursor::new(&message.data().0)
         ).read_boxed()?;
         #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&query);
+        let tag = tag_from_boxed_object(&query);
         let query = TaggedTlObject {
             object: query,
             #[cfg(feature = "telemetry")]
@@ -225,7 +226,7 @@ impl CatchainClient {
         ).read_boxed()?;
         let mut query = overlay.get_query_prefix(overlay_id)?;
         //Serializer::new(&mut query).write_bare(&message.0)?;
-        serialize_append(&mut query, &query_body)?;
+        serialize_boxed_append(&mut query, &query_body)?;
         // let timeout = timeout.duration_since(SystemTime::now())?.as_millis();
         let result = overlay.query_via_rldp(
             rldp,
@@ -233,7 +234,7 @@ impl CatchainClient {
             &TaggedByteSlice {
                 object: &query[..],
                 #[cfg(feature = "telemetry")]
-                tag: tag_from_object(&query_body)
+                tag: tag_from_boxed_object(&query_body)
             },
             Some(max_answer_size as i64),
             None,
@@ -505,7 +506,7 @@ impl QueriesConsumer for CatchainClientConsumer {
         let now = Instant::now();
         let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
 
-        let data = match serialize(&query) {
+        let data = match serialize_boxed(&query) {
             Ok(query) => query,
             Err(e) => { 
                 log::warn!("query is bad: {:?}", e);
@@ -531,7 +532,7 @@ impl QueriesConsumer for CatchainClientConsumer {
                                 match answer {
                                     Ok(answer) => { 
                                         #[cfg(feature = "telemetry")]
-                                        let tag = tag_from_object(&answer);
+                                        let tag = tag_from_boxed_object(&answer);
                                         let answer = TaggedTlObject {
                                             object: answer,
                                             #[cfg(feature = "telemetry")]

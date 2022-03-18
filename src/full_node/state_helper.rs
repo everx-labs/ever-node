@@ -16,7 +16,7 @@ use crate::{
     shard_state::ShardStateStuff
 };
 
-use adnl::common::KeyId;
+use ever_crypto::KeyId;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use ton_block::BlockIdExt;
 use ton_types::{error, fail, Result};

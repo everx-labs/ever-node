@@ -15,7 +15,7 @@ use crate::{
     CHECK, block::BlockStuff, block_proof::BlockProofStuff, engine_traits::EngineOperations, 
     shard_state::ShardStateStuff, engine::Engine
 };
-use adnl::common::KeyId;
+use ever_crypto::KeyId;
 use std::{ops::Deref, sync::Arc, time::Duration};
 use storage::block_handle_db::BlockHandle;
 use ton_block::{BlockIdExt, ShardIdent, SHARD_FULL};

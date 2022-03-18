@@ -25,7 +25,7 @@ use validator_session::{
     BlockHash, BlockPayloadPtr, CatchainOverlayManagerPtr, CatchainOverlayPtr, CatchainNode,
     SessionId, SlashingValidatorStat, SessionPtr, SessionListenerPtr, SessionFactory,
     SessionListener, SessionNode,SessionOptions,
-    PublicKey, PublicKeyHash,
+    PublicKey, PrivateKey, PublicKeyHash,
     ValidatorBlockCandidateCallback, ValidatorBlockCandidateDecisionCallback
 };
 use validator_utils::{
@@ -272,7 +272,7 @@ impl ValidatorGroupImpl {
 }
 
 pub struct ValidatorGroup {
-    local_key: PublicKey,
+    local_key: PrivateKey,
     config: SessionOptions,
     session_id: SessionId,
     catchain_seqno: u32,
@@ -298,7 +298,7 @@ impl ValidatorGroup {
 
     pub fn new(
         shard: ShardIdent,
-        local_key: PublicKey,
+        local_key: PrivateKey,
         session_id: SessionId,
         catchain_seqno: u32,
         validator_list_id: ValidatorListHash,

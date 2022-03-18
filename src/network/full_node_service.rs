@@ -16,12 +16,10 @@ use crate::{
     network::neighbours::{PROTOCOL_CAPABILITIES, PROTOCOL_VERSION}
 };
 
-use adnl::common::{
-    AdnlPeers, Answer, QueryResult, tag_from_boxed_type, tag_from_object, TaggedByteVec, TaggedObject
-};
+use adnl::common::{AdnlPeers, Answer, QueryResult, TaggedByteVec, TaggedObject};
 use overlay::QueriesConsumer;
 use std::{cmp::min, fmt::Debug, sync::Arc};
-use ton_api::{
+use ton_api::{serialize_boxed, tag_from_boxed_type, tag_from_boxed_object, 
     AnyBoxedSerialize, IntoBoxed,
     ton::{
         self, TLObject, Vector,
@@ -79,7 +77,7 @@ impl FullNodeOverlayService {
             Err(_) => BlockDescription::TonNode_BlockDescriptionEmpty
         };
         #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
+        let tag = tag_from_boxed_object(&answer);
         let answer = TaggedObject {
             object: answer,
             #[cfg(feature = "telemetry")]
@@ -116,7 +114,7 @@ impl FullNodeOverlayService {
             PreparedProof::TonNode_PreparedProofEmpty
         };
         #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
+        let tag = tag_from_boxed_object(&answer);
         let answer = TaggedObject {
             object: answer,
             #[cfg(feature = "telemetry")]
@@ -159,7 +157,7 @@ impl FullNodeOverlayService {
             Prepared::TonNode_NotFound
         };
         #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
+        let tag = tag_from_boxed_object(&answer);
         let answer = TaggedObject {
             object: answer,
             #[cfg(feature = "telemetry")]
@@ -185,7 +183,7 @@ impl FullNodeOverlayService {
             PreparedState::TonNode_NotFoundState
         };
         #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
+        let tag = tag_from_boxed_object(&answer);
         let answer = TaggedObject {
             object: answer,
             #[cfg(feature = "telemetry")]
@@ -312,7 +310,7 @@ impl FullNodeOverlayService {
             }
         }
         #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
+        let tag = tag_from_boxed_object(&answer);
         let answer = TaggedObject {
             object: answer,
             #[cfg(feature = "telemetry")]
@@ -341,7 +339,7 @@ impl FullNodeOverlayService {
             }
         }
         #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
+        let tag = tag_from_boxed_object(&answer);
         let answer = TaggedObject {
             object: answer,
             #[cfg(feature = "telemetry")]
@@ -508,7 +506,7 @@ impl FullNodeOverlayService {
             }
         }                
         #[cfg(feature = "telemetry")]
-        let tag = tag_from_object(&answer);
+        let tag = tag_from_boxed_object(&answer);
         let answer = TaggedObject {
             object: answer,
             #[cfg(feature = "telemetry")]
@@ -571,7 +569,7 @@ impl FullNodeOverlayService {
                     let answer = match consumer(self, query).await {
                         Ok(answer) => {
                             let answer = TaggedByteVec {
-                                object: adnl::common::serialize(&answer.object)?,
+                                object: serialize_boxed(&answer.object)?,
                                 #[cfg(feature = "telemetry")]
                                 tag: answer.tag
                             };    

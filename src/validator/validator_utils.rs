@@ -10,8 +10,7 @@
 * See the License for the specific TON DEV software governing permissions and
 * limitations under the License.
 */
-
-use adnl::common::{KeyId, KeyOption, KeyOptionJson};
+use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson};
 use catchain::{BlockPayloadPtr, PublicKey, PublicKeyHash, CatchainNode};
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -29,11 +28,7 @@ use validator_session::SessionNode;
 
 
 pub fn sigpubkey_to_publickey(k: &SigPubKey) -> PublicKey {
-    let public_key_bytes = k.key_bytes();
-    return Arc::new(KeyOption::from_type_and_public_key(
-        KeyOption::KEY_ED25519,
-        public_key_bytes,
-    ));
+    Ed25519KeyOption::from_public_key(k.key_bytes())
 }
 
 pub fn make_cryptosig(s: BlockPayloadPtr) -> Result<CryptoSignature> {
@@ -82,7 +77,7 @@ pub fn pairvec_val_to_sigs(
 pub fn check_crypto_signatures(signatures: &BlockSignaturesPure, validators_list: &[ValidatorDescr], data: &[u8]) -> Result<u64> {
     // Calc validators short ids
     let validators_map = validators_list.iter().map(|desc| {
-        let key = KeyOption::from_type_and_public_key(KeyOption::KEY_ED25519, desc.public_key.as_slice()).id().clone();
+        let key = Ed25519KeyOption::from_public_key(desc.public_key.as_slice()).id().clone();
         (key, desc)
     }).collect::<HashMap<_, _>>();
     // Check signatures
@@ -269,9 +264,9 @@ pub fn calc_subset_for_workchain(
     }
 }
 
-pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (KeyOptionJson, KeyOption) {
+pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (KeyOptionJson, Arc<dyn KeyOption>) {
     loop {
-        if let Ok((private, public)) = KeyOption::with_type_id(KeyOption::KEY_ED25519) {
+        if let Ok((private, public)) = Ed25519KeyOption::generate_with_json() {
             if id_opt.is_none() || Some(calc_workchain_id_by_adnl_id(public.id().data())) == id_opt {
                 return (private, public)
             }

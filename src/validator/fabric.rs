@@ -19,7 +19,7 @@ use std::{
 use super::validator_utils::{validator_query_candidate_to_validator_block_candidate, pairvec_to_cryptopair_vec};
 use crate::{
     collator_test_bundle::CollatorTestBundle, engine_traits::EngineOperations, 
-    validator::{CollatorSettings, validate_query::ValidateQuery, collator, collator_sync}
+    validator::{CollatorSettings, validate_query::ValidateQuery, collator}
 };
 use ton_block::{BlockIdExt, ShardIdent, ValidatorSet};
 use ton_types::{Result, UInt256};
@@ -61,7 +61,7 @@ pub async fn run_validate_query(
             set,
             engine.clone(),
             false,
-            cfg!(feature = "async_validator"),
+            true,
         ).try_validate().await
     } else {
         let query = ValidateQuery::new(
@@ -72,7 +72,7 @@ pub async fn run_validate_query(
             set,
             engine.clone(),
             false,
-            cfg!(feature = "async_validator"),
+            true,
         );
         let validator_result = query.try_validate().await;
         if let Err(err) = &validator_result {
@@ -168,31 +168,17 @@ pub async fn run_collate_query (
     #[cfg(feature = "metrics")]
     STATSD.incr(&format!("run_collators_{}", shard));
 
-    let collator_result = if cfg!(feature = "async_collator") {
-        let collator = collator::Collator::new(
-            shard.clone(),
-            min_masterchain_block_id,
-            prev.clone(),
-            set,
-            UInt256::from(collator_id.pub_key()?),
-            engine.clone(),
-            None,
-            CollatorSettings::default()
-        )?;
-        collator.collate(timeout).await
-    } else {
-        let collator = collator_sync::Collator::new(
-            shard.clone(),
-            min_masterchain_block_id,
-            prev.clone(),
-            set,
-            UInt256::from(collator_id.pub_key()?),
-            engine.clone(),
-            None,
-            CollatorSettings::default()
-        )?;
-        collator.collate().await
-    };
+    let collator = collator::Collator::new(
+        shard.clone(),
+        min_masterchain_block_id,
+        prev.clone(),
+        set,
+        UInt256::from(collator_id.pub_key()?),
+        engine.clone(),
+        None,
+        CollatorSettings::default()
+    )?;
+    let collator_result = collator.collate(timeout).await;
 
     #[cfg(feature = "metrics")]
     STATSD.decr(&format!("run_collators_{}", shard));
@@ -233,7 +219,7 @@ pub async fn run_collate_query (
                             match CollatorTestBundle::build_for_collating_block(prev, engine.deref()).await {
                                 Err(e) => log::error!("Error while test bundle for {} building: {}", id, e),
                                 Ok(mut b) => {
-                                    b.set_notes(err_str);
+                                    b.set_notes(err_str.to_string());
                                     if let Err(e) = b.save(&path) {
                                         log::error!("Error while test bundle for {} saving: {}", id, e);
                                     } else {

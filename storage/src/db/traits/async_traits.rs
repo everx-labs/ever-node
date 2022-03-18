@@ -48,6 +48,9 @@ pub trait KvcReadableAsync<K: DbKey>: KvcAsync {
 
     /// Determines, is key exists in key-value collection
     async fn contains(&self, key: &K) -> Result<bool>;
+
+    /// Iterates over items in key-value collection, running predicate for each key
+    fn for_each_key(&self, predicate: &mut dyn FnMut(&[u8]) -> Result<bool>) -> Result<bool>;
 }
 
 /// Trait for writable key-value collections

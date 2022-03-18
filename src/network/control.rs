@@ -17,12 +17,13 @@ use crate::{
     validator::validator_utils::validatordescr_to_catchain_node
 };
 use adnl::{
-    common::{deserialize, QueryResult, Subscriber, AdnlPeers, KeyId},
+    common::{QueryResult, Subscriber, AdnlPeers},
     server::{AdnlServer, AdnlServerConfig}
 };
+use ever_crypto::KeyId;
 use std::{fmt::Write, ops::Deref, sync::Arc, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
 use serde_json::Map;
-use ton_api::{
+use ton_api::{deserialize_boxed,
     ton::{
         self, bytes, PublicKey, TLObject, accountaddress::AccountAddress, raw::shardaccountstate::ShardAccountState,
         engine::validator::{
@@ -387,7 +388,7 @@ impl ControlQuerySubscriber {
     }
     fn export_public_key(&self, key_hash: &[u8; 32]) -> Result<PublicKey> {
         let private = self.key_ring.find(key_hash)?;
-        private.into_tl_public_key()
+        private.into_public_key_tl()
     }
     fn process_sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Signature> {
         let sign = self.key_ring.sign_data(key_hash, data)?;
@@ -450,7 +451,7 @@ impl Subscriber for ControlQuerySubscriber {
     async fn try_consume_query(&self, object: TLObject, _peers: &AdnlPeers) -> Result<QueryResult> {
         log::info!("recieve object (control server): {:?}", object);
         let query = match object.downcast::<ControlQuery>() {
-            Ok(query) => deserialize(&query.data[..])?,
+            Ok(query) => deserialize_boxed(&query.data[..])?,
             Err(object) => return Ok(QueryResult::Rejected(object))
         };
         log::info!("query (control server): {:?}", query);

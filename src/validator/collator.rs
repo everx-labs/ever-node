@@ -816,7 +816,7 @@ impl ExecutionManager {
         let tr = transaction_res?;
         let tr_cell = tr.serialize()?;
         log::trace!("{}: finalize_transaction {}, {:x}",
-            self.collated_block_descr, tr.lt, tr.account_addr);
+            self.collated_block_descr, tr.logical_time(), tr.account_id());
         let in_msg_opt = match new_msg.deref() {
             AsyncMessage::Int(enq, our) => {
                 let in_msg = InMsg::finally(enq.envelope(), &tr, enq.fwd_fee_remaining().clone())?;
@@ -847,7 +847,7 @@ impl ExecutionManager {
         if tr.orig_status != tr.end_status {
             log::info!(
                 "{}: Status of account {:x} was changed from {:?} to {:?} by message {:X}",
-                self.collated_block_descr, tr.account_addr, tr.orig_status, tr.end_status,
+                self.collated_block_descr, tr.account_id(), tr.orig_status, tr.end_status,
                 in_msg_opt.clone().unwrap_or_default().serialize()?.repr_hash()
             );
         }
