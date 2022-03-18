@@ -15,7 +15,8 @@ use crate::{
     block::{BlockIdExtExtention, BlockStuff}, block_proof::BlockProofStuff, boot,
     engine_traits::EngineOperations
 };
-use adnl::common::{KeyId, Wait};
+use adnl::common::Wait;
+use ever_crypto::KeyId;
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 use storage::{
     archives::{
@@ -541,10 +542,14 @@ struct BlockMaps {
 }
 
 async fn wait_for(tasks: Vec<JoinHandle<Result<()>>>) -> Result<()> {
-    futures::future::try_join_all(tasks).await?
-        .into_iter()
-        .find(|arch_result| arch_result.is_err())
-        .unwrap_or(Ok(()))
+    futures::future::join_all(tasks).await
+        .into_iter().find(|r| match r {
+            Err(_) => true,
+            Ok(Err(_)) => true,
+            Ok(Ok(_)) => false,
+        })
+        .unwrap_or(Ok(Ok(())))??;
+    Ok(())
 }
 
 async fn import_mc_blocks(

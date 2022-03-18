@@ -29,7 +29,7 @@ use crate::{
         counters::TpsCounter,
     },
     internal_db::{
-        InternalDb, InternalDbConfig, InternalDbImpl, 
+        InternalDb, InternalDbConfig, 
         INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, PSS_KEEPER_MC_BLOCK,
         state_gc_resolver::AllowStateGcSmartResolver, 
         restore::check_db,
@@ -90,13 +90,14 @@ use ton_types::UInt256;
 use ton_api::ton::ton_node::{
     Broadcast, broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}
 };
-use adnl::{common::KeyId, server::AdnlServerConfig};
+use adnl::server::AdnlServerConfig;
+use ever_crypto::KeyId;
 use crossbeam_channel::{Sender, Receiver};
 
 const MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT: usize = 10000; //maximum number of validated block stats entries in engine's queue
 
 pub struct Engine {
-    db: Arc<dyn InternalDb>,
+    db: Arc<InternalDb>,
     ext_db: Vec<Arc<dyn ExternalDb>>,
     overlay_operations: Arc<dyn OverlayOperations>,
     shard_states_awaiters: AwaitersPool<BlockIdExt, Arc<ShardStateStuff>>,
@@ -112,6 +113,7 @@ pub struct Engine {
     initial_sync_disabled: bool,
     pub network: Arc<NodeNetwork>,
     archives_life_time: Option<u32>,
+    enable_shard_state_persistent_gc: bool,
     shard_blocks: ShardBlocksPool,
     last_known_mc_block_seqno: AtomicU32,
     last_known_keyblock_seqno: AtomicU32,
@@ -150,7 +152,7 @@ pub struct Engine {
 
 struct DownloadContext<'a, T> {
     client: Arc<dyn FullNodeOverlayClient>,
-    db: &'a dyn InternalDb,
+    db: &'a InternalDb,
     downloader: Arc<dyn Downloader<Item = T>>,
     id: &'a BlockIdExt,
     limit: Option<u32>,
@@ -371,6 +373,7 @@ impl Engine {
         #[cfg(feature = "telemetry")] 
         let (metrics, engine_telemetry, engine_allocated) = Self::create_telemetry();
         let archives_life_time = general_config.gc_archives_life_time_hours();
+        let enable_shard_state_persistent_gc = general_config.enable_shard_state_persistent_gc();
         let db_directory = general_config.internal_db_path().to_string();
         let gc_interval_sec = general_config.cells_gc_config().gc_interval_sec;
         let cells_lifetime_sec = general_config.cells_gc_config().cells_lifetime_sec;
@@ -379,7 +382,7 @@ impl Engine {
             cells_gc_interval_sec: gc_interval_sec
         };
 
-        let db = InternalDbImpl::new(
+        let db = InternalDb::new(
             db_config,
             #[cfg(feature = "telemetry")]
             engine_telemetry.clone(),
@@ -476,6 +479,7 @@ impl Engine {
             init_mc_block_id,
             initial_sync_disabled,
             archives_life_time,
+            enable_shard_state_persistent_gc,
             network,
             shard_blocks: shard_blocks_pool,
             last_known_mc_block_seqno: AtomicU32::new(0),
@@ -615,7 +619,7 @@ impl Engine {
         self.servers.push(server)
     }
 
-    pub fn db(&self) -> &Arc<dyn InternalDb> { &self.db }
+    pub fn db(&self) -> &Arc<InternalDb> { &self.db }
 
     pub fn validator_network(&self) -> Arc<dyn PrivateOverlayOperations> { self.network.clone() }
 
@@ -1521,7 +1525,17 @@ impl Engine {
                     break
                 }
                 if let Err(e) = Self::check_gc_for_archives(&engine, &handle, &mc_state).await {
-                    log::warn!("Error (archive_manager gc): {:?}", e);
+                    log::warn!("archive manager gc: {}", e);
+                }
+                if engine.enable_shard_state_persistent_gc {
+                    let calc_ttl = |t| {
+                        let ttl = engine.persistent_state_ttl(t, boot::PSS_PERIOD_BITS);
+                        let expired = ttl <= engine.now();
+                        (ttl, expired)
+                    };
+                    if let Err(e) = engine.db.shard_state_persistent_gc(calc_ttl).await {
+                        log::warn!("persistent states gc: {}", e);
+                    }
                 }
             }
             handle = engine.wait_next_applied_mc_block(&handle, None).await?.0;

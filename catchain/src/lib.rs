@@ -44,10 +44,8 @@ mod receiver;
 mod receiver_source;
 pub mod utils;
 
-use adnl::{
-    common::{KeyId, KeyOption},
-    node::AdnlNode,
-};
+use adnl::node::AdnlNode;
+use ever_crypto::{KeyId, KeyOption};
 use failure::err_msg;
 pub use overlay::PrivateOverlayShortId;
 pub use profiling::{InstanceCounter, ResultStatusCounter};
@@ -63,13 +61,13 @@ use std::{
 use ton_types::types::UInt256;
 
 /// Public key
-pub type PublicKey = Arc<KeyOption>;
+pub type PublicKey = Arc<dyn KeyOption>;
 
 /// Public key hash
 pub type PublicKeyHash = Arc<KeyId>;
 
 /// Private key
-pub type PrivateKey = Arc<KeyOption>;
+pub type PrivateKey = Arc<dyn KeyOption>;
 
 /// Result for operations
 pub type Result<T> = ton_types::Result<T>;

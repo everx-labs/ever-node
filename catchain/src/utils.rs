@@ -15,10 +15,12 @@ extern crate hex;
 
 /// Imports
 pub use super::*;
+use ever_crypto::{Ed25519KeyOption, KeyId};
 use crate::ton_api::IntoBoxed;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::convert::TryInto;
 
 /*
     to string conversions
@@ -109,7 +111,7 @@ pub fn parse_hex_as_public_key(hex_asm: &str) -> PublicKey {
     let mut key_slice = vec![0; hex_asm.len() / 2];
     parse_hex_to_array(hex_asm, &mut key_slice[..]);
     //TODO: errors processing for key creation
-    Arc::new(adnl::common::KeyOption::from_tl_serialized_public_key(&key_slice).unwrap())
+    Ed25519KeyOption::from_public_key_tl_serialized(&key_slice).unwrap()
 }
 
 pub fn parse_hex_as_public_key_raw(hex_asm: &str) -> PublicKey {
@@ -117,16 +119,13 @@ pub fn parse_hex_as_public_key_raw(hex_asm: &str) -> PublicKey {
     let mut key_slice = [0u8; 32];
     parse_hex_to_array(hex_asm, &mut key_slice[..]);
     //TODO: errors processing for key creation
-    Arc::new(adnl::common::KeyOption::from_type_and_public_key(
-        adnl::common::KeyOption::KEY_ED25519,
-        &key_slice,
-    ))
+    Ed25519KeyOption::from_public_key(&key_slice)
 }
 
 pub fn parse_hex_as_public_key_hash(hex_asm: &str) -> PublicKeyHash {
     let mut key_slice: [u8; 32] = [0; 32];
     parse_hex_to_array(hex_asm, &mut key_slice);
-    adnl::common::KeyId::from_data(key_slice)
+    KeyId::from_data(key_slice)
 }
 
 pub fn parse_hex_as_session_id(hex_asm: &str) -> SessionId {
@@ -139,8 +138,7 @@ pub fn parse_hex_as_private_key(hex_asm: &str) -> PrivateKey {
     parse_hex_to_array(hex_asm, &mut key_slice[..]);
     //TODO: errors processing for key creation
     assert!(key_slice.len() == 32);
-    let private_key = ed25519_dalek::SecretKey::from_bytes(&key_slice).unwrap();
-    Arc::new(adnl::common::KeyOption::from_ed25519_secret_key(private_key).unwrap())
+    Ed25519KeyOption::from_private_key(key_slice.as_slice().try_into().unwrap()).unwrap()
 }
 
 pub fn parse_hex_as_expanded_private_key(hex_asm: &str) -> PrivateKey {
@@ -149,10 +147,7 @@ pub fn parse_hex_as_expanded_private_key(hex_asm: &str) -> PrivateKey {
     parse_hex_to_array(hex_asm, &mut key_slice[..]);
     //TODO: errors processing for key creation
     assert!(key_slice.len() == 64);
-    let expanded_private_key = ed25519_dalek::ExpandedSecretKey::from_bytes(&key_slice).unwrap();
-    Arc::new(
-        adnl::common::KeyOption::from_ed25519_expanded_secret_key(expanded_private_key).unwrap(),
-    )
+    Ed25519KeyOption::from_expanded_key(key_slice.as_slice().try_into().unwrap()).unwrap()
 }
 
 pub fn get_hash(data: &::ton_api::ton::bytes) -> BlockHash {
@@ -164,7 +159,7 @@ pub fn get_hash_from_block_payload(data: &BlockPayloadPtr) -> BlockHash {
 }
 
 pub fn int256_to_public_key_hash(public_key: &UInt256) -> PublicKeyHash {
-    adnl::common::KeyId::from_data(*public_key.as_slice())
+    KeyId::from_data(*public_key.as_slice())
 }
 
 pub fn get_public_key_hash(public_key: &PublicKey) -> PublicKeyHash {

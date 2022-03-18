@@ -195,7 +195,7 @@ pub struct ValidateQuery {
     // other
     validator_set: ValidatorSet,
     is_fake: bool,
-    multythread: bool,
+    multithread: bool,
     // previous state can be as two states for merge
     prev_blocks_ids: Option<Vec<BlockIdExt>>,
     old_mc_shards: ShardHashes, // old_shard_conf_
@@ -225,7 +225,7 @@ impl ValidateQuery {
         validator_set: ValidatorSet,
         engine: Arc<dyn EngineOperations>,
         is_fake: bool,
-        multythread: bool,
+        multithread: bool,
     ) -> Self {
         Self {
             engine,
@@ -234,7 +234,7 @@ impl ValidateQuery {
             block_candidate: Some(block_candidate),
             validator_set,
             is_fake,
-            multythread,
+            multithread,
             prev_blocks_ids: Some(prev_blocks_ids),
             old_mc_shards: Default::default(),
             block_limits: Default::default(),
@@ -319,23 +319,26 @@ impl ValidateQuery {
         // 3. load state(s) corresponding to previous block(s)
         for i in 0..base.prev_blocks_ids.len() {
             log::debug!(target: "validate_query", "load state for prev block {} of {} {}", i + 1, base.prev_blocks_ids.len(), base.prev_blocks_ids[i]);
-            let prev_state = self.engine.load_state(&base.prev_blocks_ids[i]).await?;
+            let prev_state = (self.engine.clone()).wait_state(&base.prev_blocks_ids[i], Some(1_000), true).await?;
             if &self.shard == prev_state.shard() && prev_state.state().before_split() {
                 reject_query!("cannot accept new unsplit shardchain block for {} \
                     after previous block {} with before_split set", self.shard, prev_state.block_id())
             }
             base.prev_states.push(prev_state);
         }
-        // 5. request masterchain state referred to in the block
         if !base.shard().is_masterchain() {
+            // It is impossible to get the master state (it have got in 'get_ref_mc_state' above)
+            // for block without proof. But proof can appear bit later due to parralelism specials.
+            // So this check is not needed.
+
             // 5.1. request corresponding block handle
-            let handle = self.engine.load_block_handle(mc_data.state.block_id())?.ok_or_else(
-                || error!("Cannot load handle for masterblock {}", mc_data.state.block_id())
-            )?;
-            if !self.is_fake && !handle.has_proof() && handle.id().seq_no() != 0 {
-                reject_query!("reference masterchain block {} for block {} does not have a valid proof",
-                    handle.id(), base.block_id())
-            }
+            // let _handle = self.engine.load_block_handle(mc_data.state.block_id())?.ok_or_else(
+            //     || error!("Cannot load handle for masterblock {}", mc_data.state.block_id())
+            // )?;
+            // if !self.is_fake && !handle.has_proof() && handle.id().seq_no() != 0 {
+            //     reject_query!("reference masterchain block {} for block {} does not have a valid proof",
+            //         handle.id(), base.block_id())
+            // }
         } else if &base.prev_blocks_ids[0] != mc_data.state.block_id() {
             soft_reject_query!("cannot validate masterchain block {} because it refers to masterchain \
                 block {} but its (expected) previous block is {}",
@@ -492,7 +495,7 @@ impl ValidateQuery {
     async fn get_ref_mc_state(&mut self, base: &ValidateBase) -> Result<McData> {
         let mc_state = match base.info.read_master_ref()? {
             Some(master_ref) => (self.engine.clone()).wait_state(&master_ref.master.master_block_id().1, Some(1_000), true).await?,
-            None => self.engine.load_state(&base.prev_blocks_ids[0]).await?
+            None => (self.engine.clone()).wait_state(&base.prev_blocks_ids[0], Some(1_000), true).await?
         };
         log::debug!(target: "validate_query", "in ValidateQuery::get_ref_mc_state() {}", mc_state.block_id());
         if mc_state.state().seq_no() < self.min_mc_seq_no {
@@ -1395,19 +1398,19 @@ impl ValidateQuery {
     ) -> Result<bool> {
         log::debug!(target: "validate_query", "pre-checking Transaction {}", trans_lt);
         let trans = Transaction::construct_from_cell(trans_root.clone())?;
-        if &trans.account_addr != acc_id || trans.lt != trans_lt {
+        if &trans.account_id() != &acc_id || trans.logical_time() != trans_lt {
             reject_query!("transaction {} of {} claims to be transaction {} of {}",
-                trans_lt, acc_id.to_hex_string(), trans.lt, trans.account_addr.to_hex_string())
+                trans_lt, acc_id.to_hex_string(), trans.logical_time(), trans.account_id().to_hex_string())
         }
-        if trans.now != base.now() {
+        if trans.now() != base.now() {
             reject_query!("transaction {} of {} claims that current time is {}
-                while the block header indicates {}", trans_lt, acc_id.to_hex_string(), trans.now, base.now())
+                while the block header indicates {}", trans_lt, acc_id.to_hex_string(), trans.now(), base.now())
         }
-        if &trans.prev_trans_hash != prev_trans_hash
-            || &trans.prev_trans_lt != prev_trans_lt {
+        if &trans.prev_trans_hash() != &prev_trans_hash
+            || &trans.prev_trans_lt() != prev_trans_lt {
             reject_query!("transaction {} of {} claims that the previous transaction was {}:{} \
                 while the correct value is {}:{}", trans_lt, acc_id.to_hex_string(),
-                    trans.prev_trans_lt, trans.prev_trans_hash.to_hex_string(),
+                    trans.prev_trans_lt(), trans.prev_trans_hash().to_hex_string(),
                     prev_trans_lt, prev_trans_hash.to_hex_string())
         }
         if trans_lt < *prev_trans_lt + *prev_trans_lt_len {
@@ -1416,7 +1419,7 @@ impl ValidateQuery {
                     trans_lt, acc_id.to_hex_string(), trans_lt, prev_trans_lt,
                     *prev_trans_lt + *prev_trans_lt_len)
         }
-        let lt_len = trans.outmsg_cnt as u64 + 1;
+        let lt_len = trans.msg_count() as u64 + 1;
         if trans_lt <= base.info.start_lt() || trans_lt + lt_len > base.info.end_lt() {
             reject_query!("transaction {} .. {} of {:x} is not inside the logical time interval {} .. {} \
                 of the encompassing new block", trans_lt, trans_lt + lt_len, acc_id,
@@ -1437,7 +1440,7 @@ impl ValidateQuery {
         trans.out_msgs.iterate_keys(|key: U15| {
             if c != key.0 {
                 reject_query!("transaction {} of {} has invalid indices in the out_msg dictionary (keys 0 .. {} expected)", 
-                trans_lt, acc_id.to_hex_string(), trans.outmsg_cnt - 1)
+                trans_lt, acc_id.to_hex_string(), trans.msg_count() - 1)
             } else {
                 c += 1;
                 Ok(true)
@@ -1534,13 +1537,13 @@ impl ValidateQuery {
 
     // checks that a ^Transaction refers to a transaction present in the ShardAccountBlocks
     fn is_valid_transaction_ref(base: &ValidateBase, transaction: &Transaction, hash: UInt256) -> Result<()> {
-        match Self::lookup_transaction(base, &transaction.account_addr, transaction.lt)? {
+        match Self::lookup_transaction(base, &transaction.account_id(), transaction.logical_time())? {
             Some(trans_cell) => if trans_cell != hash {
-                reject_query!("transaction {} of {:x} has a different hash", transaction.lt, transaction.account_addr)
+                reject_query!("transaction {} of {:x} has a different hash", transaction.logical_time(), transaction.account_id())
             } else {
                 Ok(())
             }
-            None => reject_query!("transaction {} of {:x} not found", transaction.lt, transaction.account_addr)
+            None => reject_query!("transaction {} of {:x} not found", transaction.logical_time(), transaction.account_id())
         }
     }
 
@@ -1746,10 +1749,10 @@ impl ValidateQuery {
             }
             let (_workchain_id, addr) = msg.dst_ref().ok_or_else(|| error!("No dest address"))
                 .and_then(|addr| addr.extract_std_address(true))?;
-            if addr != transaction.account_addr {
+            if &addr != transaction.account_id() {
                 reject_query!("InMsg corresponding to inbound message with hash {} and destination address {} \
                    claims that the message is processed by transaction {} of another account {}",
-                        key.to_hex_string(), addr.to_hex_string(), transaction.lt, transaction.account_addr.to_hex_string())
+                        key.to_hex_string(), addr.to_hex_string(), transaction.logical_time(), transaction.account_id().to_hex_string())
             }
         }
         let fwd_fee = match in_msg {
@@ -2115,11 +2118,11 @@ impl ValidateQuery {
                     refers to transaction that does not create this outbound message", key.to_hex_string())
             }
             let addr = src.extract_std_address(true)?.1;
-            if addr != transaction.account_addr {
+            if &addr != transaction.account_id() {
                 reject_query!("OutMsg corresponding to outbound message with hash {} and source address {} \
                     claims that the message was created by transaction {}  of another account {}",
                         key.to_hex_string(), addr.to_hex_string(),
-                        transaction.logical_time(), transaction.account_addr.to_hex_string())
+                        transaction.logical_time(), transaction.account_id().to_hex_string())
             }
             // log::debug!(target: "validate_query", "OutMsg " << key.to_hex_string() + " is indeed a valid outbound message of transaction " << trans_lt
             //           of " << trans_addr.to_hex_string();
@@ -2955,7 +2958,7 @@ impl ValidateQuery {
                     reject_query!("storage transaction {} of account {} has an inbound message",
                         lt, account_addr.to_hex_string())
                 }
-                if trans.outmsg_cnt != 0 {
+                if trans.msg_count() != 0 {
                     reject_query!("storage transaction {} of account {} has at least one outbound message",
                         lt, account_addr.to_hex_string())
                 }
@@ -2974,7 +2977,7 @@ impl ValidateQuery {
                     reject_query!("merge prepare transaction {} of account {} has an inbound message",
                         lt, account_addr.to_hex_string())
                 }
-                if trans.outmsg_cnt != 1 {
+                if trans.msg_count() != 1 {
                     reject_query!("merge prepare transaction {} of account {} must have exactly one outbound message",
                             lt, account_addr.to_hex_string())
                 }
@@ -2994,7 +2997,7 @@ impl ValidateQuery {
                     reject_query!("split prepare transaction {} of account {} has an inbound message",
                         lt, account_addr.to_hex_string())
                 }
-                if trans.outmsg_cnt != 1 {
+                if trans.msg_count() != 1 {
                     reject_query!("merge prepare transaction {} of account {} must have exactly one outbound message",
                             lt, account_addr.to_hex_string())
                 }
@@ -3038,7 +3041,7 @@ impl ValidateQuery {
         }
         base.transactions_executed.fetch_add(1, Ordering::Relaxed);
         // we cannot know prev transaction in executor
-        trans2.set_prev_trans_hash(trans.prev_trans_hash());
+        trans2.set_prev_trans_hash(trans.prev_trans_hash().clone());
         trans2.set_prev_trans_lt(trans.prev_trans_lt());
         let trans2_root = trans2.serialize()?;
         if trans_root != trans2_root {
@@ -3055,13 +3058,13 @@ impl ValidateQuery {
         let new_balance = account.balance().cloned().unwrap_or_default();
         let mut right_balance = new_balance.clone();
         right_balance.add(&money_exported)?;
-        right_balance.add(&trans.total_fees)?;
+        right_balance.add(&trans.total_fees())?;
         if left_balance != right_balance {
             reject_query!("transaction {} of {} violates the currency flow condition: \
                 old balance={} + imported={} does not equal new balance={} + exported=\
                 {} + total_fees={}", lt, account_addr.to_hex_string(),
                     old_balance.grams, money_imported.grams,
-                    new_balance.grams, money_exported.grams, trans.total_fees.grams)
+                    new_balance.grams, money_exported.grams, trans.total_fees().grams)
         }
         Ok(true)
     }
@@ -3918,10 +3921,14 @@ impl ValidateQuery {
     }
 
     async fn run_tasks(&self, tasks: Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        if self.multythread {
+        if self.multithread {
             let tasks = tasks.into_iter().map(|t| tokio::task::spawn_blocking(t));
             futures::future::join_all(tasks).await
-                .into_iter().find(|r| r.is_err())
+                .into_iter().find(|r| match r {
+                    Err(_) => true,
+                    Ok(Err(_)) => true,
+                    Ok(Ok(_)) => false,
+                })
                 .unwrap_or(Ok(Ok(())))??;
         } else {
             for task in tasks {

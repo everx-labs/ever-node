@@ -11,11 +11,9 @@
 * limitations under the License.
 */
 
-use adnl::{
-    common::{KeyId, KeyOption, Query, tag_from_boxed_type, TaggedTlObject, Wait}, 
-    node::{AdnlNode, AddressCache}
-};
+use adnl::{common::{Query, TaggedTlObject, Wait}, node::{AdnlNode, AddressCache}};
 use crate::engine::STATSD;
+use ever_crypto::{Ed25519KeyOption, KeyId};
 use dht::DhtNode;
 use overlay::{OverlayShortId, OverlayNode};
 use rand::{Rng};
@@ -27,6 +25,7 @@ use std::{
 };
 use ton_types::{error, fail, Result};
 use ton_api::{
+    tag_from_boxed_type,
     ton::{
        TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities
     }
@@ -352,7 +351,7 @@ impl Neighbours {
                             let mut new_peers = Vec::new();
 
                             for peer in peers.iter() {
-                                match KeyOption::from_tl_public_key(&peer.id) {
+                                match Ed25519KeyOption::from_public_key_tl(&peer.id) {
                                     Ok(peer_key) => {
                                         if !this.contains_overlay_peer(peer_key.id()) {
                                             new_peers.push(peer_key.id().clone());

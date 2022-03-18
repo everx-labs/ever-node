@@ -82,6 +82,10 @@ impl<K: DbKey + Debug + Send + Sync, T: KvcWriteable<K>> KvcReadableAsync<K> for
     async fn contains(&self, key: &K) -> Result<bool> {
         self.kvc.contains(key)
     }
+
+    fn for_each_key(&self, predicate: &mut dyn FnMut(&[u8]) -> Result<bool>) -> Result<bool> {
+        unimplemented!()
+    }
 }
 
 #[async_trait]

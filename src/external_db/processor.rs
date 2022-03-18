@@ -27,7 +27,7 @@ use ton_types::{
     cells_serialization::serialize_toc,
     types::UInt256,
     AccountId, Cell, Result, SliceData, HashmapType,
-    fail,
+    fail, BuilderData,
 };
 use serde::Serialize;
 
@@ -127,7 +127,7 @@ impl<T: WriteData> Processor<T> {
         add_proof: bool,
     ) -> Result<DbRecord> {
         let transaction_id = in_msg.transaction_cell().map(|cell| cell.repr_hash());
-        let transaction_now = in_msg.read_transaction()?.map(|t| t.now);
+        let transaction_now = in_msg.read_transaction()?.map(|t| t.now());
         let msg = in_msg.read_message()?;
         let cell = in_msg.message_cell()?;
         let boc = serialize_toc(&cell)?;
@@ -224,7 +224,16 @@ impl<T: WriteData> Processor<T> {
     fn prepare_account_record(
         account: Account, prev_account_state: Option<Account>, sharding_depth: u32
     ) -> Result<DbRecord> {
+
+        let mut boc1 = None;
+        if account.init_code_hash().is_some() {
+            // new format
+            let mut builder = BuilderData::new();
+            account.write_original_format(&mut builder)?;
+            boc1 = Some(serialize_toc(&builder.into_cell()?)?);
+        }
         let boc = serialize_toc(&account.serialize()?.into())?;
+
         let account_id = match account.get_id() {
             Some(id) => id,
             None => fail!("Account without id in external db processor")
@@ -234,6 +243,7 @@ impl<T: WriteData> Processor<T> {
             prev_account_state,
             proof: None,
             boc,
+            boc1,
             ..Default::default()
         };
         

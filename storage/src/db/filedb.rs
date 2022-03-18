@@ -72,6 +72,31 @@ impl FileDb {
         }
         false
     }
+
+    fn for_each_key_worker<P: AsRef<Path>>(
+        &self,
+        path: P,
+        key: &[u8],
+        depth: usize,
+        predicate: &mut dyn FnMut(&[u8]) -> Result<bool>
+    ) -> Result<bool> {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let file_name = file_name.to_str().ok_or_else(|| error!("Can't decode filename"))?;
+            let mut key = key.to_vec();
+            key.append(&mut hex::decode(&file_name)?);
+            let result = if depth == PATH_MAX_DEPTH {
+                predicate(&key)?
+            } else {
+                self.for_each_key_worker(entry.path(), &key, depth + 1, predicate)?
+            };
+            if !result {
+                return Ok(false)
+            }
+        }
+        Ok(true)
+    }
 }
 
 #[async_trait]
@@ -128,6 +153,10 @@ impl<K: DbKey + Send + Sync> KvcReadableAsync<K> for FileDb {
     async fn contains(&self, key: &K) -> Result<bool> {
         let path = self.make_path(key.key());
         Ok(path.is_file() && path.exists())
+    }
+
+    fn for_each_key(&self, predicate: &mut dyn FnMut(&[u8]) -> Result<bool>) -> Result<bool> {
+        self.for_each_key_worker(&self.path, &[], 1, predicate)
     }
 }
 

@@ -23,7 +23,7 @@ use crate::{
     validator::telemetry::CollatorValidatorTelemetry,
 };
 
-use adnl::common::{KeyId, KeyOption};
+use ever_crypto::{KeyId, KeyOption};
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
 use catchain::{
@@ -101,7 +101,7 @@ pub trait PrivateOverlayOperations: Sync + Send {
         &self, 
         validator_list_id: UInt256,
         validators: &Vec<CatchainNode>
-    ) -> Result<Option<Arc<KeyOption>>>;
+    ) -> Result<Option<Arc<dyn KeyOption>>>;
 
     fn activate_validator_list(&self, validator_list_id: UInt256) -> Result<()>;
 
@@ -145,7 +145,7 @@ pub trait EngineOperations : Sync + Send {
         &self, 
         validator_list_id: UInt256,
         validators: &Vec<CatchainNode>
-    ) -> Result<Option<Arc<KeyOption>>> {
+    ) -> Result<Option<Arc<dyn KeyOption>>> {
         unimplemented!()
     }
 

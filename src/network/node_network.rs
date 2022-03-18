@@ -32,12 +32,10 @@ use crate::{
 
 use adnl::{
     declare_counted, 
-    common::{
-        add_counted_object_to_map, CountedObject, Counter, KeyId, KeyOption, serialize, 
-        tag_from_unboxed_type, TaggedByteSlice
-    }, 
+    common::{add_counted_object_to_map, CountedObject, Counter, TaggedByteSlice}, 
     node::AdnlNode
 };
+use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
@@ -55,7 +53,7 @@ use std::{
 };
 use ton_types::{Result, fail, error, UInt256};
 use ton_block::BlockIdExt;
-use ton_api::IntoBoxed;
+use ton_api::{IntoBoxed, serialize_boxed, tag_from_bare_type};
 use ton_api::ton::{bytes, ton_node::broadcast::ConnectivityCheckBroadcast};
 
 type Cache<K, T> = lockfree::map::Map<K, T>;
@@ -110,8 +108,8 @@ declare_counted!(
 declare_counted!(
     struct ValidatorSetContext {
         validator_peers: Vec<Arc<KeyId>>,
-        validator_key: Arc<KeyOption>,
-        validator_adnl_key: Arc<KeyOption>,
+        validator_key: Arc<dyn KeyOption>,
+        validator_adnl_key: Arc<dyn KeyOption>,
         election_id: usize,
         connectivity_stat: Arc<Cache<Arc<KeyId>, ConnectivityStat>> // (last short broadcast got, last long -//-)
     }
@@ -212,7 +210,7 @@ impl NodeNetwork {
             ),
             #[cfg(feature = "telemetry")]
             tag_connectivity_check_broadcast: 
-                tag_from_unboxed_type::<ConnectivityCheckBroadcast>(),
+                tag_from_bare_type::<ConnectivityCheckBroadcast>(),
             #[cfg(feature = "telemetry")]
             engine_telemetry,
             engine_allocated
@@ -292,7 +290,7 @@ impl NodeNetwork {
 
     fn periodic_store_ip_addr(
         dht: Arc<DhtNode>,
-        node_key: Arc<KeyOption>,
+        node_key: Arc<dyn KeyOption>,
         validator_keys: Option<Arc<lockfree::set::Set<Arc<KeyId>>>>)
     {
         tokio::spawn(async move {
@@ -354,7 +352,7 @@ impl NodeNetwork {
             None => {},
             Some(peers) => {
                 for peer in peers.iter() {
-                    let peer_key = KeyOption::from_tl_public_key(&peer.id)?;
+                    let peer_key = Ed25519KeyOption::from_public_key_tl(&peer.id)?;
                     if neighbours.contains_overlay_peer(peer_key.id()) {
                         continue;
                     }
@@ -800,7 +798,7 @@ impl NodeNetwork {
             overlay.val().overlay().broadcast(
                 &self.masterchain_overlay_short_id, 
                 &TaggedByteSlice {
-                    object: &serialize(&broadcast.into_boxed())?, 
+                    object: &serialize_boxed(&broadcast.into_boxed())?, 
                     #[cfg(feature = "telemetry")]
                     tag: self.tag_connectivity_check_broadcast
                 },
@@ -899,7 +897,7 @@ impl PrivateOverlayOperations for NodeNetwork {
         &self, 
         validator_list_id: UInt256,
         validators: &Vec<CatchainNode>
-    ) -> Result<Option<Arc<KeyOption>>> {
+    ) -> Result<Option<Arc<dyn KeyOption>>> {
         log::trace!("start set_validator_list validator_list_id: {}", &validator_list_id);
 
         let validator_adnl_ids = self.config_handler.get_actual_validator_adnl_ids()?;
@@ -927,7 +925,7 @@ impl PrivateOverlayOperations for NodeNetwork {
                         self.adnl.key_by_id(&validator.adnl_id)?
                     }
                 };
-                (Arc::new(validator_key), validator_adnl_key, election_id as usize)
+                (validator_key, validator_adnl_key, election_id as usize)
             },
             None => { return Ok(None); }
         };

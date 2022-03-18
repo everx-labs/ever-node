@@ -17,6 +17,7 @@ use crate::profiling::check_execution_time;
 use crate::profiling::instrument;
 use crate::profiling::ResultStatusCounter;
 use crate::ton_api::IntoBoxed;
+use ever_crypto::Ed25519KeyOption;
 use rand::Rng;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -2538,8 +2539,7 @@ impl ReceiverImpl {
     }
 
     pub(crate) fn create_dummy(path: String) -> Result<ReceiverPtr> {
-        let (_, public_key) = KeyOption::with_type_id(KeyOption::KEY_ED25519)?;
-        let public_key = Arc::new(public_key);
+        let public_key = Ed25519KeyOption::generate()?;
         let ids = vec![CatchainNode {
             public_key: public_key.clone(),
             adnl_id: public_key.id().clone(),

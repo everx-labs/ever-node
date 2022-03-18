@@ -2,8 +2,8 @@
 use crate::{
     block::{BlockIdExtExtention, BlockStuff},
     internal_db::{
-        InternalDbImpl, LAST_APPLIED_MC_BLOCK, SHARD_CLIENT_MC_BLOCK, LAST_ROTATION_MC_BLOCK,
-        PSS_KEEPER_MC_BLOCK, InternalDb, BlockHandle,
+        InternalDb, LAST_APPLIED_MC_BLOCK, SHARD_CLIENT_MC_BLOCK, LAST_ROTATION_MC_BLOCK,
+        PSS_KEEPER_MC_BLOCK, BlockHandle,
     },
     shard_state::ShardStateStuff,
 };
@@ -25,10 +25,10 @@ const LAST_MC_BLOCKS: u32 = 100;
 const SHARD_CLIENT_MC_BLOCK_CANDIDATES: u32 = 300;
 
 pub async fn check_db(
-    mut db: InternalDbImpl,
+    mut db: InternalDb,
     processed_wc: i32,
     restore_db: bool
-) -> Result<InternalDbImpl> {
+) -> Result<InternalDb> {
 
     let unexpected_termination = check_unexpected_termination(&db.config.db_directory);
     let restoring = check_restoring(&db.config.db_directory);
@@ -110,7 +110,7 @@ fn set_restoring(db_dir: &str) -> Result<()> {
     Ok(())
 }
 
-async fn restore_last_applied_mc_block(db: &InternalDbImpl) -> Result<Option<BlockStuff>> {
+async fn restore_last_applied_mc_block(db: &InternalDb) -> Result<Option<BlockStuff>> {
     log::trace!("restore_last_applied_mc_block");
     match db.load_full_node_state(LAST_APPLIED_MC_BLOCK) {
         Ok(None) => return Ok(None),
@@ -133,7 +133,7 @@ async fn restore_last_applied_mc_block(db: &InternalDbImpl) -> Result<Option<Blo
     Ok(Some(block))
 }
 
-async fn search_and_restore_last_applied_mc_block(db: &InternalDbImpl) -> Result<BlockStuff> {
+async fn search_and_restore_last_applied_mc_block(db: &InternalDb) -> Result<BlockStuff> {
     log::trace!("search_and_restore_last_applied_mc_block");
     
     let mut last_mc_blocks = search_last_mc_blocks(db)?;
@@ -148,7 +148,7 @@ async fn search_and_restore_last_applied_mc_block(db: &InternalDbImpl) -> Result
 }
 
 async fn restore_shard_client_mc_block(
-    db: &InternalDbImpl,
+    db: &InternalDb,
     last_applied_mc_block: &BlockStuff,
     processed_wc: i32
 ) -> Result<BlockStuff> {
@@ -207,11 +207,11 @@ async fn restore_shard_client_mc_block(
 }
 
 async fn restore(
-    mut db: InternalDbImpl,
+    mut db: InternalDb,
     last_applied_mc_block: &BlockStuff,
     shard_client_mc_block: &BlockStuff,
     processed_wc: i32,
-) -> Result<InternalDbImpl> {
+) -> Result<InternalDb> {
 
     let last_mc_block =
         if last_applied_mc_block.id().seq_no() > shard_client_mc_block.id().seq_no() {
@@ -359,7 +359,7 @@ async fn restore(
 }
 
 async fn check_shard_client_mc_block(
-    db: &InternalDbImpl,
+    db: &InternalDb,
     block: &BlockStuff,
     processed_wc: i32,
     check_to_prev_mc_block: bool,
@@ -411,7 +411,7 @@ async fn check_shard_client_mc_block(
 }
 
 fn search_last_mc_blocks(
-    db: &InternalDbImpl,
+    db: &InternalDb,
 ) -> Result<Vec<BlockIdExt>> {
     let mut last_mc_block = BlockIdExt::default();
     log::trace!("search_last_mc_blocks: search last id");
@@ -443,7 +443,7 @@ fn search_last_mc_blocks(
 }
 
 async fn check_one_block(
-    db: &InternalDbImpl,
+    db: &InternalDb,
     id: &BlockIdExt,
     should_has_next: bool,
     should_has_prev: bool,
@@ -581,7 +581,7 @@ async fn check_one_block(
 }
 
 async fn calc_min_mc_state_id(
-    db: &InternalDbImpl,
+    db: &InternalDb,
     shard_client_mc_block_id: &BlockIdExt
 ) -> Result<BlockIdExt> {
     log::trace!("calc_min_mc_state_id");
@@ -611,7 +611,7 @@ async fn calc_min_mc_state_id(
 }
 
 fn check_state(
-    db: &InternalDbImpl,
+    db: &InternalDb,
     id: &BlockIdExt,
     checked_cells: &mut HashSet<UInt256>,
 ) -> Result<()> {
@@ -634,7 +634,7 @@ fn check_state(
 }
 
 async fn restore_states(
-    db: &InternalDbImpl,
+    db: &InternalDb,
     persistent_state_handle: &BlockHandle,
     min_mc_state_id: &BlockIdExt,
     processed_wc: i32,
@@ -698,7 +698,7 @@ async fn restore_states(
 // - if we have other child (in after_merge map) - call restore_chain for merged root
 // - if not - add first child's root into after_merge map
 async fn run_chain_restore(
-    db: &InternalDbImpl,
+    db: &InternalDb,
     mut prev_state_root: Cell,
     mut block_id: BlockIdExt,
     min_stored_states: &[BlockIdExt],
@@ -740,7 +740,7 @@ async fn run_chain_restore(
 // Returns None if there is no next block, and Some in a merge.
 #[async_recursion::async_recursion]
 async fn restore_chain(
-    db: &InternalDbImpl,
+    db: &InternalDb,
     mut prev_state_root: Cell,
     mut block_id: BlockIdExt,
     min_stored_states: &[BlockIdExt],

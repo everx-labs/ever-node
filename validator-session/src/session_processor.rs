@@ -21,6 +21,7 @@ use catchain::{
     profiling::{check_execution_time, instrument, ResultStatusCounter},
     BlockPtr, ExternalQueryResponseCallback,
 };
+use ever_crypto::KeyId;
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, SystemTime},
@@ -40,7 +41,6 @@ const DEBUG_CHECK_ALL_BEFORE_ROUND_SWITCH: bool = false; //check updates before 
                                                          //TODO: remove this debug option after performance tuning
 const DEBUG_DUMP_BACKTRACE_FOR_LATE_VALIDATIONS: bool = true; //dump all late validations backtrace
 const DEBUG_EVENTS_LOG: bool = true; //dump consensus events
-const DEBUG_DUMP_PRIVATE_KEY_TO_LOG: bool = false; //dump private key for further log replaying
 const COMPLETION_HANDLERS_MAX_WAIT_PERIOD: Duration = Duration::from_millis(60000); //max wait time for completion handlers
 const COMPLETION_HANDLERS_CHECK_PERIOD: Duration = Duration::from_millis(5000); //period of completion handlers checking
 const BLOCK_PREPROCESSING_WARN_LATENCY: Duration = Duration::from_millis(200); //max block processing latency
@@ -1306,8 +1306,6 @@ impl SessionProcessor for SessionProcessorImpl {
             callback(Err(err));
             return;
         }
-
-        use adnl::common::KeyId;
 
         let id = self.description.candidate_id(
             self.description
@@ -3311,11 +3309,10 @@ impl SessionProcessorImpl {
         //dump session params for further log replaying
 
         if log_enabled!(log::Level::Debug) {
-            let exp_pvt_key_dump = if DEBUG_DUMP_PRIVATE_KEY_TO_LOG {
-                hex::encode([*local_key.pvt_key().unwrap(), *local_key.exp_key().unwrap()].concat())
-            } else {
-                "<SECRET>".to_string()
-            };
+            #[cfg(feature = "export_key")] 
+            let exp_pvt_key_dump = hex::encode(local_key.export_key().unwrap());
+            #[cfg(not(feature = "export_key"))] 
+            let exp_pvt_key_dump = "<SECRET>".to_string();
 
             debug!(
                 "Create validator session {} for local ID {} and key {} (timestamp={})",
@@ -3330,7 +3327,7 @@ impl SessionProcessorImpl {
 
             for node in &ids {
                 debug!("Validator session {} node: weight={}, public_key={}, adnl_id={} (timestamp={})", session_id.to_hex_string(), node.weight,
-                &hex::encode(&catchain::serialize_tl_boxed_object!(&node.public_key.into_tl_public_key().unwrap()).as_ref()),
+                &hex::encode(&catchain::serialize_tl_boxed_object!(&node.public_key.into_public_key_tl().unwrap()).as_ref()),
                 &hex::encode(node.adnl_id.data()),
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("Time went backwards").as_millis());
             }
