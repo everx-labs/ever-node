@@ -1,7 +1,7 @@
 [package]
 edition = '2018'
 name = 'ton_node'
-version = '0.50.3'
+version = '0.50.4'
 
 
 [workspace]
@@ -58,7 +58,7 @@ ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git', tag = '2.1.14' 
 ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.120' }
 ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.7.39' }
 ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', tag = '0.7.5' }
-ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.56' }
+ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.57' }
 ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.10.12' }
 ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.32' }
 validator_session = { path = 'validator-session' }

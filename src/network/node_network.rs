@@ -139,6 +139,7 @@ impl NodeNetwork {
         let connectivity_check_enabled = connectivity_check_config.enabled;
 
         let adnl = AdnlNode::with_config(config.adnl_node()?).await?;
+        //adnl.set_options(AdnlNode::OPTION_FORCE_COMPRESSION);
         let dht = DhtNode::with_adnl_node(adnl.clone(), Self::TAG_DHT_KEY)?;
         let overlay = OverlayNode::with_adnl_node_and_zero_state(
             adnl.clone(), 
