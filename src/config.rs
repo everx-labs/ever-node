@@ -158,7 +158,7 @@ pub struct KafkaProducerConfig {
     pub sharding_depth: u32,
     pub attempt_timeout_ms: u32,
     pub message_max_size: usize,
-    pub big_messages_storage: String,
+    pub big_messages_storage: Option<String>,
     pub external_message_ref_address_prefix: Option<String>
 }
 

@@ -1,7 +1,7 @@
 [package]
 edition = '2018'
 name = 'ton_node'
-version = '0.50.4'
+version = '0.50.5'
 
 
 [workspace]
