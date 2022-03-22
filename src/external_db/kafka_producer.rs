@@ -158,8 +158,8 @@ impl KafkaProducer {
     }
 
 
-    fn store_oversized(&self, key: &str, data: &[u8], relative_path: &str) -> Result<()> {
-        let root = std::path::Path::new(&self.config.big_messages_storage);
+    fn store_oversized(&self, key: &str, data: &[u8], big_messages_storage: &str, relative_path: &str) -> Result<()> {
+        let root = std::path::Path::new(big_messages_storage);
         let message_path = root.join(relative_path);
         let dir = message_path.parent().ok_or_else(|| NodeError::Other(
             format!("Could not find parent dir for big message path: {:?}", message_path)
@@ -191,9 +191,17 @@ impl KafkaProducer {
         partition_key: Option<u32>,
         topic: &str,
     ) -> Result<()> {
+        let big_messages_storage = if let Some(bms) = &self.config.big_messages_storage {
+            bms
+        } else {
+            log::warn!(
+                "Too big message (topic {}, key {}, {} bytes, limit is {}), skipped",
+                topic, key_str, data.len(), self.config.message_max_size);
+            return Ok(());
+        };
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis().to_string();
         let relative_path = format!("{}/{}_{}", topic, key_str, timestamp);
-        self.store_oversized(&key_str, &data, &relative_path)?;
+        self.store_oversized(&key_str, &data, big_messages_storage, &relative_path)?;
         if let Some(prefix) = &self.config.external_message_ref_address_prefix {
             loop {
                 let mut headers = OwnedHeaders::new();
