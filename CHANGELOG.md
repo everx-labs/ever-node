@@ -2,10 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## Version: 0.50.5
+## Version: 0.50.11
 
 ### New
- - Merge to master
 
 
 

@@ -25,7 +25,7 @@ pub struct StorageCell {
     references: RwLock<Vec<Reference>>,
     boc_db: Arc<DynamicBocDb>,
     tree_bits_count: u64,
-    tree_cell_count: u32,
+    tree_cell_count: u64,
 }
 
 lazy_static::lazy_static!{
@@ -49,7 +49,7 @@ impl StorageCell {
         }
         let (tree_bits_count, tree_cell_count) = reader
             .read_be_u64()
-            .and_then(|first| Ok((first, reader.read_be_u32()?)))
+            .and_then(|first| Ok((first, reader.read_be_u64()?)))
             .unwrap_or((0, 0));
         let ret = Self {
             cell_data,

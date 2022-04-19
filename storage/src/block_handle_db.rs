@@ -28,8 +28,8 @@ use adnl::{
 use std::{io::{Cursor, Write}, sync::{Arc, Weak}};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::{AtomicBool, Ordering};
-use ton_block::BlockIdExt;
-use ton_types::{error, fail, Result};
+use ton_block::{BlockIdExt, ShardIdent};
+use ton_types::{error, fail, Result, UInt256};
 
 
 const FLAG_DATA: u32                 = 0x00000001;
@@ -218,6 +218,10 @@ impl BlockHandle {
 
     pub fn has_state(&self) -> bool {
         self.is_flag_set(FLAG_STATE)
+    }
+
+    pub fn reset_state(&self) {
+        self.meta.reset(FLAG_STATE, false);
     }
 
     pub fn has_persistent_state(&self) -> bool {
@@ -590,7 +594,19 @@ impl BlockHandleStorage {
         )?;
         Ok(())
     }
-        
+
+    pub fn for_each_keys(&self, predicate: &mut dyn FnMut(BlockIdExt) -> Result<bool>) -> Result<bool> {
+        self.handle_db.for_each(&mut |key_bytes, _value_bytes| {
+            let id = BlockIdExt::with_params(
+                ShardIdent::default(),
+                0, 
+                UInt256::from(key_bytes), 
+                UInt256::default()
+            );
+            predicate(id)
+        })
+    }
+
     fn create_handle_and_store(
         &self, 
         id: BlockIdExt, 
