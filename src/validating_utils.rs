@@ -24,15 +24,15 @@ pub fn supported_capabilities() -> u64 {
     GlobalCapabilities::CapBounceMsgBody as u64 |
     GlobalCapabilities::CapReportVersion as u64 |
     GlobalCapabilities::CapShortDequeue as u64 |
-    GlobalCapabilities::CapInitCodeHash as u64 |
-    GlobalCapabilities::CapOffHypercube as u64 |
-    GlobalCapabilities::CapFixTupleIndexBug as u64 |
     GlobalCapabilities::CapFastStorageStat as u64 |
+    GlobalCapabilities::CapInitCodeHash as u64 |
+    GlobalCapabilities::CapFixTupleIndexBug as u64 |
+    GlobalCapabilities::CapSetLibCode as u64 |
     GlobalCapabilities::CapMycode as u64
 }
 
 pub fn supported_version() -> u32 {
-    24
+    22
 }
 
 pub fn check_this_shard_mc_info(

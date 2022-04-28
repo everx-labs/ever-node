@@ -21,36 +21,12 @@ use crate::{
     collator_test_bundle::CollatorTestBundle, engine_traits::EngineOperations, 
     validator::{CollatorSettings, validate_query::ValidateQuery, collator}
 };
-use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, Deserializable};
+use ton_block::{BlockIdExt, ShardIdent, ValidatorSet};
 use ton_types::{Result, UInt256};
 use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
 
 #[cfg(feature = "metrics")]
 use crate::engine::STATSD;
-
-#[allow(dead_code)]
-pub async fn run_validate_query_any_candidate(
-    block: super::BlockCandidate,
-    engine: Arc<dyn EngineOperations>,
-) -> Result<SystemTime> {
-    let real_block = ton_block::Block::construct_from_bytes(&block.data)?;
-    let shard = block.block_id.shard().clone();
-    let info = real_block.read_info()?;
-    let prev = info.read_prev_ids()?;
-    let mc_state = engine.load_last_applied_mc_state().await?;
-    let min_masterchain_block_id = mc_state.find_block_id(info.min_ref_mc_seqno())?;
-    let (set, _) = mc_state.read_cur_validator_set_and_cc_conf()?;
-    run_validate_query(
-        shard,
-        SystemTime::now(),
-        min_masterchain_block_id,
-        prev,
-        block,
-        set,
-        engine,
-        SystemTime::now()
-    ).await
-}
 
 pub async fn run_validate_query(
     shard: ShardIdent,

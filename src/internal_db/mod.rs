@@ -240,9 +240,9 @@ impl InternalDb {
             fail!("It is forbidden to clear shard_state_dynamic_db while cells GC is running")
         }
 
-        self.db.drop_table("shardstate_db")?;
-        self.db.drop_table("cells_db")?;
-        self.db.drop_table("cells_db1")?;
+        self.db.drop_cf("shardstate_db")?;
+        self.db.drop_cf("cells_db")?;
+        self.db.drop_cf("cells_db1")?;
 
         self.shard_state_dynamic_db = Self::create_shard_state_dynamic_db(
             self.db.clone(),
@@ -934,20 +934,6 @@ impl InternalDb {
             clear_last_handle(self, &id);
         }
 
-        Ok(())
-    }
-
-    pub fn reset_unapplied_handles(&self) -> Result<()> {
-        let _tc = TimeChecker::new(format!("reset_unapplied_handles"), 1000);
-        self.block_handle_storage.for_each_keys(&mut |id| {
-            if let Ok(Some(handle)) = self.load_block_handle(&id) {
-                if !handle.is_applied() {
-                    handle.reset_state();
-                    let _ = self.store_block_handle(&handle, None);
-                }
-            }
-            Ok(true)
-        })?;
         Ok(())
     }
 }

@@ -57,10 +57,6 @@ pub fn create_external_db(config: ExternalDbConfig, front_workchain_ids: Vec<i32
 #[allow(dead_code)]
 #[cfg(feature = "external_db")]
 pub fn create_external_db(config: ExternalDbConfig, front_workchain_ids: Vec<i32>) -> Result<Arc<dyn ExternalDb>> {
-    let max_account_bytes_size = match config.account_producer.big_messages_storage {
-        Some(_) => None,
-        None => Some(config.account_producer.message_max_size),
-    };
     Ok(
         Arc::new(
             Processor::new(
@@ -73,7 +69,6 @@ pub fn create_external_db(config: ExternalDbConfig, front_workchain_ids: Vec<i32
                 kafka_producer::KafkaProducer::new(config.chain_range_producer)?,
                 config.bad_blocks_storage,
                 front_workchain_ids,
-                max_account_bytes_size,
             )
         )
     )

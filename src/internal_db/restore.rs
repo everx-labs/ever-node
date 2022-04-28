@@ -220,7 +220,7 @@ async fn restore(
             last_applied_mc_block
         };
 
-    log::info!("restore, use as last block: {}", last_mc_block.id());
+    log::trace!("restore, use as last block: {}", last_mc_block.id());
 
     // truncate DB
     log::debug!("try to truncate database after {}", last_mc_block.id());
@@ -243,7 +243,7 @@ async fn restore(
 
     if let Some(block_id) = db.load_full_node_state(LAST_ROTATION_MC_BLOCK)? {
         if block_id.seq_no > last_mc_block.id().seq_no {
-            db.save_validator_state(LAST_ROTATION_MC_BLOCK, last_mc_block.id())?;
+            db.save_full_node_state(LAST_ROTATION_MC_BLOCK, last_mc_block.id())?;
         }
     }
 
@@ -253,9 +253,15 @@ async fn restore(
         }
     }
 
-    let min_mc_state_id = calc_min_mc_state_id(&db, last_mc_block.id()).await?;
+    let min_mc_state_id = match calc_min_mc_state_id(&db, last_mc_block.id()).await {
+        Ok(id) => id,
+        Err(e) => {
+            let id = last_mc_block.id().clone();
+            log::warn!("Can't calculate calc_min_mc_state_id: {}, {} will use", e, id);
+            id
+        }
+    };
     
-    log::info!("Checking shard states...");
     let mut mc_block = Cow::Borrowed(last_mc_block);
     let mut broken_cells = false;
     let mut checked_cells = HashSet::new();
@@ -337,7 +343,6 @@ async fn restore(
     if broken_cells {
         log::warn!("Shard states db is broken, it will be clear and restored from persistent \
             states and blocks. It will take some time...");
-        db.reset_unapplied_handles()?;
         db.clean_shard_state_dynamic_db()?;
         log::debug!("Shard states db was cleaned");
         restore_states(
@@ -349,8 +354,6 @@ async fn restore(
             //last_mc_block,
         ).await?;
     }
-
-    log::info!("Restore successfully finished");
 
     Ok(db)
 }
@@ -591,44 +594,20 @@ async fn calc_min_mc_state_id(
     } else { 
         &pss_keeper
     };
-    let last_rotation_block_id = db.load_validator_state(LAST_ROTATION_MC_BLOCK)?;
+    let last_rotation_block_id = db.load_full_node_state(LAST_ROTATION_MC_BLOCK)?;
     if let Some(id) = &last_rotation_block_id {
-        if id.seq_no() < min_id.seq_no() {
-            if min_id.seq_no() - id.seq_no() < 10000 {
-                min_id = &id;
-            } else {
-                db.drop_validator_state(LAST_ROTATION_MC_BLOCK)?;
-            }
+        if min_id.seq_no() > id.seq_no() { 
+            min_id = &id 
         }
     }
 
-    match db.load_shard_state_dynamic(min_id) {
-        Err(e) => {
-            log::warn!(
-                "calc_min_mc_state_id: can't load state {} {}. Will use it as min",
-                e, min_id
-            );
-            Ok(min_id.clone())
-        }
-        Ok(mc_state) => {
-            let new_min_ref_mc_seqno = mc_state.state().min_ref_mc_seqno();
+    let mc_state = db.load_shard_state_dynamic(min_id)?;
+    let new_min_ref_mc_seqno = mc_state.state().min_ref_mc_seqno();
 
-            match db.find_mc_block_by_seq_no(new_min_ref_mc_seqno) {
-                Err(e) => {
-                    log::warn!(
-                        "calc_min_mc_state_id: can't find_mc_block_by_seq_no {} {}. Will use {} as min",
-                        e, new_min_ref_mc_seqno, min_id
-                    );
-                    Ok(min_id.clone())
-                }
-                Ok(handle) => {
+    let handle = db.find_mc_block_by_seq_no(new_min_ref_mc_seqno)?;
 
-                    log::trace!("calc_min_mc_state_id: {}", handle.id());
-                    Ok(handle.id().clone())
-                }
-            }
-        }
-    }
+    log::trace!("calc_min_mc_state_id: {}", handle.id());
+    Ok(handle.id().clone())
 }
 
 fn check_state(
@@ -638,31 +617,14 @@ fn check_state(
 ) -> Result<()> {
     log::trace!("check_state {}", id);
 
-    fn check_cell(cell: Cell, checked_cells: &mut HashSet<UInt256>) -> Result<(u64, u64)> {
-        let mut expected_cells = 1;
-        let mut expected_bits = cell.bit_length() as u64;
-        let new_cell = checked_cells.insert(cell.repr_hash());
-        for i in 0..cell.references_count() {
-            let child = cell.reference(i)?;
-            if new_cell {
-                let (c, b) = check_cell(child, checked_cells)?;
-                expected_cells += c;
-                expected_bits += b;
-            } else {
-                expected_cells += child.tree_cell_count() as u64;
-                expected_bits += child.tree_bits_count() as u64;
+    fn check_cell(cell: Cell, checked_cells: &mut HashSet<UInt256>) -> Result<()> {
+        if checked_cells.insert(cell.repr_hash()) {
+            for i in 0..cell.references_count() {
+                let child = cell.reference(i)?;
+                check_cell(child, checked_cells)?;
             }
         }
-
-        if cell.tree_cell_count() != expected_cells {
-            fail!("cell {:x} stored cell count {} != expected {}", 
-                cell.repr_hash(), cell.tree_cell_count(), expected_cells);
-        }
-        if cell.tree_bits_count() != expected_bits {
-            fail!("cell {} stored bit count {} != expected {}", 
-                cell.repr_hash(), cell.tree_bits_count(), expected_bits);
-        }
-        Ok((expected_cells, expected_bits))
+        Ok(())
     }
 
     let root = db.shard_state_dynamic_db.get(id)?;
@@ -679,10 +641,6 @@ async fn restore_states(
     //last_mc_block: &BlockStuff,
 ) -> Result<()> {
     log::trace!("restore_states");
-
-    if persistent_state_handle.id().seq_no() > min_mc_state_id.seq_no() {
-        fail!("restore_states: min mc state can't be older persistent state");
-    }
 
     // create list of mc and shard ids by min_mc_state_id
     let min_mc_handle = db.load_block_handle(&min_mc_state_id)?
