@@ -119,6 +119,20 @@ impl RocksDb {
         //    .unwrap_or_else(|err| panic!("unable to create column family {} for rocksdb : {}", name, err));
     }
 
+    pub fn drop_table(&self, name: &str) -> Result<bool> {
+        if let Some(lock) = self.locks.get(name) {
+            let lock = lock.val();
+            if lock.compare_exchange(0, -1000000, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                self.db().drop_cf(name)?;
+                self.locks.remove(name);
+                return Ok(true)
+            } else {
+                return Ok(false)
+            }
+        }
+        fail!("Attempt to drop already dropped table {}", name)
+    }
+
     fn cf(&self, name: &str) -> Arc<BoundColumnFamily> {
         self.db().cf_handle(name)
             .unwrap_or_else(|| panic!("no handle for column family {} in rocksdb", name))
@@ -261,17 +275,7 @@ impl Kvc for RocksDbTable {
     }
 
     fn destroy(&mut self) -> Result<bool> {
-        if let Some(lock) = self.db.locks.get(&self.family) {
-            let lock = lock.val();
-            if lock.compare_exchange(0, -1000000, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
-                self.db.drop_cf(&self.family)?;
-                self.db.locks.remove(&self.family);
-                return Ok(true)
-            } else {
-                return Ok(false)
-            }
-        }
-        fail!("Attempt to drop already dropped table {}", self.family)
+        self.db.drop_table(&self.family)
     }
 }
 
