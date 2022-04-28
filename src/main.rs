@@ -477,7 +477,7 @@ fn main() {
                     log::warn!("Got SIGINT, starting node's safe stopping...");
                     engine1.set_stop();
 
-                }).expect("Error setting Ctrl-C (SIGINT) handler");
+                }).expect("Error setting termination signals handler");
 
                 join_handle.await.ok();
 

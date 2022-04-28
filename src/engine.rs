@@ -151,16 +151,14 @@ pub struct Engine {
 }
 
 struct DownloadContext<'a, T> {
+    engine: &'a Engine,
     client: Arc<dyn FullNodeOverlayClient>,
-    db: &'a InternalDb,
     downloader: Arc<dyn Downloader<Item = T>>,
     id: &'a BlockIdExt,
     limit: Option<u32>,
     log_error_limit: u32,
     name: &'a str,
     timeout: Option<(u64, u64, u64)>, // (current, multiplier*10, max)
-    #[cfg(feature = "telemetry")]
-    full_node_telemetry: &'a FullNodeTelemetry,
 }
 
 impl <T> DownloadContext<'_, T> {
@@ -168,6 +166,9 @@ impl <T> DownloadContext<'_, T> {
     async fn download(&mut self) -> Result<T> {
         let mut attempt = 1;
         loop {
+            if self.engine.check_stop() {
+                fail!("{} id: {}, stop flag was set", self.name, self.id);
+            }
             match self.downloader.try_download(self).await {
                 Err(e) => self.log(format!("{}", e).as_str(), attempt),
                 Ok(ret) => break Ok(ret)
@@ -219,10 +220,10 @@ impl Downloader for BlockDownloader {
         &self, 
         context: &DownloadContext<'_, Self::Item>,
     ) -> Result<Self::Item> {
-        if let Some(handle) = context.db.load_block_handle(context.id)? {
+        if let Some(handle) = context.engine.db.load_block_handle(context.id)? {
             let mut is_link = false;
             if handle.has_data() && handle.has_proof_or_link(&mut is_link) {
-                let block = match context.db.load_block_data(&handle).await {
+                let block = match context.engine.db.load_block_data(&handle).await {
                     Err(e) => if !handle.has_data() {
                         None
                     } else {
@@ -233,7 +234,7 @@ impl Downloader for BlockDownloader {
                 let proof = if block.is_none() {
                     None
                 } else {
-                    match context.db.load_block_proof(&handle, is_link).await {
+                    match context.engine.db.load_block_proof(&handle, is_link).await {
                         Err(e) => if is_link && !handle.has_proof_link() {
                             None
                         } else if !is_link && !handle.has_proof() {
@@ -252,11 +253,11 @@ impl Downloader for BlockDownloader {
             }
         }
         #[cfg(feature = "telemetry")]
-        context.full_node_telemetry.new_downloading_block_attempt(context.id);
+        context.engine.full_node_telemetry.new_downloading_block_attempt(context.id);
         let ret = context.client.download_block_full(context.id).await;
         #[cfg(feature = "telemetry")]
         if ret.is_ok() { 
-            context.full_node_telemetry.new_downloaded_block(context.id);
+            context.engine.full_node_telemetry.new_downloaded_block(context.id);
         }
         ret
     }
@@ -274,10 +275,10 @@ impl Downloader for BlockProofDownloader {
         &self, 
         context: &DownloadContext<'_, Self::Item>,
     ) -> Result<Self::Item> {
-        if let Some(handle) = context.db.load_block_handle(context.id)? {
+        if let Some(handle) = context.engine.db.load_block_handle(context.id)? {
             let mut is_link = false;
             if handle.has_proof_or_link(&mut is_link) {
-                return Ok(context.db.load_block_proof(&handle, is_link).await?);
+                return Ok(context.engine.db.load_block_proof(&handle, is_link).await?);
             }
         }
         context.client.download_block_proof(
@@ -297,15 +298,15 @@ impl Downloader for NextBlockDownloader {
         &self, 
         context: &DownloadContext<'_, Self::Item>,
     ) -> Result<Self::Item> {
-        if let Some(prev_handle) = context.db.load_block_handle(context.id)? {
+        if let Some(prev_handle) = context.engine.db.load_block_handle(context.id)? {
             if prev_handle.has_next1() {
-                let next_id = context.db.load_block_next1(context.id)?;
-                if let Some(next_handle) = context.db.load_block_handle(&next_id)? {
+                let next_id = context.engine.db.load_block_next1(context.id)?;
+                if let Some(next_handle) = context.engine.db.load_block_handle(&next_id)? {
                     let mut is_link = false;
                     if next_handle.has_data() && next_handle.has_proof_or_link(&mut is_link) {
                         return Ok((
-                            context.db.load_block_data(&next_handle).await?,
-                            context.db.load_block_proof(&next_handle, is_link).await?
+                            context.engine.db.load_block_data(&next_handle).await?,
+                            context.engine.db.load_block_proof(&next_handle, is_link).await?
                         ));
                     }
                 }
@@ -324,9 +325,9 @@ impl Downloader for ZeroStateDownloader {
         &self, 
         context: &DownloadContext<'_, Self::Item>,
     ) -> Result<Self::Item> {
-        if let Some(handle) = context.db.load_block_handle(context.id)? {
+        if let Some(handle) = context.engine.db.load_block_handle(context.id)? {
             if handle.has_state() {
-                let zs = context.db.load_shard_state_dynamic(context.id)?;
+                let zs = context.engine.db.load_shard_state_dynamic(context.id)?;
                 let mut data = vec!();
                 zs.write_to(&mut data)?;
                 return Ok((zs, data));
@@ -1306,15 +1307,13 @@ impl Engine {
                 id.shard().workchain_id(),
                 id.shard().shard_prefix_with_tag()
             ).await?,
-            db: self.db.deref(),
+            engine: self,
             downloader,
             id,
             limit,
             log_error_limit,
             name,
             timeout,
-            #[cfg(feature = "telemetry")]
-            full_node_telemetry: self.full_node_telemetry(),
         };
         Ok(ret)
     }   
@@ -1546,78 +1545,70 @@ impl Engine {
 
     async fn check_gc_for_archives(
         engine: &Arc<Engine>,
-        curr_block_handle: &Arc<BlockHandle>,
+        last_keyblock: &Arc<BlockHandle>,
         mc_state: &ShardStateStuff
     ) -> Result<()> {
-        let mut prev_pss_block = None;
-        let mut prev_prev_pss_block = None;
-        let mut handle = curr_block_handle.clone();
-        let mut check_date = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
-
+        let mut gc_max_date = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
         match &engine.archives_life_time {
             None => return Ok(()),
             Some(life_time) => {
-                match check_date.checked_sub(Duration::from_secs((life_time * 3600) as u64)) {
+                match gc_max_date.checked_sub(Duration::from_secs((life_time * 3600) as u64)) {
                     Some(date) => {
                         log::info!("archive gc: checked date {}.", &date.as_secs());
-                        check_date = date
+                        gc_max_date = date
                     },
                     None => {
                         log::info!("archive gc: life_time in config is bad, actual checked date: {}",
-                            &check_date.as_secs()
+                            &gc_max_date.as_secs()
                         );
                     }
                 }
             }
         }
 
+        let mut visited_pss_blocks = 0;
+        let mut keyblock = last_keyblock.clone();
+        let prev_blocks = &mc_state.shard_state_extra()?.prev_blocks;
         loop {
-            if handle.id().seq_no() == 0 {
-                return Ok(());
-            }
+            match prev_blocks.get_prev_key_block(keyblock.id().seq_no() - 1)? {
+                None => return Ok(()),
+                Some(prev_keyblock) => {
+                    let prev_keyblock = BlockIdExt::from_ext_blk(prev_keyblock);
+                    let prev_keyblock = engine.load_block_handle(&prev_keyblock)?.ok_or_else(
+                        || error!("Cannot load handle for PSS keeper prev key block {}", prev_keyblock)
+                    )?;
+                    if engine.is_persistent_state(
+                        keyblock.gen_utime()?, prev_keyblock.gen_utime()?, boot::PSS_PERIOD_BITS
+                    ) {
+                        visited_pss_blocks += 1;
 
-            if let Some(prev_key_block_id) =
-                mc_state.shard_state_extra()?.prev_blocks.get_prev_key_block(handle.id().seq_no() - 1)? {
-
-                let block_id = BlockIdExt {
-                    shard_id: ShardIdent::masterchain(),
-                    seq_no: prev_key_block_id.seq_no,
-                    root_hash: prev_key_block_id.root_hash,
-                    file_hash: prev_key_block_id.file_hash
-                };
-                let prev_handle = engine.load_block_handle(&block_id)?.ok_or_else(
-                    || error!("Cannot load handle for PSS keeper prev key block {}", block_id)
-                )?;
-                if engine.is_persistent_state(curr_block_handle.gen_utime()?, 
-                   prev_handle.gen_utime()?, boot::PSS_PERIOD_BITS) {
-                    prev_prev_pss_block = prev_pss_block;
-                    prev_pss_block = Some(prev_handle.clone());
-                }
-                handle = prev_handle;
-
-                if let Some(pss_block) = &prev_prev_pss_block {
-                    let gen_time = pss_block.gen_utime()? as u64;
-                    let check_date = check_date.as_secs();
-                    if gen_time < check_date {
-                        log::info!(
-                            "gc for archives: found block (gen time: {}, seq_no: {}), check date: {}",
-                            &gen_time, pss_block.id().seq_no(), &check_date
-                        );
-                        break;
+                        // Due to boot process specific (pss period and key_block_utime_step combinations)
+                        // we shouldn't delete last 4 pss blocks
+                        // ....................pss_block....pss_block....pss_block....pss_block...
+                        // visited_pss_blocks:         4            3            2            1
+                        //                    ↑ we may delete blocks starting at least here (before 4th pss)
+                        if visited_pss_blocks >= 4 {
+                            let gen_time = keyblock.gen_utime()? as u64;
+                            let gc_max_date = gc_max_date.as_secs();
+                            if gen_time < gc_max_date {
+                                log::info!(
+                                    "gc for archives: found block (gen time: {}, seq_no: {}), gc max date: {}",
+                                    &gen_time, keyblock.id().seq_no(), &gc_max_date
+                                );
+                                log::info!("start gc for archives..");
+                                engine.db.archive_manager().gc(&keyblock.id()).await;
+                                log::info!("finish gc for archives.");
+                                return Ok(());
+                            }
+                        }
                     }
+                    if prev_keyblock.id().seq_no() == 0 {
+                        return Ok(());
+                    }
+                    keyblock = prev_keyblock;
                 }
-            } else {
-                return Ok(());
             }
         }
-
-        if let Some(gc_marked_block) = &prev_prev_pss_block {
-            log::info!("start gc for archives..");
-            engine.db.archive_manager().gc(&gc_marked_block.id()).await;
-            log::info!("finish gc for archives.");
-        }
-
-        Ok(())
     }
 
     fn check_finish_sync(self: Arc<Self>) {
