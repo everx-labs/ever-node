@@ -73,6 +73,7 @@ pub(super) struct Processor<T: WriteData> {
     write_chain_range: T,
     bad_blocks_storage: String,
     front_workchain_ids: Vec<i32>, // write only this workchain, or write all if None
+    max_account_bytes_size: Option<usize>,
 }
 
 impl<T: WriteData> Processor<T> {
@@ -87,6 +88,7 @@ impl<T: WriteData> Processor<T> {
         write_chain_range: T,
         bad_blocks_storage: String,
         front_workchain_ids: Vec<i32>,
+        max_account_bytes_size: Option<usize>,
     ) 
     -> Self {
         log::trace!("Processor::new workchains {:?}", front_workchain_ids);
@@ -100,6 +102,7 @@ impl<T: WriteData> Processor<T> {
             write_chain_range,
             bad_blocks_storage,
             front_workchain_ids,
+            max_account_bytes_size,
         }
     }
 
@@ -222,9 +225,25 @@ impl<T: WriteData> Processor<T> {
     }
 
     fn prepare_account_record(
-        account: Account, prev_account_state: Option<Account>, sharding_depth: u32
+        account: Account,
+        prev_account_state: Option<Account>,
+        sharding_depth: u32,
+        max_account_bytes_size: Option<usize>,
     ) -> Result<DbRecord> {
-
+        if let Some(max_size) = max_account_bytes_size {
+            let size = account.storage_info()
+                .map(|si| si.used().bits() / 8)
+                .unwrap_or_else(|| 0) as usize;
+            if max_size < size {
+                log::warn!(
+                    "Too big account ({}, {} bytes), skipped",
+                    account.get_addr().map(|a| a.to_string()).unwrap_or_else(|| "unknown".into()),
+                    size
+                );
+                return Ok(DbRecord::Empty)
+            }
+        }
+        
         let mut boc1 = None;
         if account.init_code_hash().is_some() {
             // new format
@@ -380,6 +399,7 @@ impl<T: WriteData> Processor<T> {
         let block_boc = if process_block || process_raw_block { Some(block_stuff.data().to_vec()) } else { None };
         let shard_accounts = state.map(|s| s.state().read_accounts()).transpose()?;
         let accounts_sharding_depth = self.write_account.sharding_depth();
+        let max_account_bytes_size = self.max_account_bytes_size;
         let block_proofs_sharding_depth = self.write_block_proof.sharding_depth();
         let raw_blocks_sharding_depth = self.write_raw_block.sharding_depth();
 
@@ -486,7 +506,12 @@ impl<T: WriteData> Processor<T> {
                             let acc = acc.read_account()?;
 
                             let prev_acc = get_prev_state(acc_addr.clone())?;
-                            db_records.push(Self::prepare_account_record(acc, prev_acc, accounts_sharding_depth)?);
+                            db_records.push(Self::prepare_account_record(
+                                acc,
+                                prev_acc,
+                                accounts_sharding_depth,
+                                max_account_bytes_size,
+                            )?);
                         }
 
                         for acc_addr in deleted_acc {
@@ -618,7 +643,12 @@ impl<T: WriteData> ExternalDb for Processor<T> {
             let mut accounts = Vec::new();
             state.state().read_accounts()?.iterate_objects(|acc: ShardAccount| {
                 let acc = acc.read_account()?;
-                let record = Self::prepare_account_record(acc, None, self.write_account.sharding_depth())?;
+                let record = Self::prepare_account_record(
+                    acc, 
+                    None,
+                    self.write_account.sharding_depth(),
+                    self.max_account_bytes_size,
+                )?;
                 accounts.push(record);
                 Ok(true)
             })?;
@@ -628,6 +658,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
                 accounts.into_iter().map(|r| {
                     match r {
                         DbRecord::Account(key, value, partition_key) => self.write_account.write_data(key, value, None, partition_key),
+                        DbRecord::Empty => Box::pin(async{Ok(())}),
                         _ => unreachable!(),
                     }
                 })
