@@ -366,7 +366,8 @@ impl Engine {
     pub async fn new(
         general_config: TonNodeConfig, 
         ext_db: Vec<Arc<dyn ExternalDb>>, 
-        initial_sync_disabled : bool
+        initial_sync_disabled : bool,
+        force_check_db: bool,
     ) -> Result<Arc<Self>> {
 
         log::info!("Creating engine...");
@@ -391,7 +392,7 @@ impl Engine {
         ).await?;
 
         // TODO correct workchain id needed here, but it will be known later
-        let db = Arc::new(check_db(db, 0, general_config.restore_db()).await?);
+        let db = Arc::new(check_db(db, 0, general_config.restore_db(), force_check_db).await?);
 
         let global_config = general_config.load_global_config()?;
         let test_bundles_config = general_config.test_bundles_config().clone();
@@ -1532,7 +1533,7 @@ impl Engine {
                         let expired = ttl <= engine.now();
                         (ttl, expired)
                     };
-                    if let Err(e) = engine.db.shard_state_persistent_gc(calc_ttl).await {
+                    if let Err(e) = engine.db.shard_state_persistent_gc(calc_ttl, &engine.zero_state_id).await {
                         log::warn!("persistent states gc: {}", e);
                     }
                 }
@@ -1801,7 +1802,8 @@ pub async fn run(
     zerostate_path: Option<&str>, 
     ext_db: Vec<Arc<dyn ExternalDb>>,
     validator_runtime: tokio::runtime::Handle, 
-    initial_sync_disabled : bool
+    initial_sync_disabled : bool,
+    force_check_db: bool,
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
 
     log::info!("Engine::run");
@@ -1811,7 +1813,7 @@ pub async fn run(
     let vm_config = ValidatorManagerConfig::read_configs(node_config.unsafe_catchain_patches_files());
 
     // Create engine
-    let engine = Engine::new(node_config, ext_db, initial_sync_disabled).await?;
+    let engine = Engine::new(node_config, ext_db, initial_sync_disabled, force_check_db).await?;
 
     #[cfg(feature = "telemetry")]
     telemetry_logger(engine.clone());

@@ -318,7 +318,8 @@ async fn start_engine(
     config: TonNodeConfig, 
     zerostate_path: Option<&str>, 
     validator_runtime: tokio::runtime::Handle, 
-    initial_sync_disabled: bool
+    initial_sync_disabled: bool,
+    force_check_db: bool,
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
     let external_db = start_external_db(&config)?;
     crate::engine::run(
@@ -326,7 +327,8 @@ async fn start_engine(
         zerostate_path, 
         external_db, 
         validator_runtime, 
-        initial_sync_disabled
+        initial_sync_disabled,
+        force_check_db,
     ).await
 }
 
@@ -359,11 +361,17 @@ fn main() {
             .short("i")
             .long("initial-sync-disabled")
             .value_name("initial sync disable flag")
-            .help("use this flag to sync from zero_state"));
+            .help("use this flag to sync from zero_state"))
+        .arg(clap::Arg::with_name("force_check_db")
+            .short("f")
+            .long("force-check-db")
+            .value_name("force check db flag")
+            .help("start check & restore db process forcely"));
 
     let matches = app.get_matches();
 
     let initial_sync_disabled = matches.is_present("initial_sync_disabled");
+    let force_check_db = matches.is_present("force_check_db");
 
     let config_dir_path = match matches.value_of("config") {
         Some(config) => {
@@ -465,7 +473,8 @@ fn main() {
             config, 
             zerostate_path, 
             validator_rt_handle,
-            initial_sync_disabled
+            initial_sync_disabled,
+            force_check_db,
         ).await {
             Err(e) => log::error!("Can't start node's Engine: {:?}", e),
             Ok((engine, join_handle)) => {

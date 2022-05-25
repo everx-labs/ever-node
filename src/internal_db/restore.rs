@@ -27,14 +27,20 @@ const SHARD_CLIENT_MC_BLOCK_CANDIDATES: u32 = 300;
 pub async fn check_db(
     mut db: InternalDb,
     processed_wc: i32,
-    restore_db: bool
+    restore_db: bool,
+    force: bool,
 ) -> Result<InternalDb> {
 
     let unexpected_termination = check_unexpected_termination(&db.config.db_directory);
     let restoring = check_restoring(&db.config.db_directory);
 
-    if unexpected_termination || restoring {
-        if !restore_db {
+    if unexpected_termination || restoring || force {
+        if force {
+            log::info!("Starting check & restore db process forcely");
+        } else if restore_db {
+            log::warn!("Previous node run was unexpectedly terminated, \
+            starting check & restore process...");
+        } else {
             if unexpected_termination {
                 log::warn!("Previous node run was terminated unexpectedly, \
                     but 'restore_db' option in node config is 'false', \
@@ -44,29 +50,28 @@ pub async fn check_db(
                     checking or restoring, but now 'restore_db' option in node \
                     config is 'false', so restore operation is skipped. Node may work incorrectly.");
             }
-        } else {
-            set_restoring(&db.config.db_directory)?;
-            log::warn!("Previous node run was unexpectedly terminated, \
-                starting check & restore process...");
-            match restore_last_applied_mc_block(&db).await {
-                Ok(Some(last_applied_mc_block)) => {
-                    let shard_client_mc_block = restore_shard_client_mc_block(
-                        &db, &last_applied_mc_block, processed_wc).await?;
-                    db = restore(
-                        db, &last_applied_mc_block, &shard_client_mc_block, processed_wc).await?;
-                }
-                Ok(None) => {
-                    log::info!("End of check & restore: looks like node hasn't \
-                        ever booted in blockchain.");
-                }
-                Err(err) => {
-                    log::error!("Error while restoring database: {}. Need to clear db \
-                        and re-sync node. Process will be terminated.", err);
-                    std::process::exit(0xFF);
-                }
-            }
-            reset_restoring(&db.config.db_directory)?;
+            return Ok(db);
         }
+
+        set_restoring(&db.config.db_directory)?;
+        match restore_last_applied_mc_block(&db).await {
+            Ok(Some(last_applied_mc_block)) => {
+                let shard_client_mc_block = restore_shard_client_mc_block(
+                    &db, &last_applied_mc_block, processed_wc).await?;
+                db = restore(
+                    db, &last_applied_mc_block, &shard_client_mc_block, processed_wc).await?;
+            }
+            Ok(None) => {
+                log::info!("End of check & restore: looks like node hasn't \
+                    ever booted in blockchain.");
+            }
+            Err(err) => {
+                log::error!("Error while restoring database: {}. Need to clear db \
+                    and re-sync node. Process will be terminated.", err);
+                std::process::exit(0xFF);
+            }
+        }
+        reset_restoring(&db.config.db_directory)?;
     }
     set_unexpected_termination(&db.config.db_directory)?;
     Ok(db)
@@ -639,18 +644,25 @@ fn check_state(
     log::trace!("check_state {}", id);
 
     fn check_cell(cell: Cell, checked_cells: &mut HashSet<UInt256>) -> Result<(u64, u64)> {
-        let mut expected_cells = 1;
+        const MAX_56_BITS: u64 = 0x00FF_FFFF_FFFF_FFFFu64;
+        let mut expected_cells = 1_u64;
         let mut expected_bits = cell.bit_length() as u64;
         let new_cell = checked_cells.insert(cell.repr_hash());
         for i in 0..cell.references_count() {
             let child = cell.reference(i)?;
             if new_cell {
                 let (c, b) = check_cell(child, checked_cells)?;
-                expected_cells += c;
-                expected_bits += b;
+                expected_cells = expected_cells.saturating_add(c);
+                expected_bits = expected_bits.saturating_add(b);
             } else {
-                expected_cells += child.tree_cell_count() as u64;
-                expected_bits += child.tree_bits_count() as u64;
+                expected_cells = expected_cells.saturating_add(child.tree_cell_count());
+                expected_bits = expected_bits.saturating_add(child.tree_bits_count());
+            }
+            if expected_bits > MAX_56_BITS {
+                expected_bits = MAX_56_BITS;
+            }
+            if expected_cells > MAX_56_BITS {
+                expected_cells = MAX_56_BITS;
             }
         }
 
@@ -820,7 +832,7 @@ async fn restore_chain(
                 &block_handle,
                 state_root.clone(),
                 None
-            )?;
+            ).await?;
         }
 
         // if max_stored_states.contains(&block_id) {

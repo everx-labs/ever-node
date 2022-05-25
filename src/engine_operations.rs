@@ -499,7 +499,7 @@ impl EngineOperations for Engine {
         state: Arc<ShardStateStuff>,
         state_bytes: Option<&[u8]>,
     ) -> Result<Arc<ShardStateStuff>> {
-        let (state, saved) = self.db().store_shard_state_dynamic(handle, &state, None)?;
+        let (state, saved) = self.db().store_shard_state_dynamic(handle, &state, None).await?;
         if saved {
             #[cfg(feature = "telemetry")]
             self.full_node_telemetry().new_pre_applied_block(handle.got_by_broadcast());
