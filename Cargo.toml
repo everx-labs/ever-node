@@ -1,7 +1,7 @@
 [package]
 edition = '2018'
 name = 'ton_node'
-version = '0.50.17'
+version = '0.50.18'
 
 
 [workspace]
@@ -45,7 +45,7 @@ string-builder = '^0.2.0'
 adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.73' }
 catchain = { path = 'catchain' }
 dht = { git = 'https://github.com/tonlabs/ton-labs-dht', tag = '0.5.67' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.21' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.22' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.57' }
 rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.67' }
@@ -54,13 +54,13 @@ rustracing_jaeger = { optional = true, version = '0.4.1' }
 statsd = { optional = true, version = '0.14.0' }
 storage = { path = 'storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git', tag = '2.2.5' }
+ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git', tag = '2.2.6' }
 ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.127' }
-ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.7.48' }
-ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', tag = '0.7.15' }
-ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.67' }
+ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.7.49' }
+ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', tag = '0.7.16' }
+ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.70' }
 ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.11.1' }
-ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.35' }
+ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.37' }
 validator_session = { path = 'validator-session' }
 
 [target.'cfg(unix)'.dependencies.rdkafka]

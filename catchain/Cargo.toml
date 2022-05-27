@@ -23,7 +23,7 @@ sha2 = '0.9'
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
 
 adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.73' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.21' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.22' }
 overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.57' }
 rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.67' }
 storage = { path = '../storage' }
