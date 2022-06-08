@@ -54,10 +54,6 @@ pub trait KvcReadable<K: DbKey + Send + Sync>: Kvc {
 
     /// Gets slice with given size starting from given offset from collection by the key
     fn get_slice(&self, key: &K, offset: u64, size: u64) -> Result<DbSlice> {
-        self.get_vec(key, offset, size).map(|v| DbSlice::Vector(v))
-    }
-
-    fn get_vec(&self, key: &K, offset: u64, size: u64) -> Result<Vec<u8>> {
         self.get(key).and_then(|value| {
             if offset >= value.len() as u64 || offset + size > value.as_ref().len() as u64 {
                 return Err(StorageError::OutOfRange.into());
@@ -65,7 +61,7 @@ pub trait KvcReadable<K: DbKey + Send + Sync>: Kvc {
 
             let mut result = Vec::new();
             result.extend_from_slice(&value[offset as usize..(offset + size) as usize]);
-            Ok(result)
+            Ok(result.into())
         })
     }
 

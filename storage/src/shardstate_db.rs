@@ -155,20 +155,12 @@ impl ShardStateDb {
         self.stop.fetch_or(Self::MASK_GC_STARTED, Ordering::Relaxed);
         tokio::spawn(async move {
 
-            fn check_and_stop(stop: &AtomicU8) -> bool {
-                if (stop.load(Ordering::Relaxed) & ShardStateDb::MASK_GC_STOPPED) != 0 {
-                    stop.fetch_and(!ShardStateDb::MASK_GC_STARTED, Ordering::Relaxed);
-                    true
-                } else {
-                    false
-                }
-            }
-
             async fn sleep_nicely(stop: &AtomicU8, sleep_for_sec: u64) -> bool {
                 let start = Instant::now();
                 loop {
                     tokio::time::sleep(Duration::from_secs(1)).await;
-                    if check_and_stop(stop) {
+                    if (stop.load(Ordering::Relaxed) & ShardStateDb::MASK_GC_STOPPED) != 0 {
+                        stop.fetch_and(!ShardStateDb::MASK_GC_STARTED, Ordering::Relaxed);
                         return false
                     }
                     if start.elapsed().as_secs() > sleep_for_sec {
@@ -224,38 +216,18 @@ impl ShardStateDb {
                 // start GC
                 log::info!(target: TARGET, "Statring GC for db {}", collected_db.db_index());
                 let collecting_start = Instant::now();
-                let self_ = self.clone();
-                let collected_db_ = collected_db.clone();
-                let gc_resolver_ = gc_resolver.clone();
-                let result = tokio::task::spawn_blocking(move || 
-                    gc(
-                        self_.shardstate_db(),
-                        collected_db_,
-                        gc_resolver_,
-                        &|| {
-                            if (self_.stop.load(Ordering::Relaxed) & ShardStateDb::MASK_GC_STOPPED) != 0 {
-                                fail!("GC was stopped")
-                            }
-                            Ok(())
-                        }
-                    )
+                let result = gc(
+                    self.shardstate_db(),
+                    collected_db.clone(),
+                    gc_resolver.clone(),
                 ).await;
                 last_gc_duration = collecting_start.elapsed();
                 match result {
                     Err(e) => {
-                        log::error!(target: TARGET, "Panic while GC for db {}: {}, TIME: {}ms",
-                            collected_db.db_index(), e, last_gc_duration.as_millis());
-                    },
-                    Ok(Err(e)) => {
-                        if check_and_stop(&self.stop) {
-                            log::info!(target: TARGET, "GC for db {}: was stopped",
-                                collected_db.db_index());
-                            return;
-                        }
                         log::error!(target: TARGET, "Error while GC for db {}: {}, TIME: {}ms",
-                            collected_db.db_index(), e, last_gc_duration.as_millis());
+                        collected_db.db_index(), e, last_gc_duration.as_millis());
                     },
-                    Ok(Ok(gc_stat)) => {
+                    Ok(gc_stat) => {
                         log::info!(
                             target: TARGET, 
                             "Finished GC for db {}\n\
@@ -308,22 +280,17 @@ impl ShardStateDb {
     /// Stores cells from given tree which don't exist in the storage.
     /// Returns root cell which is implemented as StorageCell.
     /// So after store() origin shard state's cells might be dropped.
-    pub fn put(
-        &self,
-        id: &BlockIdExt,
-        state_root: Cell,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
-    ) -> Result<Cell> {
+    pub fn put(&self, id: &BlockIdExt, state_root: Cell) -> Result<Cell> {
         let saved_root = match self.current_dynamic_boc_db_index.load(Ordering::Relaxed) {
             0 => {
                 self.dynamic_boc_db_0_writers.fetch_add(1, Ordering::Relaxed);
-                let r = self.put_internal(id, state_root, &self.dynamic_boc_db_0, check_stop);
+                let r = self.put_internal(id, state_root, &self.dynamic_boc_db_0);
                 self.dynamic_boc_db_0_writers.fetch_sub(1, Ordering::Relaxed);
                 r?
             },
             1 => {
                 self.dynamic_boc_db_1_writers.fetch_add(1, Ordering::Relaxed);
-                let r = self.put_internal(id, state_root, &self.dynamic_boc_db_1, check_stop);
+                let r = self.put_internal(id, state_root, &self.dynamic_boc_db_1);
                 self.dynamic_boc_db_1_writers.fetch_sub(1, Ordering::Relaxed);
                 r?
             },
@@ -337,17 +304,14 @@ impl ShardStateDb {
         &self,
         id: &BlockIdExt,
         state_root: Cell,
-        boc_db: &Arc<DynamicBocDb>,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
+        boc_db: &Arc<DynamicBocDb>
     ) -> Result<Cell> {
         let cell_id = CellId::from(state_root.repr_hash());
         
         log::trace!(target: TARGET, "ShardStateDb::put_internal  start  id {}  root_cell_id {}  db_index {}",
             id, cell_id, boc_db.db_index());
 
-        let c = tokio::task::block_in_place(
-            || boc_db.save_as_dynamic_boc(state_root.deref(), check_stop)
-        )?;
+        let c = boc_db.save_as_dynamic_boc(state_root.deref())?;
 
         let save_utime = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let db_entry = DbEntry::with_params(cell_id.clone(), id.clone(), boc_db.db_index(), save_utime);
@@ -398,24 +362,24 @@ pub struct GcStatistic {
     pub sweep_time: Duration,
 }
 
-pub fn gc(
+pub async fn gc(
     shardstate_db: Arc<dyn KvcWriteable<BlockIdExt>>,
     cleaned_boc_db: Arc<DynamicBocDb>,
     gc_resolver: Arc<dyn AllowStateGcResolver>,
-    check_stopped: &dyn Fn() -> Result<()>,
 ) -> Result<GcStatistic> {
 
     let mark_started = Instant::now();
     let shardstate_db_ = shardstate_db.clone();
     let cleaned_boc_db_ = cleaned_boc_db.clone();
     let gc_resolver_ = gc_resolver.clone();
-    let (marked, to_sweep, marked_roots) = mark(
-        shardstate_db_.deref(),
-        cleaned_boc_db_.deref(),
-        gc_resolver_.deref(),
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-        check_stopped,
-    )?;
+    let (marked, to_sweep, marked_roots) = tokio::task::spawn_blocking(move || {
+        mark(
+            shardstate_db_.deref(),
+            cleaned_boc_db_.deref(),
+            gc_resolver_.deref(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
+        )
+    }).await??;
 
     let marked_cells = marked.len();
     let mark_time = mark_started.elapsed();
@@ -433,13 +397,14 @@ pub fn gc(
     } else {
 
         let sweep_started = Instant::now();
-        let collected_cells = sweep(
-            shardstate_db,
-            cleaned_boc_db,
-            to_sweep,
-            marked,
-            check_stopped,
-        )?;
+        let collected_cells = tokio::task::spawn_blocking(move || {
+            sweep(
+                shardstate_db,
+                cleaned_boc_db,
+                to_sweep,
+                marked
+            )
+        }).await??;
 
         Ok(GcStatistic {
             collected_cells,
@@ -457,8 +422,7 @@ fn mark(
     shardstate_db: &dyn KvcWriteable<BlockIdExt>,
     dynamic_boc_db: &DynamicBocDb,
     gc_resolver: &dyn AllowStateGcResolver,
-    gc_time: u64,
-    check_stopped: &dyn Fn() -> Result<()>,
+    gc_time: u64
 ) -> MarkResult {
     // We should leave last states in DB to avoid full state saving when DB will active.
     // 1) enumerate all roots with their save-time
@@ -471,7 +435,6 @@ fn mark(
     let mut max_shard_utime = 0;
 
     shardstate_db.for_each(&mut |_key, value| {
-        check_stopped()?;
         let db_entry = DbEntry::from_slice(value)?;
         if db_entry.db_index == dynamic_boc_db.db_index() {
             if db_entry.block_id.shard().is_masterchain() {
@@ -491,7 +454,6 @@ fn mark(
     let mut to_mark = Vec::new();
     let mut to_sweep = Vec::new();
     for root in roots {
-        check_stopped()?;
         let is_mc = root.block_id.shard().is_masterchain();
         if gc_resolver.allow_state_gc(&root.block_id, root.save_utime, gc_time)?
             && (!is_mc || root.block_id.seq_no() < last_mc_seqno)
@@ -511,7 +473,7 @@ fn mark(
     let mut marked = FnvHashSet::default();
     if !to_sweep.is_empty() {
         for cell_id in to_mark {
-            mark_subtree_recursive(dynamic_boc_db, cell_id.clone(), cell_id, &mut marked, check_stopped)?;
+            mark_subtree_recursive(dynamic_boc_db, cell_id.clone(), cell_id, &mut marked)?;
         }
     }
 
@@ -523,9 +485,7 @@ fn mark_subtree_recursive(
     cell_id: CellId,
     root_id: CellId,
     marked: &mut FnvHashSet<CellId>,
-    check_stopped: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
-    check_stopped()?;
     if !marked.contains(&cell_id) {
         match load_cell_references(dynamic_boc_db, &cell_id) {
             Ok(references) => {
@@ -538,8 +498,7 @@ fn mark_subtree_recursive(
                 );
 
                 for reference in references {
-                    mark_subtree_recursive(dynamic_boc_db, reference.hash().into(), root_id.clone(),
-                        marked, check_stopped)?;
+                    mark_subtree_recursive(dynamic_boc_db, reference.hash().into(), root_id.clone(), marked)?;
                 }
             },
             Err(err) => {
@@ -559,7 +518,6 @@ fn sweep(
     dynamic_boc_db: Arc<DynamicBocDb>,
     to_sweep: Vec<(BlockIdExt, CellId)>,
     marked: FnvHashSet<CellId>,
-    check_stopped: &dyn Fn() -> Result<()>,
 ) -> Result<usize> {
     if to_sweep.is_empty() {
         return Ok(0);
@@ -579,7 +537,6 @@ fn sweep(
             &cell_id,
             &marked,
             &mut sweeped,
-            check_stopped,
         )?;
         log::trace!(target: TARGET, "GC::sweep  block_id {}", block_id);
 
@@ -598,9 +555,8 @@ fn sweep_cells_recursive(
     root_id: &CellId,
     marked: &FnvHashSet<CellId>,
     sweeped: &mut FnvHashSet<CellId>,
-    check_stopped: &dyn Fn() -> Result<()>,
 ) -> Result<usize> {
-    check_stopped()?;
+
     if marked.contains(cell_id) || sweeped.contains(cell_id) {
         Ok(0)
     } else {
@@ -617,7 +573,6 @@ fn sweep_cells_recursive(
                         root_id,
                         marked,
                         sweeped,
-                        check_stopped
                     )?;
                 }
 

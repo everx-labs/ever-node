@@ -106,7 +106,7 @@ pub struct Engine {
     download_block_awaiters: AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)>,
     external_messages: MessagesPool,
     servers: lockfree::queue::Queue<Server>,
-    stopper: Arc<Stopper>,
+    stop: Arc<AtomicU32>,
 
     zero_state_id: BlockIdExt,
     init_mc_block_id: BlockIdExt,
@@ -337,79 +337,6 @@ impl Downloader for ZeroStateDownloader {
     }
 }
 
-pub struct Stopper {
-    stop: Arc<AtomicU32>,
-}
-
-impl Stopper {
-    pub fn new() -> Self {
-        Stopper {
-            stop: Arc::new(AtomicU32::new(0)),
-        }
-    }
-
-    pub fn set_stop(&self) {
-        let stop = self.stop.fetch_or(Engine::MASK_STOP, Ordering::Relaxed);
-        Self::log_stop_status(stop);
-    }
-
-    pub async fn wait_stop(self: Arc<Self>) {
-        loop {
-            tokio::time::sleep(Duration::from_millis(Engine::TIMEOUT_STOP_MS)).await;
-            let stop = self.stop.load(Ordering::Relaxed) & !Engine::MASK_STOP;
-            Self::log_stop_status(stop);
-            if (self.stop.load(Ordering::Relaxed) & !Engine::MASK_STOP) == 0 {
-                break
-            }
-        }
-    }
-
-    pub fn log_stop_status(bitmap: u32) {
-        let mut ss = String::new();
-        #[cfg(feature = "external_db")]
-        if bitmap & Engine::MASK_SERVICE_KAFKA_CONSUMER != 0 {
-            ss.push_str("kafka consumer, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_MASTERCHAIN_BROADCAST_LISTENER != 0 {
-            ss.push_str("masterchain broadcasts listener, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_MASTERCHAIN_CLIENT != 0 {
-            ss.push_str("masterchain client, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_PSS_KEEPER != 0 {
-            ss.push_str("persistent states storer, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_SHARDCHAIN_BROADCAST_LISTENER != 0 {
-            ss.push_str("shardchains broadcasts listener, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_SHARDCHAIN_CLIENT != 0 {
-            ss.push_str("shardchains client, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_SHARDSTATE_GC != 0 {
-            ss.push_str("shard states GC, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_TOP_SHARDBLOCKS_SENDER != 0 {
-            ss.push_str("top shard blocks sender, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_VALIDATOR_MANAGER != 0 {
-            ss.push_str("validator manager, ");
-        }
-        log::warn!("Next services are still stopping ({:04x}): {}", bitmap, ss);
-    }
-
-    pub fn acquire_stop(&self, mask: u32) {
-        self.stop.fetch_or(mask, Ordering::Relaxed);
-    }
-
-    pub fn check_stop(&self) -> bool {
-        (self.stop.load(Ordering::Relaxed) & Engine::MASK_STOP) != 0 
-    }
-
-    pub fn release_stop(&self, mask: u32) {
-        self.stop.fetch_and(!mask, Ordering::Relaxed);
-    }
-}
-
 impl Engine {
 
     // Masks for services
@@ -423,8 +350,6 @@ impl Engine {
     pub const MASK_SERVICE_SHARDSTATE_GC: u32                  = 0x0040;
     pub const MASK_SERVICE_TOP_SHARDBLOCKS_SENDER: u32         = 0x0080;
     pub const MASK_SERVICE_VALIDATOR_MANAGER: u32              = 0x0100;
-    pub const MASK_SERVICE_BOOT: u32                           = 0x0200;
-    pub const MASK_SERVICE_DB_RESTORE: u32                     = 0x0400;
 
     // Sync status
     pub const SYNC_STATUS_START_BOOT: u32           = 0x0001;
@@ -435,15 +360,13 @@ impl Engine {
     pub const SYNC_STATUS_FINISH_SYNC: u32          = 0x0006;
 
     const MASK_STOP: u32 = 0x80000000; 
-    const TIMEOUT_STOP_MS: u64 = 1000; 
+    const TIMEOUT_STOP_MS: u64 = 100; 
     const TIMEOUT_TELEMETRY_SEC: u64 = 30;
 
     pub async fn new(
         general_config: TonNodeConfig, 
         ext_db: Vec<Arc<dyn ExternalDb>>, 
-        initial_sync_disabled : bool,
-        force_check_db: bool,
-        stopper: Arc<Stopper>
+        initial_sync_disabled : bool
     ) -> Result<Arc<Self>> {
 
         log::info!("Creating engine...");
@@ -460,26 +383,15 @@ impl Engine {
             cells_gc_interval_sec: gc_interval_sec
         };
 
-        stopper.acquire_stop(Self::MASK_SERVICE_DB_RESTORE);
-        let check_stop = || {
-            if stopper.check_stop() {
-                fail!("DB restore was stopped")
-            }
-            Ok(())
-        };
-        let db = InternalDb::with_update(
+        let db = InternalDb::new(
             db_config,
             #[cfg(feature = "telemetry")]
             engine_telemetry.clone(),
-            engine_allocated.clone(),
-            &check_stop
+            engine_allocated.clone()
         ).await?;
 
         // TODO correct workchain id needed here, but it will be known later
-        let db = Arc::new(
-            check_db(db, 0, general_config.restore_db(), force_check_db, &check_stop).await?
-        );
-        stopper.release_stop(Self::MASK_SERVICE_DB_RESTORE);
+        let db = Arc::new(check_db(db, 0, general_config.restore_db()).await?);
 
         let global_config = general_config.load_global_config()?;
         let test_bundles_config = general_config.test_bundles_config().clone();
@@ -563,7 +475,7 @@ impl Engine {
             ),
             external_messages: MessagesPool::new(),
             servers: lockfree::queue::Queue::new(),
-            stopper,
+            stop: Arc::new(AtomicU32::new(0)),
             zero_state_id,
             init_mc_block_id,
             initial_sync_disabled,
@@ -610,21 +522,13 @@ impl Engine {
         Ok(engine)
     }
 
-    pub fn set_sync_status(&self, status: u32) {
-        self.sync_status.store(status, Ordering::Relaxed);
-    }
-
-    pub fn get_sync_status(&self) -> u32 {
-        self.sync_status.load(Ordering::Relaxed)
+    pub fn set_stop(&self) {
+        let stop = self.stop.fetch_or(Self::MASK_STOP, Ordering::Relaxed);
+        Self::log_stop_status(stop);
     }
 
     pub async fn wait_stop(self: Arc<Self>) {
-        // set stop flag
-        self.stopper.set_stop();
-
-        self.network.delete_overlays().await;
-
-        // stop servers
+        self.set_stop();
         while let Some(server) = self.servers.pop() {
             match server {
                 Server::ControlServer(server) => {
@@ -639,24 +543,77 @@ impl Engine {
                 }
             }
         }
-
-        // stop states GC
         let engine = self.clone();
         tokio::spawn(
             async move {
                  engine.db.stop_states_gc().await;
-                 engine.stopper.release_stop(Self::MASK_SERVICE_SHARDSTATE_GC);
+                 engine.release_stop(Self::MASK_SERVICE_SHARDSTATE_GC);
             }
         );
-
-        // wait while all node's services will stop
-        self.stopper.clone().wait_stop().await;
-
-        self.network.stop_adnl().await;
+        loop {
+            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_STOP_MS)).await;
+            let stop = self.stop.load(Ordering::Relaxed) & !Self::MASK_STOP;
+            Self::log_stop_status(stop);
+            if (self.stop.load(Ordering::Relaxed) & !Self::MASK_STOP) == 0 {
+                break
+            }
+        }
+        log::info!("Stopping network...");
+        self.network.stop().await;
+        log::info!("Stopped network");
     }
 
-    pub fn stopper(&self) -> &Stopper {
-        &self.stopper
+    pub fn log_stop_status(bitmap: u32) {
+        let mut ss = String::new();
+        #[cfg(feature = "external_db")]
+        if bitmap & Self::MASK_SERVICE_KAFKA_CONSUMER != 0 {
+            ss.push_str("kafka consumer, ");
+        }
+        if bitmap & Self::MASK_SERVICE_MASTERCHAIN_BROADCAST_LISTENER != 0 {
+            ss.push_str("masterchain broadcasts listener, ");
+        }
+        if bitmap & Self::MASK_SERVICE_MASTERCHAIN_CLIENT != 0 {
+            ss.push_str("masterchain client, ");
+        }
+        if bitmap & Self::MASK_SERVICE_PSS_KEEPER != 0 {
+            ss.push_str("persistent states storer, ");
+        }
+        if bitmap & Self::MASK_SERVICE_SHARDCHAIN_BROADCAST_LISTENER != 0 {
+            ss.push_str("shardchains broadcasts listener, ");
+        }
+        if bitmap & Self::MASK_SERVICE_SHARDCHAIN_CLIENT != 0 {
+            ss.push_str("shardchains client, ");
+        }
+        if bitmap & Self::MASK_SERVICE_SHARDSTATE_GC != 0 {
+            ss.push_str("shard states GC, ");
+        }
+        if bitmap & Self::MASK_SERVICE_TOP_SHARDBLOCKS_SENDER != 0 {
+            ss.push_str("top shard blocks sender, ");
+        }
+        if bitmap & Self::MASK_SERVICE_VALIDATOR_MANAGER != 0 {
+            ss.push_str("validator manager, ");
+        }
+        log::warn!("Next services are still stopping ({:04x}): {}", bitmap, ss);
+    }
+
+    pub fn set_sync_status(&self, status: u32) {
+        self.sync_status.store(status, Ordering::Relaxed);
+    }
+
+    pub fn get_sync_status(&self) -> u32 {
+        self.sync_status.load(Ordering::Relaxed)
+    }
+
+    pub fn acquire_stop(&self, mask: u32) {
+        self.stop.fetch_or(mask, Ordering::Relaxed);
+    }
+
+    pub fn check_stop(&self) -> bool {
+        (self.stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 
+    }
+
+    pub fn release_stop(&self, mask: u32) {
+        self.stop.fetch_and(!mask, Ordering::Relaxed);
     }
 
     pub fn register_server(&self, server: Server) {
@@ -1501,6 +1458,9 @@ impl Engine {
             || error!("Cannot load handle for PSS keeper block {}", pss_keeper_block)
         )?;
         loop {
+            if engine.check_stop() {
+                break
+            }
             let mc_state = engine.load_state(handle.id()).await?;
             if handle.is_key_block()? {
                 let is_persistent_state = if handle.id().seq_no() == 0 {
@@ -1526,10 +1486,7 @@ impl Engine {
                 } else {
                     log::trace!("persistent_states_keeper: saving {}", handle.id());
                     let now = std::time::Instant::now();
-                    engine.clone().store_persistent_state_attempts(&handle, &mc_state).await;
-                    if engine.check_stop() {
-                        break
-                    }
+                    engine.store_persistent_state_attempts(&handle, &mc_state).await;
                     log::trace!("persistent_states_keeper: saved {} TIME {}ms",
                         handle.id(), now.elapsed().as_millis());
 
@@ -1557,10 +1514,8 @@ impl Engine {
                         let handle = engine.load_block_handle(&block_id)?.ok_or_else(
                             || error!("Cannot load handle for PSS keeper shard block {}", block_id)
                         )?;
-                        engine.clone().store_persistent_state_attempts(&handle, &ss).await;
-                        if engine.check_stop() {
-                            break
-                        }
+                        engine.store_persistent_state_attempts(&handle, &ss).await;
+
                         log::trace!("persistent_states_keeper: saved {} TIME {}ms",
                             handle.id(), now.elapsed().as_millis());
                     };
@@ -1577,18 +1532,12 @@ impl Engine {
                         let expired = ttl <= engine.now();
                         (ttl, expired)
                     };
-                    if let Err(e) = engine.db.shard_state_persistent_gc(calc_ttl, &engine.zero_state_id).await {
+                    if let Err(e) = engine.db.shard_state_persistent_gc(calc_ttl).await {
                         log::warn!("persistent states gc: {}", e);
                     }
                 }
             }
-            handle = loop {
-                if let Ok(h) = engine.wait_next_applied_mc_block(&handle, Some(500)).await {
-                    break h.0;
-                } else if engine.check_stop() {
-                    return Ok(());
-                }
-            };
+            handle = engine.wait_next_applied_mc_block(&handle, None).await?.0;
             engine.save_pss_keeper_mc_block_id(handle.id())?;
         }
         Ok(())
@@ -1676,30 +1625,15 @@ impl Engine {
         });
     }
 
-    pub async fn store_persistent_state_attempts(
-        self: Arc<Self>,
-        handle: &Arc<BlockHandle>,
-        ss: &Arc<ShardStateStuff>,
-    ) {
+    pub async fn store_persistent_state_attempts(&self, handle: &Arc<BlockHandle>, ss: &ShardStateStuff) {
         let mut attempts = 1;
-        loop {
-            let engine = self.clone();
-            match self.db.store_shard_state_persistent(
-                handle,
-                ss,
-                None,
-                Box::new(move || engine.check_stop())
-            ).await {
-                Ok(_) => return,
-                Err(e) => {
-                    log::error!("CRITICAL Error saving persistent state (attempt: {}): {:?}", attempts, e);
-                    if self.check_stop() {
-                        return;
-                    }
-                    attempts += 1;
-                    futures_timer::Delay::new(Duration::from_millis(5000)).await;
-                }
+        while let Err(e) = self.db.store_shard_state_persistent(handle, ss, None).await {
+            log::error!("CRITICAL Error saving persistent state (attempt: {}): {:?}", attempts, e);
+            if self.check_stop() {
+                break
             }
+            attempts += 1;
+            futures_timer::Delay::new(Duration::from_millis(5000)).await;
         }
     }
 
@@ -1815,11 +1749,7 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
         Ok(id) => (id, false),
         Err(err) => {
             log::debug!("before cold boot: {}", err);
-
-            engine.acquire_stop(Engine::MASK_SERVICE_BOOT);
-            let id = boot::cold_boot(engine.clone()).await;
-            engine.release_stop(Engine::MASK_SERVICE_BOOT);
-            let id = id?;
+            let id = boot::cold_boot(engine.clone()).await?;
             engine.save_last_applied_mc_block_id(&id)?;
             (id, true)
         }
@@ -1871,9 +1801,7 @@ pub async fn run(
     zerostate_path: Option<&str>, 
     ext_db: Vec<Arc<dyn ExternalDb>>,
     validator_runtime: tokio::runtime::Handle, 
-    initial_sync_disabled : bool,
-    force_check_db: bool,
-    stopper: Arc<Stopper>,
+    initial_sync_disabled : bool
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
 
     log::info!("Engine::run");
@@ -1883,7 +1811,7 @@ pub async fn run(
     let vm_config = ValidatorManagerConfig::read_configs(node_config.unsafe_catchain_patches_files());
 
     // Create engine
-    let engine = Engine::new(node_config, ext_db, initial_sync_disabled, force_check_db, stopper).await?;
+    let engine = Engine::new(node_config, ext_db, initial_sync_disabled).await?;
 
     #[cfg(feature = "telemetry")]
     telemetry_logger(engine.clone());

@@ -47,7 +47,7 @@ mod jaeger {
 }
 
 use crate::{
-    config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, STATSD, Stopper}, 
+    config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, STATSD}, 
     jaeger::init_jaeger, internal_db::restore::set_graceful_termination,
 };
 
@@ -318,9 +318,7 @@ async fn start_engine(
     config: TonNodeConfig, 
     zerostate_path: Option<&str>, 
     validator_runtime: tokio::runtime::Handle, 
-    initial_sync_disabled: bool,
-    force_check_db: bool,
-    stopper: Arc<Stopper>
+    initial_sync_disabled: bool
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
     let external_db = start_external_db(&config)?;
     crate::engine::run(
@@ -328,9 +326,7 @@ async fn start_engine(
         zerostate_path, 
         external_db, 
         validator_runtime, 
-        initial_sync_disabled,
-        force_check_db,
-        stopper,
+        initial_sync_disabled
     ).await
 }
 
@@ -363,17 +359,11 @@ fn main() {
             .short("i")
             .long("initial-sync-disabled")
             .value_name("initial sync disable flag")
-            .help("use this flag to sync from zero_state"))
-        .arg(clap::Arg::with_name("force_check_db")
-            .short("f")
-            .long("force-check-db")
-            .value_name("force check db flag")
-            .help("start check & restore db process forcely"));
+            .help("use this flag to sync from zero_state"));
 
     let matches = app.get_matches();
 
     let initial_sync_disabled = matches.is_present("initial_sync_disabled");
-    let force_check_db = matches.is_present("force_check_db");
 
     let config_dir_path = match matches.value_of("config") {
         Some(config) => {
@@ -468,13 +458,6 @@ fn main() {
         }
     );
 
-    let stopper = Arc::new(Stopper::new());
-    let stopper1 = stopper.clone();
-    ctrlc::set_handler(move || {
-        log::warn!("Got SIGINT, starting node's safe stopping...");
-        stopper1.set_stop();
-    }).expect("Error setting termination signals handler");
-
     let validator_rt_handle = validator_runtime.handle().clone();
     let db_dir = config.internal_db_path().to_string();
     runtime.block_on(async move {
@@ -482,24 +465,28 @@ fn main() {
             config, 
             zerostate_path, 
             validator_rt_handle,
-            initial_sync_disabled,
-            force_check_db,
-            stopper.clone(),
+            initial_sync_disabled
         ).await {
-            Err(e) => {
-                if stopper.check_stop() {
-                    log::warn!("Node stopped ({})", e);
-                    set_graceful_termination(&db_dir);
-                } else {
-                    log::error!("Can't start node's Engine: {:?}", e);
-                }
-            }
+            Err(e) => log::error!("Can't start node's Engine: {:?}", e),
             Ok((engine, join_handle)) => {
+
+                log::trace!("Engine launched, set SIGINT handler");
+
+                let engine1 = engine.clone();
+                ctrlc::set_handler(move || {
+                    log::warn!("Got SIGINT, starting node's safe stopping...");
+                    engine1.set_stop();
+
+                }).expect("Error setting termination signals handler");
+
                 join_handle.await.ok();
 
                 log::warn!("Still safe stopping node...");
+
                 engine.wait_stop().await;
+                
                 log::warn!("Node stopped");
+
                 set_graceful_termination(&db_dir);
             }
         }

@@ -349,7 +349,7 @@ pub trait EngineOperations : Sync + Send {
         master_id: &BlockIdExt,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
         attempts: Option<usize>
-    ) -> Result<(Arc<ShardStateStuff>, Arc<Vec<u8>>)> {
+    ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         unimplemented!()
     }
     async fn download_zerostate(

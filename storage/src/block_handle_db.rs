@@ -56,7 +56,6 @@ pub struct BlockHandle {
     meta: BlockMeta,
     block_file_lock: tokio::sync::RwLock<()>,
     proof_file_lock: tokio::sync::RwLock<()>,
-    saving_state_lock: tokio::sync::Mutex<()>,
     block_handle_cache: Arc<BlockHandleCache>,
     #[cfg(feature = "telemetry")]
     got_by_broadcast: AtomicBool,
@@ -76,7 +75,6 @@ impl BlockHandle {
             meta,
             block_file_lock: tokio::sync::RwLock::new(()),
             proof_file_lock: tokio::sync::RwLock::new(()),
-            saving_state_lock: tokio::sync::Mutex::new(()),
             block_handle_cache,
             #[cfg(feature = "telemetry")]
             got_by_broadcast: AtomicBool::new(false),
@@ -337,10 +335,6 @@ impl BlockHandle {
         &self.proof_file_lock
     }
 
-    pub fn saving_state_lock(&self) -> &tokio::sync::Mutex<()>  {
-        &self.saving_state_lock
-    }
-
 //    #[inline]
 //    fn flags(&self) -> u32 {
 //        self.meta.flags()
@@ -547,10 +541,6 @@ impl BlockHandleStorage {
             }
         };
         Ok(ret)
-    }
-
-    pub fn is_empty(&self) -> Result<bool> {
-        self.handle_db.is_empty()
     }
 
     pub fn load_full_node_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>> {

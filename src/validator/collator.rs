@@ -13,55 +13,55 @@
 
 #![allow(dead_code, unused_variables)]
 
-use super::{validator_utils::calc_subset_for_workchain, BlockCandidate, CollatorSettings, McData};
+use adnl::common::Wait;
+use std::{
+    cmp::{min, max},
+    collections::{HashMap, HashSet, BinaryHeap},
+    ops::Deref,
+    sync::{atomic::{Ordering, AtomicU64, AtomicBool}, Arc},
+    time::{Instant, Duration},
+};
 use crate::{
+    CHECK,
     engine_traits::EngineOperations,
-    ext_messages::EXT_MESSAGES_TRACE_TARGET,
-    rng::random::secure_256_bits,
     shard_state::ShardStateStuff,
     types::{
         accounts::ShardAccountStuff,
         limits::BlockLimitStatus,
-        messages::{MsgEnqueueStuff, MsgEnvelopeStuff},
-        top_block_descr::{cmp_shard_block_descr, Mode as TbdMode, TopBlockDescrStuff},
-    },
-    validating_utils::{
-        check_cur_validator_set, check_this_shard_mc_info, may_update_shard_block_info,
-        supported_capabilities, supported_version, update_shard_block_info,
-        update_shard_block_info2,
+        messages::{MsgEnvelopeStuff, MsgEnqueueStuff},
+        top_block_descr::{Mode as TbdMode, TopBlockDescrStuff, cmp_shard_block_descr},
     },
     validator::out_msg_queue::{MsgQueueManager, OutMsgQueueInfoStuff},
-    CHECK,
-};
-use adnl::common::Wait;
-use futures::try_join;
-use rand::Rng;
-use std::{
-    cmp::{max, min},
-    collections::{BinaryHeap, HashMap, HashSet},
-    ops::Deref,
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+    validating_utils::{
+        check_this_shard_mc_info, check_cur_validator_set, may_update_shard_block_info,
+        update_shard_block_info, update_shard_block_info2, supported_version,
+        supported_capabilities,
     },
-    time::{Duration, Instant},
+    rng::random::secure_256_bits,
+    ext_messages::EXT_MESSAGES_TRACE_TARGET,
 };
+use super::{BlockCandidate, CollatorSettings, McData, validator_utils::calc_subset_for_workchain};
 use ton_block::{
-    AddSub, BlkPrevInfo, Block, BlockCreateStats, BlockExtra, BlockIdExt, BlockInfo, CommonMsgInfo,
-    ConfigParams, CopyleftRewards, CreatorStats, CurrencyCollection, Deserializable, ExtBlkRef,
-    FutureSplitMerge, GlobalCapabilities, GlobalVersion, Grams, HashmapAugType, InMsg, InMsgDescr,
-    InternalMessageHeader, KeyExtBlkRef, KeyMaxLt, Libraries, McBlockExtra, McShardRecord,
-    McStateExtra, MerkleUpdate, Message, MsgAddressInt, OutMsg, OutMsgDescr, OutMsgQueueKey,
-    ParamLimitIndex, Serializable, ShardAccount, ShardAccountBlocks, ShardAccounts, ShardDescr,
-    ShardFees, ShardHashes, ShardIdent, ShardStateSplit, ShardStateUnsplit, TopBlockDescrSet,
-    Transaction, TransactionTickTock, UnixTime32, ValidatorSet, ValueFlow, WorkchainDescr,
-    Workchains,
+    AddSub, BlockExtra, BlockIdExt, ExtBlkRef,
+    Block, BlockInfo, CurrencyCollection, Grams, HashmapAugType, Libraries,
+    MerkleUpdate, UnixTime32, ShardStateUnsplit, ShardFees, ShardAccountBlocks,
+    Message, Serializable, ShardAccount, ShardAccounts,
+    ShardIdent, Transaction, ValueFlow, InternalMessageHeader, MsgAddressInt,
+    McStateExtra, BlockCreateStats, ParamLimitIndex,
+    InMsg, InMsgDescr, ConfigParams, TransactionTickTock, McBlockExtra,
+    OutMsg, OutMsgDescr, OutMsgQueueKey, TopBlockDescrSet,
+    ValidatorSet, ShardHashes, CommonMsgInfo, Deserializable,
+    GlobalCapabilities, McShardRecord, ShardDescr, FutureSplitMerge, Workchains, WorkchainDescr,
+    CreatorStats, KeyExtBlkRef, KeyMaxLt, ShardStateSplit, GlobalVersion, BlkPrevInfo,
 };
 use ton_executor::{
-    BlockchainConfig, ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor,
-    TransactionExecutor,
+    BlockchainConfig, OrdinaryTransactionExecutor, TickTockTransactionExecutor, TransactionExecutor, ExecuteParams,
 };
-use ton_types::{error, fail, AccountId, Cell, HashmapType, Result, UInt256, UsageTree};
+use ton_types::{
+    error, fail, Cell, Result, AccountId, HashmapType, UInt256, UsageTree,
+};
+use futures::try_join;
+use rand::Rng;
 
 #[cfg(feature = "metrics")]
 use crate::engine::STATSD;
@@ -91,7 +91,6 @@ pub struct PrevData {
     total_validator_fees: CurrencyCollection,
     overload_history: u64,
     underload_history: u64,
-    state_copyleft_rewards: CopyleftRewards,
 }
 
 impl PrevData {
@@ -105,13 +104,6 @@ impl PrevData {
         let mut gen_lt = states[0].state().gen_lt();
         let mut accounts = states[0].state().read_accounts()?;
         let mut total_validator_fees = states[0].state().total_validator_fees().clone();
-        let state_copyleft_rewards = if states[0].shard().is_masterchain() {
-            let state_copyleft_rewards = states[0].state().copyleft_rewards()?;
-            log::trace!("Masterchain copyleft reward count: {}", state_copyleft_rewards.len()?);
-            state_copyleft_rewards.clone()
-        } else {
-            CopyleftRewards::default()
-        };
         let mut overload_history = 0;
         let mut underload_history = 0;
         if let Some(state) = states.get(1) {
@@ -140,7 +132,6 @@ impl PrevData {
             total_validator_fees,
             overload_history,
             underload_history,
-            state_copyleft_rewards,
         })
     }
 
@@ -163,7 +154,6 @@ impl PrevData {
 enum AsyncMessage {
     Recover(Message),
     Mint(Message),
-    Copyleft(Message),
     Ext(Message),
     Int(MsgEnqueueStuff, bool),
     New(MsgEnvelopeStuff, Cell),
@@ -224,7 +214,6 @@ struct CollatorData {
     shards: Option<ShardHashes>,
     mint_msg: Option<InMsg>,
     recover_create_msg: Option<InMsg>,
-    copyleft_msgs: Vec<InMsg>,
 
     // fields with default values
     skip_topmsgdescr: bool,
@@ -286,7 +275,6 @@ impl CollatorData {
             shards: None,
             mint_msg: None,
             recover_create_msg: None,
-            copyleft_msgs: Default::default(),
             skip_topmsgdescr: false,
             skip_extmsg: false,
             shard_conf_adjusted: false,
@@ -451,14 +439,6 @@ impl CollatorData {
             shard.descr.fees_collected.clone(),
             shard.descr.funds_created.clone()
         )
-    }
-
-    pub fn store_workchain_copyleft_rewards(&mut self, shard: &McShardRecord) -> Result<()> {
-        self.value_flow.copyleft_rewards.merge_rewards(&shard.descr.copyleft_rewards)
-    }
-
-    pub fn get_workchains_copyleft_rewards(&self) -> &CopyleftRewards {
-        &self.value_flow.copyleft_rewards
     }
 
     pub fn register_shard_block_creators(&mut self, creators: Vec<UInt256>) -> Result<()> {
@@ -792,9 +772,6 @@ impl ExecutionManager {
             AsyncMessage::Recover(msg) | AsyncMessage::Mint(msg) | AsyncMessage::Ext(msg) => {
                 (Box::new(OrdinaryTransactionExecutor::new(config)), Some(msg))
             }
-            AsyncMessage::Copyleft(msg) => {
-                (Box::new(OrdinaryTransactionExecutor::new(config)), Some(msg))
-            }
             AsyncMessage::TickTock(tt) => {
                 (Box::new(TickTockTransactionExecutor::new(config, tt.clone())), None)
             }
@@ -861,10 +838,6 @@ impl ExecutionManager {
                 let env = MsgEnvelopeStuff::new(msg.clone(), &ShardIdent::masterchain(), Grams::default(), false)?;
                 Some(InMsg::immediatelly(env.inner(), &tr, Grams::default())?)
             }
-            AsyncMessage::Copyleft(msg) => {
-                let env = MsgEnvelopeStuff::new(msg.clone(), &ShardIdent::masterchain(), Grams::default(), false)?;
-                Some(InMsg::immediatelly(env.inner(), &tr, Grams::default())?)
-            }
             AsyncMessage::Ext(msg) => {
                 let in_msg = InMsg::external(&msg, &tr)?;
                 Some(in_msg)
@@ -885,7 +858,6 @@ impl ExecutionManager {
         match new_msg.deref() {
             AsyncMessage::Mint(_) => collator_data.mint_msg = in_msg_opt,
             AsyncMessage::Recover(_) => collator_data.recover_create_msg = in_msg_opt,
-            AsyncMessage::Copyleft(_) => collator_data.copyleft_msgs.push(in_msg_opt.ok_or_else(|| error!("Can't unwrap `in_msg_opt`"))?),
             _ => ()
         }
         collator_data.block_full |= !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
@@ -1253,8 +1225,6 @@ impl Collator {
                 mc_data, prev_data, collator_data, &mut exec_manager).await?;
         }
 
-        let new_state_copyleft_rewards = self.send_copyleft_rewards(mc_data, prev_data, collator_data, &mut exec_manager).await?;
-
         // merge prepare / merge install
         // ** will be implemented later **
 
@@ -1302,7 +1272,7 @@ impl Collator {
         //collator_data.block_limit_status.dump_block_size();
 
         // serialize everything
-        self.finalize_block(mc_data, prev_data, collator_data, exec_manager, new_state_copyleft_rewards).await
+        self.finalize_block(mc_data, prev_data, collator_data, exec_manager).await
     }
 
     fn clean_out_msg_queue(
@@ -1718,8 +1688,6 @@ impl Collator {
                             collator_data.register_shard_block_creators(sh_bd.get_creator_list(chain_len)?)?;
                             collator_data.add_top_block_descriptor(prev_bd.clone());
                             collator_data.add_top_block_descriptor(sh_bd.clone());
-                            collator_data.store_workchain_copyleft_rewards(&prev_descr)?;
-                            collator_data.store_workchain_copyleft_rewards(&descr)?;
                             tb_act += 2;
                             //prev_bd.clear();
                             //prev_descr.clear();
@@ -1759,7 +1727,6 @@ impl Collator {
                         //descr.clear();
                     } else {
                         collator_data.store_shard_fees(&descr)?;
-                        collator_data.store_workchain_copyleft_rewards(&descr)?;
                         collator_data.register_shard_block_creators(sh_bd.get_creator_list(chain_len)?)?;
                         collator_data.update_shards_max_end_lt(end_lt);
                         log::debug!("{}: updated top shard block information with {}",
@@ -2244,60 +2211,15 @@ impl Collator {
         }
     }
 
-    async fn send_copyleft_rewards(
-        &self,
-        mc_data: &McData,
-        prev_data: &PrevData,
-        collator_data: &mut CollatorData,
-        exec_manager: &mut ExecutionManager
-    ) -> Result<CopyleftRewards> {
-        if self.shard.is_masterchain() {
-            if let Ok(copyleft_config) = mc_data.config().copyleft_config() {
-                let mut new_state_copyleft_rewards = prev_data.state_copyleft_rewards.clone();
-                let send_rewards = new_state_copyleft_rewards.merge_rewards_with_threshold(
-                    &collator_data.get_workchains_copyleft_rewards(), &copyleft_config.copyleft_reward_threshold
-                )?;
-                log::debug!("send copyleft rewards count: {}", send_rewards.len());
-
-                for (account_id, value) in send_rewards {
-                    log::trace!(
-                        "{}: create copyleft reward transaction: reward {} to account {:x}",
-                        self.collated_block_descr,
-                        value,
-                        account_id
-                    );
-                    let mut hdr = InternalMessageHeader::with_addresses(
-                        MsgAddressInt::with_standart(None, -1, [0; 32].into())?,
-                        MsgAddressInt::with_standart(None, -1, account_id.clone())?,
-                        CurrencyCollection::from_grams(value)
-                    );
-                    hdr.ihr_disabled = true;
-                    hdr.bounce = false;
-                    hdr.created_lt = collator_data.start_lt()?;
-                    hdr.created_at = UnixTime32(collator_data.gen_utime);
-                    let msg = Message::with_int_header(hdr);
-                    exec_manager.execute(account_id, AsyncMessage::Copyleft(msg), prev_data, collator_data).await?;
-
-                    self.check_stop_flag()?;
-                }
-                exec_manager.wait_transactions(collator_data).await?;
-
-                return Ok(new_state_copyleft_rewards)
-            }
-        }
-        Ok(CopyleftRewards::default())
-    }
-
     //
     // finalize
     //
     async fn finalize_block(
-        &self,
-        mc_data: &McData,
-        prev_data: &PrevData,
+        &self, 
+        mc_data: &McData, 
+        prev_data: &PrevData, 
         collator_data: &mut CollatorData,
-        mut exec_manager: ExecutionManager,
-        new_state_copyleft_rewards: CopyleftRewards,
+        mut exec_manager: ExecutionManager
     ) -> Result<(BlockCandidate, ShardStateUnsplit, ExecutionManager)> {
         log::trace!("{}: finalize_block", self.collated_block_descr);
 
@@ -2313,7 +2235,6 @@ impl Collator {
         };
         let mut changed_accounts = HashMap::new();
         let mut new_config_opt = None;
-        let mut current_workchain_copyleft_rewards = CopyleftRewards::default();
         for (account_id, (sender, handle)) in exec_manager.changed_accounts.drain() {
             std::mem::drop(sender);
             let mut shard_acc = handle.await
@@ -2332,7 +2253,6 @@ impl Collator {
             if !acc_block.transactions().is_empty() {
                 accounts.insert(&acc_block)?;
             }
-            current_workchain_copyleft_rewards.merge_rewards(shard_acc.copyleft_rewards())?;
             changed_accounts.insert(account_id, shard_acc);
         }
 
@@ -2343,8 +2263,6 @@ impl Collator {
         value_flow.exported = collator_data.out_msgs.root_extra().clone();
         value_flow.fees_collected = accounts.root_extra().clone();
         value_flow.fees_collected.grams.add(&collator_data.in_msgs.root_extra().fees_collected)?;
-        log::trace!("Current workchain copyleft rewards count in finalize block: {}", current_workchain_copyleft_rewards.len()?);
-        value_flow.copyleft_rewards = current_workchain_copyleft_rewards;
 
         // value_flow.fees_collected.grams.add(&out_msg_dscr.root_extra().grams)?; // TODO: Why only grams?
 
@@ -2357,7 +2275,7 @@ impl Collator {
 
         let (out_msg_queue_info, min_ref_mc_seqno) = collator_data.out_msg_queue_info.serialize()?;
         collator_data.update_min_mc_seqno(min_ref_mc_seqno);
-        let (mut mc_state_extra, master_ref) = if self.shard.is_masterchain() {
+        let (mc_state_extra, master_ref) = if self.shard.is_masterchain() {
             let (extra, min_seqno) = self.create_mc_state_extra(prev_data, collator_data, new_config_opt)?;
             collator_data.update_min_mc_seqno(min_seqno);
             (Some(extra), None)
@@ -2397,11 +2315,6 @@ impl Collator {
         log::trace!("{}: finalize_block: calc new state", self.collated_block_descr);
         // Calc new state, then state update
 
-        log::trace!("copyleft rewards count from workchains: {}", collator_data.get_workchains_copyleft_rewards().len()?);
-        if self.shard.is_masterchain() && !value_flow.copyleft_rewards.is_empty() {
-            log::warn!("copyleft rewards in masterchain must be empty")
-        }
-
         let mut new_state = ShardStateUnsplit::with_ident(self.shard.clone());
         new_state.set_global_id(prev_data.state().state().global_id());
         new_state.set_seq_no(self.new_block_id_part.seq_no);
@@ -2415,10 +2328,6 @@ impl Collator {
         new_state.write_out_msg_queue_info(&out_msg_queue_info)?;
         new_state.set_master_ref(master_ref);
         new_state.set_total_balance(new_accounts.root_extra().balance().clone());
-        if let Some(mc_state_extra) = &mut mc_state_extra {
-            log::trace!("New unsplit copyleft rewards count: {}", new_state_copyleft_rewards.len()?);
-            mc_state_extra.state_copyleft_rewards = new_state_copyleft_rewards;
-        }
         let mut total_validator_fees = prev_data.total_validator_fees().clone();
         // total_validator_fees.add(&value_flow.created)?;
         // total_validator_fees.add(&accounts.root_extra())?;
@@ -2469,7 +2378,6 @@ impl Collator {
             *mc_block_extra.fees_mut() = collator_data.shard_fees.clone();
             mc_block_extra.write_recover_create_msg(collator_data.recover_create_msg.as_ref())?;
             mc_block_extra.write_mint_msg(collator_data.mint_msg.as_ref())?;
-            mc_block_extra.write_copyleft_msgs(&collator_data.copyleft_msgs)?;
             if mc_state_extra.after_key_block {
                 info.set_key_block(true);
                 *mc_block_extra.config_mut() = Some(mc_state_extra.config().clone());
@@ -2668,8 +2576,7 @@ impl Collator {
                 after_key_block: is_key_block,
                 last_key_block,
                 block_create_stats, 
-                global_balance,
-                state_copyleft_rewards: CopyleftRewards::default(),
+                global_balance
             }, 
             min_ref_mc_seqno
         ))

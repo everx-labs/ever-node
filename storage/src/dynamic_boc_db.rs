@@ -86,11 +86,7 @@ impl DynamicBocDb {
     }
 
     /// Converts tree of cells into DynamicBoc
-    pub fn save_as_dynamic_boc(
-        self: &Arc<Self>,
-        root_cell: &dyn CellImpl,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
-    ) -> Result<usize> {
+    pub fn save_as_dynamic_boc(self: &Arc<Self>, root_cell: &dyn CellImpl) -> Result<usize> {
         let mut transaction = self.db.begin_transaction()?;
         let mut visited = fnv::FnvHashSet::default();
         let root_id = CellId::new(root_cell.hash(MAX_LEVEL));
@@ -99,8 +95,7 @@ impl DynamicBocDb {
             root_cell,
             transaction.as_mut(),
             &mut visited,
-            &root_id,
-            check_stop
+            &root_id
         )?;
 
         transaction.commit()?;
@@ -198,9 +193,7 @@ impl DynamicBocDb {
         transaction: &mut dyn KvcTransaction<CellId>,
         visited: &mut fnv::FnvHashSet<CellId>,
         root_id: &CellId,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
     ) -> Result<usize> {
-        check_stop()?;
         let cell_id = CellId::new(cell.hash(MAX_LEVEL));
         if visited.contains(&cell_id) {
             Ok(0)
@@ -220,8 +213,7 @@ impl DynamicBocDb {
                     cell.reference(i)?.deref(),
                     transaction,
                     visited,
-                    root_id,
-                    check_stop
+                    root_id
                 )?;
             }
 

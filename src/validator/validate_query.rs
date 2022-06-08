@@ -11,51 +11,55 @@
 * limitations under the License.
 */
 
-use super::{validator_utils::calc_subset_for_workchain, BlockCandidate, McData};
 use crate::{
+    CHECK,
     block::BlockStuff,
     engine_traits::EngineOperations,
     error::NodeError,
+    validator::out_msg_queue::MsgQueueManager,
     shard_state::ShardStateStuff,
     types::{
         messages::{count_matching_bits, perform_hypercube_routing, MsgEnqueueStuff},
-        top_block_descr::{Mode as TopBlockDescrMode, TopBlockDescrStuff},
+        top_block_descr::{TopBlockDescrStuff, Mode as TopBlockDescrMode},
     },
     validating_utils::{
-        check_cur_validator_set, check_this_shard_mc_info, may_update_shard_block_info,
-        supported_capabilities, supported_version,
+        check_this_shard_mc_info, check_cur_validator_set, may_update_shard_block_info,
+        supported_version, supported_capabilities,
     },
-    validator::out_msg_queue::MsgQueueManager,
-    CHECK,
 };
+use super::{BlockCandidate, McData, validator_utils::calc_subset_for_workchain};
 use adnl::common::add_unbound_object_to_map_with_update;
-use std::{
-    collections::HashMap,
-    io::Cursor,
-    sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
-        Arc,
-    },
-};
+use std::{collections::HashMap, io::Cursor, sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc}};
 use ton_block::{
-    Account, AccountBlock, AccountIdPrefixFull, AccountStatus, AddSub, BlockCreateStats,
-    BlockError, BlockExtra, BlockIdExt, BlockInfo, BlockLimits, ConfigParamEnum, ConfigParams,
-    CopyleftRewards, Counters, CreatorStats, CurrencyCollection, DepthBalanceInfo, Deserializable,
-    EnqueuedMsg, GlobalCapabilities, Grams, HashmapAugType, InMsg, InMsgDescr, KeyExtBlkRef,
-    KeyMaxLt, LibDescr, Libraries, McBlockExtra, McShardRecord, McStateExtra, MerkleProof,
-    MerkleUpdate, Message, MsgAddressInt, MsgEnvelope, OutMsg, OutMsgDescr, OutMsgQueueKey,
-    Serializable, ShardAccount, ShardAccountBlocks, ShardAccounts, ShardFeeCreated, ShardHashes,
-    ShardIdent, StateInitLib, TopBlockDescrSet, TrComputePhase, Transaction, TransactionDescr,
-    ValidatorSet, ValueFlow, WorkchainDescr, INVALID_WORKCHAIN_ID, MASTERCHAIN_ID, MAX_SPLIT_DEPTH,
-    U15,
+    AddSub, BlockError, HashmapAugType, Deserializable, Serializable,
+    CurrencyCollection,
+    ConfigParams, ConfigParamEnum,
+    BlockExtra, BlockInfo, BlockIdExt,
+    KeyExtBlkRef,
+    McBlockExtra, McShardRecord, McStateExtra,
+    MerkleUpdate,
+    BlockCreateStats, U15, DepthBalanceInfo,
+    ShardIdent,
+    ValidatorSet,
+    TopBlockDescrSet,
+    ValueFlow, WorkchainDescr, Counters, CreatorStats, AccountIdPrefixFull,
+    OutMsg,
+    Message, MsgEnvelope, EnqueuedMsg, ShardHashes, MerkleProof, StateInitLib,
+    KeyMaxLt, LibDescr, Transaction,
+    InMsg, MsgAddressInt,
+    InMsgDescr, OutMsgDescr, ShardAccount, ShardAccountBlocks, ShardAccounts,
+    Account, AccountBlock, AccountStatus,
+    ShardFeeCreated, TransactionDescr, OutMsgQueueKey, BlockLimits,
+    GlobalCapabilities, TrComputePhase, Libraries,
+    INVALID_WORKCHAIN_ID, MASTERCHAIN_ID, MAX_SPLIT_DEPTH,
 };
 use ton_executor::{
-    BlockchainConfig, CalcMsgFwdFees, ExecuteParams, OrdinaryTransactionExecutor,
-    TickTockTransactionExecutor, TransactionExecutor,
+    BlockchainConfig, CalcMsgFwdFees, OrdinaryTransactionExecutor, TickTockTransactionExecutor, 
+    TransactionExecutor, ExecuteParams
 };
 use ton_types::{
-    deserialize_cells_tree, fail, AccountId, Cell, CellType, HashmapType, Result, SliceData,
-    UInt256,
+    fail, 
+    AccountId, Cell, CellType, deserialize_cells_tree, HashmapType, Result, SliceData, UInt256
 };
 
 #[cfg(feature = "metrics")]
@@ -138,7 +142,6 @@ struct ValidateBase {
     out_msg_descr: OutMsgDescr,
     account_blocks: ShardAccountBlocks,
     recover_create_msg: Option<InMsg>,
-    copyleft_msgs: Vec<InMsg>,
     mint_msg: Option<InMsg>,
     // from collated_data
     top_shard_descr_dict: TopBlockDescrSet,
@@ -159,8 +162,6 @@ struct ValidateBase {
     next_state_accounts: ShardAccounts,
     next_state_extra: McStateExtra,
 
-    copyleft_rewards: Arc<lockfree::queue::Queue<(AccountId, Grams)>>,
-
     result: ValidateResult,
 }
 
@@ -175,12 +176,7 @@ impl ValidateBase {
         self.info.gen_utime().0
     }
     fn is_special_in_msg(&self, in_msg: &InMsg) -> bool {
-        let is_fee_msg = self.recover_create_msg.as_ref() == Some(in_msg) || self.mint_msg.as_ref() == Some(in_msg);
-        if is_fee_msg {
-            true
-        } else {
-            self.copyleft_msgs.iter().find(|&msg| msg == in_msg).is_some()
-        }
+        self.recover_create_msg.as_ref() == Some(in_msg) || self.mint_msg.as_ref() == Some(in_msg)
     }
     fn min_shard_ref_mc_seqno(&self) -> u32 {
         self.result.min_shard_ref_mc_seqno.load(Ordering::Relaxed)
@@ -435,7 +431,6 @@ impl ValidateQuery {
                 reject_query!("key_block must contain ConfigParams in McBlockExtra")
             }
             base.recover_create_msg = base.mc_extra.read_recover_create_msg()?;
-            base.copyleft_msgs = base.mc_extra.read_copyleft_msgs()?;
             base.mint_msg = base.mc_extra.read_mint_msg()?;
         } else if base.extra.is_key_block() {
             reject_query!("non-masterchain block cannot have McBlockExtra")
@@ -3028,8 +3023,7 @@ impl ValidateQuery {
             ..ExecuteParams::default()
         };
         let _old_account_root = account_root.clone();
-        let mut trans_execute = executor.execute_with_libs_and_params(in_msg.as_ref(), account_root, params)?;
-        let copyleft_reward = trans_execute.copyleft_reward().clone();
+        let mut trans2 = executor.execute_with_libs_and_params(in_msg.as_ref(), account_root, params)?;
         *account = Account::construct_from_cell(account_root.clone())?;
         let new_hash = account_root.repr_hash();
         if state_update.new_hash != new_hash {
@@ -3037,7 +3031,7 @@ impl ValidateQuery {
                 account state hash is {:x} but the re-computed value is {:x}",
                     lt, account_addr, state_update.new_hash, new_hash)
         }
-        if trans.out_msgs != trans_execute.out_msgs {
+        if trans.out_msgs != trans2.out_msgs {
             reject_query!("transaction {} of {:x} is invalid: it has produced a set of \
                 outbound messages different from that listed in the transaction",
                     lt, account_addr)
@@ -3046,16 +3040,11 @@ impl ValidateQuery {
             base.gas_used.fetch_add(compute_ph.gas_used.0 as u64, Ordering::Relaxed);
         }
         base.transactions_executed.fetch_add(1, Ordering::Relaxed);
-
-        if let Some(copyleft_reward) = &copyleft_reward {
-            base.copyleft_rewards.push((copyleft_reward.address.clone(), copyleft_reward.reward.clone()));
-        }
-
         // we cannot know prev transaction in executor
-        trans_execute.set_prev_trans_hash(trans.prev_trans_hash().clone());
-        trans_execute.set_prev_trans_lt(trans.prev_trans_lt());
-        let trans_execute_root = trans_execute.serialize()?;
-        if trans_root != trans_execute_root {
+        trans2.set_prev_trans_hash(trans.prev_trans_hash().clone());
+        trans2.set_prev_trans_lt(trans.prev_trans_lt());
+        let trans2_root = trans2.serialize()?;
+        if trans_root != trans2_root {
             reject_query!("re created transaction {} doesn't correspond", lt)
         }
         // check new balance and value flow
@@ -3068,8 +3057,6 @@ impl ValidateQuery {
         }
         let new_balance = account.balance().cloned().unwrap_or_default();
         let mut right_balance = new_balance.clone();
-        let copyleft_reward_after = copyleft_reward.map_or(0.into(), |copyleft| copyleft.reward);
-        right_balance.add(&CurrencyCollection::from_grams(copyleft_reward_after))?;
         right_balance.add(&money_exported)?;
         right_balance.add(&trans.total_fees())?;
         if left_balance != right_balance {
@@ -3281,22 +3268,9 @@ impl ValidateQuery {
         Ok(())
     }
 
-    fn check_special_messages(base: &ValidateBase, sent_rewards: &HashMap<AccountId, Grams>) -> Result<()> {
+    fn check_special_messages(base: &ValidateBase) -> Result<()> {
         Self::check_special_message(base, base.recover_create_msg.as_ref(), &base.value_flow.recovered, base.config_params.fee_collector_address()?)?;
         Self::check_special_message(base, base.mint_msg.as_ref(), &base.value_flow.minted, base.config_params.minter_address()?)?;
-        if sent_rewards.len() != base.copyleft_msgs.len() {
-            reject_query!("sent rewards len incorrect: {} {}", sent_rewards.len(), base.copyleft_msgs.len())
-        }
-        for index in 0..base.copyleft_msgs.len() {
-            let in_msg = &base.copyleft_msgs[index];
-            let mut dst = in_msg.read_message()?.dst().ok_or_else(
-                || error!("cannot find dst address in copyleft reward message")
-            )?.address();
-            let value = sent_rewards.get(&dst).ok_or_else(
-                || error!("cannot find sended copyleft reward on address {:x}", dst)
-            )?.clone();
-            Self::check_special_message(base, Some(in_msg), &CurrencyCollection::from_grams(value), UInt256::construct_from(&mut dst)?)?;
-        }
         Ok(())
     }
 
@@ -3442,19 +3416,6 @@ impl ValidateQuery {
                     base.value_flow.fees_collected, base.value_flow.recovered
                 )
             }
-
-            let mut copyleft_rewards = CopyleftRewards::new();
-            if let Some(base_copyleft_rewards) = Arc::get_mut(&mut base.copyleft_rewards) {
-                for (acc, reward) in base_copyleft_rewards {
-                    copyleft_rewards.add_copyleft_reward(&acc, &reward)?;
-                }
-            }
-
-            if copyleft_rewards != base.value_flow.copyleft_rewards {
-                reject_query!(
-                    "new state declares copyleft_rewards not equal to the calculated copyleft_rewards"
-                )
-            }
         } else {
             fail!("Prev state is not initialized in validator query")
         }
@@ -3479,7 +3440,6 @@ impl ValidateQuery {
         } else if !base.shard().is_masterchain() && next_state.master_ref().is_none() {
             reject_query!("new state does not contain a masterchain block reference (master_ref)")
         }
-
         // custom:(Maybe ^McStateExtra) -> checked in check_mc_state_extra()
         // = ShardStateUnsplit;
         Ok(())
@@ -3629,7 +3589,7 @@ impl ValidateQuery {
     }
 
     // somewhat similar to Collator::create_mc_state_extra()
-    fn check_mc_state_extra(&self, base: &ValidateBase, mc_data: &McData) -> Result<HashMap<AccountId, Grams>> {
+    fn check_mc_state_extra(&self, base: &ValidateBase, mc_data: &McData) -> Result<()> {
         let prev_state = base.prev_state.as_ref().ok_or_else(
             || error!("Prev state is not initialized in validator query")
         )?.state();
@@ -3643,7 +3603,7 @@ impl ValidateQuery {
                     base.block_id()
                 )
             }
-            return Ok(Default::default())
+            return Ok(())
         }
         let import_created = base.mc_extra.fees().root_extra().create.clone();
         log::debug!(
@@ -3779,33 +3739,8 @@ impl ValidateQuery {
                 base.prev_state_extra.global_balance, base.value_flow.minted, base.value_flow.created,
                 import_created, expected_global_balance, base.next_state_extra.global_balance)
         }
-
-        let mut workchains_coyleft_rewards = CopyleftRewards::default();
-        base.mc_extra.fees().iterate_slices_with_keys_and_aug(|key, _created, _aug| {
-            let shard = ShardIdent::with_tagged_prefix(key.workchain_id, key.prefix)?;
-            let descr = base.mc_extra.shards().get_shard(&shard)?.ok_or_else(|| error!("ShardFees contains a record for shard {} \
-                but there is no corresponding record in the new shard configuration", shard))?;
-            workchains_coyleft_rewards.merge_rewards(&descr.descr.copyleft_rewards)?;
-            Ok(true)
-        })?;
-        let mut expected_copyleft_rewards = base.prev_state_extra.state_copyleft_rewards.clone();
-        let send_rewards = if let Ok(copyleft_config) = mc_data.config().copyleft_config() {
-            let result = expected_copyleft_rewards.merge_rewards_with_threshold(&workchains_coyleft_rewards, &copyleft_config.copyleft_reward_threshold)?;
-            result.into_iter().collect()
-        } else {
-            Default::default()
-        };
-        if !base.value_flow.copyleft_rewards.is_empty() {
-            log::warn!("copyleft rewards in masterchain must be empty, real rewards count: {}",
-                base.value_flow.copyleft_rewards.len()?
-            )
-        }
-        if base.next_state_extra.state_copyleft_rewards != expected_copyleft_rewards {
-            reject_query!("copyleft rewards unsplit changed in unexpected way")
-        }
-
         // ...
-        Ok(send_rewards)
+        Ok(())
     }
 
     fn check_counter_update(base: &ValidateBase, oc: &Counters, nc: &Counters, expected_incr: u64) -> Result<()> {
@@ -4050,10 +3985,12 @@ impl ValidateQuery {
         Self::check_delivered_dequeued(&base, &manager)?;
         Self::check_all_ticktock_processed(&base)?;
         Self::check_message_processing_order(&mut base)?;
+        Self::check_special_messages(&base)?;
         Self::check_new_state(&mut base, &mc_data, &manager)?;
         Self::check_mc_block_extra(&base, &mc_data)?;
-        let sent_rewards = self.check_mc_state_extra(&base, &mc_data)?;
-        Self::check_special_messages(&base, &sent_rewards)?;
+        self.check_mc_state_extra(&base, &mc_data)?;
+
+
 
         Ok(base)
     }

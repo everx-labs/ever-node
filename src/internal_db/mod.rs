@@ -25,7 +25,6 @@ use std::{
     sync::{Arc, atomic::{AtomicU32, Ordering}},
     time::{UNIX_EPOCH, Duration},
     collections::HashSet,
-    mem::size_of,
 };
 use storage::{
     TimeChecker,
@@ -44,11 +43,6 @@ pub const INITIAL_MC_BLOCK: &str       = "InitMcBlockId";
 pub const LAST_APPLIED_MC_BLOCK: &str  = "LastMcBlockId";
 pub const PSS_KEEPER_MC_BLOCK: &str    = "PssKeeperBlockId";
 pub const SHARD_CLIENT_MC_BLOCK: &str  = "ShardsClientMcBlockId";
-pub const DB_VERSION: &str  = "DbVersion";
-
-pub const DB_VERSION_0: u32  = 0;
-pub const DB_VERSION_1: u32  = 1; // with fixed cells/bits counter in StorageCell
-pub const CURRENT_DB_VERSION: u32 = DB_VERSION_1;
 
 /// Validator state keys
 pub(crate) const LAST_ROTATION_MC_BLOCK: &str = "LastRotationBlockId";
@@ -125,7 +119,6 @@ impl BlockResult {
 
 pub mod state_gc_resolver;
 pub mod restore;
-mod update;
 
 #[derive(serde::Deserialize)]
 pub struct InternalDbConfig {
@@ -146,7 +139,6 @@ pub struct InternalDb {
     //shardstate_db_gc: GC,
     archive_manager: Arc<ArchiveManager>,
     shard_top_blocks_db: ShardTopBlocksDb,
-    full_node_state_db: Arc<NodeStateDb>,
 
     config: InternalDbConfig,
     cells_gc_interval: Arc<AtomicU32>,
@@ -161,48 +153,7 @@ impl InternalDb {
         config: InternalDbConfig,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<EngineTelemetry>,
-        allocated: Arc<EngineAlloc>,
-    ) -> Result<Self> {
-        let db = Self::construct(
-            config,
-            #[cfg(feature = "telemetry")]
-            telemetry,
-            allocated,
-        ).await?;
-        let version = db.resolve_db_version()?;
-        if version != CURRENT_DB_VERSION {
-            fail!("DB version {} is not correspond current supported {}.", version, CURRENT_DB_VERSION);
-        }
-        Ok(db)
-    }
-
-    pub async fn with_update(
-        config: InternalDbConfig,
-        #[cfg(feature = "telemetry")]
-        telemetry: Arc<EngineTelemetry>,
-        allocated: Arc<EngineAlloc>,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
-    ) -> Result<Self> {
-        let mut db = Self::new(
-            config,
-            #[cfg(feature = "telemetry")]
-            telemetry,
-            allocated,
-        ).await?;
-
-        let version = db.resolve_db_version()?;
-        if version != CURRENT_DB_VERSION {
-            db = update::update(db, version, check_stop).await?;
-        }
-
-        Ok(db)
-    }
-
-    async fn construct(
-        config: InternalDbConfig,
-        #[cfg(feature = "telemetry")]
-        telemetry: Arc<EngineTelemetry>,
-        allocated: Arc<EngineAlloc>,
+        allocated: Arc<EngineAlloc>
     ) -> Result<Self> {
         let db = RocksDb::with_path(config.db_directory.as_str(), "db");
         let db_catchain = RocksDb::with_path(config.db_directory.as_str(), "catchains");
@@ -218,7 +169,7 @@ impl InternalDb {
         let block_handle_storage = Arc::new(
             BlockHandleStorage::with_dbs(
                 block_handle_db.clone(), 
-                full_node_state_db.clone(), 
+                full_node_state_db, 
                 validator_state_db,
                 #[cfg(feature = "telemetry")]
                 telemetry.storage.clone(),
@@ -241,7 +192,6 @@ impl InternalDb {
                 allocated.storage.clone()
             ).await?
         );
-
         let db = Self {
             db: db.clone(),
             block_handle_storage,
@@ -257,7 +207,6 @@ impl InternalDb {
             //shardstate_db_gc,
             archive_manager,
             shard_top_blocks_db: ShardTopBlocksDb::with_db(db.clone(), "shard_top_blocks_db")?,
-            full_node_state_db,
 
             cells_gc_interval: Arc::new(AtomicU32::new(config.cells_gc_interval_sec)),
             config,
@@ -267,30 +216,6 @@ impl InternalDb {
         };
 
         Ok(db)
-    }
-
-    pub fn resolve_db_version(&self) -> Result<u32> {
-        if self.block_handle_storage.is_empty()? {
-            self.store_db_version(CURRENT_DB_VERSION)?;
-            Ok(CURRENT_DB_VERSION)
-        } else {
-            self.load_db_version()
-        }
-    }
-
-    fn store_db_version(&self, v: u32) -> Result<()> {
-        let mut bytes = Vec::with_capacity(size_of::<u32>());
-        v.serialize(&mut bytes)?;
-        self.full_node_state_db.put(&DB_VERSION, &bytes)
-    }
-
-    fn load_db_version(&self) -> Result<u32> {
-        if let Some(db_slice) = self.full_node_state_db.try_get(&DB_VERSION)? {
-            let mut cursor = Cursor::new(db_slice.as_ref());
-            u32::deserialize(&mut cursor)
-        } else {
-            Ok(DB_VERSION_0)
-        }
     }
 
     fn create_shard_state_dynamic_db(
@@ -554,24 +479,21 @@ impl InternalDb {
         self.archive_manager.get_file(handle, &entry_id).await
     }
 
-    pub async fn store_shard_state_dynamic(
+    pub fn store_shard_state_dynamic(
         &self,
         handle: &Arc<BlockHandle>, 
         state: &Arc<ShardStateStuff>,
-        callback: Option<Arc<dyn Callback>>,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
+        callback: Option<Arc<dyn Callback>>
     ) -> Result<(Arc<ShardStateStuff>, bool)> {
 
         let _tc = TimeChecker::new(format!("store_shard_state_dynamic {}", state.block_id()), 300);
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
-        let _lock = handle.saving_state_lock().lock().await;
         if !handle.has_state() {
             let saved_root = self.shard_state_dynamic_db.put(
                 state.block_id(), 
-                state.root_cell().clone(),
-                check_stop,
+                state.root_cell().clone()
             )?;
             if handle.set_state() {
                 self.store_block_handle(handle, callback)?;
@@ -588,16 +510,14 @@ impl InternalDb {
         Ok((self.load_shard_state_dynamic(handle.id())?, false))
     }
 
-    pub async fn store_shard_state_dynamic_raw_force(
+    pub fn store_shard_state_dynamic_raw_force(
         &self,
         handle: &Arc<BlockHandle>, 
         state_root: Cell,
-        callback: Option<Arc<dyn Callback>>,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
+        callback: Option<Arc<dyn Callback>>
     ) -> Result<Cell> {
         let _tc = TimeChecker::new(format!("store_shard_state_dynamic_raw_force {}", handle.id()), 300);
-        let saved_root = self.shard_state_dynamic_db.put(handle.id(), state_root, check_stop)?;
-        let _lock = handle.saving_state_lock().lock().await;
+        let saved_root = self.shard_state_dynamic_db.put(handle.id(), state_root)?;
         self.store_block_handle(handle, callback)?;
         return Ok(saved_root);
     }
@@ -618,20 +538,15 @@ impl InternalDb {
     pub async fn store_shard_state_persistent(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: &Arc<ShardStateStuff>,
-        callback: Option<Arc<dyn Callback>>,
-        abort: Box<dyn Fn() -> bool + Send + Sync>
+        state: &ShardStateStuff,
+        callback: Option<Arc<dyn Callback>>
     ) -> Result<()> {
         let _tc = TimeChecker::new(format!("store_shard_state_persistent {}", state.block_id()), 10_000);
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
         if !handle.has_persistent_state() {
-            let state1 = state.clone();
-            let bytes = tokio::task::spawn_blocking(move || {
-                state1.serialize_with_abort(&abort)
-            }).await??;
-            self.shard_state_persistent_db.put(state.block_id(), &bytes).await?;
+            self.shard_state_persistent_db.put(state.block_id(), &state.serialize()?).await?;
             if handle.set_persistent_state() {
                 self.store_block_handle(handle, callback)?;
             }
@@ -682,10 +597,10 @@ impl InternalDb {
 
         // TODO read directly from file without huge vector
 
-        let data = self.shard_state_persistent_db.get_vec(id, 0, full_lenth).await?;
-        ShardStateStuff::deserialize_inmem(
+        let slice = self.shard_state_persistent_db.get_slice(id, 0, full_lenth).await?;
+        ShardStateStuff::deserialize(
             id.clone(),
-            Arc::new(data),
+            &slice,
             #[cfg(feature = "telemetry")]
             &self.telemetry,
             &self.allocated
@@ -697,11 +612,7 @@ impl InternalDb {
         self.shard_state_persistent_db.get_size(id).await
     }
 
-    pub async fn shard_state_persistent_gc(
-        &self,
-        calc_ttl: impl Fn(u32) -> (u32, bool),
-        zerostate_id: &BlockIdExt,
-    ) -> Result<()> {
+    pub async fn shard_state_persistent_gc(&self, calc_ttl: impl Fn(u32) -> (u32, bool)) -> Result<()> {
         let _tc = TimeChecker::new(format!("shard_state_persistent_gc"), 5000);
         let mut for_delete = HashSet::new();
         self.shard_state_persistent_db.for_each_key(&mut |key| {
@@ -713,11 +624,6 @@ impl InternalDb {
                 root_hash: UInt256::from(key),
                 ..Default::default()
             };
-
-            if id.root_hash() == zerostate_id.root_hash() {
-                log::info!("  Zerostate: {:x}", zerostate_id.root_hash());
-                return Ok(true);
-            }
 
             let convert_to_utc = |t| {
                 chrono::prelude::DateTime::<chrono::Utc>::from(
@@ -731,9 +637,9 @@ impl InternalDb {
                     let gen_utime = handle.gen_utime()?;
                     let (ttl, expired) = calc_ttl(gen_utime);
                     log::info!(
-                        "{} Persistent state: {:x}, mc block: {}, gen_utime: {} UTC ({}), expired at: {} UTC ({})",
+                        "{} Persistent state: {}, mc block: {}, gen_utime: {} UTC ({}), expired at: {} UTC ({})",
                         if expired {"X"} else {" "},
-                        handle.id().root_hash(),
+                        handle.id(),
                         handle.masterchain_ref_seq_no(),
                         convert_to_utc(gen_utime),
                         handle.gen_utime()?,

@@ -11,13 +11,13 @@
 * limitations under the License.
 */
 
-use std::sync::{atomic::AtomicU64, Arc};
+use std::sync::{Arc, atomic::AtomicU64};
 use ton_block::{
-    Account, AccountBlock, Augmentation, CopyleftRewards, Deserializable, HashUpdate,
-    HashmapAugType, LibDescr, Libraries, Serializable, ShardAccount, ShardAccounts, StateInitLib,
-    Transaction, Transactions,
+    Serializable, Deserializable, ShardAccount, ShardAccounts,
+    AccountBlock, Transaction, Transactions, HashUpdate, LibDescr,
+    Augmentation, HashmapAugType, Libraries, StateInitLib, Account,
 };
-use ton_types::{fail, AccountId, Cell, HashmapRemover, Result, UInt256};
+use ton_types::{Result, AccountId, Cell, HashmapRemover, fail, UInt256};
 
 pub struct ShardAccountStuff {
     account_addr: AccountId,
@@ -28,7 +28,6 @@ pub struct ShardAccountStuff {
     transactions: Transactions,
     state_update: HashUpdate,
     orig_libs: StateInitLib,
-    copyleft_rewards: CopyleftRewards,
 }
 
 impl ShardAccountStuff {
@@ -51,7 +50,6 @@ impl ShardAccountStuff {
             lt,
             transactions: Transactions::default(),
             state_update: HashUpdate::with_hashes(account_hash.clone(), account_hash),
-            copyleft_rewards: CopyleftRewards::default(),
         })
     }
     pub fn update_shard_state(&mut self, new_accounts: &mut ShardAccounts) -> Result<AccountBlock> {
@@ -80,9 +78,6 @@ impl ShardAccountStuff {
     pub fn account_addr(&self) -> &AccountId {
         &self.account_addr
     }
-    pub fn copyleft_rewards(&self) -> &CopyleftRewards {
-        &self.copyleft_rewards
-    }
     pub fn add_transaction(&mut self, transaction: &mut Transaction, account_root: Cell) -> Result<()> {
         transaction.set_prev_trans_hash(self.last_trans_hash.clone());
         transaction.set_prev_trans_lt(self.last_trans_lt);
@@ -100,11 +95,6 @@ impl ShardAccountStuff {
             &tr_root,
             transaction.total_fees()
         )?;
-
-        if let Some(copyleft_reward) = transaction.copyleft_reward() {
-            log::trace!("Copyleft reward {} {} from transaction {}", copyleft_reward.address, copyleft_reward.reward, self.last_trans_hash);
-            self.copyleft_rewards.add_copyleft_reward(&copyleft_reward.address, &copyleft_reward.reward)?;
-        }
 
         Ok(())
     }

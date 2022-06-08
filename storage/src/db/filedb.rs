@@ -131,19 +131,15 @@ impl<K: DbKey + Send + Sync> KvcReadableAsync<K> for FileDb {
     }
 
     async fn get_slice<'a>(&'a self, key: &K, offset: u64, size: u64) -> Result<DbSlice<'a>> {
-        self.get_vec(key, offset, size).await.map(|v| DbSlice::Vector(v))
-    }
-
-    async fn get_vec(&self, key: &K, offset: u64, size: u64) -> Result<Vec<u8>> {
         let path = self.make_path(key.key());
         let mut file = tokio::fs::File::open(path).await
             .map_err(|err| Self::transform_io_error(err, key.key()))?;
         file.seek(SeekFrom::Start(offset)).await?;
-        let mut result = vec![0; size as usize];
+        let mut result = vec![0u8; size as usize];
         file.read_exact(&mut result).await
             .map_err(|err| Self::transform_io_error(err, key.key()))?;
 
-        Ok(result)
+        Ok(DbSlice::Vector(result))
     }
 
     async fn get_size(&self, key: &K) -> Result<u64> {
