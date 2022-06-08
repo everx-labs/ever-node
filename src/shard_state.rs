@@ -23,7 +23,10 @@ use ton_block::{
     McStateExtra, ShardDescr, ShardHashes, HashmapAugType, InRefValue, BinTree, 
     BinTreeType, WorkchainDescr,
 };
-use ton_types::{AccountId, Cell, SliceData, error, fail, Result, deserialize_tree_of_cells, UInt256};
+use ton_types::{
+    AccountId, Cell, Result, deserialize_tree_of_cells, deserialize_tree_of_cells_inmem,
+    UInt256, BagOfCells, BocSerialiseMode, SliceData, error, fail,
+};
 
 //    #[derive(Debug, Default, Clone, Eq, PartialEq)]
 // It is a wrapper around various shard state's representations and properties.
@@ -109,6 +112,25 @@ impl ShardStateStuff {
         )
     }
 
+    pub fn deserialize_inmem(
+        block_id: BlockIdExt, 
+        bytes: Arc<Vec<u8>>,
+        #[cfg(feature = "telemetry")]
+        telemetry: &EngineTelemetry,
+        allocated: &EngineAlloc
+    ) -> Result<Arc<Self>> {
+        if block_id.seq_no() == 0 {
+            fail!("Use `deserialize_zerostate` method for zerostate");
+        }
+        let root = deserialize_tree_of_cells_inmem(bytes)?;
+        Self::from_root_cell(
+            block_id, root, 
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated
+        )
+    }
+
     pub fn deserialize(
         block_id: BlockIdExt, 
         bytes: &[u8],
@@ -120,15 +142,6 @@ impl ShardStateStuff {
             fail!("Use `deserialize_zerostate` method for zerostate");
         }
         let root = deserialize_tree_of_cells(&mut Cursor::new(bytes))?;
-        #[cfg(feature = "store_copy")]
-        {
-            let path = format!(
-                "./target/replication/states/{}", 
-                block_id.shard().shard_prefix_as_str_with_tag()
-            );
-            std::fs::create_dir_all(&path).ok();
-            std::fs::write(format!("{}/{}", path, block_id.seq_no()), bytes).ok();
-        }
         Self::from_root_cell(
             block_id, root, 
             #[cfg(feature = "telemetry")]
@@ -217,6 +230,24 @@ impl ShardStateStuff {
         let mut bytes = Cursor::new(Vec::<u8>::new());
         self.write_to(&mut bytes)?;
         Ok(bytes.into_inner())
+    }
+
+    pub fn serialize_with_abort(&self, abort: &dyn Fn() -> bool) -> Result<Vec<u8>> {
+        let mut bytes = Vec::<u8>::new();
+        let boc = BagOfCells::with_params(vec!(&self.root), vec!(), abort)?;
+        boc.write_to_with_abort(
+            &mut bytes,
+            BocSerialiseMode::Generic{
+                index: true,
+                crc: false,
+                cache_bits: false,
+                flags: 0 
+            },
+            None,
+            None,
+            abort
+        )?;
+        Ok(bytes)
     }
 
     pub fn config_params(&self) -> Result<&ConfigParams> {

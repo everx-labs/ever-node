@@ -348,8 +348,8 @@ impl ControlQuerySubscriber {
         Self::add_stats(&mut stats, "last_applied_masterchain_block_id", value);
 
         let value = match engine.processed_workchain().await {
-            Ok((true, _workchain_id)) => "masterchain".to_string(),
-            Ok((false, workchain_id)) => format!("{}", workchain_id),
+            Ok((true, _workchain_id)) => "\"masterchain\"".to_string(),
+            Ok((false, workchain_id)) => format!("\"{}\"", workchain_id),
             Err(err) => err.to_string()
         };
         Self::add_stats(&mut stats, "processed_workchain", value);
