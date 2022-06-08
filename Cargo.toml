@@ -3,7 +3,6 @@ edition = '2018'
 name = 'ton_node'
 version = '0.50.19'
 
-
 [workspace]
 members = [ 'storage' ]
 resolver = '2'
