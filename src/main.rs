@@ -47,7 +47,7 @@ mod jaeger {
 }
 
 use crate::{
-    config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, STATSD}, 
+    config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, STATSD, Stopper}, 
     jaeger::init_jaeger, internal_db::restore::set_graceful_termination,
 };
 
@@ -320,6 +320,7 @@ async fn start_engine(
     validator_runtime: tokio::runtime::Handle, 
     initial_sync_disabled: bool,
     force_check_db: bool,
+    stopper: Arc<Stopper>
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
     let external_db = start_external_db(&config)?;
     crate::engine::run(
@@ -329,6 +330,7 @@ async fn start_engine(
         validator_runtime, 
         initial_sync_disabled,
         force_check_db,
+        stopper,
     ).await
 }
 
@@ -466,6 +468,13 @@ fn main() {
         }
     );
 
+    let stopper = Arc::new(Stopper::new());
+    let stopper1 = stopper.clone();
+    ctrlc::set_handler(move || {
+        log::warn!("Got SIGINT, starting node's safe stopping...");
+        stopper1.set_stop();
+    }).expect("Error setting termination signals handler");
+
     let validator_rt_handle = validator_runtime.handle().clone();
     let db_dir = config.internal_db_path().to_string();
     runtime.block_on(async move {
@@ -475,27 +484,22 @@ fn main() {
             validator_rt_handle,
             initial_sync_disabled,
             force_check_db,
+            stopper.clone(),
         ).await {
-            Err(e) => log::error!("Can't start node's Engine: {:?}", e),
+            Err(e) => {
+                if stopper.check_stop() {
+                    log::warn!("Node stopped ({})", e);
+                    set_graceful_termination(&db_dir);
+                } else {
+                    log::error!("Can't start node's Engine: {:?}", e);
+                }
+            }
             Ok((engine, join_handle)) => {
-
-                log::trace!("Engine launched, set SIGINT handler");
-
-                let engine1 = engine.clone();
-                ctrlc::set_handler(move || {
-                    log::warn!("Got SIGINT, starting node's safe stopping...");
-                    engine1.set_stop();
-
-                }).expect("Error setting termination signals handler");
-
                 join_handle.await.ok();
 
                 log::warn!("Still safe stopping node...");
-
                 engine.wait_stop().await;
-                
                 log::warn!("Node stopped");
-
                 set_graceful_termination(&db_dir);
             }
         }

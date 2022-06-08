@@ -236,8 +236,20 @@ impl NodeNetwork {
         self.config_handler.clone()
     }
 
-    pub async fn stop(&self) {
-        self.adnl.stop().await
+    pub async fn delete_overlays(&self) {
+        for guard in self.overlays.iter() {
+            log::info!("Deleting overlay {}", guard.key());
+            match guard.val().overlay().delete_public_overlay(guard.key()) {
+                Ok(result) => log::info!("Deleted overlay {} ({})", guard.key(), result),
+                Err(e) => log::warn!("Deleting overlay {}: {}", guard.key(), e)
+            }
+        }
+    }
+
+    pub async fn stop_adnl(&self) {
+        log::info!("Stopping adnl...");
+        self.adnl.stop().await;
+        log::info!("Stopped adnl");
     }
 
     fn try_add_new_elem<K: Hash + Ord + Clone, T: CountedObject>(

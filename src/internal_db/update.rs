@@ -3,7 +3,11 @@ use crate::internal_db::{
 };
 use ton_types::Result;
 
-pub async fn update(mut db: InternalDb, mut version: u32) -> Result<InternalDb> {
+pub async fn update(
+    mut db: InternalDb, 
+    mut version: u32,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
+) -> Result<InternalDb> {
     if version == CURRENT_DB_VERSION {
         return Ok(db)
     }
@@ -13,7 +17,7 @@ pub async fn update(mut db: InternalDb, mut version: u32) -> Result<InternalDb> 
         log::info!(
             "Detected old database version 0. This version possibly contains wrong cells and bits \
              counters in cells DB. Need to restore database");
-        db = check_db(db, 0, true, true).await?;
+        db = check_db(db, 0, true, true, check_stop).await?;
         version = DB_VERSION_1;
         db.store_db_version(version)?;
     }

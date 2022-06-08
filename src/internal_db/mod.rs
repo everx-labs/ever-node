@@ -161,7 +161,48 @@ impl InternalDb {
         config: InternalDbConfig,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<EngineTelemetry>,
-        allocated: Arc<EngineAlloc>
+        allocated: Arc<EngineAlloc>,
+    ) -> Result<Self> {
+        let db = Self::construct(
+            config,
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated,
+        ).await?;
+        let version = db.resolve_db_version()?;
+        if version != CURRENT_DB_VERSION {
+            fail!("DB version {} is not correspond current supported {}.", version, CURRENT_DB_VERSION);
+        }
+        Ok(db)
+    }
+
+    pub async fn with_update(
+        config: InternalDbConfig,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<EngineTelemetry>,
+        allocated: Arc<EngineAlloc>,
+        check_stop: &(dyn Fn() -> Result<()> + Sync),
+    ) -> Result<Self> {
+        let mut db = Self::new(
+            config,
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated,
+        ).await?;
+
+        let version = db.resolve_db_version()?;
+        if version != CURRENT_DB_VERSION {
+            db = update::update(db, version, check_stop).await?;
+        }
+
+        Ok(db)
+    }
+
+    async fn construct(
+        config: InternalDbConfig,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<EngineTelemetry>,
+        allocated: Arc<EngineAlloc>,
     ) -> Result<Self> {
         let db = RocksDb::with_path(config.db_directory.as_str(), "db");
         let db_catchain = RocksDb::with_path(config.db_directory.as_str(), "catchains");
@@ -201,7 +242,7 @@ impl InternalDb {
             ).await?
         );
 
-        let mut db = Self {
+        let db = Self {
             db: db.clone(),
             block_handle_storage,
             prev1_block_db: BlockInfoDb::with_db(db.clone(), "prev1_block_db")?,
@@ -224,11 +265,6 @@ impl InternalDb {
             telemetry, 
             allocated
         };
-
-        let version = db.resolve_db_version()?;
-        if version != CURRENT_DB_VERSION {
-            db = update::update(db, version).await?;
-        }
 
         Ok(db)
     }
@@ -522,7 +558,8 @@ impl InternalDb {
         &self,
         handle: &Arc<BlockHandle>, 
         state: &Arc<ShardStateStuff>,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn Callback>>,
+        check_stop: &(dyn Fn() -> Result<()> + Sync),
     ) -> Result<(Arc<ShardStateStuff>, bool)> {
 
         let _tc = TimeChecker::new(format!("store_shard_state_dynamic {}", state.block_id()), 300);
@@ -533,7 +570,8 @@ impl InternalDb {
         if !handle.has_state() {
             let saved_root = self.shard_state_dynamic_db.put(
                 state.block_id(), 
-                state.root_cell().clone()
+                state.root_cell().clone(),
+                check_stop,
             )?;
             if handle.set_state() {
                 self.store_block_handle(handle, callback)?;
@@ -554,10 +592,11 @@ impl InternalDb {
         &self,
         handle: &Arc<BlockHandle>, 
         state_root: Cell,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn Callback>>,
+        check_stop: &(dyn Fn() -> Result<()> + Sync),
     ) -> Result<Cell> {
         let _tc = TimeChecker::new(format!("store_shard_state_dynamic_raw_force {}", handle.id()), 300);
-        let saved_root = self.shard_state_dynamic_db.put(handle.id(), state_root)?;
+        let saved_root = self.shard_state_dynamic_db.put(handle.id(), state_root, check_stop)?;
         let _lock = handle.saving_state_lock().lock().await;
         self.store_block_handle(handle, callback)?;
         return Ok(saved_root);
@@ -579,15 +618,20 @@ impl InternalDb {
     pub async fn store_shard_state_persistent(
         &self, 
         handle: &Arc<BlockHandle>, 
-        state: &ShardStateStuff,
-        callback: Option<Arc<dyn Callback>>
+        state: &Arc<ShardStateStuff>,
+        callback: Option<Arc<dyn Callback>>,
+        abort: Box<dyn Fn() -> bool + Send + Sync>
     ) -> Result<()> {
         let _tc = TimeChecker::new(format!("store_shard_state_persistent {}", state.block_id()), 10_000);
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
         if !handle.has_persistent_state() {
-            self.shard_state_persistent_db.put(state.block_id(), &state.serialize()?).await?;
+            let state1 = state.clone();
+            let bytes = tokio::task::spawn_blocking(move || {
+                state1.serialize_with_abort(&abort)
+            }).await??;
+            self.shard_state_persistent_db.put(state.block_id(), &bytes).await?;
             if handle.set_persistent_state() {
                 self.store_block_handle(handle, callback)?;
             }
@@ -638,10 +682,10 @@ impl InternalDb {
 
         // TODO read directly from file without huge vector
 
-        let slice = self.shard_state_persistent_db.get_slice(id, 0, full_lenth).await?;
-        ShardStateStuff::deserialize(
+        let data = self.shard_state_persistent_db.get_vec(id, 0, full_lenth).await?;
+        ShardStateStuff::deserialize_inmem(
             id.clone(),
-            &slice,
+            Arc::new(data),
             #[cfg(feature = "telemetry")]
             &self.telemetry,
             &self.allocated

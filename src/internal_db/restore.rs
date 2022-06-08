@@ -17,6 +17,7 @@ use std::{
     collections::{HashSet, HashMap},
     ops::Deref,
     io::Cursor,
+    time::Duration,
 };
 
 const UNEXPECTED_TERMINATION_BEACON_FILE: &str = "ton_node.running";
@@ -29,6 +30,7 @@ pub async fn check_db(
     processed_wc: i32,
     restore_db: bool,
     force: bool,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
 ) -> Result<InternalDb> {
 
     let unexpected_termination = check_unexpected_termination(&db.config.db_directory);
@@ -54,20 +56,30 @@ pub async fn check_db(
         }
 
         set_restoring(&db.config.db_directory)?;
-        match restore_last_applied_mc_block(&db).await {
+        match restore_last_applied_mc_block(&db, check_stop).await {
             Ok(Some(last_applied_mc_block)) => {
                 let shard_client_mc_block = restore_shard_client_mc_block(
-                    &db, &last_applied_mc_block, processed_wc).await?;
-                db = restore(
-                    db, &last_applied_mc_block, &shard_client_mc_block, processed_wc).await?;
+                    &db, &last_applied_mc_block, processed_wc, check_stop).await?;
+                db = match restore(
+                    db, &last_applied_mc_block, &shard_client_mc_block, processed_wc, check_stop).await 
+                {
+                    Ok(db) => db,
+                    Err(err) => {
+                        log::error!(
+                            "Error while restoring database: {}. Need to clear db and re-sync node.", err);
+                        tokio::time::sleep(Duration::from_secs(3153600000)).await; // 100 years =)
+                        std::process::exit(0xFF);
+                    }
+                };
             }
             Ok(None) => {
                 log::info!("End of check & restore: looks like node hasn't \
                     ever booted in blockchain.");
             }
             Err(err) => {
-                log::error!("Error while restoring database: {}. Need to clear db \
-                    and re-sync node. Process will be terminated.", err);
+                log::error!(
+                    "Error while restoring database: {}. Need to clear db and re-sync node.", err);
+                tokio::time::sleep(Duration::from_secs(3153600000)).await; // 100 years =)
                 std::process::exit(0xFF);
             }
         }
@@ -115,7 +127,10 @@ fn set_restoring(db_dir: &str) -> Result<()> {
     Ok(())
 }
 
-async fn restore_last_applied_mc_block(db: &InternalDb) -> Result<Option<BlockStuff>> {
+async fn restore_last_applied_mc_block(
+    db: &InternalDb,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
+) -> Result<Option<BlockStuff>> {
     log::trace!("restore_last_applied_mc_block");
     match db.load_full_node_state(LAST_APPLIED_MC_BLOCK) {
         Ok(None) => return Ok(None),
@@ -133,16 +148,20 @@ async fn restore_last_applied_mc_block(db: &InternalDb) -> Result<Option<BlockSt
         }
     }
 
-    let block = search_and_restore_last_applied_mc_block(db).await
+    let block = search_and_restore_last_applied_mc_block(db, check_stop).await
         .map_err(|e| error!("search_and_restore_last_applied_mc_block: {}", e))?;
     Ok(Some(block))
 }
 
-async fn search_and_restore_last_applied_mc_block(db: &InternalDb) -> Result<BlockStuff> {
+async fn search_and_restore_last_applied_mc_block(
+    db: &InternalDb,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
+) -> Result<BlockStuff> {
     log::trace!("search_and_restore_last_applied_mc_block");
     
-    let mut last_mc_blocks = search_last_mc_blocks(db)?;
+    let mut last_mc_blocks = search_last_mc_blocks(db, check_stop)?;
     while let Some(id) = last_mc_blocks.pop() {
+        check_stop()?;
         log::trace!("search_and_restore_last_applied_mc_block: trying {}...", id);
         match check_one_block(db, &id, false, true).await {
             Ok(block) => return Ok(block),
@@ -155,7 +174,8 @@ async fn search_and_restore_last_applied_mc_block(db: &InternalDb) -> Result<Blo
 async fn restore_shard_client_mc_block(
     db: &InternalDb,
     last_applied_mc_block: &BlockStuff,
-    processed_wc: i32
+    processed_wc: i32,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
 ) -> Result<BlockStuff> {
     let mut block = match db.load_full_node_state(SHARD_CLIENT_MC_BLOCK) {
         Ok(None) => {
@@ -192,7 +212,8 @@ async fn restore_shard_client_mc_block(
 
     let mut checked_blocks = 0_u32;
     loop {
-        match check_shard_client_mc_block(db, &block, processed_wc, false).await {
+        check_stop()?;
+        match check_shard_client_mc_block(db, &block, processed_wc, false, check_stop).await {
             Ok(_) => {
                 log::info!("restore_shard_client_mc_block: {} has all shard blocks", block.id());
                 return Ok(block)
@@ -216,6 +237,7 @@ async fn restore(
     last_applied_mc_block: &BlockStuff,
     shard_client_mc_block: &BlockStuff,
     processed_wc: i32,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
 ) -> Result<InternalDb> {
 
     let last_mc_block =
@@ -266,9 +288,10 @@ async fn restore(
     let mut checked_cells = HashSet::new();
     let mut persistent_state_handle = None;
     loop {
+        check_stop()?;
         // check master state
         if mc_block.id().seq_no() >= min_mc_state_id.seq_no() && !broken_cells {
-            if let Err(e) = check_state(&db, mc_block.id(), &mut checked_cells) {
+            if let Err(e) = check_state(&db, mc_block.id(), &mut checked_cells, check_stop) {
                 log::warn!("Error while checking state {} {}", mc_block.id(), e);
                 broken_cells = true;
             }
@@ -277,11 +300,11 @@ async fn restore(
         // check shard blocks and states
 
         let shard_blocks = check_shard_client_mc_block(
-            &db, &mc_block, processed_wc, persistent_state_handle.is_none()).await?;
+            &db, &mc_block, processed_wc, persistent_state_handle.is_none(), check_stop).await?;
 
         if mc_block.id().seq_no() >= min_mc_state_id.seq_no() && !broken_cells {
             for block_id in &shard_blocks {
-                if let Err(e) = check_state(&db, block_id, &mut checked_cells) {
+                if let Err(e) = check_state(&db, block_id, &mut checked_cells, check_stop) {
                     log::warn!("Error while checking state {} {}", block_id, e);
                     broken_cells = true;
                     break;
@@ -299,7 +322,7 @@ async fn restore(
         // if prev is zerostate check it and exit cycle
         if prev_id.seq_no() == 0 {
             if min_mc_state_id.seq_no() == 0 && !broken_cells {
-                if let Err(e) = check_state(&db, &prev_id, &mut checked_cells) {
+                if let Err(e) = check_state(&db, &prev_id, &mut checked_cells, check_stop) {
                     log::warn!("Error while checking state {} {}", prev_id, e);
                     broken_cells = true;
                 } else {
@@ -315,7 +338,7 @@ async fn restore(
                         root_hash: wc.zerostate_root_hash,
                         file_hash: wc.zerostate_file_hash,
                     };
-                    if let Err(e) = check_state(&db, &wc_zerostate_id, &mut checked_cells) {
+                    if let Err(e) = check_state(&db, &wc_zerostate_id, &mut checked_cells, check_stop) {
                         log::warn!("Error while checking state {} {}", wc_zerostate_id, e);
                         broken_cells = true;
                     }
@@ -351,7 +374,7 @@ async fn restore(
                 .ok_or_else(|| error!("internal error: persistent_state_handle is None"))?.deref(),
             &min_mc_state_id,
             processed_wc,
-            //last_mc_block,
+            check_stop
         ).await?;
     }
 
@@ -365,6 +388,7 @@ async fn check_shard_client_mc_block(
     block: &BlockStuff,
     processed_wc: i32,
     check_to_prev_mc_block: bool,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
 ) -> Result<Vec<BlockIdExt>> {
     log::trace!("check_shard_client_mc_block, mc block {}", block.id());
     
@@ -382,6 +406,7 @@ async fn check_shard_client_mc_block(
     let mut shard_blocks_ids = Vec::with_capacity(top_shard_blocks_ids.len());
     for mut id in top_shard_blocks_ids {
         loop {
+            check_stop()?;
             log::trace!("check_shard_client_mc_block: checking {}", id);
             if id.seq_no() == 0 {
                 // zerostate doesn't have correspond block, but we return its id to check 
@@ -414,10 +439,12 @@ async fn check_shard_client_mc_block(
 
 fn search_last_mc_blocks(
     db: &InternalDb,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
 ) -> Result<Vec<BlockIdExt>> {
     let mut last_mc_block = BlockIdExt::default();
     log::trace!("search_last_mc_blocks: search last id");
     db.next1_block_db.for_each(&mut |_key, val| {
+        check_stop()?;
         let id = BlockIdExt::deserialize(&mut Cursor::new(val))?;
         if id.shard().workchain_id() == MASTERCHAIN_ID && id.seq_no() as u32 > last_mc_block.seq_no() {
             last_mc_block = id;
@@ -432,6 +459,7 @@ fn search_last_mc_blocks(
         search last {} ids", last_mc_block, LAST_MC_BLOCKS);
     let mut last_mc_blocks = Vec::with_capacity(LAST_MC_BLOCKS as usize);
     db.next1_block_db.for_each(&mut |_key, val| {
+        check_stop()?;
         let id = BlockIdExt::deserialize(&mut Cursor::new(val))?;
         if id.shard().workchain_id() == MASTERCHAIN_ID 
             && id.seq_no() as u32 + LAST_MC_BLOCKS >= last_mc_block.seq_no() {
@@ -640,10 +668,16 @@ fn check_state(
     db: &InternalDb,
     id: &BlockIdExt,
     checked_cells: &mut HashSet<UInt256>,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
 ) -> Result<()> {
     log::trace!("check_state {}", id);
 
-    fn check_cell(cell: Cell, checked_cells: &mut HashSet<UInt256>) -> Result<(u64, u64)> {
+    fn check_cell(
+        cell: Cell,
+        checked_cells: &mut HashSet<UInt256>,
+        check_stop: &(dyn Fn() -> Result<()> + Sync),
+    ) -> Result<(u64, u64)> {
+        check_stop()?;
         const MAX_56_BITS: u64 = 0x00FF_FFFF_FFFF_FFFFu64;
         let mut expected_cells = 1_u64;
         let mut expected_bits = cell.bit_length() as u64;
@@ -651,7 +685,7 @@ fn check_state(
         for i in 0..cell.references_count() {
             let child = cell.reference(i)?;
             if new_cell {
-                let (c, b) = check_cell(child, checked_cells)?;
+                let (c, b) = check_cell(child, checked_cells, check_stop)?;
                 expected_cells = expected_cells.saturating_add(c);
                 expected_bits = expected_bits.saturating_add(b);
             } else {
@@ -678,7 +712,7 @@ fn check_state(
     }
 
     let root = db.shard_state_dynamic_db.get(id)?;
-    check_cell(root, checked_cells)?;
+    check_cell(root, checked_cells, check_stop)?;
 
     Ok(())
 }
@@ -688,7 +722,7 @@ async fn restore_states(
     persistent_state_handle: &BlockHandle,
     min_mc_state_id: &BlockIdExt,
     processed_wc: i32,
-    //last_mc_block: &BlockStuff,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
 ) -> Result<()> {
     log::trace!("restore_states");
 
@@ -703,9 +737,6 @@ async fn restore_states(
     let mut min_stored_states = min_mc_block.shard_hashes()?.top_blocks(&[processed_wc])?;
     min_stored_states.push(min_mc_state_id.clone());
 
-    // let mut max_stored_states = last_mc_block.shard_hashes()?.top_blocks(&[processed_wc])?;
-    // max_stored_states.push(last_mc_block.id().clone());
-
     // master chain
     let mc_state = db.load_shard_state_persistent(persistent_state_handle.id()).await?;
     let next_id = db.load_block_next1(mc_state.block_id())?;
@@ -714,8 +745,8 @@ async fn restore_states(
         mc_state.root_cell().clone(),
         next_id,
         &min_stored_states,
-        //&max_stored_states,
         false,
+        check_stop,
     ).await?;
 
     // shards
@@ -730,7 +761,8 @@ async fn restore_states(
                 next_id2, 
                 &min_stored_states, 
                 //&max_stored_states, 
-                &mut after_merge
+                &mut after_merge,
+                check_stop
             ).await?;
         }
 
@@ -741,7 +773,8 @@ async fn restore_states(
             next_id1,
             &min_stored_states,
             //&max_stored_states,
-            &mut after_merge
+            &mut after_merge,
+            check_stop
         ).await?;
     }
 
@@ -758,6 +791,7 @@ async fn run_chain_restore(
     min_stored_states: &[BlockIdExt],
     //max_stored_states: &[BlockIdExt],
     after_merge: &mut HashMap<BlockIdExt, Cell>,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
 ) -> Result<()> {
     let mut store_states = false;
     loop {
@@ -768,6 +802,7 @@ async fn run_chain_restore(
             min_stored_states,
             //max_stored_states,
             store_states,
+            check_stop,
         ).await? {
             None => break,
             Some((root1, store_states1, block_id1, next_block_id1)) => {
@@ -800,9 +835,11 @@ async fn restore_chain(
     min_stored_states: &[BlockIdExt],
     //max_stored_states: &[BlockIdExt],
     mut store_states: bool,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
 ) -> Result<Option<(Cell, bool, BlockIdExt, BlockIdExt)>> {
     log::trace!("restore_chain: {}, store_states {}", block_id, store_states);
     loop {
+        check_stop()?;
         // load block
         let block_handle = db.load_block_handle(&block_id)?.ok_or_else(
             || error!("Cannot load handle {}", block_id)
@@ -831,7 +868,8 @@ async fn restore_chain(
             db.store_shard_state_dynamic_raw_force(
                 &block_handle,
                 state_root.clone(),
-                None
+                None,
+                check_stop,
             ).await?;
         }
 
@@ -863,6 +901,7 @@ async fn restore_chain(
                     min_stored_states,
                     //max_stored_states,
                     store_states,
+                    check_stop,
                 ).await?;
                 let r2 = restore_chain(
                     db,
@@ -871,6 +910,7 @@ async fn restore_chain(
                     min_stored_states,
                     //max_stored_states,
                     store_states,
+                    check_stop,
                 ).await?;
 
                 match (r1, r2) {
