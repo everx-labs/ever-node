@@ -169,10 +169,12 @@ impl InternalDb {
             telemetry,
             allocated,
         ).await?;
+
         let version = db.resolve_db_version()?;
         if version != CURRENT_DB_VERSION {
-            fail!("DB version {} is not correspond current supported {}.", version, CURRENT_DB_VERSION);
+            fail!("DB version {} does not correspond to current supported one {}.", version, CURRENT_DB_VERSION);
         }
+
         Ok(db)
     }
 
@@ -183,7 +185,7 @@ impl InternalDb {
         allocated: Arc<EngineAlloc>,
         check_stop: &(dyn Fn() -> Result<()> + Sync),
     ) -> Result<Self> {
-        let mut db = Self::new(
+        let mut db = Self::construct(
             config,
             #[cfg(feature = "telemetry")]
             telemetry,

@@ -189,11 +189,19 @@ impl ArchiveSlice {
             assert!(self.slice_size > 0);
 
             let mut packages = Vec::new();
-            for i in 0..total_slices {
+            'c: for i in 0..total_slices {
                 let meta = self.index_db.get_value(&i.into())?;
                 log::info!(target: "storage", "Read slice #{} metadata: {:?}", i, meta);
 
-                packages.push(self.new_package(i, self.archive_id + self.slice_size * i, meta.entry_size(), meta.version()).await?);
+                match self.new_package(i, self.archive_id + self.slice_size * i, 
+                    meta.entry_size(), meta.version()).await 
+                {
+                    Ok(p) => packages.push(p),
+                    Err(e) => {
+                        log::warn!("Error while read slice #{}: {}. Stopped slices reading", i, e);
+                        break 'c;
+                    }
+                }
             }
             self.packages = tokio::sync::RwLock::new(packages);
         } else {
@@ -353,8 +361,22 @@ impl ArchiveSlice {
         std::fs::create_dir_all(path.parent().unwrap())
             .map_err(|err| error!("Cannot create directory: {:?} : {}", path.parent(), err))?;
 
-        let package = Package::open(path.clone(), false, true).await
-            .map_err(|err| error!("Failed to open or create archive \"{}\": {}", path.display(), err))?;
+        let package = match Package::open(path.clone(), false, true).await {
+            Ok(p) => p,
+            Err(e) => {
+                match tokio::fs::remove_file(path.as_path()).await {
+                    Ok(_) => log::warn!(
+                        "Failed to open or create archive \"{}\": {}. Archive file was cleaned up.",
+                        path.display(), e
+                    ),
+                    Err(e2) => log::warn!(
+                        "Failed to open or create archive \"{}\": {}. Archive file wasn't cleaned up: {}.",
+                        path.display(), e, e2
+                    ),
+                }
+                fail!("Failed to open or create archive \"{}\": {}.", path.display(), e);
+            }
+        };
 
         if !self.finalized && version >= DEFAULT_PKG_VERSION {
             package.truncate(size).await?;

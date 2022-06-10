@@ -30,17 +30,6 @@ storage = { path = '../storage' }
 ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.128' }
 ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.11.2' }
 
-[dev-dependencies]
-env_logger = '0.7.1'
-chrono = '0.4.10'
-
-[target.'cfg(windows)'.dev-dependencies.rocksdb]
-git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
-
-[target.'cfg(unix)'.dev-dependencies.rocksdb]
-git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
-features = [ 'jemalloc' ]
-
 [features]
 default = [  ]
 export_key = [ 'ever-crypto/export_key' ]
