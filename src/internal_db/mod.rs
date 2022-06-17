@@ -17,15 +17,10 @@ use crate::{
 };
 #[cfg(feature = "telemetry")]
 use crate::engine_traits::EngineTelemetry;
-#[cfg(feature = "telemetry")]
-use storage::StorageTelemetry;
 
 use std::{
-    cmp::min, collections::HashMap, io::Cursor, path::{Path, PathBuf}, 
-    sync::{Arc, atomic::{AtomicU32, Ordering}},
-    time::{UNIX_EPOCH, Duration},
-    collections::HashSet,
-    mem::size_of,
+    cmp::min, collections::{HashMap, HashSet}, io::Cursor, mem::size_of, path::{Path, PathBuf},
+    sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}}, time::{UNIX_EPOCH, Duration}
 };
 use storage::{
     TimeChecker,
@@ -36,6 +31,8 @@ use storage::{
     shardstate_persistent_db::ShardStatePersistentDb, types::BlockMeta, 
     shard_top_blocks_db::ShardTopBlocksDb, StorageAlloc, traits::Serializable,
 };
+#[cfg(feature = "telemetry")]
+use storage::StorageTelemetry;
 use ton_block::{Block, BlockIdExt};
 use ton_types::{error, fail, Result, UInt256, Cell};
 
@@ -133,6 +130,11 @@ pub struct InternalDbConfig {
     pub cells_gc_interval_sec: u32,
 }
 
+pub enum InternalDbStatus {
+    Checking, 
+    Broken
+}
+
 pub struct InternalDb {
     db: Arc<RocksDb>,
     block_handle_storage: Arc<BlockHandleStorage>,
@@ -184,6 +186,7 @@ impl InternalDb {
         telemetry: Arc<EngineTelemetry>,
         allocated: Arc<EngineAlloc>,
         check_stop: &(dyn Fn() -> Result<()> + Sync),
+        is_broken: Option<&AtomicBool>
     ) -> Result<Self> {
         let mut db = Self::construct(
             config,
@@ -194,7 +197,7 @@ impl InternalDb {
 
         let version = db.resolve_db_version()?;
         if version != CURRENT_DB_VERSION {
-            db = update::update(db, version, check_stop).await?;
+            db = update::update(db, version, check_stop, is_broken).await?;
         }
 
         Ok(db)
