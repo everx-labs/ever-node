@@ -380,13 +380,24 @@ impl EngineOperations for Engine {
         master_id: &BlockIdExt,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
         attempts: Option<usize>
-    ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
+    ) -> Result<(Arc<ShardStateStuff>, Arc<Vec<u8>>)> {
         let overlay = self.get_full_node_overlay(
             block_id.shard().workchain_id(), 
             block_id.shard().shard_prefix_with_tag()
         ).await?;
         crate::full_node::state_helper::download_persistent_state(
-            block_id, master_id, overlay.deref(), self, active_peers, attempts
+            block_id,
+            master_id,
+            overlay.deref(),
+            self.clone(),
+            active_peers,
+            attempts,
+            &|| {
+                if self.check_stop() {
+                    fail!("Persistent state downloading was stopped")
+                }
+                Ok(())
+            }
         ).await
     }
 
@@ -499,7 +510,13 @@ impl EngineOperations for Engine {
         state: Arc<ShardStateStuff>,
         state_bytes: Option<&[u8]>,
     ) -> Result<Arc<ShardStateStuff>> {
-        let (state, saved) = self.db().store_shard_state_dynamic(handle, &state, None)?;
+        let check_stop = || {
+            if self.stopper().check_stop() {
+                fail!("Stopped")
+            }
+            Ok(())
+        };
+        let (state, saved) = self.db().store_shard_state_dynamic(handle, &state, None, &check_stop).await?;
         if saved {
             #[cfg(feature = "telemetry")]
             self.full_node_telemetry().new_pre_applied_block(handle.got_by_broadcast());
@@ -850,15 +867,15 @@ impl EngineOperations for Engine {
     }
 
     fn acquire_stop(&self, mask: u32) {
-        Engine::acquire_stop(self, mask)
+        self.stopper().acquire_stop(mask);
     }
 
     fn check_stop(&self) -> bool {
-        Engine::check_stop(self)
+        self.stopper().check_stop()
     }
 
     fn release_stop(&self, mask: u32) {
-        Engine::release_stop(self, mask)
+        self.stopper().release_stop(mask);
     }
 
     fn register_server(&self, server: Server) {

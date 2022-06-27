@@ -106,6 +106,9 @@ async fn get_key_blocks(
     let mut download_new_key_blocks_until = engine.now() + engine.time_for_blockchain_init();
     let mut key_blocks = vec!(handle.clone());
     loop {
+        if engine.check_stop() {
+            fail!("Boot was stopped");
+        }
         log::info!(target: "boot", "download_next_key_blocks_ids {}", handle.id());
         let (ids, _incomplete) = match engine.download_next_key_blocks_ids(handle.id(), 10).await {
             Err(err) => {
@@ -243,6 +246,9 @@ pub(crate) async fn download_zerostate(
     }
     log::info!(target: "boot", "download zero state {}", block_id);
     loop {
+        if engine.check_stop() {
+            fail!("Boot was stopped");
+        }
         match engine.download_zerostate(block_id).await {
             Ok((state, state_bytes)) => {
                 log::info!(target: "boot", "zero state {} received", block_id);
@@ -270,6 +276,9 @@ async fn download_key_block_proof(
         }
     }
     loop {
+        if engine.check_stop() {
+            fail!("Boot was stopped");
+        }
         let proof = engine.download_block_proof(block_id, false, true).await?;
         let result = if let Some(prev_block_proof) = prev_block_proof {
             proof.check_with_prev_key_block_proof(prev_block_proof)

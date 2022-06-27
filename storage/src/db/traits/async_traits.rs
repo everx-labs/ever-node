@@ -33,7 +33,7 @@ pub trait KvcAsync: Debug + Send + Sync {
 
 /// Trait for readable key-value collections
 #[async_trait]
-pub trait KvcReadableAsync<K: DbKey>: KvcAsync {
+pub trait KvcReadableAsync<K: DbKey + Sync>: KvcAsync {
     /// Tries to get value from collection by the key; returns Ok(None) if key not found
     async fn try_get(&self, key: &K) -> Result<Option<DbSlice>>;
 
@@ -42,6 +42,10 @@ pub trait KvcReadableAsync<K: DbKey>: KvcAsync {
 
     /// Gets slice with given size starting from given offset from collection by the key
     async fn get_slice(&self, key: &K, offset: u64, size: u64) -> Result<DbSlice>;
+
+    /// Gets vector with copy of data with given size starting from given offset 
+    /// from collection by the key
+    async fn get_vec(&self, key: &K, offset: u64, size: u64) -> Result<Vec<u8>>;
 
     /// Gets the size of value by the key
     async fn get_size(&self, key: &K) -> Result<u64>;
@@ -55,7 +59,7 @@ pub trait KvcReadableAsync<K: DbKey>: KvcAsync {
 
 /// Trait for writable key-value collections
 #[async_trait]
-pub trait KvcWriteableAsync<K: DbKey>: KvcReadableAsync<K> {
+pub trait KvcWriteableAsync<K: DbKey + Sync>: KvcReadableAsync<K> {
     /// Puts value into collection by the key
     async fn put(&self, key: &K, value: &[u8]) -> Result<()>;
 
