@@ -35,8 +35,8 @@ use crate::{
         restore::check_db,
     },
     network::{
-        control::{ControlServer, DataSource, StatusReporter},
-        full_node_client::FullNodeOverlayClient, full_node_service::FullNodeOverlayService
+        full_node_client::FullNodeOverlayClient, control::ControlServer,
+        full_node_service::FullNodeOverlayService
     },
     shard_state::ShardStateStuff,
     types::{awaiters_pool::AwaitersPool, lockfree_cache::TimeBasedCache},
@@ -90,6 +90,7 @@ use ton_types::UInt256;
 use ton_api::ton::ton_node::{
     Broadcast, broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}
 };
+use adnl::server::AdnlServerConfig;
 use ever_crypto::KeyId;
 use crossbeam_channel::{Sender, Receiver};
 
@@ -336,85 +337,6 @@ impl Downloader for ZeroStateDownloader {
     }
 }
 
-pub struct Stopper {
-    stop: Arc<AtomicU32>,
-}
-
-impl Stopper {
-    pub fn new() -> Self {
-        Stopper {
-            stop: Arc::new(AtomicU32::new(0)),
-        }
-    }
-
-    pub fn set_stop(&self) {
-        let stop = self.stop.fetch_or(Engine::MASK_STOP, Ordering::Relaxed);
-        Self::log_stop_status(stop);
-    }
-
-    pub async fn wait_stop(self: Arc<Self>) {
-        loop {
-            tokio::time::sleep(Duration::from_millis(Engine::TIMEOUT_STOP_MS)).await;
-            let stop = self.stop.load(Ordering::Relaxed) & !Engine::MASK_STOP;
-            Self::log_stop_status(stop);
-            if (self.stop.load(Ordering::Relaxed) & !Engine::MASK_STOP) == 0 {
-                break
-            }
-        }
-    }
-
-    pub fn log_stop_status(bitmap: u32) {
-        let mut ss = String::new();
-        if bitmap & Engine::MASK_SERVICE_BOOT != 0 {
-            ss.push_str("boot, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_DB_RESTORE != 0 {
-            ss.push_str("DB restore, ");
-        }
-        #[cfg(feature = "external_db")]
-        if bitmap & Engine::MASK_SERVICE_KAFKA_CONSUMER != 0 {
-            ss.push_str("kafka consumer, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_MASTERCHAIN_BROADCAST_LISTENER != 0 {
-            ss.push_str("masterchain broadcasts listener, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_MASTERCHAIN_CLIENT != 0 {
-            ss.push_str("masterchain client, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_PSS_KEEPER != 0 {
-            ss.push_str("persistent states storer, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_SHARDCHAIN_BROADCAST_LISTENER != 0 {
-            ss.push_str("shardchains broadcasts listener, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_SHARDCHAIN_CLIENT != 0 {
-            ss.push_str("shardchains client, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_SHARDSTATE_GC != 0 {
-            ss.push_str("shard states GC, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_TOP_SHARDBLOCKS_SENDER != 0 {
-            ss.push_str("top shard blocks sender, ");
-        }
-        if bitmap & Engine::MASK_SERVICE_VALIDATOR_MANAGER != 0 {
-            ss.push_str("validator manager, ");
-        }
-        log::warn!("These services are still stopping ({:04x}): {}", bitmap, ss);
-    }
-
-    pub fn acquire_stop(&self, mask: u32) {
-        self.stop.fetch_or(mask, Ordering::Relaxed);
-    }
-
-    pub fn check_stop(&self) -> bool {
-        (self.stop.load(Ordering::Relaxed) & Engine::MASK_STOP) != 0 
-    }
-
-    pub fn release_stop(&self, mask: u32) {
-        self.stop.fetch_and(!mask, Ordering::Relaxed);
-    }
-}
-
 impl Engine {
 
     // Masks for services
@@ -436,9 +358,7 @@ impl Engine {
     pub const SYNC_STATUS_FINISH_BOOT: u32          = 0x0004;
     pub const SYNC_STATUS_SYNC_BLOCKS: u32          = 0x0005;
     pub const SYNC_STATUS_FINISH_SYNC: u32          = 0x0006;
-    pub const SYNC_STATUS_CHECKING_DB: u32          = 0x0007;
-    pub const SYNC_STATUS_DB_BROKEN: u32            = 0x0008;
-    
+
     const MASK_STOP: u32 = 0x80000000; 
     const TIMEOUT_STOP_MS: u64 = 100; 
     const TIMEOUT_TELEMETRY_SEC: u64 = 30;
@@ -449,92 +369,43 @@ impl Engine {
         initial_sync_disabled : bool
     ) -> Result<Arc<Self>> {
 
-        struct DbStatusReporter {
-            is_broken: AtomicBool
-        } 
-
-        impl StatusReporter for DbStatusReporter {
-            fn get_report(&self) -> u32 {
-                if self.is_broken.load(Ordering::Relaxed) {
-                    Engine::SYNC_STATUS_DB_BROKEN
-                } else {
-                    Engine::SYNC_STATUS_CHECKING_DB
-                }
-            } 
-        }
-
-        async fn open_db(
-            db_config: InternalDbConfig,
-            restore_db: bool,
-            force_check_db: bool,
-            is_broken: Option<&AtomicBool>,
-            stopper: &Arc<Stopper>,
-            #[cfg(feature = "telemetry")]
-            telemetry: Arc<EngineTelemetry>,
-            allocated: Arc<EngineAlloc>
-        ) -> Result<Arc<InternalDb>> {
-            let check_stop = || {
-                if stopper.check_stop() {
-                    fail!("DB restore was stopped")
-                }
-                Ok(())
-            };                                 
-            let db = InternalDb::with_update(
-                db_config,
-                #[cfg(feature = "telemetry")]
-                telemetry,
-                allocated,
-                &check_stop,
-                is_broken
-            ).await?;
-            // TODO correct workchain id needed here, but it will be known later
-            let db = Arc::new(
-                check_db(db, 0, restore_db, force_check_db, &check_stop, is_broken).await?
-            );
-            Ok(db)
-        }
-
         log::info!("Creating engine...");
 
         #[cfg(feature = "telemetry")] 
-        let (metrics, engine_telemetry) = Self::create_telemetry();
-        let storage_allocated = Arc::new(
-            StorageAlloc {
-                file_entries: Arc::new(AtomicU64::new(0)),
-                handles: Arc::new(AtomicU64::new(0)),
-                packages: Arc::new(AtomicU64::new(0)),
-                storage_cells: Arc::new(AtomicU64::new(0))
-            }
-        );
-        let engine_allocated = Arc::new(
-            EngineAlloc {
-                storage: storage_allocated,
-                awaiters: Arc::new(AtomicU64::new(0)),
-                catchain_clients: Arc::new(AtomicU64::new(0)),
-                overlay_clients: Arc::new(AtomicU64::new(0)),
-                peer_stats: Arc::new(AtomicU64::new(0)),
-                shard_states: Arc::new(AtomicU64::new(0)),
-                top_blocks: Arc::new(AtomicU64::new(0)),
-                validator_peers: Arc::new(AtomicU64::new(0)),
-                validator_sets: Arc::new(AtomicU64::new(0))
-            }
-        );
-
+        let (metrics, engine_telemetry, engine_allocated) = Self::create_telemetry();
         let archives_life_time = general_config.gc_archives_life_time_hours();
-        let cells_lifetime_sec = general_config.cells_gc_config().cells_lifetime_sec;
         let enable_shard_state_persistent_gc = general_config.enable_shard_state_persistent_gc();
-        let restore_db = general_config.restore_db();
+        let db_directory = general_config.internal_db_path().to_string();
+        let gc_interval_sec = general_config.cells_gc_config().gc_interval_sec;
+        let cells_lifetime_sec = general_config.cells_gc_config().cells_lifetime_sec;
+        let db_config = InternalDbConfig { 
+            db_directory, 
+            cells_gc_interval_sec: gc_interval_sec
+        };
+
+        let db = InternalDb::new(
+            db_config,
+            #[cfg(feature = "telemetry")]
+            engine_telemetry.clone(),
+            engine_allocated.clone()
+        ).await?;
+
+        // TODO correct workchain id needed here, but it will be known later
+        let db = Arc::new(check_db(db, 0, general_config.restore_db()).await?);
+
+        let global_config = general_config.load_global_config()?;
+        let test_bundles_config = general_config.test_bundles_config().clone();
+        let zero_state_id = global_config.zero_state().expect("check zero state settings");
+        let mut init_mc_block_id = global_config.init_block()?.unwrap_or_else(|| zero_state_id.clone());
+        if let Ok(Some(block_id)) = db.load_full_node_state(INITIAL_MC_BLOCK) {
+            if block_id.seq_no > init_mc_block_id.seq_no {
+                init_mc_block_id = block_id.deref().clone()
+            }
+        }
+
         let workchain_id = general_config.workchain_id().unwrap_or(ton_block::INVALID_WORKCHAIN_ID);
         log::info!("workchain_id from config {}", workchain_id);
         let workchain_id = AtomicI32::new(workchain_id);
-
-        let db_config = InternalDbConfig { 
-            db_directory: general_config.internal_db_path().to_string(), 
-            cells_gc_interval_sec: general_config.cells_gc_config().gc_interval_sec
-        };
-        let control_config = general_config.control_server()?;
-        let global_config = general_config.load_global_config()?;
-        let test_bundles_config = general_config.test_bundles_config().clone();
 
         let network = NodeNetwork::new(
             general_config,
@@ -543,56 +414,6 @@ impl Engine {
             engine_allocated.clone()
         ).await?;
         network.start().await?;
-
-        let (status_reporter, status_server) = if let Some(control_config) = control_config {
-            log::info!("Invoking DB status control server");
-            let status_reporter = Arc::new(
-                DbStatusReporter {
-                    is_broken: AtomicBool::new(false)
-                }
-            );
-            let status_server = ControlServer::with_params(
-                control_config,
-                DataSource::Status(status_reporter.clone()),
-                network.config_handler(),
-                network.config_handler(),
-                Some(&network)
-            ).await?;
-            (Some(status_reporter), Some(status_server))
-        } else {
-            (None, None)
-        };
-
-        stopper.acquire_stop(Self::MASK_SERVICE_DB_RESTORE);
-        let db = open_db(
-            db_config, 
-            restore_db,
-            force_check_db,
-            if let Some(status_reporter) = status_reporter.as_ref() {
-                Some(&status_reporter.is_broken)
-            } else {
-                None
-            },
-            &stopper,
-            #[cfg(feature = "telemetry")]
-            engine_telemetry.clone(),
-            engine_allocated.clone()
-        ).await;
-        if let Some(status_server) = status_server {
-            log::info!("Stopping DB status control server...");
-            status_server.shutdown().await;
-            log::info!("Stopped DB status control server");
-        }
-        stopper.release_stop(Self::MASK_SERVICE_DB_RESTORE);
-        let db = db?;
-
-        let zero_state_id = global_config.zero_state().expect("check zero state settings");
-        let mut init_mc_block_id = global_config.init_block()?.unwrap_or_else(|| zero_state_id.clone());
-        if let Ok(Some(block_id)) = db.load_full_node_state(INITIAL_MC_BLOCK) {
-            if block_id.seq_no > init_mc_block_id.seq_no {
-                init_mc_block_id = block_id.deref().clone()
-            }
-        }
 
         log::info!("load_all_top_shard_blocks");
         let shard_blocks = match db.load_all_top_shard_blocks() {
@@ -683,8 +504,7 @@ impl Engine {
             #[cfg(feature = "telemetry")]
             validator_telemetry: CollatorValidatorTelemetry::default(),
             #[cfg(feature = "telemetry")]
-            full_node_service_telemetry: 
-                FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Service),
+            full_node_service_telemetry: FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Service),
             #[cfg(feature = "telemetry")]
             engine_telemetry,
             engine_allocated,
@@ -1188,7 +1008,7 @@ impl Engine {
     pub fn validated_block_stats_receiver(&self) -> &Receiver<ValidatedBlockStat> { &self.validated_block_stats_receiver }
 
     #[cfg(feature = "telemetry")] 
-    fn create_telemetry() -> (Vec<TelemetryItem>, Arc<EngineTelemetry>) {
+    fn create_telemetry() -> (Vec<TelemetryItem>, Arc<EngineTelemetry>, Arc<EngineAlloc>) {
 
         fn create_metric(name: &str) -> Arc<Metric> {
             Metric::without_totals(name, Engine::TIMEOUT_TELEMETRY_SEC)
@@ -1231,7 +1051,28 @@ impl Engine {
             TelemetryItem::Metric(engine_telemetry.validator_peers.clone()),
             TelemetryItem::Metric(engine_telemetry.validator_sets.clone())
         ];
-        (metrics, engine_telemetry)
+        let storage_allocated = Arc::new(
+            StorageAlloc {
+                file_entries: Arc::new(AtomicU64::new(0)),
+                handles: Arc::new(AtomicU64::new(0)),
+                packages: Arc::new(AtomicU64::new(0)),
+                storage_cells: Arc::new(AtomicU64::new(0))
+            }
+        );
+        let engine_allocated = Arc::new(
+            EngineAlloc {
+                storage: storage_allocated,
+                awaiters: Arc::new(AtomicU64::new(0)),
+                catchain_clients: Arc::new(AtomicU64::new(0)),
+                overlay_clients: Arc::new(AtomicU64::new(0)),
+                peer_stats: Arc::new(AtomicU64::new(0)),
+                shard_states: Arc::new(AtomicU64::new(0)),
+                top_blocks: Arc::new(AtomicU64::new(0)),
+                validator_peers: Arc::new(AtomicU64::new(0)),
+                validator_sets: Arc::new(AtomicU64::new(0))
+            }
+        );
+        (metrics, engine_telemetry, engine_allocated)
 
     }
 
@@ -1945,6 +1786,16 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
     Ok((last_applied_mc_block, shard_client_mc_block, pss_keeper_mc_block))
 }
 
+async fn run_control_server(engine: Arc<Engine>, config: AdnlServerConfig) -> Result<ControlServer> {
+    ControlServer::with_config(
+        config,
+        Some(Arc::clone(&engine) as Arc<dyn EngineOperations>),
+        engine.network().config_handler(),
+        engine.network().config_handler(),
+        Some(engine.network().clone())
+    ).await
+}
+
 pub async fn run(
     node_config: TonNodeConfig,
     zerostate_path: Option<&str>, 
@@ -1968,15 +1819,7 @@ pub async fn run(
     // Console service - run first to allow console to connect to generate new keys 
     // while node is looking for net
     if let Some(config) = control_server_config {
-        let server = Server::ControlServer(
-            ControlServer::with_params(
-                config,
-                DataSource::Engine(engine.clone()),
-                engine.network().config_handler(),
-                engine.network().config_handler(),
-                Some(engine.network().clone())
-            ).await?
-        );
+        let server = Server::ControlServer(run_control_server(engine.clone(), config).await?);
         engine.register_server(server)
     };
 

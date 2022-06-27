@@ -17,10 +17,14 @@ use crate::{
 };
 #[cfg(feature = "telemetry")]
 use crate::engine_traits::EngineTelemetry;
+#[cfg(feature = "telemetry")]
+use storage::StorageTelemetry;
 
 use std::{
-    cmp::min, collections::{HashMap, HashSet}, io::Cursor, mem::size_of, path::{Path, PathBuf},
-    sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}}, time::{UNIX_EPOCH, Duration}
+    cmp::min, collections::HashMap, io::Cursor, path::{Path, PathBuf}, 
+    sync::{Arc, atomic::{AtomicU32, Ordering}},
+    time::{UNIX_EPOCH, Duration},
+    collections::HashSet,
 };
 use storage::{
     TimeChecker,
@@ -31,8 +35,6 @@ use storage::{
     shardstate_persistent_db::ShardStatePersistentDb, types::BlockMeta, 
     shard_top_blocks_db::ShardTopBlocksDb, StorageAlloc, traits::Serializable,
 };
-#[cfg(feature = "telemetry")]
-use storage::StorageTelemetry;
 use ton_block::{Block, BlockIdExt};
 use ton_types::{error, fail, Result, UInt256, Cell};
 
@@ -124,11 +126,6 @@ pub struct InternalDbConfig {
     pub cells_gc_interval_sec: u32,
 }
 
-pub enum InternalDbStatus {
-    Checking, 
-    Broken
-}
-
 pub struct InternalDb {
     db: Arc<RocksDb>,
     block_handle_storage: Arc<BlockHandleStorage>,
@@ -156,51 +153,7 @@ impl InternalDb {
         config: InternalDbConfig,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<EngineTelemetry>,
-        allocated: Arc<EngineAlloc>,
-    ) -> Result<Self> {
-        let db = Self::construct(
-            config,
-            #[cfg(feature = "telemetry")]
-            telemetry,
-            allocated,
-        ).await?;
-
-        let version = db.resolve_db_version()?;
-        if version != CURRENT_DB_VERSION {
-            fail!("DB version {} does not correspond to current supported one {}.", version, CURRENT_DB_VERSION);
-        }
-
-        Ok(db)
-    }
-
-    pub async fn with_update(
-        config: InternalDbConfig,
-        #[cfg(feature = "telemetry")]
-        telemetry: Arc<EngineTelemetry>,
-        allocated: Arc<EngineAlloc>,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
-        is_broken: Option<&AtomicBool>
-    ) -> Result<Self> {
-        let mut db = Self::construct(
-            config,
-            #[cfg(feature = "telemetry")]
-            telemetry,
-            allocated,
-        ).await?;
-
-        let version = db.resolve_db_version()?;
-        if version != CURRENT_DB_VERSION {
-            db = update::update(db, version, check_stop, is_broken).await?;
-        }
-
-        Ok(db)
-    }
-
-    async fn construct(
-        config: InternalDbConfig,
-        #[cfg(feature = "telemetry")]
-        telemetry: Arc<EngineTelemetry>,
-        allocated: Arc<EngineAlloc>,
+        allocated: Arc<EngineAlloc>
     ) -> Result<Self> {
         let db = RocksDb::with_path(config.db_directory.as_str(), "db");
         let db_catchain = RocksDb::with_path(config.db_directory.as_str(), "catchains");

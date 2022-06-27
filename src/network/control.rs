@@ -23,24 +23,25 @@ use adnl::{
 use ever_crypto::KeyId;
 use std::{fmt::Write, ops::Deref, sync::Arc, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
 use serde_json::Map;
-use ton_api::{
-    deserialize_boxed,
+use ton_api::{deserialize_boxed,
     ton::{
-        self, bytes, PublicKey, TLObject, accountaddress::AccountAddress, 
+        self, bytes, PublicKey, TLObject, accountaddress::AccountAddress, raw::shardaccountstate::ShardAccountState,
         engine::validator::{
             keyhash::KeyHash, onestat::OneStat, signature::Signature, stats::Stats, Success
         },
-        lite_server::configinfo::ConfigInfo, 
-        raw::{ShardAccountState as ShardAccountStateBoxed, shardaccountstate::ShardAccountState},
+        lite_server::configinfo::ConfigInfo,
         rpc::engine::validator::{
-            AddAdnlId, AddValidatorAdnlAddress, AddValidatorPermanentKey, AddValidatorTempKey,
+            AddAdnlId, AddValidatorAdnlAddress, AddValidatorPermanentKey, AddValidatorTempKey, 
             ControlQuery, ExportPublicKey, GenerateKeyPair, Sign, GetBundle, GetFutureBundle
         },
     },
     IntoBoxed,
 };
 use ton_types::{fail, error, Result, UInt256};
-use ton_block::{BlockIdExt, MsgAddressInt, Serializable, ShardIdent};
+use ton_block::{
+    generate_test_account_by_init_code_hash, BlockIdExt, ConfigParam0, ConfigParamEnum, ConfigParams,
+    MsgAddressInt, ShardAccount, Serializable, ShardIdent
+};
 use ton_block_json::serialize_config_param;
 
 pub struct ControlServer {
@@ -48,9 +49,9 @@ pub struct ControlServer {
 }
 
 impl ControlServer {
-    pub async fn with_params(
+    pub async fn with_config(
         config: AdnlServerConfig,
-        data_source: DataSource,
+        engine: Option<Arc<dyn EngineOperations>>,
         key_ring: Arc<dyn KeyRing>,
         node_config: Arc<NodeConfigHandler>,
         network: Option<&NodeNetwork>
@@ -58,11 +59,7 @@ impl ControlServer {
         let ret = Self {
             adnl: AdnlServer::listen(
                 config, 
-                vec![
-                    Arc::new(
-                        ControlQuerySubscriber::new(data_source, key_ring, node_config, network)?
-                    )
-                ]
+                vec![Arc::new(ControlQuerySubscriber::new(engine, key_ring, node_config, network)?)]
             ).await? 
         };
         Ok(ret)
@@ -72,26 +69,16 @@ impl ControlServer {
     }
 }
 
-pub trait StatusReporter: Send + Sync {
-    fn get_report(&self) -> u32;
-}
-
-pub enum DataSource {
-    Engine(Arc<dyn EngineOperations>),
-    Status(Arc<dyn StatusReporter>)
-}
-
 struct ControlQuerySubscriber {
-    data_source: DataSource,
+    engine: Option<Arc<dyn EngineOperations>>,
     key_ring: Arc<dyn KeyRing>, 
     config: Arc<NodeConfigHandler>,
     public_overlay_adnl_id: Option<Arc<KeyId>>
 }
 
 impl ControlQuerySubscriber {
-
     fn new(
-        data_source: DataSource, 
+        engine: Option<Arc<dyn EngineOperations>>, 
         key_ring: Arc<dyn KeyRing>, 
         config: Arc<NodeConfigHandler>,
         network: Option<&NodeNetwork>,
@@ -102,36 +89,49 @@ impl ControlQuerySubscriber {
             None
         };
         let ret = Self {
-            data_source,
+            engine,
             key_ring,
             config,
             public_overlay_adnl_id: key_id
         };
+        // To get rid of unused engine field warning
+        if ret.engine.is_none() {
+            log::debug!("Running control server without engine access")
+        }
         Ok(ret)
     }
 
     fn engine(&self) -> Result<&Arc<dyn EngineOperations>> {
-        match self.data_source {
-            DataSource::Engine(ref engine) => Ok(engine),
-            _ => fail!("`engine is not set`")
-        }
+        self.engine.as_ref().ok_or_else(|| error!("Engine was not set!"))
     }
 
-    async fn get_all_config_params(&self) -> Result<ConfigInfo> {
-        let engine = self.engine()?;
-        let mc_state = engine.load_last_applied_mc_state().await?;
-        let block_id = mc_state.block_id();
-        let config_params = mc_state.config_params()?;        
+    async fn get_all_config_params(&self) -> Result<ton::lite_server::configinfo::ConfigInfo> {
+        let (config_params, block_id) = if let Some(engine) = self.engine.as_ref() {
+            let mc_state = engine.load_last_applied_mc_state().await?;
+            let config_params = mc_state.config_params()?;
+            (config_params.clone(), mc_state.block_id().clone())
+        } else {
+            let test_config_params = self.get_test_all_config_params()?;
+            (test_config_params, BlockIdExt::default())
+        };        
         let config_info = ConfigInfo {
             mode: 0,
-            id: block_id.clone(),
+            id: block_id,
             state_proof: ton::bytes(vec!()),
             config_proof: ton::bytes(config_params.write_to_bytes()?)
         };
         Ok(config_info)
     }
 
-    async fn get_config_params(&self, param_number: u32) -> Result<ConfigInfo> {
+    fn get_test_all_config_params(&self) -> Result<ConfigParams> {
+        let mut config_param = ConfigParams::new();
+        let mut param0 = ConfigParam0::new();
+        param0.config_addr = UInt256::from([1;32]);
+        config_param.set_config(ConfigParamEnum::ConfigParam0(param0))?;
+        Ok(config_param)
+    }
+
+    async fn get_config_params(&self, param_number: u32) -> Result<ton::lite_server::configinfo::ConfigInfo> {
         let engine = self.engine()?;
         let mc_state = engine.load_last_applied_mc_state().await?;
         let config_params = mc_state.config_params()?;
@@ -145,36 +145,57 @@ impl ControlQuerySubscriber {
         Ok(config_info)
     }
 
-    async fn get_account_state(&self, address: AccountAddress) -> Result<ShardAccountStateBoxed> {
-        let engine = self.engine()?;
-        let addr = MsgAddressInt::from_str(&address.account_address)?;
-        let state = if addr.is_masterchain() {
-            engine.load_last_applied_mc_state().await?
+    fn get_test_account(
+        addr: &MsgAddressInt,
+    ) -> Result<Option<ShardAccount>> {
+        let account = generate_test_account_by_init_code_hash(false);
+        let addr_account = account.get_addr().ok_or_else(|| error!("address from test account not found!"))?;
+
+        let result = if addr_account.to_string() == addr.to_string() {
+            let shard_account = ShardAccount::with_params(&account, UInt256::default(), 0)?;
+            Some(shard_account)
         } else {
-            let mc_block_id = engine.load_shard_client_mc_block_id()?;
-            let mc_block_id = mc_block_id.ok_or_else(
-                || error!("Cannot load shard_client_mc_block_id!")
-            )?;
-            let mc_state = engine.load_state(&mc_block_id).await?;
-            let mut shard_state = None;
-            for id in mc_state.top_blocks(addr.workchain_id())? {
-                if id.shard().contains_account(addr.address().clone())? {
-                    shard_state = engine.load_state(&id).await.ok();
-                    break;
-                }
-            }
-            shard_state.ok_or_else(
-                || error!("Cannot find actual shard for account {}", &address.account_address)
-            )?
+            None
         };
-        let shard_account_opt = state.shard_account(&addr.address())?;
+        
+        Ok(result)
+    }
+
+    async fn get_account_state(&self, address: AccountAddress) -> Result<ton_api::ton::raw::ShardAccountState> {
+        let addr = MsgAddressInt::from_str(&address.account_address)?;
+        let shard_account_opt = if let Some(engine) = self.engine.as_ref() {
+            let state = if addr.is_masterchain() {
+                engine.load_last_applied_mc_state().await?
+            } else {
+                let mc_block_id = engine.load_shard_client_mc_block_id()?;
+                let mc_block_id = mc_block_id.ok_or_else(|| error!("Cannot load shard_client_mc_block_id!"))?;
+                let mc_state = engine.load_state(&mc_block_id).await?;
+
+                let mut shard_state = None;
+                for id in mc_state.top_blocks(addr.workchain_id())? {
+                    if id.shard().contains_account(addr.address().clone())? {
+                        shard_state = engine.load_state(&id).await.ok();
+                        break;
+                    }
+                }
+                shard_state.ok_or_else(|| error!("Cannot find actual shard for account {}", &address.account_address))?
+            };
+
+            state.shard_account(&addr.address())?
+        } else {
+            // For test server
+            Self::get_test_account(&addr)?
+        };
+
         let result = match shard_account_opt {
             Some(shard_account) => {
                 ShardAccountState {
                     shard_account: bytes(shard_account.write_to_bytes()?),
                 }.into_boxed()
             },
-            None => ShardAccountStateBoxed::Raw_ShardAccountNone
+            None => {
+                ton_api::ton::raw::ShardAccountState::Raw_ShardAccountNone
+            }
         };
         Ok(result)
     }
@@ -184,12 +205,10 @@ impl ControlQuerySubscriber {
             Engine::SYNC_STATUS_START_BOOT => "start_boot".to_string(),
             Engine::SYNC_STATUS_LOAD_MASTER_STATE => "load_master_state".to_string(),
             Engine::SYNC_STATUS_LOAD_SHARD_STATES => "load_shard_states".to_string(),
-            Engine::SYNC_STATUS_FINISH_BOOT => "finish_boot".to_string(),
-            Engine::SYNC_STATUS_SYNC_BLOCKS => "synchronization_by_blocks".to_string(),
-            Engine::SYNC_STATUS_FINISH_SYNC => "synchronization_finished".to_string(),
-            Engine::SYNC_STATUS_CHECKING_DB => "checking_db".to_string(),
-            Engine::SYNC_STATUS_DB_BROKEN => "db_broken".to_string(),
-            _ => "no_set_status".to_string()
+            Engine::SYNC_STATUS_FINISH_BOOT => "finish boot".to_string(),
+            Engine::SYNC_STATUS_SYNC_BLOCKS => "synchronization by blocks".to_string(),
+            Engine::SYNC_STATUS_FINISH_SYNC => "synchronization finished".to_string(),
+            _ => "no set status".to_string()
         }
     }
 
@@ -197,12 +216,15 @@ impl ControlQuerySubscriber {
         let mut root_hash = String::new();
         write!(root_hash, "{:x}", block_id.root_hash())?;
         let mut json_map = Map::new();
+
         let mut file_hash = String::new();
         write!(file_hash, "{:x}", block_id.file_hash())?;
+
         json_map.insert("shard".to_string(), block_id.shard().to_string().into());
         json_map.insert("seq_no".to_string(), block_id.seq_no().into());
         json_map.insert("rh".to_string(), root_hash.into());
         json_map.insert("fh".to_string(), file_hash.into());
+
         Ok(serde_json::to_string(&json_map)?)
     }
 
@@ -213,12 +235,9 @@ impl ControlQuerySubscriber {
         })
     }
 
-    fn statistics_to_json(
-        &self, 
-        map: &lockfree::map::Map<ShardIdent, u64>, 
-        now: u64
-    ) -> Result<String> {
+    fn statistics_to_json(&self, map: &lockfree::map::Map<ShardIdent, u64>, now: u64) -> Result<String> {
         let mut json_map = Map::new();
+
         for item in map.iter() {
             let info = if *item.val() == 0 {
                 "never".to_string()
@@ -233,28 +252,23 @@ impl ControlQuerySubscriber {
     fn get_shards_time_diff(engine: &Arc<dyn EngineOperations>, now: &i32) -> Result<i32> {
         let shard_client_mc_block_id = engine.load_shard_client_mc_block_id()?
             .ok_or_else(|| error!("Cannot load shard_mc_block_id"))?;
+
         let shard_client_mc_block_handle = engine.load_block_handle(&shard_client_mc_block_id)?
             .ok_or_else(|| error!("Cannot load handle for block {}", &shard_client_mc_block_id))?;
+
         Ok(now - shard_client_mc_block_handle.gen_utime()? as i32)
     }
 
     async fn get_stats(&self) -> Result<Stats> {
-
+        let engine = self.engine()?;
         let mut stats = Vec::new();
 
         // sync status
-        let sync_status = match &self.data_source {
-            DataSource::Engine(engine) => engine.get_sync_status(),
-            DataSource::Status(status) => status.get_report()
-        }; 
-        let sync_status = format!("\"{}\"", self.convert_sync_status(sync_status));
+        let sync_status = engine.get_sync_status();
+        let sync_status = self.convert_sync_status(sync_status);
+        let sync_status = format!("\"{}\"", sync_status);
         Self::add_stats(&mut stats, "sync_status", sync_status);
-        if let DataSource::Status(_) = &self.data_source {
-            return Ok(Stats {stats: stats.into()})
-        }
-      
-        let engine = self.engine()?;
- 
+
         let mc_block_id = if let Some(id) = engine.load_last_applied_mc_block_id()? {
             id
         } else {
@@ -364,7 +378,6 @@ impl ControlQuerySubscriber {
         }
 
         Ok(Stats {stats: stats.into()})
-
     }
 
     async fn process_generate_keypair(&self) -> Result<KeyHash> {
@@ -373,52 +386,30 @@ impl ControlQuerySubscriber {
         };
         Ok(ret)
     }
-
     fn export_public_key(&self, key_hash: &[u8; 32]) -> Result<PublicKey> {
         let private = self.key_ring.find(key_hash)?;
         private.into_public_key_tl()
     }
-
     fn process_sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Signature> {
         let sign = self.key_ring.sign_data(key_hash, data)?;
         Ok(Signature {signature: ton::bytes(sign)})
     }
-
-    async fn add_validator_permanent_key(
-        &self, 
-        key_hash: &[u8; 32], 
-        election_date: ton::int, 
-        _ttl: ton::int
-    ) -> Result<Success> {
-        self.config.add_validator_key(key_hash, election_date).await?;
+    async fn add_validator_permanent_key(&self, key_hash: &[u8; 32], elecation_date: ton::int, _ttl: ton::int) -> Result<Success> {
+        self.config.add_validator_key(key_hash, elecation_date).await?;
         Ok(Success::Engine_Validator_Success)
     }
-
-    fn add_validator_temp_key(
-        &self, 
-        _perm_key_hash: &[u8; 32], 
-        _key_hash: &[u8; 32], 
-        _ttl: ton::int
-    ) -> Result<Success> {
+    fn add_validator_temp_key(&self, _perm_key_hash: &[u8; 32], _key_hash: &[u8; 32], _ttl: ton::int) -> Result<Success> {
         Ok(Success::Engine_Validator_Success)
     }
-
-    async fn add_validator_adnl_address(
-        &self, 
-        perm_key_hash: &[u8; 32], 
-        key_hash: &[u8; 32], 
-        _ttl: ton::int
-    ) -> Result<Success> {
+    async fn add_validator_adnl_address(&self, perm_key_hash: &[u8; 32], key_hash: &[u8; 32], _ttl: ton::int) -> Result<Success> {
         self.config.add_validator_adnl_key(perm_key_hash, key_hash).await?;
         Ok(Success::Engine_Validator_Success)
     }
-    
     fn add_adnl_address(&self, _key_hash: &[u8; 32], _category: ton::int) -> Result<Success> {
         Ok(Success::Engine_Validator_Success)
     }
-
     async fn prepare_bundle(&self, block_id: BlockIdExt) -> Result<Success> {
-        if let DataSource::Engine(ref engine) = self.data_source {
+        if let Some(engine) = self.engine.as_ref() {
             let bundle = CollatorTestBundle::build_with_ethalon(&block_id, engine.deref()).await?;
             tokio::task::spawn_blocking(move || {
                 bundle.save("target/bundles").ok();
@@ -426,30 +417,33 @@ impl ControlQuerySubscriber {
         }
         Ok(Success::Engine_Validator_Success)
     }
-
     async fn prepare_future_bundle(&self, prev_block_ids: Vec<BlockIdExt>) -> Result<Success> {
-        if let DataSource::Engine(ref engine) = self.data_source {
-            let bundle = CollatorTestBundle::build_for_collating_block(
-                prev_block_ids, engine.deref()
-            ).await?;
+        if let Some(engine) = self.engine.as_ref() {
+            let bundle = CollatorTestBundle::build_for_collating_block(prev_block_ids, engine.deref()).await?;
             tokio::task::spawn_blocking(move || {
                 bundle.save("target/bundles").ok();
             });
         }
         Ok(Success::Engine_Validator_Success)
     }
-
     async fn redirect_external_message(&self, message_data: &[u8]) -> Result<Success> {
-        self.engine()?.redirect_external_message(&message_data).await?;
-        Ok(Success::Engine_Validator_Success)
+        if let Some(engine) = self.engine.as_ref() {
+            engine.redirect_external_message(&message_data).await?;
+            Ok(Success::Engine_Validator_Success)
+        } else {
+            fail!("`engine is not set`")
+        }
     }
 
     fn set_states_gc_interval(&self, interval_ms: u32) -> Result<Success> {
-        self.engine()?.adjust_states_gc_interval(interval_ms);
-        self.config.store_states_gc_interval(interval_ms);
-        Ok(Success::Engine_Validator_Success)
+        if let Some(engine) = self.engine.as_ref() {
+            engine.adjust_states_gc_interval(interval_ms);
+            self.config.store_states_gc_interval(interval_ms);
+            Ok(Success::Engine_Validator_Success)
+        } else {
+            fail!("`engine is not set`")
+        }
     }
-
 }
 
 #[async_trait::async_trait]

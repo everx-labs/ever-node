@@ -25,3 +25,8 @@ metrics-core = '0.5'
 metrics-runtime = '0.13'
 rand = '0.8'
 sha2 = '0.9'
+
+[dev-dependencies]
+env_logger = '0.7'
+chrono = '0.4'
+colored = '1.9'
