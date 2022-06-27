@@ -43,6 +43,9 @@ use ton_api::{serialize_boxed, tag_from_boxed_type, tag_from_boxed_object,
 use ton_block::BlockIdExt;
 use ton_types::{fail, Result};
 
+// max part size for partially transmitted data like archives and states
+const PART_MAX_SIZE: usize = 1 << 21; 
+
 pub struct FullNodeOverlayService {
     engine: Arc<dyn EngineOperations>,
     #[cfg(feature = "telemetry")]
@@ -385,6 +388,9 @@ impl FullNodeOverlayService {
         &self, 
         query: DownloadPersistentStateSlice
     ) -> Result<TaggedByteVec> {
+        if query.max_size as usize > PART_MAX_SIZE {
+            fail!("Part size {} is too big, max is {}", query.max_size, PART_MAX_SIZE);
+        }
         if let Some(handle) = self.engine.load_block_handle(&query.block)? {
             if handle.has_persistent_state() {
                 let data = self.engine.load_persistent_state_slice(
@@ -517,6 +523,9 @@ impl FullNodeOverlayService {
 
     // tonNode.getArchiveSlice archive_id:long offset:long max_size:int = tonNode.Data;
     async fn get_archive_slice(&self, query: GetArchiveSlice) -> Result<TaggedByteVec> {
+        if query.max_size as usize > PART_MAX_SIZE {
+            fail!("Part size {} is too big, max is {}", query.max_size, PART_MAX_SIZE);
+        }
         let answer = TaggedByteVec {
             object: self.engine.get_archive_slice(
                 query.archive_id as u64, 

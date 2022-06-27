@@ -27,12 +27,13 @@ pub async fn download_persistent_state(
     overlay: &dyn FullNodeOverlayClient,
     engine: &dyn EngineOperations, 
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-    attempts: Option<usize>
-) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
+    attempts: Option<usize>,
+    check_stop: &(dyn Fn() -> Result<()> + Sync + Send),
+) -> Result<(Arc<ShardStateStuff>, Arc<Vec<u8>>)> {
     let mut result = None;
     for _ in 0..10 {
         match download_persistent_state_iter(
-            id, master_id, overlay, engine, active_peers, attempts.clone()
+            id, master_id, overlay, engine, active_peers, attempts.clone(), check_stop,
         ).await {
             Err(e) => {
                 log::warn!("download_persistent_state_iter err: {}", e);
@@ -54,8 +55,9 @@ async fn download_persistent_state_iter(
     overlay: &dyn FullNodeOverlayClient,
     engine: &dyn EngineOperations,
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-    mut attempts: Option<usize>
-) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
+    mut attempts: Option<usize>,
+    check_stop: &(dyn Fn() -> Result<()> + Sync + Send),
+) -> Result<(Arc<ShardStateStuff>, Arc<Vec<u8>>)> {
 
     if id.seq_no == 0 {
         fail!("zerostate is not supported");
@@ -63,6 +65,7 @@ async fn download_persistent_state_iter(
 
     // Check
     let peer = loop {
+        check_stop()?;
         if let Some(remained) = attempts.as_mut() {
             if *remained == 0 {
                 fail!("Can't find peer to load persistent state")
@@ -102,6 +105,7 @@ async fn download_persistent_state_iter(
             let mut peer_attempt = 0;
             let mut part_attempt = 0;
             while offset < total_size.load(Ordering::Relaxed) {
+                check_stop()?;
                 let result = overlay.download_persistent_state_part(
                     id, master_id, offset, max_size, peer.clone(), peer_attempt
                 ).await;
@@ -171,9 +175,10 @@ async fn download_persistent_state_iter(
     );
     assert_eq!(total_size, state_bytes.len());
 
-    Ok((ShardStateStuff::deserialize(
+    let state_bytes = Arc::new(state_bytes);
+    Ok((ShardStateStuff::deserialize_inmem(
         id.clone(), 
-        &state_bytes,
+        state_bytes.clone(),
         #[cfg(feature = "telemetry")]
         engine.engine_telemetry(),
         engine.engine_allocated()

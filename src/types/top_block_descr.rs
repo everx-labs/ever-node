@@ -23,9 +23,9 @@ use std::{
     sync::{Arc, atomic::{AtomicI8, self}}
 };
 use ton_block::{
-    Block, TopBlockDescr, BlockInfo, BlockIdExt, MerkleProof, McShardRecord, McStateExtra,
-    Deserializable, HashmapAugType, BlockSignatures, CurrencyCollection, AddSub, ShardIdent,
-    Serializable
+    Block, TopBlockDescr, BlockInfo, BlockIdExt, MerkleProof, McShardRecord,
+    McStateExtra, Deserializable, HashmapAugType, BlockSignatures, CurrencyCollection,
+    AddSub, ShardIdent, Serializable, CopyleftRewards
 };
 use ton_types::{
     error, Result, fail, Cell, UInt256,
@@ -51,7 +51,7 @@ pub struct TopBlockDescrStuff {
     chain_mc_blk_ids: Vec<BlockIdExt>,
     chain_blk_ids: Vec<BlockIdExt>,
     gen_utime: u32,
-    chain_fees: Vec<(CurrencyCollection, CurrencyCollection)>,
+    chain_fees: Vec<(CurrencyCollection, CurrencyCollection, CopyleftRewards)>,
     chain_head_prev: Vec<BlockIdExt>,
     creators: Vec<UInt256>,
     is_fake: bool,
@@ -143,7 +143,7 @@ impl TopBlockDescrStuff {
                 chain_head_prev,
                 creators,
                 is_fake,
-                signarutes_validation_result: AtomicI8::new(0)
+                signarutes_validation_result: AtomicI8::new(0),
             }
         )
     }
@@ -218,10 +218,12 @@ impl TopBlockDescrStuff {
 
         shard_rec.descr.fees_collected = CurrencyCollection::default();
         shard_rec.descr.funds_created = CurrencyCollection::default();
+        shard_rec.descr.copyleft_rewards = CopyleftRewards::default();
 
         for i in 0..sum_cnt {
             shard_rec.descr.fees_collected.add(&self.chain_fees[pos + i].0)?;
             shard_rec.descr.funds_created.add(&self.chain_fees[pos + i].1)?;
+            shard_rec.descr.copyleft_rewards.merge_rewards(&self.chain_fees[pos + i].2)?;
         }
 
         Ok(shard_rec)
@@ -288,7 +290,7 @@ impl TopBlockDescrStuff {
         is_head: bool,
         signatures: Option<&BlockSignatures>,
         next_info: Option<(BlockIdExt, BlockIdExt, BlockInfo)>
-    ) -> Result<(BlockIdExt, Option<BlockIdExt>, BlockIdExt, BlockInfo, (CurrencyCollection, CurrencyCollection), UInt256)> {
+    ) -> Result<(BlockIdExt, Option<BlockIdExt>, BlockIdExt, BlockInfo, (CurrencyCollection, CurrencyCollection, CopyleftRewards), UInt256)> {
         let merkle_proof = MerkleProof::construct_from(&mut proof_root.into())?;
         let block_virt_root = merkle_proof.proof.clone().virtualize(1);
 
@@ -469,7 +471,7 @@ impl TopBlockDescrStuff {
             prev2_id,
             mc_block_id,
             info,
-            (value_flow.fees_collected, value_flow.created),
+            (value_flow.fees_collected, value_flow.created, value_flow.copyleft_rewards),
             extra.created_by
         ))
     }

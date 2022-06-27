@@ -75,6 +75,10 @@ impl<K: DbKey + Debug + Send + Sync, T: KvcWriteable<K>> KvcReadableAsync<K> for
         self.kvc.get_slice(key, offset, size)
     }
 
+    async fn get_vec(&self, key: &K, offset: u64, size: u64) -> Result<Vec<u8>> {
+        self.kvc.get_vec(key, offset, size)
+    }
+
     async fn get_size(&self, key: &K) -> Result<u64> {
         self.kvc.get_size(key)
     }
@@ -83,7 +87,7 @@ impl<K: DbKey + Debug + Send + Sync, T: KvcWriteable<K>> KvcReadableAsync<K> for
         self.kvc.contains(key)
     }
 
-    fn for_each_key(&self, predicate: &mut dyn FnMut(&[u8]) -> Result<bool>) -> Result<bool> {
+    fn for_each_key(&self, _predicate: &mut dyn FnMut(&[u8]) -> Result<bool>) -> Result<bool> {
         unimplemented!()
     }
 }

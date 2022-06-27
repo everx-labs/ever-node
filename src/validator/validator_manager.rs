@@ -1007,12 +1007,14 @@ pub fn start_validator_manager(
     runtime.clone().spawn(async move {
         engine.acquire_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
         while !engine.get_validator_status() {
-            if engine.check_stop() {
-                engine.release_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
-                return
-            }
             log::trace!("is not a validator");
-            tokio::time::sleep(Duration::from_secs(CHECK_VALIDATOR_TIMEOUT)).await;
+            for _ in 0..CHECK_VALIDATOR_TIMEOUT {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if engine.check_stop() {
+                    engine.release_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
+                    return;
+                }
+            }
         }
         log::info!("starting validator manager...");
         if let Err(e) = ValidatorManagerImpl::new(engine.clone(), runtime, config).invoke().await {
