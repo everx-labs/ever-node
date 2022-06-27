@@ -1,4 +1,3 @@
-
 use crate::{
     block::{BlockIdExtExtention, BlockStuff},
     internal_db::{
@@ -11,12 +10,8 @@ use ton_block::{BlockIdExt, MASTERCHAIN_ID, ShardIdent, SHARD_FULL};
 use ton_types::{error, fail, Result, UInt256, Cell};
 use storage::traits::Serializable;
 use std::{
-    fs::{write, remove_file},
-    path::Path,
-    borrow::Cow,
-    collections::{HashSet, HashMap},
-    ops::Deref,
-    io::Cursor,
+    borrow::Cow, collections::{HashSet, HashMap}, fs::{write, remove_file}, io::Cursor,
+    ops::Deref, path::Path, sync::atomic::{AtomicBool, Ordering}, time::Duration
 };
 
 const UNEXPECTED_TERMINATION_BEACON_FILE: &str = "ton_node.running";
@@ -27,8 +22,31 @@ const SHARD_CLIENT_MC_BLOCK_CANDIDATES: u32 = 300;
 pub async fn check_db(
     mut db: InternalDb,
     processed_wc: i32,
-    restore_db: bool
-) -> Result<InternalDb> {
+    restore_db: bool,
+    force: bool,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
+    is_broken: Option<&AtomicBool>
+) -> Result<InternalDb> {                            	
+
+    async fn force_db_reset(
+        err: failure::Error,
+        check_stop: &(dyn Fn() -> Result<()> + Sync),
+        is_broken: Option<&AtomicBool>
+    ) -> ! {
+        if let Some(is_broken) = is_broken {
+            is_broken.store(true, Ordering::Relaxed)
+        }
+        log::error!(
+            "Error while restoring database: {}. Need to clear db and re-sync node.", 
+            err
+        );
+        loop {
+            tokio::time::sleep(Duration::from_millis(300)).await; 
+            if check_stop().is_err() {
+                std::process::exit(0xFF)
+            }
+        }
+    } 
 
     let unexpected_termination = check_unexpected_termination(&db.config.db_directory);
     let restoring = check_restoring(&db.config.db_directory);
@@ -44,28 +62,26 @@ pub async fn check_db(
                     checking or restoring, but now 'restore_db' option in node \
                     config is 'false', so restore operation is skipped. Node may work incorrectly.");
             }
-        } else {
-            set_restoring(&db.config.db_directory)?;
-            log::warn!("Previous node run was unexpectedly terminated, \
-                starting check & restore process...");
-            match restore_last_applied_mc_block(&db).await {
-                Ok(Some(last_applied_mc_block)) => {
-                    let shard_client_mc_block = restore_shard_client_mc_block(
-                        &db, &last_applied_mc_block, processed_wc).await?;
-                    db = restore(
-                        db, &last_applied_mc_block, &shard_client_mc_block, processed_wc).await?;
-                }
-                Ok(None) => {
-                    log::info!("End of check & restore: looks like node hasn't \
-                        ever booted in blockchain.");
-                }
-                Err(err) => {
-                    log::error!("Error while restoring database: {}. Need to clear db \
-                        and re-sync node. Process will be terminated.", err);
-                    std::process::exit(0xFF);
-                }
+            return Ok(db);
+        }
+
+        set_restoring(&db.config.db_directory)?;
+        match restore_last_applied_mc_block(&db, check_stop).await {
+            Ok(Some(last_applied_mc_block)) => {
+                let shard_client_mc_block = restore_shard_client_mc_block(
+                    &db, &last_applied_mc_block, processed_wc, check_stop).await?;
+                db = match restore(
+                    db, &last_applied_mc_block, &shard_client_mc_block, processed_wc, check_stop
+                ).await {
+                    Ok(db) => db,
+                    Err(err) => force_db_reset(err, check_stop, is_broken).await
+                };
             }
-            reset_restoring(&db.config.db_directory)?;
+            Ok(None) => {
+                log::info!("End of check & restore: looks like node hasn't \
+                    ever booted in blockchain.");
+            }
+            Err(err) => force_db_reset(err, check_stop, is_broken).await
         }
     }
     set_unexpected_termination(&db.config.db_directory)?;
