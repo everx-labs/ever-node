@@ -19,11 +19,11 @@ use crate::{
 };
 use adnl::common::add_unbound_object_to_map;
 use rocksdb::{
-    BlockBasedOptions, BoundColumnFamily, Cache, DBWithThreadMode, IteratorMode, MultiThreaded, 
-    Options, SnapshotWithThreadMode, WriteBatch
+    BlockBasedOptions, BoundColumnFamily, Cache, DBWithThreadMode, IteratorMode, MultiThreaded,
+    Options, SnapshotWithThreadMode, WriteBatch, SliceTransform, ColumnFamilyDescriptor,
 };
 use std::{
-    fmt::{Debug, Formatter}, ops::Deref, path::Path, sync::{Arc, atomic::{AtomicI32, Ordering}}
+    fmt::{Debug, Formatter}, ops::Deref, path::Path, str::FromStr, sync::{Arc, atomic::{AtomicI32, Ordering}}
 };
 use ton_types::{fail, Result};
 
@@ -80,31 +80,34 @@ impl RocksDb {
 
         configure_options(&mut options);
 
-        let cfs = DBWithThreadMode::<MultiThreaded>::list_cf(&options, &path)
-            .unwrap_or(Vec::new());
-/*
-        if cfs.is_empty() {
-            // we must add at least default column to add other columns in future
-            cfs.push("default".to_string());
-        }
-        let db = DBWithThreadMode::<MultiThreaded>::open_cf(&options, &path, cfs);
-*/
-        let db = if read_only {
-            DBWithThreadMode::<MultiThreaded>::open_cf_for_read_only(&options, &path, cfs, false)
+        let mut cfs = DBWithThreadMode::<MultiThreaded>::list_cf(&options, &path).unwrap_or_default();
+
+        let locks = lockfree::map::Map::new();
+        let cfs = cfs.drain(..).map(|family| {
+            add_unbound_object_to_map(
+                &locks,
+                family.clone(),
+                || Ok(AtomicI32::new(0))
+            ).ok();
+            let options = Self::options_by_family_name(&family);
+            ColumnFamilyDescriptor::new(family, options)
+        });
+        let result = if read_only {
+            DBWithThreadMode::<MultiThreaded>::open_cf_descriptors_read_only(&options, &path, cfs, false)
         } else {
-            DBWithThreadMode::<MultiThreaded>::open_cf(&options, &path, cfs)
+            DBWithThreadMode::<MultiThreaded>::open_cf_descriptors(&options, &path, cfs)
         };
-        let db = db.unwrap_or_else(
+        let db = result.unwrap_or_else(
             |err| panic!("Cannot open DB {:?}: {}", path, err)
         );
         let db = Self {
             db: Some(db),
-            locks: lockfree::map::Map::new()
+            locks,
         };
         Arc::new(db)
     }
 
-    pub fn table(self: Arc<Self>, family: impl ToString) -> Result<RocksDbTable> {
+    pub(crate) fn table(self: Arc<Self>, family: impl ToString) -> Result<RocksDbTable> {
         RocksDbTable::with_db(self, family)
     }
 
@@ -112,9 +115,29 @@ impl RocksDb {
         self.db.as_ref().expect("rocksdb was occasionaly destroyed")
     }
 
-    fn create_cf(&self, name: &str) {
-        let opts = Options::default();
-        self.db().create_cf(name, &opts).ok();
+    fn options_by_family_name(name: &str) -> Options {
+        let mut options = Options::default();
+        if let Some(pos) = name.rfind('_') {
+            if name[..pos].ends_with("_prefix") {
+                if let Ok(len) = usize::from_str(&name[pos + 1..]) {
+                    options.set_prefix_extractor(SliceTransform::create_fixed_prefix(len));
+                }
+            }
+        }
+        options
+    }
+
+    fn create_cf(&self, name: &str) -> Result<()> {
+        let options = Self::options_by_family_name(name);
+        while self.locks.get(name).is_none() {
+            add_unbound_object_to_map(
+                &self.locks, 
+                name.to_string(), 
+                || Ok(AtomicI32::new(0))
+            )?;
+            self.db().create_cf(name, &options)?;
+        }
+        Ok(())
         // error is occured if column family is created twice
         //    .unwrap_or_else(|err| panic!("unable to create column family {} for rocksdb : {}", name, err));
     }
@@ -213,14 +236,8 @@ impl Deref for RocksDb {
     }
 }
 
-impl AsRef<DBWithThreadMode<MultiThreaded>> for RocksDb {
-    fn as_ref(&self) -> &DBWithThreadMode<MultiThreaded> {
-        self.db()
-    }
-}
-
 #[derive(Debug)]
-pub struct RocksDbTable {
+pub(crate) struct RocksDbTable {
     db: Arc<RocksDb>,
     family: String,
 }
@@ -229,17 +246,7 @@ impl RocksDbTable {
 
     pub(crate) fn with_db(db: Arc<RocksDb>, family: impl ToString) -> Result<Self> {
         let family = family.to_string();
-        loop {
-            if db.locks.get(&family).is_some() {
-                break
-            }
-            add_unbound_object_to_map(
-                &db.locks, 
-                family.clone(), 
-                || Ok(AtomicI32::new(0))
-            )?;
-            db.create_cf(&family);
-        }
+        db.create_cf(&family)?;
         let ret = Self {
             db,
             family
@@ -247,24 +254,36 @@ impl RocksDbTable {
         Ok(ret)
     }
 
+    pub fn drop_data(&self) -> Result<()> {
+        self.db.drop_table(&self.family)?;
+        self.db.create_cf(&self.family)?;
+        Ok(())
+    }
+
     fn cf(&self) -> Arc<BoundColumnFamily> {
         self.db.cf(&self.family)
     }
 
+    pub fn get_by_prefix(&self, prefix: impl AsRef<[u8]>) -> Vec<Box<[u8]>> {
+        self.db.db()
+            .prefix_iterator_cf(&self.cf(), prefix.as_ref())
+            .map(|(key , _value)| key)
+            .collect()
+    }
 }
 
 impl AsRef<DBWithThreadMode<MultiThreaded>> for RocksDbTable {
     fn as_ref(&self) -> &DBWithThreadMode<MultiThreaded> {
         self.db.db()
-    }               
-}
-
-impl Deref for RocksDbTable {
-    type Target = DBWithThreadMode<MultiThreaded>;
-    fn deref(&self) -> &Self::Target {
-        self.db.db()
     }
 }
+
+// impl Deref for RocksDbTable {
+//     type Target = DBWithThreadMode<MultiThreaded>;
+//     fn deref(&self) -> &Self::Target {
+//         self.db.db()
+//     }
+// }
 
 /// Implementation of key-value collection for RocksDB
 impl Kvc for RocksDbTable {
@@ -351,6 +370,10 @@ impl<K: DbKey + Send + Sync> KvcWriteable<K> for RocksDbTable {
         fail!("Attempt to delete from dropped table {}", self.family)
     }
 
+    fn clear(&self) {
+        todo!()
+    }
+
 }
 
 /// Implementation of support for take snapshots for RocksDB.
@@ -361,7 +384,7 @@ impl<K: DbKey + Send + Sync> KvcSnapshotable<K> for RocksDbTable {
 }
 
 // TODO: snapshot without family by RocksDb
-struct RocksDbSnapshot<'db> {
+pub struct RocksDbSnapshot<'db> {
     db: Arc<RocksDb>,
     snapshot: SnapshotWithThreadMode<'db, DBWithThreadMode<MultiThreaded>>,
     family: String,
@@ -461,8 +484,10 @@ impl<'db, K: DbKey + Send + Sync> KvcTransaction<K> for RocksDbTransaction {
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
-        self.db.create_cf(&self.family);
-        Ok(self.db.write(self.batch.unwrap())?)
+        if let Some(batch) = self.batch {
+            self.db.write(batch)?;
+        }
+        Ok(())
     }
 
     fn len(&self) -> usize {
@@ -473,3 +498,4 @@ impl<'db, K: DbKey + Send + Sync> KvcTransaction<K> for RocksDbTransaction {
         self.batch.as_ref().unwrap().is_empty()
     }
 }
+

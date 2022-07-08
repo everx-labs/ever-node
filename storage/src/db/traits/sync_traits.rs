@@ -90,6 +90,9 @@ pub trait KvcWriteable<K: DbKey + Send + Sync>: KvcReadable<K> {
 
     /// Deletes value from collection by the key
     fn delete(&self, key: &K) -> Result<()>;
+
+    /// Clears all value from collection
+    fn clear(&self) { unreachable!() }
 }
 
 /// Trait for key-value collections with the ability of take snapshots

@@ -685,7 +685,7 @@ impl ValidatorManagerImpl {
                     Arc::new(ValidatorGroup::new(
                         ident.clone(),
                         local_id,
-                        session_id,
+                        session_id.clone(),
                         cc_seqno,
                         validator_list_id.clone(),
                         vsubset,

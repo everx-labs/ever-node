@@ -23,11 +23,11 @@ strum = '0.18.0'
 strum_macros = '0.18.0'
 tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
 
-adnl = { git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.74' }
+adnl = { git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.75' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.128' }
-ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.7.51' }
-ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.11.2' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.129' }
+ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.7.53' }
+ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.11.3' }
 
 [target.'cfg(windows)'.dependencies.rocksdb]
 git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'

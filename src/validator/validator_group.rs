@@ -520,7 +520,9 @@ impl ValidatorGroup {
             }
             let next_block_id = match self.group_impl.execute_sync(|group_impl|
                 group_impl.create_next_block_id(
-                    candidate.block_id.root_hash, candidate.block_id.file_hash, self.shard.clone()
+                    candidate.block_id.root_hash.clone(),
+                    candidate.block_id.file_hash.clone(),
+                    self.shard.clone()
                 )
             ).await {
                 Err(x) => { log::error!(target: "validator", "{}", x); return },

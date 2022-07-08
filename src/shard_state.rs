@@ -21,7 +21,7 @@ use ton_block::{
     BlockIdExt, ShardAccount, ShardIdent, ShardStateUnsplit, ShardStateSplit, ValidatorSet, 
     CatchainConfig, Serializable, Deserializable, ConfigParams, McShardRecord, 
     McStateExtra, ShardDescr, ShardHashes, HashmapAugType, InRefValue, BinTree, 
-    BinTreeType, WorkchainDescr,
+    BinTreeType, WorkchainDescr, Account,
 };
 use ton_types::{
     AccountId, Cell, Result, deserialize_tree_of_cells, deserialize_tree_of_cells_inmem,
@@ -298,6 +298,15 @@ impl ShardStateStuff {
 
     pub fn read_cur_validator_set_and_cc_conf(&self) -> Result<(ValidatorSet, CatchainConfig)> {
         self.config_params()?.read_cur_validator_set_and_cc_conf()
+    }
+
+    pub fn find_account(&self, account_id: &UInt256) -> Result<Option<Account>> {
+        self
+            .state()
+            .read_accounts()?
+            .get(account_id)?
+            .map(|shard_acc| shard_acc.read_account())
+            .transpose()
     }
 }
 

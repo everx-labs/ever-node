@@ -369,10 +369,11 @@ impl NodeNetwork {
                     if neighbours.contains_overlay_peer(peer_key.id()) {
                         continue;
                     }
-                    let (ip, _) = DhtNode::find_address(dht, peer_key.id()).await?;
-                    overlay.add_public_peer(&ip, peer, overlay_id)?;
-                    if neighbours.add_overlay_peer(peer_key.id().clone()) {
-                        log::trace!("add_overlay_peers: add overlay peer {:?}, address: {}", peer, ip);
+                    if let Some((ip, _)) = DhtNode::find_address(dht, peer_key.id()).await? {
+                        overlay.add_public_peer(&ip, peer, overlay_id)?;
+                        if neighbours.add_overlay_peer(peer_key.id().clone()) {
+                            log::trace!("add_overlay_peers: add overlay peer {:?}, address: {}", peer, ip);
+                        }
                     }
                 }
             },
@@ -657,12 +658,16 @@ impl NodeNetwork {
         let mut lost_validators = Vec::new();
         for val in validators {
             match DhtNode::find_address(&dht, &val.adnl_id).await {
-                Ok((addr, key)) => {
+                Ok(Some((addr, key))) => {
                     log::info!("addr found: {:?}, key: {:x?}", &addr, &key);
                     overlay.add_private_peers(&local_adnl_id, vec![(addr, key)])?;
                 }
+                Ok(None) => {
+                    lost_validators.push(val);
+                    log::warn!("find address failed");
+                }
                 Err(e) => { 
-                    lost_validators.push(val.clone());
+                    lost_validators.push(val);
                     log::error!("find address failed: {:?}", e); 
                 }
             }

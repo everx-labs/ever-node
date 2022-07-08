@@ -13,7 +13,8 @@
 
 use crate::{
     block::BlockStuff, engine_traits::{EngineAlloc, EngineOperations}, 
-    shard_state::ShardStateStuff, types::top_block_descr::TopBlockDescrStuff,
+    shard_state::{ShardStateStuff, ShardHashesStuff},
+    types::top_block_descr::TopBlockDescrStuff,
     validator::{
         accept_block::create_top_shard_block_description, BlockCandidate,
         out_msg_queue::OutMsgQueueInfoStuff,
@@ -41,6 +42,7 @@ use ton_block::{
 };
 use ton_block::{ShardStateUnsplit, TopBlockDescr};
 use ton_types::{UInt256, fail, error, Result, CellType, deserialize_cells_tree};
+use ton_vm::executor::IndexProvider;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct CollatorTestBundleIndexJson {
@@ -838,7 +840,7 @@ impl CollatorTestBundle {
             prev_blocks: prev_blocks_ids,
             created_by: candidate.created_by.clone(),
             rand_seed: None,
-            now: b.block().read_info()?.gen_utime().0,
+            now: b.block().read_info()?.gen_utime().as_u32(),
             fake: true,
             contains_ethalon: false,
             contains_candidate: true,
@@ -1045,7 +1047,7 @@ impl CollatorTestBundle {
             prev_blocks: prev_blocks_ids,
             created_by: extra.created_by().clone(),
             rand_seed: Some(extra.rand_seed().clone()),
-            now: info.gen_utime().0,
+            now: info.gen_utime().as_u32(),
             fake: true,
             contains_ethalon: true,
             contains_candidate: false,
@@ -1285,4 +1287,12 @@ impl EngineOperations for CollatorTestBundle {
         &self.allocated
     }
 
+    fn acc_hashes_index_provider(
+        &self,
+        _shards: ShardHashesStuff,
+        _prev_mc_block_id: &BlockIdExt,
+        _root_hash: Option<&UInt256>
+    ) -> Result<Option<Arc<dyn IndexProvider>>> {
+        Ok(None)
+    }
 }

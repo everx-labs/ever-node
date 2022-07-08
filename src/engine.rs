@@ -31,19 +31,18 @@ use crate::{
     internal_db::{
         InternalDb, InternalDbConfig, 
         INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, PSS_KEEPER_MC_BLOCK,
-        state_gc_resolver::AllowStateGcSmartResolver, 
+        index::AccHashesIndexManager,
         restore::check_db,
+        state_gc_resolver::AllowStateGcSmartResolver, 
     },
     network::{
         control::{ControlServer, DataSource, StatusReporter},
         full_node_client::FullNodeOverlayClient, full_node_service::FullNodeOverlayService
     },
-    shard_state::ShardStateStuff,
+    shard_state::{ShardStateStuff, ShardHashesStuff},
     types::{awaiters_pool::AwaitersPool, lockfree_cache::TimeBasedCache},
     ext_messages::{MessagesPool, EXT_MESSAGES_TRACE_TARGET},
-    validator::{
-        validator_manager::{start_validator_manager, ValidatorManagerConfig},
-    },
+    validator::validator_manager::{start_validator_manager, ValidatorManagerConfig},
     shard_blocks::{
         ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker, 
         ShardBlockProcessingResult
@@ -84,7 +83,7 @@ use storage::StorageTelemetry;
 use ton_block::{
     self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL,
 };
-use ton_types::{error, fail, Cell, Result};
+use ton_types::{error, fail, Cell, Result, UInt256};
 #[cfg(feature = "slashing")]
 use ton_types::UInt256;
 use ton_api::ton::ton_node::{
@@ -118,6 +117,7 @@ pub struct Engine {
     last_known_keyblock_seqno: AtomicU32,
     will_validate: AtomicBool,
     sync_status: AtomicU32,
+    index_manager: AccHashesIndexManager,
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
  
@@ -530,7 +530,6 @@ impl Engine {
         let restore_db = general_config.restore_db();
         let workchain_id = general_config.workchain_id().unwrap_or(ton_block::INVALID_WORKCHAIN_ID);
         log::info!("workchain_id from config {}", workchain_id);
-        let workchain_id = AtomicI32::new(workchain_id);
 
         let db_config = InternalDbConfig { 
             db_directory: general_config.internal_db_path().to_string(), 
@@ -624,6 +623,9 @@ impl Engine {
         let state_gc_resolver = Arc::new(AllowStateGcSmartResolver::new(cells_lifetime_sec));
         db.start_states_gc(state_gc_resolver.clone());
 
+        let index_manager = AccHashesIndexManager::with_db(db.clone(), workchain_id)
+            .map_err(|err| error!("cannot create index manager {:?}", err))?;
+
         log::info!("Engine is created.");
 
         let (validated_block_stats_sender, validated_block_stats_receiver) = 
@@ -670,11 +672,12 @@ impl Engine {
             last_known_keyblock_seqno: AtomicU32::new(0),
             will_validate: AtomicBool::new(false),
             sync_status: AtomicU32::new(0),
+            index_manager,
             test_bundles_config,
             shard_states_cache: TimeBasedCache::new(120, "shard_states_cache".to_string()),
             loaded_from_ss_cache: AtomicU64::new(0),
             loaded_ss_total: AtomicU64::new(0),
-            workchain_id,
+            workchain_id: AtomicI32::new(workchain_id),
             state_gc_resolver,
             validation_status: lockfree::map::Map::new(),
             collation_status: lockfree::map::Map::new(),
@@ -1013,6 +1016,9 @@ impl Engine {
                 self.shard_blocks().update_shard_blocks(&self.load_state(block.id()).await?)?;
 
                 let first_time_applied = self.set_applied(handle, block.id().seq_no()).await?;
+                if let Err(err) = self.update_acc_hashes_index(block) {
+                    log::error!(target: "index", "Can't update index for mc block {}: {:?}", block.id(), err);
+                }
 
                 if first_time_applied {
                     if let Err(e) = self.save_last_applied_mc_block_id(block.id()) {
@@ -1037,6 +1043,9 @@ impl Engine {
             if !pre_apply {
                 if self.set_applied(handle, mc_seq_no).await? {
                     self.tps_counter.submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
+                }
+                if let Err(err) = self.update_acc_hashes_index(block) {
+                    log::error!(target: "index", "Can't update index for shard block {}: {:?}", block.id(), err);
                 }
             }
             log::info!(
@@ -1784,11 +1793,13 @@ impl Engine {
         let block_id = mc_state.find_block_id(mc_seq_no)?;
         let prev_block_id = self.load_block_prev1(&block_id)?;
         // check if previous state is present
-        self.load_state(&prev_block_id).await
+        let mc_state = self.load_state(&prev_block_id).await
             .map_err(|err| error!("no previous block state present for {}", err))?;
 
         self.db().truncate_database(&block_id, self.processed_workchain().await?.1).await?;
         self.save_last_applied_mc_block_id(&prev_block_id)?;
+
+        self.build_acc_hashes_index(&mc_state)?;
 
         if let Some(block_id) = self.load_pss_keeper_mc_block_id()? {
             if block_id.seq_no > prev_block_id.seq_no {
@@ -1807,7 +1818,29 @@ impl Engine {
         }
         Ok(())
     }
+}
 
+///  interface for indexing
+impl Engine {
+    /// prepare index provider object
+    pub fn acc_hashes_index_provider(
+        &self,
+        shards: ShardHashesStuff,
+        prev_mc_block_id: &BlockIdExt,
+        root_hash: Option<&UInt256>,
+    ) -> Result<Option<Arc<dyn ton_vm::executor::IndexProvider>>> {
+        self.index_manager.index_provider(shards, prev_mc_block_id, root_hash)
+    }
+
+    /// build index after boot or truncate procedure
+    pub fn build_acc_hashes_index(&self, mc_state: &ShardStateStuff) -> Result<()> {
+        self.index_manager.build_index(mc_state)
+    }
+
+    /// update index on applying block
+    pub fn update_acc_hashes_index(&self, block: &BlockStuff) -> Result<()> {
+        self.index_manager.update_index(block)
+    }
 }
 
 pub(crate) async fn load_zero_state(engine: &Arc<Engine>, path: &str) -> Result<bool> {

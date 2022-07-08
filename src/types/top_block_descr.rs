@@ -113,7 +113,7 @@ impl TopBlockDescrStuff {
 
             if i == 0 {
                 vert_seq_no = cur_info.vert_seq_no();
-                gen_utime = cur_info.gen_utime().0;
+                gen_utime = cur_info.gen_utime().as_u32();
             }
             if is_head {
                 chain_head_prev.push(prev1_id.clone());
@@ -399,7 +399,7 @@ impl TopBlockDescrStuff {
                 fail!("intermediate link for block {} is declared to be before a split", cur_id)
             }
 
-            if info.gen_utime().0 > next_info.gen_utime().0 {
+            if info.gen_utime().as_u32() > next_info.gen_utime().as_u32() {
                 fail!(
                     "block creation unixtime goes back from {} to {} in intermediate link \
                     for blocks {} and {}",

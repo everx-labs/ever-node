@@ -221,10 +221,8 @@ impl ArchiveManager {
     pub async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
         if let Some(id) = self.file_maps.files().get_closest_archive_id(mc_seq_no).await {
             Some(id)
-        } else if let Some(id) = self.file_maps.key_files().get_closest_archive_id(mc_seq_no).await {
-            Some(id)
         } else {
-            None
+            self.file_maps.key_files().get_closest_archive_id(mc_seq_no).await
         }
     }
 

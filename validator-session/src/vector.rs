@@ -493,7 +493,7 @@ where
         Self {
             pool: SessionPool::Temp,
             hash: compute_vector_hash(&data),
-            data: data,
+            data,
             instance_counter: instance_counter.clone_as_temp(),
         }
     }
@@ -502,7 +502,7 @@ where
         Self {
             pool: SessionPool::Temp,
             hash: compute_vector_hash(&data),
-            data: data,
+            data,
             instance_counter: instance_counter.clone_as_temp(),
         }
     }
@@ -989,7 +989,7 @@ where
         Self {
             pool: SessionPool::Temp,
             hash: compute_sorted_vector_hash(&data),
-            data: data,
+            data,
             instance_counter: instance_counter.clone_as_temp(),
         }
     }
@@ -998,7 +998,7 @@ where
         Self {
             pool: SessionPool::Temp,
             hash: compute_sorted_vector_hash(&data),
-            data: data,
+            data,
             instance_counter: instance_counter.clone_as_temp(),
         }
     }

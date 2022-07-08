@@ -14,7 +14,7 @@
 use std::{io::Cursor, collections::HashMap, cmp::max, sync::Arc};
 use std::io::Write;
 use ton_block::{
-    Block, BlockIdExt, BlkPrevInfo, CatchainConfig, ConfigParams, Deserializable,
+    Block, BlockIdExt, BlkPrevInfo, CatchainConfig, ConfigParams, Deserializable, ExtBlkRef,
     ShardIdent, ShardDescr, ShardHashes, ValidatorSet, HashmapAugType,
 };
 use ton_types::{Cell, Result, types::UInt256, deserialize_tree_of_cells, error, fail, HashmapType};
@@ -109,7 +109,7 @@ impl BlockStuff {
 //    }
 
     pub fn gen_utime(&self) -> Result<u32> {
-        Ok(self.block.read_info()?.gen_utime().0)
+        Ok(self.block.read_info()?.gen_utime().as_u32())
     }
 
 // Unused
@@ -157,20 +157,17 @@ impl BlockStuff {
     }
 
     pub fn construct_master_id(&self) -> Result<BlockIdExt> {
-        let mc_id = self
+        let mc_id = self.get_master_id()?;
+        Ok(BlockIdExt::from_ext_blk(mc_id))
+    }
+
+    pub fn get_master_id(&self) -> Result<ExtBlkRef> {
+        Ok(self
             .block
             .read_info()?
             .read_master_ref()?
             .ok_or_else(|| error!("Can't get master ref: given block is a master block"))?
-            .master;
-        Ok(
-            BlockIdExt {
-                shard_id: ShardIdent::masterchain(),
-                seq_no: mc_id.seq_no,
-                root_hash: mc_id.root_hash,
-                file_hash: mc_id.file_hash
-            }
-        )
+            .master)
     }
 
     pub fn write_to<T: Write>(&self, dst: &mut T) -> Result<()> {

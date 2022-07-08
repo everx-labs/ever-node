@@ -19,14 +19,21 @@ use crate::{
 use crate::engine_traits::EngineTelemetry;
 
 use std::{
-    cmp::min, collections::{HashMap, HashSet}, io::Cursor, mem::size_of, path::{Path, PathBuf},
-    sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}}, time::{UNIX_EPOCH, Duration}
+    cmp::min,
+    collections::{HashSet, HashMap},
+    io::Cursor,
+    mem::size_of,
+    path::{Path, PathBuf}, 
+    sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}},
+    time::{UNIX_EPOCH, Duration},
 };
 use storage::{
     TimeChecker,
     archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId},
     block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage, Callback}, 
-    block_info_db::BlockInfoDb, db::rocksdb::RocksDb, node_state_db::NodeStateDb, 
+    block_info_db::BlockInfoDb,
+    db::rocksdb::RocksDb,
+    node_state_db::NodeStateDb, 
     shardstate_db::{AllowStateGcResolver, ShardStateDb}, 
     shardstate_persistent_db::ShardStatePersistentDb, types::BlockMeta, 
     shard_top_blocks_db::ShardTopBlocksDb, StorageAlloc, traits::Serializable,
@@ -41,6 +48,7 @@ pub const INITIAL_MC_BLOCK: &str       = "InitMcBlockId";
 pub const LAST_APPLIED_MC_BLOCK: &str  = "LastMcBlockId";
 pub const PSS_KEEPER_MC_BLOCK: &str    = "PssKeeperBlockId";
 pub const SHARD_CLIENT_MC_BLOCK: &str  = "ShardsClientMcBlockId";
+pub const LAST_INDEX_MC_BLOCK: &str  = "IndexMcBlockId";
 pub const DB_VERSION: &str  = "DbVersion";
 
 pub const DB_VERSION_0: u32  = 0;
@@ -120,6 +128,7 @@ impl BlockResult {
 
 }
 
+pub mod index;
 pub mod state_gc_resolver;
 pub mod restore;
 mod update;
@@ -159,6 +168,7 @@ pub struct InternalDb {
 
 impl InternalDb {
 
+    #[allow(dead_code)] // is used in node-tools
     pub async fn new(
         config: InternalDbConfig,
         #[cfg(feature = "telemetry")]

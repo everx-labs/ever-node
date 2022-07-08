@@ -116,10 +116,21 @@ impl MsgEnqueueStuff {
             enqueued_lt,
         })
     }
+    #[allow(dead_code)]
+    pub fn from_envelope(env: MsgEnvelopeStuff, enqueued_lt: u64) -> Result<Self> {
+        let created_lt = enqueued_lt;
+        let enq = EnqueuedMsg::with_param(enqueued_lt, env.inner())?;
+        Ok(Self{
+            enq,
+            env,
+            created_lt,
+            enqueued_lt,
+        })
+    }
     pub fn next_hop(&self, shard: &ShardIdent, enqueued_lt: u64, config: &BlockchainConfig) -> Result<(MsgEnqueueStuff, Grams)> {
         let fwd_prices = config.get_fwd_prices(self.message().is_masterchain());
         let mut fwd_fee_remaining = self.fwd_fee_remaining().clone();
-        let transit_fee = fwd_prices.next_fee(&fwd_fee_remaining);
+        let transit_fee = fwd_prices.next_fee_checked(&fwd_fee_remaining)?;
         fwd_fee_remaining.sub(&transit_fee)?;
 
         let use_hypercube = !config.has_capability(GlobalCapabilities::CapOffHypercube);
@@ -172,14 +183,17 @@ impl MsgEnqueueStuff {
     pub fn envelope_hash(&self) -> UInt256 {
         self.enq.out_msg_cell().repr_hash()
     }
-    pub fn envelope(&self) -> &MsgEnvelope {
-        self.env.inner()
+    // pub fn envelope(&self) -> &MsgEnvelope {
+    //     self.env.inner()
+    // }
+    pub fn envelope_cell(&self) -> Cell {
+        self.enq.out_msg_cell()
     }
     pub fn message_hash(&self) -> UInt256 {
         self.env.message_hash()
     }
     pub fn message_cell(&self) -> Cell {
-        self.env.message_cell().clone()
+        self.env.message_cell()
     }
     pub fn message(&self) -> &Message {
         &self.env.msg

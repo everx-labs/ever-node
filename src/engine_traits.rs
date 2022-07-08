@@ -15,7 +15,7 @@ use crate::{
     block::BlockStuff, config::CollatorTestBundlesGeneralConfig, 
     block_proof::BlockProofStuff, config::TonNodeConfig, internal_db::BlockResult,
     network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
-    shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId}
+    shard_state::{ShardStateStuff, ShardHashesStuff}, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId}
 };
 #[cfg(feature = "telemetry")]
 use crate::{
@@ -41,6 +41,7 @@ use storage::StorageTelemetry;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
 use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, signature::SigPubKey};
 use ton_types::{Result, UInt256};
+use ton_vm::executor::IndexProvider;
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
 
 pub struct ValidatedBlockStatNode {
@@ -655,6 +656,22 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!();
     }
 
+    fn acc_hashes_index_provider(
+        &self,
+        shards: ShardHashesStuff,
+        prev_mc_block_id: &BlockIdExt,
+        root_hash: Option<&UInt256>
+    ) -> Result<Option<Arc<dyn IndexProvider>>> {
+        unimplemented!()
+    }
+
+    fn build_acc_hashes_index(&self, mc_state: &ShardStateStuff) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn update_acc_hashes_index(&self, block: &BlockStuff) -> Result<()> {
+        unimplemented!()
+    }
 }
 
 pub struct ChainRange {

@@ -977,7 +977,7 @@ impl ReceiverImpl {
         let incarnation = &self.incarnation;
         let source_hash = self.get_source_public_key_hash(dep.src as usize);
         let height = dep.height;
-        let data_hash = dep.data_hash;
+        let data_hash = dep.data_hash.clone();
         ::ton_api::ton::catchain::block::id::Id {
             incarnation: incarnation.clone(),
             src: public_key_hash_to_int256(source_hash),
@@ -1913,7 +1913,7 @@ impl ReceiverImpl {
 
         trace!("Got GetBlockQuery: {:?}", query);
 
-        let block_hash = query.block;
+        let block_hash = query.block.clone();
         let block_result = self.get_block_by_hash(&block_hash);
 
         if let Some(block_ptr) = block_result {

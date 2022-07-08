@@ -24,7 +24,7 @@ use crate::{
         INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, LAST_ROTATION_MC_BLOCK, SHARD_CLIENT_MC_BLOCK,
         BlockResult,
     },
-    shard_state::ShardStateStuff,
+    shard_state::{ShardStateStuff, ShardHashesStuff},
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
     ext_messages::{create_ext_message, EXT_MESSAGES_TRACE_TARGET},
     jaeger,
@@ -50,6 +50,7 @@ use ton_block::{
     BlockIdExt, AccountIdPrefixFull, ShardIdent, Message
 };
 use ton_types::{fail, error, Result, UInt256};
+use ton_vm::executor::IndexProvider;
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
 
 #[async_trait::async_trait]
@@ -882,6 +883,22 @@ impl EngineOperations for Engine {
         Engine::register_server(self, server)
     }
 
+    fn acc_hashes_index_provider(
+        &self,
+        shards: ShardHashesStuff,
+        prev_mc_block_id: &BlockIdExt,
+        root_hash: Option<&UInt256>
+    ) -> Result<Option<Arc<dyn IndexProvider>>> {
+        self.acc_hashes_index_provider(shards, prev_mc_block_id, root_hash)
+    }
+
+    fn build_acc_hashes_index(&self, mc_state: &ShardStateStuff) -> Result<()> {
+        self.build_acc_hashes_index(mc_state)
+    }
+
+    fn update_acc_hashes_index(&self, block: &BlockStuff) -> Result<()> {
+        self.update_acc_hashes_index(block)
+    }
 }
 
 async fn redirect_external_message(

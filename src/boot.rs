@@ -230,8 +230,8 @@ async fn download_start_blocks_and_states(
         CHECK!(shard_handle.has_state());
         CHECK!(shard_handle.is_applied());
     }
-    Ok(())
-
+    let mc_state = engine.load_state(master_handle.id()).await?;
+    engine.build_acc_hashes_index(&mc_state)
 }
 
 /// download zero state and store it

@@ -20,6 +20,7 @@ mod cell_db;
 pub mod db;
 mod dynamic_boc_db;
 mod error;
+pub mod index;
 mod macros; 
 pub mod node_state_db;
 pub mod shardstate_db;

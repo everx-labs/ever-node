@@ -199,7 +199,7 @@ pub fn get_block_dependency_id(block: &ton::BlockDep, receiver: &dyn Receiver) -
         incarnation: receiver.get_incarnation().clone().into(),
         src: public_key_hash_to_int256(receiver.get_source_public_key_hash(block.src as usize)),
         height: block.height,
-        data_hash: block.data_hash,
+        data_hash: block.data_hash.clone(),
     }
     .into_boxed()
 }
