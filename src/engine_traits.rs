@@ -680,5 +680,6 @@ pub trait ExternalDb : Sync + Send {
 
 pub enum Server {
     ControlServer(ControlServer),
+    #[cfg(feature = "external_db")]
     KafkaConsumer(stream_cancel::Trigger)
 }

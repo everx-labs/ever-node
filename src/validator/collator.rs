@@ -123,9 +123,9 @@ impl PrevData {
         } else if let Some(subshard) = subshard {
             accounts.split_for(&subshard.shard_key(false))?;
             if subshard.is_right_child() {
-                total_validator_fees.grams.0 += 1;
+                total_validator_fees.grams += 1;
             }
-            total_validator_fees.grams.0 /= 2;
+            total_validator_fees.grams /= 2;
         } else {
             overload_history = states[0].state().overload_history();
             underload_history = states[0].state().underload_history();
@@ -166,7 +166,7 @@ enum AsyncMessage {
     Copyleft(Message),
     Ext(Message),
     Int(MsgEnqueueStuff, bool),
-    New(MsgEnvelopeStuff, Cell),
+    New(MsgEnvelopeStuff, Cell), // prev_trans_cell
     TickTock(TransactionTickTock),
 }
 
@@ -355,13 +355,13 @@ impl CollatorData {
         transaction.out_msgs.iterate_slices(|slice| {
             let msg_cell = slice.reference(0)?;
             let msg_hash = msg_cell.repr_hash();
-            let msg = Message::construct_from_cell(msg_cell)?;
+            let msg = Message::construct_from_cell(msg_cell.clone())?;
             match msg.header() {
                 CommonMsgInfo::IntMsgInfo(info) => {
                     self.new_messages.push(NewMessage::new((info.created_lt, msg_hash), msg, tr_cell.clone()));
                 }
                 CommonMsgInfo::ExtOutMsgInfo(_) => {
-                    let out_msg = OutMsg::external(&msg, tr_cell.clone())?;
+                    let out_msg = OutMsg::external(msg_cell, tr_cell.clone());
                     self.add_out_msg_to_block(out_msg.read_message_hash()?, &out_msg)?;
                 }
                 CommonMsgInfo::ExtInMsgInfo(_) => fail!("External inbound message cannot be output")
@@ -423,8 +423,8 @@ impl CollatorData {
         self.transit_count += 1;
         let enqueued_lt = self.start_lt()?;
         let (new_enq, transit_fee) = enq.next_hop(shard, enqueued_lt, &self.config)?;
-        let in_msg = InMsg::transit(enq.envelope(), new_enq.envelope(), transit_fee)?;
-        let out_msg = OutMsg::transit(new_enq.envelope(), &in_msg, requeue)?;
+        let in_msg = InMsg::transit(enq.envelope_cell(), new_enq.envelope_cell(), transit_fee);
+        let out_msg = OutMsg::transit(new_enq.envelope_cell(), in_msg.serialize()?, requeue);
 
         self.add_in_msg_to_block(&in_msg)?;
         self.add_out_msg_to_block(enq.message_hash(), &out_msg)?;
@@ -572,8 +572,8 @@ impl CollatorData {
     fn dequeue_message(&mut self, enq: MsgEnqueueStuff, deliver_lt: u64, short: bool) -> Result<()> {
         self.dequeue_count += 1;
         let out_msg = match short {
-            true => OutMsg::dequeue_short(enq.envelope(), enq.next_prefix(), deliver_lt)?,
-            false => OutMsg::dequeue_long(enq.envelope(), deliver_lt)?
+            true => OutMsg::dequeue_short(enq.envelope_hash(), enq.next_prefix(), deliver_lt),
+            false => OutMsg::dequeue_long(enq.envelope_cell(), deliver_lt)
         };
         self.add_out_msg_to_block(enq.message_hash(), &out_msg)
     }
@@ -749,6 +749,7 @@ impl ExecutionManager {
                     last_tr_lt: shard_acc.lt(),
                     seed_block: seed_block.clone(),
                     debug,
+                    block_version: supported_version(),
                     ..ExecuteParams::default()
                 };
                 let new_msg1 = new_msg.clone();
@@ -786,7 +787,7 @@ impl ExecutionManager {
             AsyncMessage::Int(enq, _our) => {
                 (Box::new(OrdinaryTransactionExecutor::new(config)), Some(enq.message()))
             }
-            AsyncMessage::New(env, _tr_cell) => {
+            AsyncMessage::New(env, _prev_tr_cell) => {
                 (Box::new(OrdinaryTransactionExecutor::new(config)), Some(env.message()))
             }
             AsyncMessage::Recover(msg) | AsyncMessage::Mint(msg) | AsyncMessage::Ext(msg) => {
@@ -838,35 +839,36 @@ impl ExecutionManager {
         }
         let tr = transaction_res?;
         let tr_cell = tr.serialize()?;
-        log::trace!("{}: finalize_transaction {}, {:x}",
-            self.collated_block_descr, tr.logical_time(), tr.account_id());
+        log::trace!("{}: finalize_transaction {} with hash {:x}, {:x}",
+            self.collated_block_descr, tr.logical_time(), tr_cell.repr_hash(), tr.account_id());
         let in_msg_opt = match new_msg.deref() {
             AsyncMessage::Int(enq, our) => {
-                let in_msg = InMsg::finally(enq.envelope(), &tr, enq.fwd_fee_remaining().clone())?;
+                let in_msg = InMsg::final_msg(enq.envelope_cell(), tr_cell.clone(), enq.fwd_fee_remaining().clone());
                 if *our {
-                    let out_msg = OutMsg::dequeue_immediately(enq.envelope(), &in_msg)?;
+                    let out_msg = OutMsg::dequeue_immediate(enq.envelope_cell(), in_msg.serialize()?);
                     collator_data.add_out_msg_to_block(enq.message_hash(), &out_msg)?;
                     collator_data.del_out_msg_from_state(&enq.out_msg_key())?;
                 }
                 Some(in_msg)
             }
-            AsyncMessage::New(env, tr_cell) => {
-                let in_msg = InMsg::immediatelly(&env.inner(), &tr, env.fwd_fee_remaining().clone())?;
-                let out_msg = OutMsg::immediately(&env.inner(), tr_cell.clone(), &in_msg)?;
+            AsyncMessage::New(env, prev_tr_cell) => {
+                let env_cell = env.inner().serialize()?;
+                let in_msg = InMsg::immediate(env_cell.clone(), tr_cell.clone(), env.fwd_fee_remaining().clone());
+                let out_msg = OutMsg::immediate(env_cell, prev_tr_cell.clone(), in_msg.serialize()?);
                 collator_data.add_out_msg_to_block(env.message_hash(), &out_msg)?;
                 Some(in_msg)
             }
             AsyncMessage::Mint(msg) |
             AsyncMessage::Recover(msg) => {
                 let env = MsgEnvelopeStuff::new(msg.clone(), &ShardIdent::masterchain(), Grams::default(), false)?;
-                Some(InMsg::immediatelly(env.inner(), &tr, Grams::default())?)
+                Some(InMsg::immediate(env.inner().serialize()?, tr_cell.clone(), Grams::default()))
             }
             AsyncMessage::Copyleft(msg) => {
                 let env = MsgEnvelopeStuff::new(msg.clone(), &ShardIdent::masterchain(), Grams::default(), false)?;
-                Some(InMsg::immediatelly(env.inner(), &tr, Grams::default())?)
+                Some(InMsg::immediate(env.inner().serialize()?, tr_cell.clone(), Grams::default()))
             }
             AsyncMessage::Ext(msg) => {
-                let in_msg = InMsg::external(&msg, &tr)?;
+                let in_msg = InMsg::external(msg.serialize()?, tr_cell.clone());
                 Some(in_msg)
             }
             AsyncMessage::TickTock(_) => None
@@ -875,7 +877,7 @@ impl ExecutionManager {
             log::info!(
                 "{}: Status of account {:x} was changed from {:?} to {:?} by message {:X}",
                 self.collated_block_descr, tr.account_id(), tr.orig_status, tr.end_status,
-                in_msg_opt.clone().unwrap_or_default().serialize()?.repr_hash()
+                tr.in_msg_cell().unwrap_or_default().repr_hash()
             );
         }
         collator_data.new_transaction(&tr, tr_cell, in_msg_opt.as_ref())?;
@@ -1085,7 +1087,6 @@ impl Collator {
             duration,
         );
 
-        #[cfg(not(test))]
         #[cfg(feature = "telemetry")]
         self.engine.collator_telemetry().succeeded_attempt(
             &self.shard,
@@ -1830,7 +1831,7 @@ impl Collator {
                     collator_data.value_flow.recovered = CurrencyCollection::default();
                 }
                 Ok(_addr) => {
-                    if collator_data.value_flow.recovered.grams < Grams::from(1_000_000_000) {
+                    if collator_data.value_flow.recovered.grams.as_u128() < 1_000_000_000 {
                         log::debug!("{}: fee recovery skipped ({})",
                             self.collated_block_descr, collator_data.value_flow.recovered);
                         collator_data.value_flow.recovered = CurrencyCollection::default();
@@ -1847,7 +1848,7 @@ impl Collator {
             }
         } else {
             collator_data.value_flow.created.grams = mc_data.config().block_create_fees(false)?;
-            collator_data.value_flow.created.grams.0 >>= self.shard.prefix_len();
+            collator_data.value_flow.created.grams >>= self.shard.prefix_len();
         }
         collator_data.value_flow.from_prev_blk = prev_data.total_balance().clone();
         Ok(())
@@ -1867,7 +1868,7 @@ impl Collator {
             Ok(v) => v
         };
 
-        let old_global_balance = &mc_data.global_balance();
+        let old_global_balance = mc_data.global_balance();
         to_mint_cp.iterate_with_keys(|key: u32, amount| {
             let amount2 = old_global_balance.get_other(key)?.unwrap_or_default();
             if amount > amount2 {
@@ -1963,7 +1964,7 @@ impl Collator {
         ).await?;
         self.check_stop_flag()?;
 
-        let account_id = AccountId::from(mc_data.config().minter_address()?.serialize()?);
+        let account_id = AccountId::from(mc_data.config().minter_address()?);
         self.create_special_transaction(
             account_id,
             collator_data.value_flow.minted.clone(),
@@ -1996,15 +1997,14 @@ impl Collator {
         if amount.is_zero()? || !self.shard.is_masterchain() {
             return Ok(())
         }
-        let mut hdr = InternalMessageHeader::with_addresses(
+        let mut hdr = InternalMessageHeader::with_addresses_and_bounce(
             MsgAddressInt::with_standart(None, -1, [0; 32].into())?,
             MsgAddressInt::with_standart(None, -1, account_id.clone())?,
-            amount
+            amount,
+            true
         );
-        hdr.ihr_disabled = true;
-        hdr.bounce = true;
         hdr.created_lt = collator_data.start_lt()?;
-        hdr.created_at = UnixTime32(collator_data.gen_utime);
+        hdr.created_at = collator_data.gen_utime.into();
         let msg = Message::with_int_header(hdr);
         exec_manager.execute(account_id, f(msg), prev_data, collator_data).await?;
         Ok(())
@@ -2099,7 +2099,7 @@ impl Collator {
         exec_manager: &mut ExecutionManager,
         mut ext_messages: Vec<(Arc<Message>, UInt256)>,
     ) -> Result<()> {
-        if collator_data.skip_extmsg {
+        if collator_data.skip_extmsg() {
             log::trace!("{}: skipping processing of inbound external messages", self.collated_block_descr);
             return Ok(())
         }
@@ -2158,8 +2158,7 @@ impl Collator {
             // In the iteration we execute only existing messages.
             // Newly generating messages will be executed next itaration (only after waiting).
 
-            let mut new_messages = BinaryHeap::new();
-            std::mem::swap(&mut collator_data.new_messages, &mut new_messages);
+            let mut new_messages = std::mem::take(&mut collator_data.new_messages);
             while let Some(NewMessage{ lt_hash: _, msg, tr_cell }) = new_messages.pop() {
                 let info = msg.int_header().ok_or_else(|| error!("message is not internal"))?;
                 let fwd_fee = info.fwd_fee().clone();
@@ -2167,10 +2166,10 @@ impl Collator {
                 if !self.shard.contains_address(&info.dst)? || enqueue_only {
                     let enq = MsgEnqueueStuff::new(msg, &self.shard, fwd_fee, use_hypercube)?;
                     collator_data.add_out_msg_to_state(&enq, true)?;
-                    let out_msg = OutMsg::new(enq.envelope(), tr_cell)?;
+                    let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell);
                     collator_data.add_out_msg_to_block(out_msg.read_message_hash()?, &out_msg)?;
                 } else {
-                    CHECK!(info.created_at.0, collator_data.gen_utime);
+                    CHECK!(info.created_at.as_u32(), collator_data.gen_utime);
                     let created_lt = info.created_lt;
                     let account_id = msg.int_dst_account_id().unwrap_or_default();
                     let env = MsgEnvelopeStuff::new(msg, &self.shard, fwd_fee, use_hypercube)?;
@@ -2274,7 +2273,7 @@ impl Collator {
                     hdr.ihr_disabled = true;
                     hdr.bounce = false;
                     hdr.created_lt = collator_data.start_lt()?;
-                    hdr.created_at = UnixTime32(collator_data.gen_utime);
+                    hdr.created_at = UnixTime32::new(collator_data.gen_utime);
                     let msg = Message::with_int_header(hdr);
                     exec_manager.execute(account_id, AsyncMessage::Copyleft(msg), prev_data, collator_data).await?;
 
@@ -2380,7 +2379,7 @@ impl Collator {
         info.set_seq_no(self.new_block_id_part.seq_no)?;
         info.set_start_lt(collator_data.start_lt()?);
         info.set_end_lt(collator_data.block_limit_status.lt() + 1);
-        info.set_gen_utime(UnixTime32::from(collator_data.gen_utime));
+        info.set_gen_utime(UnixTime32::new(collator_data.gen_utime));
         info.set_gen_validator_list_hash_short(gen_validator_list_hash_short);
         info.set_gen_catchain_seqno(self.validator_set.catchain_seqno());
         info.set_min_ref_mc_seqno(collator_data.min_mc_seqno()?);
@@ -3025,3 +3024,4 @@ pub fn report_collation_metrics(
 
     pipeline.send(&STATSD);
 }
+

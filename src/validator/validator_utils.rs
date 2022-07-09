@@ -10,7 +10,7 @@
 * See the License for the specific TON DEV software governing permissions and
 * limitations under the License.
 */
-use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson};
+use ever_crypto::{Ed25519KeyOption, KeyId};
 use catchain::{BlockPayloadPtr, PublicKey, PublicKeyHash, CatchainNode};
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -191,10 +191,12 @@ pub fn compute_validator_set_cc(
     Ok(set)
 }
 
+#[cfg(feature="workchains")]
 fn calc_workchain_id(descr: &ValidatorDescr) -> i32 {
     calc_workchain_id_by_adnl_id(descr.compute_node_id_short().as_slice())
 }
 
+#[cfg(feature="workchains")]
 fn calc_workchain_id_by_adnl_id(adnl_id: &[u8]) -> i32 {
     (adnl_id[0] % 32) as i32 - 1
 }
@@ -221,6 +223,11 @@ pub fn try_calc_subset_for_workchain(
     match workchains.len()? as i32 {
         0 => fail!("workchain description is empty"),
         1 => Ok(Some(vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time)?)),
+        #[cfg(not(feature="workchains"))]
+        _ => {
+            fail!("workchains not supported")
+        }
+        #[cfg(feature="workchains")]
         count => {
             let mut list = Vec::new();
             for descr in vset.list() {
@@ -264,7 +271,8 @@ pub fn calc_subset_for_workchain(
     }
 }
 
-pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (KeyOptionJson, Arc<dyn KeyOption>) {
+#[cfg(feature="workchains")]
+pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (ever_crypto::KeyOptionJson, Arc<dyn ever_crypto::KeyOption>) {
     loop {
         if let Ok((private, public)) = Ed25519KeyOption::generate_with_json() {
             if id_opt.is_none() || Some(calc_workchain_id_by_adnl_id(public.id().data())) == id_opt {

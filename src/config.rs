@@ -11,10 +11,7 @@
 * limitations under the License.
 */
 
-use crate::{
-    network::node_network::NodeNetwork,
-    validator::validator_utils::mine_key_for_workchain,
-};
+use crate::network::node_network::NodeNetwork;
 use adnl::{
     client::AdnlClientConfigJson,
     common::{add_unbound_object_to_map_with_update, Wait},
@@ -32,7 +29,9 @@ use ton_api::{
         dht::node::Node as DhtNodeConfig, pub_::publickey::Ed25519
     }
 };
-use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, BASE_WORKCHAIN_ID, MASTERCHAIN_ID};
+#[cfg(feature="external_db")]
+use ton_block::{BASE_WORKCHAIN_ID, MASTERCHAIN_ID};
+use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256};
 
 
@@ -76,6 +75,7 @@ impl Default for CellsGcConfig {
 pub struct TonNodeConfig {
     log_config_name: Option<String>,
     ton_global_config_name: Option<String>,
+    #[cfg(feature="workchains")]
     #[serde(skip_serializing_if = "Option::is_none")]
     workchain: Option<i32>,
     internal_db_path: Option<String>,
@@ -258,15 +258,24 @@ impl TonNodeConfig {
 
     pub const DEFAULT_DB_ROOT: &'static str = "node_db";    
 
+    #[cfg(feature="external_db")]
     pub fn front_workchain_ids(&self) -> Vec<i32> {
+        #[cfg(feature="workchains")]
         match self.workchain {
             None | Some(0) | Some(-1) => vec![MASTERCHAIN_ID, BASE_WORKCHAIN_ID],
             Some(workchain_id) => vec![workchain_id]
         }
+        #[cfg(not(feature="workchains"))]
+        {
+            vec![MASTERCHAIN_ID, BASE_WORKCHAIN_ID]            
+        }
     }
+
+    #[cfg(feature="workchains")]
     pub fn workchain_id(&self) -> Option<i32> {
         self.workchain
     }
+
     pub fn from_file(
         configs_dir: &str,
         json_file_name: &str,
@@ -413,9 +422,11 @@ impl TonNodeConfig {
         self.default_rldp_roundtrip_ms
     }
 
+    #[cfg(feature = "external_db")]
     pub fn external_db_config(&self) -> Option<ExternalDbConfig> {
         self.external_db_config.clone()
     }
+
     pub fn test_bundles_config(&self) -> &CollatorTestBundlesGeneralConfig {
         &self.test_bundles_config
     }
@@ -442,9 +453,10 @@ impl TonNodeConfig {
         TonNodeGlobalConfig::from_json_file(global_config_path.as_str())
     }
 
-    pub fn remove_all_validator_keys(&mut self) {
-        self.validator_keys = None;
-    }
+// Unused
+//    pub fn remove_all_validator_keys(&mut self) {
+//        self.validator_keys = None;
+//    }
 
     fn create_and_save_console_configs(
         &mut self,
@@ -548,7 +560,10 @@ impl TonNodeConfig {
     }
 
     fn generate_and_save_keys(&mut self) -> Result<([u8; 32], Arc<dyn KeyOption>)> {
-        let (private, public) = mine_key_for_workchain(self.workchain);
+        #[cfg(feature="workchains")]
+        let (private, public) = crate::validator::validator_utils::mine_key_for_workchain(self.workchain);
+        #[cfg(not(feature="workchains"))]
+        let (private, public) = Ed25519KeyOption::generate_with_json()?;
         let key_id = public.id().data();
         let key_ring = self.validator_key_ring.get_or_insert_with(|| HashMap::new());
         key_ring.insert(base64::encode(key_id), private);
@@ -631,7 +646,7 @@ impl TonNodeConfig {
 
 pub enum ConfigEvent {
     AddValidatorAdnlKey(Arc<KeyId>, i32),
-    RemoveValidatorAdnlKey(Arc<KeyId>, i32)
+    //RemoveValidatorAdnlKey(Arc<KeyId>, i32)
 }
 
 #[async_trait::async_trait]
@@ -645,8 +660,9 @@ enum Task {
     AddValidatorKey([u8; 32], i32),
     AddValidatorAdnlKey([u8; 32], [u8; 32]),
     GetKey([u8; 32]),
-    StoreWorkchainId(i32),
     StoreStatesGcInterval(u32),
+    #[cfg(feature="workchains")]
+    StoreWorkchainId(i32),
 }
 
 #[derive(Debug)]
@@ -666,6 +682,7 @@ pub struct NodeConfigHandler {
     sender: tokio::sync::mpsc::UnboundedSender<Arc<(Arc<Wait<Answer>>, Task)>>,
     key_ring: Arc<lockfree::map::Map<String, Arc<dyn KeyOption>>>,
     validator_keys: Arc<ValidatorKeys>,
+    #[cfg(feature="workchains,external_db")]
     workchain_id: Option<i32>,
 }
 
@@ -680,6 +697,7 @@ impl NodeConfigHandler {
             sender,
             key_ring: Arc::new(lockfree::map::Map::new()),
             validator_keys: Arc::new(ValidatorKeys::new()),
+            #[cfg(feature="workchains,external_db")]
             workchain_id: config.workchain,
         });
 
@@ -730,6 +748,7 @@ impl NodeConfigHandler {
         }
     }
 
+    #[cfg(feature="workchains")]
     pub fn store_workchain(&self, workchain_id: i32) {
         let (wait, _) = Wait::new();
         let pushed_task = Arc::new((wait.clone(), Task::StoreWorkchainId(workchain_id)));
@@ -748,45 +767,47 @@ impl NodeConfigHandler {
         }
     }
 
-    /// returns validator's public key
-    pub fn get_current_validator_key(&self, vset: &ValidatorSet) -> Option<[u8; 32]> {
-        // search by adnl_id in validator_keys first
-        for id_key in self.validator_keys.values.iter() {
-            if let Some(adnl_id) = id_key.1.validator_adnl_key_id.as_ref() {
-                match UInt256::from_str(adnl_id) {
-                    Ok(adnl_id) => {
-                        let pub_key_opt = vset.list().iter().find_map(|descr| {
-                            if descr.adnl_addr.as_ref() == Some(&adnl_id) {
-                                Some(descr.public_key.key_bytes().clone())
-                            } else {
-                                None
-                            }
-                        });
-                        if let Some(pub_key) = pub_key_opt.as_ref() {
-                            log::info!("get_current_validator_key returns pub_key {}", hex::encode(pub_key));
-                            return pub_key_opt
-                        }
-                    }
-                    Err(err) => log::warn!("adnl_id error: {}", err)
-                }
-            }
-        }
-        // then search by key_id from vset in keyring
-        for descr in vset.list().iter() {
-            let key_id = base64::encode(descr.compute_node_id_short().as_slice());
-            let pub_key_found = self.key_ring.iter().position(|k_v| k_v.0 == key_id).is_some();
-            if pub_key_found {
-                log::info!("get_current_validator_key returns pub_key {}", hex::encode(descr.public_key.key_bytes()));
-                return Some(descr.public_key.key_bytes().clone())
-            }
-        }
-        log::warn!("get_current_validator_key key not found");
-        None
-    }
+// Unused
+///// returns validator's public key
+//    pub fn get_current_validator_key(&self, vset: &ValidatorSet) -> Option<[u8; 32]> {
+//        // search by adnl_id in validator_keys first
+//        for id_key in self.validator_keys.values.iter() {
+//            if let Some(adnl_id) = id_key.1.validator_adnl_key_id.as_ref() {
+//                match UInt256::from_str(adnl_id) {
+//                    Ok(adnl_id) => {
+//                        let pub_key_opt = vset.list().iter().find_map(|descr| {
+//                            if descr.adnl_addr.as_ref() == Some(&adnl_id) {
+//                                Some(descr.public_key.key_bytes().clone())
+//                            } else {
+//                                None
+//                            }
+//                        });
+//                        if let Some(pub_key) = pub_key_opt.as_ref() {
+//                            log::info!("get_current_validator_key returns pub_key {}", hex::encode(pub_key));
+//                            return pub_key_opt
+//                        }
+//                    }
+//                    Err(err) => log::warn!("adnl_id error: {}", err)
+//                }
+//            }
+//        }
+//        // then search by key_id from vset in keyring
+//        for descr in vset.list().iter() {
+//            let key_id = base64::encode(descr.compute_node_id_short().as_slice());
+//            let pub_key_found = self.key_ring.iter().position(|k_v| k_v.0 == key_id).is_some();
+//            if pub_key_found {
+//                log::info!("get_current_validator_key returns pub_key {}", hex::encode(descr.public_key.key_bytes()));
+//                return Some(descr.public_key.key_bytes().clone())
+//            }
+//        }
+//        log::warn!("get_current_validator_key key not found");
+//        None
+//    }
 
-    pub fn workchain_id(&self) -> Option<i32> {
-        self.workchain_id
-    }
+// Unused
+//    pub fn workchain_id(&self) -> Option<i32> {
+//        self.workchain_id
+//    }
 
     pub fn get_actual_validator_adnl_ids(&self) -> Result<Vec<Arc<KeyId>>> {
         let adnl_ids = self.validator_keys.get_validator_adnl_ids();
@@ -1028,6 +1049,7 @@ impl NodeConfigHandler {
                         let result = NodeConfigHandler::get_key(&actual_config, key_data);
                         Answer::GetKey(result)
                     }
+                    #[cfg(feature="workchains")]
                     Task::StoreWorkchainId(workchain_id) => {
                         actual_config.workchain = Some(workchain_id);
                         let result = actual_config.save_to_file(&name);

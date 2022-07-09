@@ -15,12 +15,14 @@ pub use super::*;
 use crate::ton_api::ton::Hashable;
 use crate::ton_api::IntoBoxed;
 
+pub const CASTAGNOLI: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISCSI);
+
 /*
     hash specialization
 */
 
 pub(crate) fn compute_hash_from_buffer(data: &[u8]) -> HashType {
-    crc32c::crc32c(data)
+    CASTAGNOLI.checksum(data)
 }
 
 pub(crate) fn compute_hash_from_buffer_u32(data: &[u32]) -> HashType {
@@ -33,7 +35,7 @@ pub(crate) fn compute_hash_from_buffer_u32(data: &[u32]) -> HashType {
 }
 
 pub(crate) fn compute_hash_from_bytes(data: &::ton_api::ton::bytes) -> HashType {
-    compute_hash_from_buffer(&data.0[..])
+    compute_hash_from_buffer(&data.0)
 }
 
 pub(crate) fn compute_hash<T>(hashable: T) -> HashType

@@ -192,10 +192,7 @@ impl<K: DbKey + Send + Sync> KvcWriteableAsync<K> for FileDb {
             if self.path().starts_with(dir) || !Self::is_dir_empty(&dir).await {
                 break;
             } else {
-                tokio::fs::remove_dir(&dir).await
-                    .unwrap_or_else(|_error| {
-                        // If can't remove empty dir, do nothing.
-                    });
+                let _ = tokio::fs::remove_dir(&dir).await;// If can't remove empty dir, do nothing.
             }
         }
 

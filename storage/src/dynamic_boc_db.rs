@@ -176,7 +176,7 @@ impl DynamicBocDb {
                         ))?;
 
                     // Restore only one cell. If caller requests referenced cell - we will restore it the same way.
-                    self.db.put(&cell_id, &StorageCell::serialize(&cell)?)?;
+                    self.db.put(cell_id, &StorageCell::serialize(&cell)?)?;
 
                     log::warn!("A cell was restored from another db  id {}  db_index {}",
                         cell_id, self.db_index);

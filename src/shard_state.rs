@@ -21,7 +21,7 @@ use ton_block::{
     BlockIdExt, ShardAccount, ShardIdent, ShardStateUnsplit, ShardStateSplit, ValidatorSet, 
     CatchainConfig, Serializable, Deserializable, ConfigParams, McShardRecord, 
     McStateExtra, ShardDescr, ShardHashes, HashmapAugType, InRefValue, BinTree, 
-    BinTreeType, WorkchainDescr,
+    BinTreeType, WorkchainDescr
 };
 use ton_types::{
     AccountId, Cell, Result, deserialize_tree_of_cells, deserialize_tree_of_cells_inmem,
@@ -226,11 +226,12 @@ impl ShardStateStuff {
         Ok(())
     }
 
-    pub fn serialize(&self) -> Result<Vec<u8>> {
-        let mut bytes = Cursor::new(Vec::<u8>::new());
-        self.write_to(&mut bytes)?;
-        Ok(bytes.into_inner())
-    }
+// Unused
+//    pub fn serialize(&self) -> Result<Vec<u8>> {
+//        let mut bytes = Cursor::new(Vec::<u8>::new());
+//        self.write_to(&mut bytes)?;
+//        Ok(bytes.into_inner())
+//    }
 
     pub fn serialize_with_abort(&self, abort: &dyn Fn() -> bool) -> Result<Vec<u8>> {
         let mut bytes = Vec::<u8>::new();
@@ -261,17 +262,18 @@ impl ShardStateStuff {
             .unwrap_or_default())
     }
 
-    pub fn prev_key_block_id(&self) -> BlockIdExt {
-        if let Some(seq_no) = self.block_id().seq_no().checked_sub(1) {
-            if let Ok(extra) = self.shard_state_extra() {
-                if let Ok(Some(id)) = extra.prev_blocks.get_prev_key_block(seq_no) {
-                    return id.master_block_id().1
-                }
-            }
-        }
-        log::error!("prev_key_block_id error for shard_state {}", self.block_id());
-        BlockIdExt::with_params(ShardIdent::masterchain(), 0, UInt256::default(), UInt256::default())
-    }
+// Unused
+//    pub fn prev_key_block_id(&self) -> BlockIdExt {
+//        if let Some(seq_no) = self.block_id().seq_no().checked_sub(1) {
+//            if let Ok(extra) = self.shard_state_extra() {
+//                if let Ok(Some(id)) = extra.prev_blocks.get_prev_key_block(seq_no) {
+//                    return id.master_block_id().1
+//                }
+//            }
+//        }
+//        log::error!("prev_key_block_id error for shard_state {}", self.block_id());
+//        BlockIdExt::with_params(ShardIdent::masterchain(), 0, UInt256::default(), UInt256::default())
+//    }
 
     pub fn find_block_id(&self, mc_seq_no: u32) -> Result<BlockIdExt> {
         match self.seq_no().cmp(&mc_seq_no) {
@@ -299,6 +301,17 @@ impl ShardStateStuff {
     pub fn read_cur_validator_set_and_cc_conf(&self) -> Result<(ValidatorSet, CatchainConfig)> {
         self.config_params()?.read_cur_validator_set_and_cc_conf()
     }
+
+// Unused
+//    pub fn find_account(&self, account_id: &UInt256) -> Result<Option<Account>> {
+//        self
+//            .state()
+//            .read_accounts()?
+//            .get(account_id)?
+//            .map(|shard_acc| shard_acc.read_account())
+//            .transpose()
+//    }
+
 }
 
 

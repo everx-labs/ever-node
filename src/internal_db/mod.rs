@@ -74,12 +74,12 @@ impl BlockResult {
     }
 
     /// Any result 
-    pub fn as_any(self) -> Arc<BlockHandle> {
+    pub fn _as_any(self) -> Arc<BlockHandle> {
         self.handle
     }
 
     /// Assert creation
-    pub fn as_created(self) -> Option<Arc<BlockHandle>> {
+    pub fn _as_created(self) -> Option<Arc<BlockHandle>> {
         match self.status {
             DataStatus::Created => Some(self.handle),
             _ => None
@@ -130,11 +130,6 @@ pub struct InternalDbConfig {
     pub cells_gc_interval_sec: u32,
 }
 
-pub enum InternalDbStatus {
-    Checking, 
-    Broken
-}
-
 pub struct InternalDb {
     db: Arc<RocksDb>,
     block_handle_storage: Arc<BlockHandleStorage>,
@@ -159,33 +154,12 @@ pub struct InternalDb {
 
 impl InternalDb {
 
-    pub async fn new(
-        config: InternalDbConfig,
-        #[cfg(feature = "telemetry")]
-        telemetry: Arc<EngineTelemetry>,
-        allocated: Arc<EngineAlloc>,
-    ) -> Result<Self> {
-        let db = Self::construct(
-            config,
-            #[cfg(feature = "telemetry")]
-            telemetry,
-            allocated,
-        ).await?;
-
-        let version = db.resolve_db_version()?;
-        if version != CURRENT_DB_VERSION {
-            fail!("DB version {} does not correspond to current supported one {}.", version, CURRENT_DB_VERSION);
-        }
-
-        Ok(db)
-    }
-
     pub async fn with_update(
         config: InternalDbConfig,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<EngineTelemetry>,
         allocated: Arc<EngineAlloc>,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
+        check_stop: Option<&(dyn Fn() -> Result<()> + Sync)>,
         is_broken: Option<&AtomicBool>
     ) -> Result<Self> {
         let mut db = Self::construct(
@@ -194,12 +168,18 @@ impl InternalDb {
             telemetry,
             allocated,
         ).await?;
-
         let version = db.resolve_db_version()?;
         if version != CURRENT_DB_VERSION {
-            db = update::update(db, version, check_stop, is_broken).await?;
+            if let Some(check_stop) = check_stop {
+                db = update::update(db, version, check_stop, is_broken).await?
+            } else {
+                fail!(
+                    "DB version {} does not correspond to current supported one {}.", 
+                    version, 
+                    CURRENT_DB_VERSION
+                )
+            }
         }
-
         Ok(db)
     }
 

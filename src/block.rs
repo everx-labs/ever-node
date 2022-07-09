@@ -14,12 +14,12 @@
 use std::{io::Cursor, collections::HashMap, cmp::max, sync::Arc};
 use std::io::Write;
 use ton_block::{
-    Block, BlockIdExt, BlkPrevInfo, CatchainConfig, ConfigParams, Deserializable,
-    ShardIdent, ShardDescr, ShardHashes, ValidatorSet, HashmapAugType,
+    Block, BlockIdExt, BlkPrevInfo, Deserializable, ExtBlkRef, ShardDescr, ShardIdent, 
+    ShardHashes, HashmapAugType
 };
 use ton_types::{Cell, Result, types::UInt256, deserialize_tree_of_cells, error, fail, HashmapType};
 
-use crate::{error::NodeError, shard_state::ShardHashesStuff};
+use crate::shard_state::ShardHashesStuff;
 
 
 pub struct BlockPrevStuff {
@@ -95,9 +95,10 @@ impl BlockStuff {
   
     pub fn id(&self) -> &BlockIdExt { &self.id }
 
-    pub fn shard(&self) -> &ShardIdent { 
-        self.id.shard() 
-    }
+// Unused
+//    pub fn shard(&self) -> &ShardIdent { 
+//        self.id.shard() 
+//    }
 
     pub fn root_cell(&self) -> &Cell { &self.root }
 
@@ -109,7 +110,7 @@ impl BlockStuff {
 //    }
 
     pub fn gen_utime(&self) -> Result<u32> {
-        Ok(self.block.read_info()?.gen_utime().0)
+        Ok(self.block.read_info()?.gen_utime().as_u32())
     }
 
 // Unused
@@ -157,20 +158,17 @@ impl BlockStuff {
     }
 
     pub fn construct_master_id(&self) -> Result<BlockIdExt> {
-        let mc_id = self
+        let mc_id = self.get_master_id()?;
+        Ok(BlockIdExt::from_ext_blk(mc_id))
+    }
+
+    pub fn get_master_id(&self) -> Result<ExtBlkRef> {
+        Ok(self
             .block
             .read_info()?
             .read_master_ref()?
             .ok_or_else(|| error!("Can't get master ref: given block is a master block"))?
-            .master;
-        Ok(
-            BlockIdExt {
-                shard_id: ShardIdent::masterchain(),
-                seq_no: mc_id.seq_no,
-                root_hash: mc_id.root_hash,
-                file_hash: mc_id.file_hash
-            }
-        )
+            .master)
     }
 
     pub fn write_to<T: Write>(&self, dst: &mut T) -> Result<()> {
@@ -222,20 +220,22 @@ impl BlockStuff {
         Ok(shards)
     }
 
-    pub fn config(&self) -> Result<ConfigParams> {
-        self
-            .block()
-            .read_extra()?
-            .read_custom()?
-            .and_then(|custom| custom.config().cloned())
-            .ok_or_else(|| error!(NodeError::InvalidArg(
-                "State doesn't contain `custom` field".to_string()
-            )))
-    }
+// Unused
+//    pub fn config(&self) -> Result<ConfigParams> {
+//        self
+//            .block()
+//            .read_extra()?
+//            .read_custom()?
+//            .and_then(|custom| custom.config().cloned())
+//            .ok_or_else(|| error!(NodeError::InvalidArg(
+//                "State doesn't contain `custom` field".to_string()
+//            )))
+//    }
 
-    pub fn read_cur_validator_set_and_cc_conf(&self) -> Result<(ValidatorSet, CatchainConfig)> {
-        self.block().read_cur_validator_set_and_cc_conf()
-    }
+// Unused
+//    pub fn read_cur_validator_set_and_cc_conf(&self) -> Result<(ValidatorSet, CatchainConfig)> {
+//        self.block().read_cur_validator_set_and_cc_conf()
+//    }
 
     pub fn calculate_tr_count(&self) -> Result<usize> {
         let now = std::time::Instant::now();

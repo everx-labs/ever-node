@@ -143,7 +143,7 @@ impl<T: WriteData> Processor<T> {
                         message_cell,
                         message,
                         block_root_for_proof,
-                        block_id,
+                        block_id.clone(),
                         Some(transaction.now()),
                     )?
                 } else {
@@ -163,7 +163,7 @@ impl<T: WriteData> Processor<T> {
         };
     
         let mut index: u64 = 1;
-        transaction.out_msgs.iterate_slices(&mut |slice: SliceData| {
+        transaction.out_msgs.iterate_slices(|slice| {
             let message_cell = slice.reference(0)?;
             let message_id = message_cell.repr_hash();
             let message = Message::construct_from_cell(message_cell.clone())?;
@@ -171,7 +171,7 @@ impl<T: WriteData> Processor<T> {
                 message_cell,
                 message,
                 block_root_for_proof,
-                block_id,
+                block_id.clone(),
                 None, // transaction_now affects ExtIn messages only
             )?;
     
@@ -418,7 +418,7 @@ impl<T: WriteData> Processor<T> {
      ) -> Result<()> {
 
         log::trace!("Processor block_stuff.id {}", block_stuff.id());
-        if !self.process_workchain(block_stuff.shard().workchain_id()) {
+        if !self.process_workchain(block_stuff.id().shard().workchain_id()) {
             return Ok(())
         }
         let process_block = self.write_block.enabled();

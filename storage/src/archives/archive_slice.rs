@@ -81,7 +81,7 @@ impl ArchiveSlice {
             format!("offsets_{}db_{}", prefix, archive_id)
         )?;
         let package_status_db = PackageStatusDb::with_db(
-            db.clone(), 
+            db, 
             format!("status_{}db_{}", prefix, archive_id)
         )?;
 

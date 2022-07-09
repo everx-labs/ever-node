@@ -729,7 +729,7 @@ impl SessionProcessor for SessionProcessorImpl {
                 catchain::utils::get_hash(&block_candidate.collated_data());
             let message = ton::message::SubmittedBlock {
                 round: self.current_round as i32,
-                root_hash: *block_candidate.root_hash(),
+                root_hash: block_candidate.root_hash().clone(),
                 file_hash: file_hash.into(),
                 collated_data_file_hash: collated_data_file_hash.into(),
             };
@@ -1310,9 +1310,9 @@ impl SessionProcessor for SessionProcessorImpl {
         let id = self.description.candidate_id(
             self.description
                 .get_source_index(&KeyId::from_data(*message.id.src.as_slice())),
-            &message.id.root_hash.into(),
-            &message.id.file_hash.into(),
-            &message.id.collated_data_file_hash.into(),
+            &message.id.root_hash,
+            &message.id.file_hash,
+            &message.id.collated_data_file_hash,
         );
 
         let block = if round_id < self.real_state.get_current_round_sequence_number() {
@@ -1364,9 +1364,9 @@ impl SessionProcessor for SessionProcessorImpl {
             let candidate = ton::candidate::Candidate {
                 src: source_idx,
                 round: round_id as ton::int,
-                root_hash: candidate.id.root_hash.clone().into(),
-                data: candidate.data.data().clone().into(),
-                collated_data: candidate.collated_data.data().clone().into(),
+                root_hash: candidate.id.root_hash.clone(),
+                data: candidate.data.data().clone(),
+                collated_data: candidate.collated_data.data().clone(),
             }
             .into_boxed();
             let serialized_candidate = catchain::utils::serialize_tl_boxed_object!(&candidate);
@@ -1382,9 +1382,9 @@ impl SessionProcessor for SessionProcessorImpl {
             .clone();
         self.notify_get_approved_candidate(
             &source_public_key_hash,
-            &message.id.root_hash.into(),
-            &message.id.file_hash.into(),
-            &message.id.collated_data_file_hash.into(),
+            &message.id.root_hash,
+            &message.id.file_hash,
+            &message.id.collated_data_file_hash,
             candidate_response,
         );
     }

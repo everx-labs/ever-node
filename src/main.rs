@@ -15,7 +15,7 @@ mod block;
 mod block_proof;
 mod boot;
 mod collator_test_bundle;
-pub mod config;
+mod config;
 mod engine;
 mod engine_traits;
 mod engine_operations;
@@ -26,7 +26,7 @@ mod external_db;
 mod full_node;
 mod internal_db;
 mod macros;
-pub mod network;
+mod network;
 mod rng;
 mod shard_blocks;
 mod shard_state;
@@ -253,13 +253,18 @@ fn init_logger(log_config_path: Option<String>) {
 
 fn log_version() {
     log::info!(
-        "Execute {:?}\nCOMMIT_ID: {:?}\nBUILD_DATE: {:?}\nCOMMIT_DATE: {:?}\nGIT_BRANCH: {:?}\n", // RUST_VERSION:{}\n
+        "Execute {:?}\n\
+        COMMIT_ID: {:?}\n\
+        BUILD_DATE: {:?}\n\
+        COMMIT_DATE: {:?}\n\
+        GIT_BRANCH: {:?}\n\
+        RUST_VERSION:{}\n",
         std::option_env!("CARGO_PKG_VERSION").unwrap_or("Not set"),
         std::option_env!("BUILD_GIT_COMMIT").unwrap_or("Not set"),
         std::option_env!("BUILD_TIME").unwrap_or("Not set"),
         std::option_env!("BUILD_GIT_DATE").unwrap_or("Not set"),
         std::option_env!("BUILD_GIT_BRANCH").unwrap_or("Not set"),
-        //std::env!("BUILD_RUST_VERSION") // TODO
+        std::option_env!("BUILD_RUST_VERSION").unwrap_or("Not set"),
     );
 }
 
@@ -279,9 +284,9 @@ fn print_build_info() -> String {
         TON_TL git commit:           {}\n\
         TON_TYPES git commit:        {}\n\
         TON_VM git commit:           {}\n\
-        TON_LABS_ABI git commit:     {}\n",
+        TON_ABI git commit:     {}\n",
         std::option_env!("CARGO_PKG_VERSION").unwrap_or("Not set"),
-        std::option_env!("RUST_VERSION").unwrap_or("Not set"),
+        std::option_env!("BUILD_RUST_VERSION").unwrap_or("Not set"),
         std::option_env!("GC_TON_NODE").unwrap_or("Not set"),
         std::option_env!("GC_ADNL").unwrap_or("Not set"),
         std::option_env!("GC_DHT").unwrap_or("Not set"),

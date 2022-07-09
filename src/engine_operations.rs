@@ -41,12 +41,17 @@ use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
 use overlay::{BroadcastSendInfo, PrivateOverlayShortId};
+#[cfg(feature="workchains")]
 use rand::Rng;
-use std::{sync::{atomic::Ordering, Arc}, ops::Deref};
+#[cfg(feature="workchains")]
+use std::sync::atomic::Ordering;
+use std::{ops::Deref, sync::Arc};
 use storage::block_handle_db::BlockHandle;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
+#[cfg(feature="workchains")]
+use ton_block::{BASE_WORKCHAIN_ID, INVALID_WORKCHAIN_ID};
 use ton_block::{
-    MASTERCHAIN_ID, INVALID_WORKCHAIN_ID, BASE_WORKCHAIN_ID, SHARD_FULL,
+    MASTERCHAIN_ID, SHARD_FULL,
     BlockIdExt, AccountIdPrefixFull, ShardIdent, Message
 };
 use ton_types::{fail, error, Result, UInt256};
@@ -54,6 +59,7 @@ use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
 
 #[async_trait::async_trait]
 impl EngineOperations for Engine {
+    #[cfg(feature="workchains")]
     async fn processed_workchain(&self) -> Result<(bool, i32)> {
         match self.workchain_id.load(Ordering::Relaxed) {
             INVALID_WORKCHAIN_ID => {

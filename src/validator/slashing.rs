@@ -18,8 +18,9 @@ use crate::engine_traits::ValidatedBlockStat;
 use crate::engine_traits::ValidatedBlockStatNode;
 use crate::shard_state::ShardStateStuff;
 use crate::validator::UInt256;
-use adnl::common::KeyOption;
+use ever_crypto::Ed25519KeyOption;
 use num_bigint::BigUint;
+use rand::Rng;
 use spin::mutex::SpinMutex;
 use std::collections::HashMap;
 use std::fmt;
@@ -49,7 +50,7 @@ use validator_session::PublicKeyHash;
 use validator_session::SlashingAggregatedValidatorStat;
 use validator_session::SlashingValidatorStat;
 
-const ELECTOR_ABI: &str = include_str!("Elector.abi.json"); //elector's ABI
+const ELECTOR_ABI: &[u8] = include_bytes!("Elector.abi.json"); //elector's ABI
 const ELECTOR_REPORT_FUNC_NAME: &str = "report"; //elector slashing report function name
 
 /// Slashing manager pointer
@@ -72,25 +73,24 @@ struct SlashingManagerImpl {
 impl SlashingManager {
     /// Create new slashing manager
     pub(crate) fn create() -> SlashingManagerPtr {
-        let contract = Contract::load(ELECTOR_ABI.as_bytes()).expect("Elector's ABI must be valid");
+        let contract = Contract::load(ELECTOR_ABI).expect("Elector's ABI must be valid");
         let report_fn = contract
             .function(ELECTOR_REPORT_FUNC_NAME)
             .expect("Elector contract must have 'report' function for slashing")
             .clone();
 
-        log::info!(target: "validator", "Use slashing report function '{}' with id={:08X}", ELECTOR_REPORT_FUNC_NAME, report_fn.get_function_id());
+        log::info!(target: "validator", "Use slashing report function '{}' with id={:08X}",
+            ELECTOR_REPORT_FUNC_NAME, report_fn.get_function_id());
 
         let mut rng = rand::thread_rng();
 
-        use rand::Rng;
-
         Arc::new(SlashingManager {
-            send_messages_block_offset: rng.gen::<u32>(),
+            send_messages_block_offset: rng.gen(),
             manager: SpinMutex::new(SlashingManagerImpl {
                 stat: SlashingValidatorStat::default(),
                 first_mc_block: 0,
                 slashing_messages: HashMap::new(),
-                report_fn: report_fn,
+                report_fn,
             }),
         })
     }
@@ -167,11 +167,8 @@ impl SlashingManager {
             for src_node in &validated_block_stat.nodes {
                 use validator_session::slashing;
 
-                let src_public_key_bytes = src_node.public_key.key_bytes();
-                let public_key = Arc::new(KeyOption::from_type_and_public_key(
-                    KeyOption::KEY_ED25519,
-                    src_public_key_bytes,
-                ));
+                let pub_key = src_node.public_key.key_bytes();
+                let public_key = Ed25519KeyOption::from_public_key(pub_key);
                 let mut dst_node = slashing::Node::new(&public_key);
 
                 dst_node.metrics[slashing::Metric::ApplyLevelTotalBlocksCount as usize] += 1;
@@ -288,14 +285,12 @@ impl SlashingManager {
     ) {
         //prepare params for serialization
 
-        let reporter_pubkey: [u8; 32] = reporter_privkey
+        let reporter_pubkey = reporter_privkey
             .pub_key()
-            .expect("PublicKey is assigned")
-            .clone();
-        let victim_pubkey: [u8; 32] = validator_pubkey
+            .expect("PublicKey is assigned");
+        let victim_pubkey = validator_pubkey
             .pub_key()
-            .expect("PublicKey is assigned")
-            .clone();
+            .expect("PublicKey is assigned");
         let metric_id: u8 = metric_id as u8;
 
         log::warn!(
