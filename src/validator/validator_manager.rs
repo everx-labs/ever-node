@@ -40,9 +40,8 @@ use catchain::utils::serialize_tl_boxed_object;
 use tokio::time::timeout;
 use ton_api::IntoBoxed;
 use ton_block::{
-    BlockIdExt, CatchainConfig, ConfigParamEnum, ConsensusConfig, 
-    McStateExtra, ShardIdent, ValidatorDescr, ValidatorSet,
-    FutureSplitMerge, ShardDescr,
+    BlockIdExt, CatchainConfig, ConfigParamEnum, ConsensusConfig, FutureSplitMerge, McStateExtra,
+    ShardDescr, ShardIdent, ValidatorDescr, ValidatorSet, BASE_WORKCHAIN_ID,
 };
 use ton_types::{error, fail, Result, UInt256};
 
@@ -685,7 +684,7 @@ impl ValidatorManagerImpl {
                     Arc::new(ValidatorGroup::new(
                         ident.clone(),
                         local_id,
-                        session_id,
+                        session_id.clone(),
                         cc_seqno,
                         validator_list_id.clone(),
                         vsubset,
@@ -726,7 +725,7 @@ impl ValidatorManagerImpl {
             return Ok(())
         }
 
-        let mc_state_extra = mc_state.state().read_custom()?.expect("masterchain state must contain extra info");
+        let mc_state_extra = mc_state.shard_state_extra()?;
         let last_masterchain_block = mc_state.block_id();
 
         let keyblock_seqno = if mc_state_extra.after_key_block {
@@ -754,7 +753,7 @@ impl ValidatorManagerImpl {
         let (master, workchain_id) = self.engine.processed_workchain().await?;
         new_shards.insert(ShardIdent::masterchain(), vec![last_masterchain_block.clone()]);
         future_shards.insert(ShardIdent::masterchain());
-        if !master {
+        if !master || workchain_id == BASE_WORKCHAIN_ID {
             mc_state_extra.shards().iterate_shards_for_workchain(workchain_id, |ident: ShardIdent, descr: ShardDescr| {
                 // Add all shards that are effective from now
                 // ValidatorGroups will be created and appropriate sessions started for these shards

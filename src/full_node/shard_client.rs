@@ -438,7 +438,7 @@ fn validate_brodcast(
     for api_sig in broadcast.signatures.iter() {
         blk_pure_signatures.add_sigpair(
             CryptoSignaturePair {
-                node_id_short: api_sig.who,
+                node_id_short: api_sig.who.clone(),
                 sign: CryptoSignature::from_bytes(&api_sig.signature)?,
             }
         );

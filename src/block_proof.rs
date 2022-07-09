@@ -12,8 +12,8 @@
 */
 
 use ton_block::{
-    Block, BlockProof, BlockIdExt, Deserializable, MerkleProof, BlockInfo,
-    ValidatorDescr, ValidatorSet, CatchainConfig, Serializable
+    Block, BlockIdExt, BlockInfo, BlockProof, Deserializable, MerkleProof, Serializable,
+    ValidatorDescr
 };
 use ton_types::{
     Cell, Result, fail, error, HashmapType, deserialize_tree_of_cells, serialize_tree_of_cells,
@@ -113,6 +113,7 @@ impl BlockProofStuff {
         &self.id
     }
 
+    #[cfg(feature="external_db")]
     pub fn proof(&self) -> &BlockProof {
         &self.proof
     }
@@ -204,26 +205,24 @@ impl BlockProofStuff {
         Ok(())
     }
 
-    pub fn get_cur_validators_set(&self) -> Result<(ValidatorSet, CatchainConfig)> {
-        let (virt_key_block, prev_key_block_info) = self.pre_check_block_proof()?;
-
-        if !prev_key_block_info.key_block() {
-            fail!(NodeError::InvalidData(format!(
-                "proof for key block {} contains a Merkle proof which declares non key block",
-                self.id(),
-            )))
-        }
-
-        let (cur_validator_set, cc_config) = virt_key_block.read_cur_validator_set_and_cc_conf()
-            .map_err(|err| { 
-                NodeError::InvalidData(format!(
-                    "Сan't extract config params from key block's proof {}: {}",
-                    self.id, err
-                ))
-            })?;
-
-        Ok((cur_validator_set, cc_config))
-    }
+// Unused
+//    pub fn get_cur_validators_set(&self) -> Result<(ValidatorSet, CatchainConfig)> {
+//        let (virt_key_block, prev_key_block_info) = self.pre_check_block_proof()?;
+//        if !prev_key_block_info.key_block() {
+//            fail!(NodeError::InvalidData(format!(
+//                "proof for key block {} contains a Merkle proof which declares non key block",
+//                self.id(),
+//            )))
+//        }
+//        let (cur_validator_set, cc_config) = virt_key_block.read_cur_validator_set_and_cc_conf()
+//            .map_err(|err| { 
+//                NodeError::InvalidData(format!(
+//                    "Сan't extract config params from key block's proof {}: {}",
+//                    self.id, err
+//                ))
+//            })?;
+//        Ok((cur_validator_set, cc_config))
+//    }
 
     pub fn check_with_prev_key_block_proof_(
         &self,
@@ -257,7 +256,7 @@ impl BlockProofStuff {
             )))
         }
         let (validators, validators_hash_short) =
-            self.process_prev_key_block_proof(prev_key_block_proof, virt_block_info.gen_utime().0)?;
+            self.process_prev_key_block_proof(prev_key_block_proof, virt_block_info.gen_utime().as_u32())?;
 
         if virt_block_info.key_block() {
             self.pre_check_key_block_proof(virt_block)?;
@@ -396,14 +395,17 @@ impl BlockProofStuff {
         }
         let _catchain_config = config.config(28)?;
         if let Err(e) = config.workchains() {
-            log::warn!("{}", e);
+            log::trace!("{}", e);
         }
 
         Ok(())
     }
 
-    fn process_prev_key_block_proof(&self, prev_key_block_proof: &BlockProofStuff, gen_utime: u32)
-    -> Result<(Vec<ValidatorDescr>, u32)> {
+    fn process_prev_key_block_proof(
+        &self, 
+        prev_key_block_proof: &BlockProofStuff, 
+        gen_utime: u32
+    ) -> Result<(Vec<ValidatorDescr>, u32)> {
         let (virt_key_block, prev_key_block_info) = prev_key_block_proof.pre_check_block_proof()?;
 
         if !prev_key_block_info.key_block() {

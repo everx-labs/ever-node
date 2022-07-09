@@ -52,7 +52,6 @@ use crate::{
 };
 #[cfg(feature = "slashing")]
 use crate::{
-    block::convert_block_id_ext_api2blk,
     engine_traits::ValidatedBlockStatNode,
     validator::validator_utils::calc_subset_for_workchain,
 };
@@ -70,8 +69,10 @@ use adnl::telemetry::{Metric, TelemetryItem, TelemetryPrinter};
 use overlay::QueriesConsumer;
 #[cfg(feature = "metrics")]
 use statsd::client;
+#[cfg(feature="workchains")]
+use std::sync::atomic::AtomicI32;
 use std::{
-    ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering, AtomicI32, AtomicU64}},
+    ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering, AtomicU64}},
     time::Duration, collections::HashMap,
 };
 #[cfg(feature = "slashing")]
@@ -124,6 +125,7 @@ pub struct Engine {
     shard_states_cache: TimeBasedCache<BlockIdExt, Arc<ShardStateStuff>>,
     loaded_from_ss_cache: AtomicU64,
     loaded_ss_total: AtomicU64,
+    #[cfg(feature="workchains")]
     pub workchain_id: AtomicI32,
 
     state_gc_resolver: Arc<AllowStateGcSmartResolver>,
@@ -488,7 +490,7 @@ impl Engine {
                 #[cfg(feature = "telemetry")]
                 telemetry,
                 allocated,
-                &check_stop,
+                Some(&check_stop),
                 is_broken
             ).await?;
             // TODO correct workchain id needed here, but it will be known later
@@ -528,9 +530,17 @@ impl Engine {
         let cells_lifetime_sec = general_config.cells_gc_config().cells_lifetime_sec;
         let enable_shard_state_persistent_gc = general_config.enable_shard_state_persistent_gc();
         let restore_db = general_config.restore_db();
-        let workchain_id = general_config.workchain_id().unwrap_or(ton_block::INVALID_WORKCHAIN_ID);
-        log::info!("workchain_id from config {}", workchain_id);
-        let workchain_id = AtomicI32::new(workchain_id);
+        #[cfg(feature="workchains")]
+        let workchain_id = match general_config.workchain_id() {
+            Some(workchain_id) => {
+                log::info!("workchain_id from config {}", workchain_id);
+                workchain_id
+            }
+            None => {
+                log::info!("workchain_id is not set in config");
+                ton_block::INVALID_WORKCHAIN_ID
+            }
+        };
 
         let db_config = InternalDbConfig { 
             db_directory: general_config.internal_db_path().to_string(), 
@@ -674,7 +684,8 @@ impl Engine {
             shard_states_cache: TimeBasedCache::new(120, "shard_states_cache".to_string()),
             loaded_from_ss_cache: AtomicU64::new(0),
             loaded_ss_total: AtomicU64::new(0),
-            workchain_id,
+            #[cfg(feature="workchains")]
+            workchain_id: AtomicI32::new(workchain_id),
             state_gc_resolver,
             validation_status: lockfree::map::Map::new(),
             collation_status: lockfree::map::Map::new(),
@@ -728,6 +739,7 @@ impl Engine {
                     server.shutdown().await;
                     log::info!("Stopped control server");
                 },
+                #[cfg(feature = "external_db")]
                 Server::KafkaConsumer(trigger) => {
                     log::info!("Stopping kafka consumer...");
                     drop(trigger);
@@ -1263,18 +1275,16 @@ impl Engine {
                 log::trace!("Processed block broadcast {} from {}", broadcast.id, src);
 
                 #[cfg(feature = "slashing")]
-                if let Ok(block_id) = convert_block_id_ext_api2blk(&broadcast.id) {
-                    if block_id.shard().is_masterchain() {
-                        let mut signing_nodes = Vec::new();
-                        for api_sig in broadcast.signatures.iter() {
-                            signing_nodes.push(UInt256::from(&api_sig.who.0));
-                        }
+                if broadcast.id.shard().is_masterchain() {
+                    let mut signing_nodes = Vec::new();
+                    for api_sig in broadcast.signatures.iter() {
+                        signing_nodes.push(api_sig.who.clone());
+                    }
 
-                        if let Err(e) = self.process_validated_block_stats_for_mc(&block_id, &signing_nodes).await {
-                            log::error!("Error while processing block broadcast stats {} from {}: {}", broadcast.id, src, e);        
-                        } else {
-                            log::trace!("Processed block broadcast stats {} from {}", broadcast.id, src);                            
-                        }
+                    if let Err(e) = self.process_validated_block_stats_for_mc(&broadcast.id, &signing_nodes).await {
+                        log::error!("Error while processing block broadcast stats {} from {}: {}", broadcast.id, src, e);        
+                    } else {
+                        log::trace!("Processed block broadcast stats {} from {}", broadcast.id, src);                            
                     }
                 }
             }
@@ -1787,7 +1797,8 @@ impl Engine {
         self.load_state(&prev_block_id).await
             .map_err(|err| error!("no previous block state present for {}", err))?;
 
-        self.db().truncate_database(&block_id, self.processed_workchain().await?.1).await?;
+        let (_master, workchain_id) = self.processed_workchain().await?;
+        self.db().truncate_database(&block_id, workchain_id).await?;
         self.save_last_applied_mc_block_id(&prev_block_id)?;
 
         if let Some(block_id) = self.load_pss_keeper_mc_block_id()? {
