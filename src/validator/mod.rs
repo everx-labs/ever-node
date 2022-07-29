@@ -27,6 +27,8 @@ mod mutex_wrapper;
 pub mod telemetry;
 #[cfg(feature = "slashing")]
 mod slashing;
+#[cfg(feature = "verification")]
+mod verification;
 
 use std::sync::Arc;
 use ton_types::{Result, UInt256, error};

@@ -25,7 +25,7 @@ use adnl::{
     node::AdnlNode
 };
 use ever_crypto::KeyId;
-use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
+use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode, QueriesConsumer};
 use rldp::RldpNode;
 use std::{io::Cursor, time::Instant, sync::Arc, time::Duration};
 #[cfg(feature = "telemetry")]
@@ -45,7 +45,8 @@ use ton_api::{serialize_boxed, serialize_boxed_append, tag_from_boxed_type, tag_
             ArchiveInfo, Broadcast, 
             DataFull, KeyBlocks, Prepared, PreparedProof, PreparedState, 
             broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}, 
-            externalmessage::ExternalMessage, 
+            externalmessage::ExternalMessage,
+            BlockCandidateStatus,
         }
     }
 };
@@ -54,9 +55,12 @@ use ton_types::{fail, error, Result};
 
 #[async_trait::async_trait]
 pub trait FullNodeOverlayClient : Sync + Send {
+    fn add_new_peers(&self, peers: Vec<Arc<KeyId>>);
+    fn add_query_consumer(&self, consumer: Arc<dyn QueriesConsumer>) -> Result<bool>;
     async fn broadcast_external_message(&self, msg: &[u8]) -> Result<BroadcastSendInfo>;
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()>;
     async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()>;
+    async fn send_block_status(&self, receiver_id: &Arc<KeyId>, status: BlockCandidateStatus) -> Result<Option<BlockCandidateStatus>>;
     async fn download_block_proof(&self, block_id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff>;
     async fn download_block_full(&self, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
     async fn check_persistent_state(
@@ -85,7 +89,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
         mc_seq_no: u32,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<Option<Vec<u8>>>;
-    async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>>;
+    async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>>;    
 }
 
 //    #[derive(Clone)]
@@ -136,6 +140,8 @@ declare_counted!(
         #[cfg(feature = "telemetry")]
         tag_prepare_zero_state: u32,
         #[cfg(feature = "telemetry")]
+        tag_send_block_status: u32,
+        #[cfg(feature = "telemetry")]
         engine_telemetry: Arc<EngineTelemetry>,
         engine_allocated: Arc<EngineAlloc>
     }
@@ -145,6 +151,7 @@ impl NodeClientOverlay {
 
     const ADNL_ATTEMPTS: u32 = 50;
     const TIMEOUT_PREPARE: u64 = 6000; // Milliseconds
+    const TIMEOUT_BLOCK_STATUS: u64 = 1000; // Milliseconds
     const TIMEOUT_DELTA: u64 = 50; // Milliseconds
     const TIMEOUT_NO_NEIGHBOURS: u64 = 1000; // Milliseconds
 
@@ -205,6 +212,8 @@ impl NodeClientOverlay {
             tag_prepare_persistent_state: tag_from_boxed_type::<PreparePersistentState>(),
             #[cfg(feature = "telemetry")]
             tag_prepare_zero_state: tag_from_boxed_type::<PrepareZeroState>(),
+            #[cfg(feature = "telemetry")]
+            tag_send_block_status: tag_from_boxed_type::<ton_api::ton::ton_node::BlockCandidateStatus>(),
             #[cfg(feature = "telemetry")]
             engine_telemetry: engine_telemetry.clone(),
             engine_allocated: engine_allocated.clone(),
@@ -415,6 +424,17 @@ impl NodeClientOverlay {
 
 #[async_trait::async_trait]
 impl FullNodeOverlayClient for NodeClientOverlay {
+    fn add_new_peers(&self, peers: Vec<Arc<KeyId>>) {
+        //self.peers.clone().add_new_peers(peers);
+        for peer in &peers {
+            let _result = self.peers.add(peer.clone());
+        }
+        self.peers.clone().start_rnd_peers_process();
+    }
+
+    fn add_query_consumer(&self, consumer: Arc<dyn QueriesConsumer>) -> Result<bool> {
+        self.overlay.add_consumer(&self.overlay_id, consumer)
+    }
 
     async fn broadcast_external_message(&self, msg: &[u8]) -> Result<BroadcastSendInfo> {
         let broadcast = ExternalMessageBroadcast {
@@ -460,6 +480,25 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             tbd.proof_for(), self.overlay_id, info.send_to
         );
         Ok(())
+    }
+
+    async fn send_block_status(&self, receiver_id: &Arc<KeyId>, status: BlockCandidateStatus) -> Result<Option<BlockCandidateStatus>> {
+        let peer = self.peers.find_neighbour(receiver_id);
+        if peer.is_none() {
+            failure::bail!(format!("Neighbour {} not found", receiver_id));
+        }
+        let peer = peer.unwrap();
+        let object = TLObject::new(status);
+
+        self.send_adnl_query_to_peer::<BlockCandidateStatus, BlockCandidateStatus>(
+            &peer,
+            &TaggedObject {
+                object: object,
+                #[cfg(feature = "telemetry")]
+                tag: self.tag_send_block_status,
+            },
+            Some(Self::TIMEOUT_BLOCK_STATUS),
+        ).await
     }
 
     // tonNode.prepareBlockProof block:tonNode.blockIdExt allow_partial:Bool = tonNode.PreparedProof;

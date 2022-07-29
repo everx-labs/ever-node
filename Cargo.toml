@@ -20,14 +20,17 @@ bitflags = '1.2.1'
 chrono = '0.4.10'
 clap = '2.33.1'
 colored = '1.9.3'
+crc32c = "0.4"
 crossbeam-channel = '0.4.2'
 ctrlc = { features = [ 'termination' ], version = '3.2.1' }
+deflate = "1.0.0"
 dirs = '2.0.2'
 env_logger = '0.7.1'
 failure = '0.1'
 futures = '0.3.1'
 futures-timer = '3.0.1'
 hex = '0.4'
+inflate = "0.4.5"
 lazy_static = '1.4.0'
 log = '0.4'
 log4rs = '1'
@@ -43,26 +46,31 @@ sha2 = '0.9'
 spin = '0.7.1'
 stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.75' }
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ton-labs-adnl' }
 catchain = { path = 'catchain' }
-dht = { git = 'https://github.com/tonlabs/ton-labs-dht', tag = '0.5.72' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.29' }
+dht = { git = 'https://github.com/tonlabs/ton-labs-dht' }
+ever-crypto = { git ='https://github.com/tonlabs/ever-labs-crypto' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.59' }
-rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.69' }
+overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay' }
+rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp' }
 rustracing = { optional = true, version = '0.4.0' }
 rustracing_jaeger = { optional = true, version = '0.4.1' }
 statsd = { optional = true, version = '0.14.0' }
 storage = { path = 'storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git', tag = '2.3.1' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.129' }
-ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.8.0' }
-ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', tag = '0.7.24' }
-ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.78' }
-ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.11.3' }
-ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.40' }
+ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api' }
+ton_block = { git = 'https://github.com/tonlabs/ton-labs-block' }
+ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git' }
+ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor' }
+ton_types = { git = 'https://github.com/tonlabs/ton-labs-types' }
+ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm' }
 validator_session = { path = 'validator-session' }
+#metrics-core = { version = "0.5.2", optional = true } #todo: enable after migration to rust 1.60
+#metrics-runtime = { version = "0.13.0", optional = true } #todo: enable after migration to rust 1.60
+metrics-core = { version = "0.5.2" }
+metrics-runtime = { version = "0.13.0" }
+ever_bls_lib = { git ='https://github.com/tonlabs/ever-labs-labs-bls' } #todo: make optional for verification feature
 
 [target.'cfg(unix)'.dependencies.rdkafka]
 optional = true
@@ -74,12 +82,14 @@ optional = true
 version = '0.26.0'
 
 [features]
-default = [ 'telemetry' ]
+default = ['telemetry', 'verification']
 external_db = [ 'rdkafka' ]
 ci_run = [ 'storage/ci_run' ]
 export_key = [ 'catchain/export_key', 'ever-crypto/export_key' ]
 metrics = [ 'statsd' ]
 slashing = [  ]
+#verification = ["dep:metrics-core", "dep:metrics-runtime"] #todo: enable after migration to rust 1.60
+verification = [ 'ever-crypto/export_key' ]
 telemetry = [
     'adnl/telemetry',
     'dht/telemetry',
@@ -90,3 +100,4 @@ telemetry = [
 trace_alloc_detail = [ 'trace_alloc' ]
 trace_alloc = [  ]
 workchains = [  ]
+

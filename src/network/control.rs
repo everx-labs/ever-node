@@ -34,6 +34,7 @@ use ton_api::{
         raw::{ShardAccountState as ShardAccountStateBoxed, shardaccountstate::ShardAccountState},
         rpc::engine::validator::{
             AddAdnlId, AddValidatorAdnlAddress, AddValidatorPermanentKey, AddValidatorTempKey,
+            AddValidatorBlsKey,
             ControlQuery, ExportPublicKey, GenerateKeyPair, Sign, GetBundle, GetFutureBundle
         },
     },
@@ -367,9 +368,9 @@ impl ControlQuerySubscriber {
 
     }
 
-    async fn process_generate_keypair(&self) -> Result<KeyHash> {
+    async fn process_generate_keypair(&self, key_type: i32) -> Result<KeyHash> {
         let ret = KeyHash {
-            key_hash: UInt256::with_array(self.key_ring.generate().await?)
+            key_hash: UInt256::with_array(self.key_ring.generate(key_type).await?)
         };
         Ok(ret)
     }
@@ -412,7 +413,12 @@ impl ControlQuerySubscriber {
         self.config.add_validator_adnl_key(perm_key_hash, key_hash).await?;
         Ok(Success::Engine_Validator_Success)
     }
-    
+
+    async fn add_validator_bls_key(&self, perm_key_hash: &[u8; 32], key_hash: &[u8; 32], _ttl: ton::int) -> Result<Success> {
+        self.config.add_validator_bls_key(perm_key_hash, key_hash).await?;
+        Ok(Success::Engine_Validator_Success)
+    }
+
     fn add_adnl_address(&self, _key_hash: &[u8; 32], _category: ton::int) -> Result<Success> {
         Ok(Success::Engine_Validator_Success)
     }
@@ -462,7 +468,7 @@ impl Subscriber for ControlQuerySubscriber {
         };
         log::info!("query (control server): {:?}", query);
         let query = match query.downcast::<GenerateKeyPair>() {
-            Ok(_) => return QueryResult::consume(self.process_generate_keypair().await?, None),
+            Ok(query) => return QueryResult::consume(self.process_generate_keypair(query.key_type).await?, None),
             Err(query) => query
         };
         let query = match query.downcast::<ExportPublicKey>() {
@@ -500,6 +506,15 @@ impl Subscriber for ControlQuerySubscriber {
         let query = match query.downcast::<AddValidatorAdnlAddress>() {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_validator_adnl_address(
+                    query.permanent_key_hash.as_slice(), query.key_hash.as_slice(), query.ttl
+                ).await?,
+                None
+            ),
+            Err(query) => query
+        };
+        let query = match query.downcast::<AddValidatorBlsKey>() {
+            Ok(query) => return QueryResult::consume_boxed(
+                self.add_validator_bls_key(
                     query.permanent_key_hash.as_slice(), query.key_hash.as_slice(), query.ttl
                 ).await?,
                 None

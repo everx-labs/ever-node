@@ -835,7 +835,26 @@ impl NodeNetwork {
             }
             match self.config_handler.get_validator_key(&validator_adnl_key_id).await {
                 Some((adnl_key, _)) => {
-                    let id = self.adnl.add_key(adnl_key, election_id as usize)?;
+                    let id = match self.adnl.add_key(adnl_key.clone(), election_id as usize) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            if let Ok(old_key) = self.adnl.key_by_tag(election_id as usize) {
+                                if *old_key.id() != validator_adnl_key_id {
+                                    log::warn!("load_and_store_adnl_key: remove old key {}, election_id: {}", 
+                                        old_key.id(), election_id);
+                                } else {
+                                    log::warn!("load_and_store_adnl_key: remove key {}, election_id: {}", 
+                                        old_key.id(), election_id);
+                                }
+
+                                self.adnl.delete_key(old_key.id(), election_id as usize);
+                                self.adnl.add_key(adnl_key, election_id as usize)?
+                            } else {
+                                fail!("failed initialization new validator key (id: {}, election_id: {}): {:?}",
+                                    validator_adnl_key_id, election_id, e);
+                            }
+                        }
+                    };
             
                     NodeNetwork::periodic_store_ip_addr(
                         self.dht.clone(),

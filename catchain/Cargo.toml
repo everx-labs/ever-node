@@ -1,35 +1,35 @@
 [package]
-edition = '2021'
-build = '../common/build/build.rs'
-name = 'catchain'
-version = '0.1.0'
+edition = "2021"
+build = "../common/build/build.rs"
+name = "catchain"
+version = "0.1.0"
 
 [dependencies]
 # external
-base64 = '0.13'
-chrono = '0.4.10'
-crossbeam = '0.7.3'
-ed25519-dalek = '1.0'
-failure = '0.1'
-futures = '0.3.4'
-hex = '0.4'
-lazy_static = '1.4.0'
-log = '0.4'
-metrics-core = '0.5.2'
-metrics-runtime = '0.13.0'
-rand = '0.8'
-regex = '1.3.1'
-sha2 = '0.9'
-tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
+base64 = "0.13"
+chrono = "0.4.10"
+crossbeam = "0.7.3"
+ed25519-dalek = "1.0"
+failure = "0.1"
+futures = "0.3.4"
+hex = "0.4"
+lazy_static = "1.4.0"
+log = "0.4"
+metrics-core = "0.5.2"
+metrics-runtime = "0.13.0"
+rand = "0.8"
+regex = "1.3.1"
+sha2 = "0.9"
+tokio = { version = "1.5", features = ["rt-multi-thread"] }
 
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.75' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.29' }
-overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.59' }
-rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.69' }
-storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.129' }
-ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.11.3' }
+adnl = { git = "https://github.com/tonlabs/ton-labs-adnl", features = ["node"] }
+ever-crypto = { git ="https://github.com/tonlabs/ever-labs-crypto" }
+overlay = { git = "https://github.com/tonlabs/ton-labs-overlay" }
+rldp = { git = "https://github.com/tonlabs/ton-labs-rldp" }
+storage = { path = "../storage" }
+ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }
+ton_types = { git = "https://github.com/tonlabs/ton-labs-types" }
 
 [features]
-default = [  ]
-export_key = [ 'ever-crypto/export_key' ]
+default = []
+export_key = ["ever-crypto/export_key"]

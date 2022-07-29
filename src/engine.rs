@@ -809,6 +809,14 @@ impl Engine {
         self.overlay_operations.clone().get_overlay(id).await
     }
 
+    pub async fn get_custom_overlay(&self, overlay_id: (Arc<overlay::OverlayShortId>, overlay::OverlayId)) -> Result<Arc<dyn FullNodeOverlayClient>> {
+        self.overlay_operations.clone().get_overlay(overlay_id).await
+    }
+
+    pub fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<overlay::OverlayShortId>, overlay::OverlayId)> {
+        self.overlay_operations.calc_overlay_id(workchain, shard)
+    }
+
     pub fn shard_states_awaiters(&self) -> &AwaitersPool<BlockIdExt, Arc<ShardStateStuff>> {
         &self.shard_states_awaiters
     }
@@ -1145,6 +1153,9 @@ impl Engine {
                             }
                             Broadcast::TonNode_ConnectivityCheckBroadcast(broadcast) => {
                                 self.network.clone().process_connectivity_broadcast(broadcast);
+                            }
+                            Broadcast::TonNode_BlockCandidateBroadcast(broadcast) => {
+                                log::warn!("TonNode_BlockCandidateBroadcast from {}: {:?}", src, broadcast);
                             }
                         }
                     }

@@ -17,7 +17,7 @@ use adnl::{
     common::{add_unbound_object_to_map_with_update, Wait},
     node::{AdnlNodeConfig, AdnlNodeConfigJson}, server::{AdnlServerConfig, AdnlServerConfigJson}
 };
-use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson};
+use ever_crypto::{BlsKeyOption, Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson};
 use std::{
     collections::HashMap, convert::TryInto, fs::File, io::BufReader, path::Path,
     sync::{Arc, atomic::{self, AtomicI32} }
@@ -50,7 +50,7 @@ macro_rules! key_option_public_key {
 
 #[async_trait::async_trait]
 pub trait KeyRing : Sync + Send  {
-    async fn generate(&self) -> Result<[u8; 32]>;
+    async fn generate(&self, key_type: i32) -> Result<[u8; 32]>;
     // find private key in KeyRing by public key hash
     fn find(&self, key_hash: &[u8; 32]) -> Result<Arc<dyn KeyOption>>;
     fn sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Vec<u8>>;
@@ -120,7 +120,8 @@ pub struct NodeExtensions {
 struct ValidatorKeysJson {
     election_id: i32,
     validator_key_id: String,
-    validator_adnl_key_id: Option<String>
+    validator_adnl_key_id: Option<String>,
+    validator_bls_key: Option<String>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Default, Debug, Clone)]
@@ -538,6 +539,7 @@ impl TonNodeConfig {
                     if keys_info.election_id == updated_info.election_id {
                         keys_info.validator_key_id = updated_info.validator_key_id;
                         keys_info.validator_adnl_key_id = updated_info.validator_adnl_key_id;
+                        keys_info.validator_bls_key = updated_info.validator_bls_key;
                         return Ok(keys_info.clone());
                 }
             }
@@ -559,12 +561,17 @@ impl TonNodeConfig {
         Ok(())
     }
 
-    fn generate_and_save_keys(&mut self) -> Result<([u8; 32], Arc<dyn KeyOption>)> {
+    fn generate_and_save_keys(&mut self, key_type: i32) -> Result<([u8; 32], Arc<dyn KeyOption>)> {
         #[cfg(feature="workchains")]
-        let (private, public) = crate::validator::validator_utils::mine_key_for_workchain(self.workchain);
+        let (private, public) = match key_type {
+            Ed25519KeyOption::KEY_TYPE => crate::validator::validator_utils::mine_key_for_workchain(self.workchain),
+            BlsKeyOption::KEY_TYPE => BlsKeyOption::generate_with_json()?,
+            _ => fail!("Unknown generate key type!"),
+        };
         #[cfg(not(feature="workchains"))]
         let (private, public) = Ed25519KeyOption::generate_with_json()?;
         let key_id = public.id().data();
+        log::info!("generate_and_save_keys: generate new key (id: {:?})", key_id);
         let key_ring = self.validator_key_ring.get_or_insert_with(|| HashMap::new());
         key_ring.insert(base64::encode(key_id), private);
         Ok((key_id.clone(), public))
@@ -585,7 +592,8 @@ impl TonNodeConfig {
         let key_info = ValidatorKeysJson {
             election_id,
             validator_key_id: base64::encode(key_id),
-            validator_adnl_key_id: None
+            validator_adnl_key_id: None,
+            validator_bls_key: None
         };
 
         if !self.is_correct_election_id(election_id) {
@@ -612,6 +620,19 @@ impl TonNodeConfig {
         Ok(key_info)
     }
 
+    fn add_validator_bls_key(
+        &mut self,
+        validator_key_id: &[u8; 32],
+        bls_key: &[u8; 32]
+    ) -> Result<ValidatorKeysJson> {
+        if let Some(mut key_info) = self.get_validator_key_info(&base64::encode(validator_key_id))? {
+            key_info.validator_bls_key = Some(base64::encode(bls_key));
+            self.update_validator_key_info(key_info)
+        } else {
+            fail!("Validator key have not been added!")
+        }
+    }
+
     fn add_validator_adnl_key(
         &mut self,
         validator_key_id: &[u8; 32],
@@ -621,7 +642,7 @@ impl TonNodeConfig {
             key_info.validator_adnl_key_id = Some(base64::encode(adnl_key_id));
             self.update_validator_key_info(key_info)
         } else {
-            fail!("Validator key was not added!")
+            fail!("Validator key have not been added!")
         }
     }
 
@@ -656,9 +677,10 @@ pub trait NodeConfigSubscriber: Send + Sync {
 
 #[derive(Debug)]
 enum Task {
-    Generate,
+    Generate(i32),
     AddValidatorKey([u8; 32], i32),
     AddValidatorAdnlKey([u8; 32], [u8; 32]),
+    AddValidatorBlsKey([u8; 32], [u8; 32]),
     GetKey([u8; 32]),
     StoreStatesGcInterval(u32),
     #[cfg(feature="workchains")]
@@ -721,6 +743,29 @@ impl NodeConfigHandler {
             Some(None) => fail!("Answer was not set!"),
             Some(Some(Answer::Result(result))) => result,
             Some(Some(_)) => fail!("Bad answer (AddValidatorKey)!"),
+            None => fail!("Waiting returned an internal error!")
+        }
+    }
+
+    pub async fn add_validator_bls_key(
+        &self,
+        validator_key_hash: &[u8; 32],
+        validator_bls_key_hash: &[u8; 32]
+    ) -> Result<()> {
+        let (wait, mut queue_reader) = Wait::new();
+        let pushed_task = Arc::new((
+            wait.clone(), 
+            Task::AddValidatorBlsKey(validator_key_hash.clone(), validator_bls_key_hash.clone())
+        ));
+
+        wait.request();
+        if let Err(e) = self.sender.send(pushed_task) {
+            fail!("Error add_validator_bls_key: {}", e);
+        }
+        match wait.wait(&mut queue_reader, true).await {
+            Some(None) => fail!("Answer was not set!"),
+            Some(Some(Answer::Result(result))) => result,
+            Some(Some(_)) => fail!("Bad answer (AddValidatorBlsKey)!"),
             None => fail!("Waiting returned an internal error!")
         }
     }
@@ -852,19 +897,22 @@ impl NodeConfigHandler {
 
     fn generate_and_save(
         key_ring: &Arc<lockfree::map::Map<String, Arc<dyn KeyOption>>>,
+        key_type: i32,
         config: &mut TonNodeConfig,
         config_name: &str
     ) -> Result<[u8; 32]> {
-        let (key_id, public_key) = config.generate_and_save_keys()?;
+        log::info!("start generate key (type: {})", key_type);
+        let (key_id, public_key) = config.generate_and_save_keys(key_type)?;
         config.save_to_file(config_name)?;
 
         let id = base64::encode(&key_id);
         key_ring.insert(id, public_key.clone());
+        log::info!("finish generate key (type: {}), key_id: {:?}", key_type, key_id);
         Ok(key_id)
     }
 
     fn revision_validator_keys(
-        validator_keys: Arc<ValidatorKeys>,
+        validator_keys: &Arc<ValidatorKeys>,
         config: &mut TonNodeConfig
     )-> Result<()> {
         loop {
@@ -882,6 +930,9 @@ impl NodeConfigHandler {
                                 if let Some(adnl_key_id) = oldest_key.validator_adnl_key_id {
                                     config.remove_key_from_key_ring(&adnl_key_id);
                                 }
+                                if let Some(bls_key_id) = oldest_key.validator_bls_key {
+                                    config.remove_key_from_key_ring(&bls_key_id);
+                                }
                         }
                     } else {
                         break;
@@ -893,29 +944,52 @@ impl NodeConfigHandler {
         Ok(())
     }
 
+    fn add_validator_bls_key_and_save(
+        self: Arc<Self>,
+        validator_keys: &Arc<ValidatorKeys>,
+        config: &mut TonNodeConfig,
+        validator_key_hash: &[u8; 32],
+        validator_bls_key_hash: &[u8; 32]
+    )-> Result<()> {
+        let key = config.add_validator_bls_key(&validator_key_hash, validator_bls_key_hash)?;
+        if key.validator_adnl_key_id.is_some() && key.validator_bls_key.is_some() {
+            validator_keys.add(key)?;
+        }
+
+        // check validator keys
+        Self::revision_validator_keys(validator_keys, config)?;
+        config.save_to_file(&config.file_name)?;
+        Ok(())
+    }
+
     fn add_validator_adnl_key_and_save(
         self: Arc<Self>,
-        validator_keys: Arc<ValidatorKeys>,
+        validator_keys: &Arc<ValidatorKeys>,
         config: &mut TonNodeConfig,
         validator_key_hash: &[u8; 32],
         validator_adnl_key_hash: &[u8; 32],
-        subscribers: Vec<Arc<dyn NodeConfigSubscriber>>
+        subscribers: &Vec<Arc<dyn NodeConfigSubscriber>>
     )-> Result<()> {
         let key = config.add_validator_adnl_key(&validator_key_hash, validator_adnl_key_hash)?;
         let election_id = key.election_id.clone();
-        validator_keys.add(key)?;
+        //if key.validator_adnl_key_id.is_some() && key.validator_bls_key.is_some() {
+            validator_keys.add(key)?;
+        //}
 
         let adnl_key_id = KeyId::from_data(*validator_adnl_key_hash);
 
-        self.clone().runtime_handle.spawn(async move {
-            for subscriber in subscribers.iter() {
+        for subscriber in subscribers.iter() {
+            let subscriber = subscriber.clone();
+            let adnl_key_id = adnl_key_id.clone();
+            self.clone().runtime_handle.spawn(async move {
                 if let Err(e) = subscriber.event(
-                    ConfigEvent::AddValidatorAdnlKey(adnl_key_id.clone(), election_id)
+                    ConfigEvent::AddValidatorAdnlKey(adnl_key_id, election_id)
                 ).await {
                     log::warn!("subscriber error: {:?}", e);
                 }
-            }
-        });
+            });
+        }
+
         // check validator keys
         Self::revision_validator_keys(validator_keys, config)?;
         config.save_to_file(&config.file_name)?;
@@ -951,10 +1025,10 @@ impl NodeConfigHandler {
     }
 
     fn get_key(config: &TonNodeConfig, key_id: [u8; 32]) -> Option<Arc<dyn KeyOption>> {
-        if let Some(validator_key_ring) = &config.validator_key_ring {
+            if let Some(validator_key_ring) = &config.validator_key_ring {
             if let Some(key_data)  = validator_key_ring.get(&base64::encode(&key_id)) {
                 match Ed25519KeyOption::from_private_key_json(&key_data) {
-                    Ok(key) => { return Some(key)},
+                    Ok(key) => { return Some(key) },
                     _ => return None
                 }
             }
@@ -1002,7 +1076,12 @@ impl NodeConfigHandler {
     }
 
     fn add_key_to_dynamic_key_ring(&self, key_id: String, key_json: &KeyOptionJson) -> Result<()> {
-        if let Some(key) = self.key_ring.insert(key_id, Ed25519KeyOption::from_private_key_json(key_json)?) {
+        let key = match *key_json.type_id() {
+            Ed25519KeyOption::KEY_TYPE => Ed25519KeyOption::from_private_key_json(key_json)?,
+            BlsKeyOption::KEY_TYPE => BlsKeyOption::from_private_key_json(key_json)?,
+            _ => fail!("Unknown key type (key_id: {})", key_id),
+        };
+        if let Some(key) = self.key_ring.insert(key.id().to_string(), key) {
             log::warn!("Added key was already in key ring collection (id: {})", key.key());
         }
         
@@ -1024,37 +1103,47 @@ impl NodeConfigHandler {
         self.clone().runtime_handle.spawn(async move {
             while let Some(task) = reader.recv().await {
                 let answer = match task.1 {
-                    Task::Generate => {
-                        let result = NodeConfigHandler::generate_and_save(&key_ring, &mut actual_config, &name);
+                    Task::Generate(key_type) => {
+                        let result = NodeConfigHandler::generate_and_save(&key_ring, key_type, &mut actual_config, &name);
                         Answer::Generate(result)
-                    }
+                    },
                     Task::AddValidatorAdnlKey(key, adnl_key) => {
                         let result = NodeConfigHandler::add_validator_adnl_key_and_save(
                             self.clone(),
-                            validator_keys.clone(),
+                            &validator_keys,
                             &mut actual_config,
                             &key,
                             &adnl_key,
-                            subscribers.clone()
+                            &subscribers
                         );
                         Answer::Result(result)
-                    }
+                    },
+                    Task::AddValidatorBlsKey(key, bls_key_id) => {
+                        let result = NodeConfigHandler::add_validator_bls_key_and_save(
+                            self.clone(),
+                            &validator_keys,
+                            &mut actual_config,
+                            &key,
+                            &bls_key_id
+                        );
+                        Answer::Result(result)
+                    },
                     Task::AddValidatorKey(key, election_id) => {
                         let result = NodeConfigHandler::add_validator_key_and_save(
                             validator_keys.clone(), &mut actual_config, &key, election_id
                         );
                         Answer::Result(result)
-                    }
+                    },
                     Task::GetKey(key_data) => {
                         let result = NodeConfigHandler::get_key(&actual_config, key_data);
                         Answer::GetKey(result)
-                    }
+                    },
                     #[cfg(feature="workchains")]
                     Task::StoreWorkchainId(workchain_id) => {
                         actual_config.workchain = Some(workchain_id);
                         let result = actual_config.save_to_file(&name);
                         Answer::Result(result)
-                    }
+                    },
                     Task::StoreStatesGcInterval(interval) => {
                         if let Some(c) = &mut actual_config.gc {
                             c.cells_gc_config.gc_interval_sec = interval;
@@ -1081,9 +1170,10 @@ impl NodeConfigHandler {
 
 #[async_trait::async_trait]
 impl KeyRing for NodeConfigHandler {
-    async fn generate(&self) -> Result<[u8; 32]> {
+    async fn generate(&self, key_type: i32) -> Result<[u8; 32]> {
+        log::info!("request generate key (key_type: {})", key_type);
         let (wait, mut queue_reader) = Wait::new();
-        let pushed_task = Arc::new((wait.clone(), Task::Generate));
+        let pushed_task = Arc::new((wait.clone(), Task::Generate(key_type)));
         wait.request();
         if let Err(e) = self.sender.send(pushed_task) {
             fail!("Error generate: {}", e);

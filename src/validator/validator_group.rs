@@ -11,6 +11,9 @@
 * limitations under the License.
 */
 
+//TODO: do not await verification manager functions for collation / validation
+//TODO: remove block status sending from validation?
+
 use std::cmp::max;
 use std::sync::*;
 use std::sync::atomic::{Ordering, AtomicU64};
@@ -41,6 +44,8 @@ use super::*;
 use super::fabric::*;
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::SlashingManagerPtr;
+#[cfg(feature = "verification")]
+use crate::validator::verification::{VerificationManagerPtr};
 use crate::validator::mutex_wrapper::MutexWrapper;
 
 struct CatchainOverlayManagerImpl {
@@ -290,6 +295,8 @@ pub struct ValidatorGroup {
 
     #[cfg(feature = "slashing")]
     slashing_manager: SlashingManagerPtr,
+    #[cfg(feature = "verification")]
+    verification_manager: VerificationManagerPtr,
     last_validation_time: AtomicU64,
     last_collation_time: AtomicU64,
 }
@@ -308,6 +315,8 @@ impl ValidatorGroup {
         allow_unsafe_self_blocks_resync: bool,
         #[cfg(feature = "slashing")]
         slashing_manager: SlashingManagerPtr,
+        #[cfg(feature = "verification")]
+        verification_manager: VerificationManagerPtr,
     ) -> Self {
         let group_impl = ValidatorGroupImpl::new(shard.clone(), session_id.clone());
         let id = format!("Val. group {} {}", shard, session_id);
@@ -328,6 +337,8 @@ impl ValidatorGroup {
             receiver: Arc::new(receiver),
             #[cfg(feature = "slashing")]
             slashing_manager,
+            #[cfg(feature = "verification")]
+            verification_manager,
             last_validation_time: AtomicU64::new(0),
             last_collation_time: AtomicU64::new(0)
         }
@@ -471,11 +482,20 @@ impl ValidatorGroup {
             }
             None => Err(failure::err_msg("Min masterchain block id missing")),
         };
+        let mut candidate = None;
         let result_message = match &result {
-            Ok(_) => {
+            Ok(result) => {
                 let now = std::time::SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
                 self.last_collation_time.fetch_max(now, Ordering::Relaxed);
+
+                candidate = Some(super::BlockCandidate {
+                    block_id: BlockIdExt::with_params(self.shard.clone(), 0, result.id.root_hash.clone(), get_hash(&result.data.data())),
+                    data: result.data.data().to_vec(),
+                    collated_file_hash: result.collated_file_hash.clone(),
+                    collated_data: result.collated_data.data().to_vec(),
+                    created_by: self.local_key.pub_key().expect("source must contain pub_key").into(),
+                });
 
                 format!("Collation successful")
             }
@@ -486,7 +506,13 @@ impl ValidatorGroup {
         );
         self.group_impl.execute_sync(|group_impl| group_impl.on_generate_slot_invoked = true).await;
 
-        callback(result)
+        callback(result);
+
+        #[cfg(feature = "verification")]
+        if let Some(candidate) = candidate {
+            log::trace!(target:"verificator", "Received new candidate for round {}", round);
+            let _verification_future = self.verification_manager.send_new_block_candidate(&candidate).await; //TODO: do not wait!
+        }
     }
 
     // Validate_query
@@ -532,6 +558,9 @@ impl ValidatorGroup {
 
             match mm_block_id {
                 Some(mc) => {
+                    #[cfg(feature = "verification")]
+                    let _verification_future = self.verification_manager.send_new_block_candidate(&candidate).await; //TODO: do not wait!
+
                     run_validate_query(
                         self.shard.clone(),
                         min_ts,

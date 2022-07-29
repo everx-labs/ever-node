@@ -373,7 +373,7 @@ impl Neighbours {
         });
     }
 
-    fn add_new_peers(self: Arc<Self>, peers: Vec<Arc<KeyId>>) {
+    pub fn add_new_peers(self: Arc<Self>, peers: Vec<Arc<KeyId>>) {
         let this = self.clone();
         tokio::spawn(async move {
             for peer in peers.iter() {
@@ -394,6 +394,21 @@ impl Neighbours {
                 }
             }
         });
+    }
+
+    pub fn find_neighbour(&self, id: &Arc<KeyId>) -> Option<Arc<Neighbour>> {
+        let count = self.peers.count();
+        if count == 0 {
+            return None;
+        }
+
+        for neighbour in self.peers.get_iter() {
+            if &neighbour.id == id {
+                return Some(neighbour);
+            }
+        }
+
+        None
     }
 
     pub fn choose_neighbour(&self) -> Result<Option<Arc<Neighbour>>> {

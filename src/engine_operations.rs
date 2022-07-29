@@ -24,6 +24,9 @@ use crate::{
         INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, LAST_ROTATION_MC_BLOCK, SHARD_CLIENT_MC_BLOCK,
         BlockResult,
     },
+    network::{
+        full_node_client::FullNodeOverlayClient,
+    },
     shard_state::ShardStateStuff,
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
     ext_messages::{create_ext_message, EXT_MESSAGES_TRACE_TARGET},
@@ -126,6 +129,14 @@ impl EngineOperations for Engine {
 
     fn get_sync_status(&self) -> u32 {
         self.get_sync_status()
+    }
+
+    async fn get_custom_overlay(&self, overlay_id: (Arc<overlay::OverlayShortId>, overlay::OverlayId)) -> Result<Arc<dyn FullNodeOverlayClient>> {
+        self.get_custom_overlay(overlay_id).await
+    }
+
+    fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<overlay::OverlayShortId>, overlay::OverlayId)> {
+        self.calc_overlay_id(workchain, shard)
     }
 
     fn validation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {

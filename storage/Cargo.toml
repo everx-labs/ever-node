@@ -1,45 +1,45 @@
 [package]
-name = 'storage'
-version = '0.5.0'
-edition = '2018'
+name = "storage"
+version = "0.5.0"
+edition = "2018"
 
 [dependencies]
-async-trait = '0.1.31'
-base64 = '0.13'
-failure = '0.1'
-fnv = '1.0.6'
-futures = '0.3.4'
-hex = '0.4'
-lazy_static = '1.4.0'
-log = '0.4'
-log4rs = '1'
-rand = '0.8'
-regex = '1.3.9'
-serde = '1.0.114'
-serde_cbor = '0.11.1'
-serde_derive = '1.0.114'
-sha2 = '0.9'
-strum = '0.18.0'
-strum_macros = '0.18.0'
-tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
+async-trait = "0.1.31"
+base64 = "0.13"
+failure = "0.1"
+fnv = "1.0.6"
+futures = "0.3.4"
+hex = "0.4"
+lazy_static = "1.4.0"
+log = "0.4"
+log4rs = "1"
+rand = "0.8"
+regex = "1.3.9"
+serde = "1.0.114"
+serde_cbor = "0.11.1"
+serde_derive = "1.0.114"
+sha2 = "0.9"
+strum = "0.18.0"
+strum_macros = "0.18.0"
+tokio = { version = "1.5", features = ["fs", "rt-multi-thread"] }
 
-adnl = { git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.75' }
-lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.129' }
-ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.8.0' }
-ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.11.3' }
+adnl = { git = "https://github.com/tonlabs/ton-labs-adnl" }
+lockfree = { git = "https://github.com/tonlabs/lockfree.git" }
+ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }
+ton_block = { git = "https://github.com/tonlabs/ton-labs-block" }
+ton_types = { git = "https://github.com/tonlabs/ton-labs-types" }
 
 [target.'cfg(windows)'.dependencies.rocksdb]
-git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
+git = "https://github.com/rust-rocksdb/rust-rocksdb.git"
 
 [target.'cfg(unix)'.dependencies.rocksdb]
-git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
-features = [ 'jemalloc' ]
+git = "https://github.com/rust-rocksdb/rust-rocksdb.git"
+features = ["jemalloc"]
 
 [build-dependencies.cc]
-version = '=1.0.61'
-features = [ 'parallel' ]
+version = "=1.0.61"
+features = ["parallel"]
 
 [features]
-ci_run = [  ]
-telemetry = [  ]
+ci_run = []
+telemetry = []

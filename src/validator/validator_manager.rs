@@ -26,6 +26,7 @@ use crate::{
         validator_group::{ValidatorGroup, ValidatorGroupStatus},
         validator_utils::{
             try_calc_subset_for_workchain,
+            try_calc_vset_for_workchain,
             validatordescr_to_catchain_node,
             validatorset_to_string,
             compute_validator_list_id,
@@ -35,8 +36,14 @@ use crate::{
 };
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::{SlashingManager, SlashingManagerPtr};
+#[cfg(feature = "verification")]
+use crate::validator::verification::{VerificationFactory, VerificationListener, VerificationManagerPtr};
+#[cfg(feature = "verification")]
+use crate::validator::BlockCandidate;
 use catchain::{CatchainNode, PublicKey};
 use catchain::utils::serialize_tl_boxed_object;
+#[cfg(feature = "verification")]
+use spin::mutex::SpinMutex;
 use tokio::time::timeout;
 use ton_api::IntoBoxed;
 use ton_block::{
@@ -359,6 +366,25 @@ fn rotate_all_shards(mc_state_extra: &McStateExtra) -> bool {
     mc_state_extra.validator_info.nx_cc_updated
 }
 
+#[cfg(feature = "verification")]
+struct VerificationListenerImpl {
+}
+
+#[cfg(feature = "verification")]
+impl VerificationListener for VerificationListenerImpl {
+    fn verify(&self, block_candidate: &BlockCandidate) -> bool {
+        ValidatorManagerImpl::verify_block_candidate(block_candidate)
+    }
+}
+
+#[cfg(feature = "verification")]
+impl VerificationListenerImpl {
+    fn new() -> Self {
+        Self {
+        }
+    }
+}
+
 struct ValidatorManagerImpl {
     engine: Arc<dyn EngineOperations>,
     rt: tokio::runtime::Handle,
@@ -367,6 +393,10 @@ struct ValidatorManagerImpl {
     config: ValidatorManagerConfig,
     #[cfg(feature = "slashing")]
     slashing_manager: SlashingManagerPtr,
+    #[cfg(feature = "verification")]
+    verification_manager: VerificationManagerPtr,
+    #[cfg(feature = "verification")]
+    verification_listener: SpinMutex<Option<Arc<VerificationListenerImpl>>>,
     validation_status: ValidationStatus,
 }
 
@@ -380,16 +410,29 @@ impl ValidatorManagerImpl {
             .build()
             .expect("Can't create validator groups runtime");
 */
-        ValidatorManagerImpl {
-            engine,
-            rt,
+        let manager = ValidatorManagerImpl {
+            engine: engine.clone(),
+            rt: rt.clone(),
             validator_sessions: HashMap::default(),
             validator_list_status: ValidatorListStatus::default(),
             config,
             validation_status: ValidationStatus::Disabled,
             #[cfg(feature = "slashing")]
             slashing_manager: SlashingManager::create(),
+            #[cfg(feature = "verification")]
+            verification_manager: VerificationFactory::create_manager(engine, rt.clone()),
+            #[cfg(feature = "verification")]
+            verification_listener: SpinMutex::new(None),
+        };
+
+        #[cfg(feature = "verification")]
+        {
+            let verification_listener = Arc::new(VerificationListenerImpl::new());
+
+            *manager.verification_listener.lock() = Some(verification_listener);
         }
+
+        manager
     }
 
     /// find own key in validator subset
@@ -679,6 +722,8 @@ impl ValidatorManagerImpl {
                 let engine = self.engine.clone();
                 #[cfg(feature = "slashing")]
                 let slashing_manager = self.slashing_manager.clone();
+                #[cfg(feature = "verification")]
+                let verification_manager = self.verification_manager.clone();
                 let allow_unsafe_self_blocks_resync = self.config.unsafe_resync_catchains.contains(&cc_seqno);
                 let session = self.validator_sessions.entry(session_id.clone()).or_insert_with(|| 
                     Arc::new(ValidatorGroup::new(
@@ -693,6 +738,8 @@ impl ValidatorManagerImpl {
                         allow_unsafe_self_blocks_resync,
                         #[cfg(feature = "slashing")]
                         slashing_manager,
+                        #[cfg(feature = "verification")]
+                        verification_manager,
                     ))
                 );
 
@@ -843,6 +890,9 @@ impl ValidatorManagerImpl {
         let next_validator_set = mc_state_extra.config.next_validator_set()?;
         let full_validator_set = mc_state_extra.config.validator_set()?;
         let possible_validator_change = next_validator_set.total() > 0;
+        let mut mc_validators = Vec::new();
+
+        mc_validators.reserve(full_validator_set.total() as usize);
 
         for ident in future_shards.iter() {
             let (cc_seqno_from_state, cc_lifetime) = if ident.is_masterchain() {
@@ -884,6 +934,10 @@ impl ValidatorManagerImpl {
                 }
             };
 
+            if ident.is_masterchain() {
+                mc_validators.append(&mut next_subset.0.clone());
+            }
+
             if let Some(local_id) = self.find_us(&next_subset.0) {
                 let vnext_subset = ValidatorSet::with_cc_seqno(0, 0, 0, next_cc_seqno, next_subset.0)?;
                 let session_id = get_session_id(
@@ -909,9 +963,28 @@ impl ValidatorManagerImpl {
                             self.config.unsafe_resync_catchains.contains(&next_cc_seqno),
                             #[cfg(feature = "slashing")]
                             self.slashing_manager.clone(),
+                            #[cfg(feature = "verification")]
+                            self.verification_manager.clone(),
                         ));
                         self.validator_sessions.insert(session_id, session);
                     }
+                }
+            }
+        }
+
+        #[cfg(feature = "verification")]
+        if let Some(verification_listener) = self.verification_listener.lock().clone() {
+            let config = &mc_state_extra.config;
+            match try_calc_vset_for_workchain(&full_validator_set, config, &catchain_config, workchain_id) {
+                Ok(workchain_validators) => {
+                    let verification_listener: Arc<dyn VerificationListener> = verification_listener.clone();
+                    let verification_listener = Arc::downgrade(&verification_listener);
+                    let local_key = self.validator_list_status.get_local_key().expect("Validator must have local key");
+
+                    self.verification_manager.update_workchains(local_key, workchain_id, &workchain_validators, &mc_validators, &verification_listener).await;
+                }
+                Err(err) => {
+                    log::error!(target: "validator", "Can't create verification workchains: {:?}", err);
                 }
             }
         }
@@ -993,6 +1066,14 @@ impl ValidatorManagerImpl {
                 }
             };
         }
+    }
+
+    #[cfg(feature = "verification")]
+    fn verify_block_candidate(_block_candidate: &BlockCandidate) -> bool {
+        log::debug!(target: "validator", "Verifying block candidate");
+
+        //TODO: block candidate verification
+        true
     }
 }
 

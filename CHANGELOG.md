@@ -6,11 +6,6 @@ All notable changes to this project will be documented in this file.
 
 ### New
 
-
-## Version: 0.50.23
-
-### New
-
 - Bumped block version to 31
 - Removed unused code
 
