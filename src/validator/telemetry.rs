@@ -11,10 +11,13 @@
 * limitations under the License.
 */
 
-use adnl::common::add_unbound_object_to_map_with_update;
+use adnl::{
+    common::{add_unbound_object_to_map_with_update, add_unbound_object_to_map},
+    telemetry::Metric
+};
 use std::{
     time::Duration,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::{Arc, atomic::{AtomicU32, AtomicUsize, Ordering}},
     cmp::{max, min},
     collections::HashMap,
 };
@@ -338,5 +341,394 @@ impl ShardTelemetrySample {
         }
         report.string().expect("unexpected error while building collator/validator telemetry report")
     }
+}
+
+struct RempQueueTelemetry {
+    pub got_from_fullnode: AtomicUsize,
+    pub in_channel_to_catchain: Arc<Metric>,
+    pub sent_to_catchain:  AtomicUsize,
+    pub got_from_catchain: AtomicUsize,
+    pub ignored_from_catchain: AtomicUsize,
+    pub in_channel_to_rmq: Arc<Metric>,
+    pub pending_collation: Arc<Metric>,
+    pub rmq_catchain_mutex_awaiting: Arc<Metric>,
+}
+
+#[derive(Default)]
+struct RempQueueTelemetrySample {
+    pub got_from_fullnode: usize,
+    pub in_channel_to_catchain: (u64, u64, u64), // cur, avg, max
+    pub sent_to_catchain:  usize,
+    pub got_from_catchain: usize,
+    pub ignored_from_catchain: usize,
+    pub in_channel_to_rmq: (u64, u64, u64),
+    pub pending_collation: (u64, u64, u64),
+    pub rmq_catchain_mutex_awaiting: (u64, u64, u64),
+}
+
+impl RempQueueTelemetry {
+    pub fn new(average_period_secs: u64) -> Self {
+        RempQueueTelemetry {
+            got_from_fullnode: AtomicUsize::default(),
+            in_channel_to_catchain: Metric::without_totals("in channel to catchain", average_period_secs),
+            sent_to_catchain:  AtomicUsize::default(),
+            got_from_catchain: AtomicUsize::default(),
+            ignored_from_catchain: AtomicUsize::default(),
+            in_channel_to_rmq: Metric::without_totals("in channel to rmq", average_period_secs),
+            pending_collation: Metric::without_totals("pending collation", average_period_secs),
+            rmq_catchain_mutex_awaiting: Metric::without_totals("rmq_catchain_mutex_awaiting", average_period_secs),
+        }
+    }
+
+    pub fn reset(&self) -> RempQueueTelemetrySample {
+        RempQueueTelemetrySample {
+            got_from_fullnode: self.got_from_fullnode.swap(0, Ordering::Relaxed),
+            in_channel_to_catchain: get_curr_avg_max(&self.in_channel_to_catchain),
+            sent_to_catchain: self.sent_to_catchain.swap(0, Ordering::Relaxed),
+            got_from_catchain: self.got_from_catchain.swap(0, Ordering::Relaxed),
+            ignored_from_catchain: self.ignored_from_catchain.swap(0, Ordering::Relaxed),
+            in_channel_to_rmq: get_curr_avg_max(&self.in_channel_to_rmq),
+            pending_collation: get_curr_avg_max(&self.pending_collation),
+            rmq_catchain_mutex_awaiting: get_curr_avg_max(&self.rmq_catchain_mutex_awaiting),
+        }
+    }
+}
+
+pub struct RempCoreTelemetry {
+    period_sec: u64,
+    got_from_fullnode: AtomicUsize,
+    in_channel_from_fullnode: Arc<Metric>,
+    pending_from_fullnode: Arc<Metric>,
+    queues: lockfree::map::Map<ShardIdent, RempQueueTelemetry>,
+    add_to_cache_attempts: AtomicUsize,
+    added_to_cache: AtomicUsize,
+    deleted_from_cache: AtomicUsize,
+    cache_size: Arc<Metric>,
+    cache_mutex_awaiting: Arc<Metric>,
+    incoming_mutex_awaiting: Arc<Metric>,
+    collator_receipt_mutex_awaiting: Arc<Metric>,
+}
+
+struct RempCoreTelemetrySample {
+    pub got_from_fullnode: usize,
+    pub in_channel_from_fullnode: (u64, u64, u64),
+    pub pending_from_fullnode: (u64, u64, u64),
+    pub queues: HashMap<ShardIdent, RempQueueTelemetrySample>,
+    pub queues_total: RempQueueTelemetrySample,
+    pub add_to_cache_attempts: usize,
+    pub added_to_cache: usize,
+    pub deleted_from_cache: usize,
+    pub cache_size: (u64, u64, u64),
+    pub cache_mutex_awaiting: (u64, u64, u64),
+    pub incoming_mutex_awaiting: (u64, u64, u64),
+    pub collator_receipt_mutex_awaiting: (u64, u64, u64),
+}
+
+impl RempCoreTelemetry {
+
+    pub fn new(period_sec: u64) -> Self {
+        RempCoreTelemetry {
+            period_sec,
+            got_from_fullnode: AtomicUsize::default(),
+            in_channel_from_fullnode: Metric::without_totals("in channel from fullnode", period_sec),
+            pending_from_fullnode: Metric::without_totals("pending from fullnode", period_sec),
+            queues: lockfree::map::Map::new(),
+            add_to_cache_attempts: AtomicUsize::default(),
+            added_to_cache: AtomicUsize::default(),
+            deleted_from_cache: AtomicUsize::default(),
+            cache_size: Metric::without_totals("messages cache size", period_sec),
+            cache_mutex_awaiting: Metric::without_totals("cache_mutex_awaiting", period_sec),
+            incoming_mutex_awaiting: Metric::without_totals("incoming_mutex_awaiting", period_sec),
+            collator_receipt_mutex_awaiting: Metric::without_totals("collator_receipt_mutex_awaiting", period_sec),
+        }
+    }
+
+    pub fn message_from_fullnode(&self) {
+        self.got_from_fullnode.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn in_channel_from_fullnode(&self, length: usize) {
+        self.in_channel_from_fullnode.update(length as u64);
+    }
+
+    pub fn pending_from_fullnode(&self, length: usize) {
+        self.pending_from_fullnode.update(length as u64);
+    }
+
+    pub fn messages_from_fullnode_for_shard(&self, shard: &ShardIdent, new_messages: usize) {
+        self.update_shard_telemetry(
+            shard,
+            |t| { t.got_from_fullnode.fetch_add(new_messages, Ordering::Relaxed); }
+        );
+    }
+
+    pub fn in_channel_to_catchain(&self, shard: &ShardIdent, count: usize) {
+        self.update_shard_telemetry(
+            shard,
+            |t| { t.in_channel_to_catchain.update(count as u64); }
+        );
+    }
+
+    pub fn sent_to_catchain(&self, shard: &ShardIdent, new_messages: usize) {
+        self.update_shard_telemetry(
+            shard,
+            |t| { t.sent_to_catchain.fetch_add(new_messages, Ordering::Relaxed); }
+        );
+    }
+
+    pub fn got_from_catchain(&self, shard: &ShardIdent, total: usize, ignored: usize) {
+        self.update_shard_telemetry(
+            shard,
+            |t| {
+                t.got_from_catchain.fetch_add(total, Ordering::Relaxed);
+                t.ignored_from_catchain.fetch_add(ignored, Ordering::Relaxed);
+             }
+        );
+    }
+
+    pub fn in_channel_to_rmq(&self, shard: &ShardIdent, count: usize) {
+        self.update_shard_telemetry(
+            shard,
+            |t| { t.in_channel_to_rmq.update(count as u64); }
+        );
+    }
+
+    pub fn pending_collation(&self, shard: &ShardIdent, count: usize) {
+        self.update_shard_telemetry(
+            shard,
+            |t| { t.pending_collation.update(count as u64); }
+        );
+    }
+
+    pub fn add_to_cache_attempt(&self, added: bool) {
+        self.add_to_cache_attempts.fetch_add(1, Ordering::Relaxed);
+        if added {
+            self.added_to_cache.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn deleted_from_cache(&self, deleted_messages: usize) {
+        self.deleted_from_cache.fetch_add(deleted_messages, Ordering::Relaxed);
+    }
+
+    pub fn cache_size(&self, size: usize) {
+        self.cache_size.update(size as u64);
+    }
+
+    pub fn cache_mutex_metric(&self) -> Arc<Metric> {
+        self.cache_mutex_awaiting.clone()
+    }
+
+    pub fn incoming_mutex_metric(&self) -> Arc<Metric> {
+        self.incoming_mutex_awaiting.clone()
+    }
+
+    pub fn collator_receipt_mutex_metric(&self) -> Arc<Metric> {
+        self.collator_receipt_mutex_awaiting.clone()
+    }
+
+    pub fn cache_size_metric(&self) -> Arc<Metric> {
+        self.cache_size.clone()
+    }
+
+    pub fn rmq_catchain_mutex_metric(&self, shard: &ShardIdent) -> Arc<Metric> {
+        loop {
+            if let Some(q) = self.queues.get(shard) {
+                return q.val().rmq_catchain_mutex_awaiting.clone();
+            } else {
+                let _ = add_unbound_object_to_map(&self.queues, shard.clone(),
+                    || Ok(RempQueueTelemetry::new(self.period_sec))).expect("Can't return error");
+            }
+        }
+    }
+
+    fn update_shard_telemetry(
+        &self,
+        shard: &ShardIdent,
+        mut updater: impl FnMut(&RempQueueTelemetry)
+    ) {
+        // We undarstand that teoretically closure might be called more than one time,
+        // and `new_messages` might added twice and more, but in practise we usually don't have 
+        // concurrent access to one shard.
+        add_unbound_object_to_map_with_update(
+            &self.queues,
+            shard.clone(),
+            |found| if let Some(found) = found {
+                updater(found);
+                Ok(None)
+            } else {
+                let t = RempQueueTelemetry::new(self.period_sec);
+                updater(&t);
+                Ok(Some(t))
+            }
+        ).expect("Can't return error");
+    }
+
+    fn reset(&self) -> RempCoreTelemetrySample {
+        let mut queues = HashMap::new();
+        let mut queues_total = RempQueueTelemetrySample::default();
+        for guard in &self.queues {
+            let s = guard.val().reset();
+            queues_total.got_from_fullnode += s.got_from_fullnode;
+            queues_total.sent_to_catchain += s.sent_to_catchain;
+            queues_total.got_from_catchain += s.got_from_catchain;
+            queues_total.ignored_from_catchain += s.ignored_from_catchain;
+            if s.got_from_fullnode > 0 || s.sent_to_catchain > 0 || 
+               s.got_from_catchain > 0 || s.ignored_from_catchain > 0 
+            {
+                queues.insert(guard.key().clone(), s);
+            }
+        }
+        RempCoreTelemetrySample {
+            got_from_fullnode: self.got_from_fullnode.swap(0, Ordering::Relaxed),
+            in_channel_from_fullnode: get_curr_avg_max(&self.in_channel_from_fullnode),
+            pending_from_fullnode: get_curr_avg_max(&self.pending_from_fullnode),
+            queues,
+            queues_total,
+            add_to_cache_attempts: self.add_to_cache_attempts.swap(0, Ordering::Relaxed),
+            added_to_cache: self.added_to_cache.swap(0, Ordering::Relaxed),
+            deleted_from_cache: self.deleted_from_cache.swap(0, Ordering::Relaxed),
+            cache_size: get_curr_avg_max(&self.cache_size),
+            cache_mutex_awaiting: get_curr_avg_max(&self.cache_mutex_awaiting),
+            incoming_mutex_awaiting: get_curr_avg_max(&self.incoming_mutex_awaiting),
+            collator_receipt_mutex_awaiting: get_curr_avg_max(&self.collator_receipt_mutex_awaiting),
+        }
+    }
+
+    pub fn report(&self) -> String {
+        let mut report = string_builder::Builder::default();
+        let sample = self.reset();
+
+        report.append(format!("*for {}sec period. cur|avg|max\n", self.period_sec));
+        report.append("                                 all shards");
+        for s in sample.queues.keys() {
+            report.append(format!("   {}", s.shard_prefix_as_str_with_tag()));
+        }
+        report.append("\n");
+
+        report.append(format!(
+            "got from fullnode                     {:>5}\n",
+            sample.got_from_fullnode));
+        report.append(format!(
+            "in channel from fullnode  {:>5}|{:>5}|{:>5}\n",
+            sample.in_channel_from_fullnode.0,
+            sample.in_channel_from_fullnode.1,
+            sample.in_channel_from_fullnode.2
+        ));
+        report.append(format!("pending from fullnode     {:>5}|{:>5}|{:>5}\n",
+            sample.pending_from_fullnode.0, sample.pending_from_fullnode.1, sample.pending_from_fullnode.2
+        ));
+
+        report.append(format!(
+            "got from fullnode                     {:>5}", sample.queues_total.got_from_fullnode
+        ));
+        for s in sample.queues.values() {
+            report.append(format!("              {:>5}", s.got_from_fullnode));
+        }
+        report.append("\n");
+
+        report.append("in channel to catchain                     ");
+        for s in sample.queues.values() {
+            report.append(format!("  {:>5}|{:>5}|{:>5}",
+                s.in_channel_to_catchain.0, s.in_channel_to_catchain.1, s.in_channel_to_catchain.2
+            ));
+        }
+        report.append("\n");
+
+        report.append(format!(
+            "sent to catchain                      {:>5}", sample.queues_total.sent_to_catchain
+        ));
+        for s in sample.queues.values() {
+            report.append(format!("              {:>5}", s.sent_to_catchain));
+        }
+        report.append("\n");
+
+        report.append(format!(
+            "got from catchain (total)             {:>5}", sample.queues_total.got_from_catchain
+        ));
+        for s in sample.queues.values() {
+            report.append(format!("              {:>5}", s.got_from_catchain));
+        }
+        report.append("\n");
+
+        report.append(format!(
+            "  new                                 {:>5}", 
+            sample.queues_total.got_from_catchain - sample.queues_total.ignored_from_catchain
+        ));
+        for s in sample.queues.values() {
+            report.append(format!("              {:>5}", s.got_from_catchain - s.ignored_from_catchain));
+        }
+        report.append("\n");
+
+        report.append(format!(
+            "  duplicates                          {:>5}", sample.queues_total.ignored_from_catchain
+        ));
+        for s in sample.queues.values() {
+            report.append(format!("              {:>5}", s.ignored_from_catchain));
+        }
+        report.append("\n");
+        
+        report.append("in channel to rmq                          ");
+        for s in sample.queues.values() {
+            report.append(format!("  {:>5}|{:>5}|{:>5}",
+                s.in_channel_to_rmq.0, s.in_channel_to_rmq.1, s.in_channel_to_rmq.2
+            ));
+        }
+        report.append("\n");
+
+        report.append("pending collation                          ");
+        for s in sample.queues.values() {
+            report.append(format!("  {:>5}|{:>5}|{:>5}",
+                s.pending_collation.0, s.pending_collation.1, s.pending_collation.2
+            ));
+        }
+        report.append("\n");
+
+        report.append("rmq catchain mutex awaiting (µs)           ");
+        for s in sample.queues.values() {
+            report.append(format!("  {:>5}|{:>5}|{:>5}",
+                s.rmq_catchain_mutex_awaiting.0, s.rmq_catchain_mutex_awaiting.1, s.rmq_catchain_mutex_awaiting.2
+            ));
+        }
+        report.append("\n");
+
+        report.append(format!(
+            "add to cache (total)                  {:>5}\n", sample.add_to_cache_attempts
+        ));
+        report.append(format!(
+            "  new                                 {:>5}\n",
+            sample.added_to_cache
+        ));
+        report.append(format!(
+            "  duplicates                          {:>5}\n",
+            sample.add_to_cache_attempts - sample.added_to_cache
+        ));
+        report.append(format!(
+            "deleted from cache                    {:>5}\n", sample.deleted_from_cache
+        ));
+        report.append(format!(
+            "cache size                {:>5}|{:>5}|{:>5}\n",
+            sample.cache_size.0, sample.cache_size.1, sample.cache_size.2
+        ));
+        report.append(format!(
+            "cache mutex awaiting (µs) {:>5}|{:>5}|{:>5}\n",
+            sample.cache_mutex_awaiting.0, sample.cache_mutex_awaiting.1, sample.cache_mutex_awaiting.2
+        ));
+        report.append(format!(
+            "incoming mutex awaiting (µs) {:>5}|{:>5}|{:>5}\n",
+            sample.incoming_mutex_awaiting.0, sample.incoming_mutex_awaiting.1, sample.incoming_mutex_awaiting.2
+        ));
+        report.append(format!(
+            "collator receipt mutex... {:>5}|{:>5}|{:>5}\n",
+            sample.collator_receipt_mutex_awaiting.0, sample.collator_receipt_mutex_awaiting.1, 
+            sample.collator_receipt_mutex_awaiting.2
+        ));
+
+        report.string().expect("unexpected error while building remp core telemetry report")
+    }
+}
+
+fn get_curr_avg_max(metric: &Metric) -> (u64, u64, u64) {
+    (metric.current(), metric.get_average(), metric.maximum())
 }
 

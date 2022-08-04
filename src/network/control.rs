@@ -21,7 +21,7 @@ use adnl::{
     server::{AdnlServer, AdnlServerConfig}
 };
 use ever_crypto::KeyId;
-use std::{fmt::Write, ops::Deref, sync::Arc, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
+use std::{fmt::Write, ops::Deref, sync::Arc, str::FromStr, time::{SystemTime, UNIX_EPOCH}, io::Cursor};
 use serde_json::Map;
 use ton_api::{
     deserialize_boxed,
@@ -39,7 +39,7 @@ use ton_api::{
     },
     IntoBoxed,
 };
-use ton_types::{fail, error, Result, UInt256};
+use ton_types::{fail, error, Result, UInt256, cells_serialization::deserialize_tree_of_cells};
 use ton_block::{BlockIdExt, MsgAddressInt, Serializable, ShardIdent};
 use ton_block_json::serialize_config_param;
 
@@ -135,7 +135,7 @@ impl ControlQuerySubscriber {
         let engine = self.engine()?;
         let mc_state = engine.load_last_applied_mc_state().await?;
         let config_params = mc_state.config_params()?;
-        let config_param = serialize_config_param(&config_params, param_number)?;
+        let config_param = serialize_config_param(config_params, param_number)?;
         let config_info = ConfigInfo {
             mode: 0,
             id: mc_state.block_id().clone(),
@@ -293,37 +293,29 @@ impl ControlQuerySubscriber {
         let adnl_ids = self.config.get_actual_validator_adnl_ids()?;
         let mc_state = engine.load_last_applied_mc_state().await?;
         let current = mc_state.config_params()?.validator_set()?.list().iter().any(|val| {
-            match validatordescr_to_catchain_node(val) {
-                Ok(catchain_node) => { 
-                    let is_validator = adnl_ids.contains(&catchain_node.adnl_id);
-                    if is_validator {
-                        Self::add_stats(&mut stats, 
-                            "current_vset_p34_adnl_id", 
-                            format!("\"{}\"", &catchain_node.adnl_id)
-                        );
-                    }
-                    is_validator
-                },
-                _ => false
+            let catchain_node = validatordescr_to_catchain_node(val);
+            let is_validator = adnl_ids.contains(&catchain_node.adnl_id);
+            if is_validator {
+                Self::add_stats(&mut stats,
+                    "current_vset_p34_adnl_id",
+                    format!("\"{}\"", &catchain_node.adnl_id)
+                );
             }
+            is_validator
         });
         Self::add_stats(&mut stats, "in_current_vset_p34", current);
 
         // in_next_vset_p36
         let next = mc_state.config_params()?.next_validator_set()?.list().iter().any(|val| {
-            match validatordescr_to_catchain_node(val) {
-                Ok(catchain_node) => { 
-                    let is_validator = adnl_ids.contains(&catchain_node.adnl_id);
-                    if is_validator {
-                        Self::add_stats(&mut stats, 
-                            "next_vset_p36_adnl_id",
-                            format!("\"{}\"", &catchain_node.adnl_id)
-                        );
-                    }
-                    is_validator
-                },
-                _ => false
+            let catchain_node = validatordescr_to_catchain_node(val);
+            let is_validator = adnl_ids.contains(&catchain_node.adnl_id);
+            if is_validator {
+                Self::add_stats(&mut stats,
+                    "next_vset_p36_adnl_id",
+                    format!("\"{}\"", &catchain_node.adnl_id)
+                );
             }
+            is_validator
         });
         Self::add_stats(&mut stats, "in_next_vset_p36", next);
 
@@ -440,7 +432,10 @@ impl ControlQuerySubscriber {
     }
 
     async fn redirect_external_message(&self, message_data: &[u8]) -> Result<Success> {
-        self.engine()?.redirect_external_message(&message_data).await?;
+        let engine = self.engine()?;
+        let mut cursor = Cursor::new(message_data);
+        let id = deserialize_tree_of_cells(&mut cursor)?.repr_hash();
+        engine.redirect_external_message(message_data, id).await?;
         Ok(Success::Engine_Validator_Success)
     }
 

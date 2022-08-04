@@ -14,8 +14,8 @@
 use std::{
     collections::{hash_set::HashSet, BTreeMap, HashMap},
     convert::TryInto,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH}
+    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, atomic::{AtomicU64, Ordering}},
 };
 use ton_block::{
     Account, AccountBlock, Block, BlockIdExt,
@@ -30,13 +30,14 @@ use ton_types::{
     AccountId, Cell, Result, SliceData, HashmapType,
     fail, BuilderData,
 };
+use ton_api::ton::ton_node::RempReceipt;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, engine::STATSD,
     engine_traits::{ChainRange, ExternalDb}, error::NodeError, external_db::WriteData,
-    shard_state::ShardStateStuff
+    shard_state::ShardStateStuff,
 };
 
 lazy_static::lazy_static!(
@@ -67,7 +68,7 @@ struct ChainRangeData {
     pub shard_blocks_ids: Vec<String>,
 }
 
-pub(super) struct Processor<T: WriteData> {
+pub(super) struct Processor<T: 'static + WriteData> {
     write_block: T,
     write_raw_block: T,
     write_message: T,
@@ -75,12 +76,15 @@ pub(super) struct Processor<T: WriteData> {
     write_account: T,
     write_block_proof: T,
     write_chain_range: T,
+    write_remp_statuses: T,
+    //remp_statuses_sender: tokio::sync::mpsc::UnboundedSender<(String, String)>,
+    //remp_statuses_in_channel: Arc<AtomicU64>,
     bad_blocks_storage: String,
     front_workchain_ids: Vec<i32>, // write only this workchain, or write all if None
     max_account_bytes_size: Option<usize>,
 }
 
-impl<T: WriteData> Processor<T> {
+impl<T: 'static + WriteData> Processor<T> {
 
     pub fn new(
         write_block: T,
@@ -90,12 +94,24 @@ impl<T: WriteData> Processor<T> {
         write_account: T,
         write_block_proof: T,
         write_chain_range: T,
+        write_remp_statuses: T,
         bad_blocks_storage: String,
         front_workchain_ids: Vec<i32>,
         max_account_bytes_size: Option<usize>,
     ) 
     -> Self {
         log::trace!("Processor::new workchains {:?}", front_workchain_ids);
+
+        // let (remp_statuses_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        // let remp_statuses_in_channel = Arc::new(AtomicU64::new(0));
+        // let remp_statuses_in_channel1 = remp_statuses_in_channel.clone();
+        // tokio::spawn(async move {
+        //     match Self::run_remp_worker(receiver, write_remp_statuses, remp_statuses_in_channel1).await {
+        //         Ok(_) => log::error!("Remp worker stopped unexpected"),
+        //         Err(e) => log::error!("FATAL! Remp worker stopped with error: {}", e),
+        //     }
+        // });
+
         Processor {
             write_block,
             write_raw_block,
@@ -104,6 +120,9 @@ impl<T: WriteData> Processor<T> {
             write_account,
             write_block_proof,
             write_chain_range,
+            write_remp_statuses,
+            //remp_statuses_sender,
+            //remp_statuses_in_channel,
             bad_blocks_storage,
             front_workchain_ids,
             max_account_bytes_size,
@@ -704,6 +723,18 @@ impl<T: WriteData> Processor<T> {
         ];
         self.write_raw_block.write_raw_data(key.to_vec(), value, Some(&attributes), partition_key).await
     }
+
+    async fn run_remp_worker(
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<(String, String)>,
+        writer: T,
+        remp_statuses_in_channel: Arc<AtomicU64>
+    ) -> Result<()> {
+        while let Some((key, value)) = receiver.recv().await {
+            remp_statuses_in_channel.fetch_sub(1, Ordering::Relaxed);
+            writer.write_data(key, value, None, None).await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -792,6 +823,28 @@ impl<T: WriteData> ExternalDb for Processor<T> {
             ).await?;
         }
 
+        Ok(())
+    }
+
+    async fn process_remp_msg_status(
+        &self,
+        id: &UInt256,
+        status: &RempReceipt,
+        signature: &[u8]
+    ) -> Result<()> {
+        //let value = ton_block_json::db_serialize_remp_status(status, signature)?;
+        // self.remp_statuses_sender.send((
+        //     format!("{:x}", id),
+        //     format!("{:#}", serde_json::json!(value))
+        // ))?;
+        // let in_channel = self.remp_statuses_in_channel.fetch_add(1, Ordering::Relaxed) + 1;
+        // log::debug!("process_remp_msg_status: enqueued remp message {:x}, channel's load: {}", id, in_channel);
+        // Ok(())
+
+        let key = format!("{:x}", id);
+        let val = format!("{:#}", 
+            serde_json::json!(ton_block_json::db_serialize_remp_status(status, signature)?));
+        self.write_remp_statuses.write_data(key, val, None, None).await?;
         Ok(())
     }
 }

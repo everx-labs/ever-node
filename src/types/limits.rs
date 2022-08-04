@@ -152,6 +152,15 @@ impl BlockLimitStatus {
         )
     }
 
+    pub fn fits_normal(&self, percent: u32) -> bool {
+        self.limits.fits_normal(
+            self.estimate_block_size(None),
+            self.gas_used,
+            self.lt_delta(),
+            percent
+        )
+    }
+
     fn lt_delta(&self) -> u32 {
         self.lt_current.checked_sub(self.lt_start).unwrap_or(0) as u32
     }

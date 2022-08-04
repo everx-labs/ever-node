@@ -37,10 +37,11 @@ use storage::StorageTelemetry;
 use ton_block::{
     BlockIdExt, Message, ShardIdent, Serializable, MerkleUpdate, Deserializable, 
     ValidatorBaseInfo, BlockSignaturesPure, BlockSignatures, HashmapAugType, 
-    TopBlockDescrSet,
+    TopBlockDescrSet, GlobalCapabilities,
 };
 use ton_block::{ShardStateUnsplit, TopBlockDescr};
 use ton_types::{UInt256, fail, error, Result, CellType, deserialize_cells_tree};
+use crate::engine_traits::RempDuplicateStatus;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct CollatorTestBundleIndexJson {
@@ -1171,6 +1172,19 @@ impl CollatorTestBundle {
 
     pub fn candidate(&self) -> Option<&BlockCandidate> { self.candidate.as_ref() }
     pub fn set_notes(&mut self, notes: String) { self.index.notes = notes }
+
+    fn get_messages(&self, remp: bool) -> Result<Vec<(Arc<Message>, UInt256)>> {
+        let remp_enabled = self.states
+            .get(&self.index.last_mc_state)
+            .ok_or_else(|| error!("Can't load last ms block to read config"))?
+            .config_params()?.has_capability(GlobalCapabilities::CapRemp);
+
+        if remp_enabled == remp {
+            Ok(self.external_messages.clone())
+        } else {
+            Ok(vec!())
+        }
+    }
 }
 
 // Is used instead full node's engine for run tests
@@ -1247,7 +1261,7 @@ impl EngineOperations for CollatorTestBundle {
     }
 
     fn get_external_messages(&self, _shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
-        Ok(self.external_messages.clone())
+        self.get_messages(false)
     }
 
     fn get_shard_blocks(&self, _mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
@@ -1285,4 +1299,21 @@ impl EngineOperations for CollatorTestBundle {
         &self.allocated
     }
 
+    fn get_remp_messages(&self, _shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
+        self.get_messages(true)
+    }
+
+    fn finalize_remp_messages(
+        &self,
+        _block: BlockIdExt,
+        _accepted: Vec<UInt256>,
+        _rejected: Vec<(UInt256, String)>,
+        _ignored: Vec<UInt256>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn check_remp_duplicate(&self, _message_id: &UInt256) -> Result<RempDuplicateStatus> {
+        Ok(RempDuplicateStatus::Fresh)
+    }
 }

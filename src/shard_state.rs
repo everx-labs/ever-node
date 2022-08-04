@@ -211,7 +211,7 @@ impl ShardStateStuff {
 //    }
 
 // Unused
-//    pub fn id(&self) -> ton_api::ton::ton_node::blockidext::BlockIdExt { 
+//    pub fn id(&self) -> BlockIdExt { 
 //        convert_block_id_ext_blk2api(&self.block_id) 
 //    }
 

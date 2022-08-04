@@ -17,12 +17,12 @@ use std::sync::atomic::{Ordering, AtomicU64};
 use std::time::*;
 use crossbeam_channel::Receiver;
 
-use crate::engine_traits::{EngineOperations, PrivateOverlayOperations};
+use crate::engine_traits::EngineOperations;
 use catchain::utils::get_hash;
-use ton_block::{BlockIdExt, ShardIdent, ValidatorSet};
+use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, ValidatorDescr};
 use ton_types::{fail, Result, UInt256};
 use validator_session::{
-    BlockHash, BlockPayloadPtr, CatchainOverlayManagerPtr, CatchainOverlayPtr, CatchainNode,
+    BlockHash, BlockPayloadPtr, CatchainOverlayManagerPtr,
     SessionId, SlashingValidatorStat, SessionPtr, SessionListenerPtr, SessionFactory,
     SessionListener, SessionNode,SessionOptions,
     PublicKey, PrivateKey, PublicKeyHash,
@@ -36,56 +36,16 @@ use validator_session_listener::{
     process_validation_queue,
     ValidatorSessionListener, ValidationAction,
 };
+use reliable_message_queue::RmqQueueManager;
+use remp_manager::RempManager;
 
 use super::*;
 use super::fabric::*;
+use crate::validator::catchain_overlay::CatchainOverlayManagerImpl;
+
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::SlashingManagerPtr;
 use crate::validator::mutex_wrapper::MutexWrapper;
-
-struct CatchainOverlayManagerImpl {
-    network: Weak<dyn PrivateOverlayOperations>,
-    validator_list_id: UInt256
-}
-
-impl CatchainOverlayManagerImpl {
-    fn new(network: Arc<dyn PrivateOverlayOperations>, validator_list_id: UInt256) -> Self {
-        Self {
-            network: Arc::downgrade(&network),
-            validator_list_id
-        }
-    }
-}
-
-impl catchain::CatchainOverlayManager for CatchainOverlayManagerImpl {
-
-    fn start_overlay(
-        &self,
-        _local_id: &PublicKeyHash,
-        overlay_short_id: &Arc<catchain::PrivateOverlayShortId>,
-        nodes: &Vec<CatchainNode>,
-        listener: catchain::CatchainOverlayListenerPtr,
-        replay_listener: catchain::CatchainOverlayLogReplayListenerPtr,
-    ) -> Result<CatchainOverlayPtr> {
-        let engine_network = self.network.upgrade().unwrap();
-        engine_network
-            .create_catchain_client(
-                self.validator_list_id.clone(), overlay_short_id, nodes, listener, replay_listener
-            )
-    }
-
-    /// Stop existing overlay
-    fn stop_overlay(
-        &self,
-        overlay_short_id: &Arc<catchain::PrivateOverlayShortId>,
-        _overlay: &CatchainOverlayPtr,
-    ) {
-        let engine_network = self.network.upgrade().unwrap();
-
-        engine_network.stop_catchain_client(overlay_short_id);
-    }
-
-}
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum ValidatorGroupStatus {
@@ -123,6 +83,7 @@ pub struct ValidatorGroupImpl {
     shard: ShardIdent,
     session_id: SessionId,
     session_ptr: Option<SessionPtr>,
+    reliable_queue: Option<Arc<RmqQueueManager>>,
 
     min_masterchain_block_id: Option<BlockIdExt>,
     min_ts: SystemTime,
@@ -155,6 +116,9 @@ impl ValidatorGroupImpl {
         min_masterchain_block_id: BlockIdExt,
         min_ts: SystemTime,
         g: Arc<ValidatorGroup>,
+        prev_validators: &Vec<ValidatorDescr>,
+        next_validator_set: &ValidatorSet,
+        next_master_cc_seqno: u32,
         rt: tokio::runtime::Handle
     ) -> Result<()> {
         self.status = ValidatorGroupStatus::Active;
@@ -195,6 +159,26 @@ impl ValidatorGroupImpl {
             session_listener,
         );
 
+        if let Some(remp_manager) = &g.remp_manager {
+            let mut rq = RmqQueueManager::new(
+                rt.clone(), g.engine.clone(), remp_manager.clone(), g.shard.clone(),
+                &g.local_key
+            );
+            rq.set_queues(next_validator_set.catchain_seqno(), next_master_cc_seqno, prev_validators, &next_validator_set.list().to_vec());
+            let reliable_queue_clone = Arc::new(rq);
+            self.reliable_queue = Some(reliable_queue_clone.clone());
+
+            let local_key = g.local_key.clone();
+            rt.clone().spawn(async move {
+                match reliable_queue_clone.start(local_key).await {
+                    Ok(()) => (),
+                    Err(e) => log::error!(target: "validator", "Cannot start RMQ {}: {}",
+                        reliable_queue_clone.info_string().await, e
+                    )
+                }
+            });
+        }
+
         let g_clone = g.clone();
         rt.clone().spawn(async move {
             process_validation_queue (g_clone.receiver.clone(), g_clone.clone(), rt).await;
@@ -223,8 +207,16 @@ impl ValidatorGroupImpl {
         return self.info_round(self.last_known_round);
     }
 
+    #[allow(dead_code)]
+    pub async fn print_messages(&mut self, count_only: bool) {
+        match &self.reliable_queue {
+            Some(r) => r.print_messages(count_only).await,
+            None => log::info!("RMQ *none*, id {}: no messages", self.info())
+        }
+    }
+
     // Initializes structure
-    pub fn new(shard: ShardIdent, session_id: SessionId) -> ValidatorGroupImpl {
+    pub fn new(shard: ShardIdent, session_id: validator_session::SessionId) -> ValidatorGroupImpl {
         log::info!(target: "validator", "Initializing session {:x}, shard {}", session_id, shard);
 
         ValidatorGroupImpl {
@@ -236,6 +228,7 @@ impl ValidatorGroupImpl {
             shard,
             session_id,
             session_ptr: None,
+            reliable_queue: None,
             prev_block_ids: Vec::new(),
 
             on_candidate_invoked: false,
@@ -243,6 +236,12 @@ impl ValidatorGroupImpl {
             replay_finished: false
         }
     }
+
+/*
+    pub fn update_next_validator_set(&mut self, catchain_seqno: u32, curr_set: &Vec<ValidatorDescr>, next_set: &Vec<ValidatorDescr>) {
+        self.reliable_queue.switch_queue(catchain_seqno, curr_set, next_set);
+    }
+ */
 
     // Advances block id counter
     pub fn create_next_block_id(&self, root_hash: BlockHash, file_hash: BlockHash, shard: ShardIdent) -> Result<BlockIdExt> {
@@ -276,10 +275,12 @@ pub struct ValidatorGroup {
     config: SessionOptions,
     session_id: SessionId,
     catchain_seqno: u32,
+    master_cc_seqno: u32,
     validator_list_id: ValidatorListHash,
 
     shard: ShardIdent,
     engine: Arc<dyn EngineOperations>,
+    remp_manager: Option<Arc<RempManager>>,
     validator_set: ValidatorSet,
     #[allow(dead_code)]
     allow_unsafe_self_blocks_resync: bool,
@@ -295,34 +296,42 @@ pub struct ValidatorGroup {
 }
 
 impl ValidatorGroup {
-
     pub fn new(
+        _rt: tokio::runtime::Handle,
         shard: ShardIdent,
         local_key: PrivateKey,
         session_id: SessionId,
         catchain_seqno: u32,
+        master_cc_seqno: u32,
         validator_list_id: ValidatorListHash,
         validator_set: ValidatorSet,
         config: SessionOptions,
+        remp_manager: Option<Arc<RempManager>>,
         engine: Arc<dyn EngineOperations>,
         allow_unsafe_self_blocks_resync: bool,
         #[cfg(feature = "slashing")]
         slashing_manager: SlashingManagerPtr,
     ) -> Self {
-        let group_impl = ValidatorGroupImpl::new(shard.clone(), session_id.clone());
-        let id = format!("Val. group {} {}", shard, session_id);
+        let group_impl = ValidatorGroupImpl::new(
+            shard.clone(),
+            session_id.clone()
+        );
+        let id = format!("Val. group {} {:x}", shard, session_id);
         let (listener, receiver) = ValidatorSessionListener::create();
 
+        log::trace!(target: "validator", "Creating validator group: {}", id);
         ValidatorGroup {
             shard: shard.clone(),
             local_key,
             validator_list_id,
             session_id,
             catchain_seqno,
+            master_cc_seqno,
             validator_set,
             config,
             engine,
             allow_unsafe_self_blocks_resync,
+            remp_manager,
             group_impl: Arc::new(MutexWrapper::new(group_impl, id)),
             callback: Arc::new(listener),
             receiver: Arc::new(receiver),
@@ -351,12 +360,16 @@ impl ValidatorGroup {
 
     pub async fn start_with_status(
         self: Arc<ValidatorGroup>,
+        prev_validators: &Vec<ValidatorDescr>,
+        next_validators: &ValidatorSet,
         validation_start_status: ValidatorGroupStatus,
         prev: Vec<BlockIdExt>,
         min_masterchain_block_id: BlockIdExt,
         min_ts: SystemTime,
         rt: tokio::runtime::Handle
     ) -> Result<()> {
+        let prev_validators_cloned = prev_validators.clone();
+        let next_validators_cloned = next_validators.clone();
         self.set_status(validation_start_status.clone()).await?;
         rt.clone().spawn (
             async move {
@@ -364,6 +377,7 @@ impl ValidatorGroup {
                     log::trace!(target: "validator", "Session delay started: {}", self.info().await);
                     tokio::time::sleep_until(start_at).await;
                 }
+
                 let callback = self.make_validator_session_callback();
                 self.group_impl.execute_sync(|group_impl|
                     {
@@ -374,6 +388,9 @@ impl ValidatorGroup {
                                 min_masterchain_block_id,
                                 min_ts,
                                 self.clone(),
+                                &prev_validators_cloned,
+                                &next_validators_cloned,
+                                self.master_cc_seqno,
                                 rt
                             )
                             {
@@ -389,16 +406,42 @@ impl ValidatorGroup {
         Ok(())
     }
 
-    pub async fn stop(self: Arc<ValidatorGroup>, rt: tokio::runtime::Handle) -> Result<()> {
+    pub async fn add_next_validators(
+        self: Arc<ValidatorGroup>, 
+        new_master_cc: u32,
+        prev_validators: &Vec<ValidatorDescr>,
+        next_validator_set: &ValidatorSet,
+    ) -> Result<()> {
+/*
+        let rmq = self.group_impl.execute_sync(|group_impl| group_impl.reliable_queue.clone()).await;
+        if let Some(rmq) = rmq {
+            rmq.add_new_queue(
+                next_validator_set.catchain_seqno(), 
+                new_master_cc, 
+                prev_validators, 
+                &next_validator_set.list().to_vec()
+            ).await;
+        }
+ */
+        Ok(())
+    }
+
+    pub async fn stop(self: Arc<ValidatorGroup>, rt: tokio::runtime::Handle, new_master_cc_seqno: Option<u32>) -> Result<()> {
         self.set_status(ValidatorGroupStatus::Stopping).await?;
         let group_impl = self.group_impl.clone();
         rt.spawn({
             async move {
                 log::trace!(target: "validator", "Stopping group: {}", self.info().await);
-                let session_ptr = 
+                let (reliable_message_queue, session_ptr) =
                     group_impl.execute_sync(|group_impl|
-                        group_impl.session_ptr.clone()
+                        (group_impl.reliable_queue.clone(), group_impl.session_ptr.clone())
                     ).await;
+                if let Some(rmq) = reliable_message_queue {
+                    if let Some(new_master_cc_seqno) = new_master_cc_seqno {
+                        rmq.forward_messages(new_master_cc_seqno, self.local_key.clone()).await;
+                    }
+                    rmq.stop().await;
+                }
                 if let Some(s_ptr) = session_ptr {
                     s_ptr.stop();
                 }
@@ -435,12 +478,29 @@ impl ValidatorGroup {
         self.validator_list_id.clone()
     }
 
+    pub async fn get_reliable_message_queue(&self) -> Option<Arc<RmqQueueManager>> {
+        self.group_impl.execute_sync(|group_impl| group_impl.reliable_queue.clone()).await
+    }
+
     pub async fn info_round(&self, round: u32) -> String {
         self.group_impl.execute_sync(|group_impl| group_impl.info_round(round)).await
     }
 
-    pub async fn info (&self) -> String {
+    pub async fn info(&self) -> String {
         self.group_impl.execute_sync(|group_impl| group_impl.info()).await
+    }
+
+    pub async fn print_messages(&self, count_only: bool) {
+        if let Some(rmq) = self.get_reliable_message_queue().await {
+            rmq.print_messages(count_only).await
+        }
+    }
+
+    pub async fn poll_rmq(&self) {
+        if let Some(rmq) = self.get_reliable_message_queue().await {
+            log::debug!(target: "validator", "Polling RMQ {}, group {}", rmq, self.info().await);
+            rmq.poll().await;
+        };
     }
 
     pub async fn on_generate_slot(&self, round: u32, callback: ValidatorBlockCandidateCallback) {
@@ -450,8 +510,17 @@ impl ValidatorGroup {
             self.info_round(round).await
         );
 
-        let (_lk_round, prev_block_ids, mm_block_id, min_ts) = 
+        let (_lk_round, prev_block_ids, mm_block_id, min_ts) =
             self.group_impl.execute_sync(|group_impl| group_impl.update_round (round)).await;
+
+        if let Some(rmq) = self.get_reliable_message_queue().await {
+            if let Err(e) = rmq.collect_messages_for_collation().await {
+                log::error!(target: "validator", "Error collecting messages for {}: `{}`",
+                    self.info_round(round).await,
+                    e
+                )
+            }
+        }
 
         let result = match mm_block_id {
             Some(mc) => {
@@ -471,6 +540,7 @@ impl ValidatorGroup {
             }
             None => Err(failure::err_msg("Min masterchain block id missing")),
         };
+
         let result_message = match &result {
             Ok(_) => {
                 let now = std::time::SystemTime::now()
@@ -481,9 +551,20 @@ impl ValidatorGroup {
             }
             Err(x) => format!("Collation failed: `{}`", x)
         };
+
+        if let Some(rmq) = self.get_reliable_message_queue().await {
+            if let Err(e) = rmq.process_collation_result().await {
+                log::error!(target: "validator", "Error processing collation results for {}: `{}`",
+                    self.info_round(round).await,
+                    e
+                )
+            }
+        }
+
         log::info!(target: "validator", "SessionListener::on_generate_slot: {}, {}",
             self.info_round(round).await, result_message
         );
+
         self.group_impl.execute_sync(|group_impl| group_impl.on_generate_slot_invoked = true).await;
 
         callback(result)
@@ -616,11 +697,11 @@ impl ValidatorGroup {
 
 
         log::info!(target: "validator", 
-            "SessionListener::on_block_committed: source {}, id {}, data size = {}, {}" ,
+            "SessionListener::on_block_committed: source {}, id {}, data size = {}, {}",
             source.id(), next_block_id, data_vec.len(), self.info_round(round).await
         );
 
-        let result = run_accept_block_query(
+        let mut result = run_accept_block_query(
             next_block_id.clone(),
             if data_vec.len() > 0 {
                 Some(data_vec)
@@ -634,6 +715,12 @@ impl ValidatorGroup {
             we_generated,
             self.engine.clone(),
         ).await;
+
+        if let Ok(()) = result {
+            if let Some(rmq) = self.get_reliable_message_queue().await {
+                result = rmq.process_messages_from_accepted_shardblock(next_block_id.clone()).await;
+            }
+        }
 
         let (result_txt, new_prevs) = self.group_impl.execute_sync(|group_impl| {
             let result_txt = match result {
@@ -684,8 +771,8 @@ impl ValidatorGroup {
         root_hash: BlockHash,
         file_hash: BlockHash,
         _collated_data_hash: BlockHash,
-        callback: ValidatorBlockCandidateCallback
-    ) {
+        callback: ValidatorBlockCandidateCallback)
+    {
         log::info!(
             target: "validator", 
             "SessionListener::on_get_approved_candidate rh {:x}, fh {:x}, {}", 
@@ -724,3 +811,6 @@ impl Drop for ValidatorGroup {
     }
 }
 
+// #[cfg(test)]
+// #[path = "tests/test_group_log_replay.rs"]
+// mod tests;

@@ -16,8 +16,8 @@ use crate::{
     config::CollatorTestBundlesGeneralConfig,
     engine::{Engine, STATSD},
     engine_traits::{
-        ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, Server, 
-        ValidatedBlockStat
+        ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, Server,
+        ValidatedBlockStat, RempCoreInterface,
     },
     error::NodeError,
     internal_db::{
@@ -28,14 +28,19 @@ use crate::{
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
     ext_messages::{create_ext_message, EXT_MESSAGES_TRACE_TARGET},
     jaeger,
-    validator::candidate_db::CandidateDb,
+    validator::{
+        candidate_db::CandidateDb,
+        validator_utils::validatordescr_to_catchain_node,
+    },
 };
 #[cfg(feature = "telemetry")]
 use crate::{
-    engine_traits::EngineTelemetry, full_node::telemetry::FullNodeTelemetry, 
-    network::telemetry::FullNodeNetworkTelemetry, validator::telemetry::CollatorValidatorTelemetry
+    engine_traits::EngineTelemetry, full_node::telemetry::{FullNodeTelemetry, RempClientTelemetry}, 
+    network::telemetry::FullNodeNetworkTelemetry, 
+    validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
 };
 
+use ton_api::serialize_boxed;
 use ever_crypto::{KeyId, KeyOption};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
@@ -47,15 +52,16 @@ use rand::Rng;
 use std::sync::atomic::Ordering;
 use std::{ops::Deref, sync::Arc};
 use storage::block_handle_db::BlockHandle;
-use ton_api::ton::ton_node::broadcast::BlockBroadcast;
+use ton_api::ton::ton_node::{RempMessage, RempMessageStatus, RempReceipt, RempSignedReceipt, broadcast::BlockBroadcast};
+use ton_block::{
+    BlockIdExt, AccountIdPrefixFull, ShardIdent, Message, GlobalCapabilities,
+    MASTERCHAIN_ID, SHARD_FULL
+};
 #[cfg(feature="workchains")]
 use ton_block::{BASE_WORKCHAIN_ID, INVALID_WORKCHAIN_ID};
-use ton_block::{
-    MASTERCHAIN_ID, SHARD_FULL,
-    BlockIdExt, AccountIdPrefixFull, ShardIdent, Message
-};
 use ton_types::{fail, error, Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
+use crate::engine_traits::RempDuplicateStatus;
 
 #[async_trait::async_trait]
 impl EngineOperations for Engine {
@@ -71,7 +77,7 @@ impl EngineOperations for Engine {
                             log::info!("single workchain configuration - old rules");
                             let workchain_id = workchains[0].0;
                             self.workchain_id.store(workchain_id, Ordering::Relaxed);
-                            Ok((false, workchain_id))
+                            Ok((true, workchain_id))
                         }
                         count => {
                             match rand::thread_rng().gen_range(0, count as usize + 1) {
@@ -96,7 +102,7 @@ impl EngineOperations for Engine {
                 }
             }
             MASTERCHAIN_ID => Ok((true, BASE_WORKCHAIN_ID)),
-            workchain_id => Ok((false, workchain_id))
+            workchain_id => Ok((workchain_id == BASE_WORKCHAIN_ID, workchain_id))
         }
     }
 
@@ -631,6 +637,25 @@ impl EngineOperations for Engine {
         for db in self.ext_db() {
             db.process_full_state(state).await?;
         }
+
+        // Initialisation of remp_capability after cold boot by first processed master state
+        if state.block_id().shard().is_masterchain() {
+            self.set_remp_capability(
+                state.config_params()?.has_capability(GlobalCapabilities::CapRemp),
+            );
+        }
+        Ok(())
+    }
+
+    async fn process_remp_msg_status_in_ext_db(
+        &self,
+        id: &UInt256,
+        status: &RempReceipt,
+        signature: &[u8],
+    ) -> Result<()> {
+        for db in self.ext_db() {
+            db.process_remp_msg_status(id, status, signature).await?;
+        }
         Ok(())
     }
 
@@ -681,33 +706,50 @@ impl EngineOperations for Engine {
         overlay.broadcast_external_message(data).await
     }
 
-    async fn redirect_external_message(&self, message_data: &[u8]) -> Result<BroadcastSendInfo> {
-        match create_ext_message(message_data) {
-            Err(e) => {
-                let err = format!(
-                    "Can't deserialize external message with len {}: {}",
-                    message_data.len(), e,
-                );
-                log::warn!(target: EXT_MESSAGES_TRACE_TARGET, "{}", &err);
-                fail!("{}", err);
-            }
-            Ok((id, message)) => {
-                match redirect_external_message(self, message, id.clone(), message_data).await {
-                    Err(e) => {
-                        let err = format!(
-                            "Can't redirect external message {:x}: {}",
-                            id, e,
-                        );
-                        log::error!(target: EXT_MESSAGES_TRACE_TARGET, "{}", &err);
-                        fail!("{}", err);
-                    }
-                    Ok(info) => {
-                        log::debug!(
-                            target: EXT_MESSAGES_TRACE_TARGET,
-                            "Redirected external message {:x} to {} nodes by {} packages",
-                            id, info.send_to, info.packets,
-                        );
-                        return Ok(info);
+    async fn redirect_external_message(&self, message_data: &[u8], id: UInt256) -> Result<()> {
+        if !self.check_sync().await? {
+            fail!("Can't process external message because node is out of sync");
+        }
+
+        if self.remp_capability() {
+            self.remp_client()
+                .ok_or_else(|| error!("redirect_external_message: remp client is not set"))?
+                .clone()
+                .process_remp_message(message_data.into(), id);
+            log::debug!(
+                target: EXT_MESSAGES_TRACE_TARGET,
+                "Redirected external message {:x} to REMP",
+                id,
+            );
+            Ok(())
+        } else {
+            match create_ext_message(message_data) {
+                Err(e) => {
+                    let err = format!(
+                        "Can't deserialize external message with len {}: {}",
+                        message_data.len(), e,
+                    );
+                    log::warn!(target: EXT_MESSAGES_TRACE_TARGET, "{}", &err);
+                    fail!("{}", err);
+                }
+                Ok((id, message)) => {
+                    match redirect_external_message(self, message, id.clone(), message_data).await {
+                        Err(e) => {
+                            let err = format!(
+                                "Can't redirect external message {:x}: {}",
+                                id, e,
+                            );
+                            log::error!(target: EXT_MESSAGES_TRACE_TARGET, "{}", &err);
+                            fail!("{}", err);
+                        }
+                        Ok(info) => {
+                            log::debug!(
+                                target: EXT_MESSAGES_TRACE_TARGET,
+                                "Redirected external message {:x} to {} nodes by {} packages",
+                                id, info.send_to, info.packets,
+                            );
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -794,6 +836,34 @@ impl EngineOperations for Engine {
         self.external_messages().complete_messages(to_delay, to_delete, self.now())
     }
 
+    // Remp messages
+    fn new_remp_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
+        self.remp_messages()?.new_message(id, message)
+    }
+    fn get_remp_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
+        self.remp_messages()?.get_messages(shard)
+    }
+    fn finalize_remp_messages(
+        &self,
+        block: BlockIdExt,
+        accepted: Vec<UInt256>,
+        rejected: Vec<(UInt256, String)>,
+        ignored: Vec<UInt256>,
+    ) -> Result<()> {
+        self.remp_messages()?.finalize_messages(block, accepted, rejected, ignored)
+    }
+    fn dequeue_remp_message_status(&self) -> Result<Option<(UInt256, Arc<Message>, RempMessageStatus)>> {
+        self.remp_messages()?.dequeue_message_status()
+    }
+
+    async fn check_remp_duplicate(&self, message_id: &UInt256) -> Result<RempDuplicateStatus> {
+        Ok(self.remp_service()
+            .ok_or_else(|| error!("Can't get message status because remp service was not set"))?
+            .remp_core_interface()?
+            .check_remp_duplicate(message_id).await
+        )
+    }
+
     // Get current list of new shard blocks with respect to last mc block.
     // If given mc_seq_no is not equal to last mc seq_no - function fails.
     fn get_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
@@ -831,6 +901,11 @@ impl EngineOperations for Engine {
     }
 
     #[cfg(feature = "telemetry")]
+    fn remp_core_telemetry(&self) -> &RempCoreTelemetry {
+        Engine::remp_core_telemetry(self)
+    }
+
+    #[cfg(feature = "telemetry")]
     fn collator_telemetry(&self) -> &CollatorValidatorTelemetry {
         Engine::collator_telemetry(self)
     }
@@ -843,6 +918,11 @@ impl EngineOperations for Engine {
     #[cfg(feature = "telemetry")]
     fn full_node_service_telemetry(&self) -> &FullNodeNetworkTelemetry {
         Engine::full_node_service_telemetry(self)
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn remp_client_telemetry(&self) -> &RempClientTelemetry {
+        Engine::remp_client_telemetry(self)
     }
 
     #[cfg(feature = "telemetry")]
@@ -888,6 +968,70 @@ impl EngineOperations for Engine {
         Engine::register_server(self, server)
     }
 
+    async fn send_remp_message(&self, to: Arc<KeyId>, message: RempMessage) -> Result<()> {
+        self.network().remp().send_message(to, message).await
+    }
+
+    async fn sign_and_send_remp_receipt(&self, to: Arc<KeyId>, receipt: RempReceipt) -> Result<()> {
+        let state = self.load_last_applied_mc_state_or_zerostate().await?;
+        let validators: Vec<CatchainNode> = state
+            .config_params()?
+            .validator_set()?.list()
+            .iter().map(|vd| validatordescr_to_catchain_node(vd)).collect();
+        let key = self.network.get_validator_key(&validators).await?.ok_or_else(|| error!("Can't get validato's key"))?;
+        if key.id().data() != receipt.source_id().as_slice() {
+            fail!("given source_id {} is not correspond to key {}", hex::encode(receipt.source_id().as_slice()), hex::encode(key.id().data()))
+        }
+        let receipt_bytes = serialize_boxed(&receipt)?;
+        let signature = key.sign(&receipt_bytes)?;
+        let signed_receipt = RempSignedReceipt::TonNode_RempSignedReceipt (
+            ton_api::ton::ton_node::rempsignedreceipt::RempSignedReceipt {
+                receipt: receipt_bytes.into(),
+                signature: ton_api::ton::bytes(signature.to_vec()),
+            }
+        );
+
+        self.network().remp().send_receipt(to, receipt.message_id(), signed_receipt).await
+    }
+
+    fn sign_remp_receipt(&self, receipt: &RempReceipt) -> Result<Vec<u8>> {
+        let receipt_bytes = serialize_boxed(receipt)?;
+        let key = self.network.public_overlay_key()?;
+        if key.id().data() != receipt.source_id().as_slice() {
+            fail!("given source_id {} is not correspond to key {}", hex::encode(receipt.source_id().as_slice()), hex::encode(key.id().data()))
+        }
+        let signature = key.sign(&receipt_bytes)?;
+        Ok(signature)
+    }
+
+    async fn update_validators(
+        &self,
+        to_resolve: Vec<CatchainNode>,
+        to_delete: Vec<CatchainNode>
+    ) -> Result<()> {
+
+        log::info!("Validators resolving for remp was started");
+
+        if to_resolve.len() > 0 {
+            // TODO support callback and breaker flag
+            self.network().search_validator_keys_for_full_node(to_resolve, Arc::new(|_| {}))?;
+        }
+        if to_delete.len() > 0 {
+            self.network().delete_validator_keys_for_full_node(to_delete)?;
+        }
+
+        log::info!("Validators resolving for remp has finished");
+        Ok(())
+    }
+
+    fn set_remp_core_interface(&self, rci: Arc<dyn RempCoreInterface>) -> Result<()> {
+        if let Some(rs) = self.remp_service() {
+            rs.set_remp_core_interface(rci)?;
+        } else {
+            log::warn!("Attempt to set remp_core_interface while remp service is disabled");
+        }
+        Ok(())
+    }
 }
 
 async fn redirect_external_message(
