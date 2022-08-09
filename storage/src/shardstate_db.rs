@@ -81,7 +81,7 @@ const SHARDSTATES_GC_LAG_SEC: u64 = 300;
 impl ShardStateDb {
 
     const MASK_GC_STARTED: u8 = 0x01;
-    const MASK_GC_STOPPED: u8 = 0x80;
+    const MASK_STOPPED: u8 = 0x80;
 
     /// Constructs new instance using in-memory key-value collections
 
@@ -156,7 +156,7 @@ impl ShardStateDb {
         tokio::spawn(async move {
 
             fn check_and_stop(stop: &AtomicU8) -> bool {
-                if (stop.load(Ordering::Relaxed) & ShardStateDb::MASK_GC_STOPPED) != 0 {
+                if (stop.load(Ordering::Relaxed) & ShardStateDb::MASK_STOPPED) != 0 {
                     stop.fetch_and(!ShardStateDb::MASK_GC_STARTED, Ordering::Relaxed);
                     true
                 } else {
@@ -233,7 +233,7 @@ impl ShardStateDb {
                         collected_db_,
                         gc_resolver_,
                         &|| {
-                            if (self_.stop.load(Ordering::Relaxed) & ShardStateDb::MASK_GC_STOPPED) != 0 {
+                            if (self_.stop.load(Ordering::Relaxed) & ShardStateDb::MASK_STOPPED) != 0 {
                                 fail!("GC was stopped")
                             }
                             Ok(())
@@ -286,8 +286,8 @@ impl ShardStateDb {
         });
     }
 
-    pub async fn stop_gc(&self) {
-        self.stop.fetch_or(Self::MASK_GC_STOPPED, Ordering::Relaxed);
+    pub async fn stop(&self) {
+        self.stop.fetch_or(Self::MASK_STOPPED, Ordering::Relaxed);
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             if !self.is_gc_run() {
@@ -312,18 +312,17 @@ impl ShardStateDb {
         &self,
         id: &BlockIdExt,
         state_root: Cell,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
     ) -> Result<Cell> {
         let saved_root = match self.current_dynamic_boc_db_index.load(Ordering::Relaxed) {
             0 => {
                 self.dynamic_boc_db_0_writers.fetch_add(1, Ordering::Relaxed);
-                let r = self.put_internal(id, state_root, &self.dynamic_boc_db_0, check_stop);
+                let r = self.put_internal(id, state_root, &self.dynamic_boc_db_0);
                 self.dynamic_boc_db_0_writers.fetch_sub(1, Ordering::Relaxed);
                 r?
             },
             1 => {
                 self.dynamic_boc_db_1_writers.fetch_add(1, Ordering::Relaxed);
-                let r = self.put_internal(id, state_root, &self.dynamic_boc_db_1, check_stop);
+                let r = self.put_internal(id, state_root, &self.dynamic_boc_db_1);
                 self.dynamic_boc_db_1_writers.fetch_sub(1, Ordering::Relaxed);
                 r?
             },
@@ -338,15 +337,21 @@ impl ShardStateDb {
         id: &BlockIdExt,
         state_root: Cell,
         boc_db: &Arc<DynamicBocDb>,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
     ) -> Result<Cell> {
         let cell_id = CellId::from(state_root.repr_hash());
         
         log::trace!(target: TARGET, "ShardStateDb::put_internal  start  id {}  root_cell_id {}  db_index {}",
             id, cell_id, boc_db.db_index());
 
+        let check_stop = || -> Result<()> {
+            if (self.stop.load(Ordering::Relaxed) & ShardStateDb::MASK_STOPPED) != 0 {
+                fail!("Stopped")
+            }
+            Ok(())
+        };
+
         let c = tokio::task::block_in_place(
-            || boc_db.save_as_dynamic_boc(state_root.deref(), check_stop)
+            || boc_db.save_as_dynamic_boc(state_root.deref(), &check_stop)
         )?;
 
         let save_utime = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();

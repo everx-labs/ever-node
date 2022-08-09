@@ -12,9 +12,17 @@
 */
 
 use crate::{
-    db_impl_base, db::traits::{KvcTransaction, KvcTransactional},
-    dynamic_boc_db::DynamicBocDb, types::{CellId, StorageCell}
+    db_impl_base, 
+    db::traits::{KvcTransaction, KvcTransactional},
+    types::{CellId, StorageCell}
 };
+
+#[cfg(not(feature = "ref_count_gc"))]
+use crate::dynamic_boc_db::DynamicBocDb;
+
+#[cfg(feature = "ref_count_gc")]
+use crate::dynamic_boc_rc_db::DynamicBocDb;
+
 use std::sync::Arc;
 use ton_types::Result;
 
@@ -22,8 +30,38 @@ db_impl_base!(CellDb, KvcTransactional, CellId);
 
 impl CellDb {
     /// Gets cell from key-value storage by cell id
-    pub fn get_cell(&self, cell_id: &CellId, boc_db: Arc<DynamicBocDb>) -> Result<StorageCell> {
-        StorageCell::deserialize(boc_db, self.db.get(cell_id)?.as_ref())
+    pub fn get_cell(
+        &self, 
+        cell_id: &CellId, 
+        boc_db: Arc<DynamicBocDb>, 
+        #[cfg(feature = "ref_count_gc")]
+        use_cache: bool
+    ) -> Result<StorageCell> {
+        StorageCell::deserialize(
+            boc_db, 
+            self.db.get(cell_id)?.as_ref(), 
+            #[cfg(feature = "ref_count_gc")]
+            use_cache
+        )
+    }
+
+    pub fn try_get_cell(
+        &self,
+        cell_id: &CellId,
+        boc_db: Arc<DynamicBocDb>,
+        #[cfg(feature = "ref_count_gc")]
+        use_cache: bool
+    ) -> Result<Option<StorageCell>> {
+        if let Some(data) = self.db.try_get(cell_id)? {
+            Ok(Some(StorageCell::deserialize(
+                boc_db, 
+                data.as_ref(), 
+                #[cfg(feature = "ref_count_gc")]
+                use_cache
+            )?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Puts cell into transaction

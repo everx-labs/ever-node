@@ -457,15 +457,7 @@ impl EngineOperations for Engine {
     }
 
     async fn load_state(&self, block_id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
-        if let Some(state) = self.shard_states_cache().get(block_id) {
-            self.update_shard_states_cache_stat(true);
-            Ok(state)
-        } else {
-            let state = self.db().load_shard_state_dynamic(block_id)?;
-            self.shard_states_cache().set(block_id.clone(), |_| Some(state.clone()))?;
-            self.update_shard_states_cache_stat(false);
-            Ok(state)
-        }
+        self.shard_states_keeper().load_state(block_id).await
     }
 
     async fn load_persistent_state_size(&self, block_id: &BlockIdExt) -> Result<u64> {
@@ -514,30 +506,19 @@ impl EngineOperations for Engine {
         &self, 
         handle: &Arc<BlockHandle>, 
         state: Arc<ShardStateStuff>,
-        state_bytes: Option<&[u8]>,
+        persistent_state: Option<&[u8]>,
     ) -> Result<Arc<ShardStateStuff>> {
-        let check_stop = || {
-            if self.stopper().check_stop() {
-                fail!("Stopped")
-            }
-            Ok(())
-        };
-        let (state, saved) = self.db().store_shard_state_dynamic(handle, &state, None, &check_stop).await?;
+        let (state, saved) =
+            self.shard_states_keeper().store_state(handle, state, persistent_state, false).await?;
         if saved {
             #[cfg(feature = "telemetry")]
             self.full_node_telemetry().new_pre_applied_block(handle.got_by_broadcast());
-        }
-        if self.shard_states_cache().get(handle.id()).is_none() {
-            self.shard_states_cache().set(handle.id().clone(), |_| Some(state.clone()))?;
         }
         self.shard_states_awaiters().do_or_wait(
             state.block_id(),
             None,
             async { Ok(state.clone()) }
         ).await?;
-        if let Some(state_data) = state_bytes {
-            self.db().store_shard_state_persistent_raw(&handle, state_data, None).await?;
-        }
         Ok(state)
     }
 

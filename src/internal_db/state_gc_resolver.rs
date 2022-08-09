@@ -11,7 +11,10 @@
 * limitations under the License.
 */
 
+#[cfg(not(feature = "async_ss_storage"))]
 use storage::shardstate_db::AllowStateGcResolver;
+#[cfg(feature = "async_ss_storage")]
+use storage::shardstate_db_async::AllowStateGcResolver;
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::Result;
 use adnl::common::add_unbound_object_to_map_with_update;
@@ -38,10 +41,10 @@ impl AllowStateGcSmartResolver {
         }
     }
 
-    pub async fn advance(&self, mc_block_id: &BlockIdExt, engine: &dyn EngineOperations) -> Result<()> {
+    pub async fn advance(&self, mc_block_id: &BlockIdExt, engine: &dyn EngineOperations) -> Result<bool> {
         let seqno = mc_block_id.seq_no();
         if seqno <= self.last_processed_block.fetch_max(seqno, Ordering::Relaxed) {
-            return Ok(())
+            return Ok(false)
         }
 
         let mc_state = engine.load_state(mc_block_id).await?;
@@ -98,9 +101,10 @@ impl AllowStateGcSmartResolver {
                     }
                 }
             }
+            Ok(true)
+        } else {
+            Ok(false)
         }
-
-        Ok(())
     }
 }
 

@@ -18,11 +18,17 @@ pub mod block_info_db;
 pub mod catchain_persistent_db;
 mod cell_db;
 pub mod db;
+#[cfg(not(feature = "ref_count_gc"))]
 mod dynamic_boc_db;
+#[cfg(feature = "ref_count_gc")]
+mod dynamic_boc_rc_db;
 mod error;
 mod macros; 
 pub mod node_state_db;
+#[cfg(not(feature = "ref_count_gc"))]
 pub mod shardstate_db;
+#[cfg(feature = "ref_count_gc")]
+pub mod shardstate_db_async;
 pub mod shardstate_persistent_db;
 pub mod traits;
 pub mod types;
