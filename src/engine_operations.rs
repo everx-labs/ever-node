@@ -380,22 +380,24 @@ impl EngineOperations for Engine {
         self.download_next_block_worker(prev_id, None).await
     }
 
-    async fn download_state(
+    async fn download_and_store_state(
         &self, 
-        block_id: &BlockIdExt, 
+        handle: &Arc<BlockHandle>,
+        root_hash: &UInt256,
         master_id: &BlockIdExt,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
         attempts: Option<usize>
-    ) -> Result<(Arc<ShardStateStuff>, Arc<Vec<u8>>)> {
+    ) -> Result<Arc<ShardStateStuff>> {
+
         let overlay = self.get_full_node_overlay(
-            block_id.shard().workchain_id(), 
-            block_id.shard().shard_prefix_with_tag()
+            handle.id().shard().workchain_id(), 
+            handle.id().shard().shard_prefix_with_tag()
         ).await?;
-        crate::full_node::state_helper::download_persistent_state(
-            block_id,
+
+        let data = crate::full_node::state_helper::download_persistent_state(
+            handle.id(),
             master_id,
             overlay.deref(),
-            self.clone(),
             active_peers,
             attempts,
             &|| {
@@ -404,7 +406,12 @@ impl EngineOperations for Engine {
                 }
                 Ok(())
             }
-        ).await
+        ).await?;
+
+        let state = self.shard_states_keeper().check_and_store_state(
+            handle, root_hash, data, self.low_memory_mode()).await?;
+
+        Ok(state)
     }
 
     async fn download_zerostate(
@@ -506,10 +513,9 @@ impl EngineOperations for Engine {
         &self, 
         handle: &Arc<BlockHandle>, 
         state: Arc<ShardStateStuff>,
-        persistent_state: Option<&[u8]>,
     ) -> Result<Arc<ShardStateStuff>> {
         let (state, saved) =
-            self.shard_states_keeper().store_state(handle, state, persistent_state, false).await?;
+            self.shard_states_keeper().store_state(handle, state, None, false).await?;
         if saved {
             #[cfg(feature = "telemetry")]
             self.full_node_telemetry().new_pre_applied_block(handle.got_by_broadcast());
@@ -524,7 +530,7 @@ impl EngineOperations for Engine {
 
     async fn store_zerostate(
         &self, 
-        mut state: Arc<ShardStateStuff>, 
+        state: Arc<ShardStateStuff>, 
         state_bytes: &[u8]
     ) -> Result<(Arc<ShardStateStuff>, Arc<BlockHandle>)> {
         let handle = self.db().create_or_load_block_handle(
@@ -535,7 +541,13 @@ impl EngineOperations for Engine {
         )?.as_non_updated().ok_or_else(
             || error!("INTERNAL ERROR: mismatch in zerostate storing")
         )?;
-        state = self.store_state(&handle, state, Some(state_bytes)).await?;
+        let (state, _) =
+            self.shard_states_keeper().store_state(&handle, state, Some(state_bytes), false).await?;
+        self.shard_states_awaiters().do_or_wait(
+            state.block_id(),
+            None,
+            async { Ok(state.clone()) }
+        ).await?;
         Ok((state, handle))
     }
 
@@ -633,7 +645,9 @@ impl EngineOperations for Engine {
             return Ok(false);
         }
         self.db().assign_mc_ref_seq_no(handle, mc_seq_no, None)?;
-        self.db().archive_block(handle.id(), None).await?;
+        if handle.id().seq_no() != 0 {
+            self.db().archive_block(handle.id(), None).await?;
+        }
         if self.db().store_block_applied(handle, None)? {
             #[cfg(feature = "telemetry")]
             self.full_node_telemetry().new_applied_block();

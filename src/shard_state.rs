@@ -25,9 +25,11 @@ use ton_block::{
 };
 use ton_types::{
     AccountId, Cell, SliceData, error, fail, Result, deserialize_tree_of_cells,
-    deserialize_cells_tree_inmem_with_abort, 
-    UInt256, BocSerialiseMode, BagOfCells,
+    deserialize_cells_tree_inmem_with_abort, UInt256
 };
+
+#[cfg(not(feature = "async_ss_storage"))]
+use ton_types::{BocSerialiseMode, BagOfCells};
 
 //    #[derive(Debug, Default, Clone, Eq, PartialEq)]
 // It is a wrapper around various shard state's representations and properties.
@@ -241,6 +243,7 @@ impl ShardStateStuff {
 //        Ok(bytes.into_inner())
 //    }
 
+    #[cfg(not(feature = "async_ss_storage"))]
     pub fn serialize_with_abort(&self, abort: &dyn Fn() -> bool) -> Result<Vec<u8>> {
         let mut bytes = Vec::<u8>::new();
         let boc = BagOfCells::with_params(vec!(&self.root), vec!(), abort)?;

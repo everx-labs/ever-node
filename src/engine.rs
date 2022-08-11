@@ -118,6 +118,7 @@ pub struct Engine {
     last_known_keyblock_seqno: AtomicU32,
     will_validate: AtomicBool,
     sync_status: AtomicU32,
+    low_memory_mode: bool,
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
  
@@ -548,6 +549,7 @@ impl Engine {
         let control_config = general_config.control_server()?;
         let global_config = general_config.load_global_config()?;
         let test_bundles_config = general_config.test_bundles_config().clone();
+        let low_memory_mode = general_config.low_memory_mode();
 
         let network = NodeNetwork::new(
             general_config,
@@ -684,6 +686,7 @@ impl Engine {
             last_known_keyblock_seqno: AtomicU32::new(0),
             will_validate: AtomicBool::new(false),
             sync_status: AtomicU32::new(0),
+            low_memory_mode,
             test_bundles_config,
             shard_states_keeper: shard_states_keeper.clone(),
             #[cfg(feature="workchains")]
@@ -881,6 +884,10 @@ impl Engine {
         &self.tps_counter
     }
 
+    pub fn low_memory_mode(&self) -> bool {
+        self.low_memory_mode
+    }
+
     pub async fn download_and_apply_block_worker(
         self: Arc<Self>, 
         id: &BlockIdExt, 
@@ -905,7 +912,8 @@ impl Engine {
                     );
                     return Ok(());
                 }
-                if handle.has_data() {
+                let mut is_link = false;
+                if handle.has_data() && handle.has_proof_or_link(&mut is_link) {
                     while !((pre_apply && handle.has_state()) || handle.is_applied()) {
                         let s = self.clone();
                         let res = self.block_applying_awaiters().do_or_wait(
@@ -1000,6 +1008,13 @@ impl Engine {
         }
 
         log::trace!("Start {}applying block... {}", if pre_apply { "pre-" } else { "" }, block.id());
+
+        let mut is_link = false;
+        let (has_proof, has_data) = (handle.has_proof_or_link(&mut is_link), handle.has_data());
+        if !has_proof || !has_data {
+            fail!("Block must have proof ({}) and data ({}) saved before applying",
+                has_proof, has_data);
+        }
 
         apply_block(handle, block, mc_seq_no, &(self.clone() as Arc<dyn EngineOperations>),
             pre_apply, recursion_depth).await?;

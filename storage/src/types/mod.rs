@@ -14,7 +14,6 @@
 
 mod block_id;
 mod block_meta;
-mod cell_id;
 mod db_slice;
 mod reference;
 mod shard_ident_key;
@@ -23,7 +22,6 @@ mod storage_cell;
 
 pub use block_id::*;
 pub use block_meta::*;
-pub use cell_id::*;
 pub use db_slice::*;
 pub use reference::*;
 pub use shard_ident_key::*;

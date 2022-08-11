@@ -29,7 +29,7 @@ use storage::{
     archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId},
     block_handle_db::{self, BlockHandle, BlockHandleDb, BlockHandleStorage}, 
     block_info_db::BlockInfoDb, db::rocksdb::RocksDb, node_state_db::NodeStateDb, 
-    shardstate_persistent_db::ShardStatePersistentDb, types::BlockMeta, 
+    types::BlockMeta, db::filedb::FileDb,
     shard_top_blocks_db::ShardTopBlocksDb, StorageAlloc, traits::Serializable,
 };
 #[cfg(not(feature = "async_ss_storage"))]
@@ -40,6 +40,8 @@ use storage::shardstate_db_async::{self, AllowStateGcResolver, ShardStateDb};
 use storage::StorageTelemetry;
 use ton_block::{Block, BlockIdExt};
 use ton_types::{error, fail, Result, UInt256, Cell};
+#[cfg(feature = "async_ss_storage")]
+use ton_types::{DoneCellsStorage, BagOfCells, BocSerialiseMode};
 
 /// Full node state keys
 pub const INITIAL_MC_BLOCK: &str         = "InitMcBlockId";
@@ -148,7 +150,7 @@ pub struct InternalDb {
     prev2_block_db: BlockInfoDb,
     next1_block_db: BlockInfoDb,
     next2_block_db: BlockInfoDb,
-    shard_state_persistent_db: ShardStatePersistentDb,
+    shard_state_persistent_db: Arc<FileDb>,
     shard_state_dynamic_db: Arc<ShardStateDb>,
     //ss_test_map: lockfree::map::Map<BlockIdExt, ShardStateStuff>,
     //shardstate_db_gc: GC,
@@ -252,9 +254,9 @@ impl InternalDb {
             prev2_block_db: BlockInfoDb::with_db(db.clone(), "prev2_block_db")?,
             next1_block_db: BlockInfoDb::with_db(db.clone(), "next1_block_db")?,
             next2_block_db: BlockInfoDb::with_db(db.clone(), "next2_block_db")?,
-            shard_state_persistent_db: ShardStatePersistentDb::with_path(
+            shard_state_persistent_db: Arc::new(FileDb::with_path(
                 Path::new(config.db_directory.as_str()).join("shard_state_persistent_db")
-            ),
+            )),
             shard_state_dynamic_db,
             //ss_test_map: lockfree::map::Map::new(),
             //shardstate_db_gc,
@@ -662,12 +664,21 @@ impl InternalDb {
         }
     }
 
-    pub fn load_shard_state_dynamic_ex(&self, id: &BlockIdExt, use_cache: bool) -> Result<Arc<ShardStateStuff>> {
-        let _tc = TimeChecker::new(format!("load_shard_state_dynamic {}  use", id), 10);        
+    pub fn load_shard_state_dynamic_ex(
+        &self,
+        id: &BlockIdExt,
+        #[cfg(feature = "async_ss_storage")]
+        use_cache: bool
+    ) -> Result<Arc<ShardStateStuff>> {
+        let _tc = TimeChecker::new(format!("load_shard_state_dynamic {}  use", id), 10);
         Ok(
             ShardStateStuff::from_root_cell(
                 id.clone(), 
-                self.shard_state_dynamic_db.get(id, use_cache)?,
+                self.shard_state_dynamic_db.get(
+                    id, 
+                    #[cfg(feature = "async_ss_storage")]
+                    use_cache
+                )?,
                 #[cfg(feature = "telemetry")]
                 &self.telemetry,
                 &self.allocated
@@ -676,9 +687,14 @@ impl InternalDb {
     }
 
     pub fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
-        self.load_shard_state_dynamic_ex(id, true)
+        self.load_shard_state_dynamic_ex(
+            id, 
+            #[cfg(feature = "async_ss_storage")]
+            true
+        )
     }
 
+    #[cfg(not(feature = "async_ss_storage"))]
     pub async fn store_shard_state_persistent(
         &self, 
         handle: &Arc<BlockHandle>, 
@@ -698,7 +714,63 @@ impl InternalDb {
 
             println!("store_shard_state_persistent {} bytes", bytes.len());
 
-            self.shard_state_persistent_db.put(state.block_id(), &bytes).await?;
+            self.shard_state_persistent_db.write_whole_file(state.block_id(), &bytes).await?;
+            if handle.set_persistent_state() {
+                self.store_block_handle(handle, callback)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "async_ss_storage")]
+    pub async fn store_shard_state_persistent(
+        &self, 
+        handle: &Arc<BlockHandle>, 
+        state: Arc<ShardStateStuff>,
+        callback: Option<Arc<dyn block_handle_db::Callback>>,
+        abort: Arc<dyn Fn() -> bool + Send + Sync>
+    ) -> Result<()> {
+        if handle.id() != state.block_id() {
+            fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
+        }
+        if !handle.has_persistent_state() {
+            let id = handle.id().clone();
+            let shard_state_dynamic_db = self.shard_state_dynamic_db.clone();
+            let shard_state_persistent_db = self.shard_state_persistent_db.clone();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                log::debug!("store_shard_state_persistent {}", id);
+                let cells_storage = 
+                    shard_state_dynamic_db.create_ordered_cells_storage(&state.root_cell().repr_hash())?;
+                let now = std::time::Instant::now();
+                let root_cell = state.root_cell().clone();
+                // Drop state - don't keep in memory a root cell that keeps full tree!
+                std::mem::drop(state);
+                let boc = BagOfCells::with_cells_storage(
+                    vec!(root_cell),
+                    vec!(),
+                    cells_storage,
+                    abort.deref(),
+                )?;
+                log::debug!("store_shard_state_persistent {} building boc TIME {}", id, now.elapsed().as_millis());
+
+                let mut dest = shard_state_persistent_db.get_write_object(&id)?;
+                let now = std::time::Instant::now();
+                boc.write_to_with_abort(
+                    &mut dest,
+                    BocSerialiseMode::Generic{
+                        index: false,
+                        crc: false,
+                        cache_bits: false,
+                        flags: 0 
+                    },
+                    None,
+                    None,
+                    abort.deref(),
+                )?;
+                log::debug!("store_shard_state_persistent {} ser boc TIME {}", id, now.elapsed().as_millis());
+                Ok(())
+            }).await??;
+
             if handle.set_persistent_state() {
                 self.store_block_handle(handle, callback)?;
             }
@@ -717,10 +789,7 @@ impl InternalDb {
             state_data.len() as u64 / 1000 + 10
         );
         if !handle.has_persistent_state() {
-
-            // TODO write directly into file without huge vector
-
-            self.shard_state_persistent_db.put(handle.id(), state_data).await?;
+            self.shard_state_persistent_db.write_whole_file(handle.id(), state_data).await?;
             if handle.set_persistent_state() {
                 self.store_block_handle(handle, callback)?;
             }
@@ -738,8 +807,8 @@ impl InternalDb {
             Ok(vec![])
         } else {
             let length = min(length, full_lenth - offset);
-            let db_slice = self.shard_state_persistent_db.get_slice(id, offset, length).await?;
-            Ok(db_slice.to_vec())
+            let data = self.shard_state_persistent_db.read_file_part(id, offset, length).await?;
+            Ok(data)
         }
     }
 
@@ -748,12 +817,10 @@ impl InternalDb {
         id: &BlockIdExt,
         abort: &dyn Fn() -> bool,
     ) -> Result<Arc<ShardStateStuff>> {
-        let _tc = TimeChecker::new(format!("load_shard_state_persistent {}", id), 200);
-        let full_lenth = self.load_shard_state_persistent_size(id).await?;
+        let _tc = TimeChecker::new(format!("load_shard_state_persistent {}", id), 1000);
 
-        // TODO read directly from file without huge vector
-
-        let data = self.shard_state_persistent_db.get_vec(id, 0, full_lenth).await?;
+        // Fast (in-memory) version
+        let data = self.shard_state_persistent_db.read_whole_file(id).await?;
         ShardStateStuff::deserialize_inmem(
             id.clone(),
             Arc::new(data),
@@ -766,7 +833,7 @@ impl InternalDb {
 
     pub async fn load_shard_state_persistent_size(&self, id: &BlockIdExt) -> Result<u64> {
         let _tc = TimeChecker::new(format!("load_shard_state_persistent_size {}", id), 50);
-        self.shard_state_persistent_db.get_size(id).await
+        self.shard_state_persistent_db.get_file_size(id).await
     }
 
     pub async fn shard_state_persistent_gc(
@@ -820,7 +887,7 @@ impl InternalDb {
         })?;
 
         for id in for_delete {
-            match self.shard_state_persistent_db.delete(&id).await {
+            match self.shard_state_persistent_db.delete_file(&id).await {
                 Ok(_) => log::debug!("shard_state_persistent_gc: {:x} deleted", id.root_hash()),
                 Err(e) => log::warn!("shard_state_persistent_gc: can't delete {:x}: {}", id.root_hash(), e)
             }
@@ -1115,6 +1182,14 @@ impl InternalDb {
             Ok(true)
         })?;
         Ok(())
+    }
+
+    #[cfg(feature = "async_ss_storage")]
+    pub fn create_done_cells_storage(
+        &self, 
+        root_cell_id: &UInt256
+    ) -> Result<Box<dyn DoneCellsStorage>> {
+        self.shard_state_dynamic_db.create_done_cells_storage(root_cell_id)
     }
 }
 

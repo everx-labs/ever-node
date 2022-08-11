@@ -2,17 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## Version: 0.51.0
+## Version: 0.51.1
 
 ### New
- - Merge to master
- - Fix build after rocksdb release 0.19
- - Async states storage
- - Fixed state and handle mismatch in ShardStatesKeeper::worker
- - - used try_get instead get
- - - decreased copying using VisitedCell
- - - to be continued...
- - ...while saving persistent state
 
 
 ## Version: 0.50.23

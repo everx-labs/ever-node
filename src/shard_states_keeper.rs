@@ -19,11 +19,12 @@ use storage::shardstate_db::AllowStateGcResolver;
 #[cfg(feature = "async_ss_storage")]
 use storage::shardstate_db_async::AllowStateGcResolver;
 use ton_block::{BlockIdExt, ShardIdent};
-use ton_types::{fail, error, Result};
+use ton_types::{fail, error, Result, UInt256};
 use adnl::common::add_unbound_object_to_map;
 use std::{
     time::Duration, ops::Deref,
 };
+use ton_types::BocDeserializer;
 
 /// This structs works beetween engine and db.
 /// ValidatorManager  Collator  ValidatorQuery  etc.   <- high level node commponents
@@ -133,7 +134,7 @@ impl ShardStatesKeeper {
 
         #[cfg(feature = "async_ss_storage")] {
             let (cb1, cb2) = if let Some(state_data) = persistent_state {
-                // while boot zerostate and init persistent state are saved using this parameter 
+                // while boot - zerostate and init persistent state are saved using this parameter 
                 self.db.store_shard_state_persistent_raw(&handle, state_data, None).await?;
                 let cb = SsNotificationCallback::new();
                 (
@@ -181,6 +182,58 @@ impl ShardStatesKeeper {
         Ok((state, saved))
     }
 
+    pub async fn check_and_store_state(
+        &self, 
+        handle: &Arc<BlockHandle>,
+        root_hash: &UInt256,
+        data: Arc<Vec<u8>>,
+        low_memory_mode: bool,
+    ) -> Result<Arc<ShardStateStuff>> {
+
+        // deserialise cells (and save it by the way - in case of low memory mode)
+
+        let now = std::time::Instant::now();
+        log::info!(
+            "check_and_store_state: deserialize (low_memory_mode: {}) {}...",
+            low_memory_mode, handle.id()
+        );
+
+        #[cfg(feature = "async_ss_storage")]
+        let state_root = {
+            let mut deserialiser = BocDeserializer::new();
+            if low_memory_mode {
+                let done_cells_storage = self.db.create_done_cells_storage(root_hash)?;
+                deserialiser = deserialiser.set_done_cells_storage(done_cells_storage);
+            }
+            deserialiser
+                .set_abort(&|| self.stopper.check_stop())
+                .deserialize_inmem(data.clone())?
+                .withdraw_one_root()?
+        };
+        #[cfg(not(feature = "async_ss_storage"))]
+        let state_root = BocDeserializer::new()
+            .set_abort(&|| self.stopper.check_stop())
+            .deserialize_inmem(data.clone())?
+            .withdraw_one_root()?;
+
+        log::info!(
+            "check_and_store_state: deserialized (low_memory_mode: {}) {} TIME {}",
+            handle.id(), low_memory_mode, now.elapsed().as_millis()
+        );
+
+        let state = ShardStateStuff::from_root_cell(
+            handle.id().clone(), 
+            state_root,
+            #[cfg(feature = "telemetry")]
+            &self.telemetry,
+            &self.allocated
+        )?;
+
+        let (state, _) = self.store_state(handle, state, Some(&data), false).await?;
+
+        Ok(state)
+    }
+
     fn check_stop(&self) -> Result<()> {
         if self.stopper.check_stop() {
             fail!("Stopped")
@@ -223,7 +276,7 @@ impl ShardStatesKeeper {
 
         // load latest block we know
         let latest_mc_id = self.db.load_full_node_state(LAST_APPLIED_MC_BLOCK)?
-            .ok_or_else(|| error!("Can't load PSS_KEEPER_MC_BLOCK in catch_up_state"))?;
+            .ok_or_else(|| error!("Can't load LAST_APPLIED_MC_BLOCK in catch_up_state"))?;
         let latest_id = if id.shard().is_masterchain() {
             (*latest_mc_id).clone()
         } else {
@@ -367,9 +420,8 @@ impl ShardStatesKeeper {
 
                 log::trace!("states_keeper: saving {}", handle.id());
                 let now = std::time::Instant::now();
-                let no_cache_state = self.wait_fully_stored_state(engine.deref(), handle.id()).await?;
-                self.store_persistent_state_attempts(
-                    engine.deref(), &handle, &no_cache_state, abort.clone()).await;
+                self.wait_and_store_persistent_state(
+                    engine.deref(), &handle, abort.clone()).await;
                 if engine.check_stop() {
                     return Ok(());
                 }
@@ -383,9 +435,8 @@ impl ShardStatesKeeper {
                     let handle = engine.load_block_handle(block_id)?.ok_or_else(
                         || error!("Cannot load handle for SS keeper shard block {}", block_id)
                     )?;
-                    let no_cache_state = self.wait_fully_stored_state(engine.deref(), handle.id()).await?;
-                    self.store_persistent_state_attempts(
-                        engine.deref(), &handle, &no_cache_state, Arc::new(|| false)).await;
+                    self.wait_and_store_persistent_state(
+                        engine.deref(), &handle, Arc::new(|| false)).await;
                     if engine.check_stop() {
                         return Ok(());
                     }
@@ -483,7 +534,11 @@ impl ShardStatesKeeper {
         // Polling is not a bad scenario here, because it is much easier all other variants 
         // and we do not need super speed.
         loop {
-            match self.db.load_shard_state_dynamic_ex(id, false) {
+            match self.db.load_shard_state_dynamic_ex(
+                id, 
+                #[cfg(feature = "async_ss_storage")]
+                false
+            ) {
                 Ok(ss) => break Ok(ss),
                 Err(_) => {
                     if engine.check_stop() {
@@ -495,15 +550,25 @@ impl ShardStatesKeeper {
         }
     }
 
-    pub async fn store_persistent_state_attempts(
+    async fn wait_and_store_persistent_state_attempt(
         &self, 
         engine: &Engine, 
         handle: &Arc<BlockHandle>, 
-        ss: &Arc<ShardStateStuff>,
+        abort: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<()> {
+        let ss = self.wait_fully_stored_state(engine, handle.id()).await?;
+        self.db.store_shard_state_persistent(handle, ss, None, abort.clone()).await?;
+        Ok(())
+    }
+
+    async fn wait_and_store_persistent_state(
+        &self, 
+        engine: &Engine, 
+        handle: &Arc<BlockHandle>, 
         abort: Arc<dyn Fn() -> bool + Send + Sync>,
     ) {
         let mut attempts = 1;
-        while let Err(e) = self.db.store_shard_state_persistent(handle, ss, None, abort.clone()).await {
+        while let Err(e) = self.wait_and_store_persistent_state_attempt(engine, handle, abort.clone()).await {
             if engine.check_stop() {
                 break
             }

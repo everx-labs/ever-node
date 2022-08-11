@@ -105,7 +105,9 @@ pub struct TonNodeConfig {
     #[serde(skip)]
     file_name: String,
     #[serde(default)]
-    restore_db: bool
+    restore_db: bool,
+    #[serde(default)]
+    low_memory_mode: bool,
 }
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
@@ -331,6 +333,11 @@ impl TonNodeConfig {
 
         config_json.connectivity_check_config.check()?;
 
+        #[cfg(not(feature = "async_ss_storage"))]
+        if config_json.low_memory_mode {
+            fail!("'low_memory_mode' is applied only with 'async_ss_storage' feature");
+        }
+
         config_json.configs_dir = configs_dir.to_string();
         config_json.file_name = json_file_name.to_string();
 
@@ -438,6 +445,9 @@ impl TonNodeConfig {
     }
     pub fn restore_db(&self) -> bool {
         self.restore_db
+    }
+    pub fn low_memory_mode(&self) -> bool {
+        self.low_memory_mode
     }
 
  

@@ -14,8 +14,8 @@
 use crate::{
     StorageAlloc, cell_db::CellDb, 
     db::{rocksdb::RocksDbTable, traits::{DbKey, KvcWriteable}},
-    dynamic_boc_rc_db::DynamicBocDb,
-    traits::Serializable, types::CellId,
+    dynamic_boc_rc_db::{DynamicBocDb, DoneCellsStorageAdapter, OrderedCellsStorageAdapter},
+    traits::Serializable,
     TARGET,
 };
 #[cfg(feature = "telemetry")]
@@ -29,7 +29,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use ton_block::BlockIdExt;
-use ton_types::{ByteOrderRead, Cell, Result, fail, error};
+use ton_types::{
+    ByteOrderRead, Cell, Result, fail, error, DoneCellsStorage, OrderedCellsStorage, UInt256
+};
 
 pub trait AllowStateGcResolver: Send + Sync {
     fn allow_state_gc(&self, block_id: &BlockIdExt, save_utime: u64, gc_utime: u64) -> Result<bool>;
@@ -38,12 +40,12 @@ pub trait AllowStateGcResolver: Send + Sync {
 pub(crate) struct DbEntry {
     // Because key in db is not a full BlockIdExt it's need to store it here to use while GC.
     pub block_id: BlockIdExt,
-    pub cell_id: CellId,
+    pub cell_id: UInt256,
     pub save_utime: u64,
 }
 
 impl DbEntry {
-    pub fn with_params(block_id: BlockIdExt, cell_id: CellId, save_utime: u64) -> Self {
+    pub fn with_params(block_id: BlockIdExt, cell_id: UInt256, save_utime: u64) -> Self {
         Self {block_id, cell_id, save_utime }
     }
 }
@@ -60,7 +62,7 @@ impl Serializable for DbEntry {
         let block_id = BlockIdExt::deserialize(reader)?;
         let mut buf = [0; 32];
         reader.read_exact(&mut buf)?;
-        let cell_id = CellId::new(buf.into());
+        let cell_id = buf.into();
         let save_utime = reader.read_le_u64().unwrap_or(0);
 
         Ok(Self { block_id, cell_id, save_utime })
@@ -87,6 +89,7 @@ impl Job {
 }
 
 pub struct ShardStateDb {
+    db: Arc<RocksDb>,
     shardstate_db: Arc<dyn KvcWriteable<BlockIdExt>>,
     dynamic_boc_db: Arc<DynamicBocDb>,
     storer: tokio::sync::mpsc::UnboundedSender<(Job, Option<Arc<dyn Callback>>)>,
@@ -111,6 +114,7 @@ impl ShardStateDb {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
 
         let ss_db = Arc::new(Self {
+            db: db.clone(),
             shardstate_db: Arc::new(RocksDbTable::with_db(db.clone(), shardstate_db_path)?),
             dynamic_boc_db: Arc::new(DynamicBocDb::with_db(
                 Arc::new(CellDb::with_db(db.clone(), cell_db_path)?),
@@ -190,7 +194,7 @@ impl ShardStateDb {
                         },
                         Err(e) => log::warn!(
                             target: TARGET, 
-                            "ShardStateDb  allow_state_gc  id {}  root_cell_id {}  error {}",
+                            "ShardStateDb  allow_state_gc  id {}  root_cell_id {:x}  error {}",
                             entry.block_id, entry.cell_id, e
                         ),
                     }
@@ -260,11 +264,33 @@ impl ShardStateDb {
         let db_entry = DbEntry::from_slice(&self.shardstate_db.get(id)?)?;
         log::debug!(
             target: TARGET,
-            "ShardStateDb::get  id {}  cell_id {}  use_cache {}",
+            "ShardStateDb::get  id {}  cell_id {:x}  use_cache {}",
             id, db_entry.cell_id, use_cache
         );
         let root_cell = self.dynamic_boc_db.load_boc(&db_entry.cell_id, use_cache)?;
         Ok(root_cell)
+    }
+
+    pub fn create_done_cells_storage(
+        &self, 
+        root_cell_id: &UInt256
+    ) -> Result<Box<dyn DoneCellsStorage>> {
+        Ok(Box::new(DoneCellsStorageAdapter::new(
+            self.db.clone(),
+            self.dynamic_boc_db.clone(),
+            format!("{:x}", root_cell_id),
+        )?))
+    }
+
+    pub fn create_ordered_cells_storage(
+        &self, 
+        root_cell_id: &UInt256
+    ) -> Result<impl OrderedCellsStorage> {
+        Ok(OrderedCellsStorageAdapter::new(
+            self.db.clone(),
+            self.dynamic_boc_db.clone(),
+            format!("{:x}", root_cell_id),
+        )?)
     }
 
     async fn worker(
@@ -323,18 +349,18 @@ impl ShardStateDb {
     }
 
     pub async fn put_internal(self: Arc<Self>, id: &BlockIdExt, state_root: Cell) -> Result<()> {
-        let cell_id = CellId::from(state_root.repr_hash());
+        let cell_id = UInt256::from(state_root.repr_hash());
 
         log::debug!(
             target: TARGET, 
-            "ShardStateDb::put_internal  id {}  root_cell_id {}",
+            "ShardStateDb::put_internal  id {}  root_cell_id {:x}",
             id, cell_id
         );
 
         if self.shardstate_db.contains(id)? {
             log::warn!(
                 target: TARGET, 
-                "ShardStateDb::put_internal  ALREADY EXISTS  id {}  root_cell_id {}",
+                "ShardStateDb::put_internal  ALREADY EXISTS  id {}  root_cell_id {:x}",
                 id, cell_id
             );
             return Ok(())
@@ -349,7 +375,7 @@ impl ShardStateDb {
                     Ok(())
                 }
             };
-            ss_db.dynamic_boc_db.save_boc(state_root, &check_stop)
+            ss_db.dynamic_boc_db.save_boc(state_root, true, &check_stop)
         }).await??;
 
         let save_utime = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -361,7 +387,7 @@ impl ShardStateDb {
 
         log::debug!(
             target: TARGET, 
-            "ShardStateDb::put_internal DONE  id {}  root_cell_id {}",
+            "ShardStateDb::put_internal DONE  id {}  root_cell_id {:x}",
             id, cell_id
         );
 

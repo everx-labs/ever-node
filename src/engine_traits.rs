@@ -343,13 +343,14 @@ pub trait EngineOperations : Sync + Send {
 
     // State related operations
 
-    async fn download_state(
+    async fn download_and_store_state(
         &self, 
-        block_id: &BlockIdExt, 
+        handle: &Arc<BlockHandle>,
+        root_hash: &UInt256,
         master_id: &BlockIdExt,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
         attempts: Option<usize>
-    ) -> Result<(Arc<ShardStateStuff>, Arc<Vec<u8>>)> {
+    ) -> Result<Arc<ShardStateStuff>> {
         unimplemented!()
     }
     async fn download_zerostate(
@@ -387,7 +388,6 @@ pub trait EngineOperations : Sync + Send {
         &self, 
         handle: &Arc<BlockHandle>, 
         state: Arc<ShardStateStuff>,
-        persistent_state: Option<&[u8]>,
     ) -> Result<Arc<ShardStateStuff>> {
         unimplemented!()
     }

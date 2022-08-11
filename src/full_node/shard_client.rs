@@ -160,7 +160,7 @@ async fn load_shard_blocks_cycle(
             break Ok(())
         }
         log::trace!("load_shard_blocks_cycle: mc block: {}", mc_handle.id());
-        let r = match engine.wait_next_applied_mc_block(&mc_handle, Some(5)).await {
+        let r = match engine.wait_next_applied_mc_block(&mc_handle, Some(5_000)).await {
             Err(e) => {
                 log::debug!("load_shard_blocks_cycle: no next mc block: {}", e);
                 continue;
