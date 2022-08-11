@@ -181,7 +181,8 @@ async fn download_persistent_state_iter(
         state_bytes.clone(),
         #[cfg(feature = "telemetry")]
         engine.engine_telemetry(),
-        engine.engine_allocated()
+        engine.engine_allocated(),
+        &|| check_stop().is_err()
     )?,
     state_bytes))
 }

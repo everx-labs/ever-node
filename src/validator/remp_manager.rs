@@ -11,7 +11,7 @@ use ever_crypto::KeyId;
 use failure::err_msg;
 
 use ton_api::ton::ton_node::RempMessageStatus;
-use ton_block::{ShardIdent, Message};
+use ton_block::{ShardIdent, Message, BlockIdExt};
 use ton_types::{UInt256, Result};
 use crate::{
     config::RempConfig,
@@ -23,6 +23,8 @@ use crate::{
 }};
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
+use crate::block::BlockStuff;
+use crate::types::shard_blocks_observer::ShardBlocksObserver;
 
 pub struct RempInterfaceQueues {
     message_cache: Arc<MessageCache>,
@@ -276,7 +278,7 @@ impl RempManager {
             message_cache: message_cache.clone(), 
             incoming_sender, 
             response_receiver 
-        } );
+        });
     }
 
     pub async fn poll_incoming(&self, shard: &ShardIdent) -> (Option<Arc<RmqMessage>>, usize) {
@@ -291,13 +293,15 @@ impl RempManager {
     pub async fn gc_old_messages(&self, current_cc_seqno: u32) -> usize {
         let for_removal = self.message_cache.get_old_messages(current_cc_seqno).await;
         for (msg, updated_status) in for_removal.iter() {
+/*
             if let Some(status) = updated_status {
-                if let Err(e) = self.queue_response_to_fullnode(msg.message_id.clone(), msg.clone(), status.clone()) {
+                if let Err(e) = self.queue_response_to_fullnode(local_id (???eh), msg.clone(), status.clone()) {
                     log::error!(target: "remp", "Cannot queue response {} for {}, `{}`",
                         status, msg, e
                     );
                 }
             }
+ */
             self.message_cache.remove_message(&msg.message_id).await;
         }
         for_removal.len()
@@ -402,7 +406,7 @@ impl RempCoreInterface for RempInterfaceQueues {
     async fn check_remp_duplicate(&self, message_id: &UInt256) -> RempDuplicateStatus {
         log::trace!(target: "remp", "RempInterfraceQueues: checking duplicates for {:x}", message_id);
         let res = self.message_cache.check_message_duplicates(message_id).await;
-        log::trace!(target: "remp", "RempInterfraceQueues: duplicate check for {:x} finished", message_id);
+        log::trace!(target: "remp", "RempInterfraceQueues: duplicate check for {:x} finished: {:?}", message_id, res);
         return res
     }
 }

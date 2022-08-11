@@ -29,11 +29,10 @@ use crate::{
         counters::TpsCounter,
         remp_client::RempClient,
     },
+    shard_states_keeper::ShardStatesKeeper,
     internal_db::{
         InternalDb, InternalDbConfig, 
-        INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, PSS_KEEPER_MC_BLOCK,
-        state_gc_resolver::AllowStateGcSmartResolver, 
-        restore::check_db,
+        INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, PSS_KEEPER_MC_BLOCK, ARCHIVES_GC_BLOCK,
     },
     network::{
         control::{ControlServer, DataSource, StatusReporter},
@@ -117,7 +116,7 @@ pub struct Engine {
     initial_sync_disabled: bool,
     pub network: Arc<NodeNetwork>,
     archives_life_time: Option<u32>,
-    enable_shard_state_persistent_gc: bool,
+    // enable_shard_state_persistent_gc: bool,
     shard_blocks: ShardBlocksPool,
     last_known_mc_block_seqno: AtomicU32,
     last_known_keyblock_seqno: AtomicU32,
@@ -127,13 +126,10 @@ pub struct Engine {
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
  
-    shard_states_cache: TimeBasedCache<BlockIdExt, Arc<ShardStateStuff>>,
-    loaded_from_ss_cache: AtomicU64,
-    loaded_ss_total: AtomicU64,
+    shard_states_keeper: Arc<ShardStatesKeeper>,
     #[cfg(feature="workchains")]
     pub workchain_id: AtomicI32,
 
-    state_gc_resolver: Arc<AllowStateGcSmartResolver>,
     validation_status: lockfree::map::Map<ShardIdent, u64>,
     collation_status: lockfree::map::Map<ShardIdent, u64>,
     validated_block_stats_sender: Sender<ValidatedBlockStat>,
@@ -410,6 +406,9 @@ impl Stopper {
         if bitmap & Engine::MASK_SERVICE_VALIDATOR_MANAGER != 0 {
             ss.push_str("validator manager, ");
         }
+        if bitmap & Engine::MASK_SERVICE_ARCHIVES_GC != 0 {
+            ss.push_str("archives gc, ");
+        }
         log::warn!("These services are still stopping ({:04x}): {}", bitmap, ss);
     }
 
@@ -441,6 +440,7 @@ impl Engine {
     pub const MASK_SERVICE_VALIDATOR_MANAGER: u32              = 0x0100;
     pub const MASK_SERVICE_BOOT: u32                           = 0x0200;
     pub const MASK_SERVICE_DB_RESTORE: u32                     = 0x0400;
+    pub const MASK_SERVICE_ARCHIVES_GC: u32                    = 0x0800;
 
     // Sync status
     pub const SYNC_STATUS_START_BOOT: u32           = 0x0001;
@@ -480,7 +480,7 @@ impl Engine {
 
         async fn open_db(
             db_config: InternalDbConfig,
-            restore_db: bool,
+            restore_db_enabled: bool,
             force_check_db: bool,
             is_broken: Option<&AtomicBool>,
             stopper: &Arc<Stopper>,
@@ -494,18 +494,17 @@ impl Engine {
                 }
                 Ok(())
             };                                 
-            let db = InternalDb::with_update(
+            let db = Arc::new(InternalDb::with_update(
                 db_config,
+                restore_db_enabled,
+                force_check_db,
+                true,
+                &check_stop,
+                is_broken,
                 #[cfg(feature = "telemetry")]
                 telemetry,
                 allocated,
-                Some(&check_stop),
-                is_broken
-            ).await?;
-            // TODO correct workchain id needed here, but it will be known later
-            let db = Arc::new(
-                check_db(db, 0, restore_db, force_check_db, &check_stop, is_broken).await?
-            );
+            ).await?);
             Ok(db)
         }
 
@@ -640,9 +639,15 @@ impl Engine {
             &engine_allocated
         )?;
 
-        log::info!("start_states_gc");
-        let state_gc_resolver = Arc::new(AllowStateGcSmartResolver::new(cells_lifetime_sec));
-        db.start_states_gc(state_gc_resolver.clone());
+        let shard_states_keeper = ShardStatesKeeper::new(
+            db.clone(),
+            enable_shard_state_persistent_gc,
+            cells_lifetime_sec,
+            stopper.clone(),
+            #[cfg(feature = "telemetry")]
+            engine_telemetry.clone(),
+            engine_allocated.clone()
+        )?;
 
         let remp_client = if remp_config.is_client_enabled() {
             let remp_client = Arc::new(RempClient::new(network.public_overlay_key()?.id().data().into()));
@@ -701,7 +706,6 @@ impl Engine {
             init_mc_block_id,
             initial_sync_disabled,
             archives_life_time,
-            enable_shard_state_persistent_gc,
             network,
             shard_blocks: shard_blocks_pool,
             last_known_mc_block_seqno: AtomicU32::new(0),
@@ -710,12 +714,9 @@ impl Engine {
             sync_status: AtomicU32::new(0),
             remp_capability: AtomicBool::new(false),
             test_bundles_config,
-            shard_states_cache: TimeBasedCache::new(120, "shard_states_cache".to_string()),
-            loaded_from_ss_cache: AtomicU64::new(0),
-            loaded_ss_total: AtomicU64::new(0),
+            shard_states_keeper: shard_states_keeper.clone(),
             #[cfg(feature="workchains")]
             workchain_id: AtomicI32::new(workchain_id),
-            state_gc_resolver,
             validation_status: lockfree::map::Map::new(),
             collation_status: lockfree::map::Map::new(),
             validated_block_stats_sender,
@@ -750,7 +751,6 @@ impl Engine {
 
         engine.acquire_stop(Self::MASK_SERVICE_SHARDSTATE_GC);
         save_top_shard_blocks_worker(engine.clone(), shard_blocks_receiver);
-
         Ok(engine)
     }
 
@@ -789,7 +789,7 @@ impl Engine {
         let engine = self.clone();
         tokio::spawn(
             async move {
-                 engine.db.stop_states_gc().await;
+                 engine.db.stop_states_db().await;
                  engine.stopper.release_stop(Self::MASK_SERVICE_SHARDSTATE_GC);
             }
         );
@@ -822,20 +822,7 @@ impl Engine {
 
     pub fn initial_sync_disabled(&self) -> bool {self.initial_sync_disabled}
 
-    pub fn shard_states_cache(&self) -> &TimeBasedCache<BlockIdExt, Arc<ShardStateStuff>> {
-        &self.shard_states_cache
-    }
-
-    pub fn update_shard_states_cache_stat(&self, loaded_from_cache: bool) {
-        let loaded_ss_total = self.loaded_ss_total.fetch_add(1, Ordering::Relaxed) + 1;
-        let loaded_from_ss_cache = if loaded_from_cache {
-            self.loaded_from_ss_cache.fetch_add(1, Ordering::Relaxed) + 1
-        } else {
-            self.loaded_from_ss_cache.load(Ordering::Relaxed)
-        };
-        log::trace!("shard_states_cache  total loaded: {}  from cache: {}  use cache: {}%",
-            loaded_ss_total, loaded_from_ss_cache, (100 * loaded_from_ss_cache) / loaded_ss_total);
-    }
+    pub fn shard_states_keeper(&self) -> &ShardStatesKeeper { &self.shard_states_keeper }
 
     pub async fn get_masterchain_overlay(&self) -> Result<Arc<dyn FullNodeOverlayClient>> {
         self.get_full_node_overlay(ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL).await
@@ -1157,34 +1144,6 @@ impl Engine {
         let id = block.id().clone();
         self.next_block_applying_awaiters.do_or_wait(&prev_id, None, async move { Ok(id) }).await?;
 
-        // Advance states GC
-        let shard_client = self.load_shard_client_mc_block_id()?.ok_or_else(
-            || error!("INTERNAL ERROR: No shard client MC block id when apply block")
-        )?;
-        let pss_keeper = self.load_pss_keeper_mc_block_id()?.ok_or_else(
-            || error!("INTERNAL ERROR: No PSS keeper MC block id when apply block")
-        )?;
-        let mut min_id: &BlockIdExt = if shard_client.seq_no() < pss_keeper.seq_no() { 
-            &shard_client
-        } else { 
-            &pss_keeper
-        };
-        let last_rotation_block_id = self.load_last_rotation_block_id()?;
-        let mut last_rotation_block_id_str = "none".to_string();
-        if let Some(id) = &last_rotation_block_id {
-            if min_id.seq_no() > id.seq_no() { 
-                min_id = &id 
-            }
-            last_rotation_block_id_str = format!("{}", id.seq_no())
-        }
-        log::trace!(
-            "Before state_gc_resolver.advance  shard_client {}  pss_keeper {}  last_rotation_block_id {}  min {}", 
-            shard_client.seq_no(),
-            pss_keeper.seq_no(),
-            last_rotation_block_id_str,
-            min_id.seq_no()
-        );
-        self.state_gc_resolver.advance(min_id, self.deref()).await?;
         Ok(())
     }
 
@@ -1646,121 +1605,60 @@ impl Engine {
         self.db().save_full_node_state(PSS_KEEPER_MC_BLOCK, id)
     }
 
-    pub fn start_persistent_states_keeper(
+    fn load_archives_gc_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+        self.db().load_full_node_state(ARCHIVES_GC_BLOCK)
+    }
+
+    pub fn save_archives_gc_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
+        self.db().save_full_node_state(ARCHIVES_GC_BLOCK, id)
+    }
+
+    pub fn start_archives_gc(
         engine: Arc<Engine>,
-        pss_keeper_block: BlockIdExt
+        archives_gc_block: BlockIdExt
     ) -> Result<tokio::task::JoinHandle<()>> {
-        log::info!("start_persistent_states_keeper");
+        log::info!("start_archives_gc");
         let join_handle = tokio::spawn(async move {
-            engine.acquire_stop(Engine::MASK_SERVICE_PSS_KEEPER);
-            if let Err(e) = Self::persistent_states_keeper(&engine, pss_keeper_block).await {
-                log::error!("FATAL!!! Unexpected error in persistent states keeper: {:?}", e);
+            engine.acquire_stop(Engine::MASK_SERVICE_ARCHIVES_GC);
+            if let Err(e) = Self::archives_gc_worker(&engine, archives_gc_block).await {
+                log::error!("FATAL!!! Unexpected error in archives gc: {:?}", e);
             }
-            engine.release_stop(Engine::MASK_SERVICE_PSS_KEEPER);
+            engine.release_stop(Engine::MASK_SERVICE_ARCHIVES_GC);
         });
         Ok(join_handle)
     }
 
-    pub async fn persistent_states_keeper(
+    pub async fn archives_gc_worker(
         engine: &Arc<Engine>,
-        pss_keeper_block: BlockIdExt
+        archives_gc_block: BlockIdExt
     ) -> Result<()> {
-        if !pss_keeper_block.shard().is_masterchain() {
-            fail!("'pss_keeper_block' mast belong master chain");
+        if !archives_gc_block.shard().is_masterchain() {
+            fail!("'archives_gc_block' must belong master chain");
         }
-        let mut handle = engine.load_block_handle(&pss_keeper_block)?.ok_or_else(
-            || error!("Cannot load handle for PSS keeper block {}", pss_keeper_block)
+        let mut handle = engine.load_block_handle(&archives_gc_block)?.ok_or_else(
+            || error!("Cannot load handle for archives_gc_block {}", archives_gc_block)
         )?;
-        loop {
-            let mc_state = engine.load_state(handle.id()).await?;
+        'm: loop {
+            if engine.check_stop() {
+                break 'm;
+            }
             if handle.is_key_block()? {
-                let is_persistent_state = if handle.id().seq_no() == 0 {
-                    false // zerostate is saved another way (see boot)
-                } else if let Some(prev_key_block_id) =
-                    mc_state.shard_state_extra()?.prev_blocks.get_prev_key_block(handle.id().seq_no() - 1)? {
-                    let block_id = BlockIdExt {
-                        shard_id: ShardIdent::masterchain(),
-                        seq_no: prev_key_block_id.seq_no,
-                        root_hash: prev_key_block_id.root_hash,
-                        file_hash: prev_key_block_id.file_hash
-                    };
-                    let prev_handle = engine.load_block_handle(&block_id)?.ok_or_else(
-                        || error!("Cannot load handle for PSS keeper prev key block {}", block_id)
-                    )?;
-                    engine.is_persistent_state(handle.gen_utime()?, prev_handle.gen_utime()?,
-                        boot::PSS_PERIOD_BITS)
-                } else {
-                    false
-                };
-                if !is_persistent_state {
-                    log::trace!("persistent_states_keeper: skip keyblock (is not persistent) {}", handle.id());
-                } else {
-                    log::trace!("persistent_states_keeper: saving {}", handle.id());
-                    let now = std::time::Instant::now();
-                    engine.clone().store_persistent_state_attempts(&handle, &mc_state).await;
-                    if engine.check_stop() {
-                        break
-                    }
-                    log::trace!("persistent_states_keeper: saved {} TIME {}ms",
-                        handle.id(), now.elapsed().as_millis());
-
-                    let mut shard_blocks = vec!();
-                    let (_master, workchain_id) = engine.processed_workchain().await?;
-                    mc_state.shards()?.iterate_shards(|ident, descr| {
-                        if ident.is_masterchain() || ident.workchain_id() == workchain_id {
-                            shard_blocks.push(BlockIdExt {
-                                shard_id: ident,
-                                seq_no: descr.seq_no,
-                                root_hash: descr.root_hash,
-                                file_hash: descr.file_hash
-                            });
-                        }
-                        Ok(true)
-                    })?;
-                    for block_id in shard_blocks {
-                        if engine.check_stop() {
-                            break
-                        }
-                        log::trace!("persistent_states_keeper: saving {}", block_id);
-                        let now = std::time::Instant::now();
-                        
-                        let ss = engine.clone().wait_state(&block_id, None, false).await?;
-                        let handle = engine.load_block_handle(&block_id)?.ok_or_else(
-                            || error!("Cannot load handle for PSS keeper shard block {}", block_id)
-                        )?;
-                        engine.clone().store_persistent_state_attempts(&handle, &ss).await;
-                        if engine.check_stop() {
-                            break
-                        }
-                        log::trace!("persistent_states_keeper: saved {} TIME {}ms",
-                            handle.id(), now.elapsed().as_millis());
-                    };
-                }
-                if engine.check_stop() {
-                    break
-                }
+                let mc_state = engine.load_state(handle.id()).await?;
                 if let Err(e) = Self::check_gc_for_archives(&engine, &handle, &mc_state).await {
                     log::warn!("archive manager gc: {}", e);
                 }
-                if engine.enable_shard_state_persistent_gc {
-                    let calc_ttl = |t| {
-                        let ttl = engine.persistent_state_ttl(t, boot::PSS_PERIOD_BITS);
-                        let expired = ttl <= engine.now();
-                        (ttl, expired)
-                    };
-                    if let Err(e) = engine.db.shard_state_persistent_gc(calc_ttl, &engine.zero_state_id).await {
-                        log::warn!("persistent states gc: {}", e);
-                    }
-                }
             }
             handle = loop {
-                if let Ok(h) = engine.wait_next_applied_mc_block(&handle, Some(500)).await {
-                    break h.0;
-                } else if engine.check_stop() {
-                    return Ok(());
+                match engine.wait_next_applied_mc_block(&handle, Some(500)).await {
+                    Ok(r) => break r.0,
+                    Err(_) => {
+                        if engine.check_stop() {
+                            break 'm;
+                        }
+                    }
                 }
             };
-            engine.save_pss_keeper_mc_block_id(handle.id())?;
+            engine.save_archives_gc_mc_block_id(handle.id())?;
         }
         Ok(())
     }
@@ -1847,33 +1745,6 @@ impl Engine {
         });
     }
 
-    pub async fn store_persistent_state_attempts(
-        self: Arc<Self>,
-        handle: &Arc<BlockHandle>,
-        ss: &Arc<ShardStateStuff>,
-    ) {
-        let mut attempts = 1;
-        loop {
-            let engine = self.clone();
-            match self.db.store_shard_state_persistent(
-                handle,
-                ss,
-                None,
-                Box::new(move || engine.check_stop())
-            ).await {
-                Ok(_) => return,
-                Err(e) => {
-                    log::error!("CRITICAL Error saving persistent state (attempt: {}): {:?}", attempts, e);
-                    if self.check_stop() {
-                        return;
-                    }
-                    attempts += 1;
-                    futures_timer::Delay::new(Duration::from_millis(5000)).await;
-                }
-            }
-        }
-    }
-
     #[allow(dead_code)]
     pub async fn truncate_database(&self, mc_seq_no: u32) -> Result<()> {
         let mc_state = self.load_last_applied_mc_state().await?;
@@ -1900,6 +1771,11 @@ impl Engine {
         if let Some(block_id) = self.load_last_rotation_block_id()? {
             if block_id.seq_no > prev_block_id.seq_no {
                 self.save_last_rotation_block_id(&prev_block_id)?;
+            }
+        }
+        if let Some(block_id) = self.load_archives_gc_mc_block_id()? {
+            if block_id.seq_no > prev_block_id.seq_no {
+                self.save_archives_gc_mc_block_id(&prev_block_id)?;
             }
         }
         Ok(())
@@ -1972,7 +1848,8 @@ pub(crate) async fn load_zero_state(engine: &Arc<Engine>, path: &str) -> Result<
 
 }
 
-async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(BlockIdExt, BlockIdExt, BlockIdExt)> {
+async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) 
+-> Result<(BlockIdExt, BlockIdExt, BlockIdExt, BlockIdExt)> {
     log::info!("Booting...");
     engine.set_sync_status(Engine::SYNC_STATUS_START_BOOT);
 
@@ -1981,7 +1858,7 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
     }
 
     let result = match engine.load_last_applied_mc_block_id() {
-        Ok(Some(id)) => crate::boot::warm_boot(engine.clone(), id).await,
+        Ok(Some(id)) => Ok((*id).clone()),
         Ok(None) => Err(error!("No last applied MC block, warm boot is not possible")),
         Err(x) => Err(x)
     };
@@ -2019,14 +1896,24 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
         }
     };
 
-    let pss_keeper_mc_block = match engine.db().load_full_node_state(PSS_KEEPER_MC_BLOCK) {
+    let ss_keeper_mc_block = match engine.db().load_full_node_state(PSS_KEEPER_MC_BLOCK) {
         Ok(Some(id)) => id.deref().clone(),
         _ => {
             if !cold {
-                fail!("INTERNAL ERROR: No PSS keeper MC block in warm boot")
+                fail!("INTERNAL ERROR: No shard states keeper MC block in warm boot")
             }
             engine.save_pss_keeper_mc_block_id(&last_applied_mc_block)?;
-            log::info!("PSS keeper MC block reset to last applied MC block");
+            log::info!("SS keeper MC block reset to last applied MC block");
+            last_applied_mc_block.clone()
+        }
+    };
+
+    let archives_gc_block = match engine.db().load_full_node_state(ARCHIVES_GC_BLOCK) {
+        Ok(Some(id)) => id.deref().clone(),
+        _ => {
+            // for compatibility don't catch error if there isn't state
+            engine.save_archives_gc_mc_block_id(&ss_keeper_mc_block)?;
+            log::info!("Archives gc MC block reset to ss_keeper_mc_block");
             last_applied_mc_block.clone()
         }
     };
@@ -2035,7 +1922,7 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) -> Result<(Blo
     log::info!("Boot complete.");
     log::info!("LastMcBlockId: {}", last_applied_mc_block);
     log::info!("ShardsClientMcBlockId: {}", shard_client_mc_block);
-    Ok((last_applied_mc_block, shard_client_mc_block, pss_keeper_mc_block))
+    Ok((last_applied_mc_block, shard_client_mc_block, ss_keeper_mc_block, archives_gc_block))
 }
 
 pub async fn run(
@@ -2086,7 +1973,8 @@ pub async fn run(
     network.add_consumer(&overlay_id, full_node_service.clone())?;
 
     // Boot
-    let (mut last_applied_mc_block, mut shard_client_mc_block, pss_keeper_block) = boot(&engine, zerostate_path).await?;
+    let (mut last_applied_mc_block, mut shard_client_mc_block, ss_keeper_block, archives_gc_block) =
+        boot(&engine, zerostate_path).await?;
 
     let (master, workchain_id) = engine.processed_workchain().await?;
     log::info!("processed masterchain: {} workchain: {}", master, workchain_id);
@@ -2104,8 +1992,14 @@ pub async fn run(
     network.add_consumer(&overlay_id, full_node_service.clone())?;
     engine.get_full_node_overlay(workchain_id, SHARD_FULL).await?;
 
-    // Saving of persistent states (for sync)
-    let _ = Engine::start_persistent_states_keeper(engine.clone(), pss_keeper_block)?;
+    let _ = Engine::start_archives_gc(engine.clone(), archives_gc_block)?;
+
+    engine.shard_states_keeper.clone().start(
+        engine.clone(),
+        last_applied_mc_block.clone(),
+        shard_client_mc_block.clone(),
+        ss_keeper_block
+    ).await?;
 
     if remp_config.is_client_enabled() {
         engine.remp_client.as_ref()

@@ -169,7 +169,7 @@ impl MessageQueue {
     }
 
     pub fn put_to_catchain(&self, rmq_message: Arc<RmqMessage>) {
-        if let Err(e) = self.catchain_info.pending_messages_queue_sender.send(rmq_message.clone()) {
+        if let Err(e) = self.catchain_info.pending_messages_queue_sender.send((rmq_message.clone(), RempMessageStatus::TonNode_RempNew)) {
             log::error!(target: "remp",
                 "RMQ {}: Cannot write reject message for {:x} into catchain: {}", self, rmq_message.message_id, e
             )
@@ -244,7 +244,7 @@ impl MessageQueue {
     pub async fn put_message_to_rmq(&self, old_message: Arc<RmqMessage>) -> Result<()> {
         let msg = Arc::new(old_message.new_with_updated_source_idx(self.catchain_info.local_idx));
         log::info!(target: "remp", "Point 3. Pushing to RMQ {}; message {}", self, msg);
-        self.catchain_info.pending_messages_queue_sender.send(msg)?;
+        self.catchain_info.pending_messages_queue_sender.send((msg, RempMessageStatus::TonNode_RempNew))?;
 
         #[cfg(feature = "telemetry")]
         self.engine.remp_core_telemetry().in_channel_to_catchain(
@@ -266,15 +266,7 @@ impl MessageQueue {
     pub async fn poll(&self) {
         log::trace!(target: "remp", "Point 4. RMQ {}: polling", self);
 
-/*
-        // Debug: dump current contents of RMQ Session catchain
-        let contents = self.remp_manager.message_cache.received_messages_to_vector(&self.shard).await;
-        log::debug!(target: "remp", "RMQ {} catchain messages contents:", self);
-        for (msg,status) in contents.iter() {
-            log::debug!(target: "remp", "RMQ {}: {}, status {}", self, msg, status);
-        }
-*/
-        log::debug!(target: "remp", "RMQ {}: total {} messages in cache", 
+        log::debug!(target: "remp", "RMQ {}: total {} messages in cache",
             self, self.remp_manager.message_cache.received_messages_count(&self.catchain_info.shard).await
         );
 
@@ -288,19 +280,21 @@ impl MessageQueue {
                 Err(TryRecvError::Empty) => {
                     break 'queue_loop;
                 },
-                Ok((rmq_message, RempMessageStatus::TonNode_RempNew)) => {
+                Ok((rmq_message, status)) => {
                     let rmq_message = Arc::new(rmq_message);
 
-                    let added = self.remp_manager.message_cache.new_message_with_shard(
-                        rmq_message.clone(), self.catchain_info.shard.clone()).await;
+                    let added = self.remp_manager.message_cache.add_external_message_status(
+                        rmq_message.clone(), self.catchain_info.shard.clone(), status.clone()
+                    ).await;
+
                     match added {
                         Err(e) => {
                             log::error!(target: "remp",
                                 "Point 4. RMQ {}: cannot insert new message {} into message_cache, error: `{}`",
                                 self, rmq_message, e
                             );
-                        }
-                        Ok((true, _)) => {
+                        },
+                        Ok(None) => {
                             let (added_to_queue, len) = self.queues.execute_sync(
                                 |catchain| catchain.add_pending_collation(
                                     &rmq_message.message_id, rmq_message.timestamp
@@ -322,25 +316,15 @@ impl MessageQueue {
                             #[cfg(feature = "telemetry")]
                             self.engine.remp_core_telemetry().add_to_cache_attempt(true);
                         },
-                        Ok((false, _)) => {
+                        Ok(Some(old_status)) => {
                             log::trace!(target: "remp",
-                                "Point 4. RMQ {}. Message {} from validator {} - we already have it; skipping",
-                                self, rmq_message.message_id.to_hex_string(), rmq_message.source_idx
+                                "Point 4. RMQ {}. Message {} status {} from validator {} - we already have it with status {}; skipping",
+                                self, rmq_message.message_id.to_hex_string(), status, rmq_message.source_idx, old_status
                             );
                             #[cfg(feature = "telemetry")]
                             self.engine.remp_core_telemetry().add_to_cache_attempt(false);
                         }
                     }
-                }
-                Ok((rmq_message, status)) => {
-                    // These kinds of messages in REMP are for archive purposes: if message was rejected
-                    // by many nodes, then this message is not copied to next RMQ catchain.
-                    // Active RMQ catchain reacts on its own collator outcomes only.
-                    log::trace!(target: "remp", "Point 4. REMP message {} from {} with status {} --- not processed by active session",
-                        rmq_message.message_id.to_hex_string(),
-                        rmq_message.source_idx,
-                        status
-                    );
                 }
             }
         }
@@ -545,88 +529,7 @@ impl fmt::Display for MessageQueue {
         )
     }
 }
-/*
-impl CatchainListener for MessageQueue {
-    fn preprocess_block(&self, block: BlockPtr) {
-        let data = block.get_payload();
-        log::trace!(target: "remp", "Preprocessing RMQ {} Message {:?} from {}",
-            self, data.data().0, block.get_source_id()
-        );
-        self.unpack_payload(data, block.get_source_id());
-    }
 
-    fn process_blocks(&self, blocks: Vec<BlockPtr>) {
-        log::trace!(target: "remp", "Processing RMQ {}: new external messages, len = {}", self, blocks.len());
-        //if blocks.len() > 0 {
-        //    for x in blocks {
-        //        self.unpack_payload(x.get_payload(), x.get_source_id());
-        //    }
-        //}
-
-        let mut msg_vect: Vec<::ton_api::ton::validator_session::round::Message> = Vec::new();
-        while let Ok(msg) = self.pending_messages_queue_receiver.try_recv() {
-            let msg_body = ::ton_api::ton::validator_session::round::validator_session::message::message::Commit {
-                round: 0,
-                candidate: Default::default(),
-                signature: msg.serialize(RempMessageStatus::TonNode_RempNew).unwrap()
-            }.into_boxed();
-            log::trace!(target: "remp", "Point 3. RMQ {} sending message: {:?}, decoded {:?}",
-                self, msg_body, msg
-            );
-
-            msg_vect.push(msg_body);
-        };
-
-        #[cfg(feature = "telemetry")]
-        let sent_to_catchain = msg_vect.len();
-
-        let payload = ::ton_api::ton::validator_session::blockupdate::BlockUpdate {
-            ts: 0, //ts as i64,
-            actions: msg_vect.into(),
-            state: 0 //real_state_hash as i32,
-        }.into_boxed();
-        let serialized_payload = catchain::utils::serialize_tl_boxed_object!(&payload);
-
-        self.rt.block_on(async move {
-            match &self.get_session().await {
-                Some(ctchn) => {
-                    ctchn.processed_block(
-                        catchain::CatchainFactory::create_block_payload(
-                            serialized_payload.clone(),
-                        ), false, false);
-                    log::trace!(target: "remp", "Point 3. RMQ {} sent message: {:?}",
-                        self, serialized_payload
-                    );
-                    #[cfg(feature = "telemetry")]
-                    self.engine.remp_core_telemetry().sent_to_catchain(&self.shard, sent_to_catchain);
-                },
-                None => log::error!("RMQ: Catchain session is not initialized!")
-            }
-        });
-    }
-
-    fn finished_processing(&self) {
-        log::trace!(target: "remp", "MessageQueue {} finished processing", self)
-    }
-
-    fn started(&self) {
-        log::trace!(target: "remp", "MessageQueue {} started", self)
-    }
-
-    fn process_broadcast(&self, _source_id: PublicKeyHash, _data: BlockPayloadPtr) {
-        log::trace!(target: "remp", "MessageQueue {} process broadcast", self)
-    }
-
-    fn process_query(&self, source_id: PublicKeyHash, data: BlockPayloadPtr, _callback: ExternalQueryResponseCallback) {
-        let data = data.data();
-        log::trace!(target: "remp", "Processing RMQ {} Query {:?} from {}", self, data.0.as_slice(), source_id);
-    }
-
-    fn set_time(&self, _timestamp: SystemTime) {
-        log::trace!(target: "remp", "MessageQueue {} set time", self)
-    }
-}
-*/
 struct StatusUpdater {
     queue: Arc<MessageQueue>,
     new_status: RempMessageStatus
@@ -646,26 +549,16 @@ impl BlockProcessor for StatusUpdater {
         }
     }
 }
-/*
-#[derive(Debug,PartialEq,Eq,PartialOrd,Ord)]
-enum MessageQueueStatus { Active, NewQueues, Forwarding, Stopping }
 
-impl fmt::Display for MessageQueueStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-*/
-/* Controls message queues - actual and previous */
+/** Controls message queues - actual and next */
 pub struct RmqQueueManager {
     rt: tokio::runtime::Handle,
     engine: Arc<dyn EngineOperations>,
     remp_manager: Arc<RempManager>,
     shard: ShardIdent,
     cur_queue: Option<Arc<MessageQueue>>,
-    new_queues: MutexWrapper<Vec<Arc<MessageQueue>>>,
-    local_public_key: PublicKey,
-    //status: MessageQueueStatus
+    next_queues: MutexWrapper<Vec<Arc<MessageQueue>>>,
+    local_public_key: PublicKey
 }
 
 impl RmqQueueManager {
@@ -683,33 +576,14 @@ impl RmqQueueManager {
             remp_manager,
             shard: shard.clone(),
             cur_queue: None,
-            new_queues: MutexWrapper::new(vec!(), format!("Next queues for {}", shard.clone())),
+            next_queues: MutexWrapper::new(vec!(), format!("Next queues for {}", shard.clone())),
             local_public_key: local_public_key.clone(),
             //status: MessageQueueStatus::Active
         };
 
         manager
     }
-/*
-    pub fn set_status(&mut self, status: MessageQueueStatus) -> Result<()> {
-        if self.status < status {
-            self.status = status;
-            Ok(())
-        }
-        else {
-            fail!("RMQ {}: cannot advance queue status from {} to {}", self, self.status, status)
-        }
-    }
 
-    pub fn ensure_status(&mut self, status: MessageQueueStatus) -> Result<()> {
-        if self.status == status {
-            Ok(())
-        }
-        else {
-            fail!("RMQ {}: has queue status {} while expected {}", self, self.status, status)
-        }
-    }
- */
     pub fn set_queues(&mut self, catchain_seqno: u32, master_cc_seqno: u32, curr: &Vec<ValidatorDescr>, next: &Vec<ValidatorDescr>) {
         if self.remp_manager.options.is_service_enabled() {
             if self.cur_queue.is_some() {
@@ -747,7 +621,7 @@ impl RmqQueueManager {
                     return
                 }
             };
-            self.new_queues.execute_sync(|q| q.push(Arc::new(queue))).await;
+            self.next_queues.execute_sync(|q| q.push(Arc::new(queue))).await;
         }
         else {
             log::error!(target: "remp", "RMQ {}: cannot add new queue: cur_queue is none!", self);
@@ -762,7 +636,6 @@ impl RmqQueueManager {
         log::info!(target: "remp", "RMQ {}: forwarding messages to new RMQ (cc_seqno {})", self, new_cc_seqno);
         let mut sent = 0;
 
-        //self.set_status(MessageQueueStatus::Forwarding)?;
         if let Some(queue) = &self.cur_queue {
             let to_forward = match queue.queues.execute_sync(|x| x.list_pending_for_forwarding()).await {
                 Ok(f) => f,
@@ -778,7 +651,7 @@ impl RmqQueueManager {
 
             log::info!(target: "remp", "RMQ {}: {} pending messages, starting next queues", self, to_forward.len());
 
-            let new_queues = self.new_queues.execute_sync( |q| q.clone() ).await;
+            let new_queues = self.next_queues.execute_sync( |q| q.clone() ).await;
 
             if new_queues.len() == 0 {
                 log::error!(target: "remp", "RMQ {}: no next queues to forward messages", self);
@@ -797,7 +670,7 @@ impl RmqQueueManager {
             }
 
             for msgid in to_forward.iter() {
-                let (_status, message) = match self.remp_manager.message_cache.get_message_with_status(msgid).await {
+                let (status, message) = match self.remp_manager.message_cache.get_message_with_status(msgid).await {
                     None => {
                         log::error!(
                             target: "remp",
@@ -806,15 +679,13 @@ impl RmqQueueManager {
                         );
                         continue
                     },
-                    Some((_m, RempMessageStatus::TonNode_RempRejected(_))) => continue,
                     Some((_m, RempMessageStatus::TonNode_RempTimeout)) => continue,
-                    Some((_m, RempMessageStatus::TonNode_RempAccepted(a))) if a.level == RempMessageLevel::TonNode_RempMasterchain => continue,
                     Some((m, _s)) if m.is_expired(new_cc_seqno) => continue,
                     Some((m, s)) => (s, m)
                 };
 
                 for new in new_queues.iter() {
-                    if let Err(x) = new.catchain_info.pending_messages_queue_sender.send(message.clone()) {
+                    if let Err(x) = new.catchain_info.pending_messages_queue_sender.send((message.clone(), status.clone())) {
                         log::error!(target: "remp",
                             "Point 5a. RMQ {}: message {:x} cannot be put to new queue {}: `{}`",
                             self, msgid, new, x
@@ -855,7 +726,7 @@ impl RmqQueueManager {
         if let Some(q) = &self.cur_queue {
             q.stop().await;
         }
-        let queues = self.new_queues.execute_sync (|q| q.clone()).await;
+        let queues = self.next_queues.execute_sync (|q| q.clone()).await;
         for q in queues.iter() {
             q.stop().await;
         }

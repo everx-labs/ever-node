@@ -133,6 +133,14 @@ impl RocksDb {
         fail!("Attempt to drop already dropped table {}", name)
     }
 
+    pub fn drop_table_force(&self, name: &str) -> Result<()> {
+        if self.drop_table(name).is_err() {
+            self.db().drop_cf(name)?;
+            self.locks.remove(name);
+        }
+        Ok(())
+    }
+
     fn cf(&self, name: &str) -> Arc<BoundColumnFamily> {
         self.db().cf_handle(name)
             .unwrap_or_else(|| panic!("no handle for column family {} in rocksdb", name))
@@ -179,7 +187,8 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDb {
     }
 
     fn for_each(&self, predicate: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool>) -> Result<bool> {
-        for (key, value) in self.db().iterator(IteratorMode::Start) {
+        for iter in self.db().iterator(IteratorMode::Start) {
+            let (key, value) = iter?;
             if !predicate(key.as_ref(), value.as_ref())? {
                 return Ok(false)
             }
@@ -302,7 +311,8 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbTable {
         if let Some(lock) = self.db.locks.get(&self.family) {
             let lock = lock.val();
             if lock.fetch_add(1, Ordering::Relaxed) >= 0 {
-                for (key, value) in self.db.iterator_cf(&self.cf(), IteratorMode::Start) {
+                for iter in self.db.iterator_cf(&self.cf(), IteratorMode::Start) {
+                    let (key, value) = iter?;
                     match predicate(key.as_ref(), value.as_ref()) {
                         Ok(false) => {
                             lock.fetch_sub(1, Ordering::Relaxed);
@@ -403,9 +413,9 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbSnapshot<'_> {
     fn try_get(&self, key: &K) -> Result<Option<DbSlice>> {
         Ok(self.snapshot.get_cf(&self.cf(), key.key())?.map(|value| value.into()))
     }
-
     fn for_each(&self, predicate: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool>) -> Result<bool> {
-        for (key, value) in self.snapshot.iterator_cf(&self.cf(), IteratorMode::Start) {
+        for iter in self.snapshot.iterator_cf(&self.cf(), IteratorMode::Start) {
+            let (key, value) = iter?;
             if !predicate(key.as_ref(), value.as_ref())? {
                 return Ok(false);
             }

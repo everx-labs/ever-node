@@ -24,8 +24,9 @@ use ton_block::{
     BinTreeType, WorkchainDescr
 };
 use ton_types::{
-    AccountId, Cell, Result, deserialize_tree_of_cells, deserialize_tree_of_cells_inmem,
-    UInt256, BagOfCells, BocSerialiseMode, SliceData, error, fail,
+    AccountId, Cell, SliceData, error, fail, Result, deserialize_tree_of_cells,
+    deserialize_cells_tree_inmem_with_abort, 
+    UInt256, BocSerialiseMode, BagOfCells,
 };
 
 //    #[derive(Debug, Default, Clone, Eq, PartialEq)]
@@ -117,20 +118,27 @@ impl ShardStateStuff {
         bytes: Arc<Vec<u8>>,
         #[cfg(feature = "telemetry")]
         telemetry: &EngineTelemetry,
-        allocated: &EngineAlloc
+        allocated: &EngineAlloc,
+        abort: &dyn Fn() -> bool,
     ) -> Result<Arc<Self>> {
         if block_id.seq_no() == 0 {
             fail!("Use `deserialize_zerostate` method for zerostate");
         }
-        let root = deserialize_tree_of_cells_inmem(bytes)?;
+        let mut result = deserialize_cells_tree_inmem_with_abort(bytes, abort)?;
+        if result.0.len() != 1 {
+            fail!("State boc can't contain {} roots", result.0.len());
+        }
         Self::from_root_cell(
-            block_id, root, 
+            block_id, 
+            result.0.pop().ok_or_else(|| error!("Can't get root"))?,
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated
         )
     }
 
+    // is used in tests
+    #[allow(dead_code)]
     pub fn deserialize(
         block_id: BlockIdExt, 
         bytes: &[u8],
@@ -254,13 +262,13 @@ impl ShardStateStuff {
     pub fn config_params(&self) -> Result<&ConfigParams> {
         Ok(&self.shard_state_extra()?.config)
     }
-
-    pub fn has_prev_block(&self, block_id: &BlockIdExt) -> Result<bool> {
-        Ok(self.shard_state_extra()?
-            .prev_blocks.get(&block_id.seq_no())?
-            .map(|id| &id.blk_ref().root_hash == block_id.root_hash() && &id.blk_ref().file_hash == block_id.file_hash())
-            .unwrap_or_default())
-    }
+// Unused
+//    pub fn has_prev_block(&self, block_id: &BlockIdExt) -> Result<bool> {
+//        Ok(self.shard_state_extra()?
+//            .prev_blocks.get(&block_id.seq_no())?
+//            .map(|id| &id.blk_ref().root_hash == block_id.root_hash() && &id.blk_ref().file_hash == block_id.file_hash())
+//            .unwrap_or_default())
+//    }
 
 // Unused
 //    pub fn prev_key_block_id(&self) -> BlockIdExt {

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Display;
+use std::ops::Rem;
 use std::sync::Arc;
 use std::time::SystemTime;
 use ever_crypto::KeyId;
@@ -11,7 +12,7 @@ use ton_api::IntoBoxed;
 use ton_api::ton::ton_node::RempMessageStatus;
 use ton_block::{ShardIdent, ValidatorDescr};
 use ton_types::{Result, UInt256, error, fail};
-use catchain::{BlockPayloadPtr, BlockPtr, Catchain, CatchainFactory, CatchainListener, CatchainNode, CatchainOverlayManagerPtr, CatchainPtr, ExternalQueryResponseCallback, PrivateKey, PublicKey, PublicKeyHash};
+use catchain::{BlockPayloadPtr, BlockPtr, CatchainFactory, CatchainListener, CatchainNode, CatchainOverlayManagerPtr, CatchainPtr, ExternalQueryResponseCallback, PrivateKey, PublicKey, PublicKeyHash};
 use crate::engine_traits::EngineOperations;
 use crate::validator::catchain_overlay::CatchainOverlayManagerImpl;
 use crate::validator::message_cache::RmqMessage;
@@ -33,8 +34,8 @@ pub struct RempCatchainInfo {
     pub shard: ShardIdent,
     pub catchain_ptr: ArcSwapOption<CatchainPtr>,
 
-    pending_messages_queue_receiver: Receiver<Arc<RmqMessage>>,
-    pub pending_messages_queue_sender: Sender<Arc<RmqMessage>>,
+    pending_messages_queue_receiver: Receiver<(Arc<RmqMessage>, RempMessageStatus)>,
+    pub pending_messages_queue_sender: Sender<(Arc<RmqMessage>, RempMessageStatus)>,
 
     pub rmq_catchain_receiver: Receiver<(RmqMessage, RempMessageStatus)>,
     rmq_catchain_sender: Sender<(RmqMessage, RempMessageStatus)>
@@ -103,12 +104,6 @@ impl RempCatchainInfo {
             pending_messages_queue_sender, pending_messages_queue_receiver,
             rmq_catchain_sender: recv_messages_queue_sender,
             rmq_catchain_receiver: recv_messages_queue_receiver,
-            /*
-                        pending_messages_queue_sender, pending_messages_queue_receiver,
-                        rmq_catchain_sender: recv_messages_queue_sender,
-                        rmq_catchain_receiver: recv_messages_queue_receiver,
-                        rmq_catchain,
-             */
             remp_manager
         });
     }
@@ -278,11 +273,11 @@ impl CatchainListener for RempCatchainInfo {
         //}
 
         let mut msg_vect: Vec<::ton_api::ton::validator_session::round::Message> = Vec::new();
-        while let Ok(msg) = self.pending_messages_queue_receiver.try_recv() {
+        while let Ok((msg, msg_status)) = self.pending_messages_queue_receiver.try_recv() {
             let msg_body = ::ton_api::ton::validator_session::round::validator_session::message::message::Commit {
                 round: 0,
                 candidate: Default::default(),
-                signature: msg.serialize(RempMessageStatus::TonNode_RempNew).unwrap()
+                signature: msg.serialize(msg_status).unwrap()
             }.into_boxed();
             log::trace!(target: "remp", "Point 3. RMQ {} sending message: {:?}, decoded {:?}",
                 self, msg_body, msg

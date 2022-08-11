@@ -388,12 +388,13 @@ impl CollatorTestBundle {
                     &allocated 
                 )?
             } else {
-                ShardStateStuff::deserialize(
+                ShardStateStuff::deserialize_inmem(
                     ss_id.clone(), 
-                    &data,
+                    Arc::new(data),
                     #[cfg(feature = "telemetry")]
                     &telemetry,
-                    &allocated 
+                    &allocated,
+                    &|| false
                 )?
             };
             states.insert(ss_id.clone(), ss);
@@ -404,12 +405,13 @@ impl CollatorTestBundle {
             let data = read(&filename).map_err(|_| error!("cannot read file {}", filename))?;
             states.insert(
                 index.id.clone(),
-                ShardStateStuff::deserialize(
+                ShardStateStuff::deserialize_inmem(
                     index.id.clone(), 
-                    &data,
+                    Arc::new(data),
                     #[cfg(feature = "telemetry")]
                     &telemetry,
-                    &allocated 
+                    &allocated,
+                    &|| false
                 )?
             );
         }
@@ -427,12 +429,13 @@ impl CollatorTestBundle {
                 &allocated 
             )?
         } else {
-            ShardStateStuff::deserialize(
+            ShardStateStuff::deserialize_inmem(
                 oldest_mc_state_id.clone(), 
-                &data,
+                Arc::new(data),
                 #[cfg(feature = "telemetry")]
                 &telemetry,
-                &allocated 
+                &allocated,
+                &|| false
             )?
         };
         let mut prev_state_root = oldest_mc_state.root_cell().clone();

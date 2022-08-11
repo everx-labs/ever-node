@@ -34,6 +34,7 @@ mod sync;
 mod types;
 mod validating_utils;
 mod validator;
+mod shard_states_keeper;
 
 #[cfg(feature = "tracing")]
 mod jaeger;

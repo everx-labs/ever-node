@@ -183,6 +183,18 @@ impl MessageCacheImpl {
         }
     }
 
+    pub fn insert_message(&mut self, message: Arc<RmqMessage>, shard: ShardIdent, status: RempMessageStatus) -> Result<()> {
+        let message_id = message.message_id;
+        if self.messages.contains_key(&message_id) || self.message_shards.contains_key(&message_id) || self.message_statuses.contains_key(&message_id) {
+            fail!("Inconsistent message cache contents: message {} present in cache, although should not", message_id)
+        }
+
+        self.messages.insert(message.message_id.clone(), message.clone());
+        self.message_statuses.insert(message.message_id.clone(), RempMessageStatus::TonNode_RempNew);
+        self.message_shards.insert(message.message_id.clone(), shard);
+        Ok(())
+    }
+
     pub fn remove_message(&mut self, message_id: &UInt256) {
         self.messages.remove(message_id);
         self.message_shards.remove(message_id);
@@ -190,6 +202,18 @@ impl MessageCacheImpl {
 
         #[cfg(feature = "telemetry")]
         self.cache_size_metric.update(self.messages.len() as u64);
+    }
+
+    pub fn update_message_shard(&mut self, message_id: &UInt256, new_shard: ShardIdent) -> Result<()> {
+        let old_shard = self.message_shards.get(message_id);
+        match &old_shard {
+            None => fail!("Message shard {:x} not found", message_id),
+            Some(x) if **x == new_shard => Ok(()),
+            Some(_) => {
+                self.message_shards.insert(message_id.clone(), new_shard);
+                Ok(())
+            }
+        }
     }
 
     pub fn update_message_status(&mut self, message_id: &UInt256, new_status: RempMessageStatus) -> Result<()> {
@@ -404,12 +428,31 @@ impl MessageCache {
                 Ok((false, c.messages.len()))
             }
             else {
-                c.messages.insert(message.message_id.clone(), message.clone());
-                c.message_statuses.insert(message.message_id.clone(), RempMessageStatus::TonNode_RempNew);
-                c.message_shards.insert(message.message_id.clone(), shard);
+                c.insert_message(message, shard, RempMessageStatus::TonNode_RempNew)?;
                 #[cfg(feature = "telemetry")]
                 c.cache_size_metric.update(c.messages.len() as u64);
                 Ok((true, c.messages.len()))
+            }
+        }).await
+    }
+
+    /// Inserts message with given status, if it is not there
+    /// If we know something about message -- that's more important than anything we discover from RMQ
+    /// If we do not know anything -- TODO: if >= 2/3 rejects, then 'Rejected'. Otherwise 'New'
+    /// Actual -- get it as granted ("imprinting")
+    pub async fn add_external_message_status(&self, message: Arc<RmqMessage>, shard: ShardIdent, status: RempMessageStatus) -> Result<Option<RempMessageStatus>> {
+        self.cache.execute_sync(|c| {
+            let old_status = c.message_statuses.get(&message.message_id);
+            match old_status {
+                None => {
+                    c.insert_message(message, shard, status)?;
+                    Ok(None)
+                },
+                Some(r) => {
+                    let r_clone = r.clone();
+                    c.update_message_shard(&message.message_id, shard)?;
+                    Ok(Some(r_clone))
+                },
             }
         }).await
     }

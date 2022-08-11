@@ -428,7 +428,7 @@ pub trait EngineOperations : Sync + Send {
         &self, 
         handle: &Arc<BlockHandle>, 
         state: Arc<ShardStateStuff>,
-        state_bytes: Option<&[u8]>,
+        persistent_state: Option<&[u8]>,
     ) -> Result<Arc<ShardStateStuff>> {
         unimplemented!()
     }
@@ -794,6 +794,7 @@ pub enum Server {
     KafkaConsumer(stream_cancel::Trigger)
 }
 
+#[derive(Debug)]
 pub enum RempDuplicateStatus {
     /// No such message in queue
     Absent,

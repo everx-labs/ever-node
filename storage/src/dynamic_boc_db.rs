@@ -20,7 +20,6 @@ use crate::{
 use crate::StorageTelemetry;
 #[cfg(all(test, feature = "telemetry"))]
 use crate::tests::utils::create_storage_telemetry;
-use adnl::{declare_counted, common::{CountedObject, Counter}};
 use std::{ops::{Deref, DerefMut}, sync::{Arc, RwLock, Weak}, time};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
@@ -28,17 +27,11 @@ use std::sync::atomic::Ordering;
 //use std::path::Path;
 use ton_types::{Cell, Result, CellImpl, MAX_LEVEL, fail, error};
 
-declare_counted!(
-    pub struct StorageCellObject {
-        object: Weak<StorageCell>
-    }
-);
-
 //#[derive(Debug)]
 pub struct DynamicBocDb {
     db: Arc<CellDb>,
     another_db: Option<Arc<CellDb>>,
-    cells: Arc<RwLock<fnv::FnvHashMap<CellId, StorageCellObject>>>,
+    cells: Arc<RwLock<fnv::FnvHashMap<CellId, Weak<StorageCell>>>>,
     db_index: u32,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<StorageTelemetry>,
@@ -77,7 +70,7 @@ impl DynamicBocDb {
         &self.db
     }
 
-    pub fn cells_map(&self) -> Arc<RwLock<fnv::FnvHashMap<CellId, StorageCellObject>>> {
+    pub fn cells_map(&self) -> Arc<RwLock<fnv::FnvHashMap<CellId, Weak<StorageCell>>>> {
         Arc::clone(&self.cells)
     }
 
@@ -124,7 +117,7 @@ impl DynamicBocDb {
             .expect("Poisoned RwLock")
             .get(cell_id)
         {
-            if let Some(cell) = Weak::upgrade(&cell.object) {
+            if let Some(cell) = Weak::upgrade(cell) {
                 log::trace!(
                     target: TARGET, 
                     "DynamicBocDb::load_cell  from cache  id {}  db_index {}",
@@ -148,20 +141,20 @@ impl DynamicBocDb {
                 }
             }
         );
-        let storage_cell_object = StorageCellObject {
-            object: Arc::downgrade(&storage_cell),
-            counter: self.allocated.storage_cells.clone().into()
-        };
         #[cfg(feature = "telemetry")]
         self.telemetry.storage_cells.update(self.allocated.storage_cells.load(Ordering::Relaxed));
         self.cells.write()
             .expect("Poisoned RwLock")
-            .insert(cell_id.clone(), storage_cell_object);
+            .insert(cell_id.clone(), Arc::downgrade(&storage_cell));
 
         log::trace!(target: TARGET, "DynamicBocDb::load_cell  from DB  id {}  db_index {}  in_cache {}",
             cell_id, self.db_index, in_cache);
 
         Ok(storage_cell)
+    }
+
+    pub(crate) fn allocated(&self) -> &StorageAlloc {
+        &self.allocated
     }
 
     fn load_cell_from_db(self: &Arc<Self>, cell_id: &CellId) -> Result<StorageCell> {

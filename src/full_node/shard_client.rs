@@ -250,11 +250,11 @@ pub async fn load_shard_blocks(
         }
         let engine = Arc::clone(&engine);
         let shard_block_id = shard_block_id.clone();
-        let apply_task = tokio::spawn(
-            async move {
-                let mut attempt = 0;
-                log::trace!("load_shard_blocks_cycle: {}, applying...", msg);
-                while let Err(e) = Arc::clone(&engine).download_and_apply_block(
+        let apply_task = tokio::spawn(async move {
+            let mut attempt = 0;
+            log::trace!("load_shard_blocks_cycle: {}, applying...", msg);
+            loop { 
+                if let Err(e) = Arc::clone(&engine).download_and_apply_block(
                     &shard_block_id, 
                     mc_seq_no, 
                     false
@@ -268,10 +268,12 @@ pub async fn load_shard_blocks(
                     if engine.check_stop() {
                         break;
                     }
+                } else {
+                    log::trace!("load_shard_blocks_cycle: {}, applied", msg);
+                    break;
                 }
-                log::trace!("load_shard_blocks_cycle: {}, applied", msg);
             }
-        );
+        });
         apply_tasks.push(apply_task);
     }
 
@@ -281,9 +283,13 @@ pub async fn load_shard_blocks(
         .find(|r| r.is_err())
         .unwrap_or(Ok(()))?;
 
+    if engine.check_stop() {
+        return Ok(());
+    }
+
     log::trace!("load_shard_blocks_cycle: processed mc block: {}", mc_block.id());
     engine.save_shard_client_mc_block_id(mc_block.id())?;
-    drop(semaphore_permit);                                    	
+    drop(semaphore_permit);
     Ok(())
 
 }

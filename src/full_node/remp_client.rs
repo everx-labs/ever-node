@@ -524,7 +524,6 @@ impl RempClient {
             signature: Vec::new().into() // TODO
         };
 
-        // Send to validators
         let (validators, mc_cc_to_die) = Self::calculate_validators(
             last_mc_state,
             dst_shard,
@@ -533,6 +532,12 @@ impl RempClient {
         )?;
         #[cfg(feature = "telemetry")]
         let processing_ns = got_at.elapsed().as_nanos() as u64;
+
+        // add message to map (it is possible to receive status before will have be sent
+        // to all validators, so we must have message in the map to handle it properly)
+        self.new_processing_history(id.clone(), mc_cc_to_die)?;
+
+        // Send to validators
         let total_validators = validators.len() as u32;
         match self.send_remp_message(validators, remp_message).await {
             Err(e) => {
@@ -542,11 +547,6 @@ impl RempClient {
             Ok(sent_to) => {
 
                 // When we already sent message we can't return error because error means "reject" 
-
-                // Save message's status into map
-                if let Err(e) = self.new_processing_history(id.clone(), mc_cc_to_die) {
-                    log::error!("new_processing_history: {}", e);
-                }
 
                 let status = RempMessageStatus::TonNode_RempSentToValidators (
                     ton_api::ton::ton_node::rempmessagestatus::RempSentToValidators {

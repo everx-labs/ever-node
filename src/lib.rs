@@ -32,6 +32,7 @@ pub mod sync;
 pub mod types;
 pub mod validating_utils;
 pub mod validator;
+pub mod shard_states_keeper;
 
 #[cfg(feature = "tracing")]
 pub mod jaeger;

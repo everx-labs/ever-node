@@ -412,7 +412,6 @@ impl ValidatorGroup {
         prev_validators: &Vec<ValidatorDescr>,
         next_validator_set: &ValidatorSet,
     ) -> Result<()> {
-/*
         let rmq = self.group_impl.execute_sync(|group_impl| group_impl.reliable_queue.clone()).await;
         if let Some(rmq) = rmq {
             rmq.add_new_queue(
@@ -422,7 +421,6 @@ impl ValidatorGroup {
                 &next_validator_set.list().to_vec()
             ).await;
         }
- */
         Ok(())
     }
 
@@ -722,15 +720,15 @@ impl ValidatorGroup {
             }
         }
 
-        let (result_txt, new_prevs) = self.group_impl.execute_sync(|group_impl| {
-            let result_txt = match result {
+        let (full_result, new_prevs) = self.group_impl.execute_sync(|group_impl| {
+            let full_result = match result {
                 Ok(()) =>
                     if group_impl.prev_block_ids != prev_block_ids {
-                        format!("Sync error: two requests at a time, prevs have changed!!!")
+                        Err(error!("Sync error: two requests at a time, prevs have changed!!!"))
                     } else {
-                        "Ok".to_string()
+                        Ok(())
                     },
-                Err(x) => format!("Error: {}", x)
+                err => err
                 // TODO: retry block commit
             };
 /*
@@ -738,17 +736,26 @@ impl ValidatorGroup {
             group_impl.reliable_queue.send_debug_message(message).await.unwrap();
 */
             group_impl.prev_block_ids = vec![next_block_id];
-            (result_txt, prevs_to_string(&group_impl.prev_block_ids))
+            (full_result, prevs_to_string(&group_impl.prev_block_ids))
         }).await;
 
-        log::info!(
-            target: "validator", 
-            "SessionListener::on_block_committed: source {}, commit result `{}`, {}, new prevs {}",
-            source.id(),
-            result_txt,
-            self.info_round(round).await,
-            new_prevs
-        );
+        match full_result {
+            Ok(()) => log::info!(
+                target: "validator", 
+                "SessionListener::on_block_committed: success!, source {}, {}, new prevs {}",
+                source.id(),
+                self.info_round(round).await,
+                new_prevs
+            ),
+            Err(err) => log::error!(
+                target: "validator", 
+                "SessionListener::on_block_committed: error!, source {}, error message: `{}`, {}, new prevs {}",
+                source.id(),
+                err,
+                self.info_round(round).await,
+                new_prevs
+            )
+        }
     }
 
     pub async fn on_block_skipped(&self, round: u32) {

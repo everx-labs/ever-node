@@ -17,6 +17,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime}
 };
+use openssl::init;
 use crate::{
     engine::{Engine, STATSD},
     engine_traits::EngineOperations,
@@ -45,6 +46,11 @@ use ton_block::{
     ShardDescr, ShardIdent, ValidatorDescr, ValidatorSet, BASE_WORKCHAIN_ID,
 };
 use ton_types::{error, fail, Result, UInt256};
+use storage::block_handle_db::BlockHandle;
+use crate::block::BlockStuff;
+use crate::types::shard_blocks_observer::ShardBlocksObserver;
+use crate::validator::remp_block_parser::RempBlockObserverToplevel;
+//use crate::validator::remp_block_parser::RempBlockObserver;
 use crate::validator::remp_manager::{RempManager, RempInterfaceQueues};
 use crate::validator::sessions_computing::{SessionHistory, SessionInfo};
 
@@ -278,6 +284,7 @@ struct ValidatorManagerImpl {
     session_history: SessionHistory,
     config: ValidatorManagerConfig,
 
+//    shard_blocks_observer_for_remp: RempBlockObserver,
     remp_manager: Option<Arc<RempManager>>,
 
     #[cfg(feature = "slashing")]
@@ -308,6 +315,7 @@ impl ValidatorManagerImpl {
             config,
             remp_manager,
             validation_status: ValidationStatus::Disabled,
+            //shard_blocks_observer_for_remp: None,
             #[cfg(feature = "slashing")]
             slashing_manager: SlashingManager::create(),
         }, remp_interface_queues)
@@ -946,7 +954,16 @@ impl ValidatorManagerImpl {
             rm.message_cache.print_all_messages(true).await;
         }
     }
+/*
+    fn init_shard_blocks_observer_for_remp(&mut self, init_mc_block: Arc<BlockHandle>) {
+        self.shard_blocks_observer_for_remp.init(init_mc_block, self.engine.clone());
+    }
 
+    async fn process_new_blocks_for_remp(&mut self, mc_block: Arc<BlockStuff>) -> Result<()> {
+        let blocks = self.shard_blocks_observer_for_remp.get_new_blocks(mc_block)?;
+        Ok(())
+    }
+*/
     /// infinite loop with possible error cancelation
     async fn invoke(&mut self) -> Result<()> {
         let mc_block_id = if let Some(id) = self.engine.load_last_rotation_block_id()? {
@@ -970,6 +987,13 @@ impl ValidatorManagerImpl {
         let mut mc_handle = self.engine.load_block_handle(&mc_block_id)?.ok_or_else(
             || error!("Cannot load handle for master block {}", mc_block_id)
         )?;
+
+        let block_observer = if let Some(remp_manager) = &self.remp_manager {
+            Some(RempBlockObserverToplevel::toplevel(
+                self.engine.clone(), remp_manager.message_cache.clone(), self.rt.clone(), mc_handle.clone()
+            )?)
+        } else { None };
+
         loop {
             if self.engine.check_stop() {
                 return Ok(())
@@ -983,8 +1007,13 @@ impl ValidatorManagerImpl {
                 self.slashing_manager.handle_masterchain_block(&mc_handle, &mc_state, &local_id, &self.engine).await;
             }
             log::trace!(target: "validator_manager", "Updaing shards for masterblock {}", mc_handle.id().seq_no);
+            if let Some(block_observer) = &block_observer {
+                if mc_handle.id().seq_no() != 0 {
+                    let mc_blockstuff = self.engine.load_block(&mc_handle).await?;
+                    block_observer.send(mc_blockstuff)?;
+                }
+            }
             self.update_shards(mc_state).await?;
-            //self.stats().await;
 
             mc_handle = loop {
                 if self.engine.check_stop() {

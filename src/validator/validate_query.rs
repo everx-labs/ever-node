@@ -3104,13 +3104,13 @@ impl ValidateQuery {
         *account = Account::construct_from_cell(account_root.clone())?;
         let new_hash = account_root.repr_hash();
         if state_update.new_hash != new_hash {
-            Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute).ok();
+            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
             reject_query!("transaction {} of {:x} is invalid: it claims that the new \
                 account state hash is {:x} but the re-computed value is {:x}",
                     lt, account_addr, state_update.new_hash, new_hash)
         }
         if trans.out_msgs != trans_execute.out_msgs {
-            Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute).ok();
+            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
             reject_query!("transaction {} of {:x} is invalid: it has produced a set of \
                 outbound messages different from that listed in the transaction",
                     lt, account_addr)
@@ -3129,7 +3129,7 @@ impl ValidateQuery {
         trans_execute.set_prev_trans_lt(trans.prev_trans_lt());
         let trans_execute_root = trans_execute.serialize()?;
         if trans_root != trans_execute_root {
-            Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute).ok();
+            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
             reject_query!("re created transaction {} doesn't correspond", lt)
         }
         // check new balance and value flow
@@ -3147,7 +3147,7 @@ impl ValidateQuery {
         right_balance.add(&money_exported)?;
         right_balance.add(&trans.total_fees())?;
         if left_balance != right_balance {
-            Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute).ok();
+            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
             reject_query!("transaction {} of {} violates the currency flow condition: \
                 old balance={} + imported={} does not equal new balance={} + exported=\
                 {} + total_fees={}", lt, account_addr.to_hex_string(),
