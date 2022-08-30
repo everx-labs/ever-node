@@ -1,4 +1,6 @@
 use std::{collections::HashMap, sync::Arc, fmt, fmt::{Display, Formatter}};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use ever_crypto::KeyId;
 use ton_api::ton::ton_node::{RempMessageStatus, RmqRecordStatus, RempMessageLevel};
 use ton_block::{BlockIdExt, Deserializable, Message, ShardIdent, Serializable, MsgAddressInt, MsgAddrStd, ExternalInboundMessageHeader};
@@ -20,13 +22,11 @@ pub struct RmqMessage {
     pub source_key: Arc<KeyId>,
     pub source_idx: u32,
     pub timestamp: u32,
-    pub master_cc_seqno: u32
-//  pub shard: ShardIdent,
 }
 
 impl RmqMessage {
-    pub fn new(message: Arc<Message>, message_id: UInt256, source_key: Arc<KeyId>, source_idx: u32, master_cc_seqno: u32) -> Result<Self> {
-        return Ok(RmqMessage { message, message_id, source_key, source_idx, timestamp: Self::timestamp_now()?, master_cc_seqno })
+    pub fn new(message: Arc<Message>, message_id: UInt256, source_key: Arc<KeyId>, source_idx: u32) -> Result<Self> {
+        return Ok(RmqMessage { message, message_id, source_key, source_idx, timestamp: Self::timestamp_now()? })
     }
 
     fn timestamp_now() -> Result<u32> {
@@ -39,16 +39,11 @@ impl RmqMessage {
             message_id: self.message_id.clone(),
             source_key: self.source_key.clone(),
             source_idx,
-            timestamp: self.timestamp,
-            master_cc_seqno: self.master_cc_seqno
+            timestamp: self.timestamp
         }
     }
 
-    pub fn is_expired(&self, current_cc_seqno: u32) -> bool {
-        self.master_cc_seqno + 2 <= current_cc_seqno
-    }
-
-    pub fn deserialize(raw: &ton_api::ton::bytes, master_cc_seqno: u32) -> Result<(RmqMessage, RempMessageStatus)> {
+    pub fn deserialize(raw: &ton_api::ton::bytes) -> Result<(Arc<RmqMessage>, RempMessageStatus)> {
         let rmq_record: ton_api::ton::ton_node::RmqRecord = catchain::utils::deserialize_tl_boxed_object(&raw)?;
 
         let rmq_message = RmqMessage {
@@ -57,7 +52,6 @@ impl RmqMessage {
             source_key: KeyId::from_data(rmq_record.source_key_id().as_slice().clone()),
             source_idx: *rmq_record.source_idx() as u32,
             timestamp: Self::timestamp_now()?,
-            master_cc_seqno
         };
 
         let rmq_message_status = match rmq_record.status() {
@@ -70,17 +64,16 @@ impl RmqMessage {
                         master_id: BlockIdExt::default()
                     }
                 ),
-            RmqRecordStatus::TonNode_RmqRejected(rej) =>
-                RempMessageStatus::TonNode_RempRejected(
-                    ton_api::ton::ton_node::rempmessagestatus::RempRejected{
+            RmqRecordStatus::TonNode_RmqRejected(rej) => // TODO: change RmqRecordStatus
+                RempMessageStatus::TonNode_RempIgnored(
+                    ton_api::ton::ton_node::rempmessagestatus::RempIgnored{
                         level: RempMessageLevel::TonNode_RempCollator,
-                        block_id: rej.block_id.clone(),
-                        error: rej.error.clone()
+                        block_id: rej.block_id.clone()
                     }
                 )
         };
 
-        Ok((rmq_message, rmq_message_status))
+        Ok((Arc::new(rmq_message), rmq_message_status))
     }
 
     pub fn serialize(&self, status: RempMessageStatus) -> Result<ton_api::ton::bytes> {
@@ -92,11 +85,18 @@ impl RmqMessage {
                         block_id: a.block_id
                     }
                 ),
-            RempMessageStatus::TonNode_RempRejected(r) if r.level == RempMessageLevel::TonNode_RempCollator =>
+            RempMessageStatus::TonNode_RempRejected(ref r) if r.level == RempMessageLevel::TonNode_RempCollator =>
                 ton_api::ton::ton_node::RmqRecordStatus::TonNode_RmqRejected(
                     ton_api::ton::ton_node::rmqrecordstatus::RmqRejected {
-                        block_id: r.block_id,
-                        error: r.error
+                        block_id: r.block_id.clone(),
+                        error: format!("{:?}", status)
+                    }
+                ),
+            RempMessageStatus::TonNode_RempIgnored(ref r) =>
+                ton_api::ton::ton_node::RmqRecordStatus::TonNode_RmqRejected(
+                    ton_api::ton::ton_node::rmqrecordstatus::RmqRejected {
+                        block_id: r.block_id.clone(),
+                        error: format!("{:?}", status)
                     }
                 ),
             _ => {
@@ -148,14 +148,14 @@ impl RmqMessage {
         );
         let (msg_id, msg) = (msg_cell.repr_hash(), msg);
 
-        RmqMessage::new (Arc::new(msg), msg_id, KeyId::from_data([0; 32]), 0, 0).unwrap()
+        RmqMessage::new (Arc::new(msg), msg_id, KeyId::from_data([0; 32]), 0).unwrap()
     }
 }
 
 impl Display for RmqMessage {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "id {:x}, source {}, source_idx {}, ts {}, cc {}",
-               self.message_id, self.source_key, self.source_idx, self.timestamp, self.master_cc_seqno
+        write!(f, "id {:x}, source {}, source_idx {}, ts {}",
+               self.message_id, self.source_key, self.source_idx, self.timestamp
         )
     }
 }
@@ -164,6 +164,8 @@ pub struct MessageCacheImpl {
     messages: HashMap<UInt256, Arc<RmqMessage>>,
     message_shards: HashMap<UInt256, ShardIdent>,
     message_statuses: HashMap<UInt256, RempMessageStatus>,
+    message_master_cc: HashMap<UInt256, u32>,
+    message_master_cc_order: BinaryHeap<(Reverse<u32>, UInt256)>,
     #[cfg(feature = "telemetry")]
     cache_size_metric: Arc<Metric>,
 }
@@ -178,20 +180,36 @@ impl MessageCacheImpl {
             messages: HashMap::new(),
             message_shards: HashMap::new(),
             message_statuses: HashMap::new(),
+            message_master_cc: HashMap::new(),
+            message_master_cc_order: BinaryHeap::new(),
             #[cfg(feature = "telemetry")]
             cache_size_metric,
         }
     }
 
-    pub fn insert_message(&mut self, message: Arc<RmqMessage>, shard: ShardIdent, status: RempMessageStatus) -> Result<()> {
+    /// There are two possible consistent message statuses:
+    /// 1. Message present will all structures
+    /// 2. Only message status present (for futures)
+    fn is_message_consistent(&self, id: &UInt256) -> bool {
+        if self.messages.contains_key(id) {
+            self.message_statuses.contains_key(id) && self.message_shards.contains_key(id) && self.message_master_cc.contains_key(id)
+        }
+        else {
+            (!self.message_shards.contains_key(id)) && self.message_master_cc.contains_key(id)
+        }
+    }
+
+    pub fn insert_message(&mut self, message: Arc<RmqMessage>, shard: ShardIdent, status: RempMessageStatus, master_cc: u32) -> Result<()> {
         let message_id = message.message_id;
         if self.messages.contains_key(&message_id) || self.message_shards.contains_key(&message_id) || self.message_statuses.contains_key(&message_id) {
             fail!("Inconsistent message cache contents: message {} present in cache, although should not", message_id)
         }
 
         self.messages.insert(message.message_id.clone(), message.clone());
-        self.message_statuses.insert(message.message_id.clone(), RempMessageStatus::TonNode_RempNew);
+        self.message_statuses.insert(message.message_id.clone(), status);
         self.message_shards.insert(message.message_id.clone(), shard);
+        self.message_master_cc.insert(message.message_id.clone(), master_cc);
+        self.message_master_cc_order.push((Reverse(master_cc), message.message_id.clone()));
         Ok(())
     }
 
@@ -199,9 +217,21 @@ impl MessageCacheImpl {
         self.messages.remove(message_id);
         self.message_shards.remove(message_id);
         self.message_statuses.remove(message_id);
+        self.message_master_cc.remove(message_id);
 
         #[cfg(feature = "telemetry")]
         self.cache_size_metric.update(self.messages.len() as u64);
+    }
+
+    pub fn cc_expired(old_cc_seqno: u32, new_cc_seqno: u32) -> bool {
+        old_cc_seqno >= new_cc_seqno+2
+    }
+
+    pub fn is_expired(&mut self, message_id: &UInt256, new_cc_seqno: u32) -> Result<bool> {
+        match self.message_master_cc.get(message_id) {
+            None => fail!("Message {:x} was not found: cannot check its expiration time", message_id),
+            Some(old_cc_seqno) => Ok(Self::cc_expired(*old_cc_seqno, new_cc_seqno))
+        }
     }
 
     pub fn update_message_shard(&mut self, message_id: &UInt256, new_shard: ShardIdent) -> Result<()> {
@@ -288,28 +318,45 @@ impl MessageCacheImpl {
         downgrading
     }
 
-    pub fn get_old_messages(&self, current_cc: u32) -> Vec<(Arc<RmqMessage>, Option<RempMessageStatus>)> {
-        let mut removing = Vec::new();
-        for (id,msg) in self.messages.iter() {
-            if let Some(status) = self.message_statuses.get(id) {
-                if msg.is_expired(current_cc) {
-                    let ns = match status {
-                        RempMessageStatus::TonNode_RempAccepted(a) if a.level == RempMessageLevel::TonNode_RempMasterchain => None,
-                        RempMessageStatus::TonNode_RempRejected(_) => None,
-                        RempMessageStatus::TonNode_RempDuplicate(_) => None,
-                        _ => Some(RempMessageStatus::TonNode_RempTimeout)
+    pub fn remove_old_message(&mut self, current_cc: u32) -> Option<(UInt256, Option<Arc<RmqMessage>>, Option<RempMessageStatus>, Option<ShardIdent>, Option<u32>)> {
+        if let Some((old_cc, msg_id)) = self.message_master_cc_order.pop() {
+            if !Self::cc_expired(old_cc.0, current_cc) {
+                self.message_master_cc_order.push((old_cc, msg_id));
+                return None
+            }
+
+            let msg_opt = self.messages.remove(&msg_id);
+            let status_opt = self.message_statuses.remove(&msg_id);
+            let shard_opt = self.message_shards.remove(&msg_id);
+            let master_cc_opt = self.message_master_cc.remove(&msg_id);
+            return Some((msg_id, msg_opt, status_opt, shard_opt, master_cc_opt))
+        }
+
+        None
+    }
+    
+/*
+                if let Some(status) = self.message_statuses.get(msg_id) {
+                   let ns = match status {
+                        RempMessageStatus::TonNode_RempAccepted(a) if a.level == RempMessageLevel::TonNode_RempMasterchain => return None,
+                        RempMessageStatus::TonNode_RempRejected(_) => return None,
+                        RempMessageStatus::TonNode_RempDuplicate(_) => return None,
+                        _ => return Some((msg, RempMessageStatus::TonNode_RempTimeout))
                     };
-                    removing.push((msg.clone(),ns))
+                    return Some ((msg.clone(),ns))
+                }
+                else {
+                    log::error!(target: "remp", "Status for message {} is missing, although master_cc_order = {}!",
+                        id, old_cc.0
+                    );
+                    removing.push((msg.clone(),None))
                 }
             }
-            else {
-                log::error!(target: "remp", "Status for message {} is missing!", id);
-                removing.push((msg.clone(),None))
-            }
         }
-        removing
-    }
 
+        return None;
+    }
+*/
     pub fn all_messages_count(&self) -> usize {
         self.messages.len()
     }
@@ -407,19 +454,26 @@ impl MessageCache {
     }
 
     pub async fn get_message_with_status(&self, message_id: &UInt256) -> Option<(Arc<RmqMessage>, RempMessageStatus)> {
-        let (msg, status) = self.cache.execute_sync(|c|
-            (c.messages.get(message_id).map(|m| m.clone()),
-             c.message_statuses.get(message_id).map(|m| m.clone()))
-        ).await;
-
-        match (msg, status) {
-            (None, None) => None,
-            (Some(m), Some (s)) => Some((m,s)),
-            (Some(_), _) => { log::error!("Message {:x} has no status", message_id); None },
-            (_, Some(_)) => { log::error!("Message {:x} has status, but no body", message_id); None }
-        }
+        self.get_message_with_status_and_master_cc(message_id).await.map(|(m,s,_e)| (m,s))
     }
 
+    pub async fn get_message_with_status_and_master_cc(&self, message_id: &UInt256) -> Option<(Arc<RmqMessage>, RempMessageStatus, u32)> {
+        let (msg, status, expiration) = self.cache.execute_sync(|c|
+            (c.messages.get(message_id).map(|m| m.clone()),
+             c.message_statuses.get(message_id).map(|m| m.clone()),
+             c.message_master_cc.get(message_id).map(|m| m.clone()))
+        ).await;
+
+        match (msg, status, expiration) {
+            (None, None, None) => None, // Not-existing message
+            (None, Some(_), Some(_)) => None, // Bare message info (retrieved from finalized block)
+            (Some(m), Some (s), Some(e)) => Some((m,s,e)), // Full message info
+            (None, s, e) => { log::error!("Message {:x} has no body, status = {:?}, master_cc = {:?}", message_id, s, e); None },
+            (m, None, e) => { log::error!("Message {:x} has no status, body = {:?}, master_cc = {:?}", message_id, m, e); None },
+            (m, s, None) => { log::error!("Message {:x} has no master_cc, body = {:?}, status = {:?}", message_id, m, s); None }
+        }
+    }
+/*
     /// Inserts message with 'New' status, returns false if message is already there
     /// and true if message is new for the message_cache
     pub async fn new_message_with_shard(&self, message: Arc<RmqMessage>, shard: ShardIdent) -> Result<(bool, usize)> {
@@ -435,17 +489,17 @@ impl MessageCache {
             }
         }).await
     }
-
+*/
     /// Inserts message with given status, if it is not there
     /// If we know something about message -- that's more important than anything we discover from RMQ
     /// If we do not know anything -- TODO: if >= 2/3 rejects, then 'Rejected'. Otherwise 'New'
     /// Actual -- get it as granted ("imprinting")
-    pub async fn add_external_message_status(&self, message: Arc<RmqMessage>, shard: ShardIdent, status: RempMessageStatus) -> Result<Option<RempMessageStatus>> {
+    pub async fn add_external_message_status(&self, message: Arc<RmqMessage>, shard: ShardIdent, status: RempMessageStatus, master_cc: u32) -> Result<Option<RempMessageStatus>> {
         self.cache.execute_sync(|c| {
             let old_status = c.message_statuses.get(&message.message_id);
             match old_status {
                 None => {
-                    c.insert_message(message, shard, status)?;
+                    c.insert_message(message, shard, status, master_cc)?;
                     Ok(None)
                 },
                 Some(r) => {
@@ -499,8 +553,21 @@ impl MessageCache {
     }
 
     /// Collect all old messages; return all messages to be timeout-rejected
-    pub async fn get_old_messages(&self, current_cc: u32) -> Vec<(Arc<RmqMessage>, Option<RempMessageStatus>)> {
-        self.cache.execute_sync(|c| c.get_old_messages(current_cc)).await
+    pub async fn get_old_messages(&self, current_cc: u32) -> Vec<(Arc<RmqMessage>, RempMessageStatus)> {
+        let mut old_messages = Vec::new();
+
+        while let Some((id, m,s,_x,_master_cc)) = self.cache.execute_sync(|c| c.remove_old_message(current_cc)).await {
+            match (m,s) {
+                (Some(m), Some(s)) => old_messages.push((m,s)),
+                (None, Some(_s)) => (),
+                (m, s) => log::error!(target: "remp",
+                    "Record for message {:?} is in incorrect state: msg = {:?}, status = {:?}",
+                    id, m, s
+                )
+            }
+        }
+
+        old_messages
     }
 
     pub fn with_metrics(

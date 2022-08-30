@@ -336,18 +336,8 @@ async fn download_block_and_state(
     };
     if !handle.has_state() {
         let state_update = block.block().read_state_update()?;
-        log::info!(target: "boot", "downloading state {}...", handle.id());
-        let (state, data) = engine.download_state(handle.id(), master_id, active_peers, attempts).await?;
-        let state_hash = state.root_cell().repr_hash();
-        if state_update.new_hash != state_hash {
-            fail!("root_hash {} of downloaded state {} is wrong", state_hash.to_hex_string(), handle.id())
-        }
-
-        let now = std::time::Instant::now();
-        log::info!(target: "boot", "storing state {}...", handle.id());
-        let state = engine.store_state(&handle, state, Some(&data)).await?;
-        log::info!(target: "boot", "stored state {} TIME: {}s", handle.id(), now.elapsed().as_secs());
-
+        let state = engine.download_and_store_state(
+            &handle, &state_update.new_hash, master_id, active_peers, attempts).await?;
         engine.process_full_state_in_ext_db(&state).await?;
     }
     engine.set_applied(&handle, master_id.seq_no()).await?;

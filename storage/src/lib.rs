@@ -29,7 +29,6 @@ pub mod node_state_db;
 pub mod shardstate_db;
 #[cfg(feature = "ref_count_gc")]
 pub mod shardstate_db_async;
-pub mod shardstate_persistent_db;
 pub mod traits;
 pub mod types;
 pub mod shard_top_blocks_db;

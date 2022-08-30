@@ -11,7 +11,7 @@
 * limitations under the License.
 */
 
-use crate::{types::{CellId, Reference}};
+use crate::{types::{Reference}};
 use std::{io::{Cursor, Write}, sync::{Arc, RwLock, atomic::{AtomicU64, Ordering}}};
 use ton_types::{
     ByteOrderRead, Cell, CellData, CellImpl, CellType, LevelMask,
@@ -189,8 +189,8 @@ impl StorageCell {
     }
 
     /// Gets cell's id
-    pub fn id(&self) -> CellId {
-        CellId::new(self.repr_hash())
+    pub fn id(&self) -> UInt256 {
+        self.repr_hash()
     }
 
     /// Gets representation hash
@@ -204,7 +204,7 @@ impl StorageCell {
             Reference::NeedToLoad(hash) => hash.clone()
         };
 
-        let cell_id = CellId::new(hash);
+        let cell_id = hash;
         let storage_cell = self.boc_db.load_cell(
             &cell_id,
             #[cfg(feature = "ref_count_gc")]
@@ -215,10 +215,8 @@ impl StorageCell {
         Ok(storage_cell)
     }
 
-    #[cfg(feature = "ref_count_gc")]
-    pub(crate) fn reference_id(&self, index: usize) -> CellId {
-        let hash = self.references.read().expect("Poisoned RwLock")[index].hash();
-        CellId::new(hash)
+    pub(crate) fn reference_id(&self, index: usize) -> UInt256 {
+        self.references.read().expect("Poisoned RwLock")[index].hash()
     }
 
     #[cfg(feature = "ref_count_gc")]
@@ -268,6 +266,10 @@ impl CellImpl for StorageCell {
 
     fn reference(&self, index: usize) -> Result<Cell> {
         Ok(Cell::with_cell_impl_arc(self.reference(index)?))
+    }
+
+    fn reference_repr_hash(&self, index: usize) -> Result<UInt256> {
+        Ok(self.reference_id(index))
     }
 
     fn cell_type(&self) -> CellType {

@@ -17,7 +17,6 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime}
 };
-use openssl::init;
 use crate::{
     engine::{Engine, STATSD},
     engine_traits::EngineOperations,
@@ -46,9 +45,6 @@ use ton_block::{
     ShardDescr, ShardIdent, ValidatorDescr, ValidatorSet, BASE_WORKCHAIN_ID,
 };
 use ton_types::{error, fail, Result, UInt256};
-use storage::block_handle_db::BlockHandle;
-use crate::block::BlockStuff;
-use crate::types::shard_blocks_observer::ShardBlocksObserver;
 use crate::validator::remp_block_parser::RempBlockObserverToplevel;
 //use crate::validator::remp_block_parser::RempBlockObserver;
 use crate::validator::remp_manager::{RempManager, RempInterfaceQueues};

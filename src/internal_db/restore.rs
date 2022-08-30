@@ -5,8 +5,9 @@ use crate::{
         PSS_KEEPER_MC_BLOCK, BlockHandle,
     },
     shard_state::ShardStateStuff,
-    shard_states_keeper::ShardStatesKeeper,
 };
+#[cfg(feature = "async_ss_storage")]
+use crate::shard_states_keeper::ShardStatesKeeper;
 use ton_block::{BlockIdExt, MASTERCHAIN_ID, ShardIdent, SHARD_FULL};
 use ton_types::{error, fail, Result, UInt256, Cell};
 use storage::traits::Serializable;
@@ -751,7 +752,11 @@ fn check_state(
         Ok((expected_cells, expected_bits))
     }
 
-    let root = db.shard_state_dynamic_db.get(id, false)?;
+    let root = db.shard_state_dynamic_db.get(
+        id, 
+        #[cfg(feature = "async_ss_storage")]
+        false
+    )?;
     check_cell(root, checked_cells, check_stop)?;
 
     Ok(())

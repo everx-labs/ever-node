@@ -141,7 +141,7 @@ impl RempBlockObserverToplevel {
                     rt: tokio::runtime::Handle,
                     init_mc_block: Arc<BlockHandle>
     ) -> Result<Sender<BlockStuff>> {
-        let mut top_level_self = Self::new(engine, message_cache, rt.clone());
+        let top_level_self = Self::new(engine, message_cache, rt.clone());
         let sender = top_level_self.queue_sender.clone();
 
         rt.clone().spawn(async move {

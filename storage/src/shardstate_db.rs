@@ -15,7 +15,7 @@ use crate::{
     StorageAlloc, cell_db::CellDb, 
     db::{rocksdb::RocksDbTable, traits::{DbKey, KvcWriteable, KvcTransaction}},
     dynamic_boc_db::DynamicBocDb, /*dynamic_boc_diff_writer::DynamicBocDiffWriter,*/
-    traits::Serializable, types::{CellId, Reference, StorageCell},
+    traits::Serializable, types::{Reference, StorageCell},
     TARGET,
 };
 #[cfg(feature = "telemetry")]
@@ -30,17 +30,17 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use ton_block::BlockIdExt;
-use ton_types::{ByteOrderRead, Cell, Result, fail};
+use ton_types::{ByteOrderRead, Cell, Result, fail, UInt256};
 
 pub(crate) struct DbEntry {
-    pub cell_id: CellId, // TODO: remove this id
+    pub cell_id: UInt256, // TODO: remove this id
     pub block_id: BlockIdExt,
     pub db_index: u32,
     pub save_utime: u64,
 }
 
 impl DbEntry {
-    pub fn with_params(cell_id: CellId, block_id: BlockIdExt, db_index: u32, save_utime: u64) -> Self {
+    pub fn with_params(cell_id: UInt256, block_id: BlockIdExt, db_index: u32, save_utime: u64) -> Self {
         Self { cell_id, block_id, db_index, save_utime }
     }
 }
@@ -57,7 +57,7 @@ impl Serializable for DbEntry {
     fn deserialize<T: Read>(reader: &mut T) -> Result<Self> {
         let mut buf = [0; 32];
         reader.read_exact(&mut buf)?;
-        let cell_id = CellId::new(buf.into());
+        let cell_id = buf.into();
         let block_id = BlockIdExt::deserialize(reader)?;
         let db_index = reader.read_le_u32().unwrap_or(0); // use 0 db by default
         let save_utime = reader.read_le_u64().unwrap_or(0);
@@ -338,9 +338,9 @@ impl ShardStateDb {
         state_root: Cell,
         boc_db: &Arc<DynamicBocDb>,
     ) -> Result<Cell> {
-        let cell_id = CellId::from(state_root.repr_hash());
+        let cell_id = UInt256::from(state_root.repr_hash());
         
-        log::trace!(target: TARGET, "ShardStateDb::put_internal  start  id {}  root_cell_id {}  db_index {}",
+        log::trace!(target: TARGET, "ShardStateDb::put_internal  start  id {}  root_cell_id {:x}  db_index {}",
             id, cell_id, boc_db.db_index());
 
         let check_stop = || -> Result<()> {
@@ -362,7 +362,7 @@ impl ShardStateDb {
         self.shardstate_db.put(id, buf.as_slice())?;
         // (self.shardstate_db as dyn KvcWriteable::<BlockIdExt>).put(id, buf.as_slice())?;
 
-        log::trace!(target: TARGET, "ShardStateDb::put_internal  finish  id {}  root_cell_id {}  db_index {}  written: {} cells",
+        log::trace!(target: TARGET, "ShardStateDb::put_internal  finish  id {}  root_cell_id {:x}  db_index {}  written: {} cells",
             id, cell_id, boc_db.db_index(), c);
 
         let root_cell = boc_db.load_dynamic_boc(&db_entry.cell_id)?;
@@ -374,7 +374,7 @@ impl ShardStateDb {
     pub fn get(&self, id: &BlockIdExt) -> Result<Cell> {
         let db_entry = DbEntry::from_slice(&self.shardstate_db.get(id)?)?;
 
-        log::trace!(target: TARGET, "ShardStateDb::get  id {}  cell_id {}  db_index {}", 
+        log::trace!(target: TARGET, "ShardStateDb::get  id {}  cell_id {:x}  db_index {}", 
             id, db_entry.cell_id, db_entry.db_index);
 
         let boc_db = match db_entry.db_index {
@@ -456,7 +456,7 @@ pub fn gc(
         })
     }
 }
-type MarkResult = Result<(FnvHashSet<CellId>, Vec<(BlockIdExt, CellId)>, usize)>;
+type MarkResult = Result<(FnvHashSet<UInt256>, Vec<(BlockIdExt, UInt256)>, usize)>;
 
 fn mark(
     shardstate_db: &dyn KvcWriteable<BlockIdExt>,
@@ -502,11 +502,11 @@ fn mark(
             && (!is_mc || root.block_id.seq_no() < last_mc_seqno)
             && (is_mc || root.save_utime + SHARDSTATES_GC_LAG_SEC < max_shard_utime)
         {
-            log::trace!(target: TARGET, "mark  to_sweep  block_id {}  cell_id {}  db_index {}  utime {}", 
+            log::trace!(target: TARGET, "mark  to_sweep   block_id {}  cell_id {:x}  db_index {}  utime {}", 
                 root.block_id, root.cell_id, dynamic_boc_db.db_index(), root.save_utime);
             to_sweep.push((root.block_id, root.cell_id));
         } else {
-            log::trace!(target: TARGET, "mark  to_mark  block_id {}  cell_id {}  db_index {}  utime {}", 
+            log::trace!(target: TARGET, "mark  to_mark   block_id {}  cell_id {:x}  db_index {}  utime {}", 
                 root.block_id, root.cell_id, dynamic_boc_db.db_index(), root.save_utime);
             to_mark.push(root.cell_id);
         }
@@ -525,9 +525,9 @@ fn mark(
 
 fn mark_subtree_recursive(
     dynamic_boc_db: &DynamicBocDb,
-    cell_id: CellId,
-    root_id: CellId,
-    marked: &mut FnvHashSet<CellId>,
+    cell_id: UInt256,
+    root_id: UInt256,
+    marked: &mut FnvHashSet<UInt256>,
     check_stopped: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     check_stopped()?;
@@ -538,7 +538,7 @@ fn mark_subtree_recursive(
 
                 log::trace!(
                     target: TARGET,
-                    "mark_subtree_recursive  marked  cell {}  root: {}  db_index {}",
+                    "mark_subtree_recursive  marked  cell {}  root: {:x}  db_index {}",
                     cell_id, root_id, dynamic_boc_db.db_index(),
                 );
 
@@ -550,7 +550,7 @@ fn mark_subtree_recursive(
             Err(err) => {
                 log::error!(
                     target: TARGET,
-                    "mark_subtree_recursive  can't load cell  cell {}  root: {}  db_index {}  error: {}",
+                    "mark_subtree_recursive  can't load cell  cell {}  root: {:x}  db_index {}  error: {}",
                     cell_id, root_id, dynamic_boc_db.db_index(), err,
                 );
             }
@@ -562,8 +562,8 @@ fn mark_subtree_recursive(
 fn sweep(
     shardstate_db: Arc<dyn KvcWriteable<BlockIdExt>>,
     dynamic_boc_db: Arc<DynamicBocDb>,
-    to_sweep: Vec<(BlockIdExt, CellId)>,
-    marked: FnvHashSet<CellId>,
+    to_sweep: Vec<(BlockIdExt, UInt256)>,
+    marked: FnvHashSet<UInt256>,
     check_stopped: &dyn Fn() -> Result<()>,
 ) -> Result<usize> {
     if to_sweep.is_empty() {
@@ -598,11 +598,11 @@ fn sweep(
 
 fn sweep_cells_recursive(
     dynamic_boc_db: &DynamicBocDb,
-    transaction: &mut dyn KvcTransaction<CellId>,
-    cell_id: &CellId,
-    root_id: &CellId,
-    marked: &FnvHashSet<CellId>,
-    sweeped: &mut FnvHashSet<CellId>,
+    transaction: &mut dyn KvcTransaction<UInt256>,
+    cell_id: &UInt256,
+    root_id: &UInt256,
+    marked: &FnvHashSet<UInt256>,
+    sweeped: &mut FnvHashSet<UInt256>,
     check_stopped: &dyn Fn() -> Result<()>,
 ) -> Result<usize> {
     check_stopped()?;
@@ -628,7 +628,7 @@ fn sweep_cells_recursive(
 
                 log::trace!(
                     target: TARGET,
-                    "sweep_cells_recursive  delete cell  id: {}  root: {}  db_index: {}",
+                    "sweep_cells_recursive  delete cell  id: {:x}  root: {:x}  db_index: {}",
                     cell_id, root_id, dynamic_boc_db.db_index(),
                 );
 
@@ -639,7 +639,7 @@ fn sweep_cells_recursive(
             Err(err) => {
                 log::error!(
                     target: TARGET,
-                    "sweep_cells_recursive  can't load cell  id: {}  root: {}  db_index: {}  error: {}",
+                    "sweep_cells_recursive  can't load cell  id: {:x}  root: {:x}  db_index: {}  error: {}",
                     cell_id, root_id, dynamic_boc_db.db_index(), err,
                 );
             }
@@ -648,7 +648,7 @@ fn sweep_cells_recursive(
     }
 }
 
-fn load_cell_references(dynamic_boc_db: &DynamicBocDb, cell_id: &CellId) -> Result<Vec<Reference>> {
+fn load_cell_references(dynamic_boc_db: &DynamicBocDb, cell_id: &UInt256) -> Result<Vec<Reference>> {
     let slice = dynamic_boc_db.cell_db().get(cell_id)?;
     StorageCell::deserialize_references(slice.as_ref())
 }

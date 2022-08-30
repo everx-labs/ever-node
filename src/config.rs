@@ -109,7 +109,9 @@ pub struct TonNodeConfig {
     #[serde(default = "RempConfig::default")]
     remp: RempConfig,
     #[serde(default)]
-    restore_db: bool
+    restore_db: bool,
+    #[serde(default)]
+    low_memory_mode: bool,
 }
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
@@ -180,50 +182,31 @@ pub struct ExternalDbConfig {
     pub bad_blocks_storage: String,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
-pub enum RempConfig {
-    None,
-    RempClient {
-        enabled: bool
-    },
-    RempService {
-        enabled: bool,
-    },
-}
-
-impl Default for RempConfig {
-    fn default() -> Self {
-        RempConfig::None
-    }
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
+pub struct RempConfig {
+    client_enabled: bool,
+    service_enabled: bool,
 }
 
 impl RempConfig {
     pub fn is_client_enabled(&self) -> bool {
-        if let RempConfig::RempClient{ enabled } = self {
-            *enabled 
-        } else {
-            false
-        }
+        self.client_enabled
     }
 
     pub fn is_service_enabled(&self) -> bool {
-        if let RempConfig::RempService{ enabled, .. } = self {
-            *enabled 
-        } else {
-            false
-        }
+        self.service_enabled
     }
 
     pub fn get_catchain_options(&self) -> Option<catchain::Options> {
-        match self {
-            RempConfig::RempService { .. } => Some(
-                catchain::Options {
-                    idle_timeout: std::time::Duration::from_secs(5),
-                    max_deps: 2,
-                    debug_disable_db: false,
-                    skip_processed_blocks: false
-                }),
-            _ => None
+        if self.is_service_enabled() {
+            Some(catchain::Options {
+                idle_timeout: std::time::Duration::from_secs(5),
+                max_deps: 2,
+                debug_disable_db: false,
+                skip_processed_blocks: false
+            })
+        } else {
+            None
         }
     }
 }
@@ -388,6 +371,11 @@ impl TonNodeConfig {
 
         config_json.connectivity_check_config.check()?;
 
+        #[cfg(not(feature = "async_ss_storage"))]
+        if config_json.low_memory_mode {
+            fail!("'low_memory_mode' is applied only with 'async_ss_storage' feature");
+        }
+
         config_json.configs_dir = configs_dir.to_string();
         config_json.file_name = json_file_name.to_string();
 
@@ -498,6 +486,9 @@ impl TonNodeConfig {
     }
     pub fn restore_db(&self) -> bool {
         self.restore_db
+    }
+    pub fn low_memory_mode(&self) -> bool {
+        self.low_memory_mode
     }
 
  

@@ -11,7 +11,7 @@ use ever_crypto::KeyId;
 use failure::err_msg;
 
 use ton_api::ton::ton_node::RempMessageStatus;
-use ton_block::{ShardIdent, Message, BlockIdExt};
+use ton_block::{ShardIdent, Message};
 use ton_types::{UInt256, Result};
 use crate::{
     config::RempConfig,
@@ -23,8 +23,6 @@ use crate::{
 }};
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
-use crate::block::BlockStuff;
-use crate::types::shard_blocks_observer::ShardBlocksObserver;
 
 pub struct RempInterfaceQueues {
     message_cache: Arc<MessageCache>,
@@ -292,7 +290,7 @@ impl RempManager {
 
     pub async fn gc_old_messages(&self, current_cc_seqno: u32) -> usize {
         let for_removal = self.message_cache.get_old_messages(current_cc_seqno).await;
-        for (msg, updated_status) in for_removal.iter() {
+        for (msg, _updated_status) in for_removal.iter() {
 /*
             if let Some(status) = updated_status {
                 if let Err(e) = self.queue_response_to_fullnode(local_id (???eh), msg.clone(), status.clone()) {
@@ -392,7 +390,6 @@ impl RempCoreInterface for RempInterfaceQueues {
             message_id,
             source,
             0,
-            0 /* will be replaced by actual receiver master_cc anyway */
         )?);
 
         log::trace!(target: "remp", "Point 1. Adding incoming message {} to incoming queue", remp_message);

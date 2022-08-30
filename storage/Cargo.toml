@@ -41,7 +41,7 @@ version = '=1.0.61'
 features = [ 'parallel' ]
 
 [features]
-default = [  ]
+default = [ 'ref_count_gc' ]
 ref_count_gc = [  ]
 ci_run = [  ]
 telemetry = [  ]

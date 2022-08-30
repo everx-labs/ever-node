@@ -1,13 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Display;
-use std::ops::Rem;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use ever_crypto::KeyId;
 use sha2::{Digest, Sha256};
 use arc_swap::ArcSwapOption;
-use crossbeam_channel::{Sender, Receiver, unbounded};
+use crossbeam_channel::{Sender, Receiver, unbounded, TryRecvError};
 use ton_api::IntoBoxed;
 use ton_api::ton::ton_node::RempMessageStatus;
 use ton_block::{ShardIdent, ValidatorDescr};
@@ -19,6 +18,30 @@ use crate::validator::message_cache::RmqMessage;
 use crate::validator::mutex_wrapper::MutexWrapper;
 use crate::validator::remp_manager::RempManager;
 use crate::validator::validator_utils::{compute_validator_list_id, get_validator_key_idx, validatordescr_to_catchain_node};
+
+const REMP_CATCHAIN_START_POLLING_INTERVAL: Duration = Duration::from_millis(1);
+
+pub struct RempCatchainInstance {
+    pub catchain_ptr: CatchainPtr,
+
+    pending_messages_queue_receiver: Receiver<(Arc<RmqMessage>, RempMessageStatus)>,
+    pub pending_messages_queue_sender: Sender<(Arc<RmqMessage>, RempMessageStatus)>,
+
+    pub rmq_catchain_receiver: Receiver<(Arc<RmqMessage>, RempMessageStatus)>,
+    rmq_catchain_sender: Sender<(Arc<RmqMessage>, RempMessageStatus)>
+}
+
+impl RempCatchainInstance {
+    fn new(catchain_ptr: CatchainPtr) -> Self {
+        let (pending_messages_queue_sender, pending_messages_queue_receiver) = unbounded();
+        let (rmq_catchain_sender, rmq_catchain_receiver) = unbounded();
+        Self {
+            catchain_ptr,
+            pending_messages_queue_sender, pending_messages_queue_receiver,
+            rmq_catchain_sender, rmq_catchain_receiver
+        }
+    }
+}
 
 pub struct RempCatchainInfo {
     rt: tokio::runtime::Handle,
@@ -32,13 +55,8 @@ pub struct RempCatchainInfo {
     pub local_key_id: UInt256,
     pub master_cc_seqno: u32,
     pub shard: ShardIdent,
-    pub catchain_ptr: ArcSwapOption<CatchainPtr>,
 
-    pending_messages_queue_receiver: Receiver<(Arc<RmqMessage>, RempMessageStatus)>,
-    pub pending_messages_queue_sender: Sender<(Arc<RmqMessage>, RempMessageStatus)>,
-
-    pub rmq_catchain_receiver: Receiver<(RmqMessage, RempMessageStatus)>,
-    rmq_catchain_sender: Sender<(RmqMessage, RempMessageStatus)>
+    pub instance: ArcSwapOption<RempCatchainInstance>
 }
 
 impl RempCatchainInfo {
@@ -87,9 +105,6 @@ impl RempCatchainInfo {
             master_cc_seqno
         );
 
-        let (recv_messages_queue_sender, recv_messages_queue_receiver) = unbounded();
-        let (pending_messages_queue_sender, pending_messages_queue_receiver) = unbounded();
-
         return Ok(Self {
             rt,
             engine,
@@ -100,10 +115,7 @@ impl RempCatchainInfo {
             node_list_id,
             master_cc_seqno,
             shard,
-            catchain_ptr: ArcSwapOption::new(None),
-            pending_messages_queue_sender, pending_messages_queue_receiver,
-            rmq_catchain_sender: recv_messages_queue_sender,
-            rmq_catchain_receiver: recv_messages_queue_receiver,
+            instance: ArcSwapOption::new(None),
             remp_manager
         });
     }
@@ -157,7 +169,7 @@ impl RempCatchainInfo {
             || error!("RMQ {}: cannot get REMP catchain options, start is impossible", self)
         )?;
 
-        let catchain_session_ptr = CatchainFactory::create_catchain(
+        let catchain_ptr = CatchainFactory::create_catchain(
             &rmq_catchain_options,
             &self.queue_id,
             &self.nodes,
@@ -171,10 +183,11 @@ impl RempCatchainInfo {
 
         log::info!(target: "remp", "RMQ session {} started: list_id: {:x}, rmq_local_key = {}, local_key = {}",
             self, self.node_list_id, rmq_local_key.id(), local_key.id());
-        Ok(catchain_session_ptr)
+
+        Ok(catchain_ptr)
     }
 
-    pub async fn stop(&self, session_opt: Option<Arc<CatchainPtr>>) -> Result<()> {
+    pub async fn stop(&self, session_opt: Option<CatchainPtr>) -> Result<()> {
         log::info!(target: "remp", "Do stopping RMQ Catchain session {} list_id={:x}", self, self.node_list_id);
         match session_opt {
             Some(session) => session.stop(true),
@@ -187,12 +200,63 @@ impl RempCatchainInfo {
         Ok(())
     }
 
-    pub fn set_session(&self, catchain: CatchainPtr) {
-        self.catchain_ptr.store(Some(Arc::new(catchain.clone())));
+    pub fn get_session(&self) -> Option<CatchainPtr> {
+        self.instance.load().map(|inst| inst.catchain_ptr.clone())
     }
 
-    pub fn get_session(&self) -> Option<Arc<CatchainPtr>> {
-        self.catchain_ptr.load()
+    fn get_instance(&self) -> Result<Arc<RempCatchainInstance>> {
+        self.instance.load().ok_or_else(|| error!("RMQ {} REMP Catchain instance is absent: not started?", self))
+    }
+
+    pub fn init_instance(&self, instance: Arc<RempCatchainInstance>) -> Result<()> {
+        match self.instance.swap(Some(instance)) {
+            None => Ok(()),
+            Some(_) => fail!("RMQ {} store_instance: already initialized", self)
+        }
+    }
+
+    pub fn pending_messages_queue_send(&self, msg: Arc<RmqMessage>, status: RempMessageStatus) -> Result<()> {
+        let instance = self.get_instance()?;
+        match instance.pending_messages_queue_sender.send((msg, status)) {
+            Ok(()) => Ok(()),
+            Err(e) => fail!("pending_messages_queue_sender: send error {}", e)
+        }
+    }
+
+    pub fn pending_messages_queue_len(&self) -> Result<usize> {
+        let instance = self.get_instance()?;
+        Ok(instance.pending_messages_queue_sender.len())
+    }
+
+    pub fn pending_messages_queue_try_recv(&self) -> Result<Option<(Arc<RmqMessage>, RempMessageStatus)>> {
+        let instance = self.get_instance()?;
+        match instance.pending_messages_queue_receiver.try_recv() {
+            Ok(x) => Ok(Some(x)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => fail!("channel disconnected")
+        }
+    }
+
+    pub fn rmq_catchain_receiver_len(&self) -> Result<usize> {
+        let instance = self.get_instance()?;
+        Ok(instance.rmq_catchain_receiver.len())
+    }
+
+    pub fn rmq_catchain_try_recv(&self) -> Result<Option<(Arc<RmqMessage>, RempMessageStatus)>> {
+        let instance = self.get_instance()?;
+        match instance.rmq_catchain_receiver.try_recv() {
+            Ok(x) => Ok(Some(x)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => fail!("channel disconnected")
+        }
+    }
+
+    fn rmq_catchain_send(&self, msg: Arc<RmqMessage>, status: RempMessageStatus) -> Result<()> {
+        let instance = self.get_instance()?;
+        match instance.rmq_catchain_sender.send((msg, status)) {
+            Ok(()) => Ok(()),
+            Err(e) => fail!("rmq_cathcain_sender: send error {}", e)
+        }
     }
 
     fn unpack_payload(&self, payload: &BlockPayloadPtr, source_idx: u32) {
@@ -208,25 +272,29 @@ impl RempCatchainInfo {
                 for msgbx in pld.actions.0.iter() {
                     match msgbx {
                         ::ton_api::ton::validator_session::round::Message::ValidatorSession_Message_Commit(msg) => {
-                            match RmqMessage::deserialize(&msg.signature, self.master_cc_seqno) {
+                            match RmqMessage::deserialize(&msg.signature) {
                                 Ok((decoded_msg, decoded_msg_status)) => {
                                     total += 1;
-                                    if decoded_msg_status != RempMessageStatus::TonNode_RempNew {
-                                        log::trace!(target: "remp",
-                                            "Point 4. RMQ {} received message: {:?}, decoded {}, ignoring",
-                                            self, msg.signature.0, decoded_msg
-                                        );
-                                        ignored += 1;
-                                    }
-                                    else {
-                                        log::trace!(target: "remp",
-                                            "Point 4. Message received from RMQ {}: {:?}, decoded {}, put to rmq_catchain queue",
-                                            self, msg.signature.0, decoded_msg //catchain.received_messages.len()
-                                        );
-                                        if let Err(e) = self.rmq_catchain_sender.send((decoded_msg.clone(), decoded_msg_status)) {
-                                            log::error!(target: "remp", "Point 4. Cannot put message {} from RMQ {} to queue: {}",
-                                                decoded_msg, self, e
-                                            )
+                                    match &decoded_msg_status {
+                                        RempMessageStatus::TonNode_RempNew |
+                                        RempMessageStatus::TonNode_RempIgnored(_) => {
+                                            log::trace!(target: "remp",
+                                                "Point 4. Message received from RMQ {}: {:?}, decoded {}, decoded_status {:?}, put to rmq_catchain queue",
+                                                self, msg.signature.0, decoded_msg, decoded_msg_status //catchain.received_messages.len()
+                                            );
+                                            if let Err(e) = self.rmq_catchain_send(decoded_msg.clone(), decoded_msg_status) {
+                                                log::error!(
+                                                    target: "remp", "Point 4. Cannot put message {} from RMQ {} to queue: {}",
+                                                    decoded_msg, self, e
+                                                )
+                                            }
+                                        },
+                                        _ => {
+                                            log::trace!(target: "remp",
+                                                "Point 4. RMQ {} received message: {:?}, decoded {}, impossible status {:?} for RMQ message, ignoring",
+                                                self, msg.signature.0, decoded_msg, decoded_msg_status
+                                            );
+                                            ignored += 1;
                                         }
                                     }
                                 }
@@ -240,7 +308,10 @@ impl RempCatchainInfo {
                 };
                 #[cfg(feature = "telemetry")] {
                     self.engine.remp_core_telemetry().got_from_catchain(&self.shard, total, ignored);
-                    self.engine.remp_core_telemetry().in_channel_to_rmq(&self.shard, self.rmq_catchain_sender.len());
+                    match self.rmq_catchain_receiver_len() {
+                        Ok(len) => self.engine.remp_core_telemetry().in_channel_to_rmq(&self.shard, len),
+                        Err(e) => log::error!(target: "remp", "Point 4. RMQ {}: cannot receive rmq_catchain queue len, `{}`", self, e)
+                    };
                 }
 
             }
@@ -273,7 +344,7 @@ impl CatchainListener for RempCatchainInfo {
         //}
 
         let mut msg_vect: Vec<::ton_api::ton::validator_session::round::Message> = Vec::new();
-        while let Ok((msg, msg_status)) = self.pending_messages_queue_receiver.try_recv() {
+        while let Ok(Some((msg, msg_status))) = self.pending_messages_queue_try_recv() {
             let msg_body = ::ton_api::ton::validator_session::round::validator_session::message::message::Commit {
                 round: 0,
                 candidate: Default::default(),
@@ -334,7 +405,7 @@ impl CatchainListener for RempCatchainInfo {
     }
 }
 
-#[derive(Debug,PartialEq,Eq)]
+#[derive(Debug,PartialEq,Eq,Clone)]
 enum RempCatchainStatus {
     Created, Starting, Active, Stopping
 }
@@ -361,11 +432,6 @@ impl RempCatchainWrapper {
     pub fn detach(&mut self) -> bool {
         self.count -= 1;
         self.count <= 0
-    }
-
-    pub fn set_status(&mut self, status: RempCatchainStatus) -> Result<()> {
-        self.status = status;
-        Ok(())
     }
 
     pub fn set_active(&mut self) -> Result<()> {
@@ -415,42 +481,68 @@ impl RempCatchainStore {
         Ok(())
     }
 
-    pub async fn start_catchain(&self, session_id: UInt256, local_key: PrivateKey) -> Result<()> {
+    pub async fn start_catchain(&self, session_id: UInt256, local_key: PrivateKey) -> Result<Arc<RempCatchainInstance>> {
         log::trace!(target: "remp", "Starting REMP catchain {:x}", session_id);
-        let catchain_to_start = self.catchains.execute_sync(|x| {
-            match x.get_mut(&session_id) {
-                Some(cc) => {
-                    match cc.status {
-                        RempCatchainStatus::Created => {
-                            cc.status = RempCatchainStatus::Starting;
-                            Ok(Some(cc.info.clone()))
-                        },
-                        RempCatchainStatus::Starting | RempCatchainStatus::Stopping =>
-                            fail!("REMP Catchain session {} is being started/stopped already", cc),
-                        RempCatchainStatus::Active => {
-                            log::trace!(target: "remp", "REMP catchain {:x} is already started", session_id);
-                            return Ok(None)
-                        }
-                    }
-                }
-                None => fail!("REMP Catchain session {:x} start impossible -- not found", session_id)
-            }
-        }).await?;
 
-        if let Some(cc_info) = &catchain_to_start {
+        let (catchain_info, do_start) = loop {
+            let (cc_status, catchain_info) = self.catchains.execute_sync(|x| {
+                match x.get_mut(&session_id) {
+                    Some(cc @ RempCatchainWrapper {status: RempCatchainStatus::Created, ..}) => {
+                        cc.status = RempCatchainStatus::Starting;
+                        Ok((RempCatchainStatus::Created, cc.info.clone()))
+                    },
+                    Some(cc) => Ok((cc.status.clone(), cc.info.clone())),
+                    None => fail!("REMP Catchain session {:x} start impossible -- not found", session_id)
+                }
+            }).await?;
+
+            match cc_status {
+                RempCatchainStatus::Created => break (catchain_info, true),
+                RempCatchainStatus::Starting => {
+                    tokio::time::sleep(REMP_CATCHAIN_START_POLLING_INTERVAL).await;
+                    continue
+                },
+                RempCatchainStatus::Active => {
+                    log::trace!(target: "remp", "REMP catchain {:x} is already started -- copying instance", session_id);
+                    break (catchain_info, false)
+                },
+                RempCatchainStatus::Stopping =>
+                    fail!("REMP Catchain session {:x} is being stopped --- start_catchain call cannot be performed", session_id)
+            }
+        };
+
+        /*
+        match cc.status {
+            RempCatchainStatus::Created => {
+                cc.status = RempCatchainStatus::Starting;
+                Ok((cc.info.clone(), true))
+            },
+            RempCatchainStatus::Stopping =>
+                fail!("REMP Catchain session {} is being stopped --- impossible combination", cc),
+            RempCatchainStatus::Active => {
+                log::trace!(target: "remp", "REMP catchain {:x} is already started", session_id);
+                return Ok((cc.info.clone(), false))
+            }
+        }
+    }
+*/
+        if do_start {
             log::trace!(target: "remp", "Actually starting REMP catchain {:x}/{}",
-                cc_info.queue_id, cc_info.shard
+                catchain_info.queue_id, catchain_info.shard
             );
-            let catchain_ptr = cc_info.clone().start(local_key).await?;
-            cc_info.clone().set_session(catchain_ptr);
+            let catchain_ptr = catchain_info.clone().start(local_key).await?;
             self.catchains.execute_sync(|x| {
                 match x.get_mut(&session_id) {
                     Some(cc) => cc.set_active(),
-                    None => Ok(())
+                    None => fail!("REMP Catchain session {:x} start impossible -- session disappeared", session_id)
                 }
-            }).await
+            }).await?;
+
+            Ok(Arc::new(RempCatchainInstance::new(catchain_ptr)))
         }
-        else { Ok(()) }
+        else {
+            catchain_info.get_instance()
+        }
     }
 
     pub async fn stop_catchain(&self, session_id: &UInt256) -> Result<()> {
@@ -463,7 +555,10 @@ impl RempCatchainStore {
                     }
                     else if catchain.detach() {
                         catchain.status = RempCatchainStatus::Stopping;
-                        Ok(Some((catchain.info.clone(), catchain.info.catchain_ptr.load().clone())))
+                        let catchain_ptr: Option<CatchainPtr> = catchain.info.instance.load().map (
+                            |inst| inst.catchain_ptr.clone()
+                        );
+                        Ok(Some((catchain.info.clone(), catchain_ptr)))
                     }
                     else { Ok(None) }
                 },
@@ -481,7 +576,7 @@ impl RempCatchainStore {
         }
     }
 
-    pub async fn get_catchain_session(&self, session_id: &UInt256) -> Option<Arc<CatchainPtr>> {
+    pub async fn get_catchain_session(&self, session_id: &UInt256) -> Option<CatchainPtr> {
         self.catchains.execute_sync(|x| {
             x.get(session_id).map(|rcw| rcw.info.get_session()).flatten()
         }).await
