@@ -17,3 +17,4 @@ pub mod shard_client;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 pub mod counters;
+pub mod remp_client;

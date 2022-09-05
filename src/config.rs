@@ -19,8 +19,10 @@ use adnl::{
 };
 use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson};
 use std::{
-    collections::HashMap, convert::TryInto, fs::File, io::BufReader, path::Path,
-    sync::{Arc, atomic::{self, AtomicI32} }
+    collections::{HashMap, HashSet}, convert::TryInto, fs::File, io::BufReader, path::Path,
+    fmt::{Display, Formatter},
+    sync::{Arc, atomic::{self, AtomicI32} },
+    time::{Duration}
 };
 use ton_api::{
     IntoBoxed, 
@@ -104,6 +106,8 @@ pub struct TonNodeConfig {
     port: Option<u16>,
     #[serde(skip)]
     file_name: String,
+    #[serde(default = "RempConfig::default")]
+    remp: RempConfig,
     #[serde(default)]
     restore_db: bool,
     #[serde(default)]
@@ -174,7 +178,37 @@ pub struct ExternalDbConfig {
     pub account_producer: KafkaProducerConfig,
     pub block_proof_producer: KafkaProducerConfig,
     pub chain_range_producer: KafkaProducerConfig,
+    pub remp_statuses_producer: KafkaProducerConfig,
     pub bad_blocks_storage: String,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
+pub struct RempConfig {
+    client_enabled: bool,
+    service_enabled: bool,
+}
+
+impl RempConfig {
+    pub fn is_client_enabled(&self) -> bool {
+        self.client_enabled
+    }
+
+    pub fn is_service_enabled(&self) -> bool {
+        self.service_enabled
+    }
+
+    pub fn get_catchain_options(&self) -> Option<catchain::Options> {
+        if self.is_service_enabled() {
+            Some(catchain::Options {
+                idle_timeout: std::time::Duration::from_secs(5),
+                max_deps: 2,
+                debug_disable_db: false,
+                skip_processed_blocks: false
+            })
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
@@ -331,6 +365,10 @@ impl TonNodeConfig {
             }
         };
 
+        // if config_json.remp.is_client_enabled() && config_json.validator_keys.is_some() {
+        //     fail!("REMP client can't be enabled for validator. Disable REMP client or clear validator's keys");
+        // }
+
         config_json.connectivity_check_config.check()?;
 
         #[cfg(not(feature = "async_ss_storage"))]
@@ -442,6 +480,9 @@ impl TonNodeConfig {
     }
     pub fn extensions(&self) -> Option<&NodeExtensions> {
         self.extensions.as_ref()
+    }
+    pub fn remp_config(&self) -> &RempConfig {
+        &self.remp
     }
     pub fn restore_db(&self) -> bool {
         self.restore_db
@@ -592,6 +633,10 @@ impl TonNodeConfig {
     }
 
     fn add_validator_key(&mut self, key_id: &[u8; 32], election_id: i32) -> Result<ValidatorKeysJson> {
+        // if self.remp.is_client_enabled() {
+        //     fail!("Can't add validator key because REMP client is enabled");
+        // }
+        
         let key_info = ValidatorKeysJson {
             election_id,
             validator_key_id: base64::encode(key_id),
@@ -627,6 +672,10 @@ impl TonNodeConfig {
         validator_key_id: &[u8; 32],
         adnl_key_id: &[u8; 32]
     ) -> Result<ValidatorKeysJson> {
+        // if self.remp.is_client_enabled() {
+        //     fail!("Can't add validator adnl key because REMP client is enabled");
+        // }
+
         if let Some(mut key_info) = self.get_validator_key_info(&base64::encode(validator_key_id))? {
             key_info.validator_adnl_key_id = Some(base64::encode(adnl_key_id));
             self.update_validator_key_info(key_info)
@@ -1447,6 +1496,100 @@ impl TonNodeGlobalConfigJson {
         }))
     }
 }
+
+pub struct ValidatorManagerConfig {
+    pub update_interval: Duration,
+    pub unsafe_resync_catchains: HashSet<u32>,
+    /// Maps catchain_seqno to block_seqno and unsafe rotation id
+    pub unsafe_catchain_rotates: HashMap<u32, (u32, u32)>
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct UnsafeCatchainRotation {
+    catchain_seqno: u32,
+    block_seqno: u32,
+    unsafe_rotation_id: u32
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ValidatorManagerConfigImpl {
+    unsafe_resync_catchains: Vec<u32>,
+    unsafe_catchain_rotates: Vec<UnsafeCatchainRotation>
+}
+
+impl Display for ValidatorManagerConfig {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "update interval: {} ms; resync: [{}]; rotates: [{}]",
+            self.update_interval.as_millis(),
+            self.unsafe_resync_catchains.iter().map(|n| format!("{} ", n)).collect::<String>(),
+            self.unsafe_catchain_rotates.iter().map(
+                |(cc, (blk, uid))| format!("({},{})=>{} ",cc,blk,uid)
+            ).collect::<String>()
+        )
+    }
+}
+
+impl ValidatorManagerConfig {
+    pub fn read_configs(config_files: Vec<String>) -> ValidatorManagerConfig {
+        log::debug!(target: "validator", "Reading validator manager config files: {}",
+            config_files.iter().map(|x| format!("{}; ",x)).collect::<String>());
+
+        let mut validator_config = ValidatorManagerConfig::default();
+
+        'iterate_configs: for one_config in config_files.into_iter() {
+            if let Ok(config_file) = std::fs::File::open(one_config.clone()) {
+                let reader = std::io::BufReader::new(config_file);
+                let config: ValidatorManagerConfigImpl = match serde_json::from_reader(reader) {
+                    Err(e) => {
+                        log::warn!("Not ValidatorManagerConfig, but expected to be: {}, error: {}",
+                            one_config, e
+                        );
+                        continue 'iterate_configs
+                    },
+                    Ok(cfg) => cfg
+                };
+
+                for resync in config.unsafe_resync_catchains.into_iter() {
+                    validator_config.unsafe_resync_catchains.insert(resync);
+                }
+
+                for rotate in config.unsafe_catchain_rotates.into_iter() {
+                    validator_config.unsafe_catchain_rotates.insert(
+                        rotate.catchain_seqno,
+                        (rotate.block_seqno, rotate.unsafe_rotation_id)
+                    );
+                }
+            }
+        }
+
+        log::info!(target: "validator", "Validator manager config has been read: {}", validator_config);
+
+        validator_config
+    }
+
+    pub fn check_unsafe_catchain_rotation(&self, block_seqno_opt: Option<u32>, catchain_seqno: u32) -> Option<u32> {
+        if let Some(blk) = block_seqno_opt {
+            match self.unsafe_catchain_rotates.get(&catchain_seqno) {
+                Some((required_block_seqno, rotation_id)) if *required_block_seqno <= blk => Some(*rotation_id),
+                _ => None
+            }
+        }
+        else {
+            None
+        }
+    }
+}
+
+impl Default for ValidatorManagerConfig {
+    fn default() -> Self {
+        return ValidatorManagerConfig {
+            update_interval: Duration::from_secs(3),
+            unsafe_resync_catchains: HashSet::new(),
+            unsafe_catchain_rotates: HashMap::new()
+        }
+    }
+}
+
 
 struct ValidatorKeys {
     values: lockfree::map::Map<i32, ValidatorKeysJson>, // election_id, keys_info

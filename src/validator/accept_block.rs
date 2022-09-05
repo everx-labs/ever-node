@@ -20,8 +20,8 @@ use crate::{
     types::top_block_descr::TopBlockDescrStuff,
     validator::validator_utils::check_crypto_signatures,
 };
-
-use std::{cmp::max, sync::Arc, ops::Deref};
+use storage::block_handle_db::BlockHandle;
+use std::{cmp::{max, min}, sync::Arc, ops::Deref, time::Duration};
 use ton_block::{
     Block, TopBlockDescr, BlockIdExt, MerkleProof, McShardRecord, CryptoSignaturePair,
     Deserializable, BlockSignatures, ValidatorSet, BlockProof, Serializable, BlockSignaturesPure,
@@ -31,7 +31,6 @@ use ton_types::{error, Result, fail, UInt256, UsageTree, HashmapType};
 use ton_api::ton::ton_node::{blocksignature::BlockSignature, broadcast::BlockBroadcast};
 //use rand::Rng;
 
-#[allow(dead_code)]
 pub async fn accept_block(
     id: BlockIdExt,
     data: Option<Vec<u8>>,
@@ -57,90 +56,35 @@ pub async fn accept_block(
         precheck_header(&block, &prev, is_fake, is_fork)?;
         Ok(block)
     }).transpose()?;
-                                                                                                                  
-    // TODO many checks - if block already applied - finish_query
-    // if (handle_->received() && handle_->received_state() && handle_->inited_signatures() &&
-    // handle_->inited_split_after() && handle_->inited_merge_before() && handle_->inited_prev() &&
-    // handle_->inited_logical_time() && handle_->inited_state_root_hash() &&
-    // (is_masterchain() ? handle_->inited_proof() && handle_->is_applied() && handle_->inited_is_key_block()
-    //                 : handle_->inited_proof_link())) {
-    //     finish_query();
-    //     return;
-    // }
 
-    let handle_opt = if let Some(handle) = engine.load_block_handle(&id)? {
-        if handle.is_applied() {
-            log::debug!(target: "validator", "Accept-block: {} is already applied", id);
-            return Ok(())
-        }
-        if !handle.has_data() {
-            fail!("INTERNAL ERROR: got uninitialized handle for block {}", id)
-        }
-        Some(handle)
-    } else {
-        None
-    }; 
-
-    #[cfg(feature = "telemetry")]
-    let mut block_broadcast = block_opt.is_some();
-    let block = match block_opt {
-        Some(b) => b,
-        None => {
-            let (block, _proof) = engine.download_block(&id, Some(10)).await?;
-            precheck_header(&block, &prev, is_fake, is_fork)?;
-            block
+    let mut timeout = 50;
+    let (handle, block, proof, signatures) = loop {
+        match accept_block_routine(
+            &id,
+            block_opt.clone(),
+            &prev,
+            &validator_set,
+            &signatures,
+            &engine,
+            is_fake,
+            is_fork,
+        ).await {
+            Ok(Some(r)) => break r,
+            Ok(None) => {
+                log::debug!(
+                    target: "validator",
+                    "accept block {}: skipping - block has already pre-applied",
+                    id
+                );
+                return Ok(())
+            },
+            Err(e) => {
+                log::warn!(target: "validator", "accept block routine {}: {}", id, e);
+                tokio::time::sleep(Duration::from_millis(timeout)).await;
+                timeout = min(timeout * 2, 1000);
+            }
         }
     };
-
-    let mut handle = if let Some(handle) = handle_opt {
-        handle
-    } else {
-        let result = engine.store_block(&block).await?;
-        #[cfg(feature = "telemetry")]
-        if block_broadcast {
-            block_broadcast = result.is_updated();
-        }
-        let handle = result.as_non_created().ok_or_else(
-            || error!("INTERNAL ERROR: accept for block {} mismatch")
-        )?;
-        #[cfg(feature = "telemetry")]
-        if block_broadcast {
-            handle.set_got_by_broadcast(true);
-        }
-        handle
-    };
-
-    // TODO - if signatures is not set - `ValidatorManager::set_block_signatures` ??????
-
-    // TODO set merge flag in handle
-    // handle_->set_merge(prev_.size() == 2);
-
-    engine.store_block_prev1(&handle, &prev[0])?;
-    if prev.len() == 2 {
-        engine.store_block_prev2(&handle, &prev[1])?;
-    }
-
-    let _ss = calc_shard_state(
-        &handle,
-        &block,
-        &(prev[0].clone(), prev.get(1).cloned()),
-        &engine
-    ).await?;
-
-    //let signatures_count = signatures.len();
-
-    let (proof, signatures) = create_new_proof(&block, &validator_set, signatures)?;
-
-    // handle_->set_state_root_hash(state_hash_);
-    // handle_->set_logical_time(lt_);
-    // handle_->set_unix_time(created_at_);
-    // handle_->set_is_key_block(is_key_block_);
-
-    handle = engine.store_block_proof(&id, Some(handle), &proof).await?
-        .as_non_created()
-        .ok_or_else(
-            || error!("INTERNAL ERROR: accept for block {} proof mismatch", id)
-        )?;
 
     if id.shard().is_masterchain() {
         log::debug!(target: "validator", "Applying block {}", id);
@@ -182,12 +126,6 @@ pub async fn accept_block(
         }
     }
 
-    // There is a problem on protocol level when more the one node sends same broadcast.
-    //// At least one another node should send block broadcast too
-    //let mut rng = rand::thread_rng();
-    //let send_block_broadcast = send_block_broadcast || 
-    //    rng.gen_range(0, 1000) < (1000 / max(1, signatures_count - 1));
-
     if send_block_broadcast {
         let broadcast = build_block_broadcast(&block, validator_set, signatures, proof)?;
         let engine = engine.clone();
@@ -208,6 +146,86 @@ pub async fn accept_block(
 
     log::trace!(target: "validator", "accept_block: {} done", id);
     Ok(())
+}
+
+pub async fn accept_block_routine(
+    id: &BlockIdExt,
+    block_opt: Option<BlockStuff>,
+    prev: &[BlockIdExt],
+    validator_set: &ValidatorSet,
+    signatures: &[CryptoSignaturePair],
+    engine: &Arc<dyn EngineOperations>,
+    is_fake: bool,
+    is_fork:  bool
+) -> Result<Option<(Arc<BlockHandle>, BlockStuff, BlockProofStuff, BlockSignatures)>> {
+
+    let handle_opt = if let Some(handle) = engine.load_block_handle(&id)? {
+        if handle.is_applied() {
+            return Ok(None)
+        }
+        if !handle.has_data() {
+            fail!("INTERNAL ERROR: got uninitialized handle for block {}", id)
+        }
+        Some(handle)
+    } else {
+        None
+    };
+
+    #[cfg(feature = "telemetry")]
+    let mut block_broadcast = block_opt.is_some();
+
+    let block = match block_opt {
+        Some(b) => b,
+        None => {
+            let (block, _proof) = engine.download_block(&id, Some(10)).await?;
+            precheck_header(&block, prev, is_fake, is_fork)?;
+            block
+        }
+    };
+
+    let mut handle = if let Some(handle) = handle_opt {
+        handle
+    } else {
+        let result = engine.store_block(&block).await?;
+        #[cfg(feature = "telemetry")]
+        if block_broadcast {
+            block_broadcast = result.is_updated();
+        }
+        let handle = result.as_non_created().ok_or_else(
+            || error!("INTERNAL ERROR: accept for block {} mismatch")
+        )?;
+        #[cfg(feature = "telemetry")]
+        if block_broadcast {
+            handle.set_got_by_broadcast(true);
+        }
+        handle
+    };
+
+    engine.store_block_prev1(&handle, &prev[0])?;
+    if prev.len() == 2 {
+        engine.store_block_prev2(&handle, &prev[1])?;
+    }
+
+    if handle.has_state() {
+        return Ok(None)
+    }
+
+    let _ss = calc_shard_state(
+        &handle,
+        &block,
+        &(prev[0].clone(), prev.get(1).cloned()),
+        &engine
+    ).await?;
+
+    let (proof, signatures) = create_new_proof(&block, &validator_set, signatures)?;
+
+    handle = engine.store_block_proof(&id, Some(handle), &proof).await?
+        .as_non_created()
+        .ok_or_else(
+            || error!("INTERNAL ERROR: accept for block {} proof mismatch", id)
+        )?;
+
+    Ok(Some((handle, block, proof, signatures)))
 }
 
 async fn choose_mc_state(
@@ -267,7 +285,7 @@ async fn choose_mc_state(
 
 fn precheck_header(
     block: &BlockStuff,
-    prev: &Vec<BlockIdExt>,
+    prev: &[BlockIdExt],
     is_fake: bool,
     is_fork: bool,
 ) -> Result<()> {
@@ -317,7 +335,7 @@ fn precheck_header(
 pub fn create_new_proof(
     block_stuff: &BlockStuff,
     validator_set: &ValidatorSet,
-    signatures: Vec<CryptoSignaturePair>
+    signatures: &[CryptoSignaturePair]
 ) -> Result<(BlockProofStuff, BlockSignatures)> {
     let id = block_stuff.id();
     log::trace!(target: "validator", "create_new_proof {}", block_stuff.id());
@@ -385,7 +403,7 @@ pub fn create_new_proof(
     let total_weight = validator_set.total_weight();
     let mut block_signatures_pure = BlockSignaturesPure::with_weight(total_weight);
     for sign in signatures {
-        block_signatures_pure.add_sigpair(sign)
+        block_signatures_pure.add_sigpair(sign.clone())
     }
     let mut block_signatures = BlockSignatures::with_params(
         ValidatorBaseInfo::with_params(

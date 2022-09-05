@@ -250,7 +250,10 @@ pub async fn process_validation_queue(
     let mut cur_round = 0;
     let mut last_action = SystemTime::now();
 
-    'queue_loop: while g.clone().get_status().await != ValidatorGroupStatus::Stopped {
+    'queue_loop: while g.clone().get_status().await < ValidatorGroupStatus::Stopping {
+        // Checking REMP messages
+        g.poll_rmq().await;
+
         let g_clone = g.clone();
         let g_info = g_clone.info().await;
 

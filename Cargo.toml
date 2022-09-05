@@ -1,7 +1,7 @@
 [package]
 edition = '2021'
 name = 'ton_node'
-version = '0.51.1'
+version = '0.51.2'
 build = 'common/build/build.rs'
 
 
@@ -13,6 +13,7 @@ resolver = '2'
 release = { debug = true }
 
 [dependencies]
+arc-swap = '0.3.11'
 async-trait = '0.1.22'
 async-recursion = '0.3.2'
 base64 = '0.13'
