@@ -16,17 +16,15 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use sha2::{Digest, Sha256};
 use ton_block::{
+    Deserializable,
     BlockSignatures, BlockSignaturesPure, CatchainConfig, ConfigParams,
     CryptoSignature, CryptoSignaturePair,
-    Deserializable,
-    Message,
     ShardIdent, SigPubKey,
     UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet,
     Workchains, WorkchainDescr,
 };
-use ton_types::{Result, UInt256, HashmapType, fail, error};
+use ton_types::{Result, UInt256, HashmapType, fail};
 use validator_session::SessionNode;
-use crate::engine_traits::EngineOperations;
 
 
 pub fn sigpubkey_to_publickey(k: &SigPubKey) -> PublicKey {
@@ -98,11 +96,11 @@ pub fn check_crypto_signatures(signatures: &BlockSignaturesPure, validators_list
     Ok(weight)
 }
 
-pub fn validatordescr_to_catchain_node(descr: &ValidatorDescr) -> CatchainNode {
-    catchain::CatchainNode {
+pub fn validatordescr_to_catchain_node(descr: &ValidatorDescr) -> Result<CatchainNode> {
+    Ok(catchain::CatchainNode {
         adnl_id: get_adnl_id(descr),
         public_key: sigpubkey_to_publickey(&descr.public_key)
-    }
+    })
 }
 
 pub fn validatordescr_to_session_node(descr: &ValidatorDescr) -> ton_types::Result<SessionNode> {
@@ -155,13 +153,9 @@ pub fn get_adnl_id(validator: &ValidatorDescr) -> Arc<KeyId> {
 pub type ValidatorListHash = UInt256;
 
 /// compute sha256 for hashes of public keys of all validators
-pub fn compute_validator_list_id(list: &[ValidatorDescr], session_data: Option<(&ShardIdent, u32)>) -> Option<ValidatorListHash> {
+pub fn compute_validator_list_id(list: &[ValidatorDescr]) -> Option<ValidatorListHash> {
     if !list.is_empty() {
         let mut hasher = Sha256::new();
-        if let Some((shard,seq)) = session_data {
-            hasher.update(shard.shard_prefix_with_tag().to_be_bytes());
-            hasher.update(seq.to_be_bytes());
-        }
         for x in list {
             hasher.update(x.compute_node_id_short().as_slice());
         }
@@ -170,30 +164,6 @@ pub fn compute_validator_list_id(list: &[ValidatorDescr], session_data: Option<(
     } else {
         None
     }
-}
-
-// pub fn get_validator_key_idx_in_validator_set(key: &PublicKey, set: &ValidatorSet) -> Result<u32> {
-//     let mut idx = 0;
-//     for validator in set.list() {
-//         let validator_key = sigpubkey_to_publickey(&validator.public_key);
-//         if key.id() == validator_key.id() {
-//             return Ok(idx);
-//         }
-//         idx += 1;
-//     }
-//     Err(failure::err_msg(format!("Key {} not found in validator set {:?}", key.id(), set)))
-// }
-
-pub fn get_validator_key_idx(public_key: &PublicKey, nodes: &Vec<CatchainNode>) -> Result<u32> {
-    let key_id = public_key.id();
-    let mut idx = 0;
-    for validator in nodes.into_iter() {
-        if key_id == validator.public_key.id() {
-            return Ok(idx);
-        }
-        idx += 1;
-    }
-    Err(failure::err_msg(format!("Key {} not found in validator list", key_id)))
 }
 
 pub fn compute_validator_set_cc(
@@ -310,15 +280,4 @@ pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (ever_crypto::KeyOptionJso
             }
         }
     }
-}
-
-pub async fn get_shard_by_message(engine: Arc<dyn EngineOperations>, message: Arc<Message>) -> Result<ShardIdent> {
-    let dst_wc = message.dst_workchain_id()
-        .ok_or_else(|| error!("Can't get workchain id from message"))?;
-    let dst_address = message.int_dst_account_id()
-        .ok_or_else(|| error!("Can't get standart destination address from message"))?;
-
-    // find account and related shard
-    let (_account, shard) = engine.load_account(dst_wc, dst_address.clone()).await?;
-    Ok(shard)
 }

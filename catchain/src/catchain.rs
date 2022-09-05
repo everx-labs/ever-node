@@ -1162,7 +1162,10 @@ impl CatchainProcessor {
             }
         }
 
-        info!("Catchain main loop is finished (session_id is {:x})", session_id);
+        info!(
+            "Catchain main loop is finished (session_id is {:x})",
+            session_id
+        );
 
         overloaded_flag.store(false, Ordering::SeqCst);
         is_stopped_flag.store(true, Ordering::SeqCst);
@@ -2261,10 +2264,8 @@ impl Catchain for CatchainImpl {
             }
 
             info!(
-                "...waiting for Catchain threads (session_id is {:x}), main={}, util={}",
-                self.session_id,
-                self.main_thread_is_stopped_flag.load(Ordering::SeqCst),
-                self.utility_thread_is_stopped_flag.load(Ordering::SeqCst)
+                "...waiting for Catchain threads (session_id is {:x})",
+                self.session_id
             );
 
             const CHECKING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);

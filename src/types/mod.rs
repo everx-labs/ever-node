@@ -17,4 +17,3 @@ pub mod top_block_descr;
 pub mod limits;
 pub mod messages;
 pub mod lockfree_cache;
-pub mod shard_blocks_observer;

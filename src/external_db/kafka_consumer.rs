@@ -15,11 +15,11 @@ use crate::{
     engine_traits::{EngineOperations, Server}, config::KafkaConsumerConfig, jaeger
 };
 use futures::StreamExt;
-use rdkafka::{consumer::Consumer, Message, message::BorrowedMessage};
+use rdkafka::{consumer::Consumer, Message};
 use std::sync::Arc;
 use std::time;
 use stream_cancel::StreamExt as StreamCancelExt;
-use ton_types::{Result, UInt256, fail, error};
+use ton_types::Result;
 
 pub struct KafkaConsumer {
     config: KafkaConsumerConfig,
@@ -73,22 +73,24 @@ impl KafkaConsumer {
                 break
             }
             let borrowed_message = borrowed_message?;
-            let message_descr = format!(
-                "topic: {}, key: {}, partition: {}, offset: {}", 
-                borrowed_message.topic(),
-                borrowed_message.key().map(|k| hex::encode(k)).unwrap_or_else(|| "<no key>".to_owned()),
-                borrowed_message.partition(),
-                borrowed_message.offset()
-            );
+            let message_descr = format!("topic: {}, partition: {}, offset: {}", 
+                borrowed_message.topic(), borrowed_message.partition(), borrowed_message.offset());
             let now = std::time::Instant::now();
-            log::trace!("Processing record, {}", message_descr);
-            match self.process_message(&borrowed_message).await {
-                Ok(_) => log::trace!("redirected external message {}", message_descr),
-                Err(e) => log::error!("error while processing external message {}: {:?}", message_descr, e),
-            };
+            if let Some(payload) = rdkafka::Message::payload(&borrowed_message) {
+                log::trace!("Processing record, {:?}", payload);
+                match self.engine.redirect_external_message(&payload).await {
+                    Ok(info) => log::trace!("count number of nodes to broadcast to: {}", info.send_to),
+                    Err(e) => log::error!(
+                        "error while processing external message (topic: {}, partition: {}, offset: {}): {:?}",
+                        borrowed_message.topic(), borrowed_message.partition(), borrowed_message.offset(), e
+                    ),
+                };
+            } else {
+                log::warn!("Record with empty payload, {}", message_descr);
+            }
+
             consumer.commit_message(&borrowed_message, rdkafka::consumer::CommitMode::Async)?;
             log::trace!("Processed record, {}, time: {} mcs", message_descr, now.elapsed().as_micros());
-
             if let Some(msg_key) = rdkafka::Message::key(&borrowed_message){
                 jaeger::message_from_kafka_received(msg_key);
             } else {
@@ -98,21 +100,4 @@ impl KafkaConsumer {
 
         Ok(())
     }
-
-    async fn process_message(&self, message: &BorrowedMessage<'_>) -> Result<()> {
-        let key = message.key().ok_or_else(|| error!("Message must have key"))?;
-        let key_len = key.len(); 
-        if key_len < 32 {
-            fail!("Message key length must be at least 32 (actual is {})", key_len);
-        }
-        let key = UInt256::from(key);
-
-        if let Some(payload) = rdkafka::Message::payload(message) {
-            self.engine.redirect_external_message(&payload, key).await?;
-        } else {
-            fail!("Message with empty payload {}", key);
-        }
-
-        Ok(())
-    } 
 }

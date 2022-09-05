@@ -47,7 +47,6 @@ pub fn create_external_db(config: ExternalDbConfig, front_workchain_ids: Vec<i32
                 stub_producer::StubProducer{enabled: true},
                 stub_producer::StubProducer{enabled: true},
                 stub_producer::StubProducer{enabled: true},
-                stub_producer::StubProducer{enabled: true},
                 config.bad_blocks_storage,
                 front_workchain_ids,
             )
@@ -72,7 +71,6 @@ pub fn create_external_db(config: ExternalDbConfig, front_workchain_ids: Vec<i32
                 kafka_producer::KafkaProducer::new(config.account_producer)?,
                 kafka_producer::KafkaProducer::new(config.block_proof_producer)?,
                 kafka_producer::KafkaProducer::new(config.chain_range_producer)?,
-                kafka_producer::KafkaProducer::new(config.remp_statuses_producer)?,
                 config.bad_blocks_storage,
                 front_workchain_ids,
                 max_account_bytes_size,

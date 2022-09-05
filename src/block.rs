@@ -15,7 +15,7 @@ use std::{io::Cursor, collections::HashMap, cmp::max, sync::Arc};
 use std::io::Write;
 use ton_block::{
     Block, BlockIdExt, BlkPrevInfo, Deserializable, ExtBlkRef, ShardDescr, ShardIdent, 
-    ShardHashes, HashmapAugType, ConfigParams
+    ShardHashes, HashmapAugType
 };
 use ton_types::{Cell, Result, types::UInt256, deserialize_tree_of_cells, error, fail, HashmapType};
 
@@ -91,7 +91,6 @@ impl BlockStuff {
     }
 
 
-
     pub fn block(&self) -> &Block { &self.block }
   
     pub fn id(&self) -> &BlockIdExt { &self.id }
@@ -114,9 +113,10 @@ impl BlockStuff {
         Ok(self.block.read_info()?.gen_utime().as_u32())
     }
 
-   pub fn is_key_block(&self) -> Result<bool> {
-       Ok(self.block.read_info()?.key_block())
-   }
+// Unused
+//    pub fn is_key_block(&self) -> Result<bool> {
+//        Ok(self.block.read_info()?.key_block())
+//    }
 
     pub fn construct_prev_id(&self) -> Result<(BlockIdExt, Option<BlockIdExt>)> {
         let header = self.block.read_info()?;
@@ -220,14 +220,17 @@ impl BlockStuff {
         Ok(shards)
     }
 
-    pub fn config(&self) -> Result<ConfigParams> {
-       self
-            .block()
-            .read_extra()?
-            .read_custom()?
-            .and_then(|custom| custom.config().cloned())
-            .ok_or_else(|| error!("State doesn't contain `custom` field"))
-    }
+// Unused
+//    pub fn config(&self) -> Result<ConfigParams> {
+//        self
+//            .block()
+//            .read_extra()?
+//            .read_custom()?
+//            .and_then(|custom| custom.config().cloned())
+//            .ok_or_else(|| error!(NodeError::InvalidArg(
+//                "State doesn't contain `custom` field".to_string()
+//            )))
+//    }
 
 // Unused
 //    pub fn read_cur_validator_set_and_cc_conf(&self) -> Result<(ValidatorSet, CatchainConfig)> {

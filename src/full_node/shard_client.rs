@@ -299,7 +299,7 @@ pub const SHARD_BROADCAST_WINDOW: u32 = 8;
 pub async fn process_block_broadcast(
     engine: &Arc<dyn EngineOperations>, 
     broadcast: &BlockBroadcast
-) -> Result<Option<BlockStuff>> {
+) -> Result<()> {
 
     log::trace!("process_block_broadcast: {}", broadcast.id);
     if let Some(handle) = engine.load_block_handle(&broadcast.id)? {
@@ -313,7 +313,7 @@ pub async fn process_block_broadcast(
                     unneeded
                 );
             }
-            return Ok(None);
+            return Ok(());
         }
     }
     #[cfg(feature = "telemetry")]
@@ -337,7 +337,7 @@ pub async fn process_block_broadcast(
             but last processed mc block is {})",
             broadcast.id, prev_key_block_seqno, last_applied_mc_state.block_id().seq_no()
         );
-        return Ok(None);
+        return Ok(());
     }
 
     let config_params = last_applied_mc_state.config_params()?;
@@ -357,7 +357,7 @@ pub async fn process_block_broadcast(
             "Skipped apply for block {} broadcast because block is already in processing",
             block.id()
         );
-        return Ok(None);
+        return Ok(())
     };
     #[cfg(feature = "telemetry")]
     handle.set_got_by_broadcast(true);
@@ -371,7 +371,7 @@ pub async fn process_block_broadcast(
                 "Skipped apply for block {} broadcast because block is already in processing",
                 block.id()
             );
-            return Ok(None);
+            return Ok(())
         }
     }
 
@@ -405,7 +405,8 @@ pub async fn process_block_broadcast(
             )
         }
     }
-    Ok(Some(block))
+    Ok(())
+
 }
 
 fn validate_brodcast(

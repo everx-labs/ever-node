@@ -15,22 +15,14 @@ pub mod validate_query;
 mod fabric;
 mod log_parser;
 pub mod accept_block;
-pub mod catchain_overlay;
-mod reliable_message_queue;
-pub mod remp_catchain;
-pub mod remp_manager;
-pub mod remp_block_parser;
 mod validator_group;
 pub mod validator_utils;
 pub mod validator_manager;
 pub mod validator_session_listener;
-pub mod sessions_computing;
-pub mod message_cache;
 pub mod candidate_db;
 pub mod collator;
 pub mod out_msg_queue;
 mod mutex_wrapper;
-pub mod remp_service;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 #[cfg(feature = "slashing")]
