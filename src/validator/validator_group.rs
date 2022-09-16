@@ -11,9 +11,6 @@
 * limitations under the License.
 */
 
-//TODO: do not await verification manager functions for collation / validation
-//TODO: remove block status sending from validation?
-
 use std::cmp::max;
 use std::sync::*;
 use std::sync::atomic::{Ordering, AtomicU64};
@@ -454,7 +451,7 @@ impl ValidatorGroup {
         self.group_impl.execute_sync(|group_impl| group_impl.info()).await
     }
 
-    pub async fn on_generate_slot(&self, round: u32, callback: ValidatorBlockCandidateCallback) {
+    pub async fn on_generate_slot(&self, round: u32, callback: ValidatorBlockCandidateCallback, rt: tokio::runtime::Handle) {
         log::info!(
             target: "validator", 
             "SessionListener::on_generate_slot: collator request, {}",
@@ -482,20 +479,16 @@ impl ValidatorGroup {
             }
             None => Err(failure::err_msg("Min masterchain block id missing")),
         };
-        let mut candidate = None;
+        #[cfg(feature = "verification")]
+        let candidate = match &result {
+            Ok(candidate) => Some(candidate.clone()),
+            _ => None
+        };
         let result_message = match &result {
-            Ok(result) => {
+            Ok(_) => {
                 let now = std::time::SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
                 self.last_collation_time.fetch_max(now, Ordering::Relaxed);
-
-                candidate = Some(super::BlockCandidate {
-                    block_id: BlockIdExt::with_params(self.shard.clone(), 0, result.id.root_hash.clone(), get_hash(&result.data.data())),
-                    data: result.data.data().to_vec(),
-                    collated_file_hash: result.collated_file_hash.clone(),
-                    collated_data: result.collated_data.data().to_vec(),
-                    created_by: self.local_key.pub_key().expect("source must contain pub_key").into(),
-                });
 
                 format!("Collation successful")
             }
@@ -510,8 +503,30 @@ impl ValidatorGroup {
 
         #[cfg(feature = "verification")]
         if let Some(candidate) = candidate {
-            log::trace!(target:"verificator", "Received new candidate for round {}", round);
-            let _verification_future = self.verification_manager.send_new_block_candidate(&candidate).await; //TODO: do not wait!
+            log::debug!(target:"verificator", "Received new candidate for round {} for shard {:?}", round, self.shard);
+            let verification_manager = self.verification_manager.clone();
+            let next_block_id = match self.group_impl.execute_sync(|group_impl|
+                group_impl.create_next_block_id(
+                    candidate.id.root_hash.clone(),
+                    get_hash(&candidate.data.data()),
+                    self.shard.clone()
+                )
+            ).await {
+                Err(x) => { log::error!(target: "validator", "{}", x); return },
+                Ok(x) => x
+            };
+
+            let candidate = super::BlockCandidate {
+                block_id: next_block_id,
+                data: candidate.data.data().to_vec(),
+                collated_file_hash: candidate.collated_file_hash.clone(),
+                collated_data: candidate.collated_data.data().to_vec(),
+                created_by: self.local_key.pub_key().expect("source must contain pub_key").into(),
+            };
+
+            rt.clone().spawn(async move {
+                verification_manager.send_new_block_candidate(&candidate).await;
+            });
         }
     }
 
@@ -558,9 +573,6 @@ impl ValidatorGroup {
 
             match mm_block_id {
                 Some(mc) => {
-                    #[cfg(feature = "verification")]
-                    let _verification_future = self.verification_manager.send_new_block_candidate(&candidate).await; //TODO: do not wait!
-
                     run_validate_query(
                         self.shard.clone(),
                         min_ts,
@@ -753,3 +765,6 @@ impl Drop for ValidatorGroup {
     }
 }
 
+#[cfg(test)]
+#[path = "tests/test_group_log_replay.rs"]
+mod tests;

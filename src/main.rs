@@ -34,6 +34,7 @@ mod sync;
 mod types;
 mod validating_utils;
 mod validator;
+mod shard_states_keeper;
 
 #[cfg(feature = "tracing")]
 mod jaeger;
@@ -67,6 +68,9 @@ use std::{
 use ton_types::error;
 use ton_types::Result;
 
+#[cfg(test)]
+#[path = "tests/test_helper.rs"]
+pub mod test_helper;
 
 #[cfg(target_os = "linux")]
 #[link(name = "tcmalloc", kind = "dylib")]

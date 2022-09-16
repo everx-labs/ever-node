@@ -930,6 +930,10 @@ impl OverlayOperations for NodeNetwork {
 
 #[async_trait::async_trait]
 impl PrivateOverlayOperations for NodeNetwork {
+    async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>> {
+        self.config_handler.get_validator_bls_key(key_id).await
+    }
+
     async fn set_validator_list(
         &self, 
         validator_list_id: UInt256,

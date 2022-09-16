@@ -12,12 +12,9 @@
 * limitations under the License.
 */
 
-//TODO: do not wait in validator group for send_new_block_candidate!
-//TODO: add workchain ID to logging
-//TODO: derivative metrics (duplication, updates speed, success/failure frequencies)
-
 use super::workchain::Workchain;
 use super::workchain::WorkchainPtr;
+use super::utils::HangCheck;
 use super::*;
 use log::*;
 use std::sync::atomic::AtomicBool;
@@ -30,12 +27,13 @@ use ton_api::ton::ton_node::broadcast::BlockCandidateBroadcast;
 use ton_types::Result;
 use catchain::utils::MetricsDumper;
 use catchain::utils::compute_instance_counter;
+use catchain::profiling::check_execution_time;
 
 /*
     Constants
 */
 
-const METRICS_DUMP_PERIOD_MS: u64 = 5000; //time for verification manager metrics dump
+const METRICS_DUMP_PERIOD_MS: u64 = 60000; //time for verification manager metrics dump
 
 /*
 ===============================================================================
@@ -57,6 +55,10 @@ pub struct VerificationManagerImpl {
     should_stop_flag: Arc<AtomicBool>,                                 //flag to indicate manager should be stopped
     dump_thread_is_stopped_flag: Arc<AtomicBool>,                      //flag to indicate dump thread is stopped
     metrics_receiver: Arc<metrics_runtime::Receiver>,                  //metrics receiver
+    blocks_instance_counter: Arc<InstanceCounter>,                     //instance counter for blocks
+    workchains_instance_counter: Arc<InstanceCounter>,                 //instance counter for workchains
+    wc_overlays_instance_counter: Arc<InstanceCounter>,                //instance counter for workchains WC overlays
+    mc_overlays_instance_counter: Arc<InstanceCounter>,                //instance counter for workchains MC overlays
     send_new_block_candidate_counter: metrics_runtime::data::Counter,  //counter for new candidates invocations
     update_workchains_counter: metrics_runtime::data::Counter,         //counter for workchains update invocations
 }
@@ -69,9 +71,19 @@ impl VerificationManager for VerificationManagerImpl {
 
     /// New block broadcast has been generated
     async fn send_new_block_candidate(&self, candidate: &BlockCandidate) {
-        let workchain_id = candidate.block_id.shard_id.workchain_id();
+        check_execution_time!(20_000);
 
-        if let Some(workchain) = self.workchains.lock().get(&workchain_id) {
+        log::debug!(target:"verificator", "New block candidate has been generated {:?}", candidate.block_id);
+
+        let _hang_checker = HangCheck::new(self.runtime.clone(), format!("VerificationManagerImpl::send_new_block_candidate: {:?}", candidate.block_id), Duration::from_millis(1000));
+
+        let workchain_id = candidate.block_id.shard_id.workchain_id();
+        let workchain = match self.workchains.lock().get(&workchain_id) {
+            Some(workchain) => Some(workchain.clone()),
+            None => None,
+        };
+
+        if let Some(workchain) = workchain {
             let block_id = candidate.block_id.clone();
             let timestamp = match SystemTime::now().duration_since(UNIX_EPOCH) {
                 Ok(n) => n.as_millis(),
@@ -108,8 +120,12 @@ impl VerificationManager for VerificationManagerImpl {
         created_by: &UInt256,
     ) -> (bool, bool) {
         let workchain_id = block_id.shard_id.workchain_id();
+        let workchain = match self.workchains.lock().get(&workchain_id) {
+            Some(workchain) => Some(workchain.clone()),
+            None => None,
+        };
 
-        if let Some(workchain) = self.workchains.lock().get(&workchain_id) {
+        if let Some(workchain) = workchain {
             let candidate_id =
                 Workchain::get_candidate_id_impl(block_id, collated_data_file_hash, created_by);
 
@@ -129,11 +145,16 @@ impl VerificationManager for VerificationManagerImpl {
     async fn update_workchains<'a>(
         &'a self,
         local_key: PrivateKey,
+        local_bls_key: PrivateKey,
         workchain_id: i32,
         workchain_validators: &'a Vec<ValidatorDescr>,
         mc_validators: &'a Vec<ValidatorDescr>,
         listener: &'a VerificationListenerPtr,
     ) {
+        check_execution_time!(100_000);
+
+        let _hang_checker = HangCheck::new(self.runtime.clone(), "VerificationManagerImpl::update_workchains".to_string(), Duration::from_millis(1000));
+
         trace!(target: "verificator", "Update workchains");
 
         self.update_workchains_counter.increment();
@@ -148,12 +169,17 @@ impl VerificationManager for VerificationManagerImpl {
             &engine,
             self.runtime.clone(),
             &local_key,
+            &local_bls_key,
             &current_workchains,
             workchain_id,
             &workchain_validators,
             mc_validators,
             listener,
             self.metrics_receiver.clone(),
+            self.workchains_instance_counter.clone(),
+            self.blocks_instance_counter.clone(),
+            self.wc_overlays_instance_counter.clone(),
+            self.mc_overlays_instance_counter.clone(),
         )
         .await
         {
@@ -201,12 +227,17 @@ impl VerificationManagerImpl {
         engine: &EnginePtr,
         runtime: tokio::runtime::Handle,
         local_key: &PrivateKey,
+        local_bls_key: &PrivateKey,
         workchains: &WorkchainMapPtr,
         workchain_id: i32,
         validators: &Vec<ValidatorDescr>,
         mc_validators: &Vec<ValidatorDescr>,
         listener: &VerificationListenerPtr,
         metrics_receiver: Arc<metrics_runtime::Receiver>,
+        workchains_instance_counter: Arc<InstanceCounter>,
+        blocks_instance_counter: Arc<InstanceCounter>,
+        wc_overlays_instance_counter: Arc<InstanceCounter>,
+        mc_overlays_instance_counter: Arc<InstanceCounter>,
     ) -> Result<WorkchainPtr> {
         let validator_set_hash = Self::compute_validator_set_hash(validators);
 
@@ -228,8 +259,13 @@ impl VerificationManagerImpl {
             mc_validators.clone(),
             validator_set_hash,
             local_key,
+            local_bls_key,
             listener.clone(),
             metrics_receiver,
+            workchains_instance_counter,
+            blocks_instance_counter,
+            wc_overlays_instance_counter,
+            mc_overlays_instance_counter,
         )
         .await?;
 
@@ -252,14 +288,13 @@ impl VerificationManagerImpl {
             let mut metrics_dumper = MetricsDumper::new();
             let mut workchain_metrics_dumpers: HashMap<i32, (MetricsDumper, i32)> = HashMap::new();
 
-            metrics_dumper.add_compute_handler("verification_blocks".to_string(), &compute_instance_counter);
-            metrics_dumper.add_compute_handler("workchains".to_string(), &compute_instance_counter);
-            metrics_dumper.add_compute_handler("overlays".to_string(), &compute_instance_counter);
-            metrics_dumper.add_compute_handler("wc_overlays".to_string(), &compute_instance_counter);
-            metrics_dumper.add_compute_handler("mc_overlays".to_string(), &compute_instance_counter);
+            metrics_dumper.add_compute_handler("verificator_block".to_string(), &compute_instance_counter);
+            metrics_dumper.add_compute_handler("verificator_workchains".to_string(), &compute_instance_counter);
+            metrics_dumper.add_compute_handler("verificator_wc_overlays".to_string(), &compute_instance_counter);
+            metrics_dumper.add_compute_handler("verificator_mc_overlays".to_string(), &compute_instance_counter);
 
-            metrics_dumper.add_derivative_metric("verification_blocks".to_string());
-            metrics_dumper.add_derivative_metric("workchains".to_string());
+            metrics_dumper.add_derivative_metric("verificator_block".to_string());
+            metrics_dumper.add_derivative_metric("verificator_workchains".to_string());
 
             let mut next_metrics_dump_time = SystemTime::now();
             let mut loop_idx = 0;
@@ -371,6 +406,10 @@ impl VerificationManagerImpl {
             metrics_receiver: metrics_receiver.clone(),
             send_new_block_candidate_counter: metrics_receiver.sink().counter("verificator_candidates"),
             update_workchains_counter: metrics_receiver.sink().counter("verificator_workchains_updates"),
+            blocks_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"verificator_block".to_string())),
+            workchains_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"verificator_workchains".to_string())),
+            wc_overlays_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"verificator_wc_overlays".to_string())),
+            mc_overlays_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"verificator_mc_overlays".to_string())),
             should_stop_flag: should_stop_flag.clone(),
             dump_thread_is_stopped_flag: dump_thread_is_stopped_flag.clone(),
         };

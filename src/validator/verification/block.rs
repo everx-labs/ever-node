@@ -11,8 +11,8 @@
 * limitations under the License.
 */
 
-pub use multi_signature_unsafe::MultiSignature;
-//pub use multi_signature_bls::MultiSignature;
+//pub use multi_signature_unsafe::MultiSignature;
+pub use multi_signature_bls::MultiSignature;
 use super::*;
 use catchain::BlockPayloadPtr;
 use log::*;
@@ -74,8 +74,12 @@ pub struct Block {
     rejections_signature: MultiSignature,             //signature for rejections
     signatures_hash: u32,                             //hash for signatures
     created_timestamp: Option<i64>,                   //time of block creation
+    first_appearance_time: std::time::SystemTime,     //time of first block appearance in a network
     merges_count: u32,                                //merges count
     initially_mc_processed: bool,                     //was this block process in MC
+    mc_originated: bool,                              //was this block appeared from MC
+    mc_delivered: bool,                               //was this block delivered to MC because of cutoff weight of delivery signatures
+    ready_for_send: bool,                             //is this block ready for sending
     _instance_counter: InstanceCounter,               //instance counter
 }
 
@@ -107,6 +111,11 @@ impl Block {
     /// Is block rejected
     pub fn is_rejected(&self) -> bool {
         !self.rejections_signature.empty()
+    }
+
+    /// Block first appearance time
+    pub fn get_first_appearance_time(&self) -> &std::time::SystemTime {
+        &self.first_appearance_time
     }
 
     /// Block creation time
@@ -152,6 +161,35 @@ impl Block {
     /// Get MC processed status
     pub fn was_mc_processed(&self) -> bool {
         self.initially_mc_processed
+    }
+
+    /// Set MC delivery status
+    pub fn mark_as_mc_delivered(&mut self) {
+        self.mc_delivered = true;
+    }
+
+    /// Get MC delivery status
+    pub fn was_mc_delivered(&self) -> bool {
+        self.mc_delivered
+    }    
+
+    /// Set origin
+    pub fn mark_as_mc_originated(&mut self) {
+        self.mc_originated = true;
+    }
+
+    /// Get origin
+    pub fn is_mc_originated(&self) -> bool {
+        self.mc_originated
+    }
+
+    /// Set ready for sending flag
+    pub fn toggle_send_ready(&mut self, new_state: bool) -> bool {
+        let prev_state = self.ready_for_send;
+
+        self.ready_for_send = new_state;
+
+        prev_state
     }
 
     /// Get status
@@ -265,7 +303,7 @@ impl Block {
         let cur_block_candidate = self.block_candidate.as_ref().unwrap();
 
         if &new_block_candidate.hash != &cur_block_candidate.hash {
-            warn!(target: "verificator", "Attempt to update block candidate {} body with a new data: prev={}, new={}", self.candidate_id, cur_block_candidate.hash, new_block_candidate.hash);
+            warn!(target: "verificator", "Attempt to update block candidate {:?} body with a new data: prev={:?}, new={:?}", self.candidate_id, cur_block_candidate.hash, new_block_candidate.hash);
             return false;
         }
 
@@ -278,7 +316,7 @@ impl Block {
     pub fn create(
         candidate_id: UInt256,
         block_candidate: Option<Arc<BlockCandidateBody>>,
-        metrics_receiver: Arc<metrics_runtime::Receiver>, //metrics receiver
+        instance_counter: &InstanceCounter,
     ) -> Arc<SpinMutex<Self>> {
         let mut body = Self {
             candidate_id: candidate_id.clone(),
@@ -291,10 +329,11 @@ impl Block {
             created_timestamp: None,
             merges_count: 0,
             initially_mc_processed: false,
-            _instance_counter: InstanceCounter::new(
-                &metrics_receiver,
-                &"verification_block".to_string(),
-            ),            
+            mc_originated: false,
+            mc_delivered: false,
+            ready_for_send: false,
+            first_appearance_time: std::time::SystemTime::now(),
+            _instance_counter: instance_counter.clone(),
         };
 
         body.update_hash();

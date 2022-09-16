@@ -14,6 +14,7 @@
 use super::block::BlockCandidateBody;
 use super::block::BlockPtr;
 use super::*;
+use super::utils::HangCheck;
 use crate::engine_traits::PrivateOverlayOperations;
 use crate::validator::validator_utils::get_adnl_id;
 use crate::validator::validator_utils::sigpubkey_to_publickey;
@@ -26,6 +27,7 @@ use catchain::PrivateOverlayShortId;
 use catchain::PublicKeyHash;
 use catchain::profiling::ResultStatusCounter;
 use catchain::profiling::InstanceCounter;
+use catchain::profiling::check_execution_time;
 use log::*;
 use overlay::OverlayShortId;
 use rand::Rng;
@@ -39,7 +41,6 @@ use ton_types::Result;
 
 //TODO: traffic metrics & derivatives
 //TODO: remove dependency from CatchainClient? (use private overlay directly)
-//TODO: private workchain sync via queries (see NEIGHBOURS_SYNC_MIN_PERIOD_MS / NEIGHBOURS_SYNC_MAX_PERIOD_MS)
 
 /*
 ===============================================================================
@@ -48,8 +49,6 @@ use ton_types::Result;
 */
 
 const MAX_NEIGHBOURS_COUNT: usize = 16; //max number of neighbours to synchronize
-const NEIGHBOURS_SYNC_MIN_PERIOD_MS: u64 = 100; //min time for sync with neighbour nodes
-const NEIGHBOURS_SYNC_MAX_PERIOD_MS: u64 = 200; //max time for sync with neighbour nodes
 const NEIGHBOURS_ROTATE_MIN_PERIOD_MS: u64 = 60000; //min time for neighbours rotation
 const NEIGHBOURS_ROTATE_MAX_PERIOD_MS: u64 = 120000; //max time for neighbours rotation
 
@@ -119,8 +118,8 @@ impl WorkchainOverlay {
         engine: &EnginePtr,
         runtime: tokio::runtime::Handle,
         metrics_receiver: Arc<metrics_runtime::Receiver>,
+        overlays_instance_counter: Arc<InstanceCounter>,
         metrics_prefix: String,
-        generic_metrics_prefix: String,
         is_master_chain_overlay: bool,
     ) -> Result<Arc<Self>> {
         let overlay_short_id =
@@ -186,10 +185,7 @@ impl WorkchainOverlay {
             runtime_handle: runtime.clone(),
             engine: engine.clone(),
             listener,
-            _instance_counter: InstanceCounter::new(
-                &metrics_receiver,
-                &format!("{}_overlays", generic_metrics_prefix),
-            ),
+            _instance_counter: (*overlays_instance_counter).clone(),
             send_message_to_neighbours_counter: metrics_receiver.sink().counter(format!("{}_send_message_to_neighbours_calls", metrics_prefix)),
             send_all_counter: metrics_receiver.sink().counter(format!("{}_send_all_calls", metrics_prefix)),
             out_broadcast_counter: metrics_receiver.sink().counter(format!("{}_out_broadcasts", metrics_prefix)),
@@ -232,12 +228,12 @@ impl WorkchainOverlay {
 
     /// Send message to other nodes
     fn send_message_multicast(&self, nodes: &Vec<PublicKeyHash>, data: BlockPayloadPtr) {
-        log::trace!(target: "verificator", "Sending multicast to {} nodes (overlay={})", nodes.len(), self.node_debug_id);
+        log::trace!(target: "verificator", "Sending multicast {} bytes to {} nodes (overlay={})", data.data().len(), nodes.len(), self.node_debug_id);
 
         let received_from_workchain = !self.is_master_chain_overlay;
 
         for adnl_id_ref in nodes {
-            static BLOCK_STATUS_QUERY_TIMEOUT: Duration = Duration::from_millis(2000);
+            static BLOCK_STATUS_QUERY_TIMEOUT: Duration = Duration::from_millis(5000);
 
             let listener = self.listener.listener.clone();
             let workchain_id = self.workchain_id;
@@ -247,6 +243,8 @@ impl WorkchainOverlay {
             let block_status_update_counter = self.block_status_update_counter.clone();
 
             let response_callback = Box::new(move |result: Result<BlockPayloadPtr>| {
+                check_execution_time!(50_000);
+
                 log::trace!(target: "verificator", "Block status query response received from {} (overlay={})", &adnl_id, node_debug_id);
 
                 match result {
@@ -436,6 +434,8 @@ impl CatchainOverlayListener for WorkchainListener {
     fn on_broadcast(&self, source_key_hash: PublicKeyHash, data: &BlockPayloadPtr) {
         trace!(target: "verificator", "WorkchainListener::on_broadcast from node with pubkeyhash={} (overlay={})", source_key_hash, self.node_debug_id);
 
+        let _hang_checker = HangCheck::new(self.runtime_handle.clone(), format!("WorkchainListener::on_broadcast: for workchain overlay {}", self.node_debug_id), Duration::from_millis(1000));                
+
         self.in_broadcast_counter.increment();
 
         let data = data.clone();
@@ -484,7 +484,11 @@ impl CatchainOverlayListener for WorkchainListener {
         data: &BlockPayloadPtr,
         response_callback: ExternalQueryResponseCallback,
     ) {
+        check_execution_time!(20_000);
+
         trace!(target: "verificator", "WorkchainListener::on_query (overlay={})", self.node_debug_id);
+
+        let _hang_checker = HangCheck::new(self.runtime_handle.clone(), format!("WorkchainListener::on_query: for workchain overlay {}", self.node_debug_id), Duration::from_millis(1000));        
 
         self.in_query_counter.increment();
 
@@ -501,7 +505,8 @@ impl CatchainOverlayListener for WorkchainListener {
 
                 match Self::process_serialized_block_status(workchain_id, &adnl_id, &data, &*listener, block_status_update_counter, received_from_workchain) {
                     Ok(block) => {
-                        response_callback(Ok(block.lock().serialize()));
+                        let serialized_response = block.lock().serialize();
+                        response_callback(Ok(serialized_response));
                     }
                     Err(err) => {
                         let message = format!("WorkchainListener::on_query error (overlay={}): {:?}", node_debug_id, err);
@@ -510,6 +515,7 @@ impl CatchainOverlayListener for WorkchainListener {
                     }
                 }
             } else {
+                warn!(target: "verificator", "Query listener is not bound");
                 response_callback(Err(failure::format_err!("Query listener is not bound")));
             }
         });
@@ -525,6 +531,8 @@ impl WorkchainListener {
         block_status_update_counter: metrics_runtime::data::Counter,
         received_from_workchain: bool,
     ) -> Result<BlockPtr> {
+        check_execution_time!(50_000);
+
         match ton_api::Deserializer::new(&mut &data.data().0[..]).read_boxed::<ton_api::ton::TLObject>() {
             Ok(message) => {
                 use ton_api::ton::ton_node::BlockCandidateStatus;

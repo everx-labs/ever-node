@@ -11,6 +11,8 @@
 * limitations under the License.
 */
 
+extern crate catchain;
+
 use crate::engine_traits::EngineOperations;
 use crate::validator::BlockCandidate;
 use std::collections::HashMap;
@@ -21,6 +23,8 @@ use ton_block::BlockIdExt;
 use ton_block::ValidatorDescr;
 use ton_types::UInt256;
 use validator_session::PrivateKey;
+use validator_session::InstanceCounter;
+use lazy_static::*;
 
 mod block;
 //mod mc_overlay;
@@ -29,6 +33,7 @@ mod multi_signature_unsafe;
 mod verification_manager;
 mod workchain;
 mod workchain_overlay;
+mod utils;
 
 /// Engine ptr
 type EnginePtr = Arc<dyn EngineOperations>;
@@ -40,9 +45,10 @@ pub type VerificationManagerPtr = Arc<dyn VerificationManager>;
 pub type VerificationListenerPtr = Weak<dyn VerificationListener>;
 
 /// Trait for verification events
+#[async_trait::async_trait]
 pub trait VerificationListener: Sync + Send {
     /// Verify block candidate
-    fn verify(&self, block_candidate: &BlockCandidate) -> bool;
+    async fn verify(&self, block_candidate: &BlockCandidate) -> bool;
 }
 
 /// Verification manager
@@ -63,6 +69,7 @@ pub trait VerificationManager: Sync + Send {
     async fn update_workchains<'a>(
         &'a self,
         local_key: PrivateKey,
+        local_bls_key: PrivateKey,
         workchain_id: i32,
         workchain_validators: &'a Vec<ValidatorDescr>,
         mc_validators: &'a Vec<ValidatorDescr>,

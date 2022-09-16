@@ -15,6 +15,9 @@ use std::{io::Cursor, sync::{Arc, atomic::{AtomicU64, Ordering}}};
 use ton_block::{Deserializable, ShardIdent, Message, AccountIdPrefixFull};
 use ton_types::{Result, types::UInt256, deserialize_tree_of_cells, fail};
 
+#[cfg(test)]
+#[path = "tests/test_ext_messages.rs"]
+mod tests;
 
 const MESSAGE_LIFETIME: u32 = 600; // seconds
 const MESSAGE_MAX_GENERATIONS: u8 = 2;
@@ -139,6 +142,10 @@ impl MessagesPool {
         Ok(id)
     }
 
+    #[cfg(test)]
+    pub fn clear(&mut self) {
+        self.messages.clear()
+    }
 
     pub fn new_message(&self, id: UInt256, message: Arc<Message>, now: u32) -> Result<()> {
         self.messages.insert_with(id, |_key, prev_gen_val, updated_pair | {
@@ -222,6 +229,10 @@ impl MessagesPool {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub fn has_messages(&self) -> bool {
+        self.messages.iter().next().is_some()
+    }
 
 }
 

@@ -13,6 +13,8 @@
 
 use crate::{block_handle_db, traits::Serializable};
 use std::{io::{Read, Write}, sync::atomic::{AtomicU64, Ordering}};
+#[cfg(test)]
+use std::sync::atomic::AtomicU32;
 use ton_block::Block;
 use ton_types::{ByteOrderRead, Result};
 
@@ -21,6 +23,8 @@ pub struct BlockMeta {
     flags: AtomicU64,
     pub gen_utime: u32,
     pub gen_lt: u64,
+    #[cfg(test)]
+    pub test_counter: AtomicU32,
 }
 
 impl BlockMeta {
@@ -45,6 +49,8 @@ impl BlockMeta {
             flags: AtomicU64::new(((flags as u64) << 32) | masterchain_ref_seq_no as u64),
             gen_utime,
             gen_lt,
+            #[cfg(test)]
+            test_counter: AtomicU32::new(0),
         }
     }
 
@@ -83,6 +89,8 @@ impl Serializable for BlockMeta {
         writer.write_all(&flags.to_le_bytes())?;
         writer.write_all(&self.gen_utime.to_le_bytes())?;
         writer.write_all(&self.gen_lt.to_le_bytes())?;
+        #[cfg(test)]
+        writer.write_all(&self.test_counter.load(Ordering::SeqCst).to_le_bytes())?;
         Ok(())
     }
 
@@ -93,6 +101,10 @@ impl Serializable for BlockMeta {
         let masterchain_ref_seq_no = flags as u32;
         let flags = (flags >> 32) as u32;
         let bm = Self::with_data(flags, gen_utime, gen_lt, masterchain_ref_seq_no);
+        #[cfg(test)] {
+            let test_counter = reader.read_le_u32().unwrap_or_default();
+            bm.test_counter.store(test_counter, Ordering::Relaxed);
+        }
         Ok(bm)
     }
 

@@ -27,6 +27,9 @@ use tokio::io::AsyncWriteExt;
 use ton_block::*;
 use ton_types::{error, fail, Result, UInt256};
 
+#[cfg(test)]
+#[path = "tests/test_archive_manager.rs"]
+mod tests;
 
 pub struct ArchiveManager {
     db: Arc<RocksDb>,
@@ -168,12 +171,10 @@ impl ArchiveManager {
         let prooflink_inited = handle.has_proof_link();
         let data_inited = handle.has_data();
 
-        if !data_inited || !(proof_inited || prooflink_inited) {
-            log::error!(
-                target: "storage",
-                "Block {} is not moved to archive: data are not stored (data = {}, proof = {}, prooflink = {})",
+        if data_inited && !(proof_inited || prooflink_inited) {
+            fail!(
+                "Can't move block {} to archive: proof are not stored (proof = {}, prooflink = {})",
                 handle.id(),
-                data_inited,
                 proof_inited,
                 prooflink_inited
             );

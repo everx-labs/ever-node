@@ -34,6 +34,9 @@ use ton_types::{
     HashmapSubtree, HashmapType, HashmapFilterResult, HashmapRemover,
 };
 
+#[cfg(test)]
+#[path = "tests/test_out_msg_queue.rs"]
+mod tests;
 
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ProcessedUptoStuff {

@@ -6,9 +6,13 @@ use crate::{
     },
     shard_state::ShardStateStuff,
 };
+#[cfg(feature = "async_ss_storage")]
+use crate::shard_states_keeper::ShardStatesKeeper;
 use ton_block::{BlockIdExt, MASTERCHAIN_ID, ShardIdent, SHARD_FULL};
 use ton_types::{error, fail, Result, UInt256, Cell};
 use storage::traits::Serializable;
+#[cfg(feature = "async_ss_storage")]
+use crate::internal_db::SsNotificationCallback;
 use std::{
     borrow::Cow, collections::{HashSet, HashMap}, fs::{write, remove_file}, io::Cursor,
     ops::Deref, path::Path, sync::atomic::{AtomicBool, Ordering}, time::Duration
@@ -286,33 +290,60 @@ async fn restore(
     }
 
     let min_mc_state_id = calc_min_mc_state_id(&db, last_mc_block.id()).await?;
-    
+
     log::info!("Checking shard states...");
     let mut mc_block = Cow::Borrowed(last_mc_block);
     let mut broken_cells = false;
     let mut checked_cells = HashSet::new();
     let mut persistent_state_handle = None;
+    #[cfg(feature = "async_ss_storage")]
+    let mut there_was_fully_saved = false;
+    #[cfg(feature = "async_ss_storage")]
+    let max_catch_up_seqno = if  min_mc_state_id.seq_no() > ShardStatesKeeper::MAX_CATCH_UP_DEPTH {
+        min_mc_state_id.seq_no() - ShardStatesKeeper::MAX_CATCH_UP_DEPTH
+    } else {
+        0
+    };
     loop {
         check_stop()?;
-        // check master state
-        if mc_block.id().seq_no() >= min_mc_state_id.seq_no() && !broken_cells {
-            if let Err(e) = check_state(&db, mc_block.id(), &mut checked_cells, check_stop) {
-                log::warn!("Error while checking state {} {}", mc_block.id(), e);
-                broken_cells = true;
-            }
-        }
-        
-        // check shard blocks and states
 
         let shard_blocks = check_shard_client_mc_block(
             &db, &mc_block, processed_wc, persistent_state_handle.is_none(), check_stop).await?;
 
+        #[cfg(not(feature = "async_ss_storage"))]
         if mc_block.id().seq_no() >= min_mc_state_id.seq_no() && !broken_cells {
-            for block_id in &shard_blocks {
-                if let Err(e) = check_state(&db, block_id, &mut checked_cells, check_stop) {
-                    log::warn!("Error while checking state {} {}", block_id, e);
+            broken_cells = !check_mc_and_shards_states(
+                &db,
+                &mc_block,
+                &mut checked_cells,
+                check_stop,
+                &shard_blocks,
+            )?;
+        }
+
+        #[cfg(feature = "async_ss_storage")]
+        if !broken_cells {
+            let cur_seq_no = mc_block.id().seq_no();
+            if !there_was_fully_saved && cur_seq_no < max_catch_up_seqno {
+                // There was not fully saved state in avaliable depth.
+                // States keeper fails if someone will try to load state.
+                broken_cells = true;
+            } else if cur_seq_no > min_mc_state_id.seq_no() || !there_was_fully_saved {
+                // if state is needed or no one fully loaded state was found
+                let broken = !check_mc_and_shards_states(
+                    &db,
+                    &mc_block,
+                    &mut checked_cells,
+                    check_stop,
+                    &shard_blocks,
+                )?;
+                // Some number of new states might be not saved.
+                // If there_was_fully_saved is true all newer that min_mc_state_id 
+                // must be fully saved too
+                if !broken {
+                    there_was_fully_saved = true;
+                } else if there_was_fully_saved {
                     broken_cells = true;
-                    break;
                 }
             }
         }
@@ -386,6 +417,29 @@ async fn restore(
     log::info!("Restore successfully finished");
 
     Ok(db)
+}
+
+fn check_mc_and_shards_states(
+    db: &InternalDb,
+    mc_block: &BlockStuff,
+    checked_cells: &mut HashSet<UInt256>,
+    check_stop: &(dyn Fn() -> Result<()> + Sync),
+    shard_blocks: &[BlockIdExt],
+) -> Result<bool> {
+
+    if let Err(e) = check_state(&db, mc_block.id(), checked_cells, check_stop) {
+        log::warn!("Error while checking state {} {}", mc_block.id(), e);
+        return Ok(false)
+    }
+
+    for block_id in shard_blocks {
+        if let Err(e) = check_state(&db, block_id, checked_cells, check_stop) {
+            log::warn!("Error while checking state {} {}", block_id, e);
+            return Ok(false)
+        }
+    }
+
+    Ok(true)
 }
 
 async fn check_shard_client_mc_block(
@@ -640,33 +694,15 @@ async fn calc_min_mc_state_id(
         }
     }
 
-    match db.load_shard_state_dynamic(min_id) {
-        Err(e) => {
-            log::warn!(
-                "calc_min_mc_state_id: can't load state {} {}. Will use it as min",
-                e, min_id
-            );
-            Ok(min_id.clone())
-        }
-        Ok(mc_state) => {
-            let new_min_ref_mc_seqno = mc_state.state().min_ref_mc_seqno();
+    let handle = db.load_block_handle(&min_id)?
+        .ok_or_else(|| error!("there is no handle for block {}", min_id))?;
+    let block = db.load_block_data(&handle).await?;
+    let min_ref_mc_seqno = block.block().read_info()?.min_ref_mc_seqno();
+    let min_ref_mc_handle = db.find_mc_block_by_seq_no(min_ref_mc_seqno)
+        .or_else(|_| db.find_mc_block_by_seq_no_without_state(min_ref_mc_seqno))?;
 
-            match db.find_mc_block_by_seq_no(new_min_ref_mc_seqno) {
-                Err(e) => {
-                    log::warn!(
-                        "calc_min_mc_state_id: can't find_mc_block_by_seq_no {} {}. Will use {} as min",
-                        e, new_min_ref_mc_seqno, min_id
-                    );
-                    Ok(min_id.clone())
-                }
-                Ok(handle) => {
-
-                    log::trace!("calc_min_mc_state_id: {}", handle.id());
-                    Ok(handle.id().clone())
-                }
-            }
-        }
-    }
+    log::trace!("calc_min_mc_state_id: {}", min_ref_mc_handle.id());
+    Ok(min_ref_mc_handle.id().clone())
 }
 
 fn check_state(
@@ -716,7 +752,11 @@ fn check_state(
         Ok((expected_cells, expected_bits))
     }
 
-    let root = db.shard_state_dynamic_db.get(id)?;
+    let root = db.shard_state_dynamic_db.get(
+        id, 
+        #[cfg(feature = "async_ss_storage")]
+        false
+    )?;
     check_cell(root, checked_cells, check_stop)?;
 
     Ok(())
@@ -742,8 +782,10 @@ async fn restore_states(
     let mut min_stored_states = min_mc_block.shard_hashes()?.top_blocks(&[processed_wc])?;
     min_stored_states.push(min_mc_state_id.clone());
 
+    let abort = || check_stop().is_err();
+
     // master chain
-    let mc_state = db.load_shard_state_persistent(persistent_state_handle.id()).await?;
+    let mc_state = db.load_shard_state_persistent(persistent_state_handle.id(), &abort).await?;
     let next_id = db.load_block_next1(mc_state.block_id())?;
     restore_chain(
         db,
@@ -757,7 +799,7 @@ async fn restore_states(
     // shards
     let mut after_merge = HashMap::new();
     for id in mc_state.top_blocks(processed_wc)? {
-        let pers_root = db.load_shard_state_persistent(&id).await?.root_cell().clone();
+        let pers_root = db.load_shard_state_persistent(&id, &abort).await?.root_cell().clone();
 
         if let Ok(next_id2) = db.load_block_next2(&id) {
             run_chain_restore(
@@ -870,12 +912,19 @@ async fn restore_chain(
             store_states = true;
         }
         if store_states {
+
+            #[cfg(feature = "async_ss_storage")]
+            let callback = SsNotificationCallback::new();
+
             db.store_shard_state_dynamic_raw_force(
                 &block_handle,
                 state_root.clone(),
-                None,
-                check_stop,
+                #[cfg(feature = "async_ss_storage")]
+                Some(callback.clone()),
             ).await?;
+
+            #[cfg(feature = "async_ss_storage")]
+            callback.wait().await;
         }
 
         // if max_stored_states.contains(&block_id) {

@@ -61,6 +61,9 @@ use ton_types::{
 #[cfg(feature = "metrics")]
 use crate::engine::STATSD;
 
+#[cfg(test)]
+#[path = "tests/test_validate_query.rs"]
+mod tests;
 
 // pub const SPLIT_MERGE_DELAY: u32 = 100;        // prepare (delay) split/merge for 100 seconds
 // pub const SPLIT_MERGE_INTERVAL: u32 = 100;     // split/merge is enabled during 60 second interval
@@ -3034,13 +3037,17 @@ impl ValidateQuery {
         *account = Account::construct_from_cell(account_root.clone())?;
         let new_hash = account_root.repr_hash();
         if state_update.new_hash != new_hash {
-            Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute).ok();
+            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
+            #[cfg(test)]
+            Self::prepare_transaction_for_test(base, std::ops::Deref::deref(&executor), _old_account_root, &trans, "account hash wrong".to_string())?;
             reject_query!("transaction {} of {:x} is invalid: it claims that the new \
                 account state hash is {:x} but the re-computed value is {:x}",
                     lt, account_addr, state_update.new_hash, new_hash)
         }
         if trans.out_msgs != trans_execute.out_msgs {
-            Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute).ok();
+            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
+            #[cfg(test)]
+            Self::prepare_transaction_for_test(base, std::ops::Deref::deref(&executor), _old_account_root, &trans, "account hash wrong".to_string())?;
             reject_query!("transaction {} of {:x} is invalid: it has produced a set of \
                 outbound messages different from that listed in the transaction",
                     lt, account_addr)
@@ -3059,7 +3066,11 @@ impl ValidateQuery {
         trans_execute.set_prev_trans_lt(trans.prev_trans_lt());
         let trans_execute_root = trans_execute.serialize()?;
         if trans_root != trans_execute_root {
-            Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute).ok();
+            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
+            #[cfg(test)]
+            if let Err(err) = crate::test_helper::compare_transactions(&trans, &trans_execute, true) {
+                Self::prepare_transaction_for_test(base, std::ops::Deref::deref(&executor), _old_account_root, &trans, err.to_string())?;
+            }
             reject_query!("re created transaction {} doesn't correspond", lt)
         }
         // check new balance and value flow
@@ -3077,7 +3088,9 @@ impl ValidateQuery {
         right_balance.add(&money_exported)?;
         right_balance.add(&trans.total_fees())?;
         if left_balance != right_balance {
-            Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute).ok();
+            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
+            #[cfg(test)]
+            Self::prepare_transaction_for_test(base, std::ops::Deref::deref(&executor), _old_account_root, &trans, "balance incorrect".to_string())?;
             reject_query!("transaction {} of {} violates the currency flow condition: \
                 old balance={} + imported={} does not equal new balance={} + exported=\
                 {} + total_fees={}", lt, account_addr.to_hex_string(),
@@ -4081,6 +4094,7 @@ impl ValidateQuery {
         #[cfg(feature = "metrics")]
         STATSD.gauge(&format!("gas_rate_validator_{}", base.block_id().shard()), ratio as f64);
 
+        #[cfg(not(test))]
         #[cfg(feature = "telemetry")]
         self.engine.validator_telemetry().succeeded_attempt(
             &self.shard,
@@ -4093,6 +4107,101 @@ impl ValidateQuery {
     }
 }
 
+#[cfg(test)]
+impl ValidateQuery {
+    fn prepare_transaction_for_test(
+        base: &ValidateBase,
+        _executor: &dyn TransactionExecutor,
+        account_root: Cell,
+        trans: &Transaction,
+        err: String
+    ) -> Result<()> {
+        let path = format!("./target/check/validator/{},{},{}",
+            base.shard().workchain_id(),
+            base.shard().shard_prefix_as_str_with_tag(),
+            base.block_id().seq_no()
+        );
+        std::fs::create_dir_all(&path).ok();
+        let account_addr = trans.account_id();
+        // sometimes it can be usable if it is the last transaction for this account
+        // comment next two lines if it is not last transaction in account block
+        let new_shard_acc = base.next_state_accounts.get_serialized(account_addr.clone())?.unwrap_or_default();
+        // let new_shard_acc = ShardAccount::construct_from(&mut new_shard_acc)?;
+        let new_account_root = new_shard_acc.account_cell();
+        let config_cell = base.config_params.serialize()?;
+        let trans_root = trans.serialize()?;
+        let msg_cell = trans.in_msg_cell().map(|cell| cell.clone()).unwrap_or_default();
+        std::fs::write(format!("{}/{}.txt", path, trans_root.repr_hash().to_hex_string()), err.as_bytes())?;
+        crate::test_helper::prepare_data_for_executor_test(
+            &path, &account_root, &new_account_root, &msg_cell, &trans_root, &config_cell
+        )?;
+        let in_msg = trans.read_in_msg()?;
+        crate::test_helper::prepare_transaction_boc(
+            &path, _executor, &Account::construct_from_cell(account_root)?, in_msg.as_ref(),
+            base.now(), base.info.start_lt(), trans.logical_time(),
+        ).ok();
+        std::fs::write(format!("{}/run.cmd", path), b"fift -n run.fif 1> fift.log 2>&1")?;
+        Ok(())
+    }
+    pub async fn try_check_transactions(mut self) -> Result<()> {
+        let (base, mc_data) = self.common_preparation().await?;
+        let mut tasks = vec![];
+        Self::check_transactions(Arc::new(base), mc_data.libraries().clone(), &mut tasks)?;
+        self.run_tasks(tasks).await
+    }
+    pub async fn test_queue_merger(mut self) -> Result<()> {
+        let (base, mc_data) = self.common_preparation().await?;
+        let manager = self.init_output_queue_manager(&mc_data, &base).await?;
+
+        // let nb = manager.neighbors[18].clone();
+        // manager.neighbors.clear();
+        // manager.neighbors.push(nb);
+        // manager.neighbors.truncate(18);
+        dbg!(base.after_merge, base.after_split, manager.neighbors().len());
+        let mut iter = manager.merge_out_queue_iter(base.shard())?;
+        let mut res1 = vec![];
+        while let Some(k_v) = iter.next() {
+            if res1.len() % 500 == 0 {
+                println!("{}", res1.len());
+            }
+            let (key, enq, lt, block_id) = k_v?;
+            res1.push((key, enq, lt, block_id));
+        }
+        println!("{}", res1.len());
+        let mut res2 = res1.clone();
+        res2.sort_by(|a, b| a.2.cmp(&b.2));
+        assert_eq!(res1.len(), res2.len());
+
+        let shard_prefix = base.shard().shard_key(true);
+        let mut res2 = vec![];
+        for nb in manager.neighbors() {
+            if nb.is_disabled() { continue }
+            let mut out_queue_short = nb.out_queue().clone();
+            ton_types::HashmapSubtree::into_subtree_with_prefix(&mut out_queue_short, &shard_prefix, &mut 0)?;
+            out_queue_short.iterate_slices(|ref mut key, ref mut value| {
+                let key = OutMsgQueueKey::construct_from(key)?;
+                if base.shard().contains_prefix(key.workchain_id, key.prefix) { 
+                    let lt = u64::construct_from(value)?;
+                    let msg = MsgEnqueueStuff::construct_from(value, lt)?;
+                    res2.push((key, msg, lt, nb.block_id().clone()));
+                }
+                Ok(true)
+            })?;
+        }
+        res2.sort_by(|a, b| a.2.cmp(&b.2));
+        println!("{}", res2.len());
+
+        assert!(!res1.is_empty());
+        assert_eq!(res1.len(), res2.len());
+        for i in 0..res1.len() {
+            if i % 57 == 0 {
+                println!("{}", i);
+                pretty_assertions::assert_eq!(res1[i], res2[i]);
+            }
+        }
+        Ok(())
+    }
+}
 
 impl ValidateQuery {
     fn prepare_transaction_for_log(

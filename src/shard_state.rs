@@ -24,9 +24,12 @@ use ton_block::{
     BinTreeType, WorkchainDescr
 };
 use ton_types::{
-    AccountId, Cell, Result, deserialize_tree_of_cells, deserialize_tree_of_cells_inmem,
-    UInt256, BagOfCells, BocSerialiseMode, SliceData, error, fail,
+    AccountId, Cell, SliceData, error, fail, Result, deserialize_tree_of_cells,
+    deserialize_cells_tree_inmem_with_abort, UInt256
 };
+
+#[cfg(not(feature = "async_ss_storage"))]
+use ton_types::{BocSerialiseMode, BagOfCells};
 
 //    #[derive(Debug, Default, Clone, Eq, PartialEq)]
 // It is a wrapper around various shard state's representations and properties.
@@ -117,20 +120,27 @@ impl ShardStateStuff {
         bytes: Arc<Vec<u8>>,
         #[cfg(feature = "telemetry")]
         telemetry: &EngineTelemetry,
-        allocated: &EngineAlloc
+        allocated: &EngineAlloc,
+        abort: &dyn Fn() -> bool,
     ) -> Result<Arc<Self>> {
         if block_id.seq_no() == 0 {
             fail!("Use `deserialize_zerostate` method for zerostate");
         }
-        let root = deserialize_tree_of_cells_inmem(bytes)?;
+        let mut result = deserialize_cells_tree_inmem_with_abort(bytes, abort)?;
+        if result.0.len() != 1 {
+            fail!("State boc can't contain {} roots", result.0.len());
+        }
         Self::from_root_cell(
-            block_id, root, 
+            block_id, 
+            result.0.pop().ok_or_else(|| error!("Can't get root"))?,
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated
         )
     }
 
+    // is used in tests
+    #[allow(dead_code)]
     pub fn deserialize(
         block_id: BlockIdExt, 
         bytes: &[u8],
@@ -151,6 +161,12 @@ impl ShardStateStuff {
     }
 
 /*
+    #[cfg(test)]
+    pub fn from_state(shard_state: ShardStateUnsplit) -> Result<Arc<Self>> {
+        let block_id = BlockIdExt::with_params(shard_state.shard().clone(),
+            shard_state.seq_no(), Default::default(), Default::default());
+        Self::with_state(block_id, shard_state)
+    }
 */
 
     fn with_params(
@@ -233,6 +249,7 @@ impl ShardStateStuff {
 //        Ok(bytes.into_inner())
 //    }
 
+    #[cfg(not(feature = "async_ss_storage"))]
     pub fn serialize_with_abort(&self, abort: &dyn Fn() -> bool) -> Result<Vec<u8>> {
         let mut bytes = Vec::<u8>::new();
         let boc = BagOfCells::with_params(vec!(&self.root), vec!(), abort)?;
@@ -254,13 +271,13 @@ impl ShardStateStuff {
     pub fn config_params(&self) -> Result<&ConfigParams> {
         Ok(&self.shard_state_extra()?.config)
     }
-
-    pub fn has_prev_block(&self, block_id: &BlockIdExt) -> Result<bool> {
-        Ok(self.shard_state_extra()?
-            .prev_blocks.get(&block_id.seq_no())?
-            .map(|id| &id.blk_ref().root_hash == block_id.root_hash() && &id.blk_ref().file_hash == block_id.file_hash())
-            .unwrap_or_default())
-    }
+// Unused
+//    pub fn has_prev_block(&self, block_id: &BlockIdExt) -> Result<bool> {
+//        Ok(self.shard_state_extra()?
+//            .prev_blocks.get(&block_id.seq_no())?
+//            .map(|id| &id.blk_ref().root_hash == block_id.root_hash() && &id.blk_ref().file_hash == block_id.file_hash())
+//            .unwrap_or_default())
+//    }
 
 // Unused
 //    pub fn prev_key_block_id(&self) -> BlockIdExt {
@@ -314,6 +331,49 @@ impl ShardStateStuff {
 
 }
 
+#[cfg(test)]
+impl ShardStateStuff {
+    pub fn read_from_file(
+        id: BlockIdExt, 
+        filename: impl AsRef<std::path::Path>,
+        #[cfg(feature = "telemetry")]
+        telemetry: &Arc<EngineTelemetry>,
+        allocated: &Arc<EngineAlloc>
+    ) -> Result<Arc<Self>> {
+        let mut bytes = std::fs::read(filename)?;
+        match id.seq_no() {
+            0 => Self::deserialize_zerostate(
+                id, 
+                &mut bytes,
+                #[cfg(feature = "telemetry")]
+                telemetry,
+                allocated
+            ),
+            _ => Self::deserialize_inmem(
+                id, 
+                Arc::new(bytes),
+                #[cfg(feature = "telemetry")]
+                telemetry,
+                allocated,
+                &|| false
+            )
+        }
+    }
+    pub fn dump_accounts(&self) {
+        let accounts = self.state().read_accounts().unwrap();
+        accounts.iterate_with_keys_and_aug(|id, _account, aug| {
+            println!("{}:{:x}: {}", self.shard().workchain_id(), id, aug.balance().grams);
+            Ok(true)
+        }).unwrap();
+    }
+    pub fn dump_out_queue_info(&self) {
+        let out_queue_info = self.state().read_out_msg_queue_info().unwrap();
+        out_queue_info.out_queue().iterate_with_keys_and_aug(|key, enq, create_lt| {
+            println!("{:x} {} {}", key, create_lt, enq.enqueued_lt());
+            Ok(true)
+        }).unwrap();
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ShardHashesStuff {
@@ -378,3 +438,6 @@ impl Deserializable for ShardHashesStuff {
     }
 }
 
+#[cfg(test)]
+#[path = "tests/test_shard_state.rs"]
+mod tests;

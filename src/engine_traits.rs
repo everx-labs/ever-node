@@ -107,6 +107,8 @@ pub trait PrivateOverlayOperations: Sync + Send {
 
     async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool>;
 
+    async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>>;
+
     fn create_catchain_client(
         &self,
         validator_list_id: UInt256,
@@ -162,6 +164,10 @@ pub trait EngineOperations : Sync + Send {
     }
 
     async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
+        unimplemented!()
+    }
+
+    async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>> {
         unimplemented!()
     }
 
@@ -351,13 +357,14 @@ pub trait EngineOperations : Sync + Send {
 
     // State related operations
 
-    async fn download_state(
+    async fn download_and_store_state(
         &self, 
-        block_id: &BlockIdExt, 
+        handle: &Arc<BlockHandle>,
+        root_hash: &UInt256,
         master_id: &BlockIdExt,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
         attempts: Option<usize>
-    ) -> Result<(Arc<ShardStateStuff>, Arc<Vec<u8>>)> {
+    ) -> Result<Arc<ShardStateStuff>> {
         unimplemented!()
     }
     async fn download_zerostate(
@@ -395,7 +402,6 @@ pub trait EngineOperations : Sync + Send {
         &self, 
         handle: &Arc<BlockHandle>, 
         state: Arc<ShardStateStuff>,
-        state_bytes: Option<&[u8]>,
     ) -> Result<Arc<ShardStateStuff>> {
         unimplemented!()
     }

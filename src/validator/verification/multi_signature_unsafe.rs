@@ -34,6 +34,8 @@ impl std::fmt::Debug for MultiSignature {
     }
 }
 
+//TODO: enable dead-code warnings after merging usafe with BLS implementations
+#[allow(dead_code)]
 impl MultiSignature {
     /// Add node to signature
     pub fn sign(&mut self, _local_key: &PrivateKey, idx: u16, _nodes_count: u16) -> Result<()> {

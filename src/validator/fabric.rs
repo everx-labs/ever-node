@@ -39,17 +39,36 @@ pub async fn run_validate_query_any_candidate(
     let prev = info.read_prev_ids()?;
     let mc_state = engine.load_last_applied_mc_state().await?;
     let min_masterchain_block_id = mc_state.find_block_id(info.min_ref_mc_seqno())?;
-    let (set, _) = mc_state.read_cur_validator_set_and_cc_conf()?;
-    run_validate_query(
-        shard,
-        SystemTime::now(),
-        min_masterchain_block_id,
-        prev,
-        block,
-        set,
-        engine,
-        SystemTime::now()
-    ).await
+    let mut cc_seqno_with_delta = 0;
+    if let Some(mc_state_extra) = mc_state.state().read_custom()? {
+        let cc_seqno_from_state = if shard.is_masterchain() {
+            mc_state_extra.validator_info.catchain_seqno
+        } else {
+            mc_state_extra.shards.calc_shard_cc_seqno(&shard)?
+        };
+        let nodes = crate::validator::validator_utils::compute_validator_set_cc(
+            engine.load_last_applied_mc_state().await?.config_params()?,
+            &shard,
+            engine.now(),
+            cc_seqno_from_state,
+            &mut cc_seqno_with_delta
+        )?;
+        let validator_set = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno_with_delta, nodes)?;
+
+        log::debug!(target: "verificator", "ValidatorSetForVerification cc_seqno: {:?}", validator_set.cc_seqno());
+        run_validate_query(
+            shard,
+            SystemTime::now(),
+            min_masterchain_block_id,
+            prev,
+            block,
+            validator_set,
+            engine,
+            SystemTime::now()
+        ).await
+    } else {
+        Err(failure::format_err!("MC state is None"))
+    }
 }
 
 pub async fn run_validate_query(
@@ -260,3 +279,6 @@ pub async fn run_collate_query (
     }
 }
 
+#[cfg(test)]
+#[path = "tests/test_replay_log.rs"]
+mod tests;

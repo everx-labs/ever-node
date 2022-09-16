@@ -26,6 +26,9 @@ use ton_block::{
 use ton_types::{Result, UInt256, HashmapType, fail};
 use validator_session::SessionNode;
 
+#[cfg(test)]
+#[path = "tests/test_validator_utils.rs"]
+mod tests;
 
 pub fn sigpubkey_to_publickey(k: &SigPubKey) -> PublicKey {
     Ed25519KeyOption::from_public_key(k.key_bytes())

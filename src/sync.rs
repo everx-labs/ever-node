@@ -704,3 +704,6 @@ async fn import_shard_blocks(
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "tests/test_sync.rs"]
+mod tests;

@@ -27,6 +27,9 @@ use crate::{
     validator::validator_utils::{calc_subset_for_workchain, check_crypto_signatures},
 };
 
+#[cfg(test)]
+#[path = "tests/test_block_proof.rs"]
+mod tests;
 
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct BlockProofStuff {
@@ -73,7 +76,30 @@ impl BlockProofStuff {
         })
     }
 
+    #[cfg(test)]
+    pub fn read_from_file(block_id: &BlockIdExt, filename: &str, is_link: bool) -> Result<Self> {
+        let data = std::fs::read(filename)?;
+        Self::deserialize(block_id, data, is_link)
+    }
 
+    #[cfg(test)]
+    pub fn fake(id: &BlockIdExt) -> Result<Self> {
+        let proof = BlockProof {
+            proof_for: id.clone(),
+            root: Cell::default(),
+            signatures: None,
+        };
+        let cell = proof.serialize()?.into();
+        let mut data = vec!();
+        serialize_tree_of_cells(&cell, &mut data)?;
+        Ok(Self {
+            root: proof.serialize()?.into(),
+            proof,
+            is_link: !id.shard().is_masterchain(),
+            id: id.clone(),
+            data,
+        })
+    }
 
 // Unused
 //    pub fn root(&self) -> &Cell {

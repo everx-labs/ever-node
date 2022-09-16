@@ -19,8 +19,13 @@ use ton_block::{
 };
 use ton_types::{Cell, Result, types::UInt256, deserialize_tree_of_cells, error, fail, HashmapType};
 
+#[cfg(test)]
+use ton_block::{BlockInfo, BlkMasterInfo};
 use crate::shard_state::ShardHashesStuff;
 
+#[cfg(test)]
+#[path = "tests/test_block.rs"]
+mod tests;
 
 pub struct BlockPrevStuff {
     pub mc_block_id: BlockIdExt,
@@ -90,6 +95,29 @@ impl BlockStuff {
         Ok(Self{ id, block, root, data: Arc::new(data), })
     }
 
+    #[cfg(test)]
+    pub fn fake(id: BlockIdExt, mc_block_id: Option<BlockIdExt>, is_key_block: bool) -> Result<Self> {
+        let mut block = Block::default();
+        if let Some(mc_block_id) = mc_block_id {
+            let mut info = BlockInfo::default();
+            info.write_master_ref(Some(&BlkMasterInfo {
+                master: ExtBlkRef {
+                    end_lt: 0,
+                    seq_no: mc_block_id.seq_no,
+                    root_hash: mc_block_id.root_hash,
+                    file_hash: mc_block_id.file_hash,
+                }
+            }))?;
+            info.set_key_block(is_key_block);
+            block.write_info(&info)?;
+        }
+        Ok(BlockStuff {
+            id,
+            block,
+            root: Cell::default(),
+            data: Arc::new(vec!(0xfe; 10_000)),
+        })
+    }
 
     pub fn block(&self) -> &Block { &self.block }
   

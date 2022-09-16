@@ -11,7 +11,7 @@
 * limitations under the License.
 */
 
-use crate::{dynamic_boc_db::DynamicBocDb, types::{CellId, Reference}};
+use crate::{types::{Reference}};
 use std::{io::{Cursor, Write}, sync::{Arc, RwLock, atomic::{AtomicU64, Ordering}}};
 use ton_types::{
     ByteOrderRead, Cell, CellData, CellImpl, CellType, LevelMask,
@@ -19,13 +19,24 @@ use ton_types::{
     MAX_LEVEL, MAX_REFERENCES_COUNT
 };
 
-//#[derive(Debug)]
+#[cfg(not(feature = "ref_count_gc"))]
+use crate::dynamic_boc_db::DynamicBocDb;
+#[cfg(feature = "ref_count_gc")]
+use ton_types::fail;
+
+#[cfg(feature = "ref_count_gc")]
+use crate::dynamic_boc_rc_db::DynamicBocDb;
+
 pub struct StorageCell {
     cell_data: CellData,
     references: RwLock<Vec<Reference>>,
     boc_db: Arc<DynamicBocDb>,
     tree_bits_count: u64,
     tree_cell_count: u64,
+    #[cfg(feature = "ref_count_gc")]
+    parents_count: u32,
+    #[cfg(feature = "ref_count_gc")]
+    use_cache: bool,
 }
 
 lazy_static::lazy_static!{
@@ -36,10 +47,17 @@ lazy_static::lazy_static!{
 impl StorageCell {
 
     /// Constructs StorageCell by deserialization
-    pub fn deserialize(boc_db: Arc<DynamicBocDb>, data: &[u8]) -> Result<Self> {
-        assert!(!data.is_empty());
+    pub fn deserialize(
+        boc_db: Arc<DynamicBocDb>, 
+        data: &[u8], 
+        #[cfg(feature = "ref_count_gc")]
+        use_cache: bool
+    ) -> Result<Self> {
+        debug_assert!(!data.is_empty());
 
         let mut reader = Cursor::new(data);
+        #[cfg(feature = "ref_count_gc")]
+        let parents_count = reader.read_le_u32()?;
         let cell_data = CellData::deserialize(&mut reader)?;
         let references_count = cell_data.references_count();
         let mut references = Vec::with_capacity(references_count as usize);
@@ -47,29 +65,40 @@ impl StorageCell {
             let hash = UInt256::from(reader.read_u256()?);
             references.push(Reference::NeedToLoad(hash));
         }
-        let (tree_bits_count, tree_cell_count) = reader
-            .read_be_u64()
-            .and_then(|first| Ok((first, reader.read_be_u64()?)))
-            .unwrap_or((0, 0));
-        let ret = Self {
+        let tree_bits_count = reader.read_le_u64()?;
+        let tree_cell_count = reader.read_le_u64()?;
+
+        CELL_COUNT.fetch_add(1, Ordering::Relaxed);
+        boc_db.allocated().storage_cells.fetch_add(1, Ordering::Relaxed);
+        Ok(Self {
             cell_data,
             references: RwLock::new(references),
             boc_db,
             tree_bits_count,
             tree_cell_count,
-        };
-        CELL_COUNT.fetch_add(1, Ordering::Relaxed);
-        Ok(ret)
+            #[cfg(feature = "ref_count_gc")]
+            parents_count,
+            #[cfg(feature = "ref_count_gc")]
+            use_cache,
+        })
     }
 
     pub fn cell_count() -> u64 {
         CELL_COUNT.load(Ordering::Relaxed)
     }
 
+    #[cfg(feature = "ref_count_gc")]
+    pub fn deserialize_parents_count(data: &[u8]) -> Result<u32> {
+        let parents_count = Cursor::new(data).read_le_u32()?;
+        Ok(parents_count)
+    }
+
     pub fn deserialize_references(data: &[u8]) -> Result<Vec<Reference>> {
-        assert!(!data.is_empty());
+        debug_assert!(!data.is_empty());
 
         let mut reader = Cursor::new(data);
+        #[cfg(feature = "ref_count_gc")]
+        let _parents_count = reader.read_le_u32()?;
         let cell_data = CellData::deserialize(&mut reader)?;
         let references_count = cell_data.references_count();
         let mut references = Vec::with_capacity(references_count);
@@ -80,12 +109,41 @@ impl StorageCell {
         Ok(references)
     }
 
-    pub fn serialize(cell: &dyn CellImpl) -> Result<Vec<u8>> {
-        let references_count = cell.references_count() as u8;
-
-        assert!(references_count as usize <= MAX_REFERENCES_COUNT);
+    pub fn serialize_self(&self) -> Result<Vec<u8>> {
 
         let mut data = Vec::new();
+
+        #[cfg(feature = "ref_count_gc")]
+        data.write_all(&self.parents_count.to_le_bytes())?;
+
+        self.cell_data.serialize(&mut data)?;
+
+        let references = &self.references.read().expect("Poisoned RwLock");
+        for r in references.iter() {
+            data.write_all(r.hash().as_slice())?;
+        }
+
+        data.write_all(&self.tree_bits_count().to_le_bytes())?;
+        data.write_all(&self.tree_cell_count().to_le_bytes())?;
+
+        debug_assert!(!data.is_empty());
+
+        Ok(data)
+    }
+
+    pub fn serialize(
+        cell: &dyn CellImpl,
+        #[cfg(feature = "ref_count_gc")]
+        parents_count: u32,
+    ) -> Result<Vec<u8>> {
+        let references_count = cell.references_count() as u8;
+
+        debug_assert!(references_count as usize <= MAX_REFERENCES_COUNT);
+
+        let mut data = Vec::new();
+
+        #[cfg(feature = "ref_count_gc")]
+        data.write_all(&parents_count.to_le_bytes())?;
 
         cell.cell_data().serialize(&mut data)?;
 
@@ -93,17 +151,46 @@ impl StorageCell {
             data.write_all(cell.reference(i as usize)?.repr_hash().as_slice())?;
         }
 
-        data.write_all(&cell.tree_bits_count().to_be_bytes())?;
-        data.write_all(&cell.tree_cell_count().to_be_bytes())?;
+        data.write_all(&cell.tree_bits_count().to_le_bytes())?;
+        data.write_all(&cell.tree_cell_count().to_le_bytes())?;
 
-        assert!(!data.is_empty());
+        debug_assert!(!data.is_empty());
 
         Ok(data)
     }
 
+    pub fn with_cell(
+        cell: &dyn CellImpl,
+        #[cfg(feature = "ref_count_gc")]
+        parents_count: u32,
+        boc_db: Arc<DynamicBocDb>,
+        #[cfg(feature = "ref_count_gc")]
+        use_cache: bool,
+    ) -> Result<Self> {
+        let references_count = cell.references_count();
+        let mut references = Vec::with_capacity(references_count);
+        for i in 0..references_count {
+            let hash = cell.reference(i)?.repr_hash();
+            references.push(Reference::NeedToLoad(hash));
+        }
+        CELL_COUNT.fetch_add(1, Ordering::Relaxed);
+        boc_db.allocated().storage_cells.fetch_add(1, Ordering::Relaxed);
+        Ok(Self {
+            cell_data: cell.cell_data().clone(),
+            references: RwLock::new(references),
+            boc_db,
+            tree_bits_count: cell.tree_bits_count(),
+            tree_cell_count: cell.tree_bits_count(),
+            #[cfg(feature = "ref_count_gc")]
+            parents_count,
+            #[cfg(feature = "ref_count_gc")]
+            use_cache
+        })
+    }
+
     /// Gets cell's id
-    pub fn id(&self) -> CellId {
-        CellId::new(self.repr_hash())
+    pub fn id(&self) -> UInt256 {
+        self.repr_hash()
     }
 
     /// Gets representation hash
@@ -117,11 +204,42 @@ impl StorageCell {
             Reference::NeedToLoad(hash) => hash.clone()
         };
 
-        let cell_id = CellId::new(hash);
-        let storage_cell = self.boc_db.load_cell(&cell_id)?;
+        let cell_id = hash;
+        let storage_cell = self.boc_db.load_cell(
+            &cell_id,
+            #[cfg(feature = "ref_count_gc")]
+            self.use_cache
+        )?;
         self.references.write().expect("Poisoned RwLock")[index] = Reference::Loaded(Arc::clone(&storage_cell));
 
         Ok(storage_cell)
+    }
+
+    pub(crate) fn reference_id(&self, index: usize) -> UInt256 {
+        self.references.read().expect("Poisoned RwLock")[index].hash()
+    }
+
+    #[cfg(feature = "ref_count_gc")]
+    pub(crate) fn parents_count(&self) -> u32 {
+        self.parents_count
+    }
+
+    #[cfg(feature = "ref_count_gc")]
+    pub(crate) fn inc_parents_count(&mut self) -> Result<u32> {
+        if self.parents_count == u32::MAX {
+            fail!("Parents count has reached the maximum value");
+        }
+        self.parents_count += 1;
+        Ok(self.parents_count)
+    }
+
+    #[cfg(feature = "ref_count_gc")]
+    pub(crate) fn dec_parents_count(&mut self) -> Result<u32> {
+        if self.parents_count == 0 {
+            fail!("Parents count has reached zero value");
+        }
+        self.parents_count -= 1;
+        Ok(self.parents_count)
     }
 }
 
@@ -148,6 +266,10 @@ impl CellImpl for StorageCell {
 
     fn reference(&self, index: usize) -> Result<Cell> {
         Ok(Cell::with_cell_impl_arc(self.reference(index)?))
+    }
+
+    fn reference_repr_hash(&self, index: usize) -> Result<UInt256> {
+        Ok(self.reference_id(index))
     }
 
     fn cell_type(&self) -> CellType {
@@ -191,6 +313,7 @@ fn references_hashes_equal(left: &[Reference], right: &[Reference]) -> bool {
 impl Drop for StorageCell {
     fn drop(&mut self) {
         CELL_COUNT.fetch_sub(1, Ordering::Relaxed);
+        self.boc_db.allocated().storage_cells.fetch_sub(1, Ordering::Relaxed);
         self.boc_db.cells_map().write()
             .expect("Poisoned RwLock")
             .remove(&self.id());

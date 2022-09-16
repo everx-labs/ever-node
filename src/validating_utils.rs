@@ -20,22 +20,26 @@ use ton_types::{fail, error, Result};
 use std::{collections::HashSet, cmp::max};
 
 pub fn supported_capabilities() -> u64 {
-    GlobalCapabilities::CapCreateStatsEnabled as u64 |
-    GlobalCapabilities::CapBounceMsgBody as u64 |
-    GlobalCapabilities::CapReportVersion as u64 |
-    GlobalCapabilities::CapShortDequeue as u64 |
-    GlobalCapabilities::CapInitCodeHash as u64 |
-    GlobalCapabilities::CapOffHypercube as u64 |
-    GlobalCapabilities::CapFixTupleIndexBug as u64 |
-    GlobalCapabilities::CapFastStorageStat as u64 |
-    GlobalCapabilities::CapMycode as u64 |
-    GlobalCapabilities::CapCopyleft as u64 |
-    GlobalCapabilities::CapFullBodyInBounced as u64 |
-    GlobalCapabilities::CapStorageFeeToTvm as u64
+    let caps =
+        GlobalCapabilities::CapCreateStatsEnabled as u64 |
+        GlobalCapabilities::CapBounceMsgBody as u64 |
+        GlobalCapabilities::CapReportVersion as u64 |
+        GlobalCapabilities::CapShortDequeue as u64 |
+        GlobalCapabilities::CapInitCodeHash as u64 |
+        GlobalCapabilities::CapOffHypercube as u64 |
+        GlobalCapabilities::CapFixTupleIndexBug as u64 |
+        GlobalCapabilities::CapFastStorageStat as u64 |
+        GlobalCapabilities::CapMycode as u64 |
+        GlobalCapabilities::CapCopyleft as u64 |
+        GlobalCapabilities::CapFullBodyInBounced as u64 |
+        GlobalCapabilities::CapStorageFeeToTvm as u64;
+    #[cfg(feature = "gosh")] 
+    let caps = caps | GlobalCapabilities::CapDiff as u64;
+    caps
 }
 
 pub fn supported_version() -> u32 {
-    31
+    32
 }
 
 pub fn check_this_shard_mc_info(

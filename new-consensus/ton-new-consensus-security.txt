@@ -1,0 +1,74 @@
+Problem Statement
+
+At the moment, the network has a vulnerability related to the algorithm for selecting validators in a shard:
+- 7 validators are selected from the general set of workchain validators to validate the shard, the candidate block is added to the shardchain if the block is approved by consensus of 5 shard validators (66% of 7);
+- the probability of choosing 5 out of 7 malicious validators in the shard is unacceptably high; as a consequence, the time when the malicious validators appear in the shard is less than the period for changing the workchain validators;
+- the results of validation in the shard are not rechecked when the block from the shard is included in the masterchain;
+- the absence of dynamic sharding makes it possible to predict the distribution of shards in advance, and, as a result, to carefully plan an attack;
+- a complete recheck of all shard blocks before being included in the masterchain is not possible, since it will lead to an increase the load on all MC validators, which will ultimately lead to limiting their performance, and finally the performance of entire network;
+- as a result, the security of the network is not ensured, and a mechanism to increase the reliability of checking shard blocks is required.
+
+To ensure the security of the network, a new mechanism is introduced for random rechecking of candidate blocks by any of the workchain validators. Such validators are called verifiers. The fact of the need for verification is calculated based on the signature from the hash of the candidate block with the private key of the validator using BLS deterministic signature. In case of block validation problems, the verifier notifies all MC validators that the corresponding shard block contains an error and must be rechecked before being included in the MC.
+
+Protocol Description
+
+1. Broadcast of candidate blocks to all validators of the workchain:
+  - immediately after the block collation, the collator broadcasts a new candidate block to all validators of the workchain;
+  - in terms of traffic, this can increase the load up to 3 times in the case of a network in which only the third collator in a round generates a block that suits the network; however, the case with the approval of the 2nd or 3rd candidate in the round is a fallback, and in most cases the network accepts the first candidate in each round (at least it should strive for this for maximum performance; statistics on reserve collations should be collected to confirm hypothesis); if the hypothesis regarding the dominance of the case of approval of the first block-candidate in each round is correct, then the volume of traffic sent to the network will not increase in comparison with the current implementation.
+
+2. Verification of the candidate block:
+  - each validator which has determined that it is a verifier is obliged to validate the candidate block;
+  - determination of the need for verification is made on the basis of a deterministic BLS signature; the signature is divided by modulo the configuration parameter of the network, which affects the frequency of the decision on the need for verification;
+  - the configuration parameter of the verification frequency is necessary for dynamic management of the reliability of the network as opposed to its performance (in a particular case, it is possible to recommend to verify all the nodes of all candidate blocks, or, on the contrary, to recommend to exclude any verification);
+  - the configuration parameter can also be changed depending on the turnover of money in the candidate block; thus, blocks with a large turnover will be verified by a large number of verifiers;
+  - in case of a "good" candidate block, the verifier sends a message approve to this block to all MC validators;
+  - in case of a "bad" candidate block, the verifier sends all MC validators a message with a reject to this block; this launches a mechanism for additional validation of the shard block by the MC nodes.
+
+3. Protection against ignoring broadcasts:
+  - each workchain validator that receives a broadcast with a candidate block for any shard, signs it with a BLS signature, aggregates it with signatures received from BLS neighbors for this block (if any), and sends the received signature to neighbors;
+  - when receiving an aggregated signature from any of the workchain nodes, the validator checks its correctness, aggregates it with the current aggregated signature of the validator, and sends the received signature to its neighbors;
+  - the workchain validator checks if 51% of signatures have been received from all workchain validators:
+    - if 51% of signatures are received, the workchain validator sends the aggregated signature to all MC validators.
+
+4. Checking the shard block before being included in the masterchain:
+  - the MC validator, before including the shard block in MC, waits for a confirmation in the form of an aggregated signature from any of the workchain validators, which contains at least 51% of the workchain validator signatures;
+  - if no rejects were received for this block before 51% of signatures were received, the block is included in the MC;
+  - if at least one reject was received by the validator for this block before 51% of signatures were received, the validator does not include it in the MC and requests its verification from the subset of the workchain node, which is determined deterministically based on the received aggregated BLS signature:
+    - if 2/3 block rejects were received from all subset nodes, the shard disqualification mechanism is started; in addition, the MC validator initiates the blame of the verifiers which sent approve to the block;
+    - if 2/3 block approvals are received from all subset nodes, the validator sends blame to the verifier from which it received the reject (which, in the end, with a sufficient number of blames, will lead to slashing of this verifier); after receiving the approval, the block is included in the shard;
+    - in all other cases, the block is not included in the MC (like all those generated from it) until 2/3 approvals are received.
+
+5. Disqualification of the shard:
+  - the MC validator upon receiving confirmation of the shard block reject from control subset of workchain validators blame all validators which signed or approved this block (which, in the end, with a sufficient number of blames, will lead to slashing of these validators);
+  - no more blocks are accepted from the subset of shard validators that issued a problem block until the next rotation of shard validators.
+
+6. Ban for any blame:
+  - any blame leads to the disqualification of the key of the node by which blame was made for this validator; accordingly, for all subsequent checks, the signatures with this key will be ignored and will not participate in the calculation of the weights.
+
+Messages
+
+1. BlockCandidate (broadcast)
+  - WC collator -> all WC nodes
+  - modification of the existing broadcasting protocol of the candidate block broadcast
+2. BlockCandidateReceived (query, reliable with timeout)
+  - WC node -> WC node's neighbors, WC node -> all MC nodes;
+  - structure:
+    - block_id: (int16, uint16, uint32) // (workchain, shard, block height)
+    - block_hash: uint256               // block's hash
+    - bls_multi_signature: uint8 [32]   // BLS signature of validators signed the block
+    - bls_signers_mask: uint32 [16]     // mask of workchain validators which signed the block (512 max)
+3. BlockCandidateVerified (broadcast)
+  - WC verifier node -> all MC nodes
+  - structure:
+    - block_hash: uint256                           // block's hash
+    - validation_status: enum (approved / rejected) // validation status
+    - verifier_signature: uint256                   // signing the BroadcastReceived message fields with the verification key
+4. BlockCandidateControlCheck (query, reliable with timeout)
+  - MC node -> WC node subset
+  - each of the nodes must have a cache of verified candidate blocks to speed up control checks (all MCs will initiate the same request to the control set of validators for the same candidate block)
+  - request structure:
+    - block_hash: uint256                           // hash of the candidate block
+  - response structure:
+    - validation_status: enum (approved / rejected) // validation status
+    - verifier_signature: uint256                   // signing the BroadcastReceived message fields with the verification key
+

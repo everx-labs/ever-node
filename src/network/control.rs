@@ -603,3 +603,6 @@ impl Subscriber for ControlQuerySubscriber {
     }
 }
 
+#[cfg(test)]
+#[path = "../tests/test_control.rs"]
+mod tests;

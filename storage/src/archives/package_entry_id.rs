@@ -23,6 +23,9 @@ use regex::Regex;
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256};
 
+#[cfg(test)]
+#[path = "tests/test_package_entry_id.rs"]
+mod tests;
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub enum PackageEntryId<B, U256, PK>

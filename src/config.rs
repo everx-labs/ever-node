@@ -34,6 +34,9 @@ use ton_block::{BASE_WORKCHAIN_ID, MASTERCHAIN_ID};
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256};
 
+#[cfg(test)]
+#[path = "tests/test_config.rs"]
+mod tests;
 
 #[macro_export]
 macro_rules! key_option_public_key {
@@ -105,7 +108,9 @@ pub struct TonNodeConfig {
     #[serde(skip)]
     file_name: String,
     #[serde(default)]
-    restore_db: bool
+    restore_db: bool,
+    #[serde(default)]
+    low_memory_mode: bool,
 }
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
@@ -332,6 +337,11 @@ impl TonNodeConfig {
 
         config_json.connectivity_check_config.check()?;
 
+        #[cfg(not(feature = "async_ss_storage"))]
+        if config_json.low_memory_mode {
+            fail!("'low_memory_mode' is applied only with 'async_ss_storage' feature");
+        }
+
         config_json.configs_dir = configs_dir.to_string();
         config_json.file_name = json_file_name.to_string();
 
@@ -418,6 +428,10 @@ impl TonNodeConfig {
         self.gc.as_ref().map(|c| c.enable_for_shard_state_persistent).unwrap_or(false)
     }
     
+    #[cfg(test)]
+    pub fn set_internal_db_path(&mut self, path: String) {
+        self.internal_db_path.replace(path);
+    }
   
     pub fn default_rldp_roundtrip(&self) -> Option<u32> {
         self.default_rldp_roundtrip_ms
@@ -440,7 +454,14 @@ impl TonNodeConfig {
     pub fn restore_db(&self) -> bool {
         self.restore_db
     }
+    pub fn low_memory_mode(&self) -> bool {
+        self.low_memory_mode
+    }
 
+    #[cfg(test)]
+    pub fn set_port(&mut self, port: u16) {
+        self.port.replace(port);
+    }
  
     pub fn load_global_config(&self) -> Result<TonNodeGlobalConfig> {
         let name = self.ton_global_config_name.as_ref().ok_or_else(
@@ -682,6 +703,7 @@ enum Task {
     AddValidatorAdnlKey([u8; 32], [u8; 32]),
     AddValidatorBlsKey([u8; 32], [u8; 32]),
     GetKey([u8; 32]),
+    GetBlsKey([u8; 32]),
     StoreStatesGcInterval(u32),
     #[cfg(feature="workchains")]
     StoreWorkchainId(i32),
@@ -881,12 +903,33 @@ impl NodeConfigHandler {
         }
     }
 
+    pub async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>> {
+        match self.validator_keys.get(&base64::encode(key_id.data())) {
+            Some(_key) => self.get_bls_key_raw(*key_id.data()).await,
+            None => None,
+        }
+    }
+
     async fn get_key_raw(&self, key_hash: [u8; 32]) -> Option<Arc<dyn KeyOption>> {
         let (wait, mut queue_reader) = Wait::new();
         let pushed_task = Arc::new((wait.clone(), Task::GetKey(key_hash)));
         wait.request();
         if let Err(e) = self.sender.send(pushed_task) {
             log::warn!("Error get_key_raw {}", e);
+            return None;
+        }
+        match wait.wait(&mut queue_reader, true).await {
+            Some(Some(Answer::GetKey(key))) => key,
+            _ => return None
+        }
+    }
+
+    async fn get_bls_key_raw(&self, key_hash: [u8; 32]) -> Option<Arc<dyn KeyOption>> {
+        let (wait, mut queue_reader) = Wait::new();
+        let pushed_task = Arc::new((wait.clone(), Task::GetBlsKey(key_hash)));
+        wait.request();
+        if let Err(e) = self.sender.send(pushed_task) {
+            log::warn!("Error get_bls_key_raw {}", e);
             return None;
         }
         match wait.wait(&mut queue_reader, true).await {
@@ -1036,6 +1079,22 @@ impl NodeConfigHandler {
         None
     }
 
+    fn get_bls_key(config: &TonNodeConfig, key_id: [u8; 32]) -> Option<Arc<dyn KeyOption>> {
+        if let Ok(Some(key_info)) = config.get_validator_key_info(&base64::encode(key_id)) {
+            if let Some(validator_key_ring) = &config.validator_key_ring {
+                if let Some(bls_key) = &key_info.validator_bls_key {
+                    if let Some(key_data) = validator_key_ring.get(bls_key) {
+                        match BlsKeyOption::from_private_key_json(&key_data) {
+                            Ok(key) => { return Some(key) },
+                            _ => return None
+                        }
+                    }
+                }
+            }   
+        }
+        None
+    }
+
     fn load_config(&self, config: &TonNodeConfig, subscribers: &Vec<Arc<dyn NodeConfigSubscriber>>) -> Result<()> {
         // load key ring
         if let Some(key_ring) = &config.validator_key_ring {
@@ -1136,6 +1195,10 @@ impl NodeConfigHandler {
                     },
                     Task::GetKey(key_data) => {
                         let result = NodeConfigHandler::get_key(&actual_config, key_data);
+                        Answer::GetKey(result)
+                    },
+                    Task::GetBlsKey(key_data) => {
+                        let result = NodeConfigHandler::get_bls_key(&actual_config, key_data);
                         Answer::GetKey(result)
                     },
                     #[cfg(feature="workchains")]

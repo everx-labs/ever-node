@@ -7,11 +7,11 @@ version = "0.0.1"
 [dependencies]
 # domestic
 catchain = { path = "../catchain" }
-ever-crypto = { git ="https://github.com/tonlabs/ever-labs-crypto" }
+ever-crypto = { git = "ssh://git@github.com/tonlabs/ever-crypto.git" }
 storage = { path = "../storage" }
-ton_api = { git = "https://github.com/tonlabs/ton-labs-tl", package = "ton_api" }
-ton_block = { git = "https://github.com/tonlabs/ton-labs-block" }
-ton_types = { git = "https://github.com/tonlabs/ton-labs-types" }
+ton_api = { git = "ssh://git@github.com/tonlabs/ton-tl.git", package = "ton_api" }
+ton_block = { git = "ssh://git@github.com/tonlabs/ton-block.git" }
+ton_types = { git = "ssh://git@github.com/tonlabs/ton-types.git" }
 
 # external
 backtrace = "0.3"
@@ -26,3 +26,7 @@ metrics-runtime = "0.13"
 rand = "0.8"
 sha2 = "0.9"
 
+[dev-dependencies]
+env_logger = "0.7"
+chrono = "0.4"
+colored = "1.9"

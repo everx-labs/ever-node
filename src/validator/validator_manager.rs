@@ -23,6 +23,7 @@ use crate::{
     engine_traits::EngineOperations,
     shard_state::ShardStateStuff,
     validator::{
+        fabric::run_validate_query_any_candidate,
         validator_group::{ValidatorGroup, ValidatorGroupStatus},
         validator_utils::{
             try_calc_subset_for_workchain,
@@ -368,19 +369,22 @@ fn rotate_all_shards(mc_state_extra: &McStateExtra) -> bool {
 
 #[cfg(feature = "verification")]
 struct VerificationListenerImpl {
+    engine: Arc<dyn EngineOperations>,
 }
 
 #[cfg(feature = "verification")]
+#[async_trait::async_trait]
 impl VerificationListener for VerificationListenerImpl {
-    fn verify(&self, block_candidate: &BlockCandidate) -> bool {
-        ValidatorManagerImpl::verify_block_candidate(block_candidate)
+    async fn verify(&self, block_candidate: &BlockCandidate) -> bool {
+        ValidatorManagerImpl::verify_block_candidate(block_candidate, self.engine.clone()).await
     }
 }
 
 #[cfg(feature = "verification")]
 impl VerificationListenerImpl {
-    fn new() -> Self {
+    fn new(engine: Arc<dyn EngineOperations>) -> Self {
         Self {
+            engine
         }
     }
 }
@@ -427,7 +431,7 @@ impl ValidatorManagerImpl {
 
         #[cfg(feature = "verification")]
         {
-            let verification_listener = Arc::new(VerificationListenerImpl::new());
+            let verification_listener = Arc::new(VerificationListenerImpl::new(manager.engine.clone()));
 
             *manager.verification_listener.lock() = Some(verification_listener);
         }
@@ -981,7 +985,10 @@ impl ValidatorManagerImpl {
                     let verification_listener = Arc::downgrade(&verification_listener);
                     let local_key = self.validator_list_status.get_local_key().expect("Validator must have local key");
 
-                    self.verification_manager.update_workchains(local_key, workchain_id, &workchain_validators, &mc_validators, &verification_listener).await;
+                    match self.engine.get_validator_bls_key(local_key.id()).await {
+                        Some(local_bls_key) => self.verification_manager.update_workchains(local_key, local_bls_key, workchain_id, &workchain_validators, &mc_validators, &verification_listener).await,
+                        None => log::error!(target: "validator", "Can't create verification workchains: no BLS private key attached"),
+                    }
                 }
                 Err(err) => {
                     log::error!(target: "validator", "Can't create verification workchains: {:?}", err);
@@ -1069,11 +1076,18 @@ impl ValidatorManagerImpl {
     }
 
     #[cfg(feature = "verification")]
-    fn verify_block_candidate(_block_candidate: &BlockCandidate) -> bool {
-        log::debug!(target: "validator", "Verifying block candidate");
+    async fn verify_block_candidate(block_candidate: &BlockCandidate, engine: Arc<dyn EngineOperations>) -> bool {
+        let candidate_id = block_candidate.block_id.clone();
 
-        //TODO: block candidate verification
-        true
+        log::debug!(target: "verificator", "Verifying block candidate {:?}", candidate_id);
+
+        match run_validate_query_any_candidate(block_candidate.clone(), engine).await {
+            Ok(_time) => return true,
+            Err(err) => {
+                log::warn!(target: "verificator", "Block {:?} verification error: {:?}", candidate_id, err);
+                return false;
+            }
+        }
     }
 }
 
@@ -1108,3 +1122,6 @@ pub fn start_validator_manager(
     });
 }
 
+#[cfg(test)]
+#[path = "tests/test_session_id.rs"]
+mod tests;

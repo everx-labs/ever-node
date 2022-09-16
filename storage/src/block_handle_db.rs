@@ -31,6 +31,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256};
 
+#[cfg(test)]
+#[path = "tests/test_block_handle_db.rs"]
+mod tests;
 
 const FLAG_DATA: u32                 = 0x00000001;
 const FLAG_PROOF: u32                = 0x00000002;
@@ -693,5 +696,19 @@ impl BlockHandleStorage {
 
 }
 
+#[cfg(test)]
+impl BlockHandleStorage {
+    fn incr_handle_counter(&self, handle: &Arc<BlockHandle>) -> Result<()> {
+        handle.meta().test_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.save_handle(handle, None)?;
+        Ok(())
+    }
+    fn handle_counter(&self, handle: &Arc<BlockHandle>) -> u32 {
+        handle.meta().test_counter.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn handle_cache_size(&self) -> usize {
+        self.handle_cache.iter().count()
+    } 
+}
 
 

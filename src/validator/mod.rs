@@ -119,6 +119,23 @@ impl McData {
 
 /* UNUSED
 impl CollatorSettings {
+    #[cfg(test)]
+    pub fn load(path: &str) -> ton_types::Result<Self> {
+        let name = format!("{}/collator_settings.json", path);
+        match std::fs::read_to_string(&name) {
+            Err(err) => {
+                log::warn!("can't read collator settings from {}: {}", name, err);
+                Ok(Default::default())
+            }
+            Ok(data) => match serde_json::from_str(&data) {
+                Ok(settings) => {
+                    log::trace!("collator settings are loaded from {}: {}", name, serde_json::json!(&settings));
+                    Ok(settings)
+                }
+                Err(err) => ton_types::fail!("can't parse collator settings from {}: {}", name, err)
+            }
+        }
+    }
     pub fn want_merge() -> Self {
         let mut settings = Self::default();
         settings.want_merge = Some(true);

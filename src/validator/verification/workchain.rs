@@ -18,13 +18,19 @@ use super::block::MultiSignature;
 use super::workchain_overlay::WorkchainOverlay;
 use super::workchain_overlay::WorkchainOverlayListener;
 use super::*;
+use super::utils::HangCheck;
 use crate::validator::validator_utils::get_adnl_id;
 use crate::validator::validator_utils::sigpubkey_to_publickey;
 use catchain::BlockPayloadPtr;
 use catchain::PublicKeyHash;
 use catchain::profiling::ResultStatusCounter;
 use catchain::profiling::InstanceCounter;
+use catchain::profiling::check_execution_time;
 use log::*;
+use rand::Rng;
+use tokio::time::sleep;
+use std::time::SystemTime;
+use std::time::Duration;
 use spin::mutex::SpinMutex;
 use ton_api::ton::ton_node::blockcandidatestatus::BlockCandidateStatus;
 use ton_api::ton::ton_node::broadcast::BlockCandidateBroadcast;
@@ -36,9 +42,20 @@ use catchain::utils::add_compute_relative_metric;
 use catchain::utils::add_compute_result_metric;
 use ever_bls_lib::bls::BLS_PUBLIC_KEY_LEN;
 
-//TODO: workchain caches clearing
 //TODO: cutoff weight configuration
 //TODO: neighbours mode configuration
+
+/*
+===============================================================================
+    Constants
+===============================================================================
+*/
+
+const BLOCK_SYNC_MIN_PERIOD_MS: u64 = 300; //min time for block sync
+const BLOCK_SYNC_MAX_PERIOD_MS: u64 = 400; //max time for block sync
+const NEIGHBOURS_SYNC_MIN_PERIOD_MS: u64 = 1500; //min time for sync with neighbour nodes
+const NEIGHBOURS_SYNC_MAX_PERIOD_MS: u64 = 2000; //max time for sync with neighbour nodes
+const BLOCK_LIFETIME_PERIOD: Duration = Duration::from_secs(600); //block's lifetime
 
 /*
 ===============================================================================
@@ -60,15 +77,16 @@ pub struct Workchain {
     workchain_id: i32,                    //workchain identifier
     self_weak_ref: SpinMutex<Option<Weak<Workchain>>>, //self weak reference
     wc_cutoff_weight: ValidatorWeight,    //cutoff weight for consensus in WC
-    local_key: PrivateKey,                //private key
+    _local_key: PrivateKey,               //private key
+    local_bls_key: PrivateKey,            //private BLS key
     local_id: PublicKeyHash,              //local ID for this node
     workchain_overlay: SpinMutex<Option<Arc<WorkchainOverlay>>>, //workchain overlay
     mc_overlay: SpinMutex<Option<Arc<WorkchainOverlay>>>, //MC overlay
     blocks: SpinMutex<HashMap<UInt256, BlockPtr>>, //blocks
     listener: VerificationListenerPtr,    //verification listener
     node_debug_id: Arc<String>,           //node debug ID for workchain
-    metrics_receiver: Arc<metrics_runtime::Receiver>,                //metrics receiver
-    _instance_counter: InstanceCounter,                              //workchain instances counter
+    _workchains_instance_counter: InstanceCounter,                   //workchain instances counter
+    blocks_instance_counter: Arc<InstanceCounter>,                   //instance counter for blocks
     merge_block_status_counter: metrics_runtime::data::Counter,      //counter for block updates (via merge with other nodes statuses)
     set_block_status_counter: metrics_runtime::data::Counter,        //counter for set block status (by local node)
     process_block_candidate_counter: metrics_runtime::data::Counter, //counter for block candidates processings
@@ -77,10 +95,11 @@ pub struct Workchain {
     send_block_status_to_mc_counter: metrics_runtime::data::Counter, //counter of sendings block status to MC
     send_block_status_counter: metrics_runtime::data::Counter,       //counter of sendings block status within workchain
     verify_block_counter: ResultStatusCounter,                       //counter for block verifications
-    candidate_send_to_mc_latency_histogram: metrics_runtime::data::Histogram, //histogram for block candidate sending to MC
-    candidate_received_in_mc_latency_histogram: metrics_runtime::data::Histogram, //histogram for block candidate receiving in MC
+    block_status_received_in_mc_counter: ResultStatusCounter,        //counter for block receivings in MC
+    block_status_send_to_mc_latency_histogram: metrics_runtime::data::Histogram, //histogram for block candidate sending to MC
+    block_status_received_in_mc_latency_histogram: metrics_runtime::data::Histogram, //histogram for block candidate receiving in MC
     candidate_delivered_to_wc_latency_histogram: metrics_runtime::data::Histogram, //histogram for block candidate receiving in WC
-    candidate_merges_count_histogram: metrics_runtime::data::Histogram, //histogram for block candidate merges count (hops count)
+    block_status_merges_count_histogram: metrics_runtime::data::Histogram, //histogram for block candidate merges count (hops count)
 }
 
 impl Workchain {
@@ -103,8 +122,13 @@ impl Workchain {
         mc_validators: Vec<ValidatorDescr>,
         validator_set_hash: UInt256,
         local_key: &PrivateKey,
+        local_bls_key: &PrivateKey,
         listener: VerificationListenerPtr,
         metrics_receiver: Arc<metrics_runtime::Receiver>,
+        workchains_instance_counter: Arc<InstanceCounter>,
+        blocks_instance_counter: Arc<InstanceCounter>,
+        wc_overlays_instance_counter: Arc<InstanceCounter>,
+        mc_overlays_instance_counter: Arc<InstanceCounter>,
     ) -> Result<Arc<Self>> {
         let local_id = local_key.id();
         let mut wc_local_idx = -1;
@@ -201,7 +225,8 @@ impl Workchain {
             wc_validators,
             validator_set_hash,
             wc_cutoff_weight,
-            local_key: local_key.clone(),
+            _local_key: local_key.clone(),
+            local_bls_key: local_bls_key.clone(),
             local_adnl_id,
             local_id: local_id.clone(),
             wc_local_idx,
@@ -212,10 +237,8 @@ impl Workchain {
             workchain_overlay: SpinMutex::new(None),
             listener,
             self_weak_ref: SpinMutex::new(None),
-            _instance_counter: InstanceCounter::new(
-                &metrics_receiver,
-                &"verificator_workchains".to_string(),
-            ),
+            _workchains_instance_counter: (*workchains_instance_counter).clone(),
+            blocks_instance_counter,
             merge_block_status_counter: metrics_receiver.sink().counter(format!("verificator_wc{}_block_status_merges", workchain_id)),
             set_block_status_counter: metrics_receiver.sink().counter(format!("verificator_wc{}_block_status_sets", workchain_id)),
             process_block_candidate_counter: metrics_receiver.sink().counter(format!("verificator_wc{}_block_candidate_processings", workchain_id)),
@@ -223,12 +246,12 @@ impl Workchain {
             new_block_candidate_counter: metrics_receiver.sink().counter(format!("verificator_wc{}_new_block_candidates", workchain_id)),
             send_block_status_to_mc_counter: metrics_receiver.sink().counter(format!("verificator_wc{}_block_status_to_mc_sends", workchain_id)),
             send_block_status_counter: metrics_receiver.sink().counter(format!("verificator_wc{}_block_status_within_wc_sends", workchain_id)),
+            block_status_received_in_mc_counter: ResultStatusCounter::new(&metrics_receiver, &format!("verificator_wc{}_block_status_received_in_mc", workchain_id)),
             verify_block_counter: ResultStatusCounter::new(&metrics_receiver, &format!("verificator_wc{}_block_candidate_verifications", workchain_id)),
             candidate_delivered_to_wc_latency_histogram: metrics_receiver.sink().histogram(format!("time:verificator_wc{}_stage1_block_candidate_delivered_in_wc", workchain_id)),
-            candidate_send_to_mc_latency_histogram: metrics_receiver.sink().histogram(format!("time:verificator_wc{}_stage2_block_candidate_send_to_mc_latency", workchain_id)),
-            candidate_received_in_mc_latency_histogram: metrics_receiver.sink().histogram(format!("time:verificator_wc{}_stage3_block_candidate_received_in_mc_latency", workchain_id)),
-            candidate_merges_count_histogram: metrics_receiver.sink().histogram(format!("verificator_wc{}_candidate_merges_count", workchain_id)),
-            metrics_receiver: metrics_receiver.clone(),
+            block_status_send_to_mc_latency_histogram: metrics_receiver.sink().histogram(format!("time:verificator_wc{}_stage2_block_status_send_to_mc_latency", workchain_id)),
+            block_status_received_in_mc_latency_histogram: metrics_receiver.sink().histogram(format!("time:verificator_wc{}_stage3_block_status_received_in_mc_latency", workchain_id)),
+            block_status_merges_count_histogram: metrics_receiver.sink().histogram(format!("verificator_wc{}_block_status_merges_count", workchain_id)),
         };
         let workchain = Arc::new(workchain);
 
@@ -265,8 +288,8 @@ impl Workchain {
             &engine,
             runtime.clone(),
             metrics_receiver.clone(),
+            mc_overlays_instance_counter,
             format!("verificator_mc{}_overlay", workchain_id),
-            "verificator_mc".to_string(),
             true,
         ).await?;
         *workchain.mc_overlay.lock() = Some(mc_overlay);
@@ -286,8 +309,8 @@ impl Workchain {
                 &engine,
                 runtime.clone(),
                 metrics_receiver,
+                wc_overlays_instance_counter,
                 format!("verificator_wc{}_overlay", workchain_id),
-                "verificator_wc".to_string(),
                 false,
             ).await?;
             *workchain.workchain_overlay.lock() = Some(workchain_overlay);
@@ -305,7 +328,9 @@ impl Workchain {
 
         let workchain_id = self.workchain_id;
 
-        metrics_dumper.add_derivative_metric(format!("verificator_wc{}_block_candidate_verifications", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("verificator_wc{}_block_candidate_verifications.total", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("verificator_wc{}_block_candidate_verifications.success", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("verificator_wc{}_block_candidate_verifications.failure", workchain_id));
         metrics_dumper.add_derivative_metric(format!("verificator_wc{}_new_block_candidates", workchain_id));
         metrics_dumper.add_derivative_metric(format!("verificator_mc{}_overlay_in_queries", workchain_id));
         metrics_dumper.add_derivative_metric(format!("verificator_mc{}_overlay_out_queries.total", workchain_id));
@@ -345,6 +370,7 @@ impl Workchain {
             metrics_dumper.add_derivative_metric(format!("verificator_wc{}_overlay_in_broadcasts", workchain_id));
             metrics_dumper.add_derivative_metric(format!("verificator_wc{}_overlay_out_broadcasts", workchain_id));
             metrics_dumper.add_derivative_metric(format!("verificator_wc{}_overlay_in_queries", workchain_id));
+            metrics_dumper.add_derivative_metric(format!("verificator_wc{}_in_block_candidates", workchain_id));
             metrics_dumper.add_derivative_metric(format!("verificator_wc{}_overlay_out_queries.total", workchain_id));
             metrics_dumper.add_derivative_metric(format!("verificator_wc{}_overlay_send_message_to_neighbours_calls", workchain_id));
         }
@@ -408,38 +434,48 @@ impl Workchain {
         candidate_id: &UInt256,
         block_candidate: Option<Arc<BlockCandidateBody>>,
     ) -> BlockPtr {
+        check_execution_time!(1_000);
+
         let block = {
             let mut blocks = self.blocks.lock();
 
             match Self::get_block_by_id_impl(&blocks, candidate_id) {
                 Some(existing_block) => existing_block,
                 None => {
-                    let new_block = Block::create(candidate_id.clone(), block_candidate, self.metrics_receiver.clone());
+                    trace!(target: "verificator", "Creating new block {:?} for workchain {}", candidate_id, self.node_debug_id);
+
+                    let new_block = Block::create(candidate_id.clone(), block_candidate.clone(), &*self.blocks_instance_counter);
 
                     blocks.insert(candidate_id.clone(), new_block.clone());
 
-                    //measure latency for initial delivery
+                    drop(blocks); //to release lock
 
-                    let latency = new_block.lock().get_delivery_latency();
-                    if let Some(latency) = latency {
-                        self.candidate_delivered_to_wc_latency_histogram.record_value(latency.as_millis() as u64);
-                    }
+                    self.start_synchronizing_block(&new_block);
 
-                    return new_block;
+                    new_block
                 }
             }
         };
 
         if let Some(block_candidate) = block_candidate {
             let status = block.lock().update_block_candidate(block_candidate.clone());
+
+            trace!(target: "verificator", "Block {:?} status is {} (node={})", candidate_id, status, self.node_debug_id);
+
             if status
             {
+                trace!(target: "verificator", "Block candidate {} is delivered (node={})", candidate_id, self.node_debug_id);
+
                 //measure latency for initial delivery
 
                 let latency = block.lock().get_delivery_latency();
                 if let Some(latency) = latency {
                     self.candidate_delivered_to_wc_latency_histogram.record_value(latency.as_millis() as u64);
                 }
+
+                //set block status to delivered
+
+                self.set_block_status(&candidate_id, None);
 
                 //initiate verification of the block
 
@@ -450,6 +486,110 @@ impl Workchain {
         block
     }
 
+    /// Remove block
+    fn remove_block(&self, candidate_id: &UInt256) {
+        trace!(target: "verificator", "Remove block {:?} for workchain {}", candidate_id, self.node_debug_id);
+
+        self.blocks.lock().remove(candidate_id);
+    }
+
+    /// Block update function
+    fn synchronize_block(workchain_weak: Weak<Workchain>, block_weak: Weak<SpinMutex<Block>>, neighbours_sync_time: Option<SystemTime>) {
+        let workchain = {
+            if let Some(workchain) = workchain_weak.upgrade() {
+                workchain
+            } else {
+                return;
+            }
+        };
+        let block = {
+            if let Some(block) = block_weak.upgrade() {
+                block
+            } else {
+                return;
+            }
+        };
+
+        let candidate_id = block.lock().get_id().clone();
+
+        //trace!(target: "verificator", "Synchronize block {:?} for workchain {}", candidate_id, workchain.node_debug_id);
+        
+        let mut rng = rand::thread_rng();
+        let delay = Duration::from_millis(rng.gen_range(
+            BLOCK_SYNC_MIN_PERIOD_MS,
+            BLOCK_SYNC_MAX_PERIOD_MS + 1,
+        ));
+        let next_sync_time = SystemTime::now() + delay;
+        let neighbours_force_sync = neighbours_sync_time.is_some() && neighbours_sync_time.unwrap().elapsed().is_ok();
+        let neighbours_sync_time = {
+            if neighbours_sync_time.is_none() || neighbours_force_sync {
+                Some(SystemTime::now() + Duration::from_millis(rng.gen_range(NEIGHBOURS_SYNC_MIN_PERIOD_MS, NEIGHBOURS_SYNC_MAX_PERIOD_MS + 1)))
+            } else {
+                neighbours_sync_time
+            }
+        };
+
+        let workchain_id = workchain.workchain_id;
+        let node_debug_id = workchain.node_debug_id.clone();
+
+        workchain.runtime.spawn(async move {
+            if let Ok(timeout) = next_sync_time.duration_since(SystemTime::now()) {
+                /*trace!(
+                    target: "verificator",
+                    "Next block {:?} synchronization for workchain's #{} private overlay is scheduled at {} (in {:.3}s from now; overlay={})",
+                    candidate_id,
+                    workchain_id,
+                    catchain::utils::time_to_string(&next_sync_time),
+                    timeout.as_secs_f64(),
+                    node_debug_id);*/
+
+                sleep(timeout).await;
+            }
+
+            //synchronize block
+
+            Self::synchronize_block(workchain_weak, block_weak, neighbours_sync_time);
+        });
+
+        //periodically force push block status to neighbours
+
+        if neighbours_force_sync {
+            let (is_delivered, _is_rejected) = workchain.get_block_status(&block);
+
+            if !is_delivered {
+                trace!(
+                    target: "verificator",
+                    "Force block {:?} synchronization for workchain's #{} private overlay (overlay={})",
+                    candidate_id,
+                    workchain_id,
+                    node_debug_id);
+
+                block.lock().toggle_send_ready(true);
+            }
+        }
+
+        //check if block updates has to be sent to network (updates buffering)
+
+        let ready_to_send = block.lock().toggle_send_ready(false);
+
+        if ready_to_send {
+            workchain.send_block_status_impl(&block);
+        }
+
+        //remove old blocks
+
+        let block_end_of_life_time = *block.lock().get_first_appearance_time() + BLOCK_LIFETIME_PERIOD;
+
+        if let Ok(_) = block_end_of_life_time.elapsed() {
+            workchain.remove_block(&candidate_id);
+        }
+    }
+
+    /// Start block synchronization
+    fn start_synchronizing_block(&self, block: &BlockPtr) {
+        Self::synchronize_block(Arc::downgrade(&self.get_self()), Arc::downgrade(block), None);
+    }
+
     /// Put new block to map after delivery
     fn add_delivered_block(&self, block_candidate: Arc<BlockCandidateBody>) -> BlockPtr {
         let candidate_id = Self::get_candidate_id(&block_candidate.candidate());
@@ -457,10 +597,6 @@ impl Workchain {
         //register block
 
         let block = self.add_block_impl(&candidate_id, Some(block_candidate.clone()));
-
-        //set block status to delivered
-
-        self.set_block_status(&candidate_id, None);
 
         block
     }
@@ -476,11 +612,19 @@ impl Workchain {
         created_timestamp: i64,
         received_from_workchain: bool,
     ) -> BlockPtr {
+        check_execution_time!(5_000);
+
         self.merge_block_status_counter.increment();
 
         //get existing block or create it
 
         let block = self.add_block_impl(candidate_id, None);
+
+        //check if block is MC originated
+
+        if !received_from_workchain {
+            block.lock().mark_as_mc_originated();
+        }
 
         //update status
 
@@ -494,7 +638,7 @@ impl Workchain {
                 }
             }
             Err(err) => {
-                error!(target: "verificator", "Can't merge block status for block {} in workchain {}: {:?}", candidate_id, self.node_debug_id, err);
+                error!(target: "verificator", "Can't merge block status for block {:?} in workchain {}: {:?}", candidate_id, self.node_debug_id, err);
             }
         }
 
@@ -504,13 +648,21 @@ impl Workchain {
             let was_mc_processed = block.lock().was_mc_processed();
             let (is_delivered, _) = self.get_block_status(&block);
 
+            self.block_status_received_in_mc_counter.total_increment();
+
+            if is_delivered {
+                self.block_status_received_in_mc_counter.success();
+            } else {
+                self.block_status_received_in_mc_counter.failure();
+            }
+
             if !was_mc_processed && is_delivered {
                 let latency = block.lock().get_delivery_latency();
                 if let Some(latency) = latency {
-                    self.candidate_received_in_mc_latency_histogram.record_value(latency.as_millis() as u64);
+                    self.block_status_received_in_mc_latency_histogram.record_value(latency.as_millis() as u64);
                 }
 
-                self.candidate_merges_count_histogram.record_value(merges_count as u64);
+                self.block_status_merges_count_histogram.record_value(merges_count as u64);
 
                 block.lock().mark_as_mc_processed();
             }
@@ -518,13 +670,17 @@ impl Workchain {
 
         //block status was updated
 
-        self.send_block_status(&block, received_from_workchain);
+        let send_immediately_to_mc = false;
+
+        self.send_block_status(&block, received_from_workchain, send_immediately_to_mc);
 
         block
     }
 
     /// Set blocks status (delivered - None, ack - Some(true), nack - Some(false))
     fn set_block_status(&self, candidate_id: &UInt256, status: Option<bool>) {
+        check_execution_time!(5_000);
+
         self.set_block_status_counter.increment();
 
         //get existing block or create it
@@ -534,14 +690,15 @@ impl Workchain {
         //update block status
 
         if self.wc_local_idx != -1 {
-            let update_status = block.lock().set_status(&self.local_key, self.wc_local_idx as u16, self.wc_validators.len() as u16, status);
+            let update_status = block.lock().set_status(&self.local_bls_key, self.wc_local_idx as u16, self.wc_validators.len() as u16, status);
 
             match update_status {
                 Ok(update_status) => {
                     if update_status {
                         //block status was updated
                         let received_from_workchain = true;
-                        self.send_block_status(&block, received_from_workchain);
+                        let send_immediately_to_mc = status.is_some(); //send to MC immediately ACK/NACK without buffering
+                        self.send_block_status(&block, received_from_workchain, send_immediately_to_mc);
                     }
                 }
                 Err(err) => {
@@ -584,7 +741,9 @@ impl Workchain {
 
     /// Process new block candidate broadcast
     fn process_block_candidate(&self, block_candidate: Arc<BlockCandidateBody>) {
-        debug!(target: "verificator", "BlockCandidateBroadcast received by verification workchain's node {} private overlay: {:?}", self.node_debug_id, block_candidate.candidate());
+        check_execution_time!(5_000);
+
+        trace!(target: "verificator", "BlockCandidateBroadcast received by verification workchain's node {} private overlay: {:?}", self.node_debug_id, block_candidate.candidate());
 
         self.process_block_candidate_counter.increment();
 
@@ -593,6 +752,10 @@ impl Workchain {
 
     /// New block broadcast has been generated
     pub fn send_new_block_candidate(&self, candidate: BlockCandidateBroadcast) {
+        check_execution_time!(5_000);
+
+        let _hang_checker = HangCheck::new(self.runtime.clone(), format!("Workchain::send_new_block_candidate: {:?} for workchain {}", candidate.id, self.node_debug_id), Duration::from_millis(1000));
+
         self.new_block_candidate_counter.increment();
 
         //process block candidate
@@ -617,7 +780,9 @@ impl Workchain {
 
     /// Block status update has been received
     pub fn process_block_status(&self, block_status: BlockCandidateStatus, received_from_workchain: bool) -> Result<BlockPtr> {
-        debug!(target: "verificator", "BlockCandidateStatus received by verification workchain's node {} private overlay: {:?}", self.node_debug_id, block_status);
+        check_execution_time!(50_000);
+
+        trace!(target: "verificator", "BlockCandidateStatus received by verification workchain's node {} private overlay: {:?}", self.node_debug_id, block_status);
 
         self.process_block_status_counter.increment();
 
@@ -668,7 +833,51 @@ impl Workchain {
     }
 
     /// Send block for delivery
-    fn send_block_status(&self, block: &BlockPtr, received_from_workchain: bool) {
+    fn send_block_status(&self, block: &BlockPtr, received_from_workchain: bool, send_immediately_to_mc: bool) {
+        //serialize block status
+
+        let (serialized_block_status, is_mc_originated, candidate_id, mc_delivered) = {
+            //this block is needeed to minimize lock of block
+            let mut block = block.lock();
+            let candidate_id = block.get_id().clone();
+
+            (block.serialize(), block.is_mc_originated(), candidate_id, block.was_mc_delivered())
+        };
+
+        //check if block need to be send to mc
+
+        let should_send_to_mc = self.should_send_to_mc(block) && received_from_workchain && !is_mc_originated && !mc_delivered;
+
+        if send_immediately_to_mc || should_send_to_mc {
+            if let Some(mc_overlay) = self.get_mc_overlay() {
+                trace!(target: "verificator", "Send block {:?} to MC after update (node={})", candidate_id, self.node_debug_id);
+
+                let mc_overlay = Arc::downgrade(&mc_overlay);
+                let serialized_block_status = serialized_block_status.clone();
+                let send_block_status_to_mc_counter = self.send_block_status_to_mc_counter.clone();
+
+                let latency = block.lock().get_delivery_latency();
+                if let Some(latency) = latency {
+                    self.block_status_send_to_mc_latency_histogram.record_value(latency.as_millis() as u64);
+                }
+
+                if should_send_to_mc {
+                    //prevent double sending of block because of new delivery signatures
+                    //do not mark block as delivered for ACK/NACK signals (because they can appear earlier than cutoff weight for delivery BLS)
+                    block.lock().mark_as_mc_delivered();
+                }
+
+                Self::send_block_status_to_mc(mc_overlay, serialized_block_status, send_block_status_to_mc_counter);
+            }
+        }
+
+        //mark as ready for send within workchain
+
+        block.lock().toggle_send_ready(true);
+    }
+
+    /// Send block for delivery implementation
+    fn send_block_status_impl(&self, block: &BlockPtr) {
         self.send_block_status_counter.increment();
 
         //serialize block status
@@ -683,23 +892,6 @@ impl Workchain {
             block.serialize()
         };
 
-        //check if block need to be send to mc
-
-        if self.should_send_to_mc(block) && received_from_workchain {
-            if let Some(mc_overlay) = self.get_mc_overlay() {
-                let mc_overlay = Arc::downgrade(&mc_overlay);
-                let serialized_block_status = serialized_block_status.clone();
-                let send_block_status_to_mc_counter = self.send_block_status_to_mc_counter.clone();
-
-                let latency = block.lock().get_delivery_latency();
-                if let Some(latency) = latency {
-                    self.candidate_send_to_mc_latency_histogram.record_value(latency.as_millis() as u64);
-                }
-
-                Self::send_block_status_to_mc(mc_overlay, serialized_block_status, send_block_status_to_mc_counter);
-            }
-        }
-
         //send block status to neighbours
 
         self.send_message_to_private_neighbours(serialized_block_status);
@@ -710,15 +902,20 @@ impl Workchain {
     */
 
     fn verify_block(&self, candidate_id: &UInt256, block_candidate: Arc<BlockCandidateBody>) {
-        debug!(target: "verificator", "Verifying block candidate {} (node={})", candidate_id, self.node_debug_id);
+        trace!(target: "verificator", "Verifying block candidate {} (node={})", candidate_id, self.node_debug_id);
 
         self.verify_block_counter.total_increment();
 
         if let Some(verification_listener) = self.listener.upgrade() {
             let candidate_id = candidate_id.clone();
             let workchain = Arc::downgrade(&self.get_self());
+            let node_debug_id = self.node_debug_id.clone();
+            let runtime = self.runtime.clone();
             let _verification_future = self.runtime.spawn(async move {
                 if let Some(workchain) = workchain.upgrade() {
+                    check_execution_time!(1_000);
+                    let _hang_checker = HangCheck::new(runtime, format!("Workchain::verify_block: {} for workchain {}", candidate_id, node_debug_id), Duration::from_millis(2000));
+
                     let candidate = super::BlockCandidate {
                         block_id: block_candidate.candidate().id.clone().into(),
                         data: block_candidate.candidate().data.to_vec().into(),
@@ -730,7 +927,7 @@ impl Workchain {
                         created_by: block_candidate.candidate().created_by.into(),
                     };
 
-                    let verification_status = verification_listener.verify(&candidate);
+                    let verification_status = verification_listener.verify(&candidate).await;
 
                     workchain.set_block_verification_status(&candidate_id, verification_status);
                 }
@@ -739,7 +936,7 @@ impl Workchain {
     }
 
     fn set_block_verification_status(&self, candidate_id: &UInt256, verification_status: bool) {
-        debug!(target: "verificator", "Verified block candidate {} status is {} (node={})", candidate_id, verification_status, self.node_debug_id);
+        trace!(target: "verificator", "Verified block candidate {:?} status is {} (node={})", candidate_id, verification_status, self.node_debug_id);
 
         if verification_status {
             self.verify_block_counter.success();
@@ -750,7 +947,7 @@ impl Workchain {
         self.set_block_status(candidate_id, Some(verification_status));
 
         if !verification_status {
-            error!(target: "verificator", "Malicios block candidate {} detected (node={})", candidate_id, self.node_debug_id);
+            error!(target: "verificator", "Malicios block candidate {:?} detected (node={})", candidate_id, self.node_debug_id);
         }
     }
 
@@ -797,11 +994,16 @@ impl WorkchainOverlayListener for Workchain {
         block_status: BlockCandidateStatus,
         received_from_workchain: bool,
     ) -> Result<BlockPtr> {
+        let candidate_id: UInt256 = block_status.candidate_id.into();
+        let _hang_checker = HangCheck::new(self.runtime.clone(), format!("Workchain::on_workchain_block_status_updated: {} for workchain {}", candidate_id, self.node_debug_id), Duration::from_millis(1000));
+
         self.process_block_status(block_status, received_from_workchain)
     }
 
     /// Process new block candidate broadcast
     fn on_workchain_block_candidate(&self, block_candidate: Arc<BlockCandidateBody>) {
+        let _hang_checker = HangCheck::new(self.runtime.clone(), format!("Workchain::on_workchain_block_candidate: {:?} for workchain {}", block_candidate.candidate().id, self.node_debug_id), Duration::from_millis(1000));
+
         self.process_block_candidate(block_candidate);
     }
 }

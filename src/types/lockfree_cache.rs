@@ -25,6 +25,7 @@ pub struct TimeBasedCache<K, V: CountedObject> {
     map: Arc<lockfree::map::Map<K, (V, AtomicU64)>>,
 }
 
+#[allow(dead_code)]
 impl<K, V> TimeBasedCache<K, V> where 
     K: 'static + Hash + Ord + Sync + Send + Display,
     V: 'static + Clone + Sync + Send + CountedObject 
@@ -91,3 +92,6 @@ impl<K, V> TimeBasedCache<K, V> where
 }
 
 
+#[cfg(test)]
+#[path = "tests/test_lockfree_cache.rs"]
+mod tests;

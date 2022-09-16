@@ -17,3 +17,5 @@ pub mod rocksdb;
 pub mod memorydb;
 pub mod filedb;
 
+#[cfg(test)]
+mod tests;
