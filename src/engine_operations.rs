@@ -359,10 +359,11 @@ impl EngineOperations for Engine {
     ) -> Result<(BlockStuff, BlockProofStuff)> {
         loop {
             if let Some(handle) = self.load_block_handle(id)? {
-                if handle.has_data() {
+                let mut is_link = false;
+                if handle.has_data() && handle.has_proof_or_link(&mut is_link) {
                     let ret = (
                         self.load_block(&handle).await?,
-                        self.load_block_proof(&handle, !id.shard().is_masterchain()).await?
+                        self.load_block_proof(&handle, is_link).await?
                     );
                     return Ok(ret)
                 }

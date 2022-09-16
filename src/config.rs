@@ -85,8 +85,9 @@ pub struct TonNodeConfig {
     #[serde(skip_serializing)]
     ip_address: Option<String>,
     adnl_node: Option<AdnlNodeConfigJson>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    extensions: Option<NodeExtensions>,
+    #[serde(skip_serializing_if = "NodeExtensions::is_default")]
+    #[serde(default)]
+    extensions: NodeExtensions,
     validator_keys: Option<Vec<ValidatorKeysJson>>,
     #[serde(skip_serializing)]
     control_server_port: Option<u16>,
@@ -96,7 +97,7 @@ pub struct TonNodeConfig {
     default_rldp_roundtrip_ms: Option<u32>,
     #[serde(default)]
     test_bundles_config: CollatorTestBundlesGeneralConfig,
-    #[serde(default = "default_connectivity_check_config")]
+    #[serde(default)]
     connectivity_check_config: ConnectivityCheckBroadcastConfig,
     gc: Option<GC>,
     validator_key_ring: Option<HashMap<String, KeyOptionJson>>,
@@ -116,10 +117,26 @@ pub struct TonNodeConfig {
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct NodeExtensions {
-    #[serde(default)]
-    pub disable_broadcast_retransmit: bool
+    pub disable_broadcast_retransmit: bool,
+    pub broadcast_hops: u8
+}
+
+impl Default for NodeExtensions {
+    fn default() -> Self {
+        NodeExtensions {
+            disable_broadcast_retransmit: false,
+            broadcast_hops: 2
+        }
+    }
+}
+
+impl NodeExtensions {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
@@ -143,7 +160,7 @@ pub struct GC {
     enable_for_archives: bool,
     archives_life_time_hours: Option<u32>, // Hours
     enable_for_shard_state_persistent: bool,
-    #[serde(default = "CellsGcConfig::default")]
+    #[serde(default)]
     cells_gc_config: CellsGcConfig,
 }
 
@@ -240,7 +257,7 @@ impl CollatorTestBundlesConfig {
     }
 }
 
-#[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 #[serde(default)]
 pub struct ConnectivityCheckBroadcastConfig {
     pub enabled: bool,
@@ -249,12 +266,14 @@ pub struct ConnectivityCheckBroadcastConfig {
     pub long_mult: u8,
 }
 
-pub fn default_connectivity_check_config() -> ConnectivityCheckBroadcastConfig {
-    ConnectivityCheckBroadcastConfig {
-        enabled: true,
-        long_len: 2 * 1024,
-        short_period_ms: 1000,
-        long_mult: 5,
+impl Default for ConnectivityCheckBroadcastConfig {
+    fn default() -> Self {
+        ConnectivityCheckBroadcastConfig {
+            enabled: true,
+            long_len: 2 * 1024,
+            short_period_ms: 1000,
+            long_mult: 5,
+        }
     }
 }
 
@@ -478,8 +497,8 @@ impl TonNodeConfig {
     pub fn connectivity_check_config(&self) -> &ConnectivityCheckBroadcastConfig {
         &self.connectivity_check_config
     }
-    pub fn extensions(&self) -> Option<&NodeExtensions> {
-        self.extensions.as_ref()
+    pub fn extensions(&self) -> &NodeExtensions {
+        &self.extensions
     }
     pub fn remp_config(&self) -> &RempConfig {
         &self.remp

@@ -192,7 +192,7 @@ pub async fn accept_block_routine(
             block_broadcast = result.is_updated();
         }
         let handle = result.as_non_created().ok_or_else(
-            || error!("INTERNAL ERROR: accept for block {} mismatch")
+            || error!("INTERNAL ERROR: accept for block {} mismatch", id)
         )?;
         #[cfg(feature = "telemetry")]
         if block_broadcast {
