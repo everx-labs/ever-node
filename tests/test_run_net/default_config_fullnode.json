@@ -1,0 +1,61 @@
+{
+    "log_config_name": "log_cfg_fullnode.yml",
+    "ton_global_config_name": "ton-global.config.json",
+    "internal_db_path": "full_node_db",
+    "ip_address": "0.0.0.0:30006",
+    "kafka_consumer_config": {
+        "group_id": "101",
+        "brokers": "kafka",
+        "topic": "requests",
+        "session_timeout_ms": 6000,
+        "run_attempt_timeout_ms": 1000
+    },
+    "external_db_config": {
+        "block_producer": {
+            "enabled": true,
+            "brokers": "kafka",
+            "message_timeout_ms": 100,
+            "topic": "blocks",
+            "attempt_timeout_ms": 100,
+            "message_max_size": 3000000,
+            "big_messages_storage": "big-blocks"
+        },
+        "message_producer": {
+            "enabled": true,
+            "brokers": "kafka",
+            "message_timeout_ms": 100,
+            "topic": "messages",
+            "attempt_timeout_ms": 100,
+            "message_max_size": 3000000,
+            "big_messages_storage": "big-messages"
+        },
+        "transaction_producer": {
+            "enabled": true,
+            "brokers": "kafka",
+            "message_timeout_ms": 100,
+            "topic": "transactions",
+            "attempt_timeout_ms": 100,
+            "message_max_size": 3000000,
+            "big_messages_storage": "big-transactions"
+        },
+        "account_producer": {
+            "enabled": true,
+            "brokers": "kafka",
+            "message_timeout_ms": 100,
+            "topic": "accounts",
+            "attempt_timeout_ms": 100,
+            "message_max_size": 3000000,
+            "big_messages_storage": "big-accounts"
+        },
+        "block_proof_producer": {
+            "enabled": true,
+            "brokers": "kafka",
+            "message_timeout_ms": 100,
+            "topic": "blocks_signatures",
+            "attempt_timeout_ms": 100,
+            "message_max_size": 3000000,
+            "big_messages_storage": "big-block-proofs"
+        },
+        "bad_blocks_storage": "bad-blocks"
+    }
+}
