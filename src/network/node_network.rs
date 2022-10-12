@@ -64,7 +64,7 @@ pub (crate) struct NetworkContext {
     pub overlay: Arc<OverlayNode>,
     pub rldp: Arc<RldpNode>,
     pub remp: Arc<RempNode>,
-    pub broadcast_hops: u8,
+    pub broadcast_hops: Option<u8>,
     #[cfg(feature = "telemetry")]
     pub telemetry: Arc<FullNodeNetworkTelemetry>,
     #[cfg(feature = "telemetry")]
@@ -936,7 +936,7 @@ impl NodeNetwork {
                     tag: self.tag_connectivity_check_broadcast
                 },
                 None,
-                Some(self.network_context.broadcast_hops)
+                self.network_context.broadcast_hops
             ).await
         } else {
             fail!("There is not masterchain overlay")

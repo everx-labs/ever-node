@@ -74,7 +74,6 @@ impl BlockProcessor for RempMasterBlockIndexingProcessor {
 
 pub struct RempBlockObserverToplevel {
     engine: Arc<dyn EngineOperations>,
-    rt: tokio::runtime::Handle,
     message_cache: Arc<MessageCache>,
     queue_sender: Sender<BlockStuff>,
     queue_receiver: Receiver<BlockStuff>,
@@ -86,15 +85,13 @@ impl RempBlockObserverToplevel {
     pub fn new (
         engine: Arc<dyn EngineOperations>,
         message_cache: Arc<MessageCache>,
-        rt: tokio::runtime::Handle
     ) -> Self {
         let (queue_sender, queue_receiver) = unbounded();
         let (response_sender, response_receiver) = unbounded();
         Self {
             engine, message_cache,
             queue_sender, queue_receiver,
-            response_sender, response_receiver,
-            rt
+            response_sender, response_receiver
         }
     }
 
@@ -141,7 +138,7 @@ impl RempBlockObserverToplevel {
                     rt: tokio::runtime::Handle,
                     init_mc_block: Arc<BlockHandle>
     ) -> Result<Sender<BlockStuff>> {
-        let top_level_self = Self::new(engine, message_cache, rt.clone());
+        let top_level_self = Self::new(engine, message_cache);
         let sender = top_level_self.queue_sender.clone();
 
         rt.clone().spawn(async move {

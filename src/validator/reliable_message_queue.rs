@@ -2,7 +2,7 @@ use std::{
     collections::{BinaryHeap, HashSet},
     fmt, fmt::Formatter,
     sync::Arc,
-    time::SystemTime
+    time::Duration, time::SystemTime
 };
 
 use ton_api::ton::ton_node::{RempMessageStatus, RempMessageLevel, rempmessagestatus::RempAccepted};
@@ -18,9 +18,14 @@ use crate::{
 use failure::err_msg;
 use ton_api::ton::ton_node::rempmessagestatus::RempIgnored;
 use crate::validator::message_cache::MessageCacheImpl;
-use crate::validator::remp_catchain::RempCatchainInfo;
+use crate::validator::remp_catchain::{RempCatchainInfo, RempCatchainInstance};
+
+#[derive(Debug,PartialEq,Eq,PartialOrd,Ord,Clone)]
+enum MessageQueueStatus { Created, Starting, Active, Stopping }
+const RMQ_STOP_POLLING_INTERVAL: Duration = Duration::from_millis(1);
 
 struct MessageQueueImpl {
+    status: MessageQueueStatus,
     pending_collation_set: HashSet<UInt256>,
     pending_collation_order: BinaryHeap<(i64, UInt256)>,
 }
@@ -29,6 +34,7 @@ pub struct MessageQueue {
     remp_manager: Arc<RempManager>,
     engine: Arc<dyn EngineOperations>,
     catchain_info: Arc<RempCatchainInfo>,
+    catchain_instance: RempCatchainInstance,
     queues: MutexWrapper<MessageQueueImpl>,
 }
 
@@ -70,7 +76,6 @@ impl MessageQueueImpl {
 
 impl MessageQueue {
     pub fn create(
-        rt: tokio::runtime::Handle,
         engine: Arc<dyn EngineOperations>,
         remp_manager: Arc<RempManager>,
         shard: ShardIdent,
@@ -81,25 +86,31 @@ impl MessageQueue {
         local: &PublicKey
     ) -> Result<Self> {
         let remp_catchain_info = Arc::new(RempCatchainInfo::create(
-            rt, engine.clone(), remp_manager.clone(),
+            //rt, engine.clone(), remp_manager.clone(),
             catchain_seqno, master_cc_seqno, curr, next, local,
             shard.clone()
         )?);
 
+        let remp_catchain_instance = RempCatchainInstance::new(remp_catchain_info.clone());
+
         let queues = MutexWrapper::with_metric(
             MessageQueueImpl {
+                status: MessageQueueStatus::Created,
                 pending_collation_set: HashSet::new(),
                 pending_collation_order: BinaryHeap::new(),
             },
-            format!("<<Queue {}*{:x}*{}>>", remp_catchain_info.local_idx, remp_catchain_info.queue_id, shard),
+            format!("<<RMQ {}>>", remp_catchain_instance),
             #[cfg(feature = "telemetry")]
             engine.remp_core_telemetry().rmq_catchain_mutex_metric(&shard),
         );
 
+        log::trace!(target: "remp", "Creating MessageQueue {}", remp_catchain_instance);
+
         return Ok(Self {
             remp_manager,
             engine,
-            catchain_info: remp_catchain_info,
+            catchain_info: remp_catchain_info.clone(),
+            catchain_instance: remp_catchain_instance,
             queues: queues,
         });
     }
@@ -107,6 +118,18 @@ impl MessageQueue {
     // pub fn get_id(&self) -> UInt256 {
     //     return self.queue_id;
     // }
+
+    async fn set_queue_status(&self, required_status: MessageQueueStatus, new_status: MessageQueueStatus) -> Result<()> {
+        self.queues.execute_sync(|mut q| {
+            if q.status != required_status {
+                fail!("RMQ {}: MessageQueue status is {:?}, but required to be {:?}", self, q.status, required_status)
+            }
+            else {
+                q.status = new_status;
+                Ok(())
+            }
+        }).await
+    }
 
     pub fn send_response_to_fullnode(&self, rmq_message: Arc<RmqMessage>, status: RempMessageStatus) {
         log::debug!(target: "remp", "RMQ {}: queueing response to fullnode {}, status {}",
@@ -146,7 +169,7 @@ impl MessageQueue {
     }
 
     pub fn put_to_catchain(&self, rmq_message: Arc<RmqMessage>) {
-        if let Err(e) = self.catchain_info.pending_messages_queue_send(rmq_message.clone(), RempMessageStatus::TonNode_RempNew) {
+        if let Err(e) = self.catchain_instance.pending_messages_queue_send(rmq_message.clone(), RempMessageStatus::TonNode_RempNew) {
             log::error!(target: "remp",
                 "RMQ {}: Cannot write reject message for {:x} into catchain: {}", self, rmq_message.message_id, e
             )
@@ -154,40 +177,51 @@ impl MessageQueue {
     }
 
     pub async fn start (self: Arc<MessageQueue>, local_key: PrivateKey) -> Result<()> {
-        self.remp_manager.catchain_store.create_catchain(self.catchain_info.clone()).await?;
-        let catchain_instance = self.remp_manager.catchain_store.start_catchain(
+        self.set_queue_status(MessageQueueStatus::Created, MessageQueueStatus::Starting).await?;
+
+        log::trace!(target: "remp", "RMQ {}: starting", self);
+        self.remp_manager.catchain_store.create_catchain(self.engine.clone(), self.remp_manager.clone(), self.catchain_info.clone()).await?;
+        log::trace!(target: "remp", "RMQ {}: catchain created", self);
+        let catchain_instance_impl = self.remp_manager.catchain_store.start_catchain(
             self.catchain_info.queue_id.clone(), local_key
         ).await?;
-        self.catchain_info.init_instance(catchain_instance)
+        log::trace!(target: "remp", "RMQ {}: catchain started", self);
+        self.catchain_instance.init_instance(catchain_instance_impl)?;
+        self.set_queue_status(MessageQueueStatus::Starting, MessageQueueStatus::Active).await
     }
 
-    pub async fn stop(&self) {
-        if let Err(e) = self.remp_manager.catchain_store.stop_catchain(&self.catchain_info.queue_id).await {
-            log::error!(target: "remp", "Cannot stop RMQ {}, error: `{}`", self, e);
+    pub async fn stop(&self) -> Result<()> {
+        loop {
+            let (do_stop, do_break) = self.queues.execute_sync(|mut q| {
+                match q.status {
+                    MessageQueueStatus::Created  => { q.status = MessageQueueStatus::Stopping; Ok((false, true)) },
+                    MessageQueueStatus::Starting => Ok((false, false)),
+                    MessageQueueStatus::Stopping => fail!("RMQ {}: cannot stop queue with 'Stopping' status", self),
+                    MessageQueueStatus::Active   => { q.status = MessageQueueStatus::Stopping; Ok((true, true)) },
+                }
+            }).await?;
+
+            if do_stop {
+                log::trace!(target: "remp", "RMQ {}: stopping catchain", self);
+                return self.remp_manager.catchain_store.stop_catchain(&self.catchain_info.queue_id).await;
+            }
+            if do_break {
+                log::trace!(target: "remp", "RMQ {}: catchain is not started -- skip stopping", self);
+                return Ok(());
+            }
+            log::trace!(target: "remp", "RMQ {}: waiting for catchain to stop it", self);
+            tokio::time::sleep(RMQ_STOP_POLLING_INTERVAL).await
         }
-/*
-        match &self.get_session().await {
-            Some(session) => session.stop(true),
-            _ => log::error!(target: "remp", "Queue {} is destroyed, but not started", self)
-        };
-        // TODO: check whether this removal is not ahead-of-time
-        log::trace!(target: "remp", "RMQ session {}, removing validator list {}",
-            self, self.node_list_id.to_hex_string());
-        if let Err(e) = self.engine.remove_validator_list(self.node_list_id).await {
-            log::error!(target: "remp", "Cannot remove validator list for queue {}: `{}`", self, e);
-        };
-        log::trace!(target: "remp", "RMQ session {} stopped", self);
- */
     }
 
     pub async fn put_message_to_rmq(&self, old_message: Arc<RmqMessage>) -> Result<()> {
         let msg = Arc::new(old_message.new_with_updated_source_idx(self.catchain_info.local_idx));
         log::info!(target: "remp", "Point 3. Pushing to RMQ {}; message {}", self, msg);
-        self.catchain_info.pending_messages_queue_send(msg, RempMessageStatus::TonNode_RempNew)?;
+        self.catchain_instance.pending_messages_queue_send(msg, RempMessageStatus::TonNode_RempNew)?;
 
         #[cfg(feature = "telemetry")]
         self.engine.remp_core_telemetry().in_channel_to_catchain(
-            &self.catchain_info.shard, self.catchain_info.pending_messages_queue_len()?);
+            &self.catchain_info.shard, self.catchain_instance.pending_messages_queue_len()?);
 
         if let Some(session) = &self.remp_manager.catchain_store.get_catchain_session(&self.catchain_info.queue_id).await {
             log::trace!(target: "remp", "Point 3. Activating RMQ {} processing", self);
@@ -235,13 +269,13 @@ impl MessageQueue {
     pub async fn poll(&self) -> Result<()> {
         log::debug!(target: "remp", "Point 4. RMQ {}: polling; total {} messages in cache, {} messages in rmq_queue",
             self, 
-            self.remp_manager.message_cache.received_messages_count(&self.catchain_info.shard).await, 
-            self.catchain_info.rmq_catchain_receiver_len()?
+            self.received_messages_count().await,
+            self.catchain_instance.rmq_catchain_receiver_len()?
         );
 
         // Process new messages from RMQ catchain and send them to collator
         'queue_loop: loop {
-            match self.catchain_info.rmq_catchain_try_recv() {
+            match self.catchain_instance.rmq_catchain_try_recv() {
                 Err(e) => {
                     log::error!(target: "remp", "RMQ {}: error receiving from rmq_queue: `{}`", self, e);
                     break 'queue_loop;
@@ -288,6 +322,7 @@ impl MessageQueue {
                                 "Point 4. RMQ {}. Message {} status {} from previous set, validator {} - we have it with non-final status {}, try to collate",
                                 self, rmq_message.message_id.to_hex_string(), status, rmq_message.source_idx, old_status
                             );
+                            self.remp_manager.message_cache.update_message_status(&rmq_message.message_id, RempMessageStatus::TonNode_RempNew).await?;
                             self.add_pending_collation(rmq_message).await;
                             #[cfg(feature = "telemetry")]
                             self.engine.remp_core_telemetry().add_to_cache_attempt(false);
@@ -372,6 +407,22 @@ impl MessageQueue {
         log::trace!(target: "remp", "Point 5. RMQ {}: total {} messages for collation", self, cnt);
     }
 
+    pub async fn all_accepted_by_collator_to_ignored(&self) -> Vec<(UInt256,u32)> {
+        let mut downgrading = Vec::new();
+
+        let to_check: Vec<UInt256> = self.queues.execute_sync(|mq| {
+            mq.pending_collation_set.iter().map(|x| x.clone()).collect()
+        }).await;
+
+        for c in to_check {
+            if let Some(ts) = self.remp_manager.message_cache.change_accepted_by_collator_to_ignored(&c).await {
+                downgrading.push((c, ts))
+            }
+        }
+
+        downgrading
+    }
+
     /// Processes one collator response from engine.deque_remp_message_status().
     /// Returns Ok(status) if the response was sucessfully processed, Ok(None) if no responses remain
     pub async fn process_one_deque_remp_message_status(&self) -> Result<Option<RempMessageStatus>> {
@@ -445,15 +496,7 @@ impl MessageQueue {
     pub async fn get_message(&self, id: &UInt256) -> Option<Arc<RmqMessage>> {
         self.remp_manager.message_cache.get_message(id).await
     }
-
-    pub async fn received_messages_to_vector (&self) -> Vec<(Arc<RmqMessage>, RempMessageStatus)> {
-        self.remp_manager.message_cache.received_messages_to_vector(&self.catchain_info.shard).await
-    }
-
-    pub async fn received_messages_count (&self) -> u32 {
-        self.remp_manager.message_cache.received_messages_count(&self.catchain_info.shard).await
-    }
-
+/*
     pub async fn info_string (&self) -> String {
         format!("Queue: {}, messages:\n{}", self, self.received_messages_count().await)
     }
@@ -464,13 +507,19 @@ impl MessageQueue {
             None => "*none*".to_string()
         }
     }
+*/
+    pub async fn received_messages_count (&self) -> usize {
+        self.queues.execute_sync(|mq| mq.pending_collation_set.len()).await
+    }
 
     pub async fn print_messages (&self, name: &str, count_only: bool) {
-        if count_only {
-            log::debug!(target: "remp", "Queue {} (queue name {}), received message count {}", 
-                self, name, self.received_messages_count().await
-            );
+//      if count_only {
+        log::debug!(target: "remp", "Queue {} (queue name {}), received message count {} (message printing not supported)",
+            self, name, self.received_messages_count().await
+        );
+/*
         }
+
         else {
             let messages = self.received_messages_to_vector().await;
             for (msg,status) in &messages {
@@ -479,6 +528,7 @@ impl MessageQueue {
                 );
             }
         }
+ */
     }
 
     async fn send_message_to_collator(&self, message_id: UInt256, message: Arc<Message>) -> Result<()> {
@@ -498,11 +548,12 @@ impl Drop for MessageQueue {
 
 impl fmt::Display for MessageQueue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}*{:x}*{}*{}",
+        write!(f, "{}*{:x}*{}*{}@{}",
                self.catchain_info.local_idx,
                self.catchain_info.queue_id,
                self.catchain_info.shard,
-               self.catchain_info.master_cc_seqno
+               self.catchain_info.master_cc_seqno,
+               self.catchain_instance.get_id()
         )
     }
 }
@@ -529,7 +580,6 @@ impl BlockProcessor for StatusUpdater {
 
 /** Controls message queues - actual and next */
 pub struct RmqQueueManager {
-    rt: tokio::runtime::Handle,
     engine: Arc<dyn EngineOperations>,
     remp_manager: Arc<RempManager>,
     shard: ShardIdent,
@@ -540,7 +590,6 @@ pub struct RmqQueueManager {
 
 impl RmqQueueManager {
     pub fn new(
-        rt: tokio::runtime::Handle,
         engine: Arc<dyn EngineOperations>,
         remp_manager: Arc<RempManager>,
         shard: ShardIdent,
@@ -548,7 +597,6 @@ impl RmqQueueManager {
     ) -> Self {
         // If RMQ is not enabled, current & prev queues are not created.
         let manager = RmqQueueManager {
-            rt,
             engine,
             remp_manager,
             shard: shard.clone(),
@@ -568,7 +616,7 @@ impl RmqQueueManager {
             }
 
             self.cur_queue = match MessageQueue::create(
-                self.rt.clone(), self.engine.clone(), self.remp_manager.clone(),
+                self.engine.clone(), self.remp_manager.clone(),
                 self.shard.clone(), catchain_seqno, master_cc_seqno, curr, next, &self.local_public_key
             ) {
                 Ok(t) => Some(Arc::new(t)),
@@ -587,18 +635,34 @@ impl RmqQueueManager {
 
         if let Some(_) = &self.cur_queue {
             //self.ensure_status(MessageQueueStatus::NewQueues)?;
-            log::debug!(target: "remp", "RMQ {}: adding next queue {}", self, next_queue_cc_seqno);
-            let queue = match MessageQueue::create(
-                self.rt.clone(), self.engine.clone(), self.remp_manager.clone(),
-                self.shard.clone(), next_queue_cc_seqno, next_master_cc_seqno, prev_validators, next_validators, &self.local_public_key
+            log::trace!(target: "remp", "RMQ {}: adding next queue {}", self, next_queue_cc_seqno);
+            let queue = Arc::new(match MessageQueue::create(
+                self.engine.clone(), self.remp_manager.clone(),
+                self.shard.clone(), next_queue_cc_seqno, next_master_cc_seqno, 
+                prev_validators, next_validators, &self.local_public_key
             ) {
                 Ok(x) => x,
                 Err(e) => {
                     log::error!(target: "remp", "RMQ {}: cannot create next queue, error `{}`", self, e);
                     return
                 }
-            };
-            self.next_queues.execute_sync(|q| q.push(Arc::new(queue))).await;
+            });
+            let added = self.next_queues.execute_sync(|q| {
+                for one_queue in q.iter() {
+                    if one_queue.catchain_info.is_same_catchain(queue.catchain_info.clone()) { 
+                        return false; 
+                    }
+                }
+                q.push(queue.clone());
+                true
+            }).await;
+
+            if added {
+                log::debug!(target: "remp", "RMQ {}: added next queue {}", self, queue);
+            }
+            else {
+                log::trace!(target: "remp", "RMQ {}: next queue {} is already there; no addition", self, queue);
+            }
         }
         else {
             log::error!(target: "remp", "RMQ {}: cannot add new queue: cur_queue is none!", self);
@@ -664,7 +728,7 @@ impl RmqQueueManager {
                 for new in new_queues.iter() {
                     let forwarding_status_inner = RempIgnored { level: RempMessageLevel::TonNode_RempCollator, block_id: Default::default() };
                     let forwarding_status = RempMessageStatus::TonNode_RempIgnored(forwarding_status_inner);
-                    if let Err(x) = new.catchain_info.pending_messages_queue_send(message.clone(), forwarding_status) {
+                    if let Err(x) = new.catchain_instance.pending_messages_queue_send(message.clone(), forwarding_status) {
                         log::error!(target: "remp",
                             "Point 5a. RMQ {}: message {:x} cannot be put to new queue {}: `{}`",
                             self, msgid, new, x
@@ -698,16 +762,15 @@ impl RmqQueueManager {
     }
 
     pub async fn stop(&self) {
-        //if let Err(e) = self.set_status(MessageQueueStatus::Stopping) {
-        //    log::error!(target: "remp", "Status change failure for RMQ {}: `{}`", self, e);
-        //}
-
         if let Some(q) = &self.cur_queue {
-            q.stop().await;
+            if let Err(e) = q.stop().await {
+                log::error!(target: "remp", "Cannot stop RMQ {} current queue {}: `{}`", self, q, e);
+            }
         }
-        let queues = self.next_queues.execute_sync (|q| q.clone()).await;
-        for q in queues.iter() {
-            q.stop().await;
+        while let Some(q) = self.next_queues.execute_sync (|q| q.pop()).await {
+            if let Err(e) = q.stop().await {
+                log::error!(target: "remp", "Cannot stop RMQ {} next queue {}: `{}`", self, q, e);
+            }
         }
     }
 
@@ -757,11 +820,12 @@ impl RmqQueueManager {
                 )
             });
             process_block_messages_by_blockid(self.engine.clone(), id, proc).await?;
-            let returned_msgs = self.remp_manager.message_cache.downgrade_accepted_by_collator(&self.shard).await;
-            for (msg,_status) in returned_msgs.iter() {
-                log::trace!(target: "remp", "Point 7. RMQ {} returning message {} to collation queue", self, msg);
+            //let returned_msgs = self.remp_manager.message_cache.downgrade_accepted_by_collator(&self.shard).await;
+            let returned_msgs = queue.all_accepted_by_collator_to_ignored().await;
+            for (msg_id, timestamp) in returned_msgs.iter() {
+                log::trace!(target: "remp", "Point 7. RMQ {} returning message {} to collation queue", self, msg_id);
                 queue.queues.execute_sync(
-                    |catchain| catchain.return_to_collation_queue(&msg.message_id, msg.timestamp)
+                    |catchain| catchain.return_to_collation_queue(&msg_id, *timestamp)
                 ).await;
             };
             Ok(())
@@ -782,11 +846,15 @@ impl RmqQueueManager {
                 match self.remp_manager.poll_incoming(&self.shard).await {
                     (Some(rmq_message), _) => {
                         if let Err(e) = self.put_message_to_rmq(rmq_message.clone()).await {
-                            log::error!(target: "remp", "Error sending RMQ {} message {:?}: {}",
+                            log::warn!(target: "remp", "Error sending RMQ {} message {:?}: {}; returning back to incoming queue",
                                 self, rmq_message, e
-                            )
-                        };
-                        cnt = cnt+1;
+                            );
+                            self.remp_manager.return_to_incoming(rmq_message, &self.shard).await;
+                            break 'a;
+                        }
+                        else {
+                            cnt = cnt+1;
+                        }
                     }
                     (None, pending) => {
                         #[cfg(feature = "telemetry")]

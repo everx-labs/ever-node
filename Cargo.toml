@@ -1,7 +1,7 @@
 [package]
 edition = '2021'
 name = 'ton_node'
-version = '0.51.4'
+version = '0.51.5'
 build = 'common/build/build.rs'
 
 

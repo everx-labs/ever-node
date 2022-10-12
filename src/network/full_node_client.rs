@@ -430,7 +430,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             &self.overlay_id, 
             &broadcast, 
             None,
-            Some(self.network_context.broadcast_hops)
+            self.network_context.broadcast_hops
         ).await
     }
     
@@ -445,7 +445,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             &self.overlay_id, 
             &broadcast, 
             None,
-            Some(self.network_context.broadcast_hops)
+            self.network_context.broadcast_hops
         ).await?;
         log::trace!(
             "send_block_broadcast {} (overlay {}) sent to {} nodes", 
@@ -467,7 +467,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             &self.overlay_id, 
             &broadcast, 
             None,
-            Some(self.network_context.broadcast_hops)
+            self.network_context.broadcast_hops
         ).await?;
         log::trace!(
             "send_top_shard_block_description {} (overlay {}) sent to {} nodes", 

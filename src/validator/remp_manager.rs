@@ -133,6 +133,19 @@ impl<T: Display,Q: RempQueue<T>> RempQueueDispatcher<T,Q> {
         );
         return (result, pending_messages.len());
     }
+
+    pub async fn return_back(&self, msg: Arc<T>, shard: &ShardIdent) {
+        log::trace!(target: "remp", "REMP {}: putting message {} for shard {} back", 
+            self.name, msg, shard
+        );
+        let mut pending_messages = self.pending_messages.lock().await;
+        match pending_messages.get_mut(&shard) {
+            Some(v) => v.push_back(msg),
+            None => { 
+                pending_messages.insert(shard.clone(), VecDeque::from([msg])); 
+            }
+        }
+    }
 }
 
 pub struct RempIncomingQueue {
@@ -281,6 +294,10 @@ impl RempManager {
 
     pub async fn poll_incoming(&self, shard: &ShardIdent) -> (Option<Arc<RmqMessage>>, usize) {
         return self.incoming_dispatcher.poll(shard).await;
+    }
+
+    pub async fn return_to_incoming(&self, message: Arc<RmqMessage>, shard: &ShardIdent) {
+        self.incoming_dispatcher.return_back(message, shard).await;
     }
 
     pub fn queue_response_to_fullnode(&self, local_key_id: UInt256, rmq_message: Arc<RmqMessage>, status: RempMessageStatus) -> Result<()> {

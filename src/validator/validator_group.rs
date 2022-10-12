@@ -161,7 +161,7 @@ impl ValidatorGroupImpl {
 
         if let Some(remp_manager) = &g.remp_manager {
             let mut rq = RmqQueueManager::new(
-                rt.clone(), g.engine.clone(), remp_manager.clone(), g.shard.clone(),
+                g.engine.clone(), remp_manager.clone(), g.shard.clone(),
                 &g.local_key
             );
             rq.set_queues(next_validator_set.catchain_seqno(), next_master_cc_seqno, prev_validators, &next_validator_set.list().to_vec());

@@ -473,7 +473,7 @@ impl CatchainOverlay for CatchainClient {
                     &overlay_id, 
                     &msg, 
                     Some(&local_validator_key),
-                    Some(broadcast_hops)
+                    broadcast_hops
                 ).await;
                 log::trace!(target: Self::TARGET, "send_broadcast_fec_ex status: {:?}", result);
             }

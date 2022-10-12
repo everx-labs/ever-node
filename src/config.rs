@@ -121,14 +121,14 @@ pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
 #[serde(default)]
 pub struct NodeExtensions {
     pub disable_broadcast_retransmit: bool,
-    pub broadcast_hops: u8
+    pub broadcast_hops: Option<u8>
 }
 
 impl Default for NodeExtensions {
     fn default() -> Self {
         NodeExtensions {
             disable_broadcast_retransmit: false,
-            broadcast_hops: 2
+            broadcast_hops: None
         }
     }
 }

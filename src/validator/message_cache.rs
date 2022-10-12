@@ -267,38 +267,27 @@ impl MessageCacheImpl {
         }
     }
 
-    pub fn for_all_messages_in_shard(
-        &self, shard: &ShardIdent, f: &mut dyn FnMut(&UInt256, &Arc<RmqMessage>, &RempMessageStatus)->()
-    ) {
-        for (id,msg) in self.messages.iter() {
-            if let Some(msg_shard) = self.message_shards.get(id) {
-                if *msg_shard == *shard {
-                    if let Some(status) = self.message_statuses.get(id) {
-                        f(id,msg,status);
-                    }
-                    else {
-                        log::error!(target: "remp", "Status for message {} is missing!", id);
+    pub fn change_accepted_by_collator_to_ignored(&mut self, msg_id: &UInt256) -> Option<u32> {
+        match (self.message_statuses.get_mut(msg_id), self.messages.get(msg_id)) {
+            (Some(status), Some(msg)) => {
+                if let RempMessageStatus::TonNode_RempAccepted(acc) = status {
+                    if acc.level == RempMessageLevel::TonNode_RempCollator {
+                        let ign = RempIgnored { block_id: acc.block_id.clone(), level: acc.level.clone() };
+                        *status = RempMessageStatus::TonNode_RempIgnored(ign);
+                        return Some(msg.timestamp)
                     }
                 }
-            }
-            else {
-                log::error!(target: "remp", "Shard for message {} is missing!", id);
-            }
+                None
+            },
+            (Some(_), None) | (None, Some(_)) => {
+                log::error!(target: "remp",
+                    "Incorrect message cache state for message {:x}: either message or status is missing", msg_id);
+                None
+            },
+            _ => None,
         }
     }
-
-    pub fn received_messages_to_vector(&self, shard: &ShardIdent) -> Vec<(Arc<RmqMessage>, RempMessageStatus)> {
-        let mut messages = Vec::new();
-        self.for_all_messages_in_shard(shard, &mut |_id,msg: &Arc<RmqMessage>,status| messages.push((msg.clone(), status.clone())));
-        return messages;
-    }
-
-    pub fn received_messages_count(&self, shard: &ShardIdent) -> u32 {
-        let mut count = 0;
-        self.for_all_messages_in_shard(shard, &mut |_id,_msg: &Arc<RmqMessage>,_status| count += 1);
-        count
-    }
-
+/*
     pub fn downgrade_accepted_by_collator(&mut self, shard: &ShardIdent) -> Vec<(Arc<RmqMessage>, RempMessageStatus)> {
         let mut downgrading = Vec::new();
         self.for_all_messages_in_shard(shard, &mut |_id,msg: &Arc<RmqMessage>,status|
@@ -317,7 +306,7 @@ impl MessageCacheImpl {
         }
         downgrading
     }
-
+*/
     pub fn remove_old_message(&mut self, current_cc: u32) -> Option<(UInt256, Option<Arc<RmqMessage>>, Option<RempMessageStatus>, Option<ShardIdent>, Option<u32>)> {
         if let Some((old_cc, msg_id)) = self.message_master_cc_order.pop() {
             if !Self::cc_expired(old_cc.0, current_cc) {
@@ -386,6 +375,7 @@ pub struct MessageCache {
 
 #[allow(dead_code)]
 impl MessageCache {
+    /*
     pub async fn received_messages_to_vector(&self, shard: &ShardIdent) -> Vec<(Arc<RmqMessage>, RempMessageStatus)> {
         self.cache.execute_sync(|cache| cache.received_messages_to_vector(shard)).await
     }
@@ -393,7 +383,7 @@ impl MessageCache {
     pub async fn received_messages_count(&self, shard: &ShardIdent) -> u32 {
         self.cache.execute_sync(|cache| cache.received_messages_count(shard)).await
     }
-
+    */
     pub async fn all_messages_count(&self) -> usize {
         self.cache.execute_sync(|cache| cache.all_messages_count()).await
     }
@@ -525,9 +515,11 @@ impl MessageCache {
         }
     }
 
-    pub async fn downgrade_accepted_by_collator(&self, shard: &ShardIdent) -> Vec<(Arc<RmqMessage>, RempMessageStatus)> {
+    /// Checks whether message msg_id is accepted by collator; if true, changes its status to
+    /// ignored and returns its timestamp
+    pub async fn change_accepted_by_collator_to_ignored(&self, msg_id: &UInt256) -> Option<u32> {
         self.cache.execute_sync(|c|
-            c.downgrade_accepted_by_collator(shard)
+            c.change_accepted_by_collator_to_ignored(msg_id)
         ).await
     }
 
