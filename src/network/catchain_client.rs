@@ -11,9 +11,7 @@
 * limitations under the License.
 */
 
-use crate::engine_traits::EngineAlloc;
-#[cfg(feature = "telemetry")]
-use crate::engine_traits::EngineTelemetry;
+use crate::network::node_network::NetworkContext;
 
 use adnl::{
     declare_counted, 
@@ -44,8 +42,7 @@ declare_counted!(
     pub struct CatchainClient {
         runtime_handle : tokio::runtime::Handle,
         overlay_id: Arc<PrivateOverlayShortId>,
-        overlay: Arc<OverlayNode>,
-        rldp: Arc<RldpNode>,
+        network_context: Arc<NetworkContext>,
         local_validator_key: Arc<dyn KeyOption>,
         validator_keys: HashMap<Arc<KeyId>, Arc<KeyId>>,
         consumer: Arc<CatchainClientConsumer>,
@@ -56,18 +53,14 @@ declare_counted!(
 impl CatchainClient {
     const TARGET:  &'static str = "catchain_network";
 
-    pub fn new(
+    pub (crate) fn new(
         runtime_handle: &tokio::runtime::Handle,
         overlay_id: &Arc<PrivateOverlayShortId>,
-        overlay: &Arc<OverlayNode>,
-        rldp: Arc<RldpNode>,
+        network_context: &Arc<NetworkContext>,
         nodes: &Vec<CatchainNode>,
         local_adnl_key: &Arc<dyn KeyOption>,
         local_validator_key: Arc<dyn KeyOption>,
         catchain_listener: CatchainOverlayListenerPtr,
-        #[cfg(feature = "telemetry")]
-        telemetry: &Arc<EngineTelemetry>,
-        allocated: &Arc<EngineAlloc>
     ) -> Result<Self> {
 
         let mut keys = HashMap::new();
@@ -87,7 +80,7 @@ impl CatchainClient {
             &overlay_id, &id_local_key
         );
 
-        overlay.add_private_overlay(
+        network_context.overlay.add_private_overlay(
             Some(runtime_handle.clone()), 
             overlay_id, 
             &local_adnl_key, 
@@ -96,32 +89,32 @@ impl CatchainClient {
         let consumer = Arc::new(
             CatchainClientConsumer::new(overlay_id.clone(), catchain_listener)
         );
-        overlay.add_consumer(&overlay_id, consumer.clone())?;
+        network_context.overlay.add_consumer(&overlay_id, consumer.clone())?;
 
         let ret = CatchainClient {
             runtime_handle,
             overlay_id: overlay_id.clone(),
-            overlay: overlay.clone(),
-            rldp: rldp,
+            network_context: network_context.clone(),
             local_validator_key: local_validator_key,
             validator_keys: keys,
             consumer: consumer,
             is_stop: Arc::new(AtomicBool::new(false)),
-            counter: allocated.catchain_clients.clone().into()
+            counter: network_context.engine_allocated.catchain_clients.clone().into()
         };
         #[cfg(feature = "telemetry")]
-        telemetry.catchain_clients.update(allocated.catchain_clients.load(Ordering::Relaxed));
+        network_context.engine_telemetry.catchain_clients.update(
+            network_context.engine_allocated.catchain_clients.load(Ordering::Relaxed)
+        );
         Ok(ret)
 
     }
 
     pub async fn stop(&self) {
-        if let Err(e) = self.overlay.delete_private_overlay(&self.overlay_id) {
+        if let Err(e) = self.network_context.overlay.delete_private_overlay(&self.overlay_id) {
             log::warn!("{:?}", e);
         }
         self.is_stop.store(true, atomic::Ordering::Relaxed);
         self.consumer.is_stop.store(true, atomic::Ordering::Relaxed);
-
         for worker in self.consumer.worker_waiters.iter() {
             worker.val().respond(None);
         }
@@ -141,7 +134,7 @@ impl CatchainClient {
         receiver_id: &PublicKeyHash,
         message: &BlockPayloadPtr
     ) -> Result<()> {
-        let overlay = self.overlay.clone();
+        let overlay = self.network_context.overlay.clone();
         let overlay_id = self.overlay_id.clone();
         let msg = message.clone();
         let receiver = receiver_id.clone();
@@ -411,7 +404,7 @@ impl CatchainOverlay for CatchainClient {
             let timeout = timeout.clone();
             let msg = message.clone();
             let overlay_id = self.overlay_id.clone();
-            let overlay = self.overlay.clone();
+            let overlay = self.network_context.overlay.clone();
             let is_stop_state = self.is_stop.clone();
             self.runtime_handle.spawn(async move { 
                 let is_stop = is_stop_state.load(atomic::Ordering::Relaxed);
@@ -432,14 +425,16 @@ impl CatchainOverlay for CatchainClient {
         response_callback: ExternalQueryResponseCallback,
         timeout: std::time::SystemTime,
         query: BlockPayloadPtr,
-        max_answer_size: u64) {
-            let receiver = dst.clone();
-            let timeout = timeout.clone();
-            let msg = query.clone();
-            let overlay_id = self.overlay_id.clone();
-            let rldp = self.rldp.clone();
-            let overlay = self.overlay.clone();
-            self.runtime_handle.spawn(async move { 
+        max_answer_size: u64
+    ) {
+        let receiver = dst.clone();
+        let timeout = timeout.clone();
+        let msg = query.clone();
+        let overlay_id = self.overlay_id.clone();
+        let rldp = self.network_context.rldp.clone();
+        let overlay = self.network_context.overlay.clone();
+        self.runtime_handle.spawn(
+            async move { 
                 let result = CatchainClient::query_via_rldp(
                     &overlay_id,
                     &overlay,
@@ -447,17 +442,25 @@ impl CatchainOverlay for CatchainClient {
                     timeout,
                     &receiver,
                     &msg,
-                    max_answer_size).await;
+                    max_answer_size
+                ).await;
                 log::info!(target: Self::TARGET, "send_query_via_rldp: {:?}", result);
                 response_callback(result);
-            });
+            }
+        );
     }
 
     /// Send broadcast
-    fn send_broadcast_fec_ex(&self, _sender_id : &PublicKeyHash, _send_as : &PublicKeyHash, payload : BlockPayloadPtr) {
+    fn send_broadcast_fec_ex(
+        &self, 
+        _sender_id: &PublicKeyHash, 
+        _send_as: &PublicKeyHash, 
+        payload: BlockPayloadPtr
+    ) {
         let msg = payload.clone();
         let overlay_id = self.overlay_id.clone();
-        let overlay = self.overlay.clone();
+        let overlay = self.network_context.overlay.clone();
+        let broadcast_hops = self.network_context.broadcast_hops;
         let local_validator_key = self.local_validator_key.clone();
         self.runtime_handle.spawn(
             async move {
@@ -466,7 +469,12 @@ impl CatchainOverlay for CatchainClient {
                     #[cfg(feature = "telemetry")]
                     tag: 0x80000002 // Catchain broadcast
                 }; 
-                let result = overlay.broadcast(&overlay_id, &msg, Some(&local_validator_key)).await;
+                let result = overlay.broadcast(
+                    &overlay_id, 
+                    &msg, 
+                    Some(&local_validator_key),
+                    Some(broadcast_hops)
+                ).await;
                 log::trace!(target: Self::TARGET, "send_broadcast_fec_ex status: {:?}", result);
             }
         );

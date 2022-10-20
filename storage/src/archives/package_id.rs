@@ -43,7 +43,7 @@ impl PackageId {
     }
 
     pub const fn for_temp(ts: &UnixTime32) -> Self {
-        Self::with_values(ts.0 - ts.0 % 3_600, PackageType::Temp)
+        Self::with_values(ts.as_u32() - ts.as_u32() % 3_600, PackageType::Temp)
     }
 
     #[allow(dead_code)]

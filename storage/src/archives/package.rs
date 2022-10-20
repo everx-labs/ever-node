@@ -50,7 +50,7 @@ impl Package {
             if !create {
                 fail!("Package file is too short")
             }
-            file.write(&PKG_HEADER_MAGIC.to_le_bytes()).await?;
+            file.write_all(&PKG_HEADER_MAGIC.to_le_bytes()).await?;
             size = PKG_HEADER_SIZE as u64;
         } else {
             read_header(&mut file).await?;

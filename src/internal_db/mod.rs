@@ -14,37 +14,50 @@
 use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, engine_traits::EngineAlloc, error::NodeError,
     shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrId, TopBlockDescrStuff},
+    internal_db::restore::check_db,
+
 };
 #[cfg(feature = "telemetry")]
 use crate::engine_traits::EngineTelemetry;
 
 use std::{
     cmp::min, collections::{HashMap, HashSet}, io::Cursor, mem::size_of, path::{Path, PathBuf},
-    sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}}, time::{UNIX_EPOCH, Duration}
+    sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}}, time::{UNIX_EPOCH, Duration}, ops::Deref
 };
 use storage::{
     TimeChecker,
     archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId},
-    block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage, Callback}, 
+    block_handle_db::{self, BlockHandle, BlockHandleDb, BlockHandleStorage}, 
     block_info_db::BlockInfoDb, db::rocksdb::RocksDb, node_state_db::NodeStateDb, 
-    shardstate_db::{AllowStateGcResolver, ShardStateDb}, 
-    shardstate_persistent_db::ShardStatePersistentDb, types::BlockMeta, 
+    types::BlockMeta, db::filedb::FileDb,
     shard_top_blocks_db::ShardTopBlocksDb, StorageAlloc, traits::Serializable,
 };
+#[cfg(not(feature = "async_ss_storage"))]
+use storage::shardstate_db::{AllowStateGcResolver, ShardStateDb};
+#[cfg(feature = "async_ss_storage")]
+use storage::shardstate_db_async::{self, AllowStateGcResolver, ShardStateDb};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
 use ton_block::{Block, BlockIdExt};
 use ton_types::{error, fail, Result, UInt256, Cell};
+#[cfg(feature = "async_ss_storage")]
+use ton_types::{DoneCellsStorage, BagOfCells, BocSerialiseMode};
 
 /// Full node state keys
-pub const INITIAL_MC_BLOCK: &str       = "InitMcBlockId";
-pub const LAST_APPLIED_MC_BLOCK: &str  = "LastMcBlockId";
-pub const PSS_KEEPER_MC_BLOCK: &str    = "PssKeeperBlockId";
-pub const SHARD_CLIENT_MC_BLOCK: &str  = "ShardsClientMcBlockId";
+pub const INITIAL_MC_BLOCK: &str         = "InitMcBlockId";
+pub const LAST_APPLIED_MC_BLOCK: &str    = "LastMcBlockId";
+pub const PSS_KEEPER_MC_BLOCK: &str      = "PssKeeperBlockId";
+pub const SHARD_CLIENT_MC_BLOCK: &str    = "ShardsClientMcBlockId";
+pub const ARCHIVES_GC_BLOCK: &str        = "ArchivesGcMcBlockId";
 pub const DB_VERSION: &str  = "DbVersion";
 
 pub const DB_VERSION_0: u32  = 0;
+#[cfg(not(feature = "async_ss_storage"))]
 pub const DB_VERSION_1: u32  = 1; // with fixed cells/bits counter in StorageCell
+pub const DB_VERSION_2: u32  = 2; // with async cells storage
+#[cfg(feature = "async_ss_storage")]
+pub const CURRENT_DB_VERSION: u32 = DB_VERSION_2;
+#[cfg(not(feature = "async_ss_storage"))]
 pub const CURRENT_DB_VERSION: u32 = DB_VERSION_1;
 
 /// Validator state keys
@@ -74,12 +87,12 @@ impl BlockResult {
     }
 
     /// Any result 
-    pub fn as_any(self) -> Arc<BlockHandle> {
+    pub fn _as_any(self) -> Arc<BlockHandle> {
         self.handle
     }
 
     /// Assert creation
-    pub fn as_created(self) -> Option<Arc<BlockHandle>> {
+    pub fn _as_created(self) -> Option<Arc<BlockHandle>> {
         match self.status {
             DataStatus::Created => Some(self.handle),
             _ => None
@@ -130,11 +143,6 @@ pub struct InternalDbConfig {
     pub cells_gc_interval_sec: u32,
 }
 
-pub enum InternalDbStatus {
-    Checking, 
-    Broken
-}
-
 pub struct InternalDb {
     db: Arc<RocksDb>,
     block_handle_storage: Arc<BlockHandleStorage>,
@@ -142,7 +150,7 @@ pub struct InternalDb {
     prev2_block_db: BlockInfoDb,
     next1_block_db: BlockInfoDb,
     next2_block_db: BlockInfoDb,
-    shard_state_persistent_db: ShardStatePersistentDb,
+    shard_state_persistent_db: Arc<FileDb>,
     shard_state_dynamic_db: Arc<ShardStateDb>,
     //ss_test_map: lockfree::map::Map<BlockIdExt, ShardStateStuff>,
     //shardstate_db_gc: GC,
@@ -157,36 +165,19 @@ pub struct InternalDb {
     allocated: Arc<EngineAlloc>,
 }
 
+#[allow(dead_code)]
 impl InternalDb {
-
-    pub async fn new(
-        config: InternalDbConfig,
-        #[cfg(feature = "telemetry")]
-        telemetry: Arc<EngineTelemetry>,
-        allocated: Arc<EngineAlloc>,
-    ) -> Result<Self> {
-        let db = Self::construct(
-            config,
-            #[cfg(feature = "telemetry")]
-            telemetry,
-            allocated,
-        ).await?;
-
-        let version = db.resolve_db_version()?;
-        if version != CURRENT_DB_VERSION {
-            fail!("DB version {} does not correspond to current supported one {}.", version, CURRENT_DB_VERSION);
-        }
-
-        Ok(db)
-    }
 
     pub async fn with_update(
         config: InternalDbConfig,
+        restore_db_enabled: bool,
+        force_check_db: bool,
+        allow_update: bool,
+        check_stop: &(dyn Fn() -> Result<()> + Sync),
+        is_broken: Option<&AtomicBool>,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<EngineTelemetry>,
         allocated: Arc<EngineAlloc>,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
-        is_broken: Option<&AtomicBool>
     ) -> Result<Self> {
         let mut db = Self::construct(
             config,
@@ -194,12 +185,21 @@ impl InternalDb {
             telemetry,
             allocated,
         ).await?;
-
         let version = db.resolve_db_version()?;
         if version != CURRENT_DB_VERSION {
-            db = update::update(db, version, check_stop, is_broken).await?;
+            if allow_update {
+                db = update::update(db, version, check_stop, is_broken).await?
+            } else {
+                fail!(
+                    "DB version {} does not correspond to current supported one {}.", 
+                    version, 
+                    CURRENT_DB_VERSION
+                )
+            }
+        } else {
+            // TODO correct workchain id needed here, but it will be known later
+            db = check_db(db, 0, restore_db_enabled, force_check_db, check_stop, is_broken).await?;
         }
-
         Ok(db)
     }
 
@@ -254,9 +254,9 @@ impl InternalDb {
             prev2_block_db: BlockInfoDb::with_db(db.clone(), "prev2_block_db")?,
             next1_block_db: BlockInfoDb::with_db(db.clone(), "next1_block_db")?,
             next2_block_db: BlockInfoDb::with_db(db.clone(), "next2_block_db")?,
-            shard_state_persistent_db: ShardStatePersistentDb::with_path(
+            shard_state_persistent_db: Arc::new(FileDb::with_path(
                 Path::new(config.db_directory.as_str()).join("shard_state_persistent_db")
-            ),
+            )),
             shard_state_dynamic_db,
             //ss_test_map: lockfree::map::Map::new(),
             //shardstate_db_gc,
@@ -304,15 +304,27 @@ impl InternalDb {
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>
     ) -> Result<Arc<ShardStateDb>> {
-        ShardStateDb::with_db(
-            db,
-            "shardstate_db",
-            "cells_db",
-            "cells_db1",
-            #[cfg(feature = "telemetry")]
-            telemetry,
-            allocated
-        )
+        #[cfg(not(feature = "async_ss_storage"))] {
+            ShardStateDb::with_db(
+                db,
+                "shardstate_db",
+                "cells_db",
+                "cells_db1",
+                #[cfg(feature = "telemetry")]
+                telemetry,
+                allocated
+            )
+        }
+        #[cfg(feature = "async_ss_storage")] {
+            ShardStateDb::new(
+                db,
+                "shardstate_db",
+                "cells_db",
+                #[cfg(feature = "telemetry")]
+                telemetry,
+                allocated
+            )
+        }
     }
 
     pub fn clean_shard_state_dynamic_db(&mut self) -> Result<()> {
@@ -320,9 +332,15 @@ impl InternalDb {
             fail!("It is forbidden to clear shard_state_dynamic_db while cells GC is running")
         }
 
-        self.db.drop_table("shardstate_db")?;
-        self.db.drop_table("cells_db")?;
-        self.db.drop_table("cells_db1")?;
+        if let Err(e) = self.db.drop_table_force("shardstate_db") {
+            log::warn!("Can't drop table \"shardstate_db\": {}", e);
+        }
+        if let Err(e) = self.db.drop_table_force("cells_db") {
+            log::warn!("Can't drop table \"shardstate_db\": {}", e);
+        }
+        if let Err(e) = self.db.drop_table_force("cells_db1") {
+            log::warn!("Can't drop table \"shardstate_db\": {}", e);
+        }
 
         self.shard_state_dynamic_db = Self::create_shard_state_dynamic_db(
             self.db.clone(),
@@ -334,19 +352,18 @@ impl InternalDb {
         Ok(())
     }
 
-    //#[allow(dead_code)]                                                                                 /
     pub fn start_states_gc(&self, resolver: Arc<dyn AllowStateGcResolver>) {
         self.shard_state_dynamic_db.clone().start_gc(resolver, self.cells_gc_interval.clone())
     }
 
-    pub async fn stop_states_gc(&self) {
-        self.shard_state_dynamic_db.stop_gc().await
+    pub async fn stop_states_db(&self) {
+        self.shard_state_dynamic_db.stop().await
     }
 
     fn store_block_handle(
         &self, 
         handle: &Arc<BlockHandle>,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<()> {
         self.block_handle_storage.save_handle(handle, callback)
     }
@@ -371,7 +388,7 @@ impl InternalDb {
         msg: &str,
         check_has: impl Fn(&Arc<BlockHandle>) -> bool,
         check_set: impl Fn(&Arc<BlockHandle>) -> bool,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<()> {
         let _tc = TimeChecker::new(format!("{} {}", msg, handle.id()), 10);
         if !check_has(handle) {
@@ -390,7 +407,7 @@ impl InternalDb {
         id: &BlockIdExt, 
         block: Option<&Block>,
         utime: Option<u32>,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<BlockResult> {
         if let Some(handle) = self.load_block_handle(id)? {
             return Ok(BlockResult::with_status(handle, DataStatus::Fetched))
@@ -423,7 +440,7 @@ impl InternalDb {
     pub async fn store_block_data(
         &self, 
         block: &BlockStuff,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<BlockResult> {
         let _tc = TimeChecker::new(format!("store_block_data {}", block.id()), 100);
         let mut result = self.create_or_load_block_handle(
@@ -473,12 +490,32 @@ impl InternalDb {
         )          
     }
 
+    pub fn find_mc_block_by_seq_no_without_state(&self, seqno: u32) -> Result<Arc<BlockHandle>> {
+        let mut found = None;
+        self.next1_block_db.for_each(&mut |_key, val| {
+            let id = BlockIdExt::deserialize(&mut Cursor::new(&val))?;
+            if id.shard().is_masterchain() && id.seq_no() == seqno {
+                found = Some(id);
+                Ok(false)
+            } else {
+                Ok(true)
+            }
+        })?;
+        if let Some(id) = found {
+            self.load_block_handle(&id)?.ok_or_else(
+                || error!("Cannot load handle for master block {}", id)
+            )
+        } else {
+            fail!("Can't find mc block with seqno {}", seqno)
+        }
+    }
+
     pub async fn store_block_proof(
         &self, 
         id: &BlockIdExt,
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<BlockResult> {
 
         if let Some(handle) = &handle {
@@ -563,8 +600,10 @@ impl InternalDb {
         &self,
         handle: &Arc<BlockHandle>, 
         state: &Arc<ShardStateStuff>,
-        callback: Option<Arc<dyn Callback>>,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
+        callback_handle: Option<Arc<dyn block_handle_db::Callback>>,
+        #[cfg(feature = "async_ss_storage")]
+        callback_ss: Option<Arc<dyn shardstate_db_async::Callback>>,
+        force: bool,
     ) -> Result<(Arc<ShardStateStuff>, bool)> {
 
         let _tc = TimeChecker::new(format!("store_shard_state_dynamic {}", state.block_id()), 300);
@@ -572,22 +611,34 @@ impl InternalDb {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
         let _lock = handle.saving_state_lock().lock().await;
-        if !handle.has_state() {
-            let saved_root = self.shard_state_dynamic_db.put(
-                state.block_id(), 
-                state.root_cell().clone(),
-                check_stop,
-            )?;
-            if handle.set_state() {
-                self.store_block_handle(handle, callback)?;
-                let state = ShardStateStuff::from_root_cell(
-                    handle.id().clone(), 
-                    saved_root,
-                    #[cfg(feature = "telemetry")]
-                    &self.telemetry,
-                    &self.allocated
+        if force || !handle.has_state() {
+            #[cfg(not(feature = "async_ss_storage"))] {
+                let saved_root = self.shard_state_dynamic_db.put(
+                    state.block_id(), 
+                    state.root_cell().clone(),
                 )?;
-                return Ok((state, true));
+                if handle.set_state() {
+                    self.store_block_handle(handle, callback_handle)?;
+                    let state = ShardStateStuff::from_root_cell(
+                        handle.id().clone(), 
+                        saved_root,
+                        #[cfg(feature = "telemetry")]
+                        &self.telemetry,
+                        &self.allocated
+                    )?;
+                    return Ok((state, true));
+                }
+            }
+            #[cfg(feature = "async_ss_storage")] {
+                self.shard_state_dynamic_db.put(
+                    state.block_id(), 
+                    state.root_cell().clone(),
+                    callback_ss
+                )?;
+                if handle.set_state() {
+                    self.store_block_handle(handle, callback_handle)?;
+                }
+                return Ok((state.clone(), true))
             }
         }
         Ok((self.load_shard_state_dynamic(handle.id())?, false))
@@ -597,22 +648,37 @@ impl InternalDb {
         &self,
         handle: &Arc<BlockHandle>, 
         state_root: Cell,
-        callback: Option<Arc<dyn Callback>>,
-        check_stop: &(dyn Fn() -> Result<()> + Sync),
+        #[cfg(feature = "async_ss_storage")]
+        callback_ss: Option<Arc<dyn shardstate_db_async::Callback>>,
     ) -> Result<Cell> {
         let _tc = TimeChecker::new(format!("store_shard_state_dynamic_raw_force {}", handle.id()), 300);
-        let saved_root = self.shard_state_dynamic_db.put(handle.id(), state_root, check_stop)?;
         let _lock = handle.saving_state_lock().lock().await;
-        self.store_block_handle(handle, callback)?;
-        return Ok(saved_root);
+
+        #[cfg(not(feature = "async_ss_storage"))] {
+            let saved_root = self.shard_state_dynamic_db.put(handle.id(), state_root)?;
+            Ok(saved_root)
+        }
+        #[cfg(feature = "async_ss_storage")] {
+            self.shard_state_dynamic_db.put(handle.id(), state_root.clone(), callback_ss)?;
+            Ok(state_root)
+        }
     }
 
-    pub fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
-        let _tc = TimeChecker::new(format!("load_shard_state_dynamic {}", id), 10);        
+    pub fn load_shard_state_dynamic_ex(
+        &self,
+        id: &BlockIdExt,
+        #[cfg(feature = "async_ss_storage")]
+        use_cache: bool
+    ) -> Result<Arc<ShardStateStuff>> {
+        let _tc = TimeChecker::new(format!("load_shard_state_dynamic {}  use", id), 10);
         Ok(
             ShardStateStuff::from_root_cell(
                 id.clone(), 
-                self.shard_state_dynamic_db.get(id)?,
+                self.shard_state_dynamic_db.get(
+                    id, 
+                    #[cfg(feature = "async_ss_storage")]
+                    use_cache
+                )?,
                 #[cfg(feature = "telemetry")]
                 &self.telemetry,
                 &self.allocated
@@ -620,12 +686,21 @@ impl InternalDb {
         )
     }
 
+    pub fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
+        self.load_shard_state_dynamic_ex(
+            id, 
+            #[cfg(feature = "async_ss_storage")]
+            true
+        )
+    }
+
+    #[cfg(not(feature = "async_ss_storage"))]
     pub async fn store_shard_state_persistent(
         &self, 
         handle: &Arc<BlockHandle>, 
         state: &Arc<ShardStateStuff>,
-        callback: Option<Arc<dyn Callback>>,
-        abort: Box<dyn Fn() -> bool + Send + Sync>
+        callback: Option<Arc<dyn block_handle_db::Callback>>,
+        abort: Arc<dyn Fn() -> bool + Send + Sync>
     ) -> Result<()> {
         let _tc = TimeChecker::new(format!("store_shard_state_persistent {}", state.block_id()), 10_000);
         if handle.id() != state.block_id() {
@@ -634,9 +709,68 @@ impl InternalDb {
         if !handle.has_persistent_state() {
             let state1 = state.clone();
             let bytes = tokio::task::spawn_blocking(move || {
-                state1.serialize_with_abort(&abort)
+                state1.serialize_with_abort(abort.deref())
             }).await??;
-            self.shard_state_persistent_db.put(state.block_id(), &bytes).await?;
+
+            println!("store_shard_state_persistent {} bytes", bytes.len());
+
+            self.shard_state_persistent_db.write_whole_file(state.block_id(), &bytes).await?;
+            if handle.set_persistent_state() {
+                self.store_block_handle(handle, callback)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "async_ss_storage")]
+    pub async fn store_shard_state_persistent(
+        &self, 
+        handle: &Arc<BlockHandle>, 
+        state: Arc<ShardStateStuff>,
+        callback: Option<Arc<dyn block_handle_db::Callback>>,
+        abort: Arc<dyn Fn() -> bool + Send + Sync>
+    ) -> Result<()> {
+        if handle.id() != state.block_id() {
+            fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
+        }
+        if !handle.has_persistent_state() {
+            let id = handle.id().clone();
+            let shard_state_dynamic_db = self.shard_state_dynamic_db.clone();
+            let shard_state_persistent_db = self.shard_state_persistent_db.clone();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                log::debug!("store_shard_state_persistent {}", id);
+                let cells_storage = 
+                    shard_state_dynamic_db.create_ordered_cells_storage(&state.root_cell().repr_hash())?;
+                let now = std::time::Instant::now();
+                let root_cell = state.root_cell().clone();
+                // Drop state - don't keep in memory a root cell that keeps full tree!
+                std::mem::drop(state);
+                let boc = BagOfCells::with_cells_storage(
+                    vec!(root_cell),
+                    vec!(),
+                    cells_storage,
+                    abort.deref(),
+                )?;
+                log::debug!("store_shard_state_persistent {} building boc TIME {}", id, now.elapsed().as_millis());
+
+                let mut dest = shard_state_persistent_db.get_write_object(&id)?;
+                let now = std::time::Instant::now();
+                boc.write_to_with_abort(
+                    &mut dest,
+                    BocSerialiseMode::Generic{
+                        index: false,
+                        crc: false,
+                        cache_bits: false,
+                        flags: 0 
+                    },
+                    None,
+                    None,
+                    abort.deref(),
+                )?;
+                log::debug!("store_shard_state_persistent {} ser boc TIME {}", id, now.elapsed().as_millis());
+                Ok(())
+            }).await??;
+
             if handle.set_persistent_state() {
                 self.store_block_handle(handle, callback)?;
             }
@@ -648,24 +782,21 @@ impl InternalDb {
         &self, 
         handle: &Arc<BlockHandle>, 
         state_data: &[u8],
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<()> {
         let _tc = TimeChecker::new(
             format!("store_shard_state_persistent_raw {}", handle.id()),
             state_data.len() as u64 / 1000 + 10
         );
         if !handle.has_persistent_state() {
-
-            // TODO write directly into file without huge vector
-
-            self.shard_state_persistent_db.put(handle.id(), state_data).await?;
+            self.shard_state_persistent_db.write_whole_file(handle.id(), state_data).await?;
             if handle.set_persistent_state() {
                 self.store_block_handle(handle, callback)?;
             }
         }
         Ok(())
     }
-
+    
     pub async fn load_shard_state_persistent_slice(&self, id: &BlockIdExt, offset: u64, length: u64) -> Result<Vec<u8>> {
         let _tc = TimeChecker::new(format!("load_shard_state_persistent_slice {}", id), 200);
         let full_lenth = self.load_shard_state_persistent_size(id).await?;
@@ -676,30 +807,33 @@ impl InternalDb {
             Ok(vec![])
         } else {
             let length = min(length, full_lenth - offset);
-            let db_slice = self.shard_state_persistent_db.get_slice(id, offset, length).await?;
-            Ok(db_slice.to_vec())
+            let data = self.shard_state_persistent_db.read_file_part(id, offset, length).await?;
+            Ok(data)
         }
     }
 
-    pub async fn load_shard_state_persistent(&self, id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
-        let _tc = TimeChecker::new(format!("load_shard_state_persistent {}", id), 200);
-        let full_lenth = self.load_shard_state_persistent_size(id).await?;
+    pub async fn load_shard_state_persistent(
+        &self, 
+        id: &BlockIdExt,
+        abort: &dyn Fn() -> bool,
+    ) -> Result<Arc<ShardStateStuff>> {
+        let _tc = TimeChecker::new(format!("load_shard_state_persistent {}", id), 1000);
 
-        // TODO read directly from file without huge vector
-
-        let data = self.shard_state_persistent_db.get_vec(id, 0, full_lenth).await?;
+        // Fast (in-memory) version
+        let data = self.shard_state_persistent_db.read_whole_file(id).await?;
         ShardStateStuff::deserialize_inmem(
             id.clone(),
             Arc::new(data),
             #[cfg(feature = "telemetry")]
             &self.telemetry,
-            &self.allocated
+            &self.allocated,
+            abort
         )
     }
 
     pub async fn load_shard_state_persistent_size(&self, id: &BlockIdExt) -> Result<u64> {
         let _tc = TimeChecker::new(format!("load_shard_state_persistent_size {}", id), 50);
-        self.shard_state_persistent_db.get_size(id).await
+        self.shard_state_persistent_db.get_file_size(id).await
     }
 
     pub async fn shard_state_persistent_gc(
@@ -753,7 +887,7 @@ impl InternalDb {
         })?;
 
         for id in for_delete {
-            match self.shard_state_persistent_db.delete(&id).await {
+            match self.shard_state_persistent_db.delete_file(&id).await {
                 Ok(_) => log::debug!("shard_state_persistent_gc: {:x} deleted", id.root_hash()),
                 Err(e) => log::warn!("shard_state_persistent_gc: can't delete {:x}: {}", id.root_hash(), e)
             }
@@ -766,7 +900,7 @@ impl InternalDb {
         &self, 
         handle: &Arc<BlockHandle>, 
         prev: &BlockIdExt,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<()> {
         self.store_block_linkage(
             handle, prev, &self.prev1_block_db, "store_block_prev1", 
@@ -784,7 +918,7 @@ impl InternalDb {
         &self, 
         handle: &Arc<BlockHandle>, 
         prev2: &BlockIdExt,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<()> {
         self.store_block_linkage(
             handle, prev2, &self.prev2_block_db, "store_block_prev2", 
@@ -802,7 +936,7 @@ impl InternalDb {
         &self, 
         handle: &Arc<BlockHandle>, 
         next: &BlockIdExt,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<()> {
         self.store_block_linkage(
             handle, next, &self.next1_block_db, "store_block_next1", 
@@ -820,7 +954,7 @@ impl InternalDb {
         &self, 
         handle: &Arc<BlockHandle>, 
         next2: &BlockIdExt,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<()> {
         self.store_block_linkage(
             handle, next2, &self.next2_block_db, "store_block_next2", 
@@ -837,7 +971,7 @@ impl InternalDb {
     pub fn store_block_applied(
         &self, 
         handle: &Arc<BlockHandle>,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<bool> {
         let _tc = TimeChecker::new(format!("store_block_applied {}", handle.id()), 10);
         if handle.set_block_applied() {
@@ -851,7 +985,7 @@ impl InternalDb {
     pub async fn archive_block(
         &self, 
         id: &BlockIdExt,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<()> {
         let _tc = TimeChecker::new(format!("archive_block {}", id), 200);
         let handle = self.load_block_handle(id)?.ok_or_else(
@@ -912,7 +1046,7 @@ impl InternalDb {
         &self, 
         handle: &Arc<BlockHandle>, 
         mc_seq_no: u32,
-        callback: Option<Arc<dyn Callback>>
+        callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<()> {
         if handle.set_masterchain_ref_seq_no(mc_seq_no)? {
             self.store_block_handle(handle, callback)?;
@@ -1048,6 +1182,36 @@ impl InternalDb {
             Ok(true)
         })?;
         Ok(())
+    }
+
+    #[cfg(feature = "async_ss_storage")]
+    pub fn create_done_cells_storage(
+        &self, 
+        root_cell_id: &UInt256
+    ) -> Result<Box<dyn DoneCellsStorage>> {
+        self.shard_state_dynamic_db.create_done_cells_storage(root_cell_id)
+    }
+}
+
+
+#[cfg(feature = "async_ss_storage")]
+pub struct SsNotificationCallback(tokio::sync::Notify);
+
+#[cfg(feature = "async_ss_storage")]
+#[async_trait::async_trait]
+impl shardstate_db_async::Callback for SsNotificationCallback {
+    async fn invoke(&self, _job: shardstate_db_async::Job, _ok: bool) {
+        self.0.notify_one();
+    }
+}
+
+#[cfg(feature = "async_ss_storage")]
+impl SsNotificationCallback {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self(tokio::sync::Notify::new()))
+    }
+    pub async fn wait(&self) {
+        self.0.notified().await;
     }
 }
 

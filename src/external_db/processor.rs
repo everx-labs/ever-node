@@ -22,11 +22,11 @@ use ton_block::{
     BlockProcessingStatus, BlockProof, Deserializable,
     HashmapAugType, Message, MessageProcessingStatus,
     Serializable, ShardAccount, Transaction, TransactionProcessingStatus,
-    MsgAddressInt, MsgAddrStd,
+    MsgAddressInt, MsgAddrStd, DepthBalanceInfo,
 };
 use ton_types::{
     cells_serialization::serialize_toc,
-    types::UInt256,
+    types::UInt256, HashmapIterator,
     AccountId, Cell, Result, SliceData, HashmapType,
     fail, BuilderData,
 };
@@ -143,7 +143,7 @@ impl<T: WriteData> Processor<T> {
                         message_cell,
                         message,
                         block_root_for_proof,
-                        block_id,
+                        block_id.clone(),
                         Some(transaction.now()),
                     )?
                 } else {
@@ -163,7 +163,7 @@ impl<T: WriteData> Processor<T> {
         };
     
         let mut index: u64 = 1;
-        transaction.out_msgs.iterate_slices(&mut |slice: SliceData| {
+        transaction.out_msgs.iterate_slices(|slice| {
             let message_cell = slice.reference(0)?;
             let message_id = message_cell.repr_hash();
             let message = Message::construct_from_cell(message_cell.clone())?;
@@ -171,7 +171,7 @@ impl<T: WriteData> Processor<T> {
                 message_cell,
                 message,
                 block_root_for_proof,
-                block_id,
+                block_id.clone(),
                 None, // transaction_now affects ExtIn messages only
             )?;
     
@@ -418,7 +418,7 @@ impl<T: WriteData> Processor<T> {
      ) -> Result<()> {
 
         log::trace!("Processor block_stuff.id {}", block_stuff.id());
-        if !self.process_workchain(block_stuff.shard().workchain_id()) {
+        if !self.process_workchain(block_stuff.id().shard().workchain_id()) {
             return Ok(())
         }
         let process_block = self.write_block.enabled();
@@ -706,6 +706,8 @@ impl<T: WriteData> Processor<T> {
     }
 }
 
+const ACCOUNTS_PORTION_LEN: usize = 1000;
+
 #[async_trait::async_trait]
 impl<T: WriteData> ExternalDb for Processor<T> {
     async fn process_block(
@@ -728,37 +730,50 @@ impl<T: WriteData> ExternalDb for Processor<T> {
         }
 
         if self.write_account.enabled() {
-            let mut accounts = Vec::new();
-            state.state().read_accounts()?.iterate_objects(|acc: ShardAccount| {
-                let acc = acc.read_account()?;
-                let record = Self::prepare_account_record(
-                    acc, 
-                    None,
-                    self.write_account.sharding_depth(),
-                    self.max_account_bytes_size,
-                    None,
-                )?;
-                accounts.push(record);
-                Ok(true)
-            })?;
-
-            let accounts_len = accounts.len();
-            futures::future::join_all(
-                accounts.into_iter().map(|r| {
-                    match r {
-                        DbRecord::Account(key, value, partition_key) => self.write_account.write_data(key, value, None, partition_key),
-                        DbRecord::Empty => Box::pin(async{Ok(())}),
-                        _ => unreachable!(),
-                    }
-                })
-            )
-            .await
-            .into_iter()
-            .find(|r| r.is_err())
-            .unwrap_or(Ok(()))?;
+            let mut total_accounts = 0;
+            let mut last_portion = false;
+            let mut iterator = HashmapIterator::from_hashmap(&state.state().read_accounts()?);
+            while !last_portion {
+                let mut accounts = Vec::new();
+                while accounts.len() < ACCOUNTS_PORTION_LEN {
+                    let acc = match iterator.next_item()? {
+                        Some((_key, mut value)) => {
+                            let _dbi = DepthBalanceInfo::construct_from(&mut value)?;
+                            let shard_acc = ShardAccount::construct_from(&mut value)?;
+                            shard_acc.read_account()?
+                        }
+                        None => {
+                            last_portion = true;
+                            break;
+                        }
+                    };
+                    let record = Self::prepare_account_record(
+                        acc, 
+                        None,
+                        self.write_account.sharding_depth(),
+                        self.max_account_bytes_size,
+                        None,
+                    )?;
+                    accounts.push(record);
+                }
+                total_accounts += accounts.len();
+                futures::future::join_all(
+                    accounts.into_iter().map(|r| {
+                        match r {
+                            DbRecord::Account(key, value, partition_key) => self.write_account.write_data(key, value, None, partition_key),
+                            DbRecord::Empty => Box::pin(async{Ok(())}),
+                            _ => unreachable!(),
+                        }
+                    })
+                )
+                .await
+                .into_iter()
+                .find(|r| r.is_err())
+                .unwrap_or(Ok(()))?;
+            }
 
             STATSD.timer("full_state_parsing_time", now.elapsed().as_micros() as f64 / 1000f64);
-            STATSD.histogram("full_state_accounts_count", accounts_len as f64);
+            STATSD.histogram("full_state_accounts_count", total_accounts as f64);
         }
 
         log::trace!("TIME: process_full_state {}ms;   {}", now.elapsed().as_millis(), state.block_id());

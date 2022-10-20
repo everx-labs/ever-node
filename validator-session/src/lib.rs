@@ -15,7 +15,6 @@
 extern crate lazy_static;
 
 extern crate catchain;
-extern crate crc32c;
 extern crate metrics_runtime;
 extern crate rand;
 extern crate sha2;

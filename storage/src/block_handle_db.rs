@@ -467,7 +467,7 @@ impl BlockHandleStorage {
                             }
                         },
                         StoreJob::DropHandle(id) => {
-                            if let Err(e) = handle_db.delete(&id) {
+                            if let Err(e) = handle_db.delete(id) {
                                 log::error!(
                                     target: TARGET, 
                                     "{} while deleting handle {}", 

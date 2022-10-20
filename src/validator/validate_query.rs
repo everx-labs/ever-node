@@ -38,16 +38,16 @@ use std::{
     },
 };
 use ton_block::{
-    Account, AccountBlock, AccountIdPrefixFull, AccountStatus, AddSub, BlockCreateStats,
-    BlockError, BlockExtra, BlockIdExt, BlockInfo, BlockLimits, ConfigParamEnum, ConfigParams,
-    CopyleftRewards, Counters, CreatorStats, CurrencyCollection, DepthBalanceInfo, Deserializable,
-    EnqueuedMsg, GlobalCapabilities, Grams, HashmapAugType, InMsg, InMsgDescr, KeyExtBlkRef,
-    KeyMaxLt, LibDescr, Libraries, McBlockExtra, McShardRecord, McStateExtra, MerkleProof,
-    MerkleUpdate, Message, MsgAddressInt, MsgEnvelope, OutMsg, OutMsgDescr, OutMsgQueueKey,
-    Serializable, ShardAccount, ShardAccountBlocks, ShardAccounts, ShardFeeCreated, ShardHashes,
-    ShardIdent, StateInitLib, TopBlockDescrSet, TrComputePhase, Transaction, TransactionDescr,
-    ValidatorSet, ValueFlow, WorkchainDescr, INVALID_WORKCHAIN_ID, MASTERCHAIN_ID, MAX_SPLIT_DEPTH,
-    U15,
+    config_params, Account, AccountBlock, AccountIdPrefixFull, AccountStatus, AddSub,
+    BlockCreateStats, BlockError, BlockExtra, BlockIdExt, BlockInfo, BlockLimits, ConfigParamEnum,
+    ConfigParams, CopyleftRewards, Counters, CreatorStats, CurrencyCollection, DepthBalanceInfo,
+    Deserializable, EnqueuedMsg, GlobalCapabilities, Grams, HashmapAugType, InMsg, InMsgDescr,
+    KeyExtBlkRef, KeyMaxLt, LibDescr, Libraries, McBlockExtra, McShardRecord, McStateExtra,
+    MerkleProof, MerkleUpdate, Message, MsgAddressInt, MsgEnvelope, OutMsg, OutMsgDescr,
+    OutMsgQueueKey, Serializable, ShardAccount, ShardAccountBlocks, ShardAccounts, ShardFeeCreated,
+    ShardHashes, ShardIdent, StateInitLib, TopBlockDescrSet, TrComputePhase, Transaction,
+    TransactionDescr, ValidatorSet, ValueFlow, WorkchainDescr, INVALID_WORKCHAIN_ID,
+    MASTERCHAIN_ID, MAX_SPLIT_DEPTH, U15,
 };
 use ton_executor::{
     BlockchainConfig, CalcMsgFwdFees, ExecuteParams, OrdinaryTransactionExecutor,
@@ -172,7 +172,7 @@ impl ValidateBase {
         self.block.id()
     }
     fn now(&self) -> u32 {
-        self.info.gen_utime().0
+        self.info.gen_utime().as_u32()
     }
     fn is_special_in_msg(&self, in_msg: &InMsg) -> bool {
         let is_fee_msg = self.recover_create_msg.as_ref() == Some(in_msg) || self.mint_msg.as_ref() == Some(in_msg);
@@ -195,13 +195,13 @@ pub struct ValidateQuery {
     shard: ShardIdent,
     min_mc_seq_no: u32,
     // block_id: BlockIdExt,
-    block_candidate: Option<BlockCandidate>,
+    block_candidate: BlockCandidate,
     // other
     validator_set: ValidatorSet,
     is_fake: bool,
     multithread: bool,
     // previous state can be as two states for merge
-    prev_blocks_ids: Option<Vec<BlockIdExt>>,
+    prev_blocks_ids: Vec<BlockIdExt>,
     old_mc_shards: ShardHashes, // old_shard_conf_
     // master chain state members
     block_limits: BlockLimits,
@@ -235,11 +235,11 @@ impl ValidateQuery {
             engine,
             shard,
             min_mc_seq_no,
-            block_candidate: Some(block_candidate),
+            block_candidate,
             validator_set,
             is_fake,
             multithread,
-            prev_blocks_ids: Some(prev_blocks_ids),
+            prev_blocks_ids,
             old_mc_shards: Default::default(),
             block_limits: Default::default(),
             // new state after applying block_candidate
@@ -258,12 +258,12 @@ impl ValidateQuery {
  */
 
 
-    fn start_up(&mut self, block_candidate: BlockCandidate) -> Result<ValidateBase> {
+    fn init_base(&mut self) -> Result<ValidateBase> {
         let mut base = ValidateBase::default();
         base.is_fake = self.is_fake;
-        base.created_by = block_candidate.created_by.clone();
-        base.prev_blocks_ids = self.prev_blocks_ids.take().unwrap();
-        let block_id = block_candidate.block_id.clone();
+        base.created_by = self.block_candidate.created_by.clone();
+        base.prev_blocks_ids = std::mem::take(&mut self.prev_blocks_ids);
+        let block_id = &self.block_candidate.block_id;
         log::info!(target: "validate_query", "validate query for {:#} started", block_id);
         if block_id.shard() != self.shard() {
             soft_reject_query!("block candidate belongs to shard {} different from current shard {}",
@@ -313,10 +313,10 @@ impl ValidateQuery {
         }
         
         // 4. unpack block candidate (while necessary data is being loaded)
-        Self::unpack_block_candidate(base, block_candidate, block_id)
+        Self::unpack_block_candidate(base, &mut self.block_candidate)
     }
 
-    async fn start_up2(&mut self, base: &mut ValidateBase) -> Result<McData> {
+    async fn init_mc_data(&mut self, base: &mut ValidateBase) -> Result<McData> {
         // 2. learn latest masterchain state and block id
         let mc_data = self.get_ref_mc_state(base).await?;
 
@@ -352,11 +352,11 @@ impl ValidateQuery {
     }
 
     // unpack block candidate, and check root hash and file hash
-    fn unpack_block_candidate(mut base: ValidateBase, mut block_candidate: BlockCandidate, block_id: BlockIdExt) -> Result<ValidateBase> {
+    fn unpack_block_candidate(mut base: ValidateBase, block_candidate: &mut BlockCandidate) -> Result<ValidateBase> {
         CHECK!(!block_candidate.data.is_empty());
         // 1. deserialize block itself
         let data = std::mem::take(&mut block_candidate.data);
-        base.block = BlockStuff::new(block_id, data)?;
+        base.block = BlockStuff::new(block_candidate.block_id.clone(), data)?;
         // 3. initial block parse
         Self::init_parse(&mut base)?;
         // ...
@@ -481,7 +481,7 @@ impl ValidateQuery {
     }
 
     // processes further and sorts data in collated_roots
-    fn extract_collated_data(base: &mut ValidateBase, block_candidate: BlockCandidate) -> Result<()> {
+    fn extract_collated_data(base: &mut ValidateBase, block_candidate: &BlockCandidate) -> Result<()> {
         if !block_candidate.collated_data.is_empty() {
             // 8. deserialize collated data
             let collated_roots = match deserialize_cells_tree(&mut Cursor::new(&block_candidate.collated_data)) {
@@ -697,9 +697,9 @@ impl ValidateQuery {
             base.prev_state_accounts.split_for(&base.shard().shard_key(false))?;
             base.prev_state_accounts.update_root_extra()?;
             if base.shard().is_right_child() {
-                base.prev_validator_fees.grams.0 += 1;
+                base.prev_validator_fees.grams += 1;
             }
-            base.prev_validator_fees.grams.0 /= 2;
+            base.prev_validator_fees.grams /= 2;
         }
         Ok(())
     }
@@ -1248,7 +1248,7 @@ impl ValidateQuery {
             }
         }
         let create_fee = base.config_params.block_create_fees(base.shard().is_masterchain()).unwrap_or_default();
-        let create_fee = CurrencyCollection::from_grams(create_fee.shr(base.shard().prefix_len()));
+        let create_fee = CurrencyCollection::from_grams(create_fee >> base.shard().prefix_len());
         if base.value_flow.created != create_fee {
             reject_query!("ValueFlow of block {} declares block creation fee {}, \
                 but the current configuration expects it to be {}",
@@ -1274,7 +1274,7 @@ impl ValidateQuery {
             reject_query!("ValueFlow for {} declares imported={} but the sum over all inbound messages \
                 listed in InMsgDescr is {}", base.block_id(), base.value_flow.imported, cc.value_imported);
         }
-        let fees_import = CurrencyCollection::from_grams(cc.fees_collected.clone());
+        let fees_import = CurrencyCollection::from_grams(cc.fees_collected);
         let cc = base.out_msg_descr.full_exported();
         if cc != &base.value_flow.exported {
             reject_query!("ValueFlow for {} declares exported={} but the sum over all outbound messages \
@@ -1563,8 +1563,8 @@ impl ValidateQuery {
         log::debug!(target: "validate_query", "checking update of enqueued outbound message {:x}", out_msg_id);
         CHECK!(old_value.is_some() || new_value.is_some());
         let m_str = if new_value.is_some() && old_value.is_some() {
-            reject_query!("EnqueuedMsg with key {} has been changed in the OutMsgQueue, \
-                but the key did not change", out_msg_id.to_hex_string())
+            reject_query!("EnqueuedMsg with key {:x} has been changed in the OutMsgQueue, \
+                but the key did not change", out_msg_id)
         } else if new_value.is_some() {
             "en"
         } else if old_value.is_some() {
@@ -1573,24 +1573,24 @@ impl ValidateQuery {
             ""
         };
         let out_msg = base.out_msg_descr.get(&out_msg_id.hash)?
-            .ok_or_else(|| error!( "no OutMsgDescr corresponding to {}queued message with key {}",
-                m_str, out_msg_id.to_hex_string()))?;
+            .ok_or_else(|| error!( "no OutMsgDescr corresponding to {}queued message with key {:x}",
+                m_str, out_msg_id))?;
         let correct = match out_msg {
             OutMsg::New(_) | OutMsg::Transit(_) => new_value.is_some(),
-            OutMsg::Dequeue(_) | OutMsg::DequeueImmediately(_) | OutMsg::DequeueShort(_) => old_value.is_some(),
+            OutMsg::Dequeue(_) | OutMsg::DequeueImmediate(_) | OutMsg::DequeueShort(_) => old_value.is_some(),
             OutMsg::TransitRequeued(_) => true,
             _ => false
         };
         if !correct {
-            reject_query!("OutMsgDescr corresponding to {} queued message with key {} has invalid tag ${:3x}",
-                m_str, out_msg_id.to_hex_string(), out_msg.tag())
+            reject_query!("OutMsgDescr corresponding to {} queued message with key {:x} has invalid tag ${:3x}",
+                m_str, out_msg_id, out_msg.tag())
         }
         let enq;
         if let Some((_enq, _lt)) = old_value {
             enq = MsgEnqueueStuff::from_enqueue_and_lt(_enq, _lt)?;
             if enq.enqueued_lt() >= base.info.start_lt() {
-                reject_query!("new EnqueuedMsg with key {} has enqueued_lt={} greater \
-                    than or equal to this block's start_lt={}", out_msg_id.to_hex_string(),
+                reject_query!("new EnqueuedMsg with key {:x} has enqueued_lt={} greater \
+                    than or equal to this block's start_lt={}", out_msg_id,
                         enq.enqueued_lt(), base.info.start_lt())
             }
             // dequeued message
@@ -1599,39 +1599,39 @@ impl ValidateQuery {
                 // check that q_msg_env still contains msg
                 let q_msg = info.out_message_cell();
                 if info.out_message_cell().repr_hash() != out_msg_id.hash {
-                    reject_query!("MsgEnvelope in the old outbound queue with key {} \
-                        contains a Message with incorrect hash {}", out_msg_id.to_hex_string(), q_msg.repr_hash().to_hex_string())
+                    reject_query!("MsgEnvelope in the old outbound queue with key {:x} \
+                        contains a Message with incorrect hash {}", out_msg_id, q_msg.repr_hash().to_hex_string())
                 }
                 // must be msg_import_tr$100
                 let in_msg = info.read_imported()?;
                 match in_msg {
-                    InMsg::Immediatelly(info) => {
-                        if info.message_cell().repr_hash() != enq.envelope_hash() {
-                            reject_query!("OutMsgDescr corresponding to dequeued message with key {} \
+                    InMsg::Immediate(info) => {
+                        if info.envelope_message_hash() != enq.envelope_hash() {
+                            reject_query!("OutMsgDescr corresponding to dequeued message with key {:x} \
                                 is a msg_export_tr_req referring to a reimport InMsgDescr that contains a MsgEnvelope \
-                                distinct from that originally kept in the old queue", out_msg_id.to_hex_string())
+                                distinct from that originally kept in the old queue", out_msg_id)
                         }
                     }
-                    _ => reject_query!("OutMsgDescr for {} refers to a reimport InMsgDescr with invalid tag ${:3x} \
-                        instead of msg_import_tr$100", out_msg_id.to_hex_string(), in_msg.tag())
+                    _ => reject_query!("OutMsgDescr for {:x} refers to a reimport InMsgDescr with invalid tag ${:3x} \
+                        instead of msg_import_tr$100", out_msg_id, in_msg.tag())
                 }
             } else if out_msg.envelope_message_hash() != Some(enq.envelope_hash()) {
-                reject_query!("OutMsgDescr corresponding to dequeued message with key {} contains a \
-                    MsgEnvelope distinct from that originally kept in the old queue", out_msg_id.to_hex_string())
+                reject_query!("OutMsgDescr corresponding to dequeued message with key {:x} contains a \
+                    MsgEnvelope distinct from that originally kept in the old queue", out_msg_id)
             }
         } else if let Some((_enq, _lt)) = new_value {
             enq = MsgEnqueueStuff::from_enqueue_and_lt(_enq, _lt)?;
             if enq.enqueued_lt() < base.info.start_lt() || enq.enqueued_lt() >= base.info.end_lt() {
-                reject_query!("new EnqueuedMsg with key {} has enqueued_lt={} outside of \
-                    this block's range {} .. {}", out_msg_id.to_hex_string(),
+                reject_query!("new EnqueuedMsg with key {:x} has enqueued_lt={} outside of \
+                    this block's range {} .. {}", out_msg_id,
                     enq.enqueued_lt(), base.info.start_lt(), base.info.end_lt())
             }
             if out_msg.envelope_message_hash() != Some(enq.envelope_hash()) {
-                reject_query!("OutMsgDescr corresponding to enqueued message with key {} \
-                    contains a MsgEnvelope distinct from that stored in the new queue", out_msg_id.to_hex_string())
+                reject_query!("OutMsgDescr corresponding to enqueued message with key {:x} \
+                    contains a MsgEnvelope distinct from that stored in the new queue", out_msg_id)
             }
         } else {
-            log::error!(target: "validate_query", "EnqueuedMsg with key {} has been not changed in the OutMsgQueue", out_msg_id.to_hex_string());
+            log::error!(target: "validate_query", "EnqueuedMsg with key {:x} has been not changed in the OutMsgQueue", out_msg_id);
             return Ok(())
         };
         // let msg_env = enq.env;
@@ -1644,8 +1644,8 @@ impl ValidateQuery {
         // or we might have several OutMsgQueue entries with different 352-bit keys all having the same last 256 bits (with the message hash)
         let new_key = enq.out_msg_key();
         if &new_key != out_msg_id {
-            reject_query!("OutMsgDescr for {} contains a MsgEnvelope that should be stored under different key {}",
-                out_msg_id.to_hex_string(), new_key.to_hex_string())
+            reject_query!("OutMsgDescr for {:x} contains a MsgEnvelope that should be stored under different key {:x}",
+            out_msg_id, new_key)
         }
         Ok(())
     }
@@ -1703,14 +1703,14 @@ impl ValidateQuery {
         }
         let key = OutMsgQueueKey::with_account_prefix(&next_prefix, env.message_cell().repr_hash());
         if let (Some(block_id), enq) = manager.find_message(&key, &cur_prefix)? {
-            let enq_msg_descr = enq.ok_or_else(|| error!("imported internal message with hash {} and \
-                previous address {}..., next hop address {} could not be found in \
-                the outbound message queue of neighbor {} under key {}",
-                    env_hash.to_hex_string(), cur_prefix, next_prefix, block_id, key.to_hex_string()))?;
+            let enq_msg_descr = enq.ok_or_else(|| error!("imported internal message with hash {:x}\
+                and previous address {}..., next hop address {} could not be found in \
+                the outbound message queue of neighbor {} under key {:x}",
+                    env_hash, cur_prefix, next_prefix, block_id, key))?;
             if &enq_msg_descr.envelope_hash() != env_hash {
                 reject_query!("imported internal message from the outbound message queue of \
-                    neighbor {} under key {} has a different MsgEnvelope in that outbound message queue",
-                        block_id, key.to_hex_string())
+                    neighbor {} under key {:x} has a different MsgEnvelope in that outbound message queue",
+                        block_id, key)
             }
             if manager.prev().already_processed(&enq_msg_descr)? {
                 reject_query!("imported internal message with hash {} and lt={} has been already imported \
@@ -1782,7 +1782,7 @@ impl ValidateQuery {
             }
             // msg_import_imm$011 in_msg:^MsgEnvelope transaction:^Transaction fwd_fee:Grams
             // importing and processing an internal message generated in this very block
-            InMsg::Immediatelly(ref info) => {
+            InMsg::Immediate(ref info) => {
                 if !base.is_special_in_msg(&in_msg) {
                     Self::update_max_processed_lt_hash(base, created_lt, key)?;
                 }
@@ -1878,7 +1878,7 @@ impl ValidateQuery {
 
         // continue checking inbound message
         match in_msg {
-            InMsg::Immediatelly(_) => {
+            InMsg::Immediate(_) => {
                 // msg_import_imm$011 in_msg:^MsgEnvelope transaction:^Transaction fwd_fee:Grams
                 // importing and processing an internal message generated in this very block
                 if cur_prefix != dest_prefix {
@@ -1892,7 +1892,7 @@ impl ValidateQuery {
                     reject_query!("inbound internal message with hash {} is a msg_import_imm$011, \
                         but its source address {} does not belong to this shard", key.to_hex_string(), src_prefix)
                 }
-                if let Some(OutMsg::Immediately(_)) = out_msg_opt.as_ref() {
+                if let Some(OutMsg::Immediate(_)) = out_msg_opt.as_ref() {
                     CHECK!(out_msg_env.is_some());
                     CHECK!(reimport.is_some());
                 } else if !base.is_special_in_msg(&in_msg) {
@@ -1915,7 +1915,7 @@ impl ValidateQuery {
                 CHECK!(base.shard().contains_full_prefix(&next_prefix));
                 if base.shard().contains_full_prefix(&cur_prefix) {
                     // we imported this message from our shard!
-                    if let Some(OutMsg::DequeueImmediately(_)) = out_msg_opt.as_ref() {
+                    if let Some(OutMsg::DequeueImmediate(_)) = out_msg_opt.as_ref() {
                         CHECK!(out_msg_env.is_some());
                         CHECK!(reimport.is_some());
                     } else {
@@ -1927,7 +1927,7 @@ impl ValidateQuery {
                 } else {
                     CHECK!(cur_prefix != next_prefix);
                     // check that the message was present in the output queue of a neighbor, and that it has not been processed before
-                    Self::check_imported_message(base, manager, &env, &info.message_cell().repr_hash(), created_lt)?;
+                    Self::check_imported_message(base, manager, &env, &info.envelope_message_hash(), created_lt)?;
                 }
                 // ...
                 // fwd_fee must be equal to the fwd_fee_remaining of this MsgEnvelope
@@ -2015,12 +2015,12 @@ impl ValidateQuery {
                         but fwd_fees_remaining has decreased from {} to {} in transit",
                             key.to_hex_string(), fwd_fee, env.fwd_fee_remaining(), tr_env.fwd_fee_remaining())
                 }
-                if Some(info.out_message_cell()) != out_msg_env {
+                if Some(info.out_envelope_message_cell()) != out_msg_env {
                     reject_query!("InMsg for transit message with hash {} contains rewritten MsgEnvelope \
                         different from that stored in corresponding OutMsgDescr ({} transit)", key.to_hex_string(), tr_req)
                 }
                 // check the amount of the transit fee
-                let transit_fee = base.config_params.fwd_prices(false)?.next_fee(env.fwd_fee_remaining());
+                let transit_fee = base.config_params.fwd_prices(false)?.next_fee_checked(env.fwd_fee_remaining())?;
                 if transit_fee != fwd_fee {
                     reject_query!("InMsg for transit message with hash {} declared collected transit fees \
                         to be {} (deducted from the remaining forwarding fees of {}), but \
@@ -2152,14 +2152,14 @@ impl ValidateQuery {
                 return Ok(()) // nothing to check here for msg_export_deq_short ?
             }
             // msg_export_imm$010 out_msg:^MsgEnvelope transaction:^Transaction reimport:^InMsg = OutMsg;
-            OutMsg::Immediately(_) => (false, false),
+            OutMsg::Immediate(_) => (false, false),
             // msg_export_new$001 out_msg:^MsgEnvelope transaction:^Transaction = OutMsg;
             // msg_export_tr$011 out_msg:^MsgEnvelope imported:^InMsg = OutMsg;
             OutMsg::New(_) | OutMsg::Transit(_) => (true, false),  // added to OutMsgQueue
             // msg_export_deq$1100 out_msg:^MsgEnvelope import_block_lt:uint63 = OutMsg;
             // msg_export_deq_short$1101 msg_env_hash:bits256 next_workchain:int32 next_addr_pfx:uint64 import_block_lt:uint64 = OutMsg;
             // msg_export_deq$110 out_msg:^MsgEnvelope import_block_lt:uint64 = OutMsg;
-            OutMsg::Dequeue(_) | OutMsg::DequeueImmediately(_) => (false, true),  // removed from OutMsgQueue
+            OutMsg::Dequeue(_) | OutMsg::DequeueImmediate(_) => (false, true),  // removed from OutMsgQueue
             // msg_export_tr_req$111 out_msg:^MsgEnvelope imported:^InMsg = OutMsg;
             OutMsg::TransitRequeued(_) => (true, true), // removed from OutMsgQueue, and then added
             _ => reject_query!("OutMsg with key (message hash) {} has an unknown tag", key.to_hex_string())
@@ -2222,39 +2222,39 @@ impl ValidateQuery {
         let q_entry = manager.next().message(&q_key)?;
         let old_q_entry = manager.prev().message(&q_key)?;
         if old_q_entry.is_some() && q_entry.is_some() {
-            reject_query!("OutMsg with key (message hash) {} should have removed or added OutMsgQueue entry with key {}, \
-                but it is present both in the old and in the new output queues",
-                    key.to_hex_string(), q_key.to_hex_string())
+            reject_query!("OutMsg with key (message hash) {:x} should have removed or \
+                added OutMsgQueue entry with key {:x}, but it is present both in the old \
+                and in the new output queues", key, q_key)
         }
         if (add || remove) && old_q_entry.is_none() && q_entry.is_none() {
-            reject_query!("OutMsg with key (message hash) {} should have removed or added OutMsgQueue entry with key {}, \
-                but it is absent both from the old and from the new output queues",
-                    key.to_hex_string(), q_key.to_hex_string())
+            reject_query!("OutMsg with key (message hash) {:x} should have removed or added \
+                OutMsgQueue entry with key {:x}, but it is absent both from the old and from \
+                the new output queues", key, q_key)
         }
         if (!add && !remove) && (old_q_entry.is_some() || q_entry.is_some()) {
-            reject_query!("OutMsg with key (message hash) {} is a msg_export_imm$010, so the OutMsgQueue entry with key {} \
-                should never be created, but it is present in either the old or the new output queue",
-                    key.to_hex_string(), q_key.to_hex_string())
+            reject_query!("OutMsg with key (message hash) {:x} is a msg_export_imm$010, \
+                so the OutMsgQueue entry with key {:x} should never be created, but it is present \
+                in either the old or the new output queue", key, q_key)
         }
         // NB: if mode!=0, the OutMsgQueue entry has been changed, so we have already checked some conditions in precheck_one_message_queue_update()
         if add {
             match q_entry {
                 Some(q_entry) => if q_entry.envelope_hash() != msg_env_hash {
-                    reject_query!("OutMsg with key {} has created OutMsgQueue entry with key {} containing a different MsgEnvelope",
-                        key.to_hex_string(), q_key.to_hex_string())
+                    reject_query!("OutMsg with key {:x} has created OutMsgQueue entry with key {:x} \
+                        containing a different MsgEnvelope", key, q_key)
                 }
-                None => reject_query!("OutMsg with key {} was expected to create OutMsgQueue entry with key {} but it did not",
-                    key.to_hex_string(), q_key.to_hex_string())
+                None => reject_query!("OutMsg with key {:x} was expected to create OutMsgQueue entry \
+                    with key {:x} but it did not", key, q_key)
             }
             // ...
         } else if remove {
             match old_q_entry {
                 Some(ref old_q_entry) => if old_q_entry.envelope_hash() != msg_env_hash {
-                    reject_query!("OutMsg with key {} has dequeued OutMsgQueue entry with key {} containing a different MsgEnvelope",
-                        key.to_hex_string(), q_key.to_hex_string())
+                    reject_query!("OutMsg with key {:x} has dequeued OutMsgQueue entry \
+                        with key {:x} containing a different MsgEnvelope", key, q_key)
                 }
-                None => reject_query!("OutMsg with key {} was expected to remove OutMsgQueue entry with key {} \
-                    but it did not exist in the old queue", key.to_hex_string(), q_key.to_hex_string())
+                None => reject_query!("OutMsg with key {:x} was expected to remove OutMsgQueue \
+                    entry with key {:x} but it did not exist in the old queue", key, q_key)
             }
             // ...
         }
@@ -2265,10 +2265,10 @@ impl ValidateQuery {
         // ...
         match out_msg {
             // msg_export_imm
-            OutMsg::Immediately(_) => match reimport {
+            OutMsg::Immediate(_) => match reimport {
                 // msg_import_imm
-                Some(InMsg::Immediatelly(ref info)) => {
-                    if info.message_cell().repr_hash() != msg_env_hash {
+                Some(InMsg::Immediate(ref info)) => {
+                    if info.envelope_message_hash() != msg_env_hash {
                         reject_query!("msg_import_imm InMsg record corresponding to msg_export_imm OutMsg record with key {} \
                             re-imported a different MsgEnvelope", key.to_hex_string())
                     }
@@ -2370,16 +2370,16 @@ impl ValidateQuery {
                 Some(InMsg::Transit(info)) => {
                     let in_env = info.read_in_message()?;
                     if &in_env.message_cell().repr_hash() != key {
-                        reject_query!("hash {:x} != Message hash {:x}", info.in_message_cell().repr_hash(), key)
+                        reject_query!("hash {:x} != Message hash {:x}", info.in_envelope_message_hash(), key)
                     }
                     let in_env = info.read_in_message()?;
                     let in_cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, &in_env.cur_addr())?;
                     let in_next_prefix = src_prefix.interpolate_addr_intermediate(&dest_prefix, &in_env.next_addr())?;
                     if !base.shard().contains_full_prefix(&in_cur_prefix) {
-                            reject_query!("msg_export_tr_req OutMsg record with key {} corresponds to \
+                            reject_query!("msg_export_tr_req OutMsg record with key {:x} corresponds to \
                                 msg_import_tr InMsg record with current imported message address {} \
                                 outside the current shard (msg_export_tr should have been used instead, because there \
-                                was no re-queueing)", key.to_hex_string(), in_cur_prefix)
+                                was no re-queueing)", key, in_cur_prefix)
                     }
                     // we have already checked correctness of hypercube routing in InMsg::msg_import_tr case of check_in_msg()
                     CHECK!(base.shard().contains_full_prefix(&in_next_prefix));
@@ -2391,16 +2391,16 @@ impl ValidateQuery {
                     let q_key = OutMsgQueueKey::with_account_prefix(&in_next_prefix, key.clone());
                     let q_entry = manager.next().message(&q_key)?;
                     let enq_msg_descr = manager.prev().message(&q_key)?.ok_or_else(|| error!(
-                            "msg_export_tr_req OutMsg record with key {} was expected to dequeue message from \
-                            OutMsgQueue with key {} but such a message is absent from the old OutMsgQueue", 
-                                key.to_hex_string(), q_key.to_hex_string()))?;
+                            "msg_export_tr_req OutMsg record with key {:x} was expected to dequeue message from \
+                            OutMsgQueue with key {:x} but such a message is absent from the old OutMsgQueue", 
+                                key, q_key))?;
                     if q_entry.is_some() {
-                        reject_query!("msg_export_tr_req OutMsg record with key {} \
-                            was expected to dequeue message from OutMsgQueue with key {} \
+                        reject_query!("msg_export_tr_req OutMsg record with key {:x} \
+                            was expected to dequeue message from OutMsgQueue with key {:x} \
                             but such a message is still present in the new OutMsgQueue",
-                                key.to_hex_string(), q_key.to_hex_string())
+                                key, q_key)
                     }
-                    if enq_msg_descr.envelope_hash() != info.in_message_cell().repr_hash() {
+                    if enq_msg_descr.envelope_hash() != info.in_envelope_message_hash() {
                         reject_query!("msg_import_tr InMsg entry corresponding to msg_export_tr_req OutMsg entry with key {} \
                             has re-imported a different MsgEnvelope from that present in the old OutMsgQueue", key.to_hex_string())
                     }
@@ -2409,10 +2409,10 @@ impl ValidateQuery {
                     msg_export_tr_req OutMsg record with key {}", key.to_hex_string())
             }
             // msg_export_deq_imm
-            OutMsg::DequeueImmediately(_) => match reimport {
+            OutMsg::DequeueImmediate(_) => match reimport {
                 // msg_import_fin
                 Some(InMsg::Final(info)) => {
-                    if info.message_cell().repr_hash() != msg_env_hash {
+                    if info.envelope_message_hash() != msg_env_hash {
                         reject_query!("msg_import_fin InMsg record corresponding to msg_export_deq_imm OutMsg record with key {} \
                             somehow imported a different MsgEnvelope from that dequeued by msg_export_deq_imm", key.to_hex_string())
                     }
@@ -2521,9 +2521,9 @@ impl ValidateQuery {
         nb_block_id: &BlockIdExt,
     ) -> Result<bool> {
         if created_lt != enq.created_lt() {
-            reject_query!("EnqueuedMsg with key {} in outbound queue of our neighbor {} \
+            reject_query!("EnqueuedMsg with key {:x} in outbound queue of our neighbor {} \
                 pretends to have been created at lt {} but its actual creation lt is {}",
-                    key.to_hex_string(), nb_block_id, created_lt, enq.created_lt())
+                    key, nb_block_id, created_lt, enq.created_lt())
         }
         CHECK!(base.shard().contains_full_prefix(&enq.next_prefix()));
 
@@ -2538,23 +2538,23 @@ impl ValidateQuery {
             // this message has been processed in a previous block of this shard
             // just check that we have not imported it once again
             if in_msg.is_some() {
-                reject_query!("have an InMsg entry for processing again already processed EnqueuedMsg with key {} \
-                    of neighbor {}",  key.to_hex_string(), nb_block_id)
+                reject_query!("have an InMsg entry for processing again already processed EnqueuedMsg with key {:x} \
+                    of neighbor {}", key, nb_block_id)
             }
             if base.shard().contains_full_prefix(&enq.cur_prefix()) {
                 // if this message comes from our own outbound queue, we must have dequeued it
                 let deq_hash = match out_msg {
-                    None => reject_query!("our old outbound queue contains EnqueuedMsg with key {} \
+                    None => reject_query!("our old outbound queue contains EnqueuedMsg with key {:x} \
                         already processed by this shard, but there is no ext_message_deq OutMsg record for this \
-                        message in this block", key.to_hex_string()),
+                        message in this block", key),
                     Some(OutMsg::DequeueShort(deq)) => deq.msg_env_hash,
-                    Some(OutMsg::DequeueImmediately(deq)) => deq.out_message_cell().repr_hash(),
+                    Some(OutMsg::DequeueImmediate(deq)) => deq.out_message_cell().repr_hash(),
                     Some(deq) => reject_query!("{:?} msg_export_deq OutMsg record for already \
-                        processed EnqueuedMsg with key {} of old outbound queue", deq, key.to_hex_string())
+                        processed EnqueuedMsg with key {:x} of old outbound queue", deq, key)
                 };
                 if deq_hash != enq.envelope_hash() {
-                    reject_query!("unpack ext_message_deq OutMsg record for already processed EnqueuedMsg with key {} \
-                        of old outbound queue contains a different MsgEnvelope", key.to_hex_string())
+                    reject_query!("unpack ext_message_deq OutMsg record for already processed EnqueuedMsg with key {:x} \
+                        of old outbound queue contains a different MsgEnvelope", key)
                 }
             }
             // next check is incorrect after a merge, when ns_.processed_upto has > 1 entries
@@ -2587,19 +2587,19 @@ impl ValidateQuery {
             }
             // must have a msg_import_fin or msg_import_tr InMsg record
             let hash = match in_msg {
-                Some(InMsg::Final(info)) => info.message_cell().repr_hash(),
-                Some(InMsg::Transit(info)) => info.in_message_cell().repr_hash(),
-                None => reject_query!("there is no InMsg entry for processing EnqueuedMsg with key {} \
+                Some(InMsg::Final(info)) => info.envelope_message_hash(),
+                Some(InMsg::Transit(info)) => info.in_envelope_message_hash(),
+                None => reject_query!("there is no InMsg entry for processing EnqueuedMsg with key {:x} \
                     of neighbor {} which is claimed to be processed by new ProcessedInfo of this block", 
-                        key.to_hex_string(), nb_block_id),
+                        key, nb_block_id),
                 _ => reject_query!("expected either a msg_import_fin or a msg_import_tr InMsg record \
-                    for processing EnqueuedMsg with key {} of neighbor {} which is claimed to be processed \
-                    by new ProcessedInfo of this block", key.to_hex_string(), nb_block_id)
+                    for processing EnqueuedMsg with key {:x} of neighbor {} which is claimed to be processed \
+                    by new ProcessedInfo of this block", key, nb_block_id)
             };
             if hash != enq.envelope_hash() {
-                reject_query!("InMsg record for processing EnqueuedMsg with key {} of neighbor {} \
+                reject_query!("InMsg record for processing EnqueuedMsg with key {:x} of neighbor {} \
                     which is claimed to be processed by new ProcessedInfo of this block contains a reference \
-                    to a different MsgEnvelope", key.to_hex_string(), nb_block_id);
+                    to a different MsgEnvelope", key, nb_block_id);
             }
             // all other checks have been done while checking InMsgDescr
             Ok(true)
@@ -2666,7 +2666,7 @@ impl ValidateQuery {
             // log::debug!(target: "validate_query", "key is " << key.to_hex_string(n));
             let enq = MsgEnqueueStuff::from_enqueue_and_lt(enq, created_lt)?;
             if msg_key.hash != enq.message_hash() {
-                reject_query!("cannot unpack EnqueuedMsg with key {} in the new OutMsgQueue", msg_key.to_hex_string())
+                reject_query!("cannot unpack EnqueuedMsg with key {:x} in the new OutMsgQueue", msg_key)
             }
             log::debug!(target: "validate_query", "scanning outbound message with (lt,hash)=({},{}) enqueued_lt={}",
                 created_lt, msg_key.hash.to_hex_string(), enq.enqueued_lt());
@@ -2758,7 +2758,7 @@ impl ValidateQuery {
             // and that it refers to this transaction
             match in_msg {
                 InMsg::External(_) => (),
-                InMsg::IHR(_) | InMsg::Immediatelly(_) | InMsg::Final(_) => {
+                InMsg::IHR(_) | InMsg::Immediate(_) | InMsg::Final(_) => {
                     let header = msg.int_header().ok_or_else(|| error!("inbound message transaction {} of {} must have \
                         internal message header", lt, account_addr.to_hex_string()))?;
                     if header.created_lt >= lt {
@@ -2808,7 +2808,7 @@ impl ValidateQuery {
             let msg = Message::construct_from_cell(out_msg_root.clone())?;
             match out_msg {
                 OutMsg::External(_) => (),
-                OutMsg::Immediately(_) | OutMsg::New(_) => {
+                OutMsg::Immediate(_) | OutMsg::New(_) => {
                     let header = msg.int_header().ok_or_else(|| error!("transaction {} of {} \
                         must have internal message header", lt, account_addr.to_hex_string()))?;
                     money_exported.add(&header.value)?;
@@ -3025,6 +3025,7 @@ impl ValidateQuery {
             last_tr_lt: tr_lt,
             seed_block: base.extra.rand_seed().clone(),
             debug: false,
+            block_version: base.info.gen_software().unwrap_or(&config_params::GlobalVersion::new()).version,
             ..ExecuteParams::default()
         };
         let _old_account_root = account_root.clone();
@@ -3033,17 +3034,19 @@ impl ValidateQuery {
         *account = Account::construct_from_cell(account_root.clone())?;
         let new_hash = account_root.repr_hash();
         if state_update.new_hash != new_hash {
+            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
             reject_query!("transaction {} of {:x} is invalid: it claims that the new \
                 account state hash is {:x} but the re-computed value is {:x}",
                     lt, account_addr, state_update.new_hash, new_hash)
         }
         if trans.out_msgs != trans_execute.out_msgs {
+            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
             reject_query!("transaction {} of {:x} is invalid: it has produced a set of \
                 outbound messages different from that listed in the transaction",
                     lt, account_addr)
         }
         if let Some(TrComputePhase::Vm(compute_ph)) = descr.compute_phase_ref() {
-            base.gas_used.fetch_add(compute_ph.gas_used.0 as u64, Ordering::Relaxed);
+            base.gas_used.fetch_add(compute_ph.gas_used.as_u64(), Ordering::Relaxed);
         }
         base.transactions_executed.fetch_add(1, Ordering::Relaxed);
 
@@ -3056,6 +3059,7 @@ impl ValidateQuery {
         trans_execute.set_prev_trans_lt(trans.prev_trans_lt());
         let trans_execute_root = trans_execute.serialize()?;
         if trans_root != trans_execute_root {
+            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
             reject_query!("re created transaction {} doesn't correspond", lt)
         }
         // check new balance and value flow
@@ -3068,11 +3072,12 @@ impl ValidateQuery {
         }
         let new_balance = account.balance().cloned().unwrap_or_default();
         let mut right_balance = new_balance.clone();
-        let copyleft_reward_after = copyleft_reward.map_or(0.into(), |copyleft| copyleft.reward);
+        let copyleft_reward_after = copyleft_reward.map_or_else(Grams::zero, |copyleft| copyleft.reward);
         right_balance.add(&CurrencyCollection::from_grams(copyleft_reward_after))?;
         right_balance.add(&money_exported)?;
         right_balance.add(&trans.total_fees())?;
         if left_balance != right_balance {
+            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
             reject_query!("transaction {} of {} violates the currency flow condition: \
                 old balance={} + imported={} does not equal new balance={} + exported=\
                 {} + total_fees={}", lt, account_addr.to_hex_string(),
@@ -3204,7 +3209,7 @@ impl ValidateQuery {
             reject_query!("special messages can be present in masterchain only")
         }
         let env = match in_msg {
-            InMsg::Immediatelly(in_msg) => in_msg.read_message()?,
+            InMsg::Immediate(in_msg) => in_msg.read_envelope_message()?,
             _ => reject_query!("wrong type of message")
         };
         let msg_hash = env.message_cell().repr_hash();
@@ -3933,8 +3938,8 @@ impl ValidateQuery {
             let created = ShardFeeCreated::construct_from(&mut created)?;
             let shard = ShardIdent::with_tagged_prefix(key.workchain_id, key.prefix)?;
             if created != aug || !Self::check_one_shard_fee(base, &shard, &created.fees, &created.create)? {
-                reject_query!("ShardFees entry with key {} corresponding to shard {} is invalid",
-                    key.to_hex_string(), shard)
+                reject_query!("ShardFees entry with key {:x} corresponding to shard {} is invalid",
+                    key, shard)
             }
             Ok(true)
         })?;
@@ -3968,9 +3973,8 @@ impl ValidateQuery {
  */
 
     async fn common_preparation(&mut self) -> Result<(ValidateBase, McData)> {
-        let block_candidate = self.block_candidate.take().unwrap();
-        let mut base = self.start_up(block_candidate)?;
-        let mc_data = self.start_up2(&mut base).await?;
+        let mut base = self.init_base()?;
+        let mc_data = self.init_mc_data(&mut base).await?;
         // stage 0
         self.compute_next_state(&mut base, &mc_data)?;
         self.unpack_prev_state(&mut base)?;
@@ -4059,30 +4063,24 @@ impl ValidateQuery {
     }
 
     pub async fn try_validate(mut self) -> Result<()> {
-        let block_id = self.block_candidate.as_ref().ok_or_else(
-            || error!("INTERNAL ERROR: empty candidate in validate query")
-        )?.block_id.clone();
+        let block_id = self.block_candidate.block_id.clone();
         log::trace!("VALIDATE {}", block_id);
         let now = std::time::Instant::now();
 
         let result = self.validate().await;
         let duration = now.elapsed().as_millis() as u64;
         let base = result.map_err(|e| {
-            log::warn!("VALIDATION FAILED {} TIME {}ms ERR {}",block_id, duration, e);
+            log::warn!("VALIDATION FAILED {} TIME {}ms ERR {}", block_id, duration, e);
             e
         })?;
 
         let gas_used = base.gas_used.load(Ordering::Relaxed);
-        let ratio = match duration {
-            0 => gas_used,
-            duration => gas_used / duration
-        };
+        let ratio = gas_used.checked_div(duration).unwrap_or(gas_used);
         log::info!("ASYNC VALIDATED {} TIME {}ms GAS_RATE: {}", base.block_id(), duration, ratio);
 
         #[cfg(feature = "metrics")]
         STATSD.gauge(&format!("gas_rate_validator_{}", base.block_id().shard()), ratio as f64);
 
-        #[cfg(not(test))]
         #[cfg(feature = "telemetry")]
         self.engine.validator_telemetry().succeeded_attempt(
             &self.shard,
@@ -4095,3 +4093,23 @@ impl ValidateQuery {
     }
 }
 
+
+impl ValidateQuery {
+    fn prepare_transaction_for_log(
+        account_before: &Cell,
+        account_after: &Cell,
+        config: &ConfigParams,
+        trans: &Transaction,
+        trans_execute: &Transaction
+    ) -> Result<()> {
+        log::trace!(target: "validate_reject",
+            "acc_before: {}\nacc_after: {}\nconfig: {}\ntrans_origin: {}\ntrans_execute: {}",
+            base64::encode(ton_types::serialize_toc(&account_before)?),
+            base64::encode(ton_types::serialize_toc(&account_after)?),
+            base64::encode(config.write_to_bytes()?),
+            base64::encode(trans.write_to_bytes()?),
+            base64::encode(trans_execute.write_to_bytes()?)
+        );
+        Ok(())
+    }
+}

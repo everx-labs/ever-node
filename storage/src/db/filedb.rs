@@ -12,13 +12,12 @@
 */
 
 use crate::{
-    db::traits::{DbKey, KvcAsync, KvcReadableAsync, KvcWriteableAsync},
-    error::StorageError, types::DbSlice
+    db::traits::DbKey,
+    error::StorageError
 };
-use async_trait::async_trait;
-use std::{io::{ErrorKind, SeekFrom}, path::{Path, PathBuf}};
+use std::{io::{ErrorKind, SeekFrom, Write, Read, Seek}, path::{Path, PathBuf}};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use ton_types::{error, fail, Result};
+use ton_types::{error, Result};
 
 #[derive(Debug)]
 pub struct FileDb {
@@ -29,15 +28,102 @@ static PATH_CHUNK_MAX_LEN: usize = 4;
 static PATH_MAX_DEPTH: usize = 2;
 
 impl FileDb {
-    /// Creates new instance with given path
     pub fn with_path<P: AsRef<Path>>(path: P) -> Self {
         Self {
-            path: path.as_ref().to_path_buf()
+            path: path.as_ref().to_path_buf(),
         }
     }
 
     pub fn path(&self) -> &PathBuf {
         &self.path
+    }
+
+    pub async fn destroy(&mut self) -> Result<bool> {
+        match tokio::fs::metadata(&self.path).await {
+            Ok(meta) if meta.is_dir() => tokio::fs::remove_dir_all(&self.path).await?,
+            _ => ()
+        }
+        Ok(true)
+    }
+
+    pub fn get_write_object(&self, key: &(dyn DbKey + Send + Sync)) -> Result<impl Write> {
+        let path = self.make_path(key.key());
+        let dir = path.parent().ok_or_else(|| error!("Unable to get parent path"))?;
+        std::fs::create_dir_all(dir)?;
+        let file = std::fs::File::create(path)?;
+        Ok(file)
+    }
+
+    pub async fn get_read_object(&self, key: &(dyn DbKey + Send + Sync)) -> Result<impl Read + Seek> {
+        let path = self.make_path(key.key());
+        let file = std::fs::File::open(path)?;
+        Ok(file)
+    }
+
+    pub async fn write_whole_file(&self, key: &(dyn DbKey + Send + Sync), data: &[u8]) -> Result<()> {
+        let path = self.make_path(key.key());
+        let dir = path.parent()
+            .ok_or_else(|| error!("Unable to get parent path"))?;
+        tokio::fs::create_dir_all(dir).await?;
+        tokio::fs::write(path, data).await?;
+
+        Ok(())
+    }
+
+    pub async fn read_whole_file(&self, key: &(dyn DbKey + Send + Sync)) -> Result<Vec<u8>> {
+       self.read_file_part(key, 0, self.get_file_size(key).await?).await
+    }
+
+    pub async fn read_file_part(&self, key: &(dyn DbKey + Send + Sync), offset: u64, size: u64) -> Result<Vec<u8>> {
+        let path = self.make_path(key.key());
+        let mut file = tokio::fs::File::open(path).await
+            .map_err(|err| Self::transform_io_error(err, key.key()))?;
+        file.seek(SeekFrom::Start(offset)).await?;
+        let mut result = vec![0; size as usize];
+        file.read_exact(&mut result).await
+            .map_err(|err| Self::transform_io_error(err, key.key()))?;
+
+        Ok(result)
+    }
+
+    pub async fn get_file_size(&self, key: &(dyn DbKey + Send + Sync)) -> Result<u64> {
+        let path = self.make_path(key.key());
+        let metadata = tokio::fs::metadata(path).await
+            .map_err(|err| Self::transform_io_error(err, key.key()))?;
+
+        Ok(metadata.len())
+    }
+
+    pub async fn contains(&self, key: &(dyn DbKey + Send + Sync)) -> Result<bool> {
+        let path = self.make_path(key.key());
+        Ok(path.is_file() && path.exists())
+    }
+
+    pub fn for_each_key(&self, predicate: &mut dyn FnMut(&[u8]) -> Result<bool>) -> Result<bool> {
+        self.for_each_key_worker(&self.path, &[], 1, predicate)
+    }
+
+    pub async fn delete_file(&self, key: &(dyn DbKey + Send + Sync)) -> Result<()> {
+        let path = self.make_path(key.key());
+        if let Err(err) = tokio::fs::remove_file(&path).await {
+            if err.kind() != ErrorKind::NotFound {
+                return Err(err.into());
+            }
+        }
+
+        // Cleanup upper-level empty directories
+        let mut dir = path.as_path();
+        loop {
+            dir = dir.parent()
+                .ok_or_else(|| error!("Unable to get parent path"))?;
+            if self.path().starts_with(dir) || !Self::is_dir_empty(&dir).await {
+                break;
+            } else {
+                let _ = tokio::fs::remove_dir(&dir).await;// If can't remove empty dir, do nothing.
+            }
+        }
+
+        Ok(())
     }
 
     pub(crate) fn make_path(&self, key: &[u8]) -> PathBuf {
@@ -96,109 +182,5 @@ impl FileDb {
             }
         }
         Ok(true)
-    }
-}
-
-#[async_trait]
-impl KvcAsync for FileDb {
-    async fn len(&self) -> Result<usize> {
-        fail!("len() is not supported for FileDb")
-    }
-
-    async fn destroy(&mut self) -> Result<bool> {
-        match tokio::fs::metadata(&self.path).await {
-            Ok(meta) if meta.is_dir() => tokio::fs::remove_dir_all(&self.path).await?,
-            _ => ()
-        }
-        Ok(true)
-    }
-}
-
-#[async_trait]
-impl<K: DbKey + Send + Sync> KvcReadableAsync<K> for FileDb {
-    async fn try_get<'a>(&'a self, key: &K) -> Result<Option<DbSlice<'a>>> {
-        let path = self.make_path(key.key());
-        match tokio::fs::read(path).await {
-            Ok(vec) => Ok(Some(DbSlice::Vector(vec))),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err.into())
-        }
-    }
-
-    async fn get<'a>(&'a self, key: &K) -> Result<DbSlice<'a>> {
-        self.try_get(key).await?
-            .ok_or_else(|| StorageError::KeyNotFound(key.key_name(), key.as_string()).into())
-    }
-
-    async fn get_slice<'a>(&'a self, key: &K, offset: u64, size: u64) -> Result<DbSlice<'a>> {
-        self.get_vec(key, offset, size).await.map(|v| DbSlice::Vector(v))
-    }
-
-    async fn get_vec(&self, key: &K, offset: u64, size: u64) -> Result<Vec<u8>> {
-        let path = self.make_path(key.key());
-        let mut file = tokio::fs::File::open(path).await
-            .map_err(|err| Self::transform_io_error(err, key.key()))?;
-        file.seek(SeekFrom::Start(offset)).await?;
-        let mut result = vec![0; size as usize];
-        file.read_exact(&mut result).await
-            .map_err(|err| Self::transform_io_error(err, key.key()))?;
-
-        Ok(result)
-    }
-
-    async fn get_size(&self, key: &K) -> Result<u64> {
-        let path = self.make_path(key.key());
-        let metadata = tokio::fs::metadata(path).await
-            .map_err(|err| Self::transform_io_error(err, key.key()))?;
-
-        Ok(metadata.len())
-    }
-
-    async fn contains(&self, key: &K) -> Result<bool> {
-        let path = self.make_path(key.key());
-        Ok(path.is_file() && path.exists())
-    }
-
-    fn for_each_key(&self, predicate: &mut dyn FnMut(&[u8]) -> Result<bool>) -> Result<bool> {
-        self.for_each_key_worker(&self.path, &[], 1, predicate)
-    }
-}
-
-#[async_trait]
-impl<K: DbKey + Send + Sync> KvcWriteableAsync<K> for FileDb {
-    async fn put(&self, key: &K, value: &[u8]) -> Result<()> {
-        let path = self.make_path(key.key());
-        let dir = path.parent()
-            .ok_or_else(|| error!("Unable to get parent path"))?;
-        tokio::fs::create_dir_all(dir).await?;
-        tokio::fs::write(path, value).await?;
-
-        Ok(())
-    }
-
-    async fn delete(&self, key: &K) -> Result<()> {
-        let path = self.make_path(key.key());
-        if let Err(err) = tokio::fs::remove_file(&path).await {
-            if err.kind() != ErrorKind::NotFound {
-                return Err(err.into());
-            }
-        }
-
-        // Cleanup upper-level empty directories
-        let mut dir = path.as_path();
-        loop {
-            dir = dir.parent()
-                .ok_or_else(|| error!("Unable to get parent path"))?;
-            if self.path().starts_with(dir) || !Self::is_dir_empty(&dir).await {
-                break;
-            } else {
-                tokio::fs::remove_dir(&dir).await
-                    .unwrap_or_else(|_error| {
-                        // If can't remove empty dir, do nothing.
-                    });
-            }
-        }
-
-        Ok(())
     }
 }

@@ -134,10 +134,11 @@ impl Neighbour {
             self.update_roundtrip_adnl(roundtrip)
         }
     }
-
-    pub fn capabilities(&self) -> i64 {
-        self.capabilities.load(atomic::Ordering::Relaxed)
-    }
+    
+// Unused
+//    pub fn capabilities(&self) -> i64 {
+//        self.capabilities.load(atomic::Ordering::Relaxed)
+//    }
     
     pub fn roundtrip_adnl(&self) -> Option<u64> {
         Self::roundtrip(&self.roundtrip_adnl)
@@ -378,15 +379,17 @@ impl Neighbours {
             for peer in peers.iter() {
                 log::trace!("add_new_peers: start find address: peer {}", peer);
                 match DhtNode::find_address(&this.dht, peer).await {
-                    Ok((ip, _)) => {
+                    Ok(Some((ip, _))) => {
                         log::info!("add_new_peers: addr peer {}", ip);
                         if !this.add_overlay_peer(peer.clone()) {
                             log::debug!("add_new_peers already present");
                         }
                     }
+                    Ok(None) => {
+                        log::warn!("add_new_peers: find address - not found");
+                    }
                     Err(e) => {
                         log::warn!("add_new_peers: find address error - {}", e);
-                        continue;
                     }
                 }
             }
@@ -552,7 +555,7 @@ impl Neighbours {
             tokio::spawn(
                 async move {
                     if let Err(e) = self_cloned.update_capabilities(peer).await {
-                        log::warn!("ERROR: {}", e)
+                        log::warn!("{}", e)
                     }
                     wait_cloned.respond(Some(())); 
                 }

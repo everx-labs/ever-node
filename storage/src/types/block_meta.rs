@@ -32,7 +32,7 @@ impl BlockMeta {
         } else {
             0
         };
-        Ok(Self::with_data(flags, info.gen_utime().0, info.start_lt(), 0))
+        Ok(Self::with_data(flags, info.gen_utime().as_u32(), info.start_lt(), 0))
     }
 
     pub fn with_data(

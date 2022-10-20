@@ -168,12 +168,10 @@ impl ArchiveManager {
         let prooflink_inited = handle.has_proof_link();
         let data_inited = handle.has_data();
 
-        if !data_inited || !(proof_inited || prooflink_inited) {
-            log::error!(
-                target: "storage",
-                "Block {} is not moved to archive: data are not stored (data = {}, proof = {}, prooflink = {})",
+        if data_inited && !(proof_inited || prooflink_inited) {
+            fail!(
+                "Can't move block {} to archive: proof are not stored (proof = {}, prooflink = {})",
                 handle.id(),
-                data_inited,
                 proof_inited,
                 prooflink_inited
             );
@@ -221,10 +219,8 @@ impl ArchiveManager {
     pub async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
         if let Some(id) = self.file_maps.files().get_closest_archive_id(mc_seq_no).await {
             Some(id)
-        } else if let Some(id) = self.file_maps.key_files().get_closest_archive_id(mc_seq_no).await {
-            Some(id)
         } else {
-            None
+            self.file_maps.key_files().get_closest_archive_id(mc_seq_no).await
         }
     }
 

@@ -113,7 +113,7 @@ impl TopBlockDescrStuff {
 
             if i == 0 {
                 vert_seq_no = cur_info.vert_seq_no();
-                gen_utime = cur_info.gen_utime().0;
+                gen_utime = cur_info.gen_utime().as_u32();
             }
             if is_head {
                 chain_head_prev.push(prev1_id.clone());
@@ -192,12 +192,13 @@ impl TopBlockDescrStuff {
         self.chain_blk_ids.len()
     }
 
-    pub fn top_block_mc_seqno(&self) -> Result<u32> {
-        let merkle_proof = MerkleProof::construct_from(&mut (&self.tbd.chain()[0]).into())?;
-        let block_virt_root = merkle_proof.proof.clone().virtualize(1);
-        let block = Block::construct_from(&mut block_virt_root.into())?;
-        Ok(block.read_info()?.read_master_id()?.seq_no)
-    }
+// Unused
+//    pub fn top_block_mc_seqno(&self) -> Result<u32> {
+//        let merkle_proof = MerkleProof::construct_from(&mut (&self.tbd.chain()[0]).into())?;
+//        let block_virt_root = merkle_proof.proof.clone().virtualize(1);
+//        let block = Block::construct_from(&mut block_virt_root.into())?;
+//        Ok(block.read_info()?.read_master_id()?.seq_no)
+//    }
 
     pub fn top_block_mc_seqno_and_creator(&self) -> Result<(u32, UInt256)> {
         let merkle_proof = MerkleProof::construct_from(&mut (&self.tbd.chain()[0]).into())?;
@@ -399,7 +400,7 @@ impl TopBlockDescrStuff {
                 fail!("intermediate link for block {} is declared to be before a split", cur_id)
             }
 
-            if info.gen_utime().0 > next_info.gen_utime().0 {
+            if info.gen_utime().as_u32() > next_info.gen_utime().as_u32() {
                 fail!(
                     "block creation unixtime goes back from {} to {} in intermediate link \
                     for blocks {} and {}",
