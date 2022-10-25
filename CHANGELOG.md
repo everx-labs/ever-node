@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## Version: 0.51.4
+## Version: 0.51.6
 
 ### New
 
