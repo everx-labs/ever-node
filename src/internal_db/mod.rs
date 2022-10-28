@@ -197,6 +197,7 @@ impl InternalDb {
                 )
             }
         } else {
+            log::info!("DB VERSION {}", version);
             // TODO correct workchain id needed here, but it will be known later
             db = check_db(db, 0, restore_db_enabled, force_check_db, check_stop, is_broken).await?;
         }

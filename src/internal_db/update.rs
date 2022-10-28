@@ -6,7 +6,7 @@ use crate::internal_db::DB_VERSION_2;
 #[cfg(not(feature = "async_ss_storage"))]
 use crate::internal_db::DB_VERSION_1;
 use std::sync::atomic::AtomicBool;
-use ton_types::Result;
+use ton_types::{Result, fail};
 
 pub async fn update(
     mut db: InternalDb, 
@@ -48,6 +48,10 @@ pub async fn update(
         db = check_db(db, 0, true, true, check_stop, is_broken).await?;
         version = DB_VERSION_2;
         db.store_db_version(version)?;
+    }
+
+    if version != CURRENT_DB_VERSION {
+        fail!("Wrong database version {}, supported: {}", version, CURRENT_DB_VERSION);
     }
 
     Ok(db)

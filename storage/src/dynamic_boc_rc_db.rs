@@ -19,7 +19,7 @@ use crate::{
 use crate::StorageTelemetry;
 #[cfg(all(test, feature = "telemetry"))]
 use crate::tests::utils::create_storage_telemetry;
-use std::{ops::{Deref, DerefMut}, sync::{Arc, RwLock, Weak}, time, io::Cursor};
+use std::{ops::{Deref, DerefMut}, sync::{Arc, RwLock, Weak}, io::Cursor};
 #[cfg(feature = "telemetry")]
 use std::{
     sync::atomic::Ordering
@@ -231,9 +231,10 @@ impl DynamicBocDb {
             match CellDb::get_cell(self.db.deref(), cell_id, Arc::clone(self), use_cache) {
                 Ok(cell) => cell,
                 Err(e) => {
-                    log::error!("FATAL! Can't load cell {:x} from db, error: {}", cell_id, e);
-                    std::thread::sleep(time::Duration::from_millis(2_000));
-                    std::process::exit(0xFF);
+                    fail!("Can't load cell {:x} from db, error: {}", cell_id, e);
+                    // log::error!("FATAL! Can't load cell {:x} from db, error: {}", cell_id, e);
+                    // std::thread::sleep(time::Duration::from_millis(2_000));
+                    // std::process::exit(0xFF);
                 }
             }
         );

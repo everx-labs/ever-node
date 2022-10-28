@@ -14,7 +14,7 @@
 use crate::{
     block::{BlockStuff, BlockIdExtExtention},
     block_proof::BlockProofStuff,
-    config::{TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig},
+    config::{TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig, ValidatorManagerConfig},
     engine_traits::{
         ExternalDb, EngineAlloc, EngineOperations,
         OverlayOperations, PrivateOverlayOperations, Server, ValidatedBlockStat,
@@ -27,6 +27,7 @@ use crate::{
             SHARD_BROADCAST_WINDOW
         },
         counters::TpsCounter,
+        remp_client::RempClient,
     },
     shard_states_keeper::ShardStatesKeeper,
     internal_db::{
@@ -38,10 +39,11 @@ use crate::{
         full_node_client::FullNodeOverlayClient, full_node_service::FullNodeOverlayService
     },
     shard_state::ShardStateStuff,
-    types::{awaiters_pool::AwaitersPool},
-    ext_messages::{MessagesPool, EXT_MESSAGES_TRACE_TARGET},
+    types::awaiters_pool::AwaitersPool,
+    ext_messages::{MessagesPool, EXT_MESSAGES_TRACE_TARGET, RempMessagesPool},
     validator::{
-        validator_manager::{start_validator_manager, ValidatorManagerConfig},
+        remp_service::RempService,
+        validator_manager::{start_validator_manager},
     },
     shard_blocks::{
         ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker, 
@@ -59,9 +61,9 @@ use crate::network::node_network::NodeNetwork;
 use crate::external_db::kafka_consumer::KafkaConsumer;
 #[cfg(feature = "telemetry")]
 use crate::{
-    engine_traits::EngineTelemetry, full_node::telemetry::FullNodeTelemetry,
+    engine_traits::EngineTelemetry, full_node::telemetry::{FullNodeTelemetry, RempClientTelemetry},
     network::telemetry::{FullNodeNetworkTelemetry, FullNodeNetworkTelemetryKind},
-    validator::telemetry::CollatorValidatorTelemetry,
+    validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
 };
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::{Metric, TelemetryItem, TelemetryPrinter};
@@ -78,12 +80,10 @@ use std::{
 use std::collections::HashSet;
 #[cfg(feature = "metrics")]
 use std::env;
+use ton_block::{self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL, GlobalCapabilities};
 use storage::{StorageAlloc, block_handle_db::BlockHandle, types::StorageCell};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
-use ton_block::{
-    self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL,
-};
 use ton_types::{error, fail, Cell, Result};
 #[cfg(feature = "slashing")]
 use ton_types::UInt256;
@@ -107,6 +107,10 @@ pub struct Engine {
     servers: lockfree::queue::Queue<Server>,
     stopper: Arc<Stopper>,
 
+    remp_client: Option<Arc<RempClient>>,
+    remp_service: Option<Arc<RempService>>,
+    remp_messages: Option<Arc<RempMessagesPool>>,
+
     zero_state_id: BlockIdExt,
     init_mc_block_id: BlockIdExt,
     initial_sync_disabled: bool,
@@ -119,6 +123,7 @@ pub struct Engine {
     will_validate: AtomicBool,
     sync_status: AtomicU32,
     low_memory_mode: bool,
+    remp_capability: AtomicBool,
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
  
@@ -134,6 +139,8 @@ pub struct Engine {
     #[cfg(feature = "telemetry")]
     full_node_telemetry: FullNodeTelemetry,
     #[cfg(feature = "telemetry")]
+    remp_core_telemetry: Arc<RempCoreTelemetry>,
+    #[cfg(feature = "telemetry")]
     collator_telemetry: CollatorValidatorTelemetry,
     #[cfg(feature = "telemetry")]
     validator_telemetry: CollatorValidatorTelemetry,
@@ -144,6 +151,8 @@ pub struct Engine {
     engine_allocated: Arc<EngineAlloc>,
     #[cfg(feature = "telemetry")]
     telemetry_printer: TelemetryPrinter,
+    #[cfg(feature = "telemetry")]
+    remp_client_telemetry: RempClientTelemetry,
 
     tps_counter: TpsCounter,
 }
@@ -527,6 +536,7 @@ impl Engine {
         );
 
         let archives_life_time = general_config.gc_archives_life_time_hours();
+        let remp_config = general_config.remp_config().clone();
         let cells_lifetime_sec = general_config.cells_gc_config().cells_lifetime_sec;
         let enable_shard_state_persistent_gc = general_config.enable_shard_state_persistent_gc();
         let restore_db = general_config.restore_db();
@@ -641,6 +651,26 @@ impl Engine {
             engine_allocated.clone()
         )?;
 
+        let remp_client = if remp_config.is_client_enabled() {
+            let remp_client = Arc::new(RempClient::new(network.public_overlay_key()?.id().data().into()));
+            network.remp().set_receipts_subscriber(remp_client.clone())?;
+            Some(remp_client)
+        } else {
+            None
+        };
+        #[cfg(feature = "telemetry")]
+        let remp_core_telemetry = Arc::new(RempCoreTelemetry::new(Self::TIMEOUT_TELEMETRY_SEC));
+        let (remp_service, remp_messages) = if remp_config.is_service_enabled() {
+            let remp_service = Arc::new(RempService::new());
+            network.remp().set_messages_subscriber(remp_service.clone())?;
+            #[cfg(feature = "telemetry")]
+            network.remp().set_telemetry(remp_core_telemetry.clone())?;
+            network.remp().start()?;
+            (Some(remp_service), Some(Arc::new(RempMessagesPool::new())))
+        } else {
+            (None, None)
+        };
+
         log::info!("Engine is created.");
 
         let (validated_block_stats_sender, validated_block_stats_receiver) = 
@@ -675,6 +705,9 @@ impl Engine {
             ),
             external_messages: MessagesPool::new(),
             servers: lockfree::queue::Queue::new(),
+            remp_client,
+            remp_service,
+            remp_messages,
             stopper,
             zero_state_id,
             init_mc_block_id,
@@ -687,6 +720,7 @@ impl Engine {
             will_validate: AtomicBool::new(false),
             sync_status: AtomicU32::new(0),
             low_memory_mode,
+            remp_capability: AtomicBool::new(false),
             test_bundles_config,
             shard_states_keeper: shard_states_keeper.clone(),
             #[cfg(feature="workchains")]
@@ -698,6 +732,8 @@ impl Engine {
             #[cfg(feature = "telemetry")]
             full_node_telemetry: FullNodeTelemetry::new(),
             #[cfg(feature = "telemetry")]
+            remp_core_telemetry,
+            #[cfg(feature = "telemetry")]
             collator_telemetry: CollatorValidatorTelemetry::default(),
             #[cfg(feature = "telemetry")]
             validator_telemetry: CollatorValidatorTelemetry::default(),
@@ -706,6 +742,8 @@ impl Engine {
                 FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Service),
             #[cfg(feature = "telemetry")]
             engine_telemetry,
+            #[cfg(feature = "telemetry")]
+            remp_client_telemetry: RempClientTelemetry::default(),
             engine_allocated,
             #[cfg(feature = "telemetry")]
             telemetry_printer: TelemetryPrinter::with_params(
@@ -714,6 +752,10 @@ impl Engine {
             ),
             tps_counter: TpsCounter::new(),
         });
+
+        if let Some(rs) = engine.remp_service() {
+            rs.set_engine(engine.clone())?;
+        }
 
         engine.acquire_stop(Self::MASK_SERVICE_SHARDSTATE_GC);
         save_top_shard_blocks_worker(engine.clone(), shard_blocks_receiver);
@@ -849,6 +891,11 @@ impl Engine {
     }
 
     #[cfg(feature = "telemetry")]
+    pub fn remp_core_telemetry(&self) -> &RempCoreTelemetry {
+        &self.remp_core_telemetry
+    }
+
+    #[cfg(feature = "telemetry")]
     pub fn collator_telemetry(&self) -> &CollatorValidatorTelemetry {
         &self.collator_telemetry
     }
@@ -866,6 +913,11 @@ impl Engine {
     #[cfg(feature = "telemetry")]
     pub fn engine_telemetry(&self) -> &Arc<EngineTelemetry> {
         &self.engine_telemetry
+    }
+
+    #[cfg(feature = "telemetry")]
+    pub fn remp_client_telemetry(&self) -> &RempClientTelemetry {
+        &self.remp_client_telemetry
     }
 
     pub fn engine_allocated(&self) -> &Arc<EngineAlloc> {
@@ -886,6 +938,27 @@ impl Engine {
 
     pub fn low_memory_mode(&self) -> bool {
         self.low_memory_mode
+    }
+
+    pub fn remp_service(&self) -> Option<&RempService> {
+        self.remp_service.as_ref().map(|arc| arc.deref())
+    }
+
+    pub fn remp_client(&self) -> Option<&Arc<RempClient>> {
+        self.remp_client.as_ref()
+    }
+
+    pub fn remp_messages(&self) -> Result<&RempMessagesPool> {
+        let rm = self.remp_messages.as_ref().ok_or_else(|| error!("Remp messages pool was not inited."))?.deref();
+        Ok(rm)
+    }
+
+    pub fn remp_capability(&self) -> bool {
+        self.remp_capability.load(Ordering::Relaxed)
+    }
+
+    pub fn set_remp_capability(&self, value: bool) {
+        self.remp_capability.store(value, Ordering::Relaxed);
     }
 
     pub async fn download_and_apply_block_worker(
@@ -1075,6 +1148,15 @@ impl Engine {
             self.tps_counter.submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
         }
 
+        if block.is_key_block()? {
+            self.remp_capability.store(
+                block.config()?.has_capability(GlobalCapabilities::CapRemp),
+                Ordering::Relaxed
+            );
+            // While the node boots start key block is not processed by this function.
+            // So see process_full_state_in_ext_db for the same code
+        }
+
         let (prev_id, prev2_id_opt) = block.construct_prev_id()?;
         if prev2_id_opt.is_some() {
             fail!("UNEXPECTED error: master block refers two previous blocks");
@@ -1260,6 +1342,10 @@ impl Engine {
                     } else {
                         log::trace!("Processed block broadcast stats {} from {}", broadcast.id, src);                            
                     }
+
+                    if let (Some(block), Some(remp_client)) = (block_opt, &self.remp_client) {
+                        remp_client.clone().process_new_block(block);
+                    }
                 }
             }
         });
@@ -1271,6 +1357,11 @@ impl Engine {
             log::trace!(
                 target: EXT_MESSAGES_TRACE_TARGET,
                 "Skipped ext message broadcast {}bytes from {}: NOT A VALIDATOR",
+                broadcast.message.data.0.len(), src
+            );
+        } else if self.remp_capability() {
+            log::warn!(
+                "Skipped ext message broadcast {}bytes from {}: REMP CAPABILITY IS ENABLED",
                 broadcast.message.data.0.len(), src
             );
         } else {
@@ -1526,7 +1617,7 @@ impl Engine {
         Ok(self.is_validator())
     }
 
-    fn load_pss_keeper_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+    pub fn load_pss_keeper_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
         self.db().load_full_node_state(PSS_KEEPER_MC_BLOCK)
     }
 
@@ -1763,12 +1854,15 @@ pub(crate) async fn load_zero_state(engine: &Arc<Engine>, path: &str) -> Result<
             engine.engine_telemetry(),
             engine.engine_allocated()
         )?;
-        let (_, handle) = engine.store_zerostate(zs, &bytes).await?;
+        let (zs, handle) = engine.store_zerostate(zs, &bytes).await?;
         engine.set_applied(&handle, id.seq_no()).await?;
+        engine.process_full_state_in_ext_db(&zs).await?;
     }
 
-    let (_, handle) = engine.store_zerostate(mc_zero_state, &mc_zs_bytes).await?;
+    let (mc_zero_state, handle) = engine.store_zerostate(mc_zero_state, &mc_zs_bytes).await?;
     engine.set_applied(&handle, zero_id.seq_no()).await?;
+    engine.process_full_state_in_ext_db(&mc_zero_state).await?;
+
     log::trace!("All static zero states had been load");
     return Ok(true)
 
@@ -1790,7 +1884,14 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>)
     };
 
     let (last_applied_mc_block, cold) = match result {
-        Ok(id) => (id, false),
+        Ok(id) => {
+            let state = engine.load_state(&id).await?;
+            engine.remp_capability.store(
+                state.config_params()?.has_capability(GlobalCapabilities::CapRemp),
+                Ordering::Relaxed
+            );
+            (id, false)
+        }
         Err(err) => {
             log::debug!("before cold boot: {}", err);
 
@@ -1839,8 +1940,10 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>)
 
     engine.set_sync_status(Engine::SYNC_STATUS_FINISH_BOOT);
     log::info!("Boot complete.");
-    log::info!("LastMcBlockId: {}", last_applied_mc_block);
-    log::info!("ShardsClientMcBlockId: {}", shard_client_mc_block);
+    log::info!("last_applied_mc_block: {}", last_applied_mc_block);
+    log::info!("shard_client_mc_block: {}", shard_client_mc_block);
+    log::info!("ss_keeper_mc_block: {}", ss_keeper_mc_block);
+    log::info!("archives_gc_block: {}", archives_gc_block);
     Ok((last_applied_mc_block, shard_client_mc_block, ss_keeper_mc_block, archives_gc_block))
 }
 
@@ -1853,11 +1956,11 @@ pub async fn run(
     force_check_db: bool,
     stopper: Arc<Stopper>,
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
-
     log::info!("Engine::run");
 
     let consumer_config = node_config.kafka_consumer_config();
     let control_server_config = node_config.control_server()?;
+    let remp_config = node_config.remp_config().clone();
     let vm_config = ValidatorManagerConfig::read_configs(node_config.unsafe_catchain_patches_files());
 
     // Create engine
@@ -1865,7 +1968,6 @@ pub async fn run(
 
     #[cfg(feature = "telemetry")]
     telemetry_logger(engine.clone());
-
     // Console service - run first to allow console to connect to generate new keys 
     // while node is looking for net
     if let Some(config) = control_server_config {
@@ -1898,7 +2000,6 @@ pub async fn run(
 
     let (master, workchain_id) = engine.processed_workchain().await?;
     log::info!("processed masterchain: {} workchain: {}", master, workchain_id);
-
     // Broadcasts (blocks, external messages etc.)
     Arc::clone(&engine).listen_broadcasts(
         ShardIdent::masterchain(),
@@ -1922,12 +2023,20 @@ pub async fn run(
         ss_keeper_block
     ).await?;
 
-    // Start validator manager, which will start validator sessions when necessary
-    start_validator_manager(
-        Arc::clone(&engine) as Arc<dyn EngineOperations>,
-        validator_runtime,
-        vm_config
-    );
+    if remp_config.is_client_enabled() {
+        engine.remp_client.as_ref()
+            .ok_or_else(|| error!("Remp client is None, while beeing enabled in config"))?
+            .clone().start(engine.clone()).await?;
+    }
+    if remp_config.is_service_enabled() {
+        // Start validator manager, which will start validator sessions when necessary
+        start_validator_manager(
+            Arc::clone(&engine) as Arc<dyn EngineOperations>,
+            validator_runtime,
+            vm_config,
+            remp_config,
+        );
+    }
 
     // Sync by archives
     if !engine.check_sync().await? {
@@ -1947,10 +2056,8 @@ pub async fn run(
             || error!("INTERNAL ERROR: No shard client MC block after boot")
         )?.deref().clone();
     }
-
     // top shard blocks
     resend_top_shard_blocks_worker(engine.clone());
-
     // blocks download clients
     engine.set_sync_status(Engine::SYNC_STATUS_SYNC_BLOCKS);
     Engine::check_finish_sync(Arc::clone(&engine));
@@ -1962,7 +2069,6 @@ pub async fn run(
         }
     );   
     Ok((engine, join_engine))
-
 }
 
 #[cfg(feature = "telemetry")]
@@ -2054,10 +2160,23 @@ fn telemetry_logger(engine: Arc<Engine>) {
                 "Full node client's telemetry:\n{}",
                 engine.network.telemetry().report(Engine::TIMEOUT_TELEMETRY_SEC)
             );
+            if engine.remp_client.is_some() {
+                log::debug!(
+                    target: "telemetry",
+                    "Remp client's telemetry:\n{}",
+                    engine.remp_client_telemetry().report()
+                );
+            }
+            if engine.remp_service().is_some() {
+                log::debug!(
+                    target: "telemetry",
+                    "Remp core's telemetry:\n{}",
+                    engine.remp_core_telemetry().report()
+                );
+            }
         }
     });
 }
-
 
 #[cfg(not(feature = "external_db"))]
 pub fn start_external_broadcast_process(

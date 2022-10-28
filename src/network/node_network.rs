@@ -20,7 +20,7 @@ use crate::{
     network::{
         catchain_client::CatchainClient,
         full_node_client::{NodeClientOverlay, FullNodeOverlayClient},
-        neighbours::{self, Neighbours}
+        neighbours::{self, Neighbours}, remp::RempNode,
     },
     types::awaiters_pool::AwaitersPool,
 };
@@ -47,7 +47,7 @@ use overlay::{
 use rldp::RldpNode;
 use std::{
     hash::Hash, 
-    sync::{Arc, atomic::{AtomicI32, AtomicU64, Ordering}}, 
+    sync::{Arc, atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering}}, 
     time::{Duration, SystemTime},
     convert::TryInto,
 };
@@ -63,7 +63,8 @@ pub (crate) struct NetworkContext {
     pub dht: Arc<DhtNode>,
     pub overlay: Arc<OverlayNode>,
     pub rldp: Arc<RldpNode>,
-    pub broadcast_hops: u8,
+    pub remp: Arc<RempNode>,
+    pub broadcast_hops: Option<u8>,
     #[cfg(feature = "telemetry")]
     pub telemetry: Arc<FullNodeNetworkTelemetry>,
     #[cfg(feature = "telemetry")]
@@ -157,6 +158,7 @@ impl NodeNetwork {
             overlay.set_broadcast_retransmit(false)
         }
         let rldp = RldpNode::with_adnl_node(adnl.clone(), vec![overlay.clone()])?;
+        let remp = Arc::new(RempNode::new(adnl.clone(), Self::TAG_OVERLAY_KEY)?);
 
         let nodes = global_config.dht_nodes()?;
         for peer in nodes.iter() {
@@ -197,6 +199,7 @@ impl NodeNetwork {
             dht,
             overlay,
             rldp,
+            remp,
             broadcast_hops,
             #[cfg(feature = "telemetry")]
             telemetry: Arc::new(
@@ -630,24 +633,40 @@ impl NodeNetwork {
 
     }
 
-    fn search_validator_keys(
-        local_adnl_id: Arc<KeyId>,
-        dht: Arc<DhtNode>,
-        overlay: Arc<OverlayNode>,
-        validators_contexts: Arc<Cache<UInt256, Arc<ValidatorSetContext>>>,
-        validator_list_id: UInt256,
-        validators: Vec<CatchainNode>
-    ) {
-        const SLEEP_TIME: u64 = 1;  //secs
+    pub fn delete_validator_keys_for_full_node(&self, validators: Vec<CatchainNode>)  -> Result<()> {
+        let local_adnl = self.network_context.adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?;
+
+        for validator in validators.iter() {
+            self.network_context.adnl.delete_peer(local_adnl.id(), &validator.adnl_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn search_validator_keys_for_full_node(
+        &self,
+        validators: Vec<CatchainNode>,
+        callback: Arc<dyn Fn(Arc<KeyId>) + Sync + Send>
+    ) -> Result<Arc<AtomicBool>> {
+        const SLEEP_TIME: u64 = 5;  //secs
+        let dht = self.network_context.dht.clone();
+        let adnl = self.network_context.adnl.clone();
+        let overlay = self.network_context.overlay.clone();
+        let local_adnl = self.network_context.adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?;
+        let local_adnl_id = local_adnl.id().clone();
+        let breaker = Arc::new(AtomicBool::new(false));
+        let breaker_ = breaker.clone();
+        let callback = callback.clone();
         tokio::spawn(async move {
             let mut current_validators = validators;
             loop {
                 match Self::search_validator_keys_round(
                     local_adnl_id.clone(),
-                    dht.clone(),
-                    overlay.clone(),
-                    current_validators).await
-                {
+                    &adnl,
+                    &dht,
+                    &overlay,
+                    current_validators,
+                    Some(callback.clone())
+                ).await {
                     Ok(lost_validators) => {
                         current_validators = lost_validators;
                     },
@@ -660,7 +679,53 @@ impl NodeNetwork {
                     log::info!("search_validator_keys: finished.");
                     break;
                 } else {
-                    log::info!("search_validator_keys: numbers losted validator keys: {}", current_validators.len());
+                    log::info!("search_validator_keys: numbers lost validator keys: {}", current_validators.len());
+                }
+                if breaker.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_secs(SLEEP_TIME)).await;
+            }
+        });
+        Ok(breaker_)
+    }
+
+    fn search_validator_keys_for_validator(
+        &self,
+        local_adnl_id: Arc<KeyId>,
+        validators_contexts: Arc<Cache<UInt256, Arc<ValidatorSetContext>>>,
+        validator_list_id: UInt256,
+        validators: Vec<CatchainNode>
+    ) {
+        const SLEEP_TIME: u64 = 1;  //secs
+        let dht = self.network_context.dht.clone();
+        let adnl = self.network_context.adnl.clone();
+        let overlay = self.network_context.overlay.clone();
+        tokio::spawn(async move {
+            let mut current_validators = validators;
+            loop {
+                match Self::search_validator_keys_round(
+                    local_adnl_id.clone(),
+                    &adnl,
+                    &dht,
+                    &overlay,
+                    current_validators,
+                    None
+                ).await {
+                    Ok(lost_validators) => {
+                        current_validators = lost_validators;
+                    },
+                    Err(e) => {
+                        log::warn!("{:?}", e);
+                        break;
+                    }
+                }
+                if current_validators.is_empty() {
+                    log::info!("search_validator_keys: finished.");
+                    break;
+                } else {
+                    log::info!("search_validator_keys: numbers lost validator keys: {}", current_validators.len());
                 }
                 tokio::time::sleep(Duration::from_secs(SLEEP_TIME)).await;
                 if validators_contexts.get(&validator_list_id).is_none() {
@@ -670,26 +735,34 @@ impl NodeNetwork {
         });
     }
 
-    async fn search_validator_keys_round(
+    async fn search_validator_keys_round<'a>(
         local_adnl_id: Arc<KeyId>,
-        dht: Arc<DhtNode>,
-        overlay: Arc<OverlayNode>,
-        validators: Vec<CatchainNode>
+        adnl: &'a AdnlNode,
+        dht: &'a Arc<DhtNode>,
+        overlay: &'a OverlayNode,
+        validators: Vec<CatchainNode>,
+        full_node_callback: Option<Arc<dyn Fn(Arc<KeyId>) + Sync + Send>>
     ) -> Result<Vec<CatchainNode>> {
         let mut lost_validators = Vec::new();
         for val in validators {
             match DhtNode::find_address(&dht, &val.adnl_id).await {
                 Ok(Some((addr, key))) => {
                     log::info!("addr found: {:?}, key: {:x?}", &addr, &key);
-                    overlay.add_private_peers(&local_adnl_id, vec![(addr, key)])?;
+                    match full_node_callback {
+                        Some(ref callback) => {
+                            adnl.add_peer(&local_adnl_id, &addr, &Arc::new(key))?;
+                            callback(val.adnl_id.clone());
+                        },
+                        None => { overlay.add_private_peers(&local_adnl_id, vec![(addr, key)])?; }
+                    }
                 }
                 Ok(None) => {
                     lost_validators.push(val);
                     log::warn!("find address failed");
                 }
                 Err(e) => { 
-                    lost_validators.push(val);
-                    log::error!("find address failed: {:?}", e); 
+                    lost_validators.push(val.clone());
+                    log::error!("find address failed: {:?}", e);
                 }
             }
         }
@@ -778,6 +851,27 @@ impl NodeNetwork {
         });
     }
 
+    pub async fn get_validator_key(&self, validators: &[CatchainNode]) -> Result<Option<Arc<dyn KeyOption>>> {
+        let validator_adnl_ids = self.config_handler.get_actual_validator_adnl_ids()?;
+        let local_validator = validators.iter().find_map(|val| {
+            if !validator_adnl_ids.contains(&val.adnl_id) {
+                return None;
+            }
+            Some(val.clone())
+        });
+
+        let validator_key = match local_validator {
+            Some(validator) => {
+                let validator_key_raw = self.config_handler.get_validator_key(validator.public_key.id()).await;
+                let (validator_key, _) = validator_key_raw.ok_or_else(|| error!("validator key not found!"))?;
+                Some(validator_key)
+            },
+            None => None
+        };
+
+        Ok(validator_key)
+    }
+
     #[cfg(feature = "telemetry")]
     pub fn telemetry(&self) -> &FullNodeNetworkTelemetry {
         &self.network_context.telemetry
@@ -842,7 +936,7 @@ impl NodeNetwork {
                     tag: self.tag_connectivity_check_broadcast
                 },
                 None,
-                Some(self.network_context.broadcast_hops)
+                self.network_context.broadcast_hops
             ).await
         } else {
             fail!("There is not masterchain overlay")
@@ -879,6 +973,14 @@ impl NodeNetwork {
         }
         Ok(false)
     }
+
+    pub fn remp(&self) -> &RempNode {
+        &self.network_context.remp
+    }
+
+    pub fn public_overlay_key(&self) -> Result<Arc<dyn KeyOption>> {
+        self.network_context.adnl.key_by_tag(Self::TAG_OVERLAY_KEY)
+    }
 }
 
 #[async_trait::async_trait]
@@ -914,6 +1016,7 @@ impl OverlayOperations for NodeNetwork {
             vec![
                 self.network_context.dht.clone(), 
                 self.network_context.overlay.clone(),
+                self.network_context.remp.clone(),
                 self.network_context.rldp.clone()
             ]
         ).await
@@ -1066,10 +1169,10 @@ impl PrivateOverlayOperations for NodeNetwork {
         )?;
 
         if !lost_validators.is_empty() {
-            Self::search_validator_keys(
+            self.search_validator_keys_for_validator(
                 local_validator_adnl_key.id().clone(),
-                self.network_context.dht.clone(), 
-                self.network_context.overlay.clone(),
+//                self.network_context.dht.clone(), 
+//                self.network_context.overlay.clone(),
                 self.validator_context.sets_contexts.clone(),
                 validator_list_id.clone(),
                 lost_validators
