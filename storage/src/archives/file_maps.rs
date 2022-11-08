@@ -198,7 +198,10 @@ impl FileMap {
             match Arc::get_mut(&mut removed_entry.value) {
                 Some(file_description) => {
                     if let Err(e) = file_description.destroy().await {
-                        log::warn!(target: "storage", "destroy file_description is error: {:?}", e);
+                        log::warn!(target: "storage", "destroy file_description {}: {:?}", key, e);
+                    }
+                    if let Err(e) = self.storage.delete(&key.into()){
+                        log::warn!(target: "storage", "delete {} from index: {:?}", key, e);
                     }
                 },
                 None => { 

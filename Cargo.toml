@@ -1,8 +1,12 @@
 [package]
+build = 'common/build/build.rs'
 edition = '2021'
 name = 'ton_node'
-version = '0.51.4'
-build = 'common/build/build.rs'
+version = '0.51.8'
+
+[[bin]]
+name = 'db_lookup'
+path = 'bin/db_lookup.rs'
 
 [[bin]]
 name = 'hardfork'
@@ -10,7 +14,6 @@ path = 'bin/hardfork.rs'
 
 [workspace]
 members = [ 'storage' ]
-resolver = '2'
 
 [profile]
 release = { debug = true }
@@ -45,35 +48,35 @@ regex = '^1.3.0'
 serde = '1.0.105'
 serde_derive = '1.0.105'
 serde_json = '1.0.64'
-sha2 = '0.9'
+sha2 = '0.10'
 spin = '0.7.1'
 stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'ssh://git@github.com/tonlabs/adnl.git' }
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.77' }
 catchain = { path = 'catchain' }
-dht = { git = 'ssh://git@github.com/tonlabs/dht.git' }
-ever-crypto = { git = 'ssh://git@github.com/tonlabs/ever-crypto.git' }
+dht = { git = 'https://github.com/tonlabs/ton-labs-dht', tag = '0.5.74' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', branch = 'consensus-updates' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-overlay = { git = 'ssh://git@github.com/tonlabs/overlay.git' }
-rldp = { git = 'ssh://git@github.com/tonlabs/rldp.git' }
+overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', branch = 'consensus-updates' }
+rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.71' }
 rustracing = { optional = true, version = '0.4.0' }
 rustracing_jaeger = { optional = true, version = '0.4.1' }
-statsd = { optional = true, version = '0.14.0' }
+statsd = { optional = true, version = '0.15' }
 storage = { path = 'storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git' }
-ton_api = { git = 'ssh://git@github.com/tonlabs/ton-tl.git', package = 'ton_api' }
-ton_block = { git = 'ssh://git@github.com/tonlabs/ton-block.git' }
-ton_block_json = { git = 'ssh://git@github.com/tonlabs/ton-block-json.git' }
-ton_executor = { git = 'ssh://git@github.com/tonlabs/ton-executor.git' }
-ton_types = { git = 'ssh://git@github.com/tonlabs/ton-types.git' }
-ton_vm = { git = 'ssh://git@github.com/tonlabs/ton-vm.git' }
+ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git', tag = '2.3.7' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', branch = 'consensus-updates' }
+ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', branch = 'consensus-updates' }
+ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', branch = 'consensus-updates' }
+ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.86' }
+ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.11.4' }
+ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', branch = 'consensus-updates' }
 validator_session = { path = 'validator-session' }
 #metrics-core = { version = "0.5.2", optional = true } #todo: enable after migration to rust 1.60
 #metrics-runtime = { version = "0.13.0", optional = true } #todo: enable after migration to rust 1.60
 metrics-core = { version = "0.5.2" }
 metrics-runtime = { version = "0.13.0" }
-ever_bls_lib = { git = 'ssh://git@github.com/tonlabs/ever-bls-lib.git' } #todo: make optional for verification feature
+ever_bls_lib = { git = 'https://github.com/tonlabs/ever-labs-bls-lib.git', tag = '0.1.24' } #todo: make optional for verification feature
 
 [target.'cfg(unix)'.dependencies.rdkafka]
 optional = true
@@ -91,8 +94,6 @@ external-ip = '4.1.0'
 pretty_assertions = '1'
 rand = '0.7'
 tokio = { features = [ 'macros' ], version = '1.5' }
-#ton_client = { git = 'ssh://git@github.com/tonlabs/TON-SDK.git', package = 'ton_client' }
-#ton_sdk = { git = 'ssh://git@github.com/tonlabs/TON-SDK.git', package = 'ton_sdk' }
 
 [features]
 default = [ 'telemetry', 'async_ss_storage', 'verification' ]
@@ -118,38 +119,19 @@ workchains = [  ]
 gosh = [ 'ton_block/gosh', 'ton_vm/gosh' ]
 
 [patch.'https://github.com/tonlabs/ton-labs-block.git']
-ton_block = { git = 'ssh://git@github.com:22/tonlabs/ton-block.git', branch = "feature-use-bls-key" }
-#ton_block = { path = '../ton-block' }
-
-[patch.'ssh://git@github.com/tonlabs/ton-block.git']
-ton_block = { git = 'ssh://git@github.com:22/tonlabs/ton-block.git', branch = "feature-use-bls-key" }
-#ton_block = { path = '../ton-block' }
+ton_block = { git = 'https://github.com:443//tonlabs/ton-labs-block.git', branch = 'consensus-updates' }
 
 [patch.'https://github.com/tonlabs/ton-labs-block-json.git']
-ton_block_json = { git = 'ssh://git@github.com:22/tonlabs/ton-block-json.git', branch = "feature-use-bls-key" }
-#ton_block_json = { path = '../ton-block-json' }
+ton_block_json = { git = 'https://github.com:443//tonlabs/ton-labs-block-json', branch = 'consensus-updates' }
 
-[patch.'ssh://git@github.com/tonlabs/ton-block-json.git']
-ton_block_json = { git = 'ssh://git@github.com:22/tonlabs/ton-block-json.git', branch = "feature-use-bls-key" }
-#ton_block_json = { path = '../ton-block-json' }
+[patch.'https://github.com/tonlabs/ton-labs-tl']
+ton_api = { git = 'https://github.com:443//tonlabs/ton-labs-tl', package = 'ton_api', branch = 'consensus-updates' }
 
-[patch.'https://github.com/tonlabs/ton-labs-executor.git']
-ton_executor = { git = 'ssh://git@github.com:22/tonlabs/ton-executor.git', branch = "feature-use-bls-key" }
+[patch.'https://github.com/tonlabs/ever-labs-crypto']
+ever-crypto = { git = 'https://github.com:443//tonlabs/ever-labs-crypto', branch = 'consensus-updates' }
 
-[patch.'ssh://git@github.com/tonlabs/ton-executor.git']
-ton_executor = { git = 'ssh://git@github.com:22/tonlabs/ton-executor.git', branch = "feature-use-bls-key" }
+[patch.'https://github.com/tonlabs/ton-labs-vm']
+ton_vm = { git = 'https://github.com:443//tonlabs/ton-labs-vm', branch = 'consensus-updates' }
 
-[patch.'https://github.com/tonlabs/ton-labs-types.git']
-ton_types = { git = 'ssh://git@github.com/tonlabs/ton-types.git' }
-
-[patch.'https://github.com/tonlabs/ton-labs-vm.git']
-ton_vm = { git = 'ssh://git@github.com:22/tonlabs/ton-vm.git', branch = "feature-use-bls-key" }
-
-[patch.'ssh://git@github.com/tonlabs/ton-vm.git']
-ton_vm = { git = 'ssh://git@github.com:22/tonlabs/ton-vm.git', branch = "feature-use-bls-key" }
-
-[patch.'ssh://git@github.com/tonlabs/ton-tl.git']
-ton_api = { git = 'ssh://git@github.com:22/tonlabs/ton-tl.git', package = 'ton_api', branch = "feature-use-bls-keys" }
-
-[patch.'ssh://git@github.com/tonlabs/ever-crypto.git']
-ever-crypto = { git = 'ssh://git@github.com:22/tonlabs/ever-crypto.git', branch = "feature-use-bls" }
+[patch.'https://github.com/tonlabs/ton-labs-overlay']
+overlay = { git = 'https://github.com:443//tonlabs/ton-labs-overlay', branch = 'consensus-updates' }

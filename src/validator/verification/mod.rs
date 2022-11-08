@@ -27,7 +27,6 @@ use validator_session::InstanceCounter;
 use lazy_static::*;
 
 mod block;
-//mod mc_overlay;
 mod multi_signature_bls;
 mod multi_signature_unsafe;
 mod verification_manager;

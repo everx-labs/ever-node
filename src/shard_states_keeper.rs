@@ -82,7 +82,7 @@ impl ShardStatesKeeper {
         engine: Arc<Engine>,
         last_applied_mc_block: BlockIdExt,
         shard_client_mc_block: BlockIdExt,
-        ss_keeper_block: BlockIdExt,
+        mut ss_keeper_block: BlockIdExt,
     ) -> Result<tokio::task::JoinHandle<()>> {
 
         log::trace!("start");
@@ -92,7 +92,21 @@ impl ShardStatesKeeper {
         let join_handle = tokio::spawn(async move {
             engine.acquire_stop(Engine::MASK_SERVICE_PSS_KEEPER);
             while let Err(e) = self.worker(&engine, &ss_keeper_block).await {
-                log::error!("FATAL!!! Unexpected error in persistent states keeper: {:?}", e);
+                log::error!("CRITICAL!!! Unexpected error in persistent states keeper: {:?}", e);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                ss_keeper_block = 'a: loop {
+                    match engine.load_pss_keeper_mc_block_id() {
+                        Err(e) => {
+                            log::error!("CRITICAL!!! load_pss_keeper_mc_block_id: {:?}", e);
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                        Ok(None) => {
+                            log::error!("CRITICAL!!! load_pss_keeper_mc_block_id returned None");
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                        Ok(Some(id)) => break 'a (*id).clone()
+                    }
+                };
             }
             engine.release_stop(Engine::MASK_SERVICE_PSS_KEEPER);
         });
@@ -102,6 +116,9 @@ impl ShardStatesKeeper {
     #[async_recursion::async_recursion]
     pub async fn load_state(&self, block_id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
         log::trace!("load_state {}", block_id);
+        if self.gc_resolver.allow_state_gc(block_id, 0, u64::MAX)? {
+            fail!("Attempt to load state {} which is already allowed to GC", block_id);
+        }
         if let Some(state) = self.states.get(block_id) {
             log::trace!("load_state {} FROM CACHE", block_id);
             return Ok(state.val().clone())
@@ -432,16 +449,24 @@ impl ShardStatesKeeper {
                 for block_id in &shard_blocks {
                     log::trace!("saving {}", block_id);
                     let now = std::time::Instant::now();
-                    let handle = engine.load_block_handle(block_id)?.ok_or_else(
-                        || error!("Cannot load handle for SS keeper shard block {}", block_id)
-                    )?;
+                    let handle = 'a: loop {
+                        match engine.wait_applied_block(block_id, Some(1000)).await {
+                            Ok((h, _)) => break 'a h,
+                            Err(e) => {
+                                if engine.check_stop() {
+                                    return Ok(());
+                                }
+                                log::debug!("states_keeper: haven't shard block handle {} yet: {:?}", 
+                                    block_id, e);
+                            }
+                        }
+                    };
                     self.wait_and_store_persistent_state(
                         engine.deref(), &handle, Arc::new(|| false)).await;
                     if engine.check_stop() {
                         return Ok(());
                     }
-                    log::trace!("saved {} TIME {}ms",
-                        handle.id(), now.elapsed().as_millis());
+                    log::trace!("saved {} TIME {}ms", handle.id(), now.elapsed().as_millis());
                 };
                 log::info!("saved mc state {} and all related shards", handle.id().seq_no());
 

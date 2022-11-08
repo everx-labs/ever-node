@@ -113,7 +113,7 @@ impl ValidatorGroupStatus {
     pub fn before (&self, of: &ValidatorGroupStatus) -> bool {
         match (&self, of) {
             (ValidatorGroupStatus::Countdown {..}, ValidatorGroupStatus::Countdown {..}) => false,
-            _ => (self <= of)
+            _ => self <= of
         }
     }
 }

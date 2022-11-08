@@ -123,7 +123,7 @@ async fn load_next_master_block(
                 break next_handle
             }
         }
-        if let Some(next_handle) = engine.store_block(&block).await?.as_non_created() {
+        if let Some(next_handle) = engine.store_block(&block).await?.to_non_created() {
             break next_handle
         } else {
             continue
@@ -131,7 +131,7 @@ async fn load_next_master_block(
     };
     if !next_handle.has_proof() {
         next_handle = engine.store_block_proof(block.id(), Some(next_handle), &proof).await?
-            .as_non_created()
+            .to_non_created()
             .ok_or_else(
                 || error!("INTERNAL ERROR: bad result for store block {} proof", block.id())
             )?;
@@ -350,7 +350,7 @@ pub async fn process_block_broadcast(
         proof.check_proof_link()?;
     }
     let block = BlockStuff::deserialize_checked(broadcast.id.clone(), broadcast.data.0.clone())?;
-    let mut handle = if let Some(handle) = engine.store_block(&block).await?.as_updated() {
+    let mut handle = if let Some(handle) = engine.store_block(&block).await?.to_updated() {
         handle
     } else {
         log::debug!(
@@ -364,7 +364,7 @@ pub async fn process_block_broadcast(
 
     if !handle.has_proof() {
         let result = engine.store_block_proof(block.id(), Some(handle), &proof).await?;
-        handle = if let Some(handle) = result.as_updated() {
+        handle = if let Some(handle) = result.to_updated() {
             handle
         } else {
             log::debug!(

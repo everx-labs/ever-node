@@ -12,12 +12,10 @@
 */
 
 use crate::{
-    block::BlockStuff, block_proof::BlockProofStuff, engine_traits::EngineAlloc, 
-    shard_state::ShardStateStuff, network::neighbours::{Neighbours, Neighbour}, 
-    types::top_block_descr::TopBlockDescrStuff
+    block::BlockStuff, block_proof::BlockProofStuff,
+    network::{neighbours::{Neighbours, Neighbour}, node_network::NetworkContext}, 
+    shard_state::ShardStateStuff, types::top_block_descr::TopBlockDescrStuff
 };
-#[cfg(feature = "telemetry")]
-use crate::{engine_traits::EngineTelemetry, network::telemetry::FullNodeNetworkTelemetry};
 
 use adnl::{
     declare_counted,
@@ -25,8 +23,7 @@ use adnl::{
     node::AdnlNode
 };
 use ever_crypto::KeyId;
-use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode, QueriesConsumer};
-use rldp::RldpNode;
+use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
 use std::{io::Cursor, time::Instant, sync::Arc, time::Duration};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
@@ -45,8 +42,7 @@ use ton_api::{serialize_boxed, serialize_boxed_append, tag_from_boxed_type, tag_
             ArchiveInfo, Broadcast, 
             DataFull, KeyBlocks, Prepared, PreparedProof, PreparedState, 
             broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}, 
-            externalmessage::ExternalMessage,
-            BlockCandidateStatus,
+            externalmessage::ExternalMessage, 
         }
     }
 };
@@ -55,12 +51,9 @@ use ton_types::{fail, error, Result};
 
 #[async_trait::async_trait]
 pub trait FullNodeOverlayClient : Sync + Send {
-    fn add_new_peers(&self, peers: Vec<Arc<KeyId>>);
-    fn add_query_consumer(&self, consumer: Arc<dyn QueriesConsumer>) -> Result<bool>;
     async fn broadcast_external_message(&self, msg: &[u8]) -> Result<BroadcastSendInfo>;
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()>;
     async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()>;
-    async fn send_block_status(&self, receiver_id: &Arc<KeyId>, status: BlockCandidateStatus) -> Result<Option<BlockCandidateStatus>>;
     async fn download_block_proof(&self, block_id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff>;
     async fn download_block_full(&self, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
     async fn check_persistent_state(
@@ -89,18 +82,15 @@ pub trait FullNodeOverlayClient : Sync + Send {
         mc_seq_no: u32,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<Option<Vec<u8>>>;
-    async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>>;    
+    async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>>;
 }
 
 //    #[derive(Clone)]
 declare_counted!(
     pub struct NodeClientOverlay {
         overlay_id: Arc<OverlayShortId>,
-        overlay: Arc<OverlayNode>,
-        rldp: Arc<RldpNode>,
         peers: Arc<Neighbours>,
-        #[cfg(feature = "telemetry")]
-        telemetry: Arc<FullNodeNetworkTelemetry>,
+        network_context: Arc<NetworkContext>,
         #[cfg(feature = "telemetry")]
         tag_block_broadcast: u32,
         #[cfg(feature = "telemetry")]
@@ -138,41 +128,26 @@ declare_counted!(
         #[cfg(feature = "telemetry")]
         tag_prepare_persistent_state: u32,
         #[cfg(feature = "telemetry")]
-        tag_prepare_zero_state: u32,
-        #[cfg(feature = "telemetry")]
-        tag_send_block_status: u32,
-        #[cfg(feature = "telemetry")]
-        engine_telemetry: Arc<EngineTelemetry>,
-        engine_allocated: Arc<EngineAlloc>
+        tag_prepare_zero_state: u32
     }
 );
 
-impl NodeClientOverlay {
+impl NodeClientOverlay {   
 
     const ADNL_ATTEMPTS: u32 = 50;
     const TIMEOUT_PREPARE: u64 = 6000; // Milliseconds
-    const TIMEOUT_BLOCK_STATUS: u64 = 1000; // Milliseconds
     const TIMEOUT_DELTA: u64 = 50; // Milliseconds
     const TIMEOUT_NO_NEIGHBOURS: u64 = 1000; // Milliseconds
 
-    pub fn new(
+    pub (crate) fn new(
         overlay_id: Arc<OverlayShortId>,
-        overlay: Arc<OverlayNode>,
-        rldp: Arc<RldpNode>,
         peers: Arc<Neighbours>,
-        #[cfg(feature = "telemetry")]
-        telemetry: Arc<FullNodeNetworkTelemetry>,
-        #[cfg(feature = "telemetry")]
-        engine_telemetry: Arc<EngineTelemetry>,
-        engine_allocated: Arc<EngineAlloc>
-    ) -> Self {
+        network_context: &Arc<NetworkContext>
+    ) -> Self { 
         let ret = Self {
             overlay_id,
-            overlay,
-            rldp,
             peers,
-            #[cfg(feature = "telemetry")]
-            telemetry,
+            network_context: network_context.clone(),
             #[cfg(feature = "telemetry")]
             tag_block_broadcast: tag_from_bare_type::<BlockBroadcast>(),
             #[cfg(feature = "telemetry")]
@@ -212,16 +187,11 @@ impl NodeClientOverlay {
             tag_prepare_persistent_state: tag_from_boxed_type::<PreparePersistentState>(),
             #[cfg(feature = "telemetry")]
             tag_prepare_zero_state: tag_from_boxed_type::<PrepareZeroState>(),
-            #[cfg(feature = "telemetry")]
-            tag_send_block_status: tag_from_boxed_type::<ton_api::ton::ton_node::BlockCandidateStatus>(),
-            #[cfg(feature = "telemetry")]
-            engine_telemetry: engine_telemetry.clone(),
-            engine_allocated: engine_allocated.clone(),
-            counter: engine_allocated.overlay_clients.clone().into()
+            counter: network_context.engine_allocated.overlay_clients.clone().into()
         };
         #[cfg(feature = "telemetry")]
-        engine_telemetry.overlay_clients.update(
-            engine_allocated.overlay_clients.load(Ordering::Relaxed)
+        network_context.engine_telemetry.overlay_clients.update(
+            network_context.engine_allocated.overlay_clients.load(Ordering::Relaxed)
         );
         ret
     }
@@ -231,7 +201,7 @@ impl NodeClientOverlay {
     }
 
     pub fn overlay(&self) -> &Arc<OverlayNode> {
-        &self.overlay
+        &self.network_context.overlay
     }
 
     pub fn peers(&self) -> &Arc<Neighbours> {
@@ -258,7 +228,12 @@ impl NodeClientOverlay {
 
         let now = Instant::now();
         let timeout = timeout.or(Some(AdnlNode::calc_timeout(peer.roundtrip_adnl())));
-        let answer = self.overlay.query(peer.id(), &data, &self.overlay_id, timeout).await?;
+        let answer = self.network_context.overlay.query(
+            peer.id(), 
+            &data, 
+            &self.overlay_id, 
+            timeout
+        ).await?;
         let roundtrip = now.elapsed().as_millis() as u64;
 
         if let Some(answer) = answer {
@@ -266,18 +241,28 @@ impl NodeClientOverlay {
                 Ok(answer) => {
                     peer.query_success(roundtrip, false);
                     #[cfg(feature = "telemetry")]
-                    self.telemetry.consumed_query(request_str, true, now.elapsed(), 0); // TODO data size (need to patch overlay)
+                    self.network_context.telemetry.consumed_query(
+                        request_str, 
+                        true, 
+                        now.elapsed(), 
+                        0
+                    ); // TODO data size (need to patch overlay)
                     return Ok(Some(answer))
                 },
                 Err(obj) => {
                     #[cfg(feature = "telemetry")]
-                    self.telemetry.consumed_query(request_str, false, now.elapsed(), 0);
+                    self.network_context.telemetry.consumed_query(
+                        request_str, 
+                        false, 
+                        now.elapsed(), 
+                        0
+                    );
                     log::warn!("Wrong answer {:?} to {:?} from {}", obj, data.object, peer.id())
                 }
             }
         } else {
             #[cfg(feature = "telemetry")]
-            self.telemetry.consumed_query(request_str, false, now.elapsed(), 0);
+            self.network_context.telemetry.consumed_query(request_str, false, now.elapsed(), 0);
             log::warn!("No reply to {:?} from {}", data.object, peer.id())
         }
 
@@ -383,7 +368,7 @@ impl NodeClientOverlay {
         T: BoxedSerialize + std::fmt::Debug 
     {
 
-        let mut query = self.overlay.get_query_prefix(&self.overlay_id)?;
+        let mut query = self.network_context.overlay.get_query_prefix(&self.overlay_id)?;
         serialize_boxed_append(&mut query, &request.object)?;
         let request_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
             format!("{}", std::any::type_name::<T>())
@@ -394,8 +379,8 @@ impl NodeClientOverlay {
         log::trace!("USE PEER {}, {}", peer.id(), request_str);
         #[cfg(feature = "telemetry")]
         let now = Instant::now();
-        let (answer, roundtrip) = self.overlay.query_via_rldp(
-            &self.rldp,
+        let (answer, roundtrip) = self.network_context.overlay.query_via_rldp(
+            &self.network_context.rldp,
             peer.id(),
             &TaggedByteSlice {
                 object: &query[..],
@@ -409,11 +394,16 @@ impl NodeClientOverlay {
 
         if let Some(answer) = answer {
             #[cfg(feature = "telemetry")]
-            self.telemetry.consumed_query(request_str, true, now.elapsed(), answer.len());
+            self.network_context.telemetry.consumed_query(
+                request_str, 
+                true, 
+                now.elapsed(), 
+                answer.len()
+            );
             Ok((answer, peer, roundtrip))
         } else {
             #[cfg(feature = "telemetry")]
-            self.telemetry.consumed_query(request_str, false, now.elapsed(), 0);
+            self.network_context.telemetry.consumed_query(request_str, false, now.elapsed(), 0);
             self.peers.update_neighbour_stats(peer.id(), roundtrip, false, true, true)?;
             fail!("No RLDP answer to {:?} from {}", request.object, peer.id())
         }
@@ -424,17 +414,6 @@ impl NodeClientOverlay {
 
 #[async_trait::async_trait]
 impl FullNodeOverlayClient for NodeClientOverlay {
-    fn add_new_peers(&self, peers: Vec<Arc<KeyId>>) {
-        //self.peers.clone().add_new_peers(peers);
-        for peer in &peers {
-            let _result = self.peers.add(peer.clone());
-        }
-        self.peers.clone().start_rnd_peers_process();
-    }
-
-    fn add_query_consumer(&self, consumer: Arc<dyn QueriesConsumer>) -> Result<bool> {
-        self.overlay.add_consumer(&self.overlay_id, consumer)
-    }
 
     async fn broadcast_external_message(&self, msg: &[u8]) -> Result<BroadcastSendInfo> {
         let broadcast = ExternalMessageBroadcast {
@@ -447,9 +426,14 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             #[cfg(feature = "telemetry")]
             tag: self.tag_external_message_broadcast
         };
-        self.overlay.broadcast(&self.overlay_id, &broadcast, None).await
+        self.network_context.overlay.broadcast(
+            &self.overlay_id, 
+            &broadcast, 
+            None,
+            self.network_context.broadcast_hops
+        ).await
     }
-
+    
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()> {
         let id = broadcast.id.clone();
         let broadcast = TaggedByteSlice {
@@ -457,7 +441,12 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             #[cfg(feature = "telemetry")]
             tag: self.tag_block_broadcast
         };        
-        let info = self.overlay.broadcast(&self.overlay_id, &broadcast, None).await?;
+        let info = self.network_context.overlay.broadcast(
+            &self.overlay_id, 
+            &broadcast, 
+            None,
+            self.network_context.broadcast_hops
+        ).await?;
         log::trace!(
             "send_block_broadcast {} (overlay {}) sent to {} nodes", 
             self.overlay_id, id, info.send_to
@@ -474,31 +463,17 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             #[cfg(feature = "telemetry")]
             tag: self.tag_new_shard_block_broadcast
         };        
-        let info = self.overlay.broadcast(&self.overlay_id, &broadcast, None).await?;
+        let info = self.network_context.overlay.broadcast(
+            &self.overlay_id, 
+            &broadcast, 
+            None,
+            self.network_context.broadcast_hops
+        ).await?;
         log::trace!(
             "send_top_shard_block_description {} (overlay {}) sent to {} nodes", 
             tbd.proof_for(), self.overlay_id, info.send_to
         );
         Ok(())
-    }
-
-    async fn send_block_status(&self, receiver_id: &Arc<KeyId>, status: BlockCandidateStatus) -> Result<Option<BlockCandidateStatus>> {
-        let peer = self.peers.find_neighbour(receiver_id);
-        if peer.is_none() {
-            failure::bail!(format!("Neighbour {} not found", receiver_id));
-        }
-        let peer = peer.unwrap();
-        let object = TLObject::new(status);
-
-        self.send_adnl_query_to_peer::<BlockCandidateStatus, BlockCandidateStatus>(
-            &peer,
-            &TaggedObject {
-                object: object,
-                #[cfg(feature = "telemetry")]
-                tag: self.tag_send_block_status,
-            },
-            Some(Self::TIMEOUT_BLOCK_STATUS),
-        ).await
     }
 
     // tonNode.prepareBlockProof block:tonNode.blockIdExt allow_partial:Bool = tonNode.PreparedProof;
@@ -806,8 +781,8 @@ Ok(if key_block {
                     id.clone(), 
                     &state_bytes,
                     #[cfg(feature = "telemetry")]
-                    &self.engine_telemetry,
-                    &self.engine_allocated
+                    &self.network_context.engine_telemetry,
+                    &self.network_context.engine_allocated
                 )?;
                 Ok((state, state_bytes))
             }
@@ -960,7 +935,7 @@ Ok(if key_block {
     }
 
     async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>> {
-        let receiver = self.overlay.clone();
+        let receiver = self.network_context.overlay.clone();
         let id = self.overlay_id.clone();
         loop {
             match receiver.wait_for_broadcast(&id).await {

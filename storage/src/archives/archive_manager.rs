@@ -14,17 +14,20 @@
 use crate::{
     StorageAlloc,
     archives::{
-        archive_slice::ArchiveSlice, file_maps::{FileDescription, FileMaps}, get_mc_seq_no,
-        package_entry::PackageEntry, package_entry_id::{GetFileNameShort, PackageEntryId}, 
+        archive_slice::ArchiveSlice, file_maps::{FileDescription, FileMaps}, 
+        get_mc_seq_no, package_entry::PackageEntry, 
+        package_entry_id::{GetFileNameShort, PackageEntryId, parse_short_filename},
         package_id::PackageId, ARCHIVE_SLICE_SIZE, KEY_ARCHIVE_PACKAGE_SIZE
     },
     block_handle_db::BlockHandle, db::rocksdb::RocksDb
 };
 #[cfg(feature = "telemetry")]
 use crate::StorageTelemetry;
-use std::{borrow::Borrow, hash::Hash, io::ErrorKind, path::PathBuf, sync::Arc};
+use std::{borrow::Borrow, hash::Hash, io::ErrorKind, path::PathBuf, sync::Arc, time::Instant};
 use tokio::io::AsyncWriteExt;
-use ton_block::*;
+use ton_block::{
+    BlockIdExt, ShardIdent,
+};
 use ton_types::{error, fail, Result, UInt256};
 
 #[cfg(test)]
@@ -207,16 +210,91 @@ impl ArchiveManager {
 
         on_success()?;
 
+        Self::remove(handle, proof_filename, block_filename).await
+    }
+
+    async fn remove(
+        handle: &BlockHandle,
+        proof_filename: Option<PathBuf>,
+        block_filename: Option<PathBuf>
+    ) -> Result<()> {
         if let Some(filename) = proof_filename {
             let _lock = handle.proof_file_lock().write().await;
-            tokio::fs::remove_file(filename).await?;
+            tokio::fs::remove_file(&filename).await
+                .map_err(|err| error!("Cannot remove file with proof {:?}: {}", filename, err))?;
         }
         if let Some(filename) = block_filename {
             let _lock = handle.block_file_lock().write().await;
-            tokio::fs::remove_file(filename).await?;
+            tokio::fs::remove_file(&filename).await
+                .map_err(|err| error!("Cannot remove file with block {:?}: {}", filename, err))?;
         }
         Ok(())
+    }
 
+    pub async fn remove_file(
+        &self,
+        handle: &BlockHandle
+    ) -> Result<()> {
+        let proof_filename = if handle.has_proof_link() {
+            let entry_id = PackageEntryId::<_, UInt256, UInt256>::ProofLink(handle.id());
+            log::debug!(target: "storage", "Remove unapplied proof link file: {}", entry_id);
+            Some(self.unapplied_dir.join(entry_id.filename_short()))
+        } else if handle.has_proof() {
+            let entry_id = PackageEntryId::<_, UInt256, UInt256>::Proof(handle.id());
+            log::debug!(target: "storage", "Remove unapplied proof file: {}", entry_id);
+            Some(self.unapplied_dir.join(entry_id.filename_short()))
+        } else {
+            None
+        };
+        let entry_id = PackageEntryId::<_, UInt256, UInt256>::Block(handle.id());
+        log::debug!(target: "storage", "Remove unapplied block file: {}", entry_id);
+        let block_filename = Some(self.unapplied_dir.join(entry_id.filename_short()));
+        Self::remove(handle, proof_filename, block_filename).await
+    }
+
+    pub async fn clean_unapplied_files(&self, ids: &[BlockIdExt]) {
+        const MAX_SLOT_MS: u128 = 500;
+        fn parse_entry(entry: &tokio::fs::DirEntry) -> Result<(ShardIdent, u32)> {
+            let (workchain_id, shard_prefix_tagged, seq_no) = parse_short_filename(
+                &entry.file_name().into_string().map_err(|_| error!("unreadable file name"))?
+            )?;
+            Ok((ShardIdent::with_tagged_prefix(workchain_id, shard_prefix_tagged)?, seq_no))
+        }
+        let mut state = match tokio::fs::read_dir(self.unapplied_dir.as_path()).await {
+            Err(err) => {
+                log::warn!("clean_unapplied_files: cannot get directory list: {} ", err);
+                return
+            }
+            Ok(state) => state
+        };
+        let start = Instant::now();
+        loop {
+            if start.elapsed().as_millis() > MAX_SLOT_MS {
+                break
+            }
+            let entry = match state.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(err) => {
+                    log::warn!("clean_unapplied_files: next_entry: {}", err);
+                    continue
+                }
+            };
+            match parse_entry(&entry) {
+                Ok((shard, seq_no)) => for id in ids {
+                    if shard.intersect_with(id.shard()) && (seq_no < id.seq_no()) {
+                        if let Err(err) = tokio::fs::remove_file(entry.path()).await {
+                            log::warn!(
+                                "clean_unapplied_files: cannot remove {:?}: {}", entry.path(), err
+                            );
+                        }
+                    }
+                },
+                Err(err) => log::warn!(
+                    "clean_unapplied_files: wrong file name: {:?}: {}", entry.path(), err
+                )
+            } 
+        }
     }
 
     pub async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {

@@ -799,10 +799,6 @@ impl Engine {
         self.overlay_operations.clone().get_overlay(id).await
     }
 
-    pub async fn get_custom_overlay(&self, overlay_id: (Arc<overlay::OverlayShortId>, overlay::OverlayId)) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        self.overlay_operations.clone().get_overlay(overlay_id).await
-    }
-
     pub fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<overlay::OverlayShortId>, overlay::OverlayId)> {
         self.overlay_operations.calc_overlay_id(workchain, shard)
     }
@@ -970,13 +966,13 @@ impl Engine {
                 let now = std::time::Instant::now();
                 proof.check_proof(self.deref()).await?;
                 let handle = self.store_block(&block).await?;
-                let handle = if let Some(handle) = handle.as_non_created() {
+                let handle = if let Some(handle) = handle.to_non_created() {
                     handle
                 } else {
                     continue
                 };
                 let handle = self.store_block_proof(id, Some(handle), &proof).await?;
-                let handle = handle.as_non_created().ok_or_else(
+                let handle = handle.to_non_created().ok_or_else(
                     || error!("INTERNAL ERROR: bad result for store block {} proof", id)
                 )?;                    
                 log::trace!(
@@ -1537,7 +1533,7 @@ impl Engine {
         Ok(self.is_validator())
     }
 
-    fn load_pss_keeper_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+    pub fn load_pss_keeper_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
         self.db().load_full_node_state(PSS_KEEPER_MC_BLOCK)
     }
 
@@ -1578,7 +1574,9 @@ impl Engine {
         let mut handle = engine.load_block_handle(&archives_gc_block)?.ok_or_else(
             || error!("Cannot load handle for archives_gc_block {}", archives_gc_block)
         )?;
+        let mut last_clean_unapplied_time = std::time::Instant::now();
         'm: loop {
+            let mc_state = engine.load_state(handle.id()).await?;
             if engine.check_stop() {
                 break 'm;
             }
@@ -1587,6 +1585,13 @@ impl Engine {
                 if let Err(e) = Self::check_gc_for_archives(&engine, &handle, &mc_state).await {
                     log::warn!("archive manager gc: {}", e);
                 }
+            }
+            // clean unapplied blocks every 15 seconds
+            if last_clean_unapplied_time.elapsed().as_secs() > 15 {
+                let (_master, workchain_id) = engine.processed_workchain().await?;
+                let ids = mc_state.top_blocks(workchain_id)?;
+                engine.db().archive_manager().clean_unapplied_files(&ids).await;
+                last_clean_unapplied_time = std::time::Instant::now();
             }
             handle = loop {
                 match engine.wait_next_applied_mc_block(&handle, Some(500)).await {
@@ -1850,8 +1855,10 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>)
 
     engine.set_sync_status(Engine::SYNC_STATUS_FINISH_BOOT);
     log::info!("Boot complete.");
-    log::info!("LastMcBlockId: {}", last_applied_mc_block);
-    log::info!("ShardsClientMcBlockId: {}", shard_client_mc_block);
+    log::info!("last_applied_mc_block: {}", last_applied_mc_block);
+    log::info!("shard_client_mc_block: {}", shard_client_mc_block);
+    log::info!("ss_keeper_mc_block: {}", ss_keeper_mc_block);
+    log::info!("archives_gc_block: {}", archives_gc_block);
     Ok((last_applied_mc_block, shard_client_mc_block, ss_keeper_mc_block, archives_gc_block))
 }
 

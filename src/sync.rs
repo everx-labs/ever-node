@@ -515,11 +515,11 @@ async fn save_block(
         fail!("Proof{} not found in archive: {}", link_str, block_id);
     };
     proof.check_proof(engine.as_ref()).await?;
-    let handle = engine.store_block(&block).await?.as_non_created().ok_or_else(
+    let handle = engine.store_block(&block).await?.to_non_created().ok_or_else(
         || error!("INTERNAL ERROR: mismatch in block {} store result during sync", block_id)
     )?;
     let handle = engine.store_block_proof(block_id, Some(handle), &proof).await?
-        .as_non_created()
+        .to_non_created()
         .ok_or_else(
             || error!(
                 "INTERNAL ERROR: mismatch in block {} proof store result during sync", 

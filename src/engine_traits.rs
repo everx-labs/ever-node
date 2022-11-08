@@ -134,10 +134,6 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    async fn get_custom_overlay(&self, overlay_id: (Arc<OverlayShortId>, OverlayId)) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        unimplemented!()
-    }
-
     fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<OverlayShortId>, OverlayId)> {
         unimplemented!()
     }

@@ -64,7 +64,7 @@ async fn run_cold(
                 Ok(proof) => match proof.check_proof_link() {
                     Ok(_) => {
                         let handle = engine.store_block_proof(&block_id, handle, &proof).await? 
-                            .as_non_created()
+                            .to_non_created()
                             .ok_or_else( 
                                 || error!(
                                     "INTERNAL ERROR: Bad result in store block {} proof", 
@@ -290,7 +290,7 @@ async fn download_key_block_proof(
         match result {
             Ok(_) => {
                 let handle = engine.store_block_proof(block_id, None, &proof).await?
-                    .as_non_created()
+                    .to_non_created()
                     .ok_or_else(
                         || error!("INTERNAL ERROR: Bad result in store block {} proof", block_id)
                     )?;
@@ -319,12 +319,12 @@ async fn download_block_and_state(
         (engine.load_block(&handle).await?, handle)
     } else {
         let (block, proof) = engine.download_block(block_id, None).await?;
-        let mut handle = engine.store_block(&block).await?.as_non_created().ok_or_else(
+        let mut handle = engine.store_block(&block).await?.to_non_created().ok_or_else(
             || error!("INTERNAL ERROR: mismatch in block {} store result during boot", block_id)
         )?;
         if !handle.has_proof() {
             handle = engine.store_block_proof(block_id, Some(handle), &proof).await?
-                .as_non_created()
+                .to_non_created()
                 .ok_or_else(
                     || error!(
                         "INTERNAL ERROR: mismatch in block {} proof store result during boot",

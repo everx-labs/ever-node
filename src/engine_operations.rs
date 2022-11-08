@@ -24,9 +24,6 @@ use crate::{
         INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, LAST_ROTATION_MC_BLOCK, SHARD_CLIENT_MC_BLOCK,
         BlockResult,
     },
-    network::{
-        full_node_client::FullNodeOverlayClient,
-    },
     shard_state::ShardStateStuff,
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
     ext_messages::{create_ext_message, EXT_MESSAGES_TRACE_TARGET},
@@ -133,10 +130,6 @@ impl EngineOperations for Engine {
 
     fn get_sync_status(&self) -> u32 {
         self.get_sync_status()
-    }
-
-    async fn get_custom_overlay(&self, overlay_id: (Arc<overlay::OverlayShortId>, overlay::OverlayId)) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        self.get_custom_overlay(overlay_id).await
     }
 
     fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<overlay::OverlayShortId>, overlay::OverlayId)> {
@@ -438,7 +431,7 @@ impl EngineOperations for Engine {
 
     async fn store_block(&self, block: &BlockStuff) -> Result<BlockResult> {
         let result = self.db().store_block_data(block, None).await?;
-        if let Some(handle) = result.clone().as_updated() {
+        if let Some(handle) = result.clone().to_updated() {
             let id = block.id();
             if id.shard().is_masterchain() {
                 let seq_no = id.seq_no();
@@ -553,7 +546,7 @@ impl EngineOperations for Engine {
             None, 
             Some(state.state().gen_time()),
             None
-        )?.as_non_updated().ok_or_else(
+        )?.to_non_updated().ok_or_else(
             || error!("INTERNAL ERROR: mismatch in zerostate storing")
         )?;
         let (state, _) =
