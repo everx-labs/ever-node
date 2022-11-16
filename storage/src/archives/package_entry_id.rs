@@ -17,9 +17,6 @@ use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
-use lazy_static::lazy_static;
-use regex::Regex;
-
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256};
 
@@ -43,7 +40,9 @@ where
 }
 
 impl PackageEntryId<BlockIdExt, UInt256, UInt256> {
+
     pub fn from_filename(filename: &str) -> Result<Self> {
+
         if filename == PackageEntryId::<BlockIdExt, UInt256, UInt256>::Empty.filename_prefix() {
             return Ok(PackageEntryId::Empty);
         }
@@ -123,6 +122,7 @@ impl PackageEntryId<BlockIdExt, UInt256, UInt256> {
         }
 
         fail!("Cannot parse filename: {}", filename)
+    
     }
 
     fn parse_block_ids(filename: &str, dummy: PackageEntryId<&BlockIdExt, UInt256, UInt256>, count: usize) -> Result<Option<Vec<BlockIdExt>>> {
@@ -184,31 +184,66 @@ impl GetFileName for BlockIdExt {
     }
 }
 
+// parse block ID: (wc,shard,seqno):rh:fh, for example (-1,F800000000000000,10):19..68:5C..DC
 fn parse_block_id(filename: &str) -> Result<(BlockIdExt, usize)> {
-    lazy_static! {
-            static ref REGEX: Regex = Regex::new(r"^\((-?\d+),([0-9a-f]{16}),(\d+)\):([0-9A-F]{64}):([0-9A-F]{64})")
-                .expect("Failed to compile regular expression");
+    fn find_id(ids: &str, upto: char) -> Result<usize> {
+        let ret = ids.find(upto).ok_or_else(|| error!(""))?;
+        if ids.len() == ret + 1 {
+            fail!("too short")
         }
+        Ok(ret)
+    }
+    fn parse_ids(ids: &str) -> Result<(BlockIdExt, usize)> {
+        if find_id(ids, '(')? != 0 {
+            fail!("bad format")
+        }
+        let pos_a = find_id(&ids[1..], ',')? + 1;
+        let pos_b = find_id(&ids[pos_a + 1..], ',')? + pos_a + 1;
+        let pos_c = find_id(&ids[pos_b + 1..], ')')? + pos_b + 1;
+        if find_id(&ids[pos_c + 1..], ':')? != 0 {
+            fail!("bad format")
+        }
+        let pos_d = find_id(&ids[pos_c + 2..], ':')? + pos_c + 2;
+        if ids.len() <= pos_d + 64 {
+            fail!("bad format")
+        }
+        let id = BlockIdExt {
+            shard_id: ShardIdent::with_tagged_prefix(
+                i32::from_str(&ids[1..pos_a])?,
+                u64::from_str_radix(&ids[pos_a + 1..pos_b], 16)?
+            )?,
+            seq_no: u32::from_str(&ids[pos_b + 1..pos_c])?,
+            root_hash: UInt256::from_str(&ids[pos_c + 2..pos_d])?,
+            file_hash: UInt256::from_str(&ids[pos_d + 1..pos_d + 65])?
+        };
+        Ok((id, pos_d + 65))
+    }
+    parse_ids(filename).map_err(|e| error!("Invalid block ID {}: {}", filename, e))
+}
 
-    let captures = REGEX.captures(filename)
-        .ok_or_else(|| error!("Incorrect BlockIdExt format: {}", filename))?;
-
-    enum Groups { Chain = 1, Shard, SeqNo, RootHash, FileHash }
-
-    let workchain_id = i32::from_str(&captures[Groups::Chain as usize])?;
-    let shard_prefix_tagged = u64::from_str_radix(&captures[Groups::Shard as usize], 16)?;
-    let seq_no = u32::from_str(&captures[Groups::SeqNo as usize])?;
-    let root_hash = UInt256::from_str(&captures[Groups::RootHash as usize])?;
-    let file_hash = UInt256::from_str(&captures[Groups::FileHash as usize])?;
-
-    let shard_id = ShardIdent::with_tagged_prefix(workchain_id, shard_prefix_tagged)?;
-
-    Ok((BlockIdExt {
-        shard_id,
-        seq_no,
-        root_hash,
-        file_hash
-    }, captures[0].len()))
+/// parse file name for example block_555_F800000000000000_100_19685CDC8B64BBB5
+pub fn parse_short_filename(filename: &str) -> Result<(i32, u64, u32)> {
+    enum Id { 
+        Wc = 1, 
+        Shard, 
+        SeqNo, 
+        Count = 5
+    }
+    fn parse_ids(ids: &Vec<&str>) -> Result<(i32, u64, u32)> {
+        if ids.len() != Id::Count as usize {
+            fail!("too short")
+        } else {
+            let ret = (
+                i32::from_str(&ids[Id::Wc as usize])?,
+                u64::from_str_radix(&ids[Id::Shard as usize], 16)?,
+                u32::from_str(&ids[Id::SeqNo as usize])?
+            );
+            Ok(ret)
+        }
+    }
+    parse_ids(&filename.split('_').collect()).map_err(
+        |e| error!("Invalid block file name {}: {}", filename, e)
+    )
 }
 
 impl FromFileName for BlockIdExt {
@@ -239,21 +274,22 @@ where
             PackageEntryId::Proof(block_id) |
             PackageEntryId::ProofLink(block_id) |
             PackageEntryId::Signatures(block_id) |
-            PackageEntryId::BlockInfo(block_id) => format!("{}_{}", self.filename_prefix(), block_id.borrow().filename()),
+            PackageEntryId::BlockInfo(block_id) => 
+                format!("{}_{}", self.filename_prefix(), block_id.borrow().filename()),
 
             PackageEntryId::PersistentState { mc_block_id, block_id } =>
                 format!("{}_{}_{}",
-                        self.filename_prefix(),
-                        mc_block_id.borrow().filename(),
-                        block_id.borrow().filename()
+                    self.filename_prefix(),
+                    mc_block_id.borrow().filename(),
+                    block_id.borrow().filename()
                 ),
 
             PackageEntryId::Candidate { block_id, collated_data_hash, source } =>
                 format!("{}_{}_{:X}_{}",
-                        self.filename_prefix(),
-                        block_id.borrow().filename(),
-                        collated_data_hash.borrow(),
-                        source.borrow().filename()
+                    self.filename_prefix(),
+                    block_id.borrow().filename(),
+                    collated_data_hash.borrow(),
+                    source.borrow().filename()
                 ),
 
         }
@@ -269,10 +305,10 @@ impl GetFileNameShort for BlockIdExt {
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
         format!("{wc_id}_{shard_id:016X}_{seq_no}_{hash:016X}",
-                wc_id = self.shard().workchain_id(),
-                shard_id = self.shard().shard_prefix_with_tag(),
-                seq_no = self.seq_no(),
-                hash = hasher.finish(),
+            wc_id = self.shard().workchain_id(),
+            shard_id = self.shard().shard_prefix_with_tag(),
+            seq_no = self.seq_no(),
+            hash = hasher.finish()
         )
     }
 }
@@ -292,21 +328,22 @@ where
             PackageEntryId::Proof(block_id) |
             PackageEntryId::ProofLink(block_id) |
             PackageEntryId::Signatures(block_id) |
-            PackageEntryId::BlockInfo(block_id) => format!("{}_{}", self.filename_prefix(), block_id.borrow().filename_short()),
+            PackageEntryId::BlockInfo(block_id) => 
+                format!("{}_{}", self.filename_prefix(), block_id.borrow().filename_short()),
 
             PackageEntryId::PersistentState { mc_block_id, block_id } =>
                 format!("{}_{}_{}",
-                        self.filename_prefix(),
-                        mc_block_id.borrow().filename_short(),
-                        block_id.borrow().filename_short()
+                    self.filename_prefix(),
+                    mc_block_id.borrow().filename_short(),
+                    block_id.borrow().filename_short()
                 ),
 
             PackageEntryId::Candidate { block_id, collated_data_hash, source } =>
                 format!("{}_{}_{:X}_{}",
-                        self.filename_prefix(),
-                        block_id.borrow().filename_short(),
-                        collated_data_hash.borrow(),
-                        source.borrow().filename()
+                    self.filename_prefix(),
+                    block_id.borrow().filename_short(),
+                    collated_data_hash.borrow(),
+                    source.borrow().filename()
                 ),
 
         }

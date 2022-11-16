@@ -423,7 +423,7 @@ impl EngineOperations for Engine {
 
     async fn store_block(&self, block: &BlockStuff) -> Result<BlockResult> {
         let result = self.db().store_block_data(block, None).await?;
-        if let Some(handle) = result.clone().as_updated() {
+        if let Some(handle) = result.clone().to_updated() {
             let id = block.id();
             if id.shard().is_masterchain() {
                 let seq_no = id.seq_no();
@@ -538,7 +538,7 @@ impl EngineOperations for Engine {
             None, 
             Some(state.state().gen_time()),
             None
-        )?.as_non_updated().ok_or_else(
+        )?.to_non_updated().ok_or_else(
             || error!("INTERNAL ERROR: mismatch in zerostate storing")
         )?;
         let (state, _) =
@@ -563,7 +563,7 @@ impl EngineOperations for Engine {
         self.db().store_block_prev2(handle, prev2, None)
     }
 
-    fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_prev2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         self.db().load_block_prev2(id)
     }
 
@@ -579,7 +579,7 @@ impl EngineOperations for Engine {
         self.db().store_block_next2(handle, next2, None)
     }
 
-    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         self.db().load_block_next2(id)
     }
 

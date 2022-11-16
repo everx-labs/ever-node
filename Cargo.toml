@@ -1,27 +1,21 @@
 [package]
+build = 'common/build/build.rs'
 edition = '2021'
 name = 'ton_node'
-version = '0.51.1'
-build = 'common/build/build.rs'
-
+version = '0.51.14'
 
 [workspace]
 members = [ 'storage' ]
-resolver = '2'
-
-[profile]
-release = { debug = true }
 
 [dependencies]
-async-trait = '0.1.22'
 async-recursion = '0.3.2'
+async-trait = '0.1.22'
 base64 = '0.13'
 bitflags = '1.2.1'
 chrono = '=0.4.19'
 clap = '2.33.1'
 colored = '1.9.3'
 crossbeam-channel = '0.4.2'
-ctrlc = { features = [ 'termination' ], version = '3.2.1' }
 dirs = '2.0.2'
 env_logger = '0.7.1'
 failure = '0.1'
@@ -39,30 +33,45 @@ regex = '^1.3.0'
 serde = '1.0.105'
 serde_derive = '1.0.105'
 serde_json = '1.0.64'
-sha2 = '0.9'
+sha2 = '0.10'
 spin = '0.7.1'
 stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.77' }
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.92' }
 catchain = { path = 'catchain' }
-dht = { git = 'https://github.com/tonlabs/ton-labs-dht', tag = '0.5.74' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.35' }
+ctrlc = { features = [ 'termination' ], version = '3.2.1' }
+dht = { git = 'https://github.com/tonlabs/ton-labs-dht', tag = '0.5.90' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.55' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.61' }
-rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.71' }
+overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.77' }
+rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.86' }
 rustracing = { optional = true, version = '0.4.0' }
 rustracing_jaeger = { optional = true, version = '0.4.1' }
-statsd = { optional = true, version = '0.14.0' }
+statsd = { optional = true, version = '0.15' }
 storage = { path = 'storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git', tag = '2.3.7' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.131' }
-ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.8.3' }
-ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', tag = '0.7.31' }
-ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.86' }
-ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.11.4' }
-ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.43' }
+ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git', tag = '2.3.23' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.143' }
+ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.8.16' }
+ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', tag = '0.7.55' }
+ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.113' }
+ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.11.8' }
+ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.58' }
 validator_session = { path = 'validator-session' }
+
+[features]
+async_ss_storage = [ 'storage/ref_count_gc' ]
+ci_run = [ 'storage/ci_run' ]
+default = [ 'telemetry', 'async_ss_storage' ]
+export_key = [ 'catchain/export_key', 'ever-crypto/export_key' ]
+external_db = [ 'rdkafka' ]
+gosh = [ 'ton_block/gosh', 'ton_vm/gosh' ]
+metrics = [ 'statsd' ]
+slashing = [  ]
+telemetry = [ 'adnl/telemetry', 'dht/telemetry', 'rldp/telemetry', 'overlay/telemetry', 'storage/telemetry' ]
+trace_alloc = [  ]
+trace_alloc_detail = [ 'trace_alloc' ]
+workchains = [  ]
 
 [target.'cfg(unix)'.dependencies.rdkafka]
 optional = true
@@ -73,22 +82,3 @@ features = [ 'cmake_build' ]
 optional = true
 version = '0.26.0'
 
-[features]
-default = [ 'telemetry', 'async_ss_storage' ]
-external_db = [ 'rdkafka' ]
-ci_run = [ 'storage/ci_run' ]
-export_key = [ 'catchain/export_key', 'ever-crypto/export_key' ]
-metrics = [ 'statsd' ]
-slashing = [  ]
-telemetry = [
-    'adnl/telemetry',
-    'dht/telemetry',
-    'rldp/telemetry',
-    'overlay/telemetry',
-    'storage/telemetry'
-]
-trace_alloc_detail = [ 'trace_alloc' ]
-trace_alloc = [  ]
-async_ss_storage = [ 'storage/ref_count_gc' ]
-workchains = [  ]
-gosh = [ 'ton_block/gosh', 'ton_vm/gosh' ]

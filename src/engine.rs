@@ -962,13 +962,13 @@ impl Engine {
                 let now = std::time::Instant::now();
                 proof.check_proof(self.deref()).await?;
                 let handle = self.store_block(&block).await?;
-                let handle = if let Some(handle) = handle.as_non_created() {
+                let handle = if let Some(handle) = handle.to_non_created() {
                     handle
                 } else {
                     continue
                 };
                 let handle = self.store_block_proof(id, Some(handle), &proof).await?;
-                let handle = handle.as_non_created().ok_or_else(
+                let handle = handle.to_non_created().ok_or_else(
                     || error!("INTERNAL ERROR: bad result for store block {} proof", id)
                 )?;                    
                 log::trace!(
@@ -1526,7 +1526,7 @@ impl Engine {
         Ok(self.is_validator())
     }
 
-    fn load_pss_keeper_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+    pub fn load_pss_keeper_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
         self.db().load_full_node_state(PSS_KEEPER_MC_BLOCK)
     }
 
@@ -1561,13 +1561,35 @@ impl Engine {
         engine: &Arc<Engine>,
         archives_gc_block: BlockIdExt
     ) -> Result<()> {
+
+        fn check_unapplied_block_id(
+            mut id: BlockIdExt, 
+            engine: &Arc<Engine>
+        ) -> Result<Option<BlockIdExt>> {
+            loop {
+                let handle = engine.load_block_handle(&id)?.ok_or_else(
+                    || error!("No handle for block {} in DB", id)
+                )?;
+                if handle.is_archived() {
+                    return Ok(Some(id))
+                }
+                if engine.load_block_prev2(&id).is_ok() {
+                    // Skip drop unapplied block right after merge
+                    return Ok(None)
+                }
+                id = engine.load_block_prev1(&id)?
+            }
+        }
+
         if !archives_gc_block.shard().is_masterchain() {
             fail!("'archives_gc_block' must belong master chain");
         }
         let mut handle = engine.load_block_handle(&archives_gc_block)?.ok_or_else(
             || error!("Cannot load handle for archives_gc_block {}", archives_gc_block)
         )?;
+        let mut last_clean_unapplied_time = std::time::Instant::now();
         'm: loop {
+            let mc_state = engine.load_state(handle.id()).await?;
             if engine.check_stop() {
                 break 'm;
             }
@@ -1576,6 +1598,20 @@ impl Engine {
                 if let Err(e) = Self::check_gc_for_archives(&engine, &handle, &mc_state).await {
                     log::warn!("archive manager gc: {}", e);
                 }
+            }
+            // clean unapplied blocks every 15 seconds
+            if last_clean_unapplied_time.elapsed().as_secs() > 15 {
+                let (_master, workchain_id) = engine.processed_workchain().await?;
+                let mut ids = Vec::new();
+                for id in mc_state.top_blocks(workchain_id)? {
+                    match check_unapplied_block_id(id, engine) {
+                        Ok(Some(id)) => ids.push(id),
+                        Err(e) => log::warn!("unapplied files gc: {}", e),
+                        _ => ()
+                    }    
+                }
+                engine.db().archive_manager().clean_unapplied_files(&ids).await;
+                last_clean_unapplied_time = std::time::Instant::now();
             }
             handle = loop {
                 match engine.wait_next_applied_mc_block(&handle, Some(500)).await {
@@ -1590,6 +1626,7 @@ impl Engine {
             engine.save_archives_gc_mc_block_id(handle.id())?;
         }
         Ok(())
+
     }
 
     async fn check_gc_for_archives(
@@ -1839,8 +1876,10 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>)
 
     engine.set_sync_status(Engine::SYNC_STATUS_FINISH_BOOT);
     log::info!("Boot complete.");
-    log::info!("LastMcBlockId: {}", last_applied_mc_block);
-    log::info!("ShardsClientMcBlockId: {}", shard_client_mc_block);
+    log::info!("last_applied_mc_block: {}", last_applied_mc_block);
+    log::info!("shard_client_mc_block: {}", shard_client_mc_block);
+    log::info!("ss_keeper_mc_block: {}", ss_keeper_mc_block);
+    log::info!("archives_gc_block: {}", archives_gc_block);
     Ok((last_applied_mc_block, shard_client_mc_block, ss_keeper_mc_block, archives_gc_block))
 }
 

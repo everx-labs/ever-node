@@ -14,24 +14,27 @@
 use crate::{
     StorageAlloc,
     archives::{
-        archive_slice::ArchiveSlice, file_maps::{FileDescription, FileMaps}, get_mc_seq_no,
-        package_entry::PackageEntry, package_entry_id::{GetFileNameShort, PackageEntryId}, 
+        archive_slice::ArchiveSlice, file_maps::{FileDescription, FileMaps}, 
+        get_mc_seq_no, package_entry::PackageEntry, 
+        package_entry_id::{GetFileNameShort, PackageEntryId, parse_short_filename},
         package_id::PackageId, ARCHIVE_SLICE_SIZE, KEY_ARCHIVE_PACKAGE_SIZE
     },
     block_handle_db::BlockHandle, db::rocksdb::RocksDb
 };
 #[cfg(feature = "telemetry")]
 use crate::StorageTelemetry;
-use std::{borrow::Borrow, hash::Hash, io::ErrorKind, path::PathBuf, sync::Arc};
+use std::{borrow::Borrow, hash::Hash, io::ErrorKind, path::PathBuf, sync::Arc, time::Instant};
 use tokio::io::AsyncWriteExt;
-use ton_block::*;
+use ton_block::{
+    BlockIdExt, ShardIdent,
+};
 use ton_types::{error, fail, Result, UInt256};
 
 
 pub struct ArchiveManager {
     db: Arc<RocksDb>,
     db_root_path: Arc<PathBuf>,
-    unapplied_dir: PathBuf,
+    unapplied_files_path: PathBuf,
     file_maps: FileMaps,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<StorageTelemetry>,
@@ -39,6 +42,8 @@ pub struct ArchiveManager {
 }
 
 impl ArchiveManager {
+
+    pub const ARCHIVE_DIR: &str = "archive";
 
     pub async fn with_data(
         db: Arc<RocksDb>,
@@ -54,12 +59,14 @@ impl ArchiveManager {
             &telemetry,
             &allocated
         ).await?;
-        let unapplied_dir = db_root_path.join("archive").join("unapplied");
-        tokio::fs::create_dir_all(unapplied_dir.as_path()).await?;
+        let unapplied_files_path = db_root_path.join(Self::ARCHIVE_DIR).join("unapplied");
+        tokio::fs::create_dir_all(unapplied_files_path.as_path()).await.map_err(
+            |e| error!("Cannot create unapplied files directory {:?}: {}", unapplied_files_path, e)
+        )?;
         Ok(Self {
             db,
             db_root_path,
-            unapplied_dir,
+            unapplied_files_path,
             file_maps,
             #[cfg(feature = "telemetry")]
             telemetry,
@@ -69,6 +76,10 @@ impl ArchiveManager {
 
     pub const fn db_root_path(&self) -> &Arc<PathBuf> {
         &self.db_root_path
+    }
+
+    pub const fn unapplied_files_path(&self) -> &PathBuf {
+        &self.unapplied_files_path
     }
 
     pub async fn add_file<B, U256, PK>(&self, entry_id: &PackageEntryId<B, U256, PK>, data: Vec<u8>) -> Result<()>
@@ -83,7 +94,7 @@ impl ArchiveManager {
             fail!("Added file's ({}) data can't have zero length", entry_id);
         }
 
-        let filename = self.unapplied_dir.join(entry_id.filename_short());
+        let filename = self.unapplied_files_path.join(entry_id.filename_short());
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -109,7 +120,7 @@ impl ArchiveManager {
         if handle.is_archived() {
             true
         } else {
-            self.unapplied_dir.join(entry_id.filename_short()).exists()
+            self.unapplied_files_path.join(entry_id.filename_short()).exists()
         }
     }
 
@@ -204,16 +215,91 @@ impl ArchiveManager {
 
         on_success()?;
 
+        Self::remove(handle, proof_filename, block_filename).await
+    }
+
+    async fn remove(
+        handle: &BlockHandle,
+        proof_filename: Option<PathBuf>,
+        block_filename: Option<PathBuf>
+    ) -> Result<()> {
         if let Some(filename) = proof_filename {
             let _lock = handle.proof_file_lock().write().await;
-            tokio::fs::remove_file(filename).await?;
+            tokio::fs::remove_file(&filename).await
+                .map_err(|err| error!("Cannot remove file with proof {:?}: {}", filename, err))?;
         }
         if let Some(filename) = block_filename {
             let _lock = handle.block_file_lock().write().await;
-            tokio::fs::remove_file(filename).await?;
+            tokio::fs::remove_file(&filename).await
+                .map_err(|err| error!("Cannot remove file with block {:?}: {}", filename, err))?;
         }
         Ok(())
+    }
 
+    pub async fn remove_file(
+        &self,
+        handle: &BlockHandle
+    ) -> Result<()> {
+        let proof_filename = if handle.has_proof_link() {
+            let entry_id = PackageEntryId::<_, UInt256, UInt256>::ProofLink(handle.id());
+            log::debug!(target: "storage", "Remove unapplied proof link file: {}", entry_id);
+            Some(self.unapplied_files_path.join(entry_id.filename_short()))
+        } else if handle.has_proof() {
+            let entry_id = PackageEntryId::<_, UInt256, UInt256>::Proof(handle.id());
+            log::debug!(target: "storage", "Remove unapplied proof file: {}", entry_id);
+            Some(self.unapplied_files_path.join(entry_id.filename_short()))
+        } else {
+            None
+        };
+        let entry_id = PackageEntryId::<_, UInt256, UInt256>::Block(handle.id());
+        log::debug!(target: "storage", "Remove unapplied block file: {}", entry_id);
+        let block_filename = Some(self.unapplied_files_path.join(entry_id.filename_short()));
+        Self::remove(handle, proof_filename, block_filename).await
+    }
+
+    pub async fn clean_unapplied_files(&self, ids: &[BlockIdExt]) {
+        const MAX_SLOT_MS: u128 = 500;
+        fn parse_entry(entry: &tokio::fs::DirEntry) -> Result<(ShardIdent, u32)> {
+            let (workchain_id, shard_prefix_tagged, seq_no) = parse_short_filename(
+                &entry.file_name().into_string().map_err(|_| error!("unreadable file name"))?
+            )?;
+            Ok((ShardIdent::with_tagged_prefix(workchain_id, shard_prefix_tagged)?, seq_no))
+        }
+        let mut state = match tokio::fs::read_dir(self.unapplied_files_path.as_path()).await {
+            Err(err) => {
+                log::warn!("clean_unapplied_files: cannot get directory list: {} ", err);
+                return
+            }
+            Ok(state) => state
+        };
+        let start = Instant::now();
+        loop {
+            if start.elapsed().as_millis() > MAX_SLOT_MS {
+                break
+            }
+            let entry = match state.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(err) => {
+                    log::warn!("clean_unapplied_files: next_entry: {}", err);
+                    continue
+                }
+            };
+            match parse_entry(&entry) {
+                Ok((shard, seq_no)) => for id in ids {
+                    if shard.intersect_with(id.shard()) && (seq_no < id.seq_no()) {
+                        if let Err(err) = tokio::fs::remove_file(entry.path()).await {
+                            log::warn!(
+                                "clean_unapplied_files: cannot remove {:?}: {}", entry.path(), err
+                            );
+                        }
+                    }
+                },
+                Err(err) => log::warn!(
+                    "clean_unapplied_files: wrong file name: {:?}: {}", entry.path(), err
+                )
+            } 
+        }
     }
 
     pub async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
@@ -224,11 +310,19 @@ impl ArchiveManager {
         }
     }
 
-    pub async fn get_archive_slice(&self, archive_id: u64, offset: u64, limit: u32) -> Result<Vec<u8>> {
+    pub async fn get_archive_slice(
+        &self, 
+        archive_id: u64, 
+        offset: u64, 
+        limit: u32
+    ) -> Result<Vec<u8>> {
         let fd = match self.get_file_desc(&PackageId::for_block(archive_id as u32), false).await? {
             Some(file_desc) => file_desc,
             None => {
-                match self.get_file_desc(&PackageId::for_key_block(archive_id as u32 / KEY_ARCHIVE_PACKAGE_SIZE), false).await? {
+                match self.get_file_desc(
+                    &PackageId::for_key_block(archive_id as u32 / KEY_ARCHIVE_PACKAGE_SIZE), 
+                    false
+                ).await? {
                     Some(key_file_desc) => key_file_desc,
                     None => fail!("Archive not found"),
                 }
@@ -315,7 +409,9 @@ impl ArchiveManager {
         let is_key = handle.is_key_block()?;
 
         let package_id = self.get_package_id_force(mc_seq_no, key_archive, is_key).await;
-        log::debug!(target: "storage", "PackageId for ({},{},{}) (mc_seq_no = {}, key block = {:?}) is {:?}, path: {:?}",
+        log::debug!(
+            target: "storage", 
+            "PackageId for ({},{},{}) (mc_seq_no = {}, key block = {:?}) is {:?}, path: {:?}",
             handle.id().shard().workchain_id(),
             handle.id().shard().shard_prefix_as_str_with_tag(),
             handle.id().seq_no(),
@@ -331,13 +427,16 @@ impl ArchiveManager {
         fd.archive_slice().add_file(Some(handle), entry_id, data).await
     }
 
-    async fn read_temp_file<B, U256, PK>(&self, entry_id: &PackageEntryId<B, U256, PK>) -> Result<(PathBuf, Vec<u8>)>
+    async fn read_temp_file<B, U256, PK>(
+        &self, 
+        entry_id: &PackageEntryId<B, U256, PK>
+    ) -> Result<(PathBuf, Vec<u8>)>
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
         PK: Borrow<UInt256> + Hash
     {
-        let temp_filename = self.unapplied_dir.join(entry_id.filename_short());
+        let temp_filename = self.unapplied_files_path.join(entry_id.filename_short());
         let data = tokio::fs::read(&temp_filename).await
             .map_err(|error| {
                 if error.kind() == ErrorKind::NotFound {
@@ -356,7 +455,11 @@ impl ArchiveManager {
         Ok((temp_filename, data))
     }
 
-    async fn get_file_desc(&self, id: &PackageId, force_create: bool) -> Result<Option<Arc<FileDescription>>> {
+    async fn get_file_desc(
+        &self, 
+        id: &PackageId, 
+        force_create: bool
+    ) -> Result<Option<Arc<FileDescription>>> {
         // TODO: Rewrite logics in order to handle multithreaded adding of packages
         if let Some(fd) = self.file_maps.get(id.package_type()).get(id.id()).await {
             if fd.deleted() {

@@ -100,7 +100,7 @@ pub async fn accept_block(
         if block_broadcast {
             block_broadcast = result.is_updated();
         }
-        let handle = result.as_non_created().ok_or_else(
+        let handle = result.to_non_created().ok_or_else(
             || error!("INTERNAL ERROR: accept for block {} mismatch")
         )?;
         #[cfg(feature = "telemetry")]
@@ -137,7 +137,7 @@ pub async fn accept_block(
     // handle_->set_is_key_block(is_key_block_);
 
     handle = engine.store_block_proof(&id, Some(handle), &proof).await?
-        .as_non_created()
+        .to_non_created()
         .ok_or_else(
             || error!("INTERNAL ERROR: accept for block {} proof mismatch", id)
         )?;

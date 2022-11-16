@@ -15,7 +15,7 @@ use crate::{
     StorageAlloc, 
     archives::{
         get_mc_seq_no_opt, ARCHIVE_PACKAGE_SIZE, KEY_ARCHIVE_PACKAGE_SIZE,
-        package::{Package, read_package_from},
+        archive_manager::ArchiveManager, package::{Package, read_package_from},
         package_entry::PackageEntry, package_entry_id::{GetFileName, PackageEntryId},
         package_entry_meta::PackageEntryMeta, package_entry_meta_db::PackageEntryMetaDb,
         package_id::{PackageId, PackageType}, package_info::PackageInfo,
@@ -64,8 +64,10 @@ impl ArchiveSlice {
         allocated: Arc<StorageAlloc>
     ) -> Result<Self> {
 
-        std::fs::create_dir_all(db_root_path.join("archive/packages"))
-            .map_err(|err| error!("Cannot create directory: {:?} : {}", db_root_path, err))?;
+        let packages_path = db_root_path.join(ArchiveManager::ARCHIVE_DIR).join("packages");
+        tokio::fs::create_dir_all(packages_path.as_path()).await.map_err(
+            |e| error!("Cannot create archive packages directory {:?}: {}", packages_path, e)
+        )?;
 
         let (prefix, slice_size, sliced_mode) =  if package_type == PackageType::KeyBlocks {
             ("key_", KEY_ARCHIVE_PACKAGE_SIZE, false)
