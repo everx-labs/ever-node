@@ -17,11 +17,6 @@ use crate::{
     network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
     shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId}
 };
-#[cfg(feature = "telemetry")]
-use crate::{
-    full_node::telemetry::FullNodeTelemetry, network::telemetry::FullNodeNetworkTelemetry,
-    validator::telemetry::CollatorValidatorTelemetry,
-};
 
 use ever_crypto::{KeyId, KeyOption};
 #[cfg(feature = "telemetry")]
@@ -34,13 +29,22 @@ use overlay::{
     BroadcastSendInfo, OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId
 };
 use std::{sync::{Arc, atomic::AtomicU64}, time::{SystemTime, UNIX_EPOCH}};
+use ton_api::ton::ton_node::{RempMessage, RempMessageStatus, RempReceipt, broadcast::BlockBroadcast};
+use ton_block::{
+    AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, signature::SigPubKey, ShardAccount,
+    MASTERCHAIN_ID, Deserializable
+};
+use ton_types::{Result, UInt256, error, AccountId};
+#[cfg(feature = "telemetry")]
+use crate::{
+    full_node::telemetry::{FullNodeTelemetry, RempClientTelemetry},
+    validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
+    network::telemetry::FullNodeNetworkTelemetry,
+};
 #[cfg(feature = "telemetry")]
 use storage::{StorageAlloc, block_handle_db::BlockHandle};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
-use ton_api::ton::ton_node::broadcast::BlockBroadcast;
-use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, signature::SigPubKey};
-use ton_types::{Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
 
 pub struct ValidatedBlockStatNode {
@@ -334,11 +338,48 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
+    async fn process_remp_msg_status_in_ext_db(
+        &self,
+        id: &UInt256,
+        status: &RempReceipt,
+        signature: &[u8],
+    ) -> Result<()> {
+        unimplemented!()
+    }
+
     async fn process_chain_range_in_ext_db(
         &self,
         chain_range: &ChainRange)
     -> Result<()> {
         unimplemented!()
+    }
+
+    // This function WAITS the shard account belonging to the shard's last committed state.
+    async fn load_account(
+        self: Arc<Self>,
+        wc: i32,
+        address: AccountId,
+    ) -> Result<(ShardAccount, ShardIdent)> {
+
+        let last_mc_state = self.load_last_applied_mc_state().await?;
+
+        if wc == MASTERCHAIN_ID {
+            let acc = last_mc_state.state().read_accounts()?.account(&address)?
+                .ok_or_else(|| error!("Can't get account {:x} from last master state {}", address, last_mc_state.block_id()))?;
+            Ok((acc, last_mc_state.block_id().shard().clone()))
+        } else {
+            let prefix = AccountIdPrefixFull::workchain(wc, u64::construct_from(&mut address.clone())?);
+            let shard_header = last_mc_state.shards()?.find_shard_by_prefix(&prefix)?
+                .ok_or_else(|| error!("Can't get shard for prefix {}", prefix))?;
+            let last_shard_state = self.wait_state(
+                &shard_header.block_id,
+                Some(10_000),
+                false,
+            ).await?;
+            let acc = last_shard_state.state().read_accounts()?.account(&address)?
+                .ok_or_else(|| error!("Can't get account {:x} from state {}", address, last_shard_state.block_id()))?;
+            Ok((acc, last_shard_state.block_id().shard().clone()))
+        }
     }
 
     // State related operations
@@ -413,7 +454,7 @@ pub trait EngineOperations : Sync + Send {
     fn store_block_prev2(&self, handle: &Arc<BlockHandle>, prev2: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
-    fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_prev2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         unimplemented!()
     }
     fn store_block_next1(&self, handle: &Arc<BlockHandle>, next: &BlockIdExt) -> Result<()> {
@@ -425,7 +466,7 @@ pub trait EngineOperations : Sync + Send {
     fn store_block_next2(&self, handle: &Arc<BlockHandle>, next2: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
-    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         unimplemented!()
     }
 
@@ -463,7 +504,6 @@ pub trait EngineOperations : Sync + Send {
     }
 
     // External messages
-
     fn new_external_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
         unimplemented!()
     }
@@ -474,10 +514,37 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
+    // Remp messages
+    fn new_remp_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
+        unimplemented!()
+    }
+    fn get_remp_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
+        unimplemented!()
+    }
+    fn finalize_remp_messages(
+        &self,
+        block: BlockIdExt,
+        accepted: Vec<UInt256>,
+        rejected: Vec<(UInt256, String)>,
+        ignored: Vec<UInt256>,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    fn finalize_remp_messages_as_ignored(&self, block_id: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
+    fn dequeue_remp_message_status(&self) -> Result<Option<(UInt256, Arc<Message>, RempMessageStatus)>> {
+        unimplemented!()
+    }
+
     // Utils
 
     fn now(&self) -> u32 {
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as u32
+    }
+
+    fn now_ms(&self) -> u64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
     }
 
     fn is_persistent_state(&self, block_time: u32, prev_time: u32, pss_period_bits: u32) -> bool {
@@ -564,7 +631,37 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    async fn redirect_external_message(&self, message_data: &[u8]) -> Result<BroadcastSendInfo> {
+    async fn redirect_external_message(&self, message_data: &[u8], id: UInt256) -> Result<()> {
+        unimplemented!()
+    }
+
+    // Remp
+
+    fn send_remp_message(&self, to: Arc<KeyId>, message: &RempMessage) -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn sign_and_send_remp_receipt(&self, to: Arc<KeyId>, receipt: RempReceipt) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn sign_remp_receipt(&self, receipt: &RempReceipt) -> Result<Vec<u8>> {
+        unimplemented!()
+    }
+
+    async fn check_remp_duplicate(&self, message_id: &UInt256) -> Result<RempDuplicateStatus> {
+        unimplemented!()
+    }
+
+    async fn update_validators(
+        &self,
+        to_resolve: Vec<CatchainNode>,
+        to_delete: Vec<CatchainNode>
+    ) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn set_remp_core_interface(&self, rci: Arc<dyn RempCoreInterface>) -> Result<()> {
         unimplemented!()
     }
 
@@ -600,6 +697,11 @@ pub trait EngineOperations : Sync + Send {
     }
 
     #[cfg(feature = "telemetry")]
+    fn remp_core_telemetry(&self) -> &RempCoreTelemetry {
+        unimplemented!()
+    }
+
+    #[cfg(feature = "telemetry")]
     fn collator_telemetry(&self) -> &CollatorValidatorTelemetry {
         unimplemented!()
     }
@@ -616,6 +718,11 @@ pub trait EngineOperations : Sync + Send {
 
     #[cfg(feature = "telemetry")]
     fn engine_telemetry(&self) -> &Arc<EngineTelemetry> {
+        unimplemented!()
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn remp_client_telemetry(&self) -> &RempClientTelemetry {
         unimplemented!()
     }
 
@@ -676,10 +783,32 @@ pub trait ExternalDb : Sync + Send {
     async fn process_full_state(&self, state: &Arc<ShardStateStuff>) -> Result<()>;
     fn process_chain_range_enabled(&self) -> bool;
     async fn process_chain_range(&self, range: &ChainRange) -> Result<()>;
+    async fn process_remp_msg_status(
+        &self,
+        id: &UInt256,
+        status: &RempReceipt,
+        signature: &[u8]
+    ) -> Result<()>;
 }
 
 pub enum Server {
     ControlServer(ControlServer),
     #[cfg(feature = "external_db")]
     KafkaConsumer(stream_cancel::Trigger)
+}
+
+#[derive(Debug)]
+pub enum RempDuplicateStatus {
+    /// No such message in queue
+    Absent,
+    /// Message found in queue, and not validated yet
+    Fresh,
+    /// Message found in queue and already included into valid block
+    Duplicate(ton_block::BlockIdExt)
+}
+
+#[async_trait::async_trait]
+pub trait RempCoreInterface: Sync + Send {
+    async fn process_incoming_message(&self, message_id: UInt256, message: Message, source: Arc<KeyId>) -> Result<()>;
+    async fn check_remp_duplicate(&self, message_id: &UInt256) -> RempDuplicateStatus;
 }

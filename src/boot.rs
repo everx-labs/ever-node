@@ -64,7 +64,7 @@ async fn run_cold(
                 Ok(proof) => match proof.check_proof_link() {
                     Ok(_) => {
                         let handle = engine.store_block_proof(&block_id, handle, &proof).await? 
-                            .as_non_created()
+                            .to_non_created()
                             .ok_or_else( 
                                 || error!(
                                     "INTERNAL ERROR: Bad result in store block {} proof", 
@@ -290,7 +290,7 @@ async fn download_key_block_proof(
         match result {
             Ok(_) => {
                 let handle = engine.store_block_proof(block_id, None, &proof).await?
-                    .as_non_created()
+                    .to_non_created()
                     .ok_or_else(
                         || error!("INTERNAL ERROR: Bad result in store block {} proof", block_id)
                     )?;
@@ -319,12 +319,12 @@ async fn download_block_and_state(
         (engine.load_block(&handle).await?, handle)
     } else {
         let (block, proof) = engine.download_block(block_id, None).await?;
-        let mut handle = engine.store_block(&block).await?.as_non_created().ok_or_else(
+        let mut handle = engine.store_block(&block).await?.to_non_created().ok_or_else(
             || error!("INTERNAL ERROR: mismatch in block {} store result during boot", block_id)
         )?;
         if !handle.has_proof() {
             handle = engine.store_block_proof(block_id, Some(handle), &proof).await?
-                .as_non_created()
+                .to_non_created()
                 .ok_or_else(
                     || error!(
                         "INTERNAL ERROR: mismatch in block {} proof store result during boot",
@@ -376,7 +376,7 @@ pub async fn warm_boot(
     block_id: Arc<BlockIdExt>
 ) -> Result<BlockIdExt> {
     let mut block_id = block_id.deref().clone();
-    let handle = loop {
+    let _handle = loop {
         let handle = engine.load_block_handle(&block_id)?.ok_or_else(
             || error!("Cannot load handle for block {}", block_id)
         )?;
@@ -392,11 +392,13 @@ pub async fn warm_boot(
     let state = engine.load_state(&block_id).await?;
     let init_block_id = engine.init_mc_block_id();
     CHECK!(&block_id == init_block_id || state.has_prev_block(init_block_id)?);
-    if block_id.seq_no() != 0 && !handle.is_key_block()? { // find last key block
-        block_id = state.shard_state_extra()?.last_key_block.clone()
-            .ok_or_else(|| error!("Masterchain state for {} doesn't contain info about prevous key block", state.block_id()))?
-            .master_block_id().1;
-    }
-    log::info!(target: "boot", "last key block id = {}", block_id);
+    
+    // I don't know for what this code here, but it defenetly wont work because of old key state already cleaned by GC
+    // if block_id.seq_no() != 0 && !handle.is_key_block()? { // find last key block
+    //     block_id = state.shard_state_extra()?.last_key_block.clone()
+    //         .ok_or_else(|| error!("Masterchain state for {} doesn't contain info about prevous key block", state.block_id()))?
+    //         .master_block_id().1;
+    // }
+    // log::info!(target: "boot", "last key block id = {}", block_id);
     Ok(block_id)
 }*/
