@@ -11,8 +11,8 @@
 * limitations under the License.
 */
 
-//pub use multi_signature_unsafe::MultiSignature;
-pub use multi_signature_bls::MultiSignature;
+pub use multi_signature_unsafe::MultiSignature;
+//pub use multi_signature_bls::MultiSignature;
 use super::*;
 use catchain::BlockPayloadPtr;
 use log::*;
@@ -315,12 +315,11 @@ impl Block {
     /// Create new block
     pub fn create(
         candidate_id: UInt256,
-        block_candidate: Option<Arc<BlockCandidateBody>>,
         instance_counter: &InstanceCounter,
     ) -> Arc<SpinMutex<Self>> {
         let mut body = Self {
             candidate_id: candidate_id.clone(),
-            block_candidate,
+            block_candidate: None,
             deliveries_signature: MultiSignature::new(1, candidate_id.clone()),
             approvals_signature: MultiSignature::new(2, candidate_id.clone()),
             rejections_signature: MultiSignature::new(3, candidate_id.clone()),

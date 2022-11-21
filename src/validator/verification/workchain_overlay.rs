@@ -51,6 +51,7 @@ use ton_types::Result;
 const MAX_NEIGHBOURS_COUNT: usize = 16; //max number of neighbours to synchronize
 const NEIGHBOURS_ROTATE_MIN_PERIOD_MS: u64 = 60000; //min time for neighbours rotation
 const NEIGHBOURS_ROTATE_MAX_PERIOD_MS: u64 = 120000; //max time for neighbours rotation
+const USE_QUERIES_FOR_BLOCK_STATUS: bool = false; //use queries for block status delivery, otherwise use messages
 
 /*
 ===============================================================================
@@ -94,6 +95,8 @@ pub struct WorkchainOverlay {
     node_debug_id: Arc<String>,             //debug ID of node
     _instance_counter: InstanceCounter,     //instance counter
     send_message_to_neighbours_counter: metrics_runtime::data::Counter, //number of send message to neighbours calls
+    out_message_counter: metrics_runtime::data::Counter,                //number of outgoing messages
+    in_message_counter: metrics_runtime::data::Counter,                 //number of incoming messages
     send_all_counter: metrics_runtime::data::Counter,                   //number of send to all active nodes calls
     out_broadcast_counter: metrics_runtime::data::Counter,              //number of outgoing broadcasts
     out_query_counter: ResultStatusCounter,                             //number of outgoing queries
@@ -145,6 +148,8 @@ impl WorkchainOverlay {
         let in_query_counter = metrics_receiver.sink().counter(format!("{}_in_queries", metrics_prefix));
         let in_block_candidate_counter = metrics_receiver.sink().counter(format!("{}_in_block_candidates", metrics_prefix));
         let block_status_update_counter = metrics_receiver.sink().counter(format!("{}_block_status_updates", metrics_prefix));
+        let out_message_counter = metrics_receiver.sink().counter(format!("{}_out_messages", metrics_prefix));
+        let in_message_counter = metrics_receiver.sink().counter(format!("{}_in_messages", metrics_prefix));
         let out_query_counter = ResultStatusCounter::new(&metrics_receiver, &format!("{}_out_queries", metrics_prefix));
 
         let listener = Arc::new(WorkchainListener {
@@ -154,6 +159,7 @@ impl WorkchainOverlay {
             node_debug_id: node_debug_id.clone(),
             in_broadcast_counter: in_broadcast_counter.clone(),
             in_query_counter: in_query_counter.clone(),
+            in_message_counter: in_message_counter.clone(),
             in_block_candidate_counter: in_block_candidate_counter.clone(),
             block_status_update_counter: block_status_update_counter.clone(),
             is_master_chain_overlay,
@@ -190,6 +196,8 @@ impl WorkchainOverlay {
             send_all_counter: metrics_receiver.sink().counter(format!("{}_send_all_calls", metrics_prefix)),
             out_broadcast_counter: metrics_receiver.sink().counter(format!("{}_out_broadcasts", metrics_prefix)),
             out_query_counter,
+            out_message_counter,
+            in_message_counter,
             block_status_update_counter,
             is_master_chain_overlay,
         };
@@ -233,52 +241,58 @@ impl WorkchainOverlay {
         let received_from_workchain = !self.is_master_chain_overlay;
 
         for adnl_id_ref in nodes {
-            static BLOCK_STATUS_QUERY_TIMEOUT: Duration = Duration::from_millis(5000);
+            if USE_QUERIES_FOR_BLOCK_STATUS {
+                static BLOCK_STATUS_QUERY_TIMEOUT: Duration = Duration::from_millis(5000);
 
-            let listener = self.listener.listener.clone();
-            let workchain_id = self.workchain_id;
-            let adnl_id = adnl_id_ref.clone();
-            let node_debug_id = self.node_debug_id.clone();
-            let out_query_counter = self.out_query_counter.clone();
-            let block_status_update_counter = self.block_status_update_counter.clone();
+                let workchain_id = self.workchain_id;
+                let adnl_id = adnl_id_ref.clone();
+                let node_debug_id = self.node_debug_id.clone();
+                let listener = self.listener.listener.clone();
+                let out_query_counter = self.out_query_counter.clone();
+                let block_status_update_counter = self.block_status_update_counter.clone();
 
-            let response_callback = Box::new(move |result: Result<BlockPayloadPtr>| {
-                check_execution_time!(50_000);
+                let response_callback = Box::new(move |result: Result<BlockPayloadPtr>| {
+                    check_execution_time!(50_000);
 
-                log::trace!(target: "verificator", "Block status query response received from {} (overlay={})", &adnl_id, node_debug_id);
+                    log::trace!(target: "verificator", "Block status query response received from {} (overlay={})", &adnl_id, node_debug_id);
 
-                match result {
-                    Ok(responsed_data) => {
-                        out_query_counter.success();
+                    match result {
+                        Ok(responsed_data) => {
+                            out_query_counter.success();
 
-                        if let Some(listener) = listener.upgrade() {
-                            match WorkchainListener::process_serialized_block_status(workchain_id, &adnl_id, &responsed_data, &*listener, block_status_update_counter, received_from_workchain) {
-                                Ok(_block) => {
-                                    /* do nothing */
-                                }
-                                Err(err) => {
-                                    warn!(target: "verificator", "Block status response processing error (overlay={}): {:?}", node_debug_id, err);
+                            if let Some(listener) = listener.upgrade() {
+                                match WorkchainListener::process_serialized_block_status(workchain_id, &adnl_id, &responsed_data, &*listener, block_status_update_counter, received_from_workchain) {
+                                    Ok(_block) => {
+                                        /* do nothing */
+                                    }
+                                    Err(err) => {
+                                        warn!(target: "verificator", "Block status response processing error (overlay={}): {:?}", node_debug_id, err);
+                                    }
                                 }
                             }
                         }
+                        Err(err) => {
+                            out_query_counter.failure();
+                            warn!(target: "verificator", "Invalid block status response (overlay={}): {:?}", node_debug_id, err);
+                        }
                     }
-                    Err(err) => {
-                        out_query_counter.failure();
-                        warn!(target: "verificator", "Invalid block status response (overlay={}): {:?}", node_debug_id, err);
-                    }
-                }
-            });
+                });
 
-            self.out_query_counter.total_increment();
+                self.out_query_counter.total_increment();
 
-            self.overlay.send_query(
-                adnl_id_ref,
-                &self.local_adnl_id,
-                "block status",
-                BLOCK_STATUS_QUERY_TIMEOUT,
-                &data,
-                response_callback,
-            );            
+                self.overlay.send_query(
+                    adnl_id_ref,
+                    &self.local_adnl_id,
+                    "block status",
+                    BLOCK_STATUS_QUERY_TIMEOUT,
+                    &data,
+                    response_callback,
+                );
+            } else {
+                self.out_message_counter.increment();
+
+                self.overlay.send_message(adnl_id_ref, &self.local_adnl_id, &data);
+            }
         }
     }
 
@@ -410,6 +424,7 @@ struct WorkchainListener {
     runtime_handle: tokio::runtime::Handle,                      //runtime handle for further interaction between threads
     in_broadcast_counter: metrics_runtime::data::Counter,        //number of incoming broadcasts
     in_query_counter: metrics_runtime::data::Counter,            //number of incoming queries
+    in_message_counter: metrics_runtime::data::Counter,          //number of incoming messages
     in_block_candidate_counter: metrics_runtime::data::Counter,  //number of incoming block candidates
     block_status_update_counter: metrics_runtime::data::Counter, //number of block status updates
     is_master_chain_overlay: bool,                               //is this overlay for communication with MC
@@ -427,8 +442,39 @@ impl CatchainOverlayLogReplayListener for WorkchainListener {
 }
 
 impl CatchainOverlayListener for WorkchainListener {
-    fn on_message(&self, _adnl_id: PublicKeyHash, _data: &BlockPayloadPtr) {
-        //do nothing; on_message is working only for catchain messages and can't be used in general case, using queries instead
+    fn on_message(&self, adnl_id: PublicKeyHash, data: &BlockPayloadPtr) {
+        check_execution_time!(20_000);
+
+        trace!(target: "verificator", "WorkchainListener::on_message (overlay={})", self.node_debug_id);
+
+        let _hang_checker = HangCheck::new(self.runtime_handle.clone(), format!("WorkchainListener::on_message: for workchain overlay {}", self.node_debug_id), Duration::from_millis(1000));
+
+        self.in_message_counter.increment();
+
+        let data = data.clone();
+        let workchain_id = self.workchain_id;
+        let node_debug_id = self.node_debug_id.clone();
+        let listener = self.listener.clone();
+        let block_status_update_counter = self.block_status_update_counter.clone();
+        let received_from_workchain = !self.is_master_chain_overlay;
+
+        self.runtime_handle.spawn(async move {
+            if let Some(listener) = listener.upgrade() {
+                log::trace!(target: "verificator", "WorkchainListener::on_message from {} (overlay={})", adnl_id, node_debug_id);
+
+                match Self::process_serialized_block_status(workchain_id, &adnl_id, &data, &*listener, block_status_update_counter, received_from_workchain) {
+                    Ok(_block) => {
+                        //ignore reverse block candidate status message
+                    }
+                    Err(err) => {
+                        let message = format!("WorkchainListener::on_message error (overlay={}): {:?}", node_debug_id, err);
+                        warn!(target: "verificator", "{}", message);
+                    }
+                }
+            } else {
+                warn!(target: "verificator", "Query listener is not bound");
+            }
+        });
     }
 
     fn on_broadcast(&self, source_key_hash: PublicKeyHash, data: &BlockPayloadPtr) {

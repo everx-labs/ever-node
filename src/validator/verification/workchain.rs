@@ -334,6 +334,8 @@ impl Workchain {
         metrics_dumper.add_derivative_metric(format!("verificator_wc{}_new_block_candidates", workchain_id));
         metrics_dumper.add_derivative_metric(format!("verificator_mc{}_overlay_in_queries", workchain_id));
         metrics_dumper.add_derivative_metric(format!("verificator_mc{}_overlay_out_queries.total", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("verificator_mc{}_overlay_in_messages", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("verificator_mc{}_overlay_out_messages", workchain_id));
 
         metrics_dumper.add_derivative_metric(format!("verificator_wc{}_block_status_processings", workchain_id));
 
@@ -373,6 +375,8 @@ impl Workchain {
             metrics_dumper.add_derivative_metric(format!("verificator_wc{}_in_block_candidates", workchain_id));
             metrics_dumper.add_derivative_metric(format!("verificator_wc{}_overlay_out_queries.total", workchain_id));
             metrics_dumper.add_derivative_metric(format!("verificator_wc{}_overlay_send_message_to_neighbours_calls", workchain_id));
+            metrics_dumper.add_derivative_metric(format!("verificator_wc{}_overlay_in_messages", workchain_id));
+            metrics_dumper.add_derivative_metric(format!("verificator_wc{}_overlay_out_messages", workchain_id));
         }
     }
 
@@ -444,7 +448,7 @@ impl Workchain {
                 None => {
                     trace!(target: "verificator", "Creating new block {:?} for workchain {}", candidate_id, self.node_debug_id);
 
-                    let new_block = Block::create(candidate_id.clone(), block_candidate.clone(), &*self.blocks_instance_counter);
+                    let new_block = Block::create(candidate_id.clone(), &*self.blocks_instance_counter);
 
                     blocks.insert(candidate_id.clone(), new_block.clone());
 
@@ -512,6 +516,15 @@ impl Workchain {
 
         let candidate_id = block.lock().get_id().clone();
 
+        //remove old blocks
+
+        let block_end_of_life_time = *block.lock().get_first_appearance_time() + BLOCK_LIFETIME_PERIOD;
+
+        if let Ok(_) = block_end_of_life_time.elapsed() {
+            workchain.remove_block(&candidate_id);
+            return; //prevent all further sync logic because the block is expired
+        }
+
         //trace!(target: "verificator", "Synchronize block {:?} for workchain {}", candidate_id, workchain.node_debug_id);
         
         let mut rng = rand::thread_rng();
@@ -574,14 +587,6 @@ impl Workchain {
 
         if ready_to_send {
             workchain.send_block_status_impl(&block);
-        }
-
-        //remove old blocks
-
-        let block_end_of_life_time = *block.lock().get_first_appearance_time() + BLOCK_LIFETIME_PERIOD;
-
-        if let Ok(_) = block_end_of_life_time.elapsed() {
-            workchain.remove_block(&candidate_id);
         }
     }
 
