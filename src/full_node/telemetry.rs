@@ -379,7 +379,7 @@ impl RempClientTelemetry {
         Self::register_something(&self.got_receipts)
     }
 
-    pub fn register_sent_receipt(&self) {
+    pub fn _register_sent_receipt(&self) {
         Self::register_something(&self.sent_receipts)
     }
 

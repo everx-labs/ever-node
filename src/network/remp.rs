@@ -1,16 +1,15 @@
 
 use adnl::{
-    common::{/*QueryResult,*/ AdnlPeers, Subscriber, /*TaggedTlObject,*/ TaggedByteSlice}, 
+    common::{AdnlPeers, Subscriber, TaggedByteSlice}, 
     node::AdnlNode
 };
 use ever_crypto::KeyId;
 use ton_api::{
     ton::{
         ton_node::{
-            RempMessage, RempReceipt, RempSignedReceipt, /*RempReceived,*/ RempMessageStatus, 
-            RempMessageStatusCompact, RempSignedReceiptCompact, RempCombinedReceipt
+            RempMessage, RempReceipt, RempMessageStatus, 
+            RempMessageStatusCompact, RempReceiptCompact, RempCombinedReceipt
         },
-        //TLObject, 
     },
     tag_from_boxed_type, serialize_boxed, deserialize_boxed,
 };
@@ -30,14 +29,14 @@ pub trait RempMessagesSubscriber: Sync + Send {
 }
 #[async_trait::async_trait]
 pub trait RempReceiptsSubscriber: Sync + Send {
-    async fn new_remp_receipt(&self, receipt: RempSignedReceipt, source: &Arc<KeyId>) -> Result<()>;
+    async fn new_remp_receipt(&self, receipt: RempReceipt, source: &Arc<KeyId>) -> Result<()>;
 }
 
 #[derive(Debug)]
 struct ReceiptStuff {
     pub to: Arc<KeyId>,
     pub receipt: RempReceipt,
-    pub sign: Vec<u8>,
+    // pub sign: Vec<u8>,
     pub self_adnl_id: Arc<KeyId>,
 }
 
@@ -136,13 +135,13 @@ impl RempNode {
         &self, 
         to: Arc<KeyId>, 
         receipt: RempReceipt,
-        sign: Vec<u8>,
+        //sign: Vec<u8>,
         self_adnl_id: Arc<KeyId>, 
     ) -> Result<()> {
         let message_id = receipt.message_id().clone();
         self.receipts_sender
             .get().ok_or_else(|| error!("receipts_sender is not set"))?
-            .send(ReceiptStuff{to, receipt, sign, self_adnl_id})?;
+            .send(ReceiptStuff{to, receipt, self_adnl_id})?;
         let in_channel = self.receipts_in_channel.fetch_add(1, Ordering::Relaxed) + 1;
         log::debug!(
             "combine_and_send_receipt: {:x}, channel's load: {}", message_id, in_channel
@@ -239,7 +238,7 @@ impl Subscriber for RempNode {
     }
 }
 
-const RECEIPTS_SEND_PERIOD_MS: u64 = 500;
+const RECEIPTS_SEND_PERIOD_MS: u64 = 1000;
 const PACKAGE_MAX_LOAD: usize = 768;
 const MESSAGE_UPDATES_TIMEOUTS_MS: [u64; 4] = [0, 1000, 2000, 5000 ];
 const CLEANUP_MSG_AFTER_SEC: u64 = 30;
@@ -295,7 +294,7 @@ impl SendCombinedReceipt for SendCombinedReceiptByAdnl {
 
 struct LastReceipt {
     pub receipt: Option<RempReceipt>,
-    pub sign: Option<Vec<u8>>,
+    //pub sign: Option<Vec<u8>>,
     pub sent_receipts: u32,
     pub updated_at: Instant,
     pub self_adnl_id: Arc<KeyId>,
@@ -351,7 +350,7 @@ async fn receipts_worker(
             Ok(Some(rs)) => {
                 receipts_in_channel.fetch_sub(1, Ordering::Relaxed);
                 log::debug!("ReceiptsSender::worker: New iteration - receipt for {:x}", rs.receipt.message_id());
-                if add_receipt_to_map(&mut receipts, rs.to, rs.receipt, rs.sign, rs.self_adnl_id)? {
+                if add_receipt_to_map(&mut receipts, rs.to, rs.receipt, rs.self_adnl_id)? {
                     pending_receipts += 1;
                     #[cfg(feature = "telemetry")]
                     telemetry.pending_receipts(pending_receipts);
@@ -510,7 +509,7 @@ fn build_combined_receipt(
     Ok(result)
 }
 
-fn expand_combined_receipt(combined_receipt: &RempCombinedReceipt) -> Result<Vec<RempSignedReceipt>> {
+fn expand_combined_receipt(combined_receipt: &RempCombinedReceipt) -> Result<Vec<RempReceipt>> {
 
     let mut result = Vec::new();
 
@@ -577,14 +576,15 @@ fn expand_combined_receipt(combined_receipt: &RempCombinedReceipt) -> Result<Vec
                 source_id: combined_receipt.source_id().clone(),
             }
         );
-        result.push(
-            RempSignedReceipt::TonNode_RempSignedReceipt(
-                ton_api::ton::ton_node::rempsignedreceipt::RempSignedReceipt {
-                    receipt: ton_api::ton::bytes(serialize_boxed(&full_receipt)?),
-                    signature: cr.signature().clone(),
-                }
-            )
-        );
+        // result.push(
+        //     RempSignedReceipt::TonNode_RempSignedReceipt(
+        //         ton_api::ton::ton_node::rempsignedreceipt::RempSignedReceipt {
+        //             receipt: ton_api::ton::bytes(serialize_boxed(&full_receipt)?),
+        //             signature: cr.signature().clone(),
+        //         }
+        //     )
+        // );
+        result.push(full_receipt);
     }
     Ok(result)
 }
@@ -609,7 +609,7 @@ fn build_combined_receipt_from(receipts: &[&LastReceipt]) -> Result<(RempCombine
     };
 
     for receipt in receipts {
-        if let (Some(r), Some(sign)) = (receipt.receipt.as_ref(), receipt.sign.as_ref()) {
+        if let Some(r) = receipt.receipt.as_ref() {
             let compact_status = match r.status() {
                 RempMessageStatus::TonNode_RempAccepted(acc) => {
                     RempMessageStatusCompact::TonNode_RempAcceptedCompact(
@@ -666,12 +666,19 @@ fn build_combined_receipt_from(receipts: &[&LastReceipt]) -> Result<(RempCombine
                 fail!("INTERNAL ERROR: source_id {:x} != r.source_id {:x} ", source_id , r.source_id());
             }
 
-            compact_receipts.push(RempSignedReceiptCompact::TonNode_RempSignedReceiptCompact (
-                ton_api::ton::ton_node::rempsignedreceiptcompact::RempSignedReceiptCompact {
+            // compact_receipts.push(RempSignedReceiptCompact::TonNode_RempSignedReceiptCompact (
+            //     ton_api::ton::ton_node::rempsignedreceiptcompact::RempSignedReceiptCompact {
+            //         message_id: r.message_id().clone(),
+            //         receipt: compact_status,
+            //         timestamp: r.timestamp().clone(),
+            //         signature: ton_api::ton::int512(sign.as_slice().try_into()?),
+            //     }
+            // ));
+            compact_receipts.push(RempReceiptCompact::TonNode_RempReceiptCompact (
+                ton_api::ton::ton_node::rempreceiptcompact::RempReceiptCompact {
                     message_id: r.message_id().clone(),
                     receipt: compact_status,
                     timestamp: r.timestamp().clone(),
-                    signature: ton_api::ton::int512(sign.as_slice().try_into()?),
                 }
             ));
         }
@@ -693,14 +700,14 @@ fn add_receipt_to_map(
     receipts: &mut HashMap<Arc<KeyId>, (Instant, HashMap<UInt256, LastReceipt>)>,
     to: Arc<KeyId>,
     receipt: RempReceipt,
-    sign: Vec<u8>,
+    // sign: Vec<u8>,
     self_adnl_id: Arc<KeyId>,
 ) -> Result<bool> {
     let id = receipt.message_id().clone();
     let added_new = if let Some((_, node)) = receipts.get_mut(&to) {
         if let Some(msg) = node.get_mut(receipt.message_id()) {
             msg.receipt = Some(receipt);
-            msg.sign = Some(sign.as_slice().try_into()?);
+            // msg.sign = Some(sign.as_slice().try_into()?);
             msg.self_adnl_id = self_adnl_id;
             log::trace!("add_receipt_to_map for msg {:x} to {}: replaced prev receipt", id, to);
             false
@@ -709,7 +716,7 @@ fn add_receipt_to_map(
                 receipt.message_id().clone(),
                 LastReceipt {
                     receipt: Some(receipt),
-                    sign: Some(sign.as_slice().try_into()?),
+                    // sign: Some(sign.as_slice().try_into()?),
                     sent_receipts: 0,
                     updated_at: Instant::now(),
                     self_adnl_id,
@@ -724,7 +731,7 @@ fn add_receipt_to_map(
             receipt.message_id().clone(),
             LastReceipt {
                 receipt: Some(receipt),
-                sign: Some(sign.as_slice().try_into()?),
+                // sign: Some(sign.as_slice().try_into()?),
                 sent_receipts: 0,
                 updated_at: Instant::now(),
                 self_adnl_id,
@@ -744,7 +751,7 @@ fn mark_as_sent(
     for receipt in combined_receipt.receipts().iter() {
         if let Some(r) = node_receipts.get_mut(receipt.message_id()) {
             r.receipt = None;
-            r.sign = None;
+            // r.sign = None;
             r.updated_at = Instant::now();
             r.sent_receipts += 1;
         }

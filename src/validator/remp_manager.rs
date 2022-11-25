@@ -386,7 +386,7 @@ impl RempInterfaceQueues {
 
         let (engine,runtime) = (self.engine.clone(), self.runtime.clone());
         runtime.clone().spawn(async move {
-            if let Err(e) = engine.sign_and_send_remp_receipt(rmq_message.source_key.clone(), receipt).await {
+            if let Err(e) = engine.send_remp_receipt(rmq_message.source_key.clone(), receipt).await {
                 log::error!(target: "remp",
                     "Cannot send {} response message {:x} to {}: {}",
                     status, rmq_message.message_id, rmq_message.source_key, e

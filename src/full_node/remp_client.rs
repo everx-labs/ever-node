@@ -21,23 +21,23 @@ use ton_executor::{
     BlockchainConfig, OrdinaryTransactionExecutor, TransactionExecutor, ExecuteParams,
 };
 use adnl::common::add_unbound_object_to_map_with_update;
-use ever_crypto::{KeyId, Ed25519KeyOption, KeyOption};
+use ever_crypto::KeyId;
 use std::{
     collections::{HashSet, HashMap}, 
     sync::{Arc, atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering}},
     time::{Duration, Instant},
-    convert::TryInto,
     cmp::max,
 };
 use ton_api::{
     IntoBoxed,
-    ton::ton_node::{RempMessage, RempMessageLevel, RempMessageStatus, RempReceipt, RempSignedReceipt}
+    ton::ton_node::{RempMessage, RempMessageLevel, RempMessageStatus, RempReceipt}
 };
 
 const HANGED_MESSAGE_TIMEOUT_MS: u64 = 20_000;
 const TIME_BEFORE_DIE_MS: u64 = 100_000;
 const MESSAGES_WORKER_TIMEOUT_MS: u64 = 50;
-const MESSAGES_RESEND_TIMEOUT_MS: u64 = 500;
+const MESSAGES_RESEND_TIMEOUT_MS: u64 = 2000;
+const NEXT_SET_LAG: u32 = 15; // include next set if it is activating during
 
 #[derive(Default)]
 pub struct RempClient {
@@ -54,7 +54,7 @@ pub struct RempClient {
 #[derive(Clone)]
 pub struct ValidatorInfo {
     got_receipt_from: Arc<AtomicBool>,
-    pub_key: Arc<dyn KeyOption>,
+    //pub_key: Arc<dyn KeyOption>,
 }
 
 pub struct RempMessageHistory {
@@ -69,15 +69,16 @@ pub struct RempMessageHistory {
 
 #[async_trait::async_trait]
 impl RempReceiptsSubscriber for RempClient {
-    async fn new_remp_receipt(&self, receipt: RempSignedReceipt, source: &Arc<KeyId>) -> Result<()> {
-        let sign_bytes = format!("{}...", hex::encode(&receipt.signature().0[0..6]));
-        log::info!("Processing REMP receipt {} from {}", sign_bytes, source);
+    async fn new_remp_receipt(&self, receipt: RempReceipt, source: &Arc<KeyId>) -> Result<()> {
+        //let sign_bytes = format!("{}...", hex::encode(&receipt.signature().0[0..6]));
+        let id = receipt.message_id().clone();
+        log::info!("Processing REMP receipt for {} from {}", id, source);
         self.process_remp_receipt(receipt, source).await
             .map_err(|e| {
-                log::error!("Error while processing REMP receipt {} from {}: {}", sign_bytes, source, e);
+                log::error!("Error while processing REMP receipt for {:x} from {}: {}", id, source, e);
                 e
             })?;
-        log::info!("Processed REMP receipt {}  from {}", sign_bytes, source);
+        log::info!("Processed REMP receipt for {}  from {}", id, source);
         Ok(())
     }
 }
@@ -260,17 +261,17 @@ impl RempClient {
                             a
                         });
                         log::debug!(
-                            "messages_worker: {:x} got receipts form {} of {}",
+                            "messages_worker: {:x} got receipts from {} of {}",
                             msg.key(), got_messsage, msg.val().validators.len()
                         );
-                        if got_messsage * 3 < msg.val().validators.len() * 2 {
+                        if got_messsage * 3 <= msg.val().validators.len() {
                             match self.send_to_next_random_validator(msg.val()) {
                                 Err(e) => log::warn!(
                                     "messages_worker: can't send {:x} to next validator: {:?}",
                                     msg.key(), e
                                 ),
                                 Ok(sent_to) => log::debug!(
-                                    "messages_worker: {:x} sent to {}",
+                                    "messages_worker: {:x} sent to validator {}",
                                     msg.key(), sent_to
                                 )
                             }
@@ -401,15 +402,15 @@ impl RempClient {
         Ok(())
     }
 
-    async fn process_remp_receipt(&self, signed_receipt: RempSignedReceipt, source: &Arc<KeyId>) -> Result<()> {
+    async fn process_remp_receipt(&self, receipt: RempReceipt, source: &Arc<KeyId>) -> Result<()> {
         let engine = self.engine.get().ok_or_else(|| error!("engine was not set"))?;
         #[cfg(feature = "telemetry")]
         engine.remp_client_telemetry().register_got_receipt();
         #[cfg(feature = "telemetry")]
         let got_at = Instant::now();
 
-        let receipt = ton_api::deserialize_boxed(&signed_receipt.receipt().0)?
-            .downcast::<RempReceipt>().or_else(|_| fail!("Can't deserialise RempReceipt from TLObject"))?;
+        //let receipt = ton_api::deserialize_boxed(&signed_receipt.receipt().0)?
+        //    .downcast::<RempReceipt>().or_else(|_| fail!("Can't deserialise RempReceipt from TLObject"))?;
         
         let message_id = receipt.message_id().clone();
 
@@ -419,12 +420,19 @@ impl RempClient {
             )?;
         let message = guard.val();
 
-        self.check_receipt_signature(
-            &signed_receipt,
-            source,
-            receipt.source_id(),
-            message
-        ).map_err(|e| error!("Failed to check receipt's signature: {}", e))?;
+        // self.check_receipt_signature(
+        //     &signed_receipt,
+        //     source,
+        //     receipt.source_id(),
+        //     message
+        // ).map_err(|e| error!("Failed to check receipt's signature: {}", e))?;
+
+        let validator_info = message.validators.get(source)
+            .ok_or_else(|| error!(
+                "Message {:x} doesn't have validator {} in their set",
+                message.message.id(), source
+            ))?;
+        validator_info.got_receipt_from.store(true, Ordering::Relaxed);
 
         let rejected = is_finally_rejected(receipt.status());
         let finalized = is_finally_accepted(receipt.status());
@@ -439,8 +447,8 @@ impl RempClient {
         #[cfg(feature = "telemetry")]
         let status_short_name = remp_status_short_name(&receipt);
 
-        let signature = signed_receipt.only().signature.0.try_into()
-            .map_err(|_| error!("signed_receipt.signature has invalid length"))?;
+        //let signature = signed_receipt.only().signature.0.try_into()
+        //    .map_err(|_| error!("signed_receipt.signature has invalid length"))?;
 
         #[cfg(feature = "telemetry")]
         let rt = ReceiptTelemetry {
@@ -452,7 +460,7 @@ impl RempClient {
         self.new_processing_status(
             &message_id, 
             receipt, 
-            signature, 
+            vec!(), //signature, 
             die_soon, 
             #[cfg(feature = "telemetry")]
             Some(rt)
@@ -524,8 +532,8 @@ impl RempClient {
         receipt_telemetry: Option<ReceiptTelemetry>
     ) -> Result<()> {
         
-        log::info!("New processing stage for external message {:x}: {:?}, source: {:x}, die_soon: {}",
-            message_id, status.status(), status.source_id(), die_soon);
+        log::info!("New processing stage for external message {:x}: {:?}, source: {}, die_soon: {}",
+            message_id, status.status(), base64::encode(status.source_id().as_slice()), die_soon);
 
         if let Some(msg) = self.messages.get(message_id) {
 
@@ -533,8 +541,8 @@ impl RempClient {
             msg.val().last_update.fetch_max(timestamp, Ordering::Relaxed);
 
             if let Some(status) = msg.val().statuses.insert(signature.clone(), status.clone()) {
-                log::warn!("Duplicate of processing status for external message {:x}: {:?}, source: {:x}, die_soon: {}",
-                    message_id, status.val().status(), status.val().source_id(), die_soon);
+                log::warn!("Duplicate of processing status for external message {:x}: {:?}, source: {}, die_soon: {}",
+                    message_id, status.val().status(), base64::encode(status.val().source_id().as_slice()), die_soon);
             }
 
             if die_soon {
@@ -639,7 +647,8 @@ impl RempClient {
         // Send
         let guard = self.messages.get(&id).ok_or_else(|| error!("Can't get just inserted value"))?;
         let message = guard.val();
-        self.send_to_next_random_validator(message)?;
+        let sent_to = self.send_to_next_random_validator(message)?;
+        log::debug!("process_remp_message_impl: {:x} sent to validator {}", id, sent_to);
 
         let sending_ns = got_at.elapsed().as_nanos() as u64 - processing_ns;
 
@@ -665,9 +674,8 @@ impl RempClient {
         let cc_config = last_mc_state_extra.config.catchain_config()?;
         let cur_validator_set = last_mc_state_extra.config.validator_set()?;
         let next_validator_set = last_mc_state_extra.config.next_validator_set()?;
-        let next_set_lag = 30; // include next set if it is activating during
 
-        if cur_validator_set.utime_until() < now + next_set_lag && next_validator_set.total() == 0 {
+        if cur_validator_set.utime_until() < now + NEXT_SET_LAG && next_validator_set.total() == 0 {
             log::warn!("Current validator set expires soon but new one is still empty!")
         }
 
@@ -683,7 +691,7 @@ impl RempClient {
                 last_mc_state_extra.validator_info.catchain_seqno,
                 &cur_validator_set
             ));
-            if cur_validator_set.utime_until() < now + next_set_lag && next_validator_set.total() > 0 {
+            if cur_validator_set.utime_until() < now + NEXT_SET_LAG && next_validator_set.total() > 0 {
                 subset_params.push((
                     shard.clone(),
                     last_mc_state_extra.validator_info.catchain_seqno + 1, // TODO is it correct?
@@ -718,7 +726,7 @@ impl RempClient {
                 match shard_descr.split_merge_at {
                     FutureSplitMerge::None => vec!((shard.clone(), cc_seqno)),
                     FutureSplitMerge::Split{split_utime: time, interval: _interval} => {
-                        if time < now + next_set_lag {
+                        if time < now + NEXT_SET_LAG {
                             let (s1, s2) = shard.split()?;
                             let s = if s1.contains_account(address)? {
                                 s1
@@ -731,7 +739,7 @@ impl RempClient {
                         }
                     }
                     FutureSplitMerge::Merge{merge_utime: time, interval: _interval} => {
-                        if time < now + next_set_lag {
+                        if time < now + NEXT_SET_LAG {
                             vec!((shard.clone(), cc_seqno), (shard.merge()?, cc_seqno + 1))
                         } else {
                             vec!((shard.clone(), cc_seqno))
@@ -757,7 +765,7 @@ impl RempClient {
                     &cur_validator_set
                 ));
                 // Next catchain
-                if cc_expires_at < now + next_set_lag {
+                if cc_expires_at < now + NEXT_SET_LAG {
                     subset_params.push((
                         shard.clone(),
                         cc_seqno + 1,
@@ -765,7 +773,7 @@ impl RempClient {
                     ));
                 }
                 // Next val set
-                if cur_validator_set.utime_until() < now + next_set_lag {
+                if cur_validator_set.utime_until() < now + NEXT_SET_LAG {
                     let cc_seqno = if cc_expires_at < cur_validator_set.utime_until() {
                         cc_seqno + 2
                     } else {
@@ -794,7 +802,7 @@ impl RempClient {
                 if !validators.contains_key(&key) {
                     let val = ValidatorInfo {
                         got_receipt_from: Arc::new(AtomicBool::new(false)),
-                        pub_key: Ed25519KeyOption::from_public_key(v.public_key.key_bytes()),
+                        //pub_key: Ed25519KeyOption::from_public_key(v.public_key.key_bytes()),
                     };
                     validators.insert(key, val);
                 }
@@ -803,7 +811,7 @@ impl RempClient {
 
         let mc_cc_expires_at =  now - now % cc_config.mc_catchain_lifetime + cc_config.mc_catchain_lifetime;
         let mc_cc_to_die = last_mc_state_extra.validator_info.catchain_seqno + 
-            if mc_cc_expires_at < now + next_set_lag {
+            if mc_cc_expires_at < now + NEXT_SET_LAG {
                 4
             } else {
                 3
@@ -994,7 +1002,7 @@ impl RempClient {
         Ok(())
     }
 
-    fn check_receipt_signature(
+    /*fn check_receipt_signature(
         &self,
         signed_receipt: &RempSignedReceipt,
         source_adnl_id: &Arc<KeyId>,
@@ -1021,7 +1029,7 @@ impl RempClient {
         validator_info.got_receipt_from.store(true, Ordering::Relaxed);
 
         Ok(())
-    }
+    }*/
 }
 
 pub fn remp_status_short_name(

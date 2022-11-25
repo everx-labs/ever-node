@@ -50,7 +50,7 @@ use overlay::{BroadcastSendInfo, PrivateOverlayShortId};
 use rand::Rng;
 #[cfg(feature="workchains")]
 use std::sync::atomic::Ordering;
-use std::{ops::Deref, sync::Arc, convert::TryInto};
+use std::{ops::Deref, sync::Arc};
 use storage::block_handle_db::BlockHandle;
 use ton_api::ton::ton_node::{RempMessage, RempMessageStatus, RempReceipt, broadcast::BlockBroadcast};
 use ton_block::{
@@ -972,7 +972,7 @@ impl EngineOperations for Engine {
         self.network().remp().send_message(to, message)
     }
 
-    async fn sign_and_send_remp_receipt(&self, to: Arc<KeyId>, receipt: RempReceipt) -> Result<()> {
+    /*async fn sign_and_send_remp_receipt(&self, to: Arc<KeyId>, receipt: RempReceipt) -> Result<()> {
         let state = self.load_last_applied_mc_state_or_zerostate().await?;
         let validators: Vec<CatchainNode> = state
             .config_params()?
@@ -996,6 +996,21 @@ impl EngineOperations for Engine {
         // self.network().remp().send_receipt(to, receipt.message_id(), signed_receipt).await
         self.network().remp().combine_and_send_receipt(to, receipt, signature, adnl_id).await
 
+    }*/
+
+    async fn send_remp_receipt(&self, to: Arc<KeyId>, receipt: RempReceipt) -> Result<()> {
+        let state = self.load_last_applied_mc_state_or_zerostate().await?;
+        let validators: Vec<CatchainNode> = state
+            .config_params()?
+            .validator_set()?.list()
+            .iter().map(|vd| validatordescr_to_catchain_node(vd)).collect();
+        let (key, adnl_id) = self.network
+            .get_validator_key(&validators).await?
+            .ok_or_else(|| error!("Can't get validator's key"))?;
+        if key.id().data() != receipt.source_id().as_slice() {
+            fail!("given source_id {} is not correspond to key {}", hex::encode(receipt.source_id().as_slice()), hex::encode(key.id().data()))
+        }
+        self.network().remp().combine_and_send_receipt(to, receipt, adnl_id).await
     }
 
     fn sign_remp_receipt(&self, receipt: &RempReceipt) -> Result<Vec<u8>> {

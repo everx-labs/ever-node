@@ -249,6 +249,9 @@ impl MessageQueue {
         if let Some(session) = &self.remp_manager.catchain_store.get_catchain_session(&self.catchain_info.queue_id).await {
             log::trace!(target: "remp", "Point 3. Activating RMQ {} processing", self);
             session.request_new_block(SystemTime::now());
+
+            // Temporary status "New" --- message is not registered yet
+            self.send_response_to_fullnode(msg, RempMessageStatus::TonNode_RempNew);
             Ok(())
         }
         else {
@@ -444,9 +447,14 @@ impl MessageQueue {
             match self.send_message_to_collator(msgid.clone(), message.message.clone()).await {
                 Err(e) => {
                     let error = format!("{}", e);
-                    log::error!(target: "remp", "Point 5. RMQ {}: error sending message {:x} to collator: {} -- rejecting",
-                                    self, msgid, &error);
+                    log::error!(target: "remp",
+                        "Point 5. RMQ {}: error sending message {:x} to collator: `{}`; message status is unknown till collation end",
+                        self, msgid, &error
+                    );
 
+                    // No new status: failure inside collator does not say
+                    // anything about the message. Let's wait till collation end.
+/*
                     let new_status = RempMessageStatus::TonNode_RempRejected(
                         ton_api::ton::ton_node::rempmessagestatus::RempRejected {
                             level: RempMessageLevel::TonNode_RempCollator,
@@ -455,6 +463,7 @@ impl MessageQueue {
                         }
                     );
                     self.update_status_send_response(&msgid, message.clone(), new_status).await;
+ */
                 },
                 Ok(()) => {
                     let new_status = RempMessageStatus::TonNode_RempAccepted (RempAccepted {
@@ -902,7 +911,7 @@ impl RmqQueueManager {
             cur_queue.clone().put_message_to_rmq(message).await
         }
         else {
-            Ok(())
+            fail!("Cannot put message to RMQ {}: queue is not started yet", self)
         }
     }
 

@@ -252,9 +252,10 @@ pub fn get_level_and_level_change(status: &RempMessageStatus) -> (RempMessageLev
     }
 }
 
+/// A message with "rejected" status or a timed-out message are finally rejected
 pub fn is_finally_rejected(status: &RempMessageStatus) -> bool {
-    match get_level_and_level_change(status) {
-        (RempMessageLevel::TonNode_RempQueue, chg) | (RempMessageLevel::TonNode_RempFullnode, chg) => chg < 0,
+    match status {
+        RempMessageStatus::TonNode_RempRejected(_) | RempMessageStatus::TonNode_RempTimeout => true,
         _ => false
     }
 }
@@ -289,7 +290,7 @@ impl RempMessagesPool {
 
     pub fn new_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
         if !add_unbound_object_to_map(&self.messages, id.clone(), || Ok(message.clone()))? {
-            fail!("External message {} is already added", id)
+            fail!("External message {:x} is already added", id)
         }
         Ok(())
     }
@@ -383,25 +384,17 @@ impl RempMessagesPool {
 
     pub fn finalize_remp_messages_as_ignored(&self, block_id: &BlockIdExt)
     -> Result<()> {
+        let mut ignored = vec!();
         for guard in self.messages.iter() {
             if let Some(dst) = guard.val().dst_ref() {
                 if let Ok(prefix) = AccountIdPrefixFull::prefix(dst) {
                     if block_id.shard().contains_full_prefix(&prefix) {
-                        self.statuses_queue.push((
-                            guard.key().clone(),
-                            guard.val().clone(),
-                            RempMessageStatus::TonNode_RempIgnored(
-                                ton_api::ton::ton_node::rempmessagestatus::RempIgnored{
-                                    level: RempMessageLevel::TonNode_RempCollator,
-                                    block_id: block_id.clone(),
-                                }
-                            )
-                        ));
+                        ignored.push(guard.key().clone());
                     }
                 }
             }
         }
-
+        self.finalize_messages(block_id.clone(), vec!(), vec!(), ignored)?;
         Ok(())
     }
 

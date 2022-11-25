@@ -641,7 +641,7 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    async fn sign_and_send_remp_receipt(&self, to: Arc<KeyId>, receipt: RempReceipt) -> Result<()> {
+    async fn send_remp_receipt(&self, to: Arc<KeyId>, receipt: RempReceipt) -> Result<()> {
         unimplemented!()
     }
 
