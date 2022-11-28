@@ -1510,7 +1510,7 @@ impl ValidateQuery {
         let mut last_trans_hash = old_state.last_trans_hash().clone();
         let mut acc_state_hash = hash_upd.old_hash;
         let mut prev_msg_hash = None;
-        let mut there_were_remp_message = false;
+        //let mut there_were_remp_message = false;
         acc_blk.transactions().iterate_slices(|key, trans_slice| {
             let trans_lt = key.clone().get_next_u64()?;
             let msg_info = Self::precheck_one_transaction(
@@ -1525,9 +1525,14 @@ impl ValidateQuery {
             ).map_err(|err| error!("transaction {:x} of account {:x} is invalid : {}", trans_lt, acc_id, err))?;
             
             if base.config_params.has_capability(GlobalCapabilities::CapRemp)  {
-                if let Some((id, is_internal)) = msg_info {
+                if let Some((id, _is_internal)) = msg_info {
                     Self::check_message_ordering(
-                        base, &id, is_internal, &mut there_were_remp_message, &mut prev_msg_hash, engine,
+                        base,
+                        &id,
+                        //is_internal,
+                        //&mut there_were_remp_message,
+                        &mut prev_msg_hash,
+                        engine,
                     ).map_err(|err| error!("transaction {:x} of account {:x} has invalid ordering : {}", trans_lt, acc_id, err))?;
                 }
             }
@@ -1550,16 +1555,16 @@ impl ValidateQuery {
     fn check_message_ordering(
         base: &ValidateBase,
         id: &UInt256,
-        is_internal: bool,
-        there_were_remp_message: &mut bool,
+        //is_internal: bool,
+        //there_were_remp_message: &mut bool,
         prev_hash: &mut Option<UInt256>,
         engine: &Arc<dyn EngineOperations>,
     ) -> Result<()> {
-        if is_internal && *there_were_remp_message {
-            reject_query!("this transaction processed internal message, but has LT greater than \
-                at least one transaction with external (remp) message.");
-        } else if !is_internal {
-            *there_were_remp_message = true;
+        // if is_internal && *there_were_remp_message {
+        //     reject_query!("this transaction processed internal message, but has LT greater than \
+        //         at least one transaction with external (remp) message.");
+        // } else if !is_internal {
+        //     *there_were_remp_message = true;
             tokio::runtime::Handle::try_current()?.block_on(async {
                 match engine.check_remp_duplicate(id).await? {
                     RempDuplicateStatus::Absent => reject_query!("message {:x} is not found in remp queue", id),
@@ -1578,7 +1583,7 @@ impl ValidateQuery {
                 }
             }
             *prev_hash = Some(hash);
-        }
+        //}
         Ok(())
     }
 
@@ -2150,7 +2155,7 @@ impl ValidateQuery {
             let in_msg_slice = base.in_msg_descr.get_as_slice(in_msg_key)?
                 .ok_or_else(|| error!("OutMsg with key {} refers to a (re)import InMsg, \
                     but there is no InMsg with such a key", in_msg_key.to_hex_string()))?;
-            if in_msg_slice != SliceData::from(reimport_cell) {
+            if in_msg_slice != SliceData::load_cell(reimport_cell)? {
                 reject_query!("OutMsg with key {} refers to a (re)import InMsg, \
                     but the actual InMsg with this key is different from the one referred to",
                         in_msg_key.to_hex_string())

@@ -343,7 +343,7 @@ pub fn create_new_proof(
     // visit block header while building a Merkle proof
 
     let usage_tree = UsageTree::with_root(block_stuff.root_cell().clone());
-    let block = Block::construct_from(&mut usage_tree.root_slice())?;
+    let block = Block::construct_from_cell(usage_tree.root_cell())?;
 
     let info = block.read_info()?;
     let _prev_ref = info.read_prev_ref()?;

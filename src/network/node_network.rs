@@ -47,8 +47,8 @@ use overlay::{
 use rldp::RldpNode;
 use std::{
     hash::Hash, 
-    sync::{Arc, atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering}}, 
-    time::{Duration, SystemTime},
+    sync::{Arc, atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicBool, Ordering}}, 
+    time::{Duration, Instant, SystemTime},
     convert::TryInto,
 };
 use ton_types::{Result, fail, error, UInt256};
@@ -82,6 +82,7 @@ pub struct NodeNetwork {
     config_handler: Arc<NodeConfigHandler>,
     connectivity_check_config: ConnectivityCheckBroadcastConfig,
     default_rldp_roundtrip: Option<u32>,
+    stop: Arc<AtomicU32>, 
     #[cfg(feature = "telemetry")]
     tag_connectivity_check_broadcast: u32
 }
@@ -126,10 +127,16 @@ impl NodeNetwork {
     pub const TAG_DHT_KEY: usize = 1;
     pub const TAG_OVERLAY_KEY: usize = 2;
 
-    const PERIOD_CHECK_OVERLAY_NODES: u64 = 1;  // seconds
-    const PERIOD_STORE_IP_ADDRESS: u64 = 500;   // seconds
-    const PERIOD_START_FIND_DHT_NODE: u64 = 60; // seconds
-    const PERIOD_UPDATE_PEERS: u64 = 5;         // seconds
+    const MASK_STOP: u32 = 0x80000000;
+
+    const TIMEOUT_SPIN_MS: u64 = 1000;
+    const TIMEOUT_STOP_MS: u64 = 500;
+    const TIMEOUT_FIND_DHT_NODES_SEC: u64 = 60;
+    const TIMEOUT_FIND_OVERLAY_PEERS_SEC: u64 = 1;
+    const TIMEOUT_SEARCH_VALIDATOR_KEYS_SEC: u64 = 1;
+    const TIMEOUT_STORE_IP_ADDRESS_SEC: u64 = 500;
+    const TIMEOUT_STORE_OVERLAY_NODE_SEC: u64 = 500;
+    const TIMEOUT_UPDATE_PEERS_SEC: u64 = 5;
 
     pub async fn new(
         config: TonNodeConfig,
@@ -143,17 +150,18 @@ impl NodeNetwork {
         let mut connectivity_check_config = config.connectivity_check_config().clone();
         connectivity_check_config.enabled = false;
         let connectivity_check_enabled = connectivity_check_config.enabled;
+        let broadcast_hops = config.extensions().broadcast_hops;
 
         let adnl = AdnlNode::with_config(config.adnl_node()?).await?;
-        adnl.set_options(AdnlNode::OPTION_FORCE_COMPRESSION);
+        if !config.extensions().disable_compression {
+            adnl.set_options(AdnlNode::OPTION_FORCE_COMPRESSION)
+        }
         let dht = DhtNode::with_adnl_node(adnl.clone(), Self::TAG_DHT_KEY)?;
         let overlay = OverlayNode::with_adnl_node_and_zero_state(
             adnl.clone(), 
             masterchain_zero_state_id.file_hash.as_slice(),
             Self::TAG_OVERLAY_KEY
         )?;
-      
-        let broadcast_hops = config.extensions().broadcast_hops;
         if config.extensions().disable_broadcast_retransmit {
             overlay.set_broadcast_retransmit(false)
         }
@@ -165,20 +173,21 @@ impl NodeNetwork {
             dht.add_peer(peer)?;
         }
 
+        let stop = Arc::new(AtomicU32::new(0));
         let masterchain_overlay_short_id = overlay.calc_overlay_short_id(
             masterchain_zero_state_id.shard().workchain_id(),
             masterchain_zero_state_id.shard().shard_prefix_with_tag() as i64,
         )?;
 
         let dht_key = adnl.key_by_tag(Self::TAG_DHT_KEY)?;
-        NodeNetwork::periodic_store_ip_addr(dht.clone(), dht_key, None);
+        NodeNetwork::periodic_store_ip_addr(dht.clone(), dht_key, None, &stop);
 
         let overlay_key = adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?;
-        NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_key, None);
+        NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_key, None, &stop);
 
         let default_rldp_roundtrip = config.default_rldp_roundtrip();
 
-        NodeNetwork::find_dht_nodes(dht.clone());
+        NodeNetwork::find_dht_nodes(dht.clone(), &stop);
         let (config_handler, config_handler_context) = NodeConfigHandler::create(
             config, tokio::runtime::Handle::current()
         )?;
@@ -226,6 +235,7 @@ impl NodeNetwork {
             config_handler,
             default_rldp_roundtrip,
             connectivity_check_config,
+            stop,
             #[cfg(feature = "telemetry")]
             tag_connectivity_check_broadcast: 
                 tag_from_bare_type::<ConnectivityCheckBroadcast>(),
@@ -257,6 +267,7 @@ impl NodeNetwork {
     pub async fn delete_overlays(&self) {
         for guard in self.overlays.iter() {
             log::info!("Deleting overlay {}", guard.key());
+            guard.val().peers().stop().await;
             match guard.val().overlay().delete_public_overlay(guard.key()) {
                 Ok(result) => log::info!("Deleted overlay {} ({})", guard.key(), result),
                 Err(e) => log::warn!("Deleting overlay {}: {}", guard.key(), e)
@@ -266,6 +277,10 @@ impl NodeNetwork {
 
     pub async fn stop_adnl(&self) {
         log::info!("Stopping adnl...");
+        self.stop.fetch_or(Self::MASK_STOP, Ordering::Relaxed);
+        while self.stop.load(Ordering::Relaxed) != Self::MASK_STOP {
+            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_STOP_MS)).await;
+        }
         self.network_context.adnl.stop().await;
         log::info!("Stopped adnl");
     }
@@ -286,91 +301,99 @@ impl NodeNetwork {
                 fail!("Cannot add element to cache") 
             } 
         }
-/*
-        let insertion = cache.insert_with(
-            id.clone(),
-            |_, prev_gen_val, updated_pair | if updated_pair.is_some() {
-                // other thread already added the value into map
-                // so discard this insertion attempt
-                lockfree::map::Preview::Discard
-            } else if prev_gen_val.is_some() {
-                // we added the value just now - keep this value
-                lockfree::map::Preview::Keep
-            } else {
-                // there is not the value in the map - try to add.
-                // If other thread adding value the same time - the closure will be recalled
-                lockfree::map::Preview::New(value.clone())
+    }
+
+    async fn wait_timeout(timeout_sec: u64, stop: &Arc<AtomicU32>) -> bool {
+        let start = Instant::now();
+        loop {
+            if (stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 {
+                return false;
             }
-        );
-        match insertion {
-            lockfree::map::Insertion::Created => {
-                // overlay info we loaded now was added - use it
-                value
-            },
-            lockfree::map::Insertion::Updated(_) => {
-                // unreachable situation - all updates must be discarded
-                unreachable!("overlay: unreachable Insertion::Updated")
-            },
-            lockfree::map::Insertion::Failed(_) => {
-                // othre thread's overlay info was added - get it and use
-                cache.get(id).unwrap().val().clone()
+            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_SPIN_MS)).await;
+            if start.elapsed().as_secs() >= timeout_sec {
+                return true;
             }
         }
-*/
     }
 
     fn periodic_store_ip_addr(
         dht: Arc<DhtNode>,
         node_key: Arc<dyn KeyOption>,
-        validator_keys: Option<Arc<lockfree::set::Set<Arc<KeyId>>>>)
-    {
-        tokio::spawn(async move {
-            let node_key = node_key.clone();
-            loop {
-                if let Err(e) = DhtNode::store_ip_address(&dht, &node_key).await {
-                    log::warn!("store ip address is ERROR: {}", e)
-                }
-                tokio::time::sleep(Duration::from_secs(Self::PERIOD_STORE_IP_ADDRESS)).await;
-                if let Some(actual_validator_adnl_keys) = validator_keys.clone() {
-                    if actual_validator_adnl_keys.get(node_key.id()).is_none() {
-                        log::info!("store ip address finish (for key {}).", node_key.id());
-                        break;
+        validator_keys: Option<Arc<lockfree::set::Set<Arc<KeyId>>>>,
+        stop: &Arc<AtomicU32>
+    ) {
+        let stop = stop.clone();
+        stop.fetch_add(1, Ordering::Relaxed);
+        tokio::spawn(
+            async move {
+                loop {
+                    if let Err(e) = DhtNode::store_ip_address(&dht, &node_key).await {
+                        log::warn!("store ip address ERROR: {}", e)
+                    }
+                    if !Self::wait_timeout(Self::TIMEOUT_STORE_IP_ADDRESS_SEC, &stop).await {
+                        break
+                    }
+                    if let Some(actual_validator_adnl_keys) = validator_keys.as_ref() {
+                        if actual_validator_adnl_keys.get(node_key.id()).is_none() {
+                            log::info!("store ip address finished (for key {}).", node_key.id());
+                            break
+                        }
                     }
                 }
+                stop.fetch_sub(1, Ordering::Relaxed)
             }
-        });
+        );
     }
 
     fn periodic_store_overlay_node(
         dht: Arc<DhtNode>, 
         overlay_id: OverlayId,
-        overlay_node: ton_api::ton::overlay::node::Node)
-    {
-        tokio::spawn(async move {
-            let overlay_node = overlay_node;
-            let overay_id = overlay_id.clone();
-            loop {
-                let res = DhtNode::store_overlay_node(&dht, &overay_id, &overlay_node).await;
-                log::info!("overlay_store status: {:?}", res);
-                tokio::time::sleep(Duration::from_secs(Self::PERIOD_STORE_IP_ADDRESS)).await;
+        overlay_node: ton_api::ton::overlay::node::Node,
+        stop: &Arc<AtomicU32>
+    ) {
+        let stop = stop.clone();
+        stop.fetch_add(1, Ordering::Relaxed);
+        tokio::spawn(
+            async move {
+                loop {
+                    let res = DhtNode::store_overlay_node(&dht, &overlay_id, &overlay_node).await;
+                    log::info!("overlay_store status: {:?}", res);
+                    if !Self::wait_timeout(Self::TIMEOUT_STORE_OVERLAY_NODE_SEC, &stop).await {
+                        break
+                    }
+                }
+                stop.fetch_sub(1, Ordering::Relaxed)
             }
-        });
+        );
     }
 
     fn process_overlay_peers(
         neighbours: Arc<Neighbours>,
         dht: Arc<DhtNode>,
         overlay: Arc<OverlayNode>,
-        overlay_id: Arc<OverlayShortId>)
-    {
-        tokio::spawn(async move {
-            loop {
-                if let Err(e) = Self::add_overlay_peers(&neighbours, &dht, &overlay, &overlay_id).await {
-                    log::warn!("add_overlay_peers: {}", e);
-                };
-                tokio::time::sleep(Duration::from_secs(Self::PERIOD_CHECK_OVERLAY_NODES)).await;
+        overlay_id: Arc<OverlayShortId>,
+        stop: &Arc<AtomicU32>
+    ) {
+        let stop = stop.clone();
+        stop.fetch_add(1, Ordering::Relaxed);
+        tokio::spawn(
+            async move {
+                loop {
+                    if let Err(e) = Self::add_overlay_peers(
+                        &neighbours, 
+                        &dht, 
+                        &overlay, 
+                        &overlay_id
+                    ).await {
+                        log::warn!("add_overlay_peers: {}", e)
+                    }
+                    if !Self::wait_timeout(Self::TIMEOUT_FIND_OVERLAY_PEERS_SEC, &stop).await {
+                        break
+                    }
+                }
+                stop.fetch_sub(1, Ordering::Relaxed)
             }
-        });
+        );
     }
 
     async fn add_overlay_peers(
@@ -541,36 +564,55 @@ impl NodeNetwork {
         Ok(())
     }
 
-    fn find_dht_nodes(dht: Arc<DhtNode>) {
-        tokio::spawn(async move {
-            loop {
-                let mut iter = None;
-                while let Some(id) = dht.get_known_peer(&mut iter) {
-                    if let Err(e) = dht.find_dht_nodes(&id).await {
-                        log::warn!("find_dht_nodes result: {:?}", e)
+    fn find_dht_nodes(dht: Arc<DhtNode>, stop: &Arc<AtomicU32>) {
+        let stop = stop.clone();
+        stop.fetch_add(1, Ordering::Relaxed);
+        tokio::spawn(
+            async move {
+                'all: loop {
+                    let mut iter = None;
+                    while let Some(id) = dht.get_known_peer(&mut iter) {
+                        if (stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 {
+                            break 'all
+                        }
+                        if let Err(e) = dht.find_dht_nodes(&id).await {
+                            log::warn!("find_dht_nodes result: {:?}", e)
+                        }
+                    }
+                    if !Self::wait_timeout(Self::TIMEOUT_FIND_DHT_NODES_SEC, &stop).await {
+                        break
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(Self::PERIOD_START_FIND_DHT_NODE)).await;
+                stop.fetch_sub(1, Ordering::Relaxed)
             }
-        });
+        );
     }
 
     fn start_update_peers(self: Arc<Self>, client_overlay: &Arc<NodeClientOverlay>) {
         let client_overlay = client_overlay.clone();
-        tokio::spawn(async move {
+        self.stop.fetch_add(1, Ordering::Relaxed);
+        tokio::spawn(
+            async move {
             let mut iter = None;
-            loop {
-                log::trace!("find overlay nodes by dht...");
-                if let Err(e) = self.update_peers(&client_overlay, &mut iter).await {
-                    log::warn!("Error find overlay nodes by dht: {}", e);
+                loop {
+                    log::trace!("find overlay nodes by dht...");
+                    if let Err(e) = self.update_peers(&client_overlay, &mut iter).await {
+                        log::warn!("Error find overlay nodes by dht: {}", e);
+                    }
+                    if (self.stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 {
+                        break
+                    }
+                    if client_overlay.peers().count() >= neighbours::MAX_NEIGHBOURS {
+                        log::trace!("finish find overlay nodes.");
+                        break;
+                    } 
+                    if !Self::wait_timeout(Self::TIMEOUT_UPDATE_PEERS_SEC, &self.stop).await {
+                        break
+                    }
                 }
-                if client_overlay.peers().count() >= neighbours::MAX_NEIGHBOURS {
-                    log::trace!("finish find overlay nodes.");
-                    return;
-                } 
-                tokio::time::sleep(Duration::from_secs(Self::PERIOD_UPDATE_PEERS)).await;
+                self.stop.fetch_sub(1, Ordering::Relaxed)
             }
-        });
+        );
     }
 
     async fn get_overlay_worker(
@@ -579,7 +621,7 @@ impl NodeNetwork {
     ) -> Result<Arc<dyn FullNodeOverlayClient>> {
 
         let (overlay_id_short, overlay_id_full) = overlay_id;
-        self.network_context.overlay.add_shard(
+        self.network_context.overlay.add_local_workchain_overlay(
             Some(self.runtime_handle.clone()), 
             &overlay_id_short
         )?;
@@ -588,7 +630,8 @@ impl NodeNetwork {
         NodeNetwork::periodic_store_overlay_node(
             self.network_context.dht.clone(),
             overlay_id_full, 
-            node
+            node,
+            &self.stop
         );
 
         let peers = self.update_overlay_peers(&overlay_id_short, &mut None).await?; 
@@ -626,7 +669,8 @@ impl NodeNetwork {
             peers.clone(), 
             self.network_context.dht.clone(), 
             self.network_context.overlay.clone(), 
-            overlay_id_short.clone()
+            overlay_id_short.clone(),
+            &self.stop
         );
         log::info!("Started Overlay {}", &overlay_id_short);
         Ok(client_overlay as Arc<dyn FullNodeOverlayClient>)
@@ -647,7 +691,6 @@ impl NodeNetwork {
         validators: Vec<CatchainNode>,
         callback: Arc<dyn Fn(Arc<KeyId>) + Sync + Send>
     ) -> Result<Arc<AtomicBool>> {
-        const SLEEP_TIME: u64 = 5;  //secs
         let dht = self.network_context.dht.clone();
         let adnl = self.network_context.adnl.clone();
         let overlay = self.network_context.overlay.clone();
@@ -656,6 +699,8 @@ impl NodeNetwork {
         let breaker = Arc::new(AtomicBool::new(false));
         let breaker_ = breaker.clone();
         let callback = callback.clone();
+        let stop = self.stop.clone();
+        stop.fetch_add(1, Ordering::Relaxed);
         tokio::spawn(async move {
             let mut current_validators = validators;
             loop {
@@ -665,7 +710,8 @@ impl NodeNetwork {
                     &dht,
                     &overlay,
                     current_validators,
-                    Some(callback.clone())
+                    Some(callback.clone()),
+                    &stop
                 ).await {
                     Ok(lost_validators) => {
                         current_validators = lost_validators;
@@ -684,9 +730,11 @@ impl NodeNetwork {
                 if breaker.load(Ordering::Relaxed) {
                     break;
                 }
-
-                tokio::time::sleep(Duration::from_secs(SLEEP_TIME)).await;
+                if !Self::wait_timeout(Self::TIMEOUT_SEARCH_VALIDATOR_KEYS_SEC, &stop).await {
+                    break
+                }
             }
+            stop.fetch_sub(1, Ordering::Relaxed)
         });
         Ok(breaker_)
     }
@@ -696,12 +744,14 @@ impl NodeNetwork {
         local_adnl_id: Arc<KeyId>,
         validators_contexts: Arc<Cache<UInt256, Arc<ValidatorSetContext>>>,
         validator_list_id: UInt256,
-        validators: Vec<CatchainNode>
+        validators: Vec<CatchainNode>,
+        stop: &Arc<AtomicU32>,
     ) {
-        const SLEEP_TIME: u64 = 1;  //secs
         let dht = self.network_context.dht.clone();
         let adnl = self.network_context.adnl.clone();
         let overlay = self.network_context.overlay.clone();
+        let stop = stop.clone();
+        stop.fetch_add(1, Ordering::Relaxed);
         tokio::spawn(async move {
             let mut current_validators = validators;
             loop {
@@ -711,7 +761,8 @@ impl NodeNetwork {
                     &dht,
                     &overlay,
                     current_validators,
-                    None
+                    None,
+                    &stop
                 ).await {
                     Ok(lost_validators) => {
                         current_validators = lost_validators;
@@ -727,11 +778,14 @@ impl NodeNetwork {
                 } else {
                     log::info!("search_validator_keys: numbers lost validator keys: {}", current_validators.len());
                 }
-                tokio::time::sleep(Duration::from_secs(SLEEP_TIME)).await;
+                if !Self::wait_timeout(Self::TIMEOUT_SEARCH_VALIDATOR_KEYS_SEC, &stop).await {
+                    break
+                }
                 if validators_contexts.get(&validator_list_id).is_none() {
                     break;
                 }
             }
+            stop.fetch_sub(1, Ordering::Relaxed)
         });
     }
 
@@ -741,11 +795,15 @@ impl NodeNetwork {
         dht: &'a Arc<DhtNode>,
         overlay: &'a OverlayNode,
         validators: Vec<CatchainNode>,
-        full_node_callback: Option<Arc<dyn Fn(Arc<KeyId>) + Sync + Send>>
+        full_node_callback: Option<Arc<dyn Fn(Arc<KeyId>) + Sync + Send>>,
+        stop: &'a Arc<AtomicU32>,
     ) -> Result<Vec<CatchainNode>> {
         let mut lost_validators = Vec::new();
         for val in validators {
-            match DhtNode::find_address(&dht, &val.adnl_id).await {
+            if (stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 {
+                fail!("Network is stopping")
+            }
+            match DhtNode::find_address(dht, &val.adnl_id).await {
                 Ok(Some((addr, key))) => {
                     log::info!("addr found: {:?}, key: {:x?}", &addr, &key);
                     match full_node_callback {
@@ -957,7 +1015,8 @@ impl NodeNetwork {
                     NodeNetwork::periodic_store_ip_addr(
                         self.network_context.dht.clone(),
                         self.network_context.adnl.key_by_id(&id)?,
-                        Some(self.validator_context.actual_local_adnl_keys.clone())
+                        Some(self.validator_context.actual_local_adnl_keys.clone()),
+                        &self.stop
                     );
                     log::info!(
                         "load_and_store_adnl_key (AddValidatorAdnlKey) id: {} finished.", 
@@ -1177,7 +1236,8 @@ impl PrivateOverlayOperations for NodeNetwork {
 //                self.network_context.overlay.clone(),
                 self.validator_context.sets_contexts.clone(),
                 validator_list_id.clone(),
-                lost_validators
+                lost_validators,
+                &self.stop
             );
         }
 

@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2022 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -61,7 +61,7 @@ use ton_executor::{
     BlockchainConfig, ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor,
     TransactionExecutor,
 };
-use ton_types::{error, fail, AccountId, Cell, HashmapType, Result, UInt256, UsageTree};
+use ton_types::{error, fail, AccountId, Cell, HashmapType, Result, UInt256, UsageTree, SliceData};
 
 #[cfg(feature = "metrics")]
 use crate::engine::STATSD;
@@ -1937,7 +1937,7 @@ impl Collator {
         let config_account_id = AccountId::from(mc_data.config().config_addr.clone());
         let fundamental_dict = mc_data.config().fundamental_smc_addr()?;
         for res in &fundamental_dict {
-            let account_id = res?.0.into_cell()?.into();
+            let account_id = SliceData::load_builder(res?.0)?;
             self.create_ticktock_transaction(account_id, tock, prev_data, collator_data, 
                 exec_manager).await?;
             self.check_stop_flag()?;
@@ -1992,7 +1992,7 @@ impl Collator {
         }
         log::trace!("{}: create_special_transactions", self.collated_block_descr);
 
-        let account_id = AccountId::from(mc_data.config().fee_collector_address()?.serialize()?);
+        let account_id = mc_data.config().fee_collector_address()?.into();
         self.create_special_transaction(
             account_id,
             collator_data.value_flow.recovered.clone(),
