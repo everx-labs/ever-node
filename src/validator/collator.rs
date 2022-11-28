@@ -2433,7 +2433,6 @@ impl Collator {
         new_state.write_custom(mc_state_extra.as_ref())?;
 
         log::trace!("{}: finalize_block: calc merkle update", self.collated_block_descr);
-        let visited = std::mem::take(&mut collator_data.usage_tree).visited();
         let new_ss_root = new_state.serialize()?;
 
         self.check_stop_flag()?;
@@ -2446,7 +2445,7 @@ impl Collator {
         let state_update = MerkleUpdate::create_fast(
             &prev_data.state_root,
             &new_ss_root,
-            |h| visited.contains(h)
+            |h| collator_data.usage_tree.contains(h)
         )?;
         log::trace!("{}: TIME: merkle update creating {}ms;", self.collated_block_descr, now.elapsed().as_millis());
 

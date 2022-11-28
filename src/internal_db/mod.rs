@@ -83,16 +83,16 @@ impl BlockResult {
         Self {
             handle, 
             status
-        }    
+        }
     }
 
     /// Any result 
-    pub fn _as_any(self) -> Arc<BlockHandle> {
+    pub fn _to_any(self) -> Arc<BlockHandle> {
         self.handle
     }
 
     /// Assert creation
-    pub fn _as_created(self) -> Option<Arc<BlockHandle>> {
+    pub fn _to_created(self) -> Option<Arc<BlockHandle>> {
         match self.status {
             DataStatus::Created => Some(self.handle),
             _ => None
@@ -100,7 +100,7 @@ impl BlockResult {
     }
 
     /// Assert non-creation
-    pub fn as_non_created(self) -> Option<Arc<BlockHandle>> {
+    pub fn to_non_created(self) -> Option<Arc<BlockHandle>> {
         match self.status {
             DataStatus::Created => None,
             _ => Some(self.handle)
@@ -108,7 +108,7 @@ impl BlockResult {
     }
 
     /// Assert non-update
-    pub fn as_non_updated(self) -> Option<Arc<BlockHandle>> {
+    pub fn to_non_updated(self) -> Option<Arc<BlockHandle>> {
         match self.status {
             DataStatus::Updated => None,
             _ => Some(self.handle)
@@ -116,7 +116,7 @@ impl BlockResult {
     }
 
     /// Assert update
-    pub fn as_updated(self) -> Option<Arc<BlockHandle>> {
+    pub fn to_updated(self) -> Option<Arc<BlockHandle>> {
         match self.status {
             DataStatus::Updated => Some(self.handle),
             _ => None
@@ -124,7 +124,7 @@ impl BlockResult {
     }
 
     /// Check update
-    pub fn is_updated(&self) -> bool{
+    pub fn is_updated(&self) -> bool {
         match self.status {
             DataStatus::Updated => true,
             _ => false
@@ -197,6 +197,7 @@ impl InternalDb {
                 )
             }
         } else {
+            log::info!("DB VERSION {}", version);
             // TODO correct workchain id needed here, but it will be known later
             db = check_db(db, 0, restore_db_enabled, force_check_db, check_stop, is_broken).await?;
         }
@@ -373,11 +374,14 @@ impl InternalDb {
         id: &BlockIdExt,
         db: &BlockInfoDb,
         msg: &str
-    ) -> Result<BlockIdExt> {
+    ) -> Result<Option<BlockIdExt>> {
         let _tc = TimeChecker::new(format!("{} {}", msg, id), 10);
-        let bytes = db.get(id)?;
+        let Some(bytes) = db.try_get(id)? else {
+            return Ok(None)
+        };
         let mut cursor = Cursor::new(&bytes);
-        BlockIdExt::deserialize(&mut cursor)
+        let ret = BlockIdExt::deserialize(&mut cursor)?;
+        Ok(Some(ret))
     }
 
     fn store_block_linkage(
@@ -446,8 +450,11 @@ impl InternalDb {
         let mut result = self.create_or_load_block_handle(
             block.id(), Some(block.block()), None, callback.clone()
         )?;
-        let handle = result.clone().as_non_updated().ok_or_else(
-            || error!("INTERNAL ERROR: block {} result mismatch in store_block_data {:?}", block.id(), result)
+        let handle = result.clone().to_non_updated().ok_or_else(
+            || error!(
+                "INTERNAL ERROR: block {} result mismatch in store_block_data {:?}", 
+                block.id(), result
+            )
         )?;
         let entry_id = PackageEntryId::<_, UInt256, UInt256>::Block(block.id());
         if !handle.has_data() || !self.archive_manager.check_file(&handle, &entry_id) {
@@ -535,7 +542,7 @@ impl InternalDb {
                 let (virt_block, _) = proof.virtualize_block()?;
                 self.create_or_load_block_handle(id, Some(&virt_block), None, callback.clone())?
             };
-            let handle = result.clone().as_non_updated().ok_or_else(
+            let handle = result.clone().to_non_updated().ok_or_else(
                 || error!("INTERNAL ERROR: block {} result mismatch in store_block_proof", id)
             )?;
             if proof.is_link() {
@@ -911,7 +918,9 @@ impl InternalDb {
     }
 
     pub fn load_block_prev1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
-        self.load_block_linkage(id, &self.prev1_block_db, "load_block_prev1")
+        self.load_block_linkage(id, &self.prev1_block_db, "load_block_prev1")?.ok_or_else(
+            || error!("No prev1 block for {}", id)
+        )
     }
 
     pub fn store_block_prev2(
@@ -928,7 +937,7 @@ impl InternalDb {
         )
     }
 
-    pub fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    pub fn load_block_prev2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         self.load_block_linkage(id, &self.prev2_block_db, "load_block_prev2")
     }
 
@@ -947,7 +956,9 @@ impl InternalDb {
     }
 
     pub fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
-        self.load_block_linkage(id, &self.next1_block_db, "load_block_next1")
+        self.load_block_linkage(id, &self.next1_block_db, "load_block_next1")?.ok_or_else(
+            || error!("No next1 block for {}", id)
+        )
     }
 
     pub fn store_block_next2(
@@ -964,7 +975,7 @@ impl InternalDb {
         )
     }
 
-    pub fn load_block_next2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    pub fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         self.load_block_linkage(id, &self.next2_block_db, "load_block_next2")
     }
 
@@ -1002,15 +1013,15 @@ impl InternalDb {
                 }
                 Ok(())
             }
-        ).await.unwrap_or_else(|err|
+        ).await.or_else(|err| {
             log::error!(
                 target: "storage",
                 "Failed to move block to archive: {}. Error: {}",
                 id,
                 err
-            )
-        );
-        Ok(())
+            );
+            Ok(())
+        })
     }
     
     pub fn load_full_node_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>> {
