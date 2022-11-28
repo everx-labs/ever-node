@@ -1525,15 +1525,20 @@ impl ValidateQuery {
             ).map_err(|err| error!("transaction {:x} of account {:x} is invalid : {}", trans_lt, acc_id, err))?;
             
             if base.config_params.has_capability(GlobalCapabilities::CapRemp)  {
-                if let Some((id, _is_internal)) = msg_info {
-                    Self::check_message_ordering(
-                        base,
-                        &id,
-                        //is_internal,
-                        //&mut there_were_remp_message,
-                        &mut prev_msg_hash,
-                        engine,
-                    ).map_err(|err| error!("transaction {:x} of account {:x} has invalid ordering : {}", trans_lt, acc_id, err))?;
+                if let Some((id, is_internal)) = msg_info {
+                    if !is_internal {
+                        Self::check_message_ordering(
+                            base,
+                            &id,
+                            //is_internal,
+                            //&mut there_were_remp_message,
+                            &mut prev_msg_hash,
+                            engine,
+                        ).map_err(|err| error!(
+                            "transaction {:x} of account {:x} has invalid ordering : {}",
+                            trans_lt, acc_id, err)
+                        )?;
+                    }
                 }
             }
             Ok(true)

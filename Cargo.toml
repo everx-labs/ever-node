@@ -43,10 +43,10 @@ string-builder = '^0.2.0'
 adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.102' }
 catchain = { path = 'catchain' }
 ctrlc = { features = [ 'termination' ], version = '3.2.1' }
-dht = { git = 'https://github.com/tonlabs/ton-labs-dht', tag = '0.5.103' }
+dht = { git = 'https://github.com/tonlabs/ton-labs-dht', tag = '0.5.104' }
 ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.65' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.90' }
+overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.91' }
 rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.97' }
 rustracing = { optional = true, version = '0.4.0' }
 rustracing_jaeger = { optional = true, version = '0.4.1' }
