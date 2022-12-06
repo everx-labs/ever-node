@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ton_node'
-version = '0.51.14'
+version = '0.51.19'
 
 [workspace]
 members = [ 'storage' ]
@@ -37,26 +37,26 @@ sha2 = '0.10'
 spin = '0.7.1'
 stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.92' }
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.110' }
 catchain = { path = 'catchain' }
 ctrlc = { features = [ 'termination' ], version = '3.2.1' }
-dht = { git = 'https://github.com/tonlabs/ton-labs-dht', tag = '0.5.90' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.55' }
+dht = { git = 'https://github.com/tonlabs/ton-labs-dht', tag = '0.5.118' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.72' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.77' }
-rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.86' }
+overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.102' }
+rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.106' }
 rustracing = { optional = true, version = '0.4.0' }
 rustracing_jaeger = { optional = true, version = '0.4.1' }
 statsd = { optional = true, version = '0.15' }
 storage = { path = 'storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git', tag = '2.3.23' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.143' }
-ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.8.16' }
-ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', tag = '0.7.55' }
-ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.113' }
-ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.11.8' }
-ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.58' }
+ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git', tag = '2.3.44' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.159' }
+ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.9.9' }
+ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', tag = '0.7.74' }
+ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.136' }
+ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.12.4' }
+ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.78' }
 validator_session = { path = 'validator-session' }
 
 [features]

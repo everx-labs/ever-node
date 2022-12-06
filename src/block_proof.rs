@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2022 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -40,7 +40,7 @@ pub struct BlockProofStuff {
 impl BlockProofStuff {
     pub fn deserialize(block_id: &BlockIdExt, data: Vec<u8>, is_link: bool) -> Result<Self> {
         let root = deserialize_tree_of_cells(&mut std::io::Cursor::new(&data))?;
-        let proof = BlockProof::construct_from(&mut root.clone().into())?;
+        let proof = BlockProof::construct_from_cell(root.clone())?;
         if &proof.proof_for != block_id {
             fail!(
                 NodeError::InvalidData(format!("proof for another block (found: {}, expected: {})", proof.proof_for, block_id))
@@ -85,7 +85,7 @@ impl BlockProofStuff {
     }
 
     pub fn virtualize_block(&self) -> Result<(Block, Cell)> {
-        let merkle_proof = MerkleProof::construct_from(&mut self.proof.root.clone().into())?;
+        let merkle_proof = MerkleProof::construct_from_cell(self.proof.root.clone())?;
         let block_virt_root = merkle_proof.proof.clone().virtualize(1);
         if *self.proof.proof_for.root_hash() != block_virt_root.repr_hash() {
             fail!(NodeError::InvalidData(format!(
