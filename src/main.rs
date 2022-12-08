@@ -271,36 +271,50 @@ fn log_version() {
 
 fn print_build_info() -> String {
     let build_info: String = format!(
-        "TON Node, version {}\n\
-        Rust: {}\n\
-        TON NODE git commit:         {}\n\
-        ADNL git commit:             {}\n\
-        DHT git commit:              {}\n\
-        OVERLAY git commit:          {}\n\
-        RLDP git commit:             {}\n\
-        TON_BLOCK git commit:        {}\n\
-        TON_BLOCK_JSON git commit:   {}\n\
-        TON_SDK git commit:          {}\n\
-        TON_EXECUTOR git commit:     {}\n\
-        TON_TL git commit:           {}\n\
-        TON_TYPES git commit:        {}\n\
-        TON_VM git commit:           {}\n\
-        TON_ABI git commit:     {}\n",
-        std::option_env!("CARGO_PKG_VERSION").unwrap_or("Not set"),
+       "Rust version:               {}\n\
+        TON NODE version:           {}\n\
+        TON NODE Block version:     {}\n\
+        TON NODE build time:        {}\n\
+        TON NODE build mode:        {}\n\
+        TON NODE git commit:        {}\n\
+        TON NODE git commit time:   {}\n\
+        TON NODE git branch:        {}\n\
+        ABI git commit:             {}\n\
+        ADNL git commit:            {}\n\
+        BLOCK git commit:           {}\n\
+        BLOCK_JSON git commit:      {}\n\
+        CRYPTO git commit:          {}\n\
+        DHT git commit:             {}\n\
+        EXECUTOR git commit:        {}\n\
+        OVERLAY git commit:         {}\n\
+        RLDP git commit:            {}\n\
+        TL git commit:              {}\n\
+        TYPES git commit:           {}\n\
+        VM git commit:              {}\n\
+        LOCKFREE git commit:        {}\n",
+
         std::option_env!("BUILD_RUST_VERSION").unwrap_or("Not set"),
-        std::option_env!("GC_TON_NODE").unwrap_or("Not set"),
+        std::option_env!("CARGO_PKG_VERSION").unwrap_or("Not set"),
+        ton_node::validating_utils::supported_version(),
+        std::option_env!("BUILD_TIME").unwrap_or("Not set"),
+        std::option_env!("BUILD_MODE").unwrap_or("Not set"),
+        std::option_env!("BUILD_GIT_COMMIT").unwrap_or("Not set"),
+        std::option_env!("BUILD_GIT_DATE").unwrap_or("Not set"),
+        std::option_env!("BUILD_GIT_BRANCH").unwrap_or("Not set"),
+
+        std::option_env!("GC_ABI").unwrap_or("Not set"),
         std::option_env!("GC_ADNL").unwrap_or("Not set"),
+        std::option_env!("GC_BLOCK").unwrap_or("Not set"),
+        std::option_env!("GC_BLOCK_JSON").unwrap_or("Not set"),
+        std::option_env!("GC_CRYPTO").unwrap_or("Not set"),
         std::option_env!("GC_DHT").unwrap_or("Not set"),
+        std::option_env!("GC_EXECUTOR").unwrap_or("Not set"),
         std::option_env!("GC_OVERLAY").unwrap_or("Not set"),
         std::option_env!("GC_RLDP").unwrap_or("Not set"),
-        std::option_env!("GC_TON_BLOCK").unwrap_or("Not set"),
-        std::option_env!("GC_TON_BLOCK_JSON").unwrap_or("Not set"),
-        std::option_env!("GC_TON_SDK").unwrap_or("Not set"),
-        std::option_env!("GC_TON_EXECUTOR").unwrap_or("Not set"),
-        std::option_env!("GC_TON_TL").unwrap_or("Not set"),
-        std::option_env!("GC_TON_TYPES").unwrap_or("Not set"),
-        std::option_env!("GC_TON_VM").unwrap_or("Not set"),
-        std::option_env!("GC_TON_LABS_ABI").unwrap_or("Not set")
+        std::option_env!("GC_TL").unwrap_or("Not set"),
+        std::option_env!("GC_TYPES").unwrap_or("Not set"),
+        std::option_env!("GC_VM").unwrap_or("Not set"),
+        std::option_env!("GC_LOCKFREE").unwrap_or("Not set"),
     );
     return build_info;
 }

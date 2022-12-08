@@ -1,11 +1,14 @@
 [package]
-build = 'common/build/build.rs'
+build = 'src/build.rs'
 edition = '2021'
 name = 'ton_node'
 version = '0.51.14'
 
 [workspace]
 members = [ 'storage' ]
+
+[build-dependencies]
+toml = "0.5"
 
 [dependencies]
 async-recursion = '0.3.2'
