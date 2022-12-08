@@ -279,6 +279,21 @@ fn print_build_info() -> String {
         TON NODE git commit:        {}\n\
         TON NODE git commit time:   {}\n\
         TON NODE git branch:        {}\n\
+<<<<<<< HEAD
+        ABI         git commit:     {}\n\
+        ADNL        git commit:     {}\n\
+        BLOCK       git commit:     {}\n\
+        BLOCK_JSON  git commit:     {}\n\
+        CRYPTO      git commit:     {}\n\
+        DHT         git commit:     {}\n\
+        EXECUTOR    git commit:     {}\n\
+        OVERLAY     git commit:     {}\n\
+        RLDP        git commit:     {}\n\
+        TL          git commit:     {}\n\
+        TYPES       git commit:     {}\n\
+        VM          git commit:     {}\n\
+        LOCKFREE    git commit:     {}\n",
+=======
         ABI git commit:             {}\n\
         ADNL git commit:            {}\n\
         BLOCK git commit:           {}\n\
@@ -292,6 +307,7 @@ fn print_build_info() -> String {
         TYPES git commit:           {}\n\
         VM git commit:              {}\n\
         LOCKFREE git commit:        {}\n",
+>>>>>>> 596c770126ba507cbe7e6287038a039f6bbeff60
 
         std::option_env!("BUILD_RUST_VERSION").unwrap_or("Not set"),
         std::option_env!("CARGO_PKG_VERSION").unwrap_or("Not set"),
