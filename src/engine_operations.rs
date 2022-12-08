@@ -711,7 +711,7 @@ impl EngineOperations for Engine {
             self.remp_client()
                 .ok_or_else(|| error!("redirect_external_message: remp client is not set"))?
                 .clone()
-                .process_remp_message(message_data.into(), id);
+                .process_remp_message(message_data.into(), id.clone());
             log::debug!(
                 target: EXT_MESSAGES_TRACE_TARGET,
                 "Redirected external message {:x} to REMP",
@@ -860,7 +860,7 @@ impl EngineOperations for Engine {
         Ok(self.remp_service()
             .ok_or_else(|| error!("Can't get message status because remp service was not set"))?
             .remp_core_interface()?
-            .check_remp_duplicate(message_id).await
+            .check_remp_duplicate(message_id)
         )
     }
 

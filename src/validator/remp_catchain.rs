@@ -266,7 +266,7 @@ impl RempCatchain {
 */
     pub async fn start(self: Arc<RempCatchain>, local_key: PrivateKey) -> Result<CatchainPtr> {
         let overlay_manager: CatchainOverlayManagerPtr =
-            Arc::new(CatchainOverlayManagerImpl::new(self.engine.validator_network(), self.info.node_list_id));
+            Arc::new(CatchainOverlayManagerImpl::new(self.engine.validator_network(), self.info.node_list_id.clone()));
         let db_root = format!("{}/rmq", self.engine.db_root_dir()?);
         let db_suffix = "".to_string();
         let allow_unsafe_self_blocks_resync = false;
@@ -279,7 +279,7 @@ impl RempCatchain {
             self.info.nodes.iter().map(|x| x.adnl_id.to_string()).collect::<Vec<String>>()
         );
 
-        let rmq_local_key = if let Some(rmq_local_key) = self.engine.set_validator_list(self.info.node_list_id, &self.info.nodes).await? {
+        let rmq_local_key = if let Some(rmq_local_key) = self.engine.set_validator_list(self.info.node_list_id.clone(), &self.info.nodes).await? {
             rmq_local_key.clone()
         } else {
             return Err(failure::err_msg(format!("Cannot add RMQ validator list {}", self.info.node_list_id.to_hex_string())));
@@ -315,7 +315,7 @@ impl RempCatchain {
         };
         // TODO: check whether this removal is not ahead-of-time
         log::trace!(target: "remp", "RMQ session {}, removing validator list, list_id {:x}", self, self.info.node_list_id);
-        self.engine.remove_validator_list(self.info.node_list_id).await?;
+        self.engine.remove_validator_list(self.info.node_list_id.clone()).await?;
         log::trace!(target: "remp", "RMQ session {} stopped", self);
         Ok(())
     }

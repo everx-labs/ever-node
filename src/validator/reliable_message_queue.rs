@@ -17,7 +17,7 @@ use crate::{
     ext_messages::{get_level_and_level_change, is_finally_accepted, is_finally_rejected},
     validator::{
         mutex_wrapper::MutexWrapper,
-        message_cache::{RmqMessage, MessageCacheImpl},
+        message_cache::{RmqMessage, MessageCache},
         remp_manager::RempManager,
         remp_block_parser::{process_block_messages_by_blockid, BlockProcessor},
         remp_catchain::{RempCatchainInfo, RempCatchainInstance}
@@ -179,7 +179,7 @@ impl MessageQueue {
     }
 
     pub async fn update_status_send_response_by_id(&self, msgid: &UInt256, new_status: RempMessageStatus) -> Option<Arc<RmqMessage>> {
-        let message = self.get_message(msgid).await;
+        let message = self.get_message(msgid);
         match &message {
             Some(rm) => self.update_status_send_response(msgid, rm.clone(), new_status.clone()).await,
             None => 
@@ -420,7 +420,7 @@ impl MessageQueue {
         log::trace!(target: "remp", "RMQ {}: collecting messages for collation", self);
         let mut cnt = 0;
         while let Some((msgid, _timestamp)) = self.queues.execute_sync(|x| x.take_first_for_collation()).await? {
-            let (status, message) = match self.remp_manager.message_cache.get_message_with_status(&msgid).await {
+            let (status, message) = match self.remp_manager.message_cache.get_message_with_status(&msgid) {
                 None => {
                     log::error!(
                         target: "remp",
@@ -454,16 +454,6 @@ impl MessageQueue {
 
                     // No new status: failure inside collator does not say
                     // anything about the message. Let's wait till collation end.
-/*
-                    let new_status = RempMessageStatus::TonNode_RempRejected(
-                        ton_api::ton::ton_node::rempmessagestatus::RempRejected {
-                            level: RempMessageLevel::TonNode_RempCollator,
-                            block_id: BlockIdExt::default(),
-                            error,
-                        }
-                    );
-                    self.update_status_send_response(&msgid, message.clone(), new_status).await;
- */
                 },
                 Ok(()) => {
                     let new_status = RempMessageStatus::TonNode_RempAccepted (RempAccepted {
@@ -490,8 +480,8 @@ impl MessageQueue {
         // If message is not removed from collation queue --- and not passed to collator (or even further,
         // to shardchain/masterchain), it may not have status "accepted by collator"
         for (c, out_of_queue) in to_check {
-            if let Some(ts) = self.remp_manager.message_cache.change_accepted_by_collator_to_ignored(&c).await {
-                downgrading.push((c, ts));
+            if let Some(ts) = self.remp_manager.message_cache.change_accepted_by_collator_to_ignored(&c) {
+                downgrading.push((c.clone(), ts));
                 if !out_of_queue {
                     log::error!(target: "remp",
                         "RMQ {}: message {:x} had status 'accepted by collator', however it is out_of_queue",
@@ -512,7 +502,7 @@ impl MessageQueue {
     /// If the message is present in the collation queue, it is skipped
     /// If the message is absent from message cache, an error is returned
     pub async fn add_to_collation_queue(&self, message_id: &UInt256, add_if_absent: bool) -> Result<()> {
-        if let Some(message) = self.remp_manager.message_cache.get_message(message_id).await {
+        if let Some(message) = self.remp_manager.message_cache.get_message(message_id) {
             self.queues.execute_sync(
                 |catchain| catchain.add_to_collation_queue(message_id, message.timestamp, add_if_absent)
             ).await?;
@@ -598,8 +588,8 @@ impl MessageQueue {
         );
     }
 
-    pub async fn get_message(&self, id: &UInt256) -> Option<Arc<RmqMessage>> {
-        self.remp_manager.message_cache.get_message(id).await
+    pub fn get_message(&self, id: &UInt256) -> Option<Arc<RmqMessage>> {
+        self.remp_manager.message_cache.get_message(id)
     }
 
     pub async fn received_messages_count (&self) -> usize {
@@ -660,7 +650,7 @@ struct StatusUpdater {
 #[async_trait::async_trait]
 impl BlockProcessor for StatusUpdater {
     async fn process_message(&self, message_id: &UInt256) {
-        match self.queue.get_message(message_id).await {
+        match self.queue.get_message(message_id) {
             None => log::warn!(target: "remp", "Cannot find message {:x} in cache", message_id),
             Some(message) => {
                 log::trace!(target: "remp", "Point 7. RMQ {} shard accepted message {}, new status {}", 
@@ -807,7 +797,7 @@ impl RmqQueueManager {
             let mut rejected_message_digest = ton_api::ton::ton_node::rmqrecord::RmqMessageDigest::default();
 
             for msgid in to_forward.iter() {
-                let (status, message, master_cc) = match self.remp_manager.message_cache.get_message_with_status_and_master_cc(msgid).await {
+                let (status, message, master_cc) = match self.remp_manager.message_cache.get_message_with_status_and_master_cc(msgid) {
                     None => {
                         log::error!(
                             target: "remp",
@@ -817,7 +807,7 @@ impl RmqQueueManager {
                         continue
                     },
                     Some((_m, RempMessageStatus::TonNode_RempTimeout, _master_cc)) => continue,
-                    Some((_m, _s, master_cc)) if MessageCacheImpl::cc_expired(master_cc, new_cc_seqno) => continue,
+                    Some((_m, _s, master_cc)) if MessageCache::cc_expired(master_cc, new_cc_seqno) => continue,
                     Some((m, s, master_cc)) => (s, m, master_cc)
                 };
 

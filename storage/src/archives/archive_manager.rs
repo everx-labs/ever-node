@@ -134,6 +134,13 @@ impl ArchiveManager {
         U256: Borrow<UInt256> + Hash,
         PK: Borrow<UInt256> + Hash
     {
+        let _lock = match &entry_id {
+            PackageEntryId::Block(_) => handle.block_file_lock().read().await,
+            PackageEntryId::Proof(_) => handle.proof_file_lock().read().await,
+            PackageEntryId::ProofLink(_) => handle.proof_file_lock().read().await,
+            _ => fail!("Unsupported package entry")
+        };
+
         if handle.is_archived() {
             let file = self.get_package_entry(
                 handle, 
@@ -144,12 +151,6 @@ impl ArchiveManager {
             return Ok(file.take_data())
         }
 
-        let _lock = match &entry_id {
-            PackageEntryId::Block(_) => handle.block_file_lock().read().await,
-            PackageEntryId::Proof(_) => handle.proof_file_lock().read().await,
-            PackageEntryId::ProofLink(_) => handle.proof_file_lock().read().await,
-            _ => fail!("Unsupported package entry")
-        };
         match self.read_temp_file(entry_id).await {
             Ok((_filename, data)) => Ok(data),
             Err(e) => {

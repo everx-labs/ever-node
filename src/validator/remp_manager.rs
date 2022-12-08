@@ -340,7 +340,7 @@ impl RempManager {
 
 #[allow(dead_code)] 
 impl RempInterfaceQueues {
-    pub fn make_test_message(&self) -> RmqMessage {
+    pub fn make_test_message(&self) -> Result<RmqMessage> {
         RmqMessage::make_test_message()
     }
 
@@ -353,19 +353,19 @@ impl RempInterfaceQueues {
     pub async fn test_remp_messages_loop(&self) {
         log::info!(target: "remp", "Test REMP messages loop is started");
         loop {
-            let test_message = self.make_test_message();
+            match self.make_test_message() {
+                Err(e) => log::error!(target: "remp", "Cannot make test REMP message: `{}`", e),
+                Ok(test_message) => {
+                    if let Err(x) = self.incoming_sender.send(Arc::new(test_message)) {
+                        log::error!(target: "remp", "Cannot send test REMP message to RMQ: {}",
+                            x
+                        );
+                    }
 
-            log::info!(target: "remp", "Sending test REMP message {:?}",
-                test_message
-            );
-            if let Err(x) = self.incoming_sender.send(Arc::new(test_message)) {
-                log::error!(target: "remp", "Cannot send test REMP message to RMQ: {}",
-                    x
-                );
-            }
-
-            while let Ok(msg) = self.response_receiver.try_recv() {
-                log::info!(target: "remp", "Received test REMP response: {:?}", msg);
+                    while let Ok(msg) = self.response_receiver.try_recv() {
+                        log::info!(target: "remp", "Received test REMP response: {:?}", msg);
+                    }
+                }
             }
 
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -377,7 +377,7 @@ impl RempInterfaceQueues {
     ) {
         let receipt = ton_api::ton::ton_node::RempReceipt::TonNode_RempReceipt (
             ton_api::ton::ton_node::rempreceipt::RempReceipt {
-                message_id: rmq_message.message_id.into(),
+                message_id: rmq_message.message_id.clone().into(),
                 status: status.clone(),
                 timestamp: 0,
                 source_id: local_key_id.into()
@@ -419,12 +419,12 @@ impl RempCoreInterface for RempInterfaceQueues {
         // build message
         let remp_message = Arc::new(RmqMessage::new (
             arc_message,
-            message_id,
+            message_id.clone(),
             source,
             0
         )?);
 
-        if self.message_cache.get_message(&message_id).await.is_some() {
+        if self.message_cache.get_message(&message_id).is_some() {
             log::trace!(target: "remp",
                 "Point 1. We already know about message {:x}, no forwarding to incoming queue is necessary",
                 message_id
@@ -439,9 +439,9 @@ impl RempCoreInterface for RempInterfaceQueues {
         Ok(())
     }
 
-    async fn check_remp_duplicate(&self, message_id: &UInt256) -> RempDuplicateStatus {
+    fn check_remp_duplicate(&self, message_id: &UInt256) -> RempDuplicateStatus {
         log::trace!(target: "remp", "RempInterfraceQueues: checking duplicates for {:x}", message_id);
-        let res = self.message_cache.check_message_duplicates(message_id).await;
+        let res = self.message_cache.check_message_duplicates(message_id);
         log::trace!(target: "remp", "RempInterfraceQueues: duplicate check for {:x} finished: {:?}", message_id, res);
         return res
     }

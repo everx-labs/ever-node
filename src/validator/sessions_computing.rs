@@ -19,7 +19,9 @@ impl SessionInfo {
 
 impl Display for SessionInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let set_string : String = self.set.list().iter().map(|x| format!("{:?} ", x.adnl_addr.map(|y| format!("{:x}", y)))).collect();
+        let set_string : String = self.set.list().iter().map(|x|
+            format!("{:?} ", x.adnl_addr.as_ref().map(|y| format!("{:x}", y)))
+        ).collect();
         write!(f, "session_id: {:x}, shard: {}, val. set: {}", self.session_id, self.shard, set_string)
     }
 }
@@ -100,7 +102,7 @@ impl SessionHistory {
             }
         };
 
-        if let Some(old_olds) = self.prevs.insert(new_session, old_sessions.clone()) {
+        if let Some(old_olds) = self.prevs.insert(new_session.clone(), old_sessions.clone()) {
             fail!("Re-initialization of previous sessions for {:x}: {} replaced with {}",
                 new_session, Self::list_prev(old_olds), Self::list_prev(old_sessions)
             );

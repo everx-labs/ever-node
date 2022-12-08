@@ -1071,7 +1071,7 @@ impl ValidateQuery {
     }
 
     // similar to Collator::register_shard_block_creators
-    fn register_shard_block_creators(&mut self, _base: &ValidateBase, creator_list: &Vec<UInt256>) -> Result<()> {
+    fn register_shard_block_creators(&mut self, _base: &ValidateBase, creator_list: &[UInt256]) -> Result<()> {
         for x in creator_list {
             log::debug!(target: "validate_query", "registering block creator {}", x.to_hex_string());
             if !x.is_zero() {

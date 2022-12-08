@@ -175,7 +175,7 @@ impl RempClient {
         id: UInt256,
     ) {
         let started = Instant::now();
-        match self.clone().process_remp_message_impl(raw_message, id).await {
+        match self.clone().process_remp_message_impl(raw_message, id.clone()).await {
             Ok((processing_ns, sending_ns)) => {
                 log::info!(
                     "Processed REMP message {:x}, processing {:>6}ms, sending {:>6}ms, total {:>6}ms",

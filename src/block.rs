@@ -73,22 +73,6 @@ impl BlockStuff {
         Ok(Self{ id, block, root, data: Arc::new(data), })
     }
 
-    #[cfg(any(test))]
-    pub fn read_from_file(filename: &str) -> Result<Self> {
-        let data = std::fs::read(filename)?;
-        let file_hash = UInt256::calc_file_hash(&data);
-
-        let root = deserialize_tree_of_cells(&mut Cursor::new(&data))?;
-        let block = Block::construct_from_cell(root.clone())?;
-        let block_info = block.read_info()?;
-        let id = BlockIdExt {
-            shard_id: block_info.shard().clone(),
-            seq_no: block_info.seq_no(),
-            root_hash: root.repr_hash(),
-            file_hash,
-        };
-        Ok(Self{ id, block, root, data: Arc::new(data), })
-    }
 
 
 
