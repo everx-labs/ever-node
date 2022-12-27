@@ -19,14 +19,14 @@ metrics-runtime = '0.13.0'
 rand = '0.8'
 regex = '1.3.1'
 sha2 = '0.10'
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.111' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.73' }
-overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.103' }
-rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.107' }
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.117' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.79' }
+overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.111' }
+rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.113' }
 storage = { path = '../storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.160' }
-ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.12.4' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.166' }
+ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.12.5' }
 
 [features]
 default = [  ]

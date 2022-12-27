@@ -304,8 +304,8 @@ impl RempClient {
             .ok_or_else(|| error!("Can't load handle for last mc block {}", last_mc_block_id))?;
         let mut shard_blocks_observer = ShardBlocksObserver::new(
             &prev_handle,
-            engine.clone(),
-            |block, mc_id| { self.process_block(block, true, Some(mc_id)) }
+            engine.clone()
+            //, mc_id| { self.process_block(block, true, Some(mc_id)) }
         ).await?;
         
         loop {
@@ -336,10 +336,10 @@ impl RempClient {
         }
     }
 
-    async fn process_new_master_block<F: Fn(&BlockStuff, &BlockIdExt) -> Result<()>>(
+    async fn process_new_master_block(
         &self,
         block: &BlockStuff,
-        shard_blocks_observer: &mut ShardBlocksObserver<F>
+        shard_blocks_observer: &mut ShardBlocksObserver
     ) -> Result<()> {
 
         log::debug!("process_new_master_block {}", block.id());
@@ -352,7 +352,10 @@ impl RempClient {
             self.process_block(block, true, Some(block.id()))?;
         }
 
-        shard_blocks_observer.process_next_mc_block(block).await?;
+        let shard_blocks_for_processing = shard_blocks_observer.process_next_mc_block(block).await?;
+        for (block_stuff, mc_id) in shard_blocks_for_processing {
+            self.process_block(&block_stuff, true, Some(&mc_id))?;
+        }
 
         // process hanged messages
         self.mc_cc_seqno.store(block.block().read_info()?.gen_catchain_seqno(), Ordering::Relaxed);

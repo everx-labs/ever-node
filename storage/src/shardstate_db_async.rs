@@ -115,9 +115,9 @@ impl ShardStateDb {
 
         let ss_db = Arc::new(Self {
             db: db.clone(),
-            shardstate_db: Arc::new(RocksDbTable::with_db(db.clone(), shardstate_db_path)?),
+            shardstate_db: Arc::new(RocksDbTable::with_db(db.clone(), shardstate_db_path, true)?),
             dynamic_boc_db: Arc::new(DynamicBocDb::with_db(
-                Arc::new(CellDb::with_db(db.clone(), cell_db_path)?),
+                Arc::new(CellDb::with_db(db.clone(), cell_db_path, true)?),
                 #[cfg(feature = "telemetry")]
                 telemetry.clone(),
                 allocated.clone()

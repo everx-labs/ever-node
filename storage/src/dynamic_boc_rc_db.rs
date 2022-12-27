@@ -143,7 +143,7 @@ impl DynamicBocDb {
         let now = std::time::Instant::now();
         let mut transaction = self.db.begin_transaction()?;
         for (id, cell) in visited.iter() {
-            transaction.put(id, &cell.serialize()?);
+            transaction.put(id, &cell.serialize()?)?;
         }
         log::debug!(
             target: TARGET, 
@@ -192,10 +192,10 @@ impl DynamicBocDb {
         let mut transaction = self.db.begin_transaction()?;
         for (id, cell) in visited.iter() {
             if cell.parents_count() == 0 {
-                transaction.delete(id);
+                transaction.delete(id)?;
                 deleted += 1;
             } else {
-                transaction.put(id, &StorageCell::serialize(cell, cell.parents_count())?);
+                transaction.put(id, &StorageCell::serialize(cell, cell.parents_count())?)?;
             }
         }
         transaction.commit()?;
@@ -402,7 +402,7 @@ impl DoneCellsStorageAdapter {
         let _ = db.drop_table_force(&path);
         Ok(Self {
             boc_db,
-            index: IndexedUint256Db::with_db(db.clone(), index_db_path)?,
+            index: IndexedUint256Db::with_db(db.clone(), index_db_path, true)?,
         })
     }
 }
@@ -449,8 +449,8 @@ impl OrderedCellsStorageAdapter {
         let _ = db.drop_table_force(&path2);
         Ok(Self {
             boc_db,
-            index1: IndexedUint256Db::with_db(db.clone(), path1)?,
-            index2: IndexedUint32Db::with_db(db.clone(), path2)?,
+            index1: IndexedUint256Db::with_db(db.clone(), path1, true)?,
+            index2: IndexedUint32Db::with_db(db.clone(), path2, true)?,
             cells_count: 0,
         })
     }

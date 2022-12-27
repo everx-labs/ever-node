@@ -18,13 +18,13 @@ use sha2::{Digest, Sha256};
 use ton_block::{
     BlockSignatures, BlockSignaturesPure, CatchainConfig, ConfigParams,
     CryptoSignature, CryptoSignaturePair,
-    Deserializable,
+    Deserializable, Serializable,
     Message,
     ShardIdent, SigPubKey,
     UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet,
     Workchains, WorkchainDescr,
 };
-use ton_types::{Result, UInt256, HashmapType, fail, error};
+use ton_types::{BuilderData, Result, UInt256, HashmapType, fail, error};
 use validator_session::SessionNode;
 use crate::engine_traits::EngineOperations;
 
@@ -155,20 +155,23 @@ pub fn get_adnl_id(validator: &ValidatorDescr) -> Arc<KeyId> {
 pub type ValidatorListHash = UInt256;
 
 /// compute sha256 for hashes of public keys of all validators
-pub fn compute_validator_list_id(list: &[ValidatorDescr], session_data: Option<(&ShardIdent, u32)>) -> Option<ValidatorListHash> {
+pub fn compute_validator_list_id(list: &[ValidatorDescr], session_data: Option<(u32, u32, &ShardIdent)>) -> Result<Option<ValidatorListHash>> {
     if !list.is_empty() {
         let mut hasher = Sha256::new();
-        if let Some((shard,seq)) = session_data {
-            hasher.update(shard.shard_prefix_with_tag().to_be_bytes());
-            hasher.update(seq.to_be_bytes());
+        if let Some((cc,master_cc,shard)) = session_data {
+            hasher.update(cc.to_be_bytes());
+            hasher.update(master_cc.to_be_bytes());
+            let mut serialized = BuilderData::new();
+            shard.write_to(&mut serialized)?;
+            hasher.update(serialized.data());
         }
         for x in list {
             hasher.update(x.compute_node_id_short().as_slice());
         }
         let hash: [u8; 32] = hasher.finalize().into();
-        Some(hash.into())
+        Ok(Some(hash.into()))
     } else {
-        None
+        Ok(None)
     }
 }
 

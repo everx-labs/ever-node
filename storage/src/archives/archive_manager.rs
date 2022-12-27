@@ -48,6 +48,7 @@ impl ArchiveManager {
     pub async fn with_data(
         db: Arc<RocksDb>,
         db_root_path: Arc<PathBuf>,
+        last_unneeded_key_block: u32,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>
@@ -55,6 +56,7 @@ impl ArchiveManager {
         let file_maps = FileMaps::new(
             db.clone(),
             &db_root_path,
+            last_unneeded_key_block,
             #[cfg(feature = "telemetry")]
             &telemetry,
             &allocated
@@ -333,8 +335,8 @@ impl ArchiveManager {
         fd.archive_slice().get_slice(archive_id, offset, limit).await
     }
 
-    pub async fn gc(&self, front_for_gc_master_block_id: &BlockIdExt) {
-        if let Err(e) = self.file_maps.files().gc(front_for_gc_master_block_id).await {
+    pub async fn gc(&self, last_unneeded_key_block: &BlockIdExt) {
+        if let Err(e) = self.file_maps.files().gc(last_unneeded_key_block).await {
             log::info!(target: "storage", "archive_manager gc is error: {:?}", e);
         }
     }

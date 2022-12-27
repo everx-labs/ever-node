@@ -1,5 +1,5 @@
 use crate::{block::BlockStuff, engine_traits::EngineOperations};
-use ton_types::{Result, UInt256, error, fail};
+use ton_types::{Result, UInt256, error};
 use ton_block::{BlockIdExt, HashmapAugType};
 use std::sync::Arc;
 use std::ops::Deref;
@@ -13,10 +13,10 @@ use crate::validator::message_cache::MessageCache;
 
 #[async_trait::async_trait]
 pub trait BlockProcessor : Sync + Send {
-    async fn process_message (&self, message_id: &UInt256);
+    fn process_message (&self, message_id: &UInt256);
 }
 
-pub async fn process_block_messages (block: BlockStuff, msg_processor: Arc<dyn BlockProcessor>) -> Result<()> {
+pub fn process_block_messages (block: BlockStuff, msg_processor: Arc<dyn BlockProcessor>) -> Result<()> {
     log::trace!(target: "remp", "REMP started processing block {}", block.id());
 
     let mut messages_in_block: Vec<UInt256> = Vec::new();
@@ -26,7 +26,7 @@ pub async fn process_block_messages (block: BlockStuff, msg_processor: Arc<dyn B
     })?;
 
     for key in messages_in_block {
-        msg_processor.process_message(&key).await;
+        msg_processor.process_message(&key);
     }
 
     log::trace!(target: "remp", "REMP finished processing block {}", block.id());
@@ -42,31 +42,34 @@ pub async fn process_block_messages_by_blockid (
         )?.deref()
     ).await?;
 
-    process_block_messages(block, msg_processor).await
+    process_block_messages(block, msg_processor)
 }
 
 struct RempMasterBlockIndexingProcessor {
     block_id: BlockIdExt,
     master_id: BlockIdExt,
-    message_cache: Arc<MessageCache>
+    message_cache: Arc<MessageCache>,
+    masterchain_seqno: u32
 }
 
 impl RempMasterBlockIndexingProcessor {
-    pub fn new (block_id: BlockIdExt, master_id: BlockIdExt, message_cache: Arc<MessageCache>) -> Self {
-        Self { block_id, master_id, message_cache }
+    pub fn new (block_id: BlockIdExt, master_id: BlockIdExt, message_cache: Arc<MessageCache>, masterchain_seqno: u32) -> Self {
+        Self { block_id, master_id, message_cache, masterchain_seqno }
     }
 }
 
 #[async_trait::async_trait]
 impl BlockProcessor for RempMasterBlockIndexingProcessor {
-    async fn process_message (&self, message_id: &UInt256) {
+    fn process_message (&self, message_id: &UInt256) {
         let accepted = RempAccepted {
             level: RempMessageLevel::TonNode_RempMasterchain,
             block_id: self.block_id.clone(),
             master_id: self.master_id.clone()
         };
 
-        if let Err(e) = self.message_cache.update_message_status (message_id, RempMessageStatus::TonNode_RempAccepted(accepted)).await {
+        if let Err(e) = self.message_cache.insert_masterchain_message_status (
+            message_id, RempMessageStatus::TonNode_RempAccepted(accepted), self.masterchain_seqno
+        ) {
             log::warn!(target: "remp", "Update message {:x} status failed: {}", message_id, e);
         }
     }
@@ -75,10 +78,10 @@ impl BlockProcessor for RempMasterBlockIndexingProcessor {
 pub struct RempBlockObserverToplevel {
     engine: Arc<dyn EngineOperations>,
     message_cache: Arc<MessageCache>,
-    queue_sender: Sender<BlockStuff>,
-    queue_receiver: Receiver<BlockStuff>,
-    response_sender: Sender<(BlockStuff, BlockIdExt)>,
-    response_receiver: Receiver<(BlockStuff, BlockIdExt)>,
+    queue_sender: Sender<(BlockStuff, u32)>,
+    queue_receiver: Receiver<(BlockStuff, u32)>,
+    //response_sender: Sender<(BlockStuff, BlockIdExt)>,
+    //response_receiver: Receiver<(BlockStuff, BlockIdExt)>,
 }
 
 impl RempBlockObserverToplevel {
@@ -87,48 +90,48 @@ impl RempBlockObserverToplevel {
         message_cache: Arc<MessageCache>,
     ) -> Self {
         let (queue_sender, queue_receiver) = unbounded();
-        let (response_sender, response_receiver) = unbounded();
+        //let (response_sender, response_receiver) = unbounded();
         Self {
             engine, message_cache,
             queue_sender, queue_receiver,
-            response_sender, response_receiver
+            //response_sender, response_receiver
         }
     }
 
     async fn top_level_cycle(&self, init_mc_block: Arc<BlockHandle>) -> Result<()> {
         let mut observer = ShardBlocksObserver::new(
             &init_mc_block,
-            self.engine.clone(),
-            |block, mc_id| {
-                match self.response_sender.send((block.clone(), mc_id.clone())) {
-                    Err(e) => fail!("{}", e),
-                    Ok(()) => Ok(())
-                }
-            }
+            self.engine.clone()
         ).await?;
 
         loop {
             match self.queue_receiver.try_recv() {
-                Ok(x) => {
-                    log::trace!(target: "remp", "Next master block {} is available, processing messages from it...", x.id());
-                    match observer.process_next_mc_block(&x).await {
+                Ok((master_blk, masterchain_seqno)) => {
+                    log::trace!(target: "remp", "Next master block {} is available, processing messages from it...", master_blk.id());
+                    match observer.process_next_mc_block(&master_blk).await {
                         Err(e) => log::error!(target: "remp", "Cannot process new blocks for REMP: `{}`", e),
-                        Ok(()) => 
-                            while let Ok((blk_stuff, _mc_blk_id)) = self.response_receiver.try_recv() {
+                        Ok(new_shard_blocks) => {
+                            for (blk_stuff, _mc_id) in new_shard_blocks {
                                 let blk_id = blk_stuff.id().clone();
-                                let msg_processor = RempMasterBlockIndexingProcessor::new(blk_id.clone(), x.id().clone(), self.message_cache.clone());
-                                match process_block_messages(blk_stuff, Arc::new(msg_processor)).await {
+                                let msg_processor = RempMasterBlockIndexingProcessor::new(
+                                    blk_id.clone(),
+                                    master_blk.id().clone(),
+                                    self.message_cache.clone(),
+                                    masterchain_seqno
+                                );
+                                match process_block_messages(blk_stuff, Arc::new(msg_processor)) {
                                     Ok(()) => (),
                                     Err(e) => log::error!(target: "remp", "Cannot process messages from block {}: `{}`", blk_id, e)
                                 }
                             }
+                        }
                     }
                 },
                 Err(TryRecvError::Disconnected) => {
                     log::warn!(target: "remp", "RempBlockObserverToplevel: end of masterblock channel, exiting");
                     return Ok(());
                 },
-                Err(TryRecvError::Empty) => (),
+                Err(TryRecvError::Empty) => ()
             }
 
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -139,7 +142,7 @@ impl RempBlockObserverToplevel {
                     message_cache: Arc<MessageCache>,
                     rt: tokio::runtime::Handle,
                     init_mc_block: Arc<BlockHandle>
-    ) -> Result<Sender<BlockStuff>> {
+    ) -> Result<Sender<(BlockStuff,u32)>> {
         let top_level_self = Self::new(engine, message_cache);
         let sender = top_level_self.queue_sender.clone();
 

@@ -59,6 +59,7 @@ impl ArchiveSlice {
         archive_id: u32,
         package_type: PackageType,
         finalized: bool,
+        create_if_not_exist: bool,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>
@@ -76,15 +77,18 @@ impl ArchiveSlice {
         };
         let index_db = PackageEntryMetaDb::with_db(
             db.clone(), 
-            format!("entry_meta_{}db_{}", prefix, archive_id)
+            format!("entry_meta_{}db_{}", prefix, archive_id),
+            create_if_not_exist,
         )?;
         let offsets_db = PackageOffsetsDb::with_db(
             db.clone(), 
-            format!("offsets_{}db_{}", prefix, archive_id)
+            format!("offsets_{}db_{}", prefix, archive_id),
+            create_if_not_exist,
         )?;
         let package_status_db = PackageStatusDb::with_db(
             db, 
-            format!("status_{}db_{}", prefix, archive_id)
+            format!("status_{}db_{}", prefix, archive_id),
+            create_if_not_exist,
         )?;
 
         Ok(Self {
@@ -120,6 +124,7 @@ impl ArchiveSlice {
             archive_id,
             package_type,
             false,
+            true,
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated,
@@ -131,9 +136,9 @@ impl ArchiveSlice {
         if self.sliced_mode {
             let mut transaction = self.package_status_db.begin_transaction()?;
 
-            transaction.put(&PackageStatusKey::SlicedMode, true.to_vec()?.as_slice());
-            transaction.put(&PackageStatusKey::TotalSlices, 1u32.to_vec()?.as_slice());
-            transaction.put(&PackageStatusKey::SliceSize, self.slice_size.to_vec()?.as_slice());
+            transaction.put(&PackageStatusKey::SlicedMode, true.to_vec()?.as_slice())?;
+            transaction.put(&PackageStatusKey::TotalSlices, 1u32.to_vec()?.as_slice())?;
+            transaction.put(&PackageStatusKey::SliceSize, self.slice_size.to_vec()?.as_slice())?;
 
             let meta = PackageEntryMeta::with_data(0, DEFAULT_PKG_VERSION);
             self.index_db.put_value(&0.into(), &meta)?;
@@ -145,8 +150,8 @@ impl ArchiveSlice {
         } else {
             let mut transaction = self.package_status_db.begin_transaction()?;
 
-            transaction.put(&PackageStatusKey::SlicedMode, false.to_vec()?.as_slice());
-            transaction.put(&PackageStatusKey::NonSlicedSize, 0u64.to_vec()?.as_slice());
+            transaction.put(&PackageStatusKey::SlicedMode, false.to_vec()?.as_slice())?;
+            transaction.put(&PackageStatusKey::NonSlicedSize, 0u64.to_vec()?.as_slice())?;
 
             transaction.commit()?;
 
@@ -164,6 +169,7 @@ impl ArchiveSlice {
         archive_id: u32,
         package_type: PackageType,
         finalized: bool,
+        cleanup_if_broken: bool,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>,
@@ -174,14 +180,15 @@ impl ArchiveSlice {
             archive_id,
             package_type,
             finalized,
+            false,
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated,
             ).await?;
-        archive_slice.load().await
+        archive_slice.load(cleanup_if_broken).await
     }
 
-    async fn load(mut self) -> Result<Self> {
+    async fn load(mut self, cleanup_if_broken: bool) -> Result<Self> {
         self.sliced_mode = self.package_status_db.try_get_value::<bool>(&PackageStatusKey::SlicedMode)?
             .ok_or_else(|| error!("cannot read sliced_mode"))?;
         if self.sliced_mode {
@@ -191,17 +198,27 @@ impl ArchiveSlice {
             assert!(self.slice_size > 0);
 
             let mut packages = Vec::new();
-            'c: for i in 0..total_slices {
+            for i in 0..total_slices {
                 let meta = self.index_db.get_value(&i.into())?;
                 log::info!(target: "storage", "Read slice #{} metadata: {:?}", i, meta);
 
-                match self.new_package(i, self.archive_id + self.slice_size * i, 
-                    meta.entry_size(), meta.version()).await 
-                {
+                match self.new_package(
+                    i,
+                    self.archive_id + self.slice_size * i, 
+                    meta.entry_size(),
+                    meta.version()
+                ).await {
                     Ok(p) => packages.push(p),
                     Err(e) => {
-                        log::warn!("Error while read slice #{}: {}. Stopped slices reading", i, e);
-                        break 'c;
+                        log::error!(target: "storage", "Can't read slice #{}: {}. Stopped slices reading", i, e);
+                        if cleanup_if_broken {
+                            log::info!(target: "storage", "Destroy slice #{}", i);
+                            match self.destroy_broken().await {
+                                Ok(_) => log::info!(target: "storage", "Destroyed slice #{}", i),
+                                Err(e) => log::error!(target: "storage", "Can't destroy broken slice #{}: {}", i, e),
+                            }
+                        }
+                        fail!("Can't read slice #{}: {}", i, e);
                     }
                 }
             }
@@ -220,14 +237,55 @@ impl ArchiveSlice {
 
     pub async fn destroy(&mut self) -> Result<()> {
         for pi in self.packages.write().await.drain(..) {
-            // TODO: check existance
-            pi.package().destroy().await?;
+            pi.package().remove().await?;
+        }
+        self.destroy_dbs()?;
+        Ok(())
+    }
+
+    pub async fn destroy_broken(&mut self) -> Result<()> {
+        if self.sliced_mode {
+            let total_slices = self.package_status_db.get_value::<u32>(&PackageStatusKey::TotalSlices)?;
+
+            for i in 0..total_slices {
+                let seq_no = self.archive_id + self.slice_size * i;
+                let package_id = PackageId::with_values(seq_no, self.package_type);
+                let path = package_id.full_path(self.db_root_path.as_path(), "pack");
+        
+                match Package::remove_by_path(&path).await {
+                    Ok(_) => log::info!(
+                            target: "storage",
+                            "destroy_packages: removed package {}",
+                            seq_no
+                        ),
+                    Err(e) => log::info!(
+                        target: "storage",
+                        "destroy_packages: can't remove package {}: {}",
+                        seq_no, e
+                    ),
+                }
+            }
+        } else {
+            let size = self.package_status_db.get_value::<u64>(&PackageStatusKey::NonSlicedSize)?;
+            self.packages.write().await
+                .push(self.new_package(0, self.archive_id, size, 0).await?);
         }
 
-        self.index_db.destroy()?;
-        self.offsets_db.destroy()?;
-        self.package_status_db.destroy()?;
+        self.destroy_dbs()?;
 
+        Ok(())
+    }
+
+    fn destroy_dbs(&mut self) -> Result<()> {
+        if !self.index_db.destroy()? {
+            fail!("index_db of slice {} was not destroyed", self.archive_id);
+        }
+        if !self.offsets_db.destroy()? {
+            fail!("offsets_db of slice {} was not destroyed", self.archive_id);
+        }
+        if !self.package_status_db.destroy()? {
+            fail!("package_status_db of slice {} was not destroyed", self.archive_id);
+        }
         Ok(())
     }
 

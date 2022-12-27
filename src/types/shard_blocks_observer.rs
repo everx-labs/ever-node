@@ -8,17 +8,15 @@ use ton_block::{BlockIdExt, SHARD_FULL, ShardIdent};
 use std::{collections::HashSet, sync::Arc};
 use storage::block_handle_db::BlockHandle;
 
-pub struct ShardBlocksObserver<F: Fn(&BlockStuff, &BlockIdExt) -> Result<()>> {
+pub struct ShardBlocksObserver {
     top_processed_blocks: HashSet<BlockIdExt>,
     engine: Arc<dyn EngineOperations>,
-    on_new_block: F,
 }
 
-impl<F: Fn(&BlockStuff, &BlockIdExt) -> Result<()>> ShardBlocksObserver<F> {
+impl ShardBlocksObserver {
     pub async fn new(
         start_mc_block: &BlockHandle,
         engine: Arc<dyn EngineOperations>,
-        on_new_block: F
     ) -> Result<Self> {
         let mut top_processed_blocks = HashSet::new();
         let (_, processed_wc) = engine.processed_workchain().await?;
@@ -40,10 +38,11 @@ impl<F: Fn(&BlockStuff, &BlockIdExt) -> Result<()>> ShardBlocksObserver<F> {
                 file_hash: wc.zerostate_file_hash,
             });
         }
-        Ok(Self{top_processed_blocks, engine, on_new_block})
+        Ok(Self{top_processed_blocks, engine})
     }
 
-    pub async fn process_next_mc_block(&mut self, mc_block: &BlockStuff) -> Result<()> {
+    pub async fn process_next_mc_block(&mut self, mc_block: &BlockStuff) -> Result<Vec<(BlockStuff, BlockIdExt)>> {
+        let mut blocks_for_external_processing = Vec::new();
         loop {
             let mut new_top_processed_blocks = HashSet::new();
             let mut has_new_blocks = false;
@@ -57,8 +56,8 @@ impl<F: Fn(&BlockStuff, &BlockIdExt) -> Result<()>> ShardBlocksObserver<F> {
                         .ok_or_else(|| error!("Can't load next #1 block's handle with id {}", next_id))?;
                     let block = self.engine.load_block(&next_handle).await?;
                     
-                    (self.on_new_block)(&block, mc_block.id())?;
-                    
+                    blocks_for_external_processing.push((block, mc_block.id().clone()));
+
                     new_top_processed_blocks.insert(next_id);
                     has_new_blocks = true;
                 } else {
@@ -73,9 +72,9 @@ impl<F: Fn(&BlockStuff, &BlockIdExt) -> Result<()>> ShardBlocksObserver<F> {
                     let next_handle = self.engine.load_block_handle(&next_id)?
                         .ok_or_else(|| error!("Can't load next #2 block's handle with id {}", next_id))?;
                     let block = self.engine.load_block(&next_handle).await?;
-                    
-                    (self.on_new_block)(&block, mc_block.id())?;
-                    
+
+                    blocks_for_external_processing.push((block, mc_block.id().clone()));
+
                     new_top_processed_blocks.insert(next_id);
                     has_new_blocks = true;
                 }
@@ -83,7 +82,7 @@ impl<F: Fn(&BlockStuff, &BlockIdExt) -> Result<()>> ShardBlocksObserver<F> {
 
             self.top_processed_blocks = new_top_processed_blocks;
             if !has_new_blocks {
-                break Ok(());
+                break Ok(blocks_for_external_processing);
             }
         }
     }

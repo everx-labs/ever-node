@@ -336,7 +336,7 @@ impl ValidatorManagerImpl {
 
     async fn update_single_validator_list(&mut self, validator_list: &[ValidatorDescr], name: &str)
     -> Result<Option<ValidatorListHash>> {
-        let list_id = match compute_validator_list_id(validator_list, None) {
+        let list_id = match compute_validator_list_id(validator_list, None)? {
             None => return Ok(None),
             Some(l) if self.validator_list_status.contains_list(&l) => return Ok(Some(l)),
             Some(l) => l,
@@ -786,6 +786,11 @@ impl ValidatorManagerImpl {
         Ok(())
     }
 
+    fn get_masterchain_seqno(&self, mc_state: Arc<ShardStateStuff>) -> Result<u32> {
+        let mc_state_extra = mc_state.shard_state_extra()?;
+        Ok(mc_state_extra.validator_info.catchain_seqno)
+    }
+
     async fn update_shards(&mut self, mc_state: Arc<ShardStateStuff>) -> Result<()> {
         if !self.update_validator_lists(&mc_state).await? {
             log::info!(target: "validator_manager", "Current validator list is empty, validation is disabled.");
@@ -908,7 +913,7 @@ impl ValidatorManagerImpl {
         let next_validator_set = mc_state_extra.config.next_validator_set()?;
         let full_validator_set = mc_state_extra.config.validator_set()?;
         let possible_validator_change = next_validator_set.total() > 0;
-        let master_cc_seqno = mc_state_extra.validator_info.catchain_seqno;
+        let master_cc_seqno = self.get_masterchain_seqno(mc_state.clone())?;
 
         for ident in future_shards.iter() {
             log::trace!(target: "validator_manager", "Future shard {}", ident);
@@ -928,7 +933,7 @@ impl ValidatorManagerImpl {
                 &full_validator_set
             };
 
-            let vnext_list_id = match compute_validator_list_id(&future_validator_set.list(), None) {
+            let vnext_list_id = match compute_validator_list_id(&future_validator_set.list(), None)? {
                 None => continue,
                 Some(l) => l
             };
@@ -1113,7 +1118,7 @@ impl ValidatorManagerImpl {
             if let Some(block_observer) = &block_observer {
                 if mc_handle.id().seq_no() != 0 {
                     let mc_blockstuff = self.engine.load_block(&mc_handle).await?;
-                    block_observer.send(mc_blockstuff)?;
+                    block_observer.send((mc_blockstuff, self.get_masterchain_seqno(mc_state.clone())?))?;
                 }
             }
             self.update_shards(mc_state).await?;

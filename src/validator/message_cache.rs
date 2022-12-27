@@ -454,7 +454,7 @@ impl MessageCache {
     /// ... if new is Shardchain Accept -- it's duplicate (except it's accept for Collator with the same block).
     /// ... if new is final Accept -- it is applied anyway
     /// Returns new message status, if it worths reporting (final statuses do not need to be reported)
-    pub async fn update_message_status(&self, message_id: &UInt256, new_status: RempMessageStatus) -> Result<Option<RempMessageStatus>> {
+    pub fn update_message_status(&self, message_id: &UInt256, new_status: RempMessageStatus) -> Result<Option<RempMessageStatus>> {
         if let RempMessageStatus::TonNode_RempAccepted(acc_new) = &new_status {
             if acc_new.level == RempMessageLevel::TonNode_RempShardchain {
                 let old_status = self.messages.message_statuses.get(message_id).map(|x| x.1.clone());
@@ -535,6 +535,22 @@ impl MessageCache {
                 },
             }
         }).await
+    }
+
+    pub fn insert_masterchain_message_status(&self, message_id: &UInt256, new_status: RempMessageStatus, masterchain_seqno: u32) -> Result<()> {
+        if let RempMessageStatus::TonNode_RempAccepted(acc_new) = &new_status {
+            if acc_new.level == RempMessageLevel::TonNode_RempMasterchain {
+                self.do_update_message_status(
+                    message_id, new_status.clone(),
+                    Some((acc_new.block_id.shard_id.clone(), masterchain_seqno))
+                )?;
+                return Ok(())
+            }
+        }
+
+        fail!("insert_masterchain_message_status for message {:x}: requested {}, however can update only to accepted by masterchain level",
+            message_id, new_status
+        )
     }
 
     pub async fn remove_message(&self, message_id: &UInt256) {

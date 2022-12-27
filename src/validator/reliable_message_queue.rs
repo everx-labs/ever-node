@@ -167,8 +167,8 @@ impl MessageQueue {
         }
     }
 
-    pub async fn update_status_send_response(&self, msgid: &UInt256, message: Arc<RmqMessage>, new_status: RempMessageStatus) {
-        match self.remp_manager.message_cache.update_message_status(&msgid, new_status.clone()).await {
+    pub fn update_status_send_response(&self, msgid: &UInt256, message: Arc<RmqMessage>, new_status: RempMessageStatus) {
+        match self.remp_manager.message_cache.update_message_status(&msgid, new_status.clone()) {
             Ok(Some(final_status)) => self.send_response_to_fullnode(message.clone(), final_status),
             Ok(None) => (), // Send nothing, no status update is requested
             Err(e) => log::error!(target: "remp", 
@@ -181,7 +181,7 @@ impl MessageQueue {
     pub async fn update_status_send_response_by_id(&self, msgid: &UInt256, new_status: RempMessageStatus) -> Option<Arc<RmqMessage>> {
         let message = self.get_message(msgid);
         match &message {
-            Some(rm) => self.update_status_send_response(msgid, rm.clone(), new_status.clone()).await,
+            Some(rm) => self.update_status_send_response(msgid, rm.clone(), new_status.clone()),
             None => 
                 log::error!(target: "remp",
                     "RMQ {}: cannot find message {:x} in RMQ messages hash! (new status {})",
@@ -203,10 +203,9 @@ impl MessageQueue {
         self.set_queue_status(MessageQueueStatus::Created, MessageQueueStatus::Starting).await?;
 
         log::trace!(target: "remp", "RMQ {}: starting", self);
-        self.remp_manager.catchain_store.create_catchain(self.engine.clone(), self.remp_manager.clone(), self.catchain_info.clone()).await?;
-        log::trace!(target: "remp", "RMQ {}: catchain created", self);
+ //     log::trace!(target: "remp", "RMQ {}: catchain created", self);
         let catchain_instance_impl = self.remp_manager.catchain_store.start_catchain(
-            self.catchain_info.queue_id.clone(), local_key
+            self.engine.clone(), self.remp_manager.clone(), self.catchain_info.clone(), local_key
         ).await?;
         log::trace!(target: "remp", "RMQ {}: catchain started", self);
         self.catchain_instance.init_instance(catchain_instance_impl)?;
@@ -360,7 +359,7 @@ impl MessageQueue {
                             );
                             let ignored = RempIgnored { level: Self::get_status_level(&old_status), block_id: Self::get_status_blockid(&old_status) };
                             let new_status = RempMessageStatus::TonNode_RempIgnored(ignored);
-                            self.remp_manager.message_cache.update_message_status(&rmq_message.message_id, new_status.clone()).await?;
+                            self.remp_manager.message_cache.update_message_status(&rmq_message.message_id, new_status.clone())?;
                             self.add_pending_collation(rmq_message, Some(new_status)).await?;
 
                             #[cfg(feature = "telemetry")]
@@ -461,7 +460,7 @@ impl MessageQueue {
                         block_id: BlockIdExt::default(),
                         master_id: BlockIdExt::default()
                     });
-                    self.update_status_send_response(&msgid, message.clone(), new_status).await;
+                    self.update_status_send_response(&msgid, message.clone(), new_status);
                     cnt = cnt + 1;
                 }
             }
@@ -649,14 +648,14 @@ struct StatusUpdater {
 
 #[async_trait::async_trait]
 impl BlockProcessor for StatusUpdater {
-    async fn process_message(&self, message_id: &UInt256) {
+    fn process_message(&self, message_id: &UInt256) {
         match self.queue.get_message(message_id) {
             None => log::warn!(target: "remp", "Cannot find message {:x} in cache", message_id),
             Some(message) => {
                 log::trace!(target: "remp", "Point 7. RMQ {} shard accepted message {}, new status {}", 
                     self.queue, message, self.new_status
                 );
-                self.queue.update_status_send_response(message_id, message, self.new_status.clone()).await
+                self.queue.update_status_send_response(message_id, message, self.new_status.clone())
             }
         }
     }

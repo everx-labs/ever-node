@@ -1687,7 +1687,7 @@ impl Engine {
             if handle.is_key_block()? {
                 let mc_state = engine.load_state(handle.id()).await?;
                 if let Err(e) = Self::check_gc_for_archives(&engine, &handle, &mc_state).await {
-                    log::warn!("archive manager gc: {}", e);
+                    log::error!("Archives GC: {}", e);
                 }
             }
             // clean unapplied blocks every 15 seconds
@@ -1701,7 +1701,7 @@ impl Engine {
                         _ => ()
                     }    
                 }
-                engine.db().archive_manager().clean_unapplied_files(&ids).await;
+                engine.db().clean_unapplied_files(&ids).await;
                 last_clean_unapplied_time = std::time::Instant::now();
             }
             handle = loop {
@@ -1764,6 +1764,7 @@ impl Engine {
                         // ....................pss_block....pss_block....pss_block....pss_block...
                         // visited_pss_blocks:         4            3            2            1
                         //                    ↑ we may delete blocks starting at least here (before 4th pss)
+                        
                         if visited_pss_blocks >= 4 {
                             let gen_time = keyblock.gen_utime()? as u64;
                             let gc_max_date = gc_max_date.as_secs();
@@ -1773,7 +1774,7 @@ impl Engine {
                                     &gen_time, keyblock.id().seq_no(), &gc_max_date
                                 );
                                 log::info!("start gc for archives..");
-                                engine.db.archive_manager().gc(&keyblock.id()).await;
+                                engine.db.archive_gc(&keyblock.id()).await?;
                                 log::info!("finish gc for archives.");
                                 return Ok(());
                             }
