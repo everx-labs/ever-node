@@ -252,25 +252,28 @@ fn init_logger(log_config_path: Option<String>) {
     }
 }
 
-fn log_version() {
-    log::info!(
+static NOT_SET_LABEL: &str = "Not set";
+
+fn get_version() -> String {
+    format!(
         "Execute {:?}\n\
         COMMIT_ID: {:?}\n\
         BUILD_DATE: {:?}\n\
         COMMIT_DATE: {:?}\n\
         GIT_BRANCH: {:?}\n\
         RUST_VERSION:{}\n",
-        std::option_env!("CARGO_PKG_VERSION").unwrap_or("Not set"),
-        std::option_env!("BUILD_GIT_COMMIT").unwrap_or("Not set"),
-        std::option_env!("BUILD_TIME").unwrap_or("Not set"),
-        std::option_env!("BUILD_GIT_DATE").unwrap_or("Not set"),
-        std::option_env!("BUILD_GIT_BRANCH").unwrap_or("Not set"),
-        std::option_env!("BUILD_RUST_VERSION").unwrap_or("Not set"),
-    );
+        std::option_env!("CARGO_PKG_VERSION").unwrap_or(NOT_SET_LABEL),
+        std::option_env!("BUILD_GIT_COMMIT").unwrap_or(NOT_SET_LABEL),
+        std::option_env!("BUILD_TIME").unwrap_or(NOT_SET_LABEL),
+        std::option_env!("BUILD_GIT_DATE").unwrap_or(NOT_SET_LABEL),
+        std::option_env!("BUILD_GIT_BRANCH").unwrap_or(NOT_SET_LABEL),
+        std::option_env!("BUILD_RUST_VERSION").unwrap_or(NOT_SET_LABEL),
+    )
 }
 
-fn print_build_info() -> String {
-    let build_info: String = format!(
+fn get_build_info() -> String {
+    let mut info = String::new();
+    info += &format!(
         "TON Node, version {}\n\
         Rust: {}\n\
         TON NODE git commit:         {}\n\
@@ -280,29 +283,34 @@ fn print_build_info() -> String {
         RLDP git commit:             {}\n\
         TON_BLOCK git commit:        {}\n\
         TON_BLOCK_JSON git commit:   {}\n\
-        TON_SDK git commit:          {}\n\
+        TON_SDK_CLIENT git commit:   {}\n\
         TON_EXECUTOR git commit:     {}\n\
         TON_TL git commit:           {}\n\
         TON_TYPES git commit:        {}\n\
-        TON_VM git commit:           {}\n\
-        TON_ABI git commit:     {}\n",
-        std::option_env!("CARGO_PKG_VERSION").unwrap_or("Not set"),
-        std::option_env!("BUILD_RUST_VERSION").unwrap_or("Not set"),
-        std::option_env!("GC_TON_NODE").unwrap_or("Not set"),
-        std::option_env!("GC_ADNL").unwrap_or("Not set"),
-        std::option_env!("GC_DHT").unwrap_or("Not set"),
-        std::option_env!("GC_OVERLAY").unwrap_or("Not set"),
-        std::option_env!("GC_RLDP").unwrap_or("Not set"),
-        std::option_env!("GC_TON_BLOCK").unwrap_or("Not set"),
-        std::option_env!("GC_TON_BLOCK_JSON").unwrap_or("Not set"),
-        std::option_env!("GC_TON_SDK").unwrap_or("Not set"),
-        std::option_env!("GC_TON_EXECUTOR").unwrap_or("Not set"),
-        std::option_env!("GC_TON_TL").unwrap_or("Not set"),
-        std::option_env!("GC_TON_TYPES").unwrap_or("Not set"),
-        std::option_env!("GC_TON_VM").unwrap_or("Not set"),
-        std::option_env!("GC_TON_LABS_ABI").unwrap_or("Not set")
+        TON_VM git commit:           {}\n",
+        std::option_env!("CARGO_PKG_VERSION").unwrap_or(NOT_SET_LABEL),
+        std::option_env!("BUILD_RUST_VERSION").unwrap_or(NOT_SET_LABEL),
+        std::option_env!("BUILD_GIT_COMMIT").unwrap_or(NOT_SET_LABEL),
+        adnl::build_commit().unwrap_or(NOT_SET_LABEL),
+        dht::build_commit().unwrap_or(NOT_SET_LABEL),
+        overlay::build_commit().unwrap_or(NOT_SET_LABEL),
+        rldp::build_commit().unwrap_or(NOT_SET_LABEL),
+        ton_block::build_commit().unwrap_or(NOT_SET_LABEL),
+        ton_block_json::build_commit().unwrap_or(NOT_SET_LABEL),
+        NOT_SET_LABEL,
+        // ton_client::build_commit().unwrap_or(NOT_SET_LABEL),
+        ton_executor::build_commit().unwrap_or(NOT_SET_LABEL),
+        ton_api::build_commit().unwrap_or(NOT_SET_LABEL),
+        ton_types::build_commit().unwrap_or(NOT_SET_LABEL),
+        ton_vm::build_commit().unwrap_or(NOT_SET_LABEL),
     );
-    return build_info;
+    #[cfg(feature = "slashing")] {
+        info += &format!(
+            "TON_ABI git commit:     {}\n",
+            ton_abi::build_commit().unwrap_or(NOT_SET_LABEL)
+        );
+    }
+    info
 }
 
 #[cfg(feature = "external_db")]
@@ -348,7 +356,9 @@ fn main() {
     #[cfg(target_os = "linux")]
     check_tcmalloc();
 
-    println!("{}", print_build_info());
+    println!("{}", get_build_info());
+    let version = get_version();
+    println!("{}", version);
 
     let app = clap::App::new("TON node")
         .arg(clap::Arg::with_name("zerostate")
@@ -409,7 +419,7 @@ fn main() {
     };
 
     init_logger(config.log_config_path());
-    log_version();
+    log::info!("{}", version);
     
     lazy_static::initialize(&STATSD);
     

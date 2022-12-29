@@ -5,7 +5,7 @@ use crate::{
     shard_state::ShardStateStuff,
     engine_traits::{EngineOperations, EngineAlloc},
     engine::{Engine, Stopper},
-    boot::self,
+    boot,
 };
 #[cfg(feature = "async_ss_storage")]
 use crate::internal_db::SsNotificationCallback;

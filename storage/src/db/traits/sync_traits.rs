@@ -109,10 +109,10 @@ pub trait KvcTransactional<K: DbKey + Send + Sync>: KvcWriteable<K> {
 /// on destroy, if not committed.
 pub trait KvcTransaction<K: DbKey + Send + Sync> {
     /// Adds put operation into transaction (batch)
-    fn put(&mut self, key: &K, value: &[u8]);
+    fn put(&mut self, key: &K, value: &[u8]) -> Result<()>;
 
     /// Adds delete operation into transaction (batch)
-    fn delete(&mut self, key: &K);
+    fn delete(&mut self, key: &K) -> Result<()>;
 
     /// Removes all pending operations from transaction (batch)
     fn clear(&mut self);

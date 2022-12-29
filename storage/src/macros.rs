@@ -32,10 +32,11 @@ macro_rules! db_impl_base {
             #[allow(dead_code)]
             pub fn with_db(
                 db: std::sync::Arc<$crate::db::rocksdb::RocksDb>, 
-                family: impl ToString
+                family: impl ToString,
+                create_if_not_exist: bool,
             ) -> ton_types::Result<Self> {
                 let ret = Self {
-                    db: Box::new(db.table(family)?)
+                    db: Box::new(db.table(family, create_if_not_exist)?)
                 };
                 Ok(ret)
             }
@@ -91,7 +92,7 @@ macro_rules! db_impl_single {
                 path: &str, 
                 name: &str
             ) -> ton_types::Result<Self> {
-                let db = $crate::db::rocksdb::RocksDb::with_path(path, name);
+                let db = $crate::db::rocksdb::RocksDb::with_path(path, name)?;
                 let ret = Self {
                     db
                 };

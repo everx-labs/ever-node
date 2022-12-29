@@ -710,11 +710,11 @@ impl EngineOperations for Engine {
     }
 
     async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
-        self.db().archive_manager().get_archive_id(mc_seq_no).await
+        self.db().get_archive_id(mc_seq_no).await
     }
 
     async fn get_archive_slice(&self, archive_id: u64, offset: u64, limit: u32) -> Result<Vec<u8>> {
-        self.db().archive_manager().get_archive_slice(archive_id, offset, limit).await
+        self.db().get_archive_slice(archive_id, offset, limit).await
     }
 
     async fn download_archive(
