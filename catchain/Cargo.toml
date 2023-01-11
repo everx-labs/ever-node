@@ -21,7 +21,7 @@ regex = '1.3.1'
 sha2 = '0.10'
 adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.119' }
 ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', tag = '0.1.80' }
-overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.113' }
+overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.114' }
 rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.115' }
 storage = { path = '../storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
