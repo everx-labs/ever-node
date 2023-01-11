@@ -50,6 +50,7 @@ mod jaeger {
 use crate::{
     config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, STATSD, Stopper}, 
     jaeger::init_jaeger, internal_db::restore::set_graceful_termination,
+    validating_utils::supported_version
 };
 
 use std::sync::Arc;
@@ -257,12 +258,14 @@ static NOT_SET_LABEL: &str = "Not set";
 fn get_version() -> String {
     format!(
         "Execute {:?}\n\
+        BLOCK_VERSION: {:?}\n\
         COMMIT_ID: {:?}\n\
         BUILD_DATE: {:?}\n\
         COMMIT_DATE: {:?}\n\
         GIT_BRANCH: {:?}\n\
         RUST_VERSION:{}\n",
         std::option_env!("CARGO_PKG_VERSION").unwrap_or(NOT_SET_LABEL),
+        supported_version(), 
         std::option_env!("BUILD_GIT_COMMIT").unwrap_or(NOT_SET_LABEL),
         std::option_env!("BUILD_TIME").unwrap_or(NOT_SET_LABEL),
         std::option_env!("BUILD_GIT_DATE").unwrap_or(NOT_SET_LABEL),
@@ -283,7 +286,6 @@ fn get_build_info() -> String {
         RLDP git commit:             {}\n\
         TON_BLOCK git commit:        {}\n\
         TON_BLOCK_JSON git commit:   {}\n\
-        TON_SDK_CLIENT git commit:   {}\n\
         TON_EXECUTOR git commit:     {}\n\
         TON_TL git commit:           {}\n\
         TON_TYPES git commit:        {}\n\
@@ -297,8 +299,6 @@ fn get_build_info() -> String {
         rldp::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_block::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_block_json::build_commit().unwrap_or(NOT_SET_LABEL),
-        NOT_SET_LABEL,
-        // ton_client::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_executor::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_api::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_types::build_commit().unwrap_or(NOT_SET_LABEL),
