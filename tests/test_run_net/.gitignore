@@ -1,0 +1,8 @@
+config?.json
+console?.json
+default_config?.json
+genkey?
+zero_state_tmp*
+zero_state.json
+ton-global.config.json
+ton-global.config.json.tmp

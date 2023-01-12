@@ -59,7 +59,7 @@ pub fn create_external_db(config: ExternalDbConfig, front_workchain_ids: Vec<i32
 #[cfg(feature = "external_db")]
 pub fn create_external_db(config: ExternalDbConfig, front_workchain_ids: Vec<i32>) -> Result<Arc<dyn ExternalDb>> {
     let max_account_bytes_size = match config.account_producer.big_messages_storage {
-        Some(_) => None,
+        Some(_) => config.account_producer.big_message_max_size,
         None => Some(config.account_producer.message_max_size),
     };
     Ok(

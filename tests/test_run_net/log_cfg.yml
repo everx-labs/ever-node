@@ -1,0 +1,101 @@
+# Scan this file for changes every 30 seconds
+# https://docs.rs/log4rs/0.8.3/log4rs/encode/pattern/index.html
+refresh_rate: 30 seconds
+
+appenders:
+  stdout:
+    kind: console
+    encoder:
+      pattern: "{d(%Y-%m-%d %H:%M:%S.%f)} {l} [{h({t})}] {I}: {m}{n}"
+
+  stdout_ref:
+    kind: console
+    encoder:
+      pattern: "{f}:{L} {l} [{h({t})}] {I}: {m}{n}"
+
+  logfile:
+    kind: file
+    path: "/ton-node/logs/output.log"
+    encoder:
+      pattern: "{d(%Y-%m-%d %H:%M:%S.%f)} {l} [{h({t})}] {I}: {m}{n}"
+
+  rolling_logfile:
+    kind: rolling_file
+    encoder:
+      pattern: "{d(%Y-%m-%d %H:%M:%S.%f)} {l} [{h({t})}] {I}: {m}{n}"
+    path: '/shared/output_NODE_NUM.log'
+    policy:
+      kind: compound
+      trigger:
+        kind: size
+        limit: 5 gb
+      roller:
+        kind: fixed_window
+        pattern: '/shared/output_NODE_NUM_{}.log'
+        base: 1
+        count: 10
+
+root:
+  level: error
+  appenders:
+    - rolling_logfile
+
+loggers:
+  # node messages
+  ton_node:
+    level: trace
+  boot:
+    level: trace
+  sync:
+    level: trace
+
+  # adnl messages
+  adnl:
+    level: warn
+  adnl_query:
+    level: info
+
+  overlay:
+    level: warn
+
+  rldp:
+    level: warn
+
+  dht:
+    level: warn
+
+  # block messages
+  ton_block:
+    level: off
+
+  # block messages
+  executor:
+    level: off
+
+  # tvm messages
+  tvm:
+    level: off
+
+  librdkafka:
+    level: error
+
+  validator:
+    level: info
+
+  validator_manager:
+    level: trace
+
+  remp:
+    level: trace
+
+  catchain:
+    level: debug
+
+  validator_session:
+    level: debug
+
+  storage:
+    level: trace
+
+  telemetry:
+    level: debug
