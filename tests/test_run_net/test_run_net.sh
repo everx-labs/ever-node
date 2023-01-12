@@ -13,11 +13,11 @@ TEST_ROOT=$(pwd);
 cargo build --release
 
 cd ../../../
-if ! [ -d "ton-node-tools" ]
+if ! [ -d "ton-labs-node-tools" ]
 then
-    git clone https://github.com/tonlabs/ton-labs-node-tools
+    git clone "https://github.com/tonlabs/ton-labs-node-tools"
 fi
-cd ton-node-tools
+cd ton-labs-node-tools
 TOOLS_ROOT=$(pwd)
 
 cargo build --release

@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2022 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -52,7 +52,7 @@ impl BlockStuff {
             fail!("block candidate has invalid root hash: declared {:x}, actual {:x}",
                 id.root_hash, root.repr_hash())
         }
-        let block = Block::construct_from(&mut root.clone().into())?;
+        let block = Block::construct_from_cell(root.clone())?;
         Ok(Self { id, block, root, data: Arc::new(data) })
     }
 
@@ -69,26 +69,10 @@ impl BlockStuff {
         if id.root_hash != root.repr_hash() {
             fail!("wrong root hash for {}", id)
         }
-        let block = Block::construct_from(&mut root.clone().into())?;
+        let block = Block::construct_from_cell(root.clone())?;
         Ok(Self{ id, block, root, data: Arc::new(data), })
     }
 
-    #[cfg(any(test))]
-    pub fn read_from_file(filename: &str) -> Result<Self> {
-        let data = std::fs::read(filename)?;
-        let file_hash = UInt256::calc_file_hash(&data);
-
-        let root = deserialize_tree_of_cells(&mut Cursor::new(&data))?;
-        let block = Block::construct_from(&mut root.clone().into())?;
-        let block_info = block.read_info()?;
-        let id = BlockIdExt {
-            shard_id: block_info.shard().clone(),
-            seq_no: block_info.seq_no(),
-            root_hash: root.repr_hash(),
-            file_hash,
-        };
-        Ok(Self{ id, block, root, data: Arc::new(data), })
-    }
 
 
     pub fn block(&self) -> &Block { &self.block }

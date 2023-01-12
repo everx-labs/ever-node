@@ -25,7 +25,7 @@ use adnl::{declare_counted, common::{CountedObject, Counter}};
 use std::{path::PathBuf, sync::Arc};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
-use ton_types::{Result, error};
+use ton_types::{Result, error, fail};
 use ton_block::BlockIdExt;
 
 use super::ARCHIVE_SLICE_SIZE;
@@ -84,12 +84,13 @@ impl FileMap {
         db_root_path: &Arc<PathBuf>,
         path: impl ToString,
         package_type: PackageType,
+        last_unneeded_key_block: u32,
         #[cfg(feature = "telemetry")]
         telemetry: &Arc<StorageTelemetry>,
         allocated: &Arc<StorageAlloc>
     ) -> Result<Self> {
  
-        let storage = PackageIndexDb::with_db(db.clone(), path)?;
+        let storage = PackageIndexDb::with_db(db.clone(), path, true)?;
         let mut index_pairs = Vec::new();
 
         storage.for_each_deserialized(|key, value| {
@@ -101,12 +102,20 @@ impl FileMap {
 
         let mut elements = Vec::new();
         for (key, value) in index_pairs {
+            let unneeded = key < last_unneeded_key_block;
+            let finalized = value.finalized();
+            log::info!(
+                target: "storage",
+                "Opening archive slice {}, finalized {}, unneeded {}",
+                key, finalized, unneeded
+            );
             let archive_slice = match ArchiveSlice::with_data(
                 db.clone(),
                 Arc::clone(db_root_path),
                 key,
                 package_type,
-                value.finalized(),
+                finalized,
+                unneeded,
                 #[cfg(feature = "telemetry")]
                 telemetry.clone(),
                 allocated.clone()
@@ -114,6 +123,12 @@ impl FileMap {
                 Ok(s) => s,
                 Err(e) => {
                     log::warn!(target: "storage", "Can't read archive slice {}: {}", key, e);
+                    if unneeded {
+                        match storage.delete(&key.into()) {
+                            Ok(_) => log::info!(target: "storage", "Deleted archive slice from index {}", key),
+                            Err(e) => log::info!(target: "storage", "Can't delete archive slice from index {}: {}", key, e),
+                        }
+                    }
                     continue;
                 }
             };
@@ -167,7 +182,7 @@ impl FileMap {
         Ok(())
     }
 
-    async fn get_marked_entries(&self, front_for_gc_master_block_id: &BlockIdExt) -> Vec<u32> {
+    async fn get_unneeded_entries(&self, last_unneeded_key_block: &BlockIdExt) -> Vec<u32> {
         let elements = self.elements.read().await;
         let mut marked_packages = Vec::new();
 
@@ -179,37 +194,59 @@ impl FileMap {
             };
 
             if elements[i].value.archive_slice.package_type() == PackageType::Blocks
-            && next_id <= front_for_gc_master_block_id.seq_no() {
+            && next_id <= last_unneeded_key_block.seq_no() {
                 marked_packages.push(elements[i].key);
             }
         }
         marked_packages
     }
 
-    pub async fn gc(&self, front_for_gc_master_block_id: &BlockIdExt) -> Result<()> {
-        log::info!(target: "storage", "file_maps gc started.");
-        let mut marked_packages = self.get_marked_entries(front_for_gc_master_block_id).await;
+    pub async fn gc(&self, last_unneeded_key_block: &BlockIdExt) -> Result<()> {
+        log::info!(
+            target: "storage",
+            "Archives GC started, last_unneeded_key_block: {}",
+            last_unneeded_key_block
+        );
+        let mut slices = self.get_unneeded_entries(last_unneeded_key_block).await;
+        log::info!(
+            target: "storage",
+            "Archives GC: found {} unneeded slices",
+            slices.len()
+        );
 
-        while let Some(key) = marked_packages.pop() {
+        'a: while let Some(key) = slices.pop() {
             let mut guard = self.elements.write().await;
-            let position = guard.iter().position(|item| item.key == key)
-                .ok_or_else(|| error!("slice not found!"))?;
-            let mut removed_entry = guard.remove(position);
-            match Arc::get_mut(&mut removed_entry.value) {
-                Some(file_description) => {
-                    if let Err(e) = file_description.destroy().await {
-                        log::warn!(target: "storage", "destroy file_description {}: {:?}", key, e);
+            let mut position = None;
+            for (p, entry) in guard.iter_mut().enumerate() {
+                if entry.key == key {
+                    position = Some(p);
+                    match Arc::get_mut(&mut entry.value) {
+                        Some(file_description) => {
+                            if let Err(e) = file_description.destroy().await {
+                                log::error!(target: "storage", "Archives GC: can't destroy archive slice {}: {:?}", key, e);
+                                continue 'a;
+                            } else {
+                                if let Err(e) = self.storage.delete(&key.into()) {
+                                    log::error!(target: "storage", "Archives GC: can't delete {} from index: {:?}", key, e);
+                                    continue 'a;
+                                }
+                                log::info!(target: "storage", "Archives GC: collected {}.", key);
+                            }
+                        },
+                        None => { 
+                            log::error!(target: "storage", "Archives GC: unable to get mutable reference to file_description"); 
+                            continue 'a;
+                        }
                     }
-                    if let Err(e) = self.storage.delete(&key.into()){
-                        log::warn!(target: "storage", "delete {} from index: {:?}", key, e);
-                    }
-                },
-                None => { 
-                    log::warn!(target: "storage", "Unable to get mutable reference to file_description"); 
                 }
             }
+            if let Some(p) = position {
+                guard.remove(p);
+            } else {
+                fail!("Slice {} not found", key)
+            }
         }
-        log::info!(target: "storage", "file_maps gc finished.");
+        log::info!(target: "storage", "Archives GC finished.");
         Ok(())
     }
 
@@ -285,6 +322,7 @@ impl FileMaps {
     pub async fn new(
         db: Arc<RocksDb>,
         db_root_path: &Arc<PathBuf>,
+        last_unneeded_key_block: u32,
         #[cfg(feature = "telemetry")]
         telemetry: &Arc<StorageTelemetry>,
         allocated: &Arc<StorageAlloc>
@@ -295,6 +333,7 @@ impl FileMaps {
                 db_root_path, 
                 "files",
                 PackageType::Blocks,
+                last_unneeded_key_block,
                 #[cfg(feature = "telemetry")]
                 telemetry,
                 allocated
@@ -304,6 +343,7 @@ impl FileMaps {
                 db_root_path, 
                 "key_files",
                 PackageType::KeyBlocks,
+                0,
                 #[cfg(feature = "telemetry")]
                 telemetry,
                 allocated

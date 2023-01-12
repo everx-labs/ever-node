@@ -117,6 +117,7 @@ pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
 #[serde(default)]
 pub struct NodeExtensions {
     pub disable_broadcast_retransmit: bool,
+    pub disable_compression: bool,
     pub broadcast_hops: Option<u8>
 }
 
@@ -124,6 +125,7 @@ impl Default for NodeExtensions {
     fn default() -> Self {
         NodeExtensions {
             disable_broadcast_retransmit: false,
+            disable_compression: false,
             broadcast_hops: None
         }
     }
@@ -178,7 +180,8 @@ pub struct KafkaProducerConfig {
     pub attempt_timeout_ms: u32,
     pub message_max_size: usize,
     pub big_messages_storage: Option<String>,
-    pub external_message_ref_address_prefix: Option<String>
+    pub big_message_max_size: Option<usize>,
+    pub external_message_ref_address_prefix: Option<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
@@ -1414,18 +1417,16 @@ impl TonNodeGlobalConfigJson {
             .zero_state
             .root_hash
             .as_ref()
-            .ok_or_else(|| error!("Unknown workchain root_hash (of zero_state)!"))?;
-                
-        let root_hash = UInt256::from_str(&root_hash)?;
+            .ok_or_else(|| error!("Unknown workchain root_hash (of zero_state)!"))?
+            .parse()?;
 
         let file_hash = self
             .validator
             .zero_state
             .file_hash
             .as_ref()
-            .ok_or_else(|| error!("Unknown workchain file_hash (of zero_state)!"))?;
-
-        let file_hash = UInt256::from_str(&file_hash)?;
+            .ok_or_else(|| error!("Unknown workchain file_hash (of zero_state)!"))?
+            .parse()?;
 
         Ok(BlockIdExt {
             shard_id: ShardIdent::with_tagged_prefix(workchain_id, shard as u64)?,
@@ -1451,12 +1452,12 @@ impl TonNodeGlobalConfigJson {
             .ok_or_else(|| error!("Unknown workchain shard (of zero_state)!"))?;
 
         let root_hash = init_block.root_hash.as_ref()
-            .ok_or_else(|| error!("Unknown workchain root_hash (of zero_state)!"))?;
-        let root_hash = UInt256::from_str(&root_hash)?;
+            .ok_or_else(|| error!("Unknown workchain root_hash (of zero_state)!"))?
+            .parse()?;
 
         let file_hash = init_block.file_hash.as_ref()
-            .ok_or_else(|| error!("Unknown workchain file_hash (of zero_state)!"))?;
-        let file_hash = UInt256::from_str(&file_hash)?;
+            .ok_or_else(|| error!("Unknown workchain file_hash (of zero_state)!"))?
+            .parse()?;
 
         Ok(Some(BlockIdExt {
             shard_id: ShardIdent::with_tagged_prefix(workchain_id, shard as u64)?,

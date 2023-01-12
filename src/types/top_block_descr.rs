@@ -150,7 +150,7 @@ impl TopBlockDescrStuff {
 
     pub fn from_bytes(bytes: &[u8], is_fake: bool)-> Result<Self> {
         let root = deserialize_tree_of_cells(&mut Cursor::new(&bytes))?;
-        let tbd = TopBlockDescr::construct_from(&mut root.into())?;
+        let tbd = TopBlockDescr::construct_from_cell(root)?;
         let id = tbd.proof_for().clone();
         TopBlockDescrStuff::new(tbd, &id, is_fake)
     }
@@ -201,9 +201,9 @@ impl TopBlockDescrStuff {
 //    }
 
     pub fn top_block_mc_seqno_and_creator(&self) -> Result<(u32, UInt256)> {
-        let merkle_proof = MerkleProof::construct_from(&mut (&self.tbd.chain()[0]).into())?;
+        let merkle_proof = MerkleProof::construct_from_cell(self.tbd.chain()[0].clone())?;
         let block_virt_root = merkle_proof.proof.clone().virtualize(1);
-        let block = Block::construct_from(&mut block_virt_root.into())?;
+        let block = Block::construct_from_cell(block_virt_root)?;
         Ok((block.read_info()?.read_master_id()?.seq_no, block.read_extra()?.created_by().clone()))
     }
 
@@ -212,9 +212,9 @@ impl TopBlockDescrStuff {
             fail!("Invalid arguments")
         }
 
-        let merkle_proof = MerkleProof::construct_from(&mut (&self.tbd.chain()[pos]).into())?;
+        let merkle_proof = MerkleProof::construct_from_cell(self.tbd.chain()[pos].clone())?;
         let block_virt_root = merkle_proof.proof.clone().virtualize(1);
-        let block = Block::construct_from(&mut block_virt_root.into())?;
+        let block = Block::construct_from_cell(block_virt_root)?;
         let mut shard_rec = McShardRecord::from_block(&block, self.chain_blk_ids[pos].clone())?;
 
         shard_rec.descr.fees_collected = CurrencyCollection::default();
@@ -292,7 +292,7 @@ impl TopBlockDescrStuff {
         signatures: Option<&BlockSignatures>,
         next_info: Option<(BlockIdExt, BlockIdExt, BlockInfo)>
     ) -> Result<(BlockIdExt, Option<BlockIdExt>, BlockIdExt, BlockInfo, (CurrencyCollection, CurrencyCollection, CopyleftRewards), UInt256)> {
-        let merkle_proof = MerkleProof::construct_from(&mut proof_root.into())?;
+        let merkle_proof = MerkleProof::construct_from_cell(proof_root.clone())?;
         let block_virt_root = merkle_proof.proof.clone().virtualize(1);
 
         if block_virt_root.repr_hash() != cur_id.root_hash {
@@ -323,7 +323,7 @@ impl TopBlockDescrStuff {
         let mc_block_id = prev_stuff.mc_block_id;
 
 
-        let block = Block::construct_from(&mut block_virt_root.into())?;
+        let block = Block::construct_from_cell(block_virt_root)?;
         let info = block.read_info()?;
         let value_flow = block.read_value_flow()?;
         value_flow.read_in_full_depth()

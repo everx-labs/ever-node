@@ -52,6 +52,8 @@ loggers:
   # adnl messages
   adnl:
     level: warn
+  adnl_query:
+    level: info
 
   overlay:
     level: warn

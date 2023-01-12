@@ -72,7 +72,7 @@ impl TryFrom<CollatorTestBundleIndexJson> for CollatorTestBundleIndex {
         }
         let mut external_messages = vec!();
         for s in value.external_messages {
-            external_messages.push(UInt256::from_str(&s)?);
+            external_messages.push(s.parse()?);
         }
         let mut mc_states = vec!();
         for s in value.mc_states {
@@ -95,8 +95,8 @@ impl TryFrom<CollatorTestBundleIndexJson> for CollatorTestBundleIndex {
             mc_states,
             neighbors,
             prev_blocks,
-            created_by: UInt256::from_str(&value.created_by)?,
-            rand_seed: Some(UInt256::from_str(&value.rand_seed)?),
+            created_by: value.created_by.parse()?,
+            rand_seed: Some(value.rand_seed.parse()?),
             now: value.now,
             fake: value.fake,
             contains_ethalon: value.contains_ethalon,

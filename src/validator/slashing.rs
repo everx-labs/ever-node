@@ -349,34 +349,28 @@ impl SlashingManager {
 
         const INTERNAL_CALL: bool = false; //external message
 
+        // TODO: dst address should be get from config
+        let src = MsgAddressExt::with_extern(SliceData::new(vec![0xffu8])).unwrap();
+        let dst = MsgAddressInt::with_standart(None, -1, [0x33; 32].into()).unwrap();
         let result = report_fn
-            .encode_input(&header, &parameters, INTERNAL_CALL, None)
-            .and_then(|builder| builder.into_cell());
+            .encode_input(&header, &parameters, INTERNAL_CALL, None, Some(dst.clone()))
+            .and_then(|builder| SliceData::load_builder(builder));
         let body = match result {
             Err(err) => {
                 log::error!(target: "validator", "SlashingManager::slash_validator: failed to encode input: {:?}", err);
                 return;
             }
-            Ok(result) => result,
+            Ok(body) => body
         };
-
         log::info!(target: "validator", "{}({}): SlashingManager::slash_validator: message body {:?}", file!(), line!(), body);
-
-        let body = SliceData::from(body);
 
         //prepare header of the message
 
-        let hdr = ExternalInboundMessageHeader::new(
-            MsgAddressExt::with_extern(SliceData::new(vec![0xffu8])).unwrap(),
-            MsgAddressInt::with_standart(None, -1, [0x33; 32].into()).unwrap(),
-        );
+        let hdr = ExternalInboundMessageHeader::new(src, dst);
 
         //create external message
 
-        let mut message = Message::with_ext_in_header(hdr);
-        message.set_body(body);
-
-        let message = Arc::new(message);
+        let message = Arc::new(Message::with_ext_in_header_and_body(hdr, body));
 
         //send message
 

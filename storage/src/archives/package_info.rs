@@ -77,6 +77,6 @@ impl PackageInfo {
     }
 
     pub async fn destroy(&mut self) -> Result<()> {
-        self.package.destroy().await
+        self.package.remove().await
     }
 }

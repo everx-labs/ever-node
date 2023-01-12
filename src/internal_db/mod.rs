@@ -49,6 +49,7 @@ pub const LAST_APPLIED_MC_BLOCK: &str    = "LastMcBlockId";
 pub const PSS_KEEPER_MC_BLOCK: &str      = "PssKeeperBlockId";
 pub const SHARD_CLIENT_MC_BLOCK: &str    = "ShardsClientMcBlockId";
 pub const ARCHIVES_GC_BLOCK: &str        = "ArchivesGcMcBlockId";
+pub const LAST_UNNEEDED_KEY_BLOCK: &str  = storage::db::rocksdb::LAST_UNNEEDED_KEY_BLOCK;
 pub const DB_VERSION: &str  = "DbVersion";
 
 pub const DB_VERSION_0: u32  = 0;
@@ -152,8 +153,6 @@ pub struct InternalDb {
     next2_block_db: BlockInfoDb,
     shard_state_persistent_db: Arc<FileDb>,
     shard_state_dynamic_db: Arc<ShardStateDb>,
-    //ss_test_map: lockfree::map::Map<BlockIdExt, ShardStateStuff>,
-    //shardstate_db_gc: GC,
     archive_manager: Arc<ArchiveManager>,
     shard_top_blocks_db: ShardTopBlocksDb,
     full_node_state_db: Arc<NodeStateDb>,
@@ -210,16 +209,16 @@ impl InternalDb {
         telemetry: Arc<EngineTelemetry>,
         allocated: Arc<EngineAlloc>,
     ) -> Result<Self> {
-        let db = RocksDb::with_path(config.db_directory.as_str(), "db");
-        let db_catchain = RocksDb::with_path(config.db_directory.as_str(), "catchains");
+        let db = RocksDb::with_path(config.db_directory.as_str(), "db")?;
+        let db_catchain = RocksDb::with_path(config.db_directory.as_str(), "catchains")?;
         let block_handle_db = Arc::new(
-            BlockHandleDb::with_db(db.clone(), "block_handle_db")?
+            BlockHandleDb::with_db(db.clone(), "block_handle_db", true)?
         );
         let full_node_state_db = Arc::new(
-            NodeStateDb::with_db(db.clone(), "node_state_db")?
+            NodeStateDb::with_db(db.clone(), storage::db::rocksdb::NODE_STATE_DB_NAME, true)?
         );
         let validator_state_db = Arc::new(
-            NodeStateDb::with_db(db_catchain, "validator_state_db")?
+            NodeStateDb::with_db(db_catchain, "validator_state_db", true)?
         );
         let block_handle_storage = Arc::new(
             BlockHandleStorage::with_dbs(
@@ -237,11 +236,13 @@ impl InternalDb {
             telemetry.storage.clone(),
             allocated.storage.clone()
         )?;
-        //let shardstate_db_gc = GC::new(&shard_state_dynamic_db, Arc::clone(&block_handle_db))?;
+        let last_unneeded_key_block = block_handle_storage
+            .load_full_node_state(LAST_UNNEEDED_KEY_BLOCK)?.unwrap_or_default();
         let archive_manager = Arc::new(
             ArchiveManager::with_data(
                 db.clone(),
                 Arc::new(PathBuf::from(&config.db_directory)),
+                last_unneeded_key_block.seq_no(),
                 #[cfg(feature = "telemetry")]
                 telemetry.storage.clone(),
                 allocated.storage.clone()
@@ -251,18 +252,16 @@ impl InternalDb {
         let db = Self {
             db: db.clone(),
             block_handle_storage,
-            prev1_block_db: BlockInfoDb::with_db(db.clone(), "prev1_block_db")?,
-            prev2_block_db: BlockInfoDb::with_db(db.clone(), "prev2_block_db")?,
-            next1_block_db: BlockInfoDb::with_db(db.clone(), "next1_block_db")?,
-            next2_block_db: BlockInfoDb::with_db(db.clone(), "next2_block_db")?,
+            prev1_block_db: BlockInfoDb::with_db(db.clone(), "prev1_block_db", true)?,
+            prev2_block_db: BlockInfoDb::with_db(db.clone(), "prev2_block_db", true)?,
+            next1_block_db: BlockInfoDb::with_db(db.clone(), "next1_block_db", true)?,
+            next2_block_db: BlockInfoDb::with_db(db.clone(), "next2_block_db", true)?,
             shard_state_persistent_db: Arc::new(FileDb::with_path(
                 Path::new(config.db_directory.as_str()).join("shard_state_persistent_db")
             )),
             shard_state_dynamic_db,
-            //ss_test_map: lockfree::map::Map::new(),
-            //shardstate_db_gc,
             archive_manager,
-            shard_top_blocks_db: ShardTopBlocksDb::with_db(db.clone(), "shard_top_blocks_db")?,
+            shard_top_blocks_db: ShardTopBlocksDb::with_db(db.clone(), "shard_top_blocks_db", true)?,
             full_node_state_db,
 
             cells_gc_interval: Arc::new(AtomicU32::new(config.cells_gc_interval_sec)),
@@ -366,6 +365,7 @@ impl InternalDb {
         handle: &Arc<BlockHandle>,
         callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<()> {
+        let _tc = TimeChecker::new(format!("store_block_handle {}", handle.id()), 30);
         self.block_handle_storage.save_handle(handle, callback)
     }
 
@@ -375,7 +375,7 @@ impl InternalDb {
         db: &BlockInfoDb,
         msg: &str
     ) -> Result<Option<BlockIdExt>> {
-        let _tc = TimeChecker::new(format!("{} {}", msg, id), 10);
+        let _tc = TimeChecker::new(format!("{} {}", msg, id), 30);
         let Some(bytes) = db.try_get(id)? else {
             return Ok(None)
         };
@@ -394,7 +394,7 @@ impl InternalDb {
         check_set: impl Fn(&Arc<BlockHandle>) -> bool,
         callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<()> {
-        let _tc = TimeChecker::new(format!("{} {}", msg, handle.id()), 10);
+        let _tc = TimeChecker::new(format!("{} {}", msg, handle.id()), 30);
         if !check_has(handle) {
             let mut value = Vec::new();
             linkage.serialize(&mut value)?;
@@ -413,6 +413,8 @@ impl InternalDb {
         utime: Option<u32>,
         callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<BlockResult> {
+        let _tc = TimeChecker::new(format!("create_or_load_block_handle {}", id), 30);
+
         if let Some(handle) = self.load_block_handle(id)? {
             return Ok(BlockResult::with_status(handle, DataStatus::Fetched))
         }
@@ -437,7 +439,7 @@ impl InternalDb {
     }
 
     pub fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
-        let _tc = TimeChecker::new(format!("load_block_handle {}", id), 10);
+        let _tc = TimeChecker::new(format!("load_block_handle {}", id), 30);
         self.block_handle_storage.load_handle(id)
     }
 
@@ -491,13 +493,14 @@ impl InternalDb {
             || error!("Cannot find MC block {} because no MC blocks applied", seqno)
         )?;
         let last_state = self.load_shard_state_dynamic(&last_id)?;
-        let id = last_state.find_block_id(seqno)?;        
+        let id = last_state.find_block_id(seqno)?;
         self.load_block_handle(&id)?.ok_or_else(
             || error!("Cannot load handle for master block {}", id)
-        )          
+        )
     }
 
     pub fn find_mc_block_by_seq_no_without_state(&self, seqno: u32) -> Result<Arc<BlockHandle>> {
+        let _tc = TimeChecker::new(format!("find_mc_block_by_seq_no_without_state {}", seqno), 300);
         let mut found = None;
         self.next1_block_db.for_each(&mut |_key, val| {
             let id = BlockIdExt::deserialize(&mut Cursor::new(&val))?;
@@ -525,73 +528,76 @@ impl InternalDb {
         callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<BlockResult> {
 
+        let _tc = TimeChecker::new(format!("store_block_proof {}", proof.id()), 100);
+
         if let Some(handle) = &handle {
             if handle.id() != id {
                 fail!("Block handle and id mismatch: {} vs {}", handle.id(), id)
             }
         }
-        {
-            let _tc = TimeChecker::new(format!("store_block_proof {}", proof.id()), 200);
-            if id != proof.id() {
-                fail!(NodeError::InvalidArg("`proof` and `id` mismatch".to_string()))
-            }
+        if id != proof.id() {
+            fail!(NodeError::InvalidArg("`proof` and `id` mismatch".to_string()))
+        }
 
-            let mut result = if let Some(handle) = handle {
-                BlockResult::with_status(handle, DataStatus::Fetched)
-            } else {
-                let (virt_block, _) = proof.virtualize_block()?;
-                self.create_or_load_block_handle(id, Some(&virt_block), None, callback.clone())?
-            };
-            let handle = result.clone().to_non_updated().ok_or_else(
-                || error!("INTERNAL ERROR: block {} result mismatch in store_block_proof", id)
-            )?;
-            if proof.is_link() {
-                let entry_id = PackageEntryId::<_, UInt256, UInt256>::ProofLink(id);
+        let mut result = if let Some(handle) = handle {
+            BlockResult::with_status(handle, DataStatus::Fetched)
+        } else {
+            let (virt_block, _) = proof.virtualize_block()?;
+            self.create_or_load_block_handle(id, Some(&virt_block), None, callback.clone())?
+        };
+        let handle = result.clone().to_non_updated().ok_or_else(
+            || error!("INTERNAL ERROR: block {} result mismatch in store_block_proof", id)
+        )?;
+        if proof.is_link() {
+            let entry_id = PackageEntryId::<_, UInt256, UInt256>::ProofLink(id);
+            if !handle.has_proof_link() || 
+                !self.archive_manager.check_file(&handle, &entry_id) 
+            {
+                let _lock = handle.proof_file_lock().write().await;
                 if !handle.has_proof_link() || 
                     !self.archive_manager.check_file(&handle, &entry_id) 
                 {
-                    let _lock = handle.proof_file_lock().write().await;
-                    if !handle.has_proof_link() || 
-                        !self.archive_manager.check_file(&handle, &entry_id) 
-                    {
-                        let entry_id = PackageEntryId::<_, UInt256, UInt256>::ProofLink(id);
-                        self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
-                        if handle.set_proof_link() {
-                            self.store_block_handle(&handle, callback)?;
-                            result = BlockResult::with_status(handle.clone(), DataStatus::Updated)
-                        }
-                    }
-                }
-            } else {
-                let entry_id = PackageEntryId::<_, UInt256, UInt256>::Proof(id);
-                if !handle.has_proof() || 
-                    !self.archive_manager.check_file(&handle, &entry_id) 
-                {
-                    let _lock = handle.proof_file_lock().write().await;
-                    if !handle.has_proof() || 
-                        !self.archive_manager.check_file(&handle, &entry_id) 
-                    {
-                        let entry_id = PackageEntryId::<_, UInt256, UInt256>::Proof(id);
-                        self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
-                        if handle.set_proof() {
-                            self.store_block_handle(&handle, callback)?;
-                            result = BlockResult::with_status(handle.clone(), DataStatus::Updated)
-                        }
+                    let entry_id = PackageEntryId::<_, UInt256, UInt256>::ProofLink(id);
+                    self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
+                    if handle.set_proof_link() {
+                        self.store_block_handle(&handle, callback)?;
+                        result = BlockResult::with_status(handle.clone(), DataStatus::Updated)
                     }
                 }
             }
-            Ok(result)
+        } else {
+            let entry_id = PackageEntryId::<_, UInt256, UInt256>::Proof(id);
+            if !handle.has_proof() || 
+                !self.archive_manager.check_file(&handle, &entry_id) 
+            {
+                let _lock = handle.proof_file_lock().write().await;
+                if !handle.has_proof() || 
+                    !self.archive_manager.check_file(&handle, &entry_id) 
+                {
+                    let entry_id = PackageEntryId::<_, UInt256, UInt256>::Proof(id);
+                    self.archive_manager.add_file(&entry_id, proof.data().to_vec()).await?;
+                    if handle.set_proof() {
+                        self.store_block_handle(&handle, callback)?;
+                        result = BlockResult::with_status(handle.clone(), DataStatus::Updated)
+                    }
+                }
+            }
         }
+        Ok(result)
     }
 
     pub async fn load_block_proof(&self, handle: &BlockHandle, is_link: bool) -> Result<BlockProofStuff> {
         let _tc = TimeChecker::new(format!("load_block_proof {} {}", if is_link {"link"} else {""}, handle.id()), 100);
-        let raw_proof = self.load_block_proof_raw(handle, is_link).await?;
+        let raw_proof = self.load_block_proof_raw_(handle, is_link).await?;
         BlockProofStuff::deserialize(handle.id(), raw_proof, is_link)
     }
 
     pub async fn load_block_proof_raw(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>> {
-        log::trace!("load_block_proof_raw {} {}", if is_link {"link"} else {""}, handle.id());
+        let _tc = TimeChecker::new(format!("load_block_proof_raw {} {}", if is_link {"link"} else {""}, handle.id()), 100);
+        self.load_block_proof_raw_(handle, is_link).await
+    }
+
+    async fn load_block_proof_raw_(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>> {
         let (entry_id, inited) = if is_link {
             (PackageEntryId::<_, UInt256, UInt256>::ProofLink(handle.id()), handle.has_proof_link())
         } else {
@@ -613,7 +619,12 @@ impl InternalDb {
         force: bool,
     ) -> Result<(Arc<ShardStateStuff>, bool)> {
 
-        let _tc = TimeChecker::new(format!("store_shard_state_dynamic {}", state.block_id()), 300);
+        #[cfg(not(feature = "async_ss_storage"))]
+        let timeout = 300;
+        #[cfg(feature = "async_ss_storage")]
+        let timeout = 30;
+        let _tc = TimeChecker::new(format!("store_shard_state_dynamic {}", state.block_id()), timeout);
+
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
@@ -647,8 +658,9 @@ impl InternalDb {
                 }
                 return Ok((state.clone(), true))
             }
+        } else {
+            Ok((self.load_shard_state_dynamic(handle.id())?, false))
         }
-        Ok((self.load_shard_state_dynamic(handle.id())?, false))
     }
 
     pub async fn store_shard_state_dynamic_raw_force(
@@ -658,7 +670,12 @@ impl InternalDb {
         #[cfg(feature = "async_ss_storage")]
         callback_ss: Option<Arc<dyn shardstate_db_async::Callback>>,
     ) -> Result<Cell> {
-        let _tc = TimeChecker::new(format!("store_shard_state_dynamic_raw_force {}", handle.id()), 300);
+
+        #[cfg(not(feature = "async_ss_storage"))]
+        let timeout = 300;
+        #[cfg(feature = "async_ss_storage")]
+        let timeout = 30;
+        let _tc = TimeChecker::new(format!("store_shard_state_dynamic_raw_force {}", handle.id()), timeout);
         let _lock = handle.saving_state_lock().lock().await;
 
         #[cfg(not(feature = "async_ss_storage"))] {
@@ -677,7 +694,7 @@ impl InternalDb {
         #[cfg(feature = "async_ss_storage")]
         use_cache: bool
     ) -> Result<Arc<ShardStateStuff>> {
-        let _tc = TimeChecker::new(format!("load_shard_state_dynamic {}  use", id), 10);
+        let _tc = TimeChecker::new(format!("load_shard_state_dynamic {}  use", id), 30);
         Ok(
             ShardStateStuff::from_root_cell(
                 id.clone(), 
@@ -737,6 +754,7 @@ impl InternalDb {
         callback: Option<Arc<dyn block_handle_db::Callback>>,
         abort: Arc<dyn Fn() -> bool + Send + Sync>
     ) -> Result<()> {
+        let _tc = TimeChecker::new(format!("store_shard_state_persistent {}", state.block_id()), 10_000);
         if handle.id() != state.block_id() {
             fail!(NodeError::InvalidArg("`state` and `handle` mismatch".to_string()))
         }
@@ -984,7 +1002,7 @@ impl InternalDb {
         handle: &Arc<BlockHandle>,
         callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<bool> {
-        let _tc = TimeChecker::new(format!("store_block_applied {}", handle.id()), 10);
+        let _tc = TimeChecker::new(format!("store_block_applied {}", handle.id()), 30);
         if handle.set_block_applied() {
             self.store_block_handle(&handle, callback)?;
             Ok(true)
@@ -1025,32 +1043,52 @@ impl InternalDb {
     }
     
     pub fn load_full_node_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>> {
-        let _tc = TimeChecker::new(format!("load_full_node_state {}", key), 10);
+        let _tc = TimeChecker::new(format!("load_full_node_state {}", key), 30);
         self.block_handle_storage.load_full_node_state(key)
     }
 
     pub fn save_full_node_state(&self, key: &'static str, block_id: &BlockIdExt) -> Result<()> {
-        let _tc = TimeChecker::new(format!("save_full_node_state {}", key), 10);
+        let _tc = TimeChecker::new(format!("save_full_node_state {}", key), 30);
         self.block_handle_storage.save_full_node_state(key, block_id)
     }
 
     pub fn drop_validator_state(&self, key: &'static str) -> Result<()> {
-        let _tc = TimeChecker::new(format!("drop_validator_state {}", key), 10);
+        let _tc = TimeChecker::new(format!("drop_validator_state {}", key), 30);
         self.block_handle_storage.drop_validator_state(key)
     }
 
     pub fn load_validator_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>> {
-        let _tc = TimeChecker::new(format!("load_validator_state {}", key), 10);
+        let _tc = TimeChecker::new(format!("load_validator_state {}", key), 30);
         self.block_handle_storage.load_validator_state(key)
     }
 
     pub fn save_validator_state(&self, key: &'static str, block_id: &BlockIdExt) -> Result<()> {
-        let _tc = TimeChecker::new(format!("save_validator_state {}", key), 10);
+        let _tc = TimeChecker::new(format!("save_validator_state {}", key), 30);
         self.block_handle_storage.save_validator_state(key, block_id)
     }
 
-    pub fn archive_manager(&self) -> &Arc<ArchiveManager> {
-        &self.archive_manager
+    pub async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
+        let _tc = TimeChecker::new(format!("get_archive_id {}", mc_seq_no), 30);
+        self.archive_manager.get_archive_id(mc_seq_no).await
+    }
+
+    pub async fn get_archive_slice(&self, archive_id: u64, offset: u64, limit: u32) -> Result<Vec<u8>> {
+        let _tc = TimeChecker::new(
+            format!("get_archive_slice id: {}, offset: {}, limit: {}", archive_id, offset, limit),
+            300
+        );
+        self.archive_manager.get_archive_slice(archive_id, offset, limit).await
+    }
+
+    pub async fn clean_unapplied_files(&self, ids: &[BlockIdExt]) {
+        let _tc = TimeChecker::new("clean_unapplied_files".to_owned(), 300);
+        self.archive_manager.clean_unapplied_files(ids).await;
+    }
+
+    pub async fn archive_gc(&self, last_unneeded_key_block: &BlockIdExt) -> Result<()> {
+        let _tc = TimeChecker::new(format!("archive_gc {}", last_unneeded_key_block), 300);
+        self.archive_manager.gc(last_unneeded_key_block).await;
+        self.save_full_node_state(LAST_UNNEEDED_KEY_BLOCK, last_unneeded_key_block)
     }
 
     pub fn assign_mc_ref_seq_no(
@@ -1059,6 +1097,7 @@ impl InternalDb {
         mc_seq_no: u32,
         callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<()> {
+        let _tc = TimeChecker::new(format!("assign_mc_ref_seq_no {}", handle.id()), 30);
         if handle.set_masterchain_ref_seq_no(mc_seq_no)? {
             self.store_block_handle(handle, callback)?;
         }

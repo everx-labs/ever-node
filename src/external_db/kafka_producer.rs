@@ -199,6 +199,14 @@ impl KafkaProducer {
                 topic, key_str, data.len(), self.config.message_max_size);
             return Ok(());
         };
+        if let Some(limit) = self.config.big_message_max_size {
+            if data.len() > limit {
+                log::warn!(
+                    "Too big message (topic {}, key {}, {} bytes, limit is {}), skipped",
+                    topic, key_str, data.len(), limit);
+                return Ok(());
+            }
+        }
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis().to_string();
         let relative_path = format!("{}/{}_{}", topic, key_str, timestamp);
         self.store_oversized(&key_str, &data, big_messages_storage, &relative_path)?;

@@ -66,7 +66,7 @@ impl CellDb {
 
     /// Puts cell into transaction
     pub fn put_cell<T: KvcTransaction<UInt256> + ?Sized>(transaction: &mut T, cell_id: &UInt256, cell_data: &[u8]) -> Result<()> {
-        transaction.put(cell_id, cell_data);
+        transaction.put(cell_id, cell_data)?;
         Ok(())
     }
 }

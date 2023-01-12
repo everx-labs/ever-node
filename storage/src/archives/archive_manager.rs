@@ -48,6 +48,7 @@ impl ArchiveManager {
     pub async fn with_data(
         db: Arc<RocksDb>,
         db_root_path: Arc<PathBuf>,
+        last_unneeded_key_block: u32,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>
@@ -55,6 +56,7 @@ impl ArchiveManager {
         let file_maps = FileMaps::new(
             db.clone(),
             &db_root_path,
+            last_unneeded_key_block,
             #[cfg(feature = "telemetry")]
             &telemetry,
             &allocated
@@ -134,6 +136,13 @@ impl ArchiveManager {
         U256: Borrow<UInt256> + Hash,
         PK: Borrow<UInt256> + Hash
     {
+        let _lock = match &entry_id {
+            PackageEntryId::Block(_) => handle.block_file_lock().read().await,
+            PackageEntryId::Proof(_) => handle.proof_file_lock().read().await,
+            PackageEntryId::ProofLink(_) => handle.proof_file_lock().read().await,
+            _ => fail!("Unsupported package entry")
+        };
+
         if handle.is_archived() {
             let file = self.get_package_entry(
                 handle, 
@@ -144,12 +153,6 @@ impl ArchiveManager {
             return Ok(file.take_data())
         }
 
-        let _lock = match &entry_id {
-            PackageEntryId::Block(_) => handle.block_file_lock().read().await,
-            PackageEntryId::Proof(_) => handle.proof_file_lock().read().await,
-            PackageEntryId::ProofLink(_) => handle.proof_file_lock().read().await,
-            _ => fail!("Unsupported package entry")
-        };
         match self.read_temp_file(entry_id).await {
             Ok((_filename, data)) => Ok(data),
             Err(e) => {
@@ -332,8 +335,8 @@ impl ArchiveManager {
         fd.archive_slice().get_slice(archive_id, offset, limit).await
     }
 
-    pub async fn gc(&self, front_for_gc_master_block_id: &BlockIdExt) {
-        if let Err(e) = self.file_maps.files().gc(front_for_gc_master_block_id).await {
+    pub async fn gc(&self, last_unneeded_key_block: &BlockIdExt) {
+        if let Err(e) = self.file_maps.files().gc(last_unneeded_key_block).await {
             log::info!(target: "storage", "archive_manager gc is error: {:?}", e);
         }
     }

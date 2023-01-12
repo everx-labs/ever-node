@@ -1070,7 +1070,7 @@ impl ValidateQuery {
     }
 
     // similar to Collator::register_shard_block_creators
-    fn register_shard_block_creators(&mut self, _base: &ValidateBase, creator_list: &Vec<UInt256>) -> Result<()> {
+    fn register_shard_block_creators(&mut self, _base: &ValidateBase, creator_list: &[UInt256]) -> Result<()> {
         for x in creator_list {
             log::debug!(target: "validate_query", "registering block creator {}", x.to_hex_string());
             if !x.is_zero() {
@@ -2082,7 +2082,7 @@ impl ValidateQuery {
             let in_msg_slice = base.in_msg_descr.get_as_slice(in_msg_key)?
                 .ok_or_else(|| error!("OutMsg with key {} refers to a (re)import InMsg, \
                     but there is no InMsg with such a key", in_msg_key.to_hex_string()))?;
-            if in_msg_slice != SliceData::from(reimport_cell) {
+            if in_msg_slice != SliceData::load_cell(reimport_cell)? {
                 reject_query!("OutMsg with key {} refers to a (re)import InMsg, \
                     but the actual InMsg with this key is different from the one referred to",
                         in_msg_key.to_hex_string())
