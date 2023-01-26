@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -39,19 +39,11 @@ use storage::{StorageAlloc, block_handle_db::BlockHandle};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
-use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, signature::SigPubKey};
+use ton_block::{AccountIdPrefixFull, BlockIdExt, Message, ShardIdent};
 use ton_types::{Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
-
-pub struct ValidatedBlockStatNode {
-    pub public_key : SigPubKey,
-    pub signed : bool,
-    pub collated : bool,
-}
-
-pub struct ValidatedBlockStat {
-    pub nodes : Vec<ValidatedBlockStatNode>,
-}
+#[cfg(feature = "slashing")]
+use crate::validator::slashing::ValidatedBlockStat;
 
 #[cfg(feature = "telemetry")]
 pub struct EngineTelemetry {
@@ -629,10 +621,12 @@ pub trait EngineOperations : Sync + Send {
 
     // Slashing related functions
 
-    fn push_validated_block_stat(&self, stat : ValidatedBlockStat) -> Result<()> {
+    #[cfg(feature = "slashing")]
+    fn push_validated_block_stat(&self, stat: ValidatedBlockStat) -> Result<()> {
         unimplemented!();
     }
 
+    #[cfg(feature = "slashing")]
     fn pop_validated_block_stat(&self) -> Result<ValidatedBlockStat> {
         unimplemented!();
     }
