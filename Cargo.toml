@@ -72,6 +72,7 @@ telemetry = [ 'adnl/telemetry', 'dht/telemetry', 'rldp/telemetry', 'overlay/tele
 trace_alloc = [  ]
 trace_alloc_detail = [ 'trace_alloc' ]
 workchains = [  ]
+signature_with_id = [ "ton_vm/signature_with_id" ]
 
 [target.'cfg(unix)'.dependencies.rdkafka]
 optional = true

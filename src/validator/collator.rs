@@ -617,6 +617,8 @@ struct ExecutionManager {
     min_lt: Arc<AtomicU64>,
     // block random seed
     seed_block: UInt256,
+    // global id from the block
+    global_id: i32,
 
     total_trans_duration: Arc<AtomicU64>,
     collated_block_descr: Arc<String>,
@@ -629,6 +631,7 @@ impl ExecutionManager {
         gen_utime: u32,
         start_lt: u64,
         seed_block: UInt256,
+        global_id: i32,
         libraries: Libraries,
         config: BlockchainConfig,
         max_collate_threads: usize,
@@ -647,6 +650,7 @@ impl ExecutionManager {
             start_lt,
             gen_utime,
             seed_block,
+            global_id,
             max_lt: Arc::new(AtomicU64::new(start_lt + 1)),
             min_lt: Arc::new(AtomicU64::new(start_lt + 1)),
             total_trans_duration: Arc::new(AtomicU64::new(0)),
@@ -718,6 +722,7 @@ impl ExecutionManager {
         let block_unixtime = self.gen_utime;
         let block_lt = self.start_lt;
         let seed_block = self.seed_block.clone();
+        let global_id = self.global_id;
         let collated_block_descr = self.collated_block_descr.clone();
         let total_trans_duration = self.total_trans_duration.clone();
         let wait_tr = self.wait_tr.clone();
@@ -750,6 +755,7 @@ impl ExecutionManager {
                     seed_block: seed_block.clone(),
                     debug,
                     block_version: supported_version(),
+                    signature_id: global_id,
                     ..ExecuteParams::default()
                 };
                 let new_msg1 = new_msg.clone();
@@ -1239,6 +1245,7 @@ impl Collator {
             collator_data.gen_utime(),
             collator_data.start_lt()?,
             self.rand_seed.clone(),
+            mc_data.state().state().global_id(),
             mc_data.libraries().clone(),
             collator_data.config.clone(),
             self.collator_settings.max_collate_threads.unwrap_or(MAX_COLLATE_THREADS),
