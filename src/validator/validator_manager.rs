@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -606,6 +606,10 @@ impl ValidatorManagerImpl {
                 cc_seqno,
                 &self.config
             );
+//=======
+//            if let Some(local_key) = self.find_us(&subset.0) {
+//                let vsubset = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno, subset.0)?;
+//>>>>>>> fb7e32d041c8044f742b29a4ebe0043997cebb7d
 
             let session_info = SessionInfo::new(ident.clone(), session_id.clone(), vsubset.clone());
             let old_shards: Vec<ShardIdent> = prev_blocks.iter().map(|blk| blk.shard_id.clone()).collect();
@@ -1026,6 +1030,7 @@ impl ValidatorManagerImpl {
             self.engine.save_last_rotation_block_id(last_masterchain_block)?;
 
             if let Some(remp) = &self.remp_manager {
+                remp.message_cache.set_master_cc_start_time(master_cc_seqno, SystemTime::now());
                 let deleted = remp.gc_old_messages(master_cc_seqno).await;
                 #[cfg(feature = "telemetry")]
                 self.engine.remp_core_telemetry().deleted_from_cache(deleted);

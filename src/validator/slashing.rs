@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -13,45 +13,38 @@
 
 #[cfg(feature = "metrics")]
 use crate::engine::STATSD;
-use crate::engine_traits::EngineOperations;
-use crate::engine_traits::ValidatedBlockStat;
-use crate::engine_traits::ValidatedBlockStatNode;
-use crate::shard_state::ShardStateStuff;
-use crate::validator::UInt256;
+use crate::{engine_traits::EngineOperations, shard_state::ShardStateStuff, validator::UInt256};
 use ever_crypto::Ed25519KeyOption;
 use num_bigint::BigUint;
 use rand::Rng;
 use spin::mutex::SpinMutex;
-use std::collections::HashMap;
-use std::fmt;
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 use storage::block_handle_db::BlockHandle;
-use ton_abi::contract::Contract;
-use ton_abi::function::Function;
-use ton_abi::Token;
-use ton_abi::TokenValue;
-use ton_abi::Uint;
-use ton_block::ConfigParamEnum;
-use ton_block::ExternalInboundMessageHeader;
-use ton_block::HashmapAugType;
-use ton_block::Message;
-use ton_block::MsgAddressExt;
-use ton_block::MsgAddressInt;
-use ton_block::Serializable;
-use ton_block::SlashingConfig;
-use ton_types::Result;
-use ton_types::SliceData;
-use validator_session::slashing::AggregatedMetric;
-use validator_session::PrivateKey;
-use validator_session::PublicKey;
+use ton_abi::{Contract, Function, Token, TokenValue, Uint};
+use ton_block::{
+    ConfigParamEnum, ExternalInboundMessageHeader, HashmapAugType, Message, MsgAddressExt,
+    MsgAddressInt, Serializable, SigPubKey, SlashingConfig,
+};
+use ton_types::{error, Result, serialize_toc, SliceData};
+use validator_session::{
+    PrivateKey, PublicKey, SlashingAggregatedMetric, SlashingMetric, SlashingNode,
+    SlashingValidatorStat,
+};
 #[cfg(feature = "metrics")]
-use validator_session::PublicKeyHash;
-#[cfg(feature = "metrics")]
-use validator_session::SlashingAggregatedValidatorStat;
-use validator_session::SlashingValidatorStat;
+use validator_session::{PublicKeyHash, SlashingAggregatedValidatorStat};
 
 const ELECTOR_ABI: &[u8] = include_bytes!("Elector.abi.json"); //elector's ABI
 const ELECTOR_REPORT_FUNC_NAME: &str = "report"; //elector slashing report function name
+lazy_static::lazy_static! {
+    static ref ELECTOR_CONTRACT_ABI: Contract = Contract::load(ELECTOR_ABI)
+        .expect("Elector's ABI must be valid");
+    static ref REPORT_FN: Function = ELECTOR_CONTRACT_ABI
+        .function(ELECTOR_REPORT_FUNC_NAME)
+        .expect("Elector contract must have 'report' function for slashing")
+        .clone();
+    // it should be got from config params
+    static ref ELECTOR_ADDRESS: MsgAddressInt = "-1:3333333333333333333333333333333333333333333333333333333333333333".parse().unwrap();
+}
 
 /// Slashing manager pointer
 pub type SlashingManagerPtr = Arc<SlashingManager>;
@@ -63,73 +56,48 @@ pub struct SlashingManager {
 }
 
 /// Internal slashing manager details
+#[derive(Default)]
 struct SlashingManagerImpl {
     stat: SlashingValidatorStat,
     first_mc_block: u32,
-    slashing_messages: HashMap<UInt256, Arc<Message>>,
-    report_fn: Function,
+    slashing_messages: Vec<(UInt256, Arc<Message>)>,
 }
 
 impl SlashingManager {
     /// Create new slashing manager
     pub(crate) fn create() -> SlashingManagerPtr {
-        let contract = Contract::load(ELECTOR_ABI).expect("Elector's ABI must be valid");
-        let report_fn = contract
-            .function(ELECTOR_REPORT_FUNC_NAME)
-            .expect("Elector contract must have 'report' function for slashing")
-            .clone();
-
-        log::info!(target: "validator", "Use slashing report function '{}' with id={:08X}",
-            ELECTOR_REPORT_FUNC_NAME, report_fn.get_function_id());
+        log::info!(target: "slashing", "Use slashing report function '{}' with id={:08X}",
+            ELECTOR_REPORT_FUNC_NAME, REPORT_FN.get_function_id());
 
         let mut rng = rand::thread_rng();
 
         Arc::new(SlashingManager {
             send_messages_block_offset: rng.gen(),
-            manager: SpinMutex::new(SlashingManagerImpl {
-                stat: SlashingValidatorStat::default(),
-                first_mc_block: 0,
-                slashing_messages: HashMap::new(),
-                report_fn,
-            }),
+            manager: SpinMutex::new(SlashingManagerImpl::default()),
         })
     }
 
     /// Update slashing statistics
     pub fn update_statistics(&self, stat: &SlashingValidatorStat) {
         self.manager.lock().stat.merge(&stat);
-        log::debug!(target: "validator", "{}({}): merge slashing statistics {:?}", file!(), line!(), stat);
+        log::debug!(target: "slashing", "merge slashing statistics {:?}", stat);
     }
 
     /// Is slashing available
     fn is_slashing_available(mc_state: &ShardStateStuff) -> bool {
-        if let Ok(state) = mc_state.state().read_custom() {
-            if let Some(state) = state {
-                if let Ok(vset) = state.config.prev_validator_set() {
-                    return vset.list().len() > 0 && vset.total_weight() > 0;
-                }
+        if let Ok(config) = mc_state.config_params() {
+            if let Ok(vset) = config.prev_validator_set() {
+                return vset.list().len() > 0 && vset.total_weight() > 0;
             }
         }
-
         false
     }
 
     /// Get slashing params
     fn get_slashing_config(mc_state: &ShardStateStuff) -> SlashingConfig {
-        if let Ok(Some(mc_state_extra)) = mc_state.state().read_custom() {
-            if let Ok(config) = mc_state_extra.config.config(40) {
-                if let Some(ConfigParamEnum::ConfigParam40(cc)) = config {
-                    return SlashingConfig {
-                        slashing_period_mc_blocks_count : cc.slashing_config.slashing_period_mc_blocks_count,
-                        resend_mc_blocks_count : cc.slashing_config.resend_mc_blocks_count,
-                        min_samples_count : cc.slashing_config.min_samples_count,
-                        collations_score_weight : cc.slashing_config.collations_score_weight,
-                        signing_score_weight : cc.slashing_config.signing_score_weight,
-                        min_slashing_protection_score : cc.slashing_config.min_slashing_protection_score,
-                        z_param_numerator : cc.slashing_config.z_param_numerator,
-                        z_param_denominator : cc.slashing_config.z_param_denominator,
-                    }
-                }
+        if let Ok(config) = mc_state.config_params() {
+            if let Ok(Some(ConfigParamEnum::ConfigParam40(cc))) = config.config(40) {
+                return cc.slashing_config;
             }
         }
 
@@ -148,7 +116,7 @@ impl SlashingManager {
     /// New masterchain block notification
     pub async fn handle_masterchain_block(
         &self,
-        block: &Arc<BlockHandle>,
+        block_handle: &Arc<BlockHandle>,
         mc_state: &ShardStateStuff,
         local_key: &PrivateKey,
         engine: &Arc<dyn EngineOperations>,
@@ -160,25 +128,23 @@ impl SlashingManager {
         // process queue of received validated block stat events
 
         while let Ok(validated_block_stat) = engine.pop_validated_block_stat() {
-            log::debug!(target: "validator", "Slashing statistics has been received {:?}", validated_block_stat);
+            log::debug!(target: "slashing", "Statistics has been received {:?}", validated_block_stat);
 
             let mut slashing_stat = SlashingValidatorStat::default();
 
             for src_node in &validated_block_stat.nodes {
-                use validator_session::slashing;
-
                 let pub_key = src_node.public_key.key_bytes();
                 let public_key = Ed25519KeyOption::from_public_key(pub_key);
-                let mut dst_node = slashing::Node::new(&public_key);
+                let mut dst_node = SlashingNode::new(public_key.clone());
 
-                dst_node.metrics[slashing::Metric::ApplyLevelTotalBlocksCount as usize] += 1;
+                dst_node.metrics[SlashingMetric::ApplyLevelTotalBlocksCount as usize] += 1;
 
                 if src_node.collated {
-                    dst_node.metrics[slashing::Metric::ApplyLevelCollationsCount as usize] += 1;
+                    dst_node.metrics[SlashingMetric::ApplyLevelCollationsCount as usize] += 1;
                 }
 
                 if src_node.signed {
-                    dst_node.metrics[slashing::Metric::ApplyLevelCommitsCount as usize] += 1;
+                    dst_node.metrics[SlashingMetric::ApplyLevelCommitsCount as usize] += 1;
                 }
 
                 slashing_stat
@@ -190,21 +156,22 @@ impl SlashingManager {
         }
 
         if !Self::is_slashing_available(mc_state) {
-            log::info!(target: "validator", "{}({}): slashing is disabled until the first elections", file!(), line!());
+            log::info!(target: "slashing", "slashing is disabled until the first elections");
             return;
         }
 
         // check slashing event
 
-        let mc_block_seqno = block.masterchain_ref_seq_no();
+        let mc_block_seqno = block_handle.masterchain_ref_seq_no();
         let remove_delivered_messages_only = (mc_block_seqno + self.send_messages_block_offset)
             % slashing_config.resend_mc_blocks_count
             != 0;
 
-        self.resend_messages(engine, block, remove_delivered_messages_only)
+        self.resend_messages(engine, block_handle, remove_delivered_messages_only)
             .await;
 
-        let (aggregated_stat, report_fn) = {
+        let aggregated_stat;
+        {
             let mut manager = self.manager.lock(); //TODO: check long lock
 
             if manager.first_mc_block == 0 {
@@ -231,37 +198,44 @@ impl SlashingManager {
 
             //compute aggregated slashing statistics
 
-            let aggregated_stat = manager.stat.aggregate(&slashing_config);
+            aggregated_stat = manager.stat.aggregate(&slashing_config);
 
-            log::info!(target: "validator", "{}({}): stat={:?}", file!(), line!(), aggregated_stat);
+            log::info!(target: "slashing", "stat={:?}", aggregated_stat);
 
             //reset slashing statistics
 
             manager.first_mc_block = mc_block_seqno;
             manager.stat.clear();
             manager.slashing_messages.clear();
-
-            (aggregated_stat, manager.report_fn.clone())
-        };
+        }
 
         //slash validators
 
         let slashed_validators = aggregated_stat.get_slashed_validators();
 
-        log::info!(target: "validator", "{}({}): slashed={:?}", file!(), line!(), slashed_validators);
+        log::debug!(target: "slashing", "slashed={:?}", slashed_validators);
+        let time_now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        for validator in slashed_validators {
+            match Self::prepare_slash_validator_message(
+                ELECTOR_ADDRESS.clone(),
+                &local_key,
+                &validator.public_key,
+                validator.metric_id,
+                time_now_ms
+            ) {
+                Ok(Some(message)) => self.send_message(engine, Arc::new(message)).await,
+                Err(err) => {
+                    log::warn!(target: "slashing", "cannot compose blaiming message due {}", err)
+                }
+                Ok(None) => (),
+            }
+        }
 
         if slashed_validators.len() > 0 {
-            for validator in slashed_validators {
-                self.slash_validator(
-                    &local_key,
-                    &validator.public_key,
-                    validator.metric_id.clone(),
-                    &engine,
-                    &report_fn,
-                )
-                .await;
-            }
-
             #[cfg(feature = "metrics")]
             Self::report_slashing_metrics(&aggregated_stat, local_key.id());
         }
@@ -275,62 +249,45 @@ impl SlashingManager {
         })
     }
 
-    async fn slash_validator(
-        &self,
+    fn prepare_slash_validator_message(
+        elector_address: MsgAddressInt,
         reporter_privkey: &PrivateKey,
         validator_pubkey: &PublicKey,
-        metric_id: AggregatedMetric,
-        engine: &Arc<dyn EngineOperations>,
-        report_fn: &Function,
-    ) {
+        metric_id: SlashingAggregatedMetric,
+        time_now_ms: u64,
+    ) -> Result<Option<Message>> {
         //prepare params for serialization
 
-        let reporter_pubkey = reporter_privkey
-            .pub_key()
-            .expect("PublicKey is assigned");
-        let victim_pubkey = validator_pubkey
-            .pub_key()
-            .expect("PublicKey is assigned");
+        let reporter_pubkey = reporter_privkey.pub_key()?;
+        let victim_pubkey = validator_pubkey.pub_key()?;
         let metric_id: u8 = metric_id as u8;
 
         log::warn!(
-            target: "validator",
-            "{}({}): Slash validator {} on metric {:?} by reporter validator {}{}",
-            file!(),
-            line!(),
+            target: "slashing",
+            "Slash validator {} on metric {:?} by reporter validator {}{}",
             hex::encode(&victim_pubkey),
             metric_id,
             hex::encode(&reporter_pubkey),
-            if metric_id != AggregatedMetric::ValidationScore as u8 { " (metric ignored)" } else { "" },
+            if metric_id != SlashingAggregatedMetric::ValidationScore as u8 { " (metric ignored)" } else { "" },
         );
 
-        if metric_id != AggregatedMetric::ValidationScore as u8 {
-            return;
+        if metric_id != SlashingAggregatedMetric::ValidationScore as u8 {
+            return Ok(None);
         }
 
         //compute signature for params
 
-        let mut params_data = Vec::new();
-
-        params_data.extend_from_slice(&reporter_pubkey);
+        let mut params_data = reporter_pubkey.to_vec();
         params_data.extend_from_slice(&victim_pubkey);
-        params_data.extend_from_slice(&metric_id.to_be_bytes());
-
+        params_data.push(metric_id);
         let signature = match reporter_privkey.sign(&params_data) {
-            Err(err) => {
-                log::error!(target: "validator", "SlashingManager::slash_validator: failed to sign block {:?}: {:?}", params_data, err);
-                return;
-            }
             Ok(signature) => signature,
+            Err(_) => vec![0; 64]
         };
 
         //prepare header for external message
 
-        let time_now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        let header: HashMap<_, _> = vec![("time".to_owned(), TokenValue::Time(time_now_ms))]
+        let header = [("time".to_owned(), TokenValue::Time(time_now_ms))]
             .into_iter()
             .collect();
 
@@ -349,20 +306,13 @@ impl SlashingManager {
 
         const INTERNAL_CALL: bool = false; //external message
 
-        // TODO: dst address should be get from config
         let src = MsgAddressExt::with_extern(SliceData::new(vec![0xffu8])).unwrap();
-        let dst = MsgAddressInt::with_standart(None, -1, [0x33; 32].into()).unwrap();
-        let result = report_fn
+        let dst = elector_address;
+        let body = REPORT_FN
             .encode_input(&header, &parameters, INTERNAL_CALL, None, Some(dst.clone()))
-            .and_then(|builder| SliceData::load_builder(builder));
-        let body = match result {
-            Err(err) => {
-                log::error!(target: "validator", "SlashingManager::slash_validator: failed to encode input: {:?}", err);
-                return;
-            }
-            Ok(body) => body
-        };
-        log::info!(target: "validator", "{}({}): SlashingManager::slash_validator: message body {:?}", file!(), line!(), body);
+            .and_then(|builder| SliceData::load_builder(builder))
+            .map_err(|err| error!("SlashingManager::prepare_slash_validator_message: failed to encode input: {:?}", err))?;
+        log::trace!(target: "slashing", "message body {}", base64::encode(&serialize_toc(&body.cell())?));
 
         //prepare header of the message
 
@@ -370,37 +320,26 @@ impl SlashingManager {
 
         //create external message
 
-        let message = Arc::new(Message::with_ext_in_header_and_body(hdr, body));
-
-        //send message
-
-        self.send_message(engine, message, true).await;
+        Ok(Some(Message::with_ext_in_header_and_body(hdr, body)))
     }
 
-    async fn send_message(
-        &self,
-        engine: &Arc<dyn EngineOperations>,
-        message: Arc<Message>,
-        store_for_resending: bool,
-    ) {
+    async fn send_message(&self, engine: &Arc<dyn EngineOperations>, message: Arc<Message>) {
         match Self::serialize_message(&message) {
             Ok((message_id, serialized_message)) => {
-                if store_for_resending {
-                    self.manager
-                        .lock()
-                        .slashing_messages
-                        .insert(message_id.clone(), message.clone());
-                }
+                self.manager
+                    .lock()
+                    .slashing_messages
+                    .push((message_id.clone(), message.clone()));
 
                 if let Err(err) = engine.redirect_external_message(&serialized_message).await {
-                    log::warn!(target: "validator", "{}({}): SlashingManager::slash_validator: can't send message: {:?}, error: {:?}", file!(), line!(), message, err);
+                    log::warn!(target: "slashing", "can't send message: {:?}, error: {:?}", message, err);
                 } else {
-                    log::info!(target: "validator", "{}({}): SlashingManager::slash_validator: message: {:?} -> {} has been successfully {}", file!(), line!(), message_id, base64::encode(&serialized_message),
-                        if store_for_resending { "sent" } else { "resent" });
+                    log::info!(target: "slashing", "message: {:?} -> {} has been successfully sent",
+                            message_id, base64::encode(&serialized_message));
                 }
             }
             Err(err) => {
-                log::warn!(target: "validator", "{}({}): SlashingManager::slash_validator: can't serialize message: {:?}, error: {:?}", file!(), line!(), message, err)
+                log::warn!(target: "slashing", "can't serialize message: {:?}, error: {:?}", message, err)
             }
         }
     }
@@ -416,47 +355,26 @@ impl SlashingManager {
     async fn resend_messages(
         &self,
         engine: &Arc<dyn EngineOperations>,
-        block: &Arc<BlockHandle>,
+        block_handle: &Arc<BlockHandle>,
         remove_only: bool,
     ) {
-        let msg_desc = match engine.load_block(block).await {
-            Ok(block) => match block.block().read_extra() {
-                Ok(extra) => match extra.read_in_msg_descr() {
-                    Ok(msg_desc) => Some(msg_desc),
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        };
+        let msg_desc = engine
+            .load_block(block_handle)
+            .await
+            .and_then(|block| block.block().read_extra()?.read_in_msg_descr());
 
-        let messages = self.manager.lock().slashing_messages.clone();
-        let mut messages_to_remove = Vec::new();
-
-        for (message_id, message) in &messages {
-            if let Some(msg_desc) = &msg_desc {
-                if let Ok(message) = msg_desc.get(&message_id) {
-                    if message.is_some() {
-                        messages_to_remove.push(message_id.clone());
-                        continue;
-                    }
+        let mut slashing_messages = std::mem::take(&mut self.manager.lock().slashing_messages);
+        for (message_id, message) in slashing_messages.drain(..) {
+            if let Ok(msg_desc) = &msg_desc {
+                if let Ok(Some(_)) = msg_desc.get(&message_id) {
+                    log::debug!(target: "slashing", "message: {:?} has been successfully delivered", message_id);
+                    continue;
                 }
             }
 
             if !remove_only {
-                self.send_message(engine, message.clone(), false).await;
+                self.send_message(engine, message).await;
             }
-        }
-
-        if !messages_to_remove.is_empty() {
-            let mut manager_lock = self.manager.lock(); //acquire lock
-
-            for message_id in messages_to_remove {
-                log::info!(target: "validator", "{}({}): SlashingManager::slash_validator: message: {:?} has been successfully delivered", file!(), line!(), message_id);
-                manager_lock.slashing_messages.remove(&message_id);
-            }
-
-            //release lock
         }
     }
 
@@ -468,8 +386,9 @@ impl SlashingManager {
         let node = aggregated_stat.get_aggregated_node(reporter_key);
         let (validation_score, slashing_score) = match node {
             Some(node) => {
-                let validation_score = node.metrics[AggregatedMetric::ValidationScore as usize];
-                let slashing_score = node.metrics[AggregatedMetric::SlashingScore as usize];
+                let validation_score =
+                    node.metrics[SlashingAggregatedMetric::ValidationScore as usize];
+                let slashing_score = node.metrics[SlashingAggregatedMetric::SlashingScore as usize];
 
                 (validation_score, slashing_score)
             }
@@ -485,18 +404,35 @@ impl SlashingManager {
     }
 }
 
-impl fmt::Debug for ValidatedBlockStat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ValidatedBlockStat(nodes=[{:?}])", self.nodes)
-    }
+pub struct ValidatedBlockStatNode {
+    pub public_key: SigPubKey,
+    pub signed: bool,
+    pub collated: bool,
 }
 
 impl fmt::Debug for ValidatedBlockStatNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "ValidatedBlockStatNode(public_key={:?}, collated={:?}, signed={:?})",
-            self.public_key, self.collated, self.signed
+            "ValidatedBlockStatNode(public_key={}, collated={}, signed={})",
+            hex::encode(self.public_key.key_bytes()), self.collated, self.signed
         )
     }
 }
+
+pub struct ValidatedBlockStat {
+    pub nodes: Vec<ValidatedBlockStatNode>,
+}
+
+impl fmt::Debug for ValidatedBlockStat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // f.write_str("ValidatedBlockStat")?;
+        // let v = self
+        //     .nodes
+        //     .iter()
+        //     .map(|node| format!("Id({}): {:?}", hex::encode(key.data())));
+        // f.debug_list().entries(v).finish()
+        write!(f, "ValidatedBlockStat(nodes=[{:?}])", self.nodes)
+    }
+}
+

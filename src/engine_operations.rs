@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -17,7 +17,7 @@ use crate::{
     engine::{Engine, STATSD},
     engine_traits::{
         ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, Server,
-        ValidatedBlockStat, RempCoreInterface,
+        RempCoreInterface,
     },
     error::NodeError,
     internal_db::{
@@ -33,6 +33,8 @@ use crate::{
         validator_utils::validatordescr_to_catchain_node,
     },
 };
+#[cfg(feature = "slashing")]
+use crate::validator::slashing::ValidatedBlockStat;
 #[cfg(feature = "telemetry")]
 use crate::{
     engine_traits::EngineTelemetry, full_node::telemetry::{FullNodeTelemetry, RempClientTelemetry}, 
@@ -707,7 +709,11 @@ impl EngineOperations for Engine {
             fail!("Can't process external message because node is out of sync");
         }
 
-        if self.remp_capability() {
+        #[cfg(feature="remp_emergency")]
+        let remp_way = !self.forcedly_disable_remp_cap() && self.remp_capability();
+        #[cfg(not(feature="remp_emergency"))]
+        let remp_way = self.remp_capability();
+        if remp_way {
             self.remp_client()
                 .ok_or_else(|| error!("redirect_external_message: remp client is not set"))?
                 .clone()
@@ -864,6 +870,11 @@ impl EngineOperations for Engine {
         )
     }
 
+    #[cfg(feature="remp_emergency")]
+    fn forcedly_disable_remp_cap(&self) -> bool {
+        self.forcedly_disable_remp_cap()
+    }
+
     // Get current list of new shard blocks with respect to last mc block.
     // If given mc_seq_no is not equal to last mc seq_no - function fails.
     fn get_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
@@ -938,14 +949,14 @@ impl EngineOperations for Engine {
         self.tps_counter().calc_tps(period)
     }
 
+    #[cfg(feature = "slashing")]
     fn push_validated_block_stat(&self, stat: ValidatedBlockStat) -> Result<()> {
-        self.validated_block_stats_sender().try_send(stat)?;
-        Ok(())
+        Ok(self.validated_block_stats_sender().try_send(stat)?)
     }
 
+    #[cfg(feature = "slashing")]
     fn pop_validated_block_stat(&self) -> Result<ValidatedBlockStat> {
-        let result = self.validated_block_stats_receiver().try_recv()?;
-        Ok(result)
+        Ok(self.validated_block_stats_receiver().try_recv()?)
     }
 
     fn adjust_states_gc_interval(&self, interval_ms: u32) {

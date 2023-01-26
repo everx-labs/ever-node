@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -46,7 +46,7 @@ mod session;
 mod session_description;
 mod session_processor;
 mod session_state;
-pub mod slashing;
+mod slashing;
 mod task_queue;
 pub mod utils;
 mod vector;
@@ -254,6 +254,15 @@ pub type SlashingAggregatedValidatorStat = slashing::AggregatedValidatorStat;
 
 /// Slashed node
 pub type SlashedNode = slashing::SlashedNode;
+
+/// Slashing node
+pub type SlashingNode = slashing::Node;
+
+/// Slashing metric
+pub type SlashingMetric = slashing::Metric;
+
+/// Slashing aggregated metric
+pub type SlashingAggregatedMetric = slashing::AggregatedMetric;
 
 /// Validator session options
 #[derive(Clone, Copy, Debug)]

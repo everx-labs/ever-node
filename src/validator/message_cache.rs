@@ -10,7 +10,7 @@ use ton_api::{
     }
 };
 use ton_block::{Deserializable, Message, ShardIdent, Serializable, MsgAddressInt, MsgAddrStd, ExternalInboundMessageHeader};
-use ton_types::{UInt256, Result, BuilderData, SliceData, fail};
+use ton_types::{UInt256, Result, BuilderData, SliceData, fail, error};
 use crate::validator::mutex_wrapper::MutexWrapper;
 use crate::ext_messages::validate_status_change;
 use crate::engine_traits::RempDuplicateStatus;
@@ -180,8 +180,6 @@ impl Display for RmqMessage {
 
 pub struct MessageCacheImpl {
     message_master_cc_order: BinaryHeap<(Reverse<u32>, UInt256)>,
-    #[cfg(feature = "telemetry")]
-    cache_size_metric: Arc<Metric>,
 }
 
 struct MessageCacheMessages {
@@ -189,17 +187,32 @@ struct MessageCacheMessages {
     message_shards: Map<UInt256, ShardIdent>,
     message_statuses: Map<UInt256, RempMessageStatus>,
     message_master_cc: Map<UInt256, u32>,
-    message_count: AtomicUsize
+    message_count: AtomicUsize,
+    message_events: Map<UInt256, Vec<SystemTime>>,
+
+    master_cc_start_time: Map<u32, SystemTime>,
+
+    #[cfg(feature = "telemetry")]
+    cache_size_metric: Arc<Metric>,
 }
 
 impl MessageCacheMessages {
-    pub fn new() -> Self {
+    pub fn new(
+        #[cfg(feature = "telemetry")]
+        cache_size_metric: Arc<Metric>
+    ) -> Self {
         MessageCacheMessages {
             messages: Map::default(),
             message_shards: Map::default(),
             message_statuses: Map::default(),
             message_master_cc: Map::default(),
-            message_count: AtomicUsize::new(0)
+            message_count: AtomicUsize::new(0),
+            message_events: Map::default(),
+
+            master_cc_start_time: Map::default(),
+
+            #[cfg(feature = "telemetry")]
+            cache_size_metric
         }
     }
 
@@ -258,6 +271,7 @@ impl MessageCacheMessages {
         self.message_statuses.insert(message_id.clone(), status);
         self.message_shards.insert(message_id.clone(), shard);
         self.message_master_cc.insert(message_id.clone(), master_cc);
+        self.message_events.insert(message_id.clone(), Vec::new());
         Ok(())
     }
 
@@ -270,17 +284,8 @@ impl MessageCacheMessages {
         self.message_statuses.insert(message_id.clone(), status);
         self.message_shards.insert(message_id.clone(), shard);
         self.message_master_cc.insert(message_id.clone(), master_cc);
+        self.message_events.insert(message_id.clone(), Vec::new());
         Ok(())
-    }
-
-    pub fn remove_message(&self, message_id: &UInt256) {
-        if self.in_messages(message_id) {
-            self.message_count.fetch_sub(1, Ordering::Relaxed);
-        }
-        self.messages.remove(message_id);
-        self.message_shards.remove(message_id);
-        self.message_statuses.remove(message_id);
-        self.message_master_cc.remove(message_id);
     }
 
     pub fn cc_expired(old_cc_seqno: u32, new_cc_seqno: u32) -> bool {
@@ -340,6 +345,23 @@ impl MessageCacheMessages {
         }
     }
 
+    pub fn mark_collation_attempt(&self, msg_id: &UInt256) -> Result<()> {
+        let mut events = self.message_events
+            .remove(msg_id)
+            .ok_or_else(|| error!("mark_collation_attempt: message {:x} has no message_events field", msg_id))?
+            .val().clone();
+
+        events.push(SystemTime::now());
+        match self.message_events.insert(msg_id.clone(), events) {
+            None => Ok(()),
+            Some(x) => {
+                fail!("mark_collation_attempt: events stats {} for message {:x} are lost",
+                    self.message_events_to_string(self.message_master_cc.get(msg_id).map(|cc| cc.1), &x.1), msg_id
+                )
+            }
+        }
+    }
+
     pub fn change_accepted_by_collator_to_ignored(&self, msg_id: &UInt256) -> Option<u32> {
         match (self.message_statuses.get(msg_id), self.messages.get(msg_id)) {
             (Some(status), Some(msg)) => {
@@ -360,18 +382,32 @@ impl MessageCacheMessages {
             _ => None,
         }
     }
+
+    pub fn message_events_to_string(&self, master_cc_opt: Option<u32>, events: &Vec<SystemTime>) -> String {
+        if let Some(master_cc) = master_cc_opt {
+            if let Some(start_time) = self.master_cc_start_time.get(&master_cc) {
+                return events.iter().map(|x| {
+                    match x.duration_since(start_time.1) {
+                        Ok(dd) => format!("{} ", dd.as_secs()),
+                        Err(e) => format!("`{}`", e)
+                    }
+                }).collect()
+            }
+        }
+
+        "*???: no master_cc start time*".to_string()
+    }
+
+    pub fn set_master_cc_start_time(&self, master_cc: u32, start_time: SystemTime) {
+        self.master_cc_start_time.insert(master_cc, start_time);
+    }
 }
 
 #[allow(dead_code)]
 impl MessageCacheImpl {
-    pub fn new (
-        #[cfg(feature = "telemetry")]
-        cache_size_metric: Arc<Metric>,
-    ) -> Self {
+    pub fn new () -> Self {
         MessageCacheImpl {
             message_master_cc_order: BinaryHeap::new(),
-            #[cfg(feature = "telemetry")]
-            cache_size_metric,
         }
     }
 
@@ -406,12 +442,26 @@ impl MessageCacheImpl {
         list
     }
  */
-    fn remove_message(&self, message_id: &UInt256, mc: Arc<MessageCacheMessages>) {
-        mc.remove_message(message_id);
+
+    /*
+    pub fn remove_message(&self, message_id: &UInt256) {
+        if self.in_messages(message_id) {
+            self.message_count.fetch_sub(1, Ordering::Relaxed);
+        }
+        self.messages.remove(message_id);
+        self.message_shards.remove(message_id);
+        self.message_statuses.remove(message_id);
+        self.message_master_cc.remove(message_id);
+        self.message_events.remove(message_id);
+    }
+
+    pub fn remove_message(&self, message_id: &UInt256) {
+        self.messages.remove_message(message_id);
 
         #[cfg(feature = "telemetry")]
-        self.cache_size_metric.update(mc.all_messages_count() as u64);
+        self.messages.cache_size_metric.update(self.messages.all_messages_count() as u64);
     }
+*/
 
     fn remove_old_message(&mut self, mc: Arc<MessageCacheMessages>, current_cc: u32) -> Option<(UInt256, Option<Arc<RmqMessage>>, Option<RempMessageStatus>, Option<ShardIdent>, Option<u32>)> {
         if let Some((old_cc, msg_id)) = self.message_master_cc_order.pop() {
@@ -419,12 +469,44 @@ impl MessageCacheImpl {
                 self.message_master_cc_order.push((old_cc, msg_id));
                 return None
             }
+
             let msg_opt = mc.messages.remove(&msg_id).map(|x| x.1.clone());
             let status_opt = mc.message_statuses.remove(&msg_id).map(|x| x.1.clone());
             let shard_opt = mc.message_shards.remove(&msg_id).map(|x| x.1.clone());
             let master_cc_opt = mc.message_master_cc.remove(&msg_id).map(|x| x.1);
-            log::trace!(target: "remp", "Removing old message: current master cc {}, old master cc {:?}, msg_id {:x}", current_cc, master_cc_opt, msg_id);
-            return Some((msg_id, msg_opt, status_opt, shard_opt, master_cc_opt))
+            let msg_events = mc.message_events.remove(&msg_id).map(|x| x.val().clone());
+
+            match master_cc_opt {
+                None =>
+                    log::error!(target: "remp", "Removing old message: message {:x} has no master_cc", msg_id),
+                Some(m_cc) if m_cc != old_cc.0 =>
+                    log::error!(target: "remp",
+                        "Removing old message: message {:x} master_cc is {}, but master_cc_order is {}",
+                        msg_id, m_cc, old_cc.0
+                    ),
+                Some(_) => ()
+            }
+
+            if msg_opt.is_some() || status_opt.is_some() {
+                if msg_opt.is_some() {
+                    mc.message_count.fetch_sub(1, Ordering::Relaxed);
+                }
+
+                #[cfg(feature = "telemetry")]
+                mc.cache_size_metric.update(mc.all_messages_count() as u64);
+
+                log::debug!(target: "remp", "Removing old message: current master cc {}, old master cc {:?}, msg_id {:x}, final status {:?}, collation history `{}`",
+                    current_cc, master_cc_opt, msg_id, status_opt,
+                    msg_events.iter().map(|x| mc.message_events_to_string(Some(old_cc.0), x)).collect::<String>()
+                );
+                return Some((msg_id, msg_opt, status_opt, shard_opt, master_cc_opt))
+            }
+            else {
+                log::error!(target: "remp",
+                    "MessageCache inconsistent: message {:x} is scheduled for removal, but not present in message cache",
+                    msg_id
+                );
+            }
         }
 
         None
@@ -553,8 +635,8 @@ impl MessageCache {
         )
     }
 
-    pub async fn remove_message(&self, message_id: &UInt256) {
-        self.cache.execute_sync(|cache| cache.remove_message(message_id, self.messages.clone())).await
+    pub fn mark_collation_attempt(&self, message_id: &UInt256) -> Result<()> {
+        self.messages.mark_collation_attempt(message_id)
     }
 
     pub fn check_message_duplicates(&self, message_id: &UInt256) -> RempDuplicateStatus {
@@ -594,6 +676,10 @@ impl MessageCache {
         }
     }
 
+    pub fn set_master_cc_start_time(&self, master_cc: u32, start_time: SystemTime) {
+        self.messages.set_master_cc_start_time(master_cc, start_time);
+    }
+
     /// Collect all old messages; return all messages to be timeout-rejected
     pub async fn get_old_messages(&self, current_cc: u32) -> Vec<(Arc<RmqMessage>, RempMessageStatus)> {
         log::trace!(target: "remp", "Removing old messages from message_cache: masterchain_cc: {}", current_cc);
@@ -622,12 +708,12 @@ impl MessageCache {
         cache_size_metric: Arc<Metric>
     ) -> Self {
         MessageCache {
-            messages: Arc::new(MessageCacheMessages::new()),
+            messages: Arc::new(MessageCacheMessages::new(
+                #[cfg(feature = "telemetry")]
+                cache_size_metric
+            )),
             cache: Arc::new(MutexWrapper::with_metric (
-                MessageCacheImpl::new(
-                    #[cfg(feature = "telemetry")]
-                    cache_size_metric
-                ),
+                MessageCacheImpl::new(),
                 "Message cache".to_string(),
                 #[cfg(feature = "telemetry")]
                 mutex_awaiting_metric

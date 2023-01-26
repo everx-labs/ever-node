@@ -276,11 +276,16 @@ impl NodeNetwork {
     }
 
     pub async fn stop_adnl(&self) {
-        log::info!("Stopping adnl...");
+        log::info!("Stopping node network loops...");
         self.stop.fetch_or(Self::MASK_STOP, Ordering::Relaxed);
         while self.stop.load(Ordering::Relaxed) != Self::MASK_STOP {
             tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_STOP_MS)).await;
+            log::info!(
+                "Still stopping node network loops ({:x})...", 
+                self.stop.load(Ordering::Relaxed)
+            );
         }
+        log::info!("Node network loops stopped. Stopping adnl...");
         self.network_context.adnl.stop().await;
         log::info!("Stopped adnl");
     }

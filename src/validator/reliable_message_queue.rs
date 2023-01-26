@@ -272,6 +272,7 @@ impl MessageQueue {
             log::trace!(target: "remp",
                 "Point 5. RMQ {}: adding message {} to collator queue", self, rmq_message
             );
+            self.remp_manager.message_cache.mark_collation_attempt(&rmq_message.message_id)?;
             if let Some(status) = status_to_send {
                 self.send_response_to_fullnode(rmq_message.clone(), status);
             }

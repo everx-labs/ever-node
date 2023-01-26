@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -17,7 +17,7 @@ use crate::{
     config::{TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig, ValidatorManagerConfig},
     engine_traits::{
         ExternalDb, EngineAlloc, EngineOperations,
-        OverlayOperations, PrivateOverlayOperations, Server, ValidatedBlockStat,
+        OverlayOperations, PrivateOverlayOperations, Server,
     },
     full_node::{
         self,
@@ -52,9 +52,9 @@ use crate::{
     boot,
 };
 #[cfg(feature = "slashing")]
-use crate::{
-    engine_traits::ValidatedBlockStatNode,
-    validator::validator_utils::calc_subset_for_workchain,
+use crate::validator::{
+    slashing::{ValidatedBlockStat, ValidatedBlockStatNode},
+    validator_utils::calc_subset_for_workchain,
 };
 use crate::network::node_network::NodeNetwork;
 #[cfg(feature = "external_db")]
@@ -86,13 +86,14 @@ use storage::{StorageAlloc, block_handle_db::BlockHandle, types::StorageCell};
 use storage::StorageTelemetry;
 use ton_types::{error, fail, Cell, Result};
 #[cfg(feature = "slashing")]
-use ton_types::UInt256;
+use ton_types::{UInt256, HashmapType};
 use ton_api::ton::ton_node::{
     Broadcast, broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}
 };
 use ever_crypto::KeyId;
+#[cfg(feature = "slashing")]
 use crossbeam_channel::{Sender, Receiver};
-
+#[cfg(feature = "slashing")]
 const MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT: usize = 10000; //maximum number of validated block stats entries in engine's queue
 
 pub struct Engine {
@@ -124,6 +125,8 @@ pub struct Engine {
     sync_status: AtomicU32,
     low_memory_mode: bool,
     remp_capability: AtomicBool,
+    #[cfg(feature="remp_emergency")]
+    forcedly_disable_remp_cap: bool,
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
  
@@ -133,7 +136,9 @@ pub struct Engine {
 
     validation_status: lockfree::map::Map<ShardIdent, u64>,
     collation_status: lockfree::map::Map<ShardIdent, u64>,
+    #[cfg(feature = "slashing")]
     validated_block_stats_sender: Sender<ValidatedBlockStat>,
+    #[cfg(feature = "slashing")]
     validated_block_stats_receiver: Receiver<ValidatedBlockStat>,
 
     #[cfg(feature = "telemetry")]
@@ -673,6 +678,7 @@ impl Engine {
 
         log::info!("Engine is created.");
 
+        #[cfg(feature = "slashing")]
         let (validated_block_stats_sender, validated_block_stats_receiver) = 
             crossbeam_channel::bounded(MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT);
         let engine = Arc::new(Engine {
@@ -721,13 +727,17 @@ impl Engine {
             sync_status: AtomicU32::new(0),
             low_memory_mode,
             remp_capability: AtomicBool::new(false),
+            #[cfg(feature="remp_emergency")]
+            forcedly_disable_remp_cap: remp_config.forcedly_disable_remp_cap(),
             test_bundles_config,
             shard_states_keeper: shard_states_keeper.clone(),
             #[cfg(feature="workchains")]
             workchain_id: AtomicI32::new(workchain_id),
             validation_status: lockfree::map::Map::new(),
             collation_status: lockfree::map::Map::new(),
+            #[cfg(feature = "slashing")]
             validated_block_stats_sender,
+            #[cfg(feature = "slashing")]
             validated_block_stats_receiver,
             #[cfg(feature = "telemetry")]
             full_node_telemetry: FullNodeTelemetry::new(),
@@ -959,6 +969,11 @@ impl Engine {
 
     pub fn set_remp_capability(&self, value: bool) {
         self.remp_capability.store(value, Ordering::Relaxed);
+    }
+
+    #[cfg(feature="remp_emergency")]
+    pub fn forcedly_disable_remp_cap(&self) -> bool {
+        self.forcedly_disable_remp_cap
     }
 
     pub async fn download_and_apply_block_worker(
@@ -1211,7 +1226,9 @@ impl Engine {
         Ok(())
     }
 
+    #[cfg(feature = "slashing")]
     pub fn validated_block_stats_sender(&self) -> &Sender<ValidatedBlockStat> { &self.validated_block_stats_sender }
+    #[cfg(feature = "slashing")]
     pub fn validated_block_stats_receiver(&self) -> &Receiver<ValidatedBlockStat> { &self.validated_block_stats_receiver }
 
     #[cfg(feature = "telemetry")] 
@@ -1263,7 +1280,7 @@ impl Engine {
     }
 
     #[cfg(feature = "slashing")]
-    async fn process_validated_block_stats_for_mc(&self, block_id: &BlockIdExt, signing_nodes: &[UInt256]) -> Result<()> {
+    async fn process_validated_block_stats_for_mc(&self, block_id: &BlockIdExt, signing_nodes: HashSet<UInt256>) -> Result<()> {
         let block_handle = self.load_block_handle(&block_id)?.ok_or_else(|| error!("Cannot load handle for block {}", block_id))?;
         let mut is_link = false;
         if block_handle.has_proof_or_link(&mut is_link) {
@@ -1277,7 +1294,7 @@ impl Engine {
     }
 
     #[cfg(feature = "slashing")]
-    async fn process_validated_block_stats(&self, block_id: &BlockIdExt, signing_nodes: &[UInt256], created_by: &UInt256) -> Result<()> {
+    async fn process_validated_block_stats(&self, block_id: &BlockIdExt, signing_nodes: HashSet<UInt256>, created_by: &UInt256) -> Result<()> {
         let last_mc_state = self.load_last_applied_mc_state().await?;
         let (cur_validator_set, cc_config) = last_mc_state.read_cur_validator_set_and_cc_conf()?;
         let shard = block_id.shard();
@@ -1295,12 +1312,10 @@ impl Engine {
             cc_seqno,
             Default::default())?;
 
-        let commit_validators = signing_nodes.iter().collect::<HashSet<_>>();
-
-        let mut validated_block_stat_nodes = Vec::new();
+        let mut nodes = Vec::new();
 
         for validator in &validators {
-            let signed = commit_validators.contains(&validator.compute_node_id_short());
+            let signed = signing_nodes.contains(&validator.compute_node_id_short());
             let collated = &validator.public_key == created_by;
             let validated_block_stat_node = ValidatedBlockStatNode {
                 public_key: validator.public_key.clone(),
@@ -1308,14 +1323,10 @@ impl Engine {
                 collated,
             };
 
-            validated_block_stat_nodes.push(validated_block_stat_node);
+            nodes.push(validated_block_stat_node);
         }
 
-        let validated_block_stat = ValidatedBlockStat {
-            nodes : validated_block_stat_nodes,
-        };
-
-        self.push_validated_block_stat(validated_block_stat)?;
+        self.push_validated_block_stat(ValidatedBlockStat { nodes })?;
 
         Ok(())
     }
@@ -1332,12 +1343,12 @@ impl Engine {
 
                 #[cfg(feature = "slashing")]
                 if broadcast.id.shard().is_masterchain() {
-                    let mut signing_nodes = Vec::new();
+                    let mut signing_nodes = HashSet::new();
                     for api_sig in broadcast.signatures.iter() {
-                        signing_nodes.push(api_sig.who.clone());
+                        signing_nodes.insert(api_sig.who.clone());
                     }
 
-                    if let Err(e) = self.process_validated_block_stats_for_mc(&broadcast.id, &signing_nodes).await {
+                    if let Err(e) = self.process_validated_block_stats_for_mc(&broadcast.id, signing_nodes).await {
                         log::error!("Error while processing block broadcast stats {} from {}: {}", broadcast.id, src, e);        
                     } else {
                         log::trace!("Processed block broadcast stats {} from {}", broadcast.id, src);                            
@@ -1352,6 +1363,10 @@ impl Engine {
     }
 
     fn process_ext_msg_broadcast(&self, broadcast: ExternalMessageBroadcast, src: Arc<KeyId>) {
+        #[cfg(feature="remp_emergency")]
+        let remp = !self.forcedly_disable_remp_cap() && self.remp_capability();
+        #[cfg(not(feature="remp_emergency"))]
+        let remp = self.remp_capability();
         // just add to list
         if !self.is_validator() {
             log::trace!(
@@ -1359,7 +1374,7 @@ impl Engine {
                 "Skipped ext message broadcast {}bytes from {}: NOT A VALIDATOR",
                 broadcast.message.data.0.len(), src
             );
-        } else if self.remp_capability() {
+        } else if remp {
             log::warn!(
                 "Skipped ext message broadcast {}bytes from {}: REMP CAPABILITY IS ENABLED",
                 broadcast.message.data.0.len(), src
@@ -1442,18 +1457,17 @@ impl Engine {
             // fill stats for slashing
             #[cfg(feature = "slashing")]
             {
-                let mut signing_nodes = Vec::new();
+                let mut signing_nodes = HashSet::new();
                 if let Some(commit_signatures) = tbd.top_block_descr().signatures() {
-                    use ton_types::HashmapType;
                     commit_signatures.pure_signatures.signatures().iterate_slices(|ref mut _key, ref mut slice| {
                         use ton_block::Deserializable;
                         let sign = ton_block::CryptoSignaturePair::construct_from(slice)?;
-                        signing_nodes.push(sign.node_id_short.clone());
+                        signing_nodes.insert(sign.node_id_short.clone());
                         Ok(true)
                     })?;
                 }
 
-                if let Err(e) = self.process_validated_block_stats(&id, &signing_nodes, &_created_by).await {
+                if let Err(e) = self.process_validated_block_stats(&id, signing_nodes, &_created_by).await {
                     log::error!("Error while processing shard block broadcast stats {}: {}", id, e);
                 } else {
                     log::trace!("Processed shard block broadcast stats {}", id);
@@ -1487,13 +1501,13 @@ impl Engine {
     }
 
     async fn create_download_context<'a, T>(
-         &'a self,
-         downloader: Arc<dyn Downloader<Item = T>>,
-         id: &'a BlockIdExt, 
-         limit: Option<u32>,
-         log_error_limit: u32,
-         name: &'a str,
-         timeout: Option<(u64, u64, u64)>
+        &'a self,
+        downloader: Arc<dyn Downloader<Item = T>>,
+        id: &'a BlockIdExt, 
+        limit: Option<u32>,
+        log_error_limit: u32,
+        name: &'a str,
+        timeout: Option<(u64, u64, u64)>
     ) -> Result<DownloadContext<'a, T>> {
         let ret = DownloadContext {
             client: self.get_full_node_overlay(
@@ -1625,7 +1639,7 @@ impl Engine {
         self.db().save_full_node_state(PSS_KEEPER_MC_BLOCK, id)
     }
 
-    fn load_archives_gc_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+    pub fn load_archives_gc_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
         self.db().load_full_node_state(ARCHIVES_GC_BLOCK)
     }
 

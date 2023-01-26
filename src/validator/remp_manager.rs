@@ -331,9 +331,11 @@ impl RempManager {
 
     pub async fn gc_old_messages(&self, current_cc_seqno: u32) -> usize {
         let for_removal = self.message_cache.get_old_messages(current_cc_seqno).await;
+        /*
         for (msg, _updated_status) in for_removal.iter() {
-            self.message_cache.remove_message(&msg.message_id).await;
+            self.message_cache.remove_message(&msg.message_id);
         }
+        */
         for_removal.len()
     }
 }
