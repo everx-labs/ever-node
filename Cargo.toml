@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ton_node'
-version = '0.51.33'
+version = '0.51.34'
 
 [workspace]
 members = [ 'storage' ]
@@ -54,9 +54,9 @@ ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git', optional = true
 ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.173' }
 ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', tag = '1.9.22' }
 ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', tag = '0.7.89' }
-ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.166' }
+ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.167' }
 ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.12.6' }
-ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.107' }
+ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', tag = '1.8.108' }
 validator_session = { path = 'validator-session' }
 
 [features]
