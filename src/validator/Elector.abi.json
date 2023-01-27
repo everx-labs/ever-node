@@ -1,5 +1,6 @@
 {
 	"ABI version": 2,
+	"version": "2.2",
 	"header": ["time"],
 	"functions": [
 		{
@@ -42,6 +43,24 @@
 			]
 		},
 		{
+			"name": "config_slash_confirmed_ok",
+			"id": "0xEE764F4C",
+			"inputs": [
+				{"name":"query_id","type":"uint64"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "config_slash_confirmed_err",
+			"id": "0xEE764F70",
+			"inputs": [
+				{"name":"query_id","type":"uint64"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "grant",
 			"id": "0x4772616E",
 			"inputs": [
@@ -59,6 +78,25 @@
 		{
 			"name": "recover_stake",
 			"id": "0x47657424",
+			"inputs": [
+				{"name":"query_id","type":"uint64"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "recover_stake_gracefully",
+			"id": "0x47657425",
+			"inputs": [
+				{"name":"query_id","type":"uint64"},
+				{"name":"elect_id","type":"uint32"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "get_elect_at",
+			"id": "0x47657426",
 			"inputs": [
 				{"name":"query_id","type":"uint64"}
 			],
@@ -134,6 +172,15 @@
 			]
 		},
 		{
+			"name": "get_buckets_workchain",
+			"inputs": [
+				{"name":"victim_pubkey","type":"uint256"}
+			],
+			"outputs": [
+				{"components":[{"name":"weight","type":"uint64"},{"name":"reports","type":"map(uint256,uint64)"}],"name":"value0","type":"map(uint8,tuple)"}
+			]
+		},
+		{
 			"name": "active_election_id",
 			"inputs": [
 			],
@@ -154,5 +201,21 @@
 	"data": [
 	],
 	"events": [
+	],
+	"fields": [
+		{"name":"_pubkey","type":"uint256"},
+		{"name":"_constructorFlag","type":"bool"},
+		{"name":"m_election_open","type":"bool"},
+		{"components":[{"name":"elect_at","type":"uint32"},{"name":"elect_close","type":"uint32"},{"name":"min_stake","type":"uint128"},{"name":"total_stake","type":"uint128"},{"components":[{"name":"stake","type":"uint128"},{"name":"time","type":"uint32"},{"name":"max_factor","type":"uint32"},{"name":"addr","type":"uint256"},{"name":"adnl_addr","type":"uint256"}],"name":"members","type":"map(uint256,tuple)"},{"name":"failed","type":"bool"},{"name":"finished","type":"bool"}],"name":"m_cur_elect","type":"tuple"},
+		{"name":"m_credits","type":"map(uint256,uint128)"},
+		{"components":[{"name":"unfreeze_at","type":"uint32"},{"name":"stake_held","type":"uint32"},{"name":"vset_hash","type":"uint256"},{"components":[{"name":"addr","type":"uint256"},{"name":"weight","type":"uint64"},{"name":"stake","type":"uint128"},{"name":"banned","type":"bool"}],"name":"frozen_dict","type":"map(uint256,tuple)"},{"name":"total_stake","type":"uint128"},{"name":"bonuses","type":"uint128"},{"components":[{"name":"tag","type":"uint8"},{"name":"complaint","type":"cell"},{"name":"voters","type":"map(uint16,uint32)"},{"name":"vset_id","type":"uint256"},{"name":"weight_remaining","type":"int64"}],"name":"complaints","type":"map(uint256,tuple)"}],"name":"m_past_elections","type":"map(uint32,tuple)"},
+		{"name":"m_grams","type":"uint128"},
+		{"name":"m_active_id","type":"uint32"},
+		{"name":"m_active_hash","type":"uint256"},
+		{"name":"m_masterchain_vtors_weight","type":"uint64"},
+		{"name":"m_workchain_vtors_weight","type":"uint64"},
+		{"name":"m_banned","type":"map(uint256,bool)"},
+		{"components":[{"name":"weight","type":"uint64"},{"name":"reports","type":"map(uint256,uint64)"}],"name":"m_reports","type":"map(uint256,map(uint8,tuple))"},
+		{"components":[{"name":"weight","type":"uint64"},{"name":"reports","type":"map(uint256,uint64)"}],"name":"m_reports_workchain","type":"map(uint256,map(uint8,tuple))"}
 	]
 }

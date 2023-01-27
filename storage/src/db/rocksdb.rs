@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -90,7 +90,7 @@ impl RocksDb {
         loop {
 
             let cfs = DBWithThreadMode::<MultiThreaded>::list_cf(&options, &path)
-                .unwrap_or(Vec::new());
+                .unwrap_or_default();
 
             log::info!(
                 target: "storage",

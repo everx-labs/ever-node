@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -646,7 +646,7 @@ impl ValidatorManagerImpl {
                 }
             };
 
-            if let Some(local_id) = self.find_us(&subset.0) {
+            if let Some(local_key) = self.find_us(&subset.0) {
                 let vsubset = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno, subset.0)?;
 
                 let session_id = get_session_unsafe_id(
@@ -683,7 +683,7 @@ impl ValidatorManagerImpl {
                 let session = self.validator_sessions.entry(session_id.clone()).or_insert_with(|| 
                     Arc::new(ValidatorGroup::new(
                         ident.clone(),
-                        local_id,
+                        local_key,
                         session_id.clone(),
                         cc_seqno,
                         validator_list_id.clone(),
@@ -884,7 +884,7 @@ impl ValidatorManagerImpl {
                 }
             };
 
-            if let Some(local_id) = self.find_us(&next_subset.0) {
+            if let Some(local_key) = self.find_us(&next_subset.0) {
                 let vnext_subset = ValidatorSet::with_cc_seqno(0, 0, 0, next_cc_seqno, next_subset.0)?;
                 let session_id = get_session_id(
                     &ident,
@@ -899,7 +899,7 @@ impl ValidatorManagerImpl {
                     if let Some(vnext_list_id) = compute_validator_list_id(&future_validator_set.list()) {
                         let session = Arc::new(ValidatorGroup::new(
                             ident.clone(),
-                            local_id,
+                            local_key,
                             session_id.clone(),
                             next_cc_seqno,
                             vnext_list_id,
@@ -974,9 +974,9 @@ impl ValidatorManagerImpl {
             let mc_state = self.engine.load_state(mc_handle.id()).await?;
             log::info!(target: "validator", "Processing masterblock {}", mc_handle.id().seq_no);
             #[cfg(feature = "slashing")]
-            if let Some(local_id) = self.validator_list_status.get_local_key() {
+            if let Some(local_key) = self.validator_list_status.get_local_key() {
                 log::debug!(target: "validator", "Processing slashing masterblock {}", mc_handle.id().seq_no);
-                self.slashing_manager.handle_masterchain_block(&mc_handle, &mc_state, &local_id, &self.engine).await;
+                self.slashing_manager.handle_masterchain_block(&mc_handle, &mc_state, &local_key, &self.engine).await;
             }
             self.update_shards(mc_state).await?;
             

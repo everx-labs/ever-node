@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -11,9 +11,7 @@
 * limitations under the License.
 */
 
-use std::collections::HashMap;
-// use std::convert::TryInto;
-use std::fmt;
+use std::{collections::HashMap, fmt::{self, Debug}};
 
 /// Public key hash
 pub type PublicKeyHash = ::catchain::PublicKeyHash;
@@ -68,9 +66,9 @@ pub struct Node {
 
 impl Node {
     /// New statistics entry
-    pub fn new(public_key: &PublicKey) -> Self {
+    pub fn new(public_key: PublicKey) -> Self {
         Self {
-            public_key: public_key.clone(),
+            public_key,
             metrics: [0; Metric::MetricsCount as usize],
         }
     }
@@ -84,9 +82,7 @@ impl Node {
 
     /// Merge metrics
     pub fn merge(&mut self, entry: &Node) {
-        for it in entry.metrics.iter().zip(self.metrics.iter_mut()) {
-            let (src_it, dst_it) = it;
-
+        for (src_it, dst_it) in entry.metrics.iter().zip(self.metrics.iter_mut()) {
             *dst_it += *src_it;
         }
     }
@@ -102,14 +98,14 @@ impl fmt::Debug for Node {
         write!(
             f,
             "Node(public_key_hash={}, metrics={:?})",
-            self.public_key.id(),
+            hex::encode(self.public_key.id().data()),
             self.metrics
         )
     }
 }
 
 /// Session statistics
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct ValidatorStat {
     /// Statistics entries for each validator
     pub validators_stat: HashMap<PublicKeyHash, Node>,
@@ -158,30 +154,40 @@ impl ValidatorStat {
     }
 }
 
+impl Debug for ValidatorStat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kv = self
+            .validators_stat
+            .iter()
+            .map(|(key, value)| (format!("Id({}): {:?}", hex::encode(key.data()), value)));
+        f.debug_list().entries(kv).finish()
+    }
+}
+
 /// Session statistics aggregated metric
 #[derive(Clone, Copy, Debug)]
 #[repr(usize)]
 pub enum AggregatedMetric {
     /// Collations participation
-    CollationsParticipation,
+    CollationsParticipation = 0,
 
     /// Approvals participation
-    ApprovalsParticipation,
+    ApprovalsParticipation = 1,
 
     /// Commits participation
-    CommitsParticipation,
+    CommitsParticipation = 2,
 
     /// Collations participation (computed on apply level)
-    ApplyLevelCollationsParticipation,
+    ApplyLevelCollationsParticipation = 3,
 
     /// Commits participation (computed on apply level)
-    ApplyLevelCommitsParticipation,
+    ApplyLevelCommitsParticipation = 4,
 
     /// Aggregated validator score
-    ValidationScore,
+    ValidationScore = 5,
 
     /// Aggregated slashing score
-    SlashingScore,
+    SlashingScore = 6,
 
     /// Number of metrics
     AggregatedMetricsCount,
@@ -255,7 +261,7 @@ impl AggregatedNode {
     }
 }
 
-impl fmt::Debug for AggregatedNode {
+impl Debug for AggregatedNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -326,9 +332,8 @@ impl AggregatedValidatorStat {
         let min_samples_count = config.min_samples_count;
         let validators_stat: HashMap<PublicKeyHash, AggregatedNode> = stat
             .validators_stat
-            .clone()
-            .into_iter()
-            .map(|(pub_key_hash, entry)| (pub_key_hash, AggregatedNode::new(&entry, config)))
+            .iter()
+            .map(|(pub_key_hash, entry)| (pub_key_hash.clone(), AggregatedNode::new(entry, config)))
             .collect();
         let metrics_params: Vec<AggregatedMetricParams> = (0
             ..AggregatedMetric::AggregatedMetricsCount as usize)
