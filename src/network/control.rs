@@ -14,7 +14,8 @@
 use crate::{
     collator_test_bundle::CollatorTestBundle, config::{KeyRing, NodeConfigHandler},
     engine_traits::EngineOperations, engine::Engine, network::node_network::NodeNetwork,
-    validator::validator_utils::validatordescr_to_catchain_node
+    validator::validator_utils::validatordescr_to_catchain_node,
+    validating_utils::{supported_version, supported_capabilities}
 };
 use adnl::{
     common::{QueryResult, Subscriber, AdnlPeers},
@@ -265,14 +266,17 @@ impl ControlQuerySubscriber {
         // masterchainblocktime
         let mc_block_handle = engine.load_block_handle(&mc_block_id)?
             .ok_or_else(|| error!("Cannot load handle for block {}", &mc_block_id))?;
-        
+
         Self::add_stats(&mut stats, "masterchainblocktime", mc_block_handle.gen_utime()?);
 
         // masterchainblocknumber
         Self::add_stats(&mut stats, "masterchainblocknumber", mc_block_handle.id().seq_no());
 
         Self::add_stats(&mut stats, "node_version", format!("\"{}\"", env!("CARGO_PKG_VERSION")));
-        let public_overlay_adnl_id = self.public_overlay_adnl_id.as_ref().ok_or_else(|| 
+        Self::add_stats(&mut stats, "supported_block", supported_version());
+        Self::add_stats(&mut stats, "supported_capabilities", supported_capabilities());
+
+        let public_overlay_adnl_id = self.public_overlay_adnl_id.as_ref().ok_or_else(||
             error!("Public overlay key id didn`t set!")
         )?;
         Self::add_stats(&mut stats, "public_overlay_key_id", format!("\"{}\"", &public_overlay_adnl_id));
@@ -292,13 +296,16 @@ impl ControlQuerySubscriber {
         // in_current_vset_p34
         let adnl_ids = self.config.get_actual_validator_adnl_ids()?;
         let mc_state = engine.load_last_applied_mc_state().await?;
+
+        Self::add_stats(&mut stats, "global_id", mc_state.state().global_id());
+
         let current = mc_state.config_params()?.validator_set()?.list().iter().any(|val| {
             match validatordescr_to_catchain_node(val) {
-                Ok(catchain_node) => { 
+                Ok(catchain_node) => {
                     let is_validator = adnl_ids.contains(&catchain_node.adnl_id);
                     if is_validator {
-                        Self::add_stats(&mut stats, 
-                            "current_vset_p34_adnl_id", 
+                        Self::add_stats(&mut stats,
+                            "current_vset_p34_adnl_id",
                             format!("\"{}\"", &catchain_node.adnl_id)
                         );
                     }
