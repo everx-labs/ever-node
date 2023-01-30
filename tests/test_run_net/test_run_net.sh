@@ -15,7 +15,7 @@ cargo build --release
 cd ../../../
 if ! [ -d "ton-labs-node-tools" ]
 then
-    git clone "https://github.com/tonlabs/ton-labs-node-tools"
+    git clone "git@github.com:tonlabs/ton-labs-node-tools.git"
 fi
 cd ton-labs-node-tools
 TOOLS_ROOT=$(pwd)

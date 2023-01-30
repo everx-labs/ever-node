@@ -3026,6 +3026,8 @@ impl ValidateQuery {
             seed_block: base.extra.rand_seed().clone(),
             debug: false,
             block_version: base.info.gen_software().unwrap_or(&config_params::GlobalVersion::new()).version,
+            #[cfg(feature = "signature_with_id")]
+            signature_id: base.global_id,  // Use network global ID as signature ID
             ..ExecuteParams::default()
         };
         let _old_account_root = account_root.clone();
