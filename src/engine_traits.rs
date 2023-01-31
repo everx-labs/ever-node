@@ -31,7 +31,7 @@ use overlay::{
 use std::{sync::{Arc, atomic::AtomicU64}, time::{SystemTime, UNIX_EPOCH}};
 use ton_api::ton::ton_node::{RempMessage, RempMessageStatus, RempReceipt, broadcast::BlockBroadcast};
 use ton_block::{
-    AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, signature::SigPubKey, ShardAccount,
+    AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, ShardAccount,
     MASTERCHAIN_ID, Deserializable
 };
 use ton_types::{Result, UInt256, error, AccountId};

@@ -17,13 +17,13 @@ use crate::{
     config::RempConfig,
     engine_traits::{EngineOperations, RempCoreInterface, RempDuplicateStatus},
     validator::{
+        mutex_wrapper::MutexWrapper,
         validator_utils::get_shard_by_message,
         message_cache::{RmqMessage, MessageCache},
         remp_catchain::RempCatchainStore
 }};
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
-use crate::validator::mutex_wrapper::MutexWrapper;
 
 pub struct RempInterfaceQueues {
     message_cache: Arc<MessageCache>,
@@ -330,13 +330,11 @@ impl RempManager {
     }
 
     pub async fn gc_old_messages(&self, current_cc_seqno: u32) -> usize {
-        let for_removal = self.message_cache.get_old_messages(current_cc_seqno).await;
-        /*
-        for (msg, _updated_status) in for_removal.iter() {
-            self.message_cache.remove_message(&msg.message_id);
-        }
-        */
-        for_removal.len()
+        let (total, accepted, rejected, only_status, incorrect) = self.message_cache.get_old_messages(current_cc_seqno).await;
+        log::info!(target: "remp", "GC old messages: {} total ({} finally accepted, {} finally rejected, {} lost), {} only status in cache, {} incorrect cache state",
+            total, accepted, rejected, total - accepted - rejected, only_status, incorrect
+        );
+        total
     }
 }
 
@@ -365,7 +363,7 @@ impl RempInterfaceQueues {
                     }
 
                     while let Ok(msg) = self.response_receiver.try_recv() {
-                        log::info!(target: "remp", "Received test REMP response: {:?}", msg);
+                        log::trace!(target: "remp", "Received test REMP response: {:?}", msg);
                     }
                 }
             }
@@ -395,7 +393,7 @@ impl RempInterfaceQueues {
                 )
             }
             else {
-                log::info!(target: "remp", "Sending {} response for message {:x} to {}",
+                log::trace!(target: "remp", "Sending {} response for message {:x} to {}",
                     status, rmq_message.message_id, rmq_message.source_idx
                 )
             }

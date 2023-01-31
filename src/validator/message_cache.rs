@@ -12,7 +12,7 @@ use ton_api::{
 use ton_block::{Deserializable, Message, ShardIdent, Serializable, MsgAddressInt, MsgAddrStd, ExternalInboundMessageHeader};
 use ton_types::{UInt256, Result, BuilderData, SliceData, fail, error};
 use crate::validator::mutex_wrapper::MutexWrapper;
-use crate::ext_messages::validate_status_change;
+use crate::ext_messages::{is_finally_accepted, is_finally_rejected, validate_status_change};
 use crate::engine_traits::RempDuplicateStatus;
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
@@ -159,7 +159,7 @@ impl RmqMessage {
 
         let msg_cell = msg.serialize().unwrap();
         //let msg_id = UInt256::rand();
-        log::info!(target: "remp", "Account: {}, Message: {:?}, serialized: {:?}, hash code: {}",
+        log::trace!(target: "remp", "Account: {}, Message: {:?}, serialized: {:?}, hash code: {}",
             address.to_hex_string(),
             msg, msg_cell.data(),
             msg_cell.repr_hash().to_hex_string()
@@ -680,25 +680,40 @@ impl MessageCache {
         self.messages.set_master_cc_start_time(master_cc, start_time);
     }
 
-    /// Collect all old messages; return all messages to be timeout-rejected
-    pub async fn get_old_messages(&self, current_cc: u32) -> Vec<(Arc<RmqMessage>, RempMessageStatus)> {
+    /// Collect all old messages; return all messages stats
+    /// (total messages removed, accepted messages, rejected messages, messages that have status only, messages with incorrect status)
+    /// total - (accepted + rejected) = lost;
+    pub async fn get_old_messages(&self, current_cc: u32) -> (usize, usize, usize, usize, usize)
+    {
         log::trace!(target: "remp", "Removing old messages from message_cache: masterchain_cc: {}", current_cc);
-        let mut old_messages = Vec::new();
+        let mut total = 0;
+        let mut accepted = 0;
+        let mut rejected = 0;
+        let mut only_status = 0;
+        let mut incorrect = 0;
 
         while let Some((id, m,s,_x,_master_cc)) =
             self.cache.execute_sync(|c| c.remove_old_message(self.messages.clone(), current_cc)).await
         {
+            total += 1;
             match (m,s) {
-                (Some(m), Some(s)) => old_messages.push((m,s)),
-                (None, Some(_s)) => (),
-                (m, s) => log::error!(target: "remp",
-                    "Record for message {:?} is in incorrect state: msg = {:?}, status = {:?}",
-                    id, m, s
-                )
+                (Some(_m), Some(s)) => {
+                    if is_finally_accepted(&s) { accepted += 1 }
+                    else if is_finally_rejected(&s) { rejected += 1 }
+                },
+                (None, Some(s)) =>
+                    if is_finally_accepted(&s) { only_status += 1 },
+                (m, status) => {
+                    log::error!(target: "remp",
+                        "Record for message {:?} is in incorrect state: msg = {:?}, status = {:?}",
+                        id, m, status
+                    );
+                    incorrect += 1
+                }
             }
         }
 
-        old_messages
+        (total, accepted, rejected, only_status, incorrect)
     }
 
     pub fn with_metrics(

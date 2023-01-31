@@ -24,6 +24,7 @@ use crate::{
     }
 };
 use failure::err_msg;
+use ton_api::ton::ton_node::rmqrecord::RmqMessageDigest;
 
 #[derive(Debug,PartialEq,Eq,PartialOrd,Ord,Clone)]
 enum MessageQueueStatus { Created, Starting, Active, Stopping }
@@ -238,7 +239,7 @@ impl MessageQueue {
 
     pub async fn put_message_to_rmq(&self, old_message: Arc<RmqMessage>) -> Result<()> {
         let msg = Arc::new(old_message.new_with_updated_source_idx(self.catchain_info.local_idx));
-        log::info!(target: "remp", "Point 3. Pushing to RMQ {}; message {}", self, msg);
+        log::trace!(target: "remp", "Point 3. Pushing to RMQ {}; message {}", self, msg);
         self.catchain_instance.pending_messages_queue_send(msg.as_rmq_record(self.catchain_info.master_cc_seqno))?;
 
         #[cfg(feature = "telemetry")]
@@ -381,9 +382,9 @@ impl MessageQueue {
                         }
 
                     }
-                }
+                },
                 Ok(Some(RmqRecord::TonNode_RmqMessageDigest(reject_digest))) => {
-                    if reject_digest.masterchain_seqno as u32 + 1 < self.catchain_info.master_cc_seqno ||
+                    if MessageCache::cc_expired(reject_digest.masterchain_seqno as u32, self.catchain_info.master_cc_seqno) ||
                         reject_digest.masterchain_seqno as u32 > self.catchain_info.master_cc_seqno {
                         log::error!(target: "remp",
                             "Point 4. RMQ {}. Message digest (masterchain_seqno = {}, len = {}) is incompatible with current master seqno {}",
@@ -391,7 +392,7 @@ impl MessageQueue {
                         )
                     }
                     else {
-                        log::trace!(target: "remp",
+                        log::info!(target: "remp",
                             "Point 4. RMQ {}. Message digest (masterchain_seqno = {}, len = {}) received",
                             self, reject_digest.masterchain_seqno, reject_digest.messages.len()
                         );
@@ -794,7 +795,7 @@ impl RmqQueueManager {
                 }
             }
 
-            let mut rejected_message_digest = ton_api::ton::ton_node::rmqrecord::RmqMessageDigest::default();
+            let mut rejected_message_digests: HashMap<u32, RmqMessageDigest> = HashMap::default();
 
             for msgid in to_forward.iter() {
                 let (status, message, master_cc) = match self.remp_manager.message_cache.get_message_with_status_and_master_cc(msgid) {
@@ -820,7 +821,15 @@ impl RmqQueueManager {
                 // 1. If at least one message with body -- put it as "non-final"
 
                 if is_finally_rejected(&status) {
-                    rejected_message_digest.messages.0.push(message.message_id.clone());
+                    if let Some(digest) = rejected_message_digests.get_mut (&master_cc) {
+                        digest.messages.0.push(message.message_id.clone());
+                    }
+                    else {
+                        let mut digest = ton_api::ton::ton_node::rmqrecord::RmqMessageDigest::default();
+                        digest.masterchain_seqno = master_cc as i32;
+                        digest.messages.0.push(message.message_id.clone());
+                        rejected_message_digests.insert(master_cc, digest);
+                    }
                 }
                 else if !is_finally_accepted(&status) {
                     if MessageQueue::is_final_status(&status) {
@@ -843,18 +852,23 @@ impl RmqQueueManager {
                 }
             }
 
-            if !rejected_message_digest.messages.0.is_empty() {
-                let digest_len = rejected_message_digest.messages.0.len();
-                let msg = ton_api::ton::ton_node::RmqRecord::TonNode_RmqMessageDigest(rejected_message_digest);
-                for new in new_queues.iter() {
-                    if let Err(x) = new.catchain_instance.pending_messages_queue_send(msg.clone()) {
-                        log::error!(target: "remp",
+            for (master_cc, digest) in rejected_message_digests.into_iter() {
+                if !digest.messages.0.is_empty() {
+                    let digest_len = digest.messages.0.len();
+                    let msg = ton_api::ton::ton_node::RmqRecord::TonNode_RmqMessageDigest(digest);
+                    for new in new_queues.iter() {
+                        if let Err(x) = new.catchain_instance.pending_messages_queue_send(msg.clone()) {
+                            log::error!(target: "remp",
                             "Point 5a. RMQ {}: message digest (len={}) cannot be put to new queue {}: `{}`",
                             self, digest_len, new, x
                         )
-                    } else {
-                        sent = sent + 1;
+                        } else {
+                            sent = sent + 1;
+                        }
                     }
+                }
+                else {
+                    log::error!(target: "remp", "RMQ {}: rejected message digest for {} is empty, but present in cache!", self, master_cc)
                 }
             }
 

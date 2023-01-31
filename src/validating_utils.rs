@@ -40,6 +40,8 @@ pub fn supported_capabilities() -> u64 {
         GlobalCapabilities::CapResolveMerkleCell as u64;
     #[cfg(feature = "gosh")] 
     let caps = caps | GlobalCapabilities::CapDiff as u64;
+    #[cfg(feature = "signature_with_id")] 
+    let caps = caps | GlobalCapabilities::CapSignatureWithId as u64;
     caps
 }
 
