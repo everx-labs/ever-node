@@ -17,9 +17,9 @@ metrics-runtime = '0.13'
 rand = '0.8'
 sha2 = '0.10'
 catchain = { path = '../catchain' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-crypto', tag = '0.1.80' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-crypto.git', tag = '0.1.90' }
 storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl', package = 'ton_api', tag = '0.2.167' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block', tag = '1.9.18' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types', tag = '1.12.6' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.2.177' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.27' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '1.12.7' }
 

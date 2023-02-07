@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -17,7 +17,6 @@ use crate::{
     engine::{Engine, STATSD},
     engine_traits::{
         ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, Server, 
-        ValidatedBlockStat
     },
     error::NodeError,
     internal_db::{
@@ -30,6 +29,8 @@ use crate::{
     jaeger,
     validator::candidate_db::CandidateDb,
 };
+#[cfg(feature = "slashing")]
+use crate::validator::slashing::ValidatedBlockStat;
 #[cfg(feature = "telemetry")]
 use crate::{
     engine_traits::EngineTelemetry, full_node::telemetry::FullNodeTelemetry, 
@@ -853,14 +854,14 @@ impl EngineOperations for Engine {
         self.tps_counter().calc_tps(period)
     }
 
+    #[cfg(feature = "slashing")]
     fn push_validated_block_stat(&self, stat: ValidatedBlockStat) -> Result<()> {
-        self.validated_block_stats_sender().try_send(stat)?;
-        Ok(())
+        Ok(self.validated_block_stats_sender().try_send(stat)?)
     }
 
+    #[cfg(feature = "slashing")]
     fn pop_validated_block_stat(&self) -> Result<ValidatedBlockStat> {
-        let result = self.validated_block_stats_receiver().try_recv()?;
-        Ok(result)
+        Ok(self.validated_block_stats_receiver().try_recv()?)
     }
 
     fn adjust_states_gc_interval(&self, interval_ms: u32) {

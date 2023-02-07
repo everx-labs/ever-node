@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -26,7 +26,7 @@ mod mutex_wrapper;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 #[cfg(feature = "slashing")]
-mod slashing;
+pub mod slashing;
 
 use std::sync::Arc;
 use ton_types::{Result, UInt256, error};

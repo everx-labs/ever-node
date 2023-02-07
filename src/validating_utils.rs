@@ -32,14 +32,19 @@ pub fn supported_capabilities() -> u64 {
         GlobalCapabilities::CapMycode as u64 |
         GlobalCapabilities::CapCopyleft as u64 |
         GlobalCapabilities::CapFullBodyInBounced as u64 |
-        GlobalCapabilities::CapStorageFeeToTvm as u64;
+        GlobalCapabilities::CapStorageFeeToTvm as u64 |
+        GlobalCapabilities::CapStcontNewFormat as u64 |
+        GlobalCapabilities::CapFastStorageStatBugfix as u64 |
+        GlobalCapabilities::CapResolveMerkleCell as u64;
     #[cfg(feature = "gosh")] 
     let caps = caps | GlobalCapabilities::CapDiff as u64;
+    #[cfg(feature = "signature_with_id")] 
+    let caps = caps | GlobalCapabilities::CapSignatureWithId as u64;
     caps
 }
 
 pub fn supported_version() -> u32 {
-    34
+    35
 }
 
 pub fn check_this_shard_mc_info(

@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -3340,7 +3340,7 @@ impl SessionProcessorImpl {
         for node in &ids {
             slashing_stat.validators_stat.insert(
                 node.public_key.id().clone(),
-                slashing::Node::new(&node.public_key),
+                slashing::Node::new(node.public_key.clone()),
             );
         }
 
