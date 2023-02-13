@@ -15,6 +15,7 @@ use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, engine::Engine, 
     engine_traits::{ChainRange, EngineOperations}, error::NodeError,
     validator::validator_utils::{calc_subset_for_workchain, check_crypto_signatures},
+    shard_states_keeper::ShardStatesKeeper,
 };
 
 use std::{sync::Arc, mem::drop, time::Duration};
@@ -90,12 +91,24 @@ async fn load_master_blocks_cycle(
     }
 }
 
+pub const MC_MAX_SUPERIORITY: u32 = ShardStatesKeeper::MAX_CATCH_UP_DEPTH / 2;
+
 async fn load_next_master_block(
     engine: &Arc<dyn EngineOperations>, 
     prev_id: &BlockIdExt
 ) -> Result<BlockIdExt> {
 
-    log::trace!("load_blocks_cycle: prev block: {}", prev_id);
+    if let Some(shard_client) = engine.load_shard_client_mc_block_id()? {
+        if shard_client.seq_no() < prev_id.seq_no() && 
+           prev_id.seq_no() - shard_client.seq_no() > MC_MAX_SUPERIORITY 
+        {
+            log::info!(
+                "load_next_master_block (block {prev_id}): waiting for shard client ({shard_client})");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    log::trace!("load_next_master_block: prev block: {}", prev_id);
     if let Some(prev_handle) = engine.load_block_handle(prev_id)? {
         if prev_handle.has_next1() {
             let next_id = engine.load_block_next1(prev_id).await?;
@@ -106,9 +119,9 @@ async fn load_next_master_block(
         fail!("Cannot load handle for prev block {}", prev_id)
     };
 
-    log::trace!("load_blocks_cycle: downloading next block... prev: {}", prev_id);
+    log::trace!("load_next_master_block: downloading next block... prev: {}", prev_id);
     let (block, proof) = engine.download_next_block(prev_id).await?;
-    log::trace!("load_blocks_cycle: got next block: {}", prev_id);
+    log::trace!("load_next_master_block: got next block: {}", prev_id);
     if block.id().seq_no != prev_id.seq_no + 1 {
         fail!("Invalid next master block got: {}, prev: {}", block.id(), prev_id);
     }
@@ -118,7 +131,8 @@ async fn load_next_master_block(
     let mut next_handle = loop {
         if let Some(next_handle) = engine.load_block_handle(block.id())? {
             if !next_handle.has_data() {
-                log::warn!("Unitialized handle detected for block {}", block.id())
+                log::warn!(
+                    "load_next_master_block: unitialized handle detected for block {}", block.id())
             } else {
                 break next_handle
             }
@@ -133,7 +147,10 @@ async fn load_next_master_block(
         next_handle = engine.store_block_proof(block.id(), Some(next_handle), &proof).await?
             .to_non_created()
             .ok_or_else(
-                || error!("INTERNAL ERROR: bad result for store block {} proof", block.id())
+                || error!(
+                    "INTERNAL ERROR: load_next_master_block: bad result for store block {} proof",
+                    block.id()
+                )
             )?;
     }
     engine.clone().apply_block(&next_handle, &block, next_handle.id().seq_no(), false).await?;
@@ -215,10 +232,14 @@ pub async fn produce_chain_range(
 
         if prev_master_shards.get(handle.id().shard()) != Some(handle.id()) {
             if handle.has_prev1() {
-                blocks.push(engine.load_block_prev1(&block_id)?);
+                blocks.push(engine.load_block_prev1(&block_id)?)
             }
             if handle.has_prev2() {
-                blocks.push(engine.load_block_prev2(&block_id)?);
+                blocks.push(
+                    engine.load_block_prev2(&block_id)?.ok_or_else(
+                        || error!("No assigned prev2 for block {} in DB", block_id)
+                    )?
+                )
             }
             range.shard_blocks.push(block_id);
         }

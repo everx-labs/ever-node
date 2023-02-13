@@ -21,9 +21,11 @@ use crate::engine_traits::{EngineOperations, PrivateOverlayOperations};
 use catchain::utils::get_hash;
 use ton_block::{BlockIdExt, ShardIdent, ValidatorSet};
 use ton_types::{fail, Result, UInt256};
+#[cfg(feature = "slashing")]
+use validator_session::SlashingValidatorStat;
 use validator_session::{
     BlockHash, BlockPayloadPtr, CatchainOverlayManagerPtr, CatchainOverlayPtr, CatchainNode,
-    SessionId, SlashingValidatorStat, SessionPtr, SessionListenerPtr, SessionFactory,
+    SessionId, SessionPtr, SessionListenerPtr, SessionFactory,
     SessionListener, SessionNode,SessionOptions,
     PublicKey, PrivateKey, PublicKeyHash,
     ValidatorBlockCandidateCallback, ValidatorBlockCandidateDecisionCallback
@@ -745,6 +747,7 @@ impl ValidatorGroup {
         callback(result);
     }
 
+    #[cfg(feature = "slashing")]
     pub fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat) {
         log::debug!(
             target: "validator", 

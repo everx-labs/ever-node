@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -46,7 +46,8 @@ mod session;
 mod session_description;
 mod session_processor;
 mod session_state;
-pub mod slashing;
+#[cfg(feature="slashing")]
+mod slashing;
 mod task_queue;
 pub mod utils;
 mod vector;
@@ -247,13 +248,28 @@ pub type SessionListenerPtr = Weak<dyn SessionListener + Send + Sync>;
 pub type ValidatorWeight = catchain::ValidatorWeight;
 
 /// Slashing validator statistics
+#[cfg(feature="slashing")]
 pub type SlashingValidatorStat = slashing::ValidatorStat;
 
 /// Slashing aggregated validator statistics
+#[cfg(feature="slashing")]
 pub type SlashingAggregatedValidatorStat = slashing::AggregatedValidatorStat;
 
 /// Slashed node
+#[cfg(feature="slashing")]
 pub type SlashedNode = slashing::SlashedNode;
+
+/// Slashing node
+#[cfg(feature="slashing")]
+pub type SlashingNode = slashing::Node;
+
+/// Slashing metric
+#[cfg(feature="slashing")]
+pub type SlashingMetric = slashing::Metric;
+
+/// Slashing aggregated metric
+#[cfg(feature="slashing")]
+pub type SlashingAggregatedMetric = slashing::AggregatedMetric;
 
 /// Validator session options
 #[derive(Clone, Copy, Debug)]
@@ -1250,6 +1266,7 @@ pub trait SessionListener {
     );
 
     /// Slashing statistics event
+    #[cfg(feature="slashing")]
     fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat);
 }
 

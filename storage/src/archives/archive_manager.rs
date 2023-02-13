@@ -37,7 +37,7 @@ mod tests;
 pub struct ArchiveManager {
     db: Arc<RocksDb>,
     db_root_path: Arc<PathBuf>,
-    unapplied_dir: PathBuf,
+    unapplied_files_path: PathBuf,
     file_maps: FileMaps,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<StorageTelemetry>,
@@ -46,9 +46,12 @@ pub struct ArchiveManager {
 
 impl ArchiveManager {
 
+    pub const ARCHIVE_DIR: &str = "archive";
+
     pub async fn with_data(
         db: Arc<RocksDb>,
         db_root_path: Arc<PathBuf>,
+        last_unneeded_key_block: u32,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>
@@ -56,16 +59,19 @@ impl ArchiveManager {
         let file_maps = FileMaps::new(
             db.clone(),
             &db_root_path,
+            last_unneeded_key_block,
             #[cfg(feature = "telemetry")]
             &telemetry,
             &allocated
         ).await?;
-        let unapplied_dir = db_root_path.join("archive").join("unapplied");
-        tokio::fs::create_dir_all(unapplied_dir.as_path()).await?;
+        let unapplied_files_path = db_root_path.join(Self::ARCHIVE_DIR).join("unapplied");
+        tokio::fs::create_dir_all(unapplied_files_path.as_path()).await.map_err(
+            |e| error!("Cannot create unapplied files directory {:?}: {}", unapplied_files_path, e)
+        )?;
         Ok(Self {
             db,
             db_root_path,
-            unapplied_dir,
+            unapplied_files_path,
             file_maps,
             #[cfg(feature = "telemetry")]
             telemetry,
@@ -75,6 +81,10 @@ impl ArchiveManager {
 
     pub const fn db_root_path(&self) -> &Arc<PathBuf> {
         &self.db_root_path
+    }
+
+    pub const fn unapplied_files_path(&self) -> &PathBuf {
+        &self.unapplied_files_path
     }
 
     pub async fn add_file<B, U256, PK>(&self, entry_id: &PackageEntryId<B, U256, PK>, data: Vec<u8>) -> Result<()>
@@ -89,7 +99,7 @@ impl ArchiveManager {
             fail!("Added file's ({}) data can't have zero length", entry_id);
         }
 
-        let filename = self.unapplied_dir.join(entry_id.filename_short());
+        let filename = self.unapplied_files_path.join(entry_id.filename_short());
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -115,7 +125,7 @@ impl ArchiveManager {
         if handle.is_archived() {
             true
         } else {
-            self.unapplied_dir.join(entry_id.filename_short()).exists()
+            self.unapplied_files_path.join(entry_id.filename_short()).exists()
         }
     }
 
@@ -129,6 +139,13 @@ impl ArchiveManager {
         U256: Borrow<UInt256> + Hash,
         PK: Borrow<UInt256> + Hash
     {
+        let _lock = match &entry_id {
+            PackageEntryId::Block(_) => handle.block_file_lock().read().await,
+            PackageEntryId::Proof(_) => handle.proof_file_lock().read().await,
+            PackageEntryId::ProofLink(_) => handle.proof_file_lock().read().await,
+            _ => fail!("Unsupported package entry")
+        };
+
         if handle.is_archived() {
             let file = self.get_package_entry(
                 handle, 
@@ -139,12 +156,6 @@ impl ArchiveManager {
             return Ok(file.take_data())
         }
 
-        let _lock = match &entry_id {
-            PackageEntryId::Block(_) => handle.block_file_lock().read().await,
-            PackageEntryId::Proof(_) => handle.proof_file_lock().read().await,
-            PackageEntryId::ProofLink(_) => handle.proof_file_lock().read().await,
-            _ => fail!("Unsupported package entry")
-        };
         match self.read_temp_file(entry_id).await {
             Ok((_filename, data)) => Ok(data),
             Err(e) => {
@@ -238,17 +249,17 @@ impl ArchiveManager {
         let proof_filename = if handle.has_proof_link() {
             let entry_id = PackageEntryId::<_, UInt256, UInt256>::ProofLink(handle.id());
             log::debug!(target: "storage", "Remove unapplied proof link file: {}", entry_id);
-            Some(self.unapplied_dir.join(entry_id.filename_short()))
+            Some(self.unapplied_files_path.join(entry_id.filename_short()))
         } else if handle.has_proof() {
             let entry_id = PackageEntryId::<_, UInt256, UInt256>::Proof(handle.id());
             log::debug!(target: "storage", "Remove unapplied proof file: {}", entry_id);
-            Some(self.unapplied_dir.join(entry_id.filename_short()))
+            Some(self.unapplied_files_path.join(entry_id.filename_short()))
         } else {
             None
         };
         let entry_id = PackageEntryId::<_, UInt256, UInt256>::Block(handle.id());
         log::debug!(target: "storage", "Remove unapplied block file: {}", entry_id);
-        let block_filename = Some(self.unapplied_dir.join(entry_id.filename_short()));
+        let block_filename = Some(self.unapplied_files_path.join(entry_id.filename_short()));
         Self::remove(handle, proof_filename, block_filename).await
     }
 
@@ -260,7 +271,7 @@ impl ArchiveManager {
             )?;
             Ok((ShardIdent::with_tagged_prefix(workchain_id, shard_prefix_tagged)?, seq_no))
         }
-        let mut state = match tokio::fs::read_dir(self.unapplied_dir.as_path()).await {
+        let mut state = match tokio::fs::read_dir(self.unapplied_files_path.as_path()).await {
             Err(err) => {
                 log::warn!("clean_unapplied_files: cannot get directory list: {} ", err);
                 return
@@ -305,11 +316,19 @@ impl ArchiveManager {
         }
     }
 
-    pub async fn get_archive_slice(&self, archive_id: u64, offset: u64, limit: u32) -> Result<Vec<u8>> {
+    pub async fn get_archive_slice(
+        &self, 
+        archive_id: u64, 
+        offset: u64, 
+        limit: u32
+    ) -> Result<Vec<u8>> {
         let fd = match self.get_file_desc(&PackageId::for_block(archive_id as u32), false).await? {
             Some(file_desc) => file_desc,
             None => {
-                match self.get_file_desc(&PackageId::for_key_block(archive_id as u32 / KEY_ARCHIVE_PACKAGE_SIZE), false).await? {
+                match self.get_file_desc(
+                    &PackageId::for_key_block(archive_id as u32 / KEY_ARCHIVE_PACKAGE_SIZE), 
+                    false
+                ).await? {
                     Some(key_file_desc) => key_file_desc,
                     None => fail!("Archive not found"),
                 }
@@ -319,8 +338,8 @@ impl ArchiveManager {
         fd.archive_slice().get_slice(archive_id, offset, limit).await
     }
 
-    pub async fn gc(&self, front_for_gc_master_block_id: &BlockIdExt) {
-        if let Err(e) = self.file_maps.files().gc(front_for_gc_master_block_id).await {
+    pub async fn gc(&self, last_unneeded_key_block: &BlockIdExt) {
+        if let Err(e) = self.file_maps.files().gc(last_unneeded_key_block).await {
             log::info!(target: "storage", "archive_manager gc is error: {:?}", e);
         }
     }
@@ -396,7 +415,9 @@ impl ArchiveManager {
         let is_key = handle.is_key_block()?;
 
         let package_id = self.get_package_id_force(mc_seq_no, key_archive, is_key).await;
-        log::debug!(target: "storage", "PackageId for ({},{},{}) (mc_seq_no = {}, key block = {:?}) is {:?}, path: {:?}",
+        log::debug!(
+            target: "storage", 
+            "PackageId for ({},{},{}) (mc_seq_no = {}, key block = {:?}) is {:?}, path: {:?}",
             handle.id().shard().workchain_id(),
             handle.id().shard().shard_prefix_as_str_with_tag(),
             handle.id().seq_no(),
@@ -412,13 +433,16 @@ impl ArchiveManager {
         fd.archive_slice().add_file(Some(handle), entry_id, data).await
     }
 
-    async fn read_temp_file<B, U256, PK>(&self, entry_id: &PackageEntryId<B, U256, PK>) -> Result<(PathBuf, Vec<u8>)>
+    async fn read_temp_file<B, U256, PK>(
+        &self, 
+        entry_id: &PackageEntryId<B, U256, PK>
+    ) -> Result<(PathBuf, Vec<u8>)>
     where
         B: Borrow<BlockIdExt> + Hash,
         U256: Borrow<UInt256> + Hash,
         PK: Borrow<UInt256> + Hash
     {
-        let temp_filename = self.unapplied_dir.join(entry_id.filename_short());
+        let temp_filename = self.unapplied_files_path.join(entry_id.filename_short());
         let data = tokio::fs::read(&temp_filename).await
             .map_err(|error| {
                 if error.kind() == ErrorKind::NotFound {
@@ -437,7 +461,11 @@ impl ArchiveManager {
         Ok((temp_filename, data))
     }
 
-    async fn get_file_desc(&self, id: &PackageId, force_create: bool) -> Result<Option<Arc<FileDescription>>> {
+    async fn get_file_desc(
+        &self, 
+        id: &PackageId, 
+        force_create: bool
+    ) -> Result<Option<Arc<FileDescription>>> {
         // TODO: Rewrite logics in order to handle multithreaded adding of packages
         if let Some(fd) = self.file_maps.get(id.package_type()).get(id.id()).await {
             if fd.deleted() {

@@ -1,8 +1,8 @@
 [package]
 build = '../common/build/build.rs'
-edition = '2018'
+edition = '2021'
 name = 'validator_session'
-version = '0.0.1'
+version = '0.0.2'
 
 [dependencies]
 backtrace = '0.3'
@@ -17,14 +17,17 @@ metrics-runtime = '0.13'
 rand = '0.8'
 sha2 = '0.10'
 catchain = { path = '../catchain' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', branch = 'consensus-updates' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-crypto', branch = 'consensus-updates' }
 storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', branch = 'consensus-updates' }
-ton_block = { git = 'https://github.com:443//tonlabs/ton-labs-block.git', branch = 'consensus-updates' }
-ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.11.4' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl', package = 'ton_api', branch = 'consensus-updates' }
+ton_block = { git = 'https://github.com:443//tonlabs/ever-block.git', branch = 'consensus-updates' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types', tag = '1.12.7' }
 
 [dev-dependencies]
 chrono = '0.4'
 colored = '1.9'
 env_logger = '0.7'
+
+[features]
+slashing = []
 

@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2022 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -61,7 +61,7 @@ use ton_executor::{
     BlockchainConfig, ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor,
     TransactionExecutor,
 };
-use ton_types::{error, fail, AccountId, Cell, HashmapType, Result, UInt256, UsageTree};
+use ton_types::{error, fail, AccountId, Cell, HashmapType, Result, UInt256, UsageTree, SliceData};
 
 #[cfg(feature = "metrics")]
 use crate::engine::STATSD;
@@ -617,6 +617,9 @@ struct ExecutionManager {
     min_lt: Arc<AtomicU64>,
     // block random seed
     seed_block: UInt256,
+    #[cfg(feature = "signature_with_id")]
+    // signature ID used in VM
+    signature_id: i32, 
 
     total_trans_duration: Arc<AtomicU64>,
     collated_block_descr: Arc<String>,
@@ -629,6 +632,8 @@ impl ExecutionManager {
         gen_utime: u32,
         start_lt: u64,
         seed_block: UInt256,
+        #[cfg(feature = "signature_with_id")]
+        signature_id: i32, 
         libraries: Libraries,
         config: BlockchainConfig,
         max_collate_threads: usize,
@@ -647,6 +652,8 @@ impl ExecutionManager {
             start_lt,
             gen_utime,
             seed_block,
+            #[cfg(feature = "signature_with_id")]
+            signature_id, 
             max_lt: Arc::new(AtomicU64::new(start_lt + 1)),
             min_lt: Arc::new(AtomicU64::new(start_lt + 1)),
             total_trans_duration: Arc::new(AtomicU64::new(0)),
@@ -718,6 +725,8 @@ impl ExecutionManager {
         let block_unixtime = self.gen_utime;
         let block_lt = self.start_lt;
         let seed_block = self.seed_block.clone();
+        #[cfg(feature = "signature_with_id")]
+        let signature_id = self.signature_id; 
         let collated_block_descr = self.collated_block_descr.clone();
         let total_trans_duration = self.total_trans_duration.clone();
         let wait_tr = self.wait_tr.clone();
@@ -750,6 +759,8 @@ impl ExecutionManager {
                     seed_block: seed_block.clone(),
                     debug,
                     block_version: supported_version(),
+                    #[cfg(feature = "signature_with_id")]
+                    signature_id, 
                     ..ExecuteParams::default()
                 };
                 let new_msg1 = new_msg.clone();
@@ -1240,6 +1251,8 @@ impl Collator {
             collator_data.gen_utime(),
             collator_data.start_lt()?,
             self.rand_seed.clone(),
+            #[cfg(feature = "signature_with_id")]
+            mc_data.state().state().global_id(), // Use network global ID as signature ID
             mc_data.libraries().clone(),
             collator_data.config.clone(),
             self.collator_settings.max_collate_threads.unwrap_or(MAX_COLLATE_THREADS),
@@ -1899,7 +1912,7 @@ impl Collator {
         let config_account_id = AccountId::from(mc_data.config().config_addr.clone());
         let fundamental_dict = mc_data.config().fundamental_smc_addr()?;
         for res in &fundamental_dict {
-            let account_id = res?.0.into_cell()?.into();
+            let account_id = SliceData::load_builder(res?.0)?;
             self.create_ticktock_transaction(account_id, tock, prev_data, collator_data, 
                 exec_manager).await?;
             self.check_stop_flag()?;
@@ -1954,7 +1967,7 @@ impl Collator {
         }
         log::trace!("{}: create_special_transactions", self.collated_block_descr);
 
-        let account_id = AccountId::from(mc_data.config().fee_collector_address()?.serialize()?);
+        let account_id = mc_data.config().fee_collector_address()?.into();
         self.create_special_transaction(
             account_id,
             collator_data.value_flow.recovered.clone(),

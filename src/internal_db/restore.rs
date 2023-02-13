@@ -578,26 +578,24 @@ async fn check_one_block(
     // prev 1
     if should_has_prev {
         let (prev1, prev2) = block.construct_prev_id()?;
+        let mut restore = true;
         match db.load_block_prev1(id) {
-            Ok(prev1_db) => {
-                if prev1_db != prev1 {
-                    log::warn!("Block {} has real prev {}, but in db {}, restore", id, prev1, prev1_db);
-                    let mut value = Vec::new();
-                    prev1.serialize(&mut value)?;
-                    db.prev1_block_db.put(id, &value)?;
-                    if handle.set_prev1() {
-                        db.store_block_handle(&handle, None)?;
-                    }
-                }
+            Ok(prev1_db) => if prev1_db != prev1 {
+                log::warn!(
+                    "Block {} has real prev {}, but in db {}, restore", 
+                    id, prev1, prev1_db
+                )
+            } else {
+                restore = false
             },
-            Err(e) => {
-                log::warn!("Block {} has no prev1 in db ({}), restore", e, id);
-                let mut value = Vec::new();
-                prev1.serialize(&mut value)?;
-                db.prev1_block_db.put(id, &value)?;
-                if handle.set_prev1() {
-                    db.store_block_handle(&handle, None)?;
-                }
+            Err(e) => log::warn!("Block {} has no prev1 in db ({}), restore", e, id)
+        };
+        if restore {
+            let mut value = Vec::new();
+            prev1.serialize(&mut value)?;
+            db.prev1_block_db.put(id, &value)?;
+            if handle.set_prev1() {
+                db.store_block_handle(&handle, None)?;
             }
         }
         if !handle.has_prev1() {
@@ -608,26 +606,25 @@ async fn check_one_block(
 
         // prev 2 (after merge)
         if let Some(prev2) = prev2 {
+            let mut restore = true;
             match db.load_block_prev2(id) {
-                Ok(prev2_db) => {
-                    if prev2_db != prev2 {
-                        log::warn!("Block {} has real prev {}, but in db {}, restore", id, prev2, prev2_db);
-                        let mut value = Vec::new();
-                        prev1.serialize(&mut value)?;
-                        db.prev1_block_db.put(id, &value)?;
-                        if handle.set_prev2() {
-                            db.store_block_handle(&handle, None)?;
-                        }
-                    }
+                Ok(Some(prev2_db)) => if prev2_db != prev2 {
+                    log::warn!(
+                        "Block {} has real prev {}, but in db {}, restore", 
+                        id, prev2, prev2_db
+                    )
+                } else {
+                    restore = false
                 },
-                Err(e) => {
-                    log::warn!("Block {} has no prev2 in db ({}), restore", e, id);
-                    let mut value = Vec::new();
-                    prev1.serialize(&mut value)?;
-                    db.prev1_block_db.put(id, &value)?;
-                    if handle.set_prev2() {
-                        db.store_block_handle(&handle, None)?;
-                    }
+                Ok(None) => log::warn!("Block {} has no prev2 in db, restore", id),
+                Err(e) => log::warn!("Block {} prev2 read error: {}, restore", e, id)
+            };
+            if restore {
+                let mut value = Vec::new();
+                prev2.serialize(&mut value)?;
+                db.prev2_block_db.put(id, &value)?;
+                if handle.set_prev2() {
+                    db.store_block_handle(&handle, None)?;
                 }
             }
             if !handle.has_prev2() {
@@ -801,7 +798,7 @@ async fn restore_states(
     for id in mc_state.top_blocks(processed_wc)? {
         let pers_root = db.load_shard_state_persistent(&id, &abort).await?.root_cell().clone();
 
-        if let Ok(next_id2) = db.load_block_next2(&id) {
+        if let Ok(Some(next_id2)) = db.load_block_next2(&id) {
             run_chain_restore(
                 db, 
                 pers_root.clone(), 
@@ -932,21 +929,9 @@ async fn restore_chain(
         //     return Ok(None);
         // }
 
-        // analize next block...
+        // analyze next block...
         match (db.load_block_next1(&block_id), db.load_block_next2(&block_id)) {
-            (Ok(next_id), Err(_)) => {
-                if next_id.shard() == block_id.shard() {
-                    // next block is not afrer split or merge - continue this loop
-                    prev_state_root = state_root;
-                    block_id = next_id;
-                    continue;
-                } else {
-                    // next block is after split, return to before split loop (see below)
-                    log::debug!("restore_chain: returns - afrer merge block {}", next_id);
-                    return Ok(Some((state_root, store_states, block_id, next_id)))
-                }
-            }
-            (Ok(next_id_1), Ok(next_id_2)) => {
+            (Ok(next_id_1), Ok(Some(next_id_2))) => {
                 // before split, create two cycles recursively
                 let r1 = restore_chain(
                     db,
@@ -975,7 +960,7 @@ async fn restore_chain(
                         // afrer merge - check ids and continue this loop
 
                         if block_id1 != block_id2 {
-                            fail!("restore_chain: afrer merge there are two different blocks {} and {}", 
+                            fail!("restore_chain: after merge there are two different blocks {} and {}", 
                                 block_id1, block_id2);
                         }
 
@@ -987,7 +972,25 @@ async fn restore_chain(
                         fail!("restore_chain: recursive calls returned {:?} and {:?}", r1, r2)
                     }
                 }
-            }
+            },
+            (Ok(next_id), next2_id) => {
+                if let Err(e) = next2_id {
+                    log::warn!(
+                        "restore_chain: error reading next2 block for {}, {}", 
+                        block_id, e
+                    )
+                }
+                if next_id.shard() == block_id.shard() {
+                    // next block is not afrer split or merge - continue this loop
+                    prev_state_root = state_root;
+                    block_id = next_id;
+                    continue;
+                } else {
+                    // next block is after split, return to before split loop (see below)
+                    log::debug!("restore_chain: returns - after merge block {}", next_id);
+                    return Ok(Some((state_root, store_states, block_id, next_id)))
+                }
+            },
             _ => {
                 log::debug!("restore_chain: returns - no next block for {}", block_id);
                 return Ok(None)

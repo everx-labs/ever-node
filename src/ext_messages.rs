@@ -248,7 +248,7 @@ pub fn create_ext_message(data: &[u8]) -> Result<(UInt256, Message)> {
     if root.repr_depth() >= MAX_EXTERNAL_MESSAGE_DEPTH {
         fail!("External message {:x} is too deep: {}", root.repr_hash(), root.repr_depth())
     }
-    let message = Message::construct_from(&mut root.clone().into())?;
+    let message = Message::construct_from_cell(root.clone())?;
     if let Some(header) = message.ext_in_header() {
         if header.dst.rewrite_pfx().is_some() {
             fail!("External inbound message {:x} contains anycast info - it is not supported", root.repr_hash())

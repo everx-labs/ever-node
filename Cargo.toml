@@ -2,7 +2,10 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ton_node'
-version = '0.51.8'
+version = '0.51.35'
+
+[workspace]
+members = [ 'storage' ]
 
 [[bin]]
 name = 'db_lookup'
@@ -12,15 +15,9 @@ path = 'bin/db_lookup.rs'
 name = 'hardfork'
 path = 'bin/hardfork.rs'
 
-[workspace]
-members = [ 'storage' ]
-
-[profile]
-release = { debug = true }
-
 [dependencies]
-async-trait = '0.1.22'
 async-recursion = '0.3.2'
+async-trait = '0.1.22'
 base64 = '0.13'
 bitflags = '1.2.1'
 chrono = '=0.4.19'
@@ -28,7 +25,6 @@ clap = '2.33.1'
 colored = '1.9.3'
 crc32c = "0.4"
 crossbeam-channel = '0.4.2'
-ctrlc = { features = [ 'termination' ], version = '3.2.1' }
 deflate = "1.0.0"
 dirs = '2.0.2'
 env_logger = '0.7.1'
@@ -39,7 +35,7 @@ hex = '0.4'
 inflate = "0.4.5"
 lazy_static = '1.4.0'
 log = '0.4'
-log4rs = '1'
+log4rs = '1.2'
 log4rs-rolling-file = '0.2.0'
 num-bigint = '0.4'
 openssl = '0.10.35'
@@ -52,86 +48,106 @@ sha2 = '0.10'
 spin = '0.7.1'
 stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.77' }
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ever-adnl', tag = '0.7.131' }
 catchain = { path = 'catchain' }
-dht = { git = 'https://github.com/tonlabs/ton-labs-dht', tag = '0.5.74' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', branch = 'consensus-updates' }
+ctrlc = { features = [ 'termination' ], version = '3.2.1' }
+dht = { git = 'https://github.com/tonlabs/ever-dht', tag = '0.5.141' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-crypto', branch = 'consensus-updates' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', branch = 'consensus-updates' }
-rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.71' }
-rustracing = { optional = true, version = '0.4.0' }
-rustracing_jaeger = { optional = true, version = '0.4.1' }
-statsd = { optional = true, version = '0.15' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay', branch = 'consensus-updates' }
+rldp = { git = 'https://github.com/tonlabs/ever-rldp', tag = '0.7.125' }
+rustracing = { version = '0.4.0', optional = true }
+rustracing_jaeger = { version = '0.4.1', optional = true }
+statsd = { version = '0.15', optional = true }
 storage = { path = 'storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_abi = { git = 'https://github.com/tonlabs/ton-labs-abi.git', tag = '2.3.7' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', branch = 'consensus-updates' }
-ton_block = { git = 'https://github.com/tonlabs/ton-labs-block', branch = 'consensus-updates' }
-ton_block_json = { git = 'https://github.com/tonlabs/ton-labs-block-json.git', branch = 'consensus-updates' }
-ton_executor = { git = 'https://github.com/tonlabs/ton-labs-executor', tag = '1.15.86' }
-ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.11.4' }
-ton_vm = { git = 'https://github.com/tonlabs/ton-labs-vm', branch = 'consensus-updates' }
+ton_abi = { git = 'https://github.com/tonlabs/ever-abi.git', tag = '2.3.65' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl', package = 'ton_api', branch = 'consensus-updates' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block', branch = 'consensus-updates' }
+ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git', branch = 'consensus-updates' }
+ton_executor = { git = 'https://github.com/tonlabs/ever-executor', tag = '1.15.175' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types', tag = '1.12.7' }
+ton_vm = { git = 'https://github.com/tonlabs/ever-vm', branch = 'consensus-updates' }
 validator_session = { path = 'validator-session' }
 #metrics-core = { version = "0.5.2", optional = true } #todo: enable after migration to rust 1.60
 #metrics-runtime = { version = "0.13.0", optional = true } #todo: enable after migration to rust 1.60
 metrics-core = { version = "0.5.2" }
 metrics-runtime = { version = "0.13.0" }
-ever_bls_lib = { git = 'https://github.com/tonlabs/ever-labs-bls-lib.git', tag = '0.1.24' } #todo: make optional for verification feature
+ever_bls_lib = { git = 'https://github.com/tonlabs/ever-labs-bls-lib.git', tag = '0.1.44' } #todo: make optional for verification feature
+
+[dev-dependencies]
+difference = '2.0'
+ed25519-dalek = '1.0.1'
+external-ip = '4.1.0'
+pretty_assertions = '1.3'
+rand = '0.7'
+tokio = { features = [ 'macros' ], version = '1.5' }
+
+[features]
+async_ss_storage = [ 'storage/ref_count_gc' ]
+ci_run = [ 'storage/ci_run' ]
+default = [ 'telemetry', 'async_ss_storage', 'verification' ]
+export_key = [ 'catchain/export_key', 'ever-crypto/export_key' ]
+external_db = [ 'rdkafka' ]
+gosh = [ 'ton_block/gosh', 'ton_vm/gosh' ]
+metrics = [ 'statsd' ]
+signature_with_id = [ 'ton_block/signature_with_id', 'ton_vm/signature_with_id', 'ton_executor/signature_with_id' ]
+slashing = [ 'validator_session/slashing' ]
+telemetry = [ 'adnl/telemetry', 'dht/telemetry', 'rldp/telemetry', 'overlay/telemetry', 'storage/telemetry' ]
+verification = [ 'ever-crypto/export_key' ]
+#verification = ["dep:metrics-core", "dep:metrics-runtime"] #todo: enable after migration to rust 1.60
+trace_alloc = [  ]
+trace_alloc_detail = [ 'trace_alloc' ]
+tracing = [ 'rustracing', 'rustracing_jaeger' ]
+workchains = [  ]
+
+[profile]
+release = { debug = true }
 
 [target.'cfg(unix)'.dependencies.rdkafka]
 optional = true
 version = '0.26.0'
 
 [target.'cfg(windows)'.dependencies.rdkafka]
-features = [ 'cmake_build' ]
+features = ['cmake_build']
 optional = true
 version = '0.26.0'
 
-[dev-dependencies]
-difference = '2.0'
-ed25519-dalek = '1.0.1'
-external-ip = '4.1.0'
-pretty_assertions = '1'
-rand = '0.7'
-tokio = { features = [ 'macros' ], version = '1.5' }
+[patch.'https://github.com/tonlabs/ever-types.git']
+ton_types = { git = 'https://git@github.com:443/tonlabs/ever-types.git', tag = '1.12.7' }
 
-[features]
-default = [ 'telemetry', 'async_ss_storage', 'verification' ]
-external_db = [ 'rdkafka' ]
-ci_run = [ 'storage/ci_run' ]
-export_key = [ 'catchain/export_key', 'ever-crypto/export_key' ]
-metrics = [ 'statsd' ]
-slashing = [  ]
-#verification = ["dep:metrics-core", "dep:metrics-runtime"] #todo: enable after migration to rust 1.60
-verification = [ 'ever-crypto/export_key' ]
-telemetry = [
-    'adnl/telemetry',
-    'dht/telemetry',
-    'rldp/telemetry',
-    'overlay/telemetry',
-    'storage/telemetry'
-]
-trace_alloc_detail = [ 'trace_alloc' ]
-trace_alloc = [  ]
-tracing = [ 'rustracing', 'rustracing_jaeger' ]
-async_ss_storage = [ 'storage/ref_count_gc' ]
-workchains = [  ]
-gosh = [ 'ton_block/gosh', 'ton_vm/gosh' ]
+[patch.'https://github.com/tonlabs/ton-labs-types.git']
+ton_types = { git = 'https://git@github.com:443/tonlabs/ever-types.git', tag = '1.12.7' }
+
+[patch.'https://github.com/tonlabs/ever-block.git']
+ton_block = { git = 'https://github.com:443//tonlabs/ever-block.git', branch = 'consensus-updates' }
 
 [patch.'https://github.com/tonlabs/ton-labs-block.git']
-ton_block = { git = 'https://github.com:443//tonlabs/ton-labs-block.git', branch = 'consensus-updates' }
+ton_block = { git = 'https://github.com:443//tonlabs/ever-block.git', branch = 'consensus-updates' }
 
-[patch.'https://github.com/tonlabs/ton-labs-block-json.git']
-ton_block_json = { git = 'https://github.com:443//tonlabs/ton-labs-block-json', branch = 'consensus-updates' }
+[patch.'https://github.com/tonlabs/ever-block-json.git']
+ton_block_json = { git = 'https://github.com:443//tonlabs/ever-block-json', branch = 'consensus-updates' }
 
-[patch.'https://github.com/tonlabs/ton-labs-tl']
-ton_api = { git = 'https://github.com:443//tonlabs/ton-labs-tl', package = 'ton_api', branch = 'consensus-updates' }
+[patch.'https://github.com/tonlabs/ever-tl.git']
+ton_api = { git = 'https://github.com:443//tonlabs/ever-tl', package = 'ton_api', branch = 'consensus-updates' }
+
+[patch.'https://github.com/tonlabs/ever-crypto']
+ever-crypto = { git = 'https://github.com:443//tonlabs/ever-crypto', branch = 'consensus-updates' }
 
 [patch.'https://github.com/tonlabs/ever-labs-crypto']
-ever-crypto = { git = 'https://github.com:443//tonlabs/ever-labs-crypto', branch = 'consensus-updates' }
+ever-crypto = { git = 'https://github.com:443//tonlabs/ever-crypto', branch = 'consensus-updates' }
 
-[patch.'https://github.com/tonlabs/ton-labs-vm']
-ton_vm = { git = 'https://github.com:443//tonlabs/ton-labs-vm', branch = 'consensus-updates' }
+[patch.'https://github.com/tonlabs/ever-vm.git']
+ton_vm = { git = 'https://github.com:443//tonlabs/ever-vm', branch = 'consensus-updates' }
 
-[patch.'https://github.com/tonlabs/ton-labs-overlay']
-overlay = { git = 'https://github.com:443//tonlabs/ton-labs-overlay', branch = 'consensus-updates' }
+[patch.'https://github.com/tonlabs/ever-adnl.git']
+adnl = { git = 'https://github.com:443//tonlabs/ever-adnl', tag = '0.7.131' }
+
+[patch.'https://github.com/tonlabs/ton-labs-adnl.git']
+adnl = { git = 'https://github.com:443//tonlabs/ever-adnl', tag = '0.7.131' }
+
+[patch.'https://github.com/tonlabs/ever-rldp.git']
+rldp = { git = 'https://github.com:443//tonlabs/ever-rldp', tag = '0.7.125' }
+
+[patch.'https://github.com/tonlabs/ton-labs-rldp.git']
+rldp = { git = 'https://github.com:443//tonlabs/ever-rldp', tag = '0.7.125' }

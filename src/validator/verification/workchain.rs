@@ -793,7 +793,7 @@ impl Workchain {
 
         let wc_pub_key_refs: Vec<&[u8; BLS_PUBLIC_KEY_LEN]> = self.wc_pub_keys.iter().map(|x| x).collect();
 
-        let candidate_id: UInt256 = block_status.candidate_id.into();
+        let candidate_id: UInt256 = block_status.candidate_id.clone().into();
         let deliveries_signature = MultiSignature::deserialize(1, &candidate_id, &wc_pub_key_refs, &block_status.deliveries_signature);
         let approvals_signature = MultiSignature::deserialize(2, &candidate_id, &wc_pub_key_refs, &block_status.approvals_signature);
         let rejections_signature = MultiSignature::deserialize(3, &candidate_id, &wc_pub_key_refs, &block_status.rejections_signature);
@@ -927,9 +927,10 @@ impl Workchain {
                         collated_file_hash: block_candidate
                             .candidate()
                             .collated_data_file_hash
+                            .clone()
                             .into(),
                         collated_data: block_candidate.candidate().collated_data.to_vec().into(),
-                        created_by: block_candidate.candidate().created_by.into(),
+                        created_by: block_candidate.candidate().created_by.clone().into(),
                     };
 
                     let verification_status = verification_listener.verify(&candidate).await;
@@ -999,7 +1000,7 @@ impl WorkchainOverlayListener for Workchain {
         block_status: BlockCandidateStatus,
         received_from_workchain: bool,
     ) -> Result<BlockPtr> {
-        let candidate_id: UInt256 = block_status.candidate_id.into();
+        let candidate_id: UInt256 = block_status.candidate_id.clone().into();
         let _hang_checker = HangCheck::new(self.runtime.clone(), format!("Workchain::on_workchain_block_status_updated: {} for workchain {}", candidate_id, self.node_debug_id), Duration::from_millis(1000));
 
         self.process_block_status(block_status, received_from_workchain)

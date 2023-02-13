@@ -34,6 +34,8 @@ pub mod validating_utils;
 pub mod validator;
 pub mod shard_states_keeper;
 
+include!("../common/src/info.rs");
+
 #[cfg(feature = "tracing")]
 pub mod jaeger;
 

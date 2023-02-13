@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -17,7 +17,6 @@ use crate::{
     engine::{Engine, STATSD},
     engine_traits::{
         ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, Server, 
-        ValidatedBlockStat
     },
     error::NodeError,
     internal_db::{
@@ -30,6 +29,8 @@ use crate::{
     jaeger,
     validator::candidate_db::CandidateDb,
 };
+#[cfg(feature = "slashing")]
+use crate::validator::slashing::ValidatedBlockStat;
 #[cfg(feature = "telemetry")]
 use crate::{
     engine_traits::EngineTelemetry, full_node::telemetry::FullNodeTelemetry, 
@@ -571,7 +572,7 @@ impl EngineOperations for Engine {
         self.db().store_block_prev2(handle, prev2, None)
     }
 
-    fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_prev2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         self.db().load_block_prev2(id)
     }
 
@@ -587,7 +588,7 @@ impl EngineOperations for Engine {
         self.db().store_block_next2(handle, next2, None)
     }
 
-    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         self.db().load_block_next2(id)
     }
 
@@ -718,11 +719,11 @@ impl EngineOperations for Engine {
     }
 
     async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
-        self.db().archive_manager().get_archive_id(mc_seq_no).await
+        self.db().get_archive_id(mc_seq_no).await
     }
 
     async fn get_archive_slice(&self, archive_id: u64, offset: u64, limit: u32) -> Result<Vec<u8>> {
-        self.db().archive_manager().get_archive_slice(archive_id, offset, limit).await
+        self.db().get_archive_slice(archive_id, offset, limit).await
     }
 
     async fn download_archive(
@@ -861,14 +862,14 @@ impl EngineOperations for Engine {
         self.tps_counter().calc_tps(period)
     }
 
+    #[cfg(feature = "slashing")]
     fn push_validated_block_stat(&self, stat: ValidatedBlockStat) -> Result<()> {
-        self.validated_block_stats_sender().try_send(stat)?;
-        Ok(())
+        Ok(self.validated_block_stats_sender().try_send(stat)?)
     }
 
+    #[cfg(feature = "slashing")]
     fn pop_validated_block_stat(&self) -> Result<ValidatedBlockStat> {
-        let result = self.validated_block_stats_receiver().try_recv()?;
-        Ok(result)
+        Ok(self.validated_block_stats_receiver().try_recv()?)
     }
 
     fn adjust_states_gc_interval(&self, interval_ms: u32) {

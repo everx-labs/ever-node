@@ -219,7 +219,7 @@ impl MultiSignature {
 
     /// Create new signature
     pub fn new(type_id: u8, candidate_id: UInt256) -> Self {
-        let msg: [u8; 32] = candidate_id.clone().into();
+        let msg: [u8; 32] = candidate_id.as_array().clone().into();
         let mut msg = msg.to_vec();
 
         msg.push(type_id);        

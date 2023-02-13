@@ -123,7 +123,7 @@ impl EngineOperations for TestEngine {
         self.db.load_block_prev1(id)
     }
 
-    fn load_block_prev2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_prev2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         self.db.load_block_prev2(id)
     }
 
@@ -131,7 +131,7 @@ impl EngineOperations for TestEngine {
         self.db.load_block_next1(id)
     }
 
-    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         self.db.load_block_next2(id)
     }
 

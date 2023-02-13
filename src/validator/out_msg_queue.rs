@@ -145,9 +145,10 @@ impl OutMsgQueueInfoStuff {
             let key = OutMsgQueueKey::with_workchain_id_and_prefix(
                 0, 
                 0x5777784F96FB1CFFu64,
-                UInt256::from_str("05aa297e3a2e003e1449e1297742d64f188985dc029c620edc84264f9786c0c3").unwrap()
+                "05aa297e3a2e003e1449e1297742d64f188985dc029c620edc84264f9786c0c3".parse().unwrap()
             );
-            out_queue.remove(key.serialize()?.into()).unwrap();
+            let key = SliceData::load_builder(key.write_to_new_cell()?)?;
+            out_queue.remove(key)?;
         }
 
 
@@ -206,7 +207,8 @@ impl OutMsgQueueInfoStuff {
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
             if !subshard.contains_full_prefix(enq.cur_prefix()) {
-                out_queue.set_builder_serialized(key.clone().into_cell()?.into(), &BuilderData::from_slice(&value), &lt)?;
+                let key = SliceData::load_builder(key.clone())?;
+                out_queue.set_builder_serialized(key, &BuilderData::from_slice(&value), &lt)?;
                 Ok(HashmapFilterResult::Remove)
             } else {
                 Ok(HashmapFilterResult::Accept)
@@ -328,8 +330,8 @@ impl OutMsgQueueInfoStuff {
     }
 
     pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<()> {
-        if self.out_queue.remove(key.serialize()?.into())?.is_none() {
-            fail!("error deleting from out_msg_queue dictionary: {:x}", key.hash)
+        if self.out_queue.remove(SliceData::load_builder(key.write_to_new_cell()?)?)?.is_none() {
+            fail!("error deleting from out_msg_queue dictionary: {:x}", key)
         }
         Ok(())
     }
@@ -929,7 +931,7 @@ impl MsgQueueMergerIterator {
             let mut out_queue_short = nb.out_queue.clone();
             out_queue_short.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
             if let Some(root) = out_queue_short.data() {
-                let mut cursor = SliceData::from(root);
+                let mut cursor = SliceData::load_cell_ref(root)?;
                 let mut bit_len = out_queue_short.bit_len();
                 let key = cursor.get_label_raw(&mut bit_len, BuilderData::default())?;
                 let lt = cursor.get_next_u64()?;
@@ -956,7 +958,7 @@ impl MsgQueueMergerIterator {
             }
             for idx in 0..2 {
                 let mut bit_len = root.bit_len - 1;
-                let mut cursor = SliceData::from(root.cursor.reference(idx)?);
+                let mut cursor = SliceData::load_cell(root.cursor.reference(idx)?)?;
                 let mut key = root.key.clone();
                 key.append_bit_bool(idx == 1)?;
                 key = cursor.get_label_raw(&mut bit_len, key)?;

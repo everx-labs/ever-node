@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -13,8 +13,9 @@
 
 use crate::{
     db::traits::{
-        DbKey, Kvc, KvcReadable, KvcSnapshotable, KvcTransaction, KvcTransactional, KvcWriteable
+        DbKey, Kvc, KvcReadable, KvcSnapshotable, KvcTransaction, KvcTransactional, KvcWriteable,
     },
+    traits::Serializable,
     types::DbSlice
 };
 use adnl::common::add_unbound_object_to_map;
@@ -23,9 +24,14 @@ use rocksdb::{
     Options, SnapshotWithThreadMode, WriteBatch
 };
 use std::{
-    fmt::{Debug, Formatter}, ops::Deref, path::Path, sync::{Arc, atomic::{AtomicI32, Ordering}}
+    fmt::{Debug, Formatter}, ops::Deref, path::Path, sync::{Arc, atomic::{AtomicI32, Ordering}},
+    io::Cursor,
 };
-use ton_types::{fail, Result};
+use ton_types::{fail, error, Result};
+use ton_block::BlockIdExt;
+
+pub const LAST_UNNEEDED_KEY_BLOCK: &str = "LastUnneededKeyBlockId"; // Latest key block we can delete in archives GC
+pub const NODE_STATE_DB_NAME: &str = "node_state_db";
 
 #[derive(Debug)]
 pub struct RocksDb {
@@ -36,12 +42,12 @@ pub struct RocksDb {
 impl RocksDb {
 
     /// Creates new instance with given path
-    pub fn with_path(path: &str, name: &str) -> Arc<Self> {
+    pub fn with_path(path: &str, name: &str) -> Result<Arc<Self>> {
         Self::with_options(path, name, |_| {}, false)
     }
 
     /// Creates new instance read only with given path
-    pub fn read_only(path: &str, name: &str) -> Arc<Self> {
+    pub fn read_only(path: &str, name: &str) -> Result<Arc<Self>> {
         Self::with_options(path, name, |_| {}, true)
     }
 
@@ -51,7 +57,7 @@ impl RocksDb {
         name: &str,
         configure_options: impl Fn(&mut Options), 
         read_only: bool
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>> {
 
         let path = Path::new(path);
         let path = path.join(name);
@@ -80,43 +86,92 @@ impl RocksDb {
 
         configure_options(&mut options);
 
-        let cfs = DBWithThreadMode::<MultiThreaded>::list_cf(&options, &path)
-            .unwrap_or(Vec::new());
-/*
-        if cfs.is_empty() {
-            // we must add at least default column to add other columns in future
-            cfs.push("default".to_string());
+        let mut iteration = 1;
+        loop {
+
+            let cfs = DBWithThreadMode::<MultiThreaded>::list_cf(&options, &path)
+                .unwrap_or_default();
+
+            log::info!(
+                target: "storage",
+                "Opening DB {} (read only: {}) with {} cfs (iteration {})",
+                name, read_only, cfs.len(), iteration
+            );
+            iteration += 1;
+
+            let db = if read_only {
+                DBWithThreadMode::<MultiThreaded>::open_cf_for_read_only(&options, &path, cfs.clone(), false)?
+            } else {
+                DBWithThreadMode::<MultiThreaded>::open_cf(&options, &path, cfs.clone())?
+            };
+
+
+            // 
+            // Clean up CF from old archives
+            //
+            if !read_only && cfs.len() > 100 && iteration <= 3 {
+                if Self::clean_up_old_cf(&db, &cfs)
+                    .map_err(|e| error!("Error while clean_up_old_cf: {}", e))? 
+                {
+                    drop(db);
+                    continue;
+                }
+            }
+
+            let db = Self {
+                db: Some(db),
+                locks: lockfree::map::Map::new()
+            };
+            return Ok(Arc::new(db))
         }
-        let db = DBWithThreadMode::<MultiThreaded>::open_cf(&options, &path, cfs);
-*/
-        let db = if read_only {
-            DBWithThreadMode::<MultiThreaded>::open_cf_for_read_only(&options, &path, cfs, false)
-        } else {
-            DBWithThreadMode::<MultiThreaded>::open_cf(&options, &path, cfs)
-        };
-        let db = db.unwrap_or_else(
-            |err| panic!("Cannot open DB {:?}: {}", path, err)
-        );
-        let db = Self {
-            db: Some(db),
-            locks: lockfree::map::Map::new()
-        };
-        Arc::new(db)
     }
 
-    pub fn table(self: Arc<Self>, family: impl ToString) -> Result<RocksDbTable> {
-        RocksDbTable::with_db(self, family)
+    fn clean_up_old_cf(db: &DBWithThreadMode<MultiThreaded>, cfs: &[String]) -> Result<bool> {
+
+        if let Some(cf) = db.cf_handle(NODE_STATE_DB_NAME) {
+            if let Ok(Some(db_slice)) = db.get_pinned_cf(&cf, LAST_UNNEEDED_KEY_BLOCK) {
+                let mut cursor = Cursor::new(db_slice.as_ref());
+                let id = BlockIdExt::deserialize(&mut cursor)?;
+                let prefixes = ["entry_meta_db_", "offsets_db_", "status_db_"];
+
+                log::info!(target: "storage", "Read last unneeded key block: {}", id.seq_no());
+
+                for cf_name in cfs {
+                    for pfx in &prefixes {
+                        if cf_name.contains(pfx) {
+                            let num = u32::from_str_radix(&cf_name.replace(pfx, ""), 10).unwrap_or(u32::MAX);
+                            if num < id.seq_no() {
+                                log::warn!(target: "storage", "Dropping old CF {}", cf_name);
+                                let result = db.drop_cf(cf_name);
+                                log::warn!(target: "storage", "Dropped old CF {}: {:?}", cf_name, result);
+                            }
+                            break;
+                        }
+                    }
+                }
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn table(
+        self: Arc<Self>,
+        family: impl ToString,
+        create_if_not_exist: bool,
+    ) -> Result<RocksDbTable> {
+        RocksDbTable::with_db(self, family, create_if_not_exist)
     }
 
     fn db(&self) -> &DBWithThreadMode<MultiThreaded> {
         self.db.as_ref().expect("rocksdb was occasionaly destroyed")
     }
 
-    fn create_cf(&self, name: &str) {
+    // Error is occured if column family is already created
+    fn create_cf(&self, name: &str) -> Result<()> {
         let opts = Options::default();
-        self.db().create_cf(name, &opts).ok();
-        // error is occured if column family is created twice
-        //    .unwrap_or_else(|err| panic!("unable to create column family {} for rocksdb : {}", name, err));
+        self.db().create_cf(name, &opts)?;
+        Ok(())
     }
 
     pub fn drop_table(&self, name: &str) -> Result<bool> {
@@ -141,9 +196,9 @@ impl RocksDb {
         Ok(())
     }
 
-    fn cf(&self, name: &str) -> Arc<BoundColumnFamily> {
+    fn cf(&self, name: &str) -> Result<Arc<BoundColumnFamily>> {
         self.db().cf_handle(name)
-            .unwrap_or_else(|| panic!("no handle for column family {} in rocksdb", name))
+            .ok_or_else(|| error!("no handle for column family {} in rocksdb", name))
     }
 
     pub fn destroy_db(path: impl AsRef<Path>) -> Result<bool> {
@@ -236,18 +291,28 @@ pub struct RocksDbTable {
 
 impl RocksDbTable {
 
-    pub(crate) fn with_db(db: Arc<RocksDb>, family: impl ToString) -> Result<Self> {
+    pub(crate) fn with_db(
+        db: Arc<RocksDb>,
+        family: impl ToString,
+        create_if_not_exist: bool,
+    ) -> Result<Self> {
         let family = family.to_string();
         loop {
             if db.locks.get(&family).is_some() {
                 break
+            }
+            if let Err(e) = db.cf(&family) {
+                if create_if_not_exist {
+                    db.create_cf(&family)?;
+                } else {
+                    fail!(e)
+                }
             }
             add_unbound_object_to_map(
                 &db.locks, 
                 family.clone(), 
                 || Ok(AtomicI32::new(0))
             )?;
-            db.create_cf(&family);
         }
         let ret = Self {
             db,
@@ -256,7 +321,7 @@ impl RocksDbTable {
         Ok(ret)
     }
 
-    fn cf(&self) -> Arc<BoundColumnFamily> {
+    fn cf(&self) -> Result<Arc<BoundColumnFamily>> {
         self.db.cf(&self.family)
     }
 
@@ -280,7 +345,7 @@ impl Kvc for RocksDbTable {
 
     fn len(&self) -> Result<usize> {
         // be careful in usual code
-        Ok(self.db.iterator_cf(&self.cf(), IteratorMode::Start).count())
+        Ok(self.db.iterator_cf(&self.cf()?, IteratorMode::Start).count())
     }
 
     fn destroy(&mut self) -> Result<bool> {
@@ -299,7 +364,7 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbTable {
         if let Some(lock) = self.db.locks.get(&self.family) {
             let lock = lock.val();
             if lock.fetch_add(1, Ordering::Relaxed) >= 0 {
-                let ret = self.db.get_pinned_cf(&self.cf(), key.key());
+                let ret = self.db.get_pinned_cf(&self.cf()?, key.key());
                 lock.fetch_sub(1, Ordering::Relaxed);
                 return Ok(ret?.map(|value| value.into()))
             }
@@ -311,7 +376,7 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbTable {
         if let Some(lock) = self.db.locks.get(&self.family) {
             let lock = lock.val();
             if lock.fetch_add(1, Ordering::Relaxed) >= 0 {
-                for iter in self.db.iterator_cf(&self.cf(), IteratorMode::Start) {
+                for iter in self.db.iterator_cf(&self.cf()?, IteratorMode::Start) {
                     let (key, value) = iter?;
                     match predicate(key.as_ref(), value.as_ref()) {
                         Ok(false) => {
@@ -341,7 +406,7 @@ impl<K: DbKey + Send + Sync> KvcWriteable<K> for RocksDbTable {
         if let Some(lock) = self.db.locks.get(&self.family) {
             let lock = lock.val();
             if lock.fetch_add(1, Ordering::Relaxed) >= 0 {
-                let ret = self.db.put_cf(&self.cf(), key.key(), value);
+                let ret = self.db.put_cf(&self.cf()?, key.key(), value);
                 lock.fetch_sub(1, Ordering::Relaxed);
                 return Ok(ret?)
             }
@@ -353,7 +418,7 @@ impl<K: DbKey + Send + Sync> KvcWriteable<K> for RocksDbTable {
         if let Some(lock) = self.db.locks.get(&self.family) {
             let lock = lock.val();
             if lock.fetch_add(1, Ordering::Relaxed) >= 0 {
-                let ret = self.db.delete_cf(&self.cf(), key.key());
+                let ret = self.db.delete_cf(&self.cf()?, key.key());
                 lock.fetch_sub(1, Ordering::Relaxed);
                 return Ok(ret?)
             }
@@ -389,7 +454,7 @@ impl<'db> RocksDbSnapshot<'db> {
             family,
         }
     }
-    fn cf(&self) -> Arc<BoundColumnFamily> {
+    fn cf(&self) -> Result<Arc<BoundColumnFamily>> {
         self.db.cf(&self.family)
     }
 }
@@ -411,10 +476,10 @@ impl Kvc for RocksDbSnapshot<'_> {
 
 impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbSnapshot<'_> {
     fn try_get(&self, key: &K) -> Result<Option<DbSlice>> {
-        Ok(self.snapshot.get_cf(&self.cf(), key.key())?.map(|value| value.into()))
+        Ok(self.snapshot.get_cf(&self.cf()?, key.key())?.map(|value| value.into()))
     }
     fn for_each(&self, predicate: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool>) -> Result<bool> {
-        for iter in self.snapshot.iterator_cf(&self.cf(), IteratorMode::Start) {
+        for iter in self.snapshot.iterator_cf(&self.cf()?, IteratorMode::Start) {
             let (key, value) = iter?;
             if !predicate(key.as_ref(), value.as_ref())? {
                 return Ok(false);
@@ -448,22 +513,24 @@ impl RocksDbTransaction {
             family,
         }
     }
-    fn cf(&self) -> Arc<BoundColumnFamily> {
+    fn cf(&self) -> Result<Arc<BoundColumnFamily>> {
         self.db.cf(&self.family)
     }
 }
 
 impl<'db, K: DbKey + Send + Sync> KvcTransaction<K> for RocksDbTransaction {
-    fn put(&mut self, key: &K, value: &[u8]) {
+    fn put(&mut self, key: &K, value: &[u8]) -> Result<()> {
         let mut batch = self.batch.take().unwrap();
-        batch.put_cf(&self.cf(), key.key(), value);
+        batch.put_cf(&self.cf()?, key.key(), value);
         self.batch = Some(batch);
+        Ok(())
     }
 
-    fn delete(&mut self, key: &K) {
+    fn delete(&mut self, key: &K) -> Result<()> {
         let mut batch = self.batch.take().unwrap();
-        batch.delete_cf(&self.cf(), key.key());
+        batch.delete_cf(&self.cf()?, key.key());
         self.batch = Some(batch);
+        Ok(())
     }
 
     fn clear(&mut self) {
@@ -471,7 +538,6 @@ impl<'db, K: DbKey + Send + Sync> KvcTransaction<K> for RocksDbTransaction {
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
-        self.db.create_cf(&self.family);
         Ok(self.db.write(self.batch.unwrap())?)
     }
 

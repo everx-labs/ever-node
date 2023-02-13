@@ -43,7 +43,9 @@ where
 }
 
 impl PackageEntryId<BlockIdExt, UInt256, UInt256> {
+
     pub fn from_filename(filename: &str) -> Result<Self> {
+
         if filename == PackageEntryId::<BlockIdExt, UInt256, UInt256>::Empty.filename_prefix() {
             return Ok(PackageEntryId::Empty);
         }
@@ -121,8 +123,9 @@ impl PackageEntryId<BlockIdExt, UInt256, UInt256> {
         ) {
             fail!("Unsupported from_filename() for PackageEntryId::Candidate");
         }
-        
+
         fail!("Cannot parse filename: {}", filename)
+    
     }
 
     fn parse_block_ids(filename: &str, dummy: PackageEntryId<&BlockIdExt, UInt256, UInt256>, count: usize) -> Result<Option<Vec<BlockIdExt>>> {

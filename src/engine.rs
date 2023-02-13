@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -17,7 +17,7 @@ use crate::{
     config::{TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig},
     engine_traits::{
         ExternalDb, EngineAlloc, EngineOperations,
-        OverlayOperations, PrivateOverlayOperations, Server, ValidatedBlockStat,
+        OverlayOperations, PrivateOverlayOperations, Server,
     },
     full_node::{
         self,
@@ -50,9 +50,9 @@ use crate::{
     boot,
 };
 #[cfg(feature = "slashing")]
-use crate::{
-    engine_traits::ValidatedBlockStatNode,
-    validator::validator_utils::calc_subset_for_workchain,
+use crate::validator::{
+    slashing::{ValidatedBlockStat, ValidatedBlockStatNode},
+    validator_utils::calc_subset_for_workchain,
 };
 use crate::network::node_network::NodeNetwork;
 #[cfg(feature = "external_db")]
@@ -86,13 +86,14 @@ use ton_block::{
 };
 use ton_types::{error, fail, Cell, Result};
 #[cfg(feature = "slashing")]
-use ton_types::UInt256;
+use ton_types::{UInt256, HashmapType};
 use ton_api::ton::ton_node::{
     Broadcast, broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}
 };
 use ever_crypto::KeyId;
+#[cfg(feature = "slashing")]
 use crossbeam_channel::{Sender, Receiver};
-
+#[cfg(feature = "slashing")]
 const MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT: usize = 10000; //maximum number of validated block stats entries in engine's queue
 
 pub struct Engine {
@@ -128,7 +129,9 @@ pub struct Engine {
 
     validation_status: lockfree::map::Map<ShardIdent, u64>,
     collation_status: lockfree::map::Map<ShardIdent, u64>,
+    #[cfg(feature = "slashing")]
     validated_block_stats_sender: Sender<ValidatedBlockStat>,
+    #[cfg(feature = "slashing")]
     validated_block_stats_receiver: Receiver<ValidatedBlockStat>,
 
     #[cfg(feature = "telemetry")]
@@ -643,6 +646,7 @@ impl Engine {
 
         log::info!("Engine is created.");
 
+        #[cfg(feature = "slashing")]
         let (validated_block_stats_sender, validated_block_stats_receiver) = 
             crossbeam_channel::bounded(MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT);
         let engine = Arc::new(Engine {
@@ -693,7 +697,9 @@ impl Engine {
             workchain_id: AtomicI32::new(workchain_id),
             validation_status: lockfree::map::Map::new(),
             collation_status: lockfree::map::Map::new(),
+            #[cfg(feature = "slashing")]
             validated_block_stats_sender,
+            #[cfg(feature = "slashing")]
             validated_block_stats_receiver,
             #[cfg(feature = "telemetry")]
             full_node_telemetry: FullNodeTelemetry::new(),
@@ -1136,7 +1142,9 @@ impl Engine {
         Ok(())
     }
 
+    #[cfg(feature = "slashing")]
     pub fn validated_block_stats_sender(&self) -> &Sender<ValidatedBlockStat> { &self.validated_block_stats_sender }
+    #[cfg(feature = "slashing")]
     pub fn validated_block_stats_receiver(&self) -> &Receiver<ValidatedBlockStat> { &self.validated_block_stats_receiver }
 
     #[cfg(feature = "telemetry")] 
@@ -1188,7 +1196,7 @@ impl Engine {
     }
 
     #[cfg(feature = "slashing")]
-    async fn process_validated_block_stats_for_mc(&self, block_id: &BlockIdExt, signing_nodes: &[UInt256]) -> Result<()> {
+    async fn process_validated_block_stats_for_mc(&self, block_id: &BlockIdExt, signing_nodes: HashSet<UInt256>) -> Result<()> {
         let block_handle = self.load_block_handle(&block_id)?.ok_or_else(|| error!("Cannot load handle for block {}", block_id))?;
         let mut is_link = false;
         if block_handle.has_proof_or_link(&mut is_link) {
@@ -1202,7 +1210,7 @@ impl Engine {
     }
 
     #[cfg(feature = "slashing")]
-    async fn process_validated_block_stats(&self, block_id: &BlockIdExt, signing_nodes: &[UInt256], created_by: &UInt256) -> Result<()> {
+    async fn process_validated_block_stats(&self, block_id: &BlockIdExt, signing_nodes: HashSet<UInt256>, created_by: &UInt256) -> Result<()> {
         let last_mc_state = self.load_last_applied_mc_state().await?;
         let (cur_validator_set, cc_config) = last_mc_state.read_cur_validator_set_and_cc_conf()?;
         let shard = block_id.shard();
@@ -1220,12 +1228,10 @@ impl Engine {
             cc_seqno,
             Default::default())?;
 
-        let commit_validators = signing_nodes.iter().collect::<HashSet<_>>();
-
-        let mut validated_block_stat_nodes = Vec::new();
+        let mut nodes = Vec::new();
 
         for validator in &validators {
-            let signed = commit_validators.contains(&validator.compute_node_id_short());
+            let signed = signing_nodes.contains(&validator.compute_node_id_short());
             let collated = &validator.public_key == created_by;
             let validated_block_stat_node = ValidatedBlockStatNode {
                 public_key: validator.public_key.clone(),
@@ -1233,14 +1239,10 @@ impl Engine {
                 collated,
             };
 
-            validated_block_stat_nodes.push(validated_block_stat_node);
+            nodes.push(validated_block_stat_node);
         }
 
-        let validated_block_stat = ValidatedBlockStat {
-            nodes : validated_block_stat_nodes,
-        };
-
-        self.push_validated_block_stat(validated_block_stat)?;
+        self.push_validated_block_stat(ValidatedBlockStat { nodes })?;
 
         Ok(())
     }
@@ -1257,12 +1259,12 @@ impl Engine {
 
                 #[cfg(feature = "slashing")]
                 if broadcast.id.shard().is_masterchain() {
-                    let mut signing_nodes = Vec::new();
+                    let mut signing_nodes = HashSet::new();
                     for api_sig in broadcast.signatures.iter() {
-                        signing_nodes.push(api_sig.who.clone());
+                        signing_nodes.insert(api_sig.who.clone());
                     }
 
-                    if let Err(e) = self.process_validated_block_stats_for_mc(&broadcast.id, &signing_nodes).await {
+                    if let Err(e) = self.process_validated_block_stats_for_mc(&broadcast.id, signing_nodes).await {
                         log::error!("Error while processing block broadcast stats {} from {}: {}", broadcast.id, src, e);        
                     } else {
                         log::trace!("Processed block broadcast stats {} from {}", broadcast.id, src);                            
@@ -1358,18 +1360,17 @@ impl Engine {
             // fill stats for slashing
             #[cfg(feature = "slashing")]
             {
-                let mut signing_nodes = Vec::new();
+                let mut signing_nodes = HashSet::new();
                 if let Some(commit_signatures) = tbd.top_block_descr().signatures() {
-                    use ton_types::HashmapType;
                     commit_signatures.pure_signatures.signatures().iterate_slices(|ref mut _key, ref mut slice| {
                         use ton_block::Deserializable;
                         let sign = ton_block::CryptoSignaturePair::construct_from(slice)?;
-                        signing_nodes.push(sign.node_id_short.clone());
+                        signing_nodes.insert(sign.node_id_short.clone());
                         Ok(true)
                     })?;
                 }
 
-                if let Err(e) = self.process_validated_block_stats(&id, &signing_nodes, &_created_by).await {
+                if let Err(e) = self.process_validated_block_stats(&id, signing_nodes, &_created_by).await {
                     log::error!("Error while processing shard block broadcast stats {}: {}", id, e);
                 } else {
                     log::trace!("Processed shard block broadcast stats {}", id);
@@ -1403,13 +1404,13 @@ impl Engine {
     }
 
     async fn create_download_context<'a, T>(
-         &'a self,
-         downloader: Arc<dyn Downloader<Item = T>>,
-         id: &'a BlockIdExt, 
-         limit: Option<u32>,
-         log_error_limit: u32,
-         name: &'a str,
-         timeout: Option<(u64, u64, u64)>
+        &'a self,
+        downloader: Arc<dyn Downloader<Item = T>>,
+        id: &'a BlockIdExt, 
+        limit: Option<u32>,
+        log_error_limit: u32,
+        name: &'a str,
+        timeout: Option<(u64, u64, u64)>
     ) -> Result<DownloadContext<'a, T>> {
         let ret = DownloadContext {
             client: self.get_full_node_overlay(
@@ -1541,7 +1542,7 @@ impl Engine {
         self.db().save_full_node_state(PSS_KEEPER_MC_BLOCK, id)
     }
 
-    fn load_archives_gc_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+    pub fn load_archives_gc_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
         self.db().load_full_node_state(ARCHIVES_GC_BLOCK)
     }
 
@@ -1568,6 +1569,26 @@ impl Engine {
         engine: &Arc<Engine>,
         archives_gc_block: BlockIdExt
     ) -> Result<()> {
+
+        fn check_unapplied_block_id(
+            mut id: BlockIdExt, 
+            engine: &Arc<Engine>
+        ) -> Result<Option<BlockIdExt>> {
+            loop {
+                let handle = engine.load_block_handle(&id)?.ok_or_else(
+                    || error!("No handle for block {} in DB", id)
+                )?;
+                if handle.is_archived() {
+                    return Ok(Some(id))
+                }
+                if engine.load_block_prev2(&id).is_ok() {
+                    // Skip drop unapplied block right after merge
+                    return Ok(None)
+                }
+                id = engine.load_block_prev1(&id)?
+            }
+        }
+
         if !archives_gc_block.shard().is_masterchain() {
             fail!("'archives_gc_block' must belong master chain");
         }
@@ -1583,14 +1604,21 @@ impl Engine {
             if handle.is_key_block()? {
                 let mc_state = engine.load_state(handle.id()).await?;
                 if let Err(e) = Self::check_gc_for_archives(&engine, &handle, &mc_state).await {
-                    log::warn!("archive manager gc: {}", e);
+                    log::error!("Archives GC: {}", e);
                 }
             }
             // clean unapplied blocks every 15 seconds
             if last_clean_unapplied_time.elapsed().as_secs() > 15 {
                 let (_master, workchain_id) = engine.processed_workchain().await?;
-                let ids = mc_state.top_blocks(workchain_id)?;
-                engine.db().archive_manager().clean_unapplied_files(&ids).await;
+                let mut ids = Vec::new();
+                for id in mc_state.top_blocks(workchain_id)? {
+                    match check_unapplied_block_id(id, engine) {
+                        Ok(Some(id)) => ids.push(id),
+                        Err(e) => log::warn!("unapplied files gc: {}", e),
+                        _ => ()
+                    }    
+                }
+                engine.db().clean_unapplied_files(&ids).await;
                 last_clean_unapplied_time = std::time::Instant::now();
             }
             handle = loop {
@@ -1606,6 +1634,7 @@ impl Engine {
             engine.save_archives_gc_mc_block_id(handle.id())?;
         }
         Ok(())
+
     }
 
     async fn check_gc_for_archives(
@@ -1652,6 +1681,7 @@ impl Engine {
                         // ....................pss_block....pss_block....pss_block....pss_block...
                         // visited_pss_blocks:         4            3            2            1
                         //                    ↑ we may delete blocks starting at least here (before 4th pss)
+                        
                         if visited_pss_blocks >= 4 {
                             let gen_time = keyblock.gen_utime()? as u64;
                             let gc_max_date = gc_max_date.as_secs();
@@ -1661,7 +1691,7 @@ impl Engine {
                                     &gen_time, keyblock.id().seq_no(), &gc_max_date
                                 );
                                 log::info!("start gc for archives..");
-                                engine.db.archive_manager().gc(&keyblock.id()).await;
+                                engine.db.archive_gc(&keyblock.id()).await?;
                                 log::info!("finish gc for archives.");
                                 return Ok(());
                             }

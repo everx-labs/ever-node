@@ -5,7 +5,7 @@ use crate::{
     shard_state::ShardStateStuff,
     engine_traits::{EngineOperations, EngineAlloc},
     engine::{Engine, Stopper},
-    boot::self,
+    boot,
 };
 #[cfg(feature = "async_ss_storage")]
 use crate::internal_db::SsNotificationCallback;
@@ -509,11 +509,18 @@ impl ShardStatesKeeper {
                 }
                 last_rotation_block_id_str = format!("{}", id.seq_no())
             }
+            let archives_gc = engine.load_archives_gc_mc_block_id()?.ok_or_else(
+                || error!("INTERNAL ERROR: No archives GC block id in ss keeper worker")
+            )?;
+            if archives_gc.seq_no() < min_id.seq_no() { 
+                min_id = &archives_gc;
+            }
             log::trace!(
-                "Before state_gc_resolver.advance  shard_client {}  ss_keeper {}  last_rotation_block_id {}  min {}", 
-                shard_client.seq_no(),
+                "Before state_gc_resolver.advance  shard_client {}  ss_keeper {}  last_rotation_block_id {}  archives_gc {}  min {}", 
+                shard_client,
                 handle.id(),
                 last_rotation_block_id_str,
+                archives_gc,
                 min_id.seq_no()
             );
             let advanced = self.gc_resolver.advance(min_id, engine.deref()).await?;
