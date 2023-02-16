@@ -11,8 +11,8 @@
 * limitations under the License.
 */
 
-pub use multi_signature_unsafe::MultiSignature;
-//pub use multi_signature_bls::MultiSignature;
+//pub use multi_signature_unsafe::MultiSignature;
+pub use multi_signature_bls::MultiSignature;
 use super::*;
 use catchain::BlockPayloadPtr;
 use log::*;
