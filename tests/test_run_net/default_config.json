@@ -9,6 +9,10 @@
         "download_next_block_full_timeout_ms": 1000,
         "download_block_full_timeout_ms": 1000
     },
+    "remp": {
+        "client_enabled": false,
+        "service_enabled": true
+    },
     "kafka_consumer_config": {
         "group_id": "101",
         "brokers": "kafka",

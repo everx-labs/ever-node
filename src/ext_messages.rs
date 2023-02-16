@@ -12,8 +12,10 @@
 */
 
 use std::{io::Cursor, sync::{Arc, atomic::{AtomicU64, Ordering}}};
-use ton_block::{Deserializable, ShardIdent, Message, AccountIdPrefixFull};
+use ton_block::{Deserializable, ShardIdent, Message, AccountIdPrefixFull, BlockIdExt};
 use ton_types::{Result, types::UInt256, deserialize_tree_of_cells, fail};
+use adnl::common::add_unbound_object_to_map;
+use ton_api::ton::ton_node::{RempMessageStatus, RempMessageLevel};
 
 
 const MESSAGE_LIFETIME: u32 = 600; // seconds
@@ -141,21 +143,11 @@ impl MessagesPool {
 
 
     pub fn new_message(&self, id: UInt256, message: Arc<Message>, now: u32) -> Result<()> {
-        self.messages.insert_with(id, |_key, prev_gen_val, updated_pair | {
-            if updated_pair.is_some() {
-                // someone already added the value into map
-                // so discard this insertion attempt
-                lockfree::map::Preview::Discard
-            } else if prev_gen_val.is_some() {
-                // it is value we inserted just now
-                lockfree::map::Preview::Keep
-            } else {
-                // there is not the value in the map - try to add.
-                // If other thread adding value the same time - the closure will be recalled
-                lockfree::map::Preview::New(MessageKeeper::new(Arc::clone(&message), now))
-            }
-        });
-
+        add_unbound_object_to_map(
+            &self.messages,
+            id,
+            || Ok(MessageKeeper::new(message.clone(), now))
+        )?;
         Ok(())
     }
 
@@ -245,5 +237,168 @@ pub fn create_ext_message(data: &[u8]) -> Result<(UInt256, Message)> {
         Ok((root.repr_hash(), message))
     } else {
         fail!("External inbound message {:x} doesn't have proper header", root.repr_hash())
+    }
+}
+
+pub fn get_level_and_level_change(status: &RempMessageStatus) -> (RempMessageLevel, i32) {
+    match status {
+        RempMessageStatus::TonNode_RempNew => (RempMessageLevel::TonNode_RempQueue, 0),
+        RempMessageStatus::TonNode_RempAccepted(a) => (a.level.clone(), 1),
+        RempMessageStatus::TonNode_RempRejected(r) => (r.level.clone(), -1),
+        RempMessageStatus::TonNode_RempIgnored(i) => (i.level.clone(), -1),
+        RempMessageStatus::TonNode_RempTimeout => (RempMessageLevel::TonNode_RempQueue, -1),
+        RempMessageStatus::TonNode_RempDuplicate(_) => (RempMessageLevel::TonNode_RempQueue, 0),
+        RempMessageStatus::TonNode_RempSentToValidators(_) => (RempMessageLevel::TonNode_RempFullnode, 0),
+    }
+}
+
+/// A message with "rejected" status or a timed-out message are finally rejected
+pub fn is_finally_rejected(status: &RempMessageStatus) -> bool {
+    match status {
+        RempMessageStatus::TonNode_RempRejected(_) | RempMessageStatus::TonNode_RempTimeout => true,
+        _ => false
+    }
+}
+
+pub fn is_finally_accepted(status: &RempMessageStatus) -> bool {
+    match get_level_and_level_change(status) {
+        (RempMessageLevel::TonNode_RempMasterchain, chg) => chg > 0,
+        _ => false
+    }
+}
+
+pub fn validate_status_change(old_status: &RempMessageStatus, new_status: &RempMessageStatus) -> bool {
+    let (_old_lvl, _old_chg) = get_level_and_level_change(old_status);
+    let (_new_lvl, _) = get_level_and_level_change(new_status);
+
+    return true // TODO: proper check
+}
+
+pub struct RempMessagesPool {
+    messages: lockfree::map::Map<UInt256, Arc<Message>>,
+    statuses_queue: lockfree::queue::Queue<(UInt256, Arc<Message>, RempMessageStatus)>,
+}
+
+impl RempMessagesPool {
+
+    pub fn new() -> Self {
+        Self {
+            messages: lockfree::map::Map::new(),
+            statuses_queue: lockfree::queue::Queue::new(),
+        }
+    }
+
+    pub fn new_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
+        if !add_unbound_object_to_map(&self.messages, id.clone(), || Ok(message.clone()))? {
+            fail!("External message {:x} is already added", id)
+        }
+        Ok(())
+    }
+
+    // Important! If call get_messages with same shard two times in row (without finalize_messages between)
+    // the messages returned first call will return second time too.
+    pub fn get_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
+        let mut result = vec!();
+        let mut ids = String::new();
+        for guard in self.messages.iter() {
+            if let Some(dst) = guard.val().dst_ref() {
+                if let Ok(prefix) = AccountIdPrefixFull::prefix(dst) {
+                    if shard.contains_full_prefix(&prefix) {
+                        result.push((guard.val().clone(), guard.key().clone()));
+                        if log::log_enabled!(log::Level::Debug) {
+                            ids.push_str(&format!("{:x} ", guard.key()));
+                        }
+                    }
+                }
+            }
+        }
+
+        log::debug!(
+            target: EXT_MESSAGES_TRACE_TARGET,
+            "get_messages(remp): shard {}, messages ({}pcs.): {}",
+            result.len(), shard, ids
+        );
+
+        Ok(result)
+    }
+
+    pub fn finalize_messages(
+        &self,
+        block: BlockIdExt,
+        accepted: Vec<UInt256>,
+        rejected: Vec<(UInt256, String)>,
+        ignored: Vec<UInt256>,
+    ) -> Result<()> {
+        for id in accepted {
+            if let Some(pair) = self.messages.remove(&id) {
+                self.statuses_queue.push((
+                    id,
+                    pair.val().clone(),
+                    RempMessageStatus::TonNode_RempAccepted(
+                        ton_api::ton::ton_node::rempmessagestatus::RempAccepted{
+                            level: RempMessageLevel::TonNode_RempCollator,
+                            block_id: block.clone(),
+                            master_id: BlockIdExt::default()
+                        }
+                    )
+                ));
+            } else {
+                log::warn!("finalize_messages: unknown accepted message {}", id);
+            }
+        }
+        for (id, error) in rejected {
+            if let Some(pair) = self.messages.remove(&id) {
+                self.statuses_queue.push((
+                    id,
+                    pair.val().clone(),
+                    RempMessageStatus::TonNode_RempRejected(
+                        ton_api::ton::ton_node::rempmessagestatus::RempRejected{
+                            level: RempMessageLevel::TonNode_RempCollator,
+                            block_id: block.clone(),
+                            error
+                        }
+                    )
+                ));
+            } else {
+                log::warn!("finalize_messages: unknown rejected message {}", id);
+            }
+        }
+        for id in ignored {
+            if let Some(pair) = self.messages.remove(&id) {
+                self.statuses_queue.push((
+                    id,
+                    pair.val().clone(),
+                    RempMessageStatus::TonNode_RempIgnored(
+                        ton_api::ton::ton_node::rempmessagestatus::RempIgnored{
+                            level: RempMessageLevel::TonNode_RempCollator,
+                            block_id: block.clone(),
+                        }
+                    )
+                ));
+            } else {
+                log::warn!("finalize_messages: unknown rejected message {}", id);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn finalize_remp_messages_as_ignored(&self, block_id: &BlockIdExt)
+    -> Result<()> {
+        let mut ignored = vec!();
+        for guard in self.messages.iter() {
+            if let Some(dst) = guard.val().dst_ref() {
+                if let Ok(prefix) = AccountIdPrefixFull::prefix(dst) {
+                    if block_id.shard().contains_full_prefix(&prefix) {
+                        ignored.push(guard.key().clone());
+                    }
+                }
+            }
+        }
+        self.finalize_messages(block_id.clone(), vec!(), vec!(), ignored)?;
+        Ok(())
+    }
+
+    pub fn dequeue_message_status(&self) -> Result<Option<(UInt256, Arc<Message>, RempMessageStatus)>> {
+        Ok(self.statuses_queue.pop())
     }
 }

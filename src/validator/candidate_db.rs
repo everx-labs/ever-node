@@ -91,6 +91,7 @@ impl CandidateDb {
         };
         self.put(&key, &ValidatorBlockCandidateWrapper { candidate }.to_vec()?)
     }
+
     pub fn load(
         &self,
         root_hash: &BlockHash,

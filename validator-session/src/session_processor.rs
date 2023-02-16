@@ -121,6 +121,7 @@ pub(crate) struct SessionProcessorImpl {
     check_all_counter: metrics_runtime::data::Counter,         //counter for check_all calls
     last_preprocess_block_warn_dump_time: SystemTime, //last time preprocess block latency warning has been printed
     last_process_blocks_warn_dump_time: SystemTime, //last time process blocks latency warning has been printed
+    #[cfg(feature="slashing")]
     slashing_stat: SlashingValidatorStat,           //slashing validator statistics
     last_preprocess_block_time: Vec<SystemTime>, //time of last preprocess block request from a partial validator
     round_duration_histogram: metrics_runtime::data::Histogram, //histogram for round duration
@@ -1910,24 +1911,19 @@ impl SessionProcessorImpl {
                 self.check_all();
             }
 
+            //because round was finished we expect it has commit at the end, even with empty block
             let signed_block = self
                 .real_state
-                .get_committed_block(&self.description, self.current_round);
+                .get_committed_block(&self.description, self.current_round)
+                .expect("Signed block is expected");
             let src_signatures = self
                 .real_state
-                .get_committed_block_signatures(self.current_round);
+                .get_committed_block_signatures(self.current_round)
+                .expect("Signatures are expected at the round commit phase");
             let src_approve_signatures = self
                 .real_state
-                .get_committed_block_approve_signatures(self.current_round);
-
-            assert!(
-                src_signatures.is_some(),
-                "Signatures are expected at the round commit phase"
-            );
-            assert!(
-                src_approve_signatures.is_some(),
-                "Signatures are expected at the round commit phase"
-            );
+                .get_committed_block_approve_signatures(self.current_round)
+                .expect("Signatures are expected at the round commit phase");
 
             let signatures_exporter = |desc: &dyn SessionDescription,
                                        signatures: &BlockCandidateSignatureVectorPtr|
@@ -1954,19 +1950,11 @@ impl SessionProcessorImpl {
             let signatures = signatures_exporter(
                 &self.description,
                 &src_signatures
-                    .as_ref()
-                    .expect("Signatures are expected at the round commit phase"),
             );
             let approve_signatures = signatures_exporter(
                 &self.description,
                 &src_approve_signatures
-                    .as_ref()
-                    .expect("Signatures are expected at the round commit phase"),
             );
-
-            assert!(signed_block.is_some()); //because round was finished we expect it has commit at the end, even with empty block
-
-            let signed_block = signed_block.expect("Signed block is expected");
 
             if let Some(ref signed_block) = signed_block {
                 //signed block was committed
@@ -2030,38 +2018,39 @@ impl SessionProcessorImpl {
             }
 
             //update slashing statistics
+            #[cfg(feature="slashing")] {
+            
+                self.slashing_stat.reset();
 
-            self.slashing_stat.reset();
+                for i in 0..self.description.get_total_nodes() {
+                    let public_key_hash = self.description.get_source_public_key_hash(i);
+                    let slashing_node = self
+                        .slashing_stat
+                        .validators_stat
+                        .get_mut(public_key_hash)
+                        .unwrap();
 
-            for i in 0..self.description.get_total_nodes() {
-                let public_key_hash = self.description.get_source_public_key_hash(i);
-                let slashing_node = self
-                    .slashing_stat
-                    .validators_stat
-                    .get_mut(public_key_hash)
-                    .unwrap();
+                    use slashing::Metric::*;
 
-                use slashing::Metric::*;
-
-                slashing_node.increment(TotalRoundsCount, 1);
-
-                if self.description.get_node_priority(i, self.current_round) >= 0 {
-                    slashing_node.increment(TotalCollationRoundsCount, 1);
-                }
-                if let Some(ref signed_block) = signed_block {
-                    if signed_block.get_source_index() == i {
-                        slashing_node.increment(CollationsCount, 1);
+                    slashing_node.increment(TotalRoundsCount, 1);
+                    if self.description.get_node_priority(i, self.current_round) >= 0 {
+                        slashing_node.increment(TotalCollationRoundsCount, 1);
+                    }
+                    if let Some(ref signed_block) = signed_block {
+                        if signed_block.get_source_index() == i {
+                            slashing_node.increment(CollationsCount, 1);
+                        }
+                    }
+                    if src_signatures.at(i as usize).is_some() {
+                        slashing_node.increment(CommitsCount, 1);
+                    }
+                    if src_approve_signatures.at(i as usize).is_some() {
+                        slashing_node.increment(ApprovalsCount, 1);
                     }
                 }
-                if src_signatures.at(i as usize).is_some() {
-                    slashing_node.increment(CommitsCount, 1);
-                }
-                if src_approve_signatures.at(i as usize).is_some() {
-                    slashing_node.increment(ApprovalsCount, 1);
-                }
-            }
 
-            self.notify_slashing_statistics(self.current_round, self.slashing_stat.clone());
+                self.notify_slashing_statistics(self.current_round, self.slashing_stat.clone());
+            }
 
             //remove current round block payloads because we have already processed it
 
@@ -3085,6 +3074,7 @@ impl SessionProcessorImpl {
         Listener management
     */
 
+    #[cfg(feature="slashing")]
     fn notify_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat) {
         check_execution_time!(20000);
         instrument!();
@@ -3334,9 +3324,10 @@ impl SessionProcessorImpl {
         }
 
         //initialize slashing statistics
-
+        #[cfg(feature="slashing")]
         let mut slashing_stat = SlashingValidatorStat::default();
 
+        #[cfg(feature="slashing")]
         for node in &ids {
             slashing_stat.validators_stat.insert(
                 node.public_key.id().clone(),
@@ -3411,20 +3402,20 @@ impl SessionProcessorImpl {
         let initial_state = initial_state.move_to_persistent(&mut description);
 
         let body = Self {
-            session_id: session_id,
-            local_key: local_key,
-            completion_task_queue: completion_task_queue,
-            callbacks_task_queue: callbacks_task_queue,
+            session_id,
+            local_key,
+            completion_task_queue,
+            callbacks_task_queue,
             session_listener: listener,
-            catchain: catchain,
+            catchain,
             next_completion_handler_available_index: 1,
             completion_handlers: HashMap::new(),
             completion_handlers_check_last_time: SystemTime::now(),
             block_to_state_map: Vec::with_capacity(STATES_RESERVED_COUNT),
-            state_merge_cache: state_merge_cache,
-            block_update_cache: block_update_cache,
+            state_merge_cache,
+            block_update_cache,
             catchain_started: false,
-            description: description,
+            description,
             real_state: initial_state.clone(),
             virtual_state: initial_state.clone(),
             current_round: 0,
@@ -3432,7 +3423,7 @@ impl SessionProcessorImpl {
             round_started_at: now,
             round_debug_at: now,
             session_processor_creation_time: now,
-            session_creation_time: session_creation_time,
+            session_creation_time,
             requested_new_block_now: false,
             requested_new_block: false,
             pending_generate: false,
@@ -3450,14 +3441,14 @@ impl SessionProcessorImpl {
             signed_block: BlockId::default(),
             signature: BlockSignature::default(),
             log_replay_report_current_time: std::time::UNIX_EPOCH,
-            collates_counter: collates_counter,
-            collates_expire_counter: collates_expire_counter,
-            validates_counter: validates_counter,
-            commits_counter: commits_counter,
-            rldp_queries_counter: rldp_queries_counter,
-            preprocess_block_counter: preprocess_block_counter,
-            process_blocks_counter: process_blocks_counter,
-            request_new_block_counter: request_new_block_counter,
+            collates_counter,
+            collates_expire_counter,
+            validates_counter,
+            commits_counter,
+            rldp_queries_counter,
+            preprocess_block_counter,
+            process_blocks_counter,
+            request_new_block_counter,
             preprocess_block_latency_histogram,
             process_blocks_latency_histogram,
             round_duration_histogram,
@@ -3472,10 +3463,11 @@ impl SessionProcessorImpl {
             block_candidate_broadcast_validation_latency_histogram,
             validation_latency_histogram,
             collation_latency_histogram,
-            check_all_counter: check_all_counter,
+            check_all_counter,
             last_preprocess_block_warn_dump_time: now,
             last_process_blocks_warn_dump_time: now,
-            slashing_stat: slashing_stat,
+            #[cfg(feature="slashing")]
+            slashing_stat,
             last_preprocess_block_time: vec![SystemTime::UNIX_EPOCH; ids.len()],
             active_weight_gauge,
         };

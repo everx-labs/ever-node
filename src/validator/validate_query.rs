@@ -23,7 +23,7 @@ use crate::{
     },
     validating_utils::{
         check_cur_validator_set, check_this_shard_mc_info, may_update_shard_block_info,
-        supported_capabilities, supported_version,
+        supported_version, supported_capabilities, calc_remp_msg_ordering_hash,
     },
     validator::out_msg_queue::MsgQueueManager,
     CHECK,
@@ -60,6 +60,7 @@ use ton_types::{
 
 #[cfg(feature = "metrics")]
 use crate::engine::STATSD;
+use crate::engine_traits::RempDuplicateStatus;
 
 
 // pub const SPLIT_MERGE_DELAY: u32 = 100;        // prepare (delay) split/merge for 100 seconds
@@ -1397,10 +1398,15 @@ impl ValidateQuery {
     }
 
     fn precheck_one_transaction(
-        base: &ValidateBase, acc_id: &AccountId, trans_lt: u64, trans_root: Cell,
-        prev_trans_lt: &mut u64, prev_trans_hash: &mut UInt256, prev_trans_lt_len: &mut u64,
+        base: &ValidateBase, 
+        acc_id: &AccountId, 
+        trans_lt: u64, 
+        trans_root: Cell,
+        prev_trans_lt: &mut u64, 
+        prev_trans_hash: &mut UInt256, 
+        prev_trans_lt_len: &mut u64,
         acc_state_hash: &mut UInt256
-    ) -> Result<bool> {
+    ) -> Result<Option<(UInt256, bool)>> {
         log::debug!(target: "validate_query", "pre-checking Transaction {}", trans_lt);
         let trans = Transaction::construct_from_cell(trans_root.clone())?;
         if &trans.account_id() != &acc_id || trans.logical_time() != trans_lt {
@@ -1436,6 +1442,10 @@ impl ValidateQuery {
                 while the actual value is {}", trans_lt, acc_id.to_hex_string(),
                 hash_upd.old_hash.to_hex_string(), acc_state_hash.to_hex_string())
         }
+        let msg_info = match (trans.in_msg_cell(), trans.read_in_msg()?) {
+            (Some(root), Some(msg)) => Some((root.repr_hash(), msg.is_internal())),
+            _ => None 
+        };
         *prev_trans_lt_len = lt_len;
         *prev_trans_lt = trans_lt;
         *prev_trans_hash = trans_root.repr_hash();
@@ -1451,11 +1461,11 @@ impl ValidateQuery {
                 Ok(true)
             }
         })?;
-        return Ok(true)
+        Ok(msg_info)
     }
 
     // NB: could be run in parallel for different accounts
-    fn precheck_one_account_block(base: &ValidateBase, acc_id: &UInt256, acc_blk: AccountBlock) -> Result<()> {
+    fn precheck_one_account_block(base: &ValidateBase, acc_id: &UInt256, acc_blk: AccountBlock, engine: &Arc<dyn EngineOperations>) -> Result<()> {
         let acc_id = AccountId::from(acc_id.clone());
         log::debug!(target: "validate_query", "pre-checking AccountBlock for {}", acc_id.to_hex_string());
         
@@ -1499,12 +1509,45 @@ impl ValidateQuery {
         let mut last_trans_lt = old_state.last_trans_lt();
         let mut last_trans_hash = old_state.last_trans_hash().clone();
         let mut acc_state_hash = hash_upd.old_hash;
-        acc_blk.transactions().iterate_slices(|key, trans_slice|
-            key.clone().get_next_u64().and_then(|key| Self::precheck_one_transaction(base,
-                &acc_id, key, trans_slice.reference(0)?, &mut last_trans_lt, &mut last_trans_hash,
-                &mut last_trans_lt_len, &mut acc_state_hash
-            )).map_err(|err| error!("transaction {:x} of account {:x} is invalid : {}", key, acc_id, err))
-        )?;
+        let mut prev_msg_hash = None;
+        //let mut there_were_remp_message = false;
+        acc_blk.transactions().iterate_slices(|key, trans_slice| {
+            let trans_lt = key.clone().get_next_u64()?;
+            let msg_info = Self::precheck_one_transaction(
+                base,
+                &acc_id,
+                trans_lt,
+                trans_slice.reference(0)?,
+                &mut last_trans_lt,
+                &mut last_trans_hash,
+                &mut last_trans_lt_len,
+                &mut acc_state_hash
+            ).map_err(|err| error!("transaction {:x} of account {:x} is invalid : {}", trans_lt, acc_id, err))?;
+            
+            #[cfg(feature="remp_emergency")]
+            let remp = !engine.forcedly_disable_remp_cap() &&
+                       base.config_params.has_capability(GlobalCapabilities::CapRemp);
+            #[cfg(not(feature="remp_emergency"))]
+            let remp = base.config_params.has_capability(GlobalCapabilities::CapRemp);
+            if remp {
+                if let Some((id, is_internal)) = msg_info {
+                    if !is_internal {
+                        Self::check_message_ordering(
+                            base,
+                            &id,
+                            //is_internal,
+                            //&mut there_were_remp_message,
+                            &mut prev_msg_hash,
+                            engine,
+                        ).map_err(|err| error!(
+                            "transaction {:x} of account {:x} has invalid ordering : {}",
+                            trans_lt, acc_id, err)
+                        )?;
+                    }
+                }
+            }
+            Ok(true)
+        })?;
         if let Some(new_state) = new_state {
             if last_trans_lt != new_state.last_trans_lt() || &last_trans_hash != new_state.last_trans_hash() {
                 reject_query!("last transaction mismatch for account {} : block lists {}:{} but \
@@ -1519,12 +1562,52 @@ impl ValidateQuery {
         Ok(())
     }
 
-    fn precheck_account_transactions(base: Arc<ValidateBase>, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
+    fn check_message_ordering(
+        base: &ValidateBase,
+        id: &UInt256,
+        //is_internal: bool,
+        //there_were_remp_message: &mut bool,
+        prev_hash: &mut Option<UInt256>,
+        engine: &Arc<dyn EngineOperations>,
+    ) -> Result<()> {
+        // if is_internal && *there_were_remp_message {
+        //     reject_query!("this transaction processed internal message, but has LT greater than \
+        //         at least one transaction with external (remp) message.");
+        // } else if !is_internal {
+        //     *there_were_remp_message = true;
+            tokio::runtime::Handle::try_current()?.block_on(async {
+                match engine.check_remp_duplicate(id).await? {
+                    RempDuplicateStatus::Absent => reject_query!("message {:x} is not found in remp queue", id),
+                    RempDuplicateStatus::Duplicate(blk) =>
+                        reject_query!("message {:x} is already included into valid block {}", id, blk),
+                    RempDuplicateStatus::Fresh => {
+                        log::trace!(target: "validate_query", "message {:x} is waiting for validation in remp queue", id);
+                        Ok(())
+                    }
+                }
+            })?;
+            let hash = calc_remp_msg_ordering_hash(&id, base.prev_blocks_ids.iter());
+            if let Some(prev_hash) = prev_hash {
+                if *prev_hash > hash {
+                    reject_query!("external message's hash is less than previous transaction's one");
+                }
+            }
+            *prev_hash = Some(hash);
+        //}
+        Ok(())
+    }
+
+    fn precheck_account_transactions(
+        base: Arc<ValidateBase>,
+        tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>,
+        engine: &Arc<dyn EngineOperations>,
+    ) -> Result<()> {
         log::debug!(target: "validate_query", "pre-checking all AccountBlocks, and all transactions of all accounts");
         base.account_blocks.iterate_with_keys(|key, acc_blk| {
             let base = base.clone();
+            let engine = engine.clone();
             Self::add_task(tasks, move ||
-                Self::precheck_one_account_block(&base, &key, acc_blk).map_err(|err|
+                Self::precheck_one_account_block(&base, &key, acc_blk, &engine).map_err(|err|
                     error!("invalid AccountBlock for account {} in the new block {} : {}",
                         key.to_hex_string(), base.block_id(), err))
             );
@@ -4038,7 +4121,7 @@ impl ValidateQuery {
         Self::add_task(&mut tasks, move || Self::precheck_value_flow(b));
         let b = base.clone();
         Self::add_task(&mut tasks, move || Self::precheck_account_updates(b));
-        Self::precheck_account_transactions(base.clone(), &mut tasks)?;
+        Self::precheck_account_transactions(base.clone(), &mut tasks, &self.engine)?;
         Self::precheck_message_queue_update(base.clone(), &manager, &mut tasks)?;
 
         Self::check_in_msg_descr(base.clone(), manager.clone(), &mut tasks)?;

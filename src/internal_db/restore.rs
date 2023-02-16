@@ -57,7 +57,7 @@ pub async fn check_db(
 
     if unexpected_termination || restoring || force {
         if force {
-            log::info!("Starting check & restore db process forcely");
+            log::info!("Starting check & restore db process forcedly");
         } else if restore_db {
             log::warn!("Previous node run was unexpectedly terminated, \
             starting check & restore process...");

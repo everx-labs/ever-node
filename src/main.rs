@@ -384,7 +384,7 @@ fn main() {
             .short("f")
             .long("force-check-db")
             .value_name("force check db flag")
-            .help("start check & restore db process forcely"));
+            .help("start check & restore db process forcedly"));
 
     let matches = app.get_matches();
 
