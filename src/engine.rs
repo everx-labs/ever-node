@@ -2081,15 +2081,13 @@ pub async fn run(
             .ok_or_else(|| error!("Remp client is None, while beeing enabled in config"))?
             .clone().start(engine.clone(), remp_client_pool).await?;
     }
-    if remp_config.is_service_enabled() {
-        // Start validator manager, which will start validator sessions when necessary
-        start_validator_manager(
-            Arc::clone(&engine) as Arc<dyn EngineOperations>,
-            validator_runtime,
-            vm_config,
-            remp_config,
-        );
-    }
+    // Start validator manager, which will start validator sessions when necessary
+    start_validator_manager(
+        Arc::clone(&engine) as Arc<dyn EngineOperations>,
+        validator_runtime,
+        vm_config,
+        remp_config,
+    );
 
     // Sync by archives
     if !engine.check_sync().await? {

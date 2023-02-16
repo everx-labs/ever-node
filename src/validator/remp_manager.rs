@@ -130,6 +130,12 @@ impl<T: Display,Q: RempQueue<T>> RempQueueDispatcher<T,Q> {
                     );
                     self.insert_to_pending_msgs(msg.clone(), &msg_shard).await
                 }
+                else {
+                    log::error!(target: "remp",
+                        "Received {} message for REMP: {}, wrong shard {}, not served by the current validator; dropping",
+                        self.name, msg, msg_shard
+                    );
+                }
             }
             else { break; }
         }

@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
     time::Duration, time::SystemTime
 };
+use std::cmp::Reverse;
 
 use ton_api::ton::ton_node::{
     RempMessageStatus, RempMessageLevel,
@@ -38,7 +39,7 @@ struct MessageQueueImpl {
     pending_collation_set: HashMap<UInt256, bool>,
 
     /// Messages, waiting for collator invocation
-    pending_collation_order: BinaryHeap<(i64, UInt256)>,
+    pending_collation_order: BinaryHeap<(Reverse<u32>, UInt256)>,
 }
 
 pub struct MessageQueue {
@@ -50,29 +51,17 @@ pub struct MessageQueue {
 }
 
 impl MessageQueueImpl {
-/*
-    pub fn add_pending_collation(&mut self, message_id: &UInt256, timestamp: u32) -> (bool, usize) {
-        if !self.pending_collation_set.contains(message_id) {
-            self.pending_collation_set.insert(message_id.clone());
-            self.pending_collation_order.push((-(timestamp as i64), message_id.clone())); // Max heap --- need earliest message
-            (true, self.pending_collation_set.len())
-        }
-        else {
-            (false, self.pending_collation_set.len())
-        }
-    }
-*/
     pub fn add_to_collation_queue(&mut self, message_id: &UInt256, timestamp: u32, add_if_absent: bool) -> Result<(bool,usize)> {
         match self.pending_collation_set.get_mut(message_id) {
             Some(waiting_collation) if *waiting_collation => Ok((false, self.pending_collation_set.len())),
             Some(waiting_collation) => {
-                self.pending_collation_order.push((-(timestamp as i64), message_id.clone()));
+                self.pending_collation_order.push((Reverse(timestamp), message_id.clone()));
                 *waiting_collation = true;
                 Ok((true, self.pending_collation_set.len()))
             },
             None if add_if_absent => {
                 self.pending_collation_set.insert(message_id.clone(), true);
-                self.pending_collation_order.push((-(timestamp as i64), message_id.clone())); // Max heap --- need earliest message
+                self.pending_collation_order.push((Reverse(timestamp), message_id.clone())); // Max heap --- need earliest message
                 Ok((true, self.pending_collation_set.len()))
             }
             None =>
@@ -80,12 +69,12 @@ impl MessageQueueImpl {
         }
     }
 
-    pub fn take_first_for_collation(&mut self) -> Result<Option<(UInt256, i64)>> {
+    pub fn take_first_for_collation(&mut self) -> Result<Option<(UInt256, u32)>> {
         if let Some((timestamp, id)) = self.pending_collation_order.pop() {
             match self.pending_collation_set.insert(id.clone(), false) {
                 None => fail!("Message {:?}: taken from collation queue, but not found in collation set", id),
                 Some(false) => fail!("Message {:?}: already removed from collation queue and given to collator", id),
-                Some(true) => Ok(Some((id, -timestamp)))
+                Some(true) => Ok(Some((id, timestamp.0)))
             }
         }
         else {
@@ -94,7 +83,7 @@ impl MessageQueueImpl {
     }
 
     pub fn list_pending_for_forwarding(&mut self) -> Result<Vec<UInt256>> {
-        return Ok(self.pending_collation_set.iter().map(|(x,_waiting) | x.clone()).collect())
+        return Ok(self.pending_collation_set.keys().cloned().collect())
     }
 }
 
@@ -238,7 +227,7 @@ impl MessageQueue {
     }
 
     pub async fn put_message_to_rmq(&self, old_message: Arc<RmqMessage>) -> Result<()> {
-        let msg = Arc::new(old_message.new_with_updated_source_idx(self.catchain_info.local_idx));
+        let msg = Arc::new(old_message.new_with_updated_source_idx(self.catchain_info.local_idx as u32));
         log::trace!(target: "remp", "Point 3. Pushing to RMQ {}; message {}", self, msg);
         self.catchain_instance.pending_messages_queue_send(msg.as_rmq_record(self.catchain_info.master_cc_seqno))?;
 

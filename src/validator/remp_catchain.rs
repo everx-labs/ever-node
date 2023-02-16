@@ -128,7 +128,7 @@ pub struct RempCatchainInfo {
     nodes: Vec<CatchainNode>,
     node_list_id: UInt256,
     pub queue_id: UInt256,
-    pub local_idx: u32,
+    pub local_idx: usize,
     pub local_key_id: UInt256,
     pub catchain_seqno: u32,
     pub master_cc_seqno: u32,

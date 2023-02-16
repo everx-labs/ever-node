@@ -21,10 +21,12 @@ use crate::engine_traits::EngineOperations;
 use catchain::utils::get_hash;
 use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, ValidatorDescr};
 use ton_types::{fail, Result, UInt256};
+#[cfg(feature = "slashing")]
+use validator_session::SlashingValidatorStat;
 use validator_session::{
     BlockHash, BlockPayloadPtr, CatchainOverlayManagerPtr,
-    SessionId, SlashingValidatorStat, SessionPtr, SessionListenerPtr, SessionFactory,
-    SessionListener, SessionNode,SessionOptions,
+    SessionId, SessionPtr, SessionListenerPtr, SessionFactory,
+    SessionListener, SessionNode, SessionOptions,
     PublicKey, PrivateKey, PublicKeyHash,
     ValidatorBlockCandidateCallback, ValidatorBlockCandidateDecisionCallback
 };
@@ -753,10 +755,7 @@ impl ValidatorGroup {
                 err => err
                 // TODO: retry block commit
             };
-/*
-            let message = group_impl.reliable_queue.make_test_message();
-            group_impl.reliable_queue.send_debug_message(message).await.unwrap();
-*/
+
             group_impl.prev_block_ids = vec![next_block_id];
             (full_result, prevs_to_string(&group_impl.prev_block_ids))
         }).await;
@@ -820,6 +819,7 @@ impl ValidatorGroup {
         callback(result);
     }
 
+    #[cfg(feature = "slashing")]
     pub fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat) {
         log::debug!(
             target: "validator", 

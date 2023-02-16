@@ -13,11 +13,11 @@ TEST_ROOT=$(pwd);
 cargo build --release --features "telemetry"
 
 cd ../../../
-if ! [ -d "ton-labs-node-tools" ]
+if ! [ -d "ever-node-tools-private" ]
 then
-    git clone "git@github.com:tonlabs/ton-labs-node-tools.git"
+    git clone "https://github.com/tonlabs/ever-node-tools"
 fi
-cd ton-labs-node-tools
+cd ever-node-tools-private
 TOOLS_ROOT=$(pwd)
 
 cargo build --release

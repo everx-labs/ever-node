@@ -423,46 +423,6 @@ impl MessageCacheImpl {
         Ok(())
     }
 
-/*
-    pub fn list_all_messages(&self) -> Vec<(ShardIdent, Arc<RmqMessage>, RempMessageStatus)> {
-        let mut list = Vec::new();
-        for (id,msg) in self.messages.iter() {
-            if let Some(msg_shard) = self.message_shards.get(id) {
-                if let Some(status) = self.message_statuses.get(id) {
-                    list.push((msg_shard.clone(), msg.clone(), status.clone()));
-                }
-                else {
-                    log::error!(target: "remp", "Status for message {} is missing!", id);
-                }
-            }
-            else {
-                log::error!(target: "remp", "Shard for message {} is missing!", id);
-            }
-        }
-        list
-    }
- */
-
-    /*
-    pub fn remove_message(&self, message_id: &UInt256) {
-        if self.in_messages(message_id) {
-            self.message_count.fetch_sub(1, Ordering::Relaxed);
-        }
-        self.messages.remove(message_id);
-        self.message_shards.remove(message_id);
-        self.message_statuses.remove(message_id);
-        self.message_master_cc.remove(message_id);
-        self.message_events.remove(message_id);
-    }
-
-    pub fn remove_message(&self, message_id: &UInt256) {
-        self.messages.remove_message(message_id);
-
-        #[cfg(feature = "telemetry")]
-        self.messages.cache_size_metric.update(self.messages.all_messages_count() as u64);
-    }
-*/
-
     fn remove_old_message(&mut self, mc: Arc<MessageCacheMessages>, current_cc: u32) -> Option<(UInt256, Option<Arc<RmqMessage>>, Option<RempMessageStatus>, Option<ShardIdent>, Option<u32>)> {
         if let Some((old_cc, msg_id)) = self.message_master_cc_order.pop() {
             if !MessageCacheMessages::cc_expired(old_cc.0, current_cc) {

@@ -42,10 +42,13 @@ impl ShardBlocksObserver {
     }
 
     pub async fn process_next_mc_block(&mut self, mc_block: &BlockStuff) -> Result<Vec<(BlockStuff, BlockIdExt)>> {
+        log::trace!("process_next_mc_block: {}", mc_block.id());
         let mut blocks_for_external_processing = Vec::new();
         loop {
             let mut new_top_processed_blocks = HashSet::new();
             let mut has_new_blocks = false;
+
+            log::trace!("process_next_mc_block: new iteration");
 
             for id in self.top_processed_blocks.iter() {
                 let handle = self.engine.load_block_handle(id)?
@@ -58,9 +61,11 @@ impl ShardBlocksObserver {
                     
                     blocks_for_external_processing.push((block, mc_block.id().clone()));
 
+                    log::trace!("process_next_mc_block: {} has next1 {}", handle.id(), next_id);
                     new_top_processed_blocks.insert(next_id);
                     has_new_blocks = true;
                 } else {
+                    log::trace!("process_next_mc_block: {} doesn't have next1", handle.id());
                     new_top_processed_blocks.insert(handle.id().clone());
                 }
                 if handle.has_next2() {
@@ -75,6 +80,7 @@ impl ShardBlocksObserver {
 
                     blocks_for_external_processing.push((block, mc_block.id().clone()));
 
+                    log::trace!("process_next_mc_block: {} has next2 {}", handle.id(), next_id);
                     new_top_processed_blocks.insert(next_id);
                     has_new_blocks = true;
                 }
@@ -82,6 +88,7 @@ impl ShardBlocksObserver {
 
             self.top_processed_blocks = new_top_processed_blocks;
             if !has_new_blocks {
+                log::trace!("process_next_mc_block: end");
                 break Ok(blocks_for_external_processing);
             }
         }

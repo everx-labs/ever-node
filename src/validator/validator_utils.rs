@@ -187,16 +187,12 @@ pub fn compute_validator_list_id(list: &[ValidatorDescr], session_data: Option<(
 //     Err(failure::err_msg(format!("Key {} not found in validator set {:?}", key.id(), set)))
 // }
 
-pub fn get_validator_key_idx(public_key: &PublicKey, nodes: &Vec<CatchainNode>) -> Result<u32> {
+pub fn get_validator_key_idx(public_key: &PublicKey, nodes: &Vec<CatchainNode>) -> Result<usize> {
     let key_id = public_key.id();
-    let mut idx = 0;
-    for validator in nodes.into_iter() {
-        if key_id == validator.public_key.id() {
-            return Ok(idx);
-        }
-        idx += 1;
+    match nodes.iter().position(|validator| validator.public_key.id() == key_id) {
+        Some(idx) => Ok(idx),
+        None => fail!("Key {} not found in validator list", key_id)
     }
-    Err(failure::err_msg(format!("Key {} not found in validator list", key_id)))
 }
 
 pub fn compute_validator_set_cc(

@@ -684,17 +684,16 @@ impl ValidatorManagerImpl {
                 }
 
                 let prev_validator_list = prev_vsubset.list();
-                let old_session_id = &prev_session_id; {
-                    match self.validator_sessions.get(old_session_id) {
-                        Some(old_session) =>
-                            old_session.clone().add_next_validators(
-                                master_cc_seqno, &prev_validator_list.to_vec(), &vsubset
-                            ).await?,
-                        None => log::error!(target: "validator_manager",
-                             "Shard {}, adding info for session {:x}, previous session id {:x} has no validator_group!",
-                             ident, session_id, old_session_id
-                        )
-                    }
+                let old_session_id = &prev_session_id;
+                match self.validator_sessions.get(old_session_id) {
+                    Some(old_session) =>
+                        old_session.clone().add_next_validators(
+                            master_cc_seqno, &prev_validator_list.to_vec(), &vsubset
+                        ).await?,
+                    None => log::error!(target: "validator_manager",
+                         "Shard {}, adding info for session {:x}, previous session id {:x} has no validator_group!",
+                         ident, session_id, old_session_id
+                    )
                 }
                 prev_validator_list.to_vec()
             }

@@ -52,6 +52,7 @@ pub enum ValidationAction {
         collated_data_hash: BlockHash,
         callback: ValidatorBlockCandidateCallback
     },
+    #[cfg(feature = "slashing")]
     OnSlashingStatistics {
         round: u32,
         stat: SlashingValidatorStat,
@@ -79,6 +80,7 @@ impl fmt::Display for ValidationAction {
 
             ValidationAction::OnGetApprovedCandidate {..} => write!(f, "OnGetApprovedCandidate"),
 
+            #[cfg(feature = "slashing")]
             ValidationAction::OnSlashingStatistics {round, ..} => write!(f, "OnSlashingStatistics round: {}", round),
         }
     }
@@ -92,6 +94,7 @@ impl ValidationAction {
             ValidationAction::OnBlockCommitted(OnBlockCommitted {round, ..}) => Some(round),
             ValidationAction::OnBlockSkipped {round} => Some(round),
             ValidationAction::OnGetApprovedCandidate {..} => None,
+            #[cfg(feature = "slashing")]
             ValidationAction::OnSlashingStatistics {round, ..} => Some(round),
         }
     }
@@ -192,6 +195,7 @@ impl SessionListener for ValidatorSessionListener {
     }
 
     /// Merge slashing statistics
+    #[cfg(feature = "slashing")]
     fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat) {
         log::info!(target: "validator", "SessionListener::on_slashing_statistics, {}", round);
         self.do_send_general (
@@ -233,6 +237,7 @@ async fn process_validation_action (action: ValidationAction, g: Arc<ValidatorGr
         ValidationAction::OnGetApprovedCandidate { source, root_hash, file_hash, collated_data_hash, callback} =>
             g.on_get_approved_candidate(source, root_hash, file_hash, collated_data_hash, callback).await,
 
+        #[cfg(feature = "slashing")]
         ValidationAction::OnSlashingStatistics { round, stat } =>
             g.on_slashing_statistics(round, stat)
     }
