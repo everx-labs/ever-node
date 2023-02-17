@@ -96,7 +96,7 @@ pub struct WorkchainOverlay {
     _instance_counter: InstanceCounter,     //instance counter
     send_message_to_neighbours_counter: metrics_runtime::data::Counter, //number of send message to neighbours calls
     out_message_counter: metrics_runtime::data::Counter,                //number of outgoing messages
-    in_message_counter: metrics_runtime::data::Counter,                 //number of incoming messages
+    _in_message_counter: metrics_runtime::data::Counter,                 //number of incoming messages
     send_all_counter: metrics_runtime::data::Counter,                   //number of send to all active nodes calls
     out_broadcast_counter: metrics_runtime::data::Counter,              //number of outgoing broadcasts
     out_query_counter: ResultStatusCounter,                             //number of outgoing queries
@@ -197,7 +197,7 @@ impl WorkchainOverlay {
             out_broadcast_counter: metrics_receiver.sink().counter(format!("{}_out_broadcasts", metrics_prefix)),
             out_query_counter,
             out_message_counter,
-            in_message_counter,
+            _in_message_counter: in_message_counter,
             block_status_update_counter,
             is_master_chain_overlay,
         };

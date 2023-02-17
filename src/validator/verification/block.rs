@@ -224,21 +224,36 @@ impl Block {
     pub fn set_status(&mut self, local_key: &PrivateKey, local_idx: u16, nodes_count: u16, status: Option<bool>) -> Result<bool> {
         let prev_hash = self.get_signatures_hash();
 
+        let mut new_deliveries_signature = self.deliveries_signature.clone();
+        let mut new_approvals_signature = self.approvals_signature.clone();
+        let mut new_rejections_signature = self.rejections_signature.clone();
+
         if let Some(status) = status {
             let signature = if status {
-                &mut self.approvals_signature
+                &mut new_approvals_signature
             } else {
-                &mut self.rejections_signature
+                &mut new_rejections_signature
             };
 
             signature.sign(local_key, local_idx, nodes_count)?;
         }
 
-        self.deliveries_signature.sign(local_key, local_idx, nodes_count)?;
+        new_deliveries_signature.sign(local_key, local_idx, nodes_count)?;
 
-        self.update_hash();
+        let new_hash = Self::compute_hash(
+            &new_deliveries_signature,
+            &new_approvals_signature,
+            &new_rejections_signature);
 
-        Ok(self.get_signatures_hash() != prev_hash)
+        if new_hash != prev_hash { //prevent duplicate merges
+            self.deliveries_signature = new_deliveries_signature;
+            self.approvals_signature = new_approvals_signature;
+            self.rejections_signature = new_rejections_signature;
+
+            self.signatures_hash = new_hash;
+        }
+
+        Ok(new_hash != prev_hash)
     }
 
     /// Merge status from another block
@@ -259,19 +274,26 @@ impl Block {
         new_approvals_signature.merge(approvals_signature)?;
         new_rejections_signature.merge(rejections_signature)?;
 
-        self.deliveries_signature = new_deliveries_signature;
-        self.approvals_signature = new_approvals_signature;
-        self.rejections_signature = new_rejections_signature;
+        let new_hash = Self::compute_hash(
+            &new_deliveries_signature,
+            &new_approvals_signature,
+            &new_rejections_signature);
 
-        if self.merges_count < merges_count {
-            self.merges_count = merges_count; //do not change hash
+        if new_hash != prev_hash { //prevent duplicate merges
+            self.deliveries_signature = new_deliveries_signature;
+            self.approvals_signature = new_approvals_signature;
+            self.rejections_signature = new_rejections_signature;
+
+            if self.merges_count < merges_count {
+                self.merges_count = merges_count; //do not change hash
+            }
+
+            self.signatures_hash = new_hash;
         }
 
         self.set_creation_timestamp(created_timestamp);        
 
-        self.update_hash();
-
-        Ok(self.get_signatures_hash() != prev_hash)
+        Ok(new_hash != prev_hash)
     }
 
     /// Get signatures hash
@@ -279,13 +301,25 @@ impl Block {
         self.signatures_hash
     }
 
+    /// Compute hash
+    fn compute_hash(
+        deliveries_signature: &MultiSignature,
+        approvals_signature: &MultiSignature,
+        rejections_signature: &MultiSignature,
+    ) -> u32 {
+        deliveries_signature.get_hash() ^ 
+        approvals_signature.get_hash() ^
+        rejections_signature.get_hash()
+    }
+
     /// Update hash
     fn update_hash(&mut self) {
         let prev_hash = self.signatures_hash;
 
-        self.signatures_hash = self.deliveries_signature.get_hash()
-            ^ self.approvals_signature.get_hash()
-            ^ self.rejections_signature.get_hash();
+        self.signatures_hash = Self::compute_hash(
+            &self.deliveries_signature,
+            &self.approvals_signature,
+            &self.rejections_signature);
 
         if self.signatures_hash != prev_hash {
             self.serialized_block_status = None;
@@ -301,7 +335,6 @@ impl Block {
         }
 
         let cur_block_candidate = self.block_candidate.as_ref().unwrap();
-
         if &new_block_candidate.hash != &cur_block_candidate.hash {
             warn!(target: "verificator", "Attempt to update block candidate {:?} body with a new data: prev={:?}, new={:?}", self.candidate_id, cur_block_candidate.hash, new_block_candidate.hash);
             return false;
