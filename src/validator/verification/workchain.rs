@@ -19,7 +19,7 @@ use super::workchain_overlay::WorkchainOverlay;
 use super::workchain_overlay::WorkchainOverlayListener;
 use super::*;
 use super::utils::HangCheck;
-use crate::validator::validator_utils::get_adnl_id;
+use super::utils::get_adnl_id;
 use crate::validator::validator_utils::sigpubkey_to_publickey;
 use catchain::BlockPayloadPtr;
 use catchain::PublicKeyHash;

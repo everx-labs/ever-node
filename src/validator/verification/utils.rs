@@ -74,3 +74,12 @@ impl Drop for HangCheck {
         self.is_running.store(false, Ordering::Release);
     }
 }
+
+/*
+    Utils
+*/
+
+pub(crate) fn get_adnl_id(validator: &ValidatorDescr) -> Arc<ever_crypto::KeyId> {
+    //validator::validator_utils::get_adnl_id(validator)
+    ever_crypto::KeyId::from_data(validator.compute_node_id_short().inner())
+}
