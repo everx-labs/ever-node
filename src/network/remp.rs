@@ -111,7 +111,7 @@ impl RempNode {
             #[cfg(feature = "telemetry")]
             tag: self.tag_message
         };
-        if let Err(e) = self.adnl.send_custom(&tagged_data, peers) {
+        if let Err(e) = self.adnl.send_custom(&tagged_data, &peers) {
             fail!("Error while sending RempMessage {:x} via message: {}", id, e);
         }
         Ok(())
@@ -285,7 +285,7 @@ impl SendCombinedReceipt for SendCombinedReceiptByAdnl {
             tag: self.adnl_tag
         };
         let peers = AdnlPeers::with_keys(self_adnl_id, to.clone());
-        if let Err(e) = self.adnl.send_custom(&tagged_data, peers) {
+        if let Err(e) = self.adnl.send_custom(&tagged_data, &peers) {
             log::error!("send_combined_receipt: {:?}", e);
         }
         Ok(())

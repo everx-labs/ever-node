@@ -125,8 +125,6 @@ pub struct Engine {
     sync_status: AtomicU32,
     low_memory_mode: bool,
     remp_capability: AtomicBool,
-    #[cfg(feature="remp_emergency")]
-    forcedly_disable_remp_cap: bool,
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
  
@@ -727,8 +725,6 @@ impl Engine {
             sync_status: AtomicU32::new(0),
             low_memory_mode,
             remp_capability: AtomicBool::new(false),
-            #[cfg(feature="remp_emergency")]
-            forcedly_disable_remp_cap: remp_config.forcedly_disable_remp_cap(),
             test_bundles_config,
             shard_states_keeper: shard_states_keeper.clone(),
             #[cfg(feature="workchains")]
@@ -971,10 +967,6 @@ impl Engine {
         self.remp_capability.store(value, Ordering::Relaxed);
     }
 
-    #[cfg(feature="remp_emergency")]
-    pub fn forcedly_disable_remp_cap(&self) -> bool {
-        self.forcedly_disable_remp_cap
-    }
 
     pub async fn download_and_apply_block_worker(
         self: Arc<Self>, 
@@ -1363,9 +1355,6 @@ impl Engine {
     }
 
     fn process_ext_msg_broadcast(&self, broadcast: ExternalMessageBroadcast, src: Arc<KeyId>) {
-        #[cfg(feature="remp_emergency")]
-        let remp = !self.forcedly_disable_remp_cap() && self.remp_capability();
-        #[cfg(not(feature="remp_emergency"))]
         let remp = self.remp_capability();
         // just add to list
         if !self.is_validator() {

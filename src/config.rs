@@ -207,9 +207,6 @@ pub struct RempConfig {
     client_enabled: bool,
     remp_client_pool: Option<u8>,
     service_enabled: bool,
-    #[cfg(feature="remp_emergency")]
-    #[serde(default)]
-    forcedly_disable_remp_cap: bool,
 }
 
 impl RempConfig {
@@ -238,10 +235,6 @@ impl RempConfig {
         self.remp_client_pool
     }
 
-    #[cfg(feature="remp_emergency")]
-    pub fn forcedly_disable_remp_cap(&self) -> bool {
-        self.forcedly_disable_remp_cap
-    }
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]

@@ -52,6 +52,8 @@ pub struct RempQueueDispatcher<T: Display+Sized, Q: RempQueue<T>> {
     pub queue: Q,
     name: String,
     #[cfg(feature = "telemetry")]
+    dispatcher_queue_size_metric: Arc<Metric>,
+    #[cfg(feature = "telemetry")]
     mutex_awaiting_metric: Arc<Metric>
 }
 
@@ -60,6 +62,8 @@ impl<T: Display,Q: RempQueue<T>> RempQueueDispatcher<T,Q> {
         name: String,
         queue: Q,
         #[cfg(feature = "telemetry")]
+        dispatcher_queue_size_metric: Arc<Metric>,
+        #[cfg(feature = "telemetry")]
         mutex_awaiting_metric: Arc<Metric>
     ) -> Self {
         Self {
@@ -67,6 +71,8 @@ impl<T: Display,Q: RempQueue<T>> RempQueueDispatcher<T,Q> {
             actual_queues: MutexWrapper::new(HashSet::new(), format!("REMP actual queues {}", name)),
             queue,
             name,
+            #[cfg(feature = "telemetry")]
+            dispatcher_queue_size_metric,
             #[cfg(feature = "telemetry")]
             mutex_awaiting_metric
         }
@@ -81,6 +87,33 @@ impl<T: Display,Q: RempQueue<T>> RempQueueDispatcher<T,Q> {
         }).await
     }
 
+    async fn recalculate_shard(&self, msg: Arc<T>) -> Option<ShardIdent> {
+        match self.queue.compute_shard(msg.clone()).await {
+            Ok(x) => Some(x),
+            Err(e) => {
+                log::error!(target: "remp", "Cannot compute shard for {}: {}", msg, e);
+                None
+            }
+        }
+    }
+
+    /// The function postpone the message until it is requested by poll from proper shard
+    async fn reroute_message(&self, msg: Arc<T>, msg_shard: &ShardIdent, required_shard: &ShardIdent) {
+        if self.actual_queues.execute_sync(|aq| aq.contains(&msg_shard)).await {
+            log::trace!(target: "remp",
+                "Received {} message for REMP: {}, wrong message shard {}, required/old shard {}; postponed",
+                self.name, msg, msg_shard, required_shard
+            );
+            self.insert_to_pending_msgs(msg.clone(), &msg_shard).await
+        }
+        else {
+            log::warn!(target: "remp",
+                "Received {} message for REMP: {}, wrong shard {}, not served by the current validator; dropping",
+                self.name, msg, msg_shard
+            );
+        }
+    }
+
     pub async fn poll(&self, shard: &ShardIdent) -> (Option<Arc<T>>, usize) {
         // TODO: what happens if we lose our right for shard XXX immediately
         // after we received the message?
@@ -90,51 +123,37 @@ impl<T: Display,Q: RempQueue<T>> RempQueueDispatcher<T,Q> {
         #[cfg(feature = "telemetry")]
         let started = Instant::now();
 
-        //let mut pending_messages = self.pending_messages.lock().await;
-
         #[cfg(feature = "telemetry")]
         self.mutex_awaiting_metric.update(started.elapsed().as_micros() as u64);
 
         // 1. Check whether we already have the message received
-        let mut result = self.pending_messages.execute_sync(|msgs| match msgs.get_mut(shard) {
-            Some(queue) => {
-                log::trace!(target: "remp",
-                    "Taking {} REMP message for shard {} from {} pending_messages",
-                    self.name, shard, queue.len()
-                );
-                queue.pop_front()
-            },
-            None => None
+        let mut result = self.pending_messages.execute_sync(|msgs| {
+            #[cfg(feature = "telemetry")]
+            self.dispatcher_queue_size_metric.update(msgs.iter().map(|(_sh,qu)| qu.len() as u64).sum());
+
+            match msgs.get_mut(shard) {
+                Some(queue) => {
+                    log::trace!(target: "remp",
+                        "Taking {} REMP message for shard {} from {} pending_messages",
+                        self.name, shard, queue.len()
+                    );
+                    queue.pop_front()
+                },
+                None => None
+            }
         }).await;
 
         // 2. Check queues if the message is not received yet
         while result.is_none() {
             if let Ok(Some(msg)) = self.queue.receive_message() {
-                // TODO: recalculate shard id each time?
-                let msg_shard = match self.queue.compute_shard(msg.clone()).await {
-                    Ok(x) => x,
-                    Err(e) => {
-                        log::error!(target: "remp", "Cannot compute shard for {}: {}", msg, e);
-                        continue
+                if let Some(msg_shard) = self.recalculate_shard(msg.clone()).await {
+                    if msg_shard == *shard {
+                        log::trace!(target: "remp", "Received {} message for REMP: {}", self.name, msg);
+                        result = Some(msg)
                     }
-                };
-
-                if msg_shard == *shard {
-                    log::trace!(target: "remp", "Received {} message for REMP: {}", self.name, msg);
-                    result = Some(msg)
-                }
-                else if self.actual_queues.execute_sync(|aq| aq.contains(&shard)).await {
-                    // It's not the requested shard - postpone the message
-                    log::trace!(target: "remp", "Received {} message for REMP: {}, wrong shard {}, expected {}", 
-                        self.name, msg, msg_shard, shard
-                    );
-                    self.insert_to_pending_msgs(msg.clone(), &msg_shard).await
-                }
-                else {
-                    log::error!(target: "remp",
-                        "Received {} message for REMP: {}, wrong shard {}, not served by the current validator; dropping",
-                        self.name, msg, msg_shard
-                    );
+                    else {
+                        self.reroute_message(msg, &msg_shard, shard).await;
+                    }
                 }
             }
             else { break; }
@@ -156,15 +175,23 @@ impl<T: Display,Q: RempQueue<T>> RempQueueDispatcher<T,Q> {
         self.insert_to_pending_msgs(msg, shard).await
     }
 
+    pub async fn reroute_messages(&self, msgs: &VecDeque<Arc<T>>, old_shard: &ShardIdent) {
+        for msg in msgs.iter() {
+            if let Some(msg_shard) = self.recalculate_shard(msg.clone()).await {
+                self.reroute_message(msg.clone(), &msg_shard, old_shard).await;
+            }
+        }
+    }
+
     pub async fn add_actual_shard(&self, shard: &ShardIdent) {
         log::trace!(target: "remp", "REMP {}: adding actual shard {}", self.name, shard);
         self.actual_queues.execute_sync(|aq| aq.insert(shard.clone())).await;
     }
 
-    pub async fn remove_actual_shard(&self, shard: &ShardIdent) {
+    pub async fn remove_actual_shard(&self, shard: &ShardIdent) -> Option<VecDeque<Arc<T>>> {
         log::trace!(target: "remp", "REMP {}: removing actual shard {}", self.name, shard);
         self.actual_queues.execute_sync(|aq| aq.remove(shard)).await;
-        self.pending_messages.execute_sync(|msgs| msgs.remove(shard)).await;
+        self.pending_messages.execute_sync(|msgs| msgs.remove(shard)).await
     }
 }
 
@@ -294,11 +321,15 @@ impl RempManager {
                 "incoming".to_string(),
                 RempIncomingQueue::new(engine.clone(), incoming_receiver),
                 #[cfg(feature = "telemetry")]
+                engine.remp_core_telemetry().incoming_queue_size_metric(),
+                #[cfg(feature = "telemetry")]
                 engine.remp_core_telemetry().incoming_mutex_metric()
             ),
             collator_receipt_dispatcher: RempQueueDispatcher::with_metric(
                 "collator receipt dispatcher".to_string(),
                 collator_interface_wrapper,
+                #[cfg(feature = "telemetry")]
+                engine.remp_core_telemetry().collator_receipt_queue_size_metric(),
                 #[cfg(feature = "telemetry")]
                 engine.remp_core_telemetry().collator_receipt_mutex_metric()
             ),
@@ -318,7 +349,10 @@ impl RempManager {
     }
 
     pub async fn remove_active_shard(&self, shard: &ShardIdent) {
-        self.incoming_dispatcher.remove_actual_shard(shard).await;
+        let remaining_incoming_msgs = self.incoming_dispatcher.remove_actual_shard(shard).await;
+        if let Some(remaining) = remaining_incoming_msgs {
+            self.incoming_dispatcher.reroute_messages(&remaining, shard).await;
+        }
         self.collator_receipt_dispatcher.remove_actual_shard(shard).await;
     }
 

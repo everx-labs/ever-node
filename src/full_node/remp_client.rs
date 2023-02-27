@@ -203,6 +203,7 @@ impl RempClient {
         }
     }
 
+    #[allow(dead_code)]
     pub fn process_new_block(self: Arc<Self>, block: BlockStuff) {
         tokio::spawn(async move {
             match self.process_block(&block, true, None) {

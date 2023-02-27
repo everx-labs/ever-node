@@ -515,7 +515,7 @@ impl ShardStatesKeeper {
             if archives_gc.seq_no() < min_id.seq_no() { 
                 min_id = &archives_gc;
             }
-            log::trace!(
+            log::info!(
                 "Before state_gc_resolver.advance  shard_client {}  ss_keeper {}  last_rotation_block_id {}  archives_gc {}  min {}", 
                 shard_client,
                 handle.id(),

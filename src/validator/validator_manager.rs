@@ -606,29 +606,11 @@ impl ValidatorManagerImpl {
                 cc_seqno,
                 &self.config
             );
-//=======
-//            if let Some(local_key) = self.find_us(&subset.0) {
-//                let vsubset = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno, subset.0)?;
-//>>>>>>> fb7e32d041c8044f742b29a4ebe0043997cebb7d
 
             let session_info = SessionInfo::new(ident.clone(), session_id.clone(), vsubset.clone());
             let old_shards: Vec<ShardIdent> = prev_blocks.iter().map(|blk| blk.shard_id.clone()).collect();
             self.session_history.new_session_after(session_info.clone(), old_shards.clone())?;
-/*
-            let prev_validator_list = &self.session_history.get_prev_validator_list(&session_id)?;
-            for old_session_id in self.session_history.get_prev_sessions(&session_id)?.iter() {
-                match self.validator_sessions.get(old_session_id) {
-                    Some(old_session) =>
-                        old_session.clone().add_next_validators(
-                            master_cc_seqno, prev_validator_list, &vsubset
-                        ).await?,
-                    None => log::error!(target: "validator_manager",
-                             "Shard {}, adding info for session {:x}, previous session id {:x} has no validator_group!",
-                             ident, session_id, old_session_id
-                        )
-                }
-            }
-*/
+
             let prev_validator_list = if cc_seqno > 1 {
                 let prev_subset = match try_calc_subset_for_workchain(
                     &full_validator_set,

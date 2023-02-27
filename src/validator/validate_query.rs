@@ -1524,10 +1524,6 @@ impl ValidateQuery {
                 &mut acc_state_hash
             ).map_err(|err| error!("transaction {:x} of account {:x} is invalid : {}", trans_lt, acc_id, err))?;
             
-            #[cfg(feature="remp_emergency")]
-            let remp = !engine.forcedly_disable_remp_cap() &&
-                       base.config_params.has_capability(GlobalCapabilities::CapRemp);
-            #[cfg(not(feature="remp_emergency"))]
             let remp = base.config_params.has_capability(GlobalCapabilities::CapRemp);
             if remp {
                 if let Some((id, is_internal)) = msg_info {

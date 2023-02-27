@@ -128,10 +128,6 @@ impl MessageQueue {
         });
     }
 
-    // pub fn get_id(&self) -> UInt256 {
-    //     return self.queue_id;
-    // }
-
     async fn set_queue_status(&self, required_status: MessageQueueStatus, new_status: MessageQueueStatus) -> Result<()> {
         self.queues.execute_sync(|mut q| {
             if q.status != required_status {
@@ -180,20 +176,10 @@ impl MessageQueue {
         };
         message
     }
-/*
-    pub fn put_to_catchain(&self, rmq_message: Arc<RmqMessage>) {
-        if let Err(e) = self.catchain_instance.pending_messages_queue_send(rmq_message.as_rmq_record(self.catchain_info.master_cc_seqno)) {
-            log::error!(target: "remp",
-                "RMQ {}: Cannot write reject message for {:x} into catchain: {}", self, rmq_message.message_id, e
-            )
-        }
-    }
-*/
+
     pub async fn start (self: Arc<MessageQueue>, local_key: PrivateKey) -> Result<()> {
         self.set_queue_status(MessageQueueStatus::Created, MessageQueueStatus::Starting).await?;
-
         log::trace!(target: "remp", "RMQ {}: starting", self);
- //     log::trace!(target: "remp", "RMQ {}: catchain created", self);
         let catchain_instance_impl = self.remp_manager.catchain_store.start_catchain(
             self.engine.clone(), self.remp_manager.clone(), self.catchain_info.clone(), local_key
         ).await?;

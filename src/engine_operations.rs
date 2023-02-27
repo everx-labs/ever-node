@@ -709,9 +709,6 @@ impl EngineOperations for Engine {
             fail!("Can't process external message because node is out of sync");
         }
 
-        #[cfg(feature="remp_emergency")]
-        let remp_way = !self.forcedly_disable_remp_cap() && self.remp_capability();
-        #[cfg(not(feature="remp_emergency"))]
         let remp_way = self.remp_capability();
         if remp_way {
             self.remp_client()
@@ -870,10 +867,6 @@ impl EngineOperations for Engine {
         )
     }
 
-    #[cfg(feature="remp_emergency")]
-    fn forcedly_disable_remp_cap(&self) -> bool {
-        self.forcedly_disable_remp_cap()
-    }
 
     // Get current list of new shard blocks with respect to last mc block.
     // If given mc_seq_no is not equal to last mc seq_no - function fails.
