@@ -984,9 +984,20 @@ impl ValidatorManagerImpl {
                     let verification_listener: Arc<dyn VerificationListener> = verification_listener.clone();
                     let verification_listener = Arc::downgrade(&verification_listener);
                     let local_key = self.validator_list_status.get_local_key().expect("Validator must have local key");
+                    log::debug!(target: "verificator", "Request BLS key");
+                    let local_bls_key = self.engine.get_validator_bls_key(local_key.id()).await;
+                    log::debug!(target: "verificator", "Request BLS key done");
 
-                    match self.engine.get_validator_bls_key(local_key.id()).await {
-                        Some(local_bls_key) => self.verification_manager.update_workchains(local_key, local_bls_key, workchain_id, &workchain_validators, &mc_validators, &verification_listener).await,
+                    match local_bls_key {
+                        Some(local_bls_key) => {
+                            let rt = self.rt.clone();
+                            let verification_manager = self.verification_manager.clone();
+                            rt.spawn(async move {
+                                log::debug!(target: "verificator", "Update workchains start");
+                                verification_manager.update_workchains(local_key, local_bls_key, workchain_id, &workchain_validators, &mc_validators, &verification_listener).await;
+                                log::debug!(target: "verificator", "Update workchains finish");
+                            });
+                        },
                         None => log::error!(target: "validator", "Can't create verification workchains: no BLS private key attached"),
                     }
                 }
