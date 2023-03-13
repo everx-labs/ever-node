@@ -28,7 +28,7 @@ appenders:
       kind: compound
       trigger:
         kind: size
-        limit: 3 gb
+        limit: 5 gb
       roller:
         kind: fixed_window
         pattern: '/shared/output_NODE_NUM_{}.log'
@@ -80,6 +80,12 @@ loggers:
     level: error
 
   validator:
+    level: info
+
+  validator_manager:
+    level: trace
+
+  remp:
     level: trace
 
   catchain:

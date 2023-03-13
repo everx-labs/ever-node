@@ -43,7 +43,7 @@ pub struct ArchiveManager {
 
 impl ArchiveManager {
 
-    pub const ARCHIVE_DIR: &str = "archive";
+    pub const ARCHIVE_DIR: &'static str = "archive";
 
     pub async fn with_data(
         db: Arc<RocksDb>,

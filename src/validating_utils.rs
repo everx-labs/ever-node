@@ -16,8 +16,9 @@ use ton_block::{
     ShardIdent, BlockIdExt, ConfigParams, McStateExtra, ShardHashes, ValidatorSet, McShardRecord,
     FutureSplitMerge, INVALID_WORKCHAIN_ID, MASTERCHAIN_ID, GlobalCapabilities,
 };
-use ton_types::{fail, error, Result};
-use std::{collections::HashSet, cmp::max};
+use ton_types::{fail, error, Result, UInt256};
+use std::{collections::HashSet, cmp::max, iter::Iterator};
+use sha2::{Sha256, Digest};
 
 pub fn supported_capabilities() -> u64 {
     let caps =
@@ -25,6 +26,7 @@ pub fn supported_capabilities() -> u64 {
         GlobalCapabilities::CapBounceMsgBody as u64 |
         GlobalCapabilities::CapReportVersion as u64 |
         GlobalCapabilities::CapShortDequeue as u64 |
+        GlobalCapabilities::CapRemp as u64 |
         GlobalCapabilities::CapInitCodeHash as u64 |
         GlobalCapabilities::CapOffHypercube as u64 |
         GlobalCapabilities::CapFixTupleIndexBug as u64 |
@@ -44,7 +46,7 @@ pub fn supported_capabilities() -> u64 {
 }
 
 pub fn supported_version() -> u32 {
-    35
+    36
 }
 
 pub fn check_this_shard_mc_info(
@@ -505,4 +507,13 @@ pub fn update_shard_block_info2(
     }
     
     Ok(())
+}
+
+pub fn calc_remp_msg_ordering_hash<'a>(msg_id: &UInt256, prev_blocks_ids: impl Iterator<Item = &'a BlockIdExt>) -> UInt256 {
+    let mut hasher = Sha256::new();
+    for prev_id in prev_blocks_ids {
+        hasher.update(prev_id.root_hash().as_slice());
+    }
+    hasher.update(msg_id.as_slice());
+    UInt256::from(hasher.finalize().as_slice())
 }

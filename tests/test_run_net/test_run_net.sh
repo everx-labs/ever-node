@@ -10,14 +10,14 @@ pkill -9 ton_node
 TEST_ROOT=$(pwd);
 
 ./remove_junk.sh
-cargo build --release
+cargo build --release --features "telemetry"
 
 cd ../../../
-if ! [ -d "ever-node-tools" ]
+if ! [ -d "ever-node-tools-private" ]
 then
-    git clone "https://github.com/tonlabs/ever-node-tools.git"
+    git clone "https://github.com/tonlabs/ever-node-tools"
 fi
-cd ever-node-tools
+cd ever-node-tools-private
 TOOLS_ROOT=$(pwd)
 
 cargo build --release
@@ -38,7 +38,8 @@ declare -A VALIDATOR_PUB_KEY_BASE64=();
 cat $TEST_ROOT/ton-global.config_1.json > $NODE_TARGET/ton-global.config.json
 cat $TEST_ROOT/ton-global.config_2.json >> $NODE_TARGET/ton-global.config.json
 
-for (( N=1; N <= $NODES; N++ ))
+# 0 is full node
+for (( N=0; N <= $NODES; N++ ))
 do
     cd $NODE_TARGET
 
@@ -58,7 +59,12 @@ do
     rm console_config.json
     sed "s/NODE_NUM/$N/g" $TEST_ROOT/log_cfg.yml > $NODE_TARGET/log_cfg_$N.yml
 
-    cp $TEST_ROOT/default_config.json default_config.json
+    if [ $N -ne 0 ]; then
+        cp $TEST_ROOT/default_config.json default_config.json
+    else 
+        cp $TEST_ROOT/default_config_fullnode.json default_config.json
+    fi
+
     sed "s/nodenumber/$N/g" default_config.json > default_config$N.json
     sed "s/0.0.0.0/$NOWIP/g" default_config$N.json > default_config.json
     PORT=$(( 3000 + $N ))
@@ -82,16 +88,20 @@ do
     jq ".client_key = $(jq .private $TEST_ROOT/genkey$N)" "$TEST_ROOT/console$N.json" > "$TEST_ROOT/console$N.tmp.json"
     jq ".config = $(cat $TEST_ROOT/console$N.tmp.json)" "$TEST_ROOT/console-template.json" > "$TEST_ROOT/console$N.json"
     rm $TEST_ROOT/console$N.tmp.json
-    CONSOLE_OUTPUT=$(./console -C $TEST_ROOT/console$N.json -c newkey | cut -c 92-)
 
     rm tmp_output_console
-    ./console -C $TEST_ROOT/console$N.json -c "addpermkey ${CONSOLE_OUTPUT} ${NOWDATE} 1610000000" > tmp_output_console
-    CONSOLE_OUTPUT=$(./console -C $TEST_ROOT/console$N.json -c "exportpub ${CONSOLE_OUTPUT}")
-    # echo $CONSOLE_OUTPUT
-    VALIDATOR_PUB_KEY_HEX[$N]=$(echo "${CONSOLE_OUTPUT}" | grep 'imported key:' | awk '{print $3}')
-    # VALIDATOR_PUB_KEY_BASE64[$N]=$(echo "${CONSOLE_OUTPUT}" | grep 'imported key:' | awk '{print $4}')
-    # echo "INFO: VALIDATOR_PUB_KEY_HEX[$N] = ${VALIDATOR_PUB_KEY_HEX[$N]}"
-    # echo "INFO: VALIDATOR_PUB_KEY_BASE64[$N] = ${VALIDATOR_PUB_KEY_BASE64[$N]}"
+    
+    # 0 is full node
+    if [ $N -ne 0 ]; then
+        CONSOLE_OUTPUT=$(./console -C $TEST_ROOT/console$N.json -c newkey | cut -c 92-)
+        ./console -C $TEST_ROOT/console$N.json -c "addpermkey ${CONSOLE_OUTPUT} ${NOWDATE} 1610000000" > tmp_output_console
+        CONSOLE_OUTPUT=$(./console -C $TEST_ROOT/console$N.json -c "exportpub ${CONSOLE_OUTPUT}")
+        # echo $CONSOLE_OUTPUT
+        VALIDATOR_PUB_KEY_HEX[$N]=$(echo "${CONSOLE_OUTPUT}" | grep 'imported key:' | awk '{print $3}')
+        # VALIDATOR_PUB_KEY_BASE64[$N]=$(echo "${CONSOLE_OUTPUT}" | grep 'imported key:' | awk '{print $4}')
+        # echo "INFO: VALIDATOR_PUB_KEY_HEX[$N] = ${VALIDATOR_PUB_KEY_HEX[$N]}"
+        # echo "INFO: VALIDATOR_PUB_KEY_BASE64[$N] = ${VALIDATOR_PUB_KEY_BASE64[$N]}"
+    fi
 
     cp $NODE_TARGET/config.json $TEST_ROOT/config$N.json
 
@@ -162,9 +172,7 @@ echo "Starting nodes..."
 
 cd $NODE_TARGET
 
-cargo build --release
-
-for (( N=1; N <= $NODES; N++ ))
+for (( N=0; N <= $NODES; N++ ))
 do
     echo "  Starting node #$N..."
 
@@ -176,7 +184,8 @@ do
     cp $TEST_ROOT/ton-global.config.json $NODE_TARGET/configs_$N/ton-global.config.json
 
     rm /shared/output_$N.log
-    ./ton_node --configs configs_$N -z . > /shared/node_$N_output &
+    rm /shared/node_$N_output
+    ./ton_node --configs configs_$N -z . >> "/shared/node_$N.output" 2>&1 &
 
 done
 

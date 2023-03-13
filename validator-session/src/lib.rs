@@ -46,6 +46,7 @@ mod session;
 mod session_description;
 mod session_processor;
 mod session_state;
+#[cfg(feature="slashing")]
 mod slashing;
 mod task_queue;
 pub mod utils;
@@ -247,21 +248,27 @@ pub type SessionListenerPtr = Weak<dyn SessionListener + Send + Sync>;
 pub type ValidatorWeight = catchain::ValidatorWeight;
 
 /// Slashing validator statistics
+#[cfg(feature="slashing")]
 pub type SlashingValidatorStat = slashing::ValidatorStat;
 
 /// Slashing aggregated validator statistics
+#[cfg(feature="slashing")]
 pub type SlashingAggregatedValidatorStat = slashing::AggregatedValidatorStat;
 
 /// Slashed node
+#[cfg(feature="slashing")]
 pub type SlashedNode = slashing::SlashedNode;
 
 /// Slashing node
+#[cfg(feature="slashing")]
 pub type SlashingNode = slashing::Node;
 
 /// Slashing metric
+#[cfg(feature="slashing")]
 pub type SlashingMetric = slashing::Metric;
 
 /// Slashing aggregated metric
+#[cfg(feature="slashing")]
 pub type SlashingAggregatedMetric = slashing::AggregatedMetric;
 
 /// Validator session options
@@ -1259,6 +1266,7 @@ pub trait SessionListener {
     );
 
     /// Slashing statistics event
+    #[cfg(feature="slashing")]
     fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat);
 }
 
