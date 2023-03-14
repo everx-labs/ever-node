@@ -142,7 +142,9 @@ impl WorkchainOverlay {
 
         let result = network.set_validator_list(overlay_id.clone(), &nodes).await?;
 
-        assert!(result.is_some());
+        if result.is_none() {
+            failure::bail!("Can't resolve ADNL IDs for overlay_id={}", overlay_id.to_hex_string());
+        }
 
         let in_broadcast_counter = metrics_receiver.sink().counter(format!("{}_in_broadcasts", metrics_prefix));
         let in_query_counter = metrics_receiver.sink().counter(format!("{}_in_queries", metrics_prefix));
