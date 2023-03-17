@@ -115,6 +115,19 @@ impl Workchain {
         }
     }
 
+    fn get_overlay_id(workchain_id: i32, wc_validator_set_hash: &UInt256, mc_validator_set_hash: &UInt256, tag: u32) -> UInt256 {
+        let magic_suffix = [0xff, 0xbe, 0x45, 0x23]; //magic suffix to create unique hash different from public overlay hashes
+        let mut overlay_id = Vec::new();
+
+        overlay_id.extend_from_slice(&magic_suffix);
+        overlay_id.extend_from_slice(&tag.to_le_bytes());
+        overlay_id.extend_from_slice(&workchain_id.to_le_bytes());
+        overlay_id.extend_from_slice(wc_validator_set_hash.as_slice());
+        overlay_id.extend_from_slice(mc_validator_set_hash.as_slice());
+
+        UInt256::calc_file_hash(&overlay_id)
+    }
+
     pub async fn create(
         engine: EnginePtr,
         runtime: tokio::runtime::Handle,
@@ -266,18 +279,11 @@ impl Workchain {
 
         //start overlay for interactions with MC
 
-        let mc_overlay_id = { //specific for the workchain_id overlay ID between all MC nodes and all WC nodes
-            let (_overlay_short_id, overlay_id) =
-                engine.calc_overlay_id(workchain_id, ton_block::SHARD_FULL)?;
+        const WC_OVERLAY_TAG: u32 = 1;
+        const MC_OVERLAY_TAG: u32 = 2;
 
-            let magic_suffix = [0xff, 0xbe, 0x45, 0x23]; //magic suffix to create unique hash different from public overlay hashes
-            let mut overlay_id = overlay_id.to_vec();
-
-            overlay_id.extend_from_slice(&magic_suffix);
-            overlay_id.extend_from_slice(workchain.mc_validator_set_hash.as_slice());
-
-            UInt256::calc_file_hash(&overlay_id)
-        };
+        let wc_overlay_id = Self::get_overlay_id(workchain.workchain_id, &workchain.wc_validator_set_hash, &workchain.mc_validator_set_hash, WC_OVERLAY_TAG);
+        let mc_overlay_id = Self::get_overlay_id(workchain.workchain_id, &workchain.wc_validator_set_hash, &workchain.mc_validator_set_hash, MC_OVERLAY_TAG);
 
         let mut full_validators = mc_validators.clone();
         full_validators.append(&mut workchain.wc_validators.clone());
@@ -307,7 +313,7 @@ impl Workchain {
             let workchain_overlay = WorkchainOverlay::create(
                 workchain.workchain_id,
                 format!("WC[{}]{}", workchain.wc_local_idx, *workchain.node_debug_id),
-                workchain.wc_validator_set_hash.clone(),
+                wc_overlay_id,
                 &workchain.wc_validators,
                 workchain.wc_validators.len(),
                 workchain.local_adnl_id.clone(),
