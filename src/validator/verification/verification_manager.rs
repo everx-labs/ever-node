@@ -147,6 +147,7 @@ impl VerificationManager for VerificationManagerImpl {
         local_key: PrivateKey,
         local_bls_key: PrivateKey,
         workchain_id: i32,
+        utime_since: u32,
         workchain_validators: &'a Vec<ValidatorDescr>,
         mc_validators: &'a Vec<ValidatorDescr>,
         listener: &'a VerificationListenerPtr,
@@ -172,6 +173,7 @@ impl VerificationManager for VerificationManagerImpl {
             &local_bls_key,
             &current_workchains,
             workchain_id,
+            utime_since,
             &workchain_validators,
             mc_validators,
             listener,
@@ -213,12 +215,14 @@ impl VerificationManagerImpl {
     }
 
     /// Compute validator set hash based on a validators list
-    fn compute_validator_set_hash(validators: &Vec<ValidatorDescr>) -> UInt256 {
+    fn compute_validator_set_hash(utime_since: u32, validators: &Vec<ValidatorDescr>) -> UInt256 {
         let mut result = Vec::<u8>::with_capacity(validators.len() * 32);
 
         for validator in validators {
             result.extend(validator.public_key.key_bytes());
         }
+
+        result.extend(utime_since.to_le_bytes());
 
         UInt256::calc_file_hash(&result)
     }
@@ -230,7 +234,8 @@ impl VerificationManagerImpl {
         local_bls_key: &PrivateKey,
         workchains: &WorkchainMapPtr,
         workchain_id: i32,
-        validators: &Vec<ValidatorDescr>,
+        utime_since: u32,
+        wc_validators: &Vec<ValidatorDescr>,
         mc_validators: &Vec<ValidatorDescr>,
         listener: &VerificationListenerPtr,
         metrics_receiver: Arc<metrics_runtime::Receiver>,
@@ -239,12 +244,14 @@ impl VerificationManagerImpl {
         wc_overlays_instance_counter: Arc<InstanceCounter>,
         mc_overlays_instance_counter: Arc<InstanceCounter>,
     ) -> Result<WorkchainPtr> {
-        let validator_set_hash = Self::compute_validator_set_hash(validators);
+        let wc_validator_set_hash = Self::compute_validator_set_hash(utime_since, wc_validators);
+        let mc_validator_set_hash = Self::compute_validator_set_hash(utime_since, mc_validators);
 
         //try to find workchain in a cache based on its ID and hash
 
         if let Some(workchain) = workchains.get(&workchain_id) {
-            if workchain.get_validator_set_hash() == &validator_set_hash {
+            if workchain.get_wc_validator_set_hash() == &wc_validator_set_hash && 
+               workchain.get_mc_validator_set_hash() == &mc_validator_set_hash {
                 return Ok(workchain.clone());
             }
         }
@@ -255,9 +262,10 @@ impl VerificationManagerImpl {
             engine.clone(),
             runtime,
             workchain_id,
-            validators.clone(),
+            wc_validators.clone(),
             mc_validators.clone(),
-            validator_set_hash,
+            wc_validator_set_hash,
+            mc_validator_set_hash,
             local_key,
             local_bls_key,
             listener.clone(),

@@ -306,7 +306,9 @@ impl ValidationStatus {
 struct ValidatorListStatus {
     known_lists: HashMap<ValidatorListHash, PublicKey>,
     curr: Option<ValidatorListHash>,
-    next: Option<ValidatorListHash>
+    next: Option<ValidatorListHash>,
+    curr_utime_since: Option<u32>,
+    next_utime_since: Option<u32>,
 }
 
 impl ValidatorListStatus {
@@ -351,6 +353,10 @@ impl ValidatorListStatus {
     fn known_hashes (&self) -> HashSet<ValidatorListHash> {
         return self.known_lists.keys().cloned().collect();
     }
+
+    fn get_curr_utime_since(&self) -> &Option<u32> {
+        &self.curr_utime_since
+    }
 }
 
 impl Default for ValidatorListStatus {
@@ -358,7 +364,9 @@ impl Default for ValidatorListStatus {
         return ValidatorListStatus {
             known_lists: HashMap::default(),
             curr: None,
-            next: None
+            next: None,
+            curr_utime_since: None,
+            next_utime_since: None,
         }
     }
 }
@@ -501,10 +509,12 @@ impl ValidatorManagerImpl {
         };
 
         self.validator_list_status.curr = self.update_single_validator_list(validator_set.list(), "current").await?;
+        self.validator_list_status.curr_utime_since = Some(validator_set.utime_since());
         if let Some(id) = self.validator_list_status.curr.as_ref() {
             self.engine.activate_validator_list(id.clone())?;
         }
         self.validator_list_status.next = self.update_single_validator_list(next_validator_set.list(), "next").await?;
+        self.validator_list_status.next_utime_since = Some(next_validator_set.utime_since());
 
         STATSD.gauge("in_current_vset_p34", if self.validator_list_status.curr.is_some() { 1 } else { 0 } as f64);
         STATSD.gauge("in_next_vset_p36", if self.validator_list_status.next.is_some() { 1 } else { 0 } as f64);
@@ -984,6 +994,7 @@ impl ValidatorManagerImpl {
                     let verification_listener: Arc<dyn VerificationListener> = verification_listener.clone();
                     let verification_listener = Arc::downgrade(&verification_listener);
                     let local_key = self.validator_list_status.get_local_key().expect("Validator must have local key");
+                    let utime_since: u32 = self.validator_list_status.get_curr_utime_since().expect("Validator curr_utime_since must be set");
                     log::debug!(target: "verificator", "Request BLS key");
                     let local_bls_key = self.engine.get_validator_bls_key(local_key.id()).await;
                     log::debug!(target: "verificator", "Request BLS key done");
@@ -994,7 +1005,7 @@ impl ValidatorManagerImpl {
                             let verification_manager = self.verification_manager.clone();
                             rt.spawn(async move {
                                 log::debug!(target: "verificator", "Update workchains start");
-                                verification_manager.update_workchains(local_key, local_bls_key, workchain_id, &workchain_validators, &mc_validators, &verification_listener).await;
+                                verification_manager.update_workchains(local_key, local_bls_key, workchain_id, utime_since, &workchain_validators, &mc_validators, &verification_listener).await;
                                 log::debug!(target: "verificator", "Update workchains finish");
                             });
                         },

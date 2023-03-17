@@ -70,6 +70,7 @@ pub trait VerificationManager: Sync + Send {
         local_key: PrivateKey,
         local_bls_key: PrivateKey,
         workchain_id: i32,
+        utime_since: u32,
         workchain_validators: &'a Vec<ValidatorDescr>,
         mc_validators: &'a Vec<ValidatorDescr>,
         listener: &'a VerificationListenerPtr,

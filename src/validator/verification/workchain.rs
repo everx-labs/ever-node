@@ -68,7 +68,8 @@ pub type WorkchainPtr = Arc<Workchain>;
 //todo: hide fields within module
 pub struct Workchain {
     runtime: tokio::runtime::Handle,      //runtime handle for spawns
-    validator_set_hash: UInt256,          //hash of validators set
+    wc_validator_set_hash: UInt256,       //hash of validators set for WC
+    mc_validator_set_hash: UInt256,       //hash of validators set for MC
     wc_validators: Vec<ValidatorDescr>,   //WC validators
     wc_pub_keys: Vec<[u8; BLS_PUBLIC_KEY_LEN]>, //WC validators pubkeys
     local_adnl_id: PublicKeyHash,         //ADNL ID for this node
@@ -120,7 +121,8 @@ impl Workchain {
         workchain_id: i32,
         wc_validators: Vec<ValidatorDescr>,
         mc_validators: Vec<ValidatorDescr>,
-        validator_set_hash: UInt256,
+        wc_validator_set_hash: UInt256,
+        mc_validator_set_hash: UInt256,
         local_key: &PrivateKey,
         local_bls_key: &PrivateKey,
         listener: VerificationListenerPtr,
@@ -165,9 +167,10 @@ impl Workchain {
 
         let mut wc_pub_keys = Vec::new();
 
-        log::info!(target: "verificator", "Creating verification workchain {} (validator_set_hash={}) with {} workchain nodes (total_weight={}, cutoff_weight={}, wc_local_idx={}, mc_local_idx={})",
+        log::info!(target: "verificator", "Creating verification workchain {} (wc_validator_set_hash={}, mc_validator_set_hash={}) with {} workchain nodes (total_weight={}, cutoff_weight={}, wc_local_idx={}, mc_local_idx={})",
             node_debug_id,
-            validator_set_hash.to_hex_string(),
+            wc_validator_set_hash.to_hex_string(),
+            mc_validator_set_hash.to_hex_string(),
             wc_validators.len(),
             wc_total_weight,
             wc_cutoff_weight,
@@ -197,9 +200,10 @@ impl Workchain {
         let mc_total_weight: ValidatorWeight = mc_validators.iter().map(|desc| desc.weight).sum();
         let mc_cutoff_weight = mc_total_weight * 2 / 3 + 1;
 
-        log::debug!(target: "verificator", "Workchain {} (validator_set_hash={}) has {} linked MC nodes (total_weight={}, cutoff_weight={})",
+        log::debug!(target: "verificator", "Workchain {} (wc_validator_set_hash={}, mc_validator_set_hash={}) has {} linked MC nodes (total_weight={}, cutoff_weight={})",
             node_debug_id,
-            validator_set_hash.to_hex_string(),
+            wc_validator_set_hash.to_hex_string(),
+            mc_validator_set_hash.to_hex_string(),
             mc_validators.len(),
             mc_total_weight,
             mc_cutoff_weight);
@@ -223,7 +227,8 @@ impl Workchain {
             node_debug_id,
             runtime: runtime.clone(),
             wc_validators,
-            validator_set_hash,
+            wc_validator_set_hash,
+            mc_validator_set_hash,
             wc_cutoff_weight,
             _local_key: local_key.clone(),
             local_bls_key: local_bls_key.clone(),
@@ -269,6 +274,7 @@ impl Workchain {
             let mut overlay_id = overlay_id.to_vec();
 
             overlay_id.extend_from_slice(&magic_suffix);
+            overlay_id.extend_from_slice(workchain.mc_validator_set_hash.as_slice());
 
             UInt256::calc_file_hash(&overlay_id)
         };
@@ -301,7 +307,7 @@ impl Workchain {
             let workchain_overlay = WorkchainOverlay::create(
                 workchain.workchain_id,
                 format!("WC[{}]{}", workchain.wc_local_idx, *workchain.node_debug_id),
-                workchain.validator_set_hash.clone(),
+                workchain.wc_validator_set_hash.clone(),
                 &workchain.wc_validators,
                 workchain.wc_validators.len(),
                 workchain.local_adnl_id.clone(),
@@ -384,10 +390,15 @@ impl Workchain {
         Common methods
     */
 
-    /// Validator set hash
-    pub fn get_validator_set_hash(&self) -> &UInt256 {
-        &self.validator_set_hash
+    /// Workchain validator set hash for WC
+    pub fn get_wc_validator_set_hash(&self) -> &UInt256 {
+        &self.wc_validator_set_hash
     }
+
+    /// Workchain validator set hash for MC
+    pub fn get_mc_validator_set_hash(&self) -> &UInt256 {
+        &self.mc_validator_set_hash
+    }    
 
     /// Get self weak reference
     fn get_self(&self) -> WorkchainPtr {
