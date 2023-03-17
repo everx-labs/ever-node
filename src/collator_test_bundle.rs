@@ -176,8 +176,8 @@ pub fn create_block_handle_storage() -> BlockHandleStorage {
         Arc::new(NodeStateDb::in_memory()),
         Arc::new(NodeStateDb::in_memory()),
         #[cfg(feature = "telemetry")]
-        create_storage_telemetry(),
-        create_storage_allocated()
+        Arc::new(StorageTelemetry::default()),
+        Arc::new(StorageAlloc::default()),
     )
 }
 
@@ -185,7 +185,7 @@ pub fn create_block_handle_storage() -> BlockHandleStorage {
 pub fn create_engine_telemetry() -> Arc<EngineTelemetry> {
     Arc::new(
         EngineTelemetry {
-            storage: create_storage_telemetry(),
+            storage: Arc::new(StorageTelemetry::default()),
             awaiters: Metric::without_totals("", 1),
             catchain_clients: Metric::without_totals("", 1),
             cells: Metric::without_totals("", 1),
@@ -202,7 +202,7 @@ pub fn create_engine_telemetry() -> Arc<EngineTelemetry> {
 pub fn create_engine_allocated() -> Arc<EngineAlloc> {
     Arc::new(
         EngineAlloc {
-            storage: create_storage_allocated(),
+            storage: Arc::new(StorageAlloc::default()),
             awaiters: Arc::new(AtomicU64::new(0)),
             catchain_clients: Arc::new(AtomicU64::new(0)),
             overlay_clients: Arc::new(AtomicU64::new(0)),
@@ -211,29 +211,6 @@ pub fn create_engine_allocated() -> Arc<EngineAlloc> {
             top_blocks: Arc::new(AtomicU64::new(0)),
             validator_peers: Arc::new(AtomicU64::new(0)),
             validator_sets: Arc::new(AtomicU64::new(0))
-        }
-    )
-}
-
-#[cfg(feature = "telemetry")]
-fn create_storage_telemetry() -> Arc<StorageTelemetry> {
-    Arc::new(
-        StorageTelemetry {
-            file_entries: Metric::without_totals("", 1),
-            handles: Metric::without_totals("", 1),
-            packages: Metric::without_totals("", 1),
-            storage_cells: Metric::without_totals("", 1)
-        }
-    )
-}
-
-fn create_storage_allocated() -> Arc<StorageAlloc> {
-    Arc::new(
-        StorageAlloc {
-            file_entries: Arc::new(AtomicU64::new(0)),
-            handles: Arc::new(AtomicU64::new(0)),
-            packages: Arc::new(AtomicU64::new(0)),
-            storage_cells: Arc::new(AtomicU64::new(0))
         }
     )
 }

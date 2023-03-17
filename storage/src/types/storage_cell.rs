@@ -19,12 +19,8 @@ use ton_types::{
     MAX_LEVEL, MAX_REFERENCES_COUNT
 };
 
-#[cfg(not(feature = "ref_count_gc"))]
-use crate::dynamic_boc_db::DynamicBocDb;
-#[cfg(feature = "ref_count_gc")]
 use ton_types::fail;
 
-#[cfg(feature = "ref_count_gc")]
 use crate::dynamic_boc_rc_db::DynamicBocDb;
 
 pub struct StorageCell {
@@ -33,9 +29,6 @@ pub struct StorageCell {
     boc_db: Arc<DynamicBocDb>,
     tree_bits_count: u64,
     tree_cell_count: u64,
-    #[cfg(feature = "ref_count_gc")]
-    parents_count: u32,
-    #[cfg(feature = "ref_count_gc")]
     use_cache: bool,
 }
 
@@ -50,14 +43,17 @@ impl StorageCell {
     pub fn deserialize(
         boc_db: Arc<DynamicBocDb>, 
         data: &[u8], 
-        #[cfg(feature = "ref_count_gc")]
-        use_cache: bool
-    ) -> Result<Self> {
+        use_cache: bool,
+        with_parents_count: bool,
+    ) -> Result<(Self, u32)> {
         debug_assert!(!data.is_empty());
 
         let mut reader = Cursor::new(data);
-        #[cfg(feature = "ref_count_gc")]
-        let parents_count = reader.read_le_u32()?;
+        let parents_count = if with_parents_count {
+            reader.read_le_u32()?
+        } else {
+            0
+        };
         let cell_data = CellData::deserialize(&mut reader)?;
         let references_count = cell_data.references_count();
         let mut references = Vec::with_capacity(references_count as usize);
@@ -68,37 +64,45 @@ impl StorageCell {
         let tree_bits_count = reader.read_le_u64()?;
         let tree_cell_count = reader.read_le_u64()?;
 
+        let read = reader.position();
+        let data_len = data.len();
+        if read != data_len as u64 {
+            fail!("There is more data after storage cell deserialisation (read: {}, data len: {})",
+                read, data_len);
+        }
+
         CELL_COUNT.fetch_add(1, Ordering::Relaxed);
         boc_db.allocated().storage_cells.fetch_add(1, Ordering::Relaxed);
-        Ok(Self {
+        let cell = Self {
             cell_data,
             references: RwLock::new(references),
             boc_db,
             tree_bits_count,
             tree_cell_count,
-            #[cfg(feature = "ref_count_gc")]
-            parents_count,
-            #[cfg(feature = "ref_count_gc")]
             use_cache,
-        })
+        };
+        Ok((cell, parents_count))
     }
 
     pub fn cell_count() -> u64 {
         CELL_COUNT.load(Ordering::Relaxed)
     }
 
-    #[cfg(feature = "ref_count_gc")]
     pub fn deserialize_parents_count(data: &[u8]) -> Result<u32> {
         let parents_count = Cursor::new(data).read_le_u32()?;
         Ok(parents_count)
     }
 
-    pub fn deserialize_references(data: &[u8]) -> Result<Vec<Reference>> {
+    pub fn deserialize_references(
+        data: &[u8],
+        with_parents_count: bool,
+    ) -> Result<Vec<Reference>> {
         debug_assert!(!data.is_empty());
 
         let mut reader = Cursor::new(data);
-        #[cfg(feature = "ref_count_gc")]
-        let _parents_count = reader.read_le_u32()?;
+        if with_parents_count {
+            let _parents_count = reader.read_le_u32()?;
+        }
         let cell_data = CellData::deserialize(&mut reader)?;
         let references_count = cell_data.references_count();
         let mut references = Vec::with_capacity(references_count);
@@ -112,9 +116,6 @@ impl StorageCell {
     pub fn serialize_self(&self) -> Result<Vec<u8>> {
 
         let mut data = Vec::new();
-
-        #[cfg(feature = "ref_count_gc")]
-        data.write_all(&self.parents_count.to_le_bytes())?;
 
         self.cell_data.serialize(&mut data)?;
 
@@ -132,18 +133,13 @@ impl StorageCell {
     }
 
     pub fn serialize(
-        cell: &dyn CellImpl,
-        #[cfg(feature = "ref_count_gc")]
-        parents_count: u32,
+        cell: &dyn CellImpl
     ) -> Result<Vec<u8>> {
         let references_count = cell.references_count() as u8;
 
         debug_assert!(references_count as usize <= MAX_REFERENCES_COUNT);
 
         let mut data = Vec::new();
-
-        #[cfg(feature = "ref_count_gc")]
-        data.write_all(&parents_count.to_le_bytes())?;
 
         cell.cell_data().serialize(&mut data)?;
 
@@ -161,10 +157,7 @@ impl StorageCell {
 
     pub fn with_cell(
         cell: &dyn CellImpl,
-        #[cfg(feature = "ref_count_gc")]
-        parents_count: u32,
         boc_db: Arc<DynamicBocDb>,
-        #[cfg(feature = "ref_count_gc")]
         use_cache: bool,
     ) -> Result<Self> {
         let references_count = cell.references_count();
@@ -181,9 +174,6 @@ impl StorageCell {
             boc_db,
             tree_bits_count: cell.tree_bits_count(),
             tree_cell_count: cell.tree_bits_count(),
-            #[cfg(feature = "ref_count_gc")]
-            parents_count,
-            #[cfg(feature = "ref_count_gc")]
             use_cache
         })
     }
@@ -207,7 +197,6 @@ impl StorageCell {
         let cell_id = hash;
         let storage_cell = self.boc_db.load_cell(
             &cell_id,
-            #[cfg(feature = "ref_count_gc")]
             self.use_cache
         )?;
         self.references.write().expect("Poisoned RwLock")[index] = Reference::Loaded(Arc::clone(&storage_cell));
@@ -219,28 +208,6 @@ impl StorageCell {
         self.references.read().expect("Poisoned RwLock")[index].hash()
     }
 
-    #[cfg(feature = "ref_count_gc")]
-    pub(crate) fn parents_count(&self) -> u32 {
-        self.parents_count
-    }
-
-    #[cfg(feature = "ref_count_gc")]
-    pub(crate) fn inc_parents_count(&mut self) -> Result<u32> {
-        if self.parents_count == u32::MAX {
-            fail!("Parents count has reached the maximum value");
-        }
-        self.parents_count += 1;
-        Ok(self.parents_count)
-    }
-
-    #[cfg(feature = "ref_count_gc")]
-    pub(crate) fn dec_parents_count(&mut self) -> Result<u32> {
-        if self.parents_count == 0 {
-            fail!("Parents count has reached zero value");
-        }
-        self.parents_count -= 1;
-        Ok(self.parents_count)
-    }
 }
 
 impl CellImpl for StorageCell {

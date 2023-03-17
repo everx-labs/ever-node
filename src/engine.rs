@@ -66,7 +66,7 @@ use crate::{
     validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
 };
 #[cfg(feature = "telemetry")]
-use adnl::telemetry::{Metric, TelemetryItem, TelemetryPrinter};
+use adnl::telemetry::{Metric, MetricBuilder, TelemetryItem, TelemetryPrinter};
 use overlay::QueriesConsumer;
 #[cfg(feature = "metrics")]
 use statsd::client;
@@ -125,8 +125,6 @@ pub struct Engine {
     sync_status: AtomicU32,
     low_memory_mode: bool,
     remp_capability: AtomicBool,
-    #[cfg(feature="remp_emergency")]
-    forcedly_disable_remp_cap: bool,
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
  
@@ -518,14 +516,7 @@ impl Engine {
 
         #[cfg(feature = "telemetry")] 
         let (metrics, engine_telemetry) = Self::create_telemetry();
-        let storage_allocated = Arc::new(
-            StorageAlloc {
-                file_entries: Arc::new(AtomicU64::new(0)),
-                handles: Arc::new(AtomicU64::new(0)),
-                packages: Arc::new(AtomicU64::new(0)),
-                storage_cells: Arc::new(AtomicU64::new(0))
-            }
-        );
+        let storage_allocated = Arc::new(StorageAlloc::default());
         let engine_allocated = Arc::new(
             EngineAlloc {
                 storage: storage_allocated,
@@ -557,9 +548,11 @@ impl Engine {
             }
         };
 
+        let cells_db_config = general_config.cells_db_config().clone();
         let db_config = InternalDbConfig { 
             db_directory: general_config.internal_db_path().to_string(), 
-            cells_gc_interval_sec: general_config.cells_gc_config().gc_interval_sec
+            cells_gc_interval_sec: general_config.cells_gc_config().gc_interval_sec,
+            cells_db_config: cells_db_config.clone(),
         };
         let control_config = general_config.control_server()?;
         let global_config = general_config.load_global_config()?;
@@ -651,6 +644,7 @@ impl Engine {
             enable_shard_state_persistent_gc,
             cells_lifetime_sec,
             stopper.clone(),
+            cells_db_config.states_db_queue_len + 10,
             #[cfg(feature = "telemetry")]
             engine_telemetry.clone(),
             engine_allocated.clone()
@@ -727,8 +721,6 @@ impl Engine {
             sync_status: AtomicU32::new(0),
             low_memory_mode,
             remp_capability: AtomicBool::new(false),
-            #[cfg(feature="remp_emergency")]
-            forcedly_disable_remp_cap: remp_config.forcedly_disable_remp_cap(),
             test_bundles_config,
             shard_states_keeper: shard_states_keeper.clone(),
             #[cfg(feature="workchains")]
@@ -971,10 +963,6 @@ impl Engine {
         self.remp_capability.store(value, Ordering::Relaxed);
     }
 
-    #[cfg(feature="remp_emergency")]
-    pub fn forcedly_disable_remp_cap(&self) -> bool {
-        self.forcedly_disable_remp_cap
-    }
 
     pub async fn download_and_apply_block_worker(
         self: Arc<Self>, 
@@ -1237,13 +1225,27 @@ impl Engine {
         fn create_metric(name: &str) -> Arc<Metric> {
             Metric::without_totals(name, Engine::TIMEOUT_TELEMETRY_SEC)
         }
+        fn create_metric_ex(name: &str) -> Arc<MetricBuilder> {
+            MetricBuilder::with_metric_and_period(
+                Metric::with_total_amount(name, Engine::TIMEOUT_TELEMETRY_SEC),
+                1_000_000_000 // 1 sec in nanos
+            )
+        }
  
         let storage_telemetry = Arc::new(
             StorageTelemetry {
                 file_entries: create_metric("Alloc NODE file entries"),
                 handles: create_metric("Alloc NODE block handles"),
                 packages: create_metric("Alloc NODE packages"),
-                storage_cells: create_metric("Alloc NODE storage cells")
+                storage_cells: create_metric("Alloc NODE storage cells"),
+                shardstates_queue: create_metric("Alloc NODE shardstates queue"),
+                cells_counters: create_metric("Alloc NODE cells counters"),
+                cell_counter_from_cache: create_metric_ex("NODE read cache cell_counters/sec"),
+                cell_counter_from_db: create_metric_ex("NODE read db cell_counters/sec"),
+                updated_old_cells: create_metric_ex("NODE old format update cells/sec"),
+                updated_cells: create_metric_ex("NODE update cell_counters/sec"),
+                new_cells: create_metric_ex("NODE create new cells/sec"),
+                deleted_cells: create_metric_ex("NODE delete cells/sec"),
             }
         );
         let engine_telemetry = Arc::new(
@@ -1265,6 +1267,14 @@ impl Engine {
             TelemetryItem::Metric(engine_telemetry.storage.handles.clone()),
             TelemetryItem::Metric(engine_telemetry.storage.packages.clone()),
             TelemetryItem::Metric(engine_telemetry.storage.storage_cells.clone()),
+            TelemetryItem::Metric(engine_telemetry.storage.shardstates_queue.clone()),
+            TelemetryItem::Metric(engine_telemetry.storage.cells_counters.clone()),
+            TelemetryItem::MetricBuilder(engine_telemetry.storage.cell_counter_from_cache.clone()),
+            TelemetryItem::MetricBuilder(engine_telemetry.storage.cell_counter_from_db.clone()),
+            TelemetryItem::MetricBuilder(engine_telemetry.storage.updated_old_cells.clone()),
+            TelemetryItem::MetricBuilder(engine_telemetry.storage.updated_cells.clone()),
+            TelemetryItem::MetricBuilder(engine_telemetry.storage.new_cells.clone()),
+            TelemetryItem::MetricBuilder(engine_telemetry.storage.deleted_cells.clone()),
             TelemetryItem::Metric(engine_telemetry.awaiters.clone()),
             TelemetryItem::Metric(engine_telemetry.catchain_clients.clone()),
             TelemetryItem::Metric(engine_telemetry.cells.clone()),
@@ -1363,9 +1373,6 @@ impl Engine {
     }
 
     fn process_ext_msg_broadcast(&self, broadcast: ExternalMessageBroadcast, src: Arc<KeyId>) {
-        #[cfg(feature="remp_emergency")]
-        let remp = !self.forcedly_disable_remp_cap() && self.remp_capability();
-        #[cfg(not(feature="remp_emergency"))]
         let remp = self.remp_capability();
         // just add to list
         if !self.is_validator() {
@@ -1655,7 +1662,7 @@ impl Engine {
         let join_handle = tokio::spawn(async move {
             engine.acquire_stop(Engine::MASK_SERVICE_ARCHIVES_GC);
             if let Err(e) = Self::archives_gc_worker(&engine, archives_gc_block).await {
-                log::error!("FATAL!!! Unexpected error in archives gc: {:?}", e);
+                log::error!("CRITICAL!!! Unexpected error in archives gc: {:?}", e);
             }
             engine.release_stop(Engine::MASK_SERVICE_ARCHIVES_GC);
         });

@@ -1253,10 +1253,6 @@ impl Collator {
         log::trace!("{}: do_collate", self.collated_block_descr);
 
         let ext_messages = self.engine.get_external_messages(&self.shard)?;
-        #[cfg(feature="remp_emergency")]
-        let remp = !self.engine.forcedly_disable_remp_cap() &&
-                   mc_data.config().has_capability(GlobalCapabilities::CapRemp);
-        #[cfg(not(feature="remp_emergency"))]
         let remp = mc_data.config().has_capability(GlobalCapabilities::CapRemp);
         let remp_messages = if remp {
             Some(self.engine.get_remp_messages(&self.shard)?)
@@ -2606,10 +2602,6 @@ impl Collator {
         let data = ton_types::serialize_toc(&cell)?;
         block_id.file_hash = UInt256::calc_file_hash(&data);
 
-        #[cfg(feature="remp_emergency")]
-        let remp = !self.engine.forcedly_disable_remp_cap() &&
-                   mc_data.config().has_capability(GlobalCapabilities::CapRemp);
-        #[cfg(not(feature="remp_emergency"))]
         let remp = mc_data.config().has_capability(GlobalCapabilities::CapRemp);
         if remp {
             let (accepted, rejected, ignored) = collator_data.withdraw_remp_msg_statuses();

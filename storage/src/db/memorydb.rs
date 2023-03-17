@@ -84,10 +84,10 @@ impl Kvc for MemoryDb {
 
 /// Implementation of readable key-value collection for MemoryDb. Actual implementation is blocking.
 impl<K: DbKey + Send + Sync> KvcReadable<K> for MemoryDb {
-    fn try_get(&self, key: &K) -> Result<Option<DbSlice>> {
+    fn try_get_raw(&self, key: &[u8]) -> Result<Option<DbSlice>> {
         Ok(self.map()?
             .lock().unwrap()
-            .get(key.key())
+            .get(key)
             .map(|vec| vec.clone().into()))
     }
 
@@ -114,17 +114,17 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for MemoryDb {
 
 /// Implementation of wriatable key-value collection for MemoryDb. Actual implementation is blocking.
 impl<K: DbKey + Send + Sync> KvcWriteable<K> for MemoryDb {
-    fn put(&self, key: &K, value: &[u8]) -> Result<()> {
+    fn put_raw(&self, key: &[u8], value: &[u8]) -> Result<()> {
         self.map()?
             .lock().unwrap()
-            .insert(key.key().to_vec(), value.to_vec());
+            .insert(key.to_vec(), value.to_vec());
         Ok(())
     }
 
-    fn delete(&self, key: &K) -> Result<()> {
+    fn delete_raw(&self, key: &[u8]) -> Result<()> {
         self.map()?
             .lock().unwrap()
-            .remove(key.key());
+            .remove(key);
         Ok(())
     }
 }
@@ -172,11 +172,11 @@ impl MemoryDbTransaction {
 }
 
 impl<K: DbKey + Send + Sync> KvcTransaction<K> for MemoryDbTransaction {
-    fn put(&mut self, key: &K, value: &[u8]) -> Result<()> {
+    fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.pending.lock().unwrap().push(
             PendingOperation::Put(
                 Pair {
-                    key: key.key().to_vec(),
+                    key: key.to_vec(),
                     value: value.to_vec(),
                 }
             )
@@ -184,9 +184,9 @@ impl<K: DbKey + Send + Sync> KvcTransaction<K> for MemoryDbTransaction {
         Ok(())
     }
 
-    fn delete(&mut self, key: &K) -> Result<()> {
+    fn delete_raw(&mut self, key: &[u8]) -> Result<()> {
         self.pending.lock().unwrap().push(
-            PendingOperation::Delete(key.key().to_vec())
+            PendingOperation::Delete(key.to_vec())
         );
         Ok(())
     }

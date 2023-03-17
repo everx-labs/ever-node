@@ -37,7 +37,11 @@ pub trait KvcReadable<K: DbKey + Send + Sync>: Kvc {
     }
 
     /// Tries to get value from collection by the key; returns Ok(None) if the key not found
-    fn try_get(&self, key: &K) -> Result<Option<DbSlice>>;
+    fn try_get_raw(&self, key: &[u8]) -> Result<Option<DbSlice>>;
+
+    fn try_get(&self, key: &K) -> Result<Option<DbSlice>> {
+        self.try_get_raw(key.key())
+    }
 
     /// Gets value from collection by the key
     fn get(&self, key: &K) -> Result<DbSlice> {
@@ -86,10 +90,18 @@ pub trait KvcReadable<K: DbKey + Send + Sync>: Kvc {
 /// Trait for writable key-value collections
 pub trait KvcWriteable<K: DbKey + Send + Sync>: KvcReadable<K> {
     /// Puts value into collection by the key
-    fn put(&self, key: &K, value: &[u8]) -> Result<()>;
+    fn put(&self, key: &K, value: &[u8]) -> Result<()> {
+        self.put_raw(key.key(), value)
+    }
+
+    fn put_raw(&self, key: &[u8], value: &[u8]) -> Result<()>;
 
     /// Deletes value from collection by the key
-    fn delete(&self, key: &K) -> Result<()>;
+    fn delete(&self, key: &K) -> Result<()> {
+        self.delete_raw(key.key())
+    }
+    
+    fn delete_raw(&self, key: &[u8]) -> Result<()>;
 }
 
 /// Trait for key-value collections with the ability of take snapshots
@@ -109,10 +121,16 @@ pub trait KvcTransactional<K: DbKey + Send + Sync>: KvcWriteable<K> {
 /// on destroy, if not committed.
 pub trait KvcTransaction<K: DbKey + Send + Sync> {
     /// Adds put operation into transaction (batch)
-    fn put(&mut self, key: &K, value: &[u8]) -> Result<()>;
+    fn put(&mut self, key: &K, value: &[u8]) -> Result<()> {
+        self.put_raw(key.key(), value)
+    }
+    fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
 
     /// Adds delete operation into transaction (batch)
-    fn delete(&mut self, key: &K) -> Result<()>;
+    fn delete(&mut self, key: &K) -> Result<()> {
+        self.delete_raw(key.key())
+    }
+    fn delete_raw(&mut self, key: &[u8]) -> Result<()>;
 
     /// Removes all pending operations from transaction (batch)
     fn clear(&mut self);

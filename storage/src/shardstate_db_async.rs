@@ -20,13 +20,11 @@ use crate::{
 };
 #[cfg(feature = "telemetry")]
 use crate::StorageTelemetry;
-#[cfg(all(test, feature = "telemetry"))]
-use crate::tests::utils::create_storage_telemetry;
 use crate::db::rocksdb::RocksDb;
 use std::{
     io::{Cursor, Read, Write},
-    sync::{Arc, atomic::{AtomicU8, AtomicU32, AtomicI32, Ordering}}, 
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    sync::{Arc, atomic::{AtomicU8, AtomicU32, Ordering}}, 
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use ton_block::BlockIdExt;
 use ton_types::{
@@ -79,6 +77,24 @@ pub trait Callback: Sync + Send {
     async fn invoke(&self, job: Job, ok: bool);
 }
 
+pub struct SsNotificationCallback(tokio::sync::Notify);
+
+#[async_trait::async_trait]
+impl Callback for SsNotificationCallback {
+    async fn invoke(&self, _job: Job, _ok: bool) {
+        self.0.notify_one();
+    }
+}
+
+impl SsNotificationCallback {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self(tokio::sync::Notify::new()))
+    }
+    pub async fn wait(&self) {
+        self.0.notified().await;
+    }
+}
+
 impl Job {
     pub fn block_id(&self) -> &BlockIdExt {
         match self {
@@ -93,19 +109,31 @@ pub struct ShardStateDb {
     shardstate_db: Arc<dyn KvcWriteable<BlockIdExt>>,
     dynamic_boc_db: Arc<DynamicBocDb>,
     storer: tokio::sync::mpsc::UnboundedSender<(Job, Option<Arc<dyn Callback>>)>,
-    in_queue: AtomicI32,
+    in_queue: AtomicU32,
     stop: AtomicU8,
+    max_queue_len: u32,
+    max_pss_slowdown_mcs: u32,
+    full_filled_counters: bool,
+    pss_slowdown_mcs: Arc<AtomicU32>,
+    #[cfg(feature = "telemetry")]
+    telemetry: Arc<StorageTelemetry>,
 }
 
 impl ShardStateDb {
 
     const MASK_GC_STARTED: u8 = 0x01;
+    const MASK_WORKER: u8 = 0x02;
     const MASK_STOPPED: u8 = 0x80;
 
     pub fn new(
         db: Arc<RocksDb>,
-        shardstate_db_path: impl ToString,
-        cell_db_path: impl ToString,
+        shardstate_db_path: &str,
+        cell_db_path: &str,
+        db_root_path: &str,
+        assume_old_cells: bool,
+        max_queue_len: u32,
+        max_pss_slowdown_mcs: u32,
+        full_filled_counters: bool,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>
@@ -113,18 +141,30 @@ impl ShardStateDb {
 
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
 
+        if assume_old_cells && full_filled_counters {
+            fail!("assume_old_cells and full_filled_counters can't be enabled at the same time")
+        }
+
         let ss_db = Arc::new(Self {
             db: db.clone(),
             shardstate_db: Arc::new(RocksDbTable::with_db(db.clone(), shardstate_db_path, true)?),
             dynamic_boc_db: Arc::new(DynamicBocDb::with_db(
                 Arc::new(CellDb::with_db(db.clone(), cell_db_path, true)?),
+                db_root_path,
+                assume_old_cells,
                 #[cfg(feature = "telemetry")]
                 telemetry.clone(),
                 allocated.clone()
             )),
             storer: sender,
-            in_queue: AtomicI32::new(0),
-            stop: AtomicU8::new(0)
+            in_queue: AtomicU32::new(0),
+            stop: AtomicU8::new(0),
+            max_queue_len,
+            max_pss_slowdown_mcs,
+            full_filled_counters,
+            pss_slowdown_mcs: Arc::new(AtomicU32::new(0)),
+            #[cfg(feature = "telemetry")]
+            telemetry,
         });
 
         tokio::spawn({
@@ -154,27 +194,95 @@ impl ShardStateDb {
                 }
             }
 
-            async fn sleep_nicely(stop: &AtomicU8, sleep_for_sec: u64) -> bool {
-                let start = Instant::now();
+            async fn sleep_nicely(stop: &AtomicU8, mut sleep_for_ms: u64) -> bool {
+                const TIMEOUT_STEP: u64 = 1000;
                 loop {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let interval = if sleep_for_ms > TIMEOUT_STEP {
+                        TIMEOUT_STEP
+                    } else {
+                        sleep_for_ms
+                    };
+                    tokio::time::sleep(Duration::from_millis(interval)).await;
                     if check_and_stop(stop) {
                         return false
                     }
-                    if start.elapsed().as_secs() > sleep_for_sec {
-                        return true
-                    } 
+                    if sleep_for_ms <= TIMEOUT_STEP {
+                        return true;
+                    }
+                    sleep_for_ms -= TIMEOUT_STEP;
                 }
             }
 
+            async fn wait_queue(in_queue: &AtomicU32, stop: &AtomicU8, max_queue_len: u32) -> bool {
+                loop {
+                    let in_queue = in_queue.load(Ordering::Relaxed);
+                    if in_queue >= max_queue_len {
+                        log::warn!(
+                            target: TARGET, 
+                            "ShardStateDb GC: waiting for queue (current queue length: {})",
+                            in_queue
+                        );
+                        if !sleep_nicely(stop, 1000).await {
+                            return false;
+                        }
+                    } else {
+                        return true;
+                    }
+                }
+            }
+
+            log::debug!(target: TARGET, "ShardStateDb GC: started worker");
+
+            let mut to_delete: Vec<BlockIdExt> = vec!();
             loop {
                 let run_gc_interval = run_interval_adjustable_sec.load(Ordering::Relaxed) as u64;
+                if to_delete.len() == 0 {
+                    log::debug!(target: TARGET, "ShardStateDb GC: waiting for {run_gc_interval}sec...");
+                    if !sleep_nicely(&self.stop, run_gc_interval * 1000).await {
+                        return;
+                    }
+                } else {
+                    let interval_ms = (run_gc_interval * 1000) / (to_delete.len() + 1) as u64;
+                    while let Some(id) = to_delete.pop() {
+                        if !wait_queue(&self.in_queue, &self.stop, self.max_queue_len).await {
+                            return;
+                        }
+                        let in_queue = self.in_queue.fetch_add(1, Ordering::Relaxed) + 1;
 
-                if !sleep_nicely(&self.stop, run_gc_interval).await {
-                    return;
+                        let now = std::time::Instant::now();
+                        let callback = SsNotificationCallback::new();
+                        if let Err(e) = self.storer.send((Job::DeleteState(id.clone()), Some(callback.clone()))) {
+                            log::error!(
+                                target: TARGET, 
+                                "Can't send state to delete from db, id {}",
+                                e.0.0.block_id()
+                            );
+                        } else {
+                            #[cfg(feature = "telemetry")]
+                            self.telemetry.shardstates_queue.update(std::cmp::max(0, in_queue) as u64);
+                            log::trace!(target: TARGET, "ShardStateDb GC: in_queue {}", in_queue);
+
+                            callback.wait().await;
+                            let elapsed = now.elapsed().as_millis() as u64;
+                            if elapsed > interval_ms {
+                                log::warn!(
+                                    target: TARGET,
+                                    "ShardStateDb GC: deleting state {} was slower then given \
+                                    interval, TIME {} ms, slot {} ms",
+                                    id, elapsed, interval_ms,
+                                );
+                            } else {
+                                if !sleep_nicely(&self.stop, interval_ms - elapsed).await {
+                                    return;
+                                }
+                            }
+                        }
+                    }
                 }
 
-                let mut to_delete = vec!();
+                log::debug!(target: TARGET, "ShardStateDb GC: collecting states to delete");
+
+                let mut kept = 0;
                 self.shardstate_db.for_each(&mut |_key, value| {
                     if check_and_stop(&self.stop) {
                         return Ok(false);
@@ -189,6 +297,7 @@ impl ShardStateDb {
                             to_delete.push(entry.block_id);
                         },
                         Ok(false) => {
+                            kept += 1;
                             log::debug!(
                                 target: TARGET, "ShardStateDb GC: keep  id {}", entry.block_id);
                         },
@@ -201,22 +310,16 @@ impl ShardStateDb {
                     Ok(true)
                 }).expect("Can't return error");
 
-                for id in to_delete {
-                    if check_and_stop(&self.stop) {
-                        return;
-                    }
-                    tokio::task::yield_now().await;
-                    if let Err(e) = self.storer.send((Job::DeleteState(id), None)) {
-                        log::error!(
-                            target: TARGET, 
-                            "Can't send state to delete from db, id {}",
-                            e.0.0.block_id()
-                        );
-                    } else {
-                        let in_queue = self.in_queue.fetch_add(1, Ordering::Relaxed) + 1;
-                        log::trace!("ShardStateDb GC: in_queue {}", in_queue);
-                    }
-                }
+                log::debug!(
+                    target: TARGET,
+                    "ShardStateDb GC: collected {} states to delete, kept {}",
+                    to_delete.len(), kept
+                );
+
+                // Sort ids by decreasing seqno. This way differences between 
+                // states will be smaller, so each delete operation will be faster
+                // (last in the vector - the earliest state - will be deleted first)
+                to_delete.sort_by(|a, b| b.seq_no().cmp(&a.seq_no()));
             }
         });
     }
@@ -225,7 +328,8 @@ impl ShardStateDb {
         self.stop.fetch_or(Self::MASK_STOPPED, Ordering::Relaxed);
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            if !self.is_gc_run() {
+            if !self.is_run() {
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 break;
             }
         }
@@ -235,11 +339,15 @@ impl ShardStateDb {
         self.stop.load(Ordering::Relaxed) & Self::MASK_GC_STARTED != 0
     }
 
+    fn is_run(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) & (Self::MASK_GC_STARTED | Self::MASK_WORKER) != 0
+    }
+
     pub fn shardstate_db(&self) -> Arc<dyn KvcWriteable<BlockIdExt>> {
         Arc::clone(&self.shardstate_db)
     }
 
-    pub fn put(
+    pub async fn put(
         &self, 
         id: &BlockIdExt, 
         state_root: Cell, 
@@ -251,10 +359,28 @@ impl ShardStateDb {
             "ShardStateDb::put  id {}  root_cell_id {:x}",
             id, root_id
         );
+
+        loop {
+            let in_queue = self.in_queue.load(Ordering::Relaxed);
+            if in_queue >= self.max_queue_len {
+                log::warn!(
+                    target: TARGET, 
+                    "ShardStateDb::put  id {}  root_cell_id {:x}  waiting for queue (current queue length: {})",
+                    id, root_id, in_queue
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            } else {
+                break;
+            }
+        }
+
+        let in_queue = self.in_queue.fetch_add(1, Ordering::Relaxed) + 1;
+
         self.storer.send((Job::PutState(state_root, id.clone()), callback))
             .map_err(|_| error!("Can't send state to put into db, id {}, root {}", id, root_id))?;
 
-        let in_queue = self.in_queue.fetch_add(1, Ordering::Relaxed) + 1;
+        #[cfg(feature = "telemetry")]
+        self.telemetry.shardstates_queue.update(std::cmp::max(0, in_queue) as u64);
         log::trace!("ShardStateDb put: in_queue {}", in_queue);
 
         Ok(())
@@ -290,6 +416,7 @@ impl ShardStateDb {
             self.db.clone(),
             self.dynamic_boc_db.clone(),
             format!("{:x}", root_cell_id),
+            self.pss_slowdown_mcs.clone(),
         )?)
     }
 
@@ -297,7 +424,40 @@ impl ShardStateDb {
         self: Arc<Self>,
         mut receiver: tokio::sync::mpsc::UnboundedReceiver<(Job, Option<Arc<dyn Callback>>)>
     ) {
-        let check_stop = || self.stop.load(Ordering::Relaxed) & Self::MASK_STOPPED != 0;
+        self.stop.fetch_or(Self::MASK_WORKER, Ordering::Relaxed);
+
+        let check_stop = || {
+            if self.stop.load(Ordering::Relaxed) & Self::MASK_STOPPED != 0 {
+                self.stop.fetch_and(!ShardStateDb::MASK_WORKER, Ordering::Relaxed);
+                true
+            } else {
+                false
+            }
+        };
+        let mut cells_counters = Some(fnv::FnvHashMap::default());
+
+        let ss_db = Arc::clone(&self);
+
+        if self.full_filled_counters {
+            let now = std::time::Instant::now();
+            if let Err(e) = tokio::task::block_in_place(|| {
+                let check_stop = || {
+                    if ss_db.stop.load(Ordering::Relaxed) & Self::MASK_STOPPED != 0 {
+                        fail!("Stopped")
+                    } else {
+                        Ok(())
+                    }
+                };
+                ss_db.dynamic_boc_db.fill_counters(&check_stop, cells_counters.as_mut().unwrap())
+            }) {
+                log::error!("ShardStateDb worker: fill_counters error {}", e);
+            }
+            log::info!(
+                "ShardStateDb worker: fill_counters TIME {}ms  counters {}", 
+                now.elapsed().as_millis(), cells_counters.as_ref().unwrap().len()
+            );
+        }
+
         loop {
             if check_stop() {
                 return;
@@ -306,11 +466,19 @@ impl ShardStateDb {
                 Ok(Some((job, callback))) => {
 
                     let in_queue = self.in_queue.fetch_sub(1, Ordering::Relaxed) - 1;
-                    log::debug!("ShardStateDb worker: in_queue {}", in_queue);
+                    #[cfg(feature = "telemetry")] {
+                        self.telemetry.shardstates_queue.update(std::cmp::max(0, in_queue) as u64);
+                        self.telemetry.cells_counters.update(cells_counters.as_ref().unwrap().len() as u64);
+                    }
+                    let slowdown = self.max_pss_slowdown_mcs * (in_queue / self.max_queue_len);
+                    self.pss_slowdown_mcs.store(slowdown, Ordering::Relaxed);
+                    log::debug!("ShardStateDb worker: in_queue {}, pss slowdown {}mcs", in_queue, slowdown);
 
                     match &job {
                         Job::PutState(cell, id) => {
-                            let ok = if let Err(e) = self.clone().put_internal(id, cell.clone()).await {
+                            let ok = if let Err(e) = self.clone().put_internal(id, cell.clone(), 
+                                &mut cells_counters, self.full_filled_counters)
+                            {
                                 if check_stop() {
                                     return;
                                 }
@@ -326,7 +494,9 @@ impl ShardStateDb {
                             }
                         }
                         Job::DeleteState(id) => {
-                            let ok = if let Err(e) = self.clone().delete_internal(id).await {
+                            let ok = if let Err(e) = self.clone().delete_internal(id,
+                                &mut cells_counters, self.full_filled_counters)
+                            {
                                 if check_stop() {
                                     return;
                                 }
@@ -348,7 +518,13 @@ impl ShardStateDb {
         }
     }
 
-    pub async fn put_internal(self: Arc<Self>, id: &BlockIdExt, state_root: Cell) -> Result<()> {
+    pub fn put_internal(
+        self: Arc<Self>,
+        id: &BlockIdExt,
+        state_root: Cell,
+        cells_counters: &mut Option<fnv::FnvHashMap<UInt256, u32>>,
+        full_filled_cells: bool,
+    ) -> Result<()> {
         let cell_id = UInt256::from(state_root.repr_hash());
 
         log::debug!(
@@ -367,7 +543,7 @@ impl ShardStateDb {
         }
 
         let ss_db = self.clone();
-        tokio::task::spawn_blocking(move || {
+        tokio::task::block_in_place(|| {
             let check_stop = || {
                 if ss_db.stop.load(Ordering::Relaxed) & Self::MASK_STOPPED != 0 {
                     fail!("Stopped")
@@ -375,8 +551,8 @@ impl ShardStateDb {
                     Ok(())
                 }
             };
-            ss_db.dynamic_boc_db.save_boc(state_root, true, &check_stop)
-        }).await??;
+            ss_db.dynamic_boc_db.save_boc(state_root, true, &check_stop, cells_counters, full_filled_cells)
+        })?;
 
         let save_utime = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let db_entry = DbEntry::with_params(id.clone(), cell_id.clone(), save_utime);
@@ -394,13 +570,18 @@ impl ShardStateDb {
         Ok(())
     }
 
-    pub async fn delete_internal(self: Arc<Self>, id: &BlockIdExt) -> Result<()> {
+    pub fn delete_internal(
+        self: Arc<Self>,
+        id: &BlockIdExt,
+        cells_counters: &mut Option<fnv::FnvHashMap<UInt256, u32>>,
+        full_filled_cells: bool,
+    ) -> Result<()> {
         log::debug!(target: TARGET, "ShardStateDb::delete_internal  id {}", id);
 
         let db_entry = DbEntry::from_slice(&self.shardstate_db.get(id)?)?;
 
         let ss_db = self.clone();
-        tokio::task::spawn_blocking(move || {
+        tokio::task::block_in_place(|| {
             let check_stop = || {
                 if ss_db.stop.load(Ordering::Relaxed) & Self::MASK_STOPPED != 0 {
                     fail!("Stopped")
@@ -408,8 +589,8 @@ impl ShardStateDb {
                     Ok(())
                 }
             };
-            ss_db.dynamic_boc_db.delete_boc(&db_entry.cell_id, &check_stop)
-        }).await??;
+            ss_db.dynamic_boc_db.delete_boc(&db_entry.cell_id, &check_stop, cells_counters, full_filled_cells)
+        })?;
 
         self.shardstate_db.delete(id)?;
 

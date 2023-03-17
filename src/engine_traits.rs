@@ -645,10 +645,6 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    #[cfg(feature="remp_emergency")]
-    fn forcedly_disable_remp_cap(&self) -> bool {
-        false
-    }
 
     async fn update_validators(
         &self,

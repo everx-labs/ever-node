@@ -606,6 +606,10 @@ impl ValidatorManagerImpl {
                 cc_seqno,
                 &self.config
             );
+//=======
+//            if let Some(local_key) = self.find_us(&subset.0) {
+//                let vsubset = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno, subset.0)?;
+//>>>>>>> fb7e32d041c8044f742b29a4ebe0043997cebb7d
 
             let session_info = SessionInfo::new(ident.clone(), session_id.clone(), vsubset.clone());
             let old_shards: Vec<ShardIdent> = prev_blocks.iter().map(|blk| blk.shard_id.clone()).collect();
