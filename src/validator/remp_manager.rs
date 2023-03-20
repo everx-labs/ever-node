@@ -236,21 +236,6 @@ impl CollatorInterfaceWrapper {
 
     pub async fn send_message_to_collator(&self, msg_id: UInt256, msg: Arc<Message>) -> Result<()> {
         self.engine.new_remp_message(msg_id.clone(), msg)
-/*
-        match self.engine.new_remp_message(msg_id.clone(), msg) {
-            Ok(()) => {
-                    let mut md = self.message_dispatcher.lock().await;
-                    if let Some(s) = md.insert(msg_id, shard.clone()) {
-                        log::error!(target: "remp",
-                            "Message {:x} already sent to Collator for shard {}",
-                            msg_id, shard
-                        )
-                    }
-                Ok(())
-            },
-            Err(e) => Err(e)
-        }
-*/
     }
 }
 

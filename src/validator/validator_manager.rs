@@ -49,35 +49,26 @@ use crate::validator::remp_block_parser::RempBlockObserverToplevel;
 //use crate::validator::remp_block_parser::RempBlockObserver;
 use crate::validator::remp_manager::{RempManager, RempInterfaceQueues};
 use crate::validator::sessions_computing::{SessionHistory, SessionInfo};
+use crate::validator::validator_utils::{GeneralSessionInfo, get_group_members_by_validator_descrs};
 
 fn get_session_id_serialize(
-    shard: &ShardIdent,
-    val_set: &ValidatorSet,
-    opts_hash: &UInt256,
-    key_seqno: i32,
-    new_catchain_ids: bool,
-    max_vertical_seqno: i32,
+    session_info: Arc<GeneralSessionInfo>,
+    vals: &Vec<ValidatorDescr>,
+    new_catchain_ids: bool
 ) -> catchain::RawBuffer {
-    let members = val_set.list().iter().map(|descr| {
-        let node_id = descr.compute_node_id_short();
-        let adnl_id = descr.adnl_addr.clone().unwrap_or(node_id.clone());
-        ton_api::ton::engine::validator::validator::groupmember::GroupMember {
-            public_key_hash: node_id,
-            adnl: adnl_id,
-            weight: descr.weight as i64,
-        }
-    }).collect::<Vec<_>>();
+    let mut members = Vec::new();
+    get_group_members_by_validator_descrs(vals, &mut members);
 
     if !new_catchain_ids {
         unimplemented!("Old catchain ids format is not supported")
     } else {
         serialize_tl_boxed_object!(&ton_api::ton::validator::group::GroupNew {
-            workchain: shard.workchain_id(),
-            shard: shard.shard_prefix_with_tag() as i64,
-            vertical_seqno: max_vertical_seqno,
-            last_key_block_seqno: key_seqno,
-            catchain_seqno: val_set.catchain_seqno() as i32,
-            config_hash: opts_hash.clone(),
+            workchain: session_info.shard.workchain_id(),
+            shard: session_info.shard.shard_prefix_with_tag() as i64,
+            vertical_seqno: session_info.max_vertical_seqno as i32,
+            last_key_block_seqno: session_info.key_seqno as i32,
+            catchain_seqno: session_info.catchain_seqno as i32,
+            config_hash: session_info.opts_hash.clone(),
             members: members.into()
         }
         .into_boxed())
@@ -86,20 +77,14 @@ fn get_session_id_serialize(
 
 /// serialize data and calc sha256
 fn get_session_id(
-    shard: &ShardIdent,
-    val_set: &ValidatorSet,
-    opts_hash: &UInt256,
-    key_seqno: i32,
+    session_info: Arc<GeneralSessionInfo>,
+    val_set: &Vec<ValidatorDescr>,
     new_catchain_ids: bool,
-    max_vertical_seqno: i32,
 ) -> UInt256 {
     let serialized = get_session_id_serialize(
-        shard,
+        session_info,
         val_set,
-        opts_hash,
-        key_seqno,
-        new_catchain_ids,
-        max_vertical_seqno,
+        new_catchain_ids
     );
     UInt256::calc_file_hash(&serialized.0)
 }
@@ -114,20 +99,16 @@ fn compute_session_unsafe_serialized(session_id: &UInt256, rotate_id: u32) -> Ve
 /// Computes session_id and if unsafe rotation is taking place,
 /// replaces session_id with unsafe rotation session id.
 fn get_session_unsafe_id(
-    shard: &ShardIdent,
-    val_set: &ValidatorSet,
-    opts_hash: &UInt256,
-    key_seqno: i32,
+    session_info: Arc<GeneralSessionInfo>,
+    val_set: &Vec<ValidatorDescr>,
     new_catchain_ids: bool,
-    max_vertical_seqno: i32,
     prev_block_opt: Option<u32>,
-    catchain_seqno: u32,
     vm_config: &ValidatorManagerConfig,
 ) -> UInt256 {
-    let session_id = get_session_id(shard, val_set, opts_hash, key_seqno, new_catchain_ids, max_vertical_seqno);
+    let session_id = get_session_id(session_info.clone(), val_set, new_catchain_ids);
 
-    if shard.is_masterchain() {
-        if let Some(rotate_id) = vm_config.check_unsafe_catchain_rotation(prev_block_opt, catchain_seqno) {
+    if session_info.shard.is_masterchain() {
+        if let Some(rotate_id) = vm_config.check_unsafe_catchain_rotation(prev_block_opt, session_info.catchain_seqno) {
             let unsafe_serialized = compute_session_unsafe_serialized(&session_id, rotate_id);
             let unsafe_id = UInt256::calc_file_hash(unsafe_serialized.as_slice());
 
@@ -136,7 +117,7 @@ fn get_session_unsafe_id(
                 "Unsafe master session rotation: session {} at block={:?}, cc={} -> rotate_id={}, new session {}",
                 session_id.to_hex_string(),
                 prev_block_opt,
-                catchain_seqno,
+                session_info.catchain_seqno,
                 rotate_id,
                 unsafe_id.to_hex_string()
             );
@@ -144,18 +125,6 @@ fn get_session_unsafe_id(
         }
     }
     return session_id;
-/*
-    auto r = opts_->check_unsafe_catchain_rotate(last_masterchain_seqno_, val_set->get_catchain_seqno());
-    if (r) {
-        td::uint8 b[36];
-        td::MutableSlice x{b, 36};
-        x.copy_from(val_group_id.as_slice());
-        x.remove_prefix(32);
-        CHECK(x.size() == 4);
-        x.copy_from(td::Slice(reinterpret_cast<const td::uint8 *>(&r), 4));
-        val_group_id = sha256_bits256(td::Slice(b, 36));
-    }
- */
 }
 
 fn validator_session_options_serialize(
@@ -595,15 +564,18 @@ impl ValidatorManagerImpl {
             };
 
             let vsubset = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno, subset.0.clone())?;
+            let general_session_info = Arc::new(GeneralSessionInfo {
+                shard: ident.clone(),
+                opts_hash: opts_hash.clone(),
+                catchain_seqno: cc_seqno,
+                key_seqno: keyblock_seqno,
+                max_vertical_seqno: 0
+            });
             let session_id = get_session_unsafe_id(
-                &ident,
-                &vsubset,
-                opts_hash,
-                keyblock_seqno as i32,
+                general_session_info.clone(),
+                &vsubset.list().to_vec(),
                 true,
-                0, /* temp */
                 prev_blocks.get(0).map(|x| x.seq_no),
-                cc_seqno,
                 &self.config
             );
 
@@ -636,15 +608,19 @@ impl ValidatorManagerImpl {
                 };
 
                 let prev_vsubset = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno-1, prev_subset.0.clone())?;
+                let prev_validator_list = prev_vsubset.list();
+                let prev_session_info = Arc::new(GeneralSessionInfo {
+                    shard: ident.clone(),
+                    opts_hash: opts_hash.clone(),
+                    catchain_seqno: cc_seqno-1,
+                    key_seqno: keyblock_seqno, // Is it true???
+                    max_vertical_seqno: 0
+                });
                 let prev_session_id = get_session_unsafe_id(
-                    &ident,
-                    &prev_vsubset,
-                    opts_hash,
-                    keyblock_seqno as i32,
+                    prev_session_info.clone(),
+                    &prev_validator_list.to_vec(),
                     true,
-                    0, /* temp */
                     prev_blocks.get(0).map(|x| x.seq_no),
-                    cc_seqno-1,
                     &self.config
                 );
                 //let prev_session_info = SessionInfo::new(ident.clone(), session_id, prev_vsubset.clone());
@@ -665,14 +641,14 @@ impl ValidatorManagerImpl {
                     }
                 }
 
-                let prev_validator_list = prev_vsubset.list();
                 let old_session_id = &prev_session_id;
                 match self.validator_sessions.get(old_session_id) {
                     Some(old_session) =>
                         old_session.clone().add_next_validators(
-                            master_cc_seqno, &prev_validator_list.to_vec(), &vsubset
+                            master_cc_seqno, &prev_validator_list.to_vec(), &vsubset,
+                            general_session_info.clone()
                         ).await?,
-                    None => log::error!(target: "validator_manager",
+                    None => log::info!(target: "validator_manager",
                          "Shard {}, adding info for session {:x}, previous session id {:x} has no validator_group!",
                          ident, session_id, old_session_id
                     )
@@ -685,10 +661,11 @@ impl ValidatorManagerImpl {
                     match self.validator_sessions.get(old_session_id) {
                         Some(old_session) =>
                             old_session.clone().add_next_validators(
-                                master_cc_seqno, prev_validator_list, &vsubset
+                                master_cc_seqno, prev_validator_list, &vsubset,
+                                general_session_info.clone()
                             ).await?,
-                        None => log::error!(target: "validator_manager",
-                             "Shard {}, adding info for session {:x}, previous session id {:x} has no validator_group!",
+                        None => log::info!(target: "validator_manager",
+                             "Shard {}, adding info for session {:x}, previous session id {:x} has no validator_group.",
                              ident, session_id, old_session_id
                         )
                     }
@@ -718,16 +695,13 @@ impl ValidatorManagerImpl {
                 let engine = self.engine.clone();
                 #[cfg(feature = "slashing")]
                 let slashing_manager = self.slashing_manager.clone();
-                let rt_clone = self.rt.clone();
                 let remp_manager = self.remp_manager.clone();
                 let allow_unsafe_self_blocks_resync = self.config.unsafe_resync_catchains.contains(&cc_seqno);
-                let session = self.validator_sessions.entry(session_id.clone()).or_insert_with(|| 
+                let session = self.validator_sessions.entry(session_id.clone()).or_insert_with(||
                     Arc::new(ValidatorGroup::new(
-                        rt_clone,
-                        ident.clone(),
+                        general_session_info.clone(),
                         local_id.clone(),
                         session_id.clone(),
-                        cc_seqno,
                         master_cc_seqno,
                         validator_list_id.clone(),
                         vsubset.clone(),
@@ -975,22 +949,24 @@ impl ValidatorManagerImpl {
         // Iterate over future shards and create all future sessions
         for (ident, (next_val_subset, next_val_list_id)) in our_future_shards.iter() {
             if let Some(local_id) = self.find_us(&next_val_subset.list()) {
+                let new_session_info = Arc::new(GeneralSessionInfo {
+                    shard: ident.clone(),
+                    opts_hash: opts_hash.clone(),
+                    catchain_seqno: next_val_subset.cc_seqno(),
+                    key_seqno: keyblock_seqno,
+                    max_vertical_seqno: 0
+                });
                 let session_id = get_session_id(
-                    &ident,
-                    &next_val_subset,
-                    &opts_hash,
-                    keyblock_seqno as i32,
+                    new_session_info.clone(),
+                    &next_val_subset.list().to_vec(),
                     true,
-                    0, /* temp */
                 );
                 gc_validator_sessions.remove(&session_id);
                 if !self.validator_sessions.contains_key(&session_id) {
                     let session = Arc::new(ValidatorGroup::new(
-                        self.rt.clone(),
-                        ident.clone(),
+                        new_session_info,
                         local_id,
                         session_id.clone(),
-                        next_val_subset.cc_seqno(),
                         master_cc_seqno + 1,
                         next_val_list_id.clone(),
                         next_val_subset.clone(),

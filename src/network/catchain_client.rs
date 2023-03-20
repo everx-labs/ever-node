@@ -179,6 +179,8 @@ impl CatchainClient {
         ).read_boxed()?;
         #[cfg(feature = "telemetry")]
         let tag = tag_from_boxed_object(&query);
+        #[cfg(not(feature = "telemetry"))]
+        let tag = 0;
         let query = TaggedTlObject {
             object: query,
             #[cfg(feature = "telemetry")]

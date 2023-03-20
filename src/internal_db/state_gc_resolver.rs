@@ -11,9 +11,6 @@
 * limitations under the License.
 */
 
-#[cfg(not(feature = "async_ss_storage"))]
-use storage::shardstate_db::AllowStateGcResolver;
-#[cfg(feature = "async_ss_storage")]
 use storage::shardstate_db_async::AllowStateGcResolver;
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::Result;

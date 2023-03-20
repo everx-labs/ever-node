@@ -15,6 +15,7 @@ use catchain::{BlockPayloadPtr, PublicKey, PublicKeyHash, CatchainNode};
 use std::sync::Arc;
 use std::collections::HashMap;
 use sha2::{Digest, Sha256};
+use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
 use ton_block::{
     BlockSignatures, BlockSignaturesPure, CatchainConfig, ConfigParams,
     CryptoSignature, CryptoSignaturePair,
@@ -320,4 +321,31 @@ pub async fn get_shard_by_message(engine: Arc<dyn EngineOperations>, message: Ar
     // find account and related shard
     let (_account, shard) = engine.load_account(dst_wc, dst_address.clone()).await?;
     Ok(shard)
+}
+
+#[derive(PartialEq)]
+pub struct GeneralSessionInfo {
+    pub shard: ShardIdent,
+    pub opts_hash: UInt256,
+    pub catchain_seqno: u32,
+    pub key_seqno: u32,
+    pub max_vertical_seqno: u32,
+}
+
+impl std::fmt::Display for GeneralSessionInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}, cc {}", self.shard, self.catchain_seqno)
+    }
+}
+
+pub fn get_group_members_by_validator_descrs(iterator: &Vec<ValidatorDescr>, dst: &mut Vec<GroupMember>)  {
+    for descr in iterator.iter() {
+        let node_id = descr.compute_node_id_short();
+        let adnl_id = descr.adnl_addr.clone().unwrap_or(node_id.clone());
+        dst.push(ton_api::ton::engine::validator::validator::groupmember::GroupMember {
+            public_key_hash: node_id,
+            adnl: adnl_id,
+            weight: descr.weight as i64,
+        });
+    };
 }

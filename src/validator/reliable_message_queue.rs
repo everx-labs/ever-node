@@ -26,6 +26,7 @@ use crate::{
 };
 use failure::err_msg;
 use ton_api::ton::ton_node::rmqrecord::RmqMessageDigest;
+use crate::validator::validator_utils::{GeneralSessionInfo, ValidatorListHash};
 
 #[derive(Debug,PartialEq,Eq,PartialOrd,Ord,Clone)]
 enum MessageQueueStatus { Created, Starting, Active, Stopping }
@@ -91,17 +92,15 @@ impl MessageQueue {
     pub fn create(
         engine: Arc<dyn EngineOperations>,
         remp_manager: Arc<RempManager>,
-        shard: ShardIdent,
-        catchain_seqno: u32,
         master_cc_seqno: u32,
         curr: &Vec<ValidatorDescr>,
         next: &Vec<ValidatorDescr>,
-        local: &PublicKey
+        local: &PublicKey,
+        node_list_id: ValidatorListHash,
+        session_params: Arc<GeneralSessionInfo>,
     ) -> Result<Self> {
         let remp_catchain_info = Arc::new(RempCatchainInfo::create(
-            //rt, engine.clone(), remp_manager.clone(),
-            catchain_seqno, master_cc_seqno, curr, next, local,
-            shard.clone()
+            session_params.clone(), master_cc_seqno, curr, next, local, node_list_id
         )?);
 
         let remp_catchain_instance = RempCatchainInstance::new(remp_catchain_info.clone());
@@ -114,7 +113,7 @@ impl MessageQueue {
             },
             format!("<<RMQ {}>>", remp_catchain_instance),
             #[cfg(feature = "telemetry")]
-            engine.remp_core_telemetry().rmq_catchain_mutex_metric(&shard),
+            engine.remp_core_telemetry().rmq_catchain_mutex_metric(&session_params.shard),
         );
 
         log::trace!(target: "remp", "Creating MessageQueue {}", remp_catchain_instance);
@@ -124,7 +123,7 @@ impl MessageQueue {
             engine,
             catchain_info: remp_catchain_info.clone(),
             catchain_instance: remp_catchain_instance,
-            queues: queues,
+            queues,
         });
     }
 
@@ -219,7 +218,7 @@ impl MessageQueue {
 
         #[cfg(feature = "telemetry")]
         self.engine.remp_core_telemetry().in_channel_to_catchain(
-            &self.catchain_info.shard, self.catchain_instance.pending_messages_queue_len()?);
+            &self.catchain_info.general_session_info.shard, self.catchain_instance.pending_messages_queue_len()?);
 
         if let Some(session) = &self.remp_manager.catchain_store.get_catchain_session(&self.catchain_info.queue_id).await {
             log::trace!(target: "remp", "Point 3. Activating RMQ {} processing", self);
@@ -242,7 +241,7 @@ impl MessageQueue {
             )
         ).await?;
         #[cfg(feature = "telemetry")]
-        self.engine.remp_core_telemetry().pending_collation(&self.catchain_info.shard, len);
+        self.engine.remp_core_telemetry().pending_collation(&self.catchain_info.general_session_info.shard, len);
 
         if added_to_queue {
             log::trace!(target: "remp",
@@ -319,7 +318,7 @@ impl MessageQueue {
                     );
 
                     let added = self.remp_manager.message_cache.add_external_message_status(
-                        &rmq_message.message_id,Some(rmq_message.clone()), self.catchain_info.shard.clone(), RempMessageStatus::TonNode_RempNew, rmq_message_master_seqno
+                        &rmq_message.message_id,Some(rmq_message.clone()), self.catchain_info.general_session_info.shard.clone(), RempMessageStatus::TonNode_RempNew, rmq_message_master_seqno
                     ).await;
 
                     match added {
@@ -378,7 +377,7 @@ impl MessageQueue {
                                 error: "reject received from digest".to_string()
                             };
                             self.remp_manager.message_cache.add_external_message_status(
-                                &message_id, None, self.catchain_info.shard.clone(),
+                                &message_id, None, self.catchain_info.general_session_info.shard.clone(),
                                 RempMessageStatus::TonNode_RempRejected(reject),
                                 reject_digest.masterchain_seqno as u32
                             ).await?;
@@ -495,7 +494,8 @@ impl MessageQueue {
     /// Processes one collator response from engine.deque_remp_message_status().
     /// Returns Ok(status) if the response was sucessfully processed, Ok(None) if no responses remain
     pub async fn process_one_deque_remp_message_status(&self) -> Result<Option<RempMessageStatus>> {
-        let (collator_result, _pending) = self.remp_manager.collator_receipt_dispatcher.poll(&self.catchain_info.shard).await;
+        let (collator_result, _pending) =
+            self.remp_manager.collator_receipt_dispatcher.poll(&self.catchain_info.general_session_info.shard).await;
 
         match collator_result {
             Some(collator_result) => {
@@ -611,7 +611,7 @@ impl fmt::Display for MessageQueue {
         write!(f, "{}*{:x}*{}*{}@{}",
                self.catchain_info.local_idx,
                self.catchain_info.queue_id,
-               self.catchain_info.shard,
+               self.catchain_info.general_session_info.shard,
                self.catchain_info.master_cc_seqno,
                self.catchain_instance.get_id()
         )
@@ -669,7 +669,10 @@ impl RmqQueueManager {
         manager
     }
 
-    pub fn set_queues(&mut self, catchain_seqno: u32, master_cc_seqno: u32, curr: &Vec<ValidatorDescr>, next: &Vec<ValidatorDescr>) {
+    pub fn set_queues(&mut self,
+                      session_params: Arc<GeneralSessionInfo>, node_list_id: ValidatorListHash,
+                      master_cc_seqno: u32, curr: &Vec<ValidatorDescr>, next: &Vec<ValidatorDescr>,
+    ) {
         if self.remp_manager.options.is_service_enabled() {
             if self.cur_queue.is_some() {
                 log::error!("RMQ Queue {}: attempt to re-initialize", self);
@@ -677,7 +680,8 @@ impl RmqQueueManager {
 
             self.cur_queue = match MessageQueue::create(
                 self.engine.clone(), self.remp_manager.clone(),
-                self.shard.clone(), catchain_seqno, master_cc_seqno, curr, next, &self.local_public_key
+                 master_cc_seqno, curr, next, &self.local_public_key, node_list_id,
+                session_params
             ) {
                 Ok(t) => Some(Arc::new(t)),
                 Err(error) => {
@@ -688,18 +692,23 @@ impl RmqQueueManager {
         }
     }
 
-    pub async fn add_new_queue(&self, next_queue_cc_seqno: u32, next_master_cc_seqno: u32, prev_validators: &Vec<ValidatorDescr>, next_validators: &Vec<ValidatorDescr>) {
+    pub async fn add_new_queue(&self,
+        next_master_cc_seqno: u32,
+        prev_validators: &Vec<ValidatorDescr>, next_validators: &Vec<ValidatorDescr>,
+        general_new_session_info: Arc<GeneralSessionInfo>,
+        node_list_id: ValidatorListHash
+    ) {
         if !self.remp_manager.options.is_service_enabled() {
             return;
         }
 
         if let Some(_) = &self.cur_queue {
             //self.ensure_status(MessageQueueStatus::NewQueues)?;
-            log::trace!(target: "remp", "RMQ {}: adding next queue {}", self, next_queue_cc_seqno);
+            log::trace!(target: "remp", "RMQ {}: adding next queue {}", self, general_new_session_info);
             let queue = Arc::new(match MessageQueue::create(
                 self.engine.clone(), self.remp_manager.clone(),
-                self.shard.clone(), next_queue_cc_seqno, next_master_cc_seqno, 
-                prev_validators, next_validators, &self.local_public_key
+                next_master_cc_seqno, prev_validators, next_validators, &self.local_public_key,
+                node_list_id, general_new_session_info
             ) {
                 Ok(x) => x,
                 Err(e) => {

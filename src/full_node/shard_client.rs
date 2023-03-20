@@ -15,7 +15,6 @@ use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, engine::Engine, 
     engine_traits::{ChainRange, EngineOperations}, error::NodeError,
     validator::validator_utils::{calc_subset_for_workchain, check_crypto_signatures},
-    shard_states_keeper::ShardStatesKeeper,
 };
 
 use std::{sync::Arc, mem::drop, time::Duration};
@@ -62,6 +61,9 @@ pub fn start_shards_client(
     Ok(join_handle)
 }
 
+// Remember about ShardStatesKeeper::MAX_CATCH_UP_DEPTH and ShardStateDb::MAX_QUEUE_LEN
+pub const MC_MAX_SUPERIORITY: u32 = 500;
+
 async fn load_master_blocks_cycle(
     engine: Arc<dyn EngineOperations>, 
     mut last_got_block_id: BlockIdExt
@@ -70,6 +72,16 @@ async fn load_master_blocks_cycle(
     loop {
         if engine.check_stop() {
             break Ok(())
+        }
+        if let Some(shard_client) = engine.load_shard_client_mc_block_id()? {
+            if shard_client.seq_no() < last_got_block_id.seq_no() && 
+            last_got_block_id.seq_no() - shard_client.seq_no() > MC_MAX_SUPERIORITY 
+            {
+                log::info!(
+                    "load_next_master_block (block {last_got_block_id}): waiting for shard client ({shard_client})");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
         }
         last_got_block_id = match load_next_master_block(&engine, &last_got_block_id).await {
             Ok(id) => {
@@ -91,22 +103,10 @@ async fn load_master_blocks_cycle(
     }
 }
 
-pub const MC_MAX_SUPERIORITY: u32 = ShardStatesKeeper::MAX_CATCH_UP_DEPTH / 2;
-
 async fn load_next_master_block(
     engine: &Arc<dyn EngineOperations>, 
     prev_id: &BlockIdExt
 ) -> Result<BlockIdExt> {
-
-    if let Some(shard_client) = engine.load_shard_client_mc_block_id()? {
-        if shard_client.seq_no() < prev_id.seq_no() && 
-           prev_id.seq_no() - shard_client.seq_no() > MC_MAX_SUPERIORITY 
-        {
-            log::info!(
-                "load_next_master_block (block {prev_id}): waiting for shard client ({shard_client})");
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    }
 
     log::trace!("load_next_master_block: prev block: {}", prev_id);
     if let Some(prev_handle) = engine.load_block_handle(prev_id)? {
