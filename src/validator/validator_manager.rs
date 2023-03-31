@@ -606,7 +606,7 @@ impl ValidatorManagerImpl {
                 cc_seqno,
                 &self.config
             );
-
+            
             let session_info = SessionInfo::new(ident.clone(), session_id.clone(), vsubset.clone());
             let old_shards: Vec<ShardIdent> = prev_blocks.iter().map(|blk| blk.shard_id.clone()).collect();
             self.session_history.new_session_after(session_info.clone(), old_shards.clone())?;

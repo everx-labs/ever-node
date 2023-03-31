@@ -378,13 +378,11 @@ fn main() {
         .arg(clap::Arg::with_name("initial_sync_disabled")
             .short("i")
             .long("initial-sync-disabled")
-            .value_name("initial sync disable flag")
             .help("use this flag to sync from zero_state"))
         .arg(clap::Arg::with_name("force_check_db")
             .short("f")
             .long("force-check-db")
-            .value_name("force check db flag")
-            .help("start check & restore db process forcedly"));
+            .help("start check & restore db process forcedly with refilling cells database"));
 
     let matches = app.get_matches();
 

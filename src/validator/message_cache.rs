@@ -251,7 +251,7 @@ impl MessageCacheMessages {
     /// There are two possible consistent message statuses:
     /// 1. Message present will all structures
     /// 2. Only message status present (for futures)
-    fn is_message_consistent(&self, id: &UInt256) -> bool {
+    fn _is_message_consistent(&self, id: &UInt256) -> bool {
         if self.in_messages(id) {
             self.in_message_statuses(id) && self.in_message_shards(id) && self.in_message_master_cc(id)
         }
@@ -292,7 +292,7 @@ impl MessageCacheMessages {
         old_cc_seqno+2 <= new_cc_seqno
     }
 
-    pub fn is_expired(&self, message_id: &UInt256, new_cc_seqno: u32) -> Result<bool> {
+    pub fn _is_expired(&self, message_id: &UInt256, new_cc_seqno: u32) -> Result<bool> {
         match self.message_master_cc.get(message_id) {
             None => fail!("Message {:x} was not found: cannot check its expiration time", message_id),
             Some(old_cc_seqno) => Ok(Self::cc_expired(old_cc_seqno.1, new_cc_seqno))

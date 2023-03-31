@@ -457,12 +457,17 @@ impl Subscriber for ControlQuerySubscriber {
         };
         log::info!("query (control server): {:?}", query);
         let query = match query.downcast::<GenerateKeyPair>() {
-            Ok(_) => return QueryResult::consume(self.process_generate_keypair().await?, None),
+            Ok(_) => return QueryResult::consume(
+                self.process_generate_keypair().await?,
+                #[cfg(feature = "telemetry")]
+                None
+            ),
             Err(query) => query
         };
         let query = match query.downcast::<ExportPublicKey>() {
             Ok(query) => return QueryResult::consume_boxed(
                 self.export_public_key(query.key_hash.as_slice())?,
+                #[cfg(feature = "telemetry")]
                 None
             ),
             Err(query) => query
@@ -470,6 +475,7 @@ impl Subscriber for ControlQuerySubscriber {
         let query = match query.downcast::<Sign>() {
             Ok(query) => return QueryResult::consume(
                 self.process_sign_data(query.key_hash.as_slice(), &query.data)?,
+                #[cfg(feature = "telemetry")]
                 None
             ),
             Err(query) => query
@@ -479,6 +485,7 @@ impl Subscriber for ControlQuerySubscriber {
                 self.add_validator_permanent_key(
                     query.key_hash.as_slice(), query.election_date, query.ttl
                 ).await?,
+                #[cfg(feature = "telemetry")]
                 None
             ),
             Err(query) => query
@@ -488,6 +495,7 @@ impl Subscriber for ControlQuerySubscriber {
                 self.add_validator_temp_key(
                     query.permanent_key_hash.as_slice(), query.key_hash.as_slice(), query.ttl
                 )?,
+                #[cfg(feature = "telemetry")]
                 None
             ),
             Err(query) => query
@@ -497,6 +505,7 @@ impl Subscriber for ControlQuerySubscriber {
                 self.add_validator_adnl_address(
                     query.permanent_key_hash.as_slice(), query.key_hash.as_slice(), query.ttl
                 ).await?,
+                #[cfg(feature = "telemetry")]
                 None
             ),
             Err(query) => query
@@ -504,6 +513,7 @@ impl Subscriber for ControlQuerySubscriber {
         let query = match query.downcast::<AddAdnlId>() {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_adnl_address(query.key_hash.as_slice(), query.category)?,
+                #[cfg(feature = "telemetry")]
                 None
             ),
             Err(query) => query
@@ -512,7 +522,8 @@ impl Subscriber for ControlQuerySubscriber {
             Ok(query) => {
                 return QueryResult::consume_boxed(
                     self.prepare_bundle(query.block_id.clone()).await?, 
-                    None
+                #[cfg(feature = "telemetry")]
+                None
                 )
             },
             Err(query) => query
@@ -524,6 +535,7 @@ impl Subscriber for ControlQuerySubscriber {
                 ).collect();
                 return QueryResult::consume_boxed(
                     self.prepare_future_bundle(prev_block_ids).await?,
+                    #[cfg(feature = "telemetry")]
                     None
                 )
             },
@@ -534,6 +546,7 @@ impl Subscriber for ControlQuerySubscriber {
                 let message_data = query.body.0;
                 return QueryResult::consume_boxed(
                     self.redirect_external_message(&message_data).await?,
+                    #[cfg(feature = "telemetry")]
                     None
                 )
             }
@@ -542,7 +555,11 @@ impl Subscriber for ControlQuerySubscriber {
         let query = match query.downcast::<ton::rpc::raw::GetShardAccountState>() {
             Ok(account) => {
                 let answer = self.get_account_state(account.account_address).await?;
-                return QueryResult::consume_boxed(answer, None)
+                return QueryResult::consume_boxed(
+                    answer, 
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
             },
             Err(query) => query
         };
@@ -551,21 +568,33 @@ impl Subscriber for ControlQuerySubscriber {
                 let param_number = query.param_list.iter().next().ok_or_else(|| error!("Invalid param_number"))?;
                 let answer = self.get_config_params(*param_number as u32).await?;
 
-                return QueryResult::consume_boxed(answer.into_boxed(), None)
+                return QueryResult::consume_boxed(
+                    answer.into_boxed(),
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
             },
             Err(query) => query
         };
         let query = match query.downcast::<ton::rpc::lite_server::GetConfigAll>() {
             Ok(_) => {
                 let answer = self.get_all_config_params().await?;
-                return QueryResult::consume_boxed(answer.into_boxed(), None)
+                return QueryResult::consume_boxed(
+                    answer.into_boxed(),
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
             },
             Err(query) => query
         };
         let query = match query.downcast::<ton::rpc::engine::validator::GetStats>() {
             Ok(_) => {
                 let answer = self.get_stats().await?;
-                return QueryResult::consume_boxed(answer.into_boxed(), None)
+                return QueryResult::consume_boxed(
+                    answer.into_boxed(),
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
             },
             Err(query) => query
         };
@@ -573,6 +602,7 @@ impl Subscriber for ControlQuerySubscriber {
             Ok(query) => {
                 return QueryResult::consume_boxed(
                     self.set_states_gc_interval(query.interval_ms as u32)?,
+                    #[cfg(feature = "telemetry")]
                     None
                 )
             }

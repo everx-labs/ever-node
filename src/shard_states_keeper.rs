@@ -7,17 +7,12 @@ use crate::{
     engine::{Engine, Stopper},
     boot,
 };
-#[cfg(feature = "async_ss_storage")]
-use crate::internal_db::SsNotificationCallback;
 #[cfg(feature = "telemetry")]
 use crate::engine_traits::EngineTelemetry;
 use storage::{
-    block_handle_db::BlockHandle,
+    block_handle_db::BlockHandle, shardstate_db_async::AllowStateGcResolver, 
+    shardstate_db_async::SsNotificationCallback,
 };
-#[cfg(not(feature = "async_ss_storage"))]
-use storage::shardstate_db::AllowStateGcResolver;
-#[cfg(feature = "async_ss_storage")]
-use storage::shardstate_db_async::AllowStateGcResolver;
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{fail, error, Result, UInt256};
 use adnl::common::add_unbound_object_to_map;
@@ -42,6 +37,7 @@ pub struct ShardStatesKeeper {
     states: lockfree::map::Map<BlockIdExt, Arc<ShardStateStuff>>,
     enable_persistent_gc: bool,
     stopper: Arc<Stopper>,
+    max_catch_up_depth: u32,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<EngineTelemetry>,
     allocated: Arc<EngineAlloc>,
@@ -56,6 +52,7 @@ impl ShardStatesKeeper {
         enable_shard_state_persistent_gc: bool,
         cells_lifetime_sec: u64,
         stopper: Arc<Stopper>,
+        max_catch_up_depth: u32,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<EngineTelemetry>,
         allocated: Arc<EngineAlloc>
@@ -71,6 +68,7 @@ impl ShardStatesKeeper {
             enable_persistent_gc: enable_shard_state_persistent_gc,
             states: lockfree::map::Map::new(),
             stopper,
+            max_catch_up_depth,
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated,
@@ -149,45 +147,30 @@ impl ShardStatesKeeper {
 
         self.check_stop()?;
 
-        #[cfg(feature = "async_ss_storage")] {
-            let (cb1, cb2) = if let Some(state_data) = persistent_state {
-                // while boot - zerostate and init persistent state are saved using this parameter 
-                self.db.store_shard_state_persistent_raw(&handle, state_data, None).await?;
-                let cb = SsNotificationCallback::new();
-                (
-                    Some(cb.clone() as Arc<dyn storage::shardstate_db_async::Callback>), 
-                    Some(cb)
-                )
-            } else {
-                (None, None)
-            };
-            self.db.store_shard_state_dynamic(
-                handle,
-                &state,
-                None,
-                #[cfg(feature = "async_ss_storage")]
-                cb1,
-                force
-            ).await?;
+        let (cb1, cb2) = if let Some(state_data) = persistent_state {
+            // while boot - zerostate and init persistent state are saved using this parameter 
+            self.db.store_shard_state_persistent_raw(&handle, state_data, None).await?;
+            let cb = SsNotificationCallback::new();
+            (
+                Some(cb.clone() as Arc<dyn storage::shardstate_db_async::Callback>), 
+                Some(cb)
+            )
+        } else {
+            (None, None)
+        };
+        self.db.store_shard_state_dynamic(
+            handle,
+            &state,
+            None,
+            cb1,
+            force
+        ).await?;
 
-            if let Some(cb) = cb2 {
-                cb.wait().await;
-                // reload state after saving just to free fully loaded tree 
-                // and use lazy loaded cells futher
-                state = self.db.load_shard_state_dynamic(handle.id())?;
-            }
-        }
-        #[cfg(not(feature = "async_ss_storage"))] {
-            if let Some(state_data) = persistent_state {
-                // while boot zerostate and init persistent state are saved using this parameter 
-                self.db.store_shard_state_persistent_raw(&handle, state_data, None).await?;
-            }
-            (state, _) = self.db.store_shard_state_dynamic(
-                handle,
-                &state,
-                None,
-                force
-            ).await?;
+        if let Some(cb) = cb2 {
+            cb.wait().await;
+            // reload state after saving just to free fully loaded tree 
+            // and use lazy loaded cells futher
+            state = self.db.load_shard_state_dynamic(handle.id())?;
         }
 
         let saved = add_unbound_object_to_map(
@@ -215,7 +198,6 @@ impl ShardStatesKeeper {
             low_memory_mode, handle.id()
         );
 
-        #[cfg(feature = "async_ss_storage")]
         let state_root = {
             let mut deserialiser = BocDeserializer::new();
             if low_memory_mode {
@@ -227,11 +209,6 @@ impl ShardStatesKeeper {
                 .deserialize_inmem(data.clone())?
                 .withdraw_one_root()?
         };
-        #[cfg(not(feature = "async_ss_storage"))]
-        let state_root = BocDeserializer::new()
-            .set_abort(&|| self.stopper.check_stop())
-            .deserialize_inmem(data.clone())?
-            .withdraw_one_root()?;
 
         log::info!(
             "check_and_store_state: deserialized (low_memory_mode: {}) {} TIME {}",
@@ -281,7 +258,6 @@ impl ShardStatesKeeper {
         Ok(())
     }
 
-    pub const MAX_CATCH_UP_DEPTH: u32 = 2000;
     const MAX_NEW_STATE_OFFSET: u32 = 50;
     async fn catch_up_state(
         &self, 
@@ -323,45 +299,71 @@ impl ShardStatesKeeper {
                 id, latest_id);
         }
 
-        let state = self.restore_state_recursive(id, 0).await?;
+        let state = self.restore_state_recursive(id).await?;
 
         log::trace!("catch_up_state {} CATCHED UP - TIME {}ms", id, now.elapsed().as_millis());
         Ok(state)
     }
 
-    #[async_recursion::async_recursion]
     async fn restore_state_recursive(
         &self, 
         id: &BlockIdExt, 
-        depth: u32,
     ) -> Result<Arc<ShardStateStuff>> {
 
-        self.check_stop()?;
+        let try_get_state = |id: &BlockIdExt| {
+            if let Some(state) = self.states.get(id) {
+                log::trace!("load_state {} FROM CACHE", id);
+                Some(state.val().clone())
+            } else if let Ok(state) = self.db.load_shard_state_dynamic(id) {
+                self.states.insert(id.clone(), state.clone());
+                Some(state)
+            } else {
+                None
+            }
+        };
 
-        if depth > Self::MAX_CATCH_UP_DEPTH {
-            fail!("restore_state_recursive: max depth achived on id {}", id);
+        if let Some(state) = try_get_state(id) {
+            return Ok(state)
         }
-        if let Some(state) = self.states.get(id) {
-            log::trace!("load_state {} FROM CACHE", id);
-            Ok(state.val().clone())
-        } else if let Ok(state) = self.db.load_shard_state_dynamic(id) {
-            self.states.insert(id.clone(), state.clone());
-            Ok(state)
-        } else {
+
+        let top_id = id.clone();
+        let mut stack = vec!(id.clone());
+        loop {
+
+            self.check_stop()?;
+
+            if stack.len() as u32 > self.max_catch_up_depth {
+                fail!("restore_state_recursive: max depth achived on id {}", id);
+            }
+
+            let id = stack.last().ok_or_else(|| error!("INTERNAL ERROR: restore_state_recursive: stask is empty"))?;
+        
             let handle = self.db.load_block_handle(id)?.ok_or_else(
                 || error!("Cannot load handle for {}", id)
             )?;
             let block = self.db.load_block_data(&handle).await?;
             let prev_root = match block.construct_prev_id()? {
                 (prev, None) => {
-                    self.restore_state_recursive(&prev, depth + 1).await?
-                        .root_cell().clone()
+                    if let Some(pr) = try_get_state(&prev) {
+                        pr.root_cell().clone()
+                    } else {
+                        stack.push(prev.clone());
+                        continue;
+                    }
                 },
                 (prev1, Some(prev2)) => {
-                    let root1 = self.restore_state_recursive(&prev1, depth + 1).await?
-                        .root_cell().clone();
-                    let root2 = self.restore_state_recursive(&prev2, depth + 1).await?
-                        .root_cell().clone();
+                    let root1 = if let Some(pr) = try_get_state(&prev1) {
+                        pr.root_cell().clone()
+                    } else {
+                        stack.push(prev1.clone());
+                        continue;
+                    };
+                    let root2 = if let Some(pr) = try_get_state(&prev2) {
+                        pr.root_cell().clone()
+                    } else {
+                        stack.push(prev2.clone());
+                        continue;
+                    };
                     ShardStateStuff::construct_split_root(root1, root2)?
                 }
             };
@@ -390,7 +392,17 @@ impl ShardStatesKeeper {
 
             self.store_state(&handle, state.clone(), None, true).await?;
 
-            Ok(state)
+            stack.pop().ok_or_else(|| error!("INTERNAL ERROR: restore_state_recursive: stask is empty when pop()"))?;
+
+            if stack.is_empty() {
+                if *state.block_id() != top_id {
+                    fail!(
+                        "INTERNAL ERROR: restore_state_recursive: found state is wrong {} != {}",
+                        state.block_id(), top_id
+                    );
+                }
+                return Ok(state);
+            }
         }
     }
 
@@ -462,7 +474,7 @@ impl ShardStatesKeeper {
                         }
                     };
                     self.wait_and_store_persistent_state(
-                        engine.deref(), &handle, Arc::new(|| false)).await;
+                        engine.deref(), &handle, abort.clone()).await;
                     if engine.check_stop() {
                         return Ok(());
                     }
@@ -568,7 +580,6 @@ impl ShardStatesKeeper {
         loop {
             match self.db.load_shard_state_dynamic_ex(
                 id, 
-                #[cfg(feature = "async_ss_storage")]
                 false
             ) {
                 Ok(ss) => break Ok(ss),

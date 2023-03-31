@@ -73,6 +73,23 @@ impl Default for CellsGcConfig {
     }
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
+pub struct CellsDbConfig {
+    pub states_db_queue_len: u32,
+    pub max_pss_slowdown_mcs: u32,
+    pub prefill_cells_cunters: bool,
+}
+
+impl Default for CellsDbConfig {
+    fn default() -> Self {
+        Self {
+            states_db_queue_len: 1000,
+            max_pss_slowdown_mcs: 750,
+            prefill_cells_cunters: false,
+        }
+    }
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct TonNodeConfig {
     log_config_name: Option<String>,
@@ -113,6 +130,8 @@ pub struct TonNodeConfig {
     restore_db: bool,
     #[serde(default)]
     low_memory_mode: bool,
+    #[serde(default)]
+    cells_db_config: CellsDbConfig,
 }
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
@@ -207,9 +226,6 @@ pub struct RempConfig {
     client_enabled: bool,
     remp_client_pool: Option<u8>,
     service_enabled: bool,
-    #[cfg(feature="remp_emergency")]
-    #[serde(default)]
-    forcedly_disable_remp_cap: bool,
 }
 
 impl RempConfig {
@@ -238,10 +254,6 @@ impl RempConfig {
         self.remp_client_pool
     }
 
-    #[cfg(feature="remp_emergency")]
-    pub fn forcedly_disable_remp_cap(&self) -> bool {
-        self.forcedly_disable_remp_cap
-    }
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
@@ -406,11 +418,6 @@ impl TonNodeConfig {
 
         config_json.connectivity_check_config.check()?;
 
-        #[cfg(not(feature = "async_ss_storage"))]
-        if config_json.low_memory_mode {
-            fail!("'low_memory_mode' is applied only with 'async_ss_storage' feature");
-        }
-
         config_json.configs_dir = configs_dir.to_string();
         config_json.file_name = json_file_name.to_string();
 
@@ -524,6 +531,9 @@ impl TonNodeConfig {
     }
     pub fn low_memory_mode(&self) -> bool {
         self.low_memory_mode
+    }
+    pub fn cells_db_config(&self) -> &CellsDbConfig {
+        &self.cells_db_config
     }
 
  
