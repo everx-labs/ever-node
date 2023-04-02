@@ -11,18 +11,16 @@
 * limitations under the License.
 */
 
-use std::cmp::max;
-use std::sync::*;
-use std::sync::atomic::{Ordering, AtomicU64};
-use std::time::*;
+use std::{cmp::max, sync::{*, atomic::{Ordering, AtomicU64}}, time::*};
 use crossbeam_channel::Receiver;
 
-use crate::engine_traits::EngineOperations;
 use catchain::utils::get_hash;
 use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, ValidatorDescr};
 use ton_types::{fail, Result, UInt256};
+
 #[cfg(feature = "slashing")]
 use validator_session::SlashingValidatorStat;
+
 use validator_session::{
     BlockHash, BlockPayloadPtr, CatchainOverlayManagerPtr,
     SessionId, SessionPtr, SessionListenerPtr, SessionFactory,
@@ -43,12 +41,17 @@ use remp_manager::RempManager;
 
 use super::*;
 use super::fabric::*;
-use crate::validator::catchain_overlay::CatchainOverlayManagerImpl;
+use crate::{
+    engine_traits::EngineOperations,
+    validator::{
+        catchain_overlay::CatchainOverlayManagerImpl,
+        mutex_wrapper::MutexWrapper,
+        validator_utils::GeneralSessionInfo
+    }
+};
 
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::SlashingManagerPtr;
-use crate::validator::mutex_wrapper::MutexWrapper;
-use crate::validator::validator_utils::GeneralSessionInfo;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum ValidatorGroupStatus {
@@ -122,6 +125,7 @@ impl ValidatorGroupImpl {
         prev_validators: &Vec<ValidatorDescr>,
         next_validator_set: &ValidatorSet,
         master_cc_seqno: u32,
+        start_remp_session: bool,
         rt: tokio::runtime::Handle
     ) -> Result<()> {
         self.status = ValidatorGroupStatus::Active;
@@ -163,23 +167,31 @@ impl ValidatorGroupImpl {
         );
 
         if let Some(remp_manager) = &g.remp_manager {
-            let mut rq = RmqQueueManager::new(
-                g.engine.clone(), remp_manager.clone(), g.shard().clone(),
-                &g.local_key
-            );
-            rq.set_queues(g.general_session_info.clone(), g.validator_list_id.clone(), master_cc_seqno, prev_validators, &next_validator_set.list().to_vec());
-            let reliable_queue_clone = Arc::new(rq);
-            self.reliable_queue = Some(reliable_queue_clone.clone());
+            if start_remp_session {
+                let mut rq = RmqQueueManager::new(
+                    g.engine.clone(), remp_manager.clone(), g.shard().clone(),
+                    &g.local_key
+                );
+                rq.set_queues(
+                    g.general_session_info.clone(),
+                    g.validator_list_id.clone(),
+                    master_cc_seqno,
+                    prev_validators,
+                    &next_validator_set.list().to_vec()
+                );
+                let reliable_queue_clone = Arc::new(rq);
+                self.reliable_queue = Some(reliable_queue_clone.clone());
 
-            let local_key = g.local_key.clone();
-            rt.clone().spawn(async move {
-                match reliable_queue_clone.start(local_key).await {
-                    Ok(()) => (),
-                    Err(e) => log::error!(target: "validator", "Cannot start RMQ {}: {}",
-                        reliable_queue_clone.info_string().await, e
-                    )
-                }
-            });
+                let local_key = g.local_key.clone();
+                rt.clone().spawn(async move {
+                    match reliable_queue_clone.start(local_key).await {
+                        Ok(()) => (),
+                        Err(e) => log::error!(target: "validator", "Cannot start RMQ {}: {}",
+                           reliable_queue_clone.info_string().await, e
+                        )
+                    }
+                });
+            }
         }
 
         let g_clone = g.clone();
@@ -302,11 +314,8 @@ pub struct ValidatorGroup {
 impl ValidatorGroup {
     pub fn new(
         general_session_info: Arc<GeneralSessionInfo>,
-        //_rt: tokio::runtime::Handle,
-        //shard: ShardIdent,
         local_key: PrivateKey,
         session_id: SessionId,
-        //catchain_seqno: u32,
         master_cc_seqno: u32,
         validator_list_id: ValidatorListHash,
         validator_set: ValidatorSet,
@@ -370,6 +379,7 @@ impl ValidatorGroup {
         prev: Vec<BlockIdExt>,
         min_masterchain_block_id: BlockIdExt,
         min_ts: SystemTime,
+        start_remp_session: bool,
         rt: tokio::runtime::Handle
     ) -> Result<()> {
         let prev_validators_cloned = prev_validators.clone();
@@ -395,6 +405,7 @@ impl ValidatorGroup {
                                 &prev_validators_cloned,
                                 &next_validators_cloned,
                                 self.master_cc_seqno,
+                                start_remp_session,
                                 rt
                             )
                             {

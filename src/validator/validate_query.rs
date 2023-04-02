@@ -61,6 +61,7 @@ use ton_types::{
 #[cfg(feature = "metrics")]
 use crate::engine::STATSD;
 use crate::engine_traits::RempDuplicateStatus;
+use crate::validator::validator_utils::is_remp_enabled;
 
 
 // pub const SPLIT_MERGE_DELAY: u32 = 100;        // prepare (delay) split/merge for 100 seconds
@@ -1523,9 +1524,8 @@ impl ValidateQuery {
                 &mut last_trans_lt_len,
                 &mut acc_state_hash
             ).map_err(|err| error!("transaction {:x} of account {:x} is invalid : {}", trans_lt, acc_id, err))?;
-            
-            let remp = base.config_params.has_capability(GlobalCapabilities::CapRemp);
-            if remp {
+
+            if is_remp_enabled(engine.clone(), &base.config_params) {
                 if let Some((id, is_internal)) = msg_info {
                     if !is_internal {
                         Self::check_message_ordering(

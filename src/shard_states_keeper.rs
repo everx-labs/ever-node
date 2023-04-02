@@ -137,6 +137,10 @@ impl ShardStatesKeeper {
         }
     }
 
+    pub fn allow_state_gc(&self, block_id: &BlockIdExt) -> Result<bool> {
+        self.gc_resolver.allow_state_gc(block_id, 0, u64::MAX)
+    }
+
     pub async fn store_state(
         &self,
         handle: &Arc<BlockHandle>, 

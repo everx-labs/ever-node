@@ -16,15 +16,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use sha2::{Digest, Sha256};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
-use ton_block::{
-    BlockSignatures, BlockSignaturesPure, CatchainConfig, ConfigParams,
-    CryptoSignature, CryptoSignaturePair,
-    Deserializable, Serializable,
-    Message,
-    ShardIdent, SigPubKey,
-    UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet,
-    Workchains, WorkchainDescr,
-};
+use ton_block::{BlockSignatures, BlockSignaturesPure, CatchainConfig, ConfigParams, CryptoSignature, CryptoSignaturePair, Deserializable, Serializable, Message, ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet, Workchains, WorkchainDescr, GlobalCapabilities};
 use ton_types::{BuilderData, Result, UInt256, HashmapType, fail, error};
 use validator_session::SessionNode;
 use crate::engine_traits::EngineOperations;
@@ -348,4 +340,9 @@ pub fn get_group_members_by_validator_descrs(iterator: &Vec<ValidatorDescr>, dst
             weight: descr.weight as i64,
         });
     };
+}
+
+pub fn is_remp_enabled(engine: Arc<dyn EngineOperations>, config_params: &ConfigParams) -> bool {
+
+    return config_params.has_capability(GlobalCapabilities::CapRemp);
 }

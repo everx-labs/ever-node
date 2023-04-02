@@ -1786,18 +1786,20 @@ impl Engine {
                         // visited_pss_blocks:         4            3            2            1
                         //                    ↑ we may delete blocks starting at least here (before 4th pss)
                         
-                        if visited_pss_blocks >= 4 {
-                            let gen_time = keyblock.gen_utime()? as u64;
-                            let gc_max_date = gc_max_date.as_secs();
-                            if gen_time < gc_max_date {
-                                log::info!(
-                                    "gc for archives: found block (gen time: {}, seq_no: {}), gc max date: {}",
-                                    &gen_time, keyblock.id().seq_no(), &gc_max_date
-                                );
-                                log::info!("start gc for archives..");
-                                engine.db.archive_gc(&keyblock.id()).await?;
-                                log::info!("finish gc for archives.");
-                                return Ok(());
+                        if engine.shard_states_keeper.allow_state_gc(keyblock.id())? {
+                            if visited_pss_blocks >= 4 {
+                                let gen_time = keyblock.gen_utime()? as u64;
+                                let gc_max_date = gc_max_date.as_secs();
+                                if gen_time < gc_max_date {
+                                    log::info!(
+                                        "gc for archives: found block (gen time: {}, seq_no: {}), gc max date: {}",
+                                        &gen_time, keyblock.id().seq_no(), &gc_max_date
+                                    );
+                                    log::info!("start gc for archives..");
+                                    engine.db.archive_gc(keyblock.id()).await?;
+                                    log::info!("finish gc for archives.");
+                                    return Ok(());
+                                }
                             }
                         }
                     }

@@ -49,7 +49,7 @@ use crate::validator::remp_block_parser::RempBlockObserverToplevel;
 //use crate::validator::remp_block_parser::RempBlockObserver;
 use crate::validator::remp_manager::{RempManager, RempInterfaceQueues};
 use crate::validator::sessions_computing::{SessionHistory, SessionInfo};
-use crate::validator::validator_utils::{GeneralSessionInfo, get_group_members_by_validator_descrs};
+use crate::validator::validator_utils::{GeneralSessionInfo, get_group_members_by_validator_descrs, is_remp_enabled};
 
 fn get_session_id_serialize(
     session_info: Arc<GeneralSessionInfo>,
@@ -526,6 +526,8 @@ impl ValidatorManagerImpl {
             if do_unsafe_catchain_rotate {"(unsafe rotate)"} else {""}
         );
 
+        let remp_enabled = is_remp_enabled(self.engine.clone(), mc_state_extra.config());
+
         for (ident, prev_blocks) in new_shards.iter() {
             let master_cc_seqno = mc_state_extra.validator_info.catchain_seqno;
             let cc_seqno_from_state = if ident.is_masterchain() {
@@ -731,6 +733,7 @@ impl ValidatorManagerImpl {
                         prev_blocks.clone(),
                         last_masterchain_block.clone(),
                         SystemTime::UNIX_EPOCH + Duration::from_secs(mc_now.into()),
+                        remp_enabled,
                         self.rt.clone()
                     ).await?;
                 } else if session_status >= ValidatorGroupStatus::Stopping {

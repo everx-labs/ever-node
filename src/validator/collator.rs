@@ -65,6 +65,7 @@ use ton_types::{error, fail, AccountId, Cell, HashmapType, Result, UInt256, Usag
 
 #[cfg(feature = "metrics")]
 use crate::engine::STATSD;
+use crate::validator::validator_utils::is_remp_enabled;
 
 // TODO move all constants (see validator query too) into one place
 pub const SPLIT_MERGE_DELAY: u32 = 100;        // prepare (delay) split/merge for 100 seconds
@@ -1253,8 +1254,7 @@ impl Collator {
         log::trace!("{}: do_collate", self.collated_block_descr);
 
         let ext_messages = self.engine.get_external_messages(&self.shard)?;
-        let remp = mc_data.config().has_capability(GlobalCapabilities::CapRemp);
-        let remp_messages = if remp {
+        let remp_messages = if is_remp_enabled(self.engine.clone(), mc_data.config()) {
             Some(self.engine.get_remp_messages(&self.shard)?)
         } else {
             None
@@ -2602,8 +2602,7 @@ impl Collator {
         let data = ton_types::serialize_toc(&cell)?;
         block_id.file_hash = UInt256::calc_file_hash(&data);
 
-        let remp = mc_data.config().has_capability(GlobalCapabilities::CapRemp);
-        if remp {
+        if is_remp_enabled(self.engine.clone(), mc_data.config()) {
             let (accepted, rejected, ignored) = collator_data.withdraw_remp_msg_statuses();
             self.engine.finalize_remp_messages(block_id.clone(), accepted, rejected, ignored)?;
         }

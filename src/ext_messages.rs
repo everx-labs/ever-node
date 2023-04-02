@@ -154,32 +154,34 @@ impl MessagesPool {
     pub fn get_messages(&self, shard: &ShardIdent, now: u32) -> Result<Vec<(Arc<Message>, UInt256)>> {
         let mut result = vec!();
         let mut ids = String::new();
+        let mut total = 0;
         for guard in self.messages.iter() {
-            if let Some(dst) = guard.val().message().dst_ref() {
-                if let Ok(prefix) = AccountIdPrefixFull::prefix(dst) {
-                    if shard.contains_full_prefix(&prefix) {
-                        if guard.val().expired(now) {
-                            log::debug!(
-                                target: EXT_MESSAGES_TRACE_TARGET,
-                                "get_messages: removing external message {:x} because it is expired",
-                                guard.key(),
-                            );
-                            self.messages.remove(guard.key());
-                        } else if guard.val().check_active(now) {
-                            result.push((guard.val().clone_message(), guard.key().clone()));
-                            ids.push_str(&format!("{:x} ", guard.key()));
+            total += 1;
+            if guard.val().expired(now) {
+                log::debug!(
+                    target: EXT_MESSAGES_TRACE_TARGET,
+                    "get_messages: removing external message {:x} because it is expired",
+                    guard.key(),
+                );
+                self.messages.remove(guard.key());
+            } else {
+                if let Some(dst) = guard.val().message().dst_ref() {
+                    if let Ok(prefix) = AccountIdPrefixFull::prefix(dst) {
+                        if shard.contains_full_prefix(&prefix) {
+                            if guard.val().check_active(now) {
+                                result.push((guard.val().clone_message(), guard.key().clone()));
+                                ids.push_str(&format!("{:x} ", guard.key()));
+                            }
                         }
                     }
                 }
             }
         }
-
         log::debug!(
             target: EXT_MESSAGES_TRACE_TARGET,
-            "get_messages: shard {}, messages: {}",
-            shard, ids
+            "get_messages: total (all shardes): {}; found for {} ({}): {}",
+            total, shard, result.len(), ids
         );
-
         Ok(result)
     }
 
