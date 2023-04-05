@@ -989,8 +989,11 @@ impl ValidatorManagerImpl {
         #[cfg(feature = "verification")]
         if let Some(verification_listener) = self.verification_listener.lock().clone() {
             let config = &mc_state_extra.config;
+            let mut are_workchains_updated = false;
             match try_calc_vset_for_workchain(&full_validator_set, config, &catchain_config, workchain_id) {
                 Ok(workchain_validators) => {
+                    let found_in_wc = self.find_us(&workchain_validators).is_some();
+                    let found_in_mc = self.find_us(&mc_validators).is_some();
                     let verification_listener: Arc<dyn VerificationListener> = verification_listener.clone();
                     let verification_listener = Arc::downgrade(&verification_listener);
                     let local_key = self.validator_list_status.get_local_key().expect("Validator must have local key");
@@ -1001,13 +1004,14 @@ impl ValidatorManagerImpl {
 
                     match local_bls_key {
                         Some(local_bls_key) => {
-                            let rt = self.rt.clone();
-                            let verification_manager = self.verification_manager.clone();
-                            rt.spawn(async move {
+                            if found_in_wc || found_in_mc {
                                 log::debug!(target: "verificator", "Update workchains start");
-                                verification_manager.update_workchains(local_key, local_bls_key, workchain_id, utime_since, &workchain_validators, &mc_validators, &verification_listener).await;
+                                self.verification_manager.update_workchains(local_key, local_bls_key, workchain_id, utime_since, &workchain_validators, &mc_validators, &verification_listener).await;
+                                are_workchains_updated = true;
                                 log::debug!(target: "verificator", "Update workchains finish");
-                            });
+                            } else {
+                                log::debug!(target: "verificator", "Skip workchains update because we are not present in WC/MC sets for workchain_id={}", workchain_id);
+                            }
                         },
                         None => log::error!(target: "validator", "Can't create verification workchains: no BLS private key attached"),
                     }
@@ -1015,6 +1019,12 @@ impl ValidatorManagerImpl {
                 Err(err) => {
                     log::error!(target: "validator", "Can't create verification workchains: {:?}", err);
                 }
+            }
+
+            if !are_workchains_updated {
+                log::debug!(target: "verificator", "Reset workchains start");
+                self.verification_manager.reset_workchains().await;
+                log::debug!(target: "verificator", "Reset workchains finish");
             }
         }
 

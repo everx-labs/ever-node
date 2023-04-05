@@ -170,7 +170,9 @@ impl Workchain {
             }
         }
 
-        assert!(local_adnl_id.is_some());
+        if local_adnl_id.is_none() {
+            failure::bail!("local_adnl_id must exist for workchain {}", workchain_id);
+        }
 
         let local_adnl_id = local_adnl_id.as_ref().expect("local_adnl_id must exist").clone();
         let node_debug_id = Arc::new(format!("#{}.{}", workchain_id, local_adnl_id));

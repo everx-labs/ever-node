@@ -75,6 +75,9 @@ pub trait VerificationManager: Sync + Send {
         mc_validators: &'a Vec<ValidatorDescr>,
         listener: &'a VerificationListenerPtr,
     );
+
+    /// Reset workchains
+    async fn reset_workchains<'a>(&'a self);
 }
 
 /// Factory for verification objects

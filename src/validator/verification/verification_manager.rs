@@ -141,6 +141,21 @@ impl VerificationManager for VerificationManagerImpl {
         Workchains management
     */
 
+    /// Reset workchains
+    async fn reset_workchains<'a>(
+        &'a self,
+    ) {
+        check_execution_time!(100_000);
+
+        let _hang_checker = HangCheck::new(self.runtime.clone(), "VerificationManagerImpl::reset_workchains".to_string(), Duration::from_millis(1000));
+
+        trace!(target: "verificator", "Reset workchains");
+
+        self.update_workchains_counter.increment();
+
+        self.set_workchains(Arc::new(HashMap::new()));
+    }    
+
     /// Update workchains
     async fn update_workchains<'a>(
         &'a self,

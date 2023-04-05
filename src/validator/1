@@ -1,0 +1,259 @@
+diff --git a/common b/common
+--- a/common
++++ b/common
+@@ -1 +1 @@
+-Subproject commit 28c0463c5a7cd398799c64d7600b4bd73401ff23
++Subproject commit 28c0463c5a7cd398799c64d7600b4bd73401ff23-dirty
+diff --git a/src/validator/validator_manager.rs b/src/validator/validator_manager.rs
+index 6a1545a..a03d6c7 100644
+--- a/src/validator/validator_manager.rs
++++ b/src/validator/validator_manager.rs
+@@ -306,7 +306,9 @@ impl ValidationStatus {
+ struct ValidatorListStatus {
+     known_lists: HashMap<ValidatorListHash, PublicKey>,
+     curr: Option<ValidatorListHash>,
+-    next: Option<ValidatorListHash>
++    next: Option<ValidatorListHash>,
++    curr_utime_since: Option<u32>,
++    next_utime_since: Option<u32>,
+ }
+ 
+ impl ValidatorListStatus {
+@@ -351,6 +353,10 @@ impl ValidatorListStatus {
+     fn known_hashes (&self) -> HashSet<ValidatorListHash> {
+         return self.known_lists.keys().cloned().collect();
+     }
++
++    fn get_curr_utime_since(&self) -> &Option<u32> {
++        &self.curr_utime_since
++    }
+ }
+ 
+ impl Default for ValidatorListStatus {
+@@ -358,7 +364,9 @@ impl Default for ValidatorListStatus {
+         return ValidatorListStatus {
+             known_lists: HashMap::default(),
+             curr: None,
+-            next: None
++            next: None,
++            curr_utime_since: None,
++            next_utime_since: None,
+         }
+     }
+ }
+@@ -501,10 +509,12 @@ impl ValidatorManagerImpl {
+         };
+ 
+         self.validator_list_status.curr = self.update_single_validator_list(validator_set.list(), "current").await?;
++        self.validator_list_status.curr_utime_since = Some(validator_set.utime_since());
+         if let Some(id) = self.validator_list_status.curr.as_ref() {
+             self.engine.activate_validator_list(id.clone())?;
+         }
+         self.validator_list_status.next = self.update_single_validator_list(next_validator_set.list(), "next").await?;
++        self.validator_list_status.next_utime_since = Some(next_validator_set.utime_since());
+ 
+         STATSD.gauge("in_current_vset_p34", if self.validator_list_status.curr.is_some() { 1 } else { 0 } as f64);
+         STATSD.gauge("in_next_vset_p36", if self.validator_list_status.next.is_some() { 1 } else { 0 } as f64);
+@@ -984,6 +994,7 @@ impl ValidatorManagerImpl {
+                     let verification_listener: Arc<dyn VerificationListener> = verification_listener.clone();
+                     let verification_listener = Arc::downgrade(&verification_listener);
+                     let local_key = self.validator_list_status.get_local_key().expect("Validator must have local key");
++                    let utime_since: u32 = self.validator_list_status.get_curr_utime_since().expect("Validator curr_utime_since must be set");
+                     log::debug!(target: "verificator", "Request BLS key");
+                     let local_bls_key = self.engine.get_validator_bls_key(local_key.id()).await;
+                     log::debug!(target: "verificator", "Request BLS key done");
+@@ -994,7 +1005,7 @@ impl ValidatorManagerImpl {
+                             let verification_manager = self.verification_manager.clone();
+                             rt.spawn(async move {
+                                 log::debug!(target: "verificator", "Update workchains start");
+-                                verification_manager.update_workchains(local_key, local_bls_key, workchain_id, &workchain_validators, &mc_validators, &verification_listener).await;
++                                verification_manager.update_workchains(local_key, local_bls_key, workchain_id, utime_since, &workchain_validators, &mc_validators, &verification_listener).await;
+                                 log::debug!(target: "verificator", "Update workchains finish");
+                             });
+                         },
+diff --git a/src/validator/verification/mod.rs b/src/validator/verification/mod.rs
+index 19b2519..cd0651f 100644
+--- a/src/validator/verification/mod.rs
++++ b/src/validator/verification/mod.rs
+@@ -70,6 +70,7 @@ pub trait VerificationManager: Sync + Send {
+         local_key: PrivateKey,
+         local_bls_key: PrivateKey,
+         workchain_id: i32,
++        utime_since: u32,
+         workchain_validators: &'a Vec<ValidatorDescr>,
+         mc_validators: &'a Vec<ValidatorDescr>,
+         listener: &'a VerificationListenerPtr,
+diff --git a/src/validator/verification/verification_manager.rs b/src/validator/verification/verification_manager.rs
+index 8f389a8..b236f19 100644
+--- a/src/validator/verification/verification_manager.rs
++++ b/src/validator/verification/verification_manager.rs
+@@ -147,6 +147,7 @@ impl VerificationManager for VerificationManagerImpl {
+         local_key: PrivateKey,
+         local_bls_key: PrivateKey,
+         workchain_id: i32,
++        utime_since: u32,
+         workchain_validators: &'a Vec<ValidatorDescr>,
+         mc_validators: &'a Vec<ValidatorDescr>,
+         listener: &'a VerificationListenerPtr,
+@@ -172,6 +173,7 @@ impl VerificationManager for VerificationManagerImpl {
+             &local_bls_key,
+             &current_workchains,
+             workchain_id,
++            utime_since,
+             &workchain_validators,
+             mc_validators,
+             listener,
+@@ -213,13 +215,15 @@ impl VerificationManagerImpl {
+     }
+ 
+     /// Compute validator set hash based on a validators list
+-    fn compute_validator_set_hash(validators: &Vec<ValidatorDescr>) -> UInt256 {
++    fn compute_validator_set_hash(utime_since: u32, validators: &Vec<ValidatorDescr>) -> UInt256 {
+         let mut result = Vec::<u8>::with_capacity(validators.len() * 32);
+ 
+         for validator in validators {
+             result.extend(validator.public_key.key_bytes());
+         }
+ 
++        result.extend(utime_since.to_le_bytes());
++
+         UInt256::calc_file_hash(&result)
+     }
+ 
+@@ -230,7 +234,8 @@ impl VerificationManagerImpl {
+         local_bls_key: &PrivateKey,
+         workchains: &WorkchainMapPtr,
+         workchain_id: i32,
+-        validators: &Vec<ValidatorDescr>,
++        utime_since: u32,
++        wc_validators: &Vec<ValidatorDescr>,
+         mc_validators: &Vec<ValidatorDescr>,
+         listener: &VerificationListenerPtr,
+         metrics_receiver: Arc<metrics_runtime::Receiver>,
+@@ -239,12 +244,14 @@ impl VerificationManagerImpl {
+         wc_overlays_instance_counter: Arc<InstanceCounter>,
+         mc_overlays_instance_counter: Arc<InstanceCounter>,
+     ) -> Result<WorkchainPtr> {
+-        let validator_set_hash = Self::compute_validator_set_hash(validators);
++        let wc_validator_set_hash = Self::compute_validator_set_hash(utime_since, wc_validators);
++        let mc_validator_set_hash = Self::compute_validator_set_hash(utime_since, mc_validators);
+ 
+         //try to find workchain in a cache based on its ID and hash
+ 
+         if let Some(workchain) = workchains.get(&workchain_id) {
+-            if workchain.get_validator_set_hash() == &validator_set_hash {
++            if workchain.get_wc_validator_set_hash() == &wc_validator_set_hash && 
++               workchain.get_mc_validator_set_hash() == &mc_validator_set_hash {
+                 return Ok(workchain.clone());
+             }
+         }
+@@ -255,9 +262,10 @@ impl VerificationManagerImpl {
+             engine.clone(),
+             runtime,
+             workchain_id,
+-            validators.clone(),
++            wc_validators.clone(),
+             mc_validators.clone(),
+-            validator_set_hash,
++            wc_validator_set_hash,
++            mc_validator_set_hash,
+             local_key,
+             local_bls_key,
+             listener.clone(),
+diff --git a/src/validator/verification/workchain.rs b/src/validator/verification/workchain.rs
+index 2c81959..0918321 100644
+--- a/src/validator/verification/workchain.rs
++++ b/src/validator/verification/workchain.rs
+@@ -68,7 +68,8 @@ pub type WorkchainPtr = Arc<Workchain>;
+ //todo: hide fields within module
+ pub struct Workchain {
+     runtime: tokio::runtime::Handle,      //runtime handle for spawns
+-    validator_set_hash: UInt256,          //hash of validators set
++    wc_validator_set_hash: UInt256,       //hash of validators set for WC
++    mc_validator_set_hash: UInt256,       //hash of validators set for MC
+     wc_validators: Vec<ValidatorDescr>,   //WC validators
+     wc_pub_keys: Vec<[u8; BLS_PUBLIC_KEY_LEN]>, //WC validators pubkeys
+     local_adnl_id: PublicKeyHash,         //ADNL ID for this node
+@@ -120,7 +121,8 @@ impl Workchain {
+         workchain_id: i32,
+         wc_validators: Vec<ValidatorDescr>,
+         mc_validators: Vec<ValidatorDescr>,
+-        validator_set_hash: UInt256,
++        wc_validator_set_hash: UInt256,
++        mc_validator_set_hash: UInt256,
+         local_key: &PrivateKey,
+         local_bls_key: &PrivateKey,
+         listener: VerificationListenerPtr,
+@@ -165,9 +167,10 @@ impl Workchain {
+ 
+         let mut wc_pub_keys = Vec::new();
+ 
+-        log::info!(target: "verificator", "Creating verification workchain {} (validator_set_hash={}) with {} workchain nodes (total_weight={}, cutoff_weight={}, wc_local_idx={}, mc_local_idx={})",
++        log::info!(target: "verificator", "Creating verification workchain {} (wc_validator_set_hash={}, mc_validator_set_hash={}) with {} workchain nodes (total_weight={}, cutoff_weight={}, wc_local_idx={}, mc_local_idx={})",
+             node_debug_id,
+-            validator_set_hash.to_hex_string(),
++            wc_validator_set_hash.to_hex_string(),
++            mc_validator_set_hash.to_hex_string(),
+             wc_validators.len(),
+             wc_total_weight,
+             wc_cutoff_weight,
+@@ -197,9 +200,10 @@ impl Workchain {
+         let mc_total_weight: ValidatorWeight = mc_validators.iter().map(|desc| desc.weight).sum();
+         let mc_cutoff_weight = mc_total_weight * 2 / 3 + 1;
+ 
+-        log::debug!(target: "verificator", "Workchain {} (validator_set_hash={}) has {} linked MC nodes (total_weight={}, cutoff_weight={})",
++        log::debug!(target: "verificator", "Workchain {} (wc_validator_set_hash={}, mc_validator_set_hash={}) has {} linked MC nodes (total_weight={}, cutoff_weight={})",
+             node_debug_id,
+-            validator_set_hash.to_hex_string(),
++            wc_validator_set_hash.to_hex_string(),
++            mc_validator_set_hash.to_hex_string(),
+             mc_validators.len(),
+             mc_total_weight,
+             mc_cutoff_weight);
+@@ -223,7 +227,8 @@ impl Workchain {
+             node_debug_id,
+             runtime: runtime.clone(),
+             wc_validators,
+-            validator_set_hash,
++            wc_validator_set_hash,
++            mc_validator_set_hash,
+             wc_cutoff_weight,
+             _local_key: local_key.clone(),
+             local_bls_key: local_bls_key.clone(),
+@@ -269,6 +274,7 @@ impl Workchain {
+             let mut overlay_id = overlay_id.to_vec();
+ 
+             overlay_id.extend_from_slice(&magic_suffix);
++            overlay_id.extend_from_slice(workchain.mc_validator_set_hash.as_slice());
+ 
+             UInt256::calc_file_hash(&overlay_id)
+         };
+@@ -301,7 +307,7 @@ impl Workchain {
+             let workchain_overlay = WorkchainOverlay::create(
+                 workchain.workchain_id,
+                 format!("WC[{}]{}", workchain.wc_local_idx, *workchain.node_debug_id),
+-                workchain.validator_set_hash.clone(),
++                workchain.wc_validator_set_hash.clone(),
+                 &workchain.wc_validators,
+                 workchain.wc_validators.len(),
+                 workchain.local_adnl_id.clone(),
+@@ -384,11 +390,16 @@ impl Workchain {
+         Common methods
+     */
+ 
+-    /// Validator set hash
+-    pub fn get_validator_set_hash(&self) -> &UInt256 {
+-        &self.validator_set_hash
++    /// Workchain validator set hash for WC
++    pub fn get_wc_validator_set_hash(&self) -> &UInt256 {
++        &self.wc_validator_set_hash
+     }
+ 
++    /// Workchain validator set hash for MC
++    pub fn get_mc_validator_set_hash(&self) -> &UInt256 {
++        &self.mc_validator_set_hash
++    }    
++
+     /// Get self weak reference
+     fn get_self(&self) -> WorkchainPtr {
+         self.self_weak_ref
