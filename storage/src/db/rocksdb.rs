@@ -120,7 +120,7 @@ impl RocksDb {
         let mut block_opts = BlockBasedOptions::default();
 
         // specified cache for blocks.
-        let cache = Cache::new_lru_cache(1024 * 1024 * 1024).unwrap();
+        let cache = Cache::new_lru_cache(1024 * 1024 * 1024);
         block_opts.set_block_cache(&cache);
 
         // save in LRU block cache also indexes and bloom filters
