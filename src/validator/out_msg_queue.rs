@@ -810,12 +810,25 @@ impl MsgQueueManager {
         let mut queue = self.next_out_queue_info.out_queue.clone();
         let mut skipped = 0;
         let mut deleted = 0;
+        
+        // Temp fix. Need to review and fix limits management further.
+        let mut processed_count_limit = 25_000; 
+        
         queue.hashmap_filter(|_key, mut slice| {
             if block_full {
                 log::warn!("BLOCK FULL when cleaning output queue, cleanup is partial");
                 partial = true;
                 return Ok(HashmapFilterResult::Stop)
             }
+            
+            // Temp fix. Need to review and fix limits management further.
+            processed_count_limit -= 1;
+            if processed_count_limit == 0 {
+                log::warn!("clean_out_msg_queue: stopped cleaning messages queue because of count limit");
+                partial = true;
+                return Ok(HashmapFilterResult::Stop)
+            }
+            
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
             log::debug!("Scanning outbound {}", enq);
