@@ -199,17 +199,17 @@ impl OutMsgQueueInfoStuff {
     fn split(&mut self, subshard: ShardIdent, engine: &Arc<dyn EngineOperations>) -> Result<Self> {
         let sibling = subshard.sibling();
 
-        //let mut queues = HashMap::new();
-        //if *self.block_id().root_hash() == UInt256::from_str("01a4070170347ddccd6c75b1c36a07214a23a734fc9c5be3ee5a54d81fc6401a")? {
-        //    queues = engine.get_outmsg_queues();
-        //}
+        let mut queues = HashMap::new();
+        if *self.block_id().root_hash() == UInt256::from_str("01a4070170347ddccd6c75b1c36a07214a23a734fc9c5be3ee5a54d81fc6401a")? {
+            queues = engine.get_outmsg_queues();
+        }
 
         let mut out_queue = OutMsgQueue::default();
-        //if let (Some(self_queue), Some(sibling_queue)) = (queues.remove(&subshard), queues.remove(&sibling)) {
-        //    log::info!("split {} - got queues from cache", self.block_id());
-        //    self.out_queue = self_queue;
-        //    out_queue = sibling_queue;
-        //} else {
+        if let (Some(self_queue), Some(sibling_queue)) = (queues.remove(&subshard), queues.remove(&sibling)) {
+            log::info!("split {} - got queues from cache", self.block_id());
+            self.out_queue = self_queue;
+            out_queue = sibling_queue;
+        } else {
             log::info!("split {} - calc queues...", self.block_id());
             let now = std::time::Instant::now();
 
@@ -229,12 +229,12 @@ impl OutMsgQueueInfoStuff {
 
             log::info!("split {} - calc queues done in {}ms", self.block_id(), now.elapsed().as_millis());
 
-        //    if *self.block_id().root_hash() == UInt256::from_str("01a4070170347ddccd6c75b1c36a07214a23a734fc9c5be3ee5a54d81fc6401a")? {
-        //        queues.insert(subshard.clone(), self.out_queue.clone());
-        //        queues.insert(sibling.clone(), out_queue.clone());
-        //        engine.set_outmsg_queues(queues);
-        //    }
-        //}
+            if *self.block_id().root_hash() == UInt256::from_str("01a4070170347ddccd6c75b1c36a07214a23a734fc9c5be3ee5a54d81fc6401a")? {
+                queues.insert(subshard.clone(), self.out_queue.clone());
+                queues.insert(sibling.clone(), out_queue.clone());
+                engine.set_outmsg_queues(queues);
+            }
+        }
 
         // out_queue
         // self.out_queue
@@ -812,7 +812,7 @@ impl MsgQueueManager {
         let mut deleted = 0;
         
         // Temp fix. Need to review and fix limits management further.
-        //let mut processed_count_limit = 25_000; 
+        let mut processed_count_limit = 25_000; 
         
         queue.hashmap_filter(|_key, mut slice| {
             if block_full {
@@ -822,12 +822,12 @@ impl MsgQueueManager {
             }
             
             // Temp fix. Need to review and fix limits management further.
-            //processed_count_limit -= 1;
-            //if processed_count_limit == 0 {
-            //    log::warn!("clean_out_msg_queue: stopped cleaning messages queue because of count limit");
-            //    partial = true;
-            //    return Ok(HashmapFilterResult::Stop)
-            //}
+            processed_count_limit -= 1;
+            if processed_count_limit == 0 {
+                log::warn!("clean_out_msg_queue: stopped cleaning messages queue because of count limit");
+                partial = true;
+                return Ok(HashmapFilterResult::Stop)
+            }
             
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
