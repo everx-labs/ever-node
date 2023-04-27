@@ -54,9 +54,9 @@ storage = { path = 'storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
 ton_abi = { git = 'https://github.com/tonlabs/ever-abi.git', optional = true, tag = '2.3.75' }
 ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.2.188' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.39' }
-ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git', tag = '0.7.108' }
-ton_executor = { git = 'https://github.com/tonlabs/ever-executor.git', tag = '1.15.189' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', branch = 'fix-main' }
+ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git', branch = 'fix-main' }
+ton_executor = { git = 'https://github.com/tonlabs/ever-executor.git', branch = 'fix-main' }
 ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '1.12.7' }
 ton_vm = { git = 'https://github.com/tonlabs/ever-vm.git', tag = '1.8.127' }
 validator_session = { path = 'validator-session' }
