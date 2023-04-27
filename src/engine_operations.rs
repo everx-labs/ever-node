@@ -1055,6 +1055,25 @@ impl EngineOperations for Engine {
         }
         Ok(())
     }
+
+    fn set_outmsg_queues(&self, queues: std::collections::HashMap<ShardIdent,ton_block::OutMsgQueue>) {
+        if let Ok(mut q) = self.out_queues_cache.lock() {
+            log::info!("set_outmsg_queues - OK");
+            *q = queues;
+        } else {
+            log::info!("set_outmsg_queues - ERR");
+        }
+    }
+
+    fn get_outmsg_queues(&self) -> std::collections::HashMap<ShardIdent,ton_block::OutMsgQueue> {
+        if let Ok(q) = self.out_queues_cache.lock() {
+            log::info!("get_outmsg_queues - OK");
+            (*q).clone()
+        } else {
+            log::info!("get_outmsg_queues - ERR");
+            std::collections::HashMap::new()
+        }
+    }
 }
 
 async fn redirect_external_message(

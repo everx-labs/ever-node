@@ -757,6 +757,14 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!();
     }
 
+    fn set_outmsg_queues(&self, queues: std::collections::HashMap<ShardIdent,ton_block::OutMsgQueue>) {
+        unimplemented!();
+    }
+
+    fn get_outmsg_queues(&self) -> std::collections::HashMap<ShardIdent,ton_block::OutMsgQueue> {
+        unimplemented!();
+    }
+
 }
 
 pub struct ChainRange {
