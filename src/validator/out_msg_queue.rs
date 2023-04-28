@@ -229,7 +229,7 @@ impl OutMsgQueueInfoStuff {
 
             log::info!("split {} - calc queues done in {}ms", self.block_id(), now.elapsed().as_millis());
 
-            if *self.block_id().root_hash() == UInt256::from_str("01a4070170347ddccd6c75b1c36a07214a23a734fc9c5be3ee5a54d81fc6401a")? {
+            if *self.block_id().root_hash() == UInt256::from_str("2f3e2958dd07af2fdcd9bafe02ded919d335ad0d260d56291db6fb881343ec05")? {
                 queues.insert(subshard.clone(), self.out_queue.clone());
                 queues.insert(sibling.clone(), out_queue.clone());
                 engine.set_outmsg_queues(queues);
