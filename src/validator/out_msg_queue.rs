@@ -200,7 +200,7 @@ impl OutMsgQueueInfoStuff {
         let sibling = subshard.sibling();
 
         let mut queues = HashMap::new();
-        if *self.block_id().root_hash() == UInt256::from_str("01a4070170347ddccd6c75b1c36a07214a23a734fc9c5be3ee5a54d81fc6401a")? {
+        if *self.block_id().root_hash() == UInt256::from_str("2f3e2958dd07af2fdcd9bafe02ded919d335ad0d260d56291db6fb881343ec05")? {
             queues = engine.get_outmsg_queues();
         }
 
