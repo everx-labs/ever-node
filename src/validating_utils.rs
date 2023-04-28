@@ -39,7 +39,8 @@ pub fn supported_capabilities() -> u64 {
         GlobalCapabilities::CapFastStorageStatBugfix as u64 |
         GlobalCapabilities::CapResolveMerkleCell as u64 |
         GlobalCapabilities::CapFeeInGasUnits as u64 |
-        GlobalCapabilities::CapBounceAfterFailedAction as u64;
+        GlobalCapabilities::CapBounceAfterFailedAction as u64 |
+        GlobalCapabilities::CapSuspendedList as u64;
     #[cfg(feature = "gosh")] 
     let caps = caps | GlobalCapabilities::CapDiff as u64;
     #[cfg(feature = "signature_with_id")] 
@@ -48,7 +49,7 @@ pub fn supported_capabilities() -> u64 {
 }
 
 pub fn supported_version() -> u32 {
-    37
+    38
 }
 
 pub fn check_this_shard_mc_info(

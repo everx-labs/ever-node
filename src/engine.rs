@@ -158,6 +158,8 @@ pub struct Engine {
     remp_client_telemetry: RempClientTelemetry,
 
     tps_counter: TpsCounter,
+
+    pub out_queues_cache: std::sync::Mutex<std::collections::HashMap<ShardIdent, ton_block::OutMsgQueue>>,
 }
 
 struct DownloadContext<'a, T> {
@@ -753,6 +755,8 @@ impl Engine {
                 metrics
             ),
             tps_counter: TpsCounter::new(),
+
+            out_queues_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
 
         if let Some(rs) = engine.remp_service() {

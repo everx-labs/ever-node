@@ -19,7 +19,7 @@ use crate::{
 };
 use std::{
     cmp::max, iter::Iterator, sync::{Arc, atomic::{AtomicBool, Ordering}},
-    collections::HashMap,
+    collections::HashMap, str::FromStr,
 };
 use ton_block::{
     BlockIdExt, ShardIdent, Serializable, Deserializable,
@@ -196,22 +196,52 @@ impl OutMsgQueueInfoStuff {
         Ok(())
     }
 
-    fn split(&mut self, subshard: ShardIdent) -> Result<Self> {
+    fn split(&mut self, subshard: ShardIdent, engine: &Arc<dyn EngineOperations>) -> Result<Self> {
         let sibling = subshard.sibling();
+
+        let mut queues = HashMap::new();
+        if *self.block_id().root_hash() == UInt256::from_str("2f3e2958dd07af2fdcd9bafe02ded919d335ad0d260d56291db6fb881343ec05")? {
+            queues = engine.get_outmsg_queues();
+        }
+
         let mut out_queue = OutMsgQueue::default();
-        self.out_queue.hashmap_filter(|key, value| {
-            let mut slice = value.clone();
-            let lt = u64::construct_from(&mut slice)?;
-            let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
-            if !subshard.contains_full_prefix(enq.cur_prefix()) {
-                let key = SliceData::load_builder(key.clone())?;
-                out_queue.set_builder_serialized(key, &BuilderData::from_slice(&value), &lt)?;
-                Ok(HashmapFilterResult::Remove)
-            } else {
-                Ok(HashmapFilterResult::Accept)
+        if let (Some(self_queue), Some(sibling_queue)) = (queues.remove(&subshard), queues.remove(&sibling)) {
+            log::info!("split {} - got queues from cache", self.block_id());
+            self.out_queue = self_queue;
+            out_queue = sibling_queue;
+        } else {
+            log::info!("split {} - calc queues...", self.block_id());
+            let now = std::time::Instant::now();
+
+            self.out_queue.hashmap_filter(|key, mut value| {
+                let lt = u64::construct_from(&mut value)?;
+                let mut slice = value.clone();
+                let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
+                if !subshard.contains_full_prefix(enq.cur_prefix()) {
+                    let key = SliceData::load_builder(key.clone())?;
+                    out_queue.set_builder_serialized(key, &BuilderData::from_slice(&value), &lt)?;
+                    Ok(HashmapFilterResult::Remove)
+                } else {
+                    Ok(HashmapFilterResult::Accept)
+                }
+            })?;
+            self.out_queue.update_root_extra()?;
+
+            log::info!("split {} - calc queues done in {}ms", self.block_id(), now.elapsed().as_millis());
+
+            if *self.block_id().root_hash() == UInt256::from_str("01a4070170347ddccd6c75b1c36a07214a23a734fc9c5be3ee5a54d81fc6401a")? {
+                queues.insert(subshard.clone(), self.out_queue.clone());
+                queues.insert(sibling.clone(), out_queue.clone());
+                engine.set_outmsg_queues(queues);
             }
-        })?;
-        self.out_queue.update_root_extra()?;
+        }
+
+        // out_queue
+        // self.out_queue
+
+
+
+
         let mut ihr_pending = self.ihr_pending.clone();
         self.ihr_pending.split_inplace(&subshard.shard_key(false))?;
         ihr_pending.split_inplace(&sibling.shard_key(false))?;
@@ -535,7 +565,7 @@ impl MsgQueueManager {
                 };
             } else if after_split {
                 log::debug!("prepare split for state {}", prev_out_queue_info.block_id());
-                let sibling_out_queue_info = prev_out_queue_info.split(shard.clone())?;
+                let sibling_out_queue_info = prev_out_queue_info.split(shard.clone(), engine)?;
                 Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, 
                     Some(sibling_out_queue_info), prev_states[0].shard(), &stop_flag)?;
                 next_out_queue_info = match next_state_opt {
@@ -780,12 +810,25 @@ impl MsgQueueManager {
         let mut queue = self.next_out_queue_info.out_queue.clone();
         let mut skipped = 0;
         let mut deleted = 0;
+        
+        // Temp fix. Need to review and fix limits management further.
+        let mut processed_count_limit = 25_000; 
+        
         queue.hashmap_filter(|_key, mut slice| {
             if block_full {
                 log::warn!("BLOCK FULL when cleaning output queue, cleanup is partial");
                 partial = true;
                 return Ok(HashmapFilterResult::Stop)
             }
+            
+            // Temp fix. Need to review and fix limits management further.
+            processed_count_limit -= 1;
+            if processed_count_limit == 0 {
+                log::warn!("clean_out_msg_queue: stopped cleaning messages queue because of count limit");
+                partial = true;
+                return Ok(HashmapFilterResult::Stop)
+            }
+            
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
             log::debug!("Scanning outbound {}", enq);

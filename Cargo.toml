@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ton_node'
-version = '0.52.2'
+version = '0.52.1000'
 
 [workspace]
 members = [ 'storage' ]
@@ -83,4 +83,14 @@ version = '0.26.0'
 features = [ 'cmake_build' ]
 optional = true
 version = '0.26.0'
+
+[patch.'https://github.com/tonlabs/ever-block.git']
+ton_block = { git = 'https://www.github.com/tonlabs/ever-block.git', branch = 'fix-main' }
+
+[patch.'https://github.com/tonlabs/ever-block-json.git']
+ton_block_json = { git = 'https://www.github.com/tonlabs/ever-block-json.git', branch = 'fix-main' }
+
+[patch.'https://github.com/tonlabs/ever-executor.git']
+ton_executor = { git = 'https://www.github.com/tonlabs/ever-executor.git', branch = 'fix-main' }
+
 
