@@ -824,7 +824,7 @@ impl MsgQueueManager {
                 log::warn!("clean_out_msg_queue: stopped cleaning messages queue because of count limit");
                 partial = true;
                 return Ok(HashmapFilterResult::Stop)
-            }9
+            }
             
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
@@ -840,7 +840,7 @@ impl MsgQueueManager {
             Ok(HashmapFilterResult::Accept)
         })?;
         log::debug!("Deleted {} messages from out_msg_queue, skipped {}", deleted, skipped);
-        self.next_ou39t_queue_info.out_queue = queue;
+        self.next_out_queue_info.out_queue = queue;
         // if (verbosity >= 2) {
         //     std::cerr << "new out_msg_queue is ";
         //     block::gen::t_OutMsgQueue.print(std::cerr, *rt);
