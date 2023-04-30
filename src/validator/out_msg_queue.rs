@@ -200,7 +200,7 @@ impl OutMsgQueueInfoStuff {
         let sibling = subshard.sibling();
 
         let mut queues = HashMap::new();
-        if *self.block_id().root_hash() == UInt256::from_str("2f3e2958dd07af2fdcd9bafe02ded919d335ad0d260d56291db6fb881343ec05")? {
+        if *self.block_id().root_hash() == UInt256::from_str("c76c48643861d12f4f59bd31f82482d6ab2383bdb1df88121ab1eb403018686e")? {
             queues = engine.get_outmsg_queues();
         }
 
@@ -229,7 +229,7 @@ impl OutMsgQueueInfoStuff {
 
             log::info!("split {} - calc queues done in {}ms", self.block_id(), now.elapsed().as_millis());
 
-            if *self.block_id().root_hash() == UInt256::from_str("01a4070170347ddccd6c75b1c36a07214a23a734fc9c5be3ee5a54d81fc6401a")? {
+            if *self.block_id().root_hash() == UInt256::from_str("c76c48643861d12f4f59bd31f82482d6ab2383bdb1df88121ab1eb403018686e")? {
                 queues.insert(subshard.clone(), self.out_queue.clone());
                 queues.insert(sibling.clone(), out_queue.clone());
                 engine.set_outmsg_queues(queues);
@@ -238,9 +238,6 @@ impl OutMsgQueueInfoStuff {
 
         // out_queue
         // self.out_queue
-
-
-
 
         let mut ihr_pending = self.ihr_pending.clone();
         self.ihr_pending.split_inplace(&subshard.shard_key(false))?;
@@ -827,7 +824,7 @@ impl MsgQueueManager {
                 log::warn!("clean_out_msg_queue: stopped cleaning messages queue because of count limit");
                 partial = true;
                 return Ok(HashmapFilterResult::Stop)
-            }
+            }9
             
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
@@ -843,7 +840,7 @@ impl MsgQueueManager {
             Ok(HashmapFilterResult::Accept)
         })?;
         log::debug!("Deleted {} messages from out_msg_queue, skipped {}", deleted, skipped);
-        self.next_out_queue_info.out_queue = queue;
+        self.next_ou39t_queue_info.out_queue = queue;
         // if (verbosity >= 2) {
         //     std::cerr << "new out_msg_queue is ";
         //     block::gen::t_OutMsgQueue.print(std::cerr, *rt);
