@@ -406,7 +406,6 @@ impl CollatorData {
             &self.usage_tree,
             false
         )?;
-        self.block_full |= !self.block_limit_status.fits(ParamLimitIndex::Normal);
         Ok(())
     }
 
@@ -419,7 +418,6 @@ impl CollatorData {
             &self.usage_tree,
             force
         )?;
-        self.block_full |= !self.block_limit_status.fits(ParamLimitIndex::Normal);
         Ok(())
     }
 
@@ -1378,7 +1376,6 @@ impl Collator {
                 Ok(stop)
             } else {
                 collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, true)?;
-                collator_data.block_full |= !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
                 Ok(true)
             }
         })
@@ -2269,7 +2266,7 @@ impl Collator {
             // Newly generating messages will be executed next itaration (only after waiting).
 
             let mut new_messages = std::mem::take(&mut collator_data.new_messages);
-            while let Some(NewMessage{ lt_hash: (created_lt, hash), msg, tr_cell }) = new_messages.pop() {
+            for NewMessage{ lt_hash: (created_lt, hash), msg, tr_cell } in new_messages.drain() {
                 let info = msg.int_header().ok_or_else(|| error!("message is not internal"))?;
                 let fwd_fee = info.fwd_fee().clone();
                 enqueue_only |= collator_data.block_full | self.check_cutoff_timeout();
@@ -2320,7 +2317,7 @@ impl Collator {
     fn check_block_overload(&self, collator_data: &mut CollatorData) {
         log::trace!("{}: check_block_overload", self.collated_block_descr);
         let class = collator_data.block_limit_status.classify();
-        if class <= ParamLimitIndex::Underload {
+        if class == ParamLimitIndex::Underload {
             collator_data.underload_history |= 1;
             log::info!("{}: Block is underloaded", self.collated_block_descr);
         } else if class >= ParamLimitIndex::Soft {
