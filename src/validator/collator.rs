@@ -1373,8 +1373,9 @@ impl Collator {
                 log::debug!("{}: dequeue message: {:x}", self.collated_block_descr, enq.message_hash());
                 collator_data.dequeue_message(enq, deliver_lt, short)?;
                 collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, false)?;
-                collator_data.block_full |= !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
-                Ok(collator_data.block_full)
+                // normal limit reached, but we can add for soft and hard limit
+                let stop = !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
+                Ok(stop)
             } else {
                 collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, true)?;
                 collator_data.block_full |= !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
@@ -1458,11 +1459,11 @@ impl Collator {
         for state in prev_states.iter() {
             self.check_one_state(mc_data, state)?;
         }
-        let mut state_root = prev_states[0].root_cell().clone();
         if self.after_merge {
-            state_root = ShardStateStuff::construct_split_root(state_root, prev_states[1].root_cell().clone())?;
+            ShardStateStuff::construct_split_root(prev_states[0].root_cell().clone(), prev_states[1].root_cell().clone())
+        } else {
+            Ok(prev_states[0].root_cell().clone())
         }
-        Ok(state_root)
     }
 
     fn check_one_state(&self, mc_data: &McData, state: &Arc<ShardStateStuff>) -> Result<()> {
@@ -2268,21 +2269,19 @@ impl Collator {
             // Newly generating messages will be executed next itaration (only after waiting).
 
             let mut new_messages = std::mem::take(&mut collator_data.new_messages);
-            while let Some(NewMessage{ lt_hash: _, msg, tr_cell }) = new_messages.pop() {
+            while let Some(NewMessage{ lt_hash: (created_lt, hash), msg, tr_cell }) = new_messages.pop() {
                 let info = msg.int_header().ok_or_else(|| error!("message is not internal"))?;
                 let fwd_fee = info.fwd_fee().clone();
                 enqueue_only |= collator_data.block_full | self.check_cutoff_timeout();
-                if !self.shard.contains_address(&info.dst)? || enqueue_only {
+                if enqueue_only || !self.shard.contains_address(&info.dst)? {
                     let enq = MsgEnqueueStuff::new(msg, &self.shard, fwd_fee, use_hypercube)?;
                     collator_data.add_out_msg_to_state(&enq, true)?;
                     let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell);
-                    collator_data.add_out_msg_to_block(out_msg.read_message_hash()?, &out_msg)?;
+                    collator_data.add_out_msg_to_block(hash, &out_msg)?;
                 } else {
                     CHECK!(info.created_at.as_u32(), collator_data.gen_utime);
-                    let created_lt = info.created_lt;
                     let account_id = msg.int_dst_account_id().unwrap_or_default();
                     let env = MsgEnvelopeStuff::new(msg, &self.shard, fwd_fee, use_hypercube)?;
-                    let hash = env.message_hash();
                     collator_data.update_last_proc_int_msg((created_lt, hash))?;
                     let msg = AsyncMessage::New(env, tr_cell);
                     exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
