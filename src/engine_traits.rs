@@ -32,7 +32,7 @@ use std::{sync::{Arc, atomic::AtomicU64}, time::{SystemTime, UNIX_EPOCH}};
 use ton_api::ton::ton_node::{RempMessage, RempMessageStatus, RempReceipt, broadcast::BlockBroadcast};
 use ton_block::{
     AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, ShardAccount,
-    MASTERCHAIN_ID, Deserializable
+    MASTERCHAIN_ID, Deserializable, OutMsgQueue
 };
 use ton_types::{Result, UInt256, error, AccountId};
 #[cfg(feature = "telemetry")]
@@ -757,11 +757,19 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!();
     }
 
-    fn set_outmsg_queues(&self, queues: std::collections::HashMap<ShardIdent,ton_block::OutMsgQueue>) {
+    fn set_split_queues(
+        &self,
+        before_split_block: &BlockIdExt,
+        queue0: OutMsgQueue,
+        queue1: OutMsgQueue
+    ) {
         unimplemented!();
     }
 
-    fn get_outmsg_queues(&self) -> std::collections::HashMap<ShardIdent,ton_block::OutMsgQueue> {
+    fn get_split_queues(
+        &self,
+        before_split_block: &BlockIdExt
+    ) -> Option<(OutMsgQueue, OutMsgQueue)> {
         unimplemented!();
     }
 
