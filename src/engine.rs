@@ -80,7 +80,7 @@ use std::{
 use std::collections::HashSet;
 #[cfg(feature = "metrics")]
 use std::env;
-use ton_block::{self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL, GlobalCapabilities};
+use ton_block::{self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL, GlobalCapabilities, OutMsgQueue};
 use storage::{StorageAlloc, block_handle_db::BlockHandle, types::StorageCell};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
@@ -131,6 +131,7 @@ pub struct Engine {
     shard_states_keeper: Arc<ShardStatesKeeper>,
     #[cfg(feature="workchains")]
     pub workchain_id: AtomicI32,
+    split_queues_cache: lockfree::map::Map<BlockIdExt, (OutMsgQueue, OutMsgQueue)>,
 
     validation_status: lockfree::map::Map<ShardIdent, u64>,
     collation_status: lockfree::map::Map<ShardIdent, u64>,
@@ -729,6 +730,7 @@ impl Engine {
             workchain_id: AtomicI32::new(workchain_id),
             validation_status: lockfree::map::Map::new(),
             collation_status: lockfree::map::Map::new(),
+            split_queues_cache: lockfree::map::Map::new(),
             #[cfg(feature = "slashing")]
             validated_block_stats_sender,
             #[cfg(feature = "slashing")]
@@ -967,6 +969,9 @@ impl Engine {
         self.remp_capability.store(value, Ordering::Relaxed);
     }
 
+    pub fn split_queues_cache(&self) -> &lockfree::map::Map<BlockIdExt, (OutMsgQueue, OutMsgQueue)> {
+        &self.split_queues_cache
+    }
 
     pub async fn download_and_apply_block_worker(
         self: Arc<Self>, 
@@ -1170,6 +1175,17 @@ impl Engine {
         }
         let id = block.id().clone();
         self.next_block_applying_awaiters.do_or_wait(&prev_id, None, async move { Ok(id) }).await?;
+
+        let mut total = 0;
+        let mut removed = 0;
+        for guard in &self.split_queues_cache {
+            total += 1;
+            if self.shard_states_keeper.allow_state_gc(guard.key())? {
+                self.split_queues_cache.remove(guard.key());
+                removed += 1;
+            }
+        }
+        log::debug!("Split queues cache GC: total {total}, removed {removed}");
 
         Ok(())
     }

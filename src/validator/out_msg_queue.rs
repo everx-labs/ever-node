@@ -19,7 +19,7 @@ use crate::{
 };
 use std::{
     cmp::max, iter::Iterator, sync::{Arc, atomic::{AtomicBool, Ordering}},
-    collections::HashMap, str::FromStr,
+    collections::HashMap,
 };
 use ton_block::{
     BlockIdExt, ShardIdent, Serializable, Deserializable,
@@ -196,49 +196,71 @@ impl OutMsgQueueInfoStuff {
         Ok(())
     }
 
-    fn split(&mut self, subshard: ShardIdent, engine: &Arc<dyn EngineOperations>) -> Result<Self> {
-        let sibling = subshard.sibling();
-
-        let mut queues = HashMap::new();
-        if *self.block_id().root_hash() == UInt256::from_str("c76c48643861d12f4f59bd31f82482d6ab2383bdb1df88121ab1eb403018686e")? {
-            queues = engine.get_outmsg_queues();
-        }
-
-        let mut out_queue = OutMsgQueue::default();
-        if let (Some(self_queue), Some(sibling_queue)) = (queues.remove(&subshard), queues.remove(&sibling)) {
-            log::info!("split {} - got queues from cache", self.block_id());
-            self.out_queue = self_queue;
-            out_queue = sibling_queue;
-        } else {
-            log::info!("split {} - calc queues...", self.block_id());
-            let now = std::time::Instant::now();
-
-            self.out_queue.hashmap_filter(|key, mut value| {
-                let lt = u64::construct_from(&mut value)?;
-                let mut slice = value.clone();
-                let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
-                if !subshard.contains_full_prefix(enq.cur_prefix()) {
-                    let key = SliceData::load_builder(key.clone())?;
-                    out_queue.set_builder_serialized(key, &BuilderData::from_slice(&value), &lt)?;
-                    Ok(HashmapFilterResult::Remove)
-                } else {
-                    Ok(HashmapFilterResult::Accept)
-                }
-            })?;
-            self.out_queue.update_root_extra()?;
-
-            log::info!("split {} - calc queues done in {}ms", self.block_id(), now.elapsed().as_millis());
-
-            if *self.block_id().root_hash() == UInt256::from_str("c76c48643861d12f4f59bd31f82482d6ab2383bdb1df88121ab1eb403018686e")? {
-                queues.insert(subshard.clone(), self.out_queue.clone());
-                queues.insert(sibling.clone(), out_queue.clone());
-                engine.set_outmsg_queues(queues);
+    fn calc_split_queues(
+        self_queue: &mut OutMsgQueue,
+        self_shard: &ShardIdent
+    ) -> Result<OutMsgQueue> {
+        let mut sibling_queue = OutMsgQueue::default();
+        self_queue.hashmap_filter(|key, value| {
+            let mut slice = value.clone();
+            let lt = u64::construct_from(&mut slice)?;
+            let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
+            if !self_shard.contains_full_prefix(enq.cur_prefix()) {
+                let key = SliceData::load_builder(key.clone())?;
+                sibling_queue.set_builder_serialized(key, &BuilderData::from_slice(&value), &lt)?;
+                Ok(HashmapFilterResult::Remove)
+            } else {
+                Ok(HashmapFilterResult::Accept)
             }
-        }
+        })?;
+        self_queue.update_root_extra()?;
+        Ok(sibling_queue)
+    }
 
-        // out_queue
-        // self.out_queue
+    pub async fn precalc_split_queues(
+        engine: &Arc<dyn EngineOperations>,
+        block_id: &BlockIdExt
+    ) -> Result<()> {
+        let ss = engine.clone().wait_state(block_id, Some(10_000), false).await?;
+        let mut queue0 = ss.state().read_out_msg_queue_info()?;
+        let queue0 = queue0.out_queue_mut();
+        let (s0, _s1) = block_id.shard().split()?;
+        let now = std::time::Instant::now();
+        let queue1 = Self::calc_split_queues(queue0, &s0)?;
+        log::info!("Precalculated split queues after block {}, TIME {}ms", 
+            block_id, now.elapsed().as_millis());
+        engine.set_split_queues(block_id, queue0.clone(), queue1);
+        Ok(())
+    }
 
+    fn split(&mut self, subshard: ShardIdent, engine: &Arc<dyn EngineOperations>) -> Result<Self> {
+
+        let (s0, _s1) = self.block_id().shard().split()?;
+        let sibling_queue = if let Some((q0, q1)) = engine.get_split_queues(self.block_id()) {
+            log::info!("Use split queues from cache (prev block {})", self.block_id());
+            if s0 == subshard {
+                self.out_queue = q0;
+                q1
+            } else {
+                self.out_queue = q1;
+                q0
+            }
+        } else {
+            let now = std::time::Instant::now();
+            let sibling_queue = Self::calc_split_queues(&mut self.out_queue, &subshard)?;
+            let (q0, q1) = if s0 == subshard {
+                (self.out_queue.clone(), sibling_queue.clone())
+            } else {
+                (sibling_queue.clone(), self.out_queue.clone())
+            };
+            engine.set_split_queues(self.block_id(), q0, q1);
+            log::warn!(
+                "There is no precalculated split queues (prev block {}), calculated TIME {}ms", 
+                self.block_id(), now.elapsed().as_millis());
+            sibling_queue
+        };
+
+        let sibling = subshard.sibling();
         let mut ihr_pending = self.ihr_pending.clone();
         self.ihr_pending.split_inplace(&subshard.shard_key(false))?;
         ihr_pending.split_inplace(&sibling.shard_key(false))?;
@@ -276,7 +298,7 @@ impl OutMsgQueueInfoStuff {
         );
         let mut sibling = OutMsgQueueInfoStuff {
             block_id,
-            out_queue,
+            out_queue: sibling_queue,
             ihr_pending,
             entries,
             min_seqno,
@@ -807,7 +829,7 @@ impl MsgQueueManager {
         let mut queue = self.next_out_queue_info.out_queue.clone();
         let mut skipped = 0;
         let mut deleted = 0;
-        
+
         // Temp fix. Need to review and fix limits management further.
         let mut processed_count_limit = 25_000; 
         

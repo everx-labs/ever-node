@@ -111,6 +111,10 @@ impl ShardStatesKeeper {
         Ok(join_handle)
     }
 
+    pub fn allow_state_gc(&self, block_id: &BlockIdExt) -> Result<bool> {
+        self.gc_resolver.allow_state_gc(block_id, 0, u64::MAX)
+    }
+
     #[async_recursion::async_recursion]
     pub async fn load_state(&self, block_id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
         log::trace!("load_state {}", block_id);

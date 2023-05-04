@@ -57,7 +57,7 @@ use storage::block_handle_db::BlockHandle;
 use ton_api::ton::ton_node::{RempMessage, RempMessageStatus, RempReceipt, broadcast::BlockBroadcast};
 use ton_block::{
     BlockIdExt, AccountIdPrefixFull, ShardIdent, Message, GlobalCapabilities,
-    MASTERCHAIN_ID, SHARD_FULL
+    MASTERCHAIN_ID, SHARD_FULL, OutMsgQueue
 };
 #[cfg(feature="workchains")]
 use ton_block::{BASE_WORKCHAIN_ID, INVALID_WORKCHAIN_ID};
@@ -1056,23 +1056,26 @@ impl EngineOperations for Engine {
         Ok(())
     }
 
-    fn set_outmsg_queues(&self, queues: std::collections::HashMap<ShardIdent,ton_block::OutMsgQueue>) {
-        if let Ok(mut q) = self.out_queues_cache.lock() {
-            log::info!("set_outmsg_queues - OK");
-            *q = queues;
-        } else {
-            log::info!("set_outmsg_queues - ERR");
-        }
+    fn set_split_queues(
+        &self,
+        before_split_block: &BlockIdExt,
+        queue0: OutMsgQueue,
+        queue1: OutMsgQueue
+    ) {
+        self.split_queues_cache().insert(
+            before_split_block.clone(),
+            (queue0, queue1)
+        );
+        log::debug!("Split queues cache: set {before_split_block}");
     }
 
-    fn get_outmsg_queues(&self) -> std::collections::HashMap<ShardIdent,ton_block::OutMsgQueue> {
-        if let Ok(q) = self.out_queues_cache.lock() {
-            log::info!("get_outmsg_queues - OK");
-            (*q).clone()
-        } else {
-            log::info!("get_outmsg_queues - ERR");
-            std::collections::HashMap::new()
-        }
+    fn get_split_queues(
+        &self,
+        before_split_block: &BlockIdExt
+    ) -> Option<(OutMsgQueue, OutMsgQueue)> {
+        log::debug!("Split queues cache: get {before_split_block}");
+        self.split_queues_cache().get(before_split_block)
+            .map(|guard| guard.val().clone())
     }
 }
 
