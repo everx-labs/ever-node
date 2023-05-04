@@ -34,7 +34,6 @@ use ton_types::{
     HashmapSubtree, HashmapType, HashmapFilterResult, HashmapRemover,
 };
 
-
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ProcessedUptoStuff {
     pub shard: u64,
@@ -201,19 +200,27 @@ impl OutMsgQueueInfoStuff {
         self_shard: &ShardIdent
     ) -> Result<OutMsgQueue> {
         let mut sibling_queue = OutMsgQueue::default();
-        self_queue.hashmap_filter(|key, value| {
-            let mut slice = value.clone();
-            let lt = u64::construct_from(&mut slice)?;
-            let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
-            if !self_shard.contains_full_prefix(enq.cur_prefix()) {
-                let key = SliceData::load_builder(key.clone())?;
-                sibling_queue.set_builder_serialized(key, &BuilderData::from_slice(&value), &lt)?;
+        self_queue.hashmap_filter(|_key, mut slice| {
+            let created_lt = u64::construct_from(&mut slice)?;
+            let enq = MsgEnqueueStuff::construct_from(&mut slice, created_lt)?;
+            if self_shard.contains_full_prefix(enq.cur_prefix()) {
+                Ok(HashmapFilterResult::Accept)
+            } else {
+                Ok(HashmapFilterResult::Remove)
+            }
+        })?;
+        self_queue.update_root_extra()?;
+
+        sibling_queue.hashmap_filter(|_key, mut slice| {
+            let created_lt = u64::construct_from(&mut slice)?;
+            let enq = MsgEnqueueStuff::construct_from(&mut slice, created_lt)?;
+            if self_shard.contains_full_prefix(enq.cur_prefix()) {
                 Ok(HashmapFilterResult::Remove)
             } else {
                 Ok(HashmapFilterResult::Accept)
             }
         })?;
-        self_queue.update_root_extra()?;
+        sibling_queue.update_root_extra()?;
         Ok(sibling_queue)
     }
 
@@ -387,9 +394,8 @@ impl OutMsgQueueInfoStuff {
     }
 
     // remove all messages which are not from new_shard
-    fn filter_messages(&mut self, new_shard: &ShardIdent, shard_prefix: &SliceData) -> Result<()> {
+    fn filter_messages(&mut self, new_shard: &ShardIdent) -> Result<()> {
         let old_shard = self.shard().clone();
-        self.out_queue.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
         self.out_queue.hashmap_filter(|_key, mut slice| {
             // log::debug!("scanning OutMsgQueue entry with key {:x}", key);
             let lt = u64::construct_from(&mut slice)?;
@@ -402,7 +408,8 @@ impl OutMsgQueueInfoStuff {
                 true => Ok(HashmapFilterResult::Accept),
                 false => Ok(HashmapFilterResult::Remove)
             }
-        })
+        })?;
+        Ok(())
     }
 
     pub fn end_lt(&self) -> u64 { self.end_lt }
@@ -765,7 +772,8 @@ impl MsgQueueManager {
                     // compute the part of virtual sibling's OutMsgQueue with destinations in our shard
                     let sib_shard = shard.sibling();
                     let shard_prefix = shard.shard_key(true);
-                    neighbors[i].filter_messages(&sib_shard, &shard_prefix)
+                    neighbors[i].out_queue.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
+                    neighbors[i].filter_messages(&sib_shard)
                         .map_err(|err| error!("cannot filter virtual sibling's OutMsgQueue from that of \
                             the last common ancestor: {}", err))?;
                     neighbors[i].set_shard(sib_shard);
