@@ -1056,6 +1056,22 @@ impl EngineOperations for Engine {
         Ok(())
     }
 
+    // returns true if there were no either calculating or done queues before
+    fn set_split_queues_calculating(&self, before_split_block: &BlockIdExt) -> bool {
+        // insert None is there was not value before and return true
+        // return false if there was any value (None or Some) before
+        adnl::common::add_unbound_object_to_map_with_update(
+            self.split_queues_cache(),
+            before_split_block.clone(),
+            |v| {
+                if v.is_some() {
+                    fail!("");
+                }
+                Ok(Some(None))
+            }
+        ).is_ok()
+    }
+
     fn set_split_queues(
         &self,
         before_split_block: &BlockIdExt,
@@ -1064,18 +1080,20 @@ impl EngineOperations for Engine {
     ) {
         self.split_queues_cache().insert(
             before_split_block.clone(),
-            (queue0, queue1)
+            Some((queue0, queue1))
         );
-        log::debug!("Split queues cache: set {before_split_block}");
     }
 
     fn get_split_queues(
         &self,
         before_split_block: &BlockIdExt
     ) -> Option<(OutMsgQueue, OutMsgQueue)> {
-        log::debug!("Split queues cache: get {before_split_block}");
-        self.split_queues_cache().get(before_split_block)
-            .map(|guard| guard.val().clone())
+        if let Some(guard) = self.split_queues_cache().get(before_split_block) {
+            if let Some(q) = guard.val() {
+                return Some(q.clone())
+            }
+        }
+        None
     }
 }
 

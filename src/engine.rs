@@ -131,7 +131,9 @@ pub struct Engine {
     shard_states_keeper: Arc<ShardStatesKeeper>,
     #[cfg(feature="workchains")]
     pub workchain_id: AtomicI32,
-    split_queues_cache: lockfree::map::Map<BlockIdExt, (OutMsgQueue, OutMsgQueue)>,
+
+    // None - queue calculating is in progress
+    split_queues_cache: lockfree::map::Map<BlockIdExt, Option<(OutMsgQueue, OutMsgQueue)>>,
 
     validation_status: lockfree::map::Map<ShardIdent, u64>,
     collation_status: lockfree::map::Map<ShardIdent, u64>,
@@ -969,7 +971,7 @@ impl Engine {
         self.remp_capability.store(value, Ordering::Relaxed);
     }
 
-    pub fn split_queues_cache(&self) -> &lockfree::map::Map<BlockIdExt, (OutMsgQueue, OutMsgQueue)> {
+    pub fn split_queues_cache(&self) -> &lockfree::map::Map<BlockIdExt, Option<(OutMsgQueue, OutMsgQueue)>> {
         &self.split_queues_cache
     }
 

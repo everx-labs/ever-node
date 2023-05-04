@@ -221,15 +221,19 @@ impl OutMsgQueueInfoStuff {
         engine: &Arc<dyn EngineOperations>,
         block_id: &BlockIdExt
     ) -> Result<()> {
-        let ss = engine.clone().wait_state(block_id, Some(10_000), false).await?;
-        let mut queue0 = ss.state().read_out_msg_queue_info()?;
-        let queue0 = queue0.out_queue_mut();
-        let (s0, _s1) = block_id.shard().split()?;
-        let now = std::time::Instant::now();
-        let queue1 = Self::calc_split_queues(queue0, &s0)?;
-        log::info!("Precalculated split queues after block {}, TIME {}ms", 
-            block_id, now.elapsed().as_millis());
-        engine.set_split_queues(block_id, queue0.clone(), queue1);
+        if engine.set_split_queues_calculating(block_id) {
+            let ss = engine.clone().wait_state(block_id, Some(10_000), false).await?;
+            let mut queue0 = ss.state().read_out_msg_queue_info()?;
+            let queue0 = queue0.out_queue_mut();
+            let (s0, _s1) = block_id.shard().split()?;
+            let now = std::time::Instant::now();
+            let queue1 = Self::calc_split_queues(queue0, &s0)?;
+            log::info!("precalc_split_queues after block {}, TIME {}ms", 
+                block_id, now.elapsed().as_millis());
+            engine.set_split_queues(block_id, queue0.clone(), queue1);
+        } else {
+            log::trace!("precalc_split_queues {} already calculating or calculated", block_id);
+        }
         Ok(())
     }
 
@@ -832,14 +836,14 @@ impl MsgQueueManager {
 
         // Temp fix. Need to review and fix limits management further.
         let mut processed_count_limit = 25_000; 
-        
+
         queue.hashmap_filter(|_key, mut slice| {
             if block_full {
                 log::warn!("BLOCK FULL when cleaning output queue, cleanup is partial");
                 partial = true;
                 return Ok(HashmapFilterResult::Stop)
             }
-            
+
             // Temp fix. Need to review and fix limits management further.
             processed_count_limit -= 1;
             if processed_count_limit == 0 {
@@ -847,7 +851,7 @@ impl MsgQueueManager {
                 partial = true;
                 return Ok(HashmapFilterResult::Stop)
             }
-            
+
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
             log::debug!("Scanning outbound {}", enq);

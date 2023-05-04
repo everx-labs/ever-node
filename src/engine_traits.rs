@@ -757,6 +757,10 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!();
     }
 
+    fn set_split_queues_calculating(&self, before_split_block: &BlockIdExt) -> bool {
+        unimplemented!();
+    }
+
     fn set_split_queues(
         &self,
         before_split_block: &BlockIdExt,
