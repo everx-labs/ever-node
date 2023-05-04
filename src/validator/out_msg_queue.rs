@@ -200,7 +200,7 @@ impl OutMsgQueueInfoStuff {
         let sibling = subshard.sibling();
 
         let mut queues = HashMap::new();
-        if *self.block_id().root_hash() == UInt256::from_str("2f3e2958dd07af2fdcd9bafe02ded919d335ad0d260d56291db6fb881343ec05")? {
+        if *self.block_id().root_hash() == UInt256::from_str("c76c48643861d12f4f59bd31f82482d6ab2383bdb1df88121ab1eb403018686e")? {
             queues = engine.get_outmsg_queues();
         }
 
@@ -229,7 +229,7 @@ impl OutMsgQueueInfoStuff {
 
             log::info!("split {} - calc queues done in {}ms", self.block_id(), now.elapsed().as_millis());
 
-            if *self.block_id().root_hash() == UInt256::from_str("2f3e2958dd07af2fdcd9bafe02ded919d335ad0d260d56291db6fb881343ec05")? {
+            if *self.block_id().root_hash() == UInt256::from_str("c76c48643861d12f4f59bd31f82482d6ab2383bdb1df88121ab1eb403018686e")? {
                 queues.insert(subshard.clone(), self.out_queue.clone());
                 queues.insert(sibling.clone(), out_queue.clone());
                 engine.set_outmsg_queues(queues);
@@ -238,9 +238,6 @@ impl OutMsgQueueInfoStuff {
 
         // out_queue
         // self.out_queue
-
-
-
 
         let mut ihr_pending = self.ihr_pending.clone();
         self.ihr_pending.split_inplace(&subshard.shard_key(false))?;

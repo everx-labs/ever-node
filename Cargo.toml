@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ton_node'
-version = '0.52.1000'
+version = '0.53.0'
 
 [workspace]
 members = [ 'storage' ]
@@ -85,12 +85,12 @@ optional = true
 version = '0.26.0'
 
 [patch.'https://github.com/tonlabs/ever-block.git']
-ton_block = { git = 'https://www.github.com/tonlabs/ever-block.git', branch = 'fix-main' }
+ton_block = { git = 'https://www.github.com/tonlabs/ever-block.git', tag = '1.9.39-patch-01' }
 
 [patch.'https://github.com/tonlabs/ever-block-json.git']
-ton_block_json = { git = 'https://www.github.com/tonlabs/ever-block-json.git', branch = 'fix-main' }
+ton_block_json = { git = 'https://www.github.com/tonlabs/ever-block-json.git', tag = '0.7.108-patch-01' }
 
 [patch.'https://github.com/tonlabs/ever-executor.git']
-ton_executor = { git = 'https://www.github.com/tonlabs/ever-executor.git', branch = 'fix-main' }
+ton_executor = { git = 'https://www.github.com/tonlabs/ever-executor.git', tag = '1.15.189-patch-01' }
 
 
