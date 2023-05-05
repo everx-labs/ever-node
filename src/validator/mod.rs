@@ -57,7 +57,6 @@ pub struct BlockCandidate {
 pub struct CollatorSettings {
     pub want_split: Option<bool>,
     pub want_merge: Option<bool>,
-    pub max_collate_threads: Option<usize>,
     pub is_fake: bool,
 }
 

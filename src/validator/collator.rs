@@ -72,8 +72,6 @@ pub const SPLIT_MERGE_INTERVAL: u32 = 100;     // split/merge is enabled during 
 
 pub const DEFAULT_COLLATE_TIMEOUT: u32 = 2000;
 
-const MAX_COLLATE_THREADS: usize = 10;
-
 pub const REMP_CUTOFF_LIMIT: u32 = 100;   // percent that remp messages can fill in a block
 
 struct ImportedData {
@@ -1070,7 +1068,7 @@ impl Collator {
         })
     }
 
-    pub async fn collate(mut self, timeout_ms: u32) -> Result<(BlockCandidate, ShardStateUnsplit)> {
+    pub async fn collate(mut self) -> Result<(BlockCandidate, ShardStateUnsplit)> {
         log::info!(
             "{}: COLLATE min_mc_block_id.seqno = {}, prev_blocks_ids: {} {}",
             self.collated_block_descr,
@@ -1078,7 +1076,7 @@ impl Collator {
             self.prev_blocks_ids[0],
             if self.prev_blocks_ids.len() > 1 { format!("{}", self.prev_blocks_ids[1]) } else { "".to_owned() }
         );
-        self.init_timeout(timeout_ms);
+        self.init_timeout();
 
         let imported_data = self.import_data()
             .await.map_err(|e| {
@@ -1295,7 +1293,7 @@ impl Collator {
             mc_data.state().state().global_id(), // Use network global ID as signature ID
             mc_data.libraries().clone(),
             collator_data.config.clone(),
-            self.collator_settings.max_collate_threads.unwrap_or(MAX_COLLATE_THREADS),
+            self.engine.collator_config().max_collate_threads as usize,
             self.collated_block_descr.clone(),
             self.debug,
         )?;
@@ -3071,11 +3069,10 @@ impl Collator {
         }
     }
 
-    fn init_timeout(&mut self, timeout_ms: u32) {
+    fn init_timeout(&mut self) {
         self.started = Instant::now();
-        self.cutoff_timeout = Duration::from_millis(timeout_ms as u64);
 
-        let stop_timeout = timeout_ms * 3;
+        let stop_timeout = self.engine.collator_config().stop_timeout_ms;
         let stop_flag = self.stop_flag.clone();
         tokio::spawn(async move {
             futures_timer::Delay::new(Duration::from_millis(stop_timeout as u64)).await;
@@ -3084,8 +3081,9 @@ impl Collator {
     }
 
     fn check_cutoff_timeout(&self) -> bool {
-        log::debug!("check_cutoff_timeout {} {}", self.started.elapsed().as_millis(), self.cutoff_timeout.as_millis());
-        self.started.elapsed() > self.cutoff_timeout
+        let cutoff_timeout = self.engine.collator_config().cutoff_timeout_ms;
+        log::debug!("check_cutoff_timeout {} {}", self.started.elapsed().as_millis(), cutoff_timeout);
+        self.started.elapsed().as_millis() as u32 > cutoff_timeout
     }
 
     fn check_stop_flag(&self) -> Result<()> {
