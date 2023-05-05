@@ -55,7 +55,7 @@ use ton_block::{
     ParamLimitIndex, Serializable, ShardAccount, ShardAccountBlocks, ShardAccounts, ShardDescr,
     ShardFees, ShardHashes, ShardIdent, ShardStateSplit, ShardStateUnsplit, TopBlockDescrSet,
     Transaction, TransactionTickTock, UnixTime32, ValidatorSet, ValueFlow, WorkchainDescr,
-    Workchains,
+    Workchains, AccountIdPrefixFull,
 };
 use ton_executor::{
     BlockchainConfig, ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor,
@@ -172,19 +172,21 @@ enum AsyncMessage {
     TickTock(TransactionTickTock),
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 struct NewMessage {
     lt_hash: (u64, UInt256),
     msg: Message,
     tr_cell: Cell,
+    prefix: AccountIdPrefixFull,
 }
 
 impl NewMessage {
-    fn new(lt_hash: (u64, UInt256), msg: Message, tr_cell: Cell) -> Self {
+    fn new(lt_hash: (u64, UInt256), msg: Message, tr_cell: Cell, prefix: AccountIdPrefixFull) -> Self {
         Self {
             lt_hash,
             msg,
             tr_cell,
+            prefix,
         }
     }
 }
@@ -362,13 +364,23 @@ impl CollatorData {
         if let Some(in_msg) = in_msg_opt {
             self.add_in_msg_to_block(in_msg)?;
         }
+        let shard = self.out_msg_queue_info.shard().clone();
         transaction.out_msgs.iterate_slices(|slice| {
             let msg_cell = slice.reference(0)?;
             let msg_hash = msg_cell.repr_hash();
             let msg = Message::construct_from_cell(msg_cell.clone())?;
             match msg.header() {
                 CommonMsgInfo::IntMsgInfo(info) => {
-                    self.new_messages.push(NewMessage::new((info.created_lt, msg_hash), msg, tr_cell.clone()));
+                    let use_hypercube = !self.config.has_capability(GlobalCapabilities::CapOffHypercube);
+                    let fwd_fee = *info.fwd_fee();
+                    let enq = MsgEnqueueStuff::new(msg.clone(), &shard, fwd_fee, use_hypercube)?;
+                    self.enqueue_count += 1;
+                    self.out_msg_queue_info.add_message(&enq)?;
+                    // TODO: add to block here
+                    // let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
+                    // self.add_out_msg_to_block(msg_hash, &out_msg)?;
+                    self.new_messages.push(NewMessage::new((info.created_lt, msg_hash), msg, tr_cell.clone(), enq.next_prefix().clone()));
+
                 }
                 CommonMsgInfo::ExtOutMsgInfo(_) => {
                     let out_msg = OutMsg::external(msg_cell, tr_cell.clone());
@@ -392,8 +404,9 @@ impl CollatorData {
     /// put OutMsg to block
     fn add_out_msg_to_block(&mut self, key: UInt256, out_msg: &OutMsg) -> Result<()> {
         self.out_msg_count += 1;
-        let msg_cell = out_msg.serialize()?;
         self.out_msgs.insert_with_key(key, out_msg)?;
+
+        let msg_cell = out_msg.serialize()?;
         self.block_limit_status.register_out_msg_op(&msg_cell, &self.out_msgs_root()?)
     }
 
@@ -2266,19 +2279,22 @@ impl Collator {
             // Newly generating messages will be executed next itaration (only after waiting).
 
             let mut new_messages = std::mem::take(&mut collator_data.new_messages);
-            for NewMessage{ lt_hash: (created_lt, hash), msg, tr_cell } in new_messages.drain() {
+            for NewMessage{ lt_hash: (created_lt, hash), msg, tr_cell, prefix } in new_messages.drain() {
                 let info = msg.int_header().ok_or_else(|| error!("message is not internal"))?;
-                let fwd_fee = info.fwd_fee().clone();
+                let fwd_fee = *info.fwd_fee();
                 enqueue_only |= collator_data.block_full | self.check_cutoff_timeout();
                 if enqueue_only || !self.shard.contains_address(&info.dst)? {
-                    let enq = MsgEnqueueStuff::new(msg, &self.shard, fwd_fee, use_hypercube)?;
-                    collator_data.add_out_msg_to_state(&enq, true)?;
-                    let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell);
+                    let env = MsgEnvelopeStuff::new(msg, &self.shard, fwd_fee, use_hypercube)?;
+                    let out_msg = OutMsg::new(env.serialize()?, tr_cell);
                     collator_data.add_out_msg_to_block(hash, &out_msg)?;
                 } else {
                     CHECK!(info.created_at.as_u32(), collator_data.gen_utime);
-                    let account_id = msg.int_dst_account_id().unwrap_or_default();
                     let env = MsgEnvelopeStuff::new(msg, &self.shard, fwd_fee, use_hypercube)?;
+                    let key = OutMsgQueueKey::with_account_prefix(&prefix, hash.clone());
+                    collator_data.out_msg_queue_info.del_message(&key)?;
+                    collator_data.enqueue_count -= 1;
+
+                    let account_id = env.message().int_dst_account_id().unwrap_or_default();
                     collator_data.update_last_proc_int_msg((created_lt, hash))?;
                     let msg = AsyncMessage::New(env, tr_cell);
                     exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
