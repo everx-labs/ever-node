@@ -3082,7 +3082,6 @@ impl Collator {
 
     fn check_cutoff_timeout(&self) -> bool {
         let cutoff_timeout = self.engine.collator_config().cutoff_timeout_ms;
-        log::debug!("check_cutoff_timeout {} {}", self.started.elapsed().as_millis(), cutoff_timeout);
         self.started.elapsed().as_millis() as u32 > cutoff_timeout
     }
 
