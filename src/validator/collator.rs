@@ -3059,7 +3059,7 @@ impl Collator {
         self.started = Instant::now();
         self.cutoff_timeout = Duration::from_millis(timeout_ms as u64);
 
-        let stop_timeout = timeout_ms * 15 / 10;
+        let stop_timeout = timeout_ms * 3;
         let stop_flag = self.stop_flag.clone();
         tokio::spawn(async move {
             futures_timer::Delay::new(Duration::from_millis(stop_timeout as u64)).await;
