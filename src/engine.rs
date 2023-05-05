@@ -14,7 +14,10 @@
 use crate::{
     block::{BlockStuff, BlockIdExtExtention},
     block_proof::BlockProofStuff,
-    config::{TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig, ValidatorManagerConfig},
+    config::{
+        TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig, 
+        ValidatorManagerConfig, CollatorConfig
+    },
     engine_traits::{
         ExternalDb, EngineAlloc, EngineOperations,
         OverlayOperations, PrivateOverlayOperations, Server,
@@ -127,6 +130,7 @@ pub struct Engine {
     remp_capability: AtomicBool,
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
+    collator_config: CollatorConfig,
  
     shard_states_keeper: Arc<ShardStatesKeeper>,
     #[cfg(feature="workchains")]
@@ -562,6 +566,7 @@ impl Engine {
         let control_config = general_config.control_server()?;
         let global_config = general_config.load_global_config()?;
         let test_bundles_config = general_config.test_bundles_config().clone();
+        let collator_config = general_config.collator_config().clone();
         let low_memory_mode = general_config.low_memory_mode();
 
         let network = NodeNetwork::new(
@@ -727,6 +732,7 @@ impl Engine {
             low_memory_mode,
             remp_capability: AtomicBool::new(false),
             test_bundles_config,
+            collator_config,
             shard_states_keeper: shard_states_keeper.clone(),
             #[cfg(feature="workchains")]
             workchain_id: AtomicI32::new(workchain_id),
@@ -893,6 +899,10 @@ impl Engine {
 
     pub fn test_bundles_config(&self) -> &CollatorTestBundlesGeneralConfig {
         &self.test_bundles_config
+    }
+
+    pub fn collator_config(&self) -> &CollatorConfig {
+        &self.collator_config
     }
 
     #[cfg(feature = "telemetry")]

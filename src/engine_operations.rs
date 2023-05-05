@@ -13,7 +13,7 @@
 
 use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, 
-    config::CollatorTestBundlesGeneralConfig,
+    config::{CollatorTestBundlesGeneralConfig, CollatorConfig},
     engine::{Engine, STATSD},
     engine_traits::{
         ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, Server,
@@ -889,6 +889,10 @@ impl EngineOperations for Engine {
     
     fn test_bundles_config(&self) -> &CollatorTestBundlesGeneralConfig {
         Engine::test_bundles_config(self)
+    }
+
+    fn collator_config(&self) -> &CollatorConfig {
+        Engine::collator_config(self)
     }
 
     fn db_root_dir(&self) -> Result<&str> {

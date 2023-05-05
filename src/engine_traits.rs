@@ -12,7 +12,7 @@
 */
 
 use crate::{
-    block::BlockStuff, config::CollatorTestBundlesGeneralConfig, 
+    block::BlockStuff, config::{CollatorTestBundlesGeneralConfig, CollatorConfig}, 
     block_proof::BlockProofStuff, config::TonNodeConfig, internal_db::BlockResult,
     network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
     shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId}
@@ -585,6 +585,10 @@ pub trait EngineOperations : Sync + Send {
     }
 
     fn test_bundles_config(&self) -> &CollatorTestBundlesGeneralConfig {
+        unimplemented!()
+    }
+
+    fn collator_config(&self) -> &CollatorConfig {
         unimplemented!()
     }
 
