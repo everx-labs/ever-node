@@ -371,14 +371,15 @@ impl CollatorData {
             let msg = Message::construct_from_cell(msg_cell.clone())?;
             match msg.header() {
                 CommonMsgInfo::IntMsgInfo(info) => {
+                    // Add out message to state for counting time and it may be removed if used
                     let use_hypercube = !self.config.has_capability(GlobalCapabilities::CapOffHypercube);
                     let fwd_fee = *info.fwd_fee();
                     let enq = MsgEnqueueStuff::new(msg.clone(), &shard, fwd_fee, use_hypercube)?;
                     self.enqueue_count += 1;
                     self.out_msg_queue_info.add_message(&enq)?;
-                    // TODO: add to block here
-                    // let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
-                    // self.add_out_msg_to_block(msg_hash, &out_msg)?;
+                    // Add to message block here for counting time later it may be replaced
+                    let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
+                    self.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
                     self.new_messages.push(NewMessage::new((info.created_lt, msg_hash), msg, tr_cell.clone(), enq.next_prefix().clone()));
 
                 }
@@ -2284,16 +2285,14 @@ impl Collator {
                 let fwd_fee = *info.fwd_fee();
                 enqueue_only |= collator_data.block_full | self.check_cutoff_timeout();
                 if enqueue_only || !self.shard.contains_address(&info.dst)? {
-                    let env = MsgEnvelopeStuff::new(msg, &self.shard, fwd_fee, use_hypercube)?;
-                    let out_msg = OutMsg::new(env.serialize()?, tr_cell);
-                    collator_data.add_out_msg_to_block(hash, &out_msg)?;
+                    // everything was made in new_transaction
                 } else {
                     CHECK!(info.created_at.as_u32(), collator_data.gen_utime);
-                    let env = MsgEnvelopeStuff::new(msg, &self.shard, fwd_fee, use_hypercube)?;
                     let key = OutMsgQueueKey::with_account_prefix(&prefix, hash.clone());
                     collator_data.out_msg_queue_info.del_message(&key)?;
                     collator_data.enqueue_count -= 1;
 
+                    let env = MsgEnvelopeStuff::new(msg, &self.shard, fwd_fee, use_hypercube)?;
                     let account_id = env.message().int_dst_account_id().unwrap_or_default();
                     collator_data.update_last_proc_int_msg((created_lt, hash))?;
                     let msg = AsyncMessage::New(env, tr_cell);
