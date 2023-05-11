@@ -17,10 +17,12 @@ use ever_crypto::{Ed25519KeyOption, KeyId};
 use dht::DhtNode;
 use overlay::{OverlayShortId, OverlayNode};
 use rand::{Rng};
+use tokio_util::sync::CancellationToken;
 use std::{
     cmp::min, 
     sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicI32, AtomicU64, AtomicI64, Ordering}},
-    time::{Duration, Instant}
+    time::{Duration, Instant},
+    future::Future,
 };
 use ton_types::{error, fail, Result};
 use ton_api::{
@@ -54,7 +56,7 @@ pub struct Neighbours {
     fail_attempts: AtomicU64,
     all_attempts: AtomicU64,
     start: Instant,
-    stop: AtomicU32,
+    cancellation_token: CancellationToken,
     #[cfg(feature = "telemetry")]
     tag_get_capabilities: u32
 }
@@ -189,12 +191,6 @@ impl Neighbour {
 pub const MAX_NEIGHBOURS: usize = 16;
 
 impl Neighbours {
-
-    const MASK_PING: u32 = 0x00000001;
-    const MASK_RANDOM_PEERS: u32 = 0x00000002;
-    const MASK_RELOAD: u32 = 0x00000004;
-    const MASK_STOP: u32 = 0x80000000;
-
     const DEFAULT_RLDP_ROUNDTRIP_MS: u32 = 2000;
     const MAX_PINGS: usize = 6;
     const TIMEOUT_PING_MAX_MS: u64 = 1000;
@@ -202,7 +198,6 @@ impl Neighbours {
     const TIMEOUT_RANDOM_PEERS_MS: u64 = 1000;
     const TIMEOUT_RELOAD_MAX_SEC: u64 = 30;
     const TIMEOUT_RELOAD_MIN_SEC: u64 = 10;
-    const TIMEOUT_STOP_MS: u64 = 1000;
 
     pub fn new(
         start_peers: &Vec<Arc<KeyId>>,
@@ -223,7 +218,7 @@ impl Neighbours {
             fail_attempts: AtomicU64::new(0),
             all_attempts: AtomicU64::new(0),
             start: Instant::now(),
-            stop: AtomicU32::new(0),
+            cancellation_token: CancellationToken::new(),
             #[cfg(feature = "telemetry")]
             tag_get_capabilities: tag_from_boxed_type::<GetCapabilities>()
         };
@@ -319,35 +314,24 @@ impl Neighbours {
     }
 
     pub fn start_reload(self: Arc<Self>) {
-        self.stop.fetch_or(Self::MASK_RELOAD, Ordering::Relaxed);
-        tokio::spawn(
-            async move {
-                loop {
-                    if (self.stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 {
-                        self.stop.fetch_and(!Self::MASK_RELOAD, Ordering::Relaxed);
-                        break
-                    }
-                    let sleep_time = rand::thread_rng().gen_range(
-                        Self::TIMEOUT_RELOAD_MIN_SEC, 
-                        Self::TIMEOUT_RELOAD_MAX_SEC
-                    );
-                    tokio::time::sleep(Duration::from_secs(sleep_time)).await;
-                    if let Err(e) = self.reload_neighbours(&self.overlay_id).await {
-                        log::warn!("reload neighbours err: {:?}", e);
-                    }
+        self.spawn_background_task(|neighbours| async move {
+            loop {
+                let sleep_time = rand::thread_rng().gen_range(
+                    Self::TIMEOUT_RELOAD_MIN_SEC, 
+                    Self::TIMEOUT_RELOAD_MAX_SEC
+                );
+                tokio::time::sleep(Duration::from_secs(sleep_time)).await;
+                if let Err(e) = neighbours.reload_neighbours(&neighbours.overlay_id).await {
+                    log::warn!("reload neighbours err: {:?}", e);
                 }
             }
-        );
+        });
     }
 
     pub fn start_ping(self: Arc<Self>) {
-        self.stop.fetch_or(Self::MASK_PING, Ordering::Relaxed);
-        tokio::spawn(
-            async move {
-                self.ping_neighbours().await;
-                self.stop.fetch_and(!Self::MASK_PING, Ordering::Relaxed);
-            }
-        );
+        self.spawn_background_task(|neighbours| async move {
+            neighbours.ping_neighbours().await;
+        });
     }
 
     pub async fn reload_neighbours(&self, overlay_id: &Arc<OverlayShortId>) -> Result<()> {
@@ -360,37 +344,32 @@ impl Neighbours {
     }
 
     pub fn start_rnd_peers_process(self: Arc<Self>) {
-        self.stop.fetch_or(Self::MASK_RANDOM_PEERS, Ordering::Relaxed);
-        tokio::spawn(
-            async move {
-                //let receiver = self.overlay.clone();
-                //let id = self.overlay_id.clone();
+        self.spawn_background_task(
+            |neighbours| async move {
+                //let receiver = neighbours.overlay.clone();
+                //let id = neighbours.overlay_id.clone();
                 log::trace!("wait random peers...");
                 loop {
-                    //let this = self.clone();
+                    //let this = neighbours.clone();
                     tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_RANDOM_PEERS_MS)).await;
-                    for peer in self.peers.get_iter() {
-                        if (self.stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 {
-                            self.stop.fetch_and(!Self::MASK_RANDOM_PEERS, Ordering::Relaxed);
-                            return
-                        }
-                        match self.overlay.get_random_peers(
+                    for peer in neighbours.peers.get_iter() {
+                        match neighbours.overlay.get_random_peers(
                             &peer.id(),
-                            &self.overlay_id, 
+                            &neighbours.overlay_id, 
                             None
                         ).await {
                             Ok(Some(peers)) => {
                                 let mut new_peers = Vec::new();
                                 for peer in peers.iter() {
                                     match Ed25519KeyOption::from_public_key_tl(&peer.id) {
-                                        Ok(key) => if !self.contains_overlay_peer(key.id()) {
+                                        Ok(key) => if !neighbours.contains_overlay_peer(key.id()) {
                                             new_peers.push(key.id().clone());
                                         },
                                         Err(e) => log::warn!("Bad peer key: {}", e)
                                     }
                                 }
                                 if !new_peers.is_empty() {
-                                    self.clone().add_new_peers(new_peers);
+                                    neighbours.clone().add_new_peers(new_peers);
                                 }
                             },
                             Err(e) => log::warn!("get_random_peers error: {}", e),
@@ -403,29 +382,7 @@ impl Neighbours {
     }
 
     pub async fn stop(&self) {
-        self.stop.fetch_or(Self::MASK_STOP, Ordering::Relaxed);
-        loop {
-            let mask = self.stop.load(Ordering::Relaxed);
-            if mask == Self::MASK_STOP {
-                break;
-            }
-            Self::log_stop_status(mask);
-            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_STOP_MS)).await;
-        }
-    }
-
-    pub fn log_stop_status(bitmap: u32) {
-        let mut ss = String::new();
-        if bitmap & Self::MASK_PING != 0 {
-            ss.push_str("ping, ");
-        }
-        if bitmap & Self::MASK_RANDOM_PEERS != 0 {
-            ss.push_str("random peers, ");
-        }
-        if bitmap & Self::MASK_RELOAD != 0 {
-            ss.push_str("reload, ");
-        }
-        log::warn!("These services are still stopping ({:04x}): {}", bitmap, ss);
+        self.cancellation_token.cancel();
     }
 
     fn add_new_peers(self: Arc<Self>, peers: Vec<Arc<KeyId>>) {
@@ -579,59 +536,52 @@ impl Neighbours {
     }
 
     async fn ping_neighbours(self: &Arc<Self>) {
-        let mut count = 0;
-        let mut max_count = 0;
         let (wait, mut queue_reader) = Wait::new();
         loop {
-            let stop = (self.stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0;
-            if !stop {
-                let peers = self.peers.count();
-                max_count = min(peers, Self::MAX_PINGS);
-                if max_count == 0 {
-                    log::trace!("No peers in overlay {}", self.overlay_id);
+            let peers = self.peers.count();
+            let max_count = min(peers, Self::MAX_PINGS);
+            if max_count == 0 {
+                log::trace!("No peers in overlay {}", self.overlay_id);
+                tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MAX_MS)).await;
+                continue
+            }
+            log::trace!("neighbours: overlay {} count {}", self.overlay_id, peers);
+            let peer = match self.peers.next_for_ping(&self.start) {
+                Ok(Some(peer)) => peer,
+                Ok(None) => {
+                    log::trace!("next_for_ping: None");
+                    tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MIN_MS)).await;
+                    continue
+                },
+                Err(e) => {
+                    log::trace!("next_for_ping: {}", e);
                     tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MAX_MS)).await;
                     continue
                 }
-                log::trace!("neighbours: overlay {} count {}", self.overlay_id, peers);
-                let peer = match self.peers.next_for_ping(&self.start) {
-                    Ok(Some(peer)) => peer,
-                    Ok(None) => {
-                        log::trace!("next_for_ping: None");
-                        tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MIN_MS)).await;
-                        continue
-                    },
-                    Err(e) => {
-                        log::trace!("next_for_ping: {}", e);
-                        tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MAX_MS)).await;
-                        continue
-                    }
-                };
-                let last = self.start.elapsed().as_millis() as u64 - peer.last_ping();
-                if last < Self::TIMEOUT_PING_MAX_MS {
-                    tokio::time::sleep(
-                        Duration::from_millis(Self::TIMEOUT_PING_MAX_MS - last)
-                    ).await;
-                } else {
-                    tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MIN_MS)).await;
-                }
-                let self_cloned = self.clone();
-                let wait_cloned = wait.clone();
-                count = wait.request();
-                tokio::spawn(
-                    async move {
-                        if let Err(e) = self_cloned.update_capabilities(peer).await {
-                            log::warn!("{}", e)
-                        }
-                        wait_cloned.respond(Some(())); 
-                    }
-                );
+            };
+            let last = self.start.elapsed().as_millis() as u64 - peer.last_ping();
+            if last < Self::TIMEOUT_PING_MAX_MS {
+                tokio::time::sleep(
+                    Duration::from_millis(Self::TIMEOUT_PING_MAX_MS - last)
+                ).await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MIN_MS)).await;
             }
-            while (count >= max_count) || (stop && (count > 0)) {
+            let self_cloned = self.clone();
+            let wait_cloned = wait.clone();
+            let mut count = wait.request();
+            tokio::spawn(
+                async move {
+                    if let Err(e) = self_cloned.update_capabilities(peer).await {
+                        log::warn!("{}", e)
+                    }
+                    wait_cloned.respond(Some(())); 
+                }
+            );
+
+            while count >= max_count {
                 wait.wait(&mut queue_reader, false).await;
                 count -= 1;     
-            }
-            if stop {
-                break
             }
         }
     }
@@ -660,6 +610,25 @@ impl Neighbours {
         }
     }
 
+    fn spawn_background_task<P, F>(self: &Arc<Self>, p: P) 
+    where 
+        P: FnOnce(Arc<Self>) -> F + Send + 'static,
+        F: Future<Output = ()> + Send + Sync + 'static
+    {
+        let cancellation_token = self.cancellation_token.clone();
+        let neighbours = self.clone();
+        tokio::spawn(async move {
+            tokio::pin!(
+                let cancelled = cancellation_token.cancelled();
+                let fut = p(neighbours);
+            );
+
+            tokio::select! {
+                _ = fut => {},
+                _ = cancelled => {},
+            }
+        });
+    }
 }
 
 #[derive(Clone)]

@@ -52,6 +52,7 @@ rustracing_jaeger = { optional = true, version = '0.4.1' }
 statsd = { optional = true, version = '0.15' }
 storage = { path = 'storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
+tokio-util = "0.7"
 ton_abi = { git = 'https://github.com/tonlabs/ever-abi.git', optional = true, tag = '2.3.75' }
 ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.2.188' }
 ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.39' }

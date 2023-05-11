@@ -47,10 +47,12 @@ use overlay::{
 use rldp::RldpNode;
 use std::{
     hash::Hash, 
-    sync::{Arc, atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicBool, Ordering}}, 
-    time::{Duration, Instant, SystemTime},
+    sync::{Arc, atomic::{AtomicI32, AtomicU64, AtomicBool, Ordering}}, 
+    time::{Duration, SystemTime},
     convert::TryInto,
+    future::Future,
 };
+use tokio_util::sync::CancellationToken;
 use ton_types::{Result, fail, error, UInt256};
 use ton_block::BlockIdExt;
 use ton_api::{IntoBoxed, serialize_boxed, tag_from_bare_type};
@@ -82,7 +84,7 @@ pub struct NodeNetwork {
     config_handler: Arc<NodeConfigHandler>,
     connectivity_check_config: ConnectivityCheckBroadcastConfig,
     default_rldp_roundtrip: Option<u32>,
-    stop: Arc<AtomicU32>, 
+    cancellation_token: CancellationToken,
     #[cfg(feature = "telemetry")]
     tag_connectivity_check_broadcast: u32
 }
@@ -127,16 +129,12 @@ impl NodeNetwork {
     pub const TAG_DHT_KEY: usize = 1;
     pub const TAG_OVERLAY_KEY: usize = 2;
 
-    const MASK_STOP: u32 = 0x80000000;
-
-    const TIMEOUT_SPIN_MS: u64 = 1000;
-    const TIMEOUT_STOP_MS: u64 = 500;
-    const TIMEOUT_FIND_DHT_NODES_SEC: u64 = 60;
-    const TIMEOUT_FIND_OVERLAY_PEERS_SEC: u64 = 1;
-    const TIMEOUT_SEARCH_VALIDATOR_KEYS_SEC: u64 = 1;
-    const TIMEOUT_STORE_IP_ADDRESS_SEC: u64 = 500;
-    const TIMEOUT_STORE_OVERLAY_NODE_SEC: u64 = 500;
-    const TIMEOUT_UPDATE_PEERS_SEC: u64 = 5;
+    const TIMEOUT_FIND_DHT_NODES: Duration = Duration::from_secs(60);
+    const TIMEOUT_FIND_OVERLAY_PEERS: Duration = Duration::from_secs(1);
+    const TIMEOUT_SEARCH_VALIDATOR_KEYS: Duration = Duration::from_secs(1);
+    const TIMEOUT_STORE_IP_ADDRESS: Duration = Duration::from_secs(500);
+    const TIMEOUT_STORE_OVERLAY_NODE: Duration = Duration::from_secs(500);
+    const TIMEOUT_UPDATE_PEERS: Duration = Duration::from_secs(5);
 
     pub async fn new(
         config: TonNodeConfig,
@@ -173,21 +171,21 @@ impl NodeNetwork {
             dht.add_peer(peer)?;
         }
 
-        let stop = Arc::new(AtomicU32::new(0));
+        let cancellation_token = CancellationToken::new();
         let masterchain_overlay_short_id = overlay.calc_overlay_short_id(
             masterchain_zero_state_id.shard().workchain_id(),
             masterchain_zero_state_id.shard().shard_prefix_with_tag() as i64,
         )?;
 
         let dht_key = adnl.key_by_tag(Self::TAG_DHT_KEY)?;
-        NodeNetwork::periodic_store_ip_addr(dht.clone(), dht_key, None, &stop);
+        NodeNetwork::periodic_store_ip_addr(dht.clone(), dht_key, None, cancellation_token.clone());
 
         let overlay_key = adnl.key_by_tag(Self::TAG_OVERLAY_KEY)?;
-        NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_key, None, &stop);
+        NodeNetwork::periodic_store_ip_addr(dht.clone(), overlay_key, None, cancellation_token.clone());
 
         let default_rldp_roundtrip = config.default_rldp_roundtrip();
 
-        NodeNetwork::find_dht_nodes(dht.clone(), &stop);
+        NodeNetwork::find_dht_nodes(dht.clone(), cancellation_token.clone());
         let (config_handler, config_handler_context) = NodeConfigHandler::create(
             config, tokio::runtime::Handle::current()
         )?;
@@ -235,7 +233,7 @@ impl NodeNetwork {
             config_handler,
             default_rldp_roundtrip,
             connectivity_check_config,
-            stop,
+            cancellation_token,
             #[cfg(feature = "telemetry")]
             tag_connectivity_check_broadcast: 
                 tag_from_bare_type::<ConnectivityCheckBroadcast>(),
@@ -277,14 +275,7 @@ impl NodeNetwork {
 
     pub async fn stop_adnl(&self) {
         log::info!("Stopping node network loops...");
-        self.stop.fetch_or(Self::MASK_STOP, Ordering::Relaxed);
-        while self.stop.load(Ordering::Relaxed) != Self::MASK_STOP {
-            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_STOP_MS)).await;
-            log::info!(
-                "Still stopping node network loops ({:x})...", 
-                self.stop.load(Ordering::Relaxed)
-            );
-        }
+        self.cancellation_token.cancel();
         log::info!("Node network loops stopped. Stopping adnl...");
         self.network_context.adnl.stop().await;
         log::info!("Stopped adnl");
@@ -308,36 +299,36 @@ impl NodeNetwork {
         }
     }
 
-    async fn wait_timeout(timeout_sec: u64, stop: &Arc<AtomicU32>) -> bool {
-        let start = Instant::now();
-        loop {
-            if (stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 {
-                return false;
+    fn spawn_background_task<F>(cancellation_token: CancellationToken, task: F) 
+    where
+        F: Future<Output = ()> + Send + Sync + 'static
+    {
+        let cancellation_token = cancellation_token;
+        tokio::spawn(async move {
+            tokio::pin!(let cancelled = cancellation_token.cancelled(););
+            tokio::select! {
+                _ = cancelled => {},
+                _ = task => {},
             }
-            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_SPIN_MS)).await;
-            if start.elapsed().as_secs() >= timeout_sec {
-                return true;
-            }
-        }
+        });
     }
 
     fn periodic_store_ip_addr(
         dht: Arc<DhtNode>,
         node_key: Arc<dyn KeyOption>,
         validator_keys: Option<Arc<lockfree::set::Set<Arc<KeyId>>>>,
-        stop: &Arc<AtomicU32>
+        cancellation_token: CancellationToken,
     ) {
-        let stop = stop.clone();
-        stop.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(
+        Self::spawn_background_task(
+            cancellation_token,
             async move {
                 loop {
                     if let Err(e) = DhtNode::store_ip_address(&dht, &node_key).await {
                         log::warn!("store ip address ERROR: {}", e)
                     }
-                    if !Self::wait_timeout(Self::TIMEOUT_STORE_IP_ADDRESS_SEC, &stop).await {
-                        break
-                    }
+
+                    tokio::time::sleep(Self::TIMEOUT_STORE_IP_ADDRESS).await;
+
                     if let Some(actual_validator_adnl_keys) = validator_keys.as_ref() {
                         if actual_validator_adnl_keys.get(node_key.id()).is_none() {
                             log::info!("store ip address finished (for key {}).", node_key.id());
@@ -345,7 +336,6 @@ impl NodeNetwork {
                         }
                     }
                 }
-                stop.fetch_sub(1, Ordering::Relaxed)
             }
         );
     }
@@ -354,20 +344,17 @@ impl NodeNetwork {
         dht: Arc<DhtNode>, 
         overlay_id: OverlayId,
         overlay_node: ton_api::ton::overlay::node::Node,
-        stop: &Arc<AtomicU32>
+        cancellation_token: CancellationToken,
     ) {
-        let stop = stop.clone();
-        stop.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(
+        Self::spawn_background_task(
+            cancellation_token,
             async move {
                 loop {
                     let res = DhtNode::store_overlay_node(&dht, &overlay_id, &overlay_node).await;
                     log::info!("overlay_store status: {:?}", res);
-                    if !Self::wait_timeout(Self::TIMEOUT_STORE_OVERLAY_NODE_SEC, &stop).await {
-                        break
-                    }
+
+                    tokio::time::sleep(Self::TIMEOUT_STORE_OVERLAY_NODE).await;
                 }
-                stop.fetch_sub(1, Ordering::Relaxed)
             }
         );
     }
@@ -377,11 +364,10 @@ impl NodeNetwork {
         dht: Arc<DhtNode>,
         overlay: Arc<OverlayNode>,
         overlay_id: Arc<OverlayShortId>,
-        stop: &Arc<AtomicU32>
+        cancellation_token: CancellationToken,
     ) {
-        let stop = stop.clone();
-        stop.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(
+        Self::spawn_background_task(
+            cancellation_token,
             async move {
                 loop {
                     if let Err(e) = Self::add_overlay_peers(
@@ -392,11 +378,9 @@ impl NodeNetwork {
                     ).await {
                         log::warn!("add_overlay_peers: {}", e)
                     }
-                    if !Self::wait_timeout(Self::TIMEOUT_FIND_OVERLAY_PEERS_SEC, &stop).await {
-                        break
-                    }
+
+                    tokio::time::sleep(Self::TIMEOUT_FIND_OVERLAY_PEERS).await;
                 }
-                stop.fetch_sub(1, Ordering::Relaxed)
             }
         );
     }
@@ -569,54 +553,44 @@ impl NodeNetwork {
         Ok(())
     }
 
-    fn find_dht_nodes(dht: Arc<DhtNode>, stop: &Arc<AtomicU32>) {
-        let stop = stop.clone();
-        stop.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(
+    fn find_dht_nodes(dht: Arc<DhtNode>, cancellation_token: CancellationToken) {
+        Self::spawn_background_task(
+            cancellation_token, 
             async move {
-                'all: loop {
+                loop {
                     let mut iter = None;
                     while let Some(id) = dht.get_known_peer(&mut iter) {
-                        if (stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 {
-                            break 'all
-                        }
                         if let Err(e) = dht.find_dht_nodes(&id).await {
                             log::warn!("find_dht_nodes result: {:?}", e)
                         }
                     }
-                    if !Self::wait_timeout(Self::TIMEOUT_FIND_DHT_NODES_SEC, &stop).await {
-                        break
-                    }
+
+                    tokio::time::sleep(Self::TIMEOUT_FIND_DHT_NODES).await;
                 }
-                stop.fetch_sub(1, Ordering::Relaxed)
             }
         );
     }
 
     fn start_update_peers(self: Arc<Self>, client_overlay: &Arc<NodeClientOverlay>) {
         let client_overlay = client_overlay.clone();
-        self.stop.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(
+        Self::spawn_background_task(
+            self.cancellation_token.clone(),
             async move {
-            let mut iter = None;
-                loop {
-                    log::trace!("find overlay nodes by dht...");
-                    if let Err(e) = self.update_peers(&client_overlay, &mut iter).await {
-                        log::warn!("Error find overlay nodes by dht: {}", e);
-                    }
-                    if (self.stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 {
-                        break
-                    }
-                    if client_overlay.peers().count() >= neighbours::MAX_NEIGHBOURS {
-                        log::trace!("finish find overlay nodes.");
-                        break;
-                    } 
-                    if !Self::wait_timeout(Self::TIMEOUT_UPDATE_PEERS_SEC, &self.stop).await {
-                        break
+                let mut iter = None;
+                    loop {
+                        log::trace!("find overlay nodes by dht...");
+                        if let Err(e) = self.update_peers(&client_overlay, &mut iter).await {
+                            log::warn!("Error find overlay nodes by dht: {}", e);
+                        }
+
+                        if client_overlay.peers().count() >= neighbours::MAX_NEIGHBOURS {
+                            log::trace!("finish find overlay nodes.");
+                            break;
+                        } 
+
+                        tokio::time::sleep(Self::TIMEOUT_UPDATE_PEERS).await;
                     }
                 }
-                self.stop.fetch_sub(1, Ordering::Relaxed)
-            }
         );
     }
 
@@ -636,7 +610,7 @@ impl NodeNetwork {
             self.network_context.dht.clone(),
             overlay_id_full, 
             node,
-            &self.stop
+            self.cancellation_token.clone(),
         );
 
         let peers = self.update_overlay_peers(&overlay_id_short, &mut None).await?; 
@@ -675,7 +649,7 @@ impl NodeNetwork {
             self.network_context.dht.clone(), 
             self.network_context.overlay.clone(), 
             overlay_id_short.clone(),
-            &self.stop
+            self.cancellation_token.clone(),
         );
         log::info!("Started Overlay {}", &overlay_id_short);
         Ok(client_overlay as Arc<dyn FullNodeOverlayClient>)
@@ -704,43 +678,41 @@ impl NodeNetwork {
         let breaker = Arc::new(AtomicBool::new(false));
         let breaker_ = breaker.clone();
         let callback = callback.clone();
-        let stop = self.stop.clone();
-        stop.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(async move {
-            let mut current_validators = validators;
-            loop {
-                match Self::search_validator_keys_round(
-                    local_adnl_id.clone(),
-                    &adnl,
-                    &dht,
-                    &overlay,
-                    current_validators,
-                    Some(callback.clone()),
-                    &stop
-                ).await {
-                    Ok(lost_validators) => {
-                        current_validators = lost_validators;
-                    },
-                    Err(e) => {
-                        log::warn!("{:?}", e);
+        
+        Self::spawn_background_task(
+            self.cancellation_token.clone(),
+            async move {
+                let mut current_validators = validators;
+                loop {
+                    match Self::search_validator_keys_round(
+                        local_adnl_id.clone(),
+                        &adnl,
+                        &dht,
+                        &overlay,
+                        current_validators,
+                        Some(callback.clone()),
+                    ).await {
+                        Ok(lost_validators) => {
+                            current_validators = lost_validators;
+                        },
+                        Err(e) => {
+                            log::warn!("{:?}", e);
+                            break;
+                        }
+                    }
+                    if current_validators.is_empty() {
+                        log::info!("search_validator_keys: finished.");
+                        break;
+                    } else {
+                        log::info!("search_validator_keys: numbers lost validator keys: {}", current_validators.len());
+                    }
+                    if breaker.load(Ordering::Relaxed) {
                         break;
                     }
-                }
-                if current_validators.is_empty() {
-                    log::info!("search_validator_keys: finished.");
-                    break;
-                } else {
-                    log::info!("search_validator_keys: numbers lost validator keys: {}", current_validators.len());
-                }
-                if breaker.load(Ordering::Relaxed) {
-                    break;
-                }
-                if !Self::wait_timeout(Self::TIMEOUT_SEARCH_VALIDATOR_KEYS_SEC, &stop).await {
-                    break
+                    tokio::time::sleep(Self::TIMEOUT_SEARCH_VALIDATOR_KEYS).await;
                 }
             }
-            stop.fetch_sub(1, Ordering::Relaxed)
-        });
+        );
         Ok(breaker_)
     }
 
@@ -750,48 +722,47 @@ impl NodeNetwork {
         validators_contexts: Arc<Cache<UInt256, Arc<ValidatorSetContext>>>,
         validator_list_id: UInt256,
         validators: Vec<CatchainNode>,
-        stop: &Arc<AtomicU32>,
     ) {
         let dht = self.network_context.dht.clone();
         let adnl = self.network_context.adnl.clone();
         let overlay = self.network_context.overlay.clone();
-        let stop = stop.clone();
-        stop.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(async move {
-            let mut current_validators = validators;
-            loop {
-                match Self::search_validator_keys_round(
-                    local_adnl_id.clone(),
-                    &adnl,
-                    &dht,
-                    &overlay,
-                    current_validators,
-                    None,
-                    &stop
-                ).await {
-                    Ok(lost_validators) => {
-                        current_validators = lost_validators;
-                    },
-                    Err(e) => {
-                        log::warn!("{:?}", e);
+
+        Self::spawn_background_task(
+            self.cancellation_token.clone(),
+            async move {
+                let mut current_validators = validators;
+                loop {
+                    match Self::search_validator_keys_round(
+                        local_adnl_id.clone(),
+                        &adnl,
+                        &dht,
+                        &overlay,
+                        current_validators,
+                        None,
+                    ).await {
+                        Ok(lost_validators) => {
+                            current_validators = lost_validators;
+                        },
+                        Err(e) => {
+                            log::warn!("{:?}", e);
+                            break;
+                        }
+                    }
+                    if current_validators.is_empty() {
+                        log::info!("search_validator_keys: finished.");
+                        break;
+                    } else {
+                        log::info!("search_validator_keys: numbers lost validator keys: {}", current_validators.len());
+                    }
+
+                    tokio::time::sleep(Self::TIMEOUT_SEARCH_VALIDATOR_KEYS).await;
+
+                    if validators_contexts.get(&validator_list_id).is_none() {
                         break;
                     }
                 }
-                if current_validators.is_empty() {
-                    log::info!("search_validator_keys: finished.");
-                    break;
-                } else {
-                    log::info!("search_validator_keys: numbers lost validator keys: {}", current_validators.len());
-                }
-                if !Self::wait_timeout(Self::TIMEOUT_SEARCH_VALIDATOR_KEYS_SEC, &stop).await {
-                    break
-                }
-                if validators_contexts.get(&validator_list_id).is_none() {
-                    break;
-                }
             }
-            stop.fetch_sub(1, Ordering::Relaxed)
-        });
+        );
     }
 
     async fn search_validator_keys_round<'a>(
@@ -801,13 +772,9 @@ impl NodeNetwork {
         overlay: &'a OverlayNode,
         validators: Vec<CatchainNode>,
         full_node_callback: Option<Arc<dyn Fn(Arc<KeyId>) + Sync + Send>>,
-        stop: &'a Arc<AtomicU32>,
     ) -> Result<Vec<CatchainNode>> {
         let mut lost_validators = Vec::new();
         for val in validators {
-            if (stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 {
-                fail!("Network is stopping")
-            }
             match DhtNode::find_address(dht, &val.adnl_id).await {
                 Ok(Some((addr, key))) => {
                     log::info!("addr found: {:?}, key: {:x?}", &addr, &key);
@@ -1021,7 +988,7 @@ impl NodeNetwork {
                         self.network_context.dht.clone(),
                         self.network_context.adnl.key_by_id(&id)?,
                         Some(self.validator_context.actual_local_adnl_keys.clone()),
-                        &self.stop
+                        self.cancellation_token.clone(),
                     );
                     log::info!(
                         "load_and_store_adnl_key (AddValidatorAdnlKey) id: {} finished.", 
@@ -1242,7 +1209,6 @@ impl PrivateOverlayOperations for NodeNetwork {
                 self.validator_context.sets_contexts.clone(),
                 validator_list_id.clone(),
                 lost_validators,
-                &self.stop
             );
         }
 
