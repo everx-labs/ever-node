@@ -14,12 +14,11 @@ use storage::{
     shardstate_db_async::SsNotificationCallback,
 };
 use ton_block::{BlockIdExt, ShardIdent};
-use ton_types::{fail, error, Result, UInt256};
+use ton_types::{fail, error, Result, UInt256, BocReader};
 use adnl::common::add_unbound_object_to_map;
 use std::{
     time::Duration, ops::Deref,
 };
-use ton_types::BocDeserializer;
 
 /// This structs works beetween engine and db.
 /// ValidatorManager  Collator  ValidatorQuery  etc.   <- high level node commponents
@@ -85,7 +84,7 @@ impl ShardStatesKeeper {
 
         log::trace!("start");
 
-        self.restore_states(&engine, last_applied_mc_block, shard_client_mc_block).await?;
+        self.restore_states(last_applied_mc_block, shard_client_mc_block).await?;
 
         let join_handle = tokio::spawn(async move {
             engine.acquire_stop(Engine::MASK_SERVICE_PSS_KEEPER);
@@ -135,6 +134,10 @@ impl ShardStatesKeeper {
             self.states.insert(block_id.clone(), state.clone());
             Ok(state)
         }
+    }
+
+    pub fn allow_state_gc(&self, block_id: &BlockIdExt) -> Result<bool> {
+        self.gc_resolver.allow_state_gc(block_id, 0, u64::MAX)
     }
 
     pub async fn store_state(
@@ -199,29 +202,44 @@ impl ShardStatesKeeper {
         );
 
         let state_root = {
-            let mut deserialiser = BocDeserializer::new();
+            let mut boc_reader = BocReader::new();
             if low_memory_mode {
                 let done_cells_storage = self.db.create_done_cells_storage(root_hash)?;
-                deserialiser = deserialiser.set_done_cells_storage(done_cells_storage);
+                boc_reader = boc_reader.set_done_cells_storage(done_cells_storage);
             }
-            deserialiser
+            boc_reader
                 .set_abort(&|| self.stopper.check_stop())
-                .deserialize_inmem(data.clone())?
-                .withdraw_one_root()?
+                .read_inmem(data.clone())?
+                .withdraw_single_root()?
         };
+
+        if state_root.repr_hash() != *root_hash {
+            fail!("Invalid state hash {:x} != {:x}", state_root.repr_hash(), root_hash);
+        }
 
         log::info!(
             "check_and_store_state: deserialized (low_memory_mode: {}) {} TIME {}",
             handle.id(), low_memory_mode, now.elapsed().as_millis()
         );
 
-        let state = ShardStateStuff::from_root_cell(
-            handle.id().clone(), 
-            state_root,
-            #[cfg(feature = "telemetry")]
-            &self.telemetry,
-            &self.allocated
-        )?;
+        let state = if let Some(wc) = handle.is_queue_update_for() {
+            ShardStateStuff::from_out_msg_queue_root_cell(
+                handle.id().clone(), 
+                state_root,
+                wc,
+                #[cfg(feature = "telemetry")]
+                &self.telemetry,
+                &self.allocated
+            )?
+        } else {
+            ShardStateStuff::from_state_root_cell(
+                handle.id().clone(), 
+                state_root,
+                #[cfg(feature = "telemetry")]
+                &self.telemetry,
+                &self.allocated
+            )?
+        };
 
         let (state, _) = self.store_state(handle, state, Some(&data), false).await?;
 
@@ -238,7 +256,6 @@ impl ShardStatesKeeper {
 
     async fn restore_states(
         &self,
-        engine: &Engine,
         last_applied_mc_block: BlockIdExt,
         shard_client_mc_block: BlockIdExt,
     ) -> Result<()> {
@@ -249,8 +266,7 @@ impl ShardStatesKeeper {
         let _ = self.load_state(&last_applied_mc_block).await?;
 
         let mc_state = self.load_state(&shard_client_mc_block).await?;
-        let (_, processed_wc) = engine.processed_workchain().await?;
-        let shard_blocks = mc_state.shard_hashes()?.top_blocks(&[processed_wc])?; 
+        let shard_blocks = mc_state.shard_hashes()?.top_blocks_all()?; 
         for block_id in &shard_blocks {
             self.load_state(block_id).await?;
         }
@@ -368,7 +384,15 @@ impl ShardStatesKeeper {
                 }
             };
 
-            let merkle_update = block.block().read_state_update()?;
+            let is_queue_update = block.is_queue_update();
+            let target_wc = block.is_queue_update_for()
+                .ok_or_else(|| error!("Block {} is not a queue update", id))?;
+            let merkle_update = if is_queue_update {
+                block.get_queue_update_for(target_wc)?.update
+            } else {
+                block.block()?.read_state_update()?
+            };
+
             let id = id.clone();
             #[cfg(feature = "telemetry")]
             let telemetry = self.telemetry.clone();
@@ -380,13 +404,25 @@ impl ShardStatesKeeper {
                     let root = merkle_update.apply_for(&prev_root)?;
                     log::trace!("TIME: restore_state_recursive: applied Merkle update {}ms   {}",
                         now.elapsed().as_millis(), id);
-                    ShardStateStuff::from_root_cell(
-                        id, 
-                        root,
-                        #[cfg(feature = "telemetry")]
-                        &telemetry,
-                        &allocated
-                    )
+
+                    if is_queue_update {
+                        ShardStateStuff::from_out_msg_queue_root_cell(
+                            id, 
+                            root,
+                            target_wc,
+                            #[cfg(feature = "telemetry")]
+                            &telemetry,
+                            &allocated
+                        )
+                    } else {
+                        ShardStateStuff::from_state_root_cell(
+                            id, 
+                            root,
+                            #[cfg(feature = "telemetry")]
+                            &telemetry,
+                            &allocated
+                        )
+                    }
                 }
             ).await??;
 
@@ -456,20 +492,21 @@ impl ShardStatesKeeper {
                 }
                 log::trace!("saved {} TIME {}ms", handle.id(), now.elapsed().as_millis());
 
-                let (_, processed_wc) = engine.processed_workchain().await?;
-                let shard_blocks = mc_state.shard_hashes()?.top_blocks(&[processed_wc])?; 
+                let shard_blocks = mc_state.shard_hashes()?.top_blocks_all()?; 
                 for block_id in &shard_blocks {
                     log::trace!("saving {}", block_id);
                     let now = std::time::Instant::now();
                     let handle = 'a: loop {
                         match engine.wait_applied_block(block_id, Some(1000)).await {
-                            Ok((h, _)) => break 'a h,
+                            Ok(h) => break 'a h,
                             Err(e) => {
                                 if engine.check_stop() {
                                     return Ok(());
                                 }
-                                log::debug!("states_keeper: haven't shard block handle {} yet: {:?}", 
-                                    block_id, e);
+                                log::debug!(
+                                    "states_keeper: haven't got shard block handle {} yet: {:?}", 
+                                    block_id, e
+                                );
                             }
                         }
                     };

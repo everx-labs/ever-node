@@ -94,7 +94,6 @@ impl Default for CellsDbConfig {
 pub struct TonNodeConfig {
     log_config_name: Option<String>,
     ton_global_config_name: Option<String>,
-    #[cfg(feature="workchains")]
     #[serde(skip_serializing_if = "Option::is_none")]
     workchain: Option<i32>,
     internal_db_path: Option<String>,
@@ -343,19 +342,13 @@ impl TonNodeConfig {
 
     #[cfg(feature="external_db")]
     pub fn front_workchain_ids(&self) -> Vec<i32> {
-        #[cfg(feature="workchains")]
         match self.workchain {
             None | Some(0) | Some(-1) => vec![MASTERCHAIN_ID, BASE_WORKCHAIN_ID],
             Some(workchain_id) => vec![workchain_id]
         }
-        #[cfg(not(feature="workchains"))]
-        {
-            vec![MASTERCHAIN_ID, BASE_WORKCHAIN_ID]            
-        }
     }
 
-    #[cfg(feature="workchains")]
-    pub fn workchain_id(&self) -> Option<i32> {
+    pub fn workchain(&self) -> Option<i32> {
         self.workchain
     }
 
@@ -656,10 +649,7 @@ impl TonNodeConfig {
     }
 
     fn generate_and_save_keys(&mut self) -> Result<([u8; 32], Arc<dyn KeyOption>)> {
-        #[cfg(feature="workchains")]
         let (private, public) = crate::validator::validator_utils::mine_key_for_workchain(self.workchain);
-        #[cfg(not(feature="workchains"))]
-        let (private, public) = Ed25519KeyOption::generate_with_json()?;
         let key_id = public.id().data();
         let key_ring = self.validator_key_ring.get_or_insert_with(|| HashMap::new());
         key_ring.insert(base64::encode(key_id), private);
@@ -765,8 +755,6 @@ enum Task {
     AddValidatorAdnlKey([u8; 32], [u8; 32]),
     GetKey([u8; 32]),
     StoreStatesGcInterval(u32),
-    #[cfg(feature="workchains")]
-    StoreWorkchainId(i32),
 }
 
 #[derive(Debug)]
@@ -849,16 +837,6 @@ impl NodeConfigHandler {
             Some(Some(Answer::Result(result))) => result,
             Some(Some(_)) => fail!("Bad answer (AddValidatorAdnlKey)!"),
             None => fail!("Waiting returned an internal error!")
-        }
-    }
-
-    #[cfg(feature="workchains")]
-    pub fn store_workchain(&self, workchain_id: i32) {
-        let (wait, _) = Wait::new();
-        let pushed_task = Arc::new((wait.clone(), Task::StoreWorkchainId(workchain_id)));
-        wait.request();
-        if let Err(e) = self.sender.send(pushed_task) {
-            log::warn!("Problem store workchain_id: {}", e);
         }
     }
 
@@ -1152,12 +1130,6 @@ impl NodeConfigHandler {
                     Task::GetKey(key_data) => {
                         let result = NodeConfigHandler::get_key(&actual_config, key_data);
                         Answer::GetKey(result)
-                    }
-                    #[cfg(feature="workchains")]
-                    Task::StoreWorkchainId(workchain_id) => {
-                        actual_config.workchain = Some(workchain_id);
-                        let result = actual_config.save_to_file(&name);
-                        Answer::Result(result)
                     }
                     Task::StoreStatesGcInterval(interval) => {
                         if let Some(c) = &mut actual_config.gc {

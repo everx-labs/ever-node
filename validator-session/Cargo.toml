@@ -17,11 +17,11 @@ metrics-runtime = '0.13'
 rand = '0.8'
 sha2 = '0.10'
 catchain = { path = '../catchain' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-crypto.git', tag = '0.1.101' }
+ever-crypto = { git = 'ssh://git@github.com/tonlabs/ever-crypto.git', tag = 'tag-test-ci-pipeline' }
 storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.2.188' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.39' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '1.12.7' }
+ton_api = { git = 'ssh://git@github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = 'tag-test-ci-pipeline' }
+ton_block = { git = 'ssh://git@github.com/tonlabs/ever-block.git', tag = 'tag-test-ci-pipeline' }
+ton_types = { git = 'ssh://git@github.com/tonlabs/ever-types.git', tag = 'tag-test-ci-pipeline' }
 
 [features]
 slashing = [  ]

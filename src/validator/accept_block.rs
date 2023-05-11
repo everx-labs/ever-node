@@ -12,7 +12,7 @@
 */
 
 use crate::{
-    block::{construct_and_check_prev_stuff, BlockStuff},
+    block::{construct_and_check_prev_stuff, BlockStuff, make_queue_update_from_block_raw},
     shard_state::ShardStateStuff,
     block_proof::BlockProofStuff,
     engine_traits::EngineOperations,
@@ -21,14 +21,16 @@ use crate::{
     validator::validator_utils::check_crypto_signatures,
 };
 use storage::block_handle_db::BlockHandle;
-use std::{cmp::{max, min}, sync::Arc, ops::Deref, time::Duration};
+use std::{cmp::{max, min}, sync::Arc, ops::Deref, time::Duration, collections::HashSet};
 use ton_block::{
     Block, TopBlockDescr, BlockIdExt, MerkleProof, McShardRecord, CryptoSignaturePair,
     Deserializable, BlockSignatures, ValidatorSet, BlockProof, Serializable, BlockSignaturesPure,
-    ValidatorBaseInfo                                                                     
+    ValidatorBaseInfo, OutQueueUpdate                                                                     
 };
 use ton_types::{error, Result, fail, UInt256, UsageTree, HashmapType};
-use ton_api::ton::ton_node::{blocksignature::BlockSignature, broadcast::BlockBroadcast};
+use ton_api::ton::ton_node::{
+    blocksignature::BlockSignature, broadcast::{BlockBroadcast, QueueUpdateBroadcast}
+};
 //use rand::Rng;
 
 pub async fn accept_block(
@@ -52,7 +54,7 @@ pub async fn accept_block(
     }
 
     let block_opt = data.map(|data| -> Result<BlockStuff> {
-        let block = BlockStuff::deserialize(id.clone(), data)?;
+        let block = BlockStuff::deserialize_block(id.clone(), data)?;
         precheck_header(&block, &prev, is_fake, is_fork)?;
         Ok(block)
     }).transpose()?;
@@ -127,19 +129,35 @@ pub async fn accept_block(
     }
 
     if send_block_broadcast {
-        let broadcast = build_block_broadcast(&block, validator_set, signatures, proof)?;
+        let block_broadcast = build_block_broadcast(&block, &validator_set, &signatures, proof)?;
+        let queue_update_broadcasts = build_queue_update_broadcasts(&block, &validator_set, &signatures)?;
         let engine = engine.clone();
         tokio::spawn(async move {
             log::trace!(target: "validator", "accept_block: sending block broadcast {}", block.id());
-            if let Err(e) = engine.send_block_broadcast(broadcast).await {
+            if let Err(e) = engine.send_block_broadcast(block_broadcast).await {
                 log::warn!(
                     target: "validator", 
                     "Accept-block {}: error while sending block broadcast: {}",
-                    block.id(),
-                    e
+                    block.id(), e
                 );
             } else {
-                log::trace!(target: "validator", "accept_block: sent block broadcast {}", block.id());
+                log::trace!(target: "validator", "accept_block {}: sent block broadcast", block.id());
+            }
+            for broadcast in queue_update_broadcasts {
+                let wc = broadcast.target_wc;
+                if let Err(e) = engine.send_queue_update_broadcast(broadcast).await {
+                    log::warn!(
+                        target: "validator", 
+                        "Accept-block {}: error while sending queue update broadcast for wc {}: {}",
+                        block.id(), wc, e
+                    );
+                } else {
+                    log::trace!(
+                        target: "validator",
+                        "accept_block {}: sent queue update broadcast for {}",
+                        block.id(), wc
+                    );
+                }
             }
         });
     }
@@ -317,7 +335,7 @@ fn precheck_header(
 
     // 3. unpack header and check vert_seqno fields
 
-    let info = block.block().read_info()?;
+    let info = block.block()?.read_info()?;
 
     if info.vert_seqno_incr() != 0 && !is_fork {
         fail!("block header has vert_seqno_incr set in an ordinary AcceptBlock")
@@ -340,56 +358,31 @@ pub fn create_new_proof(
     let id = block_stuff.id();
     log::trace!(target: "validator", "create_new_proof {}", block_stuff.id());
 
-    // visit block header while building a Merkle proof
-
+    // visit block while building a Merkle proof
     let usage_tree = UsageTree::with_root(block_stuff.root_cell().clone());
     let block = Block::construct_from_cell(usage_tree.root_cell())?;
+    visit_block_for_proof(&block, id)?;
 
-    let info = block.read_info()?;
-    let _prev_ref = info.read_prev_ref()?;
-    let _prev_vert_ref = info.read_prev_vert_ref()?;
-    let master_ref = info.read_master_ref()?;
-    let extra = block.read_extra()?;
-    block.read_value_flow()?.read_in_full_depth()?;
-
-
-    // check some header fields, especially shard
-
-    if master_ref.is_none() ^ info.shard().is_masterchain() {
-        fail!("block {} has invalid not_master flag in its header", id);
-    }
-    if info.shard().is_masterchain() && (info.after_merge() || info.after_split() || info.before_split()) {
-        fail!("masterchain block header of {} announces merge/split in its header", id);
-    }
-    if !info.shard().is_masterchain() && info.key_block() {
-        fail!("non-masterchain block header of {} announces this block to be a key block", id);
-    }
-
-    // check state update
-    let _state_update = block.read_state_update()?;
-
-    // visit validator-set related fields in key blocks
-    let mc_extra = extra.read_custom()?;
-    if info.key_block() {
-
-        let mc_extra = mc_extra.as_ref()
-            .ok_or_else(|| error!("can not extract masterchain block extra from key block {}", id))?;
-
-        let config = mc_extra.config()
-            .ok_or_else(|| error!("can not extract config params from masterchain block extra of block {}", id))?;
-
-        for i_config in 32..=38 {
-            let _val_set = config.config(i_config)?;
-        }
-        let _catchain_config = config.config(28)?;
-        // MVP for workchains
-        let _workchains = config.workchains()?.export_vector()?;
+    // queues updates. Need to include all cells of empty update and only root otherwice 
+    let mut roots = HashSet::new();
+    if let Some(updates) = block.out_msg_queue_updates.as_ref() {
+        updates.iterate(|update| {
+            if update.is_empty {
+                roots.insert(update.update.old.repr_hash());
+                roots.insert(update.update.new.repr_hash());
+            }
+            Ok(true)
+        })?;
     }
 
     // finish constructing Merkle proof from visited cells
-    let merkle_proof = MerkleProof::create_by_usage_tree(block_stuff.root_cell(), usage_tree)?;
+    let merkle_proof = MerkleProof::create_with_subtrees(
+        block_stuff.root_cell(),
+        |h| usage_tree.contains(h),
+        |h| roots.contains(h),
+    )?;
 
-    if info.shard().is_masterchain() && !info.key_block() {
+    if id.shard().is_masterchain() && !block.read_info()?.key_block() {
         if block
             .read_extra()?
             .read_custom()?
@@ -431,7 +424,7 @@ pub fn create_new_proof(
 
 
     // Construct proof
-    let is_link = !info.shard().is_masterchain();
+    let is_link = !id.shard().is_masterchain();
     let proof = BlockProof {
         proof_for: id.clone(),
         root: merkle_proof.serialize()?,
@@ -439,6 +432,53 @@ pub fn create_new_proof(
     };
 
     Ok((BlockProofStuff::new(proof, is_link)?, block_signatures))
+}
+
+pub fn visit_block_for_proof(block: &Block, id: &BlockIdExt) -> Result<()> {
+
+    // Visit header
+
+    let info = block.read_info()?;
+    let _prev_ref = info.read_prev_ref()?;
+    let _prev_vert_ref = info.read_prev_vert_ref()?;
+    let master_ref = info.read_master_ref()?;
+    let extra = block.read_extra()?;
+    block.read_value_flow()?.read_in_full_depth()?;
+
+    // check some header fields, especially shard
+
+    if master_ref.is_none() ^ info.shard().is_masterchain() {
+        fail!("block {} has invalid not_master flag in its header", id);
+    }
+    if info.shard().is_masterchain() && (info.after_merge() || info.after_split() || info.before_split()) {
+        fail!("masterchain block header of {} announces merge/split in its header", id);
+    }
+    if !info.shard().is_masterchain() && info.key_block() {
+        fail!("non-masterchain block header of {} announces this block to be a key block", id);
+    }
+
+    // check state update
+    let _state_update = block.read_state_update()?;
+
+    // visit validator-set related fields in key blocks
+    let mc_extra = extra.read_custom()?;
+    if info.key_block() {
+
+        let mc_extra = mc_extra.as_ref()
+            .ok_or_else(|| error!("can not extract masterchain block extra from key block {}", id))?;
+
+        let config = mc_extra.config()
+            .ok_or_else(|| error!("can not extract config params from masterchain block extra of block {}", id))?;
+
+        for i_config in 32..=38 {
+            let _val_set = config.config(i_config)?;
+        }
+        let _catchain_config = config.config(28)?;
+        // MVP for workchains
+        let _workchains = config.workchains()?.export_vector()?;
+    }
+
+    Ok(())
 }
 
 pub async fn create_top_shard_block_description(
@@ -456,6 +496,12 @@ pub async fn create_top_shard_block_description(
 
         let mut tbd = TopBlockDescr::with_id_and_signatures(block.id().clone(), signatures);
         for proof in proof_links {
+            // log::trace!(
+            //     "create_top_shard_block_description for {} append proof for {}\n{:#.100}",
+            //     block.id(),
+            //     proof.id(),
+            //     proof.proof_root()
+            // );
             tbd.append_proof(proof.proof_root().clone());
         }
 
@@ -472,10 +518,10 @@ fn find_known_ancestors(
     mc_state: &ShardStateStuff)
     -> Result<Option<(u32, Vec<McShardRecord>)>> {
 
-    let master_ref = block.block().read_info()?.read_master_ref()?
+    let master_ref = block.block()?.read_info()?.read_master_ref()?
         .ok_or_else(|| error!("Block {} doesn't have `master_ref`", block.id()))?.master;
     let shard = block.id().shard();
-    let mc_state_extra = mc_state.state().read_custom()?
+    let mc_state_extra = mc_state.state()?.read_custom()?
         .ok_or_else(|| error!("State for {} doesn't have McStateExtra", mc_state.block_id()))?;
 
     let mut ancestors = vec!();
@@ -672,8 +718,8 @@ fn validate_proof_link(
 
 fn build_block_broadcast(
     block: &BlockStuff,
-    validator_set: ValidatorSet,
-    signatures: BlockSignatures,
+    validator_set: &ValidatorSet,
+    signatures: &BlockSignatures,
     proof: BlockProofStuff,
 
 ) -> Result<BlockBroadcast> {
@@ -701,4 +747,44 @@ fn build_block_broadcast(
             data: ton_api::ton::bytes(block.data().to_vec()),
         }
     )
+}
+
+fn build_queue_update_broadcasts(
+    block: &BlockStuff,
+    validator_set: &ValidatorSet,
+    signatures: &BlockSignatures,
+) -> Result<Vec<QueueUpdateBroadcast>> {
+
+    let mut packed_signatures = vec!();
+    let mut broadcasts = vec!();
+
+    signatures.pure_signatures.signatures().iterate_slices(|ref mut _key, ref mut slice| {
+        let sign = CryptoSignaturePair::construct_from(slice)?;
+        packed_signatures.push(
+            BlockSignature {
+                who: UInt256::with_array(*sign.node_id_short.as_slice()),
+                signature: ton_api::ton::bytes(sign.sign.to_bytes().to_vec())
+            }
+        );
+        Ok(true)
+    })?;
+
+    if let Some(updates) = block.block()?.out_msg_queue_updates.as_ref() {
+        updates.iterate_with_keys(|wc_id: i32, update: OutQueueUpdate| {
+            if !update.is_empty {
+                let update = make_queue_update_from_block_raw(block, wc_id)?;
+                broadcasts.push(QueueUpdateBroadcast {
+                    id: block.id().clone(),
+                    catchain_seqno: validator_set.catchain_seqno() as i32,
+                    validator_set_hash: signatures.validator_info.validator_list_hash_short as i32,
+                    signatures: packed_signatures.clone().into(),
+                    data: ton_api::ton::bytes(update),
+                    target_wc: wc_id
+                });
+            }
+            Ok(true)
+        })?;
+    }
+
+    Ok(broadcasts)
 }

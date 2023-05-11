@@ -25,7 +25,7 @@ use ton_block::{
     MsgAddressInt, MsgAddrStd, DepthBalanceInfo,
 };
 use ton_types::{
-    cells_serialization::serialize_toc,
+    write_boc,
     types::UInt256, HashmapIterator,
     AccountId, Cell, Result, SliceData, HashmapType,
     fail, BuilderData,
@@ -214,9 +214,9 @@ impl<T: 'static + WriteData> Processor<T> {
         block_id: UInt256,
         transaction_now: Option<u32>,
     ) -> Result<Map<String, Value>> {
-        let boc = serialize_toc(&message_cell)?;
+        let boc = write_boc(&message_cell)?;
         let proof = block_root_for_proof
-            .map(|cell| serialize_toc(&message.prepare_proof(true, cell)?))
+            .map(|cell| write_boc(&message.prepare_proof(true, cell)?))
             .transpose()?;
     
         let set = ton_block_json::MessageSerializationSet {
@@ -241,9 +241,9 @@ impl<T: 'static + WriteData> Processor<T> {
         workchain_id: i32,
         add_proof: bool,
     ) -> Result<Map<String, Value>> {
-        let boc = serialize_toc(&tr_cell).unwrap();
+        let boc = write_boc(&tr_cell).unwrap();
         let proof = if add_proof {
-            Some(serialize_toc(&transaction.prepare_proof(&block_root)?)?)
+            Some(write_boc(&transaction.prepare_proof(&block_root)?)?)
         } else {
             None
         };
@@ -287,9 +287,9 @@ impl<T: 'static + WriteData> Processor<T> {
             // new format
             let mut builder = BuilderData::new();
             account.write_original_format(&mut builder)?;
-            boc1 = Some(serialize_toc(&builder.into_cell()?)?);
+            boc1 = Some(write_boc(&builder.into_cell()?)?);
         }
-        let boc = serialize_toc(&account.serialize()?.into())?;
+        let boc = write_boc(&account.serialize()?.into())?;
 
         let account_id = match account.get_id() {
             Some(id) => id,
@@ -447,14 +447,14 @@ impl<T: 'static + WriteData> Processor<T> {
         let process_account = self.write_account.enabled();
         let process_block_proof = self.write_block_proof.enabled();
         let block_id = block_stuff.id().clone();
-        let block = block_stuff.block().clone();
+        let block = block_stuff.block()?.clone();
         let proof = block_proof.map(|p| p.proof().clone());
         let block_root = block_stuff.root_cell().clone();
         let block_extra = block.read_extra()?;
         let block_boc = if process_block || process_raw_block { Some(block_stuff.data().to_vec()) } else { None };
         let block_order = ton_block_json::block_order(&block, mc_seq_no)?;
         let workchain_id = block.read_info()?.shard().workchain_id();
-        let shard_accounts = state.map(|s| s.state().read_accounts()).transpose()?;
+        let shard_accounts = state.map(|s| s.state()?.read_accounts()).transpose()?;
         let accounts_sharding_depth = self.write_account.sharding_depth();
         let max_account_bytes_size = self.max_account_bytes_size;
         let block_proofs_sharding_depth = self.write_block_proof.sharding_depth();
@@ -462,9 +462,9 @@ impl<T: 'static + WriteData> Processor<T> {
 
         let (prev_shard_accounts1, prev_shard_accounts2, prev_shard1) = match prev_states {
             Some((prev1, Some(prev2))) => {
-                (Some(prev1.state().read_accounts()?),  Some(prev2.state().read_accounts()?), prev1.block_id().shard().clone())
+                (Some(prev1.state()?.read_accounts()?),  Some(prev2.state()?.read_accounts()?), prev1.block_id().shard().clone())
             },
-            Some((prev, None)) => (Some(prev.state().read_accounts()?), None, prev.block_id().shard().clone()),
+            Some((prev, None)) => (Some(prev.state()?.read_accounts()?), None, prev.block_id().shard().clone()),
             None => (None, None, block_id.shard().clone())
         };
 
@@ -724,6 +724,7 @@ impl<T: 'static + WriteData> Processor<T> {
         self.write_raw_block.write_raw_data(key.to_vec(), value, Some(&attributes), partition_key).await
     }
 
+    #[allow(dead_code)]
     async fn run_remp_worker(
         mut receiver: tokio::sync::mpsc::UnboundedReceiver<(String, String)>,
         writer: T,
@@ -763,7 +764,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
         if self.write_account.enabled() {
             let mut total_accounts = 0;
             let mut last_portion = false;
-            let mut iterator = HashmapIterator::from_hashmap(&state.state().read_accounts()?);
+            let mut iterator = HashmapIterator::from_hashmap(&state.state()?.read_accounts()?);
             while !last_portion {
                 let mut accounts = Vec::new();
                 while accounts.len() < ACCOUNTS_PORTION_LEN {

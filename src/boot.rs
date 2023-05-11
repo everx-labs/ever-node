@@ -118,6 +118,9 @@ async fn get_key_blocks(
             }
             Ok(result) => result
         };
+        if ids.len() == 0 {
+            futures_timer::Delay::new(Duration::from_secs(1)).await;
+        }
         if let Some(block_id) = ids.last() {
             log::info!(target: "boot", "last key block is {}", block_id);
             download_new_key_blocks_until = engine.now() + engine.time_for_blockchain_init();
@@ -191,17 +194,24 @@ async fn choose_masterchain_state(
 }
 
 /// Download zerostate for all workchains
-async fn download_wc_zerostate(engine: &dyn EngineOperations, zerostate: &ShardStateStuff, workchain_id: i32) -> Result<()> {
-    let workchains = zerostate.config_params()?.workchains()?;
-    let wc = workchains.get(&workchain_id)?
-        .ok_or_else(|| error!("workchains doesn't have description for workchain {}", workchain_id))?;
-    let zerostate_id = BlockIdExt {
-        shard_id: ShardIdent::with_tagged_prefix(workchain_id, SHARD_FULL)?,
-        seq_no: 0,
-        root_hash: wc.zerostate_root_hash,
-        file_hash: wc.zerostate_file_hash,
-    };
-    download_zerostate(engine, &zerostate_id).await?;
+async fn download_wc_zerostates(
+    engine: &dyn EngineOperations,
+    mc_zerostate: &ShardStateStuff
+) -> Result<()> {
+    let workchains = mc_zerostate.config_params()?.workchains()?;
+    let mut ids = vec!();
+    workchains.iterate_with_keys(|wc_id, wc| {
+        ids.push(BlockIdExt {
+            shard_id: ShardIdent::with_tagged_prefix(wc_id, SHARD_FULL)?,
+            seq_no: 0,
+            root_hash: wc.zerostate_root_hash,
+            file_hash: wc.zerostate_file_hash,
+        });
+        Ok(true)
+    })?;
+    for zerostate_id in ids {
+        download_zerostate(engine, &zerostate_id).await?;
+    }
     Ok(())
 }
 
@@ -219,9 +229,10 @@ async fn download_start_blocks_and_states(
     CHECK!(master_handle.has_state());
     CHECK!(master_handle.is_applied());
 
-    let (_master, workchain_id) = engine.processed_workchain().await?;
+    let top_blocks = init_mc_block.top_blocks_all()?;
+
     engine.set_sync_status(Engine::SYNC_STATUS_LOAD_SHARD_STATES);
-    for (_, block_id) in init_mc_block.shards_blocks(workchain_id)? {
+    for block_id in top_blocks {
         let shard_handle = if block_id.seq_no() == 0 {
             download_zerostate(engine, &block_id).await?.0
         } else {
@@ -323,19 +334,21 @@ async fn download_block_and_state(
             || error!("INTERNAL ERROR: mismatch in block {} store result during boot", block_id)
         )?;
         if !handle.has_proof() {
-            handle = engine.store_block_proof(block_id, Some(handle), &proof).await?
-                .to_non_created()
-                .ok_or_else(
-                    || error!(
-                        "INTERNAL ERROR: mismatch in block {} proof store result during boot",
-                        block_id
-                    )
-                )?;
+            if let Some(proof) = proof {
+                handle = engine.store_block_proof(block_id, Some(handle), &proof).await?
+                    .to_non_created()
+                    .ok_or_else(
+                        || error!(
+                            "INTERNAL ERROR: mismatch in block {} proof store result during boot",
+                            block_id
+                        )
+                    )?;
+            }
         }
         (block, handle)
     };
     if !handle.has_state() {
-        let state_update = block.block().read_state_update()?;
+        let state_update = block.block_or_queue_update()?.read_state_update()?;
         let state = engine.download_and_store_state(
             &handle, &state_update.new_hash, master_id, active_peers, attempts).await?;
         engine.process_full_state_in_ext_db(&state).await?;
@@ -358,9 +371,10 @@ pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<BlockIdExt> 
     handle = choose_masterchain_state(engine.deref(), key_blocks.clone(), PSS_PERIOD_BITS).await?;
 
     if handle.id().seq_no() == 0 {
-        CHECK!(zero_state.is_some());
-        let (_master, workchain_id) = engine.processed_workchain().await?;
-        download_wc_zerostate(engine.deref(), zero_state.as_ref().unwrap(), workchain_id).await?;
+        let Some(zero_state) = zero_state.as_ref() else {
+            fail!("Zero state is not set")
+        };
+        download_wc_zerostates(engine.deref(), zero_state).await?;
     } else {
         download_start_blocks_and_states(engine.deref(), handle.id()).await?;
     }

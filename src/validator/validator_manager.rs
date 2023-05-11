@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -42,7 +42,8 @@ use tokio::time::timeout;
 use ton_api::IntoBoxed;
 use ton_block::{
     BlockIdExt, CatchainConfig, ConfigParamEnum, ConsensusConfig, FutureSplitMerge, McStateExtra,
-    ShardDescr, ShardIdent, ValidatorDescr, ValidatorSet, BASE_WORKCHAIN_ID,
+    ShardDescr, ShardIdent, ValidatorDescr, ValidatorSet, BASE_WORKCHAIN_ID, MASTERCHAIN_ID,
+    GlobalCapabilities,
 };
 use ton_types::{error, fail, Result, UInt256};
 use crate::validator::remp_block_parser::RempBlockObserverToplevel;
@@ -195,14 +196,28 @@ fn get_session_options(opts: &ConsensusConfig) -> validator_session::SessionOpti
     }
 }
 
+#[repr(u8)]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
-enum ValidationStatus { Disabled, Waiting, Countdown, Active }
+pub enum ValidationStatus {
+    Disabled = 0,
+    Waiting = 1,
+    Countdown = 2,
+    Active = 3
+}
 
 impl ValidationStatus {
     fn allows_validate(&self) -> bool {
         match self {
             Self::Disabled | Self::Waiting => false,
             Self::Countdown | Self::Active => true
+        }
+    }
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => ValidationStatus::Waiting,
+            2 => ValidationStatus::Countdown,
+            3 => ValidationStatus::Active,
+            _ => ValidationStatus::Disabled,
         }
     }
 }
@@ -285,7 +300,6 @@ struct ValidatorManagerImpl {
 
     #[cfg(feature = "slashing")]
     slashing_manager: SlashingManagerPtr,
-    validation_status: ValidationStatus,
 }
 
 impl ValidatorManagerImpl {
@@ -302,6 +316,7 @@ impl ValidatorManagerImpl {
             (None, None)
         };
 
+        engine.set_validation_status(ValidationStatus::Disabled);
         (ValidatorManagerImpl {
             engine,
             rt,
@@ -310,7 +325,6 @@ impl ValidatorManagerImpl {
             session_history: SessionHistory::new(),
             config,
             remp_manager,
-            validation_status: ValidationStatus::Disabled,
             //shard_blocks_observer_for_remp: None,
             #[cfg(feature = "slashing")]
             slashing_manager: SlashingManager::create(),
@@ -373,7 +387,7 @@ impl ValidatorManagerImpl {
     }
 
     async fn update_validator_lists(&mut self, mc_state: &ShardStateStuff) -> Result<bool> {
-        let (validator_set, next_validator_set) = match mc_state.state().read_custom()? {
+        let (validator_set, next_validator_set) = match mc_state.state()?.read_custom()? {
             None => return Ok(false),
             Some(state) => (state.config.validator_set()?, state.config.next_validator_set()?)
         };
@@ -439,8 +453,8 @@ impl ValidatorManagerImpl {
                         ValidatorGroupStatus::Stopped => {
                             if let Some(group) = self.validator_sessions.remove(id) {
                                 if !self.is_active_shard(group.shard()).await {
-                                    self.engine.validation_status().remove(group.shard());
-                                    self.engine.collation_status().remove(group.shard());
+                                    self.engine.remove_last_validation_time(group.shard());
+                                    self.engine.remove_last_collation_time(group.shard());
                                     if let Some(remp_manager) = &self.remp_manager {
                                         remp_manager.remove_active_shard(group.shard()).await;
                                     }
@@ -479,7 +493,7 @@ impl ValidatorManagerImpl {
     }
 
     async fn update_validation_status(&mut self, mc_state: &ShardStateStuff, mc_state_extra: &McStateExtra) -> Result<()> {
-        match self.validation_status {
+        match self.engine.validation_status() {
             ValidationStatus::Waiting => {
                 let rotate = rotate_all_shards(mc_state_extra);
                 let last_masterchain_block = mc_state.block_id();
@@ -487,13 +501,13 @@ impl ValidatorManagerImpl {
                 if self.engine.check_sync().await?
                 && (rotate || last_masterchain_block.seq_no == 0)
                 && later_than_hardfork {
-                    self.validation_status = ValidationStatus::Countdown
+                    self.engine.set_validation_status(ValidationStatus::Countdown);
                 }
             }
             ValidationStatus::Countdown => {
                 for (_, group) in self.validator_sessions.iter() {
                     if group.get_status().await == ValidatorGroupStatus::Active {
-                        self.validation_status = ValidationStatus::Active;
+                        self.engine.set_validation_status(ValidationStatus::Active);
                         break
                     }
                 }
@@ -504,7 +518,7 @@ impl ValidatorManagerImpl {
     }
 
     async fn disable_validation(&mut self) -> Result<()> {
-        self.validation_status = ValidationStatus::Disabled;
+        self.engine.set_validation_status(ValidationStatus::Disabled);
 
         let existing_validator_sessions: HashSet<UInt256> =
             self.validator_sessions.keys().cloned().collect();
@@ -517,8 +531,9 @@ impl ValidatorManagerImpl {
 
     fn enable_validation(&mut self) {
         self.engine.set_will_validate(true);
-        self.validation_status = std::cmp::max(self.validation_status, ValidationStatus::Waiting);
-        log::info!(target: "validator_manager", "Validation enabled: status {:?}", self.validation_status);
+        let validation_status = std::cmp::max(self.engine.validation_status(), ValidationStatus::Waiting);
+        self.engine.set_validation_status(validation_status);
+        log::info!(target: "validator_manager", "Validation enabled: status {:?}", validation_status);
     }
 
     async fn start_sessions(&mut self,
@@ -540,7 +555,8 @@ impl ValidatorManagerImpl {
         };
         let full_validator_set = mc_state_extra.config.validator_set()?;
 
-        let group_start_status = if self.validation_status == ValidationStatus::Countdown {
+        let validation_status = self.engine.validation_status();
+        let group_start_status = if validation_status == ValidationStatus::Countdown {
             let session_lifetime = std::cmp::min(catchain_config.mc_catchain_lifetime,
                                                  catchain_config.shard_catchain_lifetime);
             let start_at = tokio::time::Instant::now() + Duration::from_secs((session_lifetime / 2).into());
@@ -606,7 +622,11 @@ impl ValidatorManagerImpl {
                 cc_seqno,
                 &self.config
             );
-            
+//=======
+//            if let Some(local_key) = self.find_us(&subset.0) {
+//                let vsubset = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno, subset.0)?;
+//>>>>>>> fb7e32d041c8044f742b29a4ebe0043997cebb7d
+
             let session_info = SessionInfo::new(ident.clone(), session_id.clone(), vsubset.clone());
             let old_shards: Vec<ShardIdent> = prev_blocks.iter().map(|blk| blk.shard_id.clone()).collect();
             self.session_history.new_session_after(session_info.clone(), old_shards.clone())?;
@@ -778,6 +798,8 @@ impl ValidatorManagerImpl {
                 } else {
                     log::trace!(target: "validator_manager", "Current shard {}, session {:x}: working", ident, session_id);
                 }
+            } else {
+                log::trace!("We are not in subset for {}", ident);
             }
             log::trace!(target: "validator_manager", "Session {} started (if necessary)", ident);
         }
@@ -805,7 +827,7 @@ impl ValidatorManagerImpl {
         } else {
             mc_state_extra.last_key_block.as_ref().map(|id| id.seq_no).expect("masterchain state must contain info about previous key block")
         };
-        let mc_now = mc_state.state().gen_time();
+        let mc_now = mc_state.state()?.gen_time();
         let (session_options, opts_hash) = self.compute_session_options(&mc_state_extra).await?;
         let catchain_config = mc_state_extra.config.catchain_config()?;
 
@@ -826,10 +848,11 @@ impl ValidatorManagerImpl {
         // Validator sets and  for shards that will eventually be started
         let mut our_future_shards: HashMap<ShardIdent, (ValidatorSet, ValidatorListHash)> = HashMap::new();
 
-        let (master, workchain_id) = self.engine.processed_workchain().await?;
         new_shards.insert(ShardIdent::masterchain(), vec![last_masterchain_block.clone()]);
         future_shards.insert(ShardIdent::masterchain());
-        if !master || workchain_id == BASE_WORKCHAIN_ID {
+        let workchain_id = self.engine.processed_workchain().unwrap_or(BASE_WORKCHAIN_ID);
+        let cap_workchains = mc_state.config_params()?.has_capability(GlobalCapabilities::CapWorkchains);
+        if !cap_workchains || workchain_id != MASTERCHAIN_ID {
             mc_state_extra.shards().iterate_shards_for_workchain(workchain_id, |ident: ShardIdent, descr: ShardDescr| {
                 // Add all shards that are effective from now
                 // ValidatorGroups will be created and appropriate sessions started for these shards
@@ -969,7 +992,8 @@ impl ValidatorManagerImpl {
 
         // Iterate over shards and start all missing sessions
         log::trace!(target: "validator_manager", "Starting missing sessions");
-        if self.validation_status.allows_validate() {
+        let validation_status = self.engine.validation_status();
+        if validation_status.allows_validate() {
             self.start_sessions(
                 &new_shards,
                 &mut our_current_shards,
@@ -1049,8 +1073,8 @@ impl ValidatorManagerImpl {
             log::info!(target: "validator_manager", "{}", group.info().await);
             let status = group.get_status().await;
             if status == ValidatorGroupStatus::Active || status == ValidatorGroupStatus::Stopping {
-                self.engine.validation_status().insert(group.shard().clone(), group.last_validation_time());
-                self.engine.collation_status().insert(group.shard().clone(), group.last_collation_time());
+                self.engine.set_last_validation_time(group.shard().clone(), group.last_validation_time());
+                self.engine.set_last_collation_time(group.shard().clone(), group.last_collation_time());
             }
         }
  

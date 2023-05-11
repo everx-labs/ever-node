@@ -22,7 +22,7 @@ use ton_block::{
     Message,
     ShardIdent, SigPubKey,
     UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet,
-    Workchains, WorkchainDescr,
+    GlobalCapabilities,
 };
 use ton_types::{BuilderData, Result, UInt256, HashmapType, fail, error};
 use validator_session::SessionNode;
@@ -220,22 +220,12 @@ pub fn compute_validator_set_cc(
     Ok(set)
 }
 
-#[cfg(feature="workchains")]
 fn calc_workchain_id(descr: &ValidatorDescr) -> i32 {
     calc_workchain_id_by_adnl_id(descr.compute_node_id_short().as_slice())
 }
 
-#[cfg(feature="workchains")]
 fn calc_workchain_id_by_adnl_id(adnl_id: &[u8]) -> i32 {
     (adnl_id[0] % 32) as i32 - 1
-}
-
-lazy_static::lazy_static! {
-    static ref SINGLE_WORKCHAIN: Workchains = {
-        let mut workchains = Workchains::default();
-        workchains.set(&0, &WorkchainDescr::default()).unwrap();
-        workchains
-    };
 }
 
 pub fn try_calc_subset_for_workchain(
@@ -247,37 +237,49 @@ pub fn try_calc_subset_for_workchain(
     cc_seqno: u32,
     _time: UnixTime32,
 ) -> Result<Option<(Vec<ValidatorDescr>, u32)>> {
-    // in case on old block proof it doesn't contain workchains in config so 1 by default
-    let workchains = config.workchains().unwrap_or_else(|_| SINGLE_WORKCHAIN.clone());
-    match workchains.len()? as i32 {
-        0 => fail!("workchain description is empty"),
-        1 => Ok(Some(vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time)?)),
-        #[cfg(not(feature="workchains"))]
-        _ => {
-            fail!("workchains not supported")
+
+    if config.has_capability(GlobalCapabilities::CapWorkchains) {
+
+        //
+        // This is temporary (for testing purposes) algorithm of validators separating 
+        // between workchains
+        //
+
+        let count = config.workchains()?.len()?;
+        if count == 0 {
+            fail!("Workchains description is empty");
         }
-        #[cfg(feature="workchains")]
-        count => {
-            let mut list = Vec::new();
-            for descr in vset.list() {
-                let id = calc_workchain_id(descr);
-                if (id == workchain_id) || (id >= count) {
-                    list.push(descr.clone());
-                }
-            }
-            if list.len() >= cc_config.shard_validators_num as usize {
-                let vset = ValidatorSet::new(
-                    vset.utime_since(),
-                    vset.utime_until(),
-                    vset.main(),
-                    list
-                )?;
-                Ok(Some(vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time)?))
-            } else {
-                // not enough validators -- config is ok, but we cannot validate the shard at the moment
-                Ok(None)
+
+        let mut list = Vec::new();
+        for descr in vset.list() {
+            let id = calc_workchain_id(descr);
+            if (id == workchain_id) || (id >= count as i32) {
+                list.push(descr.clone());
             }
         }
+
+        log::trace!(
+            "try_calc_subset_for_workchain: workchains: {count}, total validators: {total_len}, \
+            shard validators: {shard_len}, wc {workchain_id} validators: {list_len}",
+            total_len = vset.list().len(),
+            shard_len = cc_config.shard_validators_num,
+            list_len = list.len()
+        );
+
+        if list.len() >= cc_config.shard_validators_num as usize {
+            let vset = ValidatorSet::new(
+                vset.utime_since(),
+                vset.utime_until(),
+                vset.main(),
+                list
+            )?;
+            Ok(Some(vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time)?))
+        } else {
+            // not enough validators -- config is ok, but we cannot validate the shard at the moment
+            Ok(None)
+        }
+    } else {
+        Ok(Some(vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time)?))
     }
 }
 
@@ -300,7 +302,6 @@ pub fn calc_subset_for_workchain(
     }
 }
 
-#[cfg(feature="workchains")]
 pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (ever_crypto::KeyOptionJson, Arc<dyn ever_crypto::KeyOption>) {
     loop {
         if let Ok((private, public)) = Ed25519KeyOption::generate_with_json() {

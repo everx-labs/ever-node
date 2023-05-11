@@ -89,13 +89,16 @@ loggers:
     level: trace
 
   catchain:
-    level: debug
+    level: error
 
   validator_session:
     level: debug
 
   storage:
-    level: trace
+    level: info
 
   telemetry:
     level: debug
+
+  ext_messages:
+    level: trace

@@ -20,7 +20,7 @@ pub fn process_block_messages (block: BlockStuff, msg_processor: Arc<dyn BlockPr
     log::trace!(target: "remp", "REMP started processing block {}", block.id());
 
     let mut messages_in_block: Vec<UInt256> = Vec::new();
-    block.block().read_extra()?.read_in_msg_descr()?.iterate_slices_with_keys(|key, _msg_slice| {
+    block.block()?.read_extra()?.read_in_msg_descr()?.iterate_slices_with_keys(|key, _msg_slice| {
         messages_in_block.push(key);
         Ok(true)
     })?;
