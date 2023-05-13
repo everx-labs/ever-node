@@ -217,6 +217,7 @@ struct CollatorData {
     rejected_remp_messages: Vec<(UInt256, String)>,
     ignored_remp_messages: Vec<UInt256>,
     usage_tree: UsageTree,
+    imported_visited: HashSet<UInt256>,
 
     // determined fields
     gen_utime: u32,
@@ -285,6 +286,7 @@ impl CollatorData {
             rejected_remp_messages: Default::default(),
             ignored_remp_messages: Default::default(),
             usage_tree,
+            imported_visited: HashSet::new(),
             gen_utime,
             config,
             start_lt: None,
@@ -1643,6 +1645,8 @@ impl Collator {
             self.after_merge,
             self.after_split,
             Some(&self.stop_flag),
+            Some(&collator_data.usage_tree),
+            Some(&mut collator_data.imported_visited)
         ).await
     }
 
@@ -2115,7 +2119,7 @@ impl Collator {
             }
             if self.check_cutoff_timeout() {
                 log::warn!("{}: TIMEOUT ({}ms) is elapsed, stop processing internal messages",
-                        self.collated_block_descr, self.cutoff_timeout.as_millis());
+                self.collated_block_descr, self.engine.collator_config().cutoff_timeout_ms);
                 break
             }
             self.check_stop_flag()?;
@@ -2563,7 +2567,7 @@ impl Collator {
         let state_update = MerkleUpdate::create_fast(
             &prev_data.state_root,
             &new_ss_root,
-            |h| collator_data.usage_tree.contains(h)
+            |h| collator_data.usage_tree.contains(h) || collator_data.imported_visited.contains(h)
         )?;
         log::trace!("{}: TIME: merkle update creating {}ms;", self.collated_block_descr, now.elapsed().as_millis());
 
@@ -2638,10 +2642,10 @@ impl Collator {
         };
         log::trace!(
             "{}: dequeue_count: {}, enqueue_count: {}, in_msg_count: {}, out_msg_count: {},\
-            execute_count: {}, transit_count: {}",
+            execute_count: {}, transit_count: {}, data len: {}",
             self.collated_block_descr, collator_data.dequeue_count, collator_data.enqueue_count,
             collator_data.in_msg_count, collator_data.out_msg_count, collator_data.execute_count,
-            collator_data.transit_count
+            collator_data.transit_count, candidate.data.len(),
         );
         Ok((candidate, new_state, exec_manager))
     }

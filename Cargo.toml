@@ -93,4 +93,6 @@ ton_block_json = { git = 'https://www.github.com/tonlabs/ever-block-json.git', t
 [patch.'https://github.com/tonlabs/ever-executor.git']
 ton_executor = { git = 'https://www.github.com/tonlabs/ever-executor.git', tag = '1.15.189-patch-01' }
 
+[patch.'https://github.com/tonlabs/ever-types.git']
+ton_types = { git = 'https://www.github.com/tonlabs/ever-types.git', tag = '1.12.7-patch-01' }
 

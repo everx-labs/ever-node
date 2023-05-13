@@ -77,7 +77,7 @@ use statsd::client;
 use std::sync::atomic::AtomicI32;
 use std::{
     ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering, AtomicU64}},
-    time::Duration, collections::HashMap,
+    time::Duration, collections::{HashMap, HashSet},
 };
 #[cfg(feature = "slashing")]
 use std::collections::HashSet;
@@ -87,7 +87,7 @@ use ton_block::{self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL, Global
 use storage::{StorageAlloc, block_handle_db::BlockHandle, types::StorageCell};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
-use ton_types::{error, fail, Cell, Result};
+use ton_types::{error, fail, Cell, Result, UInt256};
 #[cfg(feature = "slashing")]
 use ton_types::{UInt256, HashmapType};
 use ton_api::ton::ton_node::{
@@ -137,7 +137,7 @@ pub struct Engine {
     pub workchain_id: AtomicI32,
 
     // None - queue calculating is in progress
-    split_queues_cache: lockfree::map::Map<BlockIdExt, Option<(OutMsgQueue, OutMsgQueue)>>,
+    split_queues_cache: lockfree::map::Map<BlockIdExt, Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)>>,
 
     validation_status: lockfree::map::Map<ShardIdent, u64>,
     collation_status: lockfree::map::Map<ShardIdent, u64>,
@@ -981,7 +981,7 @@ impl Engine {
         self.remp_capability.store(value, Ordering::Relaxed);
     }
 
-    pub fn split_queues_cache(&self) -> &lockfree::map::Map<BlockIdExt, Option<(OutMsgQueue, OutMsgQueue)>> {
+    pub fn split_queues_cache(&self) -> &lockfree::map::Map<BlockIdExt, Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)>> {
         &self.split_queues_cache
     }
 

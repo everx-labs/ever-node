@@ -52,7 +52,7 @@ use overlay::{BroadcastSendInfo, PrivateOverlayShortId};
 use rand::Rng;
 #[cfg(feature="workchains")]
 use std::sync::atomic::Ordering;
-use std::{ops::Deref, sync::Arc};
+use std::{ops::Deref, sync::Arc, collections::HashSet};
 use storage::block_handle_db::BlockHandle;
 use ton_api::ton::ton_node::{RempMessage, RempMessageStatus, RempReceipt, broadcast::BlockBroadcast};
 use ton_block::{
@@ -1080,18 +1080,19 @@ impl EngineOperations for Engine {
         &self,
         before_split_block: &BlockIdExt,
         queue0: OutMsgQueue,
-        queue1: OutMsgQueue
+        queue1: OutMsgQueue,
+        visited_cells: HashSet<UInt256>,
     ) {
         self.split_queues_cache().insert(
             before_split_block.clone(),
-            Some((queue0, queue1))
+            Some((queue0, queue1, visited_cells))
         );
     }
 
     fn get_split_queues(
         &self,
         before_split_block: &BlockIdExt
-    ) -> Option<(OutMsgQueue, OutMsgQueue)> {
+    ) -> Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)> {
         if let Some(guard) = self.split_queues_cache().get(before_split_block) {
             if let Some(q) = guard.val() {
                 return Some(q.clone())

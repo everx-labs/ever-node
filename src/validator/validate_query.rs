@@ -759,6 +759,8 @@ impl ValidateQuery {
             base.after_merge,
             base.after_split,
             None,
+            None,
+            None,
         ).await
     }
 

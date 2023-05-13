@@ -19,19 +19,19 @@ use crate::{
 };
 use std::{
     cmp::max, iter::Iterator, sync::{Arc, atomic::{AtomicBool, Ordering}},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
 };
 use ton_block::{
     BlockIdExt, ShardIdent, Serializable, Deserializable,
     OutMsgQueueInfo, OutMsgQueue, OutMsgQueueKey, IhrPendingInfo,
     ProcessedInfo, ProcessedUpto, ProcessedInfoKey,
     ShardHashes, AccountIdPrefixFull,
-    HashmapAugType,
+    HashmapAugType, ShardStateUnsplit,
 };
 use ton_types::{
     error, fail,
     BuilderData, Cell, SliceData, IBitstring, Result, UInt256,
-    HashmapSubtree, HashmapType, HashmapFilterResult, HashmapRemover,
+    HashmapSubtree, HashmapType, HashmapFilterResult, HashmapRemover, UsageTree,
 };
 
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
@@ -199,7 +199,7 @@ impl OutMsgQueueInfoStuff {
         self_queue: &mut OutMsgQueue,
         self_shard: &ShardIdent
     ) -> Result<OutMsgQueue> {
-        let mut sibling_queue = self_queue.clone();
+        let mut sibling_queue = OutMsgQueue::default();
         self_queue.hashmap_filter(|_key, mut slice| {
             let created_lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, created_lt)?;
@@ -230,6 +230,15 @@ impl OutMsgQueueInfoStuff {
     ) -> Result<()> {
         if engine.set_split_queues_calculating(block_id) {
             let ss = engine.clone().wait_state(block_id, Some(10_000), false).await?;
+            let usage_tree = UsageTree::with_params(ss.root_cell().clone(), true);
+            let root_cell = usage_tree.root_cell();
+            let ss = ShardStateStuff::from_state(
+                block_id.clone(), 
+                ShardStateUnsplit::construct_from_cell(root_cell)?,
+                #[cfg(feature = "telemetry")]
+                engine.engine_telemetry(),
+                engine.engine_allocated()
+            )?;
             let mut queue0 = ss.state().read_out_msg_queue_info()?;
             let queue0 = queue0.out_queue_mut();
             let (s0, _s1) = block_id.shard().split()?;
@@ -237,17 +246,28 @@ impl OutMsgQueueInfoStuff {
             let queue1 = Self::calc_split_queues(queue0, &s0)?;
             log::info!("precalc_split_queues after block {}, TIME {}ms", 
                 block_id, now.elapsed().as_millis());
-            engine.set_split_queues(block_id, queue0.clone(), queue1);
+                engine.set_split_queues(block_id, queue0.clone(), queue1, usage_tree.build_visited_set());
         } else {
             log::trace!("precalc_split_queues {} already calculating or calculated", block_id);
         }
         Ok(())
     }
 
-    fn split(&mut self, subshard: ShardIdent, engine: &Arc<dyn EngineOperations>) -> Result<Self> {
+    fn split(
+        &mut self,
+        subshard: ShardIdent,
+        engine: &Arc<dyn EngineOperations>,
+        usage_tree: &UsageTree,
+        imported_visited: Option<&mut HashSet<UInt256>>,
+    ) -> Result<Self> {
 
         let (s0, _s1) = self.block_id().shard().split()?;
-        let sibling_queue = if let Some((q0, q1)) = engine.get_split_queues(self.block_id()) {
+        let sibling_queue = if let Some((q0, q1, visited)) = engine.get_split_queues(self.block_id()) {
+            if let Some(imported_visited) = imported_visited {
+                for cell_id in visited {
+                    imported_visited.insert(cell_id);
+                }
+            }
             log::info!("Use split queues from cache (prev block {})", self.block_id());
             if s0 == subshard {
                 self.out_queue = q0;
@@ -264,7 +284,8 @@ impl OutMsgQueueInfoStuff {
             } else {
                 (sibling_queue.clone(), self.out_queue.clone())
             };
-            engine.set_split_queues(self.block_id(), q0, q1);
+            let visited = usage_tree.build_visited_set();
+            engine.set_split_queues(self.block_id(), q0, q1, visited);
             log::warn!(
                 "There is no precalculated split queues (prev block {}), calculated TIME {}ms", 
                 self.block_id(), now.elapsed().as_millis());
@@ -547,6 +568,8 @@ impl MsgQueueManager {
         after_merge: bool,
         after_split: bool,
         stop_flag: Option<&AtomicBool>,
+        usage_tree: Option<&UsageTree>,
+        imported_visited: Option<&mut HashSet<UInt256>>,
     ) -> Result<Self> {
         let mut mc_shard_states = HashMap::new();
         mc_shard_states.insert(last_mc_state.block_id().seq_no, last_mc_state.clone());
@@ -595,7 +618,24 @@ impl MsgQueueManager {
                 };
             } else if after_split {
                 log::debug!("prepare split for state {}", prev_out_queue_info.block_id());
-                let sibling_out_queue_info = prev_out_queue_info.split(shard.clone(), engine)?;
+                let own_usage_tree;
+                let usage_tree = if let Some(ut) = usage_tree {
+                    ut
+                } else {
+                    let ss = &prev_states[0];
+                    own_usage_tree = UsageTree::with_params(ss.root_cell().clone(), true);
+                    let root_cell = own_usage_tree.root_cell();
+                    let usage_state = ShardStateStuff::from_state(
+                        ss.block_id().clone(), 
+                        ShardStateUnsplit::construct_from_cell(root_cell)?,
+                        #[cfg(feature = "telemetry")]
+                        engine.engine_telemetry(),
+                        engine.engine_allocated()
+                    )?;
+                    prev_out_queue_info = OutMsgQueueInfoStuff::from_shard_state(&usage_state)?;
+                    &own_usage_tree
+                };
+                let sibling_out_queue_info = prev_out_queue_info.split(shard.clone(), engine, &usage_tree, imported_visited)?;
                 Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, 
                     Some(sibling_out_queue_info), prev_states[0].shard(), &stop_flag)?;
                 next_out_queue_info = match next_state_opt {
@@ -862,7 +902,7 @@ impl MsgQueueManager {
 
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
-            log::debug!("Scanning outbound {}", enq);
+            // log::debug!("Scanning outbound {}", enq);
             let (processed, end_lt) = self.already_processed(&enq)?;
             if processed {
                 log::debug!("Outbound {} has beed already delivered, dequeueing", enq);

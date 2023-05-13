@@ -28,7 +28,7 @@ use catchain::{
 use overlay::{
     BroadcastSendInfo, OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId
 };
-use std::{sync::{Arc, atomic::AtomicU64}, time::{SystemTime, UNIX_EPOCH}};
+use std::{sync::{Arc, atomic::AtomicU64}, time::{SystemTime, UNIX_EPOCH}, collections::HashSet};
 use ton_api::ton::ton_node::{RempMessage, RempMessageStatus, RempReceipt, broadcast::BlockBroadcast};
 use ton_block::{
     AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, ShardAccount,
@@ -769,7 +769,8 @@ pub trait EngineOperations : Sync + Send {
         &self,
         before_split_block: &BlockIdExt,
         queue0: OutMsgQueue,
-        queue1: OutMsgQueue
+        queue1: OutMsgQueue,
+        visited_cells: HashSet<UInt256>
     ) {
         unimplemented!();
     }
@@ -777,10 +778,9 @@ pub trait EngineOperations : Sync + Send {
     fn get_split_queues(
         &self,
         before_split_block: &BlockIdExt
-    ) -> Option<(OutMsgQueue, OutMsgQueue)> {
+    ) -> Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)> {
         unimplemented!();
     }
-
 }
 
 pub struct ChainRange {
