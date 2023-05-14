@@ -199,7 +199,7 @@ impl OutMsgQueueInfoStuff {
         self_queue: &mut OutMsgQueue,
         self_shard: &ShardIdent
     ) -> Result<OutMsgQueue> {
-        let mut sibling_queue = OutMsgQueue::default();
+        let mut sibling_queue = self_queue.clone();
         self_queue.hashmap_filter(|_key, mut slice| {
             let created_lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, created_lt)?;
