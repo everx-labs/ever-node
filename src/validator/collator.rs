@@ -1320,7 +1320,7 @@ impl Collator {
         // merge prepare / merge install
         // ** will be implemented later **
 
-        if self.after_split {
+        if !self.after_split {
             // import inbound internal messages, process or transit
             let now = std::time::Instant::now();
             self.process_inbound_internal_messages(prev_data, collator_data, &output_queue_manager,
