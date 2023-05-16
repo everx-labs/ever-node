@@ -33,7 +33,7 @@
       ],
       "p8": {
         "version": 5,
-        "capabilities": "8238"
+        "capabilities": "9262"
       },
       "p9": [
         0,
@@ -99,8 +99,8 @@
           "workchain_id": 0,
           "enabled_since": nowdate,
           "actual_min_split": 0,
-          "min_split": 3,
-          "max_split": 3,
+          "min_split": 2,
+          "max_split": 2,
           "active": true,
           "accept_msgs": true,
           "flags": 0,
@@ -219,10 +219,11 @@
       },
       "p28": {
         "shuffle_mc_validators": true,
+        "isolate_mc_validators": false,
         "mc_catchain_lifetime": 250,
         "shard_catchain_lifetime": 250,
         "shard_validators_lifetime": 1000,
-        "shard_validators_num": 7
+        "shard_validators_num": 5
       },
       "p29": {
         "new_catchain_ids": true,

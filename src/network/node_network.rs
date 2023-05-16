@@ -622,14 +622,22 @@ impl NodeNetwork {
 
     async fn get_overlay_worker(
         self: Arc<Self>,
-        overlay_id: (Arc<OverlayShortId>, OverlayId)
+        overlay_id: (Arc<OverlayShortId>, OverlayId),
+        local: bool,
     ) -> Result<Arc<dyn FullNodeOverlayClient>> {
 
         let (overlay_id_short, overlay_id_full) = overlay_id;
-        self.network_context.overlay.add_local_workchain_overlay(
-            Some(self.runtime_handle.clone()), 
-            &overlay_id_short
-        )?;
+        if local {
+            self.network_context.overlay.add_local_workchain_overlay(
+                Some(self.runtime_handle.clone()), 
+                &overlay_id_short
+            )?;
+        } else {
+            self.network_context.overlay.add_other_workchain_overlay(
+                Some(self.runtime_handle.clone()), 
+                &overlay_id_short
+            )?;
+        }
 
         let node = self.network_context.overlay.get_signed_node(&overlay_id_short)?;
         NodeNetwork::periodic_store_overlay_node(
@@ -1089,22 +1097,32 @@ impl OverlayOperations for NodeNetwork {
     }
 
     async fn get_overlay(
+        &self,
+        overlay_id: &OverlayShortId
+    ) -> Option<Arc<dyn FullNodeOverlayClient>> {
+        self.overlays.get(overlay_id).map(|v| v.val().clone() as Arc<dyn FullNodeOverlayClient>)
+    }
+
+    async fn add_overlay(
         self: Arc<Self>,
-        overlay_id: (Arc<OverlayShortId>, OverlayId)
-    ) -> Result<Arc<dyn FullNodeOverlayClient>> {
+        overlay_id: (Arc<OverlayShortId>, OverlayId),
+        local: bool,
+    ) -> Result<()> {
         loop {
-            if let Some(overlay) = self.overlays.get(&overlay_id.0) {
-                return Ok(overlay.val().clone() as Arc<dyn FullNodeOverlayClient>);
-            }
-            let overlay_opt = self.overlay_awaiters.do_or_wait(
-                &overlay_id.0.clone(),
-                None,
-                Arc::clone(&self).get_overlay_worker(overlay_id.clone())
-            ).await?;
-            if let Some(overlay) = overlay_opt {
-                return Ok(overlay)
+            if self.overlays.get(&overlay_id.0).is_some() {
+                break;
+            } else {
+                let overlay_opt = self.overlay_awaiters.do_or_wait(
+                    &overlay_id.0.clone(),
+                    None,
+                    Arc::clone(&self).get_overlay_worker(overlay_id.clone(), local)
+                ).await?;
+                if overlay_opt.is_some() {
+                    break;
+                }
             }
         }
+        Ok(())
     }
 
     fn add_consumer(
@@ -1279,7 +1297,7 @@ impl PrivateOverlayOperations for NodeNetwork {
     }
 
     fn activate_validator_list(&self, validator_list_id: UInt256) -> Result<()> {
-        log::trace!("activate_validator_list {}", validator_list_id);
+        log::trace!("activate_validator_list {:x}", validator_list_id);
         self.validator_context.current_set.insert(0, validator_list_id);
         Ok(())
     }

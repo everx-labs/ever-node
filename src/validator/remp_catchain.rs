@@ -20,11 +20,11 @@ const REMP_CATCHAIN_START_POLLING_INTERVAL: Duration = Duration::from_millis(1);
 pub struct RempCatchainInstanceImpl {
     pub catchain_ptr: CatchainPtr,
 
-    pending_messages_queue_receiver: Receiver<ton_api::ton::ton_node::RmqRecord>,
-    pub pending_messages_queue_sender: Sender<ton_api::ton::ton_node::RmqRecord>,
+    pending_messages_queue_receiver: Receiver<ton_api::ton::ton_node::RempCatchainRecord>,
+    pub pending_messages_queue_sender: Sender<ton_api::ton::ton_node::RempCatchainRecord>,
 
-    pub rmq_catchain_receiver: Receiver<ton_api::ton::ton_node::RmqRecord>,
-    rmq_catchain_sender: Sender<ton_api::ton::ton_node::RmqRecord>
+    pub rmq_catchain_receiver: Receiver<ton_api::ton::ton_node::RempCatchainRecord>,
+    rmq_catchain_sender: Sender<ton_api::ton::ton_node::RempCatchainRecord>
 }
 
 impl RempCatchainInstanceImpl {
@@ -70,7 +70,7 @@ impl RempCatchainInstance {
         self.instance_impl.load().map(|inst| inst.catchain_ptr.clone())
     }
 
-    pub fn pending_messages_queue_send(&self, msg: ton_api::ton::ton_node::RmqRecord) -> Result<()> {
+    pub fn pending_messages_queue_send(&self, msg: ton_api::ton::ton_node::RempCatchainRecord) -> Result<()> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queue_sender.send(msg) {
             Ok(()) => Ok(()),
@@ -83,7 +83,7 @@ impl RempCatchainInstance {
         Ok(instance.pending_messages_queue_sender.len())
     }
 
-    pub fn pending_messages_queue_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RmqRecord>> {
+    pub fn pending_messages_queue_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RempCatchainRecord>> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queue_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
@@ -97,7 +97,7 @@ impl RempCatchainInstance {
         Ok(instance.rmq_catchain_receiver.len())
     }
 
-    pub fn rmq_catchain_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RmqRecord>> {
+    pub fn rmq_catchain_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RempCatchainRecord>> {
         let instance = self.get_instance_impl()?;
         match instance.rmq_catchain_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
@@ -106,7 +106,7 @@ impl RempCatchainInstance {
         }
     }
 
-    pub fn rmq_catchain_send(&self, msg: ton_api::ton::ton_node::RmqRecord) -> Result<()> {
+    pub fn rmq_catchain_send(&self, msg: ton_api::ton::ton_node::RempCatchainRecord) -> Result<()> {
         let instance = self.get_instance_impl()?;
         match instance.rmq_catchain_sender.send(msg) {
             Ok(()) => Ok(()),

@@ -14,11 +14,22 @@ use ever_crypto::{Ed25519KeyOption, KeyId};
 use catchain::{BlockPayloadPtr, PublicKey, PublicKeyHash, CatchainNode};
 use std::sync::Arc;
 use std::collections::HashMap;
+use std::hash::Hash;
 use sha2::{Digest, Sha256};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
-use ton_block::{BlockSignatures, BlockSignaturesPure, CatchainConfig, ConfigParams, CryptoSignature, CryptoSignaturePair, Deserializable, Serializable, Message, ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet, Workchains, WorkchainDescr, GlobalCapabilities};
+use ton_block::{
+    BlockSignatures, BlockSignaturesPure, CatchainConfig, ConfigParams,
+    CryptoSignature, CryptoSignaturePair,
+    Deserializable, Serializable,
+    Message,
+    ShardIdent, SigPubKey,
+    UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet,
+    GlobalCapabilities,
+};
 use ton_types::{BuilderData, Result, UInt256, HashmapType, fail, error};
 use validator_session::SessionNode;
+use core::fmt::Debug;
+use dashmap::DashMap;
 use crate::engine_traits::EngineOperations;
 
 
@@ -213,22 +224,12 @@ pub fn compute_validator_set_cc(
     Ok(set)
 }
 
-#[cfg(feature="workchains")]
 fn calc_workchain_id(descr: &ValidatorDescr) -> i32 {
     calc_workchain_id_by_adnl_id(descr.compute_node_id_short().as_slice())
 }
 
-#[cfg(feature="workchains")]
 fn calc_workchain_id_by_adnl_id(adnl_id: &[u8]) -> i32 {
     (adnl_id[0] % 32) as i32 - 1
-}
-
-lazy_static::lazy_static! {
-    static ref SINGLE_WORKCHAIN: Workchains = {
-        let mut workchains = Workchains::default();
-        workchains.set(&0, &WorkchainDescr::default()).unwrap();
-        workchains
-    };
 }
 
 pub fn try_calc_subset_for_workchain(
@@ -240,37 +241,49 @@ pub fn try_calc_subset_for_workchain(
     cc_seqno: u32,
     _time: UnixTime32,
 ) -> Result<Option<(Vec<ValidatorDescr>, u32)>> {
-    // in case on old block proof it doesn't contain workchains in config so 1 by default
-    let workchains = config.workchains().unwrap_or_else(|_| SINGLE_WORKCHAIN.clone());
-    match workchains.len()? as i32 {
-        0 => fail!("workchain description is empty"),
-        1 => Ok(Some(vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time)?)),
-        #[cfg(not(feature="workchains"))]
-        _ => {
-            fail!("workchains not supported")
+
+    if config.has_capability(GlobalCapabilities::CapWorkchains) {
+
+        //
+        // This is temporary (for testing purposes) algorithm of validators separating 
+        // between workchains
+        //
+
+        let count = config.workchains()?.len()?;
+        if count == 0 {
+            fail!("Workchains description is empty");
         }
-        #[cfg(feature="workchains")]
-        count => {
-            let mut list = Vec::new();
-            for descr in vset.list() {
-                let id = calc_workchain_id(descr);
-                if (id == workchain_id) || (id >= count) {
-                    list.push(descr.clone());
-                }
-            }
-            if list.len() >= cc_config.shard_validators_num as usize {
-                let vset = ValidatorSet::new(
-                    vset.utime_since(),
-                    vset.utime_until(),
-                    vset.main(),
-                    list
-                )?;
-                Ok(Some(vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time)?))
-            } else {
-                // not enough validators -- config is ok, but we cannot validate the shard at the moment
-                Ok(None)
+
+        let mut list = Vec::new();
+        for descr in vset.list() {
+            let id = calc_workchain_id(descr);
+            if (id == workchain_id) || (id >= count as i32) {
+                list.push(descr.clone());
             }
         }
+
+        log::trace!(
+            "try_calc_subset_for_workchain: workchains: {count}, total validators: {total_len}, \
+            shard validators: {shard_len}, wc {workchain_id} validators: {list_len}",
+            total_len = vset.list().len(),
+            shard_len = cc_config.shard_validators_num,
+            list_len = list.len()
+        );
+
+        if list.len() >= cc_config.shard_validators_num as usize {
+            let vset = ValidatorSet::new(
+                vset.utime_since(),
+                vset.utime_until(),
+                vset.main(),
+                list
+            )?;
+            Ok(Some(vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time)?))
+        } else {
+            // not enough validators -- config is ok, but we cannot validate the shard at the moment
+            Ok(None)
+        }
+    } else {
+        Ok(Some(vset.calc_subset(cc_config, shard_pfx, workchain_id, cc_seqno, _time)?))
     }
 }
 
@@ -293,7 +306,6 @@ pub fn calc_subset_for_workchain(
     }
 }
 
-#[cfg(feature="workchains")]
 pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (ever_crypto::KeyOptionJson, Arc<dyn ever_crypto::KeyOption>) {
     loop {
         if let Ok((private, public)) = Ed25519KeyOption::generate_with_json() {
@@ -345,4 +357,110 @@ pub fn get_group_members_by_validator_descrs(iterator: &Vec<ValidatorDescr>, dst
 pub fn is_remp_enabled(engine: Arc<dyn EngineOperations>, config_params: &ConfigParams) -> bool {
 
     return config_params.has_capability(GlobalCapabilities::CapRemp);
+}
+
+pub fn get_message_uid(msg: &Message) -> UInt256 {
+    match msg.body() {
+        Some(slice) => slice.into_cell().repr_hash(),
+        None => {
+            log::error!(target: "remp", "Message {} uid computation: no body for the message", msg);
+            UInt256::default()
+        }
+    }
+}
+
+/// Lock-free map to small set (small set means 1-10 records in one typical map cell)
+pub struct LockfreeMapSet<K, V> where V: Ord, V: Clone+Debug, K: Clone+Hash+Ord+Debug {
+    map: DashMap<K,Vec<V>>
+}
+
+impl<K,V> LockfreeMapSet<K,V> where V: Ord, V: Clone+Debug, K: Clone+Hash+Ord+Debug {
+    fn remove_and_sort(src: &Vec<V>, old_to_remove: &V) -> Vec<V> {
+        let mut canonized: Vec<V> = src.iter().filter(|x| *x != old_to_remove).cloned().collect();
+        canonized.sort();
+        canonized
+    }
+
+    fn insert_and_sort(src: &Vec<V>, new_to_insert: &V) -> Vec<V> {
+        let mut canonized = src.clone();
+        if canonized.iter().find(|x| *x == new_to_insert) == None {
+            canonized.push(new_to_insert.clone());
+        }
+        canonized.sort();
+        canonized
+    }
+/*
+    fn execute<F>(&self, msg_uid: &K, operation: F, join_function: F2) -> Result<()>
+        where F: Fn(&Vec<V>) -> Vec<V>
+    {
+        match self.map.get_mut(msg_uid) {
+            None => {
+                let mut new_vec = Vec::new();
+                new_vec = operation(&new_vec);
+                if let Some(old_vec) = self.map.insert(msg_uid.clone(), new_vec) {
+                    fail!("LockfreeMapSet: failed modifying key {:?}, lost value {:?}", msg_uid, old_vec);
+                }
+            },
+            Some(mut t) => *t = operation(t.value())
+        }
+        Ok(())
+    }
+*/
+
+    // Heuristics :(:(:(
+    pub fn append_to_set(&self, msg_uid: &K, msg_id: &V) -> Result<()> {
+        if !self.map.contains_key(msg_uid) {
+            if let Some(added_in_parallel) = self.map.insert(msg_uid.clone(), [msg_id.clone()].to_vec()) {
+                for added_msg in added_in_parallel.iter() {
+                    self.map.alter(msg_uid, |_k,x| Self::insert_and_sort(&x, added_msg))
+                }
+            }
+        }
+        else {
+            self.map.alter(msg_uid, |_k,x| Self::insert_and_sort(&x, msg_id))
+        }
+        Ok(())
+    }
+
+    pub fn remove_from_set(&self, msg_uid: &K, msg_id: &V) -> Result<()> {
+        if let Some(mut t) = self.map.get_mut(msg_uid) {
+            *t = Self::remove_and_sort(t.value(), msg_id)
+        }
+        //self.map.remove_if(msg_uid, |_k,v| v.len() == 0);
+        Ok(())
+    }
+
+    pub fn get_set(&self, msg_uid: &K) -> Vec<V> {
+        match self.map.get(msg_uid) {
+            None => Vec::new(),
+            Some(kv) => kv.value().clone()
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn contains_in_set(&self, msg_uid: &K, msg_id: &V) -> bool {
+        match self.map.get(msg_uid) {
+            None => false,
+            Some(kv) => {
+                let mut lw = 0;
+                let mut up = kv.value().len();
+                while lw < up {
+                    let mid = (lw + up) / 2;
+                    if &kv.value()[mid] < msg_id {
+                        lw = mid + 1;
+                    }
+                    else {
+                        up = mid;
+                    }
+                }
+                lw < kv.value().len() && &kv.value()[lw] == msg_id
+            }
+        }
+    }
+}
+
+impl <K,V> Default for LockfreeMapSet<K,V> where K: Clone+Hash+Ord+Debug, V: Clone+Ord+Debug {
+    fn default() -> Self {
+        LockfreeMapSet { map: DashMap::new() }
+    }
 }

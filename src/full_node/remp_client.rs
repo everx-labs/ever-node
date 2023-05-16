@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2023-2023 EverX. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     engine_traits::EngineOperations,
     validator::validator_utils::get_adnl_id,
@@ -203,17 +216,6 @@ impl RempClient {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn process_new_block(self: Arc<Self>, block: BlockStuff) {
-        tokio::spawn(async move {
-            match self.process_block(&block, true, None) {
-                Ok(_) => log::trace!("Processed new shard block {}", block.id()),
-                Err(e) => {
-                    log::error!("Error while processing new shard block {}: {}", block.id(), e);
-                }
-            }
-        });
-    }
 
 
     async fn messages_worker(&self) -> Result<()> {
@@ -345,13 +347,7 @@ impl RempClient {
 
         log::debug!("process_new_master_block {}", block.id());
 
-        let engine = self.engine.get().ok_or_else(|| error!("engine was not set"))?;
-        
-        let (process_mc, _processed_wc) = engine.processed_workchain().await?;
-        
-        if process_mc {
-            self.process_block(block, true, Some(block.id()))?;
-        }
+        self.process_block(block, true, Some(block.id()))?;
 
         let shard_blocks_for_processing = shard_blocks_observer.process_next_mc_block(block).await?;
         for (block_stuff, mc_id) in shard_blocks_for_processing {
@@ -359,7 +355,7 @@ impl RempClient {
         }
 
         // process hanged messages
-        self.mc_cc_seqno.store(block.block().read_info()?.gen_catchain_seqno(), Ordering::Relaxed);
+        self.mc_cc_seqno.store(block.block()?.read_info()?.gen_catchain_seqno(), Ordering::Relaxed);
 
         Ok(())
     }
@@ -368,7 +364,7 @@ impl RempClient {
 
         log::trace!("process_block {}", block.id());
 
-        block.block().read_extra()?.read_in_msg_descr()?.iterate_slices_with_keys(|key, _msg_slice| {
+        block.block()?.read_extra()?.read_in_msg_descr()?.iterate_slices_with_keys(|key, _msg_slice| {
             if let Some(_) = self.messages.get(&key) {
                 let (level, master_id, finalized) = if let Some(mc_id) = applied {
                     (RempMessageLevel::TonNode_RempMasterchain,
@@ -606,15 +602,12 @@ impl RempClient {
         let dst_wc = message.dst_workchain_id()
             .ok_or_else(|| error!("Can't get workchain id from message"))?;
 
-        let (process_mc, processed_wc) = engine.processed_workchain().await?;
-
-        if !((dst_wc == processed_wc) || (process_mc && dst_wc == MASTERCHAIN_ID)) {
-            let wc_descr = if dst_wc == MASTERCHAIN_ID {
-                "masterchain".to_owned() 
-            } else { 
-                format!("workchain {}", dst_wc) 
-            };
-            fail!("The node doesn't prorecess {}", wc_descr);
+        if dst_wc != MASTERCHAIN_ID { // all nodes have master blocks
+            if let Some(processed_wc) = engine.processed_workchain() {
+                if processed_wc != dst_wc {
+                    fail!("The node doesn't prorecess workchain {}", dst_wc);
+                }
+            }
         }
 
         let dst_address = message.int_dst_account_id()
@@ -673,7 +666,7 @@ impl RempClient {
         address: AccountId,
         now: u32,
     ) -> Result<(HashMap<Arc<KeyId>, ValidatorInfo>, u32)> {
-        let last_mc_state_extra = last_mc_state.state().read_custom()?
+        let last_mc_state_extra = last_mc_state.state()?.read_custom()?
             .ok_or_else(|| error!("State for {} doesn't have McStateExtra", last_mc_state.block_id()))?;
         let cc_config = last_mc_state_extra.config.catchain_config()?;
         let cur_validator_set = last_mc_state_extra.config.validator_set()?;
@@ -834,12 +827,12 @@ impl RempClient {
     ) -> Result<()> {
         log::trace!("run_local {:x}", id);
 
-        let last_mc_state_extra = last_mc_state.state().read_custom()?
+        let last_mc_state_extra = last_mc_state.state()?.read_custom()?
             .ok_or_else(|| error!("State for {} doesn't have McStateExtra", last_mc_state.block_id()))?;
         let config = BlockchainConfig::with_config(last_mc_state_extra.config)?;
 
         let params = ExecuteParams {
-            state_libs: last_mc_state.state().libraries().clone().inner(),
+            state_libs: last_mc_state.state()?.libraries().clone().inner(),
             block_unixtime: block_utime,
             block_lt: 0, // ???
             last_tr_lt: Arc::new(AtomicU64::new(account.last_trans_lt())),
@@ -935,7 +928,7 @@ impl RempClient {
         // init validator sets using last master state and resolve current (and possibly next) validators sets
         
         let last_mc_state = engine.load_last_applied_mc_state_or_zerostate().await?;
-        let last_mc_state_extra = last_mc_state.state().read_custom()?
+        let last_mc_state_extra = last_mc_state.state()?.read_custom()?
             .ok_or_else(|| error!("State for {} doesn't have McStateExtra", last_mc_state.block_id()))?;
         let mut to_resolve = vec!();
         let cur_vset = last_mc_state_extra.config.validator_set()?;
@@ -963,12 +956,12 @@ impl RempClient {
         block: &BlockStuff,
         validators: &mut HashSet<ValidatorDescr>
     ) -> Result<()> {
-        if block.block().read_info()?.key_block() {
+        if block.block()?.read_info()?.key_block() {
 
             log::trace!("resolve_validators  key block {}", block.id());
 
             let custom = block
-                .block()
+                .block()?
                 .read_extra()?
                 .read_custom()?
                 .ok_or_else(|| error!("Can't load custom from block {}", block.id()))?;

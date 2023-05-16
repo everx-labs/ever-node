@@ -35,6 +35,7 @@ pub fn supported_capabilities() -> u64 {
         GlobalCapabilities::CapCopyleft as u64 |
         GlobalCapabilities::CapFullBodyInBounced as u64 |
         GlobalCapabilities::CapStorageFeeToTvm as u64 |
+        GlobalCapabilities::CapWorkchains as u64 |
         GlobalCapabilities::CapStcontNewFormat as u64 |
         GlobalCapabilities::CapFastStorageStatBugfix as u64 |
         GlobalCapabilities::CapResolveMerkleCell as u64 |
@@ -48,7 +49,7 @@ pub fn supported_capabilities() -> u64 {
 }
 
 pub fn supported_version() -> u32 {
-    37
+    39
 }
 
 pub fn check_this_shard_mc_info(

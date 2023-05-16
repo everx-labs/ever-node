@@ -8,7 +8,7 @@ use std::cmp::Reverse;
 
 use ton_api::ton::ton_node::{
     RempMessageStatus, RempMessageLevel,
-    rempmessagestatus::{RempAccepted, RempIgnored, RempRejected}, RmqRecord
+    rempmessagestatus::{RempAccepted, RempIgnored, RempRejected}, RempCatchainRecord
 };
 use ton_block::{ShardIdent, Message, BlockIdExt, ValidatorDescr};
 use ton_types::{UInt256, Result, fail};
@@ -25,7 +25,6 @@ use crate::{
     }
 };
 use failure::err_msg;
-use ton_api::ton::ton_node::rmqrecord::RmqMessageDigest;
 use crate::validator::validator_utils::{GeneralSessionInfo, ValidatorListHash};
 
 #[derive(Debug,PartialEq,Eq,PartialOrd,Ord,Clone)]
@@ -307,7 +306,7 @@ impl MessageQueue {
                     log::trace!(target: "remp", "RMQ {}: No more messages in rmq_queue", self);
                     break 'queue_loop;
                 },
-                Ok(Some(ton_api::ton::ton_node::RmqRecord::TonNode_RmqMessage(rmq_record_message))) => {
+                Ok(Some(ton_api::ton::ton_node::RempCatchainRecord::TonNode_RempCatchainMessage(rmq_record_message))) => {
                     let rmq_message = Arc::new(RmqMessage::from_rmq_record(&rmq_record_message)?);
                     let rmq_message_master_seqno = rmq_record_message.masterchain_seqno as u32;
                     let forwarded = self.catchain_info.master_cc_seqno > rmq_message_master_seqno;
@@ -318,7 +317,7 @@ impl MessageQueue {
                     );
 
                     let added = self.remp_manager.message_cache.add_external_message_status(
-                        &rmq_message.message_id,Some(rmq_message.clone()), self.catchain_info.general_session_info.shard.clone(), RempMessageStatus::TonNode_RempNew, rmq_message_master_seqno
+                        &rmq_message.message_id, &rmq_message.message_uid, Some(rmq_message.clone()), &self.catchain_info.general_session_info.shard, RempMessageStatus::TonNode_RempNew, rmq_message_master_seqno
                     ).await;
 
                     match added {
@@ -357,11 +356,11 @@ impl MessageQueue {
 
                     }
                 },
-                Ok(Some(RmqRecord::TonNode_RmqMessageDigest(reject_digest))) => {
+                Ok(Some(RempCatchainRecord::TonNode_RempCatchainMessageDigest(reject_digest))) => {
                     if MessageCache::cc_expired(reject_digest.masterchain_seqno as u32, self.catchain_info.master_cc_seqno) ||
                         reject_digest.masterchain_seqno as u32 > self.catchain_info.master_cc_seqno {
                         log::error!(target: "remp",
-                            "Point 4. RMQ {}. Message digest (masterchain_seqno = {}, len = {}) is incompatible with current master seqno {}",
+                            "Point 4. RMQ {}. Message digest (masterchain_seqno = {}, len = {}) is too old/young for current master seqno {}",
                             self, reject_digest.masterchain_seqno, reject_digest.messages.len(), self.catchain_info.master_cc_seqno
                         )
                     }
@@ -370,14 +369,15 @@ impl MessageQueue {
                             "Point 4. RMQ {}. Message digest (masterchain_seqno = {}, len = {}) received",
                             self, reject_digest.masterchain_seqno, reject_digest.messages.len()
                         );
-                        for message_id in reject_digest.messages.iter() {
+                        for message_ids in reject_digest.messages.iter() {
                             let reject = RempRejected {
                                 level: RempMessageLevel::TonNode_RempQueue,
                                 block_id: Default::default(),
                                 error: "reject received from digest".to_string()
                             };
                             self.remp_manager.message_cache.add_external_message_status(
-                                &message_id, None, self.catchain_info.general_session_info.shard.clone(),
+                                &message_ids.id, &message_ids.uid,
+                                None, &self.catchain_info.general_session_info.shard,
                                 RempMessageStatus::TonNode_RempRejected(reject),
                                 reject_digest.masterchain_seqno as u32
                             ).await?;
@@ -625,11 +625,11 @@ struct StatusUpdater {
 
 #[async_trait::async_trait]
 impl BlockProcessor for StatusUpdater {
-    fn process_message(&self, message_id: &UInt256) {
+    fn process_message(&self, message_id: &UInt256, _message_uid: &UInt256) {
         match self.queue.get_message(message_id) {
             None => log::warn!(target: "remp", "Cannot find message {:x} in cache", message_id),
             Some(message) => {
-                log::trace!(target: "remp", "Point 7. RMQ {} shard accepted message {}, new status {}", 
+                log::trace!(target: "remp", "Point 7. RMQ {} shard accepted message {}, new status {}",
                     self.queue, message, self.new_status
                 );
                 self.queue.update_status_send_response(message_id, message, self.new_status.clone())
@@ -779,10 +779,10 @@ impl RmqQueueManager {
                 }
             }
 
-            let mut rejected_message_digests: HashMap<u32, RmqMessageDigest> = HashMap::default();
+            let mut rejected_message_digests: HashMap<u32, ton_api::ton::ton_node::rempcatchainrecord::RempCatchainMessageDigest> = HashMap::default();
 
             for msgid in to_forward.iter() {
-                let (status, message, master_cc) = match self.remp_manager.message_cache.get_message_with_status_and_master_cc(msgid) {
+                let (message, message_header) = match self.remp_manager.message_cache.get_message_with_header(msgid) {
                     None => {
                         log::error!(
                             target: "remp",
@@ -791,40 +791,43 @@ impl RmqQueueManager {
                         );
                         continue
                     },
-                    Some((_m, RempMessageStatus::TonNode_RempTimeout, _master_cc)) => continue,
-                    Some((_m, _s, master_cc)) if MessageCache::cc_expired(master_cc, new_cc_seqno) => continue,
-                    Some((m, s, master_cc)) => (s, m, master_cc)
+                    Some((_m, hdr)) if hdr.status == RempMessageStatus::TonNode_RempTimeout => continue,
+                    Some((_m, hdr)) if MessageCache::cc_expired(hdr.master_cc, new_cc_seqno) => continue,
+                    Some((m, hdr)) => (m, hdr)
                 };
 
                 // Forwarding:
-                // 1. All messages, originating from current session
-                // 2. Finalized messages (accepted/rejected) -- as plain id (message id, is_accepted)
-                // 3. Non-final messages -- (message body, is_forwarded = true)
+                // 1. Rejected messages -- as plain id (message id, message uid)
+                // 2. Non-final messages -- (full RmqRecord)
+                // All other messages are not forwarded
 
-                // Accepting of forwarded messages:
-                // 1. If at least one message with body -- put it as "non-final"
-
-                if is_finally_rejected(&status) {
-                    if let Some(digest) = rejected_message_digests.get_mut (&master_cc) {
-                        digest.messages.0.push(message.message_id.clone());
+                if is_finally_rejected(&message_header.status) {
+                    if let Some(digest) = rejected_message_digests.get_mut (&message_header.master_cc) {
+                        digest.messages.0.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
+                            id: message.message_id.clone(),
+                            uid: message.message_uid.clone()
+                        });
                     }
                     else {
-                        let mut digest = ton_api::ton::ton_node::rmqrecord::RmqMessageDigest::default();
-                        digest.masterchain_seqno = master_cc as i32;
-                        digest.messages.0.push(message.message_id.clone());
-                        rejected_message_digests.insert(master_cc, digest);
+                        let mut digest = ton_api::ton::ton_node::rempcatchainrecord::RempCatchainMessageDigest::default();
+                        digest.masterchain_seqno = message_header.master_cc as i32;
+                        digest.messages.0.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
+                            id: message.message_id.clone(),
+                            uid: message.message_uid.clone()
+                        });
+                        rejected_message_digests.insert(message_header.master_cc, digest);
                     }
                 }
-                else if !is_finally_accepted(&status) {
-                    if MessageQueue::is_final_status(&status) {
+                else if !is_finally_accepted(&message_header.status) {
+                    if MessageQueue::is_final_status(&message_header.status) {
                         log::error!(target: "remp",
                             "Point 5a. RMQ {}: message {} status {} is final, but not finally accepted or rejected",
-                            self, msgid, status
+                            self, msgid, message_header.status
                         );
                     }
 
                     for new in new_queues.iter() {
-                        if let Err(x) = new.catchain_instance.pending_messages_queue_send(message.as_rmq_record(master_cc)) {
+                        if let Err(x) = new.catchain_instance.pending_messages_queue_send(message.as_rmq_record(message_header.master_cc)) {
                             log::error!(target: "remp",
                             "Point 5a. RMQ {}: message {:x} cannot be put to new queue {}: `{}`",
                             self, msgid, new, x
@@ -839,7 +842,7 @@ impl RmqQueueManager {
             for (master_cc, digest) in rejected_message_digests.into_iter() {
                 if !digest.messages.0.is_empty() {
                     let digest_len = digest.messages.0.len();
-                    let msg = ton_api::ton::ton_node::RmqRecord::TonNode_RmqMessageDigest(digest);
+                    let msg = ton_api::ton::ton_node::RempCatchainRecord::TonNode_RempCatchainMessageDigest(digest);
                     for new in new_queues.iter() {
                         if let Err(x) = new.catchain_instance.pending_messages_queue_send(msg.clone()) {
                             log::error!(target: "remp",

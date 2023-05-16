@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.0
+
+- No new validator lists for Remp; message rerouting in Remp fixed; less load when Remp caps is off
+- Unique ids for messages
+- Test adaptation: console and remp params
+- Message uid added; not used yet
+- Message duplicate checks using message unique ids (body hashes), preliminary version
+- Patched lockfree set test --- the test is not corrected, but hided
+- Changed lockfree map to dashmap; the solution is still not perfect
+- Removed warning from the test
+- Technical fix: RmqMessage and such renamed to RempCatchainMessage
+- Build fixed (when release branch was made default)
+- Tests for REMP fixed
+- Fixed test_message_cache test, added more checks
+- Updated Cargo version
+
+## Version: 0.52.7
+
+### Fixed
+
+- Fixed bug in DB restore: LAST_ROTATION_MC_BLOCK pointer is not truncated.
+
+
+## Version 0.52.6
+
+### New
+
+- Added ability to send the validator status to the console
+- Fixed compilation after auto bumped rocks_db version
+
+## Version: 0.52.5
+
+### New
+
+- Supported ever-types version 2.0
+
 ## Version: 0.52.4
 
 ### Fixed

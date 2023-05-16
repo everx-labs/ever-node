@@ -28,8 +28,7 @@ use ton_block::{
     AddSub, ShardIdent, Serializable, CopyleftRewards
 };
 use ton_types::{
-    error, Result, fail, Cell, UInt256,
-    cells_serialization::{serialize_tree_of_cells, deserialize_tree_of_cells}
+    error, Result, fail, Cell, UInt256, read_single_root_boc,
 };
 use ton_api::ton::ton_node::newshardblock::NewShardBlock;
 
@@ -149,16 +148,14 @@ impl TopBlockDescrStuff {
     }
 
     pub fn from_bytes(bytes: &[u8], is_fake: bool)-> Result<Self> {
-        let root = deserialize_tree_of_cells(&mut Cursor::new(&bytes))?;
+        let root = read_single_root_boc(&bytes)?;
         let tbd = TopBlockDescr::construct_from_cell(root)?;
         let id = tbd.proof_for().clone();
         TopBlockDescrStuff::new(tbd, &id, is_fake)
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut data = Vec::<u8>::new();
-        serialize_tree_of_cells(&self.tbd.serialize()?, &mut data)?;
-        Ok(data)
+        self.tbd.write_to_bytes()
     }
 
     pub fn gen_utime(&self) -> u32 {
@@ -272,13 +269,13 @@ impl TopBlockDescrStuff {
         let mut res_flags = 0;
 
         let last_mc_block_id = last_mc_state.block_id();
-        let last_mc_state_extra = last_mc_state.state().read_custom()?
+        let last_mc_state_extra = last_mc_state.state()?.read_custom()?
             .ok_or_else(|| error!("State for {} doesn't have McStateExtra", last_mc_state.block_id()))?;
 
         self.validate_internal(
             last_mc_block_id,
             &last_mc_state_extra,
-            last_mc_state.state().vert_seq_no(),
+            last_mc_state.state()?.vert_seq_no(),
             &mut res_flags,
             Mode::ALLOW_NEXT_VSET
         )

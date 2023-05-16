@@ -12,7 +12,7 @@ use failure::err_msg;
 
 use ton_api::ton::ton_node::RempMessageStatus;
 use ton_block::{ShardIdent, Message};
-use ton_types::{UInt256, Result};
+use ton_types::{UInt256, Result, SliceData};
 use crate::{
     config::RempConfig,
     engine_traits::{EngineOperations, RempCoreInterface, RempDuplicateStatus},
@@ -24,6 +24,7 @@ use crate::{
 }};
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
+use crate::validator::validator_utils::get_message_uid;
 
 pub struct RempInterfaceQueues {
     message_cache: Arc<MessageCache>,
@@ -366,7 +367,7 @@ impl RempManager {
 #[allow(dead_code)] 
 impl RempInterfaceQueues {
     pub fn make_test_message(&self) -> Result<RmqMessage> {
-        RmqMessage::make_test_message()
+        RmqMessage::make_test_message(&SliceData::new_empty())
     }
 
     /**
@@ -445,6 +446,7 @@ impl RempCoreInterface for RempInterfaceQueues {
         let remp_message = Arc::new(RmqMessage::new (
             arc_message,
             message_id.clone(),
+            get_message_uid(&message),
             source,
             0
         )?);
@@ -464,10 +466,13 @@ impl RempCoreInterface for RempInterfaceQueues {
         Ok(())
     }
 
-    fn check_remp_duplicate(&self, message_id: &UInt256) -> RempDuplicateStatus {
+    fn check_remp_duplicate(&self, message_id: &UInt256) -> Result<RempDuplicateStatus> {
         log::trace!(target: "remp", "RempInterfraceQueues: checking duplicates for {:x}", message_id);
         let res = self.message_cache.check_message_duplicates(message_id);
-        log::trace!(target: "remp", "RempInterfraceQueues: duplicate check for {:x} finished: {:?}", message_id, res);
+        match &res {
+            Ok(x) => log::trace!(target: "remp", "RempInterfraceQueues: duplicate check for {:x} finished: {:?}", message_id, x),
+            Err(e) => log::error!(target: "remp", "RempInterfraceQueues: duplicate check for {:x} failed: {:?}", message_id, e)
+        }
         return res
     }
 }
