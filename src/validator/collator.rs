@@ -652,6 +652,7 @@ struct ExecutionManager {
     min_lt: Arc<AtomicU64>,
     // block random seed
     seed_block: UInt256,
+
     #[cfg(feature = "signature_with_id")]
     // signature ID used in VM
     signature_id: i32, 
@@ -1275,11 +1276,16 @@ impl Collator {
 
         let mut output_queue_manager = self.request_neighbor_msg_queues(mc_data, prev_data, collator_data).await?;
 
-        // delete delivered messages from output queue
-        let now = std::time::Instant::now();
-        self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager)?;
-        log::trace!("{}: TIME: clean_out_msg_queue {}ms;",
-            self.collated_block_descr, now.elapsed().as_millis());
+        if !self.after_split {
+            // delete delivered messages from output queue
+            let now = std::time::Instant::now();
+            self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager)?;
+            log::trace!("{}: TIME: clean_out_msg_queue {}ms;",
+                self.collated_block_descr, now.elapsed().as_millis());
+        } else {
+            log::trace!("{}: TIME: clean_out_msg_queue SKIPPED because of after_split block",
+                self.collated_block_descr);
+        }
 
         // copy out msg queue from next state
         collator_data.out_msg_queue_info = output_queue_manager.take_next();
@@ -1314,37 +1320,43 @@ impl Collator {
         // merge prepare / merge install
         // ** will be implemented later **
 
-        // import inbound internal messages, process or transit
-        let now = std::time::Instant::now();
-        self.process_inbound_internal_messages(prev_data, collator_data, &output_queue_manager,
-            &mut exec_manager).await?;
-        log::trace!("{}: TIME: process_inbound_internal_messages {}ms;", 
-            self.collated_block_descr, now.elapsed().as_millis());
-
-        if let Some(remp_messages) = remp_messages {
-            // import remp messages (if space&gas left)
+        if self.after_split {
+            // import inbound internal messages, process or transit
             let now = std::time::Instant::now();
-            let total = remp_messages.len();
-            let processed = self.process_remp_messages(prev_data, collator_data, &mut exec_manager, 
-                remp_messages).await?;
-            log::trace!("{}: TIME: process_remp_messages {}ms, processed {}, ignored {}", 
-                self.collated_block_descr, now.elapsed().as_millis(), processed, total - processed);
+            self.process_inbound_internal_messages(prev_data, collator_data, &output_queue_manager,
+                &mut exec_manager).await?;
+            log::trace!("{}: TIME: process_inbound_internal_messages {}ms;", 
+                self.collated_block_descr, now.elapsed().as_millis());
+
+            if let Some(remp_messages) = remp_messages {
+                // import remp messages (if space&gas left)
+                let now = std::time::Instant::now();
+                let total = remp_messages.len();
+                let processed = self.process_remp_messages(prev_data, collator_data, &mut exec_manager, 
+                    remp_messages).await?;
+                log::trace!("{}: TIME: process_remp_messages {}ms, processed {}, ignored {}", 
+                    self.collated_block_descr, now.elapsed().as_millis(), processed, total - processed);
+            }
+
+            // import inbound external messages (if space&gas left)
+            let now = std::time::Instant::now();
+            self.process_inbound_external_messages(prev_data, collator_data, &mut exec_manager, 
+                ext_messages).await?;
+            log::trace!("{}: TIME: process_inbound_external_messages {}ms;", 
+                self.collated_block_descr, now.elapsed().as_millis());
+
+            // process newly-generated messages (if space&gas left)
+            // (if we were unable to process all inbound messages, all new messages must be queued)
+            let now = std::time::Instant::now();
+            self.process_new_messages(!collator_data.inbound_queues_empty, prev_data, 
+                collator_data, &mut exec_manager).await?;
+            log::trace!("{}: TIME: process_new_messages {}ms;", 
+                self.collated_block_descr, now.elapsed().as_millis());
+        } else {
+            log::trace!("{}: messages processing SKIPPED because of after_split block", 
+                self.collated_block_descr);
         }
 
-        // import inbound external messages (if space&gas left)
-        let now = std::time::Instant::now();
-        self.process_inbound_external_messages(prev_data, collator_data, &mut exec_manager, 
-            ext_messages).await?;
-        log::trace!("{}: TIME: process_inbound_external_messages {}ms;", 
-            self.collated_block_descr, now.elapsed().as_millis());
-
-        // process newly-generated messages (if space&gas left)
-        // (if we were unable to process all inbound messages, all new messages must be queued)
-        let now = std::time::Instant::now();
-        self.process_new_messages(!collator_data.inbound_queues_empty, prev_data, 
-            collator_data, &mut exec_manager).await?;
-        log::trace!("{}: TIME: process_new_messages {}ms;", 
-            self.collated_block_descr, now.elapsed().as_millis());
 
         // split prepare / split install
         // ** will be implemented later **
