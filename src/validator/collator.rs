@@ -2294,7 +2294,7 @@ impl Collator {
             // Newly generating messages will be executed next itaration (only after waiting).
 
             let mut new_messages = std::mem::take(&mut collator_data.new_messages);
-            for NewMessage{ lt_hash: (created_lt, hash), msg, tr_cell, prefix } in new_messages.drain() {
+            while let Some(NewMessage{ lt_hash: (created_lt, hash), msg, tr_cell, prefix }) = new_messages.pop() {
                 let info = msg.int_header().ok_or_else(|| error!("message is not internal"))?;
                 let fwd_fee = *info.fwd_fee();
                 enqueue_only |= collator_data.block_full | self.check_cutoff_timeout();
