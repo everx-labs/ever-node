@@ -2350,8 +2350,11 @@ impl Collator {
         log::trace!("{}: check_block_overload", self.collated_block_descr);
         let class = collator_data.block_limit_status.classify();
         if class == ParamLimitIndex::Underload {
-            collator_data.underload_history |= 1;
-            log::info!("{}: Block is underloaded", self.collated_block_descr);
+            // we don't want to merge if collation too long
+            if !self.check_cutoff_timeout() {
+                collator_data.underload_history |= 1;
+                log::info!("{}: Block is underloaded", self.collated_block_descr);
+            }
         } else if class >= ParamLimitIndex::Soft {
             collator_data.overload_history |= 1;
             log::info!("{}: Block is overloaded (category {:?})", self.collated_block_descr, class);
