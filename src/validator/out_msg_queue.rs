@@ -246,7 +246,7 @@ impl OutMsgQueueInfoStuff {
             let queue1 = Self::calc_split_queues(queue0, &s0)?;
             log::info!("precalc_split_queues after block {}, TIME {}ms", 
                 block_id, now.elapsed().as_millis());
-                engine.set_split_queues(block_id, queue0.clone(), queue1, usage_tree.build_visited_set());
+            engine.set_split_queues(block_id, queue0.clone(), queue1, usage_tree.build_visited_set());
         } else {
             log::trace!("precalc_split_queues {} already calculating or calculated", block_id);
         }
@@ -883,29 +883,30 @@ impl MsgQueueManager {
         let mut deleted = 0;
 
         // Temp fix. Need to review and fix limits management further.
+        // TODO: put it to config
         let mut processed_count_limit = 25_000; 
 
         queue.hashmap_filter(|_key, mut slice| {
             if block_full {
-                log::warn!("BLOCK FULL when cleaning output queue, cleanup is partial");
+                log::warn!("BLOCK FULL when fast cleaning output queue, cleanup is partial");
                 partial = true;
                 return Ok(HashmapFilterResult::Stop)
             }
 
             // Temp fix. Need to review and fix limits management further.
-            processed_count_limit -= 1;
             if processed_count_limit == 0 {
-                log::warn!("clean_out_msg_queue: stopped cleaning messages queue because of count limit");
+                log::warn!("clean_out_msg_queue: stopped fast cleaning messages queue because of count limit");
                 partial = true;
                 return Ok(HashmapFilterResult::Stop)
             }
+            processed_count_limit -= 1;
 
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
             // log::debug!("Scanning outbound {}", enq);
             let (processed, end_lt) = self.already_processed(&enq)?;
             if processed {
-                log::debug!("Outbound {} has beed already delivered, dequeueing", enq);
+                // log::debug!("Outbound {} has beed already delivered, dequeueing fast", enq);
                 block_full = on_message(Some((enq, end_lt)), self.next_out_queue_info.out_queue.data())?;
                 deleted += 1;
                 return Ok(HashmapFilterResult::Remove)
@@ -913,6 +914,35 @@ impl MsgQueueManager {
             skipped += 1;
             Ok(HashmapFilterResult::Accept)
         })?;
+        // we reached processed_count_limit - try to remove slow by LT_HASH
+        if processed_count_limit == 0 {
+            // TODO: put it to config
+            processed_count_limit = 50;
+            let mut iter = MsgQueueMergerIterator::from_queue(&queue)?;
+            while let Some(k_v) = iter.next() {
+                let (key, enq, _created_lt, _) = k_v?;
+                if block_full {
+                    log::warn!("BLOCK FULL when slow cleaning output queue, cleanup is partial");
+                    partial = true;
+                    break;
+                }
+                if processed_count_limit == 0 {
+                    log::warn!("clean_out_msg_queue: stopped slow cleaning messages queue because of count limit");
+                    partial = true;
+                    break;
+                }
+                processed_count_limit -= 1;
+                let (processed, end_lt) = self.already_processed(&enq)?;
+                if !processed {
+                    break;
+                }
+                // log::debug!("Outbound {} has beed already delivered, dequeueing slow", enq);
+                queue.remove(SliceData::load_builder(key.write_to_new_cell()?)?)?;
+                block_full = on_message(Some((enq, end_lt)), self.next_out_queue_info.out_queue.data())?;
+                deleted += 1;
+            }
+            queue.after_remove()?;
+        }
         log::debug!("Deleted {} messages from out_msg_queue, skipped {}", deleted, skipped);
         self.next_out_queue_info.out_queue = queue;
         // if (verbosity >= 2) {
@@ -953,7 +983,7 @@ impl MsgQueueManager {
 
 impl MsgQueueManager {
     /// create iterator for merging all output messages from all neighbors to our shard
-    pub fn merge_out_queue_iter(&self, shard: &ShardIdent) -> Result<MsgQueueMergerIterator> {
+    pub fn merge_out_queue_iter(&self, shard: &ShardIdent) -> Result<MsgQueueMergerIterator<BlockIdExt>> {
         MsgQueueMergerIterator::from_manager(self, shard)
     }
     /// find enquque message and return it with neighbor id 
@@ -983,33 +1013,45 @@ impl MsgQueueManager {
 }
 
 #[derive(Eq, PartialEq)]
-struct RootRecord {
+struct RootRecord<T> {
     lt: u64,
     cursor: SliceData,
     bit_len: usize,
     key: BuilderData,
-    block_id: BlockIdExt
+    id: T
 }
 
-impl RootRecord {
+impl<T: Eq> RootRecord<T> {
     fn new(
         lt: u64,
         cursor: SliceData,
         bit_len: usize,
         key: BuilderData,
-        block_id: BlockIdExt
+        id: T
     ) -> Self {
         Self {
             lt,
             cursor,
             bit_len,
             key,
-            block_id
+            id
         }
+    }
+    fn from_cell(cell: &Cell, mut bit_len: usize, id: T) -> Result<Self> {
+        let mut cursor = SliceData::load_cell_ref(cell)?;
+        let key = cursor.get_label_raw(&mut bit_len, BuilderData::default())?;
+        let lt = cursor.get_next_u64()?;
+        Ok(Self {
+            lt,
+            cursor,
+            bit_len,
+            key,
+            id
+        })
     }
 }
 
-impl Ord for RootRecord {
+impl<T: Eq> Ord for RootRecord<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // first compare lt descending, because Vec is a stack
         let mut cmp = self.lt.cmp(&other.lt);
@@ -1024,29 +1066,26 @@ impl Ord for RootRecord {
         cmp.reverse()
     }
 }
-impl PartialOrd for RootRecord {
+impl<T: Eq> PartialOrd for RootRecord<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
 }
 
 /// it iterates messages ascending create_lt and hash
-pub struct MsgQueueMergerIterator {
+pub struct MsgQueueMergerIterator<T> {
     // store branches descending by lt and hash because Vec works like Stack
-    roots: Vec<RootRecord>,
+    roots: Vec<RootRecord<T>>,
 }
 
-impl MsgQueueMergerIterator {
+impl MsgQueueMergerIterator<BlockIdExt> {
     pub fn from_manager(manager: &MsgQueueManager, shard: &ShardIdent) -> Result<Self> {
         let shard_prefix = shard.shard_key(true);
         let mut roots = vec![];
         for nb in manager.neighbors.iter().filter(|nb| !nb.is_disabled()) {
             let mut out_queue_short = nb.out_queue.clone();
             out_queue_short.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
-            if let Some(root) = out_queue_short.data() {
-                let mut cursor = SliceData::load_cell_ref(root)?;
-                let mut bit_len = out_queue_short.bit_len();
-                let key = cursor.get_label_raw(&mut bit_len, BuilderData::default())?;
-                let lt = cursor.get_next_u64()?;
-                roots.push(RootRecord::new(lt, cursor, bit_len, key, nb.block_id().clone()));
+            if let Some(cell) = out_queue_short.data() {
+                roots.push(RootRecord::from_cell(cell, out_queue_short.bit_len(), nb.block_id().clone())?);
+                // roots.push(RootRecord::new(lt, cursor, bit_len, key, nb.block_id().clone()));
             }
         }
         if !roots.is_empty() {
@@ -1055,17 +1094,30 @@ impl MsgQueueMergerIterator {
         }
         Ok(Self { roots })
     }
-    fn insert(&mut self, root: RootRecord) {
+}
+
+impl MsgQueueMergerIterator<u8> {
+    pub fn from_queue(out_queue: &OutMsgQueue) -> Result<Self> {
+        let mut roots = Vec::new();
+        if let Some(cell) = out_queue.data() {
+            roots.push(RootRecord::from_cell(cell, out_queue.bit_len(), 0)?);
+        }
+        Ok(Self { roots })
+    }
+}
+
+impl<T: Clone + Eq> MsgQueueMergerIterator<T> {
+    fn insert(&mut self, root: RootRecord<T>) {
         let idx = self.roots.binary_search(&root).unwrap_or_else(|x| x);
         self.roots.insert(idx, root);
         debug_assert!(self.roots.first().unwrap().lt >= self.roots.last().unwrap().lt);
     }
-    fn next_item(&mut self) -> Result<Option<(OutMsgQueueKey, MsgEnqueueStuff, u64, BlockIdExt)>> {
+    fn next_item(&mut self) -> Result<Option<(OutMsgQueueKey, MsgEnqueueStuff, u64, T)>> {
         while let Some(mut root) = self.roots.pop() {
             if root.bit_len == 0 {
                 let key = OutMsgQueueKey::construct_from_cell(root.key.into_cell()?)?;
                 let enq = MsgEnqueueStuff::construct_from(&mut root.cursor, root.lt)?;
-                return Ok(Some((key, enq, root.lt, root.block_id)))
+                return Ok(Some((key, enq, root.lt, root.id)))
             }
             for idx in 0..2 {
                 let mut bit_len = root.bit_len - 1;
@@ -1074,15 +1126,15 @@ impl MsgQueueMergerIterator {
                 key.append_bit_bool(idx == 1)?;
                 key = cursor.get_label_raw(&mut bit_len, key)?;
                 let lt = cursor.get_next_u64()?;
-                self.insert(RootRecord::new(lt, cursor, bit_len, key, root.block_id.clone()));
+                self.insert(RootRecord::new(lt, cursor, bit_len, key, root.id.clone()));
             }
         }
         Ok(None)
     }
 }
 
-impl Iterator for MsgQueueMergerIterator {
-    type Item = Result<(OutMsgQueueKey, MsgEnqueueStuff, u64, BlockIdExt)>;
+impl<T: Clone + Eq> Iterator for MsgQueueMergerIterator<T> {
+    type Item = Result<(OutMsgQueueKey, MsgEnqueueStuff, u64, T)>;
     fn next(&mut self) -> Option<Self::Item> {
         self.next_item().transpose()
     }

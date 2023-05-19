@@ -1850,8 +1850,10 @@ impl Collator {
                 }
             }
             if self.check_cutoff_timeout() {
-                log::warn!("{}: TIMEOUT ({}ms) is elapsed, stop processing import_new_shard_top_blocks",
-                        self.collated_block_descr, self.cutoff_timeout.as_millis());
+                log::warn!(
+                    "{}: TIMEOUT ({}ms) is elapsed, stop processing import_new_shard_top_blocks",
+                    self.collated_block_descr, self.cutoff_timeout.as_millis()
+                );
                 break
             }
         }
@@ -2294,6 +2296,7 @@ impl Collator {
             // Newly generating messages will be executed next itaration (only after waiting).
 
             let mut new_messages = std::mem::take(&mut collator_data.new_messages);
+            // we can get sorted items somehow later
             while let Some(NewMessage{ lt_hash: (created_lt, hash), msg, tr_cell, prefix }) = new_messages.pop() {
                 let info = msg.int_header().ok_or_else(|| error!("message is not internal"))?;
                 let fwd_fee = *info.fwd_fee();
