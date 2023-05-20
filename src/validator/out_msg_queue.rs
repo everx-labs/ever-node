@@ -19,21 +19,20 @@ use crate::{
 };
 use std::{
     cmp::max, iter::Iterator, sync::{Arc, atomic::{AtomicBool, Ordering}},
-    collections::HashMap, str::FromStr,
+    collections::{HashMap, HashSet},
 };
 use ton_block::{
     BlockIdExt, ShardIdent, Serializable, Deserializable,
     OutMsgQueueInfo, OutMsgQueue, OutMsgQueueKey, IhrPendingInfo,
     ProcessedInfo, ProcessedUpto, ProcessedInfoKey,
     ShardHashes, AccountIdPrefixFull,
-    HashmapAugType,
+    HashmapAugType, ShardStateUnsplit,
 };
 use ton_types::{
     error, fail,
     BuilderData, Cell, SliceData, IBitstring, Result, UInt256,
-    HashmapSubtree, HashmapType, HashmapFilterResult, HashmapRemover,
+    HashmapSubtree, HashmapType, HashmapFilterResult, HashmapRemover, UsageTree,
 };
-
 
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ProcessedUptoStuff {
@@ -196,49 +195,104 @@ impl OutMsgQueueInfoStuff {
         Ok(())
     }
 
-    fn split(&mut self, subshard: ShardIdent, engine: &Arc<dyn EngineOperations>) -> Result<Self> {
-        let sibling = subshard.sibling();
-
-        let mut queues = HashMap::new();
-        if *self.block_id().root_hash() == UInt256::from_str("c76c48643861d12f4f59bd31f82482d6ab2383bdb1df88121ab1eb403018686e")? {
-            queues = engine.get_outmsg_queues();
-        }
-
-        let mut out_queue = OutMsgQueue::default();
-        if let (Some(self_queue), Some(sibling_queue)) = (queues.remove(&subshard), queues.remove(&sibling)) {
-            log::info!("split {} - got queues from cache", self.block_id());
-            self.out_queue = self_queue;
-            out_queue = sibling_queue;
-        } else {
-            log::info!("split {} - calc queues...", self.block_id());
-            let now = std::time::Instant::now();
-
-            self.out_queue.hashmap_filter(|key, mut value| {
-                let lt = u64::construct_from(&mut value)?;
-                let mut slice = value.clone();
-                let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
-                if !subshard.contains_full_prefix(enq.cur_prefix()) {
-                    let key = SliceData::load_builder(key.clone())?;
-                    out_queue.set_builder_serialized(key, &BuilderData::from_slice(&value), &lt)?;
-                    Ok(HashmapFilterResult::Remove)
-                } else {
-                    Ok(HashmapFilterResult::Accept)
-                }
-            })?;
-            self.out_queue.update_root_extra()?;
-
-            log::info!("split {} - calc queues done in {}ms", self.block_id(), now.elapsed().as_millis());
-
-            if *self.block_id().root_hash() == UInt256::from_str("c76c48643861d12f4f59bd31f82482d6ab2383bdb1df88121ab1eb403018686e")? {
-                queues.insert(subshard.clone(), self.out_queue.clone());
-                queues.insert(sibling.clone(), out_queue.clone());
-                engine.set_outmsg_queues(queues);
+    fn calc_split_queues(
+        self_queue: &mut OutMsgQueue,
+        self_shard: &ShardIdent
+    ) -> Result<OutMsgQueue> {
+        let mut sibling_queue = self_queue.clone();
+        self_queue.hashmap_filter(|_key, mut slice| {
+            let created_lt = u64::construct_from(&mut slice)?;
+            let enq = MsgEnqueueStuff::construct_from(&mut slice, created_lt)?;
+            if self_shard.contains_full_prefix(enq.cur_prefix()) {
+                Ok(HashmapFilterResult::Accept)
+            } else {
+                Ok(HashmapFilterResult::Remove)
             }
+        })?;
+        self_queue.update_root_extra()?;
+
+        sibling_queue.hashmap_filter(|_key, mut slice| {
+            let created_lt = u64::construct_from(&mut slice)?;
+            let enq = MsgEnqueueStuff::construct_from(&mut slice, created_lt)?;
+            if self_shard.contains_full_prefix(enq.cur_prefix()) {
+                Ok(HashmapFilterResult::Remove)
+            } else {
+                Ok(HashmapFilterResult::Accept)
+            }
+        })?;
+        sibling_queue.update_root_extra()?;
+        Ok(sibling_queue)
+    }
+
+    pub async fn precalc_split_queues(
+        engine: &Arc<dyn EngineOperations>,
+        block_id: &BlockIdExt
+    ) -> Result<()> {
+        if engine.set_split_queues_calculating(block_id) {
+            let ss = engine.clone().wait_state(block_id, Some(10_000), false).await?;
+            let usage_tree = UsageTree::with_params(ss.root_cell().clone(), true);
+            let root_cell = usage_tree.root_cell();
+            let ss = ShardStateStuff::from_state(
+                block_id.clone(), 
+                ShardStateUnsplit::construct_from_cell(root_cell)?,
+                #[cfg(feature = "telemetry")]
+                engine.engine_telemetry(),
+                engine.engine_allocated()
+            )?;
+            let mut queue0 = ss.state().read_out_msg_queue_info()?;
+            let queue0 = queue0.out_queue_mut();
+            let (s0, _s1) = block_id.shard().split()?;
+            let now = std::time::Instant::now();
+            let queue1 = Self::calc_split_queues(queue0, &s0)?;
+            log::info!("precalc_split_queues after block {}, TIME {}ms", 
+                block_id, now.elapsed().as_millis());
+            engine.set_split_queues(block_id, queue0.clone(), queue1, usage_tree.build_visited_set());
+        } else {
+            log::trace!("precalc_split_queues {} already calculating or calculated", block_id);
         }
+        Ok(())
+    }
 
-        // out_queue
-        // self.out_queue
+    fn split(
+        &mut self,
+        subshard: ShardIdent,
+        engine: &Arc<dyn EngineOperations>,
+        usage_tree: &UsageTree,
+        imported_visited: Option<&mut HashSet<UInt256>>,
+    ) -> Result<Self> {
 
+        let (s0, _s1) = self.block_id().shard().split()?;
+        let sibling_queue = if let Some((q0, q1, visited)) = engine.get_split_queues(self.block_id()) {
+            if let Some(imported_visited) = imported_visited {
+                for cell_id in visited {
+                    imported_visited.insert(cell_id);
+                }
+            }
+            log::info!("Use split queues from cache (prev block {})", self.block_id());
+            if s0 == subshard {
+                self.out_queue = q0;
+                q1
+            } else {
+                self.out_queue = q1;
+                q0
+            }
+        } else {
+            let now = std::time::Instant::now();
+            let sibling_queue = Self::calc_split_queues(&mut self.out_queue, &subshard)?;
+            let (q0, q1) = if s0 == subshard {
+                (self.out_queue.clone(), sibling_queue.clone())
+            } else {
+                (sibling_queue.clone(), self.out_queue.clone())
+            };
+            let visited = usage_tree.build_visited_set();
+            engine.set_split_queues(self.block_id(), q0, q1, visited);
+            log::warn!(
+                "There is no precalculated split queues (prev block {}), calculated TIME {}ms", 
+                self.block_id(), now.elapsed().as_millis());
+            sibling_queue
+        };
+
+        let sibling = subshard.sibling();
         let mut ihr_pending = self.ihr_pending.clone();
         self.ihr_pending.split_inplace(&subshard.shard_key(false))?;
         ihr_pending.split_inplace(&sibling.shard_key(false))?;
@@ -276,7 +330,7 @@ impl OutMsgQueueInfoStuff {
         );
         let mut sibling = OutMsgQueueInfoStuff {
             block_id,
-            out_queue,
+            out_queue: sibling_queue,
             ihr_pending,
             entries,
             min_seqno,
@@ -361,9 +415,8 @@ impl OutMsgQueueInfoStuff {
     }
 
     // remove all messages which are not from new_shard
-    fn filter_messages(&mut self, new_shard: &ShardIdent, shard_prefix: &SliceData) -> Result<()> {
+    fn filter_messages(&mut self, new_shard: &ShardIdent) -> Result<()> {
         let old_shard = self.shard().clone();
-        self.out_queue.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
         self.out_queue.hashmap_filter(|_key, mut slice| {
             // log::debug!("scanning OutMsgQueue entry with key {:x}", key);
             let lt = u64::construct_from(&mut slice)?;
@@ -376,7 +429,8 @@ impl OutMsgQueueInfoStuff {
                 true => Ok(HashmapFilterResult::Accept),
                 false => Ok(HashmapFilterResult::Remove)
             }
-        })
+        })?;
+        Ok(())
     }
 
     pub fn end_lt(&self) -> u64 { self.end_lt }
@@ -514,6 +568,8 @@ impl MsgQueueManager {
         after_merge: bool,
         after_split: bool,
         stop_flag: Option<&AtomicBool>,
+        usage_tree: Option<&UsageTree>,
+        imported_visited: Option<&mut HashSet<UInt256>>,
     ) -> Result<Self> {
         let mut mc_shard_states = HashMap::new();
         mc_shard_states.insert(last_mc_state.block_id().seq_no, last_mc_state.clone());
@@ -562,7 +618,24 @@ impl MsgQueueManager {
                 };
             } else if after_split {
                 log::debug!("prepare split for state {}", prev_out_queue_info.block_id());
-                let sibling_out_queue_info = prev_out_queue_info.split(shard.clone(), engine)?;
+                let own_usage_tree;
+                let usage_tree = if let Some(ut) = usage_tree {
+                    ut
+                } else {
+                    let ss = &prev_states[0];
+                    own_usage_tree = UsageTree::with_params(ss.root_cell().clone(), true);
+                    let root_cell = own_usage_tree.root_cell();
+                    let usage_state = ShardStateStuff::from_state(
+                        ss.block_id().clone(), 
+                        ShardStateUnsplit::construct_from_cell(root_cell)?,
+                        #[cfg(feature = "telemetry")]
+                        engine.engine_telemetry(),
+                        engine.engine_allocated()
+                    )?;
+                    prev_out_queue_info = OutMsgQueueInfoStuff::from_shard_state(&usage_state)?;
+                    &own_usage_tree
+                };
+                let sibling_out_queue_info = prev_out_queue_info.split(shard.clone(), engine, &usage_tree, imported_visited)?;
                 Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, 
                     Some(sibling_out_queue_info), prev_states[0].shard(), &stop_flag)?;
                 next_out_queue_info = match next_state_opt {
@@ -739,7 +812,8 @@ impl MsgQueueManager {
                     // compute the part of virtual sibling's OutMsgQueue with destinations in our shard
                     let sib_shard = shard.sibling();
                     let shard_prefix = shard.shard_key(true);
-                    neighbors[i].filter_messages(&sib_shard, &shard_prefix)
+                    neighbors[i].out_queue.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
+                    neighbors[i].filter_messages(&sib_shard)
                         .map_err(|err| error!("cannot filter virtual sibling's OutMsgQueue from that of \
                             the last common ancestor: {}", err))?;
                     neighbors[i].set_shard(sib_shard);
@@ -807,31 +881,32 @@ impl MsgQueueManager {
         let mut queue = self.next_out_queue_info.out_queue.clone();
         let mut skipped = 0;
         let mut deleted = 0;
-        
+
         // Temp fix. Need to review and fix limits management further.
+        // TODO: put it to config
         let mut processed_count_limit = 25_000; 
-        
+
         queue.hashmap_filter(|_key, mut slice| {
             if block_full {
-                log::warn!("BLOCK FULL when cleaning output queue, cleanup is partial");
+                log::warn!("BLOCK FULL when fast cleaning output queue, cleanup is partial");
                 partial = true;
                 return Ok(HashmapFilterResult::Stop)
             }
-            
+
             // Temp fix. Need to review and fix limits management further.
-            processed_count_limit -= 1;
             if processed_count_limit == 0 {
-                log::warn!("clean_out_msg_queue: stopped cleaning messages queue because of count limit");
+                log::warn!("clean_out_msg_queue: stopped fast cleaning messages queue because of count limit");
                 partial = true;
                 return Ok(HashmapFilterResult::Stop)
             }
-            
+            processed_count_limit -= 1;
+
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
-            log::debug!("Scanning outbound {}", enq);
+            // log::debug!("Scanning outbound {}", enq);
             let (processed, end_lt) = self.already_processed(&enq)?;
             if processed {
-                log::debug!("Outbound {} has beed already delivered, dequeueing", enq);
+                // log::debug!("Outbound {} has beed already delivered, dequeueing fast", enq);
                 block_full = on_message(Some((enq, end_lt)), self.next_out_queue_info.out_queue.data())?;
                 deleted += 1;
                 return Ok(HashmapFilterResult::Remove)
@@ -839,6 +914,35 @@ impl MsgQueueManager {
             skipped += 1;
             Ok(HashmapFilterResult::Accept)
         })?;
+        // we reached processed_count_limit - try to remove slow by LT_HASH
+        if processed_count_limit == 0 {
+            // TODO: put it to config
+            processed_count_limit = 50;
+            let mut iter = MsgQueueMergerIterator::from_queue(&queue)?;
+            while let Some(k_v) = iter.next() {
+                let (key, enq, _created_lt, _) = k_v?;
+                if block_full {
+                    log::warn!("BLOCK FULL when slow cleaning output queue, cleanup is partial");
+                    partial = true;
+                    break;
+                }
+                if processed_count_limit == 0 {
+                    log::warn!("clean_out_msg_queue: stopped slow cleaning messages queue because of count limit");
+                    partial = true;
+                    break;
+                }
+                processed_count_limit -= 1;
+                let (processed, end_lt) = self.already_processed(&enq)?;
+                if !processed {
+                    break;
+                }
+                // log::debug!("Outbound {} has beed already delivered, dequeueing slow", enq);
+                queue.remove(SliceData::load_builder(key.write_to_new_cell()?)?)?;
+                block_full = on_message(Some((enq, end_lt)), self.next_out_queue_info.out_queue.data())?;
+                deleted += 1;
+            }
+            queue.after_remove()?;
+        }
         log::debug!("Deleted {} messages from out_msg_queue, skipped {}", deleted, skipped);
         self.next_out_queue_info.out_queue = queue;
         // if (verbosity >= 2) {
@@ -879,7 +983,7 @@ impl MsgQueueManager {
 
 impl MsgQueueManager {
     /// create iterator for merging all output messages from all neighbors to our shard
-    pub fn merge_out_queue_iter(&self, shard: &ShardIdent) -> Result<MsgQueueMergerIterator> {
+    pub fn merge_out_queue_iter(&self, shard: &ShardIdent) -> Result<MsgQueueMergerIterator<BlockIdExt>> {
         MsgQueueMergerIterator::from_manager(self, shard)
     }
     /// find enquque message and return it with neighbor id 
@@ -909,33 +1013,45 @@ impl MsgQueueManager {
 }
 
 #[derive(Eq, PartialEq)]
-struct RootRecord {
+struct RootRecord<T> {
     lt: u64,
     cursor: SliceData,
     bit_len: usize,
     key: BuilderData,
-    block_id: BlockIdExt
+    id: T
 }
 
-impl RootRecord {
+impl<T: Eq> RootRecord<T> {
     fn new(
         lt: u64,
         cursor: SliceData,
         bit_len: usize,
         key: BuilderData,
-        block_id: BlockIdExt
+        id: T
     ) -> Self {
         Self {
             lt,
             cursor,
             bit_len,
             key,
-            block_id
+            id
         }
+    }
+    fn from_cell(cell: &Cell, mut bit_len: usize, id: T) -> Result<Self> {
+        let mut cursor = SliceData::load_cell_ref(cell)?;
+        let key = cursor.get_label_raw(&mut bit_len, BuilderData::default())?;
+        let lt = cursor.get_next_u64()?;
+        Ok(Self {
+            lt,
+            cursor,
+            bit_len,
+            key,
+            id
+        })
     }
 }
 
-impl Ord for RootRecord {
+impl<T: Eq> Ord for RootRecord<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // first compare lt descending, because Vec is a stack
         let mut cmp = self.lt.cmp(&other.lt);
@@ -950,29 +1066,26 @@ impl Ord for RootRecord {
         cmp.reverse()
     }
 }
-impl PartialOrd for RootRecord {
+impl<T: Eq> PartialOrd for RootRecord<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
 }
 
 /// it iterates messages ascending create_lt and hash
-pub struct MsgQueueMergerIterator {
+pub struct MsgQueueMergerIterator<T> {
     // store branches descending by lt and hash because Vec works like Stack
-    roots: Vec<RootRecord>,
+    roots: Vec<RootRecord<T>>,
 }
 
-impl MsgQueueMergerIterator {
+impl MsgQueueMergerIterator<BlockIdExt> {
     pub fn from_manager(manager: &MsgQueueManager, shard: &ShardIdent) -> Result<Self> {
         let shard_prefix = shard.shard_key(true);
         let mut roots = vec![];
         for nb in manager.neighbors.iter().filter(|nb| !nb.is_disabled()) {
             let mut out_queue_short = nb.out_queue.clone();
             out_queue_short.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
-            if let Some(root) = out_queue_short.data() {
-                let mut cursor = SliceData::load_cell_ref(root)?;
-                let mut bit_len = out_queue_short.bit_len();
-                let key = cursor.get_label_raw(&mut bit_len, BuilderData::default())?;
-                let lt = cursor.get_next_u64()?;
-                roots.push(RootRecord::new(lt, cursor, bit_len, key, nb.block_id().clone()));
+            if let Some(cell) = out_queue_short.data() {
+                roots.push(RootRecord::from_cell(cell, out_queue_short.bit_len(), nb.block_id().clone())?);
+                // roots.push(RootRecord::new(lt, cursor, bit_len, key, nb.block_id().clone()));
             }
         }
         if !roots.is_empty() {
@@ -981,17 +1094,30 @@ impl MsgQueueMergerIterator {
         }
         Ok(Self { roots })
     }
-    fn insert(&mut self, root: RootRecord) {
+}
+
+impl MsgQueueMergerIterator<u8> {
+    pub fn from_queue(out_queue: &OutMsgQueue) -> Result<Self> {
+        let mut roots = Vec::new();
+        if let Some(cell) = out_queue.data() {
+            roots.push(RootRecord::from_cell(cell, out_queue.bit_len(), 0)?);
+        }
+        Ok(Self { roots })
+    }
+}
+
+impl<T: Clone + Eq> MsgQueueMergerIterator<T> {
+    fn insert(&mut self, root: RootRecord<T>) {
         let idx = self.roots.binary_search(&root).unwrap_or_else(|x| x);
         self.roots.insert(idx, root);
         debug_assert!(self.roots.first().unwrap().lt >= self.roots.last().unwrap().lt);
     }
-    fn next_item(&mut self) -> Result<Option<(OutMsgQueueKey, MsgEnqueueStuff, u64, BlockIdExt)>> {
+    fn next_item(&mut self) -> Result<Option<(OutMsgQueueKey, MsgEnqueueStuff, u64, T)>> {
         while let Some(mut root) = self.roots.pop() {
             if root.bit_len == 0 {
                 let key = OutMsgQueueKey::construct_from_cell(root.key.into_cell()?)?;
                 let enq = MsgEnqueueStuff::construct_from(&mut root.cursor, root.lt)?;
-                return Ok(Some((key, enq, root.lt, root.block_id)))
+                return Ok(Some((key, enq, root.lt, root.id)))
             }
             for idx in 0..2 {
                 let mut bit_len = root.bit_len - 1;
@@ -1000,15 +1126,15 @@ impl MsgQueueMergerIterator {
                 key.append_bit_bool(idx == 1)?;
                 key = cursor.get_label_raw(&mut bit_len, key)?;
                 let lt = cursor.get_next_u64()?;
-                self.insert(RootRecord::new(lt, cursor, bit_len, key, root.block_id.clone()));
+                self.insert(RootRecord::new(lt, cursor, bit_len, key, root.id.clone()));
             }
         }
         Ok(None)
     }
 }
 
-impl Iterator for MsgQueueMergerIterator {
-    type Item = Result<(OutMsgQueueKey, MsgEnqueueStuff, u64, BlockIdExt)>;
+impl<T: Clone + Eq> Iterator for MsgQueueMergerIterator<T> {
+    type Item = Result<(OutMsgQueueKey, MsgEnqueueStuff, u64, T)>;
     fn next(&mut self) -> Option<Self::Item> {
         self.next_item().transpose()
     }

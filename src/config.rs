@@ -90,6 +90,22 @@ impl Default for CellsDbConfig {
     }
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
+pub struct CollatorConfig {
+    pub cutoff_timeout_ms: u32,
+    pub stop_timeout_ms: u32,
+    pub max_collate_threads: u32,
+}
+impl Default for CollatorConfig {
+    fn default() -> Self {
+        Self {
+            cutoff_timeout_ms: 1000,
+            stop_timeout_ms: 1500,
+            max_collate_threads: 1,
+        }
+    }
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct TonNodeConfig {
     log_config_name: Option<String>,
@@ -132,6 +148,8 @@ pub struct TonNodeConfig {
     low_memory_mode: bool,
     #[serde(default)]
     cells_db_config: CellsDbConfig,
+    #[serde(default)]
+    collator_config: CollatorConfig,
 }
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
@@ -536,6 +554,9 @@ impl TonNodeConfig {
         &self.cells_db_config
     }
 
+    pub fn collator_config(&self) -> &CollatorConfig {
+        &self.collator_config
+    }
  
     pub fn load_global_config(&self) -> Result<TonNodeGlobalConfig> {
         let name = self.ton_global_config_name.as_ref().ok_or_else(

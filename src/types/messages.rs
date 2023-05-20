@@ -75,6 +75,7 @@ impl MsgEnvelopeStuff {
         })
     }
     pub fn inner(&self) -> &MsgEnvelope { &self.env }
+    pub fn serialize(&self) -> Result<Cell> { self.env.serialize() }
     pub fn message(&self) -> &Message { &self.msg }
     pub fn message_hash(&self) -> UInt256 { self.env.message_hash() }
     pub fn message_cell(&self) -> Cell { self.env.message_cell() }

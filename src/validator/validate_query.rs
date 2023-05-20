@@ -759,6 +759,8 @@ impl ValidateQuery {
             base.after_merge,
             base.after_split,
             None,
+            None,
+            None,
         ).await
     }
 
@@ -2733,6 +2735,7 @@ impl ValidateQuery {
     // checks that all messages imported from our outbound queue into neighbor shards have been dequeued
     // similar to Collator::out_msg_queue_cleanup()
     // (but scans new outbound queue instead of the old)
+    #[allow(dead_code)]
     fn check_delivered_dequeued(base: &ValidateBase, manager: &MsgQueueManager) -> Result<bool> {
         log::debug!(target: "validate_query", "scanning new outbound queue and checking delivery status of all messages");
         for nb in manager.neighbors() {
@@ -4132,7 +4135,8 @@ impl ValidateQuery {
 
         Self::check_processed_upto(&base, &manager, &mc_data)?;
         Self::check_in_queue(&base, &manager)?;
-        Self::check_delivered_dequeued(&base, &manager)?;
+        // Excessive check: validity of message in queue is checked elsewhere
+        // Self::check_delivered_dequeued(&base, &manager)?;
         Self::check_all_ticktock_processed(&base)?;
         Self::check_message_processing_order(&mut base)?;
         Self::check_new_state(&mut base, &mc_data, &manager)?;

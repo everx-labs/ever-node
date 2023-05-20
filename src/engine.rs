@@ -14,7 +14,10 @@
 use crate::{
     block::{BlockStuff, BlockIdExtExtention},
     block_proof::BlockProofStuff,
-    config::{TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig, ValidatorManagerConfig},
+    config::{
+        TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig, 
+        ValidatorManagerConfig, CollatorConfig
+    },
     engine_traits::{
         ExternalDb, EngineAlloc, EngineOperations,
         OverlayOperations, PrivateOverlayOperations, Server,
@@ -74,17 +77,17 @@ use statsd::client;
 use std::sync::atomic::AtomicI32;
 use std::{
     ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering, AtomicU64}},
-    time::Duration, collections::HashMap,
+    time::Duration, collections::{HashMap, HashSet},
 };
 #[cfg(feature = "slashing")]
 use std::collections::HashSet;
 #[cfg(feature = "metrics")]
 use std::env;
-use ton_block::{self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL, GlobalCapabilities};
+use ton_block::{self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL, GlobalCapabilities, OutMsgQueue};
 use storage::{StorageAlloc, block_handle_db::BlockHandle, types::StorageCell};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
-use ton_types::{error, fail, Cell, Result};
+use ton_types::{error, fail, Cell, Result, UInt256};
 #[cfg(feature = "slashing")]
 use ton_types::{UInt256, HashmapType};
 use ton_api::ton::ton_node::{
@@ -127,10 +130,14 @@ pub struct Engine {
     remp_capability: AtomicBool,
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
+    collator_config: CollatorConfig,
  
     shard_states_keeper: Arc<ShardStatesKeeper>,
     #[cfg(feature="workchains")]
     pub workchain_id: AtomicI32,
+
+    // None - queue calculating is in progress
+    split_queues_cache: lockfree::map::Map<BlockIdExt, Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)>>,
 
     validation_status: lockfree::map::Map<ShardIdent, u64>,
     collation_status: lockfree::map::Map<ShardIdent, u64>,
@@ -559,6 +566,7 @@ impl Engine {
         let control_config = general_config.control_server()?;
         let global_config = general_config.load_global_config()?;
         let test_bundles_config = general_config.test_bundles_config().clone();
+        let collator_config = general_config.collator_config().clone();
         let low_memory_mode = general_config.low_memory_mode();
 
         let network = NodeNetwork::new(
@@ -724,11 +732,13 @@ impl Engine {
             low_memory_mode,
             remp_capability: AtomicBool::new(false),
             test_bundles_config,
+            collator_config,
             shard_states_keeper: shard_states_keeper.clone(),
             #[cfg(feature="workchains")]
             workchain_id: AtomicI32::new(workchain_id),
             validation_status: lockfree::map::Map::new(),
             collation_status: lockfree::map::Map::new(),
+            split_queues_cache: lockfree::map::Map::new(),
             #[cfg(feature = "slashing")]
             validated_block_stats_sender,
             #[cfg(feature = "slashing")]
@@ -891,6 +901,10 @@ impl Engine {
         &self.test_bundles_config
     }
 
+    pub fn collator_config(&self) -> &CollatorConfig {
+        &self.collator_config
+    }
+
     #[cfg(feature = "telemetry")]
     pub fn full_node_telemetry(&self) -> &FullNodeTelemetry {
         &self.full_node_telemetry
@@ -967,6 +981,9 @@ impl Engine {
         self.remp_capability.store(value, Ordering::Relaxed);
     }
 
+    pub fn split_queues_cache(&self) -> &lockfree::map::Map<BlockIdExt, Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)>> {
+        &self.split_queues_cache
+    }
 
     pub async fn download_and_apply_block_worker(
         self: Arc<Self>, 
@@ -1170,6 +1187,17 @@ impl Engine {
         }
         let id = block.id().clone();
         self.next_block_applying_awaiters.do_or_wait(&prev_id, None, async move { Ok(id) }).await?;
+
+        let mut total = 0;
+        let mut removed = 0;
+        for guard in &self.split_queues_cache {
+            total += 1;
+            if self.shard_states_keeper.allow_state_gc(guard.key())? {
+                self.split_queues_cache.remove(guard.key());
+                removed += 1;
+            }
+        }
+        log::debug!("Split queues cache GC: total {total}, removed {removed}");
 
         Ok(())
     }

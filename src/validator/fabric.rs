@@ -186,7 +186,6 @@ pub async fn run_collate_query (
     collator_id: PublicKey,
     set: ValidatorSet,
     engine: Arc<dyn EngineOperations>,
-    timeout: u32,
 ) -> Result<ValidatorBlockCandidate>
 {
     #[cfg(feature = "metrics")]
@@ -202,7 +201,7 @@ pub async fn run_collate_query (
         None,
         CollatorSettings::default()
     )?;
-    let collator_result = collator.collate(timeout).await;
+    let collator_result = collator.collate().await;
 
     #[cfg(feature = "metrics")]
     STATSD.decr(&format!("run_collators_{}", shard));

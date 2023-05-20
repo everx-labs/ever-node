@@ -31,6 +31,7 @@ use crate::{
             compute_validator_list_id,
             ValidatorListHash
         },
+        out_msg_queue::OutMsgQueueInfoStuff,
     },
     config::{RempConfig, ValidatorManagerConfig}
 };
@@ -606,7 +607,7 @@ impl ValidatorManagerImpl {
                 cc_seqno,
                 &self.config
             );
-            
+
             let session_info = SessionInfo::new(ident.clone(), session_id.clone(), vsubset.clone());
             let old_shards: Vec<ShardIdent> = prev_blocks.iter().map(|blk| blk.shard_id.clone()).collect();
             self.session_history.new_session_after(session_info.clone(), old_shards.clone())?;
@@ -825,6 +826,7 @@ impl ValidatorManagerImpl {
         let mut future_shards: HashSet<ShardIdent> = HashSet::new();
         // Validator sets and  for shards that will eventually be started
         let mut our_future_shards: HashMap<ShardIdent, (ValidatorSet, ValidatorListHash)> = HashMap::new();
+        let mut blocks_before_split: HashSet<BlockIdExt> = HashSet::new();
 
         let (master, workchain_id) = self.engine.processed_workchain().await?;
         new_shards.insert(ShardIdent::masterchain(), vec![last_masterchain_block.clone()]);
@@ -846,7 +848,8 @@ impl ValidatorManagerImpl {
                         Err(e) => log::error!(target: "validator_manager", "Cannot split shard: `{}`", e),
                         Ok((l,r)) => {
                             new_shards.insert(l, vec![top_block.clone()]);
-                            new_shards.insert(r, vec![top_block]);
+                            new_shards.insert(r, vec![top_block.clone()]);
+                            blocks_before_split.insert(top_block);
                         }
                     }
                 } else if descr.before_merge {
@@ -1018,6 +1021,28 @@ impl ValidatorManagerImpl {
                     self.validator_sessions.insert(session_id, session);
                 }
             }
+        }
+
+        let mut precalc_split_queues_for: HashSet<BlockIdExt> = HashSet::new();
+        for (_, session) in &self.validator_sessions {
+            for id in &blocks_before_split {
+                if id.shard().is_parent_for(session.shard()) {
+                    log::trace!(target: "validator_manager", "precalc_split_queues_for {}", id);
+                    precalc_split_queues_for.insert(id.clone());
+                }
+            }
+        }
+
+        // start background tasks which will precalculate split out messages queues
+        for id in precalc_split_queues_for {
+            let engine = self.engine.clone();
+            tokio::spawn(async move {
+                log::trace!(target: "validator_manager", "Split queues precalculating for {}", id);
+                match OutMsgQueueInfoStuff::precalc_split_queues(&engine, &id).await {
+                    Ok(_) => log::trace!(target: "validator_manager", "Split queues precalculated for {}", id),
+                    Err(e) => log::error!(target: "validator_manager", "Can't precalculate split queues for {}: {}", id, e)
+                }
+            });
         }
 
         if rotate_all_shards(&mc_state_extra) {

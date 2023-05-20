@@ -532,7 +532,6 @@ impl ValidatorGroup {
                     self.local_key.clone(),
                     self.validator_set.clone(),
                     self.engine.clone(),
-                    1000,
                 ).await {
                     Ok(b) => Ok(Arc::new(b)),
                     Err(x) => Err(x)
