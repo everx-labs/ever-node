@@ -19,6 +19,7 @@ colored = '1.9.3'
 crossbeam-channel = '0.4.2'
 dirs = '2.0.2'
 env_logger = '0.7.1'
+enum-as-inner = '=0.5.1'
 failure = '0.1'
 futures = '0.3.1'
 futures-timer = '3.0.1'
@@ -41,7 +42,7 @@ stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
 adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.7.143' }
 catchain = { path = 'catchain' }
-ctrlc = { features = [ 'termination' ], version = '3.2.1' }
+ctrlc = { features = [ 'termination' ], version = '=3.2.5' }
 dht = { git = 'https://github.com/tonlabs/ever-dht.git', tag = '0.5.154' }
 ever-crypto = { git = 'https://github.com/tonlabs/ever-crypto.git', tag = '0.1.101' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
