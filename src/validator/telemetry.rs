@@ -503,10 +503,6 @@ impl RempCoreTelemetry {
         self.deleted_from_cache.fetch_add(deleted_messages, Ordering::Relaxed);
     }
 
-    pub fn cache_size(&self, size: usize) {
-        self.cache_size.update(size as u64);
-    }
-
     pub fn cache_mutex_metric(&self) -> Arc<Metric> {
         self.cache_mutex_awaiting.clone()
     }
