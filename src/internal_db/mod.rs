@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -35,9 +35,9 @@ use storage::{
 use storage::shardstate_db_async::{self, AllowStateGcResolver, ShardStateDb};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
-use ton_block::{Block, BlockIdExt};
-use ton_types::{error, fail, Result, UInt256, Cell};
-use ton_types::{DoneCellsStorage, BagOfCells, BocSerialiseMode};
+use ton_block::{Block, BlockIdExt, INVALID_WORKCHAIN_ID};
+use ton_types::{error, fail, Result, UInt256, Cell, BocWriter, MAX_SAFE_DEPTH};
+use ton_types::{DoneCellsStorage};
 
 /// Full node state keys
 pub const INITIAL_MC_BLOCK: &str         = "InitMcBlockId";
@@ -121,7 +121,7 @@ impl BlockResult {
     }
 
     /// Check update
-    pub fn is_updated(&self) -> bool {
+    pub fn _is_updated(&self) -> bool {
         match self.status {
             DataStatus::Updated => true,
             _ => false
@@ -429,6 +429,7 @@ impl InternalDb {
         &self, 
         id: &BlockIdExt, 
         block: Option<&Block>,
+        is_queue_update: Option<(i32, bool)>, // (update for, is_empty)
         utime: Option<u32>,
         callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<BlockResult> {
@@ -438,10 +439,14 @@ impl InternalDb {
             return Ok(BlockResult::with_status(handle, DataStatus::Fetched))
         }
         let meta = if let Some(block) = block {
-            BlockMeta::from_block(block)?
+            if let Some((target_wc, is_empty)) = is_queue_update {
+                BlockMeta::from_queue_update(block, target_wc, is_empty)?
+            } else {
+                BlockMeta::from_block(block)?
+            }
         } else if id.seq_no == 0 {
             if let Some(utime) = utime {
-                BlockMeta::with_data(0, utime, 0, 0)
+                BlockMeta::with_data(0, utime, 0, 0, INVALID_WORKCHAIN_ID)
             } else {
                 fail!("Cannot create handle for zero block {} without UNIX time")
             }
@@ -469,7 +474,11 @@ impl InternalDb {
     ) -> Result<BlockResult> {
         let _tc = TimeChecker::new(format!("store_block_data {}", block.id()), 100);
         let mut result = self.create_or_load_block_handle(
-            block.id(), Some(block.block()), None, callback.clone()
+            block.id(),
+            Some(block.block_or_queue_update()?),
+            block.is_queue_update_for().map(|o| (o, false)),
+            None,
+            callback.clone()
         )?;
         let handle = result.clone().to_non_updated().ok_or_else(
             || error!(
@@ -494,7 +503,11 @@ impl InternalDb {
     pub async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         let _tc = TimeChecker::new(format!("load_block_data {}", handle.id()), 100);
         let raw_block = self.load_block_data_raw(handle).await?;
-        BlockStuff::deserialize(handle.id().clone(), raw_block)
+        if let Some(target_wc)= handle.is_queue_update_for() {
+            BlockStuff::deserialize_queue_update(handle.id().clone(), target_wc, raw_block)
+        } else {
+            BlockStuff::deserialize_block(handle.id().clone(), raw_block)
+        }
     }
 
     pub async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
@@ -562,7 +575,7 @@ impl InternalDb {
             BlockResult::with_status(handle, DataStatus::Fetched)
         } else {
             let (virt_block, _) = proof.virtualize_block()?;
-            self.create_or_load_block_handle(id, Some(&virt_block), None, callback.clone())?
+            self.create_or_load_block_handle(id, Some(&virt_block), None, None, callback.clone())?
         };
         let handle = result.clone().to_non_updated().ok_or_else(
             || error!("INTERNAL ERROR: block {} result mismatch in store_block_proof", id)
@@ -680,18 +693,32 @@ impl InternalDb {
         use_cache: bool
     ) -> Result<Arc<ShardStateStuff>> {
         let _tc = TimeChecker::new(format!("load_shard_state_dynamic {}  use", id), 30);
-        Ok(
-            ShardStateStuff::from_root_cell(
-                id.clone(), 
-                self.shard_state_dynamic_db.get(
-                    id, 
-                    use_cache
-                )?,
+
+        let handle = self.load_block_handle(id)?.ok_or_else(
+            || error!("Cannot load handle for block {}", id)
+        )?;
+
+        let root_cell = self.shard_state_dynamic_db.get(handle.id(), use_cache)?;
+
+        let ss = if let Some (target_wc) = handle.is_queue_update_for() {
+            ShardStateStuff::from_out_msg_queue_root_cell(
+                handle.id().clone(), 
+                root_cell,
+                target_wc,
                 #[cfg(feature = "telemetry")]
                 &self.telemetry,
                 &self.allocated
             )?
-        )
+        } else {
+            ShardStateStuff::from_state_root_cell(
+                handle.id().clone(), 
+                root_cell,
+                #[cfg(feature = "telemetry")]
+                &self.telemetry,
+                &self.allocated
+            )?
+        };
+        Ok(ss)
     }
 
     pub fn load_shard_state_dynamic(&self, id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
@@ -721,34 +748,20 @@ impl InternalDb {
             let shard_state_dynamic_db = self.shard_state_dynamic_db.clone();
             let shard_state_persistent_db = self.shard_state_persistent_db.clone();
             tokio::task::spawn_blocking(move || -> Result<()> {
-                log::debug!("store_shard_state_persistent {}", id);
-                let cells_storage = shard_state_dynamic_db.create_ordered_cells_storage(&root_hash)?;
-                let now1 = std::time::Instant::now();
                 let root_cell = state.root_cell().clone();
                 // Drop state - don't keep in memory a root cell that keeps full tree!
                 std::mem::drop(state);
-                let boc = BagOfCells::with_cells_storage(
-                    vec!(root_cell),
-                    vec!(),
-                    cells_storage,
-                    abort.deref(),
-                )?;
+
+                log::debug!("store_shard_state_persistent {}", id);
+                let cells_storage = shard_state_dynamic_db.create_ordered_cells_storage(&root_hash)?;
+                let now1 = std::time::Instant::now();
+                let boc = BocWriter::with_params(
+                    [&root_cell], MAX_SAFE_DEPTH, cells_storage, abort.deref())?;
                 log::info!("store_shard_state_persistent {:x} building boc TIME {}sec", root_hash, now1.elapsed().as_secs());
 
                 let mut dest = shard_state_persistent_db.get_write_object(&id)?;
                 let now2 = std::time::Instant::now();
-                boc.write_to_with_abort(
-                    &mut dest,
-                    BocSerialiseMode::Generic{
-                        index: false,
-                        crc: false,
-                        cache_bits: false,
-                        flags: 0 
-                    },
-                    None,
-                    None,
-                    abort.deref(),
-                )?;
+                boc.write(&mut dest)?;
                 log::info!(
                     "store_shard_state_persistent {:x} DONE; write boc TIME {}sec, total TIME {}sec",
                     root_hash, now2.elapsed().as_secs(), now1.elapsed().as_secs()
@@ -806,7 +819,7 @@ impl InternalDb {
 
         // Fast (in-memory) version
         let data = self.shard_state_persistent_db.read_whole_file(id).await?;
-        ShardStateStuff::deserialize_inmem(
+        ShardStateStuff::deserialize_state_inmem(
             id.clone(),
             Arc::new(data),
             #[cfg(feature = "telemetry")]
@@ -1081,7 +1094,6 @@ impl InternalDb {
         Ok(result)
     }
 
-
     pub fn remove_top_shard_block(&self, id: &TopBlockDescrId) -> Result<()> {
         let _tc = TimeChecker::new(format!("remove_top_shard_block {}", id), 50);
         self.shard_top_blocks_db.delete(&id.to_bytes()?)
@@ -1096,13 +1108,13 @@ impl InternalDb {
         log::info!("Adjusted states gc interval {} -> {}", prev, interval_ms);
     }
 
-    pub async fn truncate_database(&self, mc_block_id: &BlockIdExt, processed_wc: i32) -> Result<()> {
+    pub async fn truncate_database(&self, mc_block_id: &BlockIdExt) -> Result<()> {
         // store shard blocks to truncate
         let prev_id = self.load_block_prev1(mc_block_id)?;
         let prev_handle = self.load_block_handle(&prev_id)?
             .ok_or_else(|| error!("there is no handle for block {}", prev_id))?;
         let prev_block = self.load_block_data(&prev_handle).await?;
-        let top_blocks = prev_block.shard_hashes()?.top_blocks(&[processed_wc])?;
+        let top_blocks = prev_block.shard_hashes()?.top_blocks_all()?;
 
         // truncate archives
         self.archive_manager.trunc(mc_block_id, &|id: &BlockIdExt| {
@@ -1133,13 +1145,11 @@ impl InternalDb {
             if id.shard().is_masterchain() && id.seq_no() >= mc_block_id.seq_no() {
                 clear_dbs(self, id);
             } else {
-                if id.shard().workchain_id() == processed_wc {
-                    for tb in &top_blocks {
-                        if id.shard().intersect_with(tb.shard()) {
-                            if id.seq_no() > tb.seq_no() {
-                                clear_dbs(self, id);
-                                break;
-                            }
+                for tb in &top_blocks {
+                    if id.shard().intersect_with(tb.shard()) {
+                        if id.seq_no() > tb.seq_no() {
+                            clear_dbs(self, id);
+                            break;
                         }
                     }
                 }
@@ -1148,13 +1158,11 @@ impl InternalDb {
         })?;
         self.next2_block_db.for_each(&mut |_key, val| {
             let id = BlockIdExt::deserialize(&mut Cursor::new(&val))?;
-            if id.shard().workchain_id() == processed_wc {
-                for tb in &top_blocks {
-                    if id.shard().intersect_with(tb.shard()) {
-                        if id.seq_no() > tb.seq_no() {
-                            clear_dbs(self, id);
-                            break;
-                        }
+            for tb in &top_blocks {
+                if id.shard().intersect_with(tb.shard()) {
+                    if id.seq_no() > tb.seq_no() {
+                        clear_dbs(self, id);
+                        break;
                     }
                 }
             }
@@ -1201,5 +1209,4 @@ impl InternalDb {
         self.shard_state_dynamic_db.create_done_cells_storage(root_cell_id)
     }
 }
-
 

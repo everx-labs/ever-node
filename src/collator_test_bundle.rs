@@ -17,7 +17,7 @@ use crate::{
     validator::{
         accept_block::create_top_shard_block_description, BlockCandidate,
         out_msg_queue::OutMsgQueueInfoStuff,
-    }
+    }, config::CollatorConfig
 };
 #[cfg(feature = "telemetry")]
 use crate::engine_traits::EngineTelemetry;
@@ -25,8 +25,8 @@ use crate::engine_traits::EngineTelemetry;
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
 use std::{
-    collections::HashMap, convert::{TryFrom, TryInto}, fs::{File, read, write}, 
-    io::Cursor, ops::Deref, sync::{Arc, atomic::AtomicU64} 
+    collections::{HashMap, HashSet}, convert::{TryFrom, TryInto}, fs::{File, read, write}, 
+    ops::Deref, sync::{Arc, atomic::AtomicU64} 
 };
 use storage::{
     StorageAlloc, block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage}, 
@@ -37,10 +37,10 @@ use storage::StorageTelemetry;
 use ton_block::{
     BlockIdExt, Message, ShardIdent, Serializable, MerkleUpdate, Deserializable, 
     ValidatorBaseInfo, BlockSignaturesPure, BlockSignatures, HashmapAugType, 
-    TopBlockDescrSet, GlobalCapabilities,
+    TopBlockDescrSet, GlobalCapabilities, OutMsgQueue,
 };
 use ton_block::{ShardStateUnsplit, TopBlockDescr};
-use ton_types::{UInt256, fail, error, Result, CellType, deserialize_cells_tree};
+use ton_types::{UInt256, fail, error, Result, CellType, read_boc, read_single_root_boc};
 use crate::engine_traits::RempDuplicateStatus;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -165,7 +165,7 @@ impl CollatorTestBundleIndex {
 fn construct_from_file<T: Deserializable>(path: &str) -> Result<(T, UInt256, UInt256)> {
     let bytes = std::fs::read(path)?;
     let fh = UInt256::calc_file_hash(&bytes);
-    let cell = ton_types::deserialize_tree_of_cells(&mut std::io::Cursor::new(bytes))?;
+    let cell = read_single_root_boc(&bytes)?;
     let rh = cell.repr_hash();
     Ok((T::construct_from_cell(cell)?, fh, rh))
 }
@@ -226,7 +226,9 @@ pub struct CollatorTestBundle {
     block_handle_storage: BlockHandleStorage,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<EngineTelemetry>,
-    allocated: Arc<EngineAlloc>
+    allocated: Arc<EngineAlloc>,
+    collator_config: CollatorConfig,
+    split_queues_cache: lockfree::map::Map<BlockIdExt, Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)>>,
 }
 
 #[allow(dead_code)]
@@ -249,7 +251,7 @@ impl CollatorTestBundle {
             &allocated
         )?;
 
-        let mut now = mc_state.state().gen_time() + 1;
+        let mut now = mc_state.state()?.gen_time() + 1;
         let mut states = HashMap::new();
         states.insert(last_mc_state.clone(), mc_state);
         for wc_zero_state_name in wc_zero_state_names {
@@ -299,7 +301,9 @@ impl CollatorTestBundle {
             candidate: None,
             #[cfg(feature = "telemetry")]
             telemetry,
-            allocated
+            allocated,
+            collator_config: CollatorConfig::default(),
+            split_queues_cache: lockfree::map::Map::new(),
         })
     }
 
@@ -365,7 +369,7 @@ impl CollatorTestBundle {
                     &allocated 
                 )?
             } else {
-                ShardStateStuff::deserialize_inmem(
+                ShardStateStuff::deserialize_state_inmem(
                     ss_id.clone(), 
                     Arc::new(data),
                     #[cfg(feature = "telemetry")]
@@ -382,7 +386,7 @@ impl CollatorTestBundle {
             let data = read(&filename).map_err(|_| error!("cannot read file {}", filename))?;
             states.insert(
                 index.id.clone(),
-                ShardStateStuff::deserialize_inmem(
+                ShardStateStuff::deserialize_state_inmem(
                     index.id.clone(), 
                     Arc::new(data),
                     #[cfg(feature = "telemetry")]
@@ -406,7 +410,7 @@ impl CollatorTestBundle {
                 &allocated 
             )?
         } else {
-            ShardStateStuff::deserialize_inmem(
+            ShardStateStuff::deserialize_state_inmem(
                 oldest_mc_state_id.clone(), 
                 Arc::new(data),
                 #[cfg(feature = "telemetry")]
@@ -438,7 +442,7 @@ impl CollatorTestBundle {
                 let new_root = mu.apply_for(&prev_state_root)?;
                 states.insert(
                     id.clone(), 
-                    ShardStateStuff::from_root_cell(
+                    ShardStateStuff::from_state_root_cell(
                         id.clone(), 
                         new_root.clone(),
                         #[cfg(feature = "telemetry")]
@@ -457,7 +461,7 @@ impl CollatorTestBundle {
             let data = read(&filename).map_err(|_| error!("cannot read file {}", filename))?;
             blocks.insert(
                 index.id.clone(),
-                BlockStuff::deserialize(index.id.clone(), data)?
+                BlockStuff::deserialize_block(index.id.clone(), data)?
             );
         }
         for id in index.prev_blocks.iter() {
@@ -466,7 +470,7 @@ impl CollatorTestBundle {
                 let data = read(&filename).map_err(|_| error!("cannot read file {}", filename))?;
                 blocks.insert(
                     id.clone(),
-                    BlockStuff::deserialize(id.clone(), data)?
+                    BlockStuff::deserialize_block(id.clone(), data)?
                 );
             }
         }
@@ -496,7 +500,13 @@ impl CollatorTestBundle {
             candidate,
             #[cfg(feature = "telemetry")]
             telemetry,
-            allocated 
+            allocated,
+            collator_config: CollatorConfig {
+                cutoff_timeout_ms: 1000,
+                stop_timeout_ms: 3000,
+                max_collate_threads: 1,
+            },
+            split_queues_cache: lockfree::map::Map::new(),
         })
     }
 
@@ -506,7 +516,7 @@ impl CollatorTestBundle {
                 self.blocks.get(&self.index.id).ok_or_else(|| error!("Index declares contains_ethalon=true but the block is not found"))?.clone()
             ))
         } else if let Some(candidate) = self.candidate() {
-            Ok(Some(BlockStuff::new(self.index.id.clone(), candidate.data.clone())?))
+            Ok(Some(BlockStuff::deserialize_block_checked(self.index.id.clone(), candidate.data.clone())?))
         } else {
             Ok(None)
         }
@@ -528,7 +538,7 @@ impl CollatorTestBundle {
                 }
             };
             let merkle_update = block
-                .block()
+                .block()?
                 .read_state_update()?;
             let block_id = block.id().clone();
             let ss_root = merkle_update.apply_for(&prev_ss_root)?;
@@ -590,8 +600,7 @@ impl CollatorTestBundle {
         //
         let mut neighbors = vec!();
         let shards = mc_state.shard_hashes()?;
-        let (_master, workchain_id) = engine.processed_workchain().await?;
-        let neighbor_list = shards.neighbours_for(&shard, workchain_id)?;
+        let neighbor_list = shards.neighbours_for(&shard)?;
         for shard in neighbor_list.iter() {
             states.insert(shard.block_id().clone(), engine.load_state(shard.block_id()).await?);
             neighbors.push(shard.block_id().clone());
@@ -654,7 +663,7 @@ impl CollatorTestBundle {
         for mc_seq_no in oldest_mc_seq_no + 1..=newest_mc_seq_no {
             let handle = engine.find_mc_block_by_seq_no(mc_seq_no).await?;
             let block = engine.load_block(&handle).await?;
-            mc_merkle_updates.insert(block.id().clone(), block.block().read_state_update()?);
+            mc_merkle_updates.insert(block.id().clone(), block.block()?.read_state_update()?);
             states.insert(block.id().clone(), engine.load_state(block.id()).await?);
             mc_states.push(block.id().clone());
         }
@@ -695,7 +704,9 @@ impl CollatorTestBundle {
             candidate: None,
             #[cfg(feature = "telemetry")]
             telemetry: create_engine_telemetry(),
-            allocated: create_engine_allocated()
+            allocated: create_engine_allocated(),
+            collator_config: CollatorConfig::default(),
+            split_queues_cache: lockfree::map::Map::new(),
         })
     }
 
@@ -741,13 +752,12 @@ impl CollatorTestBundle {
         //
         let mut neighbors = vec!();
         let shards = if shard.is_masterchain() {
-            let block = BlockStuff::new(candidate.block_id.clone(), candidate.data.clone())?;
+            let block = BlockStuff::deserialize_block_checked(candidate.block_id.clone(), candidate.data.clone())?;
             block.shard_hashes()?
         } else {
             mc_state.shard_hashes()?
         };
-        let (_master, workchain_id) = engine.processed_workchain().await?;
-        let neighbor_list = shards.neighbours_for(&shard, workchain_id)?;
+        let neighbor_list = shards.neighbours_for(&shard)?;
         for shard in neighbor_list.iter() {
             states.insert(shard.block_id().clone(), engine.load_state(shard.block_id()).await?);
             neighbors.push(shard.block_id().clone());
@@ -801,12 +811,12 @@ impl CollatorTestBundle {
         for mc_seq_no in oldest_mc_seq_no + 1..=newest_mc_seq_no {
             let handle = engine.find_mc_block_by_seq_no(mc_seq_no).await?;
             let block = engine.load_block(&handle).await?;
-            mc_merkle_updates.insert(block.id().clone(), block.block().read_state_update()?);
+            mc_merkle_updates.insert(block.id().clone(), block.block()?.read_state_update()?);
             states.insert(block.id().clone(), engine.load_state(block.id()).await?);
             mc_states.push(block.id().clone());
         }
 
-        let b = BlockStuff::new(candidate.block_id.clone(), candidate.data.clone())?;
+        let b = BlockStuff::deserialize_block_checked(candidate.block_id.clone(), candidate.data.clone())?;
 
         let index = CollatorTestBundleIndex {
             id: candidate.block_id.clone(),
@@ -819,7 +829,7 @@ impl CollatorTestBundle {
             prev_blocks: prev_blocks_ids,
             created_by: candidate.created_by.clone(),
             rand_seed: None,
-            now: b.block().read_info()?.gen_utime().as_u32(),
+            now: b.block()?.read_info()?.gen_utime().as_u32(),
             fake: true,
             contains_ethalon: false,
             contains_candidate: true,
@@ -837,7 +847,9 @@ impl CollatorTestBundle {
             candidate: Some(candidate),
             #[cfg(feature = "telemetry")]
             telemetry: create_engine_telemetry(),
-            allocated: create_engine_allocated()
+            allocated: create_engine_allocated(),
+            collator_config: CollatorConfig::default(),
+            split_queues_cache: lockfree::map::Map::new(),
         })
     }
 
@@ -855,8 +867,8 @@ impl CollatorTestBundle {
             || error!("Cannot load handle for block {}", block_id)
         )?;
         let block = engine.load_block(&handle).await?;
-        let info = block.block().read_info()?;
-        let extra = block.block().read_extra()?;
+        let info = block.block()?.read_info()?;
+        let extra = block.block()?.read_extra()?;
         let mut states = HashMap::new();
 
         //
@@ -894,7 +906,7 @@ impl CollatorTestBundle {
                     || error!("Cannot load handle for shard block {}", shard_block_id)               
                 )?.deref()
             ).await?;
-            let info = block.block().read_info()?;
+            let info = block.block()?.read_info()?;
             let prev_blocks_ids = info.read_prev_ids()?;
             let base_info = ValidatorBaseInfo::with_params(
                 info.gen_validator_list_hash_short(),
@@ -940,8 +952,7 @@ impl CollatorTestBundle {
             Err(_) => mc_state.shard_hashes()?
         };
 
-        let (_master, workchain_id) = engine.processed_workchain().await?;
-        let neighbor_list = shards.neighbours_for(block_id.shard(), workchain_id)?;
+        let neighbor_list = shards.neighbours_for(block_id.shard())?;
         for shard in neighbor_list.iter() {
             states.insert(shard.block_id().clone(), engine.load_state(shard.block_id()).await?);
             neighbors.push(shard.block_id().clone());
@@ -1010,7 +1021,7 @@ impl CollatorTestBundle {
         for mc_seq_no in oldest_mc_seq_no + 1..=newest_mc_seq_no {
             let handle = engine.find_mc_block_by_seq_no(mc_seq_no).await?;
             let block = engine.load_block(&handle).await?;
-            mc_merkle_updates.insert(block.id().clone(), block.block().read_state_update()?);
+            mc_merkle_updates.insert(block.id().clone(), block.block()?.read_state_update()?);
             states.insert(block.id().clone(), engine.load_state(block.id()).await?);
             mc_states.push(block.id().clone());
         }
@@ -1044,7 +1055,9 @@ impl CollatorTestBundle {
             candidate: None,
             #[cfg(feature = "telemetry")]
             telemetry: create_engine_telemetry(),
-            allocated: create_engine_allocated()
+            allocated: create_engine_allocated(),
+            collator_config: CollatorConfig::default(),
+            split_queues_cache: lockfree::map::Map::new(),
         })
     }
 
@@ -1248,7 +1261,7 @@ impl EngineOperations for CollatorTestBundle {
         if self.top_shard_blocks.len() > 0 {
             return Ok(self.top_shard_blocks.clone());
         } else if let Some(candidate) = self.candidate() {
-            let collated_roots = deserialize_cells_tree(&mut Cursor::new(&candidate.collated_data))?;
+            let collated_roots = read_boc(&candidate.collated_data)?.roots;
             for i in 0..collated_roots.len() {
                 let croot = collated_roots[i].clone();
                 if croot.cell_type() == CellType::Ordinary {
@@ -1294,6 +1307,39 @@ impl EngineOperations for CollatorTestBundle {
     }
 
     async fn check_remp_duplicate(&self, _message_id: &UInt256) -> Result<RempDuplicateStatus> {
-        Ok(RempDuplicateStatus::Fresh)
+        Ok(RempDuplicateStatus::Fresh(UInt256::default()))
+    }
+
+    fn collator_config(&self) -> &CollatorConfig {
+        &self.collator_config
+    }
+
+    fn set_split_queues_calculating(&self, _before_split_block: &BlockIdExt) -> bool {
+        true
+    }
+
+    fn set_split_queues(
+        &self,
+        before_split_block: &BlockIdExt,
+        queue0: OutMsgQueue,
+        queue1: OutMsgQueue,
+        visited_cells: HashSet<UInt256>,
+    ) {
+        self.split_queues_cache.insert(
+            before_split_block.clone(),
+            Some((queue0, queue1, visited_cells))
+        );
+    }
+
+    fn get_split_queues(
+        &self,
+        before_split_block: &BlockIdExt
+    ) -> Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)> {
+        if let Some(guard) = self.split_queues_cache.get(before_split_block) {
+            if let Some(q) = guard.val() {
+                return Some(q.clone())
+            }
+        }
+        None
     }
 }

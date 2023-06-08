@@ -92,7 +92,6 @@ impl RocksDb {
                 DBWithThreadMode::<MultiThreaded>::open_cf_descriptors(&options, &path, cfs_opt)?
             };
 
-
             // 
             // Clean up CF from old archives
             //

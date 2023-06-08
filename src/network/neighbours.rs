@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -23,11 +23,10 @@ use std::{
     time::{Duration, Instant}
 };
 use ton_types::{error, fail, Result};
-use ton_api::{
-    tag_from_boxed_type,
-    ton::{
-       TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities
-    }
+#[cfg(feature = "telemetry")]
+use ton_api::tag_from_boxed_type;
+use ton_api::ton::{
+    TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities
 };
 
 #[derive(Debug)]
@@ -432,20 +431,16 @@ impl Neighbours {
         let this = self.clone();
         tokio::spawn(async move {
             for peer in peers.iter() {
-                log::trace!("add_new_peers: start find address: peer {}", peer);
+                log::trace!("add_new_peers: searching IP for peer {}...", peer);
                 match DhtNode::find_address(&this.dht, peer).await {
                     Ok(Some((ip, _))) => {
-                        log::info!("add_new_peers: addr peer {}", ip);
+                        log::info!("add_new_peers: peer {}, IP {}", peer, ip);
                         if !this.add_overlay_peer(peer.clone()) {
                             log::debug!("add_new_peers already present");
                         }
                     }
-                    Ok(None) => {
-                        log::warn!("add_new_peers: find address - not found");
-                    }
-                    Err(e) => {
-                        log::warn!("add_new_peers: find address error - {}", e);
-                    }
+                    Ok(None) => log::warn!("add_new_peers: peer {}, IP not found", peer),
+                    Err(e) => log::warn!("add_new_peers: peer {}, IP search error {}", peer, e)
                 }
             }
         });

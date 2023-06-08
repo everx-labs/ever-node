@@ -69,7 +69,6 @@ use std::{
 use ton_types::error;
 use ton_types::Result;
 
-
 #[cfg(target_os = "linux")]
 #[link(name = "tcmalloc", kind = "dylib")]
 extern "C" {

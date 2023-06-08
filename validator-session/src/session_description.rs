@@ -263,7 +263,8 @@ impl SessionDescription for SessionDescriptionImpl {
     }
 
     fn get_delay(&self, mut priority: u32) -> std::time::Duration {
-        if self.sources.len() < 5 {
+        //difference with original TON implementation: enable max performance for single node sessions
+        if self.sources.len() > 1 && self.sources.len() < 5 {
             priority += 1;
         }
 

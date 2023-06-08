@@ -13,7 +13,7 @@
 
 use crate::{block_handle_db, traits::Serializable};
 use std::{io::{Read, Write}, sync::atomic::{AtomicU64, Ordering}};
-use ton_block::Block;
+use ton_block::{Block, INVALID_WORKCHAIN_ID};
 use ton_types::{ByteOrderRead, Result};
 
 #[derive(Debug, Default)]
@@ -21,6 +21,7 @@ pub struct BlockMeta {
     flags: AtomicU64,
     pub gen_utime: u32,
     pub gen_lt: u64,
+    pub queue_update_for: i32,
 }
 
 impl BlockMeta {
@@ -32,19 +33,30 @@ impl BlockMeta {
         } else {
             0
         };
-        Ok(Self::with_data(flags, info.gen_utime().as_u32(), info.start_lt(), 0))
+        Ok(Self::with_data(flags, info.gen_utime().as_u32(), info.start_lt(), 0, INVALID_WORKCHAIN_ID))
+    }
+
+    pub fn from_queue_update(block: &Block, queue_update_for: i32, is_empty: bool) -> Result<Self> {
+        let info = block.read_info()?;
+        let mut flags = block_handle_db::FLAG_IS_QUEUE_UPDATE;
+        if is_empty {
+            flags |= block_handle_db::FLAG_IS_EMPTY_QUEUE_UPDATE;
+        }
+        Ok(Self::with_data(flags, info.gen_utime().as_u32(), info.start_lt(), 0, queue_update_for))
     }
 
     pub fn with_data(
         flags: u32, 
         gen_utime: u32, 
         gen_lt: u64, 
-        masterchain_ref_seq_no: u32
+        masterchain_ref_seq_no: u32,
+        queue_update_for: i32,
     ) -> Self {
         Self {
             flags: AtomicU64::new(((flags as u64) << 32) | masterchain_ref_seq_no as u64),
             gen_utime,
             gen_lt,
+            queue_update_for,
         }
     }
 
@@ -83,6 +95,9 @@ impl Serializable for BlockMeta {
         writer.write_all(&flags.to_le_bytes())?;
         writer.write_all(&self.gen_utime.to_le_bytes())?;
         writer.write_all(&self.gen_lt.to_le_bytes())?;
+        if self.flags() & block_handle_db::FLAG_IS_QUEUE_UPDATE != 0 {
+            writer.write_all(&self.queue_update_for.to_le_bytes())?;
+        }
         Ok(())
     }
 
@@ -92,7 +107,12 @@ impl Serializable for BlockMeta {
         let gen_lt = reader.read_le_u64()?;
         let masterchain_ref_seq_no = flags as u32;
         let flags = (flags >> 32) as u32;
-        let bm = Self::with_data(flags, gen_utime, gen_lt, masterchain_ref_seq_no);
+        let queue_update_for = if flags & block_handle_db::FLAG_IS_QUEUE_UPDATE != 0{
+            reader.read_le_u32()? as i32
+        } else {
+            INVALID_WORKCHAIN_ID
+        };
+        let bm = Self::with_data(flags, gen_utime, gen_lt, masterchain_ref_seq_no, queue_update_for);
         Ok(bm)
     }
 

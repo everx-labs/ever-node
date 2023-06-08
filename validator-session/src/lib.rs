@@ -275,6 +275,7 @@ pub type SlashingAggregatedMetric = slashing::AggregatedMetric;
 #[derive(Clone, Copy, Debug)]
 pub struct SessionOptions {
     /// Catchain processing timeout
+    /// (will be ignored for single-node sessions)
     pub catchain_idle_timeout: std::time::Duration,
 
     /// Maximum number of dependencies to merge
@@ -1505,6 +1506,25 @@ impl SessionFactory {
             db_suffix,
             allow_unsafe_self_blocks_resync,
             overlay_manager,
+            listener,
+        )
+    }
+
+    /// Create session
+    pub fn create_single_node_session(
+        options: &SessionOptions,
+        session_id: &SessionId,
+        local_key: &PrivateKey,
+        db_path: String,
+        db_suffix: String,
+        listener: SessionListenerPtr,
+    ) -> SessionPtr {
+        session::SessionImpl::create_single(
+            options,
+            session_id,
+            local_key,
+            db_path,
+            db_suffix,
             listener,
         )
     }

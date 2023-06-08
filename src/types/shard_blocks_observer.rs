@@ -4,7 +4,7 @@ use crate::{
     shard_state::ShardHashesStuff,
 };
 use ton_types::{Result, error};
-use ton_block::{BlockIdExt, SHARD_FULL, ShardIdent};
+use ton_block::{BlockIdExt, SHARD_FULL, ShardIdent, BASE_WORKCHAIN_ID, MASTERCHAIN_ID};
 use std::{collections::HashSet, sync::Arc};
 use storage::block_handle_db::BlockHandle;
 
@@ -19,24 +19,26 @@ impl ShardBlocksObserver {
         engine: Arc<dyn EngineOperations>,
     ) -> Result<Self> {
         let mut top_processed_blocks = HashSet::new();
-        let (_, processed_wc) = engine.processed_workchain().await?;
-        if start_mc_block.id().seq_no() > 0 {
-            let start_mc_block = engine.load_block(start_mc_block).await?;
-            let shard_hashes: ShardHashesStuff = start_mc_block.shards()?.into();
-            for id in shard_hashes.top_blocks(&vec!(processed_wc))? {
-                top_processed_blocks.insert(id);
+        let processed_wc = engine.processed_workchain().unwrap_or(BASE_WORKCHAIN_ID);
+        if processed_wc != MASTERCHAIN_ID {
+            if start_mc_block.id().seq_no() > 0 {
+                let start_mc_block = engine.load_block(start_mc_block).await?;
+                let shard_hashes: ShardHashesStuff = start_mc_block.shards()?.into();
+                for id in shard_hashes.top_blocks(&vec!(processed_wc))? {
+                    top_processed_blocks.insert(id);
+                }
+            } else {
+                let zerostate = engine.load_state(start_mc_block.id()).await?;
+                let workchains = zerostate.config_params()?.workchains()?;
+                let wc = workchains.get(&processed_wc)?
+                    .ok_or_else(|| error!("workchains doesn't have description for workchain {}", processed_wc))?;
+                top_processed_blocks.insert(BlockIdExt {
+                    shard_id: ShardIdent::with_tagged_prefix(processed_wc, SHARD_FULL)?,
+                    seq_no: 0,
+                    root_hash: wc.zerostate_root_hash,
+                    file_hash: wc.zerostate_file_hash,
+                });
             }
-        } else {
-            let zerostate = engine.load_state(start_mc_block.id()).await?;
-            let workchains = zerostate.config_params()?.workchains()?;
-            let wc = workchains.get(&processed_wc)?
-                .ok_or_else(|| error!("workchains doesn't have description for workchain {}", processed_wc))?;
-            top_processed_blocks.insert(BlockIdExt {
-                shard_id: ShardIdent::with_tagged_prefix(processed_wc, SHARD_FULL)?,
-                seq_no: 0,
-                root_hash: wc.zerostate_root_hash,
-                file_hash: wc.zerostate_file_hash,
-            });
         }
         Ok(Self{top_processed_blocks, engine})
     }

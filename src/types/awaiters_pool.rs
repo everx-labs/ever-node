@@ -21,7 +21,6 @@ use std::{
 use ton_types::{Result, error};
 use adnl::{declare_counted, common::{add_counted_object_to_map, CountedObject, Counter}};
 
-
 declare_counted!(
     struct OperationAwaiters<R> {
        is_started: AtomicBool,

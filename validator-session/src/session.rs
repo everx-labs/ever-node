@@ -19,9 +19,14 @@ use catchain::profiling::instrument;
 use catchain::utils::compute_instance_counter;
 use catchain::utils::MetricsDumper;
 use catchain::BlockPtr;
+use catchain::CatchainOverlay;
 use catchain::CatchainListener;
 use catchain::CatchainPtr;
 use catchain::ExternalQueryResponseCallback;
+use catchain::PrivateOverlayShortId;
+use catchain::CatchainOverlayManager;
+use catchain::CatchainOverlayListenerPtr;
+use catchain::CatchainOverlayLogReplayListenerPtr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -248,6 +253,133 @@ impl CatchainListenerImpl {
     fn create(task_queue: TaskQueuePtr) -> ArcCatchainListenerPtr {
         Arc::new(Self {
             task_queue: task_queue,
+        })
+    }
+}
+
+/*
+===================================================================================================
+    Loopback overlay with manager
+===================================================================================================
+*/
+
+struct LoopbackOverlay {
+    listener: CatchainOverlayListenerPtr,
+}
+
+impl CatchainOverlay for LoopbackOverlay {
+    /// Send message
+    fn send_message(
+        &self,
+        _receiver_id: &PublicKeyHash,
+        _sender_id: &PublicKeyHash,
+        _message: &BlockPayloadPtr,
+    ) {
+        // no need to send message to itself
+        /*if let Some(listener) = self.listener.upgrade() {
+            listener.on_message(sender_id.clone(), message);
+        }*/
+    }
+
+    /// Send message to multiple sources
+    fn send_message_multicast(
+        &self,
+        _receiver_ids: &[PublicKeyHash],
+        _sender_id: &PublicKeyHash,
+        _message: &BlockPayloadPtr,
+    ) {
+        // no need to send message to itself
+        /*if let Some(listener) = self.listener.upgrade() {
+            listener.on_message(sender_id.clone(), message);
+        }*/
+    }
+
+    /// Send query
+    fn send_query(
+        &self,
+        _receiver_id: &PublicKeyHash,
+        sender_id: &PublicKeyHash,
+        _name: &str,
+        _timeout: std::time::Duration,
+        message: &BlockPayloadPtr,
+        response_callback: ExternalQueryResponseCallback,
+    ) {
+        if let Some(listener) = self.listener.upgrade() {
+            listener.on_query(sender_id.clone(), message, response_callback);
+        }
+    }
+
+    /// Send query via RLDP (ADNL ID of the current node should be registered for the query)
+    fn send_query_via_rldp(
+        &self,
+        dst_adnl_id: PublicKeyHash,
+        _name: String,
+        response_callback: ExternalQueryResponseCallback,
+        _timeout: std::time::SystemTime,
+        query: BlockPayloadPtr,
+        _max_answer_size: u64,
+    ) {
+        if let Some(listener) = self.listener.upgrade() {
+            listener.on_query(dst_adnl_id, &query, response_callback);
+        }
+    }
+
+    /// Send broadcast
+    fn send_broadcast_fec_ex(
+        &self,
+        _sender_id: &PublicKeyHash,
+        _send_as: &PublicKeyHash,
+        _payload: BlockPayloadPtr,
+    ) {
+        // no need to send broadcast to itself
+        /*if let Some(listener) = self.listener.upgrade() {
+            listener.on_broadcast(send_as.clone(), &payload);
+        }*/
+    }
+
+    /// Implementation specific
+    fn get_impl(&self) -> &dyn Any {
+        self
+    }
+}
+
+struct LoopbackOverlayManager {
+    overlay_created: Arc<AtomicBool>, //only one loopback overlay manager may be created for now
+}
+
+impl CatchainOverlayManager for LoopbackOverlayManager {
+    /// Create new overlay
+    fn start_overlay(
+        &self,
+        _local_id: &PublicKeyHash,
+        overlay_short_id: &Arc<PrivateOverlayShortId>,
+        _nodes: &Vec<CatchainNode>,
+        overlay_listener: CatchainOverlayListenerPtr,
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
+    ) -> Result<CatchainOverlayPtr> {
+        if let Err(_prev) = self.overlay_created.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
+            failure::bail!("Loopback overlay {} has been already created", overlay_short_id);
+        }
+        
+        Ok(Arc::new(LoopbackOverlay {
+            listener: overlay_listener,
+        }))
+    }
+
+    /// Stop existing overlay
+    fn stop_overlay(
+        &self,
+        _overlay_short_id: &Arc<PrivateOverlayShortId>,
+        _overlay: &CatchainOverlayPtr,
+    ) {
+      //no implementaion, no owning
+    }
+}
+
+impl LoopbackOverlayManager {
+    fn create() -> CatchainOverlayManagerPtr {
+        Arc::new(LoopbackOverlayManager {
+            overlay_created: Arc::new(AtomicBool::new(false))
         })
     }
 }
@@ -972,6 +1104,36 @@ impl SessionImpl {
         ));
 
         task_queue
+    }
+
+    pub(crate) fn create_single(
+        options: &SessionOptions,
+        session_id: &SessionId,
+        local_key: &PrivateKey,
+        path: String,
+        db_suffix: String,
+        listener: SessionListenerPtr,
+    ) -> SessionPtr {
+        let nodes = vec![SessionNode {
+            adnl_id: local_key.id().clone(),
+            public_key: local_key.clone(),
+            weight: 1,
+        }];
+
+        let mut updated_options = options.clone();
+        updated_options.catchain_idle_timeout = Duration::from_millis(1);
+
+        Self::create(
+            &updated_options,
+            session_id,
+            &nodes,
+            local_key,
+            path,
+            db_suffix,
+            false,
+            LoopbackOverlayManager::create(),
+            listener
+        )
     }
 
     pub(crate) fn create(

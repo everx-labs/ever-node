@@ -1,32 +1,53 @@
-use crate::{block::BlockStuff, engine_traits::EngineOperations};
-use ton_types::{Result, UInt256, error};
-use ton_block::{BlockIdExt, HashmapAugType};
+/*
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use std::sync::Arc;
-use std::ops::Deref;
 use std::time::Duration;
-use storage::block_handle_db::BlockHandle;
-use crate::types::shard_blocks_observer::ShardBlocksObserver;
-use ton_api::ton::ton_node::{RempMessageLevel, RempMessageStatus};
+
 use crossbeam_channel::{Sender, Receiver, unbounded, TryRecvError};
-use ton_api::ton::ton_node::rempmessagestatus::RempAccepted;
+
+use ton_types::{Result, UInt256, error};
+use ton_block::{BlockIdExt, Deserializable, HashmapAugType, InMsg};
+use ton_api::ton::ton_node::{RempMessageLevel, RempMessageStatus, rempmessagestatus::RempAccepted};
+use storage::block_handle_db::BlockHandle;
+
+use crate::{block::BlockStuff, engine_traits::EngineOperations};
+use crate::types::shard_blocks_observer::ShardBlocksObserver;
 use crate::validator::message_cache::MessageCache;
+use crate::validator::validator_utils::get_message_uid;
 
 #[async_trait::async_trait]
 pub trait BlockProcessor : Sync + Send {
-    fn process_message (&self, message_id: &UInt256);
+    fn process_message (&self, message_id: &UInt256, message_uid: &UInt256);
 }
 
 pub fn process_block_messages (block: BlockStuff, msg_processor: Arc<dyn BlockProcessor>) -> Result<()> {
     log::trace!(target: "remp", "REMP started processing block {}", block.id());
 
-    let mut messages_in_block: Vec<UInt256> = Vec::new();
-    block.block().read_extra()?.read_in_msg_descr()?.iterate_slices_with_keys(|key, _msg_slice| {
-        messages_in_block.push(key);
+    let mut messages_in_block: Vec<(UInt256,UInt256)> = Vec::new();
+    let block_result = block.block()?.read_extra()?.read_in_msg_descr()?.iterate_slices_with_keys(|key, mut msg_slice| {
+        let in_msg = InMsg::construct_from(&mut msg_slice)?;
+        let message = in_msg.read_message()?;
+        messages_in_block.push((key, get_message_uid(&message)));
         Ok(true)
-    })?;
+    });
 
-    for key in messages_in_block {
-        msg_processor.process_message(&key);
+    if let Err(err) = block_result {
+        log::error!(target: "remp", "Error processing block {}: {}", block.id(), err);
+    }
+
+    for (key, uid) in messages_in_block {
+        msg_processor.process_message(&key, &uid);
     }
 
     log::trace!(target: "remp", "REMP finished processing block {}", block.id());
@@ -36,11 +57,9 @@ pub fn process_block_messages (block: BlockStuff, msg_processor: Arc<dyn BlockPr
 pub async fn process_block_messages_by_blockid (
     engine: Arc<dyn EngineOperations>, id: BlockIdExt, msg_processor: Arc<dyn BlockProcessor>
 ) -> Result<()> {
-    let block = engine.load_block(
-        engine.load_block_handle(&id)?.ok_or_else(
-            || error!("Cannot load handle {}", id)
-        )?.deref()
-    ).await?;
+    let handle = engine.load_block_handle(&id)?
+        .ok_or_else(|| error!("Cannot load handle {}", id))?;
+    let block = engine.load_block(&handle).await?;
 
     process_block_messages(block, msg_processor)
 }
@@ -60,7 +79,7 @@ impl RempMasterBlockIndexingProcessor {
 
 #[async_trait::async_trait]
 impl BlockProcessor for RempMasterBlockIndexingProcessor {
-    fn process_message (&self, message_id: &UInt256) {
+    fn process_message (&self, message_id: &UInt256, message_uid: &UInt256) {
         let accepted = RempAccepted {
             level: RempMessageLevel::TonNode_RempMasterchain,
             block_id: self.block_id.clone(),
@@ -68,9 +87,10 @@ impl BlockProcessor for RempMasterBlockIndexingProcessor {
         };
 
         if let Err(e) = self.message_cache.insert_masterchain_message_status (
-            message_id, RempMessageStatus::TonNode_RempAccepted(accepted), self.masterchain_seqno
+            message_id, message_uid,
+            RempMessageStatus::TonNode_RempAccepted(accepted), self.masterchain_seqno
         ) {
-            log::warn!(target: "remp", "Update message {:x} status failed: {}", message_id, e);
+            log::warn!(target: "remp", "Update message {:x}, uid {:x} status failed: {}", message_id, message_uid, e);
         }
     }
 }

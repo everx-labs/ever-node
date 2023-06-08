@@ -20,7 +20,6 @@ use std::str::FromStr;
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256};
 
-
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub enum PackageEntryId<B, U256, PK>
 where
