@@ -1257,7 +1257,27 @@ impl ReceiverImpl {
             + Duration::from_secs(if self.allow_unsafe_self_blocks_resync {
                 MAX_UNSAFE_INITIAL_SYNC_COMPLETE_TIME_SECS
             } else {
-                MAX_SAFE_INITIAL_SYNC_COMPLETE_TIME_SECS
+                if self.sources.len() == 1 {
+                    //Special case: for one node in a network we don't need optimisation with block processing start lag
+                    0
+                } else {
+                    //This lag is needed for optimization purpose during the restart
+                    //Restart flow:
+                    //- node reads root (last_sent_block) which means the LAST block which was generated
+                    //  and written to DB before restart, so forks between restored blocks and new
+                    //  generated blocks are impossible
+                    //- node fully reads DB with all root block's deps
+                    //- node starts blocks preprocessing which may take significant time
+                    //- during this preprocessing node can generate new blocks; in case some previously dead nodes
+                    //  appear after restart of this node it is possible node can generate new block based on messages
+                    //  received from such nodes; this may lead to decentralized consensus state change before preprocessing of
+                    //  all block which have been generated before restart, so consensus decisions will be done earlier
+                    //- there is no risk to publish any new block based on non-top blocks because the order in terms of height is
+                    //  guaranteed by last_sent_block (which is known before start of preprocessing)
+                    //- constant below (MAX_SAFE_INITIAL_SYNC_COMPLETE_TIME_SECS) provides reasonable timeout to skip very old blocks
+                    //  and prevent fully useless early blocks processing/merging 
+                    MAX_SAFE_INITIAL_SYNC_COMPLETE_TIME_SECS
+                }
             });
 
         trace!(

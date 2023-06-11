@@ -25,7 +25,6 @@ pub mod kafka_consumer;
 #[cfg(not(feature = "external_db"))]
 mod stub_producer;
 
-
 #[async_trait::async_trait]
 pub trait WriteData : Sync + Send {
     fn enabled(&self) -> bool;

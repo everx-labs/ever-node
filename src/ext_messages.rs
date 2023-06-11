@@ -11,12 +11,11 @@
 * limitations under the License.
 */
 
-use std::{io::Cursor, sync::{Arc, atomic::{AtomicU64, Ordering}}};
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use ton_block::{Deserializable, ShardIdent, Message, AccountIdPrefixFull, BlockIdExt};
-use ton_types::{Result, types::UInt256, deserialize_tree_of_cells, fail};
+use ton_types::{Result, types::UInt256, fail, read_single_root_boc};
 use adnl::common::add_unbound_object_to_map;
 use ton_api::ton::ton_node::{RempMessageStatus, RempMessageLevel};
-
 
 const MESSAGE_LIFETIME: u32 = 600; // seconds
 const MESSAGE_MAX_GENERATIONS: u8 = 2;
@@ -132,7 +131,6 @@ impl MessagesPool {
         Self{ messages: lockfree::map::Map::new() }
     }
 
-
     pub fn new_message_raw(&self, data: &[u8], now: u32) -> Result<UInt256> {
         let (id, message) = create_ext_message(data)?;
         let message = Arc::new(message);
@@ -140,7 +138,6 @@ impl MessagesPool {
         self.new_message(id.clone(), message, now)?;
         Ok(id)
     }
-
 
     pub fn new_message(&self, id: UInt256, message: Arc<Message>, now: u32) -> Result<()> {
         add_unbound_object_to_map(
@@ -154,32 +151,34 @@ impl MessagesPool {
     pub fn get_messages(&self, shard: &ShardIdent, now: u32) -> Result<Vec<(Arc<Message>, UInt256)>> {
         let mut result = vec!();
         let mut ids = String::new();
+        let mut total = 0;
         for guard in self.messages.iter() {
-            if let Some(dst) = guard.val().message().dst_ref() {
-                if let Ok(prefix) = AccountIdPrefixFull::prefix(dst) {
-                    if shard.contains_full_prefix(&prefix) {
-                        if guard.val().expired(now) {
-                            log::debug!(
-                                target: EXT_MESSAGES_TRACE_TARGET,
-                                "get_messages: removing external message {:x} because it is expired",
-                                guard.key(),
-                            );
-                            self.messages.remove(guard.key());
-                        } else if guard.val().check_active(now) {
-                            result.push((guard.val().clone_message(), guard.key().clone()));
-                            ids.push_str(&format!("{:x} ", guard.key()));
+            total += 1;
+            if guard.val().expired(now) {
+                log::debug!(
+                    target: EXT_MESSAGES_TRACE_TARGET,
+                    "get_messages: removing external message {:x} because it is expired",
+                    guard.key(),
+                );
+                self.messages.remove(guard.key());
+            } else {
+                if let Some(dst) = guard.val().message().dst_ref() {
+                    if let Ok(prefix) = AccountIdPrefixFull::prefix(dst) {
+                        if shard.contains_full_prefix(&prefix) {
+                            if guard.val().check_active(now) {
+                                result.push((guard.val().clone_message(), guard.key().clone()));
+                                ids.push_str(&format!("{:x} ", guard.key()));
+                            }
                         }
                     }
                 }
             }
         }
-
         log::debug!(
             target: EXT_MESSAGES_TRACE_TARGET,
-            "get_messages: shard {}, messages: {}",
-            shard, ids
+            "get_messages: total (all shardes): {}; found for {} ({}): {}",
+            total, shard, result.len(), ids
         );
-
         Ok(result)
     }
 
@@ -214,7 +213,6 @@ impl MessagesPool {
         Ok(())
     }
 
-
 }
 
 pub fn create_ext_message(data: &[u8]) -> Result<(UInt256, Message)> {
@@ -222,7 +220,7 @@ pub fn create_ext_message(data: &[u8]) -> Result<(UInt256, Message)> {
     if data.len() > MAX_EXTERNAL_MESSAGE_SIZE {
         fail!("External message is too large: {}", data.len())
     }
-    let root = deserialize_tree_of_cells(&mut Cursor::new(data))?;
+    let root = read_single_root_boc(&data)?;
     if root.level() != 0 {
         fail!("External message must have zero level, but has {}", root.level())
     }
@@ -249,6 +247,16 @@ pub fn get_level_and_level_change(status: &RempMessageStatus) -> (RempMessageLev
         RempMessageStatus::TonNode_RempTimeout => (RempMessageLevel::TonNode_RempQueue, -1),
         RempMessageStatus::TonNode_RempDuplicate(_) => (RempMessageLevel::TonNode_RempQueue, 0),
         RempMessageStatus::TonNode_RempSentToValidators(_) => (RempMessageLevel::TonNode_RempFullnode, 0),
+    }
+}
+
+pub fn get_level_numeric_value(lvl: &RempMessageLevel) -> i32 {
+    match lvl {
+        RempMessageLevel::TonNode_RempFullnode => 0,
+        RempMessageLevel::TonNode_RempQueue => 1,
+        RempMessageLevel::TonNode_RempCollator => 2,
+        RempMessageLevel::TonNode_RempShardchain => 3,
+        RempMessageLevel::TonNode_RempMasterchain => 4
     }
 }
 

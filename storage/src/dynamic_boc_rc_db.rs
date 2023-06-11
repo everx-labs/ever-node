@@ -283,7 +283,6 @@ impl DynamicBocDb {
         Ok(Cell::with_cell_impl_arc(storage_cell))
     }
 
-
     pub fn fill_counters(
         self: &Arc<Self>,
         check_stop: &(dyn Fn() -> Result<()> + Sync),

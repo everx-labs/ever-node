@@ -34,7 +34,6 @@ use std::{
 };
 use rand::Rng;
 
-
 pub enum StoreAction {
     Save(TopBlockDescrId, Arc<TopBlockDescrStuff>),
     Remove(TopBlockDescrId)

@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -19,7 +19,6 @@ use ton_block::{
 };
 use ton_executor::{BlockchainConfig, CalcMsgFwdFees};
 use ton_types::{error, fail, Result, AccountId, Cell, SliceData, UInt256};
-
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MsgEnvelopeStuff {
@@ -129,7 +128,7 @@ impl MsgEnqueueStuff {
     }
     pub fn next_hop(&self, shard: &ShardIdent, enqueued_lt: u64, config: &BlockchainConfig) -> Result<(MsgEnqueueStuff, Grams)> {
         let fwd_prices = config.get_fwd_prices(self.message().is_masterchain());
-        let mut fwd_fee_remaining = self.fwd_fee_remaining().clone();
+        let mut fwd_fee_remaining = *self.fwd_fee_remaining();
         let transit_fee = fwd_prices.next_fee_checked(&fwd_fee_remaining)?;
         fwd_fee_remaining.sub(&transit_fee)?;
 

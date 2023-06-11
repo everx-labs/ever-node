@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -27,7 +27,6 @@ const DOWNLOADING_BLOCK_TTL_SEC: usize = 300;
 
 pub const TPS_PERIOD_1: u64 = 5 * 60; // 5 min
 pub const TPS_PERIOD_2: u64 = 60; // 1 min
-
 
 pub struct FullNodeTelemetry {
     // Almost all metrics are zeroed while report creation
@@ -327,7 +326,6 @@ pub const REMP_MESSAGE_PROCESSING: u8 = 0;
 pub const REMP_MESSAGE_FINALIZED: u8 = 1;
 pub const REMP_MESSAGE_REJECTED: u8 = 2;
 pub const REMP_MESSAGE_EXPIRED: u8 = 3;
-
 
 struct MessageTelemetry {
     pub got_at: Instant,

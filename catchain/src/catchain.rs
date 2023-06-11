@@ -1570,7 +1570,7 @@ impl CatchainProcessor {
 
             self.process_blocks_batching_requests_counter.increment();
 
-            info!("...catchain finish processing");
+            debug!("...catchain finish processing");
 
             if self.top_blocks.len() == 0 {
                 self.notify_finished_processing();

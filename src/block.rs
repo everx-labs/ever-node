@@ -11,16 +11,20 @@
 * limitations under the License.
 */
 
-use std::{io::Cursor, collections::HashMap, cmp::max, sync::Arc};
+use std::{cmp::max, sync::Arc};
 use std::io::Write;
 use ton_block::{
     Block, BlockIdExt, BlkPrevInfo, Deserializable, ExtBlkRef, ShardDescr, ShardIdent, 
-    ShardHashes, HashmapAugType, ConfigParams
+    ShardHashes, HashmapAugType, MerkleProof, Serializable, ConfigParams, OutQueueUpdate,
 };
-use ton_types::{Cell, Result, types::UInt256, deserialize_tree_of_cells, error, fail, HashmapType};
+use ton_types::{
+    Cell, Result, types::UInt256, BocReader, error, fail, HashmapType, UsageTree,
+};
 
-use crate::shard_state::ShardHashesStuff;
-
+use crate::{
+    shard_state::ShardHashesStuff,
+    validator::accept_block::visit_block_for_proof,
+};
 
 pub struct BlockPrevStuff {
     pub mc_block_id: BlockIdExt,
@@ -35,49 +39,85 @@ pub struct BlockPrevStuff {
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct BlockStuff {
     id: BlockIdExt,
-    block: Block,
+    block: Option<Block>,
+    queue_update: Option<Block>, // virtual block with queue update, info, ...
+    queue_update_for: i32,
     root: Cell,
     data: Arc<Vec<u8>>, // Arc is used to make cloning more lightweight
 }
 
 impl BlockStuff {
-    pub fn new(id: BlockIdExt, data: Vec<u8>) -> Result<Self> {
-        let file_hash = UInt256::calc_file_hash(&data);
-        if file_hash != id.file_hash {
-            fail!("block candidate has invalid file hash: declared {:x}, actual {:x}",
-                id.file_hash, file_hash)
-        }
-        let root = deserialize_tree_of_cells(&mut Cursor::new(&data))?;
-        if root.repr_hash() != id.root_hash {
-            fail!("block candidate has invalid root hash: declared {:x}, actual {:x}",
-                id.root_hash, root.repr_hash())
-        }
-        let block = Block::construct_from_cell(root.clone())?;
-        Ok(Self { id, block, root, data: Arc::new(data) })
-    }
 
-    pub fn deserialize_checked(id: BlockIdExt, data: Vec<u8>) -> Result<Self> {
+    pub fn deserialize_block_checked(id: BlockIdExt, data: Vec<u8>) -> Result<Self> {
         let file_hash = UInt256::calc_file_hash(&data);
         if id.file_hash() != &file_hash {
             fail!("wrong file_hash for {}", id)
         }
-        Self::deserialize(id, data)
+        Self::deserialize_block(id, data)
     }
 
-    pub fn deserialize(id: BlockIdExt, data: Vec<u8>) -> Result<Self> {
-        let root = deserialize_tree_of_cells(&mut Cursor::new(&data))?;
+    pub fn deserialize_block(id: BlockIdExt, data: Vec<u8>) -> Result<Self> {
+        let data = Arc::new(data);
+        let root = BocReader::new().read_inmem(data.clone())?.withdraw_single_root()?;
         if id.root_hash != root.repr_hash() {
             fail!("wrong root hash for {}", id)
         }
-        let block = Block::construct_from_cell(root.clone())?;
-        Ok(Self{ id, block, root, data: Arc::new(data), })
+        let block = Some(Block::construct_from_cell(root.clone())?);
+        Ok(Self { id, block, root, data, ..Default::default() })
     }
 
+    pub fn deserialize_queue_update(id: BlockIdExt, queue_update_for: i32, data: Vec<u8>) -> Result<Self> {
+        let data = Arc::new(data);
+        let root = BocReader::new().read_inmem(data.clone())?.withdraw_single_root()?;
+        let merkle_proof = MerkleProof::construct_from_cell(root.clone())?;
+        if id.root_hash != merkle_proof.hash {
+            fail!("wrong merkle proof hash for {}", id)
+        }
+        let queue_update = Some(merkle_proof.virtualize()?);
+        Ok(Self { id, queue_update, queue_update_for, root, data, ..Default::default() })
+    }
 
+    pub fn block(&self) -> Result<&Block> {
+        self.block.as_ref().ok_or_else(|| {
+            error!("the block {} is not full, it contains only queue update for WC {}", 
+                self.id, self.queue_update_for)
+        })
+    }
 
+    pub fn block_or_queue_update(&self) -> Result<&Block> {
+        if let Some(block) = self.block.as_ref() {
+            Ok(block)
+        } else if let Some(virt_block) = self.queue_update.as_ref() {
+            Ok(virt_block)
+        } else {
+            fail!("INTERNAL ERROR: both block and queue_update fields are None in {}", self.id)
+        }
+    }
 
-    pub fn block(&self) -> &Block { &self.block }
-  
+    pub fn get_queue_update_for(&self, workchain_id: i32) -> Result<OutQueueUpdate> {
+        if self.is_queue_update() && self.queue_update_for != workchain_id {
+            fail!("This queue update is for wc {}, not {}", self.queue_update_for, workchain_id)
+        }
+        self
+            .block_or_queue_update()?
+            .out_msg_queue_updates.as_ref().ok_or_else(|| {
+                error!("Block {} doesn't contain queue updates at all", self.id())
+            })?
+            .get(&workchain_id)?.ok_or_else(|| {
+                error!("Block {} doesn't contain queue update for wc {}", self.id(), workchain_id)
+            })
+    }
+
+    pub fn is_queue_update(&self) -> bool { self.queue_update.is_some() }
+
+    pub fn is_queue_update_for(&self) -> Option<i32> {
+        if self.is_queue_update() {
+            Some(self.queue_update_for)
+        } else {
+            None
+        }
+    }
+    
     pub fn id(&self) -> &BlockIdExt { &self.id }
 
 // Unused
@@ -95,15 +135,15 @@ impl BlockStuff {
 //    }
 
     pub fn gen_utime(&self) -> Result<u32> {
-        Ok(self.block.read_info()?.gen_utime().as_u32())
+        Ok(self.block_or_queue_update()?.read_info()?.gen_utime().as_u32())
     }
 
    pub fn is_key_block(&self) -> Result<bool> {
-       Ok(self.block.read_info()?.key_block())
+       Ok(self.block_or_queue_update()?.read_info()?.key_block())
    }
 
     pub fn construct_prev_id(&self) -> Result<(BlockIdExt, Option<BlockIdExt>)> {
-        let header = self.block.read_info()?;
+        let header = self.block_or_queue_update()?.read_info()?;
         match header.read_prev_ref()? {
             BlkPrevInfo::Block{prev} => {
                 let shard_id = if header.after_split() {
@@ -148,7 +188,7 @@ impl BlockStuff {
 
     pub fn get_master_id(&self) -> Result<ExtBlkRef> {
         Ok(self
-            .block
+            .block_or_queue_update()?
             .read_info()?
             .read_master_ref()?
             .ok_or_else(|| error!("Can't get master ref: given block is a master block"))?
@@ -162,7 +202,7 @@ impl BlockStuff {
 
     pub fn shards(&self) -> Result<ShardHashes> {
         Ok(self
-            .block()
+            .block()?
             .read_extra()?
             .read_custom()?
             .ok_or_else(|| error!("Given block is not a master block."))?
@@ -173,7 +213,7 @@ impl BlockStuff {
 
     pub fn shard_hashes(&self) -> Result<ShardHashesStuff> {
         Ok(ShardHashesStuff::from(self
-            .block()
+            .block()?
             .read_extra()?
             .read_custom()?
             .ok_or_else(|| error!("Given block is not a master block."))?
@@ -182,10 +222,10 @@ impl BlockStuff {
         ))
     }
 
-    pub fn shards_blocks(&self, workchain_id: i32) -> Result<HashMap<ShardIdent, BlockIdExt>> {
-        let mut shards = HashMap::new();
+    pub fn top_blocks(&self, workchain_id: i32) -> Result<Vec<BlockIdExt>> {
+        let mut shards = Vec::new();
         self
-            .block()
+            .block()?
             .read_extra()?
             .read_custom()?
             .ok_or_else(|| error!("Given block is not a master block."))?
@@ -197,32 +237,76 @@ impl BlockStuff {
                     root_hash: descr.root_hash,
                     file_hash: descr.file_hash
                 };
-                shards.insert(ident, last_shard_block);
+                shards.push(last_shard_block);
                 Ok(true)
             })?;
 
         Ok(shards)
     }
 
-    pub fn config(&self) -> Result<ConfigParams> {
-       self
-            .block()
+    pub fn top_blocks_all_headers(&self) -> Result<Vec<(BlockIdExt, ShardDescr)>> {
+        let mut shards = Vec::new();
+        self
+            .block()?
             .read_extra()?
             .read_custom()?
-            .and_then(|custom| custom.config().cloned())
-            .ok_or_else(|| error!("State doesn't contain `custom` field"))
+            .ok_or_else(|| error!("Given block is not a master block."))?
+            .shards()
+            .iterate_shards(|ident: ShardIdent, descr: ShardDescr| {
+                let id = BlockIdExt {
+                    shard_id: ident.clone(),
+                    seq_no: descr.seq_no,
+                    root_hash: descr.root_hash.clone(),
+                    file_hash: descr.file_hash.clone()
+                };
+                shards.push((id, descr));
+                Ok(true)
+            })?;
+
+        Ok(shards)
     }
+
+    pub fn top_blocks_all(&self) -> Result<Vec<BlockIdExt>> {
+        let mut shards = Vec::new();
+        self
+            .block()?
+            .read_extra()?
+            .read_custom()?
+            .ok_or_else(|| error!("Given block is not a master block."))?
+            .shards()
+            .iterate_shards(|ident: ShardIdent, descr: ShardDescr| {
+                let last_shard_block = BlockIdExt {
+                    shard_id: ident.clone(),
+                    seq_no: descr.seq_no,
+                    root_hash: descr.root_hash,
+                    file_hash: descr.file_hash
+                };
+                shards.push(last_shard_block);
+                Ok(true)
+            })?;
+
+        Ok(shards)
+    }
+
+   pub fn get_config_params(&self) -> Result<ConfigParams> {
+       self.block()?
+           .read_extra()?
+           .read_custom()?
+           .ok_or_else(|| error!("Block {} doesn't contain `custom` field", self.id))?
+           .config_mut().take()
+           .ok_or_else(|| error!("Block {} doesn't contain `config` field", self.id))
+   }
 
 // Unused
 //    pub fn read_cur_validator_set_and_cc_conf(&self) -> Result<(ValidatorSet, CatchainConfig)> {
-//        self.block().read_cur_validator_set_and_cc_conf()
+//        self.block()?.read_cur_validator_set_and_cc_conf()
 //    }
 
     pub fn calculate_tr_count(&self) -> Result<usize> {
         let now = std::time::Instant::now();
         let mut tr_count = 0;
 
-        self.block.read_extra()?.read_account_blocks()?.iterate_objects(|account_block| {
+        self.block()?.read_extra()?.read_account_blocks()?.iterate_objects(|account_block| {
             tr_count += account_block.transactions().len()?;
             Ok(true)
         })?;
@@ -356,3 +440,31 @@ pub fn construct_and_check_prev_stuff(
 
 }
 
+#[allow(dead_code)]
+pub fn make_queue_update_from_block(block_stuff: &BlockStuff, update_for_wc: i32) -> Result<BlockStuff> {
+    let queue_update_bytes = make_queue_update_from_block_raw(block_stuff, update_for_wc)?;
+    BlockStuff::deserialize_queue_update(block_stuff.id().clone(), update_for_wc, queue_update_bytes)
+}
+
+pub fn make_queue_update_from_block_raw(block_stuff: &BlockStuff, update_for_wc: i32) -> Result<Vec<u8>> {
+    let usage_tree = UsageTree::with_root(block_stuff.root_cell().clone());
+    let block = Block::construct_from_cell(usage_tree.root_cell())?;
+
+    visit_block_for_proof(&block, block_stuff.id())?;
+
+    let update_root = block
+        .out_msg_queue_updates.as_ref()
+        .ok_or_else(|| error!("Block {} doesn't contain out_msg_queue_updates", block_stuff.id()))?
+        .get_as_slice(&update_for_wc)?
+        .ok_or_else(|| error!("Block {} doesn't contain out msg queue update for wc {}", block_stuff.id(), update_for_wc))?
+        .cell().clone();
+
+    let update_root_hash = update_root.repr_hash();
+
+    let queue_update = MerkleProof::create_with_subtrees(
+        block_stuff.root_cell(),
+        |h| usage_tree.contains(h),
+        |h| h == &update_root_hash
+    )?;
+    queue_update.write_to_bytes()
+}
