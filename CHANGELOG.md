@@ -135,7 +135,6 @@ All notable changes to this project will be documented in this file.
 
 - Fixed bug in DB restore: LAST_ROTATION_MC_BLOCK pointer is not truncated.
 
-
 ## Version 0.52.6
 
 ### New

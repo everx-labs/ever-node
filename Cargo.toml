@@ -73,9 +73,6 @@ telemetry = [ 'adnl/telemetry', 'dht/telemetry', 'rldp/telemetry', 'overlay/tele
 trace_alloc = [  ]
 trace_alloc_detail = [ 'trace_alloc' ]
 
-[profile]
-
-
 [target.'cfg(unix)'.dependencies.rdkafka]
 optional = true
 version = '0.26.0'
@@ -84,4 +81,3 @@ version = '0.26.0'
 features = [ 'cmake_build' ]
 optional = true
 version = '0.26.0'
-
