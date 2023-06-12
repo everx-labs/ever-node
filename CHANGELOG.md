@@ -2,13 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.21
+
+- Fixed setup of special settings for the "cells" column family in RocksDB
+
 ## Version 0.55.20
 
 - Fix got GetStats during boot
 
 ## Version 0.55.18
 
-- Venom: supported key blocks
+- Optimistic consensus: supported key blocks
 - Improve node requests logging
 
 ## Version 0.55.17
@@ -45,7 +49,7 @@ All notable changes to this project will be documented in this file.
 
 - Merge shards MVP
 - Add script to restart specific node
-- Venom: fixed cc rotating
+- Optimistic consensus: fixed cc rotating
 - Update restart_nodes.sh
 - Added 'validation_countdown_mode' option
 - Printing valIdation_countdown_mode
@@ -81,7 +85,7 @@ All notable changes to this project will be documented in this file.
 
 ## Version 0.55.2
 
-- Venom consensus - part one
+- Optimistic consensus - part one
 
 ## Version 0.55.0
 
@@ -130,7 +134,6 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Fixed bug in DB restore: LAST_ROTATION_MC_BLOCK pointer is not truncated.
-
 
 ## Version 0.52.6
 

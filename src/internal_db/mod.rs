@@ -210,7 +210,7 @@ impl InternalDb {
         allocated: Arc<EngineAlloc>,
     ) -> Result<Self> {
         let mut hi_perf_cfs = HashSet::new();
-        hi_perf_cfs.insert("CELLS_CF_NAME".to_string());
+        hi_perf_cfs.insert(CELLS_CF_NAME.to_string());
         let db = RocksDb::with_options(config.db_directory.as_str(), "db", hi_perf_cfs, false)?;
         let db_catchain = RocksDb::with_path(config.db_directory.as_str(), "catchains")?;
         let block_handle_db = Arc::new(
