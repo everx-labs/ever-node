@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.21
+
+- Fixed setup of special settings for the "cells" column family in RocksDB
+
 ## Version 0.55.20
 
 - Fix got GetStats during boot
