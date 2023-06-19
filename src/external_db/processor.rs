@@ -425,6 +425,7 @@ impl<T: 'static + WriteData> Processor<T> {
         };
     }
 
+
     pub async fn process_block_impl(
         &self, 
         block_stuff: &BlockStuff,
@@ -473,6 +474,7 @@ impl<T: 'static + WriteData> Processor<T> {
 
             let mut db_records = Vec::new();
 
+            
             // Accounts, transactions and messages
             if process_account || process_transaction || process_message {
                 
@@ -507,6 +509,7 @@ impl<T: 'static + WriteData> Processor<T> {
                     Ok(true)
                 })?;
                 log::trace!("TIME: preliminary prepare {} transactions {}ms;   {}", tr_count, now.elapsed().as_millis(), block_id);
+
 
                 // Iterate ton_block transactions to:
                 // - prepare messages and transactions for external db
@@ -567,6 +570,7 @@ impl<T: 'static + WriteData> Processor<T> {
                     block_id,
                 );
 
+                
                 // Prepare accounts (changed and deleted)
                 if process_account {
                     let now = std::time::Instant::now();

@@ -192,6 +192,7 @@ async fn main() -> Result<()> {
     drop(ss_db);
     drop(db);
 
+
     let (_db, ss_db) = open_db();
 
     let before_updates = std::time::Instant::now();

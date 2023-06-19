@@ -48,7 +48,6 @@ use ton_block::{
     TransactionDescr, ValidatorSet, ValueFlow, WorkchainDescr, INVALID_WORKCHAIN_ID,
     MASTERCHAIN_ID, U15, OutMsgQueueInfo, OutQueueUpdate,
 };
-#[cfg(not(feature = "fast_finality"))]
 use ton_block::MAX_SPLIT_DEPTH;
 use ton_executor::{
     BlockchainConfig, CalcMsgFwdFees, ExecuteParams, OrdinaryTransactionExecutor,
@@ -63,9 +62,7 @@ use crate::validator::validator_utils::is_remp_enabled;
 
 // pub const SPLIT_MERGE_DELAY: u32 = 100;        // prepare (delay) split/merge for 100 seconds
 // pub const SPLIT_MERGE_INTERVAL: u32 = 100;     // split/merge is enabled during 60 second interval
-#[cfg(not(feature = "fast_finality"))]
 pub const MIN_SPLIT_MERGE_INTERVAL: u32 = 30;  // split/merge interval must be at least 30 seconds
-#[cfg(not(feature = "fast_finality"))]
 pub const MAX_SPLIT_MERGE_DELAY: u32 = 1000;   // end of split/merge interval must be at most 1000 seconds in the future
 
 macro_rules! error {
@@ -257,6 +254,7 @@ impl ValidateQuery {
  *   INITIAL PARSE & LOAD REQUIRED DATA
  * 
  */
+
 
     fn init_base(&mut self) -> Result<ValidateBase> {
         let mut base = ValidateBase::default();
@@ -930,10 +928,7 @@ impl ValidateQuery {
                 }
             }
         }
-        #[cfg(not(feature = "fast_finality"))]
         let mut fsm_inherited = false;
-        #[cfg(feature = "fast_finality")]
-        let fsm_inherited = false;
         if let Some(prev) = prev {
             // shard was not created, split or merged; it is a successor of `prev`
             old_before_merge = prev.descr.before_merge;
@@ -949,7 +944,7 @@ impl ValidateQuery {
                     shard
                 )
             }
-            #[cfg(not(feature = "fast_finality"))] {
+             {
                 fsm_inherited = 
                     !prev.descr().is_fsm_none() && prev.descr().fsm_equal(info.descr());
                 if 
@@ -977,7 +972,6 @@ impl ValidateQuery {
         }
         let wc_info = wc_info.expect("in ton node it is a bug");
         let depth = shard.prefix_len();
-        #[cfg(not(feature = "fast_finality"))]
         let split_cond = 
             (info.descr.want_split || depth < wc_info.min_split()) && 
             depth < wc_info.max_split() && 
@@ -997,7 +991,7 @@ impl ValidateQuery {
             // must be set at the last block of the range
             //
             
-            #[cfg(not(feature = "fast_finality"))] {
+             {
                 let fsm_begin = info.descr().fsm_utime();
                 let fsm_end = info.descr().fsm_utime_end();
                 if 
@@ -1061,7 +1055,6 @@ impl ValidateQuery {
                 shard, cc_seqno, info.descr.next_catchain_seqno
             )
         }
-        #[cfg(not(feature = "fast_finality"))]
         if !cc_updated && self.update_shard_cc {
             reject_query!(
                 "new shard configuration for shard {} has unchanged catchain seqno {}, \
@@ -1077,30 +1070,12 @@ impl ValidateQuery {
                 shard, cc_seqno
             )
         }
-        #[cfg(not(feature = "fast_finality"))]
         if cc_updated && !(self.update_shard_cc || bm_cleared) {
             reject_query!(
                 "new shard configuration for shard {} has increased catchain seqno {} \
                 without a good reason", 
                 shard, cc_seqno
             )
-        }
-        #[cfg(feature = "fast_finality")]
-        if cc_updated {
-            let collators = info.descr.collators.as_ref()
-                .ok_or_else(|| error!("no collators in shard {}", shard))?;
-
-            // TODO FAST FINALITY process unexpected finish
-            // TODO FAST FINALITY process merge
-            // TODO FAST FINALITY check that catchain seqno changed only one time for current collator range
-
-            if info.descr.seq_no <= collators.prev.finish {
-                reject_query!(
-                    "new shard configuration for shard {} has increased catchain seqno {} \
-                    without a good reason", 
-                    shard, cc_seqno
-                )
-            }
         }
 
         base.result.min_shard_ref_mc_seqno.fetch_min(info.descr.min_ref_mc_seqno, Ordering::Relaxed);
@@ -1125,7 +1100,7 @@ impl ValidateQuery {
         let ccvc = base.next_state_extra.config.catchain_config()?;
         let wc_set = base.next_state_extra.config.workchains()?;
         self.update_shard_cc = base.info.key_block();
-        #[cfg(not(feature = "fast_finality"))] {
+         {
             self.update_shard_cc |= 
                 base.now() / ccvc.shard_catchain_lifetime > prev_now / ccvc.shard_catchain_lifetime;
         }
@@ -1245,14 +1220,8 @@ impl ValidateQuery {
                 reject_query!("block has start_lt {} less than or equal to lt {} of the previous state",
                     base.info.start_lt(), state.state()?.gen_lt())
             }
-            #[cfg(not(feature = "fast_finality"))]
             if base.now() <= state.state()?.gen_time() {
                 reject_query!("block has creation time {} less than or equal to that of the previous state ({})",
-                    base.now(), state.state()?.gen_time())
-            }
-            #[cfg(feature = "fast_finality")]
-            if base.now() < state.state()?.gen_time() {
-                reject_query!("block has creation time {} less that of the previous state ({})",
                     base.now(), state.state()?.gen_time())
             }
             gen_lt = std::cmp::max(gen_lt, state.state()?.gen_lt());
@@ -2868,6 +2837,7 @@ impl ValidateQuery {
         })?;
         Ok(true)
     }
+
 
     // similar to Collator::make_account_from()
     // std::unique_ptr<block::Account> ValidateQuery::make_account_from(td::ConstBitPtr addr, Ref<vm::CellSlice> account,

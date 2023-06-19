@@ -1641,6 +1641,7 @@ impl Default for ValidatorManagerConfig {
     }
 }
 
+
 struct ValidatorKeys {
     values: lockfree::map::Map<i32, ValidatorKeysJson>, // election_id, keys_info
     index: lockfree::map::Map<i32, i32>,                // current_election_id, next_election_id

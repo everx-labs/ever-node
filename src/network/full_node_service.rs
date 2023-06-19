@@ -511,6 +511,7 @@ impl FullNodeOverlayService {
         fail!("Shard state {} doesn't have a persistent state", query.block)
     }
 
+
     // tonNode.downloadZeroState block:tonNode.blockIdExt = tonNode.Data;
     async fn download_zero_state(&self, query: DownloadZeroState) -> Result<TaggedByteVec> {
         if let Some(handle) = self.engine.load_block_handle(&query.block)? {

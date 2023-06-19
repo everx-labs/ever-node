@@ -157,6 +157,7 @@ impl KafkaProducer {
         }
     }
 
+
     fn store_oversized(&self, key: &str, data: &[u8], big_messages_storage: &str, relative_path: &str) -> Result<()> {
         let root = std::path::Path::new(big_messages_storage);
         let message_path = root.join(relative_path);

@@ -11,6 +11,7 @@
 * limitations under the License.
 */
 
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct PackageEntryMeta {
     entry_size: u64,

@@ -417,6 +417,7 @@ impl EngineOperations for Engine {
         attempts: Option<usize>
     ) -> Result<Arc<ShardStateStuff>> {
 
+
         let (is_foreign_block, own_wc) = self.is_foreign_wc(handle.id().shard().workchain_id()).await?;
         let (queue_for_wc, overlay_wc) = if is_foreign_block {
             (Some(own_wc), own_wc)

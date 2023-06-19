@@ -131,6 +131,7 @@ impl MessagesPool {
         Self{ messages: lockfree::map::Map::new() }
     }
 
+
     pub fn new_message_raw(&self, data: &[u8], now: u32) -> Result<UInt256> {
         let (id, message) = create_ext_message(data)?;
         let message = Arc::new(message);

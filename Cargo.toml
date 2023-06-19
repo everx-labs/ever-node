@@ -65,7 +65,6 @@ validator_session = { path = 'validator-session' }
 default = [ 'telemetry' ]
 export_key = [ 'catchain/export_key', 'ever-crypto/export_key' ]
 external_db = [ 'rdkafka' ]
-fast_finality = [ 'ton_block/fast_finality' ]
 gosh = [ 'ton_block/gosh', 'ton_vm/gosh' ]
 metrics = [ 'statsd' ]
 signature_with_id = [ 'ton_block/signature_with_id', 'ton_vm/signature_with_id', 'ton_executor/signature_with_id' ]

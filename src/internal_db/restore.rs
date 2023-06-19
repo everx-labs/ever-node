@@ -31,7 +31,9 @@ pub async fn check_db(
     is_broken: Option<&AtomicBool>
 ) -> Result<InternalDb> {
 
+
     // TODO support queue updates!!!
+
 
     async fn force_db_reset(
         err: failure::Error,

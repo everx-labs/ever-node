@@ -19,9 +19,6 @@ use crate::{
     },
     shard_state::ShardStateStuff,
 };
-#[cfg(feature = "fast_finality")]
-use crate::validator::workchains_fast_finality::calc_subset_for_workchain_fast_finality;
-#[cfg(not(feature = "fast_finality"))]
 use crate::validator::validator_utils::calc_subset_for_workchain_standard;
 
 use std::{sync::Arc, mem::drop, time::Duration, collections::HashMap};
@@ -585,6 +582,7 @@ pub async fn process_block_broadcast(
         |e| error!("INTERNAL ERROR: can't load last mc state: {}", e)
     )?;
 
+
     let (is_foreign_block, own_wc) = engine.is_foreign_wc(broadcast.id().shard().workchain_id()).await?;
     let block;
     if is_foreign_block { 
@@ -719,11 +717,7 @@ fn validate_brodcast(
     let subset = if block_id.shard().is_masterchain() {
         calc_subset_for_masterchain(&val_set, config, cc_seqno)?
     } else {
-        #[cfg(feature = "fast_finality")] {
-            calc_subset_for_workchain_fast_finality(
-                &val_set, cc_seqno, mc_state, block_id.shard(), block_id.seq_no())?
-        }
-        #[cfg(not(feature = "fast_finality"))] {
+         {
             calc_subset_for_workchain_standard(&val_set, config, block_id.shard(), cc_seqno)?
         }
     };

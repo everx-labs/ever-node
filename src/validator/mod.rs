@@ -35,8 +35,6 @@ pub mod remp_service;
 pub mod telemetry;
 #[cfg(feature = "slashing")]
 pub mod slashing;
-#[cfg(feature = "fast_finality")]
-pub mod workchains_fast_finality;
 
 use std::sync::Arc;
 use ton_types::{Result, UInt256, error};
