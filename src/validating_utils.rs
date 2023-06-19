@@ -20,6 +20,9 @@ use ton_types::{fail, error, Result, UInt256};
 use std::{collections::HashSet, cmp::max, iter::Iterator};
 use sha2::{Sha256, Digest};
 
+#[cfg(feature = "fast_finality")]
+pub const UNREGISTERED_CHAIN_MAX_LEN: u32 = 32;
+#[cfg(not(feature = "fast_finality"))]
 pub const UNREGISTERED_CHAIN_MAX_LEN: u32 = 8;
 
 pub fn supported_capabilities() -> u64 {
@@ -52,7 +55,7 @@ pub fn supported_capabilities() -> u64 {
 }
 
 pub fn supported_version() -> u32 {
-    42
+    41
 }
 
 pub fn check_this_shard_mc_info(
@@ -67,6 +70,9 @@ pub fn check_this_shard_mc_info(
     is_validate: bool,
     now: u32,
 ) -> Result<(u32, bool, bool)> {
+    #[cfg(feature = "fast_finality")]
+    let now_upper_limit = u32::MAX;
+    #[cfg(not(feature = "fast_finality"))]
     let mut now_upper_limit = u32::MAX;
     // let mut before_split = false;
     // let mut accept_msgs = false;
@@ -125,18 +131,41 @@ pub fn check_this_shard_mc_info(
         }
         if left.descr().is_fsm_split() {
             if is_validate {
+                #[cfg(not(feature = "fast_finality"))]
                 if now >= left.descr().fsm_utime() && now < left.descr().fsm_utime_end() {
                     split_allowed = true;
+                }
+                #[cfg(feature = "fast_finality")] {
+                    let collators = left.descr.collators.as_ref()
+                        .ok_or_else(|| error!("No collators for {}", shard))?;
+                    if collators.next2.is_none() {
+                        fail!("Shard {} doesn't have next2 collator but fsm is split", shard);
+                    }
+                    if block_id.seq_no() == collators.current.finish {
+                        split_allowed = true;
+                    }
                 }
             } else {
                 // t-node's collator contains next code:
                 // auto tmp_now = std::max<td::uint32>(config_->utime, (unsigned)std::time(nullptr));
                 // but `now` parameter passed to this function is already initialized same way.
                 // `13` and `11` is a magic from t-node
+                #[cfg(not(feature = "fast_finality"))]
                 if now >= left.descr().fsm_utime() && now + 13 < left.descr().fsm_utime_end() {
                     now_upper_limit = left.descr().fsm_utime_end() - 11;  // ultimate value of now_ must be at most now_upper_limit_
                     before_split = true;
                     log::info!("BEFORE_SPLIT set for the new block of shard {}", shard);
+                }
+                #[cfg(feature = "fast_finality")] {
+                    let collators = left.descr.collators.as_ref()
+                        .ok_or_else(|| error!("No collators for {}", shard))?;
+                    if collators.next2.is_none() {
+                        fail!("Shard {} doesn't have next2 collator but fsm is split", shard);
+                    }
+                    if block_id.seq_no() == collators.current.finish {
+                        before_split = true;
+                        log::info!("BEFORE_SPLIT set for the new block of shard {}", shard);
+                    }
                 }
             }
         }
@@ -394,6 +423,8 @@ pub fn may_update_shard_block_info(
                     new_info.block_id()
                 )
             }
+
+            #[cfg(not(feature = "fast_finality"))]
             if new_info.descr.gen_utime < odef.descr.fsm_utime() ||
                 new_info.descr.gen_utime >= odef.descr.fsm_utime() + odef.descr.fsm_interval() {
                 fail!(
@@ -405,6 +436,17 @@ pub fn may_update_shard_block_info(
                     new_info.descr.gen_utime
                 )
             }
+
+            #[cfg(feature = "fast_finality")] {
+                let collators = odef.descr.collators.as_ref().ok_or_else(|| error!("collators not set"))?;
+                if new_info.descr.seq_no != collators.current.finish {
+                    fail!(
+                        "cannot register a before_split block {} because current collator's finish is {}",
+                        new_info.block_id(),
+                        collators.current.finish,
+                    )
+                }
+            }
         }
         if before_merge {
             if odef.descr.is_fsm_split() || odef.descr.is_fsm_none() {
@@ -415,6 +457,7 @@ pub fn may_update_shard_block_info(
                     odef.block_id().shard()
                 )
             }
+            #[cfg(not(feature = "fast_finality"))]
             if new_info.descr.gen_utime < odef.descr.fsm_utime() ||
                 new_info.descr.gen_utime >= odef.descr.fsm_utime() + odef.descr.fsm_interval() {
                 fail!(
@@ -428,7 +471,7 @@ pub fn may_update_shard_block_info(
                 )
             }
 
-            // TODO VENOM check collator ranges
+            // TODO FAST FINALITY check collator ranges
             // if shard is preparing to split/merge - it connot be collated by next collator without split/merge
             // before_split and before_merge must be set at the last block of the range
             //

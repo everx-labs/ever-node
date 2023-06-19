@@ -386,6 +386,8 @@ impl OutMsgQueueInfoStuff {
             let value = ProcessedUpto::with_params(
                 entry.last_msg_lt, 
                 entry.last_msg_hash.clone(), 
+                #[cfg(feature = "fast_finality")] 
+                None
             );
             proc_info.set(&key, &value)?
         }

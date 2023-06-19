@@ -17,6 +17,9 @@ use crate::{
     validator::validator_utils::check_crypto_signatures, 
     validating_utils::UNREGISTERED_CHAIN_MAX_LEN,
 };
+#[cfg(feature = "fast_finality")]
+use crate::validator::workchains_fast_finality::calc_subset_for_workchain_fast_finality;
+#[cfg(not(feature = "fast_finality"))]
 use crate::validator::validator_utils::calc_subset_for_workchain_standard;
 
 use bitflags::bitflags;
@@ -52,6 +55,8 @@ pub struct TopBlockDescrStuff {
     chain_mc_blk_ids: Vec<BlockIdExt>,
     chain_blk_ids: Vec<BlockIdExt>,
     gen_utime: u32,
+    #[cfg(feature = "fast_finality")]
+    gen_utime_ms: u64,
     chain_fees: Vec<(CurrencyCollection, CurrencyCollection, CopyleftRewards)>,
     chain_head_prev: Vec<BlockIdExt>,
     creators: Vec<UInt256>,
@@ -84,6 +89,8 @@ impl TopBlockDescrStuff {
 
         let mut vert_seq_no = Default::default();
         let mut gen_utime = Default::default();
+        #[cfg(feature = "fast_finality")]
+        let mut gen_utime_ms = Default::default();
         let mut chain_head_prev = vec!();
         let mut chain_mc_blk_ids = vec!();
         let mut chain_blk_ids = vec!();
@@ -115,6 +122,18 @@ impl TopBlockDescrStuff {
             if i == 0 {
                 vert_seq_no = cur_info.vert_seq_no();
                 gen_utime = cur_info.gen_utime().as_u32();
+                #[cfg(feature = "fast_finality")] {
+                    gen_utime_ms = cur_info.gen_utime_ms();
+                    if gen_utime != (gen_utime_ms / 1000) as u32 {
+                        fail!(
+                            "invalid gen_utime in ShardTopBlockDescr for {}: \
+                            gen_utime_ms = {}, gen_utime = {}",
+                            tbd.proof_for(),
+                            gen_utime_ms,
+                            gen_utime,
+                        );
+                    }
+                }
             }
             if is_head {
                 chain_head_prev.push(prev1_id.clone());
@@ -139,6 +158,8 @@ impl TopBlockDescrStuff {
                 chain_mc_blk_ids,
                 chain_blk_ids,
                 gen_utime,
+                #[cfg(feature = "fast_finality")] 
+                gen_utime_ms,
                 chain_fees,
                 chain_head_prev,
                 creators,
@@ -161,6 +182,11 @@ impl TopBlockDescrStuff {
 
     pub fn gen_utime(&self) -> u32 {
         self.gen_utime
+    }
+
+    #[cfg(feature = "fast_finality")] 
+    pub fn gen_utime_ms(&self) -> u64 {
+        self.gen_utime_ms
     }
 
     pub fn get_prev_at(&self, index: usize) -> Vec<BlockIdExt> {
@@ -393,12 +419,24 @@ impl TopBlockDescrStuff {
                 fail!("intermediate link for block {} is declared to be before a split", cur_id)
             }
 
+            #[cfg(not(feature = "fast_finality"))]
             if info.gen_utime().as_u32() > next_info.gen_utime().as_u32() {
                 fail!(
                     "block creation unixtime goes back from {} to {} in intermediate link \
                     for blocks {} and {}",
                     info.gen_utime(),
                     next_info.gen_utime(),
+                    cur_id,
+                    next_id
+                )
+            }
+            #[cfg(feature = "fast_finality")]
+            if info.gen_utime_ms() > next_info.gen_utime_ms() {
+                fail!(
+                    "block creation unixtime goes back from {} to {} in intermediate link \
+                    for blocks {} and {}",
+                    info.gen_utime_ms(),
+                    next_info.gen_utime_ms(),
                     cur_id,
                     next_id
                 )
@@ -707,6 +745,10 @@ impl TopBlockDescrStuff {
 
         let mut vset_ok = false;
         let shard_id = self.proof_for().shard();
+        #[cfg(feature = "fast_finality")]
+        let mut subset = calc_subset_for_workchain_fast_finality(
+            &cur_validator_set, cc_seqno, last_mc_state, shard_id, self.proof_for().seq_no())?;
+        #[cfg(not(feature = "fast_finality"))]
         let mut subset = calc_subset_for_workchain_standard(
             &cur_validator_set, &last_mc_state_extra.config, shard_id, cc_seqno)?;
 
@@ -727,6 +769,10 @@ impl TopBlockDescrStuff {
             vset_ok = true;
         } else if mode.intersects(Mode::ALLOW_NEXT_VSET) {
             let next_validator_set = last_mc_state_extra.config.next_validator_set()?;
+            #[cfg(feature = "fast_finality")]
+            let next_subset = calc_subset_for_workchain_fast_finality(
+                &next_validator_set, cc_seqno, last_mc_state, shard_id, self.proof_for().seq_no())?;
+            #[cfg(not(feature = "fast_finality"))]
             let next_subset = calc_subset_for_workchain_standard(
                 &next_validator_set, &last_mc_state_extra.config, shard_id, cc_seqno)?;
             if (cc_seqno == signatures.validator_info.catchain_seqno) &&
@@ -752,6 +798,47 @@ impl TopBlockDescrStuff {
         }
 
         // check range
+        #[cfg(feature = "fast_finality")] {
+            let range = subset.collator_range.ok_or_else(
+                || error!("{} has no collator range in val. set", self.proof_for())
+            )?;
+
+            let start = range.start;
+            let finish = range.finish;
+            let seq_no = self.proof_for().seq_no();
+            if !(start..=finish).contains(&seq_no) {
+                fail!(
+                    "ShardTopBlockDescr for {id} is invalid because it refers to a collator range \
+                    {start}..={finish} but its seqno is {seq_no}",
+                    id = self.proof_for()
+                )
+            }
+
+            if let Some(descr) = last_mc_state_extra.shards().get_shard(shard_id)? {
+                if descr.descr.is_fsm_merge() {
+                    let collators = descr.descr.collators
+                        .ok_or_else(|| error!("There is no collators in shard descr"))?;
+
+                    if range != collators.current {
+                        fail!(
+                            "ShardTopBlockDescr for {id} is invalid because it prepared to merge but \
+                            refers to next collator range {start}..={finish} (without being merged), \
+                            current range for the shard is {current_start}..={current_finish}",
+                            id = self.proof_for(),
+                            start = range.start,
+                            finish = range.finish,
+                            current_start = collators.current.start,
+                            current_finish = collators.current.finish,
+                        )
+                    }
+                }
+            }
+
+            // TODO FAST FINALITY check collator ranges
+            // if shard is preparing to split/merge - it connot be collated by next collator without split/merge
+            // before_split and before_merge must be set at the last block of the range
+            //
+        }
 
         // check signatures
 

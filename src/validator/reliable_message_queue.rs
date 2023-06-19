@@ -353,7 +353,6 @@ impl MessageQueue {
             &rmq_message.message_id,
             &rmq_message.message_uid,
             Some(rmq_message.clone()),
-            &self.catchain_info.general_session_info.shard,
             if forwarded { Self::forwarded_ignored_status().clone() } else { RempMessageStatus::TonNode_RempNew },
             |old_status, new_status| {
                 if Self::is_forwarded_status(old_status) {
@@ -436,7 +435,7 @@ impl MessageQueue {
             for message_ids in reject_digest.messages.iter() {
                 self.remp_manager.message_cache.add_external_message_status(
                     &message_ids.id, &message_ids.uid,
-                    None, &self.catchain_info.general_session_info.shard,
+                    None,
                     Self::forwarded_rejected_status().clone(),
                     // Forwarded reject cannot replace any status: if we know something
                     // to grant re-collation for the message, then this knowledge is
@@ -508,6 +507,13 @@ impl MessageQueue {
                 },
                 Some((m, s)) => (s, m)
             };
+
+            if let Some(lowest_id) = self.remp_manager.message_cache.get_lower_id_for_uid(&message.message_id, &message.message_uid)? {
+                log::trace!(target: "remp", "Point 5. RMQ {}: message {:x} has another message {:x} with same uid {:x}, skipping",
+                    self, message.message_id, lowest_id, message.message_uid
+                );
+                continue
+            }
 
             match status.clone() {
                 RempMessageStatus::TonNode_RempNew 
@@ -727,7 +733,7 @@ struct StatusUpdater {
 
 #[async_trait::async_trait]
 impl BlockProcessor for StatusUpdater {
-    fn process_message(&self, message_id: &UInt256, _message_uid: &UInt256) {
+    async fn process_message(&self, message_id: &UInt256, _message_uid: &UInt256) {
         match self.queue.get_message(message_id) {
             None => log::warn!(target: "remp", "Cannot find message {:x} in cache", message_id),
             Some(message) => {

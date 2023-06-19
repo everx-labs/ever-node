@@ -27,6 +27,8 @@ use ton_block::{
     Deserializable, BlockSignatures, ValidatorSet, BlockProof, Serializable, BlockSignaturesPure, 
     ValidatorBaseInfo, OutQueueUpdate
 };
+#[cfg(feature = "fast_finality")]
+use ton_block::{BinTreeType, CollatorRange};
 use ton_types::{error, Result, fail, UInt256, UsageTree, HashmapType};
 use ton_api::ton::ton_node::{
     blocksignature::BlockSignature, broadcast::{BlockBroadcast, QueueUpdateBroadcast}
@@ -37,6 +39,8 @@ pub async fn accept_block(
     data: Option<Vec<u8>>,
     prev: Vec<BlockIdExt>,
     validator_set: ValidatorSet,
+    #[cfg(feature = "fast_finality")]
+    collator_range: &Option<CollatorRange>,
     signatures: Vec<CryptoSignaturePair>,
     _approve_signatures: Vec<CryptoSignaturePair>, // is not actually used by t-node
     send_block_broadcast: bool,
@@ -59,12 +63,16 @@ pub async fn accept_block(
     }).transpose()?;
 
     let mut timeout = 50;
+    let mut attempt = 0;
+    const MAX_ATTEMPTS: usize = 100;
     let (handle, block, proof, signatures) = loop {
         match accept_block_routine(
             &id,
             block_opt.clone(),
             &prev,
             &validator_set,
+            #[cfg(feature = "fast_finality")]
+            collator_range,
             &signatures,
             &engine,
             is_fake,
@@ -80,9 +88,16 @@ pub async fn accept_block(
                 return Ok(())
             },
             Err(e) => {
-                log::warn!(target: "validator", "accept block routine {}: {}", id, e);
-                tokio::time::sleep(Duration::from_millis(timeout)).await;
-                timeout = min(timeout * 2, 1000);
+                attempt += 1;
+                log::warn!(target: "validator", 
+                    "accept block routine (attempt {attempt} of {MAX_ATTEMPTS}) {id}: {e}");
+                if attempt > MAX_ATTEMPTS {
+                    log::error!("accept block routine {id}: OUT OF {MAX_ATTEMPTS} ATTEMPTS");
+                    fail!("accept block routine {id}: OUT OF {MAX_ATTEMPTS} ATTEMPTS", );
+                } else {
+                    tokio::time::sleep(Duration::from_millis(timeout)).await;
+                    timeout = min(timeout * 2, 1000);
+                }
             }
         }
     };
@@ -170,6 +185,8 @@ pub async fn accept_block_routine(
     block_opt: Option<BlockStuff>,
     prev: &[BlockIdExt],
     validator_set: &ValidatorSet,
+    #[cfg(feature = "fast_finality")]
+    collator_range: &Option<CollatorRange>,
     signatures: &[CryptoSignaturePair],
     engine: &Arc<dyn EngineOperations>,
     is_fake: bool,
@@ -237,6 +254,8 @@ pub async fn accept_block_routine(
     let (proof, signatures) = create_new_proof(
         &block,
         &validator_set,
+        #[cfg(feature = "fast_finality")]
+        collator_range,
         signatures)?;
 
     handle = engine.store_block_proof(&id, Some(handle), &proof).await?
@@ -353,6 +372,8 @@ fn precheck_header(
 pub fn create_new_proof(
     block_stuff: &BlockStuff,
     validator_set: &ValidatorSet,
+    #[cfg(feature = "fast_finality")]
+    _collator_range: &Option<CollatorRange>,
     signatures: &[CryptoSignaturePair]
 ) -> Result<(BlockProofStuff, BlockSignatures)> {
     let id = block_stuff.id();
@@ -399,9 +420,9 @@ pub fn create_new_proof(
         block_signatures_pure.add_sigpair(sign.clone())
     }
 
-    // #[cfg(feature = "venom")]
+    // #[cfg(feature = "fast_finality")]
     // let cc_seqno = collator_range.start;
-    // #[cfg(not(feature = "venom"))]
+    // #[cfg(not(feature = "fast_finality"))]
     let cc_seqno = validator_set.catchain_seqno();
 
     let mut block_signatures = BlockSignatures::with_params(
@@ -461,6 +482,11 @@ pub fn visit_block_for_proof(block: &Block, id: &BlockIdExt) -> Result<()> {
     if !info.shard().is_masterchain() && info.key_block() {
         fail!("non-masterchain block header of {} announces this block to be a key block", id);
     }
+
+    #[cfg(feature = "fast_finality")]
+    extra.ref_shard_blocks().iterate(|shards| {
+        shards.iterate(|_prefix, _block_id| Ok(true))
+    })?;
 
     // check state update
     let _state_update = block.read_state_update()?;

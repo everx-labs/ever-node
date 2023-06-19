@@ -369,8 +369,8 @@ impl RempManager {
         Ok(())
     }
 
-    pub async fn gc_old_messages(&self, current_cc_seqno: u32) -> usize {
-        let (total, accepted, rejected, only_status, incorrect) = self.message_cache.get_old_messages(current_cc_seqno).await;
+    pub async fn gc_old_messages(&self, current_master_cc_seqno: u32) -> usize {
+        let (total, accepted, rejected, only_status, incorrect) = self.message_cache.get_old_messages(current_master_cc_seqno).await;
         log::info!(target: "remp", "GC old messages: {} total ({} finally accepted, {} finally rejected, {} lost), {} only status in cache, {} incorrect cache state",
             total, accepted, rejected, total - accepted - rejected, only_status, incorrect
         );
@@ -484,8 +484,12 @@ impl RempCoreInterface for RempInterfaceQueues {
         log::trace!(target: "remp", "RempInterfaceQueues: checking duplicates for {:x}", message_id);
         let res = self.message_cache.check_message_duplicates(message_id);
         match &res {
-            Ok(x) => log::trace!(target: "remp", "RempInterfaceQueues: duplicate check for {:x} finished: {:?}", message_id, x),
-            Err(e) => log::error!(target: "remp", "RempInterfaceQueues: duplicate check for {:x} failed: {:?}", message_id, e)
+            Ok(x) =>
+                log::trace!(target: "remp", "RempInterfaceQueues: duplicate check for {:x} finished: {}",
+                    message_id, self.message_cache.duplicate_info(x)
+                ),
+            Err(e) =>
+                log::error!(target: "remp", "RempInterfaceQueues: duplicate check for {:x} failed: {:?}", message_id, e)
         }
         return res
     }

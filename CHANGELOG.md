@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.26
+
+- Supported new version of BocWriter::with_params with fixed cell lifetime
+
+## Version 0.55.25
+
+- Filled gen_utime_ms for block and state
+
+## Version 0.55.24
+
+- Remp collation check for uid duplicates added
+
+## Version: 0.55.22
+
+- Limited the number of attempts in accept block routine (was infinite)
+
 ## Version 0.55.21
 
 - Fixed setup of special settings for the "cells" column family in RocksDB
@@ -134,6 +150,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Fixed bug in DB restore: LAST_ROTATION_MC_BLOCK pointer is not truncated.
+
 
 ## Version 0.52.6
 

@@ -57,6 +57,10 @@ use crate::validator::sessions_computing::{SessionHistory, SessionInfo};
 use crate::validator::validator_utils::{
     ValidatorSubsetInfo, get_first_block_seqno_after_prevs, try_calc_subset_for_workchain_standard
 };
+#[cfg(feature = "fast_finality")]
+use crate::validator::workchains_fast_finality::{
+    try_calc_next_subset_for_workchain_fast_finality, try_calc_prev_subset_for_workchain_fast_finality
+};
 
 fn get_session_id_serialize(
     session_info: Arc<GeneralSessionInfo>,
@@ -484,7 +488,7 @@ impl ValidatorManagerImpl {
                 &full_validator_set,
                 &mc_state,
                 &prev_session_info.shard,
-                prev_session_info.catchain_seqno-1,
+                prev_session_info.catchain_seqno,
                 0, // TODO: correct block necessary!
             )? {
                 Some(x) => x,
@@ -563,6 +567,17 @@ impl ValidatorManagerImpl {
         session_id: &UInt256,
         master_cc_seqno: u32,
     ) -> Result<Option<Vec<ValidatorDescr>>> {
+        #[cfg(feature = "fast_finality")]
+        if !general_session_info.shard.is_masterchain() {
+            return Ok(
+                try_calc_prev_subset_for_workchain_fast_finality(
+                    full_validator_set, 
+                    full_validator_set.cc_seqno(), 
+                    mc_state, 
+                    &general_session_info.shard
+                )?.map(|v| v.validators)
+            );
+        }
 
         self.compute_prev_validator_list_impl(
             full_validator_set, current_subset, mc_state,
@@ -759,6 +774,8 @@ impl ValidatorManagerImpl {
                         master_cc_seqno,
                         validator_list_id.clone(),
                         vsubset.clone(),
+                        #[cfg(feature = "fast_finality")]
+                        &subset.collator_range,
                         session_options,
                         remp_manager,
                         engine,
@@ -767,6 +784,13 @@ impl ValidatorManagerImpl {
                         slashing_manager,
                     ))
                 );
+
+                #[cfg(feature = "fast_finality")]
+                if !general_session_info.shard.is_masterchain() {
+                    if let Some(range) = &subset.collator_range {
+                        session.set_collator_range(range).await;
+                    }
+                }
 
                 let session_status = session.get_status().await;
                 let session_clone = session.clone();
@@ -959,6 +983,20 @@ impl ValidatorManagerImpl {
 
             let next_cc_seqno = cc_seqno_from_state + 1;
 
+            #[cfg(feature = "fast_finality")]
+            let next_subset_opt = if !ident.is_masterchain() {
+                //let block_seqno = Self::get_first_block_seqno_after_prevs(new_shards.get(ident))?;
+                try_calc_next_subset_for_workchain_fast_finality(
+                    &future_validator_set, 
+                    future_validator_set.cc_seqno(), 
+                    &mc_state, 
+                    ident
+                )?
+            } else {
+                try_calc_subset_for_workchain_standard(&future_validator_set, mc_state.config_params()?, ident, next_cc_seqno)?
+            };
+
+            #[cfg(not(feature = "fast_finality"))]
             let next_subset_opt = try_calc_subset_for_workchain_standard(
                 &future_validator_set, mc_state.config_params()?, ident, next_cc_seqno)?;
 
@@ -1024,6 +1062,8 @@ impl ValidatorManagerImpl {
                         master_cc_seqno + 1,
                         next_val_list_id.clone(),
                         wc.compute_validator_set(*next_cc_seqno)?,
+                        #[cfg(feature = "fast_finality")]
+                        &wc.collator_range,
                         session_options,
                         self.remp_manager.clone(),
                         self.engine.clone(),
@@ -1063,6 +1103,7 @@ impl ValidatorManagerImpl {
             self.engine.save_last_rotation_block_id(last_masterchain_block)?;
 
             if let Some(remp) = &self.remp_manager {
+                remp.message_cache.set_master_cc(master_cc_seqno);
                 remp.message_cache.set_master_cc_start_time(master_cc_seqno, SystemTime::now());
                 let _deleted = remp.gc_old_messages(master_cc_seqno).await;
                 #[cfg(feature = "telemetry")]

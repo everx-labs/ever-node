@@ -756,7 +756,7 @@ impl InternalDb {
                 let cells_storage = shard_state_dynamic_db.create_ordered_cells_storage(&root_hash)?;
                 let now1 = std::time::Instant::now();
                 let boc = BocWriter::with_params(
-                    [&root_cell], MAX_SAFE_DEPTH, cells_storage, abort.deref())?;
+                    [root_cell], MAX_SAFE_DEPTH, cells_storage, abort.deref())?;
                 log::info!("store_shard_state_persistent {:x} building boc TIME {}sec", root_hash, now1.elapsed().as_secs());
 
                 let mut dest = shard_state_persistent_db.get_write_object(&id)?;

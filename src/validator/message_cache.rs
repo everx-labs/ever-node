@@ -2,7 +2,7 @@ use std::{
     cmp::Reverse, collections::BinaryHeap, sync::Arc, fmt, fmt::{Display, Formatter},
     time::SystemTime
 };
-use std::sync::atomic::{AtomicUsize, Ordering, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering, Ordering::Relaxed};
 use lockfree::map::Map;
 use ever_crypto::KeyId;
 use ton_api::{
@@ -12,7 +12,7 @@ use ton_api::{
         RempMessageStatus, RempMessageLevel
     }
 };
-use ton_block::{Deserializable, Message, ShardIdent, Serializable, MsgAddressInt, MsgAddrStd, ExternalInboundMessageHeader, BlockIdExt};
+use ton_block::{Deserializable, Message, Serializable, MsgAddressInt, MsgAddrStd, ExternalInboundMessageHeader, BlockIdExt};
 use ton_types::{UInt256, Result, BuilderData, SliceData, fail, error};
 use crate::validator::mutex_wrapper::MutexWrapper;
 use crate::ext_messages::{get_level_and_level_change, get_level_numeric_value, is_finally_accepted, is_finally_rejected, validate_status_change};
@@ -126,7 +126,7 @@ impl Display for RmqMessage {
 
 #[derive(Debug)]
 pub struct RempMessageHeader {
-    pub shard: ShardIdent,
+    //pub shard: ShardIdent,
     pub status: RempMessageStatus,
     pub master_cc: u32,
 
@@ -135,34 +135,33 @@ pub struct RempMessageHeader {
 }
 
 impl RempMessageHeader {
-    pub fn new_arc(shard: &ShardIdent, status: RempMessageStatus, master_cc: u32, message_id: &UInt256, message_uid: &UInt256) -> Arc<Self> {
-        Arc::new(RempMessageHeader { shard: shard.clone(), status, master_cc, message_id: message_id.clone(), message_uid: message_uid.clone() })
+    pub fn new_arc(status: RempMessageStatus, master_cc: u32, message_id: &UInt256, message_uid: &UInt256) -> Arc<Self> {
+        Arc::new(RempMessageHeader { status, master_cc, message_id: message_id.clone(), message_uid: message_uid.clone() })
     }
 
     #[allow(dead_code)]
-    pub fn from_rmq_record(record: &ton_api::ton::ton_node::rmqrecord::RmqMessage, message_uid: &UInt256, shard: &ShardIdent, status: &RempMessageStatus) -> Self {
+    pub fn from_rmq_record(record: &ton_api::ton::ton_node::rmqrecord::RmqMessage, message_uid: &UInt256, status: &RempMessageStatus) -> Self {
         RempMessageHeader {
-            shard: shard.clone(),
             status: status.clone(),
             master_cc: record.masterchain_seqno as u32,
             message_id: record.message_id.clone(),
             message_uid: message_uid.clone()
         }
     }
-
+/*
     pub fn new_replace_shard(&self, shard: &ShardIdent) -> Arc<Self> {
         Self::new_arc(shard, self.status.clone(), self.master_cc, &self.message_id, &self.message_uid)
     }
-
+*/
     pub fn new_replace_status(&self, status: RempMessageStatus) -> Arc<Self> {
-        Self::new_arc(&self.shard, status, self.master_cc, &self.message_id, &self.message_uid)
+        Self::new_arc(status, self.master_cc, &self.message_id, &self.message_uid)
     }
 }
 
 impl Display for RempMessageHeader {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "id {}, uid {}, {}, {:?}, master_cc {}",
-               self.message_id, self.message_uid, self.shard, self.status, self.master_cc
+        write!(f, "id {:x}, uid {:x}, {:?}, master_cc {}",
+               self.message_id, self.message_uid, /*self.shard,*/ self.status, self.master_cc
         )
     }
 }
@@ -179,6 +178,7 @@ struct MessageCacheMessages {
 
     message_count: AtomicUsize,
 
+    master_cc: AtomicU32,
     master_cc_start_time: Map<u32, SystemTime>,
 
     #[cfg(feature = "telemetry")]
@@ -198,9 +198,10 @@ impl MessageCacheMessages {
             message_events: Map::default(),
 
             master_cc_start_time: Map::default(),
+            master_cc: AtomicU32::new(0),
 
             #[cfg(feature = "telemetry")]
-            cache_size_metric
+            cache_size_metric,
         }
     }
 
@@ -288,19 +289,19 @@ impl MessageCacheMessages {
             }
         }
     }
-
+/*
     pub fn update_message_shard(&self, message_id: &UInt256, new_shard: &ShardIdent) -> Result<()> {
         self.update_message_header(message_id, |hdr: Arc<RempMessageHeader>| hdr.new_replace_shard(new_shard))
     }
-
+*/
     pub fn update_message_status(&self, message_id: &UInt256, new_status: RempMessageStatus,
-                                 info_if_insered: Option<(&ShardIdent, u32, &UInt256)>
+                                 info_if_insered: Option<(u32, &UInt256)>
     ) -> Result<()> {
         let old_header_opt = self.message_headers.get(&message_id);
         match &old_header_opt {
             None => {
-                if let Some((shard, master_cc, message_uid)) = info_if_insered {
-                    let message_header = RempMessageHeader::new_arc(shard, new_status, master_cc, message_id, message_uid);
+                if let Some((master_cc, message_uid)) = info_if_insered {
+                    let message_header = RempMessageHeader::new_arc(new_status, master_cc, message_id, message_uid);
                     log::trace!(target: "remp",
                         "Message {:x}: absent from cache, adding {}",
                         message_id, message_header
@@ -330,11 +331,25 @@ impl MessageCacheMessages {
     }
 
     pub fn attach_id_to_uid(&self, msg_id: &UInt256, msg_uid: &UInt256) -> Result<()> {
-        self.message_by_uid.append_to_set(msg_uid, msg_id)
+        log::trace!(target: "remp", "Attaching id {:x} to uid {:x}", msg_id, msg_uid);
+        self.message_by_uid.append_to_set(msg_uid, msg_id)?;
+        if !self.message_by_uid.contains_in_set(msg_uid, msg_id) {
+            fail!("id {:x} was added to uid {:x}, but addition didn't happen: [{:?}]",
+                msg_id, msg_uid, self.message_by_uid.get_set(msg_uid)
+            );
+        }
+        Ok(())
     }
 
     pub fn detach_id_from_uid(&self, msg_id: &UInt256, msg_uid: &UInt256) -> Result<()> {
-        self.message_by_uid.remove_from_set(msg_uid, msg_id)
+        log::trace!(target: "remp", "Detaching id {:x} from uid {:x}", msg_id, msg_uid);
+        self.message_by_uid.remove_from_set(msg_uid, msg_id)?;
+        if self.message_by_uid.contains_in_set(msg_uid, msg_id) {
+            fail!("id {:x} was removed from uid {:x}, but removal didn't happen: [{:?}]",
+                msg_id, msg_uid, self.message_by_uid.get_set(msg_uid)
+            );
+        }
+        Ok(())
     }
 
 /*
@@ -424,14 +439,14 @@ impl MessageCacheImpl {
         }
     }
 
-    fn insert_message(&mut self, mc: Arc<MessageCacheMessages>, message: Arc<RmqMessage>, message_uid: &UInt256, shard: &ShardIdent, status: RempMessageStatus, master_cc: u32) -> Result<()> {
-        mc.insert_message(message.clone(), RempMessageHeader::new_arc(shard, status, master_cc, &message.message_id, message_uid))?;
+    fn insert_message(&mut self, mc: Arc<MessageCacheMessages>, message: Arc<RmqMessage>, message_uid: &UInt256, status: RempMessageStatus, master_cc: u32) -> Result<()> {
+        mc.insert_message(message.clone(), RempMessageHeader::new_arc(status, master_cc, &message.message_id, message_uid))?;
         self.message_master_cc_order.push((Reverse(master_cc), message.message_id.clone()));
         Ok(())
     }
 
-    fn insert_message_status(&mut self, mc: Arc<MessageCacheMessages>, message_id: &UInt256, message_uid: &UInt256, shard: &ShardIdent, status: RempMessageStatus, master_cc: u32) -> Result<()> {
-        mc.insert_message_header(RempMessageHeader::new_arc(shard, status, master_cc, message_id, message_uid))?;
+    fn insert_message_status(&mut self, mc: Arc<MessageCacheMessages>, message_id: &UInt256, message_uid: &UInt256, status: RempMessageStatus, master_cc: u32) -> Result<()> {
+        mc.insert_message_header(RempMessageHeader::new_arc(status, master_cc, message_id, message_uid))?;
         self.message_master_cc_order.push((Reverse(master_cc), message_id.clone()));
         Ok(())
     }
@@ -452,6 +467,11 @@ impl MessageCacheImpl {
                     log::error!(target: "remp", "Error detaching message {:x} from uid {:x}: `{}`",
                         msg_id, msg_header.message_uid, e
                     );
+                }
+                else {
+                    log::trace!(target: "remp", "Successfully detached message {:x} from uid {:x}: [{:?}]",
+                        msg_id, msg_header.message_uid, mc.message_by_uid.get_set(&msg_header.message_uid)
+                    )
                 }
 
                 if msg_header.master_cc != old_cc.0 {
@@ -479,28 +499,6 @@ impl MessageCacheImpl {
                 log::error!(target: "remp", "Message is inconsistent: message {:x} has no message header", msg_id);
             }
             return Some((msg_id, msg_opt, msg_header_opt));
-/*
-            if msg_opt.is_some() || status_opt.is_some() {
-                if msg_opt.is_some() {
-                    mc.message_count.fetch_sub(1, Ordering::Relaxed);
-                }
-
-                #[cfg(feature = "telemetry")]
-                mc.cache_size_metric.update(mc.all_messages_count() as u64);
-
-                log::debug!(target: "remp", "Removing old message: current master cc {}, old master cc {:?}, msg_id {:x}, final status {:?}, collation history `{}`",
-                    current_cc, master_cc_opt, msg_id, status_opt,
-                    msg_events.iter().map(|x| mc.message_events_to_string(Some(old_cc.0), x)).collect::<String>()
-                );
-                return Some((msg_id, msg_opt, status_opt, shard_opt, master_cc_opt))
-            }
-            else {
-                log::error!(target: "remp",
-                    "MessageCache inconsistent: message {:x} is scheduled for removal, but not present in message cache",
-                    msg_id
-                );
-            }
- */
         }
 
         None
@@ -522,7 +520,7 @@ impl MessageCache {
         self.messages.all_messages_count()
     }
 
-    fn do_update_message_status(&self, message_id: &UInt256, new_status: RempMessageStatus, if_absent: Option<(&ShardIdent, u32, &UInt256)>) -> Result<()> {
+    fn do_update_message_status(&self, message_id: &UInt256, new_status: RempMessageStatus, if_absent: Option<(u32, &UInt256)>) -> Result<()> {
         self.messages.update_message_status(message_id, new_status, if_absent)
     }
 
@@ -596,7 +594,7 @@ impl MessageCache {
     /// Actual -- get it as granted ("imprinting")
     /// Returns old status and new (added) status
     pub async fn add_external_message_status<F>(&self,
-        message_id: &UInt256, message_uid: &UInt256, message: Option<Arc<RmqMessage>>, shard: &ShardIdent,
+        message_id: &UInt256, message_uid: &UInt256, message: Option<Arc<RmqMessage>>,
         status_if_new: RempMessageStatus, status_updater: F,
         master_cc: u32
     ) -> Result<(Option<RempMessageStatus>,RempMessageStatus)>
@@ -606,14 +604,13 @@ impl MessageCache {
             match self.messages.message_headers.get(message_id) {
                 None => {
                     match message {
-                        None => c.insert_message_status(self.messages.clone(), message_id, message_uid, shard, status_if_new.clone(), master_cc)?,
-                        Some(message) => c.insert_message(self.messages.clone(), message, message_uid, shard, status_if_new.clone(), master_cc)?
+                        None => c.insert_message_status(self.messages.clone(), message_id, message_uid, status_if_new.clone(), master_cc)?,
+                        Some(message) => c.insert_message(self.messages.clone(), message, message_uid, status_if_new.clone(), master_cc)?
                     };
                     Ok((None, status_if_new))
                 },
                 Some(old_header_rg) => {
                     let old_header = old_header_rg.1.clone();
-                    self.messages.update_message_shard(&message_id, shard)?;
                     let updated_status = status_updater (&old_header.status,&status_if_new);
                     self.messages.update_message_status(&message_id, updated_status.clone(), None)?;
                     Ok((Some(old_header.status.clone()), updated_status.clone()))
@@ -622,28 +619,29 @@ impl MessageCache {
         }).await
     }
 
-    pub fn insert_masterchain_message_status(&self, message_id: &UInt256, message_uid: &UInt256, new_status: RempMessageStatus, masterchain_seqno: u32) -> Result<()> {
-        if let RempMessageStatus::TonNode_RempAccepted(acc_new) = &new_status {
-            if acc_new.level == RempMessageLevel::TonNode_RempMasterchain {
-                self.do_update_message_status(
-                    message_id, new_status.clone(),
-                    Some((&acc_new.block_id.shard_id, masterchain_seqno, message_uid))
-                )?;
-                return Ok(())
-            }
-        }
-
-        fail!("insert_masterchain_message_status for message {:x}: requested {}, however can update only to accepted by masterchain level",
-            message_id, new_status
-        )
-    }
-
     pub fn mark_collation_attempt(&self, message_id: &UInt256) -> Result<()> {
         self.messages.mark_collation_attempt(message_id)
     }
 
     pub fn get_messages_for_uid(&self, msg_uid: &UInt256) -> Vec<UInt256> {
         self.messages.message_by_uid.get_set(msg_uid)
+    }
+
+    /// Returns None if `id` is the lowest message id for `uid`
+    /// Returns minimal message id for `uid` otherwise
+    pub fn get_lower_id_for_uid(&self, id: &UInt256, uid: &UInt256) -> Result<Option<UInt256>> {
+        let equivalent_msgs = self.get_messages_for_uid(uid);
+        log::trace!(target: "remp", "Looking for lower id for uid {:x}, ids {:?}", uid, equivalent_msgs);
+
+        if !equivalent_msgs.contains(id) {
+            fail!("Message cache: messages for uid {:x} do not contain id {:x}", uid, id);
+        }
+
+        match equivalent_msgs.iter().min() {
+            None => fail!("Message cache: empty list of messages for uid {:x}", uid),
+            Some(lowest_msg_id) if lowest_msg_id == id => Ok(None),
+            Some(lowest_msg_id) => Ok(Some(lowest_msg_id.clone()))
+        }
     }
 
     /// Checks, whether `message_id` can be collated or validated. There are three possible outcomes:
@@ -659,13 +657,7 @@ impl MessageCache {
         };
 
         let equivalent_msgs = self.get_messages_for_uid(&uid);
-        if !equivalent_msgs.contains(message_id)
-        {
-            fail!("Message cache: message id {:x} is not associated with message uid {:x}, cache contents: [{}]",
-                message_id, uid,
-                equivalent_msgs.iter().map(|eq_id| format!(" {:x} ", eq_id)).collect::<String>()
-            );
-        };
+        log::trace!(target: "remp", "Attached to uid {:x}, ids {:?}", uid, equivalent_msgs);
 
         // Check whether a message with same uid was already accepted by shardchain or masterchain
         let fresh_duplicate_status = match equivalent_msgs.iter().map(|previous_msg_id| {
@@ -689,10 +681,24 @@ impl MessageCache {
         };
 
         // Check whether message_id is minimal among other messages with same uid
-        match equivalent_msgs.iter().min() {
-            None => fail!("Message cache: empty list of message for uid {:x}", uid),
-            Some(lowest_msg_id) if message_id == lowest_msg_id => Ok(fresh_duplicate_status),
-            Some(lowest_msg_id) => Ok(RempDuplicateStatus::Duplicate(BlockIdExt::default(), uid.clone(), (*lowest_msg_id).clone()))
+        match self.get_lower_id_for_uid(&message_id, &uid)? {
+            None => Ok(fresh_duplicate_status),
+            Some(lowest_msg_id) => {
+                match self.messages.message_headers.get(&lowest_msg_id) {
+                    None => log::error!(target: "remp",
+                        "Message id {:x}, duplicate for {:x}, uid {:x} is not found in cache",
+                        lowest_msg_id, message_id, uid
+                    ),
+                    Some(m)
+                        if Self::cc_expired(m.val().master_cc, self.messages.master_cc.load(Ordering::Relaxed)) =>
+                            log::error!(target: "remp",
+                                "Duplicate message for {:x} is expired {}",
+                                lowest_msg_id, m.val()
+                            ),
+                    _ => ()
+                }
+                Ok(RempDuplicateStatus::Duplicate(BlockIdExt::default(), uid.clone(), lowest_msg_id))
+            }
         }
     }
 
@@ -722,8 +728,31 @@ impl MessageCache {
         }
     }
 
+    pub fn set_master_cc(&self, new_current_cc: u32) {
+        self.messages.master_cc.store(new_current_cc, Ordering::Relaxed);
+    }
+
     pub fn set_master_cc_start_time(&self, master_cc: u32, start_time: SystemTime) {
         self.messages.set_master_cc_start_time(master_cc, start_time);
+    }
+
+    fn extend_info_for_uids(&self, uid: &UInt256) -> String {
+        self.get_messages_for_uid(&uid).iter()
+            .map(|x| match self.messages.message_headers.get(x) {
+                    Some(v) => format!("{:x}:master cc {}; ", x, v.val().master_cc),
+                    None => format!("{:x}:None; ", x)
+                }
+            )
+            .collect::<String>()
+    }
+
+    pub fn duplicate_info(&self, status: &RempDuplicateStatus) -> String {
+        match status {
+            RempDuplicateStatus::Absent => "Absent".to_string(),
+            RempDuplicateStatus::Fresh(uid) => format!("Fresh uid: {:x}, ids: [{}]", uid, self.extend_info_for_uids(uid)),
+            RempDuplicateStatus::Duplicate(_,uid,lw) =>
+                format!("Duplicate uid: {:x}, ids: [{}], id: {:x}", uid, self.extend_info_for_uids(uid), lw)
+        }
     }
 
     /// Collect all old messages; return all messages stats

@@ -48,6 +48,7 @@ use ton_block::{
     TransactionDescr, ValidatorSet, ValueFlow, WorkchainDescr, INVALID_WORKCHAIN_ID,
     MASTERCHAIN_ID, U15, OutMsgQueueInfo, OutQueueUpdate,
 };
+#[cfg(not(feature = "fast_finality"))]
 use ton_block::MAX_SPLIT_DEPTH;
 use ton_executor::{
     BlockchainConfig, CalcMsgFwdFees, ExecuteParams, OrdinaryTransactionExecutor,
@@ -62,7 +63,9 @@ use crate::validator::validator_utils::is_remp_enabled;
 
 // pub const SPLIT_MERGE_DELAY: u32 = 100;        // prepare (delay) split/merge for 100 seconds
 // pub const SPLIT_MERGE_INTERVAL: u32 = 100;     // split/merge is enabled during 60 second interval
+#[cfg(not(feature = "fast_finality"))]
 pub const MIN_SPLIT_MERGE_INTERVAL: u32 = 30;  // split/merge interval must be at least 30 seconds
+#[cfg(not(feature = "fast_finality"))]
 pub const MAX_SPLIT_MERGE_DELAY: u32 = 1000;   // end of split/merge interval must be at most 1000 seconds in the future
 
 macro_rules! error {
@@ -927,90 +930,177 @@ impl ValidateQuery {
                 }
             }
         }
+        #[cfg(not(feature = "fast_finality"))]
         let mut fsm_inherited = false;
+        #[cfg(feature = "fast_finality")]
+        let fsm_inherited = false;
         if let Some(prev) = prev {
             // shard was not created, split or merged; it is a successor of `prev`
             old_before_merge = prev.descr.before_merge;
-            if !prev.descr().is_fsm_none() && !prev.descr().fsm_equal(info.descr())
-                && base.now() < prev.descr().fsm_utime_end() && !info.descr.before_split {
-                reject_query!("future split/merge information for shard {} has been arbitrarily \
-                    changed without a good reason", shard)
+            if 
+                !prev.descr().is_fsm_none() && 
+                !prev.descr().fsm_equal(info.descr()) && 
+                base.now() < prev.descr().fsm_utime_end() && 
+                !info.descr.before_split 
+            {
+                reject_query!(
+                    "future split/merge information for shard {} has been arbitrarily \
+                    changed without a good reason", 
+                    shard
+                )
             }
-            fsm_inherited = !prev.descr().is_fsm_none() && prev.descr().fsm_equal(info.descr());
-            if fsm_inherited && (base.now() > prev.descr().fsm_utime_end() || info.descr.before_split) {
-                reject_query!("future split/merge information for shard {}\
-                    has been carried on to the new shard configuration, but it is either expired (expire time {}, now {}), 
-                    or before_split bit has been set ({})",
-                        shard, prev.descr().fsm_utime_end(), base.now(), info.descr.before_split);
+            #[cfg(not(feature = "fast_finality"))] {
+                fsm_inherited = 
+                    !prev.descr().is_fsm_none() && prev.descr().fsm_equal(info.descr());
+                if 
+                    fsm_inherited && 
+                    (base.now() > prev.descr().fsm_utime_end() || info.descr.before_split) 
+                {
+                    reject_query!(
+                        "future split/merge information for shard {} has been carried on \
+                        to the new shard configuration, but it is either expired \
+                        (expire time {}, now {}), or before_split bit has been set ({})",
+                        shard, prev.descr().fsm_utime_end(), base.now(), 
+                        info.descr.before_split
+                    )
+                }
             }
         } else {
             // shard was created, split or merged
             if info.descr.before_split {
-                reject_query!("a newly-created, split or merged shard {} cannot have before_split set immediately after", shard)
+                reject_query!(
+                    "a newly-created, split or merged shard {} cannot have \
+                    before_split set immediately after", 
+                    shard
+                )
             }
         }
         let wc_info = wc_info.expect("in ton node it is a bug");
         let depth = shard.prefix_len();
-        let split_cond = (info.descr.want_split || depth < wc_info.min_split()) && depth < wc_info.max_split() && depth < MAX_SPLIT_DEPTH;
-        let merge_cond = depth > wc_info.min_split() && (info.descr.want_merge || depth > wc_info.max_split())
-            && (sibling.map(|s| s.descr.want_merge).unwrap_or_default() || depth > wc_info.max_split());
+        #[cfg(not(feature = "fast_finality"))]
+        let split_cond = 
+            (info.descr.want_split || depth < wc_info.min_split()) && 
+            depth < wc_info.max_split() && 
+            depth < MAX_SPLIT_DEPTH;
+        let merge_cond = 
+            depth > wc_info.min_split() && 
+            (info.descr.want_merge || depth > wc_info.max_split()) && 
+            (   
+                sibling.map(|s| s.descr.want_merge).unwrap_or_default() ||
+                depth > wc_info.max_split()
+            );
         if !fsm_inherited && !info.descr().is_fsm_none() {
             
-            // TODO VENOM check collator ranges
-            // if shard is preparing to split/merge - it connot be collated by next collator without split/merge
-            // before_split and before_merge must be set at the last block of the range
+            // TODO FAST FINALITY check collator ranges
+            // if shard is preparing to split/merge - it connot be collated by 
+            // next collator without split/merge before_split and before_merge 
+            // must be set at the last block of the range
             //
             
-             {
-                if info.descr().fsm_utime() < base.now() || info.descr().fsm_utime_end() <= info.descr().fsm_utime()
-                    || info.descr().fsm_utime_end() < info.descr().fsm_utime() + MIN_SPLIT_MERGE_INTERVAL
-                    || info.descr().fsm_utime_end() > base.now() + MAX_SPLIT_MERGE_DELAY {
-                    reject_query!("incorrect future split/merge interval {} .. {} \
+            #[cfg(not(feature = "fast_finality"))] {
+                let fsm_begin = info.descr().fsm_utime();
+                let fsm_end = info.descr().fsm_utime_end();
+                if 
+                    fsm_begin < base.now() || 
+                    fsm_end <= fsm_begin || 
+                    fsm_end < fsm_begin + MIN_SPLIT_MERGE_INTERVAL || 
+                    fsm_end > base.now() + MAX_SPLIT_MERGE_DELAY 
+                {
+                    reject_query!(
+                        "incorrect future split/merge interval {} .. {} \
                         set for shard {} in new shard configuration (it is {} now)",
-                            info.descr().fsm_utime(), info.descr().fsm_utime_end(), shard, base.now());
+                        fsm_begin, fsm_end, shard, base.now()
+                    );
                 }
                 if info.descr().is_fsm_split() && !split_cond {
-                    reject_query!("announcing future split for shard {} in new shard configuration, \
-                        but split conditions are not met", shard)
+                    reject_query!(
+                        "announcing future split for shard {} in new shard configuration, \
+                        but split conditions are not met", 
+                        shard
+                    )
                 }
                 if info.descr().is_fsm_merge() && !merge_cond {
-                    reject_query!("announcing future merge for shard {} in new shard configuration, \
-                        but merge conditions are not met", shard) 
+                    reject_query!(
+                        "announcing future merge for shard {} in new shard configuration, \
+                        but merge conditions are not met", 
+                        shard
+                    ) 
                 }
             }
         }
         if info.descr.before_merge {
             if !sibling.map(|s| s.descr.before_merge).unwrap_or_default() {
-                reject_query!("before_merge set for shard {} in shard configuration, \
-                    but not for its sibling", shard)
+                reject_query!(
+                    "before_merge set for shard {} in shard configuration, \
+                    but not for its sibling", 
+                    shard
+                )
             }
             if !info.descr().is_fsm_merge() {
-                reject_query!("before_merge set for shard {} in shard configuration, \
-                    but it has not been announced in future split/merge for this shard", shard)
+                reject_query!(
+                    "before_merge set for shard {} in shard configuration, \
+                    but it has not been announced in future split/merge \
+                    for this shard", 
+                    shard
+                )
             }
             if !merge_cond {
-                reject_query!("before_merge set for shard {} in shard configuration, \
-                    but merge conditions are not met", shard)
+                reject_query!(
+                    "before_merge set for shard {} in shard configuration, \
+                    but merge conditions are not met", 
+                    shard
+                )
             }
         }
         CHECK!(cc_seqno != !0);
         let cc_updated = info.descr.next_catchain_seqno != cc_seqno;
         if info.descr.next_catchain_seqno != cc_seqno + cc_updated as u32 {
-            reject_query!("new shard configuration for shard {} changed catchain seqno \
-                from {} to {} (only updates by at most one are allowed)", shard, cc_seqno, info.descr.next_catchain_seqno)
+            reject_query!(
+                "new shard configuration for shard {} changed catchain seqno \
+                from {} to {} (only updates by at most one are allowed)", 
+                shard, cc_seqno, info.descr.next_catchain_seqno
+            )
         }
+        #[cfg(not(feature = "fast_finality"))]
         if !cc_updated && self.update_shard_cc {
-            reject_query!("new shard configuration for shard {} has unchanged catchain seqno {}, \
-                but it must have been updated for all shards", shard, cc_seqno)
+            reject_query!(
+                "new shard configuration for shard {} has unchanged catchain seqno {}, \
+                but it must have been updated for all shards", 
+                shard, cc_seqno
+            )
         }
         let bm_cleared = !info.descr.before_merge && old_before_merge;
         if !cc_updated && bm_cleared && !workchain_created {
-            reject_query!("new shard configuration for shard {} has unchanged catchain seqno {} \
-                while the before_merge bit has been cleared", shard, cc_seqno)
+            reject_query!(
+                "new shard configuration for shard {} has unchanged catchain seqno {} \
+                while the before_merge bit has been cleared", 
+                shard, cc_seqno
+            )
         }
+        #[cfg(not(feature = "fast_finality"))]
         if cc_updated && !(self.update_shard_cc || bm_cleared) {
-            reject_query!("new shard configuration for shard {} has increased catchain seqno {} \
-                without a good reason", shard, cc_seqno);
+            reject_query!(
+                "new shard configuration for shard {} has increased catchain seqno {} \
+                without a good reason", 
+                shard, cc_seqno
+            )
+        }
+        #[cfg(feature = "fast_finality")]
+        if cc_updated {
+            let collators = info.descr.collators.as_ref()
+                .ok_or_else(|| error!("no collators in shard {}", shard))?;
+
+            // TODO FAST FINALITY process unexpected finish
+            // TODO FAST FINALITY process merge
+            // TODO FAST FINALITY check that catchain seqno changed only one time for current collator range
+
+            if info.descr.seq_no <= collators.prev.finish {
+                reject_query!(
+                    "new shard configuration for shard {} has increased catchain seqno {} \
+                    without a good reason", 
+                    shard, cc_seqno
+                )
+            }
         }
 
         base.result.min_shard_ref_mc_seqno.fetch_min(info.descr.min_ref_mc_seqno, Ordering::Relaxed);
@@ -1035,7 +1125,7 @@ impl ValidateQuery {
         let ccvc = base.next_state_extra.config.catchain_config()?;
         let wc_set = base.next_state_extra.config.workchains()?;
         self.update_shard_cc = base.info.key_block();
-         {
+        #[cfg(not(feature = "fast_finality"))] {
             self.update_shard_cc |= 
                 base.now() / ccvc.shard_catchain_lifetime > prev_now / ccvc.shard_catchain_lifetime;
         }
@@ -1155,8 +1245,14 @@ impl ValidateQuery {
                 reject_query!("block has start_lt {} less than or equal to lt {} of the previous state",
                     base.info.start_lt(), state.state()?.gen_lt())
             }
+            #[cfg(not(feature = "fast_finality"))]
             if base.now() <= state.state()?.gen_time() {
                 reject_query!("block has creation time {} less than or equal to that of the previous state ({})",
+                    base.now(), state.state()?.gen_time())
+            }
+            #[cfg(feature = "fast_finality")]
+            if base.now() < state.state()?.gen_time() {
+                reject_query!("block has creation time {} less that of the previous state ({})",
                     base.now(), state.state()?.gen_time())
             }
             gen_lt = std::cmp::max(gen_lt, state.state()?.gen_lt());
