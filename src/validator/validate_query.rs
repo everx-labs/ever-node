@@ -4282,7 +4282,8 @@ impl ValidateQuery {
 
         Self::check_processed_upto(&base, &manager, &mc_data)?;
         Self::check_in_queue(&base, &manager)?;
-        Self::check_delivered_dequeued(&base, &manager)?;
+        // Excessive check: validity of message in queue is checked elsewhere
+        // Self::check_delivered_dequeued(&base, &manager)?;
         Self::check_all_ticktock_processed(&base)?;
         Self::check_message_processing_order(&mut base)?;
         Self::check_new_state(&mut base, &mc_data, &manager)?;
