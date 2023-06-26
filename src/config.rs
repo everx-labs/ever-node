@@ -100,7 +100,7 @@ impl Default for CollatorConfig {
         Self {
             cutoff_timeout_ms: 1000,
             stop_timeout_ms: 1500,
-            max_collate_threads: 10,
+            max_collate_threads: 1,
         }
     }
 }
