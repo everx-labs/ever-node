@@ -2800,7 +2800,7 @@ impl ValidateQuery {
     // checks that all messages imported from our outbound queue into neighbor shards have been dequeued
     // similar to Collator::out_msg_queue_cleanup()
     // (but scans new outbound queue instead of the old)
-    fn check_delivered_dequeued(base: &ValidateBase, manager: &MsgQueueManager) -> Result<bool> {
+    fn _check_delivered_dequeued(base: &ValidateBase, manager: &MsgQueueManager) -> Result<bool> {
         log::debug!(target: "validate_query", "scanning new outbound queue and checking delivery status of all messages");
         for nb in manager.neighbors() {
             if !nb.is_disabled() && !nb.can_check_processed() {
