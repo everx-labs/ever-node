@@ -24,7 +24,6 @@ use crate::{
 use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, Deserializable};
 use ton_types::{Result, UInt256};
 use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
-
 #[cfg(feature = "metrics")]
 use crate::engine::STATSD;
 
@@ -258,4 +257,3 @@ pub async fn run_collate_query (
         }
     }
 }
-

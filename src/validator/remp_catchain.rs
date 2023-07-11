@@ -1,29 +1,43 @@
+/*
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use std::{collections::{HashMap, HashSet}, fmt, fmt::Display, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
 use ever_crypto::KeyId;
-use sha2::{Digest, Sha256};
 use arc_swap::ArcSwapOption;
 use crossbeam_channel::{Sender, Receiver, unbounded, TryRecvError};
 use ton_api::IntoBoxed;
-use ton_block::{ShardIdent, Serializable, ValidatorDescr};
-use ton_types::{BuilderData, Result, UInt256, error, fail};
-use catchain::{BlockPayloadPtr, BlockPtr, CatchainFactory, CatchainListener, CatchainNode, CatchainOverlayManagerPtr, CatchainPtr, ExternalQueryResponseCallback, PrivateKey, PublicKey, PublicKeyHash};
+use ton_block::ValidatorDescr;
+use ton_types::{Result, UInt256, error, fail};
+use catchain::{BlockPayloadPtr, BlockPtr, CatchainFactory, CatchainListener, CatchainNode, CatchainOverlayManagerPtr, CatchainPtr, ExternalQueryResponseCallback, PrivateKey, PublicKey, PublicKeyHash, serialize_tl_boxed_object};
 use crate::engine_traits::EngineOperations;
 use crate::validator::catchain_overlay::CatchainOverlayManagerImpl;
 use crate::validator::message_cache::RmqMessage;
 use crate::validator::mutex_wrapper::MutexWrapper;
 use crate::validator::remp_manager::RempManager;
-use crate::validator::validator_utils::{compute_validator_list_id, get_validator_key_idx, validatordescr_to_catchain_node};
+use crate::validator::validator_utils::{
+    get_group_members_by_validator_descrs, get_validator_key_idx, GeneralSessionInfo, validatordescr_to_catchain_node, ValidatorListHash
+};
 
 const REMP_CATCHAIN_START_POLLING_INTERVAL: Duration = Duration::from_millis(1);
 
 pub struct RempCatchainInstanceImpl {
     pub catchain_ptr: CatchainPtr,
 
-    pending_messages_queue_receiver: Receiver<ton_api::ton::ton_node::RmqRecord>,
-    pub pending_messages_queue_sender: Sender<ton_api::ton::ton_node::RmqRecord>,
+    pending_messages_queue_receiver: Receiver<ton_api::ton::ton_node::RempCatchainRecord>,
+    pub pending_messages_queue_sender: Sender<ton_api::ton::ton_node::RempCatchainRecord>,
 
-    pub rmq_catchain_receiver: Receiver<ton_api::ton::ton_node::RmqRecord>,
-    rmq_catchain_sender: Sender<ton_api::ton::ton_node::RmqRecord>
+    pub rmq_catchain_receiver: Receiver<ton_api::ton::ton_node::RempCatchainRecord>,
+    rmq_catchain_sender: Sender<ton_api::ton::ton_node::RempCatchainRecord>
 }
 
 impl RempCatchainInstanceImpl {
@@ -69,7 +83,7 @@ impl RempCatchainInstance {
         self.instance_impl.load().map(|inst| inst.catchain_ptr.clone())
     }
 
-    pub fn pending_messages_queue_send(&self, msg: ton_api::ton::ton_node::RmqRecord) -> Result<()> {
+    pub fn pending_messages_queue_send(&self, msg: ton_api::ton::ton_node::RempCatchainRecord) -> Result<()> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queue_sender.send(msg) {
             Ok(()) => Ok(()),
@@ -77,12 +91,13 @@ impl RempCatchainInstance {
         }
     }
 
+    #[cfg(feature = "telemetry")]
     pub fn pending_messages_queue_len(&self) -> Result<usize> {
         let instance = self.get_instance_impl()?;
         Ok(instance.pending_messages_queue_sender.len())
     }
 
-    pub fn pending_messages_queue_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RmqRecord>> {
+    pub fn pending_messages_queue_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RempCatchainRecord>> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queue_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
@@ -96,7 +111,7 @@ impl RempCatchainInstance {
         Ok(instance.rmq_catchain_receiver.len())
     }
 
-    pub fn rmq_catchain_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RmqRecord>> {
+    pub fn rmq_catchain_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RempCatchainRecord>> {
         let instance = self.get_instance_impl()?;
         match instance.rmq_catchain_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
@@ -105,7 +120,7 @@ impl RempCatchainInstance {
         }
     }
 
-    pub fn rmq_catchain_send(&self, msg: ton_api::ton::ton_node::RmqRecord) -> Result<()> {
+    pub fn rmq_catchain_send(&self, msg: ton_api::ton::ton_node::RempCatchainRecord) -> Result<()> {
         let instance = self.get_instance_impl()?;
         match instance.rmq_catchain_sender.send(msg) {
             Ok(()) => Ok(()),
@@ -125,44 +140,41 @@ impl fmt::Display for RempCatchainInstance {
 }
 
 pub struct RempCatchainInfo {
+    pub general_session_info: Arc<GeneralSessionInfo>,
+    pub master_cc_seqno: u32,
     nodes: Vec<CatchainNode>,
     node_list_id: UInt256,
     pub queue_id: UInt256,
     pub local_idx: usize,
-    pub local_key_id: UInt256,
-    pub catchain_seqno: u32,
-    pub master_cc_seqno: u32,
-    pub shard: ShardIdent,
+    pub local_key_id: UInt256
 }
 
 impl RempCatchainInfo {
-    pub fn compute_id(catchain_seqno: u32, master_cc_seqno: u32, shard: &ShardIdent, current: &Vec<ValidatorDescr>, next: &Vec<ValidatorDescr>) -> Result<UInt256> {
-        let mut hasher = Sha256::new();
-        hasher.update(catchain_seqno.to_be_bytes());
-        hasher.update(master_cc_seqno.to_be_bytes());
+    pub fn compute_id(current: &Vec<ValidatorDescr>, next: &Vec<ValidatorDescr>, general_session_info: Arc<GeneralSessionInfo>) -> UInt256 {
+        let mut members = Vec::new();
+        get_group_members_by_validator_descrs(current, &mut members);
+        get_group_members_by_validator_descrs(next, &mut members);
 
-        let mut shard_serialized: BuilderData = BuilderData::new();
-        shard.write_to(&mut shard_serialized)?;
-        hasher.update(shard_serialized.data());
+        let serialized = serialize_tl_boxed_object!(&ton_api::ton::ton_node::rempsessioninfo::RempSessionInfo {
+            workchain: general_session_info.shard.workchain_id(),
+            shard: general_session_info.shard.shard_prefix_with_tag() as i64,
+            vertical_seqno: general_session_info.max_vertical_seqno as i32,
+            last_key_block_seqno: general_session_info.key_seqno as i32,
+            catchain_seqno: general_session_info.catchain_seqno as i32,
+            config_hash: general_session_info.opts_hash.clone(),
+            members: members.into()
+        }.into_boxed());
 
-        for x in current {
-            hasher.update(x.compute_node_id_short().as_slice());
-        }
-
-        for x in next {
-            hasher.update(x.compute_node_id_short().as_slice());
-        }
-
-        Ok(From::<[u8; 32]>::from(hasher.finalize().into()))
+        UInt256::calc_file_hash(&serialized.0)
     }
 
     pub fn create(
-        catchain_seqno: u32,
+        general_session_info: Arc<GeneralSessionInfo>,
         master_cc_seqno: u32,
         curr: &Vec<ValidatorDescr>,
         next: &Vec<ValidatorDescr>,
         local: &PublicKey,
-        shard: ShardIdent
+        node_list_id: ValidatorListHash
     ) -> Result<Self> {
         let mut nodes: Vec<CatchainNode> = curr.iter().map(validatordescr_to_catchain_node).collect();
         let mut nodes_vdescr = curr.clone();
@@ -182,31 +194,31 @@ impl RempCatchainInfo {
 
         let local_key_id = local.id().data().into();
         let local_idx = get_validator_key_idx(local, &nodes)?;
-        let queue_id = Self::compute_id(catchain_seqno, master_cc_seqno, &shard, curr, next)?;
+        let queue_id = Self::compute_id(curr, next, general_session_info.clone());
 
-        let node_list_id = compute_validator_list_id(&nodes_vdescr, Some((catchain_seqno, master_cc_seqno, &shard)))?.
-            ok_or_else(|| error!("compute_validator_list (cc {}, mc {}, shard {}) returns None", catchain_seqno, master_cc_seqno, shard))?;
-
-        Ok(RempCatchainInfo { 
+        Ok(RempCatchainInfo {
+            general_session_info,
             queue_id,
             nodes,
             local_idx,
             local_key_id,
             node_list_id,
-            catchain_seqno,
-            master_cc_seqno,
-            shard,
+            master_cc_seqno
         })
     }
 
     pub fn is_same_catchain(&self, other: Arc<RempCatchainInfo>) -> bool {
-        let general_eq = self.queue_id == other.queue_id &&
+        let is_same_nodelist = 
             self.nodes.len() == other.nodes.len() &&
+            self.nodes.iter().zip (other.nodes.iter()).all(|(a,b)| a.adnl_id == b.adnl_id);
+
+        let general_eq = self.queue_id == other.queue_id &&
+            self.general_session_info == other.general_session_info &&
             self.local_idx == other.local_idx &&
             self.local_key_id == other.local_key_id &&
+            is_same_nodelist &&
             self.node_list_id == other.node_list_id &&
-            self.master_cc_seqno == other.master_cc_seqno &&
-            self.shard == other.shard;
+            self.master_cc_seqno == other.master_cc_seqno;
 
         general_eq
     }
@@ -214,12 +226,11 @@ impl RempCatchainInfo {
 
 impl fmt::Display for RempCatchainInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}*{:x}*{}", self.local_idx, self.queue_id, self.shard)
+        write!(f, "{}*{:x}*{}", self.local_idx, self.queue_id, self.general_session_info.shard)
     }
 }
 
 pub struct RempCatchain {
-    //rt: tokio::runtime::Handle,
     engine: Arc<dyn EngineOperations>,
     remp_manager: Arc<RempManager>,
 
@@ -254,23 +265,7 @@ impl RempCatchain {
             remp_manager
         });
     }
-/*
-    pub fn compute_id(catchain_seqno: u32, current: &Vec<ValidatorDescr>, next: &Vec<ValidatorDescr>) -> UInt256 {
-        let mut hasher = Sha256::new();
-        hasher.update(catchain_seqno.to_be_bytes());
-        for x in current {
-            hasher.update(x.compute_node_id_short().as_slice());
-        }
-        for x in next {
-            hasher.update(x.compute_node_id_short().as_slice());
-        }
-        From::<[u8; 32]>::from(hasher.finalize().into())
-    }
 
-    pub fn is_same_catchain(&self, other: Arc<RempCatchain>) -> bool {
-        return self.info.is_same_catchain(other.info.clone());
-    }
-*/
     pub async fn start(self: Arc<RempCatchain>, local_key: PrivateKey) -> Result<CatchainPtr> {
         let overlay_manager: CatchainOverlayManagerPtr =
             Arc::new(CatchainOverlayManagerImpl::new(self.engine.validator_network(), self.info.node_list_id.clone()));
@@ -286,12 +281,6 @@ impl RempCatchain {
             self.info.nodes.iter().map(|x| x.adnl_id.to_string()).collect::<Vec<String>>()
         );
 
-        let rmq_local_key = if let Some(rmq_local_key) = self.engine.set_validator_list(self.info.node_list_id.clone(), &self.info.nodes).await? {
-            rmq_local_key.clone()
-        } else {
-            return Err(failure::err_msg(format!("Cannot add RMQ validator list {}", self.info.node_list_id.to_hex_string())));
-        };
-
         let rmq_catchain_options = self.remp_manager.options.get_catchain_options().ok_or_else(
             || error!("RMQ {}: cannot get REMP catchain options, start is impossible", self)
         )?;
@@ -300,7 +289,7 @@ impl RempCatchain {
             &rmq_catchain_options,
             &self.info.queue_id,
             &self.info.nodes,
-            &local_key, //&rmq_local_key,
+            &local_key,
             db_root,
             db_suffix,
             allow_unsafe_self_blocks_resync,
@@ -308,8 +297,8 @@ impl RempCatchain {
             message_listener
         );
 
-        log::info!(target: "remp", "RMQ session {} started: list_id: {:x}, rmq_local_key = {}, local_key = {}",
-            self, self.info.node_list_id, rmq_local_key.id(), local_key.id());
+        log::info!(target: "remp", "RMQ session {} started: list_id: {:x}, local_key = {}",
+            self, self.info.node_list_id, local_key.id());
 
         Ok(catchain_ptr)
     }
@@ -320,9 +309,6 @@ impl RempCatchain {
             Some(session) => session.stop(true),
             _ => log::trace!(target: "remp", "Queue {} is destroyed, but not started", self)
         };
-        // TODO: check whether this removal is not ahead-of-time
-        log::trace!(target: "remp", "RMQ session {}, removing validator list, list_id {:x}", self, self.info.node_list_id);
-        self.engine.remove_validator_list(self.info.node_list_id.clone()).await?;
         log::trace!(target: "remp", "RMQ session {} stopped", self);
         Ok(())
     }
@@ -335,13 +321,16 @@ impl RempCatchain {
 
         match pld {
             Ok(::ton_api::ton::validator_session::BlockUpdate::ValidatorSession_BlockUpdate(pld)) => {
+                #[cfg(feature = "telemetry")]
                 let mut total = 0;
                 for msgbx in pld.actions.0.iter() {
                     match msgbx {
                         ::ton_api::ton::validator_session::round::Message::ValidatorSession_Message_Commit(msg) => {
                             match RmqMessage::deserialize(&msg.signature) {
                                 Ok(unpacked_message) => {
-                                    total += 1;
+                                    #[cfg(feature = "telemetry")] {
+                                        total += 1;
+                                    }
                                     log::trace!(target: "remp",
                                         "Point 4. Message received from RMQ {}: {:?}, decoded {:?}, put to rmq_catchain queue",
                                         self, msg.signature.0, unpacked_message //catchain.received_messages.len()
@@ -362,9 +351,9 @@ impl RempCatchain {
                     }
                 };
                 #[cfg(feature = "telemetry")] {
-                    self.engine.remp_core_telemetry().got_from_catchain(&self.info.shard, total, 0);
+                    self.engine.remp_core_telemetry().got_from_catchain(&self.info.general_session_info.shard, total, 0);
                     match self.instance.rmq_catchain_receiver_len() {
-                        Ok(len) => self.engine.remp_core_telemetry().in_channel_to_rmq(&self.info.shard, len),
+                        Ok(len) => self.engine.remp_core_telemetry().in_channel_to_rmq(&self.info.general_session_info.shard, len),
                         Err(e) => log::error!(target: "remp", "Point 4. RMQ {}: cannot receive rmq_catchain queue len, `{}`", self, e)
                     };
                 }
@@ -431,7 +420,7 @@ impl CatchainListener for RempCatchain {
                     self, serialized_payload
                 );
                 #[cfg(feature = "telemetry")]
-                self.engine.remp_core_telemetry().sent_to_catchain(&self.info.shard, sent_to_catchain);
+                self.engine.remp_core_telemetry().sent_to_catchain(&self.info.general_session_info.shard, sent_to_catchain);
             },
             None => log::error!("RMQ: Catchain session is not initialized!")
         }
@@ -581,7 +570,7 @@ impl RempCatchainStore {
 
         if do_start {
             log::trace!(target: "remp", "Actually starting REMP catchain {:x}/{}",
-                session_id, catchain_info.info.shard
+                session_id, catchain_info.info.general_session_info.shard
             );
             let catchain_ptr = catchain_info.clone().start(local_key).await?;
             let instance_impl = Arc::new(RempCatchainInstanceImpl::new(catchain_ptr));

@@ -31,6 +31,10 @@ pub async fn check_db(
     is_broken: Option<&AtomicBool>
 ) -> Result<InternalDb> {
 
+
+    // TODO support queue updates!!!
+
+
     async fn force_db_reset(
         err: failure::Error,
         check_stop: &(dyn Fn() -> Result<()> + Sync),
@@ -281,7 +285,7 @@ async fn restore(
                 db truncation will be skipped", last_mc_block.id());
         },
         Ok(next_id) => {
-            match db.truncate_database(&next_id, processed_wc).await {
+            match db.truncate_database(&next_id).await {
                 Err(e) => 
                     log::warn!("Error while db truncation at block {}: {}", next_id, e),
                 Ok(_) => 
@@ -292,7 +296,7 @@ async fn restore(
     db.save_full_node_state(SHARD_CLIENT_MC_BLOCK, last_mc_block.id())?;
     db.save_full_node_state(LAST_APPLIED_MC_BLOCK, last_mc_block.id())?;
 
-    if let Some(block_id) = db.load_full_node_state(LAST_ROTATION_MC_BLOCK)? {
+    if let Some(block_id) = db.load_validator_state(LAST_ROTATION_MC_BLOCK)? {
         if block_id.seq_no > last_mc_block.id().seq_no {
             db.save_validator_state(LAST_ROTATION_MC_BLOCK, last_mc_block.id())?;
         }
@@ -469,7 +473,7 @@ async fn check_one_block(
     let handle = db.load_block_handle(id)?
         .ok_or_else(|| error!("there is no handle for block {}", id))?;
     let block_data = db.load_block_data_raw(&handle).await?;
-    let block = BlockStuff::deserialize_checked(id.clone(), block_data)?;
+    let block = BlockStuff::deserialize_block_checked(id.clone(), block_data)?;
     let _proof = db.load_block_proof(&handle, !id.is_masterchain()).await?;
 
     if !handle.has_data() {
@@ -576,7 +580,7 @@ async fn check_one_block(
         }
 
         // next 2 (before split)
-        if block.block().read_info()?.before_split() {
+        if block.block()?.read_info()?.before_split() {
             match db.load_block_next2(id) {
                 Ok(_) => {
                     if !handle.has_next2() {
@@ -627,7 +631,7 @@ async fn calc_min_mc_state_id(
     let handle = db.load_block_handle(&min_id)?
         .ok_or_else(|| error!("there is no handle for block {}", min_id))?;
     let block = db.load_block_data(&handle).await?;
-    let min_ref_mc_seqno = block.block().read_info()?.min_ref_mc_seqno();
+    let min_ref_mc_seqno = block.block()?.read_info()?.min_ref_mc_seqno();
     let min_ref_mc_handle = db.find_mc_block_by_seq_no_without_state(min_ref_mc_seqno)?;
 
     log::trace!("calc_min_mc_state_id: {}", min_ref_mc_handle.id());
@@ -766,7 +770,7 @@ async fn restore_chain(
         let block = db.load_block_data(&block_handle).await?;
 
         // apply merkle update
-        let merkle_update = block.block().read_state_update()?;
+        let merkle_update = block.block()?.read_state_update()?;
         let block_id_ = block_id.clone();
         let state_root = tokio::task::spawn_blocking(
             move || -> Result<Cell> {

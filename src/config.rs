@@ -36,7 +36,6 @@ use ton_block::{BASE_WORKCHAIN_ID, MASTERCHAIN_ID};
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256};
 
-
 #[macro_export]
 macro_rules! key_option_public_key {
     ($key: expr) => {
@@ -110,10 +109,10 @@ impl Default for CollatorConfig {
 pub struct TonNodeConfig {
     log_config_name: Option<String>,
     ton_global_config_name: Option<String>,
-    #[cfg(feature="workchains")]
     #[serde(skip_serializing_if = "Option::is_none")]
     workchain: Option<i32>,
     internal_db_path: Option<String>,
+    validation_countdown_mode: Option<String>,
     unsafe_catchain_patches_path: Option<String>,
     #[serde(skip_serializing)]
     ip_address: Option<String>,
@@ -247,6 +246,7 @@ pub struct RempConfig {
 }
 
 impl RempConfig {
+
     pub fn is_client_enabled(&self) -> bool {
         self.client_enabled
     }
@@ -361,19 +361,13 @@ impl TonNodeConfig {
 
     #[cfg(feature="external_db")]
     pub fn front_workchain_ids(&self) -> Vec<i32> {
-        #[cfg(feature="workchains")]
         match self.workchain {
             None | Some(0) | Some(-1) => vec![MASTERCHAIN_ID, BASE_WORKCHAIN_ID],
             Some(workchain_id) => vec![workchain_id]
         }
-        #[cfg(not(feature="workchains"))]
-        {
-            vec![MASTERCHAIN_ID, BASE_WORKCHAIN_ID]            
-        }
     }
 
-    #[cfg(feature="workchains")]
-    pub fn workchain_id(&self) -> Option<i32> {
+    pub fn workchain(&self) -> Option<i32> {
         self.workchain
     }
 
@@ -438,7 +432,6 @@ impl TonNodeConfig {
 
         config_json.configs_dir = configs_dir.to_string();
         config_json.file_name = json_file_name.to_string();
-
         Ok(config_json)
     }
 
@@ -488,6 +481,10 @@ impl TonNodeConfig {
         result
     }
 
+    pub fn validation_countdown_mode(&self) -> Option<String> {
+        self.validation_countdown_mode.clone()
+    }
+
     pub fn gc_archives_life_time_hours(&self) -> Option<u32> {
         match &self.gc {
             Some(gc) => {
@@ -522,7 +519,6 @@ impl TonNodeConfig {
         self.gc.as_ref().map(|c| c.enable_for_shard_state_persistent).unwrap_or(false)
     }
     
-  
     pub fn default_rldp_roundtrip(&self) -> Option<u32> {
         self.default_rldp_roundtrip_ms
     }
@@ -677,10 +673,7 @@ impl TonNodeConfig {
     }
 
     fn generate_and_save_keys(&mut self) -> Result<([u8; 32], Arc<dyn KeyOption>)> {
-        #[cfg(feature="workchains")]
         let (private, public) = crate::validator::validator_utils::mine_key_for_workchain(self.workchain);
-        #[cfg(not(feature="workchains"))]
-        let (private, public) = Ed25519KeyOption::generate_with_json()?;
         let key_id = public.id().data();
         let key_ring = self.validator_key_ring.get_or_insert_with(|| HashMap::new());
         key_ring.insert(base64::encode(key_id), private);
@@ -786,8 +779,6 @@ enum Task {
     AddValidatorAdnlKey([u8; 32], [u8; 32]),
     GetKey([u8; 32]),
     StoreStatesGcInterval(u32),
-    #[cfg(feature="workchains")]
-    StoreWorkchainId(i32),
 }
 
 #[derive(Debug)]
@@ -870,16 +861,6 @@ impl NodeConfigHandler {
             Some(Some(Answer::Result(result))) => result,
             Some(Some(_)) => fail!("Bad answer (AddValidatorAdnlKey)!"),
             None => fail!("Waiting returned an internal error!")
-        }
-    }
-
-    #[cfg(feature="workchains")]
-    pub fn store_workchain(&self, workchain_id: i32) {
-        let (wait, _) = Wait::new();
-        let pushed_task = Arc::new((wait.clone(), Task::StoreWorkchainId(workchain_id)));
-        wait.request();
-        if let Err(e) = self.sender.send(pushed_task) {
-            log::warn!("Problem store workchain_id: {}", e);
         }
     }
 
@@ -1173,12 +1154,6 @@ impl NodeConfigHandler {
                     Task::GetKey(key_data) => {
                         let result = NodeConfigHandler::get_key(&actual_config, key_data);
                         Answer::GetKey(result)
-                    }
-                    #[cfg(feature="workchains")]
-                    Task::StoreWorkchainId(workchain_id) => {
-                        actual_config.workchain = Some(workchain_id);
-                        let result = actual_config.save_to_file(&name);
-                        Answer::Result(result)
                     }
                     Task::StoreStatesGcInterval(interval) => {
                         if let Some(c) = &mut actual_config.gc {
@@ -1565,7 +1540,8 @@ pub struct ValidatorManagerConfig {
     pub update_interval: Duration,
     pub unsafe_resync_catchains: HashSet<u32>,
     /// Maps catchain_seqno to block_seqno and unsafe rotation id
-    pub unsafe_catchain_rotates: HashMap<u32, (u32, u32)>
+    pub unsafe_catchain_rotates: HashMap<u32, (u32, u32)>,
+    pub no_countdown_for_zerostate: bool
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -1583,7 +1559,8 @@ struct ValidatorManagerConfigImpl {
 
 impl Display for ValidatorManagerConfig {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "update interval: {} ms; resync: [{}]; rotates: [{}]",
+        write!(f, "validation countdown mode: {}; update interval: {} ms; resync: [{}]; rotates: [{}]",
+            if self.no_countdown_for_zerostate { "except-zerostate" } else { "always" },
             self.update_interval.as_millis(),
             self.unsafe_resync_catchains.iter().map(|n| format!("{} ", n)).collect::<String>(),
             self.unsafe_catchain_rotates.iter().map(
@@ -1594,11 +1571,20 @@ impl Display for ValidatorManagerConfig {
 }
 
 impl ValidatorManagerConfig {
-    pub fn read_configs(config_files: Vec<String>) -> ValidatorManagerConfig {
+    pub fn read_configs(config_files: Vec<String>, validation_countdown_mode: Option<String>) -> ValidatorManagerConfig {
         log::debug!(target: "validator", "Reading validator manager config files: {}",
             config_files.iter().map(|x| format!("{}; ",x)).collect::<String>());
 
         let mut validator_config = ValidatorManagerConfig::default();
+        match validation_countdown_mode {
+            Some(x) if x == "always" => validator_config.no_countdown_for_zerostate = false,
+            Some(x) if x == "except-zerostate" => validator_config.no_countdown_for_zerostate = true,
+            Some(x) => log::error!(
+                "Incorrect option: validation_countdown_mode must be either 'always' or 'except-zerostate', '{}' found",
+                x
+            ),
+            None => ()
+        }
 
         'iterate_configs: for one_config in config_files.into_iter() {
             if let Ok(config_file) = std::fs::File::open(one_config.clone()) {
@@ -1649,7 +1635,8 @@ impl Default for ValidatorManagerConfig {
         return ValidatorManagerConfig {
             update_interval: Duration::from_secs(3),
             unsafe_resync_catchains: HashSet::new(),
-            unsafe_catchain_rotates: HashMap::new()
+            unsafe_catchain_rotates: HashMap::new(),
+            no_countdown_for_zerostate: false
         }
     }
 }

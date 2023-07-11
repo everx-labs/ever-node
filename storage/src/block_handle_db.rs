@@ -31,23 +31,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256};
 
-
-const FLAG_DATA: u32                 = 0x00000001;
-const FLAG_PROOF: u32                = 0x00000002;
-const FLAG_PROOF_LINK: u32           = 0x00000004;
-//const FLAG_EXT_DB: u32               = 1 << 3;
-const FLAG_STATE: u32                = 0x00000010;
-const FLAG_PERSISTENT_STATE: u32     = 0x00000020;
-const FLAG_NEXT_1: u32               = 0x00000040;
-const FLAG_NEXT_2: u32               = 0x00000080;
-const FLAG_PREV_1: u32               = 0x00000100;
-const FLAG_PREV_2: u32               = 0x00000200;
-const FLAG_APPLIED: u32              = 0x00000400;
-pub(crate) const FLAG_KEY_BLOCK: u32 = 0x00000800;
-const FLAG_MOVED_TO_ARCHIVE: u32     = 0x00002000;
+const FLAG_DATA: u32                             = 0x00000001;
+const FLAG_PROOF: u32                            = 0x00000002;
+const FLAG_PROOF_LINK: u32                       = 0x00000004;
+//const FLAG_EXT_DB: u32                         = 0x00000008;
+const FLAG_STATE: u32                            = 0x00000010;
+const FLAG_PERSISTENT_STATE: u32                 = 0x00000020;
+const FLAG_NEXT_1: u32                           = 0x00000040;
+const FLAG_NEXT_2: u32                           = 0x00000080;
+const FLAG_PREV_1: u32                           = 0x00000100;
+const FLAG_PREV_2: u32                           = 0x00000200;
+const FLAG_APPLIED: u32                          = 0x00000400;
+pub(crate) const FLAG_KEY_BLOCK: u32             = 0x00000800;
+const FLAG_MOVED_TO_ARCHIVE: u32                 = 0x00002000;
+pub(crate) const FLAG_IS_QUEUE_UPDATE: u32       = 0x00004000;
+pub(crate) const FLAG_IS_EMPTY_QUEUE_UPDATE: u32 = 0x00008000;
 
 // not serializing flags
-const FLAG_ARCHIVING: u32            = 0x00010000;
+const FLAG_ARCHIVING: u32            = 0x80000000;
 
 /// Meta information related to block
 #[derive(Debug)]
@@ -307,6 +308,22 @@ impl BlockHandle {
 
     pub fn set_archived(&self) -> bool {
         self.set_flag(FLAG_MOVED_TO_ARCHIVE)
+    }
+
+    pub fn is_queue_update(&self) -> bool {
+        self.is_flag_set(FLAG_IS_QUEUE_UPDATE)
+    }
+
+    pub fn is_empty_queue_update(&self) -> bool {
+        self.is_flag_set(FLAG_IS_EMPTY_QUEUE_UPDATE)
+    }
+
+    pub fn is_queue_update_for(&self) -> Option<i32> {
+        if self.is_queue_update() {
+            Some(self.meta.queue_update_for)
+        } else {
+            None
+        }
     }
 
 /*
@@ -692,6 +709,4 @@ impl BlockHandleStorage {
     }
 
 }
-
-
 

@@ -31,7 +31,6 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use ton_block::BlockIdExt;
 use ton_types::{error, fail, Result, UInt256};
 
-
 const DEFAULT_PKG_VERSION: u32 = 1;
 
 //#[derive(Debug)]

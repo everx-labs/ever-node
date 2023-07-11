@@ -14,8 +14,10 @@
 use crate::{
     block::construct_and_check_prev_stuff,
     shard_state::ShardStateStuff,
-    validator::validator_utils::{calc_subset_for_workchain, check_crypto_signatures},
+    validator::validator_utils::check_crypto_signatures, 
+    validating_utils::UNREGISTERED_CHAIN_MAX_LEN,
 };
+use crate::validator::validator_utils::calc_subset_for_workchain_standard;
 
 use bitflags::bitflags;
 use std::{
@@ -24,12 +26,11 @@ use std::{
 };
 use ton_block::{
     Block, TopBlockDescr, BlockInfo, BlockIdExt, MerkleProof, McShardRecord,
-    McStateExtra, Deserializable, HashmapAugType, BlockSignatures, CurrencyCollection,
+    Deserializable, HashmapAugType, BlockSignatures, CurrencyCollection,
     AddSub, ShardIdent, Serializable, CopyleftRewards
 };
 use ton_types::{
-    error, Result, fail, Cell, UInt256,
-    cells_serialization::{serialize_tree_of_cells, deserialize_tree_of_cells}
+    error, Result, fail, Cell, UInt256, read_single_root_boc,
 };
 use ton_api::ton::ton_node::newshardblock::NewShardBlock;
 
@@ -149,16 +150,14 @@ impl TopBlockDescrStuff {
     }
 
     pub fn from_bytes(bytes: &[u8], is_fake: bool)-> Result<Self> {
-        let root = deserialize_tree_of_cells(&mut Cursor::new(&bytes))?;
+        let root = read_single_root_boc(&bytes)?;
         let tbd = TopBlockDescr::construct_from_cell(root)?;
         let id = tbd.proof_for().clone();
         TopBlockDescrStuff::new(tbd, &id, is_fake)
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut data = Vec::<u8>::new();
-        serialize_tree_of_cells(&self.tbd.serialize()?, &mut data)?;
-        Ok(data)
+        self.tbd.write_to_bytes()
     }
 
     pub fn gen_utime(&self) -> u32 {
@@ -259,26 +258,22 @@ impl TopBlockDescrStuff {
     pub fn prevalidate(
         &self,
         last_mc_block_id: &BlockIdExt,
-        last_mc_state_extra: &McStateExtra,
-        vert_seq_no: u32,
+        last_mc_state: &ShardStateStuff,
         mode: Mode,
         res_flags: &mut u8
     ) -> Result<i32> {
         *res_flags = 0;
-        self.validate_internal(last_mc_block_id, last_mc_state_extra, vert_seq_no, res_flags, mode)
+        self.validate_internal(last_mc_block_id, last_mc_state, res_flags, mode)
     }
 
     pub fn validate(&self, last_mc_state: &Arc<ShardStateStuff>) -> Result<i32> {
         let mut res_flags = 0;
 
         let last_mc_block_id = last_mc_state.block_id();
-        let last_mc_state_extra = last_mc_state.state().read_custom()?
-            .ok_or_else(|| error!("State for {} doesn't have McStateExtra", last_mc_state.block_id()))?;
 
         self.validate_internal(
             last_mc_block_id,
-            &last_mc_state_extra,
-            last_mc_state.state().vert_seq_no(),
+            last_mc_state,
             &mut res_flags,
             Mode::ALLOW_NEXT_VSET
         )
@@ -480,8 +475,7 @@ impl TopBlockDescrStuff {
     fn validate_internal(
         &self,
         last_mc_block_id: &BlockIdExt,
-        last_mc_state_extra: &McStateExtra,
-        vert_seq_no: u32,
+        last_mc_state: &ShardStateStuff,
         res_flags: &mut u8,
         mode: Mode
     ) -> Result<i32> {
@@ -495,7 +489,7 @@ impl TopBlockDescrStuff {
         );
 
         debug_assert!(self.size() > 0);
-        debug_assert!(self.size() <= 8);
+        debug_assert!(self.size() <= UNREGISTERED_CHAIN_MAX_LEN as usize);
         debug_assert!(self.chain_mc_blk_ids.len() == self.chain_blk_ids.len());
 
         if last_mc_block_id.seq_no() < self.chain_mc_blk_ids[0].seq_no() {
@@ -513,6 +507,7 @@ impl TopBlockDescrStuff {
             return Ok(-1);  // valid, but too new
         }
 
+        let vert_seq_no = last_mc_state.state()?.vert_seq_no();
         if vert_seq_no != self.vert_seq_no {
             if self.vert_seq_no < vert_seq_no {
                 fail!(
@@ -533,6 +528,7 @@ impl TopBlockDescrStuff {
             }
         }
 
+        let last_mc_state_extra = last_mc_state.shard_state_extra()?;
         let mut next_mc_seqno = std::u32::MAX;
         for mc_id in self.chain_mc_blk_ids.iter() {
             if mc_id.seq_no() > next_mc_seqno {
@@ -657,7 +653,7 @@ impl TopBlockDescrStuff {
 
         let clen = (self.proof_for().seq_no - max(l_shard_descr.block_id().seq_no(), r_shard_descr.block_id().seq_no())) as usize;
         debug_assert!(clen > 0);
-        debug_assert!(clen <= 8);
+        debug_assert!(clen <= UNREGISTERED_CHAIN_MAX_LEN as usize);
         debug_assert!(clen <= self.size());
 
         if clen < self.size() {
@@ -712,18 +708,12 @@ impl TopBlockDescrStuff {
         // compute and check validator set
 
         let cur_validator_set = last_mc_state_extra.config.validator_set()?;
-        let cc_config = last_mc_state_extra.config.catchain_config()?;
         let cc_seqno = last_mc_state_extra.shards().calc_shard_cc_seqno(self.proof_for().shard())?;
 
         let mut vset_ok = false;
-        let (mut validators, mut hash_short) = calc_subset_for_workchain(
-            &cur_validator_set,
-            &last_mc_state_extra.config,
-            &cc_config, 
-            self.proof_for().shard().shard_prefix_with_tag(), 
-            self.proof_for().shard().workchain_id(), 
-            cc_seqno,
-            0.into())?;
+        let shard_id = self.proof_for().shard();
+        let mut subset = calc_subset_for_workchain_standard(
+            &cur_validator_set, &last_mc_state_extra.config, shard_id, cc_seqno)?;
 
         // original t-node's code contains this check later.
         // But we have some checks there which needs signatures!!!
@@ -736,26 +726,20 @@ impl TopBlockDescrStuff {
             .ok_or_else(|| error!("There is no signatures in top block descr"))?;
 
         if (cc_seqno == signatures.validator_info.catchain_seqno) &&
-           (hash_short == signatures.validator_info.validator_list_hash_short) {
+           (subset.short_hash == signatures.validator_info.validator_list_hash_short) 
+        {
             *res_flags |= 4;
             vset_ok = true;
         } else if mode.intersects(Mode::ALLOW_NEXT_VSET) {
             let next_validator_set = last_mc_state_extra.config.next_validator_set()?;
-            let (next_validators, next_hash_short) = calc_subset_for_workchain(
-                &next_validator_set,
-                &last_mc_state_extra.config,
-                &cc_config, 
-                self.proof_for().shard().shard_prefix_with_tag(), 
-                self.proof_for().shard().workchain_id(), 
-                cc_seqno,
-                0.into())?;
-
+            let next_subset = calc_subset_for_workchain_standard(
+                &next_validator_set, &last_mc_state_extra.config, shard_id, cc_seqno)?;
             if (cc_seqno == signatures.validator_info.catchain_seqno) &&
-               (next_hash_short == signatures.validator_info.validator_list_hash_short) {
+               (next_subset.short_hash == signatures.validator_info.validator_list_hash_short) 
+            {
                 *res_flags |= 8;
                vset_ok = true;
-               validators = next_validators;
-               hash_short = next_hash_short;
+               subset = next_subset;
             }
         }
 
@@ -767,11 +751,12 @@ impl TopBlockDescrStuff {
                 self.proof_for(),
                 signatures.validator_info.validator_list_hash_short,
                 signatures.validator_info.catchain_seqno,
-                hash_short,
+                subset.short_hash,
                 cc_seqno
             )
         }
 
+        // check range
 
         // check signatures
 
@@ -793,8 +778,8 @@ impl TopBlockDescrStuff {
             &self.proof_for().root_hash,
             &self.proof_for().file_hash
         );
-        let total_weight: u64 = validators.iter().map(|v| v.weight).sum();
-        let weight = match check_crypto_signatures(&signatures.pure_signatures, &validators, &checked_data) {
+        let total_weight: u64 = subset.validators.iter().map(|v| v.weight).sum();
+        let weight = match check_crypto_signatures(&signatures.pure_signatures, &subset.validators, &checked_data) {
             Err(err) => {
                 *res_flags |= 0x21;
                 self.signarutes_validation_result.store(-1, atomic::Ordering::Relaxed);

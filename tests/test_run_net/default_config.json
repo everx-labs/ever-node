@@ -4,13 +4,15 @@
     "internal_db_path": "node_db_nodenumber",
     "ip_address": "0.0.0.0:main_port",
     "control_server_port": control_port,
+    workchain_id
     "shard_keeper": {
         "get_peer_attempt_timeout_ms": 1000,
         "download_next_block_full_timeout_ms": 1000,
         "download_block_full_timeout_ms": 1000
     },
+    "validation_countdown_mode": "except-zerostate",
     "remp": {
-        "client_enabled": false,
+        "client_enabled": true,
         "service_enabled": true
     },
     "kafka_consumer_config": {
