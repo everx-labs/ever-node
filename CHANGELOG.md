@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.27
+
+- Prohibited big cells in ext messages
+
 ## Version 0.55.26
 
 - Supported new version of BocWriter::with_params with fixed cell lifetime
