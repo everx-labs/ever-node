@@ -11,23 +11,21 @@
 * limitations under the License.
 */
 
-use adnl::{common::{Query, TaggedTlObject, Wait}, node::{AdnlNode, AddressCache}};
 use crate::engine::STATSD;
-use ever_crypto::{Ed25519KeyOption, KeyId};
+
+use adnl::{common::{Query, TaggedTlObject, Wait}, node::{AdnlNode, AddressCache}};
 use dht::DhtNode;
 use overlay::{OverlayShortId, OverlayNode};
-use rand::{Rng};
+use rand::Rng;
 use std::{
     cmp::min, 
     sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicI32, AtomicU64, AtomicI64, Ordering}},
     time::{Duration, Instant}
 };
-use ton_types::{error, fail, Result};
+use ton_api::ton::{TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities};
 #[cfg(feature = "telemetry")]
 use ton_api::tag_from_boxed_type;
-use ton_api::ton::{
-    TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities
-};
+use ton_types::{error, fail, KeyId, KeyOption, Result};
 
 #[derive(Debug)]
 pub struct Neighbour {
@@ -381,7 +379,8 @@ impl Neighbours {
                             Ok(Some(peers)) => {
                                 let mut new_peers = Vec::new();
                                 for peer in peers.iter() {
-                                    match Ed25519KeyOption::from_public_key_tl(&peer.id) {
+                                    let result: Result<Arc<dyn KeyOption>> = (&peer.id).try_into();
+                                    match result {
                                         Ok(key) => if !self.contains_overlay_peer(key.id()) {
                                             new_peers.push(key.id().clone());
                                         },

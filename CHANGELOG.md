@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.35
+
+- Different fixes
+  
+## Version 0.55.33
+
+- Fix of SystemTime::elapsed() unwrap call
+
+## Version 0.55.32
+
+- Prohibited big cells in ext messages
+
+## Version 0.55.31
+
+- Peristent state heuristics
+
+## Version 0.55.30
+
+- Remove ever-crypto crate
+
+## Version 0.55.28
+
+- Fast finality prototype
+
+## Version 0.55.27
+
+- Stabilization of fast finality feature
+
 ## Version 0.55.26
 
 - Supported new version of BocWriter::with_params with fixed cell lifetime

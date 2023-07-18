@@ -11,7 +11,13 @@
 * limitations under the License.
 */
 
-pub use super::*;
+use crate::{
+    Any, BlockHash, BlockId, CachedInstanceCounter, CacheObject, HashableObject, HashType, 
+    Merge, MovablePoolObject, PoolObject, PoolPtr, SentBlock, SentBlockPtr, SentBlockWrapper,
+    SessionCache, SessionDescription, SessionPool, SKIP_ROUND_CANDIDATE_BLOCKID, ton
+};
+use catchain::instrument;
+use std::fmt;
 
 /*
     Implementation details for SentBlock
@@ -82,7 +88,7 @@ impl SentBlock for SentBlockImpl {
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn SentBlock> {
-        profiling::instrument!();
+        instrument!();
 
         Self::create_persistent_object(self.clone(), cache)
     }
@@ -107,7 +113,7 @@ impl SentBlockWrapper for SentBlockPtr {
 
 impl Merge<Option<PoolPtr<dyn SentBlock>>> for Option<PoolPtr<dyn SentBlock>> {
     fn merge(&self, right: &Self, _desc: &mut dyn SessionDescription) -> Self {
-        profiling::instrument!();
+        instrument!();
 
         let left = self;
 
@@ -256,8 +262,9 @@ impl SentBlockImpl {
         block_creation_time: std::time::SystemTime,
         block_payload_creation_time: std::time::SystemTime,
     ) -> Self {
-        trace!(
-          "...sent block {:?} has been created (source_id={}, root_hash={:?}, file_hash={:?}, collated_data_file_hash={:?})",
+        log::trace!(
+          "...sent block {:?} has been created \
+          (source_id={}, root_hash={:?}, file_hash={:?}, collated_data_file_hash={:?})",
           candidate_id,
           source_id,
           root_hash,
@@ -294,7 +301,7 @@ impl SentBlockImpl {
         block_creation_time: std::time::SystemTime,
         block_payload_creation_time: std::time::SystemTime,
     ) -> SentBlockPtr {
-        profiling::instrument!();
+        instrument!();
 
         let candidate_id =
             desc.candidate_id(source_id, &root_hash, &file_hash, &collated_data_file_hash);

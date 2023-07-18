@@ -11,8 +11,17 @@
 * limitations under the License.
 */
 
-pub use super::*;
-use crate::ton_api::IntoBoxed;
+use crate::{
+    Any, BlockId, BoolVectorPtr, CacheObject, CachedInstanceCounter, HashableObject, 
+    HashType, Merge, MovablePoolObject, PoolObject, PoolPtr, RoundAttemptState, 
+    RoundAttemptStatePtr, RoundAttemptStateWrapper, RoundState, SentBlockPtr, 
+    SentBlockWrapper, SessionCache, SessionDescription, SessionFactory, SessionPool, 
+    SortedVectorWrapper, TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG, ValidatorWeight, 
+    VectorMerge, VoteCandidatePtr, VoteCandidateVectorPtr, VoteCandidateWrapper, ton
+};
+use catchain::instrument;
+use std::fmt;
+use ton_api::IntoBoxed;
 
 /*
     Implementation details for RoundAttemptState
@@ -127,9 +136,9 @@ impl RoundAttemptState for RoundAttemptStateImpl {
         src_idx: u32,
         attempt_id: u32,
     ) -> Option<ton::Message> {
-        profiling::instrument!();
+        instrument!();
 
-        trace!(
+        log::trace!(
             "...create attempt action for source={} and attempt={}",
             src_idx,
             attempt_id
@@ -138,14 +147,14 @@ impl RoundAttemptState for RoundAttemptStateImpl {
         //vote if the node did not vote in the attempt
 
         if !self.check_vote_received_from(src_idx) {
-            trace!("...choose block to vote");
+            log::trace!("...choose block to vote");
 
             if let Some(block_to_vote) =
                 round.choose_block_to_vote(desc, src_idx, attempt_id, self.vote_for.clone())
             {
                 let block_to_vote_id = block_to_vote.get_id();
 
-                trace!("...block {:?} has been choosen to vote", block_to_vote_id);
+                log::trace!("...block {:?} has been choosen to vote", block_to_vote_id);
 
                 return Some(
                     ton::message::Vote {
@@ -161,12 +170,12 @@ impl RoundAttemptState for RoundAttemptStateImpl {
         //precommit if the node did not have precommitted block in the attempt
 
         if !self.check_precommit_received_from(src_idx) {
-            trace!("...get voted block");
+            log::trace!("...get voted block");
 
             if let Some(voted_block) = self.get_voted_block(desc) {
                 let voted_block_id = voted_block.get_id();
 
-                trace!(
+                log::trace!(
                     "...block {:?} has been choosen to precommit",
                     voted_block_id
                 );
@@ -198,7 +207,7 @@ impl RoundAttemptState for RoundAttemptStateImpl {
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn RoundAttemptState> {
-        profiling::instrument!();
+        instrument!();
 
         let self_cloned = Self::new(
             self.sequence_number,
@@ -217,7 +226,7 @@ impl RoundAttemptState for RoundAttemptStateImpl {
     */
 
     fn dump(&self, desc: &dyn SessionDescription) -> String {
-        profiling::instrument!();
+        instrument!();
 
         let mut result = "".to_string();
 
@@ -372,7 +381,7 @@ impl RoundAttemptStateWrapper for RoundAttemptStatePtr {
         message: &ton::Message,
         round_state: &dyn RoundState,
     ) -> RoundAttemptStatePtr {
-        profiling::instrument!();
+        instrument!();
 
         get_impl(&**self).apply_action_dispatch(
             desc,
@@ -391,9 +400,9 @@ impl RoundAttemptStateWrapper for RoundAttemptStatePtr {
         attempt_id: u32,
         round_state: &dyn RoundState,
     ) -> (RoundAttemptStatePtr, bool) {
-        profiling::instrument!();
+        instrument!();
 
-        trace!(
+        log::trace!(
             "......actualizing attempt {} of round {} for source {}",
             attempt_id,
             round_state.get_sequence_number(),
@@ -417,7 +426,7 @@ impl RoundAttemptStateWrapper for RoundAttemptStatePtr {
 
 impl Merge<PoolPtr<dyn RoundAttemptState>> for PoolPtr<dyn RoundAttemptState> {
     fn merge(&self, right: &Self, desc: &mut dyn SessionDescription) -> Self {
-        profiling::instrument!();
+        instrument!();
 
         let left = &get_impl(&**self);
         let right = &get_impl(&**right);
@@ -576,11 +585,11 @@ impl RoundAttemptStateImpl {
         round_state: &dyn RoundState,
         default_state: RoundAttemptStatePtr,
     ) -> RoundAttemptStatePtr {
-        profiling::instrument!();
+        instrument!();
 
         //dispatching incremental message based on its ID
 
-        trace!("...dispatching incoming attempt message");
+        log::trace!("...dispatching incoming attempt message");
 
         let new_attempt_state = match message {
             ton::Message::ValidatorSession_Message_VoteFor(message) => self.apply_vote_for_action(
@@ -592,7 +601,7 @@ impl RoundAttemptStateImpl {
                 default_state,
             ),
             ton::Message::ValidatorSession_Message_Vote(_) => {
-                trace!("...apply vote action");
+                log::trace!("...apply vote action");
                 self.apply_default_action(
                     desc,
                     src_idx,
@@ -604,7 +613,7 @@ impl RoundAttemptStateImpl {
                 .0
             }
             ton::Message::ValidatorSession_Message_Precommit(_) => {
-                trace!("...apply precommit action");
+                log::trace!("...apply precommit action");
                 self.apply_default_action(
                     desc,
                     src_idx,
@@ -616,7 +625,7 @@ impl RoundAttemptStateImpl {
                 .0
             }
             ton::Message::ValidatorSession_Message_Empty(_) => {
-                trace!("...apply empty action");
+                log::trace!("...apply empty action");
                 self.apply_default_action(
                     desc,
                     src_idx,
@@ -647,14 +656,14 @@ impl RoundAttemptStateImpl {
         round_state: &dyn RoundState,
         default_state: RoundAttemptStatePtr,
     ) -> RoundAttemptStatePtr {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("...apply vote-for action");
+        log::trace!("...apply vote-for action");
 
         //check the node has already sent vote-for message
 
         if self.vote_for.is_some() {
-            warn!(
+            log::warn!(
                 "Node {} sent an invalid message: duplicate VOTEFOR: {:?}",
                 desc.get_source_public_key_hash(src_idx),
                 message
@@ -665,8 +674,12 @@ impl RoundAttemptStateImpl {
         //check that expected for this attempt author of vote-for message is the node
 
         if src_idx != desc.get_vote_for_author(attempt_id) {
-            warn!("Node {} sent an invalid message: invalid VOTEFOR author (expected {} but received {}): attempt_id={}, message={:?}",
-        desc.get_source_public_key_hash(src_idx), desc.get_vote_for_author(attempt_id), src_idx, attempt_id, message);
+            log::warn!(
+                "Node {} sent an invalid message: invalid VOTEFOR author \
+                (expected {} but received {}): attempt_id={}, message={:?}",
+                desc.get_source_public_key_hash(src_idx), 
+                desc.get_vote_for_author(attempt_id), src_idx, attempt_id, message
+            );
             return default_state;
         }
 
@@ -677,14 +690,22 @@ impl RoundAttemptStateImpl {
         let max_attempts = desc.opts().max_round_attempts;
 
         if first_attempt == 0 && max_attempts > 0 {
-            warn!("Node {} sent an invalid message: too early for VOTEFOR: src_idx={}, attempt_id={}, first_attempt={}, max_round_attempts={}, message={:?}",
-        desc.get_source_public_key_hash(src_idx), src_idx, attempt_id, first_attempt, max_attempts, message);
+            log::warn!(
+                "Node {} sent an invalid message: too early for VOTEFOR: \
+                src_idx={}, attempt_id={}, first_attempt={}, max_round_attempts={}, message={:?}",
+                desc.get_source_public_key_hash(src_idx), src_idx, attempt_id, 
+                first_attempt, max_attempts, message
+            );
             return default_state;
         }
 
         if first_attempt + max_attempts > attempt_id && max_attempts == 0 {
-            warn!("Node {} sent an invalid message: too early for VOTEFOR: src_idx={}, attempt_id={}, first_attempt={}, max_round_attempts={}, message={:?}",
-        desc.get_source_public_key_hash(src_idx), src_idx, attempt_id, first_attempt, max_attempts, message);
+            log::warn!(
+                "Node {} sent an invalid message: too early for VOTEFOR: \
+                src_idx={}, attempt_id={}, first_attempt={}, max_round_attempts={}, message={:?}",
+                desc.get_source_public_key_hash(src_idx), src_idx, attempt_id, 
+                first_attempt, max_attempts, message
+            );
             return default_state;
         }
 
@@ -699,8 +720,11 @@ impl RoundAttemptStateImpl {
                 .unwrap()
                 .check_block_is_approved(desc)
         {
-            warn!("Node {} sent an invalid message: VOTEFOR for non approved block: attempt_id={}, message={:?}",
-        desc.get_source_public_key_hash(src_idx), attempt_id, message);
+            log::warn!(
+                "Node {} sent an invalid message:
+                VOTEFOR for non approved block: attempt_id={}, message={:?}",
+                desc.get_source_public_key_hash(src_idx), attempt_id, message
+            );
             return default_state;
         }
 
@@ -724,9 +748,9 @@ impl RoundAttemptStateImpl {
         round_state: &dyn RoundState,
         default_state: RoundAttemptStatePtr,
     ) -> (RoundAttemptStatePtr, bool) {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("......apply default action");
+        log::trace!("......apply default action");
 
         //try to vote
 
@@ -740,7 +764,7 @@ impl RoundAttemptStateImpl {
         );
 
         if vote_result.1 {
-            trace!("......has new vote");
+            log::trace!("......has new vote");
             return vote_result;
         }
 
@@ -756,7 +780,7 @@ impl RoundAttemptStateImpl {
         );
 
         if precommit_result.1 {
-            trace!("......has a precommit");
+            log::trace!("......has a precommit");
             return precommit_result;
         }
 
@@ -768,7 +792,7 @@ impl RoundAttemptStateImpl {
                     //do nothing
                 }
                 _ => {
-                    warn!(
+                    log::warn!(
                         "Node {} sent an invalid message (expected EMPTY): {:?}",
                         desc.get_source_public_key_hash(src_idx),
                         message
@@ -789,14 +813,14 @@ impl RoundAttemptStateImpl {
         round_state: &dyn RoundState,
         default_state: RoundAttemptStatePtr,
     ) -> (RoundAttemptStatePtr, bool) {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("......try to vote");
+        log::trace!("......try to vote");
 
         //check if we have already received a vote from the node
 
         if self.check_vote_received_from(src_idx) {
-            trace!(
+            log::trace!(
                 "......vote has been already received from the node #{}; skip {:?}",
                 src_idx,
                 &message
@@ -810,7 +834,7 @@ impl RoundAttemptStateImpl {
             round_state.choose_block_to_vote(desc, src_idx, attempt_id, self.vote_for.clone());
 
         if block_to_vote.is_none() {
-            trace!(
+            log::trace!(
                 "......can't choose block to vote for node #{}; skip {:?}",
                 src_idx,
                 &message
@@ -821,7 +845,7 @@ impl RoundAttemptStateImpl {
         let block_to_vote = block_to_vote.unwrap();
         let block_to_vote_id = block_to_vote.get_id();
 
-        trace!("......block to vote is {:?}", &block_to_vote);
+        log::trace!("......block to vote is {:?}", &block_to_vote);
 
         //check if block to vote is an expected one
 
@@ -830,7 +854,7 @@ impl RoundAttemptStateImpl {
                 ton::Message::ValidatorSession_Message_Vote(message) => {
                     let candidate_id: BlockId = message.candidate.clone().into();
                     if &candidate_id != block_to_vote_id {
-                        warn!(
+                        log::warn!(
                             "Node {} sent an invalid message (expected VOTE({:?})): {:?}",
                             desc.get_source_public_key_hash(src_idx),
                             block_to_vote_id,
@@ -839,7 +863,7 @@ impl RoundAttemptStateImpl {
                     }
                 }
                 _ => {
-                    warn!(
+                    log::warn!(
                         "Node {} sent an invalid message (expected VOTE({:?})): {:?}",
                         desc.get_source_public_key_hash(src_idx),
                         block_to_vote_id,
@@ -848,7 +872,7 @@ impl RoundAttemptStateImpl {
                 }
             }
         } else {
-            warn!(
+            log::warn!(
                 "Node {}: making implicit VOTE({:?})",
                 desc.get_source_public_key_hash(src_idx),
                 block_to_vote_id
@@ -866,7 +890,7 @@ impl RoundAttemptStateImpl {
         let vote_candidate = vote_candidate.push(desc, src_idx);
         let votes = self.votes.push(desc, vote_candidate);
 
-        trace!("......new votes for attempt {}: {:?}", attempt_id, &votes);
+        log::trace!("......new votes for attempt {}: {:?}", attempt_id, &votes);
 
         let attempt_state = Self::create(
             desc,
@@ -888,14 +912,14 @@ impl RoundAttemptStateImpl {
         _round_state: &dyn RoundState,
         default_state: RoundAttemptStatePtr,
     ) -> (RoundAttemptStatePtr, bool) {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("......try to precommit");
+        log::trace!("......try to precommit");
 
         //check if we have already received a precommit from the node
 
         if self.check_precommit_received_from(src_idx) {
-            trace!(
+            log::trace!(
                 "......precommit has been already received from the node #{}; skip {:?}",
                 src_idx,
                 &message
@@ -908,7 +932,7 @@ impl RoundAttemptStateImpl {
         let voted_block = self.get_voted_block(desc);
 
         if voted_block.is_none() {
-            trace!(
+            log::trace!(
                 "......can't choose block to precommit for node #{}; skip {:?}",
                 src_idx,
                 &message
@@ -919,7 +943,7 @@ impl RoundAttemptStateImpl {
         let voted_block = voted_block.unwrap();
         let voted_block_id = voted_block.get_id();
 
-        trace!("......block to precommit is {:?}", &voted_block);
+        log::trace!("......block to precommit is {:?}", &voted_block);
 
         //check if voted block is an expected one
 
@@ -928,7 +952,7 @@ impl RoundAttemptStateImpl {
                 ton::Message::ValidatorSession_Message_Precommit(message) => {
                     let candidate_id: BlockId = message.candidate.clone().into();
                     if &candidate_id != voted_block_id {
-                        warn!(
+                        log::warn!(
                             "Node {} sent an invalid message (expected PRECOMMIT({:?})): {:?}",
                             desc.get_source_public_key_hash(src_idx),
                             voted_block_id,
@@ -937,7 +961,7 @@ impl RoundAttemptStateImpl {
                     }
                 }
                 _ => {
-                    warn!(
+                    log::warn!(
                         "Node {} sent an invalid message (expected PRECOMMIT({:?})): {:?}",
                         desc.get_source_public_key_hash(src_idx),
                         voted_block_id,
@@ -946,7 +970,7 @@ impl RoundAttemptStateImpl {
                 }
             }
         } else {
-            warn!(
+            log::warn!(
                 "Node {}: making implicit PRECOMMIT({:?})",
                 desc.get_source_public_key_hash(src_idx),
                 voted_block_id
@@ -1032,7 +1056,7 @@ impl RoundAttemptStateImpl {
         precommitted: BoolVectorPtr,
         vote_for: Option<SentBlockPtr>,
     ) -> RoundAttemptStatePtr {
-        profiling::instrument!();
+        instrument!();
 
         let hash = Self::compute_hash(sequence_number, &votes, &precommitted, &vote_for);
         let body = Self::new(

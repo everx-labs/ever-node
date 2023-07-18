@@ -12,14 +12,14 @@
 */
 
 use crate::{
-    CHECK, block::BlockStuff, block_proof::BlockProofStuff, engine_traits::EngineOperations, 
+    CHECK, block::BlockStuff, block_proof::BlockProofStuff, engine_traits::EngineOperations,
     shard_state::ShardStateStuff, engine::Engine
 };
-use ever_crypto::KeyId;
+
 use std::{ops::Deref, sync::Arc, time::Duration};
 use storage::block_handle_db::BlockHandle;
 use ton_block::{BlockIdExt, ShardIdent, SHARD_FULL};
-use ton_types::{error, fail, Result};
+use ton_types::{error, fail, KeyId, Result};
 
 pub const PSS_PERIOD_BITS: u32 = 17;
 const RETRY_MASTER_STATE_DOWNLOAD: usize = 10;

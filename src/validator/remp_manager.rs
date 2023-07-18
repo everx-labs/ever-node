@@ -11,45 +11,37 @@
 * limitations under the License.
 */
 
-#[cfg(feature = "telemetry")]
-use std::time::Instant;
-use std::{
-    collections::{HashMap, VecDeque},
-    fmt, fmt::{Display, Formatter},
-    sync::Arc,
-};
-use std::collections::HashSet;
-use crossbeam_channel::{Sender, Receiver, unbounded, TryRecvError};
-
-use ever_crypto::KeyId;
-use failure::err_msg;
-
-use ton_api::ton::ton_node::RempMessageStatus;
-use ton_block::{ShardIdent, Message};
-use ton_types::{UInt256, Result, SliceData};
 use crate::{
     config::RempConfig,
     engine_traits::{EngineOperations, RempCoreInterface, RempDuplicateStatus},
     validator::{
-        mutex_wrapper::MutexWrapper,
-        validator_utils::get_shard_by_message,
-        message_cache::{RmqMessage, MessageCache},
-        remp_catchain::RempCatchainStore
-}};
+        message_cache::{RmqMessage, MessageCache}, mutex_wrapper::MutexWrapper,
+        remp_catchain::RempCatchainStore,
+        validator_utils::{get_message_uid, get_shard_by_message}
+    }
+};
+
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
-use crate::validator::validator_utils::get_message_uid;
+use std::{collections::{HashMap, HashSet, VecDeque}, fmt, sync::Arc, time::Duration};
+#[cfg(feature = "telemetry")]
+use std::time::Instant;
+use ton_api::ton::ton_node::RempMessageStatus;
+use ton_block::{ShardIdent, Message};
+use ton_types::{error, KeyId, Result, SliceData, UInt256};
 
 pub struct RempInterfaceQueues {
     message_cache: Arc<MessageCache>,
     runtime: Arc<tokio::runtime::Handle>,
     pub engine: Arc<dyn EngineOperations>,
-    pub incoming_sender: Sender<Arc<RmqMessage>>,
-    pub response_receiver: Receiver<(UInt256, Arc<RmqMessage>, RempMessageStatus)>
+    pub incoming_sender: 
+        crossbeam_channel::Sender<Arc<RmqMessage>>,
+    pub response_receiver: 
+        crossbeam_channel::Receiver<(UInt256, Arc<RmqMessage>, RempMessageStatus)>
 }
 
 #[async_trait::async_trait]
-pub trait RempQueue<T: Display> {
+pub trait RempQueue<T: fmt::Display> {
     /// Function that checks status of RempQueue.
     /// Should return Ok(Some(x)) if new message x is present in the queue
     /// (message is removed from the queue),
@@ -61,7 +53,7 @@ pub trait RempQueue<T: Display> {
     async fn compute_shard (&self, msg: Arc<T>) -> Result<ShardIdent>;
 }
 
-pub struct RempQueueDispatcher<T: Display+Sized, Q: RempQueue<T>> {
+pub struct RempQueueDispatcher<T: fmt::Display+Sized, Q: RempQueue<T>> {
     pending_messages: MutexWrapper<HashMap<ShardIdent,VecDeque<Arc<T>>>>,
     actual_queues: MutexWrapper<HashSet<ShardIdent>>,
     pub queue: Q,
@@ -72,7 +64,7 @@ pub struct RempQueueDispatcher<T: Display+Sized, Q: RempQueue<T>> {
     mutex_awaiting_metric: Arc<Metric>
 }
 
-impl<T: Display,Q: RempQueue<T>> RempQueueDispatcher<T,Q> {
+impl<T: fmt::Display, Q: RempQueue<T>> RempQueueDispatcher<T,Q> {
     pub fn with_metric(
         name: String,
         queue: Q,
@@ -212,11 +204,14 @@ impl<T: Display,Q: RempQueue<T>> RempQueueDispatcher<T,Q> {
 
 pub struct RempIncomingQueue {
     engine: Arc<dyn EngineOperations>,
-    pub incoming_receiver: Receiver<Arc<RmqMessage>>,
+    pub incoming_receiver: crossbeam_channel::Receiver<Arc<RmqMessage>>
 }
 
 impl RempIncomingQueue {
-    pub fn new(engine: Arc<dyn EngineOperations>, incoming_receiver: Receiver<Arc<RmqMessage>>) -> Self {
+    pub fn new(
+        engine: Arc<dyn EngineOperations>, 
+        incoming_receiver: crossbeam_channel::Receiver<Arc<RmqMessage>>
+    ) -> Self {
         RempIncomingQueue { engine, incoming_receiver }
     }
 }
@@ -226,8 +221,10 @@ impl RempQueue<RmqMessage> for RempIncomingQueue {
     fn receive_message(&self) -> Result<Option<Arc<RmqMessage>>> {
         match self.incoming_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
-            Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => Err(err_msg("REMP Incoming Queue is disconnected!"))
+            Err(crossbeam_channel::TryRecvError::Empty) => 
+                Ok(None),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => 
+                Err(error!("REMP Incoming Queue is disconnected!"))
         }
     }
 
@@ -273,8 +270,8 @@ impl RempQueue<CollatorResult> for CollatorInterfaceWrapper {
     }
 }
 
-impl Display for CollatorResult {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+impl fmt::Display for CollatorResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "message_id: {:x}, status: {}", self.message_id, self.status)
     }
 }
@@ -296,15 +293,15 @@ pub struct RempManager {
     pub message_cache: Arc<MessageCache>,
     incoming_dispatcher: RempQueueDispatcher<RmqMessage, RempIncomingQueue>,
     pub collator_receipt_dispatcher: RempQueueDispatcher<CollatorResult, CollatorInterfaceWrapper>,
-    pub response_sender: Sender<(UInt256, Arc<RmqMessage>, RempMessageStatus)>
+    pub response_sender: crossbeam_channel::Sender<(UInt256, Arc<RmqMessage>, RempMessageStatus)>
 }
 
 impl RempManager {
     pub fn create_with_options(engine: Arc<dyn EngineOperations>, opt: RempConfig, runtime: Arc<tokio::runtime::Handle>)
         -> (Self, RempInterfaceQueues) 
     {
-        let (incoming_sender, incoming_receiver) = unbounded();
-        let (response_sender, response_receiver) = unbounded();
+        let (incoming_sender, incoming_receiver) = crossbeam_channel::unbounded();
+        let (response_sender, response_receiver) = crossbeam_channel::unbounded();
         let message_cache = Arc::new(MessageCache::with_metrics(
             #[cfg(feature = "telemetry")]
             engine.remp_core_telemetry().cache_mutex_metric(),
@@ -443,9 +440,11 @@ impl RempInterfaceQueues {
     pub async fn poll_responses_loop(&self) {
         loop {
             match self.response_receiver.try_recv() {
-                Ok((local_key_id, msg,status)) => self.send_response_to_fullnode(local_key_id, msg, status).await,
-                Err(TryRecvError::Empty) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
-                Err(TryRecvError::Disconnected) => return
+                Ok((local_key_id, msg,status)) => 
+                    self.send_response_to_fullnode(local_key_id, msg, status).await,
+                Err(crossbeam_channel::TryRecvError::Empty) => 
+                    tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => return
             }
         }
     }

@@ -309,7 +309,7 @@ impl ShardStateStuff {
     pub fn shard_hashes(&self) -> Result<ShardHashesStuff> {
         Ok(ShardHashesStuff::from(self.shard_state_extra()?.shards().clone()))
     }
-                       
+
     pub fn root_cell(&self) -> &Cell { &self.root }
 
     pub fn shard(&self) -> &ShardIdent { &self.block_id.shard() }

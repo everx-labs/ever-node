@@ -11,14 +11,11 @@
 * limitations under the License.
 */
 
-use crate::{
-    network::full_node_client::FullNodeOverlayClient,
-};
+use crate::network::full_node_client::FullNodeOverlayClient;
 
-use ever_crypto::KeyId;
-use std::sync::{Arc, /*atomic::{AtomicUsize, Ordering}*/};
+use std::sync::Arc;
 use ton_block::BlockIdExt;
-use ton_types::{error, fail, Result};
+use ton_types::{error, fail, KeyId, Result};
 
 pub async fn download_persistent_state(
     id: &BlockIdExt,

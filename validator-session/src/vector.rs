@@ -11,7 +11,14 @@
 * limitations under the License.
 */
 
-pub use super::*;
+use crate::{
+    Any, CachedInstanceCounter, CacheObject, HashableObject, HashType, MovablePoolObject, 
+    PoolPtr, PoolObject, SessionCache, SessionDescription, SessionPool, SortedVector, 
+    SortedVectorWrapper, SortingPredicate, TypeDesc, Vector, VectorMerge, VectorWrapper, 
+    ton
+};
+use catchain::instrument;
+use std::fmt;
 
 /*
 ===================================================================================================
@@ -134,7 +141,7 @@ where
     */
 
     fn push(&self, desc: &mut dyn SessionDescription, value: T) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
+        instrument!();
 
         let mut result = VectorImpl::<T>::new(self.data.len() + 1, &self.instance_counter);
 
@@ -151,7 +158,7 @@ where
         index: usize,
         value: T,
     ) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
+        instrument!();
 
         assert!(index <= self.data.len());
 
@@ -169,7 +176,7 @@ where
         desc: &mut dyn SessionDescription,
         modifier: &Box<dyn Fn(&T) -> T>,
     ) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
+        instrument!();
 
         let modified_vec = self
             .data
@@ -187,7 +194,7 @@ where
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
+        instrument!();
 
         let data_cloned = self
             .data
@@ -245,7 +252,7 @@ where
     */
 
     fn push(&self, desc: &mut dyn SessionDescription, value: T) -> Option<PoolPtr<dyn Vector<T>>> {
-        profiling::instrument!();
+        instrument!();
 
         Some(match &self {
             Some(ref src) => VectorImpl::<T>::get_impl(&**src).push(desc, value),
@@ -259,7 +266,7 @@ where
         index: usize,
         value: T,
     ) -> Option<PoolPtr<dyn Vector<T>>> {
-        profiling::instrument!();
+        instrument!();
 
         match &self {
             Some(ref src) => Some(VectorImpl::<T>::get_impl(&**src).change(desc, index, value)),
@@ -272,7 +279,7 @@ where
         desc: &mut dyn SessionDescription,
         modifier: &Box<dyn Fn(&T) -> T>,
     ) -> Option<PoolPtr<dyn Vector<T>>> {
-        profiling::instrument!();
+        instrument!();
 
         match &self {
             Some(ref src) => Some(VectorImpl::<T>::get_impl(&**src).modify(desc, modifier)),
@@ -302,7 +309,7 @@ where
         merge_all: bool,
         merge_fn: &dyn Fn(&T, &T, &mut dyn SessionDescription) -> T,
     ) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
+        instrument!();
 
         let left = self;
         let left_count = left.len();
@@ -413,7 +420,7 @@ where
     T: Clone + HashableObject + TypeDesc + MovablePoolObject<T> + fmt::Debug,
 {
     fn move_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
+        instrument!();
 
         if SessionPool::Persistent == self.get_pool() {
             return self.clone();
@@ -515,7 +522,7 @@ where
         desc: &mut dyn SessionDescription,
         data: Vec<T>,
     ) -> PoolPtr<dyn Vector<T>> {
-        profiling::instrument!();
+        instrument!();
 
         VectorImpl::create_temp_object(
             Self::with_data(data, T::get_vector_instance_counter(desc)),
@@ -663,7 +670,7 @@ where
         desc: &mut dyn SessionDescription,
         value: T,
     ) -> Option<PoolPtr<dyn SortedVector<T, Compare>>> {
-        profiling::instrument!();
+        instrument!();
 
         match &self {
             Some(ref src) => {
@@ -763,7 +770,7 @@ where
         _merge_all: bool,
         merge_fn: &dyn Fn(&T, &T, &mut dyn SessionDescription) -> T,
     ) -> PoolPtr<dyn SortedVector<T, Compare>> {
-        profiling::instrument!();
+        instrument!();
 
         let left = self;
         let left_count = left.len();
@@ -1014,7 +1021,7 @@ where
     where
         Compare: SortingPredicate<T> + 'static,
     {
-        profiling::instrument!();
+        instrument!();
 
         SortedVectorImpl::create_temp_object(
             Self::with_data(data, T::get_vector_instance_counter(desc)),

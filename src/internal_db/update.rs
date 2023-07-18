@@ -1,7 +1,7 @@
 use crate::internal_db::{
-    InternalDb, CURRENT_DB_VERSION, DB_VERSION_0, DB_VERSION_3, restore::check_db
+    InternalDb, CURRENT_DB_VERSION, DB_VERSION_0, DB_VERSION_2, DB_VERSION_3, DB_VERSION_4,
+    restore::check_db
 };
-use crate::internal_db::DB_VERSION_2;
 use std::sync::atomic::AtomicBool;
 use ton_types::{Result, fail};
 
@@ -42,6 +42,13 @@ pub async fn update(
         );
         db = check_db(db, 0, restore_db_enabled, force_check_db, check_stop, is_broken).await?;
         db.store_db_version(DB_VERSION_3)?;
+    } else if version == DB_VERSION_3 {
+        log::info!(
+            "Detected old database version 3. This version contains performance issue in cells DB. \
+            Database will be updated."
+        );
+        db.update_cells_db_upto_4().await?;
+        db.store_db_version(DB_VERSION_4)?;
     } else if version != CURRENT_DB_VERSION {
         fail!("Wrong database version {}, supported: {}", version, CURRENT_DB_VERSION);
     }

@@ -38,7 +38,8 @@ pub async fn apply_block(
 
     if handle.is_queue_update() {
         calc_out_msg_queue(handle, block, &prev_ids, engine).await?;
-        set_next_prev_ids(&handle, &prev_ids, engine.deref())?;
+        set_prev_ids(&handle, &prev_ids, engine.deref())?;
+        set_next_ids(&handle, &prev_ids, engine.deref())?;
     } else {
         let (shard_state, prev_states) = if handle.has_state() {
             let shard_state = engine.load_state(handle.id()).await?;
@@ -52,8 +53,9 @@ pub async fn apply_block(
         } else {
             calc_shard_state(handle, block, &prev_ids, engine).await?
         };
+        set_prev_ids(&handle, &prev_ids, engine.deref())?;
         if !pre_apply {
-            set_next_prev_ids(&handle, &prev_ids, engine.deref())?;
+            set_next_ids(&handle, &prev_ids, engine.deref())?;
             engine.process_block_in_ext_db(
                 handle, &block, None, &shard_state, (&prev_states.0, prev_states.1.as_ref()), mc_seq_no
             ).await?;
@@ -201,8 +203,8 @@ pub async fn calc_out_msg_queue(
     Ok(())
 }
 
-// Sets next block link for prev. block and prev. for current one
-pub fn set_next_prev_ids(
+// set next block ids for prev blocks
+pub fn set_next_ids(
     handle: &Arc<BlockHandle>,
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
     engine: &dyn EngineOperations
@@ -218,8 +220,6 @@ pub fn set_next_prev_ids(
                 || error!("Cannot load handle for prev2 block {}", prev_id2)
             )?;
             engine.store_block_next1(&prev_handle2, handle.id())?;
-            engine.store_block_prev1(handle, &prev_id1)?;
-            engine.store_block_prev2(handle, &prev_id2)?;
         },
         (prev_id, None) => {
             // if after split and it is second ("1" branch) shard - set next2 for prev block
@@ -233,6 +233,24 @@ pub fn set_next_prev_ids(
             } else {
                 engine.store_block_next1(&prev_handle, handle.id())?;
             }
+        }
+    }
+    Ok(())
+}
+
+// Set prev block ids for (pre-)applied block
+pub fn set_prev_ids(
+    handle: &Arc<BlockHandle>,
+    prev_ids: &(BlockIdExt, Option<BlockIdExt>),
+    engine: &dyn EngineOperations
+) -> Result<()> {
+    match prev_ids {
+        (prev_id1, Some(prev_id2)) => {
+            // After merge
+            engine.store_block_prev1(handle, &prev_id1)?;
+            engine.store_block_prev2(handle, &prev_id2)?;
+        },
+        (prev_id, None) => {
             engine.store_block_prev1(handle, &prev_id)?;
         }
     }

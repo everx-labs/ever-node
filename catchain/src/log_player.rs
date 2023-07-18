@@ -11,20 +11,21 @@
 * limitations under the License.
 */
 
-pub use super::*;
-
+use crate::{
+    Any, BlockPayloadPtr, CatchainFactory, CatchainListenerPtr, CatchainNode, CatchainOverlay,
+    CatchainOverlayListenerPtr, CatchainOverlayManagerPtr, CatchainOverlayLogReplayListenerPtr,
+    CatchainOverlayManager, CatchainOverlayPtr, CatchainPtr, CatchainReplayListenerPtr, 
+    ExternalQueryResponseCallback, LogPlayer, LogPlayerPtr, LogReplayOptions, Options, 
+    PublicKeyHash, PrivateKey, SessionId, ValidatorWeight, utils
+};
 use overlay::PrivateOverlayShortId;
-use regex::Captures;
-use regex::Regex;
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufRead;
-use std::io::BufReader;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use utils::*;
+use std::{
+    cell::RefCell, collections::HashMap, fmt, fs::File, io::{BufRead, BufReader}, 
+    rc::Rc, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::SystemTime
+};
+use ton_types::{fail, Result};
 
-/*
+/*                                                
     Constants
 */
 
@@ -90,7 +91,7 @@ impl LogHeader {
             return;
         }
 
-        trace!("...use session ID {:?}", session_id);
+        log::trace!("...use session ID {:?}", session_id);
 
         let session_desc = SessionDesc {
             session_id: session_id.clone(),
@@ -110,7 +111,7 @@ impl LogHeader {
         let session_desc = self.get_session(&session_id);
 
         if session_desc.is_none() {
-            warn!("...unknown session ID {:?}", session_id);
+            log::warn!("...unknown session ID {:?}", session_id);
             return;
         }
 
@@ -121,7 +122,7 @@ impl LogHeader {
             return;
         }
 
-        trace!("...use local ID {} for session {:?}", local_id, session_id);
+        log::trace!("...use local ID {} for session {:?}", local_id, session_id);
 
         session_desc.local_id = new_local_id;
     }
@@ -135,7 +136,7 @@ impl LogHeader {
 
         local_keys.insert(public_key_hash, private_key.clone());
 
-        trace!("...use local ID private key {}", private_key.id());
+        log::trace!("...use local ID private key {}", private_key.id());
     }
 
     fn add_node(
@@ -147,7 +148,7 @@ impl LogHeader {
         let session_desc = self.get_session(&session_id);
 
         if session_desc.is_none() {
-            warn!("...unknown session ID {:?}", session_id);
+            log::warn!("...unknown session ID {:?}", session_id);
             return;
         }
 
@@ -160,7 +161,7 @@ impl LogHeader {
             }
         }
 
-        trace!(
+        log::trace!(
             "...add node with ADNL ID {}, PublicKeyHash {} and weight {} for session {:?}",
             catchain_node.adnl_id,
             catchain_node.public_key.id(),
@@ -187,7 +188,7 @@ impl LogHeader {
 
                 for node_desc in session_desc.node_ids.iter_mut() {
                     if &node_desc.public_key.id() == &local_id {
-                        trace!("...resolve private key for {}", node_desc.public_key.id());
+                        log::trace!("...resolve private key for {}", node_desc.public_key.id());
                         node_desc.public_key = local_key.clone();
                     }
                 }
@@ -196,21 +197,21 @@ impl LogHeader {
     }
 }
 
-type FormatParser = Box<dyn Fn(&Captures) -> Result<bool>>;
+type FormatParser = Box<dyn Fn(&regex::Captures) -> Result<bool>>;
 
 struct Format {
-    regexp: Regex,        //regular expression for a log line
+    regexp: regex::Regex, //regular expression for a log line
     parser: FormatParser, //parser of log line
 }
 
 impl Format {
     fn new<F>(regexp: &str, parser_fn: F) -> Result<Self>
     where
-        F: Fn(&Captures) -> Result<bool>,
+        F: Fn(&regex::Captures) -> Result<bool>,
         F: 'static,
     {
         Ok(Self {
-            regexp: Regex::new(regexp)?,
+            regexp: regex::Regex::new(regexp)?,
             parser: Box::new(parser_fn),
         })
     }
@@ -251,16 +252,16 @@ impl CatchainOverlayManager for LogPlayerOverlayManager {
         let overlay_clone = overlay.clone();
 
         if let Some(replay_listener) = overlay_log_replay_listener.upgrade() {
-            debug!(
+            log::debug!(
                 "LogPlayer: set initial replay time to {}",
-                catchain::utils::time_to_string(&self.initial_timestamp)
+                utils::time_to_string(&self.initial_timestamp)
             );
             replay_listener.on_time_changed(self.initial_timestamp);
         }
 
         //start processing thread
 
-        debug!("LogPlayer: create processing thread");
+        log::debug!("LogPlayer: create processing thread");
 
         let log_replay_options = self.log_replay_options.clone();
         let session_id = self.session_id.clone();
@@ -383,14 +384,14 @@ impl LogPlayerImpl {
     ) {
         let start_time = SystemTime::now();
 
-        debug!(
+        log::debug!(
             "LogReplay main loop is started with replay_options={:?}",
             log_replay_options
         );
 
         let listener = overlay.listener.clone();
 
-        trace!("...replay log from '{}'", log_replay_options.log_file_name);
+        log::trace!("...replay log from '{}'", log_replay_options.log_file_name);
 
         if let Some(listener) = replay_listener.upgrade() {
             listener.replay_started();
@@ -404,14 +405,14 @@ impl LogPlayerImpl {
             listener,
             overlay_log_replay_listener,
         ) {
-            error!("LogReplay: error: {:?}", err);
+            log::error!("LogReplay: error: {:?}", err);
         }
 
         if let Some(listener) = replay_listener.upgrade() {
             listener.replay_finished();
         }
 
-        debug!(
+        log::debug!(
             "LogReplay main loop is finished in {:?}",
             start_time.elapsed()
         );
@@ -431,14 +432,14 @@ impl LogPlayerImpl {
 
         for (index, line) in reader.lines().enumerate() {
             if stop_flag.load(Ordering::Relaxed) {
-                trace!("...replay is stopped by request during log replaying");
+                log::trace!("...replay is stopped by request during log replaying");
                 return Ok(());
             }
 
             let line_number = index + 1;
 
             if let Err(err) = line {
-                warn!(
+                log::warn!(
                     "LogReplay: parsing error (line #{}): {:?}",
                     line_number, err
                 );
@@ -450,7 +451,7 @@ impl LogPlayerImpl {
             for format in formats {
                 if let Some(captures) = format.regexp.captures(&line) {
                     match (format.parser)(&captures) {
-                        Err(err) => warn!(
+                        Err(err) => log::warn!(
                             "LogReplay: parsing error (line #{}): {:?}",
                             line_number, err
                         ),
@@ -491,10 +492,10 @@ impl LogPlayerImpl {
         let session_id = session_id.clone();
         let replay_without_delays = replay_options.replay_without_delays;
 
-        let parse_data = Rc::new(move |message_type, captures: &Captures| {
+        let parse_data = Rc::new(move |message_type, captures: &regex::Captures| {
             let data_size: u32 = captures.get(1).unwrap().as_str().parse().unwrap();
             let data = &captures.get(2).unwrap().as_str();
-            let bytes = parse_hex(&data);
+            let bytes = utils::parse_hex(&data);
             let source_id = &captures.get(3).unwrap().as_str();
             let source_id = utils::parse_hex_as_public_key_hash(&source_id);
             let block_session_id = &captures.get(4).unwrap().as_str();
@@ -522,7 +523,7 @@ impl LogPlayerImpl {
                         std::time::Duration::from_millis(1000);
 
                     if timeout > DEBUG_PRINT_MIN_DELAY {
-                        debug!("Waiting for {:?} due to log timestamp", timeout);
+                        log::debug!("Waiting for {:?} due to log timestamp", timeout);
                     }
                 }
 
@@ -540,7 +541,7 @@ impl LogPlayerImpl {
                     }
 
                     if stop_flag_clone.load(Ordering::Relaxed) {
-                        trace!("...replay is stopped by request during log replaying");
+                        log::trace!("...replay is stopped by request during log replaying");
                         return Ok(false);
                     }
 
@@ -549,7 +550,7 @@ impl LogPlayerImpl {
             }
 
             if stop_flag_clone.load(Ordering::Relaxed) {
-                trace!("...replay is stopped by request during log replaying");
+                log::trace!("...replay is stopped by request during log replaying");
                 return Ok(false);
             }
 
@@ -573,7 +574,7 @@ impl LogPlayerImpl {
                         source_id.clone(),
                         &CatchainFactory::create_block_payload(::ton_api::ton::bytes(bytes)),
                     ),
-                    _ => warn!("...unknown message type {}", message_type),
+                    _ => log::warn!("...unknown message type {}", message_type),
                 }
             }
 
@@ -589,25 +590,25 @@ impl LogPlayerImpl {
                 concat!(
                     r".*Receive message from overlay for source: size=(\d+), payload=([0-9a-fA-F]+), source=([0-9a-fA-F]+), session_id=([0-9a-fA-F]+), timestamp=(\d+).*"
                 ),
-                move |captures: &Captures| parse_message_rust("block", captures),
+                move |captures: &regex::Captures| parse_message_rust("block", captures),
             )?,
             Format::new(
                 concat!(
                     r".*Receive broadcast from overlay for source: size=(\d+), payload=([0-9a-fA-F]+), source=([0-9a-fA-F]+), session_id=([0-9a-fA-F]+), timestamp=(\d+).*"
                 ),
-                move |captures: &Captures| parse_broadcast_rust("broadcast", captures),
+                move |captures: &regex::Captures| parse_broadcast_rust("broadcast", captures),
             )?,
             Format::new(
                 concat!(
                     r"^CatChainReceivedBlockImpl::receive_block payload.size = (\d+) payload = ([0-9a-fA-F]+) source.size = \d+ source = ([0-9a-fA-F]+) session_id.size = \d+ session_id = ([0-9a-fA-F]+) block_source_id = \d+ height = \d+ timestamp = (\d+) .*$"
                 ),
-                move |captures: &Captures| parse_message_cpp("block", captures),
+                move |captures: &regex::Captures| parse_message_cpp("block", captures),
             )?,
             Format::new(
                 concat!(
                     r"^CatChainReceivedBlockImpl::receive_broadcast payload.size = (\d+) payload = ([0-9a-fA-F]+) source.size = \d+ source = ([0-9a-fA-F]+) session_id.size = \d+ session_id = ([0-9a-fA-F]+) timestamp = (\d+) .*$"
                 ),
-                move |captures: &Captures| parse_broadcast_cpp("broadcast", captures),
+                move |captures: &regex::Captures| parse_broadcast_cpp("broadcast", captures),
             )?,
         ];
 
@@ -659,10 +660,14 @@ impl LogPlayerImpl {
         let formats = [
             Format::new(
                 r".* Create validator session ([0-9a-fA-F]+) for local ID ([0-9a-fA-F]+) and key ([0-9a-fA-F]+) .*timestamp=([0-9]+)",
-                move |captures: &Captures| {
-                    let session_id = parse_hex_as_session_id(&captures.get(1).unwrap().as_str());
-                    let local_id = parse_hex_as_public_key_hash(&captures.get(2).unwrap().as_str());
-                    let local_key = parse_hex_as_expanded_private_key(
+                move |captures: &regex::Captures| {
+                    let session_id = utils::parse_hex_as_session_id(
+                        &captures.get(1).unwrap().as_str()
+                    );
+                    let local_id = utils::parse_hex_as_public_key_hash(
+                        &captures.get(2).unwrap().as_str()
+                    );
+                    let local_key = utils::parse_hex_as_expanded_private_key(
                         &captures.get(3).unwrap().as_str().trim(),
                     );
                     let timestamp: u64 = captures.get(4).unwrap().as_str().parse().unwrap();
@@ -678,15 +683,21 @@ impl LogPlayerImpl {
             )?,
             Format::new(
                 r".* Validator session ([0-9a-fA-F]+) node: weight=([0-9]+), public_key=([0-9a-fA-F]+), adnl_id=([0-9a-fA-F]+) .*timestamp=([0-9]+)",
-                move |captures: &Captures| {
-                    let session_id = parse_hex_as_session_id(&captures.get(1).unwrap().as_str());
+                move |captures: &regex::Captures| {
+                    let session_id = utils::parse_hex_as_session_id(
+                        &captures.get(1).unwrap().as_str()
+                    );
                     let weight = captures
                         .get(2)
                         .unwrap()
                         .as_str()
                         .parse::<ValidatorWeight>()?;
-                    let public_key = parse_hex_as_public_key(&captures.get(3).unwrap().as_str());
-                    let adnl_id = parse_hex_as_public_key_hash(&captures.get(4).unwrap().as_str());
+                    let public_key = utils::parse_hex_as_public_key(
+                        &captures.get(3).unwrap().as_str()
+                    );
+                    let adnl_id = utils::parse_hex_as_public_key_hash(
+                        &captures.get(4).unwrap().as_str()
+                    );
                     let catchain_node = CatchainNode {
                         public_key: public_key,
                         adnl_id: adnl_id,
@@ -699,11 +710,11 @@ impl LogPlayerImpl {
             )?,
             Format::new(
                 r"^SessionId\.size.*SessionId = ([0-9a-fA-F]+) timestamp = ([0-9]+) *$",
-                move |captures: &Captures| {
+                move |captures: &regex::Captures| {
                     let hex = &captures.get(1).unwrap().as_str();
-                    let session_id = parse_hex_as_session_id(hex);
+                    let session_id = utils::parse_hex_as_session_id(hex);
                     let timestamp: u64 = captures.get(2).unwrap().as_str().parse().unwrap();
-                    let replay_time =
+                    let replay_time = 
                         std::time::UNIX_EPOCH + std::time::Duration::from_millis(timestamp);
 
                     add_session_id(session_id, replay_time);
@@ -713,11 +724,11 @@ impl LogPlayerImpl {
             )?,
             Format::new(
                 r"^SessionLocalId\.size.*SessionLocalId = ([0-9a-fA-F]+) SessionId\.size.*SessionId = ([0-9a-fA-F]+) timestamp = ([0-9]+) *$",
-                move |captures: &Captures| {
+                move |captures: &regex::Captures| {
                     let hex = &captures.get(1).unwrap().as_str();
-                    let local_id = parse_hex_as_public_key_hash(hex);
+                    let local_id = utils::parse_hex_as_public_key_hash(hex);
                     let hex = &captures.get(2).unwrap().as_str();
-                    let session_id = parse_hex_as_session_id(hex);
+                    let session_id = utils::parse_hex_as_session_id(hex);
 
                     add_local_id(session_id, local_id);
 
@@ -726,13 +737,13 @@ impl LogPlayerImpl {
             )?,
             Format::new(
                 r"^SessionNode.*SessionId = ([0-9a-fA-F]+) .* PubKey = ([0-9a-fA-F]+).*Id = ([0-9a-fA-F]+).*AdnlId = ([0-9a-fA-F]+).*Weight = ([0-9]+) timestamp = ([0-9]+) *$",
-                move |captures: &Captures| {
+                move |captures: &regex::Captures| {
                     let hex = &captures.get(1).unwrap().as_str();
-                    let session_id = parse_hex_as_session_id(hex.trim());
+                    let session_id = utils::parse_hex_as_session_id(hex.trim());
                     let hex = &captures.get(2).unwrap().as_str();
-                    let public_key = parse_hex_as_public_key(hex.trim());
+                    let public_key = utils::parse_hex_as_public_key(hex.trim());
                     let hex = &captures.get(4).unwrap().as_str();
-                    let adnl_id = parse_hex_as_public_key_hash(hex.trim());
+                    let adnl_id = utils::parse_hex_as_public_key_hash(hex.trim());
                     let catchain_node = CatchainNode {
                         public_key: public_key,
                         adnl_id: adnl_id,
@@ -750,11 +761,11 @@ impl LogPlayerImpl {
             )?,
             Format::new(
                 r"^CatchainImpl::PrivateKey PrivateKey.size = ([0-9]+) PrivateKey = ([0-9a-fA-F]+) PublicKeyHash.size = ([0-9]+) PublicKeyHash = ([0-9a-fA-F]+) timestamp = ([0-9]+) *$",
-                move |captures: &Captures| {
+                move |captures: &regex::Captures| {
                     let hex = &captures.get(2).unwrap().as_str();
-                    let private_key = parse_hex_as_private_key(&hex.trim()[8..72]);
+                    let private_key = utils::parse_hex_as_private_key(&hex.trim()[8..72]);
                     let hex = &captures.get(4).unwrap().as_str();
-                    let public_key_hash = parse_hex_as_public_key_hash(hex.trim());
+                    let public_key_hash = utils::parse_hex_as_public_key_hash(hex.trim());
 
                     add_private_key(public_key_hash, private_key);
 
@@ -763,7 +774,7 @@ impl LogPlayerImpl {
             )?,
             Format::new(
                 r"^CatChainReceivedBlockImpl::initialize.*$",
-                move |_captures: &Captures| {
+                move |_captures: &regex::Captures| {
                     Ok(!terminate_on_body) //terminator
                 },
             )?,
@@ -787,7 +798,7 @@ impl LogPlayerImpl {
     */
 
     pub fn create_log_player(log_replay_options: &LogReplayOptions) -> Result<LogPlayerPtr> {
-        debug!(
+        log::debug!(
             "LogPlayer: created with replay_options={:?}",
             log_replay_options
         );
@@ -799,7 +810,7 @@ impl LogPlayerImpl {
             Self::parse_header(&log_replay_options.log_file_name, &stop_flag, true)?;
 
         if log_header.session_descs.len() == 0 {
-            bail!(
+            fail!(
                 "No sessions have been found in the log '{}'",
                 &log_replay_options.log_file_name
             );
@@ -807,7 +818,7 @@ impl LogPlayerImpl {
 
         let preferred_session_id =
             if let Some(preferred_session_id) = &log_replay_options.session_id {
-                parse_hex_as_session_id(&preferred_session_id)
+                utils::parse_hex_as_session_id(&preferred_session_id)
             } else {
                 log_header.session_descs[log_header.session_descs.len() - 1]
                     .session_id
@@ -816,7 +827,7 @@ impl LogPlayerImpl {
         let session_desc = log_header.get_session(&preferred_session_id);
 
         if session_desc.is_none() {
-            bail!(
+            fail!(
                 "Session ID {} has not been found in the log '{}'",
                 preferred_session_id,
                 &log_replay_options.log_file_name
@@ -845,7 +856,7 @@ impl LogPlayerImpl {
     }
 
     pub fn create_log_players(log_replay_options: &LogReplayOptions) -> Vec<LogPlayerPtr> {
-        debug!(
+        log::debug!(
             "LogPlayer: created with replay_options={:?}",
             log_replay_options
         );
@@ -935,7 +946,7 @@ impl CatchainOverlay for OverlayImpl {
         sender_id: &PublicKeyHash,
         message: &BlockPayloadPtr,
     ) {
-        debug!(
+        log::debug!(
             "LogReplay: send message {} -> {}: {:?}",
             sender_id, receiver_id, message
         );
@@ -947,10 +958,10 @@ impl CatchainOverlay for OverlayImpl {
         sender_id: &PublicKeyHash,
         message: &BlockPayloadPtr,
     ) {
-        debug!(
+        log::debug!(
             "LogReplay: send multicast message {} -> {}: {:?}",
             sender_id,
-            public_key_hashes_to_string(receiver_ids),
+            utils::public_key_hashes_to_string(receiver_ids),
             message
         );
     }
@@ -964,7 +975,7 @@ impl CatchainOverlay for OverlayImpl {
         message: &BlockPayloadPtr,
         _response_callback: ExternalQueryResponseCallback,
     ) {
-        debug!(
+        log::debug!(
             "LogReplay: send query '{}' {} -> {}: {:?}",
             name, sender_id, receiver_id, message
         );
@@ -979,7 +990,7 @@ impl CatchainOverlay for OverlayImpl {
         query: BlockPayloadPtr,
         _max_answer_size: u64,
     ) {
-        debug!(
+        log::debug!(
             "LogReplay: send query '{}' via RLDP -> {}: {:?}",
             name, dst, query
         );
@@ -991,7 +1002,7 @@ impl CatchainOverlay for OverlayImpl {
         send_as: &PublicKeyHash,
         payload: BlockPayloadPtr,
     ) {
-        debug!(
+        log::debug!(
             "LogReplay: send broadcast_fec_ex {}/{}: {:?}",
             sender_id, send_as, payload
         );
@@ -1000,7 +1011,7 @@ impl CatchainOverlay for OverlayImpl {
 
 impl Drop for OverlayImpl {
     fn drop(&mut self) {
-        debug!("Dropping LogPlayer overlay...");
+        log::debug!("Dropping LogPlayer overlay...");
 
         self.stop();
     }
@@ -1015,14 +1026,14 @@ impl OverlayImpl {
                 break;
             }
 
-            info!("...waiting for LogPlayer overlay thread");
+            log::info!("...waiting for LogPlayer overlay thread");
 
             const CHECKING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 
             std::thread::sleep(CHECKING_INTERVAL);
         }
 
-        info!("LogPlayer has been stopped");
+        log::info!("LogPlayer has been stopped");
     }
 
     fn create_dummy_overlay(

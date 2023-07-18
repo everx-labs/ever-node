@@ -15,8 +15,8 @@ use crate::{
     block::{BlockIdExtExtention, BlockStuff}, block_proof::BlockProofStuff, boot,
     engine_traits::EngineOperations
 };
+
 use adnl::common::Wait;
-use ever_crypto::KeyId;
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 use storage::{
     archives::{
@@ -25,9 +25,8 @@ use storage::{
     },
     block_handle_db::BlockHandle
 };
-use tokio::task::JoinHandle;
 use ton_block::{BlockIdExt, BASE_WORKCHAIN_ID};
-use ton_types::{error, fail, Result};
+use ton_types::{error, fail, KeyId, Result};
 
 //type PreDownloadTask = (u32, JoinHandle<Result<Vec<u8>>>);
 
@@ -541,7 +540,7 @@ struct BlockMaps {
     blocks: BTreeMap<Arc<BlockIdExt>, BlocksEntry>,
 }
 
-async fn wait_for(tasks: Vec<JoinHandle<Result<()>>>) -> Result<()> {
+async fn wait_for(tasks: Vec<tokio::task::JoinHandle<Result<()>>>) -> Result<()> {
     futures::future::join_all(tasks).await
         .into_iter().find(|r| match r {
             Err(_) => true,

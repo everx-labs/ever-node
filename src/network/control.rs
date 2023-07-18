@@ -17,13 +17,12 @@ use crate::{
     validator::{validator_utils::validatordescr_to_catchain_node},
     validating_utils::{supported_version, supported_capabilities}
 };
+
 use adnl::{
     common::{QueryResult, Subscriber, AdnlPeers},
     server::{AdnlServer, AdnlServerConfig}
 };
-use ever_crypto::KeyId;
-use serde_json::{json, Map, Value};
-use std::{ops::Deref, sync::Arc};
+use std::sync::Arc;
 use ton_api::{
     deserialize_boxed,
     ton::{
@@ -40,9 +39,9 @@ use ton_api::{
     },
     IntoBoxed,
 };
-use ton_types::{fail, error, Result, UInt256, read_single_root_boc};
 use ton_block::{BlockIdExt, MsgAddressInt, Serializable, ShardIdent, MASTERCHAIN_ID};
 use ton_block_json::serialize_config_param;
+use ton_types::{error, fail, KeyId, read_single_root_boc, Result, UInt256};
 
 pub struct ControlServer {
     adnl: AdnlServer
@@ -195,7 +194,7 @@ impl ControlQuerySubscriber {
     }
 
     fn block_id_to_json(block_id: &BlockIdExt) -> String {
-        json!({
+        serde_json::json!({
             "shard":  block_id.shard().to_string(),
             "seq_no": block_id.seq_no(),
             "rh":     format!("{:x}", block_id.root_hash),
@@ -215,7 +214,7 @@ impl ControlQuerySubscriber {
         now: i64,
         new_format: bool
     ) -> String {
-        let mut json_map = Map::new();
+        let mut json_map = serde_json::Map::new();
         for item in map.iter() {
             let value = if new_format {
                 match *item.val() {
@@ -230,7 +229,7 @@ impl ControlQuerySubscriber {
             };
             json_map.insert(item.key().to_string(), value);
         }
-        format!("{:#}", Value::from(json_map))
+        format!("{:#}", serde_json::Value::from(json_map))
     }
 
     fn get_shards_time_diff(engine: &Arc<dyn EngineOperations>, now: u32) -> Result<u32> {
@@ -272,7 +271,7 @@ impl ControlQuerySubscriber {
             id
         } else {
             Self::add_stats(&mut stats, "masterchainblock", "\"not set\"");
-            return Ok(Stats {stats: stats.into()})                                  
+            return Ok(Stats {stats: stats.into()})
         };
 
         let mc_block_handle = engine.load_block_handle(&mc_block_id)?
@@ -405,10 +404,6 @@ impl ControlQuerySubscriber {
 
     }
 
-    async fn get_stats(&self) -> Result<Stats> {
-        self.get_selected_stats(None).await
-    }
-
     async fn process_generate_keypair(&self) -> Result<KeyHash> {
         let ret = KeyHash {
             key_hash: UInt256::with_array(self.key_ring.generate().await?)
@@ -418,7 +413,7 @@ impl ControlQuerySubscriber {
 
     fn export_public_key(&self, key_hash: &[u8; 32]) -> Result<PublicKey> {
         let private = self.key_ring.find(key_hash)?;
-        private.into_public_key_tl()
+        (&private).try_into()
     }
 
     fn process_sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Signature> {
@@ -461,7 +456,7 @@ impl ControlQuerySubscriber {
 
     async fn prepare_bundle(&self, block_id: BlockIdExt) -> Result<Success> {
         if let DataSource::Engine(ref engine) = self.data_source {
-            let bundle = CollatorTestBundle::build_with_ethalon(&block_id, engine.deref()).await?;
+            let bundle = CollatorTestBundle::build_with_ethalon(&block_id, engine).await?;
             tokio::task::spawn_blocking(move || {
                 bundle.save("target/bundles").ok();
             });
@@ -472,7 +467,7 @@ impl ControlQuerySubscriber {
     async fn prepare_future_bundle(&self, prev_block_ids: Vec<BlockIdExt>) -> Result<Success> {
         if let DataSource::Engine(ref engine) = self.data_source {
             let bundle = CollatorTestBundle::build_for_collating_block(
-                prev_block_ids, engine.deref()
+                prev_block_ids, engine
             ).await?;
             tokio::task::spawn_blocking(move || {
                 bundle.save("target/bundles").ok();
@@ -638,7 +633,7 @@ impl Subscriber for ControlQuerySubscriber {
         };
         let query = match query.downcast::<ton::rpc::engine::validator::GetStats>() {
             Ok(_) => {
-                let answer = self.get_stats().await?;
+                let answer = self.get_selected_stats(None).await?;
                 return QueryResult::consume_boxed(
                     answer.into_boxed(),
                     #[cfg(feature = "telemetry")]

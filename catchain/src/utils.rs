@@ -11,16 +11,15 @@
 * limitations under the License.
 */
 
-extern crate hex;
-
 /// Imports
-pub use super::*;
-use ever_crypto::{Ed25519KeyOption, KeyId};
-use crate::ton_api::IntoBoxed;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::convert::TryInto;
+use crate::{
+    serialize_tl_boxed_object, 
+    BlockHash, BlockPayloadPtr, CatchainFactory, PrivateKey, PublicKey, PublicKeyHash, 
+    RawBuffer, Receiver, SessionId, ton, utils
+};
+use std::{collections::{BTreeMap, HashMap, HashSet}, convert::TryInto};
+use ton_api::{deserialize_typed, IntoBoxed};
+use ton_types::{Ed25519KeyOption, KeyId, Result, UInt256};
 
 /*
     to string conversions
@@ -111,7 +110,8 @@ pub fn parse_hex_as_public_key(hex_asm: &str) -> PublicKey {
     let mut key_slice = vec![0; hex_asm.len() / 2];
     parse_hex_to_array(hex_asm, &mut key_slice[..]);
     //TODO: errors processing for key creation
-    Ed25519KeyOption::from_public_key_tl_serialized(&key_slice).unwrap()
+    let key = deserialize_typed::<ton_api::ton::PublicKey>(key_slice).unwrap();
+    (&key).try_into().unwrap()
 }
 
 pub fn parse_hex_as_public_key_raw(hex_asm: &str) -> PublicKey {
@@ -465,7 +465,7 @@ impl MetricsDumper {
 
         //snapshot time
 
-        let duration = self.last_dump_time.elapsed().unwrap().as_secs_f64();
+        let duration = get_elapsed_time(&self.last_dump_time).as_secs_f64();
         self.last_dump_time = std::time::SystemTime::now();
 
         //compute metrics
@@ -768,4 +768,12 @@ pub fn compute_result_ignore_metric(
         value: (percentage * MetricsDumper::METRIC_FLOAT_MULTIPLIER) as u64,
         usage: MetricUsage::Percents,
     })
+}
+
+pub fn get_elapsed_time(from_time: &std::time::SystemTime) -> std::time::Duration {
+  if let Ok(latency) = from_time.elapsed() {
+    latency
+  } else {
+    std::time::Duration::ZERO
+  }
 }

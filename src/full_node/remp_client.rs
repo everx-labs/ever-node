@@ -11,8 +11,6 @@
 * limitations under the License.
 */
 
-#[cfg(feature = "telemetry")]
-use crate::full_node::telemetry::ReceiptTelemetry;
 use crate::{
     engine_traits::EngineOperations,
     validator::validator_utils::get_adnl_id,
@@ -26,7 +24,19 @@ use crate::{
         mpmc_channel::MpmcChannel,
     },
 };
-use ton_types::{Result, fail, error, UInt256, AccountId};
+#[cfg(feature = "telemetry")]
+use crate::full_node::telemetry::ReceiptTelemetry;
+
+use adnl::common::add_unbound_object_to_map_with_update;
+use std::{
+    cmp::max, collections::{HashSet, HashMap}, 
+    sync::{Arc, atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering}},
+    time::{Duration, Instant}
+};
+use ton_api::{
+    IntoBoxed,
+    ton::ton_node::{RempMessage, RempMessageLevel, RempMessageStatus, RempReceipt}
+};
 use ton_block::{
     Message, ShardIdent, FutureSplitMerge, ShardAccount, BlockIdExt, ValidatorDescr, MASTERCHAIN_ID,
     HashmapAugType
@@ -34,18 +44,7 @@ use ton_block::{
 use ton_executor::{
     BlockchainConfig, OrdinaryTransactionExecutor, TransactionExecutor, ExecuteParams,
 };
-use adnl::common::add_unbound_object_to_map_with_update;
-use ever_crypto::KeyId;
-use std::{
-    collections::{HashSet, HashMap}, 
-    sync::{Arc, atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering}},
-    time::{Duration, Instant},
-    cmp::max,
-};
-use ton_api::{
-    IntoBoxed,
-    ton::ton_node::{RempMessage, RempMessageLevel, RempMessageStatus, RempReceipt}
-};
+use ton_types::{error, fail, AccountId, base64_encode, KeyId, Result, UInt256};
 
 const HANGED_MESSAGE_TIMEOUT_MS: u64 = 20_000;
 const TIME_BEFORE_DIE_MS: u64 = 100_000;
@@ -548,8 +547,11 @@ impl RempClient {
         receipt_telemetry: Option<ReceiptTelemetry>
     ) -> Result<()> {
         
-        log::info!("New processing stage for external message {:x}: {:?}, source: {}, die_soon: {}",
-            message_id, status.status(), base64::encode(status.source_id().as_slice()), die_soon);
+        log::info!(
+            "New processing stage for external message {:x}: {:?}, source: {}, die_soon: {}",
+            message_id, status.status(), 
+            base64_encode(status.source_id().as_slice()), die_soon
+        );
 
         if let Some(msg) = self.messages.get(message_id) {
 
@@ -557,8 +559,12 @@ impl RempClient {
             msg.val().last_update.fetch_max(timestamp, Ordering::Relaxed);
 
             if let Some(status) = msg.val().statuses.insert(signature.clone(), status.clone()) {
-                log::warn!("Duplicate of processing status for external message {:x}: {:?}, source: {}, die_soon: {}",
-                    message_id, status.val().status(), base64::encode(status.val().source_id().as_slice()), die_soon);
+                log::warn!(
+                    "Duplicate of processing status for external message \
+                    {:x}: {:?}, source: {}, die_soon: {}",
+                    message_id, status.val().status(), 
+                    base64_encode(status.val().source_id().as_slice()), die_soon
+                );
             }
 
             if die_soon {

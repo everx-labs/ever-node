@@ -11,39 +11,51 @@
 * limitations under the License.
 */
 
-use std::{collections::{HashMap, HashSet}, fmt, fmt::Display, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
-use ever_crypto::KeyId;
-use arc_swap::ArcSwapOption;
-use crossbeam_channel::{Sender, Receiver, unbounded, TryRecvError};
-use ton_api::IntoBoxed;
-use ton_block::ValidatorDescr;
-use ton_types::{Result, UInt256, error, fail};
-use catchain::{BlockPayloadPtr, BlockPtr, CatchainFactory, CatchainListener, CatchainNode, CatchainOverlayManagerPtr, CatchainPtr, ExternalQueryResponseCallback, PrivateKey, PublicKey, PublicKeyHash, serialize_tl_boxed_object};
-use crate::engine_traits::EngineOperations;
-use crate::validator::catchain_overlay::CatchainOverlayManagerImpl;
-use crate::validator::message_cache::RmqMessage;
-use crate::validator::mutex_wrapper::MutexWrapper;
-use crate::validator::remp_manager::RempManager;
-use crate::validator::validator_utils::{
-    get_group_members_by_validator_descrs, get_validator_key_idx, GeneralSessionInfo, validatordescr_to_catchain_node, ValidatorListHash
+use crate::{
+    engine_traits::EngineOperations,
+    validator::{
+        catchain_overlay::CatchainOverlayManagerImpl, message_cache::RmqMessage, 
+        mutex_wrapper::MutexWrapper, remp_manager::RempManager,
+        validator_utils::{
+            get_group_members_by_validator_descrs, get_validator_key_idx, GeneralSessionInfo,
+            validatordescr_to_catchain_node, ValidatorListHash
+        }
+    }
 };
+
+use catchain::{
+    serialize_tl_boxed_object,
+    BlockPayloadPtr, BlockPtr, CatchainFactory, CatchainListener, CatchainNode, 
+    CatchainOverlayManagerPtr, CatchainPtr, ExternalQueryResponseCallback, PrivateKey,
+    PublicKey, PublicKeyHash
+};
+use std::{
+    collections::{HashMap, HashSet}, fmt, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}
+};
+use ton_api::{
+    IntoBoxed, ton::ton_node::RempCatchainRecord
+};
+use ton_block::ValidatorDescr;
+use ton_types::{error, fail, KeyId, Result, UInt256};
 
 const REMP_CATCHAIN_START_POLLING_INTERVAL: Duration = Duration::from_millis(1);
 
 pub struct RempCatchainInstanceImpl {
     pub catchain_ptr: CatchainPtr,
 
-    pending_messages_queue_receiver: Receiver<ton_api::ton::ton_node::RempCatchainRecord>,
-    pub pending_messages_queue_sender: Sender<ton_api::ton::ton_node::RempCatchainRecord>,
+    pending_messages_queue_receiver: crossbeam_channel::Receiver<RempCatchainRecord>,
+    pub pending_messages_queue_sender: crossbeam_channel::Sender<RempCatchainRecord>,
 
-    pub rmq_catchain_receiver: Receiver<ton_api::ton::ton_node::RempCatchainRecord>,
-    rmq_catchain_sender: Sender<ton_api::ton::ton_node::RempCatchainRecord>
+    pub rmq_catchain_receiver: crossbeam_channel::Receiver<RempCatchainRecord>,
+    rmq_catchain_sender: crossbeam_channel::Sender<RempCatchainRecord>
 }
 
 impl RempCatchainInstanceImpl {
     fn new(catchain_ptr: CatchainPtr) -> Self {
-        let (pending_messages_queue_sender, pending_messages_queue_receiver) = unbounded();
-        let (rmq_catchain_sender, rmq_catchain_receiver) = unbounded();
+        let (pending_messages_queue_sender, pending_messages_queue_receiver) = 
+            crossbeam_channel::unbounded();
+        let (rmq_catchain_sender, rmq_catchain_receiver) = 
+            crossbeam_channel::unbounded();
         Self {
             catchain_ptr,
             pending_messages_queue_sender, pending_messages_queue_receiver,
@@ -55,12 +67,12 @@ impl RempCatchainInstanceImpl {
 pub struct RempCatchainInstance {
     id: SystemTime,
     info: Arc<RempCatchainInfo>,
-    instance_impl: ArcSwapOption<RempCatchainInstanceImpl>
+    instance_impl: arc_swap::ArcSwapOption<RempCatchainInstanceImpl>
 }
 
 impl RempCatchainInstance {
     pub fn new(info: Arc<RempCatchainInfo>) -> Self {
-        Self { id: SystemTime::now(), info, instance_impl: ArcSwapOption::new(None) }
+        Self { id: SystemTime::now(), info, instance_impl: arc_swap::ArcSwapOption::new(None) }
     }
 
     pub fn init_instance(&self, instance: Arc<RempCatchainInstanceImpl>) -> Result<()> {
@@ -83,7 +95,7 @@ impl RempCatchainInstance {
         self.instance_impl.load().map(|inst| inst.catchain_ptr.clone())
     }
 
-    pub fn pending_messages_queue_send(&self, msg: ton_api::ton::ton_node::RempCatchainRecord) -> Result<()> {
+    pub fn pending_messages_queue_send(&self, msg: RempCatchainRecord) -> Result<()> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queue_sender.send(msg) {
             Ok(()) => Ok(()),
@@ -97,12 +109,12 @@ impl RempCatchainInstance {
         Ok(instance.pending_messages_queue_sender.len())
     }
 
-    pub fn pending_messages_queue_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RempCatchainRecord>> {
+    pub fn pending_messages_queue_try_recv(&self) -> Result<Option<RempCatchainRecord>> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queue_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
-            Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => fail!("channel disconnected")
+            Err(crossbeam_channel::TryRecvError::Empty) => Ok(None),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => fail!("channel disconnected")
         }
     }
 
@@ -111,16 +123,16 @@ impl RempCatchainInstance {
         Ok(instance.rmq_catchain_receiver.len())
     }
 
-    pub fn rmq_catchain_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RempCatchainRecord>> {
+    pub fn rmq_catchain_try_recv(&self) -> Result<Option<RempCatchainRecord>> {
         let instance = self.get_instance_impl()?;
         match instance.rmq_catchain_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
-            Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => fail!("channel disconnected")
+            Err(crossbeam_channel::TryRecvError::Empty) => Ok(None),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => fail!("channel disconnected")
         }
     }
 
-    pub fn rmq_catchain_send(&self, msg: ton_api::ton::ton_node::RempCatchainRecord) -> Result<()> {
+    pub fn rmq_catchain_send(&self, msg: RempCatchainRecord) -> Result<()> {
         let instance = self.get_instance_impl()?;
         match instance.rmq_catchain_sender.send(msg) {
             Ok(()) => Ok(()),
@@ -408,7 +420,7 @@ impl CatchainListener for RempCatchain {
             actions: msg_vect.into(),
             state: 0 //real_state_hash as i32,
         }.into_boxed();
-        let serialized_payload = catchain::utils::serialize_tl_boxed_object!(&payload);
+        let serialized_payload = serialize_tl_boxed_object!(&payload);
 
         match &self.instance.get_session() {
             Some(ctchn) => {
@@ -420,7 +432,10 @@ impl CatchainListener for RempCatchain {
                     self, serialized_payload
                 );
                 #[cfg(feature = "telemetry")]
-                self.engine.remp_core_telemetry().sent_to_catchain(&self.info.general_session_info.shard, sent_to_catchain);
+                self.engine.remp_core_telemetry().sent_to_catchain(
+                    &self.info.general_session_info.shard, 
+                    sent_to_catchain
+                );
             },
             None => log::error!("RMQ: Catchain session is not initialized!")
         }
@@ -488,7 +503,7 @@ impl RempCatchainWrapper {
     }
 }
 
-impl Display for RempCatchainWrapper {
+impl fmt::Display for RempCatchainWrapper {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}({:?})", self.info, self.status)
     }

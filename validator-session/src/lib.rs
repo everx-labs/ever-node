@@ -11,31 +11,9 @@
 * limitations under the License.
 */
 
-#[macro_use]
-extern crate lazy_static;
-
-extern crate catchain;
-extern crate metrics_runtime;
-extern crate rand;
-extern crate sha2;
-extern crate ton_api;
-extern crate ton_types;
-
-#[macro_use]
-extern crate log;
-
-#[macro_use]
-extern crate failure;
-
 //const TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG: bool = false; //compatibility with Telegram Node: bug in hashes computation for attempt and round
 const TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG: bool = true; //compatibility with Telegram Node: bug in hashes computation for attempt and round
 
-use std::any::Any;
-use std::cell::RefCell;
-use std::fmt;
-use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::Weak;
 mod block_candidate;
 mod cache;
 mod old_round;
@@ -55,14 +33,11 @@ mod vector_bool;
 mod vote_candidate;
 
 pub use cache::*;
-pub use catchain::ActivityNodePtr;
-use catchain::CatchainPtr;
-pub use catchain::CatchainReplayListener;
-use task_queue::CallbackTaskQueuePtr;
-use task_queue::CompletionHandlerProcessor;
-use task_queue::TaskQueuePtr;
+use catchain::{function, CatchainPtr};
+use task_queue::{CallbackTaskQueuePtr, CompletionHandlerProcessor, TaskQueuePtr};
+use std::{any::Any, cell::RefCell, fmt, rc::Rc, sync::{Arc, Weak}};
 
-pub mod profiling {
+mod profiling {
     pub use catchain::profiling::*;
 }
 
@@ -126,7 +101,7 @@ pub type PublicKeyHash = ::catchain::PublicKeyHash;
 /// Block ID
 pub type BlockId = BlockHash;
 
-lazy_static! {
+lazy_static::lazy_static! {
   /// Block candidate identifier for skip round (optional case to identify candidate as empty)
   pub static ref SKIP_ROUND_CANDIDATE_BLOCKID : BlockId = ton_types::UInt256::default();
 

@@ -22,13 +22,10 @@ use adnl::{
     common::{CountedObject, Counter,TaggedByteSlice, TaggedObject, TaggedTlObject}, 
     node::AdnlNode
 };
-use ever_crypto::KeyId;
 use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
 use std::{io::Cursor, time::Instant, sync::Arc, time::Duration};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
-#[cfg(feature = "telemetry")]
-use ton_api::{tag_from_boxed_type, tag_from_bare_type};
 use ton_api::{
     serialize_boxed, serialize_boxed_append, 
     BoxedSerialize, BoxedDeserialize, Deserializer, IntoBoxed,
@@ -53,8 +50,10 @@ use ton_api::{
         }
     }
 };
+#[cfg(feature = "telemetry")]
+use ton_api::{tag_from_boxed_type, tag_from_bare_type};
 use ton_block::BlockIdExt;
-use ton_types::{fail, error, Result};
+use ton_types::{error, fail, KeyId, Result};
 
 #[async_trait::async_trait]
 pub trait FullNodeOverlayClient : Sync + Send {

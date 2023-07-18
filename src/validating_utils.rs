@@ -16,9 +16,8 @@ use ton_block::{
     ShardIdent, BlockIdExt, ConfigParams, McStateExtra, ShardHashes, ValidatorSet, McShardRecord,
     INVALID_WORKCHAIN_ID, MASTERCHAIN_ID, GlobalCapabilities,
 };
-use ton_types::{fail, error, Result, UInt256};
+use ton_types::{fail, error, Result, Sha256, UInt256};
 use std::{collections::HashSet, cmp::max, iter::Iterator};
-use sha2::{Sha256, Digest};
 
 pub const UNREGISTERED_CHAIN_MAX_LEN: u32 = 8;
 
@@ -52,7 +51,7 @@ pub fn supported_capabilities() -> u64 {
 }
 
 pub fn supported_version() -> u32 {
-    42
+    44
 }
 
 pub fn check_this_shard_mc_info(
@@ -472,3 +471,4 @@ pub fn calc_remp_msg_ordering_hash<'a>(msg_id: &UInt256, prev_blocks_ids: impl I
     hasher.update(msg_id.as_slice());
     UInt256::from(hasher.finalize().as_slice())
 }
+

@@ -10,31 +10,24 @@
 * See the License for the specific TON DEV software governing permissions and
 * limitations under the License.
 */
-use ever_crypto::{Ed25519KeyOption, KeyId};
-use catchain::{BlockPayloadPtr, PublicKey, PublicKeyHash, CatchainNode};
-use std::sync::Arc;
-use std::collections::HashMap;
-use std::hash::Hash;
-use sha2::{Digest, Sha256};
 
-use validator_session::SessionNode;
 use crate::{
     engine_traits::EngineOperations, shard_state::ShardStateStuff,
 };
 
+use catchain::{BlockPayloadPtr, CatchainNode, PublicKey, PublicKeyHash};
+use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
 use ton_block::{
-    BlockIdExt, BlockSignatures, BlockSignaturesPure, ConfigParams,
-    CryptoSignature, CryptoSignaturePair,
-    Deserializable, Serializable,
-    Message,
-    ShardIdent, SigPubKey,
-    UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet,
-    GlobalCapabilities,
+    BlockIdExt, BlockSignatures, BlockSignaturesPure, ConfigParams, CryptoSignature, 
+    CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, Serializable, 
+    ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet
 };
-use ton_types::{BuilderData, Result, UInt256, HashmapType, fail, error};
-use core::fmt::Debug;
-use dashmap::DashMap;
+use ton_types::{
+    error, fail, BuilderData, HashmapType, Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson, 
+    Result, Sha256, UInt256
+};
+use validator_session::SessionNode;
 
 pub fn sigpubkey_to_publickey(k: &SigPubKey) -> PublicKey {
     Ed25519KeyOption::from_public_key(k.key_bytes())
@@ -162,8 +155,11 @@ pub fn get_adnl_id(validator: &ValidatorDescr) -> Arc<KeyId> {
 pub type ValidatorListHash = UInt256;
 
 /// compute sha256 for hashes of public keys of all validators
-pub fn compute_validator_list_id(list: &[ValidatorDescr], session_data: Option<(u32, u32, &ShardIdent)>) -> Result<Option<ValidatorListHash>> {
-    if !list.is_empty() {
+pub fn compute_validator_list_id(
+    list: &[ValidatorDescr], 
+    session_data: Option<(u32, u32, &ShardIdent)>
+) -> Result<Option<ValidatorListHash>> {
+    if !list.is_empty() {     
         let mut hasher = Sha256::new();
         if let Some((cc,master_cc,shard)) = session_data {
             hasher.update(cc.to_be_bytes());
@@ -175,7 +171,7 @@ pub fn compute_validator_list_id(list: &[ValidatorDescr], session_data: Option<(
         for x in list {
             hasher.update(x.compute_node_id_short().as_slice());
         }
-        let hash: [u8; 32] = hasher.finalize().into();
+        let hash: [u8; 32] = hasher.finalize();
         Ok(Some(hash.into()))
     } else {
         Ok(None)
@@ -358,7 +354,7 @@ pub fn calc_subset_for_workchain_standard(
     }
 }
 
-pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (ever_crypto::KeyOptionJson, Arc<dyn ever_crypto::KeyOption>) {
+pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (KeyOptionJson, Arc<dyn KeyOption>) {
     loop {
         if let Ok((private, public)) = Ed25519KeyOption::generate_with_json() {
             if id_opt.is_none() || Some(calc_workchain_id_by_adnl_id(public.id().data())) == id_opt {
@@ -417,7 +413,6 @@ pub fn get_group_members_by_validator_descrs(iterator: &Vec<ValidatorDescr>, dst
 }
 
 pub fn is_remp_enabled(_engine: Arc<dyn EngineOperations>, config_params: &ConfigParams) -> bool {
-
     return config_params.has_capability(GlobalCapabilities::CapRemp);
 }
 
@@ -433,7 +428,7 @@ pub fn get_message_uid(msg: &Message) -> UInt256 {
 
 /// Lock-free map to small set (small set means 1-10 records in one typical map cell)
 pub struct LockfreeMapSet<K, V> where V: Ord, V: Clone+Debug, K: Clone+Hash+Ord+Debug {
-    map: DashMap<K,Vec<V>>
+    map: dashmap::DashMap<K,Vec<V>>
 }
 
 impl<K,V> LockfreeMapSet<K,V> where V: Ord, V: Clone+Debug, K: Clone+Hash+Ord+Debug {
@@ -523,6 +518,6 @@ impl<K,V> LockfreeMapSet<K,V> where V: Ord, V: Clone+Debug, K: Clone+Hash+Ord+De
 
 impl <K,V> Default for LockfreeMapSet<K,V> where K: Clone+Hash+Ord+Debug, V: Clone+Ord+Debug {
     fn default() -> Self {
-        LockfreeMapSet { map: DashMap::new() }
+        LockfreeMapSet { map: dashmap::DashMap::new() }
     }
 }

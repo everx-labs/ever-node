@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use ton_block::{Deserializable, ShardIdent, Message, AccountIdPrefixFull, BlockIdExt};
-use ton_types::{Result, types::UInt256, fail, read_single_root_boc};
+use ton_types::{Result, types::UInt256, fail, read_boc};
 use adnl::common::add_unbound_object_to_map;
 use ton_api::ton::ton_node::{RempMessageStatus, RempMessageLevel};
 
@@ -221,7 +221,12 @@ pub fn create_ext_message(data: &[u8]) -> Result<(UInt256, Message)> {
     if data.len() > MAX_EXTERNAL_MESSAGE_SIZE {
         fail!("External message is too large: {}", data.len())
     }
-    let root = read_single_root_boc(&data)?;
+
+    let read_result = read_boc(&data)?;
+    if read_result.header.big_cells_count > 0 {
+        fail!("External message contains big cells")
+    }
+    let root = read_result.withdraw_single_root()?;
     if root.level() != 0 {
         fail!("External message must have zero level, but has {}", root.level())
     }

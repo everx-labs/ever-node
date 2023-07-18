@@ -35,7 +35,6 @@ use adnl::{
     common::{add_counted_object_to_map, CountedObject, Counter, TaggedByteSlice}, 
     node::AdnlNode
 };
-use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
@@ -46,17 +45,18 @@ use overlay::{
 };
 use rldp::RldpNode;
 use std::{
-    hash::Hash, 
+    convert::TryInto, hash::Hash, 
     sync::{Arc, atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicBool, Ordering}}, 
-    time::{Duration, Instant, SystemTime},
-    convert::TryInto,
+    time::{Duration, Instant, SystemTime}
 };
-use ton_types::{Result, fail, error, UInt256};
 use ton_block::BlockIdExt;
+use ton_types::{error, fail, KeyId, KeyOption, Result, UInt256};
+use ton_api::{
+    IntoBoxed, serialize_boxed,
+    ton::{bytes, ton_node::broadcast::ConnectivityCheckBroadcast}
+};
 #[cfg(feature = "telemetry")]
 use ton_api::{tag_from_bare_type};
-use ton_api::{IntoBoxed, serialize_boxed};
-use ton_api::ton::{bytes, ton_node::broadcast::ConnectivityCheckBroadcast};
 
 type Cache<K, T> = lockfree::map::Map<K, T>;
 
@@ -413,7 +413,7 @@ impl NodeNetwork {
             None => {},
             Some(peers) => {
                 for peer in peers.iter() {
-                    let peer_key = Ed25519KeyOption::from_public_key_tl(&peer.id)?;
+                    let peer_key: Arc<dyn KeyOption> = (&peer.id).try_into()?;
                     if neighbours.contains_overlay_peer(peer_key.id()) {
                         continue;
                     }

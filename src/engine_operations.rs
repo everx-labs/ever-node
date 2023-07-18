@@ -17,7 +17,7 @@ use crate::{
     engine::{Engine, STATSD},
     engine_traits::{
         ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, Server,
-        RempCoreInterface,
+        RempCoreInterface, RempDuplicateStatus
     },
     error::NodeError,
     internal_db::{
@@ -32,7 +32,7 @@ use crate::{
         candidate_db::CandidateDb,
         validator_manager::ValidationStatus,
         validator_utils::validatordescr_to_catchain_node,
-    },
+    }
 };
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::ValidatedBlockStat;
@@ -43,17 +43,18 @@ use crate::{
     validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
 };
 
-use ton_api::serialize_boxed;
-use ever_crypto::{KeyId, KeyOption};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
 use overlay::{BroadcastSendInfo, PrivateOverlayShortId};
 use std::{collections::HashSet, ops::Deref, sync::Arc};
 use storage::block_handle_db::BlockHandle;
-use ton_api::ton::ton_node::{
-    RempMessage, RempMessageStatus, RempReceipt, 
-    broadcast::{BlockBroadcast, QueueUpdateBroadcast}
+use ton_api::{
+    serialize_boxed, 
+    ton::ton_node::{
+        RempMessage, RempMessageStatus, RempReceipt, 
+        broadcast::{BlockBroadcast, QueueUpdateBroadcast}
+    }
 };
 use ton_block::{
     MASTERCHAIN_ID, SHARD_FULL, GlobalCapabilities, OutMsgQueue,
@@ -61,9 +62,8 @@ use ton_block::{
 };
 #[cfg(feature="workchains")]
 use ton_block::{BASE_WORKCHAIN_ID, INVALID_WORKCHAIN_ID};
-use ton_types::{fail, error, Result, UInt256};
+use ton_types::{error, fail, KeyId, KeyOption, Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
-use crate::engine_traits::RempDuplicateStatus;
 
 #[async_trait::async_trait]
 impl EngineOperations for Engine {
@@ -869,7 +869,7 @@ impl EngineOperations for Engine {
         if !is_resend {
             let id = tbd.proof_for();
             if let Err(e) = self.shard_blocks().process_shard_block(
-                id, cc_seqno, || Ok(tbd.clone()), false, false, self.deref()).await {
+                id, cc_seqno, || Ok(tbd.clone()), false, self.deref()).await {
                 log::error!("Can't add own shard top block {}: {}", id, e);
             }
         }
@@ -952,11 +952,18 @@ impl EngineOperations for Engine {
 
     // Get current list of new shard blocks with respect to last mc block.
     // If given mc_seq_no is not equal to last mc seq_no - function fails.
-    fn get_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
-        self.shard_blocks().get_shard_blocks(mc_seq_no, false)
+    async fn get_shard_blocks(
+        &self,
+        mc_state: &Arc<ShardStateStuff>,
+        actual_last_mc_seqno: Option<&mut u32>,
+    ) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+        self.shard_blocks().get_shard_blocks(mc_state, self, false, actual_last_mc_seqno).await
     }
-    fn get_own_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
-        self.shard_blocks().get_shard_blocks(mc_seq_no, true)
+    async fn get_own_shard_blocks(
+        &self, 
+        mc_state: &Arc<ShardStateStuff>
+    ) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+        self.shard_blocks().get_shard_blocks(mc_state, self, true, None).await
     }
 
     // Save tsb into persistent storage

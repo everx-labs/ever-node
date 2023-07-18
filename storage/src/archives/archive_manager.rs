@@ -511,7 +511,6 @@ impl ArchiveManager {
             Ok(PackageId::for_key_block(mc_seq_no / KEY_ARCHIVE_PACKAGE_SIZE))
         } else {
             let package_id = self.file_maps.files().get_closest_id(mc_seq_no).await.ok_or_else(|| {
-                log::error!(target: "storage", "Package not found for seq_no: {}", mc_seq_no);
                 error!("Package not found for seq_no: {}", mc_seq_no)
             })?;
             Ok(PackageId::for_block(package_id))

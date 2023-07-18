@@ -11,16 +11,13 @@
 * limitations under the License.
 */
 
-pub use super::*;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-use std::sync::Mutex;
-use std::sync::Weak;
-use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+use crate::{ActivityNode, ActivityNodePtr, utils};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, Weak, atomic::{AtomicBool, AtomicU64, Ordering}},
+    time::{Duration, SystemTime, UNIX_EPOCH}
+};
+use crate::utils::get_elapsed_time;
 
 /*
     Constants
@@ -67,7 +64,7 @@ impl ActivityNode for ActivityNodeImpl {
         let timestamp = match now.duration_since(UNIX_EPOCH) {
             Ok(elapsed) => elapsed.as_millis(),
             Err(err) => {
-                error!("ActivityNode::tick: can't get system time: {}", err);
+                log::error!("ActivityNode::tick: can't get system time: {}", err);
                 panic!("ActivityNode::tick: can't get system time");
             }
         };
@@ -131,7 +128,7 @@ impl Drop for ActivityNodeManager {
 impl ActivityNodeManager {
     /// Get global instance of the manager
     fn global_instance() -> Arc<Mutex<ActivityNodeManager>> {
-        lazy_static! {
+        lazy_static::lazy_static! {
             static ref INSTANCE: Arc<Mutex<ActivityNodeManager>> = ActivityNodeManager::create();
         }
         INSTANCE.clone()
@@ -167,7 +164,7 @@ impl ActivityNodeManager {
                 break;
             }
 
-            info!("...waiting for Catchain activity node dumping thread start");
+            log::info!("...waiting for Catchain activity node dumping thread start");
 
             const CHECKING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 
@@ -186,7 +183,7 @@ impl ActivityNodeManager {
                 break;
             }
 
-            info!("...waiting for Catchain activity node dumping thread stop");
+            log::info!("...waiting for Catchain activity node dumping thread stop");
 
             const CHECKING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 
@@ -225,7 +222,7 @@ impl ActivityNodeManager {
     ) {
         started.store(true, Ordering::Release);
 
-        info!("Catchain activity nodes dumping thread is started");
+        log::info!("Catchain activity nodes dumping thread is started");
 
         loop {
             if should_stop.load(Ordering::Relaxed) {
@@ -249,7 +246,7 @@ impl ActivityNodeManager {
             std::thread::sleep(DUMP_PERIOD);
         }
 
-        info!("Catchain activity nodes dumping thread is finished");
+        log::info!("Catchain activity nodes dumping thread is finished");
 
         started.store(false, Ordering::Release);
     }
@@ -262,7 +259,7 @@ impl ActivityNodeManager {
     /// Dump active nodes
     fn dump(nodes: HashMap<NodeId, Weak<dyn ActivityNode>>) {
         if nodes.len() == 0 {
-            info!("No Catchain activity nodes have been found");
+            log::info!("No Catchain activity nodes have been found");
             return;
         }
 
@@ -273,25 +270,39 @@ impl ActivityNodeManager {
                 let creation_time = node.get_creation_time();
                 let access_time = node.get_access_time();
 
-                result = format!("{}\n  - {}: created {:.3}s ago, accessed {:.3}s ago (creation_time={}, access_time={})",
-                result, node.get_name(), creation_time.elapsed().unwrap().as_secs_f64(), access_time.elapsed().unwrap().as_secs_f64(), utils::time_to_timestamp_string(&creation_time),
-                utils::time_to_timestamp_string(&access_time));
+                result = format!(
+                    "{}\n  - {}: created {:.3}s ago, accessed {:.3}s ago \
+                    (creation_time={}, access_time={})",
+                    result, 
+                    node.get_name(), 
+                    get_elapsed_time(&creation_time).as_secs_f64(), 
+                    get_elapsed_time(&access_time).as_secs_f64(), 
+                    utils::time_to_timestamp_string(&creation_time),
+                    utils::time_to_timestamp_string(&access_time)
+                );
             }
         }
 
-        debug!("{}", result);
+        log::debug!("{}", result);
 
         for (_, node) in nodes.iter() {
             if let Some(node) = node.upgrade() {
                 let creation_time = node.get_creation_time();
                 let access_time = node.get_access_time();
 
-                if access_time.elapsed().unwrap() < ACCESS_WARN_THRESHOLD {
+                if get_elapsed_time(&access_time) < ACCESS_WARN_THRESHOLD {
                     continue;
                 }
 
-                warn!("Activity node '{}' has not been accessed during the last {:.3}s; last accessed at {} (created {:.3}s ago at {})",
-                node.get_name(), access_time.elapsed().unwrap().as_secs_f64(), utils::time_to_timestamp_string(&access_time), creation_time.elapsed().unwrap().as_secs_f64(), utils::time_to_timestamp_string(&creation_time));
+                log::warn!(
+                    "Activity node '{}' has not been accessed during the last {:.3}s; \
+                    last accessed at {} (created {:.3}s ago at {})",
+                    node.get_name(), 
+                    get_elapsed_time(&access_time).as_secs_f64(), 
+                    utils::time_to_timestamp_string(&access_time), 
+                    get_elapsed_time(&creation_time).as_secs_f64(), 
+                    utils::time_to_timestamp_string(&creation_time)
+                );
             }
         }
     }

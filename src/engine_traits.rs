@@ -19,8 +19,15 @@ use crate::{
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
     validator::validator_manager::ValidationStatus,
 };
+#[cfg(feature = "slashing")]
+use crate::validator::slashing::ValidatedBlockStat;
+#[cfg(feature = "telemetry")]
+use crate::{
+    full_node::telemetry::{FullNodeTelemetry, RempClientTelemetry},
+    validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
+    network::telemetry::FullNodeNetworkTelemetry,
+};
 
-use ever_crypto::{KeyId, KeyOption};
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
 use catchain::{
@@ -31,6 +38,9 @@ use overlay::{
     BroadcastSendInfo, OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId
 };
 use std::{collections::HashSet, sync::{Arc, atomic::AtomicU64}, time::{SystemTime, UNIX_EPOCH}};
+use storage::{StorageAlloc, block_handle_db::BlockHandle};
+#[cfg(feature = "telemetry")]
+use storage::StorageTelemetry;
 use ton_api::ton::ton_node::{
     RempMessage, RempMessageStatus, RempReceipt, 
     broadcast::{BlockBroadcast, QueueUpdateBroadcast},
@@ -39,20 +49,8 @@ use ton_block::{
     AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, ShardAccount,
     MASTERCHAIN_ID, Deserializable, ConfigParams, OutMsgQueue
 };
-use ton_types::{Result, UInt256, error, AccountId};
-#[cfg(feature = "telemetry")]
-use crate::{
-    full_node::telemetry::{FullNodeTelemetry, RempClientTelemetry},
-    validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
-    network::telemetry::FullNodeNetworkTelemetry,
-};
-use storage::{StorageAlloc, block_handle_db::BlockHandle};
-#[cfg(feature = "telemetry")]
-use storage::StorageTelemetry;
-
+use ton_types::{error, AccountId, KeyId, KeyOption, Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
-#[cfg(feature = "slashing")]
-use crate::validator::slashing::ValidatedBlockStat;
 
 #[cfg(feature = "telemetry")]
 pub struct EngineTelemetry {
@@ -221,7 +219,7 @@ pub trait EngineOperations : Sync + Send {
     async fn load_applied_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         unimplemented!()
     }
-    async fn wait_applied_block(&self, id: &BlockIdExt, timeout_ms: Option<u64>) -> Result<(Arc<BlockHandle>)> {
+    async fn wait_applied_block(&self, id: &BlockIdExt, timeout_ms: Option<u64>) -> Result<Arc<BlockHandle>> {
         unimplemented!()
     }
     async fn load_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
@@ -537,10 +535,17 @@ pub trait EngineOperations : Sync + Send {
 
     // Get current list of new shard blocks with respect to last mc block.
     // If given mc_seq_no is not equal to last mc seq_no - function fails.
-    fn get_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+    async fn get_shard_blocks(
+        &self,
+        last_mc_state: &Arc<ShardStateStuff>,
+        actual_last_mc_seqno: Option<&mut u32>,
+    ) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
         unimplemented!()
     }
-    fn get_own_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+    async fn get_own_shard_blocks(
+        &self, 
+        last_mc_state: &Arc<ShardStateStuff>
+    ) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
         unimplemented!()
     }
 

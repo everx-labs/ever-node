@@ -23,7 +23,8 @@ use crate::{
     },
     validating_utils::{
         check_cur_validator_set, check_this_shard_mc_info, may_update_shard_block_info,
-        supported_version, supported_capabilities, calc_remp_msg_ordering_hash, UNREGISTERED_CHAIN_MAX_LEN,
+        supported_version, supported_capabilities, calc_remp_msg_ordering_hash,
+        UNREGISTERED_CHAIN_MAX_LEN,
     },
     validator::{out_msg_queue::MsgQueueManager, validator_utils::calc_subset_for_masterchain},
     CHECK,
@@ -53,7 +54,10 @@ use ton_executor::{
     BlockchainConfig, CalcMsgFwdFees, ExecuteParams, OrdinaryTransactionExecutor,
     TickTockTransactionExecutor, TransactionExecutor,
 };
-use ton_types::{read_boc, fail, AccountId, Cell, CellType, HashmapType, Result, SliceData, UInt256};
+use ton_types::{
+    read_boc, fail, AccountId, base64_encode, Cell, CellType, HashmapType, Result, 
+    SliceData, UInt256
+};
 
 #[cfg(feature = "metrics")]
 use crate::engine::STATSD;
@@ -551,7 +555,10 @@ impl ValidateQuery {
         self.new_mc_shards = if base.shard().is_masterchain() {
             base.mc_extra.shards().clone()
         } else {
-            self.old_mc_shards.clone()
+
+             {
+                self.old_mc_shards.clone()
+            }
         };
         if base.global_id != mc_state.state()?.global_id() {
             reject_query!("blockchain global id mismatch: new block has {} while the masterchain configuration expects {}",
@@ -750,6 +757,7 @@ impl ValidateQuery {
             &self.engine,
             &mc_data.state,
             self.shard().clone(),
+            self.block_candidate.block_id.seq_no,
             &self.new_mc_shards,
             &base.prev_states,
             base.next_state.as_ref(),
@@ -840,7 +848,7 @@ impl ValidateQuery {
                         info.block_id, info.descr.reg_mc_seqno, base.block_id().seq_no)
                 }
                 let sh_bd = match base.top_shard_descr_dict.get_top_block_descr(info.block_id.shard())? {
-                    Some(tbd) => TopBlockDescrStuff::new(tbd, &info.block_id, base.is_fake)?,
+                    Some(tbd) => TopBlockDescrStuff::new(tbd, &info.block_id, base.is_fake, false)?,
                     None => reject_query!("no ShardTopBlockDescr for newly-registered shard {} is present in collated data",
                         info.block_id)
                 };
@@ -1126,6 +1134,7 @@ impl ValidateQuery {
             } else {
                 self.check_one_shard(base, mc_data, &descr, None, wc_info.as_ref())?;
             }
+
             Ok(true)
         }).map_err(|err| error!("new shard configuration is invalid : {}", err))?;
         base.prev_state_extra.config.workchains()?.iterate_keys(|wc_id: i32| {
@@ -1209,6 +1218,7 @@ impl ValidateQuery {
         if new_info.nx_cc_updated != cc_updated & self.update_shard_cc {
             reject_query!("new_info.nx_cc_updated has incorrect value {}", new_info.nx_cc_updated)
         }
+
         Ok(())
     }
 
@@ -1239,11 +1249,18 @@ impl ValidateQuery {
             reject_query!("block has start_lt {} less than or equal to lt {} of the reference masterchain state",
                 base.info.start_lt(), mc_data.state.state()?.gen_lt())
         }
-        let lt_bound = std::cmp::max(gen_lt, std::cmp::max(mc_data.state.state()?.gen_lt(), base.max_shard_lt()));
-        if base.info.start_lt() > lt_bound + base.config_params.get_lt_align() * 4 {
-            reject_query!("block has start_lt {} which is too large without a good reason (lower bound is {})",
-                base.info.start_lt(), lt_bound + 1)
+
+        {
+            let lt_bound = std::cmp::max(gen_lt, std::cmp::max(mc_data.state.state()?.gen_lt(), base.max_shard_lt()));
+
+            if base.info.start_lt() > lt_bound + base.config_params.get_lt_align() * 4 {
+                reject_query!("block has start_lt {} which is too large without a good reason (lower bound is {})",
+                    base.info.start_lt(), lt_bound + 1)
+            }
         }
+
+        // TODO FAST FINALITY: add a proper LT check
+
         if base.shard().is_masterchain() && base.info.start_lt() - gen_lt > base.config_params.get_max_lt_growth() {
             reject_query!("block increases logical time from previous state by {} which exceeds the limit ({})",
                 base.info.start_lt() - gen_lt, base.config_params.get_max_lt_growth())
@@ -2596,7 +2613,8 @@ impl ValidateQuery {
     }
 
     // compare to Collator::update_processed_upto()
-    fn check_processed_upto(base: &ValidateBase, manager: &MsgQueueManager, mc_data: &McData) -> Result<()> {
+    fn check_processed_upto(base: &ValidateBase, manager: &MsgQueueManager, _mc_data: &McData) -> Result<()> {
+        let mc_data = _mc_data;
         log::debug!(target: "validate_query", "checking ProcessedInfo");
         if !manager.next().is_reduced() {
             reject_query!("new ProcessedInfo is not reduced (some entries completely cover other entries)");
@@ -2610,15 +2628,20 @@ impl ValidateQuery {
                 reject_query!("newly-added ProcessedInfo entry refers to shard {} distinct from the current shard {}",
                     ShardIdent::with_tagged_prefix(base.shard().workchain_id(), upd.shard)?, base.shard())
             }
-            let ref_mc_seqno = match base.shard().is_masterchain() {
-                true => base.block_id().seq_no,
-                false => mc_data.state.state()?.seq_no()
-            };
-            if upd.mc_seqno != ref_mc_seqno {
-                reject_query!("newly-added ProcessedInfo entry refers to masterchain block {} but \
-                    the processed inbound message queue belongs to masterchain block {}",
-                        upd.mc_seqno, ref_mc_seqno)
+             {
+                let ref_mc_seqno = match base.shard().is_masterchain() {
+                    true => base.block_id().seq_no,
+                    false => mc_data.state.state()?.seq_no()
+                };
+                if upd.mc_seqno() != ref_mc_seqno {
+                    reject_query!(
+                        "newly-added ProcessedInfo entry refers to masterchain block {} but \
+                        the processed inbound message queue belongs to masterchain block {}",
+                        upd.mc_seqno(), ref_mc_seqno
+                    )
+                }
             }
+            // TODO: add fast finality check
             if upd.last_msg_lt >= base.info.end_lt() {
                 reject_query!("newly-added ProcessedInfo entry claims that the last processed message has lt {} \
                     larger than this block's end lt {}", upd.last_msg_lt, base.info.end_lt())
@@ -2797,6 +2820,7 @@ impl ValidateQuery {
         return Ok(true)
     }
 
+    // is not used because this check is too long and seems to be useless
     // checks that all messages imported from our outbound queue into neighbor shards have been dequeued
     // similar to Collator::out_msg_queue_cleanup()
     // (but scans new outbound queue instead of the old)
@@ -3182,13 +3206,25 @@ impl ValidateQuery {
         *account = Account::construct_from_cell(account_root.clone())?;
         let new_hash = account_root.repr_hash();
         if state_update.new_hash != new_hash {
-            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
+            let _ = Self::prepare_transaction_for_log(
+                &_old_account_root, 
+                account_root, 
+                executor.config().raw_config(), 
+                &trans, 
+                &trans_execute
+            );
             reject_query!("transaction {} of {:x} is invalid: it claims that the new \
                 account state hash is {:x} but the re-computed value is {:x}",
                     lt, account_addr, state_update.new_hash, new_hash)
         }
         if trans.out_msgs != trans_execute.out_msgs {
-            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
+            let _ = Self::prepare_transaction_for_log(
+                &_old_account_root, 
+                account_root, 
+                executor.config().raw_config(), 
+                &trans, 
+                &trans_execute
+            );
             reject_query!("transaction {} of {:x} is invalid: it has produced a set of \
                 outbound messages different from that listed in the transaction",
                     lt, account_addr)
@@ -3207,7 +3243,13 @@ impl ValidateQuery {
         trans_execute.set_prev_trans_lt(trans.prev_trans_lt());
         let trans_execute_root = trans_execute.serialize()?;
         if trans_root != trans_execute_root {
-            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
+            let _ = Self::prepare_transaction_for_log(
+                &_old_account_root, 
+                account_root, 
+                executor.config().raw_config(), 
+                &trans, 
+                &trans_execute
+            );
             reject_query!("re created transaction {} doesn't correspond", lt)
         }
         // check new balance and value flow
@@ -3225,7 +3267,13 @@ impl ValidateQuery {
         right_balance.add(&money_exported)?;
         right_balance.add(&trans.total_fees())?;
         if left_balance != right_balance {
-            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
+            let _ = Self::prepare_transaction_for_log(
+                &_old_account_root, 
+                account_root, 
+                executor.config().raw_config(), 
+                &trans, 
+                &trans_execute
+            );
             reject_query!("transaction {} of {} violates the currency flow condition: \
                 old balance={} + imported={} does not equal new balance={} + exported=\
                 {} + total_fees={}", lt, account_addr.to_hex_string(),
@@ -4244,6 +4292,7 @@ impl ValidateQuery {
 
         let manager = self.init_output_queue_manager(&mc_data, &base).await?;
         self.check_shard_layout(&base, &mc_data)?;
+
         check_cur_validator_set(
             &self.validator_set,
             base.block_id(),
@@ -4336,11 +4385,11 @@ impl ValidateQuery {
     ) -> Result<()> {
         log::trace!(target: "validate_reject",
             "acc_before: {}\nacc_after: {}\nconfig: {}\ntrans_origin: {}\ntrans_execute: {}",
-            base64::encode(ton_types::write_boc(&account_before)?),
-            base64::encode(ton_types::write_boc(&account_after)?),
-            base64::encode(config.write_to_bytes()?),
-            base64::encode(trans.write_to_bytes()?),
-            base64::encode(trans_execute.write_to_bytes()?)
+            base64_encode(ton_types::write_boc(&account_before)?),
+            base64_encode(ton_types::write_boc(&account_after)?),
+            base64_encode(config.write_to_bytes()?),
+            base64_encode(trans.write_to_bytes()?),
+            base64_encode(trans_execute.write_to_bytes()?)
         );
         Ok(())
     }

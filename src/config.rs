@@ -12,17 +12,15 @@
 */
 
 use crate::network::node_network::NodeNetwork;
+
 use adnl::{
     client::AdnlClientConfigJson,
     common::{add_unbound_object_to_map_with_update, Wait},
     node::{AdnlNodeConfig, AdnlNodeConfigJson}, server::{AdnlServerConfig, AdnlServerConfigJson}
 };
-use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson};
 use std::{
-    collections::{HashMap, HashSet}, convert::TryInto, fs::File, io::BufReader, path::Path,
-    fmt::{Display, Formatter},
-    sync::{Arc, atomic::{self, AtomicI32} },
-    time::{Duration}
+    collections::{HashMap, HashSet}, convert::TryInto, fs::File, fmt::{Display, Formatter}, 
+    io::BufReader, path::Path, sync::{Arc, atomic::{self, AtomicI32}}, time::{Duration}
 };
 use ton_api::{
     IntoBoxed, 
@@ -31,10 +29,13 @@ use ton_api::{
         dht::node::Node as DhtNodeConfig, pub_::publickey::Ed25519
     }
 };
+use ton_block::{BlockIdExt, ShardIdent};
 #[cfg(feature="external_db")]
 use ton_block::{BASE_WORKCHAIN_ID, MASTERCHAIN_ID};
-use ton_block::{BlockIdExt, ShardIdent};
-use ton_types::{error, fail, Result, UInt256};
+use ton_types::{
+    error, fail, base64_decode, base64_encode, Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson, 
+    Result, UInt256
+};
 
 #[macro_export]
 macro_rules! key_option_public_key {
@@ -76,7 +77,7 @@ impl Default for CellsGcConfig {
 pub struct CellsDbConfig {
     pub states_db_queue_len: u32,
     pub max_pss_slowdown_mcs: u32,
-    pub prefill_cells_cunters: bool,
+    pub prefill_cells_counters: bool,
 }
 
 impl Default for CellsDbConfig {
@@ -84,16 +85,20 @@ impl Default for CellsDbConfig {
         Self {
             states_db_queue_len: 1000,
             max_pss_slowdown_mcs: 750,
-            prefill_cells_cunters: false,
+            prefill_cells_counters: false,
         }
     }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
+#[serde(default, deny_unknown_fields)]
 pub struct CollatorConfig {
     pub cutoff_timeout_ms: u32,
     pub stop_timeout_ms: u32,
     pub max_collate_threads: u32,
+    pub retry_if_empty: bool,
+    pub finalize_empty_after_ms: u32,
+    pub empty_collation_sleep_ms: u32
 }
 impl Default for CollatorConfig {
     fn default() -> Self {
@@ -101,6 +106,9 @@ impl Default for CollatorConfig {
             cutoff_timeout_ms: 1000,
             stop_timeout_ms: 1500,
             max_collate_threads: 1,
+            retry_if_empty: false,
+            finalize_empty_after_ms: 800,
+            empty_collation_sleep_ms: 100
         }
     }
 }
@@ -149,6 +157,8 @@ pub struct TonNodeConfig {
     cells_db_config: CellsDbConfig,
     #[serde(default)]
     collator_config: CollatorConfig,
+    #[serde(default)]
+    skip_saving_persistent_states: bool,
 }
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
@@ -546,6 +556,9 @@ impl TonNodeConfig {
     pub fn low_memory_mode(&self) -> bool {
         self.low_memory_mode
     }
+    pub fn skip_saving_persistent_states(&self) -> bool {
+        self.skip_saving_persistent_states
+    }
     pub fn cells_db_config(&self) -> &CellsDbConfig {
         &self.cells_db_config
     }
@@ -591,7 +604,7 @@ impl TonNodeConfig {
         let console_client_config = AdnlClientConfigJson::with_params(
             &server_address,
             serde_json::from_str(key_option_public_key!(
-                base64::encode(&server_key.pub_key()?)
+                base64_encode(&server_key.pub_key()?)
             ))?,
             None
         );
@@ -676,7 +689,7 @@ impl TonNodeConfig {
         let (private, public) = crate::validator::validator_utils::mine_key_for_workchain(self.workchain);
         let key_id = public.id().data();
         let key_ring = self.validator_key_ring.get_or_insert_with(|| HashMap::new());
-        key_ring.insert(base64::encode(key_id), private);
+        key_ring.insert(base64_encode(key_id), private);
         Ok((key_id.clone(), public))
     }
 
@@ -698,7 +711,7 @@ impl TonNodeConfig {
         
         let key_info = ValidatorKeysJson {
             election_id,
-            validator_key_id: base64::encode(key_id),
+            validator_key_id: base64_encode(key_id),
             validator_adnl_key_id: None
         };
 
@@ -735,8 +748,8 @@ impl TonNodeConfig {
         //     fail!("Can't add validator adnl key because REMP client is enabled");
         // }
 
-        if let Some(mut key_info) = self.get_validator_key_info(&base64::encode(validator_key_id))? {
-            key_info.validator_adnl_key_id = Some(base64::encode(adnl_key_id));
+        if let Some(mut key_info) = self.get_validator_key_info(&base64_encode(validator_key_id))? {
+            key_info.validator_adnl_key_id = Some(base64_encode(adnl_key_id));
             self.update_validator_key_info(key_info)
         } else {
             fail!("Validator key was not added!")
@@ -920,14 +933,14 @@ impl NodeConfigHandler {
         let mut result = Vec::new();
 
         for adnl_id in adnl_ids.iter() {
-            let id = base64::decode(adnl_id)?;
+            let id = base64_decode(adnl_id)?;
             result.push(KeyId::from_data(id[..].try_into()?));
         }
         Ok(result)
     }
 
     pub async fn get_validator_key(&self, key_id: &Arc<KeyId>) -> Option<(Arc<dyn KeyOption>, i32)> {
-        match self.validator_keys.get(&base64::encode(key_id.data())) {
+        match self.validator_keys.get(&base64_encode(key_id.data())) {
             Some(key) => {
                 //       let result = if let Some(key) = self.key_ring.get(&key_id) {
                 //           Some(key.(val(), key_election_id))
@@ -964,7 +977,7 @@ impl NodeConfigHandler {
         let (key_id, public_key) = config.generate_and_save_keys()?;
         config.save_to_file(config_name)?;
 
-        let id = base64::encode(&key_id);
+        let id = base64_encode(&key_id);
         key_ring.insert(id, public_key.clone());
         Ok(key_id)
     }
@@ -1058,7 +1071,7 @@ impl NodeConfigHandler {
 
     fn get_key(config: &TonNodeConfig, key_id: [u8; 32]) -> Option<Arc<dyn KeyOption>> {
         if let Some(validator_key_ring) = &config.validator_key_ring {
-            if let Some(key_data)  = validator_key_ring.get(&base64::encode(&key_id)) {
+            if let Some(key_data)  = validator_key_ring.get(&base64_encode(&key_id)) {
                 match Ed25519KeyOption::from_private_key_json(&key_data) {
                     Ok(key) => { return Some(key)},
                     _ => return None
@@ -1087,7 +1100,7 @@ impl NodeConfigHandler {
                 match &key.validator_adnl_key_id {
                     None => { continue; }
                     Some(validator_adnl_key_id) => {
-                        let adnl_key_id = base64::decode(&validator_adnl_key_id)?;
+                        let adnl_key_id = base64_decode(&validator_adnl_key_id)?;
                         let adnl_key_id = KeyId::from_data(adnl_key_id[..].try_into()?);
                         let election_id = key.election_id;
                         let subscribers = subscribers.clone();
@@ -1203,7 +1216,7 @@ impl KeyRing for NodeConfigHandler {
 
     // find private key in KeyRing by public key hash
     fn find(&self, key_id: &[u8; 32]) -> Result<Arc<dyn KeyOption>> {
-       let id = base64::encode(key_id);
+       let id = base64_encode(key_id);
         match self.key_ring.get(&id) {
             Some(key) => Ok(key.val().clone()),
             None => fail!("key not found for hash: {}", &id)
@@ -1357,7 +1370,7 @@ impl IdDhtNode {
         };
 
         let key = if let Some(key) = &self.key {
-            base64::decode(key)?
+            base64_decode(key)?
         } else {
             fail!("No public key!");
         };
@@ -1454,7 +1467,7 @@ impl TonNodeGlobalConfigJson {
                 }.into_boxed(),
                 addr_list,
                 version,
-                signature: ton::bytes(base64::decode(signature)?)
+                signature: base64_decode(signature)?.into()
             };
             result.push(node)//convert_to_dht_node_cfg()?);
         }

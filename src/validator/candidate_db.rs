@@ -11,13 +11,8 @@
 * limitations under the License.
 */
 
-use ever_crypto::Ed25519KeyOption;
 use catchain::{BlockHash, CatchainFactory};
-use storage::{
-    db_impl_single,
-    db::traits::{DbKey, KvcWriteable},
-    traits::Serializable
-};
+use storage::{db_impl_single, db::traits::{DbKey, KvcWriteable}, traits::Serializable};
 use std::{fmt::{Formatter, Display}, io::{Read, Write}, sync::Arc};
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, Result};
@@ -52,7 +47,7 @@ pub struct ValidatorBlockCandidateWrapper {
 impl Serializable for ValidatorBlockCandidateWrapper {
     fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
         let candidate = ton_api::ton::db::candidate::Candidate {
-            source : self.candidate.public_key.into_public_key_tl()?,
+            source : (&self.candidate.public_key).try_into()?,
             id : BlockIdExt::with_params(
                 ShardIdent::default(), 0, // Shard & seqno: not needed
                 self.candidate.id.root_hash.clone(),
@@ -69,7 +64,7 @@ impl Serializable for ValidatorBlockCandidateWrapper {
         match ton_api::Deserializer::new(reader).read_bare() {
             Ok(ton_api::ton::db::candidate::Candidate { source, id, data, collated_data }) => {
                 let candidate = ValidatorBlockCandidate {
-                    public_key: Ed25519KeyOption::from_public_key_tl(&source)?,
+                    public_key: (&source).try_into()?,
                     id: ValidatorBlockId { root_hash: id.root_hash.into(), file_hash: id.file_hash.into() },
                     collated_file_hash: catchain::utils::get_hash(&data),
                     data: CatchainFactory::create_block_payload(data),

@@ -53,7 +53,8 @@ pub const DB_VERSION_0: u32  = 0;
 pub const _DB_VERSION_1: u32  = 1; // with fixed cells/bits counter in StorageCell
 pub const DB_VERSION_2: u32  = 2; // with async cells storage
 pub const DB_VERSION_3: u32  = 3; // with faster cells storage (separated counters)
-pub const CURRENT_DB_VERSION: u32 = DB_VERSION_3;
+pub const DB_VERSION_4: u32  = 4; // with updated cells (with counter) and correct allow_old_cells property
+pub const CURRENT_DB_VERSION: u32 = DB_VERSION_4;
 
 const CELLS_CF_NAME: &str = "cells_db";
 
@@ -242,7 +243,11 @@ impl InternalDb {
                 let mut cursor = Cursor::new(db_slice.as_ref());
                 u32::deserialize(&mut cursor)?
             } else {
-                0
+                if block_handle_storage.is_empty()? {
+                    CURRENT_DB_VERSION
+                } else {
+                    0
+                }
             };
             if version < DB_VERSION_3 {
                 assume_old_cells = true;
@@ -256,6 +261,7 @@ impl InternalDb {
             db.clone(),
             &config,
             assume_old_cells,
+            false,
             #[cfg(feature = "telemetry")]
             telemetry.storage.clone(),
             allocated.storage.clone()
@@ -326,6 +332,7 @@ impl InternalDb {
         db: Arc<RocksDb>,
         config: &InternalDbConfig,
         assume_old_cells: bool,
+        update_cells: bool,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>,
@@ -336,9 +343,10 @@ impl InternalDb {
             CELLS_CF_NAME,
             &config.db_directory,
             assume_old_cells,
+            update_cells,
             config.cells_db_config.states_db_queue_len,
             config.cells_db_config.max_pss_slowdown_mcs,
-            config.cells_db_config.prefill_cells_cunters,
+            config.cells_db_config.prefill_cells_counters,
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated
@@ -363,11 +371,29 @@ impl InternalDb {
             self.db.clone(),
             &self.config,
             false,
+            false,
             #[cfg(feature = "telemetry")]
             self.telemetry.storage.clone(),
             self.allocated.storage.clone()
         )?;
 
+        Ok(())
+    }
+
+    pub async fn update_cells_db_upto_4(&mut self) -> Result<()> {
+        // Node is just started when we call this function, so it is ok to block one worker here.
+        self.shard_state_dynamic_db = tokio::task::block_in_place(|| {
+            Self::create_shard_state_dynamic_db(
+                self.db.clone(),
+                &self.config,
+                true,
+                true,
+                #[cfg(feature = "telemetry")]
+                self.telemetry.storage.clone(),
+                self.allocated.storage.clone()
+            )
+        })?;
+        self.full_node_state_db.put(&ASSUME_OLD_FORMAT_CELLS, &[0])?;
         Ok(())
     }
 
@@ -1085,12 +1111,33 @@ impl InternalDb {
     pub fn load_all_top_shard_blocks(&self) -> Result<HashMap<TopBlockDescrId, TopBlockDescrStuff>> {
         let _tc = TimeChecker::new(format!("load_all_top_shard_blocks"), 100);
         let mut result = HashMap::<TopBlockDescrId, TopBlockDescrStuff>::new();
+
+        let mut invalid_entries = Vec::new();
         self.shard_top_blocks_db.for_each(&mut |id_bytes, tsb_bytes| {
-            let id = TopBlockDescrId::from_bytes(&id_bytes)?;
-            let tsb = TopBlockDescrStuff::from_bytes(tsb_bytes, false)?;
-            result.insert(id, tsb);
+            let id = TopBlockDescrId::from_bytes(&id_bytes);
+            let tbds = TopBlockDescrStuff::from_bytes(tsb_bytes, false);
+
+            match &id {
+                Ok(id) => {
+                    if let Err(e) = &tbds {
+                        log::error!("Skipping invalid top block description for {id}: {e:?}");
+                    }
+                }
+                Err(e) => log::error!("Skipping invalid top block description: {e:?}"),
+            }
+
+            if let (Ok(id), Ok(tbds)) = (id, tbds) {
+                result.insert(id, tbds);
+            } else {
+                invalid_entries.push(id_bytes.to_owned());
+            }
             Ok(true)
         })?;
+
+        for id in invalid_entries {
+            self.shard_top_blocks_db.delete(&id)?;
+        }
+
         Ok(result)
     }
 

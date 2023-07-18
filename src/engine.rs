@@ -12,8 +12,7 @@
 */
 
 use crate::{
-    block::{BlockStuff, BlockIdExtExtention},
-    block_proof::BlockProofStuff,
+    block::{BlockStuff, BlockIdExtExtention}, block_proof::BlockProofStuff, boot,
     config::{
         TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig, 
         ValidatorManagerConfig, CollatorConfig
@@ -22,6 +21,7 @@ use crate::{
         ExternalDb, EngineAlloc, EngineOperations,
         OverlayOperations, PrivateOverlayOperations, Server,
     },
+    ext_messages::{MessagesPool, EXT_MESSAGES_TRACE_TARGET, RempMessagesPool},
     full_node::{
         apply_block::{self, apply_block},
         shard_client::{
@@ -31,79 +31,76 @@ use crate::{
         counters::TpsCounter,
         remp_client::RempClient,
     },
-    shard_states_keeper::ShardStatesKeeper,
     internal_db::{
         InternalDb, InternalDbConfig, 
         INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, PSS_KEEPER_MC_BLOCK, ARCHIVES_GC_BLOCK,
     },
     network::{
         control::{ControlServer, DataSource, StatusReporter},
-        full_node_client::FullNodeOverlayClient, full_node_service::FullNodeOverlayService
-    },
-    shard_state::ShardStateStuff,
-    types::awaiters_pool::AwaitersPool,
-    ext_messages::{MessagesPool, EXT_MESSAGES_TRACE_TARGET, RempMessagesPool},
-    validator::{
-        remp_service::RempService,
-        validator_manager::{start_validator_manager, ValidationStatus},
+        full_node_client::FullNodeOverlayClient, full_node_service::FullNodeOverlayService,
+        node_network::NodeNetwork
     },
     shard_blocks::{
         ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker, 
         ShardBlockProcessingResult
     },
-    boot,
+    shard_state::ShardStateStuff,
+    shard_states_keeper::ShardStatesKeeper,
+    types::awaiters_pool::AwaitersPool,
+    validator::{
+        remp_service::RempService,
+        validator_manager::{start_validator_manager, ValidationStatus},
+    }
 };
+#[cfg(feature = "external_db")]
+use crate::external_db::kafka_consumer::KafkaConsumer;
 #[cfg(feature = "slashing")]
 use crate::validator::{
     slashing::{ValidatedBlockStat, ValidatedBlockStatNode},
     validator_utils::calc_subset_for_workchain,
 };
-use crate::network::node_network::NodeNetwork;
-#[cfg(feature = "external_db")]
-use crate::external_db::kafka_consumer::KafkaConsumer;
 #[cfg(feature = "telemetry")]
 use crate::{
     engine_traits::EngineTelemetry, full_node::telemetry::{FullNodeTelemetry, RempClientTelemetry},
     network::telemetry::{FullNodeNetworkTelemetry, FullNodeNetworkTelemetryKind},
     validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
 };
+
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::{Metric, MetricBuilder, TelemetryItem, TelemetryPrinter};
 use overlay::QueriesConsumer;
-#[cfg(feature = "metrics")]
-use statsd::client;
 use std::{
     ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering, AtomicU64}},
     time::Duration, collections::{HashMap, HashSet},
 };
-#[cfg(feature = "slashing")]
-use std::collections::HashSet;
 #[cfg(feature = "metrics")]
 use std::env;
-#[cfg(feature = "telemetry")]
-use storage::types::StorageCell;
+#[cfg(feature = "slashing")]
+use std::collections::HashSet;
 use storage::{StorageAlloc, block_handle_db::BlockHandle};
 #[cfg(feature = "telemetry")]
+use storage::types::StorageCell;
+#[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
+use ton_api::ton::ton_node::{
+    Broadcast, 
+    broadcast::{
+        BlockBroadcast, QueueUpdateBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast
+    }
+};
 use ton_block::{
     self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL, BASE_WORKCHAIN_ID, GlobalCapabilities,
     OutMsgQueue
 };
-use ton_types::{error, fail, Result, UInt256};
-#[cfg(feature = "telemetry")]
-use ton_types::Cell;
+use ton_types::{error, fail, KeyId, Result, UInt256};
 #[cfg(feature = "slashing")]
 use ton_types::HashmapType;
-use ton_api::ton::ton_node::{
-    Broadcast, broadcast::{
-        BlockBroadcast, QueueUpdateBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast
-    }
-};
-use ever_crypto::KeyId;
+#[cfg(feature = "telemetry")]
+use ton_types::Cell;
+
 #[cfg(feature = "slashing")]
-use crossbeam_channel::{Sender, Receiver};
-#[cfg(feature = "slashing")]
-const MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT: usize = 10000; //maximum number of validated block stats entries in engine's queue
+//maximum number of validated block stats entries in engine's queue
+const MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT: usize = 10000; 
 
 pub struct Engine {
     db: Arc<InternalDb>,
@@ -148,9 +145,9 @@ pub struct Engine {
     last_validation_time: lockfree::map::Map<ShardIdent, u64>,
     last_collation_time: lockfree::map::Map<ShardIdent, u64>,
     #[cfg(feature = "slashing")]
-    validated_block_stats_sender: Sender<ValidatedBlockStat>,
+    validated_block_stats_sender: crossbeam_channel::Sender<ValidatedBlockStat>,
     #[cfg(feature = "slashing")]
-    validated_block_stats_receiver: Receiver<ValidatedBlockStat>,
+    validated_block_stats_receiver: crossbeam_channel::Receiver<ValidatedBlockStat>,
 
     #[cfg(feature = "telemetry")]
     full_node_telemetry: FullNodeTelemetry,
@@ -584,6 +581,7 @@ impl Engine {
         let remp_config = general_config.remp_config().clone();
         let cells_lifetime_sec = general_config.cells_gc_config().cells_lifetime_sec;
         let enable_shard_state_persistent_gc = general_config.enable_shard_state_persistent_gc();
+        let skip_saving_persistent_states = general_config.skip_saving_persistent_states();
         let restore_db = general_config.restore_db();
         let processed_workchain = general_config.workchain();
 
@@ -682,6 +680,7 @@ impl Engine {
         let shard_states_keeper = ShardStatesKeeper::new(
             db.clone(),
             enable_shard_state_persistent_gc,
+            skip_saving_persistent_states,
             cells_lifetime_sec,
             stopper.clone(),
             cells_db_config.states_db_queue_len + 10,
@@ -1265,7 +1264,9 @@ impl Engine {
             .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i32 - gen_utime as i32;
         if block.id().shard().is_masterchain() {
             if !pre_apply {
-                self.shard_blocks().update_shard_blocks(&self.load_state(block.id()).await?)?;
+                self.shard_blocks()
+                    .update_shard_blocks(&self.load_state(block.id()).await?)
+                    .await?;
 
                 let first_time_applied = self.set_applied(handle, block.id().seq_no()).await?;
 
@@ -1386,9 +1387,18 @@ impl Engine {
     }
 
     #[cfg(feature = "slashing")]
-    pub fn validated_block_stats_sender(&self) -> &Sender<ValidatedBlockStat> { &self.validated_block_stats_sender }
+    pub fn validated_block_stats_sender(
+        &self
+    ) -> &crossbeam_channel::Sender<ValidatedBlockStat> { 
+        &self.validated_block_stats_sender 
+    }
+
     #[cfg(feature = "slashing")]
-    pub fn validated_block_stats_receiver(&self) -> &Receiver<ValidatedBlockStat> { &self.validated_block_stats_receiver }
+    pub fn validated_block_stats_receiver(
+        &self
+    ) -> &crossbeam_channel::Receiver<ValidatedBlockStat> { 
+        &self.validated_block_stats_receiver 
+    }
 
     #[cfg(feature = "telemetry")] 
     fn create_telemetry() -> (Vec<TelemetryItem>, Arc<EngineTelemetry>) {
@@ -1726,7 +1736,7 @@ impl Engine {
                 }
 
                 if let Err(e) = self.shard_blocks.process_shard_block(
-                    &id, cc_seqno, || Ok(tbd.clone()), false, false, self.deref()).await {
+                    &id, cc_seqno, || Ok(tbd.clone()), false, self.deref()).await {
                     log::error!("Error in process_shard_block after wait_state {}: {}", id, e);
                 }
             });
@@ -2183,20 +2193,13 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>)
         load_zero_state(&engine, zerostate_path).await?;
     }
 
-    let result = match engine.load_last_applied_mc_block_id() {
-        Ok(Some(id)) => Ok((*id).clone()),
-        Ok(None) => Err(error!("No last applied MC block, warm boot is not possible")),
-        Err(x) => Err(x)
-    };
-
-    let (last_applied_mc_block, cold) = match result {
-        Ok(id) => {
-            let state = engine.load_state(&id).await?;
+    let (last_applied_mc_block, cold) = match engine.load_last_applied_mc_state().await {
+        Ok(state) => {
             engine.remp_capability.store(
                 state.config_params()?.has_capability(GlobalCapabilities::CapRemp),
                 Ordering::Relaxed
             );
-            (id, false)
+            (state.block_id().clone(), false)
         }
         Err(err) => {
             log::debug!("before cold boot: {}", err);
@@ -2550,11 +2553,11 @@ pub fn start_external_broadcast_process(
 
 #[cfg(feature = "metrics")]
 lazy_static::lazy_static! {
-    pub static ref STATSD: client::Client = {
+    pub static ref STATSD: statsd::client::Client = {
         let mut statsd_endp = env::var("STATSD_DOMAIN").expect("STATSD_DOMAIN env variable not found");
         let statsd_port = env::var("STATSD_PORT").expect("STATSD_PORT env variable not found");
         statsd_endp.push_str(&statsd_port);
-        let statsd_client = match client::Client::new(statsd_endp, "rnode"){
+        let statsd_client = match statsd::client::Client::new(statsd_endp, "rnode"){
             Ok(client) => client,
             Err(e) => {
                 panic!("Can't init statsd client: {:?}", e);

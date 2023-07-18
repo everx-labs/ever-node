@@ -11,26 +11,6 @@
 * limitations under the License.
 */
 
-#[macro_use]
-extern crate lazy_static;
-
-extern crate base64;
-extern crate chrono;
-extern crate crossbeam;
-extern crate metrics_core;
-extern crate metrics_runtime;
-extern crate rand;
-extern crate regex;
-extern crate sha2;
-extern crate tokio;
-extern crate ton_api;
-extern crate ton_types;
-
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate failure;
-
 /// Modules
 mod activity_node;
 mod block;
@@ -44,21 +24,14 @@ mod receiver;
 mod receiver_source;
 pub mod utils;
 
+use crate::profiling::InstanceCounter;
 use adnl::node::AdnlNode;
-use ever_crypto::{KeyId, KeyOption};
-use failure::err_msg;
-pub use overlay::PrivateOverlayShortId;
-pub use profiling::{InstanceCounter, ResultStatusCounter};
+use overlay::PrivateOverlayShortId;
 use std::{
-    any::Any,
-    cell::RefCell,
-    fmt,
-    path::Path,
-    rc::{Rc, Weak},
-    sync::Arc,
+    any::Any, cell::RefCell, fmt, path::Path, rc::{Rc, Weak}, sync::Arc,
     time::SystemTime,
 };
-use ton_types::types::UInt256;
+use ton_types::{KeyId, KeyOption, UInt256};
 
 /// Public key
 pub type PublicKey = Arc<dyn KeyOption>;

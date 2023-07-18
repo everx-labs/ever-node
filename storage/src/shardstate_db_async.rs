@@ -131,6 +131,7 @@ impl ShardStateDb {
         cell_db_path: &str,
         db_root_path: &str,
         assume_old_cells: bool,
+        update_cells: bool,
         max_queue_len: u32,
         max_pss_slowdown_mcs: u32,
         full_filled_counters: bool,
@@ -141,21 +142,28 @@ impl ShardStateDb {
 
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
 
-        if assume_old_cells && full_filled_counters {
+        if assume_old_cells && full_filled_counters && !update_cells {
             fail!("assume_old_cells and full_filled_counters can't be enabled at the same time")
+        }
+
+        let mut dynamic_boc_db = DynamicBocDb::with_db(
+            Arc::new(CellDb::with_db(db.clone(), cell_db_path, true)?),
+            db_root_path,
+            assume_old_cells,
+            #[cfg(feature = "telemetry")]
+            telemetry.clone(),
+            allocated.clone()
+        );
+        if update_cells {
+            if assume_old_cells {
+                dynamic_boc_db.check_and_update_cells()?;
+            }
         }
 
         let ss_db = Arc::new(Self {
             db: db.clone(),
             shardstate_db: Arc::new(RocksDbTable::with_db(db.clone(), shardstate_db_path, true)?),
-            dynamic_boc_db: Arc::new(DynamicBocDb::with_db(
-                Arc::new(CellDb::with_db(db.clone(), cell_db_path, true)?),
-                db_root_path,
-                assume_old_cells,
-                #[cfg(feature = "telemetry")]
-                telemetry.clone(),
-                allocated.clone()
-            )),
+            dynamic_boc_db: Arc::new(dynamic_boc_db),
             storer: sender,
             in_queue: AtomicU32::new(0),
             stop: AtomicU8::new(0),
@@ -310,7 +318,7 @@ impl ShardStateDb {
                     Ok(true)
                 }).expect("Can't return error");
 
-                log::debug!(
+                log::info!(
                     target: TARGET,
                     "ShardStateDb GC: collected {} states to delete, kept {}",
                     to_delete.len(), kept
@@ -470,7 +478,7 @@ impl ShardStateDb {
                         self.telemetry.shardstates_queue.update(std::cmp::max(0, in_queue) as u64);
                         self.telemetry.cells_counters.update(cells_counters.as_ref().unwrap().len() as u64);
                     }
-                    let slowdown = self.max_pss_slowdown_mcs * (in_queue / self.max_queue_len);
+                    let slowdown = (self.max_pss_slowdown_mcs * in_queue) / self.max_queue_len;
                     self.pss_slowdown_mcs.store(slowdown, Ordering::Relaxed);
                     log::debug!("ShardStateDb worker: in_queue {}, pss slowdown {}mcs", in_queue, slowdown);
 
@@ -527,7 +535,7 @@ impl ShardStateDb {
     ) -> Result<()> {
         let cell_id = UInt256::from(state_root.repr_hash());
 
-        log::debug!(
+        log::trace!(
             target: TARGET, 
             "ShardStateDb::put_internal  id {}  root_cell_id {:x}",
             id, cell_id
@@ -561,7 +569,7 @@ impl ShardStateDb {
 
         self.shardstate_db.put(id, &buf)?;
 
-        log::debug!(
+        log::trace!(
             target: TARGET, 
             "ShardStateDb::put_internal DONE  id {}  root_cell_id {:x}",
             id, cell_id
@@ -576,7 +584,7 @@ impl ShardStateDb {
         cells_counters: &mut Option<fnv::FnvHashMap<UInt256, u32>>,
         full_filled_cells: bool,
     ) -> Result<()> {
-        log::debug!(target: TARGET, "ShardStateDb::delete_internal  id {}", id);
+        log::trace!(target: TARGET, "ShardStateDb::delete_internal  id {}", id);
 
         let db_entry = DbEntry::from_slice(&self.shardstate_db.get(id)?)?;
 
@@ -594,7 +602,7 @@ impl ShardStateDb {
 
         self.shardstate_db.delete(id)?;
 
-        log::debug!(target: TARGET, "ShardStateDb::delete_internal  DONE  id {}", id);
+        log::trace!(target: TARGET, "ShardStateDb::delete_internal  DONE  id {}", id);
         Ok(())
     }
 }   

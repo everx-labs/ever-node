@@ -552,7 +552,7 @@ impl ValidatorGroup {
                 match run_collate_query (
                     self.shard().clone(),
                     min_ts,
-                    mc.clone(),
+                    mc.seq_no,
                     prev_block_ids,
                     self.local_key.clone(),
                     self.validator_set.clone(),

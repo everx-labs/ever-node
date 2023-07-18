@@ -1,10 +1,21 @@
-use std::{
-    cmp::Reverse, collections::BinaryHeap, sync::Arc, fmt, fmt::{Display, Formatter},
-    time::SystemTime
+use crate::{
+    engine_traits::RempDuplicateStatus,
+    ext_messages::{
+        get_level_and_level_change, get_level_numeric_value, is_finally_accepted, 
+        is_finally_rejected, validate_status_change
+    },
+    validator::{
+        mutex_wrapper::MutexWrapper, validator_utils::{get_message_uid, LockfreeMapSet}
+    }
 };
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering, Ordering::Relaxed};
-use lockfree::map::Map;
-use ever_crypto::KeyId;
+
+#[cfg(feature = "telemetry")]
+use adnl::telemetry::Metric;
+use catchain::serialize_tl_boxed_object;
+use std::{
+    cmp::Reverse, collections::BinaryHeap, fmt, 
+    sync::{Arc, atomic::{AtomicU32, AtomicUsize, Ordering}}, time::SystemTime
+};
 use ton_api::{
     IntoBoxed,
     ton::ton_node::{
@@ -12,14 +23,11 @@ use ton_api::{
         RempMessageStatus, RempMessageLevel
     }
 };
-use ton_block::{Deserializable, Message, Serializable, MsgAddressInt, MsgAddrStd, ExternalInboundMessageHeader, BlockIdExt};
-use ton_types::{UInt256, Result, BuilderData, SliceData, fail, error};
-use crate::validator::mutex_wrapper::MutexWrapper;
-use crate::ext_messages::{get_level_and_level_change, get_level_numeric_value, is_finally_accepted, is_finally_rejected, validate_status_change};
-use crate::engine_traits::RempDuplicateStatus;
-#[cfg(feature = "telemetry")]
-use adnl::telemetry::Metric;
-use crate::validator::validator_utils::{get_message_uid, LockfreeMapSet};
+use ton_block::{
+    Deserializable, Message, Serializable, MsgAddressInt, MsgAddrStd, 
+    ExternalInboundMessageHeader, BlockIdExt
+};
+use ton_types::{error, fail, BuilderData, KeyId, SliceData, Result, UInt256};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RmqMessage {
@@ -79,7 +87,7 @@ impl RmqMessage {
     }
 
     pub fn serialize(rmq_record: &ton_api::ton::ton_node::RempCatchainRecord) -> Result<ton_api::ton::bytes> {
-        let rmq_record_serialized = catchain::utils::serialize_tl_boxed_object!(rmq_record);
+        let rmq_record_serialized = serialize_tl_boxed_object!(rmq_record);
         return Ok(rmq_record_serialized)
     }
 
@@ -112,12 +120,12 @@ impl RmqMessage {
         );
         let (msg_id, msg_uid, msg) = (msg_cell.repr_hash(), get_message_uid(&msg), msg);
 
-        RmqMessage::new (Arc::new(msg), msg_id, msg_uid,KeyId::from_data([0; 32]), 0)
+        RmqMessage::new (Arc::new(msg), msg_id, msg_uid, KeyId::from_data([0; 32]), 0)
     }
 }
 
-impl Display for RmqMessage {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+impl fmt::Display for RmqMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "id {:x}, uid {:x} source {}, source_idx {}, ts {}",
                self.message_id, self.message_uid, self.source_key, self.source_idx, self.timestamp
         )
@@ -158,8 +166,8 @@ impl RempMessageHeader {
     }
 }
 
-impl Display for RempMessageHeader {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+impl fmt::Display for RempMessageHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "id {:x}, uid {:x}, {:?}, master_cc {}",
                self.message_id, self.message_uid, /*self.shard,*/ self.status, self.master_cc
         )
@@ -171,15 +179,15 @@ pub struct MessageCacheImpl {
 }
 
 struct MessageCacheMessages {
-    messages: Map<UInt256, Arc<RmqMessage>>,
-    message_headers: Map<UInt256, Arc<RempMessageHeader>>,
-    message_events: Map<UInt256, Vec<SystemTime>>,
+    messages: lockfree::map::Map<UInt256, Arc<RmqMessage>>,
+    message_headers: lockfree::map::Map<UInt256, Arc<RempMessageHeader>>,
+    message_events: lockfree::map::Map<UInt256, Vec<SystemTime>>,
     message_by_uid: LockfreeMapSet<UInt256, UInt256>,
 
     message_count: AtomicUsize,
 
     master_cc: AtomicU32,
-    master_cc_start_time: Map<u32, SystemTime>,
+    master_cc_start_time: lockfree::map::Map<u32, SystemTime>,
 
     #[cfg(feature = "telemetry")]
     cache_size_metric: Arc<Metric>,
@@ -191,13 +199,13 @@ impl MessageCacheMessages {
         cache_size_metric: Arc<Metric>
     ) -> Self {
         MessageCacheMessages {
-            messages: Map::default(),
-            message_headers: Map::default(),
+            messages: lockfree::map::Map::default(),
+            message_headers: lockfree::map::Map::default(),
             message_by_uid: LockfreeMapSet::default(),
             message_count: AtomicUsize::new(0),
-            message_events: Map::default(),
+            message_events: lockfree::map::Map::default(),
 
-            master_cc_start_time: Map::default(),
+            master_cc_start_time: lockfree::map::Map::default(),
             master_cc: AtomicU32::new(0),
 
             #[cfg(feature = "telemetry")]
@@ -206,7 +214,7 @@ impl MessageCacheMessages {
     }
 
     pub fn all_messages_count(&self) -> usize {
-        self.message_count.load(Relaxed)
+        self.message_count.load(Ordering::Relaxed)
     }
 
     fn in_messages(&self, id: &UInt256) -> bool {

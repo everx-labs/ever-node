@@ -30,7 +30,7 @@ use std::{
 //use std::path::Path;
 use ton_types::{
     Cell, Result, MAX_LEVEL, fail, DoneCellsStorage, UInt256, OrderedCellsStorage,
-    ByteOrderRead, error,
+    ByteOrderRead, error, CellData,
 };
 
 pub const BROKEN_CELL_BEACON_FILE: &str = "ton_node.broken_cell";
@@ -137,7 +137,7 @@ impl VisitedCell {
                 (Cow::Owned(cell.repr_hash()), parents_count)
             }
         };
-        (build_counter_key(&id), counter.to_le_bytes())
+        (build_counter_key(id.as_slice()), counter.to_le_bytes())
     }
 
     fn serialize_cell(&self) -> Result<Option<Vec<u8>>> {
@@ -163,9 +163,9 @@ impl VisitedCell {
     }
 }
 
-fn build_counter_key(cell_id: &UInt256) -> [u8; 33] {
+fn build_counter_key(cell_id: &[u8]) -> [u8; 33] {
     let mut key = [0_u8; 33];
-    key[..32].copy_from_slice(cell_id.as_slice());
+    key[..32].copy_from_slice(cell_id);
     key[32] = 0;
     key
 }
@@ -283,6 +283,65 @@ impl DynamicBocDb {
         Ok(Cell::with_cell_impl_arc(storage_cell))
     }
 
+    pub fn check_and_update_cells(&mut self) -> Result<()> {
+        log::debug!(
+            target: TARGET, 
+            "DynamicBocDb::check_and_update_cells  started",
+        );
+
+        let mut transaction = self.db.begin_transaction()?;
+        let mut total_cells = 0;
+        let mut updated_cells = 0;
+        let now = std::time::Instant::now();
+
+        self.db.for_each(&mut |key, value| {
+            if key.len() == 32 {
+                // try to load cell in old format
+                let mut reader = Cursor::new(value);
+                let counter = reader.read_le_u32()?;
+                if let Ok(cell_data) = CellData::deserialize(&mut reader) {
+                    let references_count = cell_data.references_count();
+                    let tail_len = 32 * references_count +  // references
+                                   2 * 8;  // tree_bits_count, tree_cell_count
+                    if value.len() - reader.position() as usize == tail_len {
+                        // check if there is no counter in new format
+                        let counter_key = build_counter_key(key);
+                        if self.db.try_get_raw(&counter_key)?.is_none() {
+                            // save cell in new format (without counter)
+                            transaction.put_raw(key, &value[4..])?;
+                            // counter
+                            let counter = counter.to_le_bytes();
+                            transaction.put_raw(&counter_key, &counter)?;
+                            updated_cells += 1;
+                        }
+                    }
+                }
+                total_cells += 1;
+
+                if total_cells % 100_000 == 0 {
+                    log::info!(
+                        target: TARGET, 
+                        "DynamicBocDb::check_and_update_cells  processed {}, updated {}",
+                        total_cells, updated_cells,
+                    );
+                }
+            }
+            Ok(true)
+        })?;
+
+        let enum_time = now.elapsed().as_millis();
+
+        transaction.commit()?;
+        self.assume_old_cells = false;
+
+        log::info!(
+            target: TARGET, 
+            "DynamicBocDb::check_and_update_cells  processed {}, updated {}, enum TIME {}, commit TIME {}",
+            total_cells, updated_cells, enum_time, now.elapsed().as_millis() - enum_time,
+        );
+
+        Ok(())
+    }
 
     pub fn fill_counters(
         self: &Arc<Self>,
@@ -329,7 +388,7 @@ impl DynamicBocDb {
         let mut deleted = 0;
         let mut transaction = self.db.begin_transaction()?;
         for (id, cell) in visited.iter() {
-            let counter_key = build_counter_key(&id);
+            let counter_key = build_counter_key(id.as_slice());
             let counter = cell.parents_count();
             if counter == 0 {
                 transaction.delete(id)?;
@@ -406,7 +465,10 @@ impl DynamicBocDb {
             Ok((cell, _)) => Arc::new(cell),
             Err(e) => {
                 log::error!("FATAL!");
-                log::error!("FATAL! Can't deserialize cell {:x} from db, error: {:?}", cell_id, e);
+                log::error!(
+                    "FATAL! Can't deserialize cell {:x} from db, data: {}, error: {:?}",
+                    cell_id, hex::encode(storage_cell_data), e
+                );
                 log::error!("FATAL!");
                 
                 let path = Path::new(&self.db_root_path).join(BROKEN_CELL_BEACON_FILE);
@@ -587,7 +649,7 @@ impl DynamicBocDb {
         }
 
         if !full_filled_counters {
-            if let Some(counter_raw) = self.db.try_get_raw(&build_counter_key(&cell_id))? {
+            if let Some(counter_raw) = self.db.try_get_raw(&build_counter_key(cell_id.as_slice()))? {
                 // Cell's counter is in DB - load it and update
                 let mut visited_cell = VisitedCell::with_raw_counter(cell_id.clone(), &counter_raw)?;
                 let counter = update_cell(&mut visited_cell)?;

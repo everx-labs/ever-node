@@ -16,7 +16,7 @@ use crate::{
     shard_state::ShardStateStuff, types::top_block_descr::TopBlockDescrStuff,
     validator::{
         accept_block::create_top_shard_block_description, BlockCandidate,
-        out_msg_queue::OutMsgQueueInfoStuff,
+        out_msg_queue::{OutMsgQueueInfoStuff, CachedStates},
     }, config::CollatorConfig
 };
 #[cfg(feature = "telemetry")]
@@ -327,7 +327,7 @@ impl CollatorTestBundle {
         for id in index.top_shard_blocks.iter() {
             let filename = format!("{}/top_shard_blocks/{:x}", path, id.root_hash());
             let tbd = TopBlockDescr::construct_from_file(filename)?;
-            top_shard_blocks.push(Arc::new(TopBlockDescrStuff::new(tbd, id, index.fake)?));
+            top_shard_blocks.push(Arc::new(TopBlockDescrStuff::new(tbd, id, index.fake, false)?));
         }
 
         // to add simple external message:
@@ -505,6 +505,9 @@ impl CollatorTestBundle {
                 cutoff_timeout_ms: 1000,
                 stop_timeout_ms: 3000,
                 max_collate_threads: 1,
+                retry_if_empty: false,
+                finalize_empty_after_ms: 0,
+                empty_collation_sleep_ms: 0
             },
             split_queues_cache: lockfree::map::Map::new(),
         })
@@ -564,11 +567,15 @@ impl CollatorTestBundle {
     // Uses real engine for top shard blocks and external messages.
     pub async fn build_for_collating_block(
         prev_blocks_ids: Vec<BlockIdExt>,
-        engine: &dyn EngineOperations,
+        engine: &Arc<dyn EngineOperations>,
     ) -> Result<Self> {
 
         log::info!("Building for furure block, prev[0]: {}", prev_blocks_ids[0]);
 
+        // TODO: fill caches states
+        let mut cached_states = CachedStates::new(engine);
+
+        // TODO: use cached states instead
         let mut states = HashMap::new();
         let shard = if prev_blocks_ids.len() > 1 { prev_blocks_ids[0].shard().merge()? } else { prev_blocks_ids[0].shard().clone() };
         let is_master = shard.is_masterchain();
@@ -585,7 +592,7 @@ impl CollatorTestBundle {
         // top shard blocks
         //
         let top_shard_blocks = if is_master {
-            engine.get_shard_blocks(last_mc_id.seq_no())?
+            engine.get_shard_blocks(&mc_state, None).await?
         } else {
             vec![]
         };
@@ -642,12 +649,12 @@ impl CollatorTestBundle {
 
         // collect needed mc states
         for (_, state) in states.iter() {
-            let nb = OutMsgQueueInfoStuff::from_shard_state(state)?;
+            let nb = OutMsgQueueInfoStuff::from_shard_state(state, &mut cached_states).await?;
             for entry in nb.entries() {
-                if entry.mc_seqno < oldest_mc_seq_no {
-                    oldest_mc_seq_no = entry.mc_seqno;
-                } else if entry.mc_seqno > newest_mc_seq_no {
-                    newest_mc_seq_no = entry.mc_seqno;
+                if entry.mc_seqno() < oldest_mc_seq_no {
+                    oldest_mc_seq_no = entry.mc_seqno();
+                } else if entry.mc_seqno() > newest_mc_seq_no {
+                    newest_mc_seq_no = entry.mc_seqno();
                 }
             }
         }
@@ -717,11 +724,15 @@ impl CollatorTestBundle {
         _min_masterchain_block_id: BlockIdExt,
         prev_blocks_ids: Vec<BlockIdExt>,
         candidate: BlockCandidate,
-        engine: &dyn EngineOperations,
+        engine: &Arc<dyn EngineOperations>,
     ) -> Result<Self> {
 
         log::info!("Building for validating block, candidate: {}", candidate.block_id);
 
+        // TODO: fill caches states
+        let mut cached_states = CachedStates::new(engine);
+
+        // TODO: use cached states instead
         let mut states = HashMap::new();
         let is_master = shard.is_masterchain();
 
@@ -737,7 +748,7 @@ impl CollatorTestBundle {
         // top shard blocks
         //
         let top_shard_blocks = if is_master {
-            engine.get_shard_blocks(last_mc_id.seq_no())?
+            engine.get_shard_blocks(&mc_state, None).await?
         } else {
             vec![]
         };
@@ -790,12 +801,12 @@ impl CollatorTestBundle {
 
         // collect needed mc states
         for (_, state) in states.iter() {
-            let nb = OutMsgQueueInfoStuff::from_shard_state(state)?;
+            let nb = OutMsgQueueInfoStuff::from_shard_state(state, &mut cached_states).await?;
             for entry in nb.entries() {
-                if entry.mc_seqno < oldest_mc_seq_no {
-                    oldest_mc_seq_no = entry.mc_seqno;
-                } else if entry.mc_seqno > newest_mc_seq_no {
-                    newest_mc_seq_no = entry.mc_seqno;
+                if entry.mc_seqno() < oldest_mc_seq_no {
+                    oldest_mc_seq_no = entry.mc_seqno();
+                } else if entry.mc_seqno() > newest_mc_seq_no {
+                    newest_mc_seq_no = entry.mc_seqno();
                 }
             }
         }
@@ -858,7 +869,7 @@ impl CollatorTestBundle {
     // from ethalon block
     pub async fn build_with_ethalon(
         block_id: &BlockIdExt,
-        engine: &dyn EngineOperations,
+        engine: &Arc<dyn EngineOperations>,
     ) -> Result<Self> {
 
         log::info!("Building with ethalon {}", block_id);
@@ -869,6 +880,11 @@ impl CollatorTestBundle {
         let block = engine.load_block(&handle).await?;
         let info = block.block()?.read_info()?;
         let extra = block.block()?.read_extra()?;
+
+        // TODO: fill caches states
+        let mut cached_states = CachedStates::new(engine);
+
+        // TODO: use cached states instead
         let mut states = HashMap::new();
 
         //
@@ -922,7 +938,7 @@ impl CollatorTestBundle {
                     &prev_blocks_ids,
                     engine.deref(),
                 ).await? {
-                let tbd = TopBlockDescrStuff::new(tbd, block_id, true).unwrap();
+                let tbd = TopBlockDescrStuff::new(tbd, block_id, true, false).unwrap();
                 top_shard_blocks_ids.push(tbd.proof_for().clone());
                 top_shard_blocks.push(Arc::new(tbd));
             }
@@ -989,12 +1005,12 @@ impl CollatorTestBundle {
 
         // collect needed mc states
         for (_, state) in states.iter() {
-            let nb = OutMsgQueueInfoStuff::from_shard_state(state)?;
+            let nb = OutMsgQueueInfoStuff::from_shard_state(state, &mut cached_states).await?;
             for entry in nb.entries() {
-                if entry.mc_seqno < oldest_mc_seq_no {
-                    oldest_mc_seq_no = entry.mc_seqno;
-                } else if entry.mc_seqno > newest_mc_seq_no {
-                    newest_mc_seq_no = entry.mc_seqno;
+                if entry.mc_seqno() < oldest_mc_seq_no {
+                    oldest_mc_seq_no = entry.mc_seqno();
+                } else if entry.mc_seqno() > newest_mc_seq_no {
+                    newest_mc_seq_no = entry.mc_seqno();
                 }
             }
         }
@@ -1257,7 +1273,10 @@ impl EngineOperations for CollatorTestBundle {
         self.get_messages(false)
     }
 
-    fn get_shard_blocks(&self, _mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+    async fn get_shard_blocks(&self,
+        _: &Arc<ShardStateStuff>,
+        _: Option<&mut u32>,
+    ) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
         if self.top_shard_blocks.len() > 0 {
             return Ok(self.top_shard_blocks.clone());
         } else if let Some(candidate) = self.candidate() {
@@ -1269,7 +1288,7 @@ impl EngineOperations for CollatorTestBundle {
                     let top_shard_descr_dict = TopBlockDescrSet::construct_from_cell(croot)?;
                     top_shard_descr_dict.collection().iterate(|tbd| {
                         let id = tbd.0.proof_for().clone();
-                        res.push(Arc::new(TopBlockDescrStuff::new(tbd.0, &id, true)?));
+                        res.push(Arc::new(TopBlockDescrStuff::new(tbd.0, &id, true, false)?));
                         Ok(true)
                     })?;
                     return Ok(res);

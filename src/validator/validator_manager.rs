@@ -23,11 +23,9 @@ use crate::{
     engine::{Engine, STATSD},
     engine_traits::EngineOperations,
     shard_state::ShardStateStuff,
-
     validator::{
         remp_block_parser::RempBlockObserverToplevel,
         remp_manager::{RempManager, RempInterfaceQueues},
-
         validator_group::{ValidatorGroup, ValidatorGroupStatus},
         validator_utils::{
             try_calc_subset_for_workchain,
@@ -44,7 +42,7 @@ use crate::{
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::{SlashingManager, SlashingManagerPtr};
 
-use catchain::{CatchainNode, PublicKey, utils::serialize_tl_boxed_object};
+use catchain::{CatchainNode, PublicKey, serialize_tl_boxed_object};
 use tokio::time::timeout;
 use ton_api::IntoBoxed;
 use ton_block::{
@@ -683,7 +681,7 @@ impl ValidatorManagerImpl {
             )? {
                 Some(x) => x,
                 None => {
-                    log::error!(
+                    log::debug!(
                         target: "validator_manager", 
                         "Cannot compute validator set for workchain {}:{:016X}: less than {} of {}",
                         ident.workchain_id(), 
@@ -722,7 +720,15 @@ impl ValidatorManagerImpl {
                     &mc_state, prev_blocks, general_session_info.clone(),
                     &session_id, master_cc_seqno
                 ).await? {
-                    None => continue,
+                    None => {
+                        log::debug!(
+                            target: "validator_manager",
+                            "No previous subset for session: \
+                            shard {}, cc_seqno {}, keyblock_seqno {}, skipping",
+                            ident, cc_seqno, keyblock_seqno,
+                        );
+                        Vec::new()
+                    },
                     Some(x) => x
                 };
 
@@ -730,8 +736,11 @@ impl ValidatorManagerImpl {
 
             if let Some(local_id) = &local_id_option {
                 our_current_shards.insert (ident.clone(), vsubset.clone());
-
-                log::debug!(target: "validator_manager", "subset for session: shard {}, cc_seqno {}, keyblock_seqno {}, validator_set {}, session_id {:x}",
+                
+                log::debug!(
+                    target: "validator_manager", 
+                    "subset for session: shard {}, cc_seqno {}, keyblock_seqno {}, \
+                    validator_set {}, session_id {:x}",
                     ident, cc_seqno, keyblock_seqno,
                     validatorset_to_string(&vsubset), session_id
                 );
@@ -742,7 +751,11 @@ impl ValidatorManagerImpl {
                 // 1. Do not start new sessions
                 // 2. Do not remove functioning old sessions
                 if do_unsafe_catchain_rotate && !ident.is_masterchain() && local_id_option.is_none() {
-                    log::trace!(target: "validator", "Current shard {}, session {:x}: unsafe rotation skipping", ident, session_id);
+                    log::trace!(
+                        target: "validator", 
+                        "Current shard {}, session {:x}: unsafe rotation skipping", 
+                        ident, session_id
+                    );
                     continue;
                 }
 
@@ -840,7 +853,7 @@ impl ValidatorManagerImpl {
 
         // Shards that will eventually be started (in later masterstates): need to prepare
         let mut future_shards: HashSet<ShardIdent> = HashSet::new();
-        // Validator sets and  for shards that will eventually be started
+        // Validator sets for shards that will eventually be started
         let mut our_future_shards: HashMap<ShardIdent, (ValidatorSubsetInfo, u32, ValidatorListHash)> = HashMap::new();
         let mut blocks_before_split: HashSet<BlockIdExt> = HashSet::new();
 
@@ -945,8 +958,12 @@ impl ValidatorManagerImpl {
             let near_validator_change = possible_validator_change &&
                 next_validator_set.utime_since() <= (mc_now / cc_lifetime + 1) * cc_lifetime;
             let future_validator_set = if near_validator_change {
-                log::info!(target: "validator_manager", "Validator change will happen during catchain session lifetime for shard {}: cc_lifetime {}, now {}, next set since {}",
-                           ident, cc_lifetime, mc_now, next_validator_set.utime_since());
+                log::info!(
+                    target: "validator_manager", 
+                    "Validator change will happen during catchain session lifetime \
+                    for shard {}: cc_lifetime {}, now {}, next set since {}",
+                    ident, cc_lifetime, mc_now, next_validator_set.utime_since()
+                );
                 &next_validator_set
             } else {
                 &full_validator_set
@@ -977,7 +994,11 @@ impl ValidatorManagerImpl {
             };
 
             our_future_shards.insert(ident.clone(), (next_subset, next_cc_seqno, vnext_list_id));
-            log::trace!(target: "validator_manager", "Future shard {}: computing next subset with cc_seqno {} -- done", ident, next_cc_seqno);
+            log::trace!(
+                target: "validator_manager", 
+                "Future shard {}: computing next subset with cc_seqno {} -- done", 
+                ident, next_cc_seqno
+            );
         };
 
         // Iterate over shards and start all missing sessions
@@ -1171,7 +1192,11 @@ impl ValidatorManagerImpl {
                 match timeout(self.config.update_interval, self.engine.wait_next_applied_mc_block(&mc_handle, None)).await {
                     Ok(r_res) => break r_res?.0,
                     Err(tokio::time::error::Elapsed{..}) => {
-                        log::warn!(target: "validator_manager", "Validator manager didn't receive next applied master block after {}", mc_handle.id());
+                        log::warn!(
+                            target: "validator_manager", 
+                            "Validator manager didn't receive next applied master block after {}",
+                            mc_handle.id()
+                        );
                     }
                 }
             }
@@ -1191,6 +1216,7 @@ pub fn start_validator_manager(
         engine.acquire_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
         while !engine.get_validator_status() {
             log::trace!("is not a validator");
+            let _ = engine.clear_last_rotation_block_id();
             for _ in 0..CHECK_VALIDATOR_TIMEOUT {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 if engine.check_stop() {

@@ -4,7 +4,6 @@ then
     exit 1
 fi
 
-
 echo "Stopping nodes..."
 
 pkill ton_node
@@ -16,7 +15,6 @@ done
 NODES=5
 TEST_ROOT=$(pwd);
 NODE_TARGET=$TEST_ROOT/../../target/release/
-
 
 echo "Starting nodes..."
 
