@@ -39,13 +39,13 @@ serde_json = '1.0.64'
 spin = '0.7.1'
 stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.8.18' }
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.8.19' }
 catchain = { path = 'catchain' }
 ctrlc = { features = [ 'termination' ], version = '3.4.0' }
-dht = { git = 'https://github.com/tonlabs/ever-dht.git', tag = '0.6.29' }
+dht = { git = 'https://github.com/tonlabs/ever-dht.git', tag = '0.6.30' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.6.209' }
-rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.7.204' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.6.210' }
+rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.7.205' }
 statsd = { optional = true, version = '0.15' }
 storage = { path = 'storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
