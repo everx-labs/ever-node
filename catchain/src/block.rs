@@ -11,10 +11,11 @@
 * limitations under the License.
 */
 
-pub use super::*;
-use std::fmt;
-use std::str::FromStr;
-use utils::*;
+use crate::{
+    Block, BlockExtraId, BlockHash, BlockHeight, BlockPayloadPtr, BlockPtr, 
+    CatchainFactory, PublicKeyHash, utils
+};
+use std::{fmt, str::FromStr, sync::Arc};
 
 /*
     Implementation details for Block
@@ -156,11 +157,11 @@ impl BlockImpl {
         let mut body = BlockImpl {
             source_id: 0,
             fork_id: 0,
-            source_public_key_hash: parse_hex_as_public_key_hash(
+            source_public_key_hash: utils::parse_hex_as_public_key_hash(
                 "0000000000000000000000000000000000000000000000000000000000000000",
             ),
             height: 0,
-            hash: parse_hex_as_int256(
+            hash: utils::parse_hex_as_int256(
                 "0000000000000000000000000000000000000000000000000000000000000000",
             ),
             prev: None,
@@ -187,13 +188,13 @@ impl BlockImpl {
                     body.height = FromStr::from_str(value).unwrap();
                 }
                 if id == "hash" {
-                    body.hash = parse_hex_as_int256(value);
+                    body.hash = utils::parse_hex_as_int256(value);
                 }
                 if id == "src_hash" {
-                    body.source_public_key_hash = parse_hex_as_public_key_hash(value);
+                    body.source_public_key_hash = utils::parse_hex_as_public_key_hash(value);
                 }
                 if id == "payload" {
-                    body.payload = parse_hex_as_block_payload(value);
+                    body.payload = utils::parse_hex_as_block_payload(value);
                 }
             }
         }

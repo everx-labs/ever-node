@@ -180,7 +180,10 @@ impl RocksDb {
         // compaction. Calling this function will set it up such that total of
         // `total_threads` is used. Good value for `total_threads` is the number of
         // cores.
-        options.increase_parallelism(4);
+        let num_cpus = std::thread::available_parallelism().unwrap().get();
+        options.set_max_subcompactions(std::cmp::max(num_cpus as u32 / 2, 1));
+        options.set_max_background_jobs(std::cmp::max(num_cpus as i32 / 2, 2));
+        options.increase_parallelism(num_cpus as i32);
 
         // If true, missing column families will be automatically created.
         options.create_missing_column_families(true);

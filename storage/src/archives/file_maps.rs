@@ -252,7 +252,7 @@ impl FileMap {
 
     pub async fn get(&self, mc_seq_no: u32) -> Option<Arc<FileDescription>> {
         let guard = self.elements.read().await;
-        log::debug!(target: "storage", "Searching for file description (elements count = {})", guard.len());
+        log::trace!(target: "storage", "Searching for file description (elements count = {})", guard.len());
         match guard.binary_search_by(|entry| entry.key.cmp(&mc_seq_no)) {
             Ok(index) => Some(Arc::clone(&guard[index].value)),
             Err(_) => None
@@ -261,7 +261,7 @@ impl FileMap {
 
     pub async fn get_closest(&self, mc_seq_no: u32) -> Option<Arc<FileDescription>> {
         let guard = self.elements.read().await;
-        log::debug!(target: "storage", "Searching for file description (elements count = {})", guard.len());
+        log::trace!(target: "storage", "Searching for file description (elements count = {})", guard.len());
         let index = match guard.binary_search_by(|entry| entry.key.cmp(&mc_seq_no)) {
             Ok(index) => index,
             Err(0) => return None,
@@ -283,7 +283,7 @@ impl FileMap {
 
     pub async fn trunc<F: Fn(&BlockIdExt) -> bool>(&self, block_id: &BlockIdExt, delete_condition: &F) -> Result<()> {
         let mut guard = self.elements.write().await;
-        log::debug!(target: "storage", "Searching for file description (elements count = {})", guard.len());
+        log::trace!(target: "storage", "Searching for file description (elements count = {})", guard.len());
         // TODO: may be iterate from end
         let index = match guard.binary_search_by(|entry| entry.key.cmp(&block_id.seq_no)) {
             Ok(index) => index,

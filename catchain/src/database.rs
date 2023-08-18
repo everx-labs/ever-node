@@ -11,15 +11,12 @@
 * limitations under the License.
 */
 
-pub use super::*;
-use std::{
-    path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-};
+use crate::{
+    check_execution_time, instrument, BlockHash, Database, DatabasePtr, RawBuffer
+}; 
+use std::{path::Path, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 use storage::catchain_persistent_db::CatchainPersistentDb;
+use ton_types::{fail, Result};
 
 /*
     Implementation details for Database
@@ -71,7 +68,7 @@ impl Database for DatabaseImpl {
 
         match self.db.get(hash) {
             Ok(ref data) => Ok(ton_api::ton::bytes(data.as_ref().to_vec())),
-            Err(err) => bail!("Block {} not found: {:?}", hash, err),
+            Err(err) => fail!("Block {} not found: {:?}", hash, err),
         }
     }
 
@@ -82,7 +79,7 @@ impl Database for DatabaseImpl {
         self.put_tx_counter.increment();
 
         match self.db.put(&hash, &data) {
-            Err(err) => error!("Block {} DB saving error: {:?}", hash, err),
+            Err(err) => log::error!("Block {} DB saving error: {:?}", hash, err),
             _ => (),
         }
     }
@@ -92,7 +89,7 @@ impl Database for DatabaseImpl {
         instrument!();
 
         match self.db.delete(&hash) {
-            Err(err) => warn!("Block {} DB erasing error: {:?}", hash, err),
+            Err(err) => log::warn!("Block {} DB erasing error: {:?}", hash, err),
             _ => (),
         }
     }
@@ -106,14 +103,14 @@ impl Drop for DatabaseImpl {
     fn drop(&mut self) {
         instrument!();
 
-        debug!("Dropping Catchain database...");
+        log::debug!("Dropping Catchain database...");
 
         if self.destroy_db.load(Ordering::SeqCst) {
-            debug!("Destroying DB at path '{}'", self.get_db_path().display());
+            log::debug!("Destroying DB at path '{}'", self.get_db_path().display());
             self.destroy_database();
         }
 
-        debug!("Catchain database has been successfully dropped");
+        log::debug!("Catchain database has been successfully dropped");
     }
 }
 
@@ -124,7 +121,7 @@ impl Drop for DatabaseImpl {
 impl DatabaseImpl {
     fn destroy_database(&mut self) {
         if let Err(err) = self.db.destroy() {
-            error!("cannot destroy catchain db: {}", err)
+            log::error!("cannot destroy catchain db: {}", err)
         }
     }
 
@@ -133,7 +130,7 @@ impl DatabaseImpl {
         name: &str,
         metrics_receiver: &metrics_runtime::Receiver,
     ) -> Result<DatabasePtr> {
-        debug!("Creating catchain table in DB at path '{}'", path);
+        log::debug!("Creating catchain table in DB at path '{}'", path);
 
         let put_tx_counter = metrics_receiver.sink().counter("db_put_txs");
         let get_tx_counter = metrics_receiver.sink().counter("db_get_txs");

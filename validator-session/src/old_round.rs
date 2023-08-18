@@ -11,7 +11,15 @@
 * limitations under the License.
 */
 
-pub use super::*;
+use crate::{
+    Any, BlockCandidateSignatureVectorPtr, BlockId, CacheObject, CachedInstanceCounter, 
+    HashableObject, HashType, Merge, MovablePoolObject, OldRoundState, OldRoundStatePtr,
+    OldRoundStateWrapper, PoolObject, PoolPtr, RoundState, RoundStatePtr, SentBlockPtr, 
+    SentBlockWrapper, SessionCache, SessionDescription, SessionFactory, SessionPool, 
+    SKIP_ROUND_CANDIDATE_BLOCKID, VectorMerge, ton
+};
+use std::fmt;
+use catchain::instrument;
 
 /*
     Implementation details for OldRoundState
@@ -86,7 +94,7 @@ impl OldRoundState for OldRoundStateImpl {
         right: &dyn RoundState,
         desc: &mut dyn SessionDescription,
     ) -> PoolPtr<dyn OldRoundState> {
-        profiling::instrument!();
+        instrument!();
 
         let left = self;
 
@@ -115,7 +123,7 @@ impl OldRoundState for OldRoundStateImpl {
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn OldRoundState> {
-        profiling::instrument!();
+        instrument!();
 
         let self_cloned = Self::new(
             self.sequence_number,
@@ -142,7 +150,7 @@ impl OldRoundStateWrapper for OldRoundStatePtr {
         attempt_id: u32,
         message: &ton::Message,
     ) -> OldRoundStatePtr {
-        profiling::instrument!();
+        instrument!();
 
         get_impl(&**self).apply_action_dispatch(desc, src_idx, attempt_id, message, self.clone())
     }
@@ -154,7 +162,7 @@ impl OldRoundStateWrapper for OldRoundStatePtr {
 
 impl Merge<PoolPtr<dyn OldRoundState>> for PoolPtr<dyn OldRoundState> {
     fn merge(&self, right: &Self, desc: &mut dyn SessionDescription) -> Self {
-        profiling::instrument!();
+        instrument!();
 
         let left = &get_impl(&**self);
         let right = &get_impl(&**right);
@@ -284,9 +292,9 @@ impl OldRoundStateImpl {
         message: &ton::Message,
         default_state: OldRoundStatePtr,
     ) -> OldRoundStatePtr {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("...applying action on old round #{}", self.sequence_number);
+        log::trace!("...applying action on old round #{}", self.sequence_number);
 
         let new_round_state = match message {
             ton::Message::ValidatorSession_Message_ApprovedBlock(message) => {
@@ -296,7 +304,7 @@ impl OldRoundStateImpl {
                 self.apply_committed_block_action(desc, src_idx, attempt_id, message, default_state)
             }
             _ => {
-                warn!(
+                log::warn!(
                     "Node {} sent an invalid message in old round: expected APPROVE/COMMIT: {:?}",
                     desc.get_source_public_key_hash(src_idx),
                     message
@@ -317,16 +325,16 @@ impl OldRoundStateImpl {
         message: &ton::message::ApprovedBlock,
         default_state: OldRoundStatePtr,
     ) -> OldRoundStatePtr {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("...applying approved block action");
+        log::trace!("...applying approved block action");
 
         let candidate_id: BlockId = message.candidate.clone().into();
 
         //check if approve is received for a committed block
 
         if &candidate_id != self.get_block_id() {
-            warn!(
+            log::warn!(
                 "Node {} sent an invalid message: approved not committed block in old round {:?}",
                 desc.get_source_public_key_hash(src_idx),
                 message
@@ -338,7 +346,7 @@ impl OldRoundStateImpl {
         //check if block has been already approved
 
         if self.approve_signatures.at(src_idx as usize).is_some() {
-            warn!(
+            log::warn!(
                 "Node {} sent an invalid message: double approve in old round {:?}",
                 desc.get_source_public_key_hash(src_idx),
                 message
@@ -358,20 +366,21 @@ impl OldRoundStateImpl {
                 src_idx,
                 &message.signature,
             ) {
-                warn!(
+                log::warn!(
                     "Node {} invalid APPROVE signature has been received: message={:?}, err={:?}",
                     desc.get_source_public_key_hash(src_idx),
                     message,
                     err
                 );
-
                 return default_state;
             }
         } else {
             if message.signature.len() != 0 {
-                warn!("Node {} invalid APPROVE signature has been received (expected unsigned block): {:?}",
-          desc.get_source_public_key_hash(src_idx), message);
-
+                log::warn!(
+                    "Node {} invalid APPROVE signature has been received \
+                    (expected unsigned block): {:?}",
+                    desc.get_source_public_key_hash(src_idx), message
+                );
                 return default_state;
             }
         }
@@ -401,9 +410,9 @@ impl OldRoundStateImpl {
         message: &ton::message::Commit,
         default_state: OldRoundStatePtr,
     ) -> OldRoundStatePtr {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("...applying commit action");
+        log::trace!("...applying commit action");
 
         //check if the node is trying to sign a block which has not been committed
 
@@ -411,9 +420,11 @@ impl OldRoundStateImpl {
         let candidate_id: BlockId = message.candidate.clone().into();
 
         if &candidate_id != block_id {
-            warn!("Node {} sent an invalid message: signed wrong block in old round (should be {:?}): {:?}",
-        desc.get_source_public_key_hash(src_idx), block_id, message);
-
+            log::warn!(
+                "Node {} sent an invalid message: signed wrong block in old round \
+                (should be {:?}): {:?}",
+                desc.get_source_public_key_hash(src_idx), block_id, message
+            );
             return default_state;
         }
 
@@ -428,7 +439,7 @@ impl OldRoundStateImpl {
                 src_idx,
                 &message.signature,
             ) {
-                warn!(
+                log::warn!(
                     "Node {} invalid COMMIT signature has been received: message={:?}, err={:?}",
                     desc.get_source_public_key_hash(src_idx),
                     message,
@@ -439,9 +450,11 @@ impl OldRoundStateImpl {
             }
         } else {
             if message.signature.len() != 0 {
-                warn!("Node {} invalid COMMIT signature has been received (expected unsigned block): {:?}",
-          desc.get_source_public_key_hash(src_idx), message);
-
+                log::warn!( 
+                    "Node {} invalid COMMIT signature has been received \
+                    (expected unsigned block): {:?}",
+                    desc.get_source_public_key_hash(src_idx), message
+                );
                 return default_state;
             }
         }
@@ -449,12 +462,11 @@ impl OldRoundStateImpl {
         //check if block has been already approved
 
         if self.check_block_is_signed_by(src_idx) {
-            warn!(
+            log::warn!(
                 "Node {} sent an invalid message: double commit in old round {:?}",
                 desc.get_source_public_key_hash(src_idx),
                 message
             );
-
             return default_state;
         }
 
@@ -519,7 +531,7 @@ impl OldRoundStateImpl {
         signatures: BlockCandidateSignatureVectorPtr,
         approve_signatures: BlockCandidateSignatureVectorPtr,
     ) -> OldRoundStatePtr {
-        profiling::instrument!();
+        instrument!();
 
         let hash = Self::compute_hash(sequence_number, &block, &signatures, &approve_signatures);
         let body = Self::new(

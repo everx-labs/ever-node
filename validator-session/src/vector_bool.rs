@@ -1,4 +1,23 @@
-pub use super::*;
+/*
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
+use crate::{
+    Any, BoolVector, CachedInstanceCounter, CacheObject, HashableObject, HashType, 
+    MovablePoolObject, PoolObject, PoolPtr, SessionCache, SessionDescription, SessionPool, 
+    TypeDesc, VectorMerge, utils
+};
+use catchain::instrument;
+use std::fmt;
 
 /*
     Implementation details for BoolVector
@@ -50,7 +69,7 @@ impl BoolVector for BoolVectorImpl {
         index: usize,
         value: bool,
     ) -> PoolPtr<dyn BoolVector> {
-        profiling::instrument!();
+        instrument!();
 
         assert!(index <= self.len);
 
@@ -68,7 +87,7 @@ impl BoolVector for BoolVectorImpl {
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn BoolVector> {
-        profiling::instrument!();
+        instrument!();
 
         let self_cloned = Self::with_raw_data(self.len, self.data.clone(), &self.instance_counter);
 
@@ -96,7 +115,7 @@ impl VectorMerge<bool, PoolPtr<dyn BoolVector>> for PoolPtr<dyn BoolVector> {
         right: &PoolPtr<dyn BoolVector>,
         desc: &mut dyn SessionDescription,
     ) -> PoolPtr<dyn BoolVector> {
-        profiling::instrument!();
+        instrument!();
 
         let left = self;
         let left_count = left.len();
@@ -179,7 +198,7 @@ impl PoolObject for BoolVectorImpl {
 
 impl MovablePoolObject<PoolPtr<dyn BoolVector>> for PoolPtr<dyn BoolVector> {
     fn move_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn BoolVector> {
-        profiling::instrument!();
+        instrument!();
 
         if SessionPool::Persistent == self.get_pool() {
             return self.clone();
@@ -303,7 +322,7 @@ impl BoolVectorImpl {
         desc: &mut dyn SessionDescription,
         data: Vec<bool>,
     ) -> PoolPtr<dyn BoolVector> {
-        profiling::instrument!();
+        instrument!();
 
         Self::create_temp_object(
             Self::with_data(data, bool::get_vector_instance_counter(desc)),

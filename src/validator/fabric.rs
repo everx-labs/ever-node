@@ -12,7 +12,6 @@
 */
 
 use std::{
-    ops::Deref,
     sync::Arc,
     time::SystemTime,
 };
@@ -24,7 +23,6 @@ use crate::{
 use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, Deserializable};
 use ton_types::{Result, UInt256};
 use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
-
 #[cfg(feature = "metrics")]
 use crate::engine::STATSD;
 
@@ -110,7 +108,7 @@ pub async fn run_validate_query(
                     tokio::spawn(
                         async move {
                             match CollatorTestBundle::build_for_validating_block(
-                                shard, min_masterchain_block_id, prev, block, engine.deref()
+                                shard, min_masterchain_block_id, prev, block, &engine
                             ).await {
                                 Err(e) => log::error!(
                                     "Error while test bundle for {} building: {}", id, e
@@ -181,7 +179,7 @@ pub async fn run_accept_block_query(
 pub async fn run_collate_query (
     shard: ShardIdent,
     _min_ts: SystemTime,
-    min_masterchain_block_id: BlockIdExt,
+    min_mc_seqno: u32,
     prev: Vec<BlockIdExt>,
     collator_id: PublicKey,
     set: ValidatorSet,
@@ -193,7 +191,7 @@ pub async fn run_collate_query (
 
     let collator = collator::Collator::new(
         shard.clone(),
-        min_masterchain_block_id,
+        min_mc_seqno,
         prev.clone(),
         set,
         UInt256::from(collator_id.pub_key()?),
@@ -239,7 +237,7 @@ pub async fn run_collate_query (
                         let path = test_bundles_config.path().to_string();
                         let engine = engine.clone();
                         tokio::spawn(async move {
-                            match CollatorTestBundle::build_for_collating_block(prev, engine.deref()).await {
+                            match CollatorTestBundle::build_for_collating_block(prev, &engine).await {
                                 Err(e) => log::error!("Error while test bundle for {} building: {}", id, e),
                                 Ok(mut b) => {
                                     b.set_notes(err_str.to_string());
@@ -258,4 +256,3 @@ pub async fn run_collate_query (
         }
     }
 }
-

@@ -45,7 +45,7 @@ impl AllowStateGcSmartResolver {
         }
 
         let mc_state = engine.load_state(mc_block_id).await?;
-        let new_min_ref_mc_seqno = mc_state.state().min_ref_mc_seqno();
+        let new_min_ref_mc_seqno = mc_state.state()?.min_ref_mc_seqno();
         let old_min_ref_mc_seqno = self.min_ref_mc_block.fetch_max(new_min_ref_mc_seqno, Ordering::Relaxed);
 
         log::trace!(
@@ -62,8 +62,7 @@ impl AllowStateGcSmartResolver {
             if let Ok(handle) = engine.find_mc_block_by_seq_no(new_min_ref_mc_seqno).await {
                 let min_mc_state = engine.load_state(handle.id()).await?;
 
-                let (_master, workchain_id) = engine.processed_workchain().await?;
-                let top_blocks = min_mc_state.shard_hashes()?.top_blocks(&[workchain_id])?;
+                let top_blocks = min_mc_state.shard_hashes()?.top_blocks_all()?;
                 let mut actual_shardes = HashSet::new();
                 for id in top_blocks {
                     add_unbound_object_to_map_with_update(

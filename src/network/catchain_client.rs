@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -21,22 +21,24 @@ use adnl::{
     },
     node::AdnlNode,
 };
-use ever_crypto::{KeyId, KeyOption};
-use overlay::{OverlayNode, PrivateOverlayShortId, QueriesConsumer};
 use catchain::{
     BlockPayloadPtr, CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr,
     ExternalQueryResponseCallback, PublicKeyHash
 };
+use overlay::{OverlayNode, PrivateOverlayShortId, QueriesConsumer};
 use rldp::RldpNode;
 use std::{
     collections::HashMap, io::Cursor, sync::{Arc, atomic::{self, AtomicBool}}, time::Instant
 };
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
-use ton_api::{serialize_boxed, serialize_boxed_append, tag_from_boxed_object,
+use ton_api::{
+    serialize_boxed, serialize_boxed_append,
     Deserializer, IntoBoxed, ton::{ ton_node::Broadcast, TLObject }
 };
-use ton_types::{error, fail, Result};
+#[cfg(feature = "telemetry")]
+use ton_api::tag_from_boxed_object;
+use ton_types::{error, fail, KeyId, KeyOption, Result};
 
 declare_counted!(
     pub struct CatchainClient {

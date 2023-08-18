@@ -14,24 +14,27 @@
 use crate::{
     block::construct_and_check_prev_stuff,
     shard_state::ShardStateStuff,
-    validator::validator_utils::{calc_subset_for_workchain, check_crypto_signatures},
+    validator::validator_utils::check_crypto_signatures, 
+    validating_utils::UNREGISTERED_CHAIN_MAX_LEN,
 };
+use crate::validator::validator_utils::calc_subset_for_workchain_standard;
 
 use bitflags::bitflags;
 use std::{
-    cmp::{max, Ordering, PartialOrd, Ord}, convert::TryInto, fmt, io::{Write, Cursor},
+    cmp::{max, Ordering, PartialOrd, Ord}, convert::TryInto, fmt, io::{Write, Read, Cursor},
     sync::{Arc, atomic::{AtomicI8, self}}
 };
 use ton_block::{
     Block, TopBlockDescr, BlockInfo, BlockIdExt, MerkleProof, McShardRecord,
-    McStateExtra, Deserializable, HashmapAugType, BlockSignatures, CurrencyCollection,
+    Deserializable, HashmapAugType, BlockSignatures, CurrencyCollection,
     AddSub, ShardIdent, Serializable, CopyleftRewards
 };
 use ton_types::{
     error, Result, fail, Cell, UInt256,
-    cells_serialization::{serialize_tree_of_cells, deserialize_tree_of_cells}
 };
 use ton_api::ton::ton_node::newshardblock::NewShardBlock;
+
+pub use self::id::TopBlockDescrId;
 
 bitflags! {
     pub struct Mode: u8 {
@@ -47,20 +50,20 @@ bitflags! {
 #[derive(Default, Debug)]
 pub struct TopBlockDescrStuff {
     tbd: TopBlockDescr,
-    vert_seq_no: u32,
+    info: BriefBlockInfo,
     chain_mc_blk_ids: Vec<BlockIdExt>,
     chain_blk_ids: Vec<BlockIdExt>,
-    gen_utime: u32,
-    chain_fees: Vec<(CurrencyCollection, CurrencyCollection, CopyleftRewards)>,
+    chain_fees: Vec<ProofFunds>,
     chain_head_prev: Vec<BlockIdExt>,
     creators: Vec<UInt256>,
     is_fake: bool,
+    is_own: bool,
     signarutes_validation_result: AtomicI8, // 0 did not check, -1 bad, 1 good
 }
 
 impl TopBlockDescrStuff {
 
-    pub fn new(tbd: TopBlockDescr, block_id: &BlockIdExt, is_fake: bool) -> Result<Self> {
+    pub fn new(tbd: TopBlockDescr, block_id: &BlockIdExt, is_fake: bool, is_own: bool) -> Result<Self> {
 
         log::trace!(
             target: "validator",
@@ -81,8 +84,7 @@ impl TopBlockDescrStuff {
 
         // read proof link chain
 
-        let mut vert_seq_no = Default::default();
-        let mut gen_utime = Default::default();
+        let mut info = Default::default();
         let mut chain_head_prev = vec!();
         let mut chain_mc_blk_ids = vec!();
         let mut chain_blk_ids = vec!();
@@ -97,7 +99,7 @@ impl TopBlockDescrStuff {
 
             let is_head = i == tbd.chain().len() - 1;
 
-            let (prev1_id, prev2_id, cur_mc_id, cur_info, funds, creator) = Self::read_one_proof(
+            let parsed = Self::read_one_proof(
                 block_id,
                 &cur_id,
                 proof_root,
@@ -112,57 +114,69 @@ impl TopBlockDescrStuff {
             ))?;
 
             if i == 0 {
-                vert_seq_no = cur_info.vert_seq_no();
-                gen_utime = cur_info.gen_utime().as_u32();
+                info = BriefBlockInfo::from(&parsed.cur_info);
             }
             if is_head {
-                chain_head_prev.push(prev1_id.clone());
-                if let Some(p) = prev2_id {
+                chain_head_prev.push(parsed.prev1_id.clone());
+                if let Some(p) = parsed.prev2_id {
                     chain_head_prev.push(p);
                 }
             }
 
-            chain_mc_blk_ids.push(cur_mc_id.clone());
+            chain_mc_blk_ids.push(parsed.cur_mc_id.clone());
             chain_blk_ids.push(cur_id.clone());
-            chain_fees.push(funds);
-            creators.push(creator);
+            chain_fees.push(parsed.funds);
+            creators.push(parsed.creator);
 
-            next_info = Some((cur_id, cur_mc_id, cur_info));
-            cur_id = prev1_id;
+            next_info = Some((cur_id, parsed.cur_mc_id, parsed.cur_info));
+            cur_id = parsed.prev1_id;
         }
-
 
         Ok(
             Self {
                 tbd,
-                vert_seq_no,
+                info,
                 chain_mc_blk_ids,
                 chain_blk_ids,
-                gen_utime,
                 chain_fees,
                 chain_head_prev,
                 creators,
                 is_fake,
+                is_own,
                 signarutes_validation_result: AtomicI8::new(0),
             }
         )
     }
 
     pub fn from_bytes(bytes: &[u8], is_fake: bool)-> Result<Self> {
-        let root = deserialize_tree_of_cells(&mut Cursor::new(&bytes))?;
+        let mut bytes = Cursor::new(bytes);
+
+        // Read BOC first
+        let root = ton_types::BocReader::new().read(&mut bytes)?.withdraw_single_root()?;
+
+        // Try to read meta from the remaining data. Defaults to 0 for compatibility
+        let mut meta = 0u8;
+        _ = bytes.read_exact(std::slice::from_mut(&mut meta));
+
         let tbd = TopBlockDescr::construct_from_cell(root)?;
         let id = tbd.proof_for().clone();
-        TopBlockDescrStuff::new(tbd, &id, is_fake)
+
+        let is_own = meta != 0;
+        TopBlockDescrStuff::new(tbd, &id, is_fake, is_own)
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut data = Vec::<u8>::new();
-        serialize_tree_of_cells(&self.tbd.serialize()?, &mut data)?;
-        Ok(data)
+        let meta = self.is_own as u8;
+        let root_cell = self.tbd.serialize()?;
+
+        let mut result = Vec::new();
+        ton_types::BocWriter::with_root(&root_cell)?.write(&mut result)?;
+        result.push(meta);
+        Ok(result)
     }
 
     pub fn gen_utime(&self) -> u32 {
-        self.gen_utime
+        self.info.gen_utime
     }
 
     pub fn get_prev_at(&self, index: usize) -> Vec<BlockIdExt> {
@@ -190,6 +204,12 @@ impl TopBlockDescrStuff {
 
     pub fn size(&self) -> usize {
         self.chain_blk_ids.len()
+    }
+
+    // Returns a list of referenced shard blocks with their end_lt
+
+    pub fn is_own(&self) -> bool {
+        self.is_own
     }
 
 // Unused
@@ -222,9 +242,10 @@ impl TopBlockDescrStuff {
         shard_rec.descr.copyleft_rewards = CopyleftRewards::default();
 
         for i in 0..sum_cnt {
-            shard_rec.descr.fees_collected.add(&self.chain_fees[pos + i].0)?;
-            shard_rec.descr.funds_created.add(&self.chain_fees[pos + i].1)?;
-            shard_rec.descr.copyleft_rewards.merge_rewards(&self.chain_fees[pos + i].2)?;
+            let chain_fees = &self.chain_fees[pos + i];
+            shard_rec.descr.fees_collected.add(&chain_fees.fees_collected)?;
+            shard_rec.descr.funds_created.add(&chain_fees.funds_created)?;
+            shard_rec.descr.copyleft_rewards.merge_rewards(&chain_fees.copyleft_rewards)?;
         }
 
         Ok(shard_rec)
@@ -252,33 +273,29 @@ impl TopBlockDescrStuff {
         Ok(NewShardBlock {
             block: self.proof_for().clone().into(),
             cc_seqno: signatures.validator_info.catchain_seqno as i32,
-            data: self.to_bytes()?.into(),
+            data: self.top_block_descr().write_to_bytes()?.into(),
         })
     }
 
     pub fn prevalidate(
         &self,
         last_mc_block_id: &BlockIdExt,
-        last_mc_state_extra: &McStateExtra,
-        vert_seq_no: u32,
+        last_mc_state: &ShardStateStuff,
         mode: Mode,
         res_flags: &mut u8
     ) -> Result<i32> {
         *res_flags = 0;
-        self.validate_internal(last_mc_block_id, last_mc_state_extra, vert_seq_no, res_flags, mode)
+        self.validate_internal(last_mc_block_id, last_mc_state, res_flags, mode)
     }
 
     pub fn validate(&self, last_mc_state: &Arc<ShardStateStuff>) -> Result<i32> {
         let mut res_flags = 0;
 
         let last_mc_block_id = last_mc_state.block_id();
-        let last_mc_state_extra = last_mc_state.state().read_custom()?
-            .ok_or_else(|| error!("State for {} doesn't have McStateExtra", last_mc_state.block_id()))?;
 
         self.validate_internal(
             last_mc_block_id,
-            &last_mc_state_extra,
-            last_mc_state.state().vert_seq_no(),
+            last_mc_state,
             &mut res_flags,
             Mode::ALLOW_NEXT_VSET
         )
@@ -291,7 +308,7 @@ impl TopBlockDescrStuff {
         is_head: bool,
         signatures: Option<&BlockSignatures>,
         next_info: Option<(BlockIdExt, BlockIdExt, BlockInfo)>
-    ) -> Result<(BlockIdExt, Option<BlockIdExt>, BlockIdExt, BlockInfo, (CurrencyCollection, CurrencyCollection, CopyleftRewards), UInt256)> {
+    ) -> Result<ParsedProof> {
         let merkle_proof = MerkleProof::construct_from_cell(proof_root.clone())?;
         let block_virt_root = merkle_proof.proof.clone().virtualize(1);
 
@@ -467,21 +484,24 @@ impl TopBlockDescrStuff {
             }
         }
 
-        Ok((
+        Ok(ParsedProof {
             prev1_id,
             prev2_id,
-            mc_block_id,
-            info,
-            (value_flow.fees_collected, value_flow.created, value_flow.copyleft_rewards),
-            extra.created_by
-        ))
+            cur_mc_id: mc_block_id,
+            cur_info: info,
+            funds: ProofFunds {
+                fees_collected: value_flow.fees_collected,
+                funds_created: value_flow.created,
+                copyleft_rewards: value_flow.copyleft_rewards,
+            },
+            creator: extra.created_by,
+        })
     }
 
     fn validate_internal(
         &self,
         last_mc_block_id: &BlockIdExt,
-        last_mc_state_extra: &McStateExtra,
-        vert_seq_no: u32,
+        last_mc_state: &ShardStateStuff,
         res_flags: &mut u8,
         mode: Mode
     ) -> Result<i32> {
@@ -495,7 +515,7 @@ impl TopBlockDescrStuff {
         );
 
         debug_assert!(self.size() > 0);
-        debug_assert!(self.size() <= 8);
+        debug_assert!(self.size() <= UNREGISTERED_CHAIN_MAX_LEN as usize);
         debug_assert!(self.chain_mc_blk_ids.len() == self.chain_blk_ids.len());
 
         if last_mc_block_id.seq_no() < self.chain_mc_blk_ids[0].seq_no() {
@@ -513,13 +533,14 @@ impl TopBlockDescrStuff {
             return Ok(-1);  // valid, but too new
         }
 
-        if vert_seq_no != self.vert_seq_no {
-            if self.vert_seq_no < vert_seq_no {
+        let vert_seq_no = last_mc_state.state()?.vert_seq_no();
+        if vert_seq_no != self.info.vert_seq_no {
+            if self.info.vert_seq_no < vert_seq_no {
                 fail!(
                     "ShardTopBlockDescr for {} is too old: it has vertical seqno {} \
                     but we already know about {}",
                     self.proof_for(),
-                    self.vert_seq_no,
+                    self.info.vert_seq_no,
                     vert_seq_no
                 )
             } else if mode.intersects(Mode::FAIL_NEW) {
@@ -527,12 +548,13 @@ impl TopBlockDescrStuff {
                     "ShardTopBlockDescr for {} is too new for us: it has vertical seqno {} \
                     but we know only about {}",
                     self.proof_for(),
-                    self.vert_seq_no,
+                    self.info.vert_seq_no,
                     vert_seq_no
                 )
             }
         }
 
+        let last_mc_state_extra = last_mc_state.shard_state_extra()?;
         let mut next_mc_seqno = std::u32::MAX;
         for mc_id in self.chain_mc_blk_ids.iter() {
             if mc_id.seq_no() > next_mc_seqno {
@@ -657,7 +679,7 @@ impl TopBlockDescrStuff {
 
         let clen = (self.proof_for().seq_no - max(l_shard_descr.block_id().seq_no(), r_shard_descr.block_id().seq_no())) as usize;
         debug_assert!(clen > 0);
-        debug_assert!(clen <= 8);
+        debug_assert!(clen <= UNREGISTERED_CHAIN_MAX_LEN as usize);
         debug_assert!(clen <= self.size());
 
         if clen < self.size() {
@@ -712,18 +734,12 @@ impl TopBlockDescrStuff {
         // compute and check validator set
 
         let cur_validator_set = last_mc_state_extra.config.validator_set()?;
-        let cc_config = last_mc_state_extra.config.catchain_config()?;
         let cc_seqno = last_mc_state_extra.shards().calc_shard_cc_seqno(self.proof_for().shard())?;
 
         let mut vset_ok = false;
-        let (mut validators, mut hash_short) = calc_subset_for_workchain(
-            &cur_validator_set,
-            &last_mc_state_extra.config,
-            &cc_config, 
-            self.proof_for().shard().shard_prefix_with_tag(), 
-            self.proof_for().shard().workchain_id(), 
-            cc_seqno,
-            0.into())?;
+        let shard_id = self.proof_for().shard();
+        let mut subset = calc_subset_for_workchain_standard(
+            &cur_validator_set, &last_mc_state_extra.config, shard_id, cc_seqno)?;
 
         // original t-node's code contains this check later.
         // But we have some checks there which needs signatures!!!
@@ -736,26 +752,20 @@ impl TopBlockDescrStuff {
             .ok_or_else(|| error!("There is no signatures in top block descr"))?;
 
         if (cc_seqno == signatures.validator_info.catchain_seqno) &&
-           (hash_short == signatures.validator_info.validator_list_hash_short) {
+           (subset.short_hash == signatures.validator_info.validator_list_hash_short) 
+        {
             *res_flags |= 4;
             vset_ok = true;
         } else if mode.intersects(Mode::ALLOW_NEXT_VSET) {
             let next_validator_set = last_mc_state_extra.config.next_validator_set()?;
-            let (next_validators, next_hash_short) = calc_subset_for_workchain(
-                &next_validator_set,
-                &last_mc_state_extra.config,
-                &cc_config, 
-                self.proof_for().shard().shard_prefix_with_tag(), 
-                self.proof_for().shard().workchain_id(), 
-                cc_seqno,
-                0.into())?;
-
+            let next_subset = calc_subset_for_workchain_standard(
+                &next_validator_set, &last_mc_state_extra.config, shard_id, cc_seqno)?;
             if (cc_seqno == signatures.validator_info.catchain_seqno) &&
-               (next_hash_short == signatures.validator_info.validator_list_hash_short) {
+               (next_subset.short_hash == signatures.validator_info.validator_list_hash_short) 
+            {
                 *res_flags |= 8;
                vset_ok = true;
-               validators = next_validators;
-               hash_short = next_hash_short;
+               subset = next_subset;
             }
         }
 
@@ -767,11 +777,12 @@ impl TopBlockDescrStuff {
                 self.proof_for(),
                 signatures.validator_info.validator_list_hash_short,
                 signatures.validator_info.catchain_seqno,
-                hash_short,
+                subset.short_hash,
                 cc_seqno
             )
         }
 
+        // check range
 
         // check signatures
 
@@ -782,7 +793,7 @@ impl TopBlockDescrStuff {
         match self.signarutes_validation_result.load(atomic::Ordering::Relaxed) {
             -1 => fail!("ShardTopBlockDescr for {} has bad signatures (according to cached result)", self.proof_for()),
             1 => {
-                log::debug!("ShardTopBlockDescr for {} has valid signatures (according to cached result)", self.proof_for());
+                // log::debug!("ShardTopBlockDescr for {} has valid signatures (according to cached result)", self.proof_for());
                 *res_flags |= 0x10;
                 return Ok(clen as i32)
             }
@@ -793,8 +804,8 @@ impl TopBlockDescrStuff {
             &self.proof_for().root_hash,
             &self.proof_for().file_hash
         );
-        let total_weight: u64 = validators.iter().map(|v| v.weight).sum();
-        let weight = match check_crypto_signatures(&signatures.pure_signatures, &validators, &checked_data) {
+        let total_weight: u64 = subset.validators.iter().map(|v| v.weight).sum();
+        let weight = match check_crypto_signatures(&signatures.pure_signatures, &subset.validators, &checked_data) {
             Err(err) => {
                 *res_flags |= 0x21;
                 self.signarutes_validation_result.store(-1, atomic::Ordering::Relaxed);
@@ -841,6 +852,37 @@ impl TopBlockDescrStuff {
     }
 }
 
+struct ParsedProof {
+    prev1_id: BlockIdExt,
+    prev2_id: Option<BlockIdExt>,
+    cur_mc_id: BlockIdExt,
+    cur_info: BlockInfo,
+    funds: ProofFunds,
+    creator: UInt256,
+}
+
+#[derive(Debug, Default)]
+struct BriefBlockInfo {
+    vert_seq_no: u32,
+    gen_utime: u32,
+}
+
+impl From<&BlockInfo> for BriefBlockInfo {
+    fn from(info: &BlockInfo) -> Self {
+        Self {
+            vert_seq_no: info.vert_seq_no(),
+            gen_utime: info.gen_utime().as_u32(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProofFunds {
+    fees_collected: CurrencyCollection,
+    funds_created: CurrencyCollection,
+    copyleft_rewards: CopyleftRewards,
+}
+
 // see cmp_shard_block_descr_ref in t-node
 pub fn cmp_shard_block_descr(a: &TopBlockDescrStuff, b: &TopBlockDescrStuff) -> Ordering {
     let a = a.proof_for();
@@ -858,63 +900,46 @@ pub fn cmp_shard_block_descr(a: &TopBlockDescrStuff, b: &TopBlockDescrStuff) -> 
     }
 }
 
-#[derive(Default, Debug, PartialEq, Eq, Hash, Clone)]
-pub struct TopBlockDescrId {
-    pub id: ShardIdent,
-    pub cc_seqno: u32,
-}
+mod id {
+    use super::*;
 
-impl TopBlockDescrId {
-    pub fn new(id: ShardIdent, cc_seqno: u32) -> Self {
-        Self{id, cc_seqno}
+    #[derive(Default, Debug, PartialEq, Eq, Hash, Clone, Ord, PartialOrd)]
+    pub struct TopBlockDescrId {
+        pub id: ShardIdent,
+        pub cc_seqno: u32,
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let (wc_bytes, rest) = bytes.split_at(std::mem::size_of::<i32>());
-        let (shard_bytes, rest) = rest.split_at(std::mem::size_of::<u64>());
-        let (cc_bytes, _) = rest.split_at(std::mem::size_of::<u32>());
+    impl TopBlockDescrId {
+        pub fn new(id: ShardIdent, cc_seqno: u32) -> Self {
+            Self{id, cc_seqno}
+        }
 
-        Ok(Self{
-            id: ShardIdent::with_tagged_prefix(
-                i32::from_le_bytes(wc_bytes.try_into()?),
-                u64::from_le_bytes(shard_bytes.try_into()?),
-            )?,
-            cc_seqno: u32::from_le_bytes(cc_bytes.try_into()?),
-        })
-    }
+        pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+            let (wc_bytes, rest) = bytes.split_at(std::mem::size_of::<i32>());
+            let (shard_bytes, rest) = rest.split_at(std::mem::size_of::<u64>());
+            let (cc_bytes, _) = rest.split_at(std::mem::size_of::<u32>());
 
-    pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut writer = Cursor::new(vec!());
-        writer.write_all(&self.id.workchain_id().to_le_bytes())?;
-        writer.write_all(&self.id.shard_prefix_with_tag().to_le_bytes())?;
-        writer.write_all(&self.cc_seqno.to_le_bytes())?;
-        Ok(writer.into_inner())
-    }
+            Ok(Self{
+                id: ShardIdent::with_tagged_prefix(
+                    i32::from_le_bytes(wc_bytes.try_into()?),
+                    u64::from_le_bytes(shard_bytes.try_into()?),
+                )?,
+                cc_seqno: u32::from_le_bytes(cc_bytes.try_into()?),
+            })
+        }
 
-}
-
-impl PartialOrd for TopBlockDescrId {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for TopBlockDescrId {
-    fn cmp(&self, other: &Self) -> Ordering {
-        let self_id = self.id.shard_prefix_with_tag();
-        let other_id = other.id.shard_prefix_with_tag();
-        if self_id < other_id || (self_id == other_id && self.cc_seqno < other.cc_seqno) {
-            Ordering::Less
-        } else if self == other {
-            Ordering::Equal
-        } else {
-            Ordering::Greater
+        pub fn to_bytes(&self) -> Result<Vec<u8>> {
+            let mut writer = Cursor::new(vec!());
+            writer.write_all(&self.id.workchain_id().to_le_bytes())?;
+            writer.write_all(&self.id.shard_prefix_with_tag().to_le_bytes())?;
+            writer.write_all(&self.cc_seqno.to_le_bytes())?;
+            Ok(writer.into_inner())
         }
     }
-}
 
-impl fmt::Display for TopBlockDescrId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "({}, {})", self.id, self.cc_seqno)
+    impl fmt::Display for TopBlockDescrId {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "({}, {})", self.id, self.cc_seqno)
+        }
     }
 }

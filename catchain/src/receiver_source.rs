@@ -11,10 +11,14 @@
 * limitations under the License.
 */
 
-pub use super::*;
-use crate::ton_api::IntoBoxed;
-use std::collections::BTreeMap;
-use utils::*;
+use crate::{
+    serialize_tl_boxed_object, 
+    Any, BlockHeight, BlockPayloadPtr, CatchainFactory, PublicKey, PublicKeyHash, 
+    ReceivedBlockPtr, Receiver, ReceiverSource, ReceiverSourcePtr, ReceiverSourceStatistics,
+    ton, utils
+};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use ton_api::IntoBoxed;
 
 /*
     Implementation details for ReceiverSource
@@ -124,7 +128,7 @@ impl ReceiverSource for ReceiverSourceImpl {
         if let Some(existing_block) = self.get_block(block.get_height()) {
             assert!(block.get_hash() != existing_block.borrow().get_hash());
 
-            warn!(
+            log::warn!(
                 "fork found on height {} for source #{}: blocks {} and {}",
                 block.get_height(),
                 self.id,
@@ -169,7 +173,7 @@ impl ReceiverSource for ReceiverSourceImpl {
 
         self.fork_ids.push(fork_id);
 
-        trace!("...adding new fork {} of source {}", fork_id, self.id);
+        log::trace!("...adding new fork {} of source {}", fork_id, self.id);
 
         if self.fork_ids.len() > 1 {
             assert!(self.is_blamed());
@@ -189,7 +193,7 @@ impl ReceiverSource for ReceiverSourceImpl {
         }
 
         if self.blamed_heights[fork] == 0 || self.blamed_heights[fork] > height {
-            info!(
+            log::info!(
                 "Source {} has been blamed at fork {} and height {}",
                 self.id, fork, height
             );
@@ -199,7 +203,7 @@ impl ReceiverSource for ReceiverSourceImpl {
 
     fn mark_as_blamed(&mut self, receiver: &mut dyn Receiver) {
         if !self.blamed {
-            debug!("Blaming source {}", self.id);
+            log::debug!("Blaming source {}", self.id);
 
             self.blocks.clear();
             self.delivered_height = 0;
@@ -232,10 +236,10 @@ impl ReceiverSource for ReceiverSourceImpl {
             serialize_tl_boxed_object!(&fork_proof.into_boxed()),
         ));
 
-        error!(
+        log::error!(
             "Fork has been found for source {} hash={:?}",
             self.get_id(),
-            get_hash(self.fork_proof_serialized.as_ref().unwrap().data())
+            utils::get_hash(self.fork_proof_serialized.as_ref().unwrap().data())
         );
     }
 
@@ -339,9 +343,9 @@ impl ReceiverSourceImpl {
     */
 
     fn new(id: usize, public_key: PublicKey, adnl_id: &PublicKeyHash) -> Self {
-        let public_key_hash = get_public_key_hash(&public_key);
+        let public_key_hash = utils::get_public_key_hash(&public_key);
 
-        trace!(
+        log::trace!(
             "...creating source #{} with public_key_hash={}, adnl_id={}",
             id,
             public_key_hash,

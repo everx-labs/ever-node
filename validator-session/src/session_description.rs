@@ -11,15 +11,16 @@
 * limitations under the License.
 */
 
-pub use super::*;
-use crate::ton_api::IntoBoxed;
-use catchain::profiling::ResultStatusCounter;
-use rand::{rngs::ThreadRng, Rng};
-use std::{
-    collections::HashMap,
-    time::{Duration, SystemTime},
+use crate::{
+    BlockId, BlockHash, BlockSignature, CachedInstanceCounter, CacheEntry, CatchainNode, 
+    HashType, PublicKey, PublicKeyHash, SessionCache, SessionDescription, SessionNode, 
+    SessionOptions, SessionPool, ValidatorWeight
 };
-use ton_types::UInt256;
+use catchain::{serialize_tl_boxed_object, profiling::ResultStatusCounter};
+use rand::Rng;
+use std::{collections::HashMap, fmt, sync::Arc, time::{Duration, SystemTime}};
+use ton_api::IntoBoxed;
+use ton_types::{Result, UInt256};
 
 /*
     Constants
@@ -73,7 +74,7 @@ pub(crate) struct SessionDescriptionImpl {
     cutoff_weight: ValidatorWeight,           //cutoff weight for validators decision making
     total_weight: ValidatorWeight,            //total weight of all validators
     self_idx: u32,                            //index of this validator in a list of sources
-    rng: ThreadRng,                           //random generator
+    rng: rand::rngs::ThreadRng,               //random generator
     current_time: Option<std::time::SystemTime>, //current time for log replaying
     metrics_receiver: Arc<metrics_runtime::Receiver>, //receiver for profiling metrics
     sent_blocks_instance_counter: CachedInstanceCounter, //instance counter for sent blocks
@@ -246,7 +247,7 @@ impl SessionDescription for SessionDescriptionImpl {
         let time_elapsed = match now.duration_since(std::time::UNIX_EPOCH) {
             Ok(elapsed) => elapsed.as_secs_f64(),
             Err(_err) => {
-                error!("SessionDescription::get_ts: can't get system time");
+                log::error!("SessionDescription::get_ts: can't get system time");
                 panic!("SessionDescription::get_ts");
             }
         };
@@ -263,7 +264,8 @@ impl SessionDescription for SessionDescriptionImpl {
     }
 
     fn get_delay(&self, mut priority: u32) -> std::time::Duration {
-        if self.sources.len() < 5 {
+        //difference with original TON implementation: enable max performance for single node sessions
+        if self.sources.len() > 1 && self.sources.len() < 5 {
             priority += 1;
         }
 
@@ -304,7 +306,7 @@ impl SessionDescription for SessionDescriptionImpl {
             collated_data_file_hash: collated_data_file_hash.clone().into(),
         }
         .into_boxed();
-        let serialized_candidate_id = catchain::utils::serialize_tl_boxed_object!(&candidate_id);
+        let serialized_candidate_id = serialize_tl_boxed_object!(&candidate_id);
 
         catchain::utils::get_hash(&serialized_candidate_id)
     }
@@ -321,7 +323,7 @@ impl SessionDescription for SessionDescriptionImpl {
             file_hash: file_hash.clone().into(),
         }
         .into_boxed();
-        let serialized_block_id = catchain::utils::serialize_tl_boxed_object!(&block_id);
+        let serialized_block_id = serialize_tl_boxed_object!(&block_id);
 
         self.sources[src_idx as usize]
             .public_key
@@ -340,7 +342,7 @@ impl SessionDescription for SessionDescriptionImpl {
             file_hash: file_hash.clone().into(),
         }
         .into_boxed();
-        let serialized_block_id = catchain::utils::serialize_tl_boxed_object!(&block_id);
+        let serialized_block_id = serialize_tl_boxed_object!(&block_id);
 
         self.sources[src_idx as usize]
             .public_key
@@ -556,7 +558,11 @@ impl SessionDescriptionImpl {
         let self_idx = match rev_sources.get(local_id) {
             Some(source) => *source,
             None => {
-                error!("SessionDescription::new: can't find validator with local ID {} in a list of sources {:?}", local_id, nodes);
+                log::error!(
+                    "SessionDescription::new: can't find validator with local ID {} \
+                    in a list of sources {:?}", 
+                    local_id, nodes
+                );
                 panic!("SessionDescription::new");
             }
         };

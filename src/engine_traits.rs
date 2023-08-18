@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -15,10 +15,19 @@ use crate::{
     block::BlockStuff, config::{CollatorTestBundlesGeneralConfig, CollatorConfig}, 
     block_proof::BlockProofStuff, config::TonNodeConfig, internal_db::BlockResult,
     network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
-    shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId}
+    shard_state::ShardStateStuff,
+    types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
+    validator::validator_manager::ValidationStatus,
+};
+#[cfg(feature = "slashing")]
+use crate::validator::slashing::ValidatedBlockStat;
+#[cfg(feature = "telemetry")]
+use crate::{
+    full_node::telemetry::{FullNodeTelemetry, RempClientTelemetry},
+    validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
+    network::telemetry::FullNodeNetworkTelemetry,
 };
 
-use ever_crypto::{KeyId, KeyOption};
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
 use catchain::{
@@ -28,26 +37,20 @@ use catchain::{
 use overlay::{
     BroadcastSendInfo, OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId
 };
-use std::{sync::{Arc, atomic::AtomicU64}, time::{SystemTime, UNIX_EPOCH}, collections::HashSet};
-use ton_api::ton::ton_node::{RempMessage, RempMessageStatus, RempReceipt, broadcast::BlockBroadcast};
-use ton_block::{
-    AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, ShardAccount,
-    MASTERCHAIN_ID, Deserializable, OutMsgQueue
-};
-use ton_types::{Result, UInt256, error, AccountId};
-#[cfg(feature = "telemetry")]
-use crate::{
-    full_node::telemetry::{FullNodeTelemetry, RempClientTelemetry},
-    validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
-    network::telemetry::FullNodeNetworkTelemetry,
-};
-#[cfg(feature = "telemetry")]
+use std::{collections::HashSet, sync::{Arc, atomic::AtomicU64}, time::{SystemTime, UNIX_EPOCH}};
 use storage::{StorageAlloc, block_handle_db::BlockHandle};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
+use ton_api::ton::ton_node::{
+    RempMessage, RempMessageStatus, RempReceipt, 
+    broadcast::{BlockBroadcast, QueueUpdateBroadcast},
+};
+use ton_block::{
+    AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, ShardAccount,
+    MASTERCHAIN_ID, Deserializable, ConfigParams, OutMsgQueue
+};
+use ton_types::{error, AccountId, KeyId, KeyOption, Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
-#[cfg(feature = "slashing")]
-use crate::validator::slashing::ValidatedBlockStat;
 
 #[cfg(feature = "telemetry")]
 pub struct EngineTelemetry {
@@ -80,12 +83,18 @@ pub trait OverlayOperations : Sync + Send {
     async fn start(&self) -> Result<()>;
     async fn get_peers_count(&self, masterchain_zero_state_id: &BlockIdExt) -> Result<usize>;
     async fn get_overlay(
-        self: Arc<Self>, 
-        overlay_id: (Arc<OverlayShortId>, OverlayId)
-    ) -> Result<Arc<dyn FullNodeOverlayClient>>;
+        &self, 
+        overlay_id: &OverlayShortId
+    ) -> Option<Arc<dyn FullNodeOverlayClient>>;
+    async fn add_overlay(
+        self: Arc<Self>,
+        overlay_id: (Arc<OverlayShortId>, OverlayId),
+        local: bool,
+    ) -> Result<()>;
     async fn get_masterchain_overlay(self: Arc<Self>) -> Result<Arc<dyn FullNodeOverlayClient>> {
         let overlay_id = self.calc_overlay_id(ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL)?;
-        self.get_overlay(overlay_id).await
+        self.get_overlay(&overlay_id.0).await
+            .ok_or_else(|| error!("INTERNAL ERROR: masterchain overlay was not found"))
     }
     fn add_consumer(&self, overlay_id: &Arc<OverlayShortId>, consumer: Arc<dyn QueriesConsumer>) -> Result<()>;
     fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<OverlayShortId>, OverlayId)> ;
@@ -120,7 +129,9 @@ pub trait PrivateOverlayOperations: Sync + Send {
 #[allow(unused)]
 pub trait EngineOperations : Sync + Send {
 
-    async fn processed_workchain(&self) -> Result<(bool, i32)> { Ok((true, 0)) }
+    fn processed_workchain(&self) -> Option<i32> { None }
+
+    async fn is_foreign_wc(&self, workchain_id: i32) -> Result<(bool, i32)> { unimplemented!() }
 
     fn get_validator_status(&self) -> bool { unimplemented!() }
 
@@ -128,11 +139,35 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    fn validation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
+    fn validation_status(&self) -> ValidationStatus {
         unimplemented!()
     }
 
-    fn collation_status(&self) -> &lockfree::map::Map<ShardIdent, u64> {
+    fn set_validation_status(&self, status: ValidationStatus) {
+        unimplemented!()
+    }
+
+    fn last_validation_time(&self) -> &lockfree::map::Map<ShardIdent, u64> {
+        unimplemented!()
+    }
+
+    fn set_last_validation_time(&self, shard: ShardIdent, time: u64) {
+        unimplemented!()
+    }
+
+    fn remove_last_validation_time(&self, shard: &ShardIdent) {
+        unimplemented!()
+    }
+
+    fn last_collation_time(&self) -> &lockfree::map::Map<ShardIdent, u64> {
+        unimplemented!()
+    }
+
+    fn set_last_collation_time(&self, shard: ShardIdent, time: u64) {
+        unimplemented!()
+    }
+
+    fn remove_last_collation_time(&self, shard: &ShardIdent) {
         unimplemented!()
     }
 
@@ -184,7 +219,7 @@ pub trait EngineOperations : Sync + Send {
     async fn load_applied_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         unimplemented!()
     }
-    async fn wait_applied_block(&self, id: &BlockIdExt, timeout_ms: Option<u64>) -> Result<(Arc<BlockHandle>, BlockStuff)> {
+    async fn wait_applied_block(&self, id: &BlockIdExt, timeout_ms: Option<u64>) -> Result<Arc<BlockHandle>> {
         unimplemented!()
     }
     async fn load_block(&self, handle: &BlockHandle) -> Result<BlockStuff> {
@@ -205,10 +240,25 @@ pub trait EngineOperations : Sync + Send {
     fn save_last_applied_mc_block_id(&self, last_mc_block: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
-    async fn load_last_applied_mc_state_or_zerostate(&self) -> Result<Arc<ShardStateStuff>> {
+    async fn load_actual_config_params(&self) -> Result<ConfigParams> {
         match self.load_last_applied_mc_block_id()? {
-            Some(block_id) => self.load_state(&block_id).await,
-            None => self.load_mc_zero_state().await
+            Some(block_id) => {
+                let handle = self.load_block_handle(&block_id)?
+                    .ok_or_else(|| error!("no handle for block {}", block_id))?;
+                if handle.is_applied() {
+                    self.load_state(&block_id).await?.config_params().cloned()
+                } else if handle.has_data() {
+                    self.load_block(&handle).await?.get_config_params()
+                } else if handle.has_proof_link() {
+                    self.load_block_proof(&handle, true).await?.get_config_params()
+                } else {
+                    self.load_block_proof(&handle, false).await?.get_config_params()
+                }
+            }
+            None => {
+                let mc_zero_state = self.load_mc_zero_state().await?;
+                Ok(mc_zero_state.config_params()?.clone())
+            }
         }
     }
     async fn load_last_applied_mc_state(&self) -> Result<Arc<ShardStateStuff>> {
@@ -285,7 +335,7 @@ pub trait EngineOperations : Sync + Send {
     ) -> Result<()> {
         unimplemented!()
     }
-    async fn download_block(&self, id: &BlockIdExt, limit: Option<u32>) -> Result<(BlockStuff, BlockProofStuff)> {
+    async fn download_block(&self, id: &BlockIdExt, limit: Option<u32>) -> Result<(BlockStuff, Option<BlockProofStuff>)> {
         unimplemented!()
     }
     async fn download_block_proof(&self, id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff> {
@@ -308,6 +358,13 @@ pub trait EngineOperations : Sync + Send {
         id: &BlockIdExt, 
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff
+    ) -> Result<BlockResult> {
+        unimplemented!()
+    }
+    fn create_handle_for_empty_queue_update(
+        &self,
+        block: &BlockStuff // virt block constructed from proof of update 
+                           // (block's BOC contains only queue update, other cells are pruned)
     ) -> Result<BlockResult> {
         unimplemented!()
     }
@@ -356,7 +413,7 @@ pub trait EngineOperations : Sync + Send {
         let last_mc_state = self.load_last_applied_mc_state().await?;
 
         if wc == MASTERCHAIN_ID {
-            let acc = last_mc_state.state().read_accounts()?.account(&address)?
+            let acc = last_mc_state.state()?.read_accounts()?.account(&address)?
                 .ok_or_else(|| error!("Can't get account {:x} from last master state {}", address, last_mc_state.block_id()))?;
             Ok((acc, last_mc_state.block_id().shard().clone()))
         } else {
@@ -368,7 +425,7 @@ pub trait EngineOperations : Sync + Send {
                 Some(10_000),
                 false,
             ).await?;
-            let acc = last_shard_state.state().read_accounts()?.account(&address)?
+            let acc = last_shard_state.state()?.read_accounts()?.account(&address)?
                 .ok_or_else(|| error!("Can't get account {:x} from state {}", address, last_shard_state.block_id()))?;
             Ok((acc, last_shard_state.block_id().shard().clone()))
         }
@@ -478,10 +535,17 @@ pub trait EngineOperations : Sync + Send {
 
     // Get current list of new shard blocks with respect to last mc block.
     // If given mc_seq_no is not equal to last mc seq_no - function fails.
-    fn get_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+    async fn get_shard_blocks(
+        &self,
+        last_mc_state: &Arc<ShardStateStuff>,
+        actual_last_mc_seqno: Option<&mut u32>,
+    ) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
         unimplemented!()
     }
-    fn get_own_shard_blocks(&self, mc_seq_no: u32) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+    async fn get_own_shard_blocks(
+        &self, 
+        last_mc_state: &Arc<ShardStateStuff>
+    ) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
         unimplemented!()
     }
 
@@ -618,11 +682,15 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
+    async fn send_queue_update_broadcast(&self, broadcast: QueueUpdateBroadcast) -> Result<()> {
+        unimplemented!()
+    }
+
     async fn send_top_shard_block_description(
         &self,
         tbd: Arc<TopBlockDescrStuff>,
         cc_seqno: u32,
-        resend: bool,
+        is_resend: bool,
     ) -> Result<()> {
         unimplemented!()
     }
@@ -648,7 +716,6 @@ pub trait EngineOperations : Sync + Send {
     async fn check_remp_duplicate(&self, message_id: &UInt256) -> Result<RempDuplicateStatus> {
         unimplemented!()
     }
-
 
     async fn update_validators(
         &self,
@@ -781,6 +848,7 @@ pub trait EngineOperations : Sync + Send {
     ) -> Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)> {
         unimplemented!();
     }
+
 }
 
 pub struct ChainRange {
@@ -816,18 +884,20 @@ pub enum Server {
     KafkaConsumer(stream_cancel::Trigger)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 pub enum RempDuplicateStatus {
     /// No such message in queue
     Absent,
-    /// Message found in queue, and not validated yet
-    Fresh,
+    /// Message found in queue, and not validated yet --- message uid as parameter
+    Fresh(UInt256),
     /// Message found in queue and already included into valid block
-    Duplicate(ton_block::BlockIdExt)
+    /// Parameters: block id; message uid; included message id (may be different from original id,
+    /// since messages with different ids may share the same uid)
+    Duplicate(ton_block::BlockIdExt, UInt256, UInt256)
 }
 
 #[async_trait::async_trait]
 pub trait RempCoreInterface: Sync + Send {
     async fn process_incoming_message(&self, message_id: UInt256, message: Message, source: Arc<KeyId>) -> Result<()>;
-    fn check_remp_duplicate(&self, message_id: &UInt256) -> RempDuplicateStatus;
+    fn check_remp_duplicate(&self, message_id: &UInt256) -> Result<RempDuplicateStatus>;
 }

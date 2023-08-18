@@ -11,9 +11,7 @@
 * limitations under the License.
 */
 
-pub use super::*;
-
-use metrics_runtime;
+use std::cell::RefCell;
 
 /*
     Instances counter
@@ -142,7 +140,7 @@ impl Profiler {
 
     /// Get global instance of the profiler (for merging from local instance to global)
     pub fn global_instance() -> std::sync::Arc<std::sync::Mutex<Profiler>> {
-        lazy_static! {
+        lazy_static::lazy_static! {
             pub static ref INSTANCE: std::sync::Arc<std::sync::Mutex<Profiler>> =
                 std::sync::Arc::new(std::sync::Mutex::<Profiler>::new(Profiler::new()));
         }
@@ -151,7 +149,7 @@ impl Profiler {
 
     /// New profiler creation
     fn new() -> Self {
-        lazy_static! {
+        lazy_static::lazy_static! {
             pub static ref ROOT_CODE_LINE: ProfileCodeLine = ProfileCodeLine {
                 file_name: "",
                 function_name: "<root>",
@@ -496,7 +494,7 @@ impl Drop for ExecutionTimeGuard {
             return;
         }
 
-        warn!(
+        log::warn!(
             "Execution time {:.3}ms is greater than expected time {:.3}ms for {} at {}({})",
             duration.as_secs_f64() * 1000.0,
             self.max_duration.as_secs_f64() * 1000.0,
@@ -524,17 +522,17 @@ macro_rules! function {
 #[macro_export]
 macro_rules! instrument {
     () => {
-        lazy_static! {
-            static ref INSTRUMENT_CODE_LINE: super::catchain::profiling::ProfileCodeLine =
-                super::catchain::profiling::ProfileCodeLine {
+        lazy_static::lazy_static! {
+            static ref INSTRUMENT_CODE_LINE: crate::profiling::ProfileCodeLine =
+                crate::profiling::ProfileCodeLine {
                     file_name: file!(),
-                    function_name: super::catchain::profiling::function!(85),
+                    function_name: crate::function!(85),
                     line: line!(),
                 };
         }
 
         let _instrument_guard =
-            super::catchain::profiling::ProfileGuard::new(&INSTRUMENT_CODE_LINE);
+            crate::profiling::ProfileGuard::new(&INSTRUMENT_CODE_LINE);
     };
 }
 
@@ -542,20 +540,21 @@ macro_rules! instrument {
 #[macro_export]
 macro_rules! check_execution_time {
     ($max_duration_microseconds:expr) => {
-        lazy_static! {
-            static ref CHECK_EXECUTION_TIME_CODE_LINE: super::catchain::profiling::ProfileCodeLine =
-                super::catchain::profiling::ProfileCodeLine {
+        lazy_static::lazy_static! {
+            static ref CHECK_EXECUTION_TIME_CODE_LINE: crate::profiling::ProfileCodeLine =
+                crate::profiling::ProfileCodeLine {
                     file_name: file!(),
-                    function_name: super::catchain::profiling::function!(95),
+                    function_name: crate::function!(95),
                     line: line!(),
                 };
             static ref CHECK_EXECUTION_TIME_MAX_DURATION: std::time::Duration =
                 std::time::Duration::from_micros($max_duration_microseconds);
         }
 
-        let _check_execution_time_guard = super::catchain::profiling::ExecutionTimeGuard::new(
+        let _check_execution_time_guard = crate::profiling::ExecutionTimeGuard::new(
             &CHECK_EXECUTION_TIME_CODE_LINE,
             &CHECK_EXECUTION_TIME_MAX_DURATION,
         );
     };
 }
+                                                

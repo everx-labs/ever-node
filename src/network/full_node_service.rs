@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -12,14 +12,17 @@
 */
 
 use crate::{
-    engine_traits::EngineOperations, 
+    engine_traits::EngineOperations, block::make_queue_update_from_block_raw,
     network::neighbours::{PROTOCOL_CAPABILITIES, PROTOCOL_VERSION}
 };
 
 use adnl::common::{AdnlPeers, Answer, QueryResult, TaggedByteVec, TaggedObject};
 use overlay::QueriesConsumer;
 use std::{cmp::min, fmt::Debug, sync::Arc};
-use ton_api::{serialize_boxed, tag_from_boxed_type, tag_from_boxed_object, 
+#[cfg(feature = "telemetry")]
+use ton_api::{tag_from_boxed_type, tag_from_boxed_object};
+use ton_api::{
+    serialize_boxed, 
     AnyBoxedSerialize, IntoBoxed,
     ton::{
         self, TLObject, Vector,
@@ -29,8 +32,9 @@ use ton_api::{serialize_boxed, tag_from_boxed_type, tag_from_boxed_object,
             DownloadBlockProof, DownloadBlockProofLink, DownloadKeyBlockProof, DownloadKeyBlockProofLink,
             PrepareBlock, DownloadBlock, DownloadBlockFull, GetArchiveInfo,
             PrepareZeroState, GetNextKeyBlockIds, GetArchiveSlice, 
-            PrepareBlockProof, PrepareKeyBlockProof, DownloadPersistentState, GetCapabilities
-
+            PrepareBlockProof, PrepareKeyBlockProof, DownloadPersistentState, GetCapabilities,
+            PrepareQueueUpdate, PreparePersistentMsgQueue, DownloadQueueUpdate,
+            DownloadPersistentMsgQueueSlice,
         },
         ton_node::{
             self,
@@ -150,9 +154,28 @@ impl FullNodeOverlayService {
 
     // tonNode.prepareBlock block:tonNode.blockIdExt = tonNode.Prepared;
     async fn prepare_block(&self, query: PrepareBlock) -> Result<TaggedObject<Prepared>> {
-        let answer = if let Some(handle) = self.engine.load_block_handle(&query.block)? {
+        self.prepare_block_or_update(&query.block, None).await
+    }
+
+    // tonNode.prepareQueueUpdate block:tonNode.blockIdExt target_wc:int = tonNode.Prepared;
+    async fn prepare_queue_update(&self, query: PrepareQueueUpdate) -> Result<TaggedObject<Prepared>> {
+        self.prepare_block_or_update(&query.block, Some(query.target_wc)).await
+    }
+
+    async fn prepare_block_or_update(
+        &self,
+        id: &BlockIdExt,
+        queue_update: Option<i32>
+    ) -> Result<TaggedObject<Prepared>> {
+        let answer = if let Some(handle) = self.engine.load_block_handle(id)? {
             if handle.has_data() {
-                Prepared::TonNode_Prepared
+                match (handle.is_queue_update_for(), queue_update) {
+                    (None, Some(_)) => Prepared::TonNode_Prepared, // we can extract any update from block
+                    (None, None) => Prepared::TonNode_Prepared,
+                    (Some(_), None) => Prepared::TonNode_NotFound,
+                    (Some(wc1), Some(wc2)) if wc1 == wc2 => Prepared::TonNode_Prepared,
+                    (Some(_), Some(_)) => Prepared::TonNode_NotFound,
+                }
             } else {
                 Prepared::TonNode_NotFound
             }
@@ -174,11 +197,18 @@ impl FullNodeOverlayService {
 
     fn prepare_state_internal(
         &self, 
-        block_id: BlockIdExt
+        block_id: BlockIdExt,
+        target_wc: Option<i32>
     ) -> Result<TaggedObject<PreparedState>> {
         let answer = if let Some(handle) = self.engine.load_block_handle(&block_id)? {
             if handle.has_persistent_state() {
-                PreparedState::TonNode_PreparedState
+                match (handle.is_queue_update_for(), target_wc) {
+                    (None, Some(_)) => PreparedState::TonNode_NotFoundState, // can't extract msg queue from full state because it too heavy operation
+                    (None, None) => PreparedState::TonNode_PreparedState,
+                    (Some(_), None) => PreparedState::TonNode_NotFoundState,
+                    (Some(wc1), Some(wc2)) if wc1 == wc2 => PreparedState::TonNode_PreparedState,
+                    (Some(_), Some(_)) => PreparedState::TonNode_NotFoundState,
+                }
             } else {
                 PreparedState::TonNode_NotFoundState
             }
@@ -200,7 +230,15 @@ impl FullNodeOverlayService {
         &self, 
         query: PreparePersistentState
     ) -> Result<TaggedObject<PreparedState>> {
-        self.prepare_state_internal(query.block)
+        self.prepare_state_internal(query.block, None)
+    }
+
+    // tonNode.preparePersistentMsgQueue block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt target_wc:int = tonNode.PreparedState;
+    async fn prepare_persistent_msg_queue(
+        &self, 
+        query: PreparePersistentMsgQueue
+    ) -> Result<TaggedObject<PreparedState>> {
+        self.prepare_state_internal(query.block, Some(query.target_wc))
     }
 
     // tonNode.prepareZeroState block:tonNode.blockIdExt = tonNode.PreparedState;
@@ -208,7 +246,7 @@ impl FullNodeOverlayService {
         &self, 
         query: PrepareZeroState
     ) -> Result<TaggedObject<PreparedState>> {
-        self.prepare_state_internal(query.block)
+        self.prepare_state_internal(query.block, None)
     }
 
     const NEXT_KEY_BLOCKS_LIMIT: usize = 8;
@@ -351,6 +389,37 @@ impl FullNodeOverlayService {
         Ok(answer)
     }
 
+    // tonNode.downloadQueueUpdate block:tonNode.blockIdExt target_wc:int = tonNode.Data;
+    async fn download_queue_update(
+        &self, 
+        query: DownloadQueueUpdate
+    ) -> Result<TaggedByteVec> {
+        if let Some(handle) = self.engine.load_block_handle(&query.block)? {
+            if handle.has_data() {
+                let data = match (query.target_wc, handle.is_queue_update_for()) {
+                    (wc1, Some(wc2)) if wc1 == wc2 => {
+                        self.engine.load_block_raw(&handle).await?
+                    }
+                    (wc1, Some(wc2)) => {
+                        fail!("Queue update {} is for wc {} not {}", query.block, wc2, wc1);
+                    }
+                    (wc1, None) => {
+                        let block = self.engine.load_block(&handle).await?;
+                        make_queue_update_from_block_raw(&block, wc1)? // May be pretty heavy operation. Disable it?
+                    }
+                };
+
+                let answer = TaggedByteVec {
+                    object: data,
+                    #[cfg(feature = "telemetry")]
+                    tag: 0x8000000A // Raw reply do download block
+                };
+                return Ok(answer)
+            }
+        }
+        fail!("Block's data isn't initialized");
+    }
+
     // tonNode.downloadBlock block:tonNode.blockIdExt = tonNode.Data;
     async fn download_block(&self, query: DownloadBlock) -> Result<TaggedByteVec> {
         if let Some(handle) = self.engine.load_block_handle(&query.block)? {
@@ -408,6 +477,40 @@ impl FullNodeOverlayService {
         }
         fail!("Shard state {} doesn't have a persistent state", query.block)
     }
+
+    // tonNode.downloadPersistentMsgQueueSlice block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt target_wc:int offset:long max_size:long = tonNode.Data;
+    async fn download_persistent_msg_queue_slice(
+        &self, 
+        query: DownloadPersistentMsgQueueSlice
+    ) -> Result<TaggedByteVec> {
+        if query.max_size as usize > PART_MAX_SIZE {
+            fail!("Part size {} is too big, max is {}", query.max_size, PART_MAX_SIZE);
+        }
+        if let Some(handle) = self.engine.load_block_handle(&query.block)? {
+            if handle.has_persistent_state() {
+                if let Some(wc) = handle.is_queue_update_for() {
+                    if wc != query.target_wc {
+                        fail!("{} is a queue for wc {} not {}", query.block, wc, query.target_wc)
+                    }
+                    let data = self.engine.load_persistent_state_slice(
+                        &handle,
+                        query.offset as u64,
+                        query.max_size as u64
+                    ).await?;
+                    let answer = TaggedByteVec {
+                        object: data,
+                        #[cfg(feature = "telemetry")]
+                        tag: 0x8000000B // Raw reply to download state slice
+                    };
+                    return Ok(answer)
+                } else {
+                    fail!("{} is not a queue for wc {}", query.block, query.target_wc)
+                }
+            }
+        }
+        fail!("Shard state {} doesn't have a persistent state", query.block)
+    }
+
 
     // tonNode.downloadZeroState block:tonNode.blockIdExt = tonNode.Data;
     async fn download_zero_state(&self, query: DownloadZeroState) -> Result<TaggedByteVec> {
@@ -657,9 +760,13 @@ impl FullNodeOverlayService {
 #[async_trait::async_trait]
 impl QueriesConsumer for FullNodeOverlayService {
     #[allow(dead_code)]
-    async fn try_consume_query(&self, query: TLObject, _adnl_peers: &AdnlPeers) -> Result<QueryResult> {
+    async fn try_consume_query(
+        &self, 
+        query: TLObject, 
+        adnl_peers: &AdnlPeers
+    ) -> Result<QueryResult> {
 
-        log::debug!("try_consume_query {:?}", query);
+        log::debug!("try_consume_query {:?} from {}", query, adnl_peers.other());
 
         let query = match self.consume_query::<GetNextBlockDescription, _, _>(
             query,
@@ -693,9 +800,25 @@ impl QueriesConsumer for FullNodeOverlayService {
             Err(query) => query
         };
 
+        let query = match self.consume_query::<PrepareQueueUpdate, _, _>(
+            query,
+            &Self::prepare_queue_update
+        ).await? {
+            Ok(answer) => return Ok(answer),
+            Err(query) => query
+        };
+
         let query = match self.consume_query::<PreparePersistentState, _, _>(
             query,
             &Self::prepare_persistent_state
+        ).await? {
+            Ok(answer) => return Ok(answer),
+            Err(query) => query
+        };
+
+        let query = match self.consume_query::<PreparePersistentMsgQueue, _, _>(
+            query,
+            &Self::prepare_persistent_msg_queue
         ).await? {
             Ok(answer) => return Ok(answer),
             Err(query) => query
@@ -741,6 +864,14 @@ impl QueriesConsumer for FullNodeOverlayService {
             Err(query) => query
         };
 
+        let query = match self.consume_query_raw::<DownloadQueueUpdate, _>(
+            query,
+            &Self::download_queue_update
+        ).await? {
+            Ok(answer) => return Ok(answer),
+            Err(query) => query
+        };
+
         let query = match self.consume_query_raw::<DownloadPersistentState, _>(
             query,
             &Self::download_persistent_state
@@ -752,6 +883,14 @@ impl QueriesConsumer for FullNodeOverlayService {
         let query = match self.consume_query_raw::<DownloadPersistentStateSlice, _>(
             query,
             &Self::download_persistent_state_slice
+        ).await? {
+            Ok(answer) => return Ok(answer),
+            Err(query) => query
+        };
+
+        let query = match self.consume_query_raw::<DownloadPersistentMsgQueueSlice, _>(
+            query,
+            &Self::download_persistent_msg_queue_slice
         ).await? {
             Ok(answer) => return Ok(answer),
             Err(query) => query
@@ -822,6 +961,6 @@ impl QueriesConsumer for FullNodeOverlayService {
         };
 
         log::warn!("Unsupported full node query {:?}", query);
-        failure::bail!("Unsupported full node query {:?}", query);
+        fail!("Unsupported full node query {:?}", query);
     }
 }

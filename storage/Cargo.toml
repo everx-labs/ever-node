@@ -5,7 +5,6 @@ version = '0.5.0'
 
 [dependencies]
 async-trait = '0.1.31'
-base64 = '0.13'
 failure = '0.1'
 fnv = '1.0.6'
 futures = '0.3.4'
@@ -16,24 +15,27 @@ log4rs = '1.2'
 serde = '1.0.114'
 serde_cbor = '0.11.1'
 serde_derive = '1.0.114'
-sha2 = '0.10'
 strum = '0.18.0'
 strum_macros = '0.18.0'
-adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.7.143' }
+adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.8.19' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 rand = { features = [ 'small_rng' ], version = '0.8' }
 tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.2.188' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.39' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '1.12.7' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.24' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.88' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.18' }
 
 [build-dependencies]
 cc = { features = [ 'parallel' ], version = '=1.0.61' }
 
 [features]
-ci_run = [  ]
 default = [  ]
 telemetry = [  ]
+
+[[bench]]
+harness = false
+name = 'shardstate_db'
+path = 'benches/shardstate_db.rs'
 
 [target.'cfg(unix)'.dependencies.rocksdb]
 features = [ 'jemalloc' ]

@@ -14,19 +14,26 @@
 use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, engine::Engine, 
     engine_traits::{ChainRange, EngineOperations}, error::NodeError,
-    validator::validator_utils::{calc_subset_for_workchain, check_crypto_signatures},
+    validator::validator_utils::{
+        check_crypto_signatures, calc_subset_for_masterchain,
+    },
+    shard_state::ShardStateStuff,
 };
+use crate::validator::validator_utils::calc_subset_for_workchain_standard;
 
-use std::{sync::Arc, mem::drop, time::Duration};
-use tokio::task::JoinHandle;
-use ton_block::{BlockIdExt, BlockSignaturesPure, CryptoSignaturePair, CryptoSignature, ConfigParams};
+use std::{sync::Arc, mem::drop, time::Duration, collections::HashMap};
+use ton_block::{
+    BlockIdExt, BlockSignaturesPure, CryptoSignaturePair, CryptoSignature, 
+    GlobalCapabilities, ProofChain, MerkleProof, Deserializable, Block, Serializable,
+    BASE_WORKCHAIN_ID,
+};
 use ton_types::{Result, fail, error};
-use ton_api::ton::ton_node::broadcast::BlockBroadcast;
+use ton_api::ton::ton_node::broadcast::{BlockBroadcast, QueueUpdateBroadcast};
 
 pub fn start_masterchain_client(
     engine: Arc<dyn EngineOperations>, 
     last_got_block_id: BlockIdExt
-) -> Result<JoinHandle<()>> {
+) -> Result<tokio::task::JoinHandle<()>> {
     let join_handle = tokio::spawn(async move {
         engine.acquire_stop(Engine::MASK_SERVICE_MASTERCHAIN_CLIENT);
         loop {
@@ -45,7 +52,7 @@ pub fn start_masterchain_client(
 pub fn start_shards_client(
     engine: Arc<dyn EngineOperations>, 
     shards_mc_block_id: BlockIdExt
-) -> Result<JoinHandle<()>> {
+) -> Result<tokio::task::JoinHandle<()>> {
     let join_handle = tokio::spawn(async move {
         engine.acquire_stop(Engine::MASK_SERVICE_SHARDCHAIN_CLIENT);
         loop {
@@ -171,7 +178,6 @@ async fn load_shard_blocks_cycle(
     let mut mc_handle = engine.load_block_handle(shards_mc_block_id)?.ok_or_else(
         || error!("Cannot load handle for shard master block {}", shards_mc_block_id)
     )?;
-    let (_master, workchain_id) = engine.processed_workchain().await?;
     loop {
         if engine.check_stop() {
             break Ok(())
@@ -186,7 +192,6 @@ async fn load_shard_blocks_cycle(
         };
         mc_handle = r.0;
         let mc_block = r.1;
-        let shard_ids = mc_block.shard_hashes()?.top_blocks(&[workchain_id])?;
 
         log::trace!("load_shard_blocks_cycle: waiting semaphore: {}", mc_block.id());
         let semaphore_permit = Arc::clone(&semaphore).acquire_owned().await?;
@@ -195,7 +200,7 @@ async fn load_shard_blocks_cycle(
 
         let engine = Arc::clone(&engine);
         tokio::spawn(async move {
-            if let Err(e) = load_shard_blocks(engine.clone(), semaphore_permit, &mc_block, shard_ids).await {
+            if let Err(e) = load_shard_blocks(engine.clone(), semaphore_permit, &mc_block).await {
                 log::error!("FATAL!!! Unexpected error in shard blocks processing for mc block {}: {:?}", mc_block.id(), e);
             }
             if engine.produce_chain_ranges_enabled() {
@@ -209,22 +214,26 @@ async fn load_shard_blocks_cycle(
 
 pub async fn produce_chain_range(
     engine: Arc<dyn EngineOperations>,
-    mc_block: &BlockStuff
+    mc_block: &BlockStuff,
 ) -> Result<()> {
     let mut range = ChainRange {
         master_block: mc_block.id().clone(),
         shard_blocks: Vec::new(),
     };
-    let (_master, workchain_id) = engine.processed_workchain().await?;
 
+    let processed_wc = engine.processed_workchain().unwrap_or(BASE_WORKCHAIN_ID);
     let prev_master = engine.load_block_prev1(mc_block.id())?;
     let prev_master = engine.load_block_handle(&prev_master)?
         .ok_or_else(|| NodeError::InvalidData(format!("Can not load block handle for {}", prev_master)))?;
     let prev_master = engine.load_block(&prev_master).await?;
-    let prev_master_shards = prev_master.shards_blocks(workchain_id)?;
+    let prev_blocks = prev_master.top_blocks(processed_wc)?;
+    let mut prev_master_shards = HashMap::new();
+    for id in prev_blocks {
+        prev_master_shards.insert(id.shard().clone(), id);
+    }
 
-    let mut blocks: Vec<BlockIdExt> = mc_block.shards_blocks(workchain_id)?.values().cloned().collect();
-    // for new rust let mut blocks: Vec<BlockIdExt> = mc_block.shards_blocks(workchain_id)?.into_values().collect();
+    let mut blocks = mc_block.top_blocks(processed_wc)?;
+    // for new rust let mut blocks: Vec<BlockIdExt> = mc_block.top_blocks(processed_wc)?.into_values().collect();
 
     while let Some(block_id) = blocks.pop() {
         let handle = engine.load_block_handle(&block_id)?
@@ -254,26 +263,17 @@ pub async fn load_shard_blocks(
     engine: Arc<dyn EngineOperations>,
     semaphore_permit: tokio::sync::OwnedSemaphorePermit,
     mc_block: &BlockStuff,
-    shard_ids: Vec<BlockIdExt>,
 ) -> Result<()> {
 
-    let mut apply_tasks = Vec::new();
-    let mc_seq_no = mc_block.id().seq_no();
-    for shard_block_id in shard_ids {
-        let msg = format!(
-            "process mc block {}, shard block {} {}", 
-            mc_block.id(), shard_block_id.shard(), shard_block_id
-        );
-        if let Some(shard_block_handle) = engine.load_block_handle(&shard_block_id)? {
-            if shard_block_handle.is_applied() {
-                continue;
-            }
-        }
-        let engine = Arc::clone(&engine);
-        let shard_block_id = shard_block_id.clone();
-        let apply_task = tokio::spawn(async move {
+    fn start_apply_block_task(
+        engine: Arc<dyn EngineOperations>,
+        shard_block_id: BlockIdExt,
+        mc_seq_no: u32,
+        msg: String,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
             let mut attempt = 0;
-            log::trace!("load_shard_blocks_cycle: {}, applying...", msg);
+            log::trace!("load_shard_blocks_cycle: {}, applying block...", msg);
             loop { 
                 if let Err(e) = Arc::clone(&engine).download_and_apply_block(
                     &shard_block_id, 
@@ -281,22 +281,124 @@ pub async fn load_shard_blocks(
                     false
                 ).await {
                     log::error!(
-                        "Error while applying shard block (attempt {}) {}: {}",
+                        "Error while applying shard block (attempt {}) {}: {:?}",
                         attempt, shard_block_id, e
                     );
                     attempt += 1;
                     // TODO make method to ban bad peer who gave bad block
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                     if engine.check_stop() {
                         break;
                     }
                 } else {
-                    log::trace!("load_shard_blocks_cycle: {}, applied", msg);
+                    log::trace!("load_shard_blocks_cycle: {}, applied block", msg);
                     break;
                 }
             }
-        });
-        apply_tasks.push(apply_task);
+        })
     }
+
+    fn start_apply_proof_chain_task(
+        proof_chain: ProofChain,
+        own_wc: i32,
+        engine: Arc<dyn EngineOperations>,
+        shard_block_id: BlockIdExt,
+        mc_seq_no: u32,
+        msg: String,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut attempt = 0;
+            log::trace!("load_shard_blocks_cycle: {}, applying proof chain...", msg);
+            loop { 
+                if let Err(e) = apply_proof_chain(
+                    &proof_chain,
+                    own_wc,
+                    &engine,
+                    &shard_block_id, 
+                    mc_seq_no, 
+                    false,
+                    false,
+                ).await {
+                    log::error!(
+                        "Error while applying proof chain (attempt {}) {}: {:?}",
+                        attempt, shard_block_id, e
+                    );
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if engine.check_stop() {
+                        break;
+                    }
+                } else {
+                    log::trace!("load_shard_blocks_cycle: {}, applied proof chain", msg);
+                    break;
+                }
+            }
+        })
+    }
+
+    let mut apply_tasks = Vec::new();
+    let mc_seq_no = mc_block.id().seq_no();
+
+    if engine.load_actual_config_params().await?.has_capability(GlobalCapabilities::CapWorkchains) {
+        // Apply own blocks and foreign queue updates
+        for (shard_block_id, shard_header) in mc_block.top_blocks_all_headers()? {
+            let wc = shard_block_id.shard().workchain_id();
+            let (is_foreign_wc, own_wc) = engine.is_foreign_wc(wc).await?;
+            let msg = format!(
+                "load_shard_blocks: mc block {}, {} {}", 
+                mc_block.id(),
+                if is_foreign_wc {
+                    format!("queue update (wc: {})", wc)
+                } else {
+                    "shard block".to_owned()
+                },
+                shard_block_id
+            );
+            if let Some(shard_block_handle) = engine.load_block_handle(&shard_block_id)? {
+                if shard_block_handle.is_applied() {
+                    continue;
+                }
+            }
+            if is_foreign_wc {
+                apply_tasks.push(start_apply_proof_chain_task(
+                    shard_header.proof_chain
+                        .ok_or_else(|| error!("INTERNAL ERROR: no proof chain for {}", shard_block_id))?,
+                    own_wc,
+                    engine.clone(),
+                    shard_block_id.clone(),
+                    mc_seq_no,
+                    msg,
+                ));
+            } else {
+                apply_tasks.push(start_apply_block_task(
+                    engine.clone(),
+                    shard_block_id.clone(),
+                    mc_seq_no,
+                    msg,
+                ));
+            }
+        }
+    } else {
+        // Apply full shard blocks (classic single wc config)
+        for shard_block_id in mc_block.top_blocks(BASE_WORKCHAIN_ID)? {
+            let msg = format!(
+                "load_shard_blocks: mc block {}, shard block {}", 
+                mc_block.id(),
+                shard_block_id
+            );
+            if let Some(shard_block_handle) = engine.load_block_handle(&shard_block_id)? {
+                if shard_block_handle.is_applied() {
+                    continue;
+                }
+            }
+            apply_tasks.push(start_apply_block_task(
+                engine.clone(),
+                shard_block_id.clone(),
+                mc_seq_no,
+                msg,
+            ));
+        }
+    };
 
     futures::future::join_all(apply_tasks)
         .await
@@ -315,21 +417,154 @@ pub async fn load_shard_blocks(
 
 }
 
+pub async fn apply_proof_chain(
+    proof_chain: &ProofChain,
+    own_wc: i32,
+    engine: &Arc<dyn EngineOperations>,
+    shard_block_id: &BlockIdExt,
+    mc_seq_no: u32,
+    pre_apply: bool,
+    apply_only_empty: bool,
+) -> Result<bool> {
+
+    // - chain contains proofs of blocks n, n-1, n-2 etc.
+    // - each block proof contains dictionary with queue updates
+    // - we need to get update for own WC
+    //      - if update is empty - it was fully wrote into proof.
+    //      - if not - run usual download_and_apply_block func
+
+    log::trace!(
+        "apply_proof_chain: {shard_block_id}, len: {}, mc_seq_no: {mc_seq_no}, pre_apply: {pre_apply}",
+        proof_chain.len()
+    );
+
+    if proof_chain.len() == 0 {
+        return Ok(true);
+    }
+
+    let mut merkle_proof = MerkleProof::construct_from_cell(proof_chain[proof_chain.len() - 1].clone())?;
+    let mut next_merkle_proof;
+
+    for i in (0..proof_chain.len()).rev() {
+
+        let id = if let Some(next_proof_cell) = proof_chain.get(i - 1) {
+            let merkle_proof = MerkleProof::construct_from_cell(next_proof_cell.clone())?;
+            let block_virt_root = merkle_proof.proof.clone().virtualize(1);
+            let block = Block::construct_from_cell(block_virt_root.clone())?;
+            let id = block.read_info()?.read_prev_ref()?.prev1()?
+                .workchain_block_id(shard_block_id.shard().clone()).1;
+            next_merkle_proof = Some(merkle_proof);
+            id
+        } else {
+            next_merkle_proof = None;
+            shard_block_id.clone()
+        };
+
+        if let Some(handle) = engine.load_block_handle(&id)? {
+            if !pre_apply && handle.is_applied() || pre_apply && handle.has_state() {
+                merkle_proof = next_merkle_proof.unwrap_or_default();
+                log::trace!("apply_proof_chain: {} already done", id);
+                continue;
+            }
+        }
+
+        log::trace!("apply_proof_chain: next proof {}", id);
+
+        let data = merkle_proof.write_to_bytes()?;
+        let block_stuff = BlockStuff::deserialize_queue_update(id.clone(), own_wc, data)?;
+        let queue_update = block_stuff.get_queue_update_for(own_wc)?;
+
+        log::trace!("apply_proof_chain: apply {}, is_empty {}", id, queue_update.is_empty);
+        if queue_update.is_empty {
+            let handle = engine.create_handle_for_empty_queue_update(&block_stuff)?
+                .to_non_updated().ok_or_else(
+                    || error!("INTERNAL ERROR: mismatch in empty queue update {} storing", id)
+                )?;
+            Arc::clone(&engine).apply_block(
+                &handle,
+                &block_stuff,
+                mc_seq_no,
+                pre_apply,
+            ).await?;
+        } else if !apply_only_empty {
+            Arc::clone(&engine).download_and_apply_block(
+                &id,
+                mc_seq_no, 
+                pre_apply
+            ).await?;
+        } else {
+            log::trace!("apply_proof_chain {} finished because of non empty update", id);
+            return Ok(false);
+        }
+
+        merkle_proof = next_merkle_proof.unwrap_or_default();
+    }
+
+    Ok(true)
+}
+
+pub trait BlockOrQueueUpdateBroadcast: Sync + Send {
+    fn id(&self) -> &BlockIdExt;
+    fn catchain_seqno(&self) -> u32;
+    fn validator_set_hash(&self) -> u32;
+    fn proof(&self) -> Option<Vec<u8>>;
+    fn data(&self)-> Vec<u8>;
+    fn is_queue_update_for(&self) -> Option<i32>;
+    fn signatures(&self) -> &[ton_api::ton::ton_node::blocksignature::BlockSignature];
+
+    fn extract_signatures(&self) -> Result<BlockSignaturesPure> {
+        let mut blk_pure_signatures = BlockSignaturesPure::default();
+        for api_sig in self.signatures().iter() {
+            blk_pure_signatures.add_sigpair(
+                CryptoSignaturePair {
+                    node_id_short: api_sig.who.clone(),
+                    sign: CryptoSignature::from_bytes(&api_sig.signature)?,
+                }
+            );
+        }
+        Ok(blk_pure_signatures)
+    }
+}
+
+impl BlockOrQueueUpdateBroadcast for BlockBroadcast {
+    fn id(&self) -> &BlockIdExt { &self.id }
+    fn catchain_seqno(&self) -> u32 { self.catchain_seqno as u32 }
+    fn validator_set_hash(&self) -> u32 { self.validator_set_hash as u32 }
+    fn proof(&self) -> Option<Vec<u8>> { Some(self.proof.0.clone()) }
+    fn data(&self)-> Vec<u8> { self.data.0.clone() }
+    fn is_queue_update_for(&self) -> Option<i32> { None }
+    fn signatures(&self) -> &[ton_api::ton::ton_node::blocksignature::BlockSignature] {
+        &self.signatures
+    }
+}
+
+impl BlockOrQueueUpdateBroadcast for QueueUpdateBroadcast {
+    fn id(&self) -> &BlockIdExt { &self.id }
+    fn catchain_seqno(&self) -> u32 { self.catchain_seqno as u32 }
+    fn validator_set_hash(&self) -> u32 { self.validator_set_hash as u32 }
+    fn proof(&self) -> Option<Vec<u8>> { None }
+    fn data(&self)-> Vec<u8> { self.data.0.clone() }
+    fn is_queue_update_for(&self) -> Option<i32> { Some(self.target_wc) }
+    fn signatures(&self) -> &[ton_api::ton::ton_node::blocksignature::BlockSignature] {
+        &self.signatures
+    }
+}
+
 pub const SHARD_BROADCAST_WINDOW: u32 = 8;
 
 pub async fn process_block_broadcast(
     engine: &Arc<dyn EngineOperations>, 
-    broadcast: &BlockBroadcast
+    broadcast: &dyn BlockOrQueueUpdateBroadcast
 ) -> Result<Option<BlockStuff>> {
 
-    log::trace!("process_block_broadcast: {}", broadcast.id);
-    if let Some(handle) = engine.load_block_handle(&broadcast.id)? {
+    log::trace!("process_block_broadcast: {}", broadcast.id());
+    if let Some(handle) = engine.load_block_handle(broadcast.id())? {
         if handle.has_data() {
             #[cfg(feature = "telemetry")] {
                 let duplicate = handle.got_by_broadcast();
                 let unneeded = !duplicate;
                 engine.full_node_telemetry().new_block_broadcast(
-                    &broadcast.id, 
+                    broadcast.id(),
                     duplicate, 
                     unneeded
                 );
@@ -338,39 +573,69 @@ pub async fn process_block_broadcast(
         }
     }
     #[cfg(feature = "telemetry")]
-    engine.full_node_telemetry().new_block_broadcast(&broadcast.id, false, false);
+    engine.full_node_telemetry().new_block_broadcast(broadcast.id(), false, false);
 
-    let is_master = broadcast.id.shard().is_masterchain();
-    let proof = BlockProofStuff::deserialize(
-        &broadcast.id, 
-        broadcast.proof.0.clone(), 
-        !is_master
-    )?;
-    let (virt_block, _) = proof.virtualize_block()?;
-    let block_info = virt_block.read_info()?;
-    let prev_key_block_seqno = block_info.prev_key_block_seqno();
-    let last_applied_mc_state = engine.load_last_applied_mc_state_or_zerostate().await.map_err(
+    let is_master = broadcast.id().shard().is_masterchain();
+    let mut proof_opt = None;
+
+    let last_applied_mc_state = engine.load_last_applied_mc_state().await.map_err(
         |e| error!("INTERNAL ERROR: can't load last mc state: {}", e)
     )?;
-    if prev_key_block_seqno > last_applied_mc_state.block_id().seq_no() {
-        log::debug!(
-            "Skipped block broadcast {} because it refers too new key block: {}, \
-            but last processed mc block is {})",
-            broadcast.id, prev_key_block_seqno, last_applied_mc_state.block_id().seq_no()
-        );
-        return Ok(None);
-    }
 
-    let config_params = last_applied_mc_state.config_params()?;
-    validate_brodcast(broadcast, config_params, &broadcast.id)?;
 
-    // Build and save block and proof
-    if is_master {
-        proof.check_with_master_state(last_applied_mc_state.as_ref())?;
+    let (is_foreign_block, own_wc) = engine.is_foreign_wc(broadcast.id().shard().workchain_id()).await?;
+    let block;
+    if is_foreign_block { 
+        let target_wc = broadcast.is_queue_update_for()
+            .ok_or_else(|| error!("Got full block broadcast {} from foreign wc", broadcast.id()))?;
+        if target_wc != own_wc {
+            fail!("Got queue update brodcast {} for foreign wc {}", broadcast.id(), target_wc);
+        }
+        block = BlockStuff::deserialize_queue_update(
+            broadcast.id().clone(),
+            target_wc,
+            broadcast.data()
+        )?;
+        BlockProofStuff::check_queue_update(&block)?;
+
+        validate_brodcast(broadcast, &last_applied_mc_state, broadcast.id())?;
+
+    } else if let Some(proof_data) = broadcast.proof() {
+
+        let proof = BlockProofStuff::deserialize(
+            broadcast.id(),
+            proof_data,
+            !is_master
+        )?;
+        let (virt_block, _) = proof.virtualize_block()?;
+        let block_info = virt_block.read_info()?;
+        let prev_key_block_seqno = block_info.prev_key_block_seqno();
+        if prev_key_block_seqno > last_applied_mc_state.block_id().seq_no() {
+            log::debug!(
+                "Skipped block broadcast {} because it refers too new key block: {}, \
+                but last processed mc block is {})",
+                broadcast.id(), prev_key_block_seqno, last_applied_mc_state.block_id().seq_no()
+            );
+            return Ok(None);
+        }
+
+        validate_brodcast(broadcast, &last_applied_mc_state, broadcast.id())?;
+
+        // Build and save block and proof
+        if is_master {
+            proof.check_with_master_state(last_applied_mc_state.as_ref())?;
+        } else {
+            proof.check_proof_link()?;
+        }
+
+        proof_opt = Some(proof);
+
+        block = BlockStuff::deserialize_block_checked(broadcast.id().clone(), broadcast.data())?;
     } else {
-        proof.check_proof_link()?;
+        fail!("Invalid block or queue broadcast {} - it doesn't have both proof and target_wc",
+            broadcast.id());
     }
-    let block = BlockStuff::deserialize_checked(broadcast.id.clone(), broadcast.data.0.clone())?;
+    
     let mut handle = if let Some(handle) = engine.store_block(&block).await?.to_updated() {
         handle
     } else {
@@ -380,24 +645,33 @@ pub async fn process_block_broadcast(
         );
         return Ok(None);
     };
+
     #[cfg(feature = "telemetry")]
     handle.set_got_by_broadcast(true);
 
-    if !handle.has_proof() {
-        let result = engine.store_block_proof(block.id(), Some(handle), &proof).await?;
-        handle = if let Some(handle) = result.to_updated() {
-            handle
-        } else {
-            log::debug!(
-                "Skipped apply for block {} broadcast because block is already in processing",
-                block.id()
-            );
-            return Ok(None);
+    if let Some(proof) = proof_opt.as_ref() {
+        if !handle.has_proof() {
+            let result = engine.store_block_proof(block.id(), Some(handle), proof).await?;
+            handle = if let Some(handle) = result.to_updated() {
+                handle
+            } else {
+                log::debug!(
+                    "Skipped apply for block {} broadcast because block is already in processing",
+                    block.id()
+                );
+                return Ok(None);
+            }
         }
     }
 
+    if broadcast.is_queue_update_for().is_some() {
+        // skip pre-apply for queue updates because it may cause unneeded 
+        // network requests of empty previous updates
+        return Ok(None)
+    }
+
     // Apply (only blocks that is not too new for us)
-    if block.id().shard().is_masterchain() {
+    if is_master {
         if block.id().seq_no() == last_applied_mc_state.block_id().seq_no() + 1 {
             engine.clone().apply_block(&handle, &block, block.id().seq_no(), false).await?;
         } else {
@@ -408,7 +682,7 @@ pub async fn process_block_broadcast(
         }
     } else {
         let master_ref = block
-            .block()
+            .block_or_queue_update()?
             .read_info()?
             .read_master_ref()?
             .ok_or_else(|| NodeError::InvalidData(format!(
@@ -430,53 +704,43 @@ pub async fn process_block_broadcast(
 }
 
 fn validate_brodcast(
-    broadcast: &BlockBroadcast,
-    config_params: &ConfigParams,
+    broadcast: &dyn BlockOrQueueUpdateBroadcast,
+    mc_state: &ShardStateStuff,
     block_id: &BlockIdExt,
 ) -> Result<()> {
 
-    let validator_set = config_params.validator_set()?;
-    let cc_config = config_params.catchain_config()?;
+    let config = mc_state.config_params()?;
+    let val_set = config.validator_set()?;
+    let cc_seqno = broadcast.catchain_seqno();
 
     // build validator set
-    let (validators, validators_hash_short) = calc_subset_for_workchain(
-        &validator_set,
-        config_params,
-        &cc_config, 
-        block_id.shard().shard_prefix_with_tag(), 
-        block_id.shard().workchain_id(), 
-        broadcast.catchain_seqno as u32,
-        0.into() // TODO: unix time is not realy used in algorithm, but exists in t-node,
-                 // maybe delete it from `calc_subset` parameters?
-    )?;
+    let subset = if block_id.shard().is_masterchain() {
+        calc_subset_for_masterchain(&val_set, config, cc_seqno)?
+    } else {
+         {
+            calc_subset_for_workchain_standard(&val_set, config, block_id.shard(), cc_seqno)?
+        }
+    };
 
-    if validators_hash_short != broadcast.validator_set_hash as u32 {
+    if subset.short_hash != broadcast.validator_set_hash() {
         fail!(NodeError::InvalidData(format!(
             "Bad validator set hash in broadcast with block {}, calculated: {}, found: {}",
             block_id,
-            validators_hash_short,
-            broadcast.validator_set_hash
+            subset.short_hash,
+            broadcast.validator_set_hash()
         )));
     }
 
     // extract signatures - build ton_block::BlockSignaturesPure
-    let mut blk_pure_signatures = BlockSignaturesPure::default();
-    for api_sig in broadcast.signatures.iter() {
-        blk_pure_signatures.add_sigpair(
-            CryptoSignaturePair {
-                node_id_short: api_sig.who.clone(),
-                sign: CryptoSignature::from_bytes(&api_sig.signature)?,
-            }
-        );
-    }
+    let blk_pure_signatures = broadcast.extract_signatures()?;
 
     // Check signatures
     let checked_data = ton_block::Block::build_data_for_sign(
         &block_id.root_hash,
         &block_id.file_hash
     );
-    let total_weight: u64 = validators.iter().map(|v| v.weight).sum();
-    let weight = check_crypto_signatures(&blk_pure_signatures, &validators, &checked_data)
+    let total_weight: u64 = subset.validators.iter().map(|v| v.weight).sum();
+    let weight = check_crypto_signatures(&blk_pure_signatures, &subset.validators, &checked_data)
         .map_err(|err| NodeError::InvalidData(
             format!("Bad signatures in broadcast with block {}: {}", block_id, err)
         ))?;

@@ -34,7 +34,6 @@ use std::{
 };
 use rand::Rng;
 
-
 pub enum StoreAction {
     Save(TopBlockDescrId, Arc<TopBlockDescrStuff>),
     Remove(TopBlockDescrId)
@@ -47,8 +46,7 @@ pub enum ShardBlockProcessingResult {
 
 declare_counted!(
     struct ShardBlocksPoolItem {
-        top_block: Arc<TopBlockDescrStuff>,
-        own: bool
+        top_block: Arc<TopBlockDescrStuff>
     }
 );
 
@@ -77,8 +75,7 @@ impl ShardBlocksPool {
                 key,
                 || {
                     let ret = ShardBlocksPoolItem { 
-                        top_block: val.clone(), 
-                        own: false,
+                        top_block: val.clone(),
                         counter: allocated.top_blocks.clone().into() 
                     };
                     #[cfg(feature = "telemetry")]
@@ -112,9 +109,9 @@ impl ShardBlocksPool {
             } else {
                 TopBlockDescr::construct_from_bytes(&data)?
             };
-            Ok(Arc::new(TopBlockDescrStuff::new(tbd, &id, self.is_fake)?))
+            Ok(Arc::new(TopBlockDescrStuff::new(tbd, &id, self.is_fake, own)?))
         };
-        self.process_shard_block(id, cc_seqno, factory, own, check_only, engine).await
+        self.process_shard_block(id, cc_seqno, factory, check_only, engine).await
     }
 
     pub async fn process_shard_block(
@@ -122,7 +119,6 @@ impl ShardBlocksPool {
         id: &BlockIdExt,
         cc_seqno: u32,
         mut factory: impl FnMut() -> Result<Arc<TopBlockDescrStuff>>,
-        own: bool,
         check_only: bool,
         engine: &dyn EngineOperations,
     ) -> Result<ShardBlockProcessingResult> {
@@ -177,7 +173,6 @@ impl ShardBlocksPool {
                     let top_blocks = &engine.engine_allocated().top_blocks;
                     let ret = ShardBlocksPoolItem { 
                         top_block: tbds.clone(),
-                        own,
                         counter: top_blocks.clone().into() 
                     };
                     #[cfg(feature = "telemetry")]
@@ -248,15 +243,28 @@ impl ShardBlocksPool {
 
     }
 
-    pub fn get_shard_blocks(&self, last_mc_seq_no: u32, only_own: bool) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
-        if last_mc_seq_no != self.last_mc_seq_no.load(Ordering::Relaxed) {
+    pub async fn get_shard_blocks(
+        &self,
+        last_mc_state: &Arc<ShardStateStuff>,
+        _engine: &dyn EngineOperations,
+        only_own: bool,
+        actual_last_mc_seqno: Option<&mut u32>,
+    ) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
+        let last_mc_seq_no = last_mc_state.block_id().seq_no;
+
+        let mc_seqno = self.last_mc_seq_no.load(Ordering::Relaxed);
+        if let Some(actual_last_mc_seqno) = actual_last_mc_seqno {
+            *actual_last_mc_seqno = mc_seqno;
+        }
+
+        if last_mc_seq_no != mc_seqno {
             log::error!("get_shard_blocks: Given last_mc_seq_no {} is not actual", last_mc_seq_no);
-            fail!("Given last_mc_seq_no {} is not actual {}", last_mc_seq_no, self.last_mc_seq_no.load(Ordering::Relaxed));
+            fail!("Given last_mc_seq_no {} is not actual {}", last_mc_seq_no, mc_seqno);
         } else {
             let mut returned_list = string_builder::Builder::default();
             let mut blocks = Vec::new();
             for guard in self.shard_blocks.iter() {
-                if !only_own || guard.val().own {
+                if !only_own || guard.val().top_block.is_own() {
                     blocks.push(guard.val().top_block.clone());
                     returned_list.append(format!("\n{} {}", guard.key().cc_seqno, guard.key().id));
                 }
@@ -267,7 +275,7 @@ impl ShardBlocksPool {
         }
     }
 
-    pub fn update_shard_blocks(&self, last_mc_state: &Arc<ShardStateStuff>) -> Result<()> {
+    pub async fn update_shard_blocks(&self, last_mc_state: &Arc<ShardStateStuff>) -> Result<()> {
         self.last_mc_seq_no.store(last_mc_state.block_id().seq_no(), Ordering::Relaxed);
         let mut removed_list = string_builder::Builder::default();
         for block in self.shard_blocks.iter() {
@@ -312,12 +320,8 @@ pub fn resend_top_shard_blocks_worker(engine: Arc<dyn EngineOperations>) {
 }
 
 async fn resend_top_shard_blocks(engine: &dyn EngineOperations) -> Result<()> {
-    let id = if let Some(id) = engine.load_last_applied_mc_block_id()? {
-        id
-    } else {
-        fail!("INTERNAL ERROR: No last applied MC block after sync")
-    };
-    let tsbs = engine.get_own_shard_blocks(id.seq_no)?;
+    let mc_state = engine.load_last_applied_mc_state().await?;
+    let tsbs = engine.get_own_shard_blocks(&mc_state).await?;
     for tsb in tsbs {
         engine.send_top_shard_block_description(tsb, 0, true).await?;
     }

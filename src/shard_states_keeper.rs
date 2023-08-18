@@ -14,12 +14,11 @@ use storage::{
     shardstate_db_async::SsNotificationCallback,
 };
 use ton_block::{BlockIdExt, ShardIdent};
-use ton_types::{fail, error, Result, UInt256};
+use ton_types::{fail, error, Result, UInt256, BocReader};
 use adnl::common::add_unbound_object_to_map;
 use std::{
     time::Duration, ops::Deref,
 };
-use ton_types::BocDeserializer;
 
 /// This structs works beetween engine and db.
 /// ValidatorManager  Collator  ValidatorQuery  etc.   <- high level node commponents
@@ -38,6 +37,7 @@ pub struct ShardStatesKeeper {
     enable_persistent_gc: bool,
     stopper: Arc<Stopper>,
     max_catch_up_depth: u32,
+    skip_saving_pss: bool,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<EngineTelemetry>,
     allocated: Arc<EngineAlloc>,
@@ -50,6 +50,7 @@ impl ShardStatesKeeper {
     pub fn new(
         db: Arc<InternalDb>,
         enable_shard_state_persistent_gc: bool,
+        skip_saving_pss: bool,
         cells_lifetime_sec: u64,
         stopper: Arc<Stopper>,
         max_catch_up_depth: u32,
@@ -69,6 +70,7 @@ impl ShardStatesKeeper {
             states: lockfree::map::Map::new(),
             stopper,
             max_catch_up_depth,
+            skip_saving_pss,
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated,
@@ -85,7 +87,7 @@ impl ShardStatesKeeper {
 
         log::trace!("start");
 
-        self.restore_states(&engine, last_applied_mc_block, shard_client_mc_block).await?;
+        self.restore_states(last_applied_mc_block, shard_client_mc_block).await?;
 
         let join_handle = tokio::spawn(async move {
             engine.acquire_stop(Engine::MASK_SERVICE_PSS_KEEPER);
@@ -149,8 +151,6 @@ impl ShardStatesKeeper {
         force: bool,
     ) -> Result<(Arc<ShardStateStuff>, bool)> {
 
-        self.check_stop()?;
-
         let (cb1, cb2) = if let Some(state_data) = persistent_state {
             // while boot - zerostate and init persistent state are saved using this parameter 
             self.db.store_shard_state_persistent_raw(&handle, state_data, None).await?;
@@ -203,29 +203,44 @@ impl ShardStatesKeeper {
         );
 
         let state_root = {
-            let mut deserialiser = BocDeserializer::new();
+            let mut boc_reader = BocReader::new();
             if low_memory_mode {
                 let done_cells_storage = self.db.create_done_cells_storage(root_hash)?;
-                deserialiser = deserialiser.set_done_cells_storage(done_cells_storage);
+                boc_reader = boc_reader.set_done_cells_storage(done_cells_storage);
             }
-            deserialiser
+            boc_reader
                 .set_abort(&|| self.stopper.check_stop())
-                .deserialize_inmem(data.clone())?
-                .withdraw_one_root()?
+                .read_inmem(data.clone())?
+                .withdraw_single_root()?
         };
+
+        if state_root.repr_hash() != *root_hash {
+            fail!("Invalid state hash {:x} != {:x}", state_root.repr_hash(), root_hash);
+        }
 
         log::info!(
             "check_and_store_state: deserialized (low_memory_mode: {}) {} TIME {}",
             handle.id(), low_memory_mode, now.elapsed().as_millis()
         );
 
-        let state = ShardStateStuff::from_root_cell(
-            handle.id().clone(), 
-            state_root,
-            #[cfg(feature = "telemetry")]
-            &self.telemetry,
-            &self.allocated
-        )?;
+        let state = if let Some(wc) = handle.is_queue_update_for() {
+            ShardStateStuff::from_out_msg_queue_root_cell(
+                handle.id().clone(), 
+                state_root,
+                wc,
+                #[cfg(feature = "telemetry")]
+                &self.telemetry,
+                &self.allocated
+            )?
+        } else {
+            ShardStateStuff::from_state_root_cell(
+                handle.id().clone(), 
+                state_root,
+                #[cfg(feature = "telemetry")]
+                &self.telemetry,
+                &self.allocated
+            )?
+        };
 
         let (state, _) = self.store_state(handle, state, Some(&data), false).await?;
 
@@ -242,7 +257,6 @@ impl ShardStatesKeeper {
 
     async fn restore_states(
         &self,
-        engine: &Engine,
         last_applied_mc_block: BlockIdExt,
         shard_client_mc_block: BlockIdExt,
     ) -> Result<()> {
@@ -253,8 +267,7 @@ impl ShardStatesKeeper {
         let _ = self.load_state(&last_applied_mc_block).await?;
 
         let mc_state = self.load_state(&shard_client_mc_block).await?;
-        let (_, processed_wc) = engine.processed_workchain().await?;
-        let shard_blocks = mc_state.shard_hashes()?.top_blocks(&[processed_wc])?; 
+        let shard_blocks = mc_state.shard_hashes()?.top_blocks_all()?; 
         for block_id in &shard_blocks {
             self.load_state(block_id).await?;
         }
@@ -372,7 +385,13 @@ impl ShardStatesKeeper {
                 }
             };
 
-            let merkle_update = block.block().read_state_update()?;
+            let is_queue_update_for = block.is_queue_update_for();
+            let merkle_update = if let Some (target_wc) = &is_queue_update_for {
+                block.get_queue_update_for(*target_wc)?.update
+            } else {
+                block.block()?.read_state_update()?
+            };
+
             let id = id.clone();
             #[cfg(feature = "telemetry")]
             let telemetry = self.telemetry.clone();
@@ -384,13 +403,25 @@ impl ShardStatesKeeper {
                     let root = merkle_update.apply_for(&prev_root)?;
                     log::trace!("TIME: restore_state_recursive: applied Merkle update {}ms   {}",
                         now.elapsed().as_millis(), id);
-                    ShardStateStuff::from_root_cell(
-                        id, 
-                        root,
-                        #[cfg(feature = "telemetry")]
-                        &telemetry,
-                        &allocated
-                    )
+
+                    if let Some (target_wc) = &is_queue_update_for {
+                        ShardStateStuff::from_out_msg_queue_root_cell(
+                            id, 
+                            root,
+                            *target_wc,
+                            #[cfg(feature = "telemetry")]
+                            &telemetry,
+                            &allocated
+                        )
+                    } else {
+                        ShardStateStuff::from_state_root_cell(
+                            id, 
+                            root,
+                            #[cfg(feature = "telemetry")]
+                            &telemetry,
+                            &allocated
+                        )
+                    }
                 }
             ).await??;
 
@@ -446,64 +477,69 @@ impl ShardStatesKeeper {
             }
 
             if is_persistent_state {
-                // store states
+                if self.skip_saving_pss {
+                    log::trace!("Persistent state is skipped due to config {}", handle.id());
+                } else {
+                    // store states
 
-                let e = engine.clone();
-                let abort = Arc::new(move || e.check_stop());
+                    let e = engine.clone();
+                    let abort = Arc::new(move || e.check_stop());
 
-                log::trace!("states_keeper: saving {}", handle.id());
-                let now = std::time::Instant::now();
-                self.wait_and_store_persistent_state(
-                    engine.deref(), &handle, abort.clone()).await;
-                if engine.check_stop() {
-                    return Ok(());
-                }
-                log::trace!("saved {} TIME {}ms", handle.id(), now.elapsed().as_millis());
-
-                let (_, processed_wc) = engine.processed_workchain().await?;
-                let shard_blocks = mc_state.shard_hashes()?.top_blocks(&[processed_wc])?; 
-                for block_id in &shard_blocks {
-                    log::trace!("saving {}", block_id);
+                    log::trace!("states_keeper: saving {}", handle.id());
                     let now = std::time::Instant::now();
-                    let handle = 'a: loop {
-                        match engine.wait_applied_block(block_id, Some(1000)).await {
-                            Ok((h, _)) => break 'a h,
-                            Err(e) => {
-                                if engine.check_stop() {
-                                    return Ok(());
-                                }
-                                log::debug!("states_keeper: haven't shard block handle {} yet: {:?}", 
-                                    block_id, e);
-                            }
-                        }
-                    };
                     self.wait_and_store_persistent_state(
                         engine.deref(), &handle, abort.clone()).await;
                     if engine.check_stop() {
                         return Ok(());
                     }
                     log::trace!("saved {} TIME {}ms", handle.id(), now.elapsed().as_millis());
-                };
-                log::info!("saved mc state {} and all related shards", handle.id().seq_no());
 
-                // gc iteration for persistent/stored states
-
-                if self.enable_persistent_gc {
-                    let calc_ttl = |t| {
-                        let ttl = engine.persistent_state_ttl(t, boot::PSS_PERIOD_BITS);
-                        let expired = ttl <= engine.now();
-                        (ttl, expired)
+                    let shard_blocks = mc_state.shard_hashes()?.top_blocks_all()?; 
+                    for block_id in &shard_blocks {
+                        log::trace!("saving {}", block_id);
+                        let now = std::time::Instant::now();
+                        let handle = 'a: loop {
+                            match engine.wait_applied_block(block_id, Some(1000)).await {
+                                Ok(h) => break 'a h,
+                                Err(e) => {
+                                    if engine.check_stop() {
+                                        return Ok(());
+                                    }
+                                    log::debug!(
+                                        "states_keeper: haven't got shard block handle {} yet: {:?}", 
+                                        block_id, e
+                                    );
+                                }
+                            }
+                        };
+                        self.wait_and_store_persistent_state(
+                            engine.deref(), &handle, abort.clone()).await;
+                        if engine.check_stop() {
+                            return Ok(());
+                        }
+                        log::trace!("saved {} TIME {}ms", handle.id(), now.elapsed().as_millis());
                     };
-                    let mut last_stored = shard_blocks;
-                    last_stored.push(handle.id().clone());
-                    let zerostate_id = engine.zero_state_id();
-                    if let Err(e) = self.db.shard_state_persistent_gc(calc_ttl, zerostate_id).await {
-                        log::warn!("persistent states gc: {}", e);
-                    }
-                }
+                    log::info!("saved mc state {} and all related shards", handle.id().seq_no());
 
-                if engine.check_stop() {
-                    return Ok(());
+                    // gc iteration for persistent/stored states
+
+                    if self.enable_persistent_gc {
+                        let calc_ttl = |t| {
+                            let ttl = engine.persistent_state_ttl(t, boot::PSS_PERIOD_BITS);
+                            let expired = ttl <= engine.now();
+                            (ttl, expired)
+                        };
+                        let mut last_stored = shard_blocks;
+                        last_stored.push(handle.id().clone());
+                        let zerostate_id = engine.zero_state_id();
+                        if let Err(e) = self.db.shard_state_persistent_gc(calc_ttl, zerostate_id).await {
+                            log::warn!("persistent states gc: {}", e);
+                        }
+                    }
+
+                    if engine.check_stop() {
+                        return Ok(());
+                    }
                 }
             }
 

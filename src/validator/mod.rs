@@ -82,7 +82,7 @@ pub struct McData {
 impl McData {
     pub fn new(mc_state: Arc<ShardStateStuff>) -> Result<Self> {
 
-        let mc_state_extra = mc_state.state().read_custom()?
+        let mc_state_extra = mc_state.state()?.read_custom()?
             .ok_or_else(|| error!("Can't read custom field from mc state"))?;
 
         // prev key block
@@ -106,19 +106,19 @@ impl McData {
     pub fn prev_key_block_seqno(&self) -> u32 { self.prev_key_block_seqno }
     pub fn prev_key_block(&self) -> Option<&BlockIdExt> { self.prev_key_block.as_ref() }
     pub fn state(&self) -> &Arc<ShardStateStuff> { &self.state }
-    pub fn vert_seq_no(&self) -> u32 { self.state().state().vert_seq_no() }
+    pub fn vert_seq_no(&self) -> Result<u32> { Ok(self.state().state()?.vert_seq_no()) }
     pub fn get_lt_align(&self) -> u64 { 1000000 }
     pub fn global_balance(&self) -> &CurrencyCollection { &self.mc_state_extra.global_balance }
-    pub fn libraries(&self) -> &Libraries { self.state.state().libraries() }
-    pub fn master_ref(&self) -> BlkMasterInfo {
-        let end_lt = self.state.state().gen_lt();
+    pub fn libraries(&self) -> Result<&Libraries> { Ok(self.state.state()?.libraries()) }
+    pub fn master_ref(&self) -> Result<BlkMasterInfo> {
+        let end_lt = self.state.state()?.gen_lt();
         let master = ExtBlkRef {
             end_lt,
-            seq_no: self.state.state().seq_no(),
+            seq_no: self.state.state()?.seq_no(),
             root_hash: self.state.block_id().root_hash().clone(),
             file_hash: self.state.block_id().file_hash().clone(),
         };
-        BlkMasterInfo { master }
+        Ok(BlkMasterInfo { master })
     }
 }
 

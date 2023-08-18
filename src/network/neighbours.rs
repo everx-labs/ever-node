@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -11,24 +11,21 @@
 * limitations under the License.
 */
 
-use adnl::{common::{Query, TaggedTlObject, Wait}, node::{AdnlNode, AddressCache}};
 use crate::engine::STATSD;
-use ever_crypto::{Ed25519KeyOption, KeyId};
+
+use adnl::{common::{Query, TaggedTlObject, Wait}, node::{AdnlNode, AddressCache}};
 use dht::DhtNode;
 use overlay::{OverlayShortId, OverlayNode};
-use rand::{Rng};
+use rand::Rng;
 use std::{
     cmp::min, 
     sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicI32, AtomicU64, AtomicI64, Ordering}},
     time::{Duration, Instant}
 };
-use ton_types::{error, fail, Result};
-use ton_api::{
-    tag_from_boxed_type,
-    ton::{
-       TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities
-    }
-};
+use ton_api::ton::{TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities};
+#[cfg(feature = "telemetry")]
+use ton_api::tag_from_boxed_type;
+use ton_types::{error, fail, KeyId, KeyOption, Result};
 
 #[derive(Debug)]
 pub struct Neighbour {
@@ -382,7 +379,8 @@ impl Neighbours {
                             Ok(Some(peers)) => {
                                 let mut new_peers = Vec::new();
                                 for peer in peers.iter() {
-                                    match Ed25519KeyOption::from_public_key_tl(&peer.id) {
+                                    let result: Result<Arc<dyn KeyOption>> = (&peer.id).try_into();
+                                    match result {
                                         Ok(key) => if !self.contains_overlay_peer(key.id()) {
                                             new_peers.push(key.id().clone());
                                         },
@@ -432,20 +430,16 @@ impl Neighbours {
         let this = self.clone();
         tokio::spawn(async move {
             for peer in peers.iter() {
-                log::trace!("add_new_peers: start find address: peer {}", peer);
+                log::trace!("add_new_peers: searching IP for peer {}...", peer);
                 match DhtNode::find_address(&this.dht, peer).await {
                     Ok(Some((ip, _))) => {
-                        log::info!("add_new_peers: addr peer {}", ip);
+                        log::info!("add_new_peers: peer {}, IP {}", peer, ip);
                         if !this.add_overlay_peer(peer.clone()) {
                             log::debug!("add_new_peers already present");
                         }
                     }
-                    Ok(None) => {
-                        log::warn!("add_new_peers: find address - not found");
-                    }
-                    Err(e) => {
-                        log::warn!("add_new_peers: find address error - {}", e);
-                    }
+                    Ok(None) => log::warn!("add_new_peers: peer {}, IP not found", peer),
+                    Err(e) => log::warn!("add_new_peers: peer {}, IP search error {}", peer, e)
                 }
             }
         });

@@ -11,7 +11,14 @@
 * limitations under the License.
 */
 
-pub use super::*;
+use crate::{
+    Any, BlockId, BoolVectorPtr, CachedInstanceCounter, CacheObject, HashableObject, 
+    HashType, Merge, MovablePoolObject, PoolObject, PoolPtr, SentBlockPtr, SentBlockWrapper, 
+    SessionCache, SessionDescription, SessionFactory, SessionPool, VectorMerge, VoteCandidate,
+    VoteCandidatePtr, VoteCandidateWrapper, ton
+};
+use catchain::instrument;
+use std::fmt;
 
 /*
     Implementation details for VoteCandidate
@@ -87,7 +94,7 @@ impl VoteCandidate for VoteCandidateImpl {
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn VoteCandidate> {
-        profiling::instrument!();
+        instrument!();
 
         let self_cloned = Self::new(
             self.block.move_to_persistent(cache),
@@ -105,7 +112,7 @@ impl VoteCandidate for VoteCandidateImpl {
 
 impl VoteCandidateWrapper for VoteCandidatePtr {
     fn push(&self, desc: &mut dyn SessionDescription, src_idx: u32) -> VoteCandidatePtr {
-        profiling::instrument!();
+        instrument!();
 
         let &self_impl = &get_impl(&**self);
 
@@ -129,7 +136,7 @@ impl VoteCandidateWrapper for VoteCandidatePtr {
 
 impl Merge<PoolPtr<dyn VoteCandidate>> for PoolPtr<dyn VoteCandidate> {
     fn merge(&self, right: &Self, desc: &mut dyn SessionDescription) -> Self {
-        profiling::instrument!();
+        instrument!();
 
         let left = self;
 
@@ -263,7 +270,7 @@ impl VoteCandidateImpl {
         block: SentBlockPtr,
         voted_by: BoolVectorPtr,
     ) -> VoteCandidatePtr {
-        profiling::instrument!();
+        instrument!();
 
         let body = Self::new(block, voted_by, desc.get_vote_candidates_instance_counter());
 

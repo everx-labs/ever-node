@@ -17,7 +17,6 @@
 
 use openssl::rand::rand_bytes;
 
-
 /*
 pub struct Randbuf {
     buf: Vec<u8>,

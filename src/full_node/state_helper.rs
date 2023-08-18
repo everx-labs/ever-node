@@ -11,17 +11,15 @@
 * limitations under the License.
 */
 
-use crate::{
-    network::full_node_client::FullNodeOverlayClient,
-};
+use crate::network::full_node_client::FullNodeOverlayClient;
 
-use ever_crypto::KeyId;
-use std::sync::{Arc, /*atomic::{AtomicUsize, Ordering}*/};
+use std::sync::Arc;
 use ton_block::BlockIdExt;
-use ton_types::{error, fail, Result};
+use ton_types::{error, fail, KeyId, Result};
 
 pub async fn download_persistent_state(
     id: &BlockIdExt,
+    msg_queue_for: Option<i32>,
     master_id: &BlockIdExt,
     overlay: &dyn FullNodeOverlayClient,
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
@@ -31,7 +29,7 @@ pub async fn download_persistent_state(
     let mut result = None;
     for _ in 0..10 {
         match download_persistent_state_iter(
-            id, master_id, overlay, active_peers, attempts.clone(), check_stop,
+            id, msg_queue_for, master_id, overlay, active_peers, attempts.clone(), check_stop,
         ).await {
             Err(e) => {
                 log::warn!("download_persistent_state_iter err: {}", e);
@@ -49,6 +47,7 @@ pub async fn download_persistent_state(
 
 async fn download_persistent_state_iter(
     id: &BlockIdExt,
+    msg_queue_for: Option<i32>,
     master_id: &BlockIdExt,
     overlay: &dyn FullNodeOverlayClient,
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
@@ -60,20 +59,26 @@ async fn download_persistent_state_iter(
         fail!("zerostate is not supported");
     }
 
+    let descr = if let Some(wc) = msg_queue_for {
+        format!("out messages queue for wc {}", wc)
+    } else {
+        "persistent state".to_owned()
+    };
+
     // Check
     let peer = loop {
         check_stop()?;
         if let Some(remained) = attempts.as_mut() {
             if *remained == 0 {
-                fail!("Can't find peer to load persistent state")
+                fail!("Can't find peer to load {} {}", descr, id.shard())
             }
             *remained -= 1;
         }
-        match overlay.check_persistent_state(id, master_id, active_peers).await {
+        match overlay.check_persistent_state(id, msg_queue_for, master_id, active_peers).await {
             Err(e) => 
-                log::trace!("check_persistent_state {}: {}", id.shard(), e),
+                log::trace!("check_persistent_state descr {} {}: {}", descr, id.shard(), e),
             Ok(None) => 
-                log::trace!("download_persistent_state {}: state not found!", id.shard()),
+                log::trace!("download_persistent_state {}: {} not found!", descr, id.shard()),
             Ok(Some(p)) => 
                 break p
         }
@@ -93,7 +98,7 @@ async fn download_persistent_state_iter(
     loop {
         check_stop()?;
         let result = overlay.download_persistent_state_part(
-            id, master_id, offset, max_size, peer.clone(), peer_attempt
+            id, msg_queue_for, master_id, offset, max_size, peer.clone(), peer_attempt
         ).await;
         match result {
             Ok(next_bytes) => {
@@ -104,7 +109,7 @@ async fn download_persistent_state_iter(
                     log::info!("download_persistent_state {}: got part offset: {}", id.shard(), offset);
                 //}
                 if len < max_size {
-                    log::info!("the total length of persistent state {} might be {}", id.shard(), offset + len);
+                    log::info!("the total length of {} {} might be {}", descr, id.shard(), offset + len);
                     break
                 }
                 offset += max_size;
@@ -126,8 +131,8 @@ async fn download_persistent_state_iter(
         }
     }
 
-    log::info!("download_persistent_state: DOWNLOADED {}sec, id: {}, master_id: {} ", 
-        now.elapsed().as_secs(), id, master_id);
+    log::info!("download_persistent_state: DOWNLOADED {} {}sec, id: {}, master_id: {} ", 
+        descr, now.elapsed().as_secs(), id, master_id);
 
     Ok(Arc::new(state_bytes))
 }

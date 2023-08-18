@@ -12,14 +12,15 @@
 */
 
 use crate::{
-    block::BlockStuff, engine_traits::EngineOperations, shard_state::ShardStateStuff
+    block::BlockStuff, engine_traits::EngineOperations, shard_state::ShardStateStuff,
+    validating_utils::UNREGISTERED_CHAIN_MAX_LEN
 };
 use std::{ops::Deref, sync::Arc};
 use storage::block_handle_db::BlockHandle;
 use ton_types::{error, fail, Result};
-use ton_block::BlockIdExt;
+use ton_block::{BlockIdExt, MerkleProof, Deserializable, Serializable};
 
-pub const MAX_RECURSION_DEPTH: u32 = 16;
+pub const MAX_RECURSION_DEPTH: u32 = UNREGISTERED_CHAIN_MAX_LEN * 2;
 
 pub async fn apply_block(
     handle: &Arc<BlockHandle>,
@@ -34,23 +35,31 @@ pub async fn apply_block(
     }
     let prev_ids = block.construct_prev_id()?;    
     check_prev_blocks(&prev_ids, engine, mc_seq_no, pre_apply, recursion_depth).await?;
-    let (shard_state, prev_states) = if handle.has_state() {
-        let shard_state = engine.load_state(handle.id()).await?;
-        let prev1 = engine.load_state(&prev_ids.0).await?;
-        let prev2 = if let Some(id) = &prev_ids.1 {
-            Some(engine.load_state(id).await?)
-        } else {
-            None
-        };
-        (shard_state, (prev1, prev2))
+
+    if handle.is_queue_update() {
+        calc_out_msg_queue(handle, block, &prev_ids, engine).await?;
+        set_prev_ids(&handle, &prev_ids, engine.deref())?;
+        set_next_ids(&handle, &prev_ids, engine.deref())?;
     } else {
-        calc_shard_state(handle, block, &prev_ids, engine).await?
-    };
-    if !pre_apply {
-        set_next_prev_ids(&handle, &prev_ids, engine.deref())?;
-        engine.process_block_in_ext_db(
-            handle, &block, None, &shard_state, (&prev_states.0, prev_states.1.as_ref()), mc_seq_no
-        ).await?;
+        let (shard_state, prev_states) = if handle.has_state() {
+            let shard_state = engine.load_state(handle.id()).await?;
+            let prev1 = engine.load_state(&prev_ids.0).await?;
+            let prev2 = if let Some(id) = &prev_ids.1 {
+                Some(engine.load_state(id).await?)
+            } else {
+                None
+            };
+            (shard_state, (prev1, prev2))
+        } else {
+            calc_shard_state(handle, block, &prev_ids, engine).await?
+        };
+        set_prev_ids(&handle, &prev_ids, engine.deref())?;
+        if !pre_apply {
+            set_next_ids(&handle, &prev_ids, engine.deref())?;
+            engine.process_block_in_ext_db(
+                handle, &block, None, &shard_state, (&prev_states.0, prev_states.1.as_ref()), mc_seq_no
+            ).await?;
+        }
     }
     Ok(())
 }
@@ -97,40 +106,21 @@ pub async fn calc_shard_state(
 
     let (prev_ss_root, prev_ss) = match prev_ids {
         (prev1, Some(prev2)) => {
-            let ss1 = engine.clone().wait_state(prev1, None, true).await?.root_cell().clone();
-            let ss2 = engine.clone().wait_state(prev2, None, true).await?.root_cell().clone();
-
-            let root = ShardStateStuff::construct_split_root(ss1.clone(), ss2.clone())?;
-            let ss1 = ShardStateStuff::from_root_cell(
-                prev1.clone(), 
-                ss1,
-                #[cfg(feature = "telemetry")]
-                engine.engine_telemetry(),
-                engine.engine_allocated()
-            )?;
-            let ss2 = ShardStateStuff::from_root_cell(
-                prev2.clone(), 
-                ss2,
-                #[cfg(feature = "telemetry")]
-                engine.engine_telemetry(),
-                engine.engine_allocated()
+            let ss1 = engine.clone().wait_state(prev1, None, true).await?;
+            let ss2 = engine.clone().wait_state(prev2, None, true).await?;
+            let root = ShardStateStuff::construct_split_root(
+                ss1.root_cell().clone(), 
+                ss2.root_cell().clone()
             )?;
             (root, (ss1, Some(ss2)))
         },
         (prev, None) => {
-            let root = engine.clone().wait_state(prev, None, true).await?.root_cell().clone();
-            let ss = ShardStateStuff::from_root_cell(
-                prev.clone(), 
-                root.clone(),
-                #[cfg(feature = "telemetry")]
-                engine.engine_telemetry(),
-                engine.engine_allocated()
-            )?;
-            (root, (ss, None))
+            let ss = engine.clone().wait_state(prev, None, true).await?;
+            (ss.root_cell().clone(), (ss, None))
         }
     };
 
-    let merkle_update = block.block().read_state_update()?;
+    let merkle_update = block.block()?.read_state_update()?;
     let block_id = block.id().clone();
     let engine_cloned = engine.clone();
 
@@ -140,7 +130,7 @@ pub async fn calc_shard_state(
             let ss_root = merkle_update.apply_for(&prev_ss_root)?;
             log::trace!("TIME: calc_shard_state: applied Merkle update {}ms   {}",
                 now.elapsed().as_millis(), block_id);
-            ShardStateStuff::from_root_cell(
+            ShardStateStuff::from_state_root_cell(
                 block_id.clone(), 
                 ss_root,
                 #[cfg(feature = "telemetry")]
@@ -155,11 +145,66 @@ pub async fn calc_shard_state(
     log::trace!("TIME: calc_shard_state: store_state {}ms   {}",
             now.elapsed().as_millis(), handle.id());
     Ok((ss, prev_ss))
-
 }
 
-// Sets next block link for prev. block and prev. for current one
-pub fn set_next_prev_ids(
+// Gets prev block(s) state and applies merkle update from block to calculate new state
+pub async fn calc_out_msg_queue(
+    handle: &Arc<BlockHandle>,
+    block: &BlockStuff,
+    prev_ids: &(BlockIdExt, Option<BlockIdExt>),
+    engine: &Arc<dyn EngineOperations>
+) -> Result<()> {
+
+    log::trace!("calc_out_msg_queue: block: {}", block.id());
+
+    let prev_ss_root = match prev_ids {
+        (prev1, Some(prev2)) => {
+            let ss1 = engine.clone().wait_state(prev1, None, true).await?;
+            let ss2 = engine.clone().wait_state(prev2, None, true).await?;
+            let root = ShardStateStuff::construct_split_root(
+                MerkleProof::construct_from_cell(ss1.root_cell().clone())?.proof,
+                MerkleProof::construct_from_cell(ss2.root_cell().clone())?.proof 
+            )?;
+            MerkleProof {
+                hash: root.hash(0),
+                depth: root.depth(0),
+                proof: root,
+            }.serialize()?
+        },
+        (prev, None) => engine.clone().wait_state(prev, None, true).await?.root_cell().clone(),
+    };
+    let target_wc = block.is_queue_update_for()
+        .ok_or_else(|| error!("Block {} is not a queue update", block.id()))?;
+    let merkle_update = block.get_queue_update_for(target_wc)?.update;
+    let block_id = block.id().clone();
+    let engine_cloned = engine.clone();
+
+    let ss = tokio::task::spawn_blocking(
+        move || -> Result<Arc<ShardStateStuff>> {
+            let now = std::time::Instant::now();
+            let ss_root = merkle_update.apply_for(&prev_ss_root)?;
+            log::trace!("TIME: calc_out_msg_queue: applied Merkle update {}ms   {}",
+                now.elapsed().as_millis(), block_id);
+            ShardStateStuff::from_out_msg_queue_root_cell(
+                block_id.clone(),
+                ss_root,
+                target_wc,
+                #[cfg(feature = "telemetry")]
+                engine_cloned.engine_telemetry(),
+                engine_cloned.engine_allocated()
+            )
+        }
+    ).await??;
+
+    let now = std::time::Instant::now();
+    engine.store_state(handle, ss).await?;
+    log::trace!("TIME: calc_out_msg_queue: store_state {}ms   {}",
+            now.elapsed().as_millis(), handle.id());
+    Ok(())
+}
+
+// set next block ids for prev blocks
+pub fn set_next_ids(
     handle: &Arc<BlockHandle>,
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
     engine: &dyn EngineOperations
@@ -175,8 +220,6 @@ pub fn set_next_prev_ids(
                 || error!("Cannot load handle for prev2 block {}", prev_id2)
             )?;
             engine.store_block_next1(&prev_handle2, handle.id())?;
-            engine.store_block_prev1(handle, &prev_id1)?;
-            engine.store_block_prev2(handle, &prev_id2)?;
         },
         (prev_id, None) => {
             // if after split and it is second ("1" branch) shard - set next2 for prev block
@@ -190,6 +233,24 @@ pub fn set_next_prev_ids(
             } else {
                 engine.store_block_next1(&prev_handle, handle.id())?;
             }
+        }
+    }
+    Ok(())
+}
+
+// Set prev block ids for (pre-)applied block
+pub fn set_prev_ids(
+    handle: &Arc<BlockHandle>,
+    prev_ids: &(BlockIdExt, Option<BlockIdExt>),
+    engine: &dyn EngineOperations
+) -> Result<()> {
+    match prev_ids {
+        (prev_id1, Some(prev_id2)) => {
+            // After merge
+            engine.store_block_prev1(handle, &prev_id1)?;
+            engine.store_block_prev2(handle, &prev_id2)?;
+        },
+        (prev_id, None) => {
             engine.store_block_prev1(handle, &prev_id)?;
         }
     }

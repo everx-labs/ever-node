@@ -11,14 +11,15 @@
 * limitations under the License.
 */
 
-use crate::validator::validator_utils::compute_validator_set_cc;
+use crate::{validator::validator_utils::compute_validator_set_cc, shard_state::ShardStateStuff};
 use ton_block::{
     ShardIdent, BlockIdExt, ConfigParams, McStateExtra, ShardHashes, ValidatorSet, McShardRecord,
-    FutureSplitMerge, INVALID_WORKCHAIN_ID, MASTERCHAIN_ID, GlobalCapabilities,
+    INVALID_WORKCHAIN_ID, MASTERCHAIN_ID, GlobalCapabilities,
 };
-use ton_types::{fail, error, Result, UInt256};
+use ton_types::{fail, error, Result, Sha256, UInt256};
 use std::{collections::HashSet, cmp::max, iter::Iterator};
-use sha2::{Sha256, Digest};
+
+pub const UNREGISTERED_CHAIN_MAX_LEN: u32 = 8;
 
 pub fn supported_capabilities() -> u64 {
     let caps =
@@ -35,6 +36,7 @@ pub fn supported_capabilities() -> u64 {
         GlobalCapabilities::CapCopyleft as u64 |
         GlobalCapabilities::CapFullBodyInBounced as u64 |
         GlobalCapabilities::CapStorageFeeToTvm as u64 |
+        GlobalCapabilities::CapWorkchains as u64 |
         GlobalCapabilities::CapStcontNewFormat as u64 |
         GlobalCapabilities::CapFastStorageStatBugfix as u64 |
         GlobalCapabilities::CapResolveMerkleCell as u64 |
@@ -49,7 +51,7 @@ pub fn supported_capabilities() -> u64 {
 }
 
 pub fn supported_version() -> u32 {
-    41
+    43
 }
 
 pub fn check_this_shard_mc_info(
@@ -169,11 +171,12 @@ pub fn check_this_shard_mc_info(
                     because masterchain contains newer possible ancestors {} and {}",
                         shard, prev_blocks[0], left.block_id(), right.block_id())
             }
-            if prev_blocks[0].seq_no >= cseqno + 8 {
+            if prev_blocks[0].seq_no >= cseqno + UNREGISTERED_CHAIN_MAX_LEN {
                 fail!("cannot create new block for shard {} after previous block {} \
-                    because this would lead to an unregistered chain of length > 8 \
+                    because this would lead to an unregistered chain of length > {} \
                     (masterchain contains only {} and {})",
-                        shard, prev_blocks[0], left.block_id(), right.block_id())
+                    shard, prev_blocks[0], UNREGISTERED_CHAIN_MAX_LEN, left.block_id(), right.block_id()
+                )
             }
         }
     } else if left.shard().is_parent_for(shard) {
@@ -220,9 +223,12 @@ pub fn check_prev_block(listed: &BlockIdExt, prev: &BlockIdExt, chk_chain_len: b
         fail!("cannot generate a shardchain block after previous block {} \
             because masterchain configuration lists another block {} of the same height", prev, listed)
     }
-    if chk_chain_len && prev.seq_no >= listed.seq_no + 8 {
-        fail!("cannot generate next block after {} because this would lead to \
-            an unregistered chain of length > 8 (only {} is registered in the masterchain)", prev, listed)
+    if chk_chain_len && prev.seq_no >= listed.seq_no + UNREGISTERED_CHAIN_MAX_LEN {
+        fail!(
+            "cannot generate next block after {} because this would lead to \
+            an unregistered chain of length > {} (only {} is registered in the masterchain)", 
+            prev, UNREGISTERED_CHAIN_MAX_LEN, listed
+        )
     }
     Ok(())
 }
@@ -233,8 +239,7 @@ pub fn check_cur_validator_set(
     shard: &ShardIdent,
     mc_state_extra: &McStateExtra,
     old_mc_shards: &ShardHashes,
-    config_params: &ConfigParams,
-    now: u32,
+    mc_state: &ShardStateStuff,
     is_fake: bool,
 ) -> Result<bool> {
     if is_fake { return Ok(true) }
@@ -245,7 +250,13 @@ pub fn check_cur_validator_set(
     } else {
         old_mc_shards.calc_shard_cc_seqno(&shard)?
     };
-    let nodes = compute_validator_set_cc(config_params, &shard, now, cc_seqno_from_state, &mut cc_seqno_with_delta)?;
+    let nodes = compute_validator_set_cc(
+        mc_state,
+        block_id.shard(),
+        block_id.seq_no(),
+        cc_seqno_from_state,
+        &mut cc_seqno_with_delta
+    )?;
     if nodes.is_empty() {
         fail!("Cannot compute masterchain validator set from old masterchain state")
     }
@@ -383,6 +394,7 @@ pub fn may_update_shard_block_info(
                     new_info.block_id()
                 )
             }
+
             if new_info.descr.gen_utime < odef.descr.fsm_utime() ||
                 new_info.descr.gen_utime >= odef.descr.fsm_utime() + odef.descr.fsm_interval() {
                 fail!(
@@ -394,6 +406,7 @@ pub fn may_update_shard_block_info(
                     new_info.descr.gen_utime
                 )
             }
+
         }
         if before_merge {
             if odef.descr.is_fsm_split() || odef.descr.is_fsm_none() {
@@ -416,6 +429,11 @@ pub fn may_update_shard_block_info(
                     new_info.descr.gen_utime
                 )
             }
+
+            // TODO FAST FINALITY check collator ranges
+            // if shard is preparing to split/merge - it connot be collated by next collator without split/merge
+            // before_split and before_merge must be set at the last block of the range
+            //
         }
 
         if !before_merge && !before_split {
@@ -445,73 +463,6 @@ pub fn may_update_shard_block_info(
     return Ok((!before_split, ancestor))
 }
 
-pub fn update_shard_block_info(
-    shardes: &mut ShardHashes,
-    mut new_info: McShardRecord,
-    old_blkids: &Vec<BlockIdExt>,
-    shards_updated: Option<&mut HashSet<ShardIdent>>,
-) -> Result<()> {
-
-    let (res, ancestor) = may_update_shard_block_info(shardes, &new_info, old_blkids, !0,
-        shards_updated.as_ref().map(|s| &**s))?;
-    
-    if !res {
-        fail!(
-            "cannot apply the after-split update for {} without a corresponding sibling update",
-            new_info.blk_id()
-        );
-    }
-    if let Some(ancestor) = ancestor {
-        if ancestor.descr.split_merge_at != FutureSplitMerge::None {
-            new_info.descr.split_merge_at = ancestor.descr.split_merge_at;
-        }
-    }
-    
-    let shard = new_info.shard().clone();
-
-    if old_blkids.len() == 2 {
-        shardes.merge_shards(&shard, |_, _| Ok(new_info.descr))?;
-    } else {
-        shardes.update_shard(&shard, |_| Ok(new_info.descr))?;
-    }
-
-    if let Some(shards_updated) = shards_updated {
-        shards_updated.insert(shard);
-    }
-    Ok(())
-}
-
-pub fn update_shard_block_info2(
-    shardes: &mut ShardHashes,
-    mut new_info1: McShardRecord,
-    mut new_info2: McShardRecord,
-    old_blkids: &Vec<BlockIdExt>,
-    shards_updated: Option<&mut HashSet<ShardIdent>>,
-) -> Result<()> {
-
-    let (res1, _) = may_update_shard_block_info(shardes, &new_info1, old_blkids, !0,
-                        shards_updated.as_ref().map(|s| &**s))?;
-    let (res2, _) = may_update_shard_block_info(shardes, &new_info2, old_blkids, !0,
-                        shards_updated.as_ref().map(|s| &**s))?;
-
-    if res1 || res2 {
-        fail!("the two updates in update_shard_block_info2 must follow a shard split event");
-    }
-    if new_info1.shard().shard_prefix_with_tag() > new_info2.shard().shard_prefix_with_tag() {
-        std::mem::swap(&mut new_info1, &mut new_info2);
-    }
-
-    let shard1 = new_info1.shard().clone();
-
-    shardes.split_shard(&new_info1.shard().merge()?, |_| Ok((new_info1.descr, new_info2.descr)))?;
-
-    if let Some(shards_updated) = shards_updated {
-        shards_updated.insert(shard1);
-    }
-    
-    Ok(())
-}
-
 pub fn calc_remp_msg_ordering_hash<'a>(msg_id: &UInt256, prev_blocks_ids: impl Iterator<Item = &'a BlockIdExt>) -> UInt256 {
     let mut hasher = Sha256::new();
     for prev_id in prev_blocks_ids {
@@ -520,3 +471,4 @@ pub fn calc_remp_msg_ordering_hash<'a>(msg_id: &UInt256, prev_blocks_ids: impl I
     hasher.update(msg_id.as_slice());
     UInt256::from(hasher.finalize().as_slice())
 }
+

@@ -28,13 +28,14 @@ mod internal_db;
 mod macros;
 mod network;
 mod rng;
-mod shard_blocks;
 mod shard_state;
 mod sync;
 mod types;
 mod validating_utils;
 mod validator;
 mod shard_states_keeper;
+
+mod shard_blocks;
 
 #[cfg(feature = "tracing")]
 mod jaeger;
@@ -68,7 +69,6 @@ use std::{
 #[cfg(feature = "external_db")]
 use ton_types::error;
 use ton_types::Result;
-
 
 #[cfg(target_os = "linux")]
 #[link(name = "tcmalloc", kind = "dylib")]

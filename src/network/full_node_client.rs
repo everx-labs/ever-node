@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -22,12 +22,12 @@ use adnl::{
     common::{CountedObject, Counter,TaggedByteSlice, TaggedObject, TaggedTlObject}, 
     node::AdnlNode
 };
-use ever_crypto::KeyId;
 use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
 use std::{io::Cursor, time::Instant, sync::Arc, time::Duration};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
-use ton_api::{serialize_boxed, serialize_boxed_append, tag_from_boxed_type, tag_from_bare_type, 
+use ton_api::{
+    serialize_boxed, serialize_boxed_append, 
     BoxedSerialize, BoxedDeserialize, Deserializer, IntoBoxed,
     ton::{
         self, TLObject, Bool,
@@ -36,35 +36,49 @@ use ton_api::{serialize_boxed, serialize_boxed_append, tag_from_boxed_type, tag_
             PreparePersistentState, DownloadBlockProof, DownloadBlockProofLink,
             DownloadKeyBlockProof, DownloadKeyBlockProofLink, PrepareBlock, DownloadBlockFull,
             PrepareZeroState, GetNextKeyBlockIds, GetArchiveInfo, GetArchiveSlice,
-            PrepareBlockProof, PrepareKeyBlockProof
+            PrepareBlockProof, PrepareKeyBlockProof, PrepareQueueUpdate, DownloadQueueUpdate,
+            PreparePersistentMsgQueue, DownloadPersistentMsgQueueSlice,
         },
         ton_node::{ 
             ArchiveInfo, Broadcast, 
             DataFull, KeyBlocks, Prepared, PreparedProof, PreparedState, 
-            broadcast::{BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast}, 
+            broadcast::{
+                BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast,
+                QueueUpdateBroadcast,
+            }, 
             externalmessage::ExternalMessage, 
         }
     }
 };
+#[cfg(feature = "telemetry")]
+use ton_api::{tag_from_boxed_type, tag_from_bare_type};
 use ton_block::BlockIdExt;
-use ton_types::{fail, error, Result};
+use ton_types::{error, fail, KeyId, Result};
 
 #[async_trait::async_trait]
 pub trait FullNodeOverlayClient : Sync + Send {
     async fn broadcast_external_message(&self, msg: &[u8]) -> Result<BroadcastSendInfo>;
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()>;
+    async fn send_queue_update_broadcast(&self, broadcast: QueueUpdateBroadcast) -> Result<()>;
     async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()>;
     async fn download_block_proof(&self, block_id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff>;
     async fn download_block_full(&self, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
+    async fn download_out_msg_queue_update(
+        &self,
+        id: &BlockIdExt,
+        target_wc: i32,
+    ) -> Result<BlockStuff>;
     async fn check_persistent_state(
         &self,
         block_id: &BlockIdExt,
+        msg_queue_for: Option<i32>,
         masterchain_block_id: &BlockIdExt,
-        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
     ) -> Result<Option<Arc<Neighbour>>>;
     async fn download_persistent_state_part(
         &self,
         block_id: &BlockIdExt,
+        msg_queue_for: Option<i32>,
         masterchain_block_id: &BlockIdExt,
         offset: usize,
         max_size: usize,
@@ -94,7 +108,11 @@ declare_counted!(
         #[cfg(feature = "telemetry")]
         tag_block_broadcast: u32,
         #[cfg(feature = "telemetry")]
+        tag_queue_update_broadcast: u32,
+        #[cfg(feature = "telemetry")]
         tag_download_block_full: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_queue_update: u32,
         #[cfg(feature = "telemetry")]
         tag_download_block_proof: u32,
         #[cfg(feature = "telemetry")]
@@ -107,6 +125,8 @@ declare_counted!(
         tag_download_next_block_full: u32,
         #[cfg(feature = "telemetry")]
         tag_download_persistent_state_slice: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_persistent_msg_queue_slice: u32,
         #[cfg(feature = "telemetry")]
         tag_download_zero_state: u32,
         #[cfg(feature = "telemetry")]
@@ -122,11 +142,15 @@ declare_counted!(
         #[cfg(feature = "telemetry")]
         tag_prepare_block: u32,
         #[cfg(feature = "telemetry")]
+        tag_prepare_queue_update: u32,
+        #[cfg(feature = "telemetry")]
         tag_prepare_block_proof: u32,
         #[cfg(feature = "telemetry")]
         tag_prepare_key_block_proof: u32,
         #[cfg(feature = "telemetry")]
         tag_prepare_persistent_state: u32,
+        #[cfg(feature = "telemetry")]
+        tag_prepare_persistent_msg_queue: u32,
         #[cfg(feature = "telemetry")]
         tag_prepare_zero_state: u32
     }
@@ -151,7 +175,11 @@ impl NodeClientOverlay {
             #[cfg(feature = "telemetry")]
             tag_block_broadcast: tag_from_bare_type::<BlockBroadcast>(),
             #[cfg(feature = "telemetry")]
+            tag_queue_update_broadcast: tag_from_bare_type::<QueueUpdateBroadcast>(),
+            #[cfg(feature = "telemetry")]
             tag_download_block_full: tag_from_boxed_type::<DownloadBlockFull>(),
+            #[cfg(feature = "telemetry")]
+            tag_download_queue_update: tag_from_boxed_type::<DownloadQueueUpdate>(),
             #[cfg(feature = "telemetry")]
             tag_download_block_proof: tag_from_boxed_type::<DownloadBlockProof>(),
             #[cfg(feature = "telemetry")]
@@ -165,6 +193,9 @@ impl NodeClientOverlay {
             #[cfg(feature = "telemetry")]
             tag_download_persistent_state_slice: 
                 tag_from_boxed_type::<DownloadPersistentStateSlice>(),
+            #[cfg(feature = "telemetry")]
+            tag_download_persistent_msg_queue_slice:
+                tag_from_boxed_type::<DownloadPersistentMsgQueueSlice>(),
             #[cfg(feature = "telemetry")]
             tag_download_zero_state: tag_from_boxed_type::<DownloadZeroState>(),
             #[cfg(feature = "telemetry")]
@@ -180,11 +211,15 @@ impl NodeClientOverlay {
             #[cfg(feature = "telemetry")]
             tag_prepare_block: tag_from_boxed_type::<PrepareBlock>(),
             #[cfg(feature = "telemetry")]
+            tag_prepare_queue_update: tag_from_boxed_type::<PrepareQueueUpdate>(),
+            #[cfg(feature = "telemetry")]
             tag_prepare_block_proof: tag_from_boxed_type::<PrepareBlockProof>(),
             #[cfg(feature = "telemetry")]
             tag_prepare_key_block_proof: tag_from_boxed_type::<PrepareKeyBlockProof>(),
             #[cfg(feature = "telemetry")]
             tag_prepare_persistent_state: tag_from_boxed_type::<PreparePersistentState>(),
+            #[cfg(feature = "telemetry")]
+            tag_prepare_persistent_msg_queue: tag_from_boxed_type::<PreparePersistentMsgQueue>(),
             #[cfg(feature = "telemetry")]
             tag_prepare_zero_state: tag_from_boxed_type::<PrepareZeroState>(),
             counter: network_context.engine_allocated.overlay_clients.clone().into()
@@ -220,7 +255,7 @@ impl NodeClientOverlay {
     {
 
         let request_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
-            format!("ADNL {}", std::any::type_name::<R>())
+            format!("ADNL {:?}", data.object)
         } else {
             String::default()
         };
@@ -299,7 +334,7 @@ impl NodeClientOverlay {
                 fail!("neighbour is not found!")
             };
             if let Some(active_peers) = &active_peers {
-                if active_peers.insert(peer.id().clone()).is_err() {
+                if active_peers.insert(peer.id().clone()).is_ok() {
                     continue;
                 }
             }
@@ -450,6 +485,27 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         log::trace!(
             "send_block_broadcast {} (overlay {}) sent to {} nodes", 
             self.overlay_id, id, info.send_to
+        );
+        Ok(())
+    }
+
+    async fn send_queue_update_broadcast(&self, broadcast: QueueUpdateBroadcast) -> Result<()> {
+        let id = broadcast.id.clone();
+        let wc = broadcast.target_wc;
+        let broadcast = TaggedByteSlice {
+            object: &serialize_boxed(&broadcast.into_boxed())?,
+            #[cfg(feature = "telemetry")]
+            tag: self.tag_queue_update_broadcast
+        };
+        let info = self.network_context.overlay.broadcast(
+            &self.overlay_id,
+            &broadcast,
+            None,
+            self.network_context.broadcast_hops
+        ).await?;
+        log::trace!(
+            "send_queue_update_broadcast {} for wc {} (overlay {}) sent to {} nodes", 
+            self.overlay_id, wc, id, info.send_to
         );
         Ok(())
     }
@@ -667,7 +723,7 @@ Ok(if key_block {
                         if id != &data_full.id {
                             fail!("Block with another id was received");
                         }
-                        let block = BlockStuff::deserialize_checked(id.clone(), data_full.block.0)?;
+                        let block = BlockStuff::deserialize_block_checked(id.clone(), data_full.block.0)?;
                         let proof = BlockProofStuff::deserialize(
                             block.id(),
                             data_full.proof.0,
@@ -680,20 +736,77 @@ Ok(if key_block {
 
     }
 
+    async fn download_out_msg_queue_update(
+        &self,
+        id: &BlockIdExt,
+        target_wc: i32,
+    ) -> Result<BlockStuff> {
+
+        // Prepare
+        let (prepare, good_peer): (Prepared, _) = self.send_adnl_query(
+            TaggedObject {
+                object: PrepareQueueUpdate {
+                    block: id.clone(),
+                    target_wc
+                },
+                #[cfg(feature = "telemetry")]
+                tag: self.tag_prepare_queue_update
+            },
+            Some(1),
+            None,
+            None
+        ).await?;
+        log::trace!("download_out_msg_queue_update {}: {:?}, peer {}", id, prepare, good_peer.id());
+
+        // Download
+        match prepare {
+            Prepared::TonNode_NotFound => fail!("Got `TonNode_NotFound` from {}", good_peer.id()),
+            Prepared::TonNode_Prepared => {
+                let update_bytes = self.send_rldp_query_raw(
+                    &TaggedObject {
+                        object: DownloadQueueUpdate {
+                            block: id.clone(),
+                            target_wc,
+                        },
+                        #[cfg(feature = "telemetry")]
+                        tag: self.tag_download_queue_update
+                    },
+                    good_peer,
+                    0
+                ).await?;
+                BlockStuff::deserialize_queue_update(id.clone(), target_wc, update_bytes)
+            }
+        }
+    }
+
+    // tonNode.preparePersistentState block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt = tonNode.PreparedState;
+    // tonNode.preparePersistentMsgQueue block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt target_wc:int = tonNode.PreparedState;
     async fn check_persistent_state(
         &self,
         block_id: &BlockIdExt,
+        msg_queue_for: Option<i32>,
         masterchain_block_id: &BlockIdExt,
-        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
     ) -> Result<Option<Arc<Neighbour>>> {
+        let request = if let Some(target_wc) = msg_queue_for {
+            TLObject::new(
+                PreparePersistentMsgQueue {
+                    block: block_id.clone(),
+                    masterchain_block: masterchain_block_id.clone(),
+                    target_wc
+                }
+            )
+        } else {
+            TLObject::new(
+                PreparePersistentState {
+                    block: block_id.clone(),
+                    masterchain_block: masterchain_block_id.clone()
+                }
+            )
+        };
         let (prepare, peer): (PreparedState, _) = self.send_adnl_query(
             TaggedTlObject {
-                object: TLObject::new(
-                    PreparePersistentState {
-                        block: block_id.clone(),
-                        masterchain_block: masterchain_block_id.clone()
-                    }
-                ),
+                object: request,
                 #[cfg(feature = "telemetry")]
                 tag: self.tag_prepare_persistent_state
             },
@@ -710,20 +823,33 @@ Ok(if key_block {
         }
     }
 
-    // tonNode.preparePersistentState block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt = tonNode.PreparedState;
-    // tonNode.downloadPersistentState block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt = tonNode.Data; DEPRECATED?
     // tonNode.downloadPersistentStateSlice block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt offset:long max_size:long = tonNode.Data;
+    // tonNode.downloadPersistentMsgQueueSlice block:tonNode.blockIdExt masterchain_block:tonNode.blockIdExt target_wc:int offset:long max_size:long = tonNode.Data;
     async fn download_persistent_state_part(
         &self,
         block_id: &BlockIdExt,
+        msg_queue_for: Option<i32>,
         masterchain_block_id: &BlockIdExt,
         offset: usize,
         max_size: usize,
         peer: Arc<Neighbour>,
         attempt: u32,
     ) -> Result<Vec<u8>> {
-        self.send_rldp_query_raw(
-            &TaggedObject {
+        if let Some(target_wc) = msg_queue_for {
+            let request = TaggedObject {
+                object: DownloadPersistentMsgQueueSlice {
+                    block: block_id.clone(),
+                    masterchain_block: masterchain_block_id.clone(),
+                    offset: offset as i64,
+                    max_size: max_size as i64,
+                    target_wc
+                },
+                #[cfg(feature = "telemetry")]
+                tag: self.tag_download_persistent_msg_queue_slice
+            };
+            self.send_rldp_query_raw(&request, peer, attempt).await
+        } else {
+            let request = TaggedObject {
                 object: DownloadPersistentStateSlice {
                     block: block_id.clone(),
                     masterchain_block: masterchain_block_id.clone(),
@@ -732,10 +858,9 @@ Ok(if key_block {
                 },
                 #[cfg(feature = "telemetry")]
                 tag: self.tag_download_persistent_state_slice
-            },
-            peer,
-            attempt
-        ).await
+            };
+            self.send_rldp_query_raw(&request, peer, attempt).await
+        }
     }
 
     // tonNode.prepareZeroState block:tonNode.blockIdExt = tonNode.PreparedState;
@@ -848,7 +973,7 @@ Ok(if key_block {
                 fail!("Got `TonNode_DataFullEmpty` from {}", peer.id())
             },
             DataFull::TonNode_DataFull(data_full) => {
-                let block = BlockStuff::deserialize_checked(
+                let block = BlockStuff::deserialize_block_checked(
                     data_full.id.clone(), 
                     data_full.block.to_vec()
                 )?;
@@ -935,18 +1060,15 @@ Ok(if key_block {
     }
 
     async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>> {
-        let receiver = self.network_context.overlay.clone();
-        let id = self.overlay_id.clone();
         loop {
-            match receiver.wait_for_broadcast(&id).await {
-                Ok(Some(info)) => {
+            match self.network_context.overlay.wait_for_broadcast(&self.overlay_id).await? {
+                Some(info) => {
                     let answer: Broadcast = Deserializer::new(
                         &mut Cursor::new(info.data)
                     ).read_boxed()?;
                     break Ok(Some((answer, info.recv_from)))
                 },
-                Ok(None) => break Ok(None),
-                Err(e) => log::error!("broadcast waiting error: {}", e)
+                None => break Ok(None),
             }
         }
     }

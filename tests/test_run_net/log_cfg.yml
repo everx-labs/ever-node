@@ -13,12 +13,6 @@ appenders:
     encoder:
       pattern: "{f}:{L} {l} [{h({t})}] {I}: {m}{n}"
 
-  logfile:
-    kind: file
-    path: "/ton-node/logs/output.log"
-    encoder:
-      pattern: "{d(%Y-%m-%d %H:%M:%S.%f)} {l} [{h({t})}] {I}: {m}{n}"
-
   rolling_logfile:
     kind: rolling_file
     encoder:
@@ -89,13 +83,16 @@ loggers:
     level: trace
 
   catchain:
-    level: debug
+    level: error
 
   validator_session:
     level: debug
 
   storage:
-    level: trace
+    level: info
 
   telemetry:
     level: debug
+
+  ext_messages:
+    level: trace

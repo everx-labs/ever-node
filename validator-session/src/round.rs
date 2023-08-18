@@ -13,8 +13,18 @@
 
 //TODO: remove duplicates for make_one & apply_action
 
-pub use super::*;
-use std::collections::HashSet;
+use crate::{
+    Any, BlockCandidate, BlockCandidatePtr, BlockCandidateSignaturePtr, 
+    BlockCandidateSignatureVectorPtr, BlockCandidateWrapper, BlockId, CacheObject, 
+    CachedInstanceCounter, HashableObject, HashType, Merge, MovablePoolObject, PoolObject, 
+    PoolPtr, RoundAttemptState, RoundAttemptStatePtr, RoundAttemptStateWrapper, RoundState, 
+    RoundStatePtr, RoundStateWrapper, SentBlockPtr, SentBlockWrapper, SessionCache, 
+    SessionDescription, SessionFactory, SessionPool, SKIP_ROUND_CANDIDATE_BLOCKID, 
+    SortedVector, SortedVectorWrapper, SortingPredicate, TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG,
+    ValidatorWeight, Vector, VectorMerge, VectorWrapper, ton
+};
+use catchain::instrument;
+use std::{collections::HashSet, fmt};
 use ton_api::IntoBoxed;
 
 /*
@@ -200,7 +210,7 @@ impl RoundState for RoundStateImpl {
         desc: &dyn SessionDescription,
         src_idx: u32,
     ) -> Vec<SentBlockPtr> {
-        profiling::instrument!();
+        instrument!();
 
         //if there are no sent blocks, then nothing to approve
 
@@ -288,7 +298,7 @@ impl RoundState for RoundStateImpl {
         src_idx: u32,
         attempt_id: u32,
     ) -> bool {
-        profiling::instrument!();
+        instrument!();
 
         if src_idx != desc.get_vote_for_author(attempt_id) {
             //do not need to generate vote for if validator is not an author for this attempt
@@ -346,7 +356,7 @@ impl RoundState for RoundStateImpl {
         attempt_id: u32,
         vote_for: Option<SentBlockPtr>,
     ) -> Option<SentBlockPtr> {
-        profiling::instrument!();
+        instrument!();
 
         let src_idx = src_idx as usize;
 
@@ -436,7 +446,7 @@ impl RoundState for RoundStateImpl {
         src_idx: u32,
         attempt_id: u32,
     ) -> ton::Message {
-        profiling::instrument!();
+        instrument!();
 
         assert!(src_idx == desc.get_vote_for_author(attempt_id));
 
@@ -524,7 +534,7 @@ impl RoundState for RoundStateImpl {
         src_idx: u32,
         attempt_id: u32,
     ) -> Option<ton::Message> {
-        profiling::instrument!();
+        instrument!();
 
         use ton_api::ton::validator_session::round::validator_session::message::message::*;
 
@@ -555,7 +565,7 @@ impl RoundState for RoundStateImpl {
         if let Some(vote_candidate) = vote_candidate {
             let block_id = vote_candidate.get_id();
 
-            trace!(
+            log::trace!(
                 "...choose block {:?} to vote in round {} and attempt {}",
                 block_id,
                 self.get_sequence_number(),
@@ -586,7 +596,7 @@ impl RoundState for RoundStateImpl {
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn RoundState> {
-        profiling::instrument!();
+        instrument!();
 
         let self_cloned = Self::new(
             self.precommitted_block.move_to_persistent(cache),
@@ -608,7 +618,7 @@ impl RoundState for RoundStateImpl {
     */
 
     fn dump(&self, desc: &dyn SessionDescription) -> String {
-        profiling::instrument!();
+        instrument!();
 
         let mut result = "".to_string();
 
@@ -788,7 +798,7 @@ impl RoundState for RoundStateImpl {
 
 impl Merge<PoolPtr<dyn RoundState>> for PoolPtr<dyn RoundState> {
     fn merge(&self, right: &Self, desc: &mut dyn SessionDescription) -> Self {
-        profiling::instrument!();
+        instrument!();
 
         let left = &get_impl(&**self);
         let right = &get_impl(&**right);
@@ -940,7 +950,7 @@ impl RoundStateWrapper for RoundStatePtr {
         block_creation_time: std::time::SystemTime,
         block_payload_creation_time: std::time::SystemTime,
     ) -> RoundStatePtr {
-        profiling::instrument!();
+        instrument!();
 
         get_impl(&**self).apply_action_dispatch(
             desc,
@@ -959,7 +969,7 @@ impl RoundStateWrapper for RoundStatePtr {
         src_idx: u32,
         attempt_id: u32,
     ) -> (RoundStatePtr, bool) {
-        profiling::instrument!();
+        instrument!();
 
         RoundStateImpl::make_one_impl(self.clone(), desc, src_idx, attempt_id)
     }
@@ -1111,11 +1121,11 @@ impl RoundStateImpl {
         block_creation_time: std::time::SystemTime,
         block_payload_creation_time: std::time::SystemTime,
     ) -> RoundStatePtr {
-        profiling::instrument!();
+        instrument!();
 
         //update attempts state
 
-        trace!("...applying action on round #{}", self.sequence_number);
+        log::trace!("...applying action on round #{}", self.sequence_number);
 
         let first_attempt = self.first_attempt.clone();
 
@@ -1124,8 +1134,11 @@ impl RoundStateImpl {
         {
             //we have received new first attempt for the (round, node)
 
-            trace!("...new first attempt {} has been detected for round #{} (previous first attempt was {})",
-        attempt_id, self.sequence_number, first_attempt.at(src_idx as usize));
+            log::trace!(
+                "...new first attempt {} has been detected for round #{} \
+                (previous first attempt was {})",
+                attempt_id, self.sequence_number, first_attempt.at(src_idx as usize)
+            );
 
             let first_attempt = first_attempt.change(desc, src_idx as usize, attempt_id);
             let new_round_state = Self::create(
@@ -1144,7 +1157,7 @@ impl RoundStateImpl {
 
         //dispatching incremental message based on its ID
 
-        trace!("...dispatching incoming message");
+        log::trace!("...dispatching incoming message");
 
         let state = get_impl(&*default_state);
         let default_state = default_state.clone();
@@ -1184,14 +1197,14 @@ impl RoundStateImpl {
         block_creation_time: std::time::SystemTime,
         block_payload_creation_time: std::time::SystemTime,
     ) -> RoundStatePtr {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("...applying submitted block action");
+        log::trace!("...applying submitted block action");
 
         //check if node can submit block in this round
 
         if desc.get_node_priority(src_idx, self.sequence_number) < 0 {
-            warn!(
+            log::warn!(
                 "Node {} sent an invalid message: node cannot propose blocks in this round: {:?}",
                 desc.get_source_public_key_hash(src_idx),
                 message
@@ -1203,7 +1216,7 @@ impl RoundStateImpl {
         //check if node has already proposed a block
 
         if self.check_block_is_sent_by(src_idx) {
-            warn!(
+            log::warn!(
                 "Node {} sent an invalid message: duplicate block propose: {:?}",
                 desc.get_source_public_key_hash(src_idx),
                 message
@@ -1227,8 +1240,9 @@ impl RoundStateImpl {
         let block_id = block_candidate.get_id().clone();
         let new_sent_blocks = self.sent_blocks.push(desc, block_candidate);
 
-        trace!(
-            "...create updated state (add block {:?} to round {}); sent_blocks={:?}, old_sent_blocks={:?}",
+        log::trace!(
+            "...create updated state (add block {:?} to round {}); \
+            sent_blocks={:?}, old_sent_blocks={:?}",
             block_id,
             self.sequence_number,
             &new_sent_blocks,
@@ -1255,9 +1269,9 @@ impl RoundStateImpl {
         message: &ton::message::ApprovedBlock,
         default_state: RoundStatePtr,
     ) -> RoundStatePtr {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("...applying approved block action");
+        log::trace!("...applying approved block action");
 
         let candidate_id: BlockId = message.candidate.clone().into();
 
@@ -1266,7 +1280,7 @@ impl RoundStateImpl {
         let mut sent_block = self.get_block(&candidate_id);
 
         if candidate_id != *SKIP_ROUND_CANDIDATE_BLOCKID && sent_block.is_none() {
-            warn!(
+            log::warn!(
                 "Node {} sent an invalid message: the node has approved unknown block: {:?}",
                 desc.get_source_public_key_hash(src_idx),
                 message
@@ -1283,8 +1297,9 @@ impl RoundStateImpl {
                 .unwrap()
                 .check_block_is_approved_by(src_idx)
         {
-            warn!(
-                "Node {} sent an invalid message: duplicate block has been sent for approval: {:?}",
+            log::warn!(
+                "Node {} sent an invalid message: duplicate block has been sent \
+                for approval: {:?}",
                 desc.get_source_public_key_hash(src_idx),
                 message
             );
@@ -1303,9 +1318,11 @@ impl RoundStateImpl {
                 if block_candidate.get_source_index() == sent_block.get_source_index()
                     && block_candidate.check_block_is_approved_by(src_idx)
                 {
-                    warn!("Node {} sent an invalid message: another block has been sent for approval from the same node: {:?}",
-            desc.get_source_public_key_hash(src_idx), message);
-
+                    log::warn!(
+                        "Node {} sent an invalid message: another block has been sent \
+                        for approval from the same node: {:?}",
+                        desc.get_source_public_key_hash(src_idx), message
+                    );
                     return default_state;
                 }
             }
@@ -1313,7 +1330,7 @@ impl RoundStateImpl {
 
         //check block signature
 
-        trace!("...check block signature");
+        log::trace!("...check block signature");
 
         if candidate_id != *SKIP_ROUND_CANDIDATE_BLOCKID {
             let sent_block = sent_block.as_ref().unwrap().get_block();
@@ -1325,23 +1342,21 @@ impl RoundStateImpl {
                 src_idx,
                 &message.signature,
             ) {
-                warn!(
+                log::warn!(
                     "Node {} invalid signature has been received: message={:?}, err={:?}",
                     desc.get_source_public_key_hash(src_idx),
                     message,
                     err
                 );
-
                 return default_state;
             }
         } else {
             if message.signature.len() != 0 {
-                warn!(
+                log::warn!(
                     "Node {} invalid signature has been received (expected unsigned block): {:?}",
                     desc.get_source_public_key_hash(src_idx),
                     message
                 );
-
                 return default_state;
             }
         }
@@ -1358,7 +1373,7 @@ impl RoundStateImpl {
 
         //add signature to the block & create updated state
 
-        trace!("...create updated state");
+        log::trace!("...create updated state");
 
         let signature = SessionFactory::create_block_candidate_signature(
             desc,
@@ -1387,9 +1402,9 @@ impl RoundStateImpl {
         message: &ton::message::RejectedBlock,
         default_state: RoundStatePtr,
     ) -> RoundStatePtr {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("...applying rejected block action");
+        log::trace!("...applying rejected block action");
 
         let reason: String = if let Ok(reason) = std::str::from_utf8(&message.reason) {
             reason.to_string()
@@ -1419,7 +1434,7 @@ impl RoundStateImpl {
             ("<unknown>".to_string(), "<unknown>".to_string())
         };
 
-        error!(
+        log::error!(
             "Node {} (ADNL ID {}) rejected candidate {:?} ({}) from {} with reason {}",
             desc.get_source_public_key_hash(src_idx),
             desc.get_source_adnl_id(src_idx),
@@ -1440,19 +1455,18 @@ impl RoundStateImpl {
         message: &ton::message::Commit,
         default_state: RoundStatePtr,
     ) -> RoundStatePtr {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("...applying commit action");
+        log::trace!("...applying commit action");
 
         //check if node is trying to commit block before the precommit phase
 
         if self.precommitted_block.is_none() {
-            warn!(
+            log::warn!(
                 "Node {} sent an invalid message: {:?}; attempt to commit non precommitted block",
                 desc.get_source_public_key_hash(src_idx),
                 message
             );
-
             return default_state;
         }
 
@@ -1461,26 +1475,25 @@ impl RoundStateImpl {
         let block_id = precommitted_block.get_id();
 
         if *block_id != candidate_id {
-            warn!(
-                "Node {} sent an invalid message: {:?}; attempt to commit wrong block {:?}. Expected {:?}",
+            log::warn!(
+                "Node {} sent an invalid message: {:?}; attempt to commit wrong block {:?}. \
+                Expected {:?}",
                 desc.get_source_public_key_hash(src_idx),
                 message,
                 message.candidate,
                 block_id
             );
-
             return default_state;
         }
 
         //check if node is trying to sign block second time in the same round
 
         if self.signatures.at(src_idx as usize).is_some() {
-            warn!(
+            log::warn!(
                 "Node {} sent an invalid message: {:?}; duplicate signature",
                 desc.get_source_public_key_hash(src_idx),
                 message
             );
-
             return default_state;
         }
 
@@ -1488,9 +1501,11 @@ impl RoundStateImpl {
 
         if &candidate_id == &*SKIP_ROUND_CANDIDATE_BLOCKID {
             if message.signature.len() != 0 {
-                warn!("Node {} sent an invalid signature: {:?}; attempt to sign a skip round candidate",
-          desc.get_source_public_key_hash(src_idx), message);
-
+                log::warn!(
+                    "Node {} sent an invalid signature: {:?}; \
+                    attempt to sign a skip round candidate",
+                    desc.get_source_public_key_hash(src_idx), message
+                );
                 return default_state;
             }
         } else {
@@ -1503,13 +1518,12 @@ impl RoundStateImpl {
             );
 
             if let Err(err) = signature {
-                warn!(
+                log::warn!(
                     "Node {} sent an invalid signature: {:?}; {:?}",
                     desc.get_source_public_key_hash(src_idx),
                     message,
                     err
                 );
-
                 return default_state;
             }
         }
@@ -1540,9 +1554,9 @@ impl RoundStateImpl {
         message: &ton::Message,
         default_state: RoundStatePtr,
     ) -> RoundStatePtr {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("...applying action on attempt {}", attempt_id);
+        log::trace!("...applying action on attempt {}", attempt_id);
 
         //check node is trying to change attempt after a precommit message
 
@@ -1552,7 +1566,11 @@ impl RoundStateImpl {
                     //do nothing
                 }
                 _ => {
-                    warn!("Node {} sent an invalid message in precommitted round (expected EMPTY): {:?}", desc.get_source_public_key_hash(src_idx), message);
+                    log::warn!(
+                        "Node {} sent an invalid message in precommitted round \
+                        (expected EMPTY): {:?}", 
+                        desc.get_source_public_key_hash(src_idx), message
+                    );
                 }
             }
 
@@ -1675,7 +1693,7 @@ impl RoundStateImpl {
 
         let new_attempts = self.attempts.push(desc, attempt); //attempts are sorted vector; no problem to push duplicate
 
-        trace!(
+        log::trace!(
             "...create updated attempts for round {}: {:?}",
             self.sequence_number,
             &new_attempts
@@ -1699,9 +1717,9 @@ impl RoundStateImpl {
         src_idx: u32,
         attempt_id: u32,
     ) -> (RoundStatePtr, bool) {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("......actualizing round {}", state.get_sequence_number());
+        log::trace!("......actualizing round {}", state.get_sequence_number());
 
         let mut made_changes = false;
         let default_state = state;
@@ -1709,7 +1727,7 @@ impl RoundStateImpl {
 
         //update attempts
 
-        trace!("......actualizing attempts");
+        log::trace!("......actualizing attempts");
 
         let first_attempt = state.first_attempt.clone();
 
@@ -1718,7 +1736,7 @@ impl RoundStateImpl {
         {
             //we have received new first attempt for the (round, node)
 
-            trace!(
+            log::trace!(
                 "......new first attempt {} has been found for source {}",
                 attempt_id,
                 src_idx
@@ -1756,7 +1774,7 @@ impl RoundStateImpl {
         let attempt = if let Some(attempt) = Self::get_attempt(&state.attempts, attempt_id) {
             attempt
         } else {
-            trace!("......creating new attempt");
+            log::trace!("......creating new attempt");
 
             SessionFactory::create_attempt(desc, attempt_id)
         };
@@ -1771,7 +1789,7 @@ impl RoundStateImpl {
 
         //update state
 
-        trace!("......create updated round {} state", state.sequence_number);
+        log::trace!("......create updated round {} state", state.sequence_number);
 
         let attempts = state.attempts.push(desc, attempt);
         let state = Self::create(
@@ -1897,7 +1915,7 @@ impl RoundStateImpl {
         signatures: BlockCandidateSignatureVectorPtr,
         attempts: AttemptVector,
     ) -> RoundStatePtr {
-        profiling::instrument!();
+        instrument!();
 
         let hash = Self::compute_hash(
             &precommitted_block,

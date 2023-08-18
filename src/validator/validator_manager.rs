@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -17,68 +17,63 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime}
 };
+
 use crate::{
+    config::{RempConfig, ValidatorManagerConfig},
     engine::{Engine, STATSD},
     engine_traits::EngineOperations,
     shard_state::ShardStateStuff,
-
     validator::{
+        remp_block_parser::RempBlockObserverToplevel,
+        remp_manager::{RempManager, RempInterfaceQueues},
         validator_group::{ValidatorGroup, ValidatorGroupStatus},
         validator_utils::{
             try_calc_subset_for_workchain,
             validatordescr_to_catchain_node,
             validatorset_to_string,
             compute_validator_list_id,
-            ValidatorListHash
+            ValidatorListHash,
+            GeneralSessionInfo, get_group_members_by_validator_descrs, is_remp_enabled
         },
         out_msg_queue::OutMsgQueueInfoStuff,
     },
-    config::{RempConfig, ValidatorManagerConfig}
 };
+
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::{SlashingManager, SlashingManagerPtr};
-use catchain::{CatchainNode, PublicKey};
-use catchain::utils::serialize_tl_boxed_object;
+
+use catchain::{CatchainNode, PublicKey, serialize_tl_boxed_object};
 use tokio::time::timeout;
 use ton_api::IntoBoxed;
 use ton_block::{
-    BlockIdExt, CatchainConfig, ConfigParamEnum, ConsensusConfig, FutureSplitMerge, McStateExtra,
-    ShardDescr, ShardIdent, ValidatorDescr, ValidatorSet, BASE_WORKCHAIN_ID,
+    BlockIdExt, CatchainConfig, ConfigParamEnum, ConsensusConfig, FutureSplitMerge, McStateExtra, 
+    ShardDescr, ShardIdent, ValidatorDescr, ValidatorSet, BASE_WORKCHAIN_ID, MASTERCHAIN_ID, 
+    GlobalCapabilities
 };
 use ton_types::{error, fail, Result, UInt256};
-use crate::validator::remp_block_parser::RempBlockObserverToplevel;
-//use crate::validator::remp_block_parser::RempBlockObserver;
-use crate::validator::remp_manager::{RempManager, RempInterfaceQueues};
 use crate::validator::sessions_computing::{SessionHistory, SessionInfo};
+use crate::validator::validator_utils::{
+    ValidatorSubsetInfo, get_first_block_seqno_after_prevs, try_calc_subset_for_workchain_standard
+};
 
 fn get_session_id_serialize(
-    shard: &ShardIdent,
-    val_set: &ValidatorSet,
-    opts_hash: &UInt256,
-    key_seqno: i32,
-    new_catchain_ids: bool,
-    max_vertical_seqno: i32,
+    session_info: Arc<GeneralSessionInfo>,
+    vals: &Vec<ValidatorDescr>,
+    new_catchain_ids: bool
 ) -> catchain::RawBuffer {
-    let members = val_set.list().iter().map(|descr| {
-        let node_id = descr.compute_node_id_short();
-        let adnl_id = descr.adnl_addr.clone().unwrap_or(node_id.clone());
-        ton_api::ton::engine::validator::validator::groupmember::GroupMember {
-            public_key_hash: node_id,
-            adnl: adnl_id,
-            weight: descr.weight as i64,
-        }
-    }).collect::<Vec<_>>();
+    let mut members = Vec::new();
+    get_group_members_by_validator_descrs(vals, &mut members);
 
     if !new_catchain_ids {
         unimplemented!("Old catchain ids format is not supported")
     } else {
         serialize_tl_boxed_object!(&ton_api::ton::validator::group::GroupNew {
-            workchain: shard.workchain_id(),
-            shard: shard.shard_prefix_with_tag() as i64,
-            vertical_seqno: max_vertical_seqno,
-            last_key_block_seqno: key_seqno,
-            catchain_seqno: val_set.catchain_seqno() as i32,
-            config_hash: opts_hash.clone(),
+            workchain: session_info.shard.workchain_id(),
+            shard: session_info.shard.shard_prefix_with_tag() as i64,
+            vertical_seqno: session_info.max_vertical_seqno as i32,
+            last_key_block_seqno: session_info.key_seqno as i32,
+            catchain_seqno: session_info.catchain_seqno as i32,
+            config_hash: session_info.opts_hash.clone(),
             members: members.into()
         }
         .into_boxed())
@@ -87,20 +82,14 @@ fn get_session_id_serialize(
 
 /// serialize data and calc sha256
 fn get_session_id(
-    shard: &ShardIdent,
-    val_set: &ValidatorSet,
-    opts_hash: &UInt256,
-    key_seqno: i32,
+    session_info: Arc<GeneralSessionInfo>,
+    val_set: &Vec<ValidatorDescr>,
     new_catchain_ids: bool,
-    max_vertical_seqno: i32,
 ) -> UInt256 {
     let serialized = get_session_id_serialize(
-        shard,
+        session_info,
         val_set,
-        opts_hash,
-        key_seqno,
-        new_catchain_ids,
-        max_vertical_seqno,
+        new_catchain_ids
     );
     UInt256::calc_file_hash(&serialized.0)
 }
@@ -115,20 +104,16 @@ fn compute_session_unsafe_serialized(session_id: &UInt256, rotate_id: u32) -> Ve
 /// Computes session_id and if unsafe rotation is taking place,
 /// replaces session_id with unsafe rotation session id.
 fn get_session_unsafe_id(
-    shard: &ShardIdent,
-    val_set: &ValidatorSet,
-    opts_hash: &UInt256,
-    key_seqno: i32,
+    session_info: Arc<GeneralSessionInfo>,
+    val_set: &Vec<ValidatorDescr>,
     new_catchain_ids: bool,
-    max_vertical_seqno: i32,
     prev_block_opt: Option<u32>,
-    catchain_seqno: u32,
     vm_config: &ValidatorManagerConfig,
 ) -> UInt256 {
-    let session_id = get_session_id(shard, val_set, opts_hash, key_seqno, new_catchain_ids, max_vertical_seqno);
+    let session_id = get_session_id(session_info.clone(), val_set, new_catchain_ids);
 
-    if shard.is_masterchain() {
-        if let Some(rotate_id) = vm_config.check_unsafe_catchain_rotation(prev_block_opt, catchain_seqno) {
+    if session_info.shard.is_masterchain() {
+        if let Some(rotate_id) = vm_config.check_unsafe_catchain_rotation(prev_block_opt, session_info.catchain_seqno) {
             let unsafe_serialized = compute_session_unsafe_serialized(&session_id, rotate_id);
             let unsafe_id = UInt256::calc_file_hash(unsafe_serialized.as_slice());
 
@@ -137,7 +122,7 @@ fn get_session_unsafe_id(
                 "Unsafe master session rotation: session {} at block={:?}, cc={} -> rotate_id={}, new session {}",
                 session_id.to_hex_string(),
                 prev_block_opt,
-                catchain_seqno,
+                session_info.catchain_seqno,
                 rotate_id,
                 unsafe_id.to_hex_string()
             );
@@ -145,18 +130,6 @@ fn get_session_unsafe_id(
         }
     }
     return session_id;
-/*
-    auto r = opts_->check_unsafe_catchain_rotate(last_masterchain_seqno_, val_set->get_catchain_seqno());
-    if (r) {
-        td::uint8 b[36];
-        td::MutableSlice x{b, 36};
-        x.copy_from(val_group_id.as_slice());
-        x.remove_prefix(32);
-        CHECK(x.size() == 4);
-        x.copy_from(td::Slice(reinterpret_cast<const td::uint8 *>(&r), 4));
-        val_group_id = sha256_bits256(td::Slice(b, 36));
-    }
- */
 }
 
 fn validator_session_options_serialize(
@@ -196,14 +169,28 @@ fn get_session_options(opts: &ConsensusConfig) -> validator_session::SessionOpti
     }
 }
 
+#[repr(u8)]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
-enum ValidationStatus { Disabled, Waiting, Countdown, Active }
+pub enum ValidationStatus {
+    Disabled = 0,
+    Waiting = 1,
+    Countdown = 2,
+    Active = 3
+}
 
 impl ValidationStatus {
     fn allows_validate(&self) -> bool {
         match self {
             Self::Disabled | Self::Waiting => false,
             Self::Countdown | Self::Active => true
+        }
+    }
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => ValidationStatus::Waiting,
+            2 => ValidationStatus::Countdown,
+            3 => ValidationStatus::Active,
+            _ => ValidationStatus::Disabled,
         }
     }
 }
@@ -286,7 +273,6 @@ struct ValidatorManagerImpl {
 
     #[cfg(feature = "slashing")]
     slashing_manager: SlashingManagerPtr,
-    validation_status: ValidationStatus,
 }
 
 impl ValidatorManagerImpl {
@@ -303,6 +289,7 @@ impl ValidatorManagerImpl {
             (None, None)
         };
 
+        engine.set_validation_status(ValidationStatus::Disabled);
         (ValidatorManagerImpl {
             engine,
             rt,
@@ -311,7 +298,6 @@ impl ValidatorManagerImpl {
             session_history: SessionHistory::new(),
             config,
             remp_manager,
-            validation_status: ValidationStatus::Disabled,
             //shard_blocks_observer_for_remp: None,
             #[cfg(feature = "slashing")]
             slashing_manager: SlashingManager::create(),
@@ -374,7 +360,7 @@ impl ValidatorManagerImpl {
     }
 
     async fn update_validator_lists(&mut self, mc_state: &ShardStateStuff) -> Result<bool> {
-        let (validator_set, next_validator_set) = match mc_state.state().read_custom()? {
+        let (validator_set, next_validator_set) = match mc_state.state()?.read_custom()? {
             None => return Ok(false),
             Some(state) => (state.config.validator_set()?, state.config.next_validator_set()?)
         };
@@ -440,8 +426,8 @@ impl ValidatorManagerImpl {
                         ValidatorGroupStatus::Stopped => {
                             if let Some(group) = self.validator_sessions.remove(id) {
                                 if !self.is_active_shard(group.shard()).await {
-                                    self.engine.validation_status().remove(group.shard());
-                                    self.engine.collation_status().remove(group.shard());
+                                    self.engine.remove_last_validation_time(group.shard());
+                                    self.engine.remove_last_collation_time(group.shard());
                                     if let Some(remp_manager) = &self.remp_manager {
                                         remp_manager.remove_active_shard(group.shard()).await;
                                     }
@@ -469,7 +455,7 @@ impl ValidatorManagerImpl {
         };
         let session_options = get_session_options(&consensus_config);
         let (opts_hash, session_options_serialized) = get_validator_session_options_hash(&session_options);
-        log::info!(target: "validator_manager", "SessionOptions from config.29: {:?}", session_options);
+        log::debug!(target: "validator_manager", "SessionOptions from config.29: {:?}", session_options);
         log::debug!(
             target: "validator_manager",
             "SessionOptions from config.29 serialized: {} hash: {:x}",
@@ -479,22 +465,132 @@ impl ValidatorManagerImpl {
         Ok((session_options, opts_hash))
     }
 
+    async fn compute_prev_validator_list_impl(
+        &self,
+        full_validator_set: &ValidatorSet,
+        current_subset: &ValidatorSet,
+        mc_state: &ShardStateStuff,
+        prev_blocks: &Vec<BlockIdExt>,
+        general_session_info: Arc<GeneralSessionInfo>,
+        session_id: &UInt256,
+        master_cc_seqno: u32,
+    ) -> Result<Option<Vec<ValidatorDescr>>> {
+        let catchain_config = mc_state.config_params()?.catchain_config()?;
+        if general_session_info.catchain_seqno > 1 {
+            let prev_session_info = Arc::new(general_session_info.with_cc_seqno(general_session_info.catchain_seqno-1));
+            let prev_subset = match try_calc_subset_for_workchain(
+                &full_validator_set,
+                &mc_state,
+                &prev_session_info.shard,
+                prev_session_info.catchain_seqno,
+                0, // TODO: correct block necessary!
+            )? {
+                Some(x) => x,
+                None => {
+                    log::error!(
+                        target: "validator_manager",
+                        "Cannot compute validator set for workchain {}: less than {} of {}",
+                        prev_session_info.shard,
+                        catchain_config.shard_validators_num,
+                        full_validator_set.list().len()
+                    );
+                    return Ok(None)
+                }
+            };
+
+            let prev_session_id = get_session_unsafe_id(
+                prev_session_info.clone(),
+                &prev_subset.validators,
+                true,
+                prev_blocks.get(0).map(|x| x.seq_no),
+                &self.config
+            );
+
+            for old_session_id in self.session_history.get_prev_sessions(&session_id)?.iter() {
+                if *old_session_id == prev_session_id {
+                    log::trace!(target: "validator_manager", "Old session id: {:x}, old session id from prev cc: {:x}",
+                            old_session_id, prev_session_id
+                        );
+                }
+                else {
+                    log::warn!(target: "validator_manager", "Old session id: {:x} != old session id from prev cc: {:x}",
+                            old_session_id, prev_session_id
+                        );
+                }
+            }
+
+            let old_session_id = &prev_session_id;
+            match self.validator_sessions.get(old_session_id) {
+                Some(old_session) =>
+                    old_session.clone().add_next_validators(
+                        master_cc_seqno, &prev_subset.validators, &current_subset, general_session_info.clone(),
+                    ).await?,
+                None => log::debug!(target: "validator_manager",
+                         "Shard {}, adding info for session {:x}, previous session id {:x} has no validator_group!",
+                         prev_session_info.shard, session_id, old_session_id
+                    )
+            }
+            Ok(Some(prev_subset.validators))
+        }
+        else {
+            let prev_validator_list = &self.session_history.get_prev_validator_list(&session_id)?;
+            for old_session_id in self.session_history.get_prev_sessions(&session_id)?.iter() {
+                match self.validator_sessions.get(old_session_id) {
+                    Some(old_session) =>
+                        old_session.clone().add_next_validators(
+                            master_cc_seqno, prev_validator_list, &current_subset,
+                            general_session_info.clone()
+                        ).await?,
+                    None => log::debug!(target: "validator_manager",
+                             "Shard {}, adding info for session {:x}, previous session id {:x} has no validator_group!",
+                             general_session_info.shard, session_id, old_session_id
+                        )
+                }
+            }
+            Ok(Some(prev_validator_list.clone()))
+        }
+    }
+
+    async fn compute_prev_validator_list(
+        &self,
+        full_validator_set: &ValidatorSet,
+        current_subset: &ValidatorSet,
+        mc_state: &ShardStateStuff,
+        prev_blocks: &Vec<BlockIdExt>,
+        general_session_info: Arc<GeneralSessionInfo>,
+        session_id: &UInt256,
+        master_cc_seqno: u32,
+    ) -> Result<Option<Vec<ValidatorDescr>>> {
+
+        self.compute_prev_validator_list_impl(
+            full_validator_set, current_subset, mc_state,
+            prev_blocks, general_session_info,
+            session_id, master_cc_seqno
+        ).await
+    }
+
     async fn update_validation_status(&mut self, mc_state: &ShardStateStuff, mc_state_extra: &McStateExtra) -> Result<()> {
-        match self.validation_status {
+        match self.engine.validation_status() {
             ValidationStatus::Waiting => {
                 let rotate = rotate_all_shards(mc_state_extra);
                 let last_masterchain_block = mc_state.block_id();
                 let later_than_hardfork = self.engine.get_last_fork_masterchain_seqno() <= last_masterchain_block.seq_no;
                 if self.engine.check_sync().await?
-                && (rotate || last_masterchain_block.seq_no == 0)
-                && later_than_hardfork {
-                    self.validation_status = ValidationStatus::Countdown
+                    && (rotate || last_masterchain_block.seq_no == 0)
+                    && later_than_hardfork
+                {
+                    if last_masterchain_block.seq_no == 0 && self.config.no_countdown_for_zerostate {
+                        self.engine.set_validation_status(ValidationStatus::Active);
+                    }
+                    else {
+                        self.engine.set_validation_status(ValidationStatus::Countdown);
+                    }
                 }
             }
             ValidationStatus::Countdown => {
                 for (_, group) in self.validator_sessions.iter() {
                     if group.get_status().await == ValidatorGroupStatus::Active {
-                        self.validation_status = ValidationStatus::Active;
+                        self.engine.set_validation_status(ValidationStatus::Active);
                         break
                     }
                 }
@@ -505,7 +601,7 @@ impl ValidatorManagerImpl {
     }
 
     async fn disable_validation(&mut self) -> Result<()> {
-        self.validation_status = ValidationStatus::Disabled;
+        self.engine.set_validation_status(ValidationStatus::Disabled);
 
         let existing_validator_sessions: HashSet<UInt256> =
             self.validator_sessions.keys().cloned().collect();
@@ -518,20 +614,21 @@ impl ValidatorManagerImpl {
 
     fn enable_validation(&mut self) {
         self.engine.set_will_validate(true);
-        self.validation_status = std::cmp::max(self.validation_status, ValidationStatus::Waiting);
-        log::info!(target: "validator_manager", "Validation enabled: status {:?}", self.validation_status);
+        let validation_status = std::cmp::max(self.engine.validation_status(), ValidationStatus::Waiting);
+        self.engine.set_validation_status(validation_status);
+        log::debug!(target: "validator_manager", "Validation enabled: status {:?}", validation_status);
     }
 
     async fn start_sessions(&mut self,
         new_shards: &HashMap<ShardIdent, Vec<BlockIdExt>>,
         our_current_shards: &mut HashMap<ShardIdent, ValidatorSet>,
-        _our_future_shards: &mut HashMap<ShardIdent, (ValidatorSet, UInt256)>,
         keyblock_seqno: u32,
         session_options: validator_session::SessionOptions,
         opts_hash: &UInt256,
         catchain_config: &CatchainConfig,
         gc_validator_sessions: &mut HashSet<UInt256>,
         mc_now: u32,
+        mc_state: &ShardStateStuff,
         mc_state_extra: &McStateExtra,
         last_masterchain_block: &BlockIdExt
     ) -> Result<()> {
@@ -541,7 +638,8 @@ impl ValidatorManagerImpl {
         };
         let full_validator_set = mc_state_extra.config.validator_set()?;
 
-        let group_start_status = if self.validation_status == ValidationStatus::Countdown {
+        let validation_status = self.engine.validation_status();
+        let group_start_status = if validation_status == ValidationStatus::Countdown {
             let session_lifetime = std::cmp::min(catchain_config.mc_catchain_lifetime,
                                                  catchain_config.shard_catchain_lifetime);
             let start_at = tokio::time::Instant::now() + Duration::from_secs((session_lifetime / 2).into());
@@ -557,6 +655,8 @@ impl ValidatorManagerImpl {
         log::trace!(target: "validator_manager", "Starting/updating sessions {}",
             if do_unsafe_catchain_rotate {"(unsafe rotate)"} else {""}
         );
+
+        let remp_enabled = is_remp_enabled(self.engine.clone(), mc_state_extra.config());
 
         for (ident, prev_blocks) in new_shards.iter() {
             let master_cc_seqno = mc_state_extra.validator_info.catchain_seqno;
@@ -574,16 +674,14 @@ impl ValidatorManagerImpl {
 
             let subset = match try_calc_subset_for_workchain(
                 &full_validator_set,
-                &mc_state_extra.config,
-                &catchain_config,
-                ident.shard_prefix_with_tag(),
-                ident.workchain_id(),
+                &mc_state,
+                ident,
                 cc_seqno,
-                mc_now.into(),
+                get_first_block_seqno_after_prevs(prev_blocks).unwrap_or_default()
             )? {
                 Some(x) => x,
                 None => {
-                    log::error!(
+                    log::debug!(
                         target: "validator_manager", 
                         "Cannot compute validator set for workchain {}:{:016X}: less than {} of {}",
                         ident.workchain_id(), 
@@ -595,127 +693,54 @@ impl ValidatorManagerImpl {
                 }
             };
 
-            let vsubset = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno, subset.0.clone())?;
+            let vsubset = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno, subset.validators.clone())?;
+            let general_session_info = Arc::new(GeneralSessionInfo {
+                shard: ident.clone(),
+                opts_hash: opts_hash.clone(),
+                catchain_seqno: cc_seqno,
+                key_seqno: keyblock_seqno,
+                max_vertical_seqno: 0
+            });
+
             let session_id = get_session_unsafe_id(
-                &ident,
-                &vsubset,
-                opts_hash,
-                keyblock_seqno as i32,
+                general_session_info.clone(),
+                &vsubset.list().to_vec(),
                 true,
-                0, /* temp */
                 prev_blocks.get(0).map(|x| x.seq_no),
-                cc_seqno,
                 &self.config
             );
 
             let session_info = SessionInfo::new(ident.clone(), session_id.clone(), vsubset.clone());
             let old_shards: Vec<ShardIdent> = prev_blocks.iter().map(|blk| blk.shard_id.clone()).collect();
             self.session_history.new_session_after(session_info.clone(), old_shards.clone())?;
-/*
-            let prev_validator_list = &self.session_history.get_prev_validator_list(&session_id)?;
-            for old_session_id in self.session_history.get_prev_sessions(&session_id)?.iter() {
-                match self.validator_sessions.get(old_session_id) {
-                    Some(old_session) =>
-                        old_session.clone().add_next_validators(
-                            master_cc_seqno, prev_validator_list, &vsubset
-                        ).await?,
-                    None => log::error!(target: "validator_manager",
-                             "Shard {}, adding info for session {:x}, previous session id {:x} has no validator_group!",
-                             ident, session_id, old_session_id
-                        )
-                }
-            }
-*/
-            let prev_validator_list = if cc_seqno > 1 {
-                let prev_subset = match try_calc_subset_for_workchain(
-                    &full_validator_set,
-                    &mc_state_extra.config,
-                    &catchain_config,
-                    ident.shard_prefix_with_tag(),
-                    ident.workchain_id(),
-                    cc_seqno-1,
-                    mc_now.into(),
-                )? {
-                    Some(x) => x,
+
+            let prev_validator_list =
+                match self.compute_prev_validator_list(
+                    &full_validator_set, &vsubset,
+                    &mc_state, prev_blocks, general_session_info.clone(),
+                    &session_id, master_cc_seqno
+                ).await? {
                     None => {
-                        log::error!(
-                        target: "validator_manager",
-                        "Cannot compute validator set for workchain {}:{:016X}: less than {} of {}",
-                        ident.workchain_id(),
-                        ident.shard_prefix_with_tag(),
-                        catchain_config.shard_validators_num,
-                        full_validator_set.list().len()
-                    );
-                        continue
-                    }
+                        log::debug!(
+                            target: "validator_manager",
+                            "No previous subset for session: \
+                            shard {}, cc_seqno {}, keyblock_seqno {}, skipping",
+                            ident, cc_seqno, keyblock_seqno,
+                        );
+                        Vec::new()
+                    },
+                    Some(x) => x
                 };
 
-                let prev_vsubset = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno-1, prev_subset.0.clone())?;
-                let prev_session_id = get_session_unsafe_id(
-                    &ident,
-                    &prev_vsubset,
-                    opts_hash,
-                    keyblock_seqno as i32,
-                    true,
-                    0, /* temp */
-                    prev_blocks.get(0).map(|x| x.seq_no),
-                    cc_seqno-1,
-                    &self.config
-                );
-                //let prev_session_info = SessionInfo::new(ident.clone(), session_id, prev_vsubset.clone());
-                //let prev_old_shards = prev_blocks.iter().map(|blk| blk.shard_id.clone()).collect();
-                //self.session_history.new_session_after(prev_session_info, prev_old_shards)?;
+            let local_id_option = self.find_us(&subset.validators);
 
-                //let prev_validator_list = &self.session_history.get_prev_validator_list(&session_id)?;
-                for old_session_id in self.session_history.get_prev_sessions(&session_id)?.iter() {
-                    if *old_session_id == prev_session_id {
-                        log::trace!(target: "validator_manager", "Old session id: {:x}, old session id from prev cc: {:x}",
-                            old_session_id, prev_session_id
-                        );
-                    }
-                    else {
-                        log::warn!(target: "validator_manager", "Old session id: {:x} != old session id from prev cc: {:x}",
-                            old_session_id, prev_session_id
-                        );
-                    }
-                }
-
-                let prev_validator_list = prev_vsubset.list();
-                let old_session_id = &prev_session_id;
-                match self.validator_sessions.get(old_session_id) {
-                    Some(old_session) =>
-                        old_session.clone().add_next_validators(
-                            master_cc_seqno, &prev_validator_list.to_vec(), &vsubset
-                        ).await?,
-                    None => log::error!(target: "validator_manager",
-                         "Shard {}, adding info for session {:x}, previous session id {:x} has no validator_group!",
-                         ident, session_id, old_session_id
-                    )
-                }
-                prev_validator_list.to_vec()
-            }
-            else {
-                let prev_validator_list = &self.session_history.get_prev_validator_list(&session_id)?;
-                for old_session_id in self.session_history.get_prev_sessions(&session_id)?.iter() {
-                    match self.validator_sessions.get(old_session_id) {
-                        Some(old_session) =>
-                            old_session.clone().add_next_validators(
-                                master_cc_seqno, prev_validator_list, &vsubset
-                            ).await?,
-                        None => log::error!(target: "validator_manager",
-                             "Shard {}, adding info for session {:x}, previous session id {:x} has no validator_group!",
-                             ident, session_id, old_session_id
-                        )
-                    }
-                }
-                prev_validator_list.clone()
-            };
-
-            let local_id_option = self.find_us(&subset.0);
             if let Some(local_id) = &local_id_option {
                 our_current_shards.insert (ident.clone(), vsubset.clone());
-
-                log::info!(target: "validator_manager", "subset for session: shard {}, cc_seqno {}, keyblock_seqno {}, validator_set {}, session_id {:x}",
+                
+                log::debug!(
+                    target: "validator_manager", 
+                    "subset for session: shard {}, cc_seqno {}, keyblock_seqno {}, \
+                    validator_set {}, session_id {:x}",
                     ident, cc_seqno, keyblock_seqno,
                     validatorset_to_string(&vsubset), session_id
                 );
@@ -726,23 +751,24 @@ impl ValidatorManagerImpl {
                 // 1. Do not start new sessions
                 // 2. Do not remove functioning old sessions
                 if do_unsafe_catchain_rotate && !ident.is_masterchain() && local_id_option.is_none() {
-                    log::trace!(target: "validator", "Current shard {}, session {:x}: unsafe rotation skipping", ident, session_id);
+                    log::trace!(
+                        target: "validator", 
+                        "Current shard {}, session {:x}: unsafe rotation skipping", 
+                        ident, session_id
+                    );
                     continue;
                 }
 
                 let engine = self.engine.clone();
                 #[cfg(feature = "slashing")]
                 let slashing_manager = self.slashing_manager.clone();
-                let rt_clone = self.rt.clone();
                 let remp_manager = self.remp_manager.clone();
                 let allow_unsafe_self_blocks_resync = self.config.unsafe_resync_catchains.contains(&cc_seqno);
-                let session = self.validator_sessions.entry(session_id.clone()).or_insert_with(|| 
+                let session = self.validator_sessions.entry(session_id.clone()).or_insert_with(||
                     Arc::new(ValidatorGroup::new(
-                        rt_clone,
-                        ident.clone(),
+                        general_session_info.clone(),
                         local_id.clone(),
                         session_id.clone(),
-                        cc_seqno,
                         master_cc_seqno,
                         validator_list_id.clone(),
                         vsubset.clone(),
@@ -772,6 +798,7 @@ impl ValidatorManagerImpl {
                         prev_blocks.clone(),
                         last_masterchain_block.clone(),
                         SystemTime::UNIX_EPOCH + Duration::from_secs(mc_now.into()),
+                        remp_enabled,
                         self.rt.clone()
                     ).await?;
                 } else if session_status >= ValidatorGroupStatus::Stopping {
@@ -779,6 +806,8 @@ impl ValidatorManagerImpl {
                 } else {
                     log::trace!(target: "validator_manager", "Current shard {}, session {:x}: working", ident, session_id);
                 }
+            } else {
+                log::trace!("We are not in subset for {}", ident);
             }
             log::trace!(target: "validator_manager", "Session {} started (if necessary)", ident);
         }
@@ -806,7 +835,7 @@ impl ValidatorManagerImpl {
         } else {
             mc_state_extra.last_key_block.as_ref().map(|id| id.seq_no).expect("masterchain state must contain info about previous key block")
         };
-        let mc_now = mc_state.state().gen_time();
+        let mc_now = mc_state.state()?.gen_time();
         let (session_options, opts_hash) = self.compute_session_options(&mc_state_extra).await?;
         let catchain_config = mc_state_extra.config.catchain_config()?;
 
@@ -824,14 +853,15 @@ impl ValidatorManagerImpl {
 
         // Shards that will eventually be started (in later masterstates): need to prepare
         let mut future_shards: HashSet<ShardIdent> = HashSet::new();
-        // Validator sets and  for shards that will eventually be started
-        let mut our_future_shards: HashMap<ShardIdent, (ValidatorSet, ValidatorListHash)> = HashMap::new();
+        // Validator sets for shards that will eventually be started
+        let mut our_future_shards: HashMap<ShardIdent, (ValidatorSubsetInfo, u32, ValidatorListHash)> = HashMap::new();
         let mut blocks_before_split: HashSet<BlockIdExt> = HashSet::new();
 
-        let (master, workchain_id) = self.engine.processed_workchain().await?;
         new_shards.insert(ShardIdent::masterchain(), vec![last_masterchain_block.clone()]);
         future_shards.insert(ShardIdent::masterchain());
-        if !master || workchain_id == BASE_WORKCHAIN_ID {
+        let workchain_id = self.engine.processed_workchain().unwrap_or(BASE_WORKCHAIN_ID);
+        let cap_workchains = mc_state.config_params()?.has_capability(GlobalCapabilities::CapWorkchains);
+        if !cap_workchains || workchain_id != MASTERCHAIN_ID {
             mc_state_extra.shards().iterate_shards_for_workchain(workchain_id, |ident: ShardIdent, descr: ShardDescr| {
                 // Add all shards that are effective from now
                 // ValidatorGroups will be created and appropriate sessions started for these shards
@@ -911,7 +941,7 @@ impl ValidatorManagerImpl {
         }
 
         // Initializing future shards
-        log::info!(target: "validator_manager", "Future shards initialization:");
+        log::debug!(target: "validator_manager", "Future shards initialization:");
         let next_validator_set = mc_state_extra.config.next_validator_set()?;
         let full_validator_set = mc_state_extra.config.validator_set()?;
         let possible_validator_change = next_validator_set.total() > 0;
@@ -928,8 +958,12 @@ impl ValidatorManagerImpl {
             let near_validator_change = possible_validator_change &&
                 next_validator_set.utime_since() <= (mc_now / cc_lifetime + 1) * cc_lifetime;
             let future_validator_set = if near_validator_change {
-                log::info!(target: "validator_manager", "Validator change will happen during catchain session lifetime for shard {}: cc_lifetime {}, now {}, next set since {}",
-                           ident, cc_lifetime, mc_now, next_validator_set.utime_since());
+                log::info!(
+                    target: "validator_manager", 
+                    "Validator change will happen during catchain session lifetime \
+                    for shard {}: cc_lifetime {}, now {}, next set since {}",
+                    ident, cc_lifetime, mc_now, next_validator_set.utime_since()
+                );
                 &next_validator_set
             } else {
                 &full_validator_set
@@ -941,22 +975,17 @@ impl ValidatorManagerImpl {
             };
 
             let next_cc_seqno = cc_seqno_from_state + 1;
-            let next_subset = match try_calc_subset_for_workchain(
-                &future_validator_set,
-                &mc_state_extra.config,
-                &catchain_config,
-                ident.shard_prefix_with_tag(),
-                ident.workchain_id(),
-                next_cc_seqno,
-                mc_now.into(),
-            )? {
-                Some(x) => x.0,
+
+            let next_subset_opt = try_calc_subset_for_workchain_standard(
+                &future_validator_set, mc_state.config_params()?, ident, next_cc_seqno)?;
+
+            let next_subset = match next_subset_opt {
+                Some(x) => x,
                 None => {
                     log::error!(
                         target: "validator_manager", 
-                        "Cannot compute validator set for workchain {}:{:016X}: less than {} of {}",
-                        ident.workchain_id(), 
-                        ident.shard_prefix_with_tag(),
+                        "Cannot compute validator set for workchain {}: less than {} of {}",
+                        ident,
                         catchain_config.shard_validators_num,
                         future_validator_set.list().len()
                     );
@@ -964,25 +993,28 @@ impl ValidatorManagerImpl {
                 }
             };
 
-            log::trace!(target: "validator_manager", "Computing next subset {} with cc_seqno {}", ident, cc_seqno_from_state+1);
-            let vnext_subset = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno_from_state + 1, next_subset)?;
-            our_future_shards.insert(ident.clone(), (vnext_subset, vnext_list_id));
-            log::trace!(target: "validator_manager", "Computing next subset {} with cc_seqno {} -- done", ident, cc_seqno_from_state+1);
+            our_future_shards.insert(ident.clone(), (next_subset, next_cc_seqno, vnext_list_id));
+            log::trace!(
+                target: "validator_manager", 
+                "Future shard {}: computing next subset with cc_seqno {} -- done", 
+                ident, next_cc_seqno
+            );
         };
 
         // Iterate over shards and start all missing sessions
         log::trace!(target: "validator_manager", "Starting missing sessions");
-        if self.validation_status.allows_validate() {
+        let validation_status = self.engine.validation_status();
+        if validation_status.allows_validate() {
             self.start_sessions(
                 &new_shards,
                 &mut our_current_shards,
-                &mut our_future_shards,
                 keyblock_seqno,
                 session_options,
                 &opts_hash,
                 &catchain_config,
                 &mut gc_validator_sessions,
                 mc_now,
+                &mc_state,
                 &mc_state_extra,
                 last_masterchain_block
             ).await?;
@@ -990,31 +1022,33 @@ impl ValidatorManagerImpl {
         log::trace!(target: "validator_manager", "Missing sessions started. Current shards:");
 
         // Iterate over future shards and create all future sessions
-        for (ident, (next_val_subset, next_val_list_id)) in our_future_shards.iter() {
-            if let Some(local_id) = self.find_us(&next_val_subset.list()) {
+        for (ident, (wc, next_cc_seqno, next_val_list_id)) in our_future_shards.iter() {
+            if let Some(local_id) = self.find_us(&wc.validators) {
+                let new_session_info = Arc::new(GeneralSessionInfo {
+                    shard: ident.clone(),
+                    opts_hash: opts_hash.clone(),
+                    catchain_seqno: *next_cc_seqno,
+                    key_seqno: keyblock_seqno,
+                    max_vertical_seqno: 0
+                });
                 let session_id = get_session_id(
-                    &ident,
-                    &next_val_subset,
-                    &opts_hash,
-                    keyblock_seqno as i32,
+                    new_session_info.clone(),
+                    &wc.validators,
                     true,
-                    0, /* temp */
                 );
                 gc_validator_sessions.remove(&session_id);
                 if !self.validator_sessions.contains_key(&session_id) {
                     let session = Arc::new(ValidatorGroup::new(
-                        self.rt.clone(),
-                        ident.clone(),
+                        new_session_info,
                         local_id,
                         session_id.clone(),
-                        next_val_subset.cc_seqno(),
                         master_cc_seqno + 1,
                         next_val_list_id.clone(),
-                        next_val_subset.clone(),
+                        wc.compute_validator_set(*next_cc_seqno)?,
                         session_options,
                         self.remp_manager.clone(),
                         self.engine.clone(),
-                        self.config.unsafe_resync_catchains.contains(&next_val_subset.cc_seqno()),
+                        self.config.unsafe_resync_catchains.contains(next_cc_seqno),
                         #[cfg(feature = "slashing")]
                         self.slashing_manager.clone()
                     ));
@@ -1050,10 +1084,11 @@ impl ValidatorManagerImpl {
             self.engine.save_last_rotation_block_id(last_masterchain_block)?;
 
             if let Some(remp) = &self.remp_manager {
+                remp.message_cache.set_master_cc(master_cc_seqno);
                 remp.message_cache.set_master_cc_start_time(master_cc_seqno, SystemTime::now());
-                let deleted = remp.gc_old_messages(master_cc_seqno).await;
+                let _deleted = remp.gc_old_messages(master_cc_seqno).await;
                 #[cfg(feature = "telemetry")]
-                self.engine.remp_core_telemetry().deleted_from_cache(deleted);
+                self.engine.remp_core_telemetry().deleted_from_cache(_deleted);
             }
         }
 
@@ -1074,8 +1109,8 @@ impl ValidatorManagerImpl {
             log::info!(target: "validator_manager", "{}", group.info().await);
             let status = group.get_status().await;
             if status == ValidatorGroupStatus::Active || status == ValidatorGroupStatus::Stopping {
-                self.engine.validation_status().insert(group.shard().clone(), group.last_validation_time());
-                self.engine.collation_status().insert(group.shard().clone(), group.last_collation_time());
+                self.engine.set_last_validation_time(group.shard().clone(), group.last_validation_time());
+                self.engine.set_last_collation_time(group.shard().clone(), group.last_collation_time());
             }
         }
  
@@ -1157,7 +1192,11 @@ impl ValidatorManagerImpl {
                 match timeout(self.config.update_interval, self.engine.wait_next_applied_mc_block(&mc_handle, None)).await {
                     Ok(r_res) => break r_res?.0,
                     Err(tokio::time::error::Elapsed{..}) => {
-                        log::warn!(target: "validator_manager", "Validator manager didn't receive next applied master block after {}", mc_handle.id());
+                        log::warn!(
+                            target: "validator_manager", 
+                            "Validator manager didn't receive next applied master block after {}",
+                            mc_handle.id()
+                        );
                     }
                 }
             }
@@ -1177,6 +1216,7 @@ pub fn start_validator_manager(
         engine.acquire_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
         while !engine.get_validator_status() {
             log::trace!("is not a validator");
+            let _ = engine.clear_last_rotation_block_id();
             for _ in 0..CHECK_VALIDATOR_TIMEOUT {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 if engine.check_stop() {

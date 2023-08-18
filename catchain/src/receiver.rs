@@ -11,19 +11,24 @@
 * limitations under the License.
 */
 
-use self::ton::CatchainSentResponse;
-pub use super::*;
-use crate::profiling::check_execution_time;
-use crate::profiling::instrument;
-use crate::profiling::ResultStatusCounter;
-use crate::ton_api::IntoBoxed;
-use ever_crypto::Ed25519KeyOption;
+use crate::{
+    check_execution_time, instrument, serialize_tl_boxed_object,
+    Any, BlockHash, BlockHeight, BlockPayloadPtr, CatchainFactory, CatchainNode, 
+    DatabasePtr, ExternalQueryResponseCallback, Options, PrivateKey, PublicKeyHash, 
+    QueryResponseCallback, RawBuffer, ReceivedBlock, ReceivedBlockPtr, Receiver, 
+    ReceiverListenerPtr, ReceiverPtr, ReceiverSourcePtr, ReceiverListener, 
+    ReceiverTaskQueue, ReceiverTaskQueuePtr, SessionId, 
+    profiling::{InstanceCounter, ResultStatusCounter}, received_block::ReceivedBlockImpl, 
+    ton, utils
+};
 use rand::Rng;
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::convert::TryInto;
-use std::time::Duration;
-use utils::*;
+use std::{
+    cell::RefCell, collections::{HashMap, VecDeque}, convert::TryInto, sync::Arc, 
+    rc::Rc, time::{Duration, SystemTime}
+};
+use ton_api::IntoBoxed;
+use ton_types::{error, fail, base64_encode_url_safe, Ed25519KeyOption, Result};
+use crate::utils::get_elapsed_time;
 
 /*
     Constants
@@ -39,7 +44,7 @@ const MAX_UNSAFE_INITIAL_SYNC_COMPLETE_TIME_SECS: u64 = 300; //max time to finis
 const MAX_SAFE_INITIAL_SYNC_COMPLETE_TIME_SECS: u64 = 5; //max time to finish synchronization (safe mode)
 const INFINITE_INITIAL_SYNC_COMPLETE_TIME_SECS: u64 = 10 * 365 * 24 * 3600; //inifinite time to finish synchronization
 
-lazy_static! {
+lazy_static::lazy_static! {
   static ref ZERO_HASH : BlockHash = BlockHash::default(); //default block hash to save the root in the DB
 }
 
@@ -166,7 +171,7 @@ impl Receiver for ReceiverImpl {
 
         let fork_id = self.total_forks;
 
-        trace!("...new fork {} has been added for receiver", fork_id);
+        log::trace!("...new fork {} has been added for receiver", fork_id);
 
         fork_id
     }
@@ -176,7 +181,7 @@ impl Receiver for ReceiverImpl {
     }
 
     fn add_fork_proof(&mut self, fork_proof: &BlockPayloadPtr) {
-        trace!("...add block {:?} as a fork proof", fork_proof);
+        log::trace!("...add block {:?} as a fork proof", fork_proof);
 
         self.add_block_for_delivery(fork_proof.clone(), Vec::new());
     }
@@ -201,14 +206,14 @@ impl Receiver for ReceiverImpl {
     fn validate_block_dependency(&self, dep: &ton::BlockDep) -> Result<()> {
         instrument!();
 
-        (received_block::ReceivedBlockImpl::pre_validate_block_dependency(self, dep))?;
+        ReceivedBlockImpl::pre_validate_block_dependency(self, dep)?;
 
         if dep.height <= 0 {
             return Ok(());
         }
 
         let id = &self.get_block_dependency_id(&dep);
-        let serialized_block_id = utils::serialize_tl_boxed_object!(id);
+        let serialized_block_id = serialize_tl_boxed_object!(id);
 
         if let Some(_block) = self.get_block_by_hash(&utils::get_hash(&serialized_block_id)) {
             return Ok(());
@@ -250,10 +255,11 @@ impl Receiver for ReceiverImpl {
         in_query_status.total_increment();
 
         if !self.read_db {
-            response_callback(Err(format_err!(
+            let err = error!(
                 "DB is not read for catchain receiver {}",
                 self.incarnation.to_hex_string()
-            )));
+            );
+            response_callback(Err(err));
             return;
         }
 
@@ -292,10 +298,10 @@ impl Receiver for ReceiverImpl {
         instrument!();
 
         let id = self.get_block_id(&block, payload.data());
-        let hash = get_block_id_hash(&id);
+        let hash = utils::get_block_id_hash(&id);
         let block_opt = self.get_block_by_hash(&hash);
 
-        trace!(
+        log::trace!(
             "New block with hash={:?} and id={:?} has been received",
             hash,
             id
@@ -303,7 +309,7 @@ impl Receiver for ReceiverImpl {
 
         if let Some(block) = block_opt {
             if block.borrow().is_initialized() {
-                trace!(
+                log::trace!(
                     "...skip block {:?} because it has been already initialized",
                     hash
                 );
@@ -313,32 +319,30 @@ impl Receiver for ReceiverImpl {
         }
 
         if block.incarnation != self.incarnation {
-            let message = format!(
+            let warning = error!(
                 "Block from source {} incarnation mismatch: expected {} but received {:?}",
                 adnl_id,
                 self.incarnation.to_hex_string(),
                 block.incarnation
             );
-            warn!("{}", message);
-            return Err(err_msg(message));
+            log::warn!("{}", warning);
+            return Err(warning);
         }
 
         if let Err(validation_error) = self.validate_block_with_payload(&block, &payload) {
-            let message = format!(
+            let warning = error!(
                 "Receiver {} received broken block from source {}: {}",
                 self.incarnation.to_hex_string(),
                 adnl_id,
                 validation_error
             );
-
-            warn!("{}", message);
-
-            return Err(err_msg(message));
+            log::warn!("{}", warning);
+            return Err(warning);
         }
 
         if block.src as usize == self.local_idx {
             if !self.allow_unsafe_self_blocks_resync || self.started {
-                error!(
+                log::error!(
                     "Receiver {} has received unknown SELF block from {} (unsafe={})",
                     self.incarnation.to_hex_string(),
                     adnl_id,
@@ -349,8 +353,12 @@ impl Receiver for ReceiverImpl {
                     panic!("Unknown SELF block is received");
                 }
             } else {
-                error!("Receiver {} has received unknown SELF block from {}. UPDATING LOCAL DATABASE. UNSAFE", self.incarnation.to_hex_string(),
-          adnl_id);
+                log::error!(
+                    "Receiver {} has received unknown SELF block from {}. \
+                    UPDATING LOCAL DATABASE. UNSAFE", 
+                    self.incarnation.to_hex_string(),
+                    adnl_id
+                );
 
                 self.initial_sync_complete_time = SystemTime::now()
                     + Duration::from_secs(MAX_UNSAFE_INITIAL_SYNC_COMPLETE_TIME_SECS);
@@ -387,13 +395,13 @@ impl Receiver for ReceiverImpl {
 
                                 receiver.block_written_to_db(&id);
 
-                                trace!(
+                                log::trace!(
                                     "...block {:?} has been successfully processed after receiving",
                                     hash
                                 );
                             }));
                         }
-                        Err(err) => warn!("Block serialization error: {:?}", err),
+                        Err(err) => log::warn!("Block serialization error: {:?}", err),
                     }
                 }));
             }
@@ -416,7 +424,7 @@ impl Receiver for ReceiverImpl {
         }
 
         if !self.read_db {
-            bail!("DB is not read");
+            fail!("DB is not read");
         }
 
         let reader: &mut dyn std::io::Read = bytes;
@@ -441,7 +449,7 @@ impl Receiver for ReceiverImpl {
                         payload,
                     );
                 } else {
-                    let err = format_err!("unknown message received {:?}", message);
+                    let err = error!("unknown message received {:?}", message);
 
                     //error!("{}", err);
 
@@ -485,7 +493,7 @@ impl Receiver for ReceiverImpl {
     fn deliver_block(&mut self, block: &mut dyn ReceivedBlock) {
         instrument!();
 
-        trace!(
+        log::trace!(
             "Catchain delivering block {:?} from source={} fork={} height={} custom={} deps={:?}",
             block.get_hash(),
             block.get_source_id(),
@@ -497,7 +505,7 @@ impl Receiver for ReceiverImpl {
 
         //notify listeners about new block appearance
 
-        lazy_static! {
+        lazy_static::lazy_static! {
             static ref DEFAULT_BLOCK: BlockPayloadPtr =
                 CatchainFactory::create_empty_block_payload();
         }
@@ -564,13 +572,13 @@ impl Receiver for ReceiverImpl {
             return self.root_block.clone();
         }
 
-        let hash = get_block_dependency_hash(block, self);
+        let hash = utils::get_block_dependency_hash(block, self);
         let block_opt = self.get_block_by_hash(&hash);
 
         if let Some(block) = block_opt {
             return block;
         } else {
-            let new_block = received_block::ReceivedBlockImpl::create(&block, self);
+            let new_block = ReceivedBlockImpl::create(&block, self);
 
             self.add_received_block(new_block.clone());
 
@@ -579,7 +587,7 @@ impl Receiver for ReceiverImpl {
     }
 
     fn create_block_from_string_dump(&self, dump: &String) -> ReceivedBlockPtr {
-        received_block::ReceivedBlockImpl::create_from_string_dump(dump, self)
+        ReceivedBlockImpl::create_from_string_dump(dump, self)
     }
 
     fn parse_add_received_block(&mut self, s: &String) {
@@ -637,7 +645,7 @@ impl Receiver for ReceiverImpl {
         instrument!();
 
         let now = SystemTime::now();
-        trace!("Catchain_startup: check_all called; now {:?}", now);
+        log::trace!("Catchain_startup: check_all called; now {:?}", now);
 
         //synchronize with chosen neighbours
 
@@ -650,7 +658,7 @@ impl Receiver for ReceiverImpl {
 
             self.next_sync_time = now + delay;
 
-            trace!(
+            log::trace!(
                 "...next sync is scheduled at {} (in {:.3}s from now)",
                 utils::time_to_string(&self.next_sync_time),
                 delay.as_secs_f64(),
@@ -669,7 +677,7 @@ impl Receiver for ReceiverImpl {
 
             self.next_neighbours_rotate_time = now + delay;
 
-            trace!(
+            log::trace!(
                 "...next neighbours rotation is scheduled at {} (in {:.3}s from now)",
                 utils::time_to_string(&self.next_neighbours_rotate_time),
                 delay.as_secs_f64(),
@@ -677,7 +685,7 @@ impl Receiver for ReceiverImpl {
         }
 
         //start up checks (for unsafe startup)
-        trace!(
+        log::trace!(
             "Catchain_startup: self.started {}, self.read_db {}",
             self.started,
             self.read_db
@@ -685,7 +693,7 @@ impl Receiver for ReceiverImpl {
 
         if !self.started && self.read_db {
             let elapsed = self.initial_sync_complete_time.elapsed();
-            trace!(
+            log::trace!(
                 "Catchain_startup: initial sync complete time {:?}, now {:?}, elapsed? {:?}",
                 self.initial_sync_complete_time,
                 SystemTime::now(),
@@ -698,7 +706,7 @@ impl Receiver for ReceiverImpl {
                 } else {
                     true
                 };
-                trace!("Catchain_startup: allow {}", allow);
+                log::trace!("Catchain_startup: allow {}", allow);
 
                 if allow {
                     self.initial_sync_complete_time =
@@ -871,7 +879,7 @@ impl ReceiverImpl {
         assert!(!source.is_blamed());
 
         if source.has_unreceived() || source.has_undelivered() {
-            info!(
+            log::info!(
                 "Catchain: has_unreceived={} has_undelivered={}",
                 source.has_unreceived(),
                 source.has_undelivered()
@@ -901,7 +909,7 @@ impl ReceiverImpl {
         if self.unsafe_root_block_writing {
             self.initial_sync_complete_time = now + Duration::from_secs(5);
 
-            info!("Catchain: writing=true");
+            log::info!("Catchain: writing=true");
 
             return false;
         }
@@ -932,7 +940,7 @@ impl ReceiverImpl {
         self.unsafe_root_block_writing = false;
         self.initial_sync_complete_time = now + Duration::from_secs(5);
 
-        info!("Catchain: need update root");
+        log::info!("Catchain: need update root");
 
         return false;
     }
@@ -980,7 +988,7 @@ impl ReceiverImpl {
         let data_hash = dep.data_hash.clone();
         ::ton_api::ton::catchain::block::id::Id {
             incarnation: incarnation.clone(),
-            src: public_key_hash_to_int256(source_hash),
+            src: utils::public_key_hash_to_int256(source_hash),
             height,
             data_hash,
         }
@@ -1003,14 +1011,14 @@ impl ReceiverImpl {
     ) -> Result<()> {
         instrument!();
 
-        (received_block::ReceivedBlockImpl::pre_validate_block(self, block, payload))?;
+        ReceivedBlockImpl::pre_validate_block(self, block, payload)?;
 
         if block.height <= 0 {
             return Ok(());
         }
 
         let id = &self.get_block_id(&block, payload.data());
-        let serialized_block_id = utils::serialize_tl_boxed_object!(id);
+        let serialized_block_id = serialize_tl_boxed_object!(id);
 
         if let Some(_block) = self.get_block_by_hash(&utils::get_hash(&serialized_block_id)) {
             return Ok(());
@@ -1050,7 +1058,7 @@ impl ReceiverImpl {
     fn add_block_impl(&mut self, payload: BlockPayloadPtr, deps: Vec<BlockHash>) {
         instrument!();
 
-        trace!(
+        log::trace!(
             "Adding new block with deps {:?} and payload {:?}",
             deps,
             payload
@@ -1079,7 +1087,7 @@ impl ReceiverImpl {
             let block = self.get_block_by_hash(&dep);
 
             if block.is_none() {
-                error!("...can't find block with hash {:?}", dep);
+                log::error!("...can't find block with hash {:?}", dep);
                 unreachable!();
             }
 
@@ -1110,20 +1118,20 @@ impl ReceiverImpl {
                 block.signature = block_id_signature.to_vec().into();
             }
             Err(_err) => {
-                error!("...block signing error: {:?}", _err);
+                log::error!("...block signing error: {:?}", _err);
                 return;
             }
         }
 
-        trace!("...block has been signed {:?}", block);
+        log::trace!("...block has been signed {:?}", block);
 
         //save block to DB
 
-        trace!("...save block to DB");
+        log::trace!("...save block to DB");
 
         if let Some(ref db) = self.db {
             let db = db.clone();
-            let block_id_hash = get_block_id_hash(&block_id);
+            let block_id_hash = utils::get_block_id_hash(&block_id);
             let block = block.clone();
             let payload = payload.clone();
 
@@ -1139,7 +1147,7 @@ impl ReceiverImpl {
                         Ok(raw_data) => {
                             db.put_block(&block_id_hash, raw_data);
                         }
-                        Err(err) => warn!("Block serialization error: {:?}", err),
+                        Err(err) => log::warn!("Block serialization error: {:?}", err),
                     }
 
                     //save mapping for root block to it's ID
@@ -1159,7 +1167,7 @@ impl ReceiverImpl {
 
                         //initiate delivery flow
 
-                        trace!("...deliver a new created block {:?}", block);
+                        log::trace!("...deliver a new created block {:?}", block);
 
                         match receiver.create_block_with_payload(&block, payload) {
                             Ok(block) => {
@@ -1167,7 +1175,7 @@ impl ReceiverImpl {
 
                                 block.borrow_mut().written(receiver);
                             }
-                            Err(err) => error!("...creation block error: {:?}", err),
+                            Err(err) => log::error!("...creation block error: {:?}", err),
                         }
 
                         receiver.run_scheduler();
@@ -1190,7 +1198,7 @@ impl ReceiverImpl {
     fn start_up_db(&mut self, path: String) -> Result<()> {
         instrument!();
 
-        trace!("...starting up DB");
+        log::trace!("...starting up DB");
 
         if self.options.debug_disable_db {
             self.read_db();
@@ -1203,7 +1211,7 @@ impl ReceiverImpl {
             format!(
                 "catchainreceiver{}{}",
                 self.db_suffix,
-                base64::encode_config(self.incarnation.as_slice(), base64::URL_SAFE),
+                base64_encode_url_safe(self.incarnation.as_slice()),
             ),
             self.get_metrics_receiver(),
         )?;
@@ -1214,7 +1222,7 @@ impl ReceiverImpl {
             let hash: [u8; 32] = root_block
                 .0
                 .try_into()
-                .map_err(|_| ton_types::error!("Cannot convert root block hash"))?;
+                .map_err(|_| error!("Cannot convert root block hash"))?;
             let root_block_id_hash: BlockHash = hash.into();
             self.read_db_from(root_block_id_hash);
         } else {
@@ -1226,14 +1234,14 @@ impl ReceiverImpl {
     fn read_db(&mut self) {
         instrument!();
 
-        trace!("...reading DB");
+        log::trace!("...reading DB");
 
-        trace!("Catchain_startup: db_root_block {:?}", self.db_root_block);
+        log::trace!("Catchain_startup: db_root_block {:?}", self.db_root_block);
         if self.db_root_block != ZERO_HASH.clone() {
             self.run_scheduler();
 
             match self.get_block_by_hash(&self.db_root_block) {
-                None => warn!(
+                None => log::warn!(
                     "Catchain_startup: no block with hash {:?} in db",
                     self.db_root_block
                 ),
@@ -1257,10 +1265,30 @@ impl ReceiverImpl {
             + Duration::from_secs(if self.allow_unsafe_self_blocks_resync {
                 MAX_UNSAFE_INITIAL_SYNC_COMPLETE_TIME_SECS
             } else {
-                MAX_SAFE_INITIAL_SYNC_COMPLETE_TIME_SECS
+                if self.sources.len() == 1 {
+                    //Special case: for one node in a network we don't need optimisation with block processing start lag
+                    0
+                } else {
+                    //This lag is needed for optimization purpose during the restart
+                    //Restart flow:
+                    //- node reads root (last_sent_block) which means the LAST block which was generated
+                    //  and written to DB before restart, so forks between restored blocks and new
+                    //  generated blocks are impossible
+                    //- node fully reads DB with all root block's deps
+                    //- node starts blocks preprocessing which may take significant time
+                    //- during this preprocessing node can generate new blocks; in case some previously dead nodes
+                    //  appear after restart of this node it is possible node can generate new block based on messages
+                    //  received from such nodes; this may lead to decentralized consensus state change before preprocessing of
+                    //  all block which have been generated before restart, so consensus decisions will be done earlier
+                    //- there is no risk to publish any new block based on non-top blocks because the order in terms of height is
+                    //  guaranteed by last_sent_block (which is known before start of preprocessing)
+                    //- constant below (MAX_SAFE_INITIAL_SYNC_COMPLETE_TIME_SECS) provides reasonable timeout to skip very old blocks
+                    //  and prevent fully useless early blocks processing/merging 
+                    MAX_SAFE_INITIAL_SYNC_COMPLETE_TIME_SECS
+                }
             });
 
-        trace!(
+        log::trace!(
             "...waiting until {:?} for DB initial complete",
             utils::time_to_string(&self.initial_sync_complete_time)
         );
@@ -1273,7 +1301,7 @@ impl ReceiverImpl {
     fn read_db_from(&mut self, id: BlockHash) {
         instrument!();
 
-        trace!("...reading DB from block {:?}", id);
+        log::trace!("...reading DB from block {:?}", id);
 
         let listener = self.listener.upgrade().unwrap();
         let listener = listener.borrow();
@@ -1298,7 +1326,7 @@ impl ReceiverImpl {
     ) {
         instrument!();
 
-        trace!("...reading block {:?} from DB", id);
+        log::trace!("...reading block {:?} from DB", id);
 
         self.pending_in_db -= 1;
 
@@ -1309,14 +1337,14 @@ impl ReceiverImpl {
         let message = deserializer.read_boxed::<ton_api::ton::TLObject>();
 
         if let Err(err) = message {
-            error!("DB block {} parsing error: {:?}", id, err);
+            log::error!("DB block {} parsing error: {:?}", id, err);
             return;
         }
 
         let message = message.unwrap();
 
         if !message.is::<::ton_api::ton::catchain::Block>() {
-            error!(
+            log::error!(
                 "DB block {:?} parsing error: object does not contain Block message: object={:?}",
                 id, message
             );
@@ -1339,7 +1367,7 @@ impl ReceiverImpl {
         //check block ID
 
         let block_id = self.get_block_id(&block, payload.data());
-        let block_id_hash = get_block_id_hash(&block_id);
+        let block_id_hash = utils::get_block_id_hash(&block_id);
 
         assert!(&block_id_hash == id);
 
@@ -1373,7 +1401,7 @@ impl ReceiverImpl {
                 err
             );
 
-            warn!("{}", message);
+            log::warn!("{}", message);
 
             return;
         }
@@ -1424,7 +1452,7 @@ impl ReceiverImpl {
         instrument!();
 
         let block = self
-            .get_block_by_hash(&get_block_id_hash(block_id))
+            .get_block_by_hash(&utils::get_block_id_hash(block_id))
             .unwrap();
 
         block.borrow_mut().written(self);
@@ -1439,7 +1467,7 @@ impl ReceiverImpl {
     fn choose_neighbours(&mut self) {
         instrument!();
 
-        trace!("Rotate neighbours");
+        log::trace!("Rotate neighbours");
 
         //randomly choose max neighbours from sources
 
@@ -1447,7 +1475,7 @@ impl ReceiverImpl {
         let mut new_neighbours: Vec<usize> = Vec::new();
         let mut items_count = MAX_NEIGHBOURS_COUNT;
 
-        trace!(
+        log::trace!(
             "...choose {} neighbours from {} sources",
             items_count,
             sources_count
@@ -1475,7 +1503,7 @@ impl ReceiverImpl {
             items_count -= 1;
         }
 
-        trace!("...new receiver neighbours are: {:?}", new_neighbours);
+        log::trace!("...new receiver neighbours are: {:?}", new_neighbours);
 
         self.neighbours = new_neighbours;
     }
@@ -1483,7 +1511,7 @@ impl ReceiverImpl {
     fn synchronize(&mut self) {
         instrument!();
 
-        trace!("Synchronize with other validators");
+        log::trace!("Synchronize with other validators");
 
         let sources_count = self.get_sources_count();
 
@@ -1507,7 +1535,7 @@ impl ReceiverImpl {
     fn synchronize_with(&mut self, source: ReceiverSourcePtr) {
         instrument!();
 
-        trace!("...synchronize with source {}", source.borrow().get_id());
+        log::trace!("...synchronize with source {}", source.borrow().get_id());
 
         assert!(!source.borrow().is_blamed());
 
@@ -1541,14 +1569,14 @@ impl ReceiverImpl {
                     Err(err) => {
                         get_mut_impl(receiver).out_queries_counter.failure();
 
-                        warn!("GetDifference query error: {:?}", err)
+                        log::warn!("GetDifference query error: {:?}", err)
                     }
                     Ok(response) => {
                         get_mut_impl(receiver).out_queries_counter.success();
 
                         match response {
                             Difference::Catchain_Difference(difference) => {
-                                trace!("GetDifference response: {:?}", difference);
+                                log::trace!("GetDifference response: {:?}", difference);
                             }
                             Difference::Catchain_DifferenceFork(difference_fork) => {
                                 get_mut_impl(receiver).got_fork_proof(&difference_fork);
@@ -1616,7 +1644,7 @@ impl ReceiverImpl {
                             Err(err) => {
                                 get_mut_impl(receiver).out_queries_counter.failure();
 
-                                warn!(
+                                log::warn!(
                                     "GetBlock {:} query error: {:?}",
                                     dep_hash.to_hex_string(),
                                     err
@@ -1626,7 +1654,7 @@ impl ReceiverImpl {
                                 get_mut_impl(receiver).out_queries_counter.success();
 
                                 match response {
-                                    BlockResult::Catchain_BlockNotFound => warn!(
+                                    BlockResult::Catchain_BlockNotFound => log::warn!(
                                         "GetBlock {:} query didn't find the block",
                                         dep_hash.to_hex_string()
                                     ),
@@ -1662,7 +1690,7 @@ impl ReceiverImpl {
     ) -> (bool, Result<BlockPayloadPtr>) {
         instrument!();
 
-        trace!("Receiver: received query from {}: {:?}", adnl_id, data);
+        log::trace!("Receiver: received query from {}: {:?}", adnl_id, data);
 
         match ton_api::Deserializer::new(&mut &data.data().0[..])
             .read_boxed::<ton_api::ton::TLObject>()
@@ -1676,7 +1704,7 @@ impl ReceiverImpl {
                                 self.process_get_difference_query(
                                     adnl_id,
                                     &message,
-                                    data.get_creation_time().elapsed().unwrap(),
+                                    get_elapsed_time(&data.get_creation_time()),
                                 ),
                             ),
                         )
@@ -1726,7 +1754,7 @@ impl ReceiverImpl {
 
                 return (
                     false,
-                    Err(format_err!("unknown query received {:?}", message)),
+                    Err(error!("unknown query received {:?}", message)),
                 );
             }
             Err(err) => {
@@ -1743,13 +1771,13 @@ impl ReceiverImpl {
     ) -> Result<ton::GetDifferenceResponse> {
         instrument!();
 
-        trace!("Got GetDifferenceRequest: {:?}", query);
+        log::trace!("Got GetDifferenceRequest: {:?}", query);
 
         let sources_delivered_heights = &*query.rt;
 
         if sources_delivered_heights.len() != self.get_sources_count() {
-            warn!("Incorrect GetDifferenceRequest query from {}", adnl_id);
-            bail!("bad vt size");
+            log::warn!("Incorrect GetDifferenceRequest query from {}", adnl_id);
+            fail!("bad vt size");
         }
 
         //check is fork detected for sources
@@ -1888,7 +1916,7 @@ impl ReceiverImpl {
         const BLOCKS_SENT_WARN_THRESHOLD: usize = MAX_BLOCKS_TO_SEND as usize / 2;
 
         if total_sent_blocks > BLOCKS_SENT_WARN_THRESHOLD {
-            warn!(
+            log::warn!(
                 "Sending {} absent blocks to node with ADNL ID {}",
                 total_sent_blocks, adnl_id
             );
@@ -1911,7 +1939,7 @@ impl ReceiverImpl {
     ) -> Result<(ton::BlockResultResponse, BlockPayloadPtr)> {
         instrument!();
 
-        trace!("Got GetBlockQuery: {:?}", query);
+        log::trace!("Got GetBlockQuery: {:?}", query);
 
         let block_hash = query.block.clone();
         let block_result = self.get_block_by_hash(&block_hash);
@@ -1938,13 +1966,13 @@ impl ReceiverImpl {
         &mut self,
         adnl_id: &PublicKeyHash,
         query: &ton::GetBlocksRequest,
-    ) -> Result<CatchainSentResponse> {
+    ) -> Result<ton::CatchainSentResponse> {
         instrument!();
 
         //limit number of blocks to be process by the request
 
         if query.blocks.len() > 100 {
-            bail!("too many blocks");
+            fail!("too many blocks");
         }
 
         //process blocks and send them back to the requester
@@ -1989,13 +2017,13 @@ impl ReceiverImpl {
         &mut self,
         adnl_id: &PublicKeyHash,
         query: &ton::GetBlockHistoryRequest,
-    ) -> Result<CatchainSentResponse> {
+    ) -> Result<ton::CatchainSentResponse> {
         instrument!();
 
         //limit number of blocks to be processed by the request
 
         let mut height = match query.height {
-            height if height <= 0 => bail!("not-positive height"),
+            height if height <= 0 => fail!("not-positive height"),
             height if height > 100 => 100,
             height => height,
         };
@@ -2045,7 +2073,7 @@ impl ReceiverImpl {
 
                 let prev = match block_it.borrow().get_prev() {
                     Some(prev) => prev.clone(),
-                    None => bail!("Block.height is incorrect. There is no previous block"),
+                    None => fail!("Block.height is incorrect. There is no previous block"),
                 };
 
                 drop(block);
@@ -2066,12 +2094,12 @@ impl ReceiverImpl {
 
     fn got_fork_proof(&mut self, fork_proof: &ton::DifferenceFork) {
         if let Err(status) = self.validate_block_dependency(&fork_proof.left) {
-            warn!("Incorrect fork blame, left is invalid: {:?}", status);
+            log::warn!("Incorrect fork blame, left is invalid: {:?}", status);
             return;
         }
 
         if let Err(status) = self.validate_block_dependency(&fork_proof.right) {
-            warn!("Incorrect fork blame, right is invalid: {:?}", status);
+            log::warn!("Incorrect fork blame, right is invalid: {:?}", status);
             return;
         }
 
@@ -2079,7 +2107,7 @@ impl ReceiverImpl {
             || fork_proof.left.src != fork_proof.right.src
             || fork_proof.left.data_hash == fork_proof.right.data_hash
         {
-            warn!(
+            log::warn!(
                 "Incorrect fork blame, not a fork: {}/{}, {}/{}, {:?}/{:?}",
                 fork_proof.left.height,
                 fork_proof.right.height,
@@ -2166,7 +2194,7 @@ impl ReceiverImpl {
         response_promise: ExternalQueryResponseCallback,
     ) {
         check_execution_time!(20000);
-        profiling::instrument!();
+        instrument!();
 
         if let Some(listener) = self.listener.upgrade() {
             listener.borrow_mut().on_custom_query(
@@ -2191,7 +2219,7 @@ impl ReceiverImpl {
         instrument!();
 
         if let Some(listener) = self.listener.upgrade() {
-            trace!(
+            log::trace!(
                 "Send to {}: {:?}",
                 receiver_adnl_id,
                 serialized_block_with_payload
@@ -2220,9 +2248,9 @@ impl ReceiverImpl {
         instrument!();
 
         if let Some(listener) = self.listener.upgrade() {
-            trace!(
+            log::trace!(
                 "Send to {:?}: {:?}",
-                public_key_hashes_to_string(receiver_adnl_ids),
+                utils::public_key_hashes_to_string(receiver_adnl_ids),
                 serialized_block_with_payload
             );
 
@@ -2284,7 +2312,7 @@ impl ReceiverImpl {
                                 }
                             }
                             Err(obj) => boxed_response_callback(
-                                Err(format_err!("unknown response {:?}", obj)),
+                                Err(error!("unknown response {:?}", obj)),
                                 CatchainFactory::create_empty_block_payload(),
                                 receiver,
                             ),
@@ -2339,7 +2367,7 @@ impl ReceiverImpl {
         instrument!();
 
         if let Some(listener) = self.listener.upgrade() {
-            trace!("...query GetBlock {}: {:?}", receiver_adnl_id, request);
+            log::trace!("...query GetBlock {}: {:?}", receiver_adnl_id, request);
 
             let serialized_message = serialize_tl_boxed_object!(&request);
 
@@ -2367,7 +2395,7 @@ impl ReceiverImpl {
         instrument!();
 
         if let Some(listener) = self.listener.upgrade() {
-            trace!("...query GetDifference {}: {:?}", receiver_adnl_id, request);
+            log::trace!("...query GetDifference {}: {:?}", receiver_adnl_id, request);
 
             let serialized_message = serialize_tl_boxed_object!(&request);
 
@@ -2419,7 +2447,7 @@ impl ReceiverImpl {
 
         let sources_count = ids.len();
 
-        debug!(
+        log::debug!(
             "Creating catchaing receiver for session incarnation {:?} with {} sources",
             incarnation, sources_count
         );
@@ -2430,7 +2458,7 @@ impl ReceiverImpl {
             &received_blocks_instance_counter,
         );
 
-        trace!(
+        log::trace!(
             "...creating root received block for receiver session incarnation {:?}",
             incarnation
         );
@@ -2438,7 +2466,7 @@ impl ReceiverImpl {
         let local_key_id_finder = || {
             let local_id = local_key.id();
             for (i, id) in ids.iter().enumerate() {
-                if get_public_key_hash(&id.public_key) == *local_id {
+                if utils::get_public_key_hash(&id.public_key) == *local_id {
                     return (local_id, i);
                 }
             }
@@ -2452,7 +2480,7 @@ impl ReceiverImpl {
 
         assert!(sources_count == 0 || local_idx != sources_count);
 
-        debug!(
+        log::debug!(
             "Receiver local_idx={}, sources_count={}",
             local_idx, sources_count
         );
@@ -2596,13 +2624,13 @@ impl ReceiverImpl {
         }
 
         let block_id = self.get_block_id(block, payload.data());
-        let block_hash = get_block_id_hash(&block_id);
+        let block_hash = utils::get_block_id_hash(&block_id);
 
         if let Some(existing_block_entry) = self.blocks.get(&block_hash) {
             let existing_block = existing_block_entry.clone();
 
             if !existing_block.borrow().is_initialized() {
-                trace!(
+                log::trace!(
                     "...create block with hash={:?} exists but has not been initialized",
                     block_hash
                 );
@@ -2614,10 +2642,9 @@ impl ReceiverImpl {
 
             return Ok(existing_block.clone());
         } else {
-            trace!("...create block with hash={:?}", block_hash);
+            log::trace!("...create block with hash={:?}", block_hash);
 
-            let new_block =
-                received_block::ReceivedBlockImpl::create_with_payload(&block, payload, self)?;
+            let new_block = ReceivedBlockImpl::create_with_payload(&block, payload, self)?;
 
             self.add_received_block(new_block.clone());
 
