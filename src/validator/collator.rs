@@ -39,6 +39,7 @@ use crate::{
 use adnl::common::Wait;
 use futures::try_join;
 use rand::Rng;
+use tokio::sync::Mutex;
 use std::{
     cmp::{max, min},
     collections::{BinaryHeap, HashMap, HashSet},
@@ -641,6 +642,77 @@ impl CollatorData {
     }
 }
 
+struct ParallelMsgsCounter {
+    max_parallel_threads: usize,
+    max_msgs_queue_on_account: usize,
+
+    limits_reached: Arc<AtomicBool>,
+    msgs_by_accounts: Arc<Mutex<(usize, HashMap<AccountId, usize>)>>,
+}
+
+impl ParallelMsgsCounter {
+    pub fn new(max_parallel_threads: usize, max_msgs_queue_on_account: usize) -> Self {
+        Self {
+            max_parallel_threads: max_parallel_threads.max(1),
+            max_msgs_queue_on_account: max_msgs_queue_on_account.max(1),
+
+            limits_reached: Arc::new(AtomicBool::new(false)),
+
+            msgs_by_accounts: Arc::new(Mutex::new((0, HashMap::new()))),
+        }
+    }
+
+    pub fn limits_reached(&self) -> bool {
+        self.limits_reached.load(Ordering::Relaxed)
+    }
+    fn set_limits_reached(&self, val: bool) {
+        self.limits_reached.store(val, Ordering::Relaxed);
+    }
+
+    pub async fn add_account_msgs_counter(&self, account_id: AccountId) {
+        let mut guard = self.msgs_by_accounts.clone().lock_owned().await;
+        let (active_threads, msgs_by_account) = &mut *guard;
+        let msgs_count = msgs_by_account
+            .entry(account_id.clone())
+            .and_modify(|val| {
+                if *val == 0 {
+                    *active_threads += 1;
+                }
+                *val += 1;
+            })
+            .or_insert_with(|| {
+                *active_threads += 1;
+                1
+            });
+        if *msgs_count >= self.max_msgs_queue_on_account || *active_threads >= self.max_parallel_threads {
+            self.set_limits_reached(true);
+        }
+
+        log::trace!("ParallelMsgsCounter: msgs count inreased for {:x}, counter state is: ({}, {:?})", account_id, active_threads, msgs_by_account);
+    }
+
+    pub async fn sub_account_msgs_counter(&self, account_id: AccountId) {
+        let mut guard = self.msgs_by_accounts.clone().lock_owned().await;
+        let (active_threads, msgs_by_account) = &mut *guard;
+        let msgs_count = msgs_by_account
+            .entry(account_id.clone())
+            .and_modify(|val| {
+                *val -= 1;
+                if *val == 0 {
+                    *active_threads -= 1;
+                }
+            })
+            .or_insert(0);
+        if *msgs_count < self.max_msgs_queue_on_account {
+            if *active_threads < self.max_parallel_threads && msgs_by_account.values().all(|c| *c < self.max_msgs_queue_on_account) {
+                self.set_limits_reached(false);
+            }
+        }
+
+        log::trace!("ParallelMsgsCounter: msgs count decreased for {:x}, counter state is: ({}, {:?})", account_id, active_threads, msgs_by_account);
+    }
+}
+
 struct ExecutionManager {
     changed_accounts: HashMap<
         AccountId, 
@@ -655,6 +727,8 @@ struct ExecutionManager {
     max_collate_threads: usize,
     libraries: Libraries,
     gen_utime: u32,
+
+    parallel_msgs_counter: ParallelMsgsCounter,
 
     // bloc's start logical time
     start_lt: u64,
@@ -685,6 +759,7 @@ impl ExecutionManager {
         libraries: Libraries,
         config: BlockchainConfig,
         max_collate_threads: usize,
+        max_collate_msgs_queue_on_account: usize,
         collated_block_descr: Arc<String>,
         debug: bool,
     ) -> Result<Self> {
@@ -695,6 +770,7 @@ impl ExecutionManager {
             receive_tr,
             wait_tr,
             max_collate_threads,
+            parallel_msgs_counter: ParallelMsgsCounter::new(max_collate_threads, max_collate_msgs_queue_on_account),
             libraries,
             config,
             start_lt,
@@ -720,10 +796,10 @@ impl ExecutionManager {
         Ok(())
     }
 
-    // checks if a number of parallel transactilns is not too big, waits and finalizes some if needed.
+    // checks limits of parallel transactions reached, waits and finalizes some if needed.
     pub async fn check_parallel_transactions(&mut self, collator_data: &mut CollatorData) -> Result<()> {
         log::trace!("{}: check_parallel_transactions", self.collated_block_descr);
-        if self.wait_tr.count() >= self.max_collate_threads {
+        if self.parallel_msgs_counter.limits_reached() {
             self.wait_transaction(collator_data).await?;
         }
         Ok(())
@@ -740,6 +816,7 @@ impl ExecutionManager {
         let msg = Arc::new(msg);
         if let Some((sender, _handle)) = self.changed_accounts.get(&account_id) {
             self.wait_tr.request();
+            self.parallel_msgs_counter.add_account_msgs_counter(account_id).await;
             sender.send(msg)?;
         } else {
             let shard_acc = if let Some(shard_acc) = prev_data.accounts().account(&account_id)? {
@@ -753,6 +830,7 @@ impl ExecutionManager {
                 account_id.clone(),
                 shard_acc,
             )?;
+            self.parallel_msgs_counter.add_account_msgs_counter(account_id.clone()).await;
             self.wait_tr.request();
             sender.send(msg)?;
             self.changed_accounts.insert(account_id, (sender, handle));
@@ -873,7 +951,12 @@ impl ExecutionManager {
         log::trace!("{}: wait_transaction", self.collated_block_descr);
         let wait_op = self.wait_tr.wait(&mut self.receive_tr, false).await;
         if let Some(Some((new_msg, transaction_res))) = wait_op {
-            self.finalize_transaction(new_msg, transaction_res, collator_data)?;
+            // we can safely decrease parallel_msgs_counter because
+            // * wait_tr counter decreases only when wait_op is some as well
+            // * and sender always sends some in this case
+            let account_id = self.finalize_transaction(new_msg, transaction_res, collator_data)?;
+            // decrease account msgs counter to control parallel processing limits
+            self.parallel_msgs_counter.sub_account_msgs_counter(account_id).await;
         }
         Ok(())
     }
@@ -883,7 +966,7 @@ impl ExecutionManager {
         new_msg: Arc<AsyncMessage>,
         transaction_res: Result<Transaction>,
         collator_data: &mut CollatorData
-    ) -> Result<()> {
+    ) -> Result<AccountId> {
         if let AsyncMessage::Ext(ref msg) = new_msg.deref() {
             let msg_id = msg.serialize()?.repr_hash();
             let account_id = msg.int_dst_account_id().unwrap_or_default();
@@ -894,7 +977,7 @@ impl ExecutionManager {
                     self.collated_block_descr, account_id, msg_id, err
                 );
                 collator_data.rejected_ext_messages.push((msg_id, err.to_string()));
-                return Ok(())
+                return Ok(account_id)
             } else {
                 log::debug!(
                     target: EXT_MESSAGES_TRACE_TARGET,
@@ -905,6 +988,7 @@ impl ExecutionManager {
             }
         }
         let tr = transaction_res?;
+        let account_id = tr.account_id().clone();
         let tr_cell = tr.serialize()?;
         log::trace!("{}: finalize_transaction {} with hash {:x}, {:x}",
             self.collated_block_descr, tr.logical_time(), tr_cell.repr_hash(), tr.account_id());
@@ -959,7 +1043,7 @@ impl ExecutionManager {
         }
         collator_data.block_full |= !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
 
-        Ok(())
+        Ok(account_id)
     }
 }
 
@@ -1356,6 +1440,7 @@ impl Collator {
             mc_data.libraries()?.clone(),
             collator_data.config.clone(),
             self.engine.collator_config().max_collate_threads as usize,
+            self.engine.collator_config().max_collate_msgs_queue_on_account as usize,
             self.collated_block_descr.clone(),
             self.debug,
         )?;
@@ -2635,6 +2720,7 @@ impl Collator {
         let mut changed_accounts = HashMap::new();
         let mut new_config_opt = None;
         let mut current_workchain_copyleft_rewards = CopyleftRewards::default();
+        let changed_accounts_count = exec_manager.changed_accounts.len();
         for (account_id, (sender, handle)) in exec_manager.changed_accounts.drain() {
             std::mem::drop(sender);
             let mut shard_acc = handle.await
@@ -2883,23 +2969,23 @@ impl Collator {
         if workchain_id != -1
             && (collator_data.dequeue_count > 0 || collator_data.enqueue_count > 0
                 || collator_data.in_msg_count > 0 || collator_data.out_msg_count > 0 || collator_data.execute_count > 0
-                || collator_data.transit_count > 0
+                || collator_data.transit_count > 0 || changed_accounts_count > 0
             )
         {
             log::debug!(
                 "{}: finalize_block finished: dequeue_count: {}, enqueue_count: {}, in_msg_count: {}, out_msg_count: {}, \
-                execute_count: {}, transit_count: {}",
+                execute_count: {}, transit_count: {}, changed_accounts: {}",
                 self.collated_block_descr, collator_data.dequeue_count, collator_data.enqueue_count,
                 collator_data.in_msg_count, collator_data.out_msg_count, collator_data.execute_count,
-                collator_data.transit_count,
+                collator_data.transit_count, changed_accounts_count,
             );
         }
         log::trace!(
             "{}: finalize_block finished: dequeue_count: {}, enqueue_count: {}, in_msg_count: {}, out_msg_count: {}, \
-            execute_count: {}, transit_count: {}, data len: {}",
+            execute_count: {}, transit_count: {}, changed_accounts: {}, data len: {}",
             self.collated_block_descr, collator_data.dequeue_count, collator_data.enqueue_count,
             collator_data.in_msg_count, collator_data.out_msg_count, collator_data.execute_count,
-            collator_data.transit_count, candidate.data.len(),
+            collator_data.transit_count, changed_accounts_count, candidate.data.len(),
         );
         Ok((candidate, new_state, exec_manager))
     }
