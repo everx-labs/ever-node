@@ -1172,7 +1172,7 @@ impl MsgQueueManager {
                 ordered_cleaning_timeout_nanos,
                 |node_obj| {
                     if block_full {
-                        log::debug!("{}: BLOCK FULL when ordered cleaning output queue, cleanup is partial", self.block_descr);
+                        log::debug!("{}: BLOCK FULL (>= Soft) when ordered cleaning output queue, cleanup is partial", self.block_descr);
                         partial = true;
                         return Ok(HashmapFilterResult::Stop);
                     }
@@ -1241,7 +1241,7 @@ impl MsgQueueManager {
 
             queue.hashmap_filter(|_key, mut slice| {
                 if block_full {
-                    log::debug!("{}: BLOCK FULL when random cleaning output queue, cleanup is partial", self.block_descr);
+                    log::debug!("{}: BLOCK FULL (>= Soft) when random cleaning output queue, cleanup is partial", self.block_descr);
                     partial = true;
                     return Ok(HashmapFilterResult::Stop)
                 }
