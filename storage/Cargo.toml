@@ -20,13 +20,13 @@ serde_cbor = '0.11.1'
 serde_derive = '1.0.114'
 strum = '0.18.0'
 strum_macros = '0.18.0'
-adnl = { git = 'ssh://git@github.com/tonlabs/ever-adnl.git', tag = 'tag-tmp-rc' }
+adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.1' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 rand = { features = [ 'small_rng' ], version = '0.8' }
 tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'ssh://git@github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = 'tag-tmp-rc' }
-ton_block = { git = 'ssh://git@github.com/tonlabs/ever-block.git', tag = 'tag-tmp-rc' }
-ton_types = { git = 'ssh://git@github.com/tonlabs/ever-types.git', tag = 'tag-tmp-rc' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.41' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.104' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.28' }
 
 [build-dependencies]
 cc = { features = [ 'parallel' ], version = '1.0.61' }
