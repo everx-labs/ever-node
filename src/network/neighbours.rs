@@ -11,14 +11,14 @@
 * limitations under the License.
 */
 
-use crate::engine::STATSD;
+use crate::network::node_network::NodeNetwork;
 
 use adnl::{common::{Query, TaggedTlObject, Wait}, node::{AdnlNode, AddressCache}};
 use dht::DhtNode;
 use overlay::{OverlayShortId, OverlayNode};
 use rand::Rng;
 use std::{
-    cmp::min, 
+    cmp::min,
     sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicI32, AtomicU64, AtomicI64, Ordering}},
     time::{Duration, Instant}
 };
@@ -51,7 +51,7 @@ pub struct Neighbours {
     fail_attempts: AtomicU64,
     all_attempts: AtomicU64,
     start: Instant,
-    stop: AtomicU32,
+    cancellation_token: Arc<tokio_util::sync::CancellationToken>,
     #[cfg(feature = "telemetry")]
     tag_get_capabilities: u32
 }
@@ -122,8 +122,8 @@ impl Neighbour {
 
     pub fn query_failed(&self, roundtrip: u64, is_rldp: bool) {
         let _un = self.unreliability.fetch_add(1, Ordering::Relaxed) + 1;
-        let metric = format!("neghbour.{}.failed", self.id);
-        STATSD.incr(&metric);
+        let labels = [("neighbour", self.id.to_string())];
+        metrics::increment_counter!("neighbours_failed", &labels);
 //        log::trace!("query_failed (key_id {}, overlay: ) new value: {}", self.id, un);
         if is_rldp {
             self.update_roundtrip_rldp(roundtrip)
@@ -187,26 +187,23 @@ pub const MAX_NEIGHBOURS: usize = 16;
 
 impl Neighbours {
 
-    const MASK_PING: u32 = 0x00000001;
-    const MASK_RANDOM_PEERS: u32 = 0x00000002;
-    const MASK_RELOAD: u32 = 0x00000004;
-    const MASK_STOP: u32 = 0x80000000;
-
     const DEFAULT_RLDP_ROUNDTRIP_MS: u32 = 2000;
     const MAX_PINGS: usize = 6;
     const TIMEOUT_PING_MAX_MS: u64 = 1000;
-    const TIMEOUT_PING_MIN_MS: u64 = 10;
-    const TIMEOUT_RANDOM_PEERS_MS: u64 = 1000;
     const TIMEOUT_RELOAD_MAX_SEC: u64 = 30;
     const TIMEOUT_RELOAD_MIN_SEC: u64 = 10;
-    const TIMEOUT_STOP_MS: u64 = 1000;
+
+    const TIMEOUT_PING_MAX: Duration = Duration::from_millis(Self::TIMEOUT_PING_MAX_MS);
+    const TIMEOUT_PING_MIN: Duration = Duration::from_millis(10);
+    const TIMEOUT_RANDOM_PEERS: Duration = Duration::from_millis(1000);
 
     pub fn new(
         start_peers: &Vec<Arc<KeyId>>,
         dht: &Arc<DhtNode>,
         overlay: &Arc<OverlayNode>,
         overlay_id: Arc<OverlayShortId>,
-        default_rldp_roundtrip: &Option<u32>
+        default_rldp_roundtrip: &Option<u32>,
+        cancellation_token: Arc<tokio_util::sync::CancellationToken>
     ) -> Result<Self> {
         let default_rldp_roundtrip = default_rldp_roundtrip.unwrap_or(
             Self::DEFAULT_RLDP_ROUNDTRIP_MS
@@ -220,7 +217,7 @@ impl Neighbours {
             fail_attempts: AtomicU64::new(0),
             all_attempts: AtomicU64::new(0),
             start: Instant::now(),
-            stop: AtomicU32::new(0),
+            cancellation_token,
             #[cfg(feature = "telemetry")]
             tag_get_capabilities: tag_from_boxed_type::<GetCapabilities>()
         };
@@ -316,16 +313,12 @@ impl Neighbours {
     }
 
     pub fn start_reload(self: Arc<Self>) {
-        self.stop.fetch_or(Self::MASK_RELOAD, Ordering::Relaxed);
-        tokio::spawn(
+        NodeNetwork::spawn_background_task(
+            self.cancellation_token.clone(),
             async move {
                 loop {
-                    if (self.stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 {
-                        self.stop.fetch_and(!Self::MASK_RELOAD, Ordering::Relaxed);
-                        break
-                    }
                     let sleep_time = rand::thread_rng().gen_range(
-                        Self::TIMEOUT_RELOAD_MIN_SEC, 
+                        Self::TIMEOUT_RELOAD_MIN_SEC,
                         Self::TIMEOUT_RELOAD_MAX_SEC
                     );
                     tokio::time::sleep(Duration::from_secs(sleep_time)).await;
@@ -334,17 +327,16 @@ impl Neighbours {
                     }
                 }
             }
-        );
+        )
     }
 
     pub fn start_ping(self: Arc<Self>) {
-        self.stop.fetch_or(Self::MASK_PING, Ordering::Relaxed);
-        tokio::spawn(
+        NodeNetwork::spawn_background_task(
+            self.cancellation_token.clone(),
             async move {
                 self.ping_neighbours().await;
-                self.stop.fetch_and(!Self::MASK_PING, Ordering::Relaxed);
             }
-        );
+        )
     }
 
     pub async fn reload_neighbours(&self, overlay_id: &Arc<OverlayShortId>) -> Result<()> {
@@ -357,23 +349,15 @@ impl Neighbours {
     }
 
     pub fn start_rnd_peers_process(self: Arc<Self>) {
-        self.stop.fetch_or(Self::MASK_RANDOM_PEERS, Ordering::Relaxed);
-        tokio::spawn(
+        NodeNetwork::spawn_background_task(
+            self.cancellation_token.clone(),
             async move {
-                //let receiver = self.overlay.clone();
-                //let id = self.overlay_id.clone();
-                log::trace!("wait random peers...");
+                log::trace!("Wait random peers in overlay {}...", self.overlay_id);
                 loop {
-                    //let this = self.clone();
-                    tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_RANDOM_PEERS_MS)).await;
                     for peer in self.peers.get_iter() {
-                        if (self.stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0 {
-                            self.stop.fetch_and(!Self::MASK_RANDOM_PEERS, Ordering::Relaxed);
-                            return
-                        }
                         match self.overlay.get_random_peers(
                             &peer.id(),
-                            &self.overlay_id, 
+                            &self.overlay_id,
                             None
                         ).await {
                             Ok(Some(peers)) => {
@@ -391,39 +375,21 @@ impl Neighbours {
                                     self.clone().add_new_peers(new_peers);
                                 }
                             },
-                            Err(e) => log::warn!("get_random_peers error: {}", e),
+                            Err(e) => log::warn!(
+                                "Get random peers in overlay {} error: {}", 
+                                self.overlay_id, e
+                            ),
                             _ => {},
                         }
                     }
+                    tokio::time::sleep(Self::TIMEOUT_RANDOM_PEERS).await;
                 }
             }
-        );
+        )
     }
 
     pub async fn stop(&self) {
-        self.stop.fetch_or(Self::MASK_STOP, Ordering::Relaxed);
-        loop {
-            let mask = self.stop.load(Ordering::Relaxed);
-            if mask == Self::MASK_STOP {
-                break;
-            }
-            Self::log_stop_status(mask);
-            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_STOP_MS)).await;
-        }
-    }
-
-    pub fn log_stop_status(bitmap: u32) {
-        let mut ss = String::new();
-        if bitmap & Self::MASK_PING != 0 {
-            ss.push_str("ping, ");
-        }
-        if bitmap & Self::MASK_RANDOM_PEERS != 0 {
-            ss.push_str("random peers, ");
-        }
-        if bitmap & Self::MASK_RELOAD != 0 {
-            ss.push_str("reload, ");
-        }
-        log::warn!("These services are still stopping ({:04x}): {}", bitmap, ss);
+        self.cancellation_token.cancel();
     }
 
     fn add_new_peers(self: Arc<Self>, peers: Vec<Arc<KeyId>>) {
@@ -476,8 +442,8 @@ impl Neighbours {
             } else if (version == PROTOCOL_VERSION) && (capabilities < PROTOCOL_CAPABILITIES) {
                 unr += 2;
             }
-            let stat_name = format!("neighbour.unr.{}", neighbour.id());
-            STATSD.gauge(&stat_name, unr as f64);
+            let labels = [("neighbour", neighbour.id().to_string())];
+            metrics::gauge!("neighbour_unr", unr as f64, &labels);
             log::trace!(
                 "Neighbour {}, unr {}, rt ADNL {}, rt RLDP {} (all stat: {:.4}, peer stat: {:.4}/{}))",
                 neighbour.id(), unr,
@@ -573,59 +539,51 @@ impl Neighbours {
     }
 
     async fn ping_neighbours(self: &Arc<Self>) {
-        let mut count = 0;
-        let mut max_count = 0;
         let (wait, mut queue_reader) = Wait::new();
         loop {
-            let stop = (self.stop.load(Ordering::Relaxed) & Self::MASK_STOP) != 0;
-            if !stop {
-                let peers = self.peers.count();
-                max_count = min(peers, Self::MAX_PINGS);
-                if max_count == 0 {
-                    log::trace!("No peers in overlay {}", self.overlay_id);
-                    tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MAX_MS)).await;
+            let peers = self.peers.count();
+            let max_count = min(peers, Self::MAX_PINGS);
+            if max_count == 0 {
+                log::trace!("No peers in overlay {}", self.overlay_id);
+                tokio::time::sleep(Self::TIMEOUT_PING_MAX).await;
+                continue
+            }
+            log::trace!("neighbours: overlay {} count {}", self.overlay_id, peers);
+            let peer = match self.peers.next_for_ping(&self.start) {
+                Ok(Some(peer)) => peer,
+                Ok(None) => {
+                    log::trace!("next_for_ping: None");
+                    tokio::time::sleep(Self::TIMEOUT_PING_MIN).await;
+                    continue
+                },
+                Err(e) => {
+                    log::trace!("next_for_ping: {}", e);
+                    tokio::time::sleep(Self::TIMEOUT_PING_MAX).await;
                     continue
                 }
-                log::trace!("neighbours: overlay {} count {}", self.overlay_id, peers);
-                let peer = match self.peers.next_for_ping(&self.start) {
-                    Ok(Some(peer)) => peer,
-                    Ok(None) => {
-                        log::trace!("next_for_ping: None");
-                        tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MIN_MS)).await;
-                        continue
-                    },
-                    Err(e) => {
-                        log::trace!("next_for_ping: {}", e);
-                        tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MAX_MS)).await;
-                        continue
+            };
+            let last = self.start.elapsed().as_millis() as u64 - peer.last_ping();
+            if last < Self::TIMEOUT_PING_MAX_MS {
+                tokio::time::sleep(
+                    Duration::from_millis(Self::TIMEOUT_PING_MAX_MS - last)
+                ).await;
+            } else {
+                tokio::time::sleep(Self::TIMEOUT_PING_MIN).await;
+            }
+            let self_cloned = self.clone();
+            let wait_cloned = wait.clone();
+            let mut count = wait.request();
+            tokio::spawn(
+                async move {
+                    if let Err(e) = self_cloned.update_capabilities(peer).await {
+                        log::warn!("{}", e)
                     }
-                };
-                let last = self.start.elapsed().as_millis() as u64 - peer.last_ping();
-                if last < Self::TIMEOUT_PING_MAX_MS {
-                    tokio::time::sleep(
-                        Duration::from_millis(Self::TIMEOUT_PING_MAX_MS - last)
-                    ).await;
-                } else {
-                    tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_PING_MIN_MS)).await;
+                    wait_cloned.respond(Some(()));
                 }
-                let self_cloned = self.clone();
-                let wait_cloned = wait.clone();
-                count = wait.request();
-                tokio::spawn(
-                    async move {
-                        if let Err(e) = self_cloned.update_capabilities(peer).await {
-                            log::warn!("{}", e)
-                        }
-                        wait_cloned.respond(Some(())); 
-                    }
-                );
-            }
-            while (count >= max_count) || (stop && (count > 0)) {
+            );
+            while count >= max_count {
                 wait.wait(&mut queue_reader, false).await;
-                count -= 1;     
-            }
-            if stop {
-                break
+                count -= 1;
             }
         }
     }

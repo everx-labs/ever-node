@@ -11,22 +11,23 @@
 * limitations under the License.
 */
 
-use crate::{types::{Reference}};
-use std::{io::{Cursor, Write}, sync::{Arc, RwLock, atomic::{AtomicU64, Ordering}}};
+use crate::dynamic_boc_rc_db::DynamicBocDb;
+use std::{io::{Cursor, Write}, sync::{Arc,Weak, atomic::{AtomicU64, Ordering}}};
 use ton_types::{
     ByteOrderRead, Cell, CellData, CellImpl, CellType, LevelMask,
-    Result, UInt256,
-    MAX_LEVEL, MAX_REFERENCES_COUNT
+    Result, UInt256, fail,
+    MAX_LEVEL, MAX_REFERENCES_COUNT, error
 };
 
-use ton_types::fail;
-
-use crate::dynamic_boc_rc_db::DynamicBocDb;
+struct Reference {
+    hash: UInt256,
+    cell: Option<Weak<StorageCell>>,
+}
 
 pub struct StorageCell {
     cell_data: CellData,
-    references: RwLock<Vec<Reference>>,
-    boc_db: Arc<DynamicBocDb>,
+    references: parking_lot::RwLock<Vec<Reference>>,
+    boc_db: Weak<DynamicBocDb>,
     tree_bits_count: u64,
     tree_cell_count: u64,
     use_cache: bool,
@@ -41,7 +42,7 @@ impl StorageCell {
 
     /// Constructs StorageCell by deserialization
     pub fn deserialize(
-        boc_db: Arc<DynamicBocDb>, 
+        boc_db: &Arc<DynamicBocDb>, 
         data: &[u8], 
         use_cache: bool,
         with_parents_count: bool,
@@ -59,7 +60,7 @@ impl StorageCell {
         let mut references = Vec::with_capacity(references_count as usize);
         for _ in 0..references_count {
             let hash = UInt256::from(reader.read_u256()?);
-            references.push(Reference::NeedToLoad(hash));
+            references.push(Reference { hash, cell: None });
         }
         let tree_bits_count = reader.read_le_u64()?;
         let tree_cell_count = reader.read_le_u64()?;
@@ -75,8 +76,8 @@ impl StorageCell {
         boc_db.allocated().storage_cells.fetch_add(1, Ordering::Relaxed);
         let cell = Self {
             cell_data,
-            references: RwLock::new(references),
-            boc_db,
+            references: parking_lot::RwLock::new(references),
+            boc_db: Arc::downgrade(boc_db),
             tree_bits_count,
             tree_cell_count,
             use_cache,
@@ -93,35 +94,15 @@ impl StorageCell {
         Ok(parents_count)
     }
 
-    pub fn deserialize_references(
-        data: &[u8],
-        with_parents_count: bool,
-    ) -> Result<Vec<Reference>> {
-        debug_assert!(!data.is_empty());
-
-        let mut reader = Cursor::new(data);
-        if with_parents_count {
-            let _parents_count = reader.read_le_u32()?;
-        }
-        let cell_data = CellData::deserialize(&mut reader)?;
-        let references_count = cell_data.references_count();
-        let mut references = Vec::with_capacity(references_count);
-        for _ in 0..references_count {
-            let hash = UInt256::from(reader.read_u256()?);
-            references.push(Reference::NeedToLoad(hash));
-        }
-        Ok(references)
-    }
-
     pub fn serialize_self(&self) -> Result<Vec<u8>> {
 
         let mut data = Vec::new();
 
         self.cell_data.serialize(&mut data)?;
 
-        let references = &self.references.read().expect("Poisoned RwLock");
+        let references = &self.references.read();
         for r in references.iter() {
-            data.write_all(r.hash().as_slice())?;
+            data.write_all(r.hash.as_slice())?;
         }
 
         data.write_all(&self.tree_bits_count().to_le_bytes())?;
@@ -157,21 +138,21 @@ impl StorageCell {
 
     pub fn with_cell(
         cell: &dyn CellImpl,
-        boc_db: Arc<DynamicBocDb>,
+        boc_db: &Arc<DynamicBocDb>,
         use_cache: bool,
     ) -> Result<Self> {
         let references_count = cell.references_count();
         let mut references = Vec::with_capacity(references_count);
         for i in 0..references_count {
             let hash = cell.reference(i)?.repr_hash();
-            references.push(Reference::NeedToLoad(hash));
+            references.push(Reference {hash, cell: None} );
         }
         CELL_COUNT.fetch_add(1, Ordering::Relaxed);
         boc_db.allocated().storage_cells.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
             cell_data: cell.cell_data().clone(),
-            references: RwLock::new(references),
-            boc_db,
+            references: parking_lot::RwLock::new(references),
+            boc_db: Arc::downgrade(boc_db),
             tree_bits_count: cell.tree_bits_count(),
             tree_cell_count: cell.tree_bits_count(),
             use_cache
@@ -189,23 +170,29 @@ impl StorageCell {
     }
 
     pub(crate) fn reference(&self, index: usize) -> Result<Arc<StorageCell>> {
-        let hash = match &self.references.read().expect("Poisoned RwLock")[index] {
-            Reference::Loaded(cell) => return Ok(Arc::clone(cell)),
-            Reference::NeedToLoad(hash) => hash.clone()
+        let hash = {
+            let references = self.references.read();
+            let reference = references.get(index).ok_or_else(|| error!("Reference #{index} not found"))?;
+            if let Some(weak) = &reference.cell {
+                if let Some(cell) = weak.upgrade() {
+                    return Ok(cell);
+                }
+            }
+            reference.hash.clone()
         };
 
-        let cell_id = hash;
-        let storage_cell = self.boc_db.load_cell(
-            &cell_id,
+        let boc_db = self.boc_db.upgrade().ok_or_else(|| error!("BocDb is dropped"))?;
+        let storage_cell = boc_db.load_cell(
+            &hash,
             self.use_cache
         )?;
-        self.references.write().expect("Poisoned RwLock")[index] = Reference::Loaded(Arc::clone(&storage_cell));
+
+        if self.use_cache {
+            self.references.write()[index].cell = 
+                Some(Arc::downgrade(&storage_cell));
+        }
 
         Ok(storage_cell)
-    }
-
-    pub(crate) fn reference_id(&self, index: usize) -> UInt256 {
-        self.references.read().expect("Poisoned RwLock")[index].hash()
     }
 
 }
@@ -228,7 +215,7 @@ impl CellImpl for StorageCell {
     }
 
     fn references_count(&self) -> usize {
-        self.references.read().expect("Poisoned RwLock").len()
+        self.cell_data.references_count() as usize
     }
 
     fn reference(&self, index: usize) -> Result<Cell> {
@@ -236,7 +223,10 @@ impl CellImpl for StorageCell {
     }
 
     fn reference_repr_hash(&self, index: usize) -> Result<UInt256> {
-        Ok(self.reference_id(index))
+        Ok(self.references.read()
+            .get(index).ok_or_else(|| error!("There is no reference #{}", index))?
+            .hash.clone()
+        )
     }
 
     fn cell_type(&self) -> CellType {
@@ -268,34 +258,17 @@ impl CellImpl for StorageCell {
     }
 }
 
-fn references_hashes_equal(left: &[Reference], right: &[Reference]) -> bool {
-    for i in 0..left.len() {
-        if left[i].hash() != right[i].hash() {
-            return false;
-        }
-    }
-    true
-}
-
 impl Drop for StorageCell {
     fn drop(&mut self) {
         CELL_COUNT.fetch_sub(1, Ordering::Relaxed);
-        self.boc_db.allocated().storage_cells.fetch_sub(1, Ordering::Relaxed);
-        self.boc_db.cells_map().write()
-            .expect("Poisoned RwLock")
-            .remove(&self.id());
+        if let Some(boc_db) = self.boc_db.upgrade() {
+            boc_db.allocated().storage_cells.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
 impl PartialEq for StorageCell {
     fn eq(&self, other: &Self) -> bool {
-        if self.cell_data != other.cell_data {
-            return false;
-        }
-
-        let self_guard = self.references.read().expect("Poisoned RwLock");
-        let other_guard = other.references.read().expect("Poisoned RwLock");
-        self_guard.len() == other_guard.len()
-            && references_hashes_equal(&self_guard, &other_guard)
+        self.cell_data.raw_hash(MAX_LEVEL) == other.cell_data.raw_hash(MAX_LEVEL)
     }
 }

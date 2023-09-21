@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -18,10 +18,12 @@ use adnl::{
     common::{add_unbound_object_to_map_with_update, Wait},
     node::{AdnlNodeConfig, AdnlNodeConfigJson}, server::{AdnlServerConfig, AdnlServerConfigJson}
 };
+use storage::shardstate_db_async::CellsDbConfig;
 use std::{
-    collections::{HashMap, HashSet}, convert::TryInto, fs::File, fmt::{Display, Formatter}, 
+    collections::{HashMap, HashSet}, convert::TryInto, fs::File, fmt::{Display, Formatter},
     io::BufReader, path::Path, sync::{Arc, atomic::{self, AtomicI32}}, time::{Duration}
 };
+use std::path::PathBuf;
 use ton_api::{
     IntoBoxed, 
     ton::{
@@ -74,27 +76,13 @@ impl Default for CellsGcConfig {
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
-pub struct CellsDbConfig {
-    pub states_db_queue_len: u32,
-    pub max_pss_slowdown_mcs: u32,
-    pub prefill_cells_counters: bool,
-}
-
-impl Default for CellsDbConfig {
-    fn default() -> Self {
-        Self {
-            states_db_queue_len: 1000,
-            max_pss_slowdown_mcs: 750,
-            prefill_cells_counters: false,
-        }
-    }
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct CollatorConfig {
     pub cutoff_timeout_ms: u32,
     pub stop_timeout_ms: u32,
+    pub clean_timeout_percentage_points: u32,
+    pub optimistic_clean_percentage_points: u32,
+    pub max_secondary_clean_timeout_percentage_points: u32,
     pub max_collate_threads: u32,
     pub retry_if_empty: bool,
     pub finalize_empty_after_ms: u32,
@@ -105,7 +93,10 @@ impl Default for CollatorConfig {
         Self {
             cutoff_timeout_ms: 1000,
             stop_timeout_ms: 1500,
-            max_collate_threads: 1,
+            clean_timeout_percentage_points: 150, // 0.150 = 15% = 150ms
+            optimistic_clean_percentage_points: 1000, // 1.000 = 100% = 150ms
+            max_secondary_clean_timeout_percentage_points: 350, // 0.350 = 35% = 350ms
+            max_collate_threads: 10,
             retry_if_empty: false,
             finalize_empty_after_ms: 800,
             empty_collation_sleep_ms: 100
@@ -113,12 +104,39 @@ impl Default for CollatorConfig {
     }
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Copy)]
+pub enum ShardStatesCacheMode {
+    Off, // States saved sinchronously and not cached.
+    Moderate, // States saved asiynchronously. Number of cached cells (in the state's BOCs) is minimal.
+    Full, // States saved asiynchronously. Number of cells in memory is continously growing.
+}
+impl Default for ShardStatesCacheMode {
+    fn default() -> Self {
+        ShardStatesCacheMode::Moderate
+    }
+}
+impl ShardStatesCacheMode {
+    pub fn is_enabled(&self) -> bool {
+        matches!(self, ShardStatesCacheMode::Moderate)
+    }
+    pub fn _is_fully_enabled(&self) -> bool {
+        matches!(self, ShardStatesCacheMode::Full)
+    }
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, ShardStatesCacheMode::Off)
+    }
+}
+
+fn default_states_cache_cleanup_diff() -> u32 { 1000 }
+
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct TonNodeConfig {
     log_config_name: Option<String>,
     ton_global_config_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     workchain: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    boot_from_zerostate: Option<bool>,
     internal_db_path: Option<String>,
     validation_countdown_mode: Option<String>,
     unsafe_catchain_patches_path: Option<String>,
@@ -159,6 +177,10 @@ pub struct TonNodeConfig {
     collator_config: CollatorConfig,
     #[serde(default)]
     skip_saving_persistent_states: bool,
+    #[serde(default)]
+    states_cache_mode: ShardStatesCacheMode,
+    #[serde(default = "default_states_cache_cleanup_diff")]
+    states_cache_cleanup_diff: u32,
 }
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
@@ -243,8 +265,10 @@ pub struct ExternalDbConfig {
     pub transaction_producer: KafkaProducerConfig,
     pub account_producer: KafkaProducerConfig,
     pub block_proof_producer: KafkaProducerConfig,
+    pub raw_block_proof_producer: KafkaProducerConfig,
     pub chain_range_producer: KafkaProducerConfig,
     pub remp_statuses_producer: KafkaProducerConfig,
+    pub shard_hashes_producer: KafkaProducerConfig,
     pub bad_blocks_storage: String,
 }
 
@@ -380,6 +404,9 @@ impl TonNodeConfig {
     pub fn workchain(&self) -> Option<i32> {
         self.workchain
     }
+    pub fn boot_from_zerostate(&self) -> bool {
+        self.boot_from_zerostate.unwrap_or(false)
+    }
 
     pub fn from_file(
         configs_dir: &str,
@@ -388,7 +415,7 @@ impl TonNodeConfig {
         default_config_name: &str,
         client_console_key: Option<String>
     ) -> Result<Self> { 
-        let config_file_path = TonNodeConfig::build_path(configs_dir, json_file_name)?;
+        let config_file_path = TonNodeConfig::build_path(configs_dir, json_file_name);
         let config_file = File::open(config_file_path.clone());
 
         let mut config_json = match config_file {
@@ -403,9 +430,9 @@ impl TonNodeConfig {
             }
             Err(_) => {
                 // generate new config from default_config
-                let path = TonNodeConfig::build_path(configs_dir, default_config_name)?;
+                let path = TonNodeConfig::build_path(configs_dir, default_config_name);
                 let default_config_file = File::open(&path)
-                    .map_err(|err| error!("Can`t open {}: {}", path, err))?;
+                    .map_err(|err| error!("Can`t open {:?}: {}", path, err))?;
 
                 let reader = BufReader::new(default_config_file);
                 let mut config: TonNodeConfig = serde_json::from_reader(reader)?;
@@ -462,11 +489,9 @@ impl TonNodeConfig {
         }
     }
 
-    pub fn log_config_path(&self) -> Option<String> {
+    pub fn log_config_path(&self) -> Option<PathBuf> {
         if let Some(log_config_name) = &self.log_config_name {
-            if let Ok(log_path) = TonNodeConfig::build_path(&self.configs_dir, &log_config_name) {
-                return Some(log_path);
-            }
+            return Some(self.build_config_path(&log_config_name))
         }
         None
     }
@@ -474,14 +499,13 @@ impl TonNodeConfig {
     pub fn unsafe_catchain_patches_files(&self) -> Vec<String> {
         let mut result = Vec::new();
         if let Some(catchain_patches) = &self.unsafe_catchain_patches_path {
-            if let Ok(log_path) = TonNodeConfig::build_path(&self.configs_dir, &catchain_patches) {
-                if let Ok(dir) = std::fs::read_dir(log_path) {
-                    for filename in dir.into_iter() {
-                        if let Ok(fname) = filename {
-                            if let Some(path_str) = fname.path().to_str() {
-                                if path_str.ends_with(".json") {
-                                    result.push(path_str.to_string());
-                                }
+            let log_path = self.build_config_path(&catchain_patches);
+            if let Ok(dir) = std::fs::read_dir(log_path) {
+                for filename in dir.into_iter() {
+                    if let Ok(fname) = filename {
+                        if let Some(path_str) = fname.path().to_str() {
+                            if path_str.ends_with(".json") {
+                                result.push(path_str.to_string());
                             }
                         }
                     }
@@ -559,6 +583,12 @@ impl TonNodeConfig {
     pub fn skip_saving_persistent_states(&self) -> bool {
         self.skip_saving_persistent_states
     }
+    pub fn states_cache_mode(&self) -> ShardStatesCacheMode {
+        self.states_cache_mode
+    }
+    pub fn states_cache_cleanup_diff(&self) -> u32 {
+        self.states_cache_cleanup_diff
+    }
     pub fn cells_db_config(&self) -> &CellsDbConfig {
         &self.cells_db_config
     }
@@ -571,12 +601,12 @@ impl TonNodeConfig {
         let name = self.ton_global_config_name.as_ref().ok_or_else(
             || error!("global config information not found in config.json!")
         )?;
-        let global_config_path = TonNodeConfig::build_path(&self.configs_dir, &name)?;
+        let global_config_path = self.build_config_path(&name);
 /*        
         let data = std::fs::read_to_string(global_config_path)
             .map_err(|err| error!("Global config file is not found! : {}", err))?;
 */
-        TonNodeGlobalConfig::from_json_file(global_config_path.as_str())
+        TonNodeGlobalConfig::from_json_file(global_config_path)
     }
 
 // Unused
@@ -600,7 +630,7 @@ impl TonNodeConfig {
         let (server_private_key, server_key) = Ed25519KeyOption::generate_with_json()?;
 
         // generate and save client console template
-        let config_file_path = TonNodeConfig::build_path(configs_dir, "console_config.json")?;
+        let config_file_path = TonNodeConfig::build_path(configs_dir, "console_config.json");
         let console_client_config = AdnlClientConfigJson::with_params(
             &server_address,
             serde_json::from_str(key_option_public_key!(
@@ -671,16 +701,17 @@ impl TonNodeConfig {
         fail!("Validator keys information was not found!");
     }
 
-    fn build_path(directory_name: &str, file_name: &str) -> Result<String> {
+    pub fn build_config_path(&self, file_name: &str) -> PathBuf {
+        Self::build_path(&self.configs_dir, file_name)
+    }
+
+    fn build_path(directory_name: &str, file_name: &str) -> PathBuf {
         let path = Path::new(directory_name);
-        let path = path.join(file_name);
-        let result = path.to_str()
-            .ok_or_else(|| error!("path is not valid!"))?;
-        Ok(String::from(result))
+        path.join(file_name)
     }
 
     fn save_to_file(&self, file_name: &str) -> Result<()> {
-        let config_file_path = TonNodeConfig::build_path(&self.configs_dir, file_name)?;
+        let config_file_path = self.build_config_path(file_name);
         std::fs::write(config_file_path, serde_json::to_string_pretty(&self)?)?;
         Ok(())
     }
@@ -912,7 +943,7 @@ impl NodeConfigHandler {
 //        }
 //        // then search by key_id from vset in keyring
 //        for descr in vset.list().iter() {
-//            let key_id = base64::encode(descr.compute_node_id_short().as_slice());
+//            let key_id = base64_encode(descr.compute_node_id_short().as_slice());
 //            let pub_key_found = self.key_ring.iter().position(|k_v| k_v.0 == key_id).is_some();
 //            if pub_key_found {
 //                log::info!("get_current_validator_key returns pub_key {}", hex::encode(descr.public_key.key_bytes()));
@@ -1104,7 +1135,7 @@ impl NodeConfigHandler {
                         let adnl_key_id = KeyId::from_data(adnl_key_id[..].try_into()?);
                         let election_id = key.election_id;
                         let subscribers = subscribers.clone();
-                        self.clone().runtime_handle.spawn(async move {
+                        self.runtime_handle.spawn(async move {
                             for subscriber in subscribers.iter() {
                                 if let Err(e) = subscriber.event(
                                     ConfigEvent::AddValidatorAdnlKey(adnl_key_id.clone(), election_id)
@@ -1227,7 +1258,7 @@ impl KeyRing for NodeConfigHandler {
 impl TonNodeGlobalConfig {
 
     /// Constructor from json file
-    pub fn from_json_file(json_file: &str) -> Result<Self> {
+    pub fn from_json_file(json_file: impl AsRef<Path>) -> Result<Self> {
         let ton_node_global_cfg_json = TonNodeGlobalConfigJson::from_json_file(json_file)?;
         Ok(TonNodeGlobalConfig(ton_node_global_cfg_json))
     }
@@ -1245,7 +1276,11 @@ impl TonNodeGlobalConfig {
     pub fn init_block(&self) -> Result<Option<BlockIdExt>> {
         self.0.init_block()
     }
-    
+
+    pub fn hardforks(&self) -> Result<Vec<BlockIdExt>> {
+        self.0.hardforks()
+    }
+
     pub fn dht_nodes(&self) -> Result<Vec<DhtNodeConfig>> {
         self.0.get_dht_nodes_configs()
     }
@@ -1334,23 +1369,14 @@ pub struct Address {
 struct Validator {
     #[serde(alias = "@type")]
     type_node : Option<String>,
-    zero_state : ZeroState,
-    init_block : Option<InitBlock>,
+    zero_state : ConfigBlockId,
+    init_block : Option<ConfigBlockId>,
+    hardforks : Vec<ConfigBlockId>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default)]
-struct ZeroState {
-    workchain : Option<i32>,
-    shard : Option<i64>,
-    seqno : Option<i32>,
-    root_hash : Option<String>,
-    file_hash : Option<String>,
-}
-
-#[derive(Debug, Default, serde::Deserialize)]
-#[serde(default)]
-struct InitBlock {
+struct ConfigBlockId {
     workchain : Option<i32>,
     shard : Option<i64>,
     seqno : Option<i32>,
@@ -1383,14 +1409,11 @@ impl IdDhtNode {
 impl TonNodeGlobalConfigJson {
     
     /// Constructs new configuration from JSON data
-    pub fn from_json_file(json_file: &str) -> Result<Self> {
-        match File::open(json_file) {
-            Ok(file) => {
-                let reader = BufReader::new(file);
-                Ok(serde_json::from_reader(reader)?)
-            }
-            Err(err) => fail!("cannot open file {} : {}", json_file, err)
-        }
+    pub fn from_json_file(json_file: impl AsRef<Path>) -> Result<Self> {
+        let file = File::open(json_file.as_ref())
+            .map_err(|err| error!("cannot open file {:?} : {}", json_file.as_ref(), err))?;
+        let reader = BufReader::new(file);
+        Ok(serde_json::from_reader(reader)?)
     }
 /*
     pub fn from_json(json: &str) -> Result<Self> {
@@ -1474,36 +1497,26 @@ impl TonNodeGlobalConfigJson {
         Ok(result)
     }
 
-    pub fn zero_state(&self) -> Result<BlockIdExt> {
-        let workchain_id = self
-            .validator
-            .zero_state
+    fn parse_block_id(&self, block_id: &ConfigBlockId) -> Result<BlockIdExt> {
+        let workchain_id = block_id
             .workchain
             .ok_or_else(|| error!("Unknown workchain id (of zero_state)!"))?;
 
-        let seqno = self
-            .validator
-            .zero_state
+        let seqno = block_id
             .seqno
             .ok_or_else(|| error!("Unknown workchain seqno (of zero_state)!"))?;
 
-        let shard = self
-            .validator
-            .zero_state
+        let shard = block_id
             .shard
             .ok_or_else(|| error!("Unknown workchain shard (of zero_state)!"))?;
 
-        let root_hash = self
-            .validator
-            .zero_state
+        let root_hash = block_id
             .root_hash
             .as_ref()
             .ok_or_else(|| error!("Unknown workchain root_hash (of zero_state)!"))?
             .parse()?;
 
-        let file_hash = self
-            .validator
-            .zero_state
+        let file_hash = block_id
             .file_hash
             .as_ref()
             .ok_or_else(|| error!("Unknown workchain file_hash (of zero_state)!"))?
@@ -1517,35 +1530,37 @@ impl TonNodeGlobalConfigJson {
         })
     }
 
+    pub fn zero_state(&self) -> Result<BlockIdExt> {
+        self.parse_block_id(&self.validator.zero_state)
+            .map_err(|err| error!("zero state parse error: {}", err))
+    }
+
     pub fn init_block(&self) -> Result<Option<BlockIdExt>> {
-        let init_block = match self.validator.init_block {
-            Some(ref init_block) => init_block,
+        match self.validator.init_block {
+            Some(ref init_block) => {
+                match self.parse_block_id(&init_block) {
+                    Ok(block_id) => Ok(Some(block_id)),
+                    Err(err) => fail!("init block parse error: {}", err)
+                }
+            }
             None => return Ok(None)
-        };
-        
-        let workchain_id = init_block.workchain
-            .ok_or_else(|| error!("Unknown workchain id (of zero_state)!"))?;
+        }
+    }
 
-        let seqno = init_block.seqno
-            .ok_or_else(|| error!("Unknown workchain seqno (of zero_state)!"))?;
-
-        let shard = init_block.shard
-            .ok_or_else(|| error!("Unknown workchain shard (of zero_state)!"))?;
-
-        let root_hash = init_block.root_hash.as_ref()
-            .ok_or_else(|| error!("Unknown workchain root_hash (of zero_state)!"))?
-            .parse()?;
-
-        let file_hash = init_block.file_hash.as_ref()
-            .ok_or_else(|| error!("Unknown workchain file_hash (of zero_state)!"))?
-            .parse()?;
-
-        Ok(Some(BlockIdExt {
-            shard_id: ShardIdent::with_tagged_prefix(workchain_id, shard as u64)?,
-            seq_no: seqno as u32,
-            root_hash,
-            file_hash,
-        }))
+    fn hardforks(&self) -> Result<Vec<BlockIdExt>> {
+        log::info!("hardforks count {}", self.validator.hardforks.len());
+        self.validator
+            .hardforks
+            .iter()
+            .try_fold(Vec::new(), |mut vec, block_id| {
+                match self.parse_block_id(block_id) {
+                    Ok(block_id) => {
+                        vec.push(block_id);
+                        Ok(vec)
+                    }
+                    Err(err) => fail!("hardforks parse error: {}", err),
+                }
+            })
     }
 }
 

@@ -523,7 +523,7 @@ fn prepare_resolver_ctx(
 
 struct TopBlockResolverContext {
     resolved_block_ids: dashmap::DashMap<(ShardIdent, u32), BlockIdPart>,
-    block_flags: dashmap::DashMap<BlockIdExt, Option<BlockFlags>>,
+    block_flags: dashmap::DashMap<BlockIdExt, Option<BlockFlags>>
 }
 
 impl TopBlockResolverContext {
@@ -587,6 +587,7 @@ impl TopBlockResolverContext {
                     // (The oldest candidates will be marked first)
                     match self.mark_as_resolved(iter.tbds.proof_for().clone()) {
                         Ok(()) => {
+                            log::trace!("Resolved {}", iter.tbds.proof_for());
                             stack.pop();
                             continue;
                         },
@@ -619,6 +620,7 @@ impl TopBlockResolverContext {
                         ) {
                             Some(NextCandidate::Leaf)
                         } else {
+                            log::debug!("Old block not found while resolving {ref_block_id}");
                             None
                         }
                     }
@@ -632,6 +634,7 @@ impl TopBlockResolverContext {
                                 is_old_block && flags.is_applied ||
                                 !is_old_block && flags.has_state
                         ) {
+                            log::debug!("Block not found while resolving {ref_block_id}, is_old: {is_old_block}");
                             return None;
                         }
 
@@ -641,11 +644,17 @@ impl TopBlockResolverContext {
                         }
 
                         // Search for the specified top block description
-                        shard_blocks
+                        let candidate = shard_blocks
                             .get(&group)?
                             .items
                             .get(&ref_block_id.seq_no)
-                            .map(|group| NextCandidate::Found(group.top_block.clone()))
+                            .map(|group| NextCandidate::Found(group.top_block.clone()));
+
+                        if candidate.is_none() {
+                            log::debug!("Block candidate not found while resolving {ref_block_id}");
+                        }
+
+                        candidate
                     })
                 };
 
@@ -696,6 +705,10 @@ impl TopBlockResolverContext {
                 } else {
                     // There is some block but with a different id. It indicates that there were
                     // some forks in shards and we must not include such block.
+                    log::warn!(
+                        "Fork detected while resolving {block_id}, old hash: {}",
+                        part.root_hash,
+                    );
                     None
                 }
             },

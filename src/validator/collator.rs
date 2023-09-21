@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2022 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -27,7 +27,7 @@ use crate::{
     validating_utils::{
         calc_remp_msg_ordering_hash, check_cur_validator_set, check_this_shard_mc_info, 
         may_update_shard_block_info, supported_capabilities, supported_version,
-        UNREGISTERED_CHAIN_MAX_LEN,
+        UNREGISTERED_CHAIN_MAX_LEN, fmt_next_block_descr_from_next_seqno,
     },
     validator::{
         BlockCandidate, CollatorSettings, McData,
@@ -66,8 +66,6 @@ use ton_executor::{
 };
 use ton_types::{error, fail, AccountId, Cell, HashmapType, Result, UInt256, UsageTree, SliceData};
 
-#[cfg(feature = "metrics")]
-use crate::engine::STATSD;
 use crate::validator::validator_utils::is_remp_enabled;
 
 // TODO move all constants (see validator query too) into one place
@@ -172,6 +170,10 @@ enum AsyncMessage {
     Int(MsgEnqueueStuff, bool),
     New(MsgEnvelopeStuff, Cell), // prev_trans_cell
     TickTock(TransactionTickTock),
+}
+
+impl AsyncMessage {
+    fn is_external(&self) -> bool { matches!(self, Self::Ext(_)) }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -343,7 +345,7 @@ impl CollatorData {
     fn update_last_proc_int_msg(&mut self, new_lt_hash: (u64, UInt256)) -> Result<()> {
         if self.last_proc_int_msg < new_lt_hash {
             CHECK!(new_lt_hash.0 > 0);
-            log::debug!("last_proc_int_msg updated to ({},{:x})", new_lt_hash.0, new_lt_hash.1);
+            log::trace!("last_proc_int_msg updated to ({},{:x})", new_lt_hash.0, new_lt_hash.1);
             self.last_proc_int_msg = new_lt_hash;
         } else {
             log::error!("processed message ({},{:x}) AFTER message ({},{:x})", new_lt_hash.0, new_lt_hash.1,
@@ -735,18 +737,25 @@ impl ExecutionManager {
         collator_data: &mut CollatorData,
     ) -> Result<()> {
         log::trace!("{}: execute (adding into queue): {:x}", self.collated_block_descr, account_id);
-        self.wait_tr.request();
         let msg = Arc::new(msg);
-        match self.changed_accounts.get(&account_id) {
-            None => {
-                let (sender, handle) = self.start_account_job(
-                    account_id.clone(),
-                    prev_data.accounts(),
-                )?;
-                sender.send(msg)?;
-                self.changed_accounts.insert(account_id, (sender, handle));
-            }
-            Some((sender, _handle)) => sender.send(msg)?
+        if let Some((sender, _handle)) = self.changed_accounts.get(&account_id) {
+            self.wait_tr.request();
+            sender.send(msg)?;
+        } else {
+            let shard_acc = if let Some(shard_acc) = prev_data.accounts().account(&account_id)? {
+                shard_acc
+            } else if msg.is_external() {
+                return Ok(()); // skip external messages for unexisting accounts
+            } else {
+                ShardAccount::default()
+            };
+            let (sender, handle) = self.start_account_job(
+                account_id.clone(),
+                shard_acc,
+            )?;
+            self.wait_tr.request();
+            sender.send(msg)?;
+            self.changed_accounts.insert(account_id, (sender, handle));
         }
 
         self.check_parallel_transactions(collator_data).await?;
@@ -757,13 +766,13 @@ impl ExecutionManager {
     fn start_account_job(
         &self,
         account_addr: AccountId,
-        accounts: &ShardAccounts,
+        shard_acc: ShardAccount,
     ) -> Result<(tokio::sync::mpsc::UnboundedSender<Arc<AsyncMessage>>, tokio::task::JoinHandle<Result<ShardAccountStuff>>)> {
         log::trace!("{}: start_account_job: {:x}", self.collated_block_descr, account_addr);
 
-        let mut shard_acc = ShardAccountStuff::from_shard_state(
+        let mut shard_acc = ShardAccountStuff::new(
             account_addr,
-            accounts,
+            shard_acc,
             Arc::new(AtomicU64::new(self.min_lt.load(Ordering::Relaxed))),
         )?;
 
@@ -892,7 +901,6 @@ impl ExecutionManager {
                     "{}: account {:x} accepted inbound external message {:x}",
                     self.collated_block_descr, account_id, msg_id,
                 );
-                collator_data.accepted_ext_messages.push(msg_id);
             }
         }
         let tr = transaction_res?;
@@ -973,7 +981,6 @@ pub struct Collator {
     collator_settings: CollatorSettings,
 
     started: Instant,
-    cutoff_timeout: Duration,
     stop_flag: Arc<AtomicBool>,
 }
 
@@ -1001,11 +1008,7 @@ impl Collator {
             _ => fail!("`prev_blocks_ids` has invlid length"),
         };
 
-        let collated_block_descr = Arc::new(format!("{}:{}, {}", 
-            shard.workchain_id(), 
-            shard.shard_prefix_as_str_with_tag(), 
-            new_block_seqno
-        ));
+        let collated_block_descr = Arc::new(fmt_next_block_descr_from_next_seqno(&shard, Some(new_block_seqno)));
 
         log::trace!("{}: new", collated_block_descr);
 
@@ -1074,7 +1077,6 @@ impl Collator {
             rand_seed,
             collator_settings,
             started: Instant::now(),
-            cutoff_timeout: Default::default(),
             stop_flag: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -1092,10 +1094,12 @@ impl Collator {
         let mut collator_data;
         let mut attempt = 0;
         let mut duration;
+        // inside the loop try to collate new block
         let (candidate, state, exec_manager) = loop {
 
             let attempt_started = Instant::now();
 
+            // load required data including masterchain and shards states
             let imported_data = self.import_data()
                 .await.map_err(|e| {
                     log::warn!("{}: COLLATION FAILED: TIME: {}ms import_data: {:?}",
@@ -1105,6 +1109,7 @@ impl Collator {
 
             let mc_data;
             let prev_data;
+            // unpack state, perform some checkes, import masterchain and shards blocks
             (mc_data, prev_data, collator_data) = self.prepare_data(imported_data)
                 .await.map_err(|e| {
                     log::warn!("{}: COLLATION FAILED: TIME: {}ms prepare_data: {:?}",
@@ -1112,6 +1117,7 @@ impl Collator {
                     e
                 })?;
 
+            // load messages and process them to produce block candidate
             let result = self.do_collate(&mc_data, &prev_data, &mut collator_data).await
                 .map_err(|e| {
                     log::warn!("{}: COLLATION FAILED: TIME: {}ms do_collate: {:?}",
@@ -1123,6 +1129,7 @@ impl Collator {
                 break result;
             }
 
+            // sleep after empty collation to respect the collation time iterval
             attempt += 1;
             let sleep = self.engine.collator_config().empty_collation_sleep_ms;
             let sleep = if duration < sleep { sleep - duration } else { 0 };
@@ -1150,7 +1157,7 @@ impl Collator {
             candidate.block_id,
         );
 
-        #[cfg(feature = "metrics")]
+        #[cfg(feature = "log_metrics")]
         report_collation_metrics(
             &self.shard,
             collator_data.dequeue_count,
@@ -1268,7 +1275,7 @@ impl Collator {
             mc_data.mc_state_extra(),
             mc_data.mc_state_extra().shards(),
             &mc_data.state(),
-            false,
+            self.collator_settings.is_fake,
         )?;
 
         self.check_utime(&mc_data, &prev_data, &mut collator_data)?;
@@ -1297,9 +1304,8 @@ impl Collator {
         prev_data: &PrevData,
         collator_data: &mut CollatorData,
     ) -> Result<Option<(BlockCandidate, ShardStateUnsplit, ExecutionManager)>> {
-        log::trace!("{}: do_collate", self.collated_block_descr);
+        log::debug!("{}: do_collate", self.collated_block_descr);
 
-        let ext_messages = self.engine.get_external_messages(&self.shard)?;
         let remp_messages = if is_remp_enabled(self.engine.clone(), mc_data.config()) {
             Some(self.engine.get_remp_messages(&self.shard)?)
         } else {
@@ -1307,20 +1313,33 @@ impl Collator {
         };
         self.check_stop_flag()?;
 
+        // loads out queues from neighbors and out queue of current shard
         let mut output_queue_manager = self.request_neighbor_msg_queues(mc_data, prev_data, collator_data).await?;
 
+        let mut out_queue_cleaned_partial = false;
+        let mut out_queue_clean_deleted = 0;
+
         if !self.after_split {
-            // delete delivered messages from output queue
+            // delete delivered messages from output queue for a limited time
             let now = std::time::Instant::now();
-            self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager)?;
-            log::trace!("{}: TIME: clean_out_msg_queue {}ms;",
-                self.collated_block_descr, now.elapsed().as_millis());
+            let cc = self.engine.collator_config();
+            let clean_timeout_nanos = (cc.cutoff_timeout_ms as i128) * 1_000_000 * (cc.clean_timeout_percentage_points as i128) / 1000;
+            let processed;
+            (out_queue_cleaned_partial, processed, out_queue_clean_deleted) =
+                self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager, clean_timeout_nanos, cc.optimistic_clean_percentage_points).await?;
+            let elapsed = now.elapsed().as_millis();
+            log::debug!("{}: TIME: clean_out_msg_queue initial {}ms;", self.collated_block_descr, elapsed);
+            let labels = [("shard", self.shard.to_string()), ("step", "initial".to_owned())];
+            metrics::gauge!("clean_out_msg_queue_partial", if out_queue_cleaned_partial { 1.0 } else { 0.0 }, &labels);
+            metrics::gauge!("clean_out_msg_queue_elapsed", elapsed as f64, &labels);
+            metrics::gauge!("clean_out_msg_queue_processed", processed as f64, &labels);
+            metrics::gauge!("clean_out_msg_queue_deleted", out_queue_clean_deleted as f64, &labels);
         } else {
-            log::trace!("{}: TIME: clean_out_msg_queue SKIPPED because of after_split block",
+            log::debug!("{}: TIME: clean_out_msg_queue initial SKIPPED because of after_split block",
                 self.collated_block_descr);
         }
 
-        // copy out msg queue from next state
+        // copy out msg queue from next state which is cleared compared to previous
         collator_data.out_msg_queue_info = output_queue_manager.take_next();
         collator_data.out_msg_queue_info.forced_fix_out_queue()?;
 
@@ -1358,7 +1377,7 @@ impl Collator {
             let now = std::time::Instant::now();
             self.process_inbound_internal_messages(prev_data, collator_data, &output_queue_manager,
                 &mut exec_manager).await?;
-            log::trace!("{}: TIME: process_inbound_internal_messages {}ms;", 
+            log::debug!("{}: TIME: process_inbound_internal_messages {}ms;", 
                 self.collated_block_descr, now.elapsed().as_millis());
 
             if let Some(remp_messages) = remp_messages {
@@ -1367,29 +1386,66 @@ impl Collator {
                 let total = remp_messages.len();
                 let processed = self.process_remp_messages(prev_data, collator_data, &mut exec_manager, 
                     remp_messages).await?;
-                log::trace!("{}: TIME: process_remp_messages {}ms, processed {}, ignored {}", 
+                log::debug!("{}: TIME: process_remp_messages {}ms, processed {}, ignored {}", 
                     self.collated_block_descr, now.elapsed().as_millis(), processed, total - processed);
             }
 
             // import inbound external messages (if space&gas left)
             let now = std::time::Instant::now();
-            self.process_inbound_external_messages(prev_data, collator_data, &mut exec_manager, 
-                ext_messages).await?;
-            log::trace!("{}: TIME: process_inbound_external_messages {}ms;", 
+            self.process_inbound_external_messages(prev_data, collator_data, &mut exec_manager).await?;
+            log::debug!("{}: TIME: process_inbound_external_messages {}ms;", 
                 self.collated_block_descr, now.elapsed().as_millis());
+            metrics::histogram!("collator_process_inbound_external_messages_time", now.elapsed());
 
             // process newly-generated messages (if space&gas left)
             // (if we were unable to process all inbound messages, all new messages must be queued)
             let now = std::time::Instant::now();
             self.process_new_messages(!collator_data.inbound_queues_empty, prev_data, 
                 collator_data, &mut exec_manager).await?;
-            log::trace!("{}: TIME: process_new_messages {}ms;", 
+            log::debug!("{}: TIME: process_new_messages {}ms;", 
                 self.collated_block_descr, now.elapsed().as_millis());
+            metrics::histogram!("collator_process_new_messages_time", now.elapsed());
         } else {
-            log::trace!("{}: messages processing SKIPPED because of after_split block", 
+            log::debug!("{}: messages processing SKIPPED because of after_split block", 
                 self.collated_block_descr);
         }
 
+        let clean_remaining_timeout_nanos = self.get_remaining_clean_time_limit_nanos();
+
+        if !collator_data.block_full && out_queue_cleaned_partial && out_queue_clean_deleted == 0 && clean_remaining_timeout_nanos > 10_000_000 {
+            if !self.after_split {
+                // we have collation time left and out msg queue was not fully processed
+                // so will try to clean more for a remaining time only by random algorithm
+                let now = std::time::Instant::now();
+
+                // set current out msg queue to manager to process new clean
+                *output_queue_manager.next_mut() = std::mem::take(&mut collator_data.out_msg_queue_info);
+
+                let processed;
+                (out_queue_cleaned_partial, processed, out_queue_clean_deleted) =
+                    self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager, clean_remaining_timeout_nanos, 0).await?;
+                let elapsed = now.elapsed().as_millis();
+                log::debug!("{}: TIME: clean_out_msg_queue remaining {}ms;", self.collated_block_descr, elapsed);
+                let labels = [("shard", self.shard.to_string()), ("step", "remaining".to_owned())];
+                metrics::gauge!("clean_out_msg_queue_partial", if out_queue_cleaned_partial { 1.0 } else { 0.0 }, &labels);
+                metrics::gauge!("clean_out_msg_queue_elapsed", elapsed as f64, &labels);
+                metrics::gauge!("clean_out_msg_queue_processed", processed as f64, &labels);
+                metrics::gauge!("clean_out_msg_queue_deleted", out_queue_clean_deleted as f64, &labels);
+
+                // copy out msg queue from manager after clean
+                collator_data.out_msg_queue_info = output_queue_manager.take_next();
+                collator_data.out_msg_queue_info.forced_fix_out_queue()?;
+            } else {
+                log::debug!("{}: TIME: clean_out_msg_queue remaining SKIPPED because of after_split block",
+                    self.collated_block_descr);
+            }
+        } else {
+            let labels = [("shard", self.shard.to_string()), ("step", "remaining".to_owned())];
+            metrics::gauge!("clean_out_msg_queue_partial", 0.0, &labels);
+            metrics::gauge!("clean_out_msg_queue_elapsed", 0.0, &labels);
+            metrics::gauge!("clean_out_msg_queue_processed", 0.0, &labels);
+            metrics::gauge!("clean_out_msg_queue_deleted", 0.0, &labels);
+        }
 
         // split prepare / split install
         // ** will be implemented later **
@@ -1434,18 +1490,21 @@ impl Collator {
         Ok(Some(result))
     }
 
-    fn clean_out_msg_queue(
+    async fn clean_out_msg_queue(
         &self,
         mc_data: &McData,
         collator_data: &mut CollatorData,
-        output_queue_manager: &mut MsgQueueManager
-    ) -> Result<bool> {
-        log::trace!("{}: clean_out_msg_queue", self.collated_block_descr);
+        output_queue_manager: &mut MsgQueueManager,
+        clean_timeout_nanos: i128,
+        optimistic_clean_percentage_points: u32,
+    ) -> Result<(bool, i32, i32)> {
+        log::debug!("{}: clean_out_msg_queue", self.collated_block_descr);
         let short = mc_data.config().has_capability(GlobalCapabilities::CapShortDequeue);
-        output_queue_manager.clean_out_msg_queue(|message, root| {
+
+        output_queue_manager.clean_out_msg_queue(clean_timeout_nanos, optimistic_clean_percentage_points, |message, root| {
             self.check_stop_flag()?;
             if let Some((enq, deliver_lt)) = message {
-                log::debug!("{}: dequeue message: {:x}", self.collated_block_descr, enq.message_hash());
+                log::trace!("{}: dequeue message: {:x}", self.collated_block_descr, enq.message_hash());
                 collator_data.dequeue_message(enq, deliver_lt, short)?;
                 collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, false)?;
                 // normal limit reached, but we can add for soft and hard limit
@@ -1455,7 +1514,7 @@ impl Collator {
                 collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, true)?;
                 Ok(true)
             }
-        })
+        }).await
     }
 
     //
@@ -1532,19 +1591,19 @@ impl Collator {
 
         // capabilities & global version
         if mc_data.config().has_capabilities() && 
-           (0 != (mc_data.config().capabilities() & !supported_capabilities())) {
+            (0 != (mc_data.config().capabilities() & !supported_capabilities())) {
             fail!(
                 "block generation capabilities {:016x} have been enabled in global configuration, \
-                 but we support only {:016x} (upgrade validator software?)",
-                 mc_data.config().capabilities(),
-               supported_capabilities()
+                but we support only {:016x} (upgrade validator software?)",
+                mc_data.config().capabilities(),
+                supported_capabilities()
             );
         }
         if mc_data.config().global_version() > supported_version() {
             fail!(
                 "block version {} have been enabled in global configuration, but we support only {} \
-                 (upgrade validator software?)",
-                 mc_data.config().global_version(),
+                (upgrade validator software?)",
+                mc_data.config().global_version(),
                 supported_version()
             );
         }
@@ -1723,7 +1782,7 @@ impl Collator {
         prev_data: &PrevData, 
         collator_data: &mut CollatorData
     ) -> Result<MsgQueueManager> {
-        log::trace!("{}: request_neighbor_msg_queues", self.collated_block_descr);
+        log::debug!("{}: request_neighbor_msg_queues", self.collated_block_descr);
         MsgQueueManager::init(
             &self.engine,
             mc_data.state(),
@@ -1736,7 +1795,8 @@ impl Collator {
             self.after_split,
             Some(&self.stop_flag),
             Some(&collator_data.usage_tree),
-            Some(&mut collator_data.imported_visited)
+            Some(&mut collator_data.imported_visited),
+            Some(self.collated_block_descr.clone()),
         ).await
     }
 
@@ -1762,6 +1822,7 @@ impl Collator {
                         self.new_block_id_part.seq_no(),
                         wc_info.zerostate_root_hash,
                         wc_info.zerostate_file_hash,
+                        None
                     )?;
 
                     collator_data.store_shard_fees_zero(&ShardIdent::with_workchain_id(wc_id)?)?;
@@ -1811,14 +1872,14 @@ impl Collator {
             let chain_len = match result {
                 Ok(len) => {
                     if len <= 0 || len > UNREGISTERED_CHAIN_MAX_LEN as i32 {
-                        log::debug!("{}: ShardTopBlockDescr for {} skipped: its chain length is {}",
+                        log::warn!("{}: ShardTopBlockDescr for {} skipped: its chain length is {}",
                             self.collated_block_descr, sh_bd.proof_for(), len);
                         continue;
                     }
                     len as usize
                 }
                 Err(e) => {
-                    log::debug!("{}: ShardTopBlockDescr for {} skipped: res_flags = {}, error: {}",
+                    log::warn!("{}: ShardTopBlockDescr for {} skipped: res_flags = {}, error: {}",
                     self.collated_block_descr, sh_bd.proof_for(), res_flags, e);
                     continue
                 }
@@ -1855,7 +1916,7 @@ impl Collator {
             log::debug!("{}: may_update_shard_block_info TIME: {}μ for {}", self.collated_block_descr, now.elapsed().as_micros(), descr.shard());
             match result {
                 Err(e) => {
-                    log::debug!("{}: cannot add new top shard block {} to shard configuration: {}",
+                    log::warn!("{}: cannot add new top shard block {} to shard configuration: {}",
                         self.collated_block_descr, sh_bd.proof_for(), e);
                     continue
                 }
@@ -1957,8 +2018,8 @@ impl Collator {
                 }
             }
             if self.check_cutoff_timeout() {
-                log::warn!("{}: TIMEOUT ({}ms) is elapsed, stop processing import_new_shard_top_blocks_for_masterchain",
-                        self.collated_block_descr, self.cutoff_timeout.as_millis());
+                log::warn!("{}: TIMEOUT is elapsed, stop processing import_new_shard_top_blocks_for_masterchain",
+                        self.collated_block_descr);
                 break
             }
         }
@@ -2203,17 +2264,17 @@ impl Collator {
         output_queue_manager: &MsgQueueManager,
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
-        log::trace!("{}: process_inbound_internal_messages", self.collated_block_descr);
+        log::debug!("{}: process_inbound_internal_messages", self.collated_block_descr);
         let mut iter = output_queue_manager.merge_out_queue_iter(&self.shard)?;
         while let Some(k_v) = iter.next() {
             let (key, enq, created_lt, block_id) = k_v?;
-            log::debug!(
+            log::trace!(
                 "{}: message {:x}, lt: {}, enq lt: {}",
                 self.collated_block_descr, key, created_lt, enq.enqueued_lt()
             );
             collator_data.update_last_proc_int_msg((created_lt, enq.message_hash()))?;
             if collator_data.out_msg_queue_info.already_processed(&enq)? {
-                log::debug!(
+                log::trace!(
                     "{}: message {:x} has been already processed by us before, skipping",
                     self.collated_block_descr, key.hash
                 );
@@ -2224,8 +2285,8 @@ impl Collator {
                 let our = self.shard.contains_full_prefix(&enq.cur_prefix());
                 let to_us = self.shard.contains_full_prefix(&enq.dst_prefix());
                 if to_us {
-                    log::debug!("{}: message {:x} sent to execution", self.collated_block_descr, key.hash);
                     let account_id = enq.dst_account_id()?;
+                    log::debug!("{}: message {:x} sent to execution to account {:x}", self.collated_block_descr, key.hash, account_id);
                     let msg = AsyncMessage::Int(enq, our);
                     exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
                 } else {
@@ -2239,7 +2300,7 @@ impl Collator {
                 }
             }
             if collator_data.block_full {
-                log::trace!("{}: BLOCK FULL, stop processing internal messages", self.collated_block_descr);
+                log::debug!("{}: BLOCK FULL, stop processing internal messages", self.collated_block_descr);
                 break
             }
             if self.check_cutoff_timeout() {
@@ -2289,39 +2350,29 @@ impl Collator {
         prev_data: &PrevData,
         collator_data: &mut CollatorData,
         exec_manager: &mut ExecutionManager,
-        mut ext_messages: Vec<(Arc<Message>, UInt256)>,
     ) -> Result<()> {
         if collator_data.skip_extmsg() {
-            log::trace!("{}: skipping processing of inbound external messages", self.collated_block_descr);
+            log::debug!("{}: skipping processing of inbound external messages", self.collated_block_descr);
             return Ok(())
         }
 
-        //LK temporary: check external messaging delivery
-        {
-            use rand::thread_rng;
-            use rand::seq::SliceRandom;
-            let mut rng = thread_rng();
-            ext_messages.shuffle(&mut rng);
-            log::debug!("{}: try to process {} external messages", self.collated_block_descr, ext_messages.len());
-        }
-        //LK temporary end
-
-        log::trace!("{}: process_inbound_external_messages", self.collated_block_descr);
-        for (msg, id) in ext_messages.drain(..) {
+        log::debug!("{}: process_inbound_external_messages", self.collated_block_descr);
+        for (msg, id) in self.engine.get_external_messages_iterator(self.shard.clone()) {
             let header = msg.ext_in_header().ok_or_else(|| error!("message {:x} \
                 is not external inbound message", id))?;
             if self.shard.contains_address(&header.dst)? {
                 if !collator_data.block_limit_status.fits(ParamLimitIndex::Soft) {
-                    log::trace!("{}: BLOCK FULL, stop processing external messages", self.collated_block_descr);
+                    log::debug!("{}: BLOCK FULL, stop processing external messages", self.collated_block_descr);
                     break
                 }
                 if self.check_cutoff_timeout() {
-                    log::warn!("{}: TIMEOUT ({}ms) is elapsed, stop processing external messages",
-                        self.collated_block_descr, self.cutoff_timeout.as_millis());
+                    log::warn!("{}: TIMEOUT is elapsed, stop processing external messages",
+                        self.collated_block_descr);
                     break
                 }
                 let (_, account_id) = header.dst.extract_std_address(true)?;
                 let msg = AsyncMessage::Ext(msg.deref().clone());
+                log::debug!("{}: message {:x} sent to execution", self.collated_block_descr, id);
                 exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
             } else {
                 // usually node collates more than one shard, the message can belong another one,
@@ -2332,8 +2383,11 @@ impl Collator {
             self.check_stop_flag()?;
         }
         exec_manager.wait_transactions(collator_data).await?;
-        let (_accepted, rejected) = collator_data.withdraw_ext_msg_statuses();
-        self.engine.complete_external_messages(rejected.into_iter().map(|(id, _)| id).collect(), vec![])?;
+        let (accepted, rejected) = collator_data.withdraw_ext_msg_statuses();
+        self.engine.complete_external_messages(
+            rejected.into_iter().map(|(id, _)| id).collect(),
+            accepted,
+        )?;
         Ok(())
     }
 
@@ -2366,8 +2420,8 @@ impl Collator {
                     ignored.push(id);
                     ignore = true;
                 } else if self.check_cutoff_timeout() {
-                    log::warn!("{}: TIMEOUT ({}ms) is elapsed, stop processing remp messages",
-                        self.collated_block_descr, self.cutoff_timeout.as_millis());
+                    log::warn!("{}: TIMEOUT is elapsed, stop processing remp messages",
+                        self.collated_block_descr);
                     ignored.push(id);
                     ignore = true;
                 } else {
@@ -2399,7 +2453,7 @@ impl Collator {
         collator_data: &mut CollatorData,
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
-        log::trace!("{}: process_new_messages", self.collated_block_descr);
+        log::debug!("{}: process_new_messages", self.collated_block_descr);
         let use_hypercube = !collator_data.config.has_capability(GlobalCapabilities::CapOffHypercube);
         while !collator_data.new_messages.is_empty() {
 
@@ -2424,6 +2478,7 @@ impl Collator {
                     let account_id = env.message().int_dst_account_id().unwrap_or_default();
                     collator_data.update_last_proc_int_msg((created_lt, hash))?;
                     let msg = AsyncMessage::New(env, tr_cell);
+                    log::debug!("{}: message {:x} sent to execution", self.collated_block_descr, key.hash);
                     exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
                 };
                 self.check_stop_flag()?;
@@ -2601,6 +2656,17 @@ impl Collator {
             changed_accounts.insert(account_id, shard_acc);
         }
 
+        if let Some(new_hardfork_config) = self.engine.get_config_for_hardfork() {
+            if let Some(new_config) = new_config_opt.as_mut() {
+                new_hardfork_config.config_params.iterate_slices(|key, value| {
+                    new_config.config_params.set(key, &value)?;
+                    Ok(true)
+                })?;
+            } else {
+                new_config_opt = Some(new_hardfork_config);
+            }
+        }
+
         log::trace!("{}: finalize_block: calc value flow", self.collated_block_descr);
         // calc value flow
         let mut value_flow = collator_data.value_flow.clone();
@@ -2698,6 +2764,9 @@ impl Collator {
             )?;
         }
         new_state.write_custom(mc_state_extra.as_ref())?;
+        if self.engine.get_config_for_hardfork().is_some() {
+            new_state.update_config_smc()?;
+        }
 
 
         if log::log_enabled!(log::Level::Trace) {
@@ -2771,18 +2840,21 @@ impl Collator {
             extra,
         )?;
         let mut block_id = self.new_block_id_part.clone();
-
-        // !!!! DEBUG !!!!
-        // if let Ok(block_str) = ton_block_json::debug_block(new_block.clone()) {
-        //     let _ = std::fs::write(format!("{}.json", block_id), block_str);
-        // }
-        // !!!! DEBUG !!!!
+        let workchain_id = block_id.shard().workchain_id();
 
         log::trace!("{}: finalize_block: fill block candidate", self.collated_block_descr);
         let cell = new_block.serialize()?;
         block_id.root_hash = cell.repr_hash();
         let data = ton_types::write_boc(&cell)?;
         block_id.file_hash = UInt256::calc_file_hash(&data);
+
+        // !!!! DEBUG !!!!
+        // if let Ok(block_str) = ton_block_json::debug_block(new_block.clone()) {
+        //     let _ = std::fs::write(
+        //         format!("tmp/{}.json", block_id), block_str
+        //     );
+        // }
+        // !!!! DEBUG !!!!
 
         if is_remp_enabled(self.engine.clone(), mc_data.config()) {
             let (accepted, rejected, ignored) = collator_data.withdraw_remp_msg_statuses();
@@ -2808,8 +2880,22 @@ impl Collator {
             collated_file_hash: UInt256::default(),
             created_by: self.created_by.clone(),
         };
+        if workchain_id != -1
+            && (collator_data.dequeue_count > 0 || collator_data.enqueue_count > 0
+                || collator_data.in_msg_count > 0 || collator_data.out_msg_count > 0 || collator_data.execute_count > 0
+                || collator_data.transit_count > 0
+            )
+        {
+            log::debug!(
+                "{}: finalize_block finished: dequeue_count: {}, enqueue_count: {}, in_msg_count: {}, out_msg_count: {}, \
+                execute_count: {}, transit_count: {}",
+                self.collated_block_descr, collator_data.dequeue_count, collator_data.enqueue_count,
+                collator_data.in_msg_count, collator_data.out_msg_count, collator_data.execute_count,
+                collator_data.transit_count,
+            );
+        }
         log::trace!(
-            "{}: dequeue_count: {}, enqueue_count: {}, in_msg_count: {}, out_msg_count: {},\
+            "{}: finalize_block finished: dequeue_count: {}, enqueue_count: {}, in_msg_count: {}, out_msg_count: {}, \
             execute_count: {}, transit_count: {}, data len: {}",
             self.collated_block_descr, collator_data.dequeue_count, collator_data.enqueue_count,
             collator_data.in_msg_count, collator_data.out_msg_count, collator_data.execute_count,
@@ -3229,21 +3315,6 @@ impl Collator {
         Ok(changed)
     }
 
-    #[inline]
-    fn calc_collator_index(shard: &ShardIdent, val_set_len: u16) -> u16 {
-        let prefix = shard.shard_prefix_with_tag();
-        let prefix = prefix >> prefix.trailing_zeros();
-        prefix as u16 % val_set_len
-    }
-    #[inline]
-    fn calc_next_collator_index(current: u16, val_set_len: u16) -> u16 {
-        if current + 1 >= val_set_len as u16 {
-            0
-        } else {
-            current + 1
-        }
-    }
-
     pub fn update_shard_block_info(
         &self,
         shardes: &mut ShardHashes,
@@ -3461,6 +3532,19 @@ impl Collator {
         self.started.elapsed().as_millis() as u32 > cutoff_timeout
     }
 
+    fn get_remaining_cutoff_time_limit_nanos(&self) -> i128 {
+        let cutoff_timeout_nanos = self.engine.collator_config().cutoff_timeout_ms as i128 * 1_000_000;
+        let elapsed_nanos = self.started.elapsed().as_nanos() as i128;
+        cutoff_timeout_nanos - elapsed_nanos
+    }
+
+    fn get_remaining_clean_time_limit_nanos(&self) -> i128 {
+        let remaining_cutoff_timeout_nanos = self.get_remaining_cutoff_time_limit_nanos();
+        let cc = self.engine.collator_config();
+        let max_secondary_clean_timeout_nanos = (cc.cutoff_timeout_ms as i128) * 1_000_000 * (cc.max_secondary_clean_timeout_percentage_points as i128) / 1000;
+        remaining_cutoff_timeout_nanos.min(max_secondary_clean_timeout_nanos)
+    }
+
     fn check_stop_flag(&self) -> Result<()> {
         if self.stop_flag.load(Ordering::Relaxed) {
             fail!("Stop flag was set")
@@ -3494,7 +3578,7 @@ fn test_count_bits_u64() {
     }
 }
 
-#[cfg(feature = "metrics")]
+#[cfg(feature = "log_metrics")]
 pub fn report_collation_metrics(
     shard: &ShardIdent,
     dequeue_msg_count: usize,
@@ -3508,19 +3592,17 @@ pub fn report_collation_metrics(
     block_size: usize,
     time: u32,
 ) {
-    let mut pipeline = STATSD.pipeline();
-
-    pipeline.timer(&format!("collation_time_{}", shard), time as f64);
-    pipeline.gauge(&format!("dequeue_msg_count_{}", shard), dequeue_msg_count as f64);
-    pipeline.gauge(&format!("enqueue_msg_count_{}", shard), enqueue_msg_count as f64);
-    pipeline.gauge(&format!("in_msg_count_{}", shard), in_msg_count as f64);
-    pipeline.gauge(&format!("out_msg_count_{}", shard), out_msg_count as f64);
-    pipeline.gauge(&format!("transit_msg_count_{}", shard), transit_msg_count as f64);
-    pipeline.gauge(&format!("executed_trs_count_{}", shard), executed_trs_count as f64);
-    pipeline.gauge(&format!("gas_used_{}", shard), gas_used as f64);
-    pipeline.gauge(&format!("gas_rate_collator_{}", shard), gas_rate as f64);
-    pipeline.gauge(&format!("block_size_{}", shard), block_size as f64);
-
-    pipeline.send(&STATSD);
+    let labels = [("shard", shard.to_string())];
+    // divide by 1000 because buckets are in seconds
+    metrics::histogram!("collation_time", (time as f64) / 1000.0, &labels);
+    metrics::increment_gauge!("dequeue_msg_count", dequeue_msg_count as f64, &labels);
+    metrics::increment_gauge!("enqueue_msg_count",  enqueue_msg_count as f64, &labels);
+    metrics::increment_gauge!("in_msg_count",  in_msg_count as f64, &labels);
+    metrics::increment_gauge!("out_msg_count", out_msg_count as f64, &labels,);
+    metrics::increment_gauge!("transit_msg_count", transit_msg_count as f64, &labels);
+    metrics::increment_gauge!("executed_trs_count", executed_trs_count as f64, &labels);
+    metrics::histogram!("gas_used", gas_used as f64, &labels);
+    metrics::histogram!("gas_rate_collator", gas_rate as f64,  &labels);
+    metrics::histogram!("block_size", block_size as f64,  &labels);
 }
 

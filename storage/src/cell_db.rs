@@ -29,7 +29,7 @@ impl CellDb {
     pub fn get_cell(
         &self, 
         cell_id: &UInt256,
-        boc_db: Arc<DynamicBocDb>, 
+        boc_db: &Arc<DynamicBocDb>, 
         use_cache: bool,
         with_parents_count: bool,
     ) -> Result<(StorageCell, u32)> {
@@ -44,7 +44,7 @@ impl CellDb {
     pub fn try_get_cell(
         &self,
         cell_id: &UInt256,
-        boc_db: Arc<DynamicBocDb>,
+        boc_db: &Arc<DynamicBocDb>,
         use_cache: bool,
         with_parents_count: bool,
     ) -> Result<Option<(StorageCell, u32)>> {

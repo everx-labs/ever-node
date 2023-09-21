@@ -50,6 +50,9 @@ pub trait TaskQueue<FuncPtr: Send + 'static>: Send + Sync {
         timeout: std::time::Duration,
         last_warn_dump_time: &mut std::time::SystemTime,
     ) -> Option<FuncPtr>;
+
+    /// Flush queue
+    fn flush(&self);
 }
 
 /// Post closure to be run in a main processing thread

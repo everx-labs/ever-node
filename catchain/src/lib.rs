@@ -24,7 +24,7 @@ mod receiver;
 mod receiver_source;
 pub mod utils;
 
-use crate::profiling::InstanceCounter;
+use crate::{profiling::InstanceCounter, utils::MetricsHandle};
 use adnl::node::AdnlNode;
 use overlay::PrivateOverlayShortId;
 use std::{
@@ -544,7 +544,7 @@ pub trait Receiver {
     fn process(&mut self);
 
     /// Receiver for metrics
-    fn get_metrics_receiver(&self) -> &metrics_runtime::Receiver;
+    fn get_metrics_receiver(&self) -> &MetricsHandle;
 
     /// Received blocks instance counter
     fn get_received_blocks_instance_counter(&self) -> &InstanceCounter;
@@ -1017,7 +1017,7 @@ impl CatchainFactory {
         path: String,
         db_suffix: String,
         allow_unsafe_self_blocks_resync: bool,
-        metrics: Option<Arc<metrics_runtime::Receiver>>,
+        metrics: Option<MetricsHandle>,
     ) -> Result<ReceiverPtr> {
         receiver::ReceiverImpl::create(
             listener,
@@ -1040,7 +1040,7 @@ impl CatchainFactory {
     pub fn create_database(
         path: String,
         name: String,
-        metrics: &metrics_runtime::Receiver,
+        metrics: &MetricsHandle,
     ) -> Result<DatabasePtr> {
         database::DatabaseImpl::create(&path, &name, metrics)
     }

@@ -56,25 +56,38 @@ pub fn create_external_db(config: ExternalDbConfig, front_workchain_ids: Vec<i32
 
 #[allow(dead_code)]
 #[cfg(feature = "external_db")]
-pub fn create_external_db(config: ExternalDbConfig, front_workchain_ids: Vec<i32>) -> Result<Arc<dyn ExternalDb>> {
+pub fn create_external_db(
+    config: ExternalDbConfig, front_workchain_ids: Vec<i32>, control_id: Option<[u8; 32]>
+) -> Result<Arc<dyn ExternalDb>> {
+    use ton_types::fail;
+
     let max_account_bytes_size = match config.account_producer.big_messages_storage {
         Some(_) => config.account_producer.big_message_max_size,
         None => Some(config.account_producer.message_max_size),
     };
+    let writers = processor::Writers {
+        write_block: kafka_producer::KafkaProducer::new(config.block_producer)?,
+        write_raw_block: kafka_producer::KafkaProducer::new(config.raw_block_producer)?,
+        write_message: kafka_producer::KafkaProducer::new(config.message_producer)?,
+        write_transaction: kafka_producer::KafkaProducer::new(config.transaction_producer)?,
+        write_account: kafka_producer::KafkaProducer::new(config.account_producer)?,
+        write_block_proof: kafka_producer::KafkaProducer::new(config.block_proof_producer)?,
+        write_raw_block_proof: kafka_producer::KafkaProducer::new(config.raw_block_proof_producer)?,
+        write_chain_range: kafka_producer::KafkaProducer::new(config.chain_range_producer)?,
+        write_remp_statuses: kafka_producer::KafkaProducer::new(config.remp_statuses_producer)?,
+        write_shard_hashes: kafka_producer::KafkaProducer::new(config.shard_hashes_producer)?,  
+    };
+    if writers.write_shard_hashes.enabled() && control_id.is_none() {
+        fail!("Control server config should be specified is shard hashes writer is enabled")
+    }
     Ok(
         Arc::new(
             Processor::new(
-                kafka_producer::KafkaProducer::new(config.block_producer)?,
-                kafka_producer::KafkaProducer::new(config.raw_block_producer)?,
-                kafka_producer::KafkaProducer::new(config.message_producer)?,
-                kafka_producer::KafkaProducer::new(config.transaction_producer)?,
-                kafka_producer::KafkaProducer::new(config.account_producer)?,
-                kafka_producer::KafkaProducer::new(config.block_proof_producer)?,
-                kafka_producer::KafkaProducer::new(config.chain_range_producer)?,
-                kafka_producer::KafkaProducer::new(config.remp_statuses_producer)?,
+                writers,
                 config.bad_blocks_storage,
                 front_workchain_ids,
                 max_account_bytes_size,
+                control_id.unwrap_or_default(),
             )
         )
     )

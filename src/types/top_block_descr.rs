@@ -82,6 +82,17 @@ impl TopBlockDescrStuff {
             );
         }
 
+        if tbd.proof_for() != block_id {
+            fail!(
+                "ShardTopBlockDescr is for block {} but given id is {}",
+                tbd.proof_for(), block_id
+            )
+        }
+        if tbd.chain().len() > UNREGISTERED_CHAIN_MAX_LEN as usize {
+            fail!("invalid ShardTopBlockDescr for {}: its proof-chain is too long ({} > {})",
+                tbd.proof_for(), tbd.chain().len(), UNREGISTERED_CHAIN_MAX_LEN);
+        }
+
         // read proof link chain
 
         let mut info = Default::default();
@@ -96,6 +107,9 @@ impl TopBlockDescrStuff {
         for (i, proof_root) in tbd.chain().iter().enumerate() {
 
             //CHECK(chain->size_ext() == (i == rec.len - 1 ? 0x10000u : 0x20000u));
+
+            // head is a first block after commited to masterchain
+            // tbd.chain: tail . . . head
 
             let is_head = i == tbd.chain().len() - 1;
 

@@ -15,6 +15,7 @@ use rustracing::sampler::AllSampler;
 use rustracing_jaeger::{
     reporter::JaegerCompactReporter, span::SpanContext, span::SpanReceiver, Tracer,
 };
+use std::net::ToSocketAddrs;
 use std::{collections::HashMap, env, sync::Mutex};
 
 use ton_types::fail;
@@ -100,16 +101,19 @@ impl JaegerHelper {
                 "6831".to_string()
             }
         };
-        let agent_url = format!("{}:{}", agent_host, agent_port)
-            .parse()
-            .and_then(|v| Ok(std::net::SocketAddr::V4(v)));
-        let Ok(agent_url) = agent_url else {
-            log::error!(
-                target: "jaeger", 
-                "Invalid JAEGER_* env. Can't parse string to ip address"
-            );
-            return None
-        };  
+        let agent_url = match format!("{}:{}", agent_host, agent_port)
+            .to_socket_addrs()
+            .map(|mut iter| iter.next())
+        {
+            Ok(Some(url)) => url,
+            _ => {
+                log::error!(
+                    target: "jaeger", 
+                    "Invalid JAEGER_* env. Can't parse string to valid address"
+                );
+                return None
+            }
+        };
         match reporter.set_agent_addr(agent_url) {
             Ok(_) => log::info!(
                 target: "jaeger", 

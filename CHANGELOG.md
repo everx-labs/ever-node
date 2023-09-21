@@ -2,7 +2,113 @@
 
 All notable changes to this project will be documented in this file.
 
-## Version 0.55.35
+## Version 0.55.63
+
+- Fixed a possible hang-up while saving a shard state
+
+## Version 0.55.62
+
+- Refactor processing of external messages
+
+## Version 0.55.61
+
+- Support hardforking in node
+  
+## Version 0.55.60
+
+- Remove time limit for boot
+
+## Version 0.55.59
+
+- Support hops check for old-fashioned broadcasts
+
+## Version 0.55.58
+
+- Fix build for front node
+
+## Version 0.55.57
+
+- Fixed loop to request peers from queue (add_overlay_peers)
+
+## Version 0.55.56
+
+- Save persistent state with BocWriterStack
+
+## Version 0.55.55
+
+- Update for fast finality
+
+## Version 0.55.54
+
+- Bugfixes for states cache optimisations
+
+## Version 0.55.53
+
+- Added control queries `GetAccountByBlock`, `GetShardAccountMeta`, `GetShardAccountMetaByBlock`, `GetAppliedShardsInfo`
+- Produce applied shard hashes and raw block proofs to Kafka
+
+## Version 0.55.52
+
+- Bump cc crate version
+
+## Version 0.55.51
+
+- Supported ton_block library without fast-finality feature
+
+## Version 0.55.50
+
+- Speed up node shutdown
+
+## Version 0.55.45
+
+- Added shard states cache modes ("states_cache_mode" param in config.json)
+    - "Off" - states are saved synchronously and not cached.
+    - "Moderate" - *recommended* - states are saved asiynchronously. Number of cached cells (in the state's BOCs) is minimal.
+    - "Full" - states saved asynchronously. The number of cells in memory is continuously growing.
+- Added "cache_cells_counters" param in config.json. If it is set to true, then cell counters are cached in memory.
+  It speeds up cells' DB but takes more memory. This cache was always enabled before.
+- Added limit for cells DB cache size ("cells_lru_size" param in config.json). Zero value means default limit - 1000000.
+- Fixed stopping of node (in part of a cells GC)
+
+## Version 0.55.44
+
+- Limit for rocksdb log file: max 3 files, 100MB each
+
+## Version 0.55.43
+
+- Refactor boot procedure
+- Simplify procedure to get next key blocks
+
+## Version 0.55.42
+
+- Fixed migration of DB from v4 to v5
+
+## Version 0.55.41
+
+- Adjusted the total WAL size limit for RocksDB
+
+## Version 0.55.40
+
+- Validation fixes for single-node sessions
+  
+## Version 0.55.39
+
+- Fixed shard states GC stopping
+
+## Version 0.55.38
+
+- New cleaning algorithm for shard states cache. Now it lives less in case of a persistent state saving.
+- Pretty logging for major workers' positions
+
+## Version 0.55.37
+
+- Skip validations for single node sessions
+- Validator manager fix for single-node sessions
+- Update session creation for single node sessions
+- Fix for deep recursion on catchain blocks dropping
+- Increase package version
+
+## Version 0.55.36
 
 - Different fixes
   
