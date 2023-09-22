@@ -21,8 +21,6 @@ use std::{collections::HashSet, cmp::max, iter::Iterator};
 
 pub const UNREGISTERED_CHAIN_MAX_LEN: u32 = 8;
 
-
-
 pub fn supported_capabilities() -> u64 {
     let caps =
         GlobalCapabilities::CapCreateStatsEnabled as u64 |
