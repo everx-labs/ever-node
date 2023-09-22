@@ -141,7 +141,7 @@ impl MessageQueue {
     }
 
     async fn set_queue_status(&self, required_status: MessageQueueStatus, new_status: MessageQueueStatus) -> Result<()> {
-        self.queues.execute_sync(|mut q| {
+        self.queues.execute_sync(|q| {
             if q.status != required_status {
                 fail!("RMQ {}: MessageQueue status is {:?}, but required to be {:?}", self, q.status, required_status)
             }
@@ -202,7 +202,7 @@ impl MessageQueue {
 
     pub async fn stop(&self) -> Result<()> {
         loop {
-            let (do_stop, do_break) = self.queues.execute_sync(|mut q| {
+            let (do_stop, do_break) = self.queues.execute_sync(|q| {
                 match q.status {
                     MessageQueueStatus::Created  => { q.status = MessageQueueStatus::Stopping; Ok((false, true)) },
                     MessageQueueStatus::Starting => Ok((false, false)),

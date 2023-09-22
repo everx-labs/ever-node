@@ -11,13 +11,14 @@
 * limitations under the License.
 */
 
-use crate::{ActivityNode, ActivityNodePtr, utils};
+use crate::{
+    ActivityNode, ActivityNodePtr, utils::{get_elapsed_time, time_to_timestamp_string}
+};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak, atomic::{AtomicBool, AtomicU64, Ordering}},
     time::{Duration, SystemTime, UNIX_EPOCH}
 };
-use crate::utils::get_elapsed_time;
 
 /*
     Constants
@@ -277,8 +278,8 @@ impl ActivityNodeManager {
                     node.get_name(), 
                     get_elapsed_time(&creation_time).as_secs_f64(), 
                     get_elapsed_time(&access_time).as_secs_f64(), 
-                    utils::time_to_timestamp_string(&creation_time),
-                    utils::time_to_timestamp_string(&access_time)
+                    time_to_timestamp_string(&creation_time),
+                    time_to_timestamp_string(&access_time)
                 );
             }
         }
@@ -299,9 +300,9 @@ impl ActivityNodeManager {
                     last accessed at {} (created {:.3}s ago at {})",
                     node.get_name(), 
                     get_elapsed_time(&access_time).as_secs_f64(), 
-                    utils::time_to_timestamp_string(&access_time), 
+                    time_to_timestamp_string(&access_time), 
                     get_elapsed_time(&creation_time).as_secs_f64(), 
-                    utils::time_to_timestamp_string(&creation_time)
+                    time_to_timestamp_string(&creation_time)
                 );
             }
         }

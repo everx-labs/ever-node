@@ -279,6 +279,9 @@ pub struct SessionOptions {
 
     /// Allow new catchain IDs
     pub new_catchain_ids: bool,
+
+    /// Skip validations for single node sessions
+    pub skip_single_node_session_validations: bool,
 }
 
 /// Merge wrapper
@@ -1112,7 +1115,7 @@ pub trait SessionDescription: fmt::Display + fmt::Debug + cache::SessionCache {
     fn is_in_past(&self, time: std::time::SystemTime) -> bool;
 
     /// Receiver for metrics
-    fn get_metrics_receiver(&self) -> &metrics_runtime::Receiver;
+    fn get_metrics_receiver(&self) -> &catchain::utils::MetricsHandle;
 
     /// Sent block instance counter
     fn get_sent_blocks_instance_counter(&self) -> &CachedInstanceCounter;
@@ -1455,7 +1458,7 @@ impl SessionFactory {
 
     /// Create session callbacks task queue
     pub fn create_callback_task_queue(
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: catchain::utils::MetricsHandle,
     ) -> CallbackTaskQueuePtr {
         session::SessionImpl::create_callback_task_queue(metrics_receiver)
     }
@@ -1530,7 +1533,7 @@ impl SessionFactory {
         completion_task_queue: TaskQueuePtr,
         callbacks_task_queue: CallbackTaskQueuePtr,
         session_creation_time: std::time::SystemTime,
-        metrics: Option<Arc<metrics_runtime::Receiver>>,
+        metrics: Option<catchain::utils::MetricsHandle>,
     ) -> SessionProcessorPtr {
         session_processor::SessionProcessorImpl::create(
             options,

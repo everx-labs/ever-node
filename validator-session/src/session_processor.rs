@@ -28,15 +28,16 @@ use crate::{
 };
 use catchain::{
     check_execution_time, instrument, serialize_tl_boxed_object,
-    BlockPtr, CatchainPtr, ExternalQueryResponseCallback, profiling::ResultStatusCounter
+    BlockPtr, CatchainPtr, ExternalQueryResponseCallback, profiling::ResultStatusCounter,
+    utils::get_elapsed_time
 };
+use metrics::Recorder;
 use std::{
-    cell::RefCell, collections::{HashMap, HashSet}, fmt, rc::Rc, sync::Arc,
+    cell::RefCell, collections::{HashMap, HashSet}, fmt, rc::Rc, 
     time::{Duration, SystemTime, UNIX_EPOCH}
 };
 use ton_api::IntoBoxed;
 use ton_types::{error, KeyId, Result, UInt256};
-use catchain::utils::get_elapsed_time;
 
 /*
     Constants
@@ -123,30 +124,30 @@ pub(crate) struct SessionProcessorImpl {
     collates_expire_counter: ResultStatusCounter, //result status counter for expired collation requests
     commits_counter: ResultStatusCounter,         //result status counter for commits requests
     rldp_queries_counter: ResultStatusCounter,    //result status counter for RLDP queries
-    preprocess_block_counter: metrics_runtime::data::Counter, //counter for preprocess calls
-    preprocess_block_latency_histogram: metrics_runtime::data::Histogram, //histogram for preprocess block latency
-    process_blocks_counter: metrics_runtime::data::Counter, //counter for process calls
-    process_blocks_latency_histogram: metrics_runtime::data::Histogram, //histogram for process blocks latency
-    request_new_block_counter: metrics_runtime::data::Counter, //counter for new blocks requesting
-    check_all_counter: metrics_runtime::data::Counter,         //counter for check_all calls
+    preprocess_block_counter: metrics::Counter, //counter for preprocess calls
+    preprocess_block_latency_histogram: metrics::Histogram, //histogram for preprocess block latency
+    process_blocks_counter: metrics::Counter, //counter for process calls
+    process_blocks_latency_histogram: metrics::Histogram, //histogram for process blocks latency
+    request_new_block_counter: metrics::Counter, //counter for new blocks requesting
+    check_all_counter: metrics::Counter,         //counter for check_all calls
     last_preprocess_block_warn_dump_time: SystemTime, //last time preprocess block latency warning has been printed
     last_process_blocks_warn_dump_time: SystemTime, //last time process blocks latency warning has been printed
     #[cfg(feature="slashing")]
     slashing_stat: SlashingValidatorStat,           //slashing validator statistics
     last_preprocess_block_time: Vec<SystemTime>, //time of last preprocess block request from a partial validator
-    round_duration_histogram: metrics_runtime::data::Histogram, //histogram for round duration
+    round_duration_histogram: metrics::Histogram, //histogram for round duration
     first_candidate_received: bool, //first candidate for validation has been received in current round
-    first_candidate_received_latency_histogram: metrics_runtime::data::Histogram, //histogram for first candidate approved in a round
+    first_candidate_received_latency_histogram: metrics::Histogram, //histogram for first candidate approved in a round
     first_candidate_approved: bool, //first candidate for validation has been received in current round
-    first_candidate_approved_latency_histogram: metrics_runtime::data::Histogram, //histogram for first candidate approved in a round
+    first_candidate_approved_latency_histogram: metrics::Histogram, //histogram for first candidate approved in a round
     first_candidate_voted: bool, //first candidate for validation has been voted in current round
-    first_candidate_voted_latency_histogram: metrics_runtime::data::Histogram, //histogram for first candidate voted in a round
+    first_candidate_voted_latency_histogram: metrics::Histogram, //histogram for first candidate voted in a round
     first_candidate_precommitted: bool, //first candidate for validation has been precommitted in current round
-    first_candidate_precommitted_latency_histogram: metrics_runtime::data::Histogram, //histogram for first candidate precommitted in a round
-    block_candidate_broadcast_validation_latency_histogram: metrics_runtime::data::Histogram, //histogram for block candidate broadcast processing during validation
-    validation_latency_histogram: metrics_runtime::data::Histogram, //histogram for block candidate validation
-    collation_latency_histogram: metrics_runtime::data::Histogram, //histogram for block candidate collation
-    active_weight_gauge: metrics_runtime::data::Gauge,             //gauge for active weight
+    first_candidate_precommitted_latency_histogram: metrics::Histogram, //histogram for first candidate precommitted in a round
+    block_candidate_broadcast_validation_latency_histogram: metrics::Histogram, //histogram for block candidate broadcast processing during validation
+    validation_latency_histogram: metrics::Histogram, //histogram for block candidate validation
+    collation_latency_histogram: metrics::Histogram, //histogram for block candidate collation
+    active_weight_gauge: metrics::Gauge,             //gauge for active weight
 }
 
 /*
@@ -220,7 +221,7 @@ impl SessionProcessor for SessionProcessorImpl {
     fn check_all(&mut self) {
         instrument!();
 
-        self.check_all_counter.increment();
+        self.check_all_counter.increment(1);
 
         //flush caches
 
@@ -278,7 +279,7 @@ impl SessionProcessor for SessionProcessorImpl {
 
         let total_active_weight = self.get_total_active_weight();
 
-        self.active_weight_gauge.record(total_active_weight as i64);
+        self.active_weight_gauge.set(total_active_weight as f64);
 
         if self.virtual_state.has_approved_block(&self.description)
             && !self.first_candidate_approved
@@ -292,7 +293,7 @@ impl SessionProcessor for SessionProcessorImpl {
 
             if let Ok(latency) = self.get_latency_from_round_start() {
                 self.first_candidate_approved_latency_histogram
-                    .record_value(latency.as_millis() as u64);
+                    .record(latency.as_millis() as f64);
             }
         }
 
@@ -306,7 +307,7 @@ impl SessionProcessor for SessionProcessorImpl {
 
             if let Ok(latency) = self.get_latency_from_round_start() {
                 self.first_candidate_voted_latency_histogram
-                    .record_value(latency.as_millis() as u64);
+                    .record(latency.as_millis() as f64);
             }
         }
 
@@ -320,7 +321,7 @@ impl SessionProcessor for SessionProcessorImpl {
 
             if let Ok(latency) = self.get_latency_from_round_start() {
                 self.first_candidate_precommitted_latency_histogram
-                    .record_value(latency.as_millis() as u64);
+                    .record(latency.as_millis() as f64);
             }
         }
 
@@ -343,7 +344,7 @@ impl SessionProcessor for SessionProcessorImpl {
 
         log::trace!("Preprocessing block {}", block);
 
-        self.preprocess_block_counter.increment();
+        self.preprocess_block_counter.increment(1);
 
         self.last_preprocess_block_time[source_id as usize] = start_time;
 
@@ -351,7 +352,7 @@ impl SessionProcessor for SessionProcessorImpl {
             get_elapsed_time(&block.get_payload().get_creation_time());
 
         self.preprocess_block_latency_histogram
-            .record_value(block_payload_processing_latency.as_millis() as u64);
+            .record(block_payload_processing_latency.as_millis() as f64);
 
         if block_payload_processing_latency > BLOCK_PREPROCESSING_WARN_LATENCY {
             let block_processing_latency = get_elapsed_time(&block.get_creation_time());
@@ -403,9 +404,9 @@ impl SessionProcessor for SessionProcessorImpl {
                 let block_update: Result<ton::BlockUpdate> =
                     catchain::utils::deserialize_tl_boxed_object(&block.get_payload().data());
 
-                match block_update.as_ref() {
+                match block_update {
                     Ok(block_update) => {
-                        let block_update = block_update.clone().only();
+                        let block_update = block_update.only();
                         (Some(block_update), true)
                     }
                     Err(err) => {
@@ -658,7 +659,7 @@ impl SessionProcessor for SessionProcessorImpl {
 
         log::trace!("Processing blocks {:?}", blocks);
 
-        self.process_blocks_counter.increment();
+        self.process_blocks_counter.increment(1);
 
         //reset flags
 
@@ -680,7 +681,7 @@ impl SessionProcessor for SessionProcessorImpl {
                 get_elapsed_time(&block.get_payload().get_creation_time());
 
             self.process_blocks_latency_histogram
-                .record_value(block_payload_processing_latency.as_millis() as u64);
+                .record(block_payload_processing_latency.as_millis() as f64);
 
             if block_payload_processing_latency > BLOCK_PROCESSING_WARN_LATENCY {
                 let block_processing_latency = get_elapsed_time(&block.get_creation_time());
@@ -1917,7 +1918,7 @@ impl SessionProcessorImpl {
 
             if let Ok(latency) = self.get_latency_from_round_start() {
                 self.round_duration_histogram
-                    .record_value(latency.as_millis() as u64);
+                    .record(latency.as_millis() as f64);
             }
 
             self.pending_generate = false;
@@ -2182,7 +2183,7 @@ impl SessionProcessorImpl {
             }
         }
 
-        self.request_new_block_counter.increment();
+        self.request_new_block_counter.increment(1);
 
         self.catchain.request_new_block(block_generation_time);
     }
@@ -2331,7 +2332,7 @@ impl SessionProcessorImpl {
             move |result: Result<ValidatorBlockCandidatePtr>, processor| {
                 let generation_duration = get_elapsed_time(&start_generation_time);
 
-                collation_latency_histogram.record_value(generation_duration.as_millis() as u64);
+                collation_latency_histogram.record(generation_duration.as_millis() as f64);
 
                 if generation_duration > MAX_GENERATION_TIME {
                     log::warn!(
@@ -2516,7 +2517,7 @@ impl SessionProcessorImpl {
 
             if let Ok(latency) = self.get_latency_from_round_start() {
                 self.first_candidate_received_latency_histogram
-                    .record_value(latency.as_millis() as u64);
+                    .record(latency.as_millis() as f64);
             }
         }
 
@@ -2754,9 +2755,9 @@ impl SessionProcessorImpl {
                     }
 
                     validation_latency_histogram
-                        .record_value(validation_duration.as_millis() as u64);
+                        .record(validation_duration.as_millis() as f64);
                     block_candidate_broadcast_validation_latency_histogram
-                        .record_value(broadcast_processing_duration.as_millis() as u64);
+                        .record(broadcast_processing_duration.as_millis() as f64);
 
                     let processor = get_mut_impl(processor);
 
@@ -2787,14 +2788,21 @@ impl SessionProcessorImpl {
                 );
             }
 
-            self.notify_candidate(
-                round,
-                &source_public_key,
-                &tl_block.root_hash().clone().into(),
-                &catchain::CatchainFactory::create_block_payload(tl_block.data().clone()),
-                &catchain::CatchainFactory::create_block_payload(tl_block.collated_data().clone()),
-                completion_handler,
-            );
+            if self.description.opts().skip_single_node_session_validations &&
+               self.description.get_total_nodes() == 1 &&
+               block.get_source_index() == self.get_local_idx() {
+                //special case - auto approve of self blocks for single node sessions
+                completion_handler(Ok(SystemTime::now()));
+            } else {
+                self.notify_candidate(
+                    round,
+                    &source_public_key,
+                    &tl_block.root_hash().clone().into(),
+                    &catchain::CatchainFactory::create_block_payload(tl_block.data().clone()),
+                    &catchain::CatchainFactory::create_block_payload(tl_block.collated_data().clone()),
+                    completion_handler,
+                );
+            }
 
             return;
         }
@@ -3405,7 +3413,7 @@ impl SessionProcessorImpl {
         completion_task_queue: TaskQueuePtr,
         callbacks_task_queue: CallbackTaskQueuePtr,
         session_creation_time: std::time::SystemTime,
-        metrics: Option<Arc<metrics_runtime::Receiver>>,
+        metrics: Option<catchain::utils::MetricsHandle>,
     ) -> SessionProcessorPtr {
         //dump session params for further log replaying
 
@@ -3475,44 +3483,44 @@ impl SessionProcessorImpl {
             ResultStatusCounter::new(&metrics_receiver, &"commit_requests".to_owned());
         let rldp_queries_counter =
             ResultStatusCounter::new(&metrics_receiver, &"rldp_queries".to_owned());
-        let preprocess_block_counter = metrics_receiver.sink().counter("preprocess_block_calls");
-        let process_blocks_counter = metrics_receiver.sink().counter("process_blocks_calls");
-        let request_new_block_counter = metrics_receiver.sink().counter("request_new_block_calls");
-        let check_all_counter = metrics_receiver.sink().counter("check_all_calls");
+        let preprocess_block_counter = metrics_receiver.sink().register_counter(&"preprocess_block_calls".into());
+        let process_blocks_counter = metrics_receiver.sink().register_counter(&"process_blocks_calls".into());
+        let request_new_block_counter = metrics_receiver.sink().register_counter(&"request_new_block_calls".into());
+        let check_all_counter = metrics_receiver.sink().register_counter(&"check_all_calls".into());
         let preprocess_block_latency_histogram = metrics_receiver
             .sink()
-            .histogram("time:preprocess_block_latency");
+            .register_histogram(&"time:preprocess_block_latency".into());
         let process_blocks_latency_histogram = metrics_receiver
             .sink()
-            .histogram("time:process_blocks_latency");
+            .register_histogram(&"time:process_blocks_latency".into());
         let first_candidate_received_latency_histogram = metrics_receiver
             .sink()
-            .histogram("time:round_stage1_received_latency");
+            .register_histogram(&"time:round_stage1_received_latency".into());
         let first_candidate_approved_latency_histogram = metrics_receiver
             .sink()
-            .histogram("time:round_stage2_approved_latency");
+            .register_histogram(&"time:round_stage2_approved_latency".into());
         let first_candidate_voted_latency_histogram = metrics_receiver
             .sink()
-            .histogram("time:round_stage3_voted_latency");
+            .register_histogram(&"time:round_stage3_voted_latency".into());
         let first_candidate_precommitted_latency_histogram = metrics_receiver
             .sink()
-            .histogram("time:round_stage4_precommitted_latency");
+            .register_histogram(&"time:round_stage4_precommitted_latency".into());
         let round_duration_histogram = metrics_receiver
             .sink()
-            .histogram("time:round_stage5_committed_latency");
+            .register_histogram(&"time:round_stage5_committed_latency".into());
         let block_candidate_broadcast_validation_latency_histogram = metrics_receiver
             .sink()
-            .histogram("time:block_candidate_broadcast_validation_latency");
+            .register_histogram(&"time:block_candidate_broadcast_validation_latency".into());
         let validation_latency_histogram =
-            metrics_receiver.sink().histogram("time:validation_latency");
+            metrics_receiver.sink().register_histogram(&"time:validation_latency".into());
         let collation_latency_histogram =
-            metrics_receiver.sink().histogram("time:collation_latency");
-        let active_weight_gauge = metrics_receiver.sink().gauge("active_weight");
-        let total_weight_gauge = metrics_receiver.sink().gauge("total_weight");
-        let cutoff_weight_gauge = metrics_receiver.sink().gauge("cutoff_weight");
+            metrics_receiver.sink().register_histogram(&"time:collation_latency".into());
+        let active_weight_gauge = metrics_receiver.sink().register_gauge(&"active_weight".into());
+        let total_weight_gauge = metrics_receiver.sink().register_gauge(&"total_weight".into());
+        let cutoff_weight_gauge = metrics_receiver.sink().register_gauge(&"cutoff_weight".into());
 
-        total_weight_gauge.record(description.get_total_weight() as i64);
-        cutoff_weight_gauge.record(description.get_cutoff_weight() as i64);
+        total_weight_gauge.set(description.get_total_weight() as f64);
+        cutoff_weight_gauge.set(description.get_cutoff_weight() as f64);
 
         //initialize state
 

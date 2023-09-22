@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -32,12 +32,11 @@ pub struct ShardAccountStuff {
 }
 
 impl ShardAccountStuff {
-    pub fn from_shard_state(
+    pub fn new(
         account_addr: AccountId,
-        accounts: &ShardAccounts,
+        shard_acc: ShardAccount,
         lt: Arc<AtomicU64>,
     ) -> Result<Self> {
-        let shard_acc = accounts.account(&account_addr)?.unwrap_or_default();
         let account_hash = shard_acc.account_cell().repr_hash();
         let account_root = shard_acc.account_cell();
         let last_trans_hash = shard_acc.last_trans_hash().clone();

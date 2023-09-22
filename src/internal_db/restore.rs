@@ -778,6 +778,7 @@ async fn restore_chain(
                 let root = merkle_update.apply_for(&prev_state_root)?;
                 log::trace!("TIME: restore_chain: applied Merkle update {}ms   {}",
                     now.elapsed().as_millis(), block_id_);
+                metrics::histogram!("restore_chain_apply_merkle_update_time", now.elapsed());
                 Ok(root)
             }
         ).await??;

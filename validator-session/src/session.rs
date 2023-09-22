@@ -23,12 +23,12 @@ use catchain::{
     ActivityNodePtr, BlockPtr, CatchainListener, CatchainOverlay, CatchainOverlayListenerPtr,
     CatchainOverlayManager, CatchainOverlayLogReplayListenerPtr, CatchainPtr, 
     ExternalQueryResponseCallback, 
-    profiling::Profiler, utils::{compute_instance_counter, MetricsDumper}
+    profiling::Profiler, utils::{compute_instance_counter, get_elapsed_time, MetricsDumper}
 };
+use metrics::Recorder;
 use overlay::PrivateOverlayShortId;
 use std::{fmt, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, SystemTime}};
 use ton_types::Result;
-use catchain::utils::get_elapsed_time;
 
 /*
     Constants
@@ -72,8 +72,8 @@ struct TaskQueueImpl<FuncPtr> {
     name: String,                                                         //queue name
     queue_sender: crossbeam::channel::Sender<Box<TaskDesc<FuncPtr>>>, //queue sender from outer world to the ValidatorSession
     queue_receiver: crossbeam::channel::Receiver<Box<TaskDesc<FuncPtr>>>, //queue receiver from outer world to the ValidatorSession
-    post_counter: metrics_runtime::data::Counter,                         //counter for queue posts
-    pull_counter: metrics_runtime::data::Counter,                         //counter for queue pull
+    post_counter: metrics::Counter,                         //counter for queue posts
+    pull_counter: metrics::Counter,                         //counter for queue pull
     is_overloaded: Arc<AtomicBool>, //atomic flag to indicate that queue is overloaded
     linked_queue: Option<Arc<dyn TaskQueue<FuncPtr>>>, //linked task queue to wake up
 }
@@ -102,7 +102,7 @@ where
         if let Err(send_error) = self.queue_sender.send(task_desc) {
             log::error!("ValidatorSession method post closure error: {}", send_error);
         } else {
-            self.post_counter.increment();
+            self.post_counter.increment(1);
 
             if let Some(ref linked_queue) = &self.linked_queue {
                 linked_queue.post_closure(FuncPtr::create_default_task());
@@ -137,7 +137,7 @@ where
                     self.is_overloaded.store(false, Ordering::Release);
                 }
 
-                self.pull_counter.increment();
+                self.pull_counter.increment(1);
 
                 Some(task_desc.task)
             }
@@ -146,6 +146,12 @@ where
 
                 None
             }
+        }
+    }
+
+    fn flush(&self) {
+        while !self.queue_receiver.is_empty() {
+            let _result = self.queue_receiver.try_recv();
         }
     }
 }
@@ -163,14 +169,14 @@ where
         queue_sender: crossbeam::channel::Sender<Box<TaskDesc<FuncPtr>>>,
         queue_receiver: crossbeam::channel::Receiver<Box<TaskDesc<FuncPtr>>>,
         linked_queue: Option<Arc<dyn TaskQueue<FuncPtr>>>,
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: catchain::utils::MetricsHandle,
     ) -> Self {
         let pull_counter = metrics_receiver
             .sink()
-            .counter(format!("{}_queue.pulls", name));
+            .register_counter(&format!("{}_queue.pulls", name).into());
         let post_counter = metrics_receiver
             .sink()
-            .counter(format!("{}_queue.posts", name));
+            .register_counter(&format!("{}_queue.posts", name).into());
 
         Self {
             name: name,
@@ -455,13 +461,6 @@ impl SessionImpl {
     fn stop_impl(&self, destroy_catchain_db: bool) {
         self.stop_flag.store(true, Ordering::Release);
 
-        log::debug!(
-            "...stopping Catchain (session_id is {})",
-            self.session_id.to_hex_string()
-        );
-
-        self.catchain.stop(destroy_catchain_db);
-
         loop {
             if self
                 .session_callbacks_processing_thread_stopped
@@ -480,6 +479,15 @@ impl SessionImpl {
 
             std::thread::sleep(CHECKING_INTERVAL);
         }
+
+        //order is important: catchain retains blocks and controls their GC without deep recursion during automatic destroying
+
+        log::debug!(
+            "...stopping Catchain (session_id is {})",
+            self.session_id.to_hex_string()
+        );
+
+        self.catchain.stop(destroy_catchain_db);
 
         log::info!(
             "ValidatorSession has been stopped (session_id is {})",
@@ -505,7 +513,7 @@ impl SessionImpl {
         catchain: CatchainPtr,
         session_activity_node: ActivityNodePtr,
         session_creation_time: std::time::SystemTime,
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: catchain::utils::MetricsHandle,
     ) {
         log::info!(
             "ValidatorSession main loop is started (session_id is {}); \
@@ -518,10 +526,10 @@ impl SessionImpl {
 
         let loop_counter = metrics_receiver
             .sink()
-            .counter("validator_session_main_loop_iterations");
+            .register_counter(&"validator_session_main_loop_iterations".into());
         let loop_overloads_counter = metrics_receiver
             .sink()
-            .counter("validator_session_main_loop_overloads");
+            .register_counter(&"validator_session_main_loop_overloads".into());
 
         //create session processor
 
@@ -880,7 +888,7 @@ impl SessionImpl {
                 instrument!();
 
                 session_activity_node.tick();
-                loop_counter.increment();
+                loop_counter.increment(1);
 
                 //check if the main loop should be stopped
 
@@ -892,7 +900,7 @@ impl SessionImpl {
                 //check overload flag
 
                 if task_queue.is_overloaded() {
-                    loop_overloads_counter.increment();
+                    loop_overloads_counter.increment(1);
                 }
 
                 //handle session event with timeout
@@ -988,6 +996,9 @@ impl SessionImpl {
 
         //finishing routines
 
+        task_queue.flush();
+        completion_task_queue.flush();
+
         log::info!(
             "ValidatorSession main loop is finished (session_id is {})",
             session_id.to_hex_string()
@@ -1001,7 +1012,7 @@ impl SessionImpl {
         is_stopped_flag: Arc<AtomicBool>,
         task_queue: CallbackTaskQueuePtr,
         session_id: SessionId,
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: catchain::utils::MetricsHandle,
     ) {
         log::info!(
             "ValidatorSession session callbacks processing loop is started (session_id is {})",
@@ -1017,10 +1028,10 @@ impl SessionImpl {
 
         let loop_counter = metrics_receiver
             .sink()
-            .counter("validator_session_callbacks_loop_iterations");
+            .register_counter(&"validator_session_callbacks_loop_iterations".into());
         let loop_overloads_counter = metrics_receiver
             .sink()
-            .counter("validator_session_callbacks_loop_overloads");
+            .register_counter(&"validator_session_callbacks_loop_overloads".into());
 
         //session callbacks processing loop
 
@@ -1028,7 +1039,7 @@ impl SessionImpl {
                                                                                               
         loop {
             activity_node.tick();
-            loop_counter.increment();
+            loop_counter.increment(1);
 
             //check if the loop should be stopped
 
@@ -1039,7 +1050,7 @@ impl SessionImpl {
             //check overload flag
 
             if task_queue.is_overloaded() {
-                loop_overloads_counter.increment();
+                loop_overloads_counter.increment(1);
             }
 
             //handle session outgoing event with timeout
@@ -1057,6 +1068,8 @@ impl SessionImpl {
 
         //finishing routines
 
+        task_queue.flush();
+
         log::info!(
             "ValidatorSession session callbacks processing loop is finished (session_id is {})",
             session_id.to_hex_string()
@@ -1072,7 +1085,7 @@ impl SessionImpl {
     pub(crate) fn create_task_queue(
         name: String,
         linked_queue: Option<TaskQueuePtr>,
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: catchain::utils::MetricsHandle,
     ) -> TaskQueuePtr {
         type ChannelPair = (
             crossbeam::channel::Sender<Box<TaskDesc<TaskPtr>>>,
@@ -1092,7 +1105,7 @@ impl SessionImpl {
     }
 
     pub(crate) fn create_callback_task_queue(
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: catchain::utils::MetricsHandle,
     ) -> CallbackTaskQueuePtr {
         type ChannelPair = (
             crossbeam::channel::Sender<Box<TaskDesc<CallbackTaskPtr>>>,
@@ -1168,11 +1181,8 @@ impl SessionImpl {
 
         //create metrics receiver
 
-        let metrics_receiver = Arc::new(
-            metrics_runtime::Receiver::builder()
-                .build()
-                .expect("failed to create validator session metrics receiver"),
-        );
+        let metrics_receiver =
+            catchain::utils::MetricsHandle::new(Some(Duration::from_secs(30)));
 
         //create task queues
 

@@ -11,38 +11,35 @@
 * limitations under the License.
 */
 
-use std::{
-    collections::{HashMap, HashSet},
-    convert::TryFrom,
-    sync::Arc,
-    time::{Duration, SystemTime}
-};
-
 use crate::{
     config::{RempConfig, ValidatorManagerConfig},
-    engine::{Engine, STATSD},
+    engine::Engine,
     engine_traits::EngineOperations,
     shard_state::ShardStateStuff,
     validator::{
+        sessions_computing::{SessionHistory, SessionInfo},
         remp_block_parser::RempBlockObserverToplevel,
         remp_manager::{RempManager, RempInterfaceQueues},
         validator_group::{ValidatorGroup, ValidatorGroupStatus},
         validator_utils::{
-            try_calc_subset_for_workchain,
-            validatordescr_to_catchain_node,
-            validatorset_to_string,
-            compute_validator_list_id,
-            ValidatorListHash,
-            GeneralSessionInfo, get_group_members_by_validator_descrs, is_remp_enabled
+            compute_validator_list_id, get_group_members_by_validator_descrs, 
+            get_first_block_seqno_after_prevs, is_remp_enabled, try_calc_subset_for_workchain,
+            validatordescr_to_catchain_node, validatorset_to_string,
+            GeneralSessionInfo, ValidatorListHash, ValidatorSubsetInfo
         },
         out_msg_queue::OutMsgQueueInfoStuff,
-    },
+    },                                                                                                  
 };
+use crate::validator::validator_utils::try_calc_subset_for_workchain_standard;
 
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::{SlashingManager, SlashingManagerPtr};
 
 use catchain::{CatchainNode, PublicKey, serialize_tl_boxed_object};
+use std::{
+    collections::{HashMap, HashSet}, convert::TryFrom, sync::Arc,
+    time::{Duration, SystemTime}
+};
 use tokio::time::timeout;
 use ton_api::IntoBoxed;
 use ton_block::{
@@ -51,10 +48,6 @@ use ton_block::{
     GlobalCapabilities
 };
 use ton_types::{error, fail, Result, UInt256};
-use crate::validator::sessions_computing::{SessionHistory, SessionInfo};
-use crate::validator::validator_utils::{
-    ValidatorSubsetInfo, get_first_block_seqno_after_prevs, try_calc_subset_for_workchain_standard
-};
 
 fn get_session_id_serialize(
     session_info: Arc<GeneralSessionInfo>,
@@ -166,6 +159,7 @@ fn get_session_options(opts: &ConsensusConfig) -> validator_session::SessionOpti
         max_block_size: opts.max_block_bytes,
         max_collated_data_size: opts.max_collated_bytes,
         new_catchain_ids: opts.new_catchain_ids,
+        skip_single_node_session_validations: false, // This should be set to true for single-node sessions
     }
 }
 
@@ -371,8 +365,8 @@ impl ValidatorManagerImpl {
         }
         self.validator_list_status.next = self.update_single_validator_list(next_validator_set.list(), "next").await?;
 
-        STATSD.gauge("in_current_vset_p34", if self.validator_list_status.curr.is_some() { 1 } else { 0 } as f64);
-        STATSD.gauge("in_next_vset_p36", if self.validator_list_status.next.is_some() { 1 } else { 0 } as f64);
+        metrics::gauge!("in_current_vset_p34", if self.validator_list_status.curr.is_some() { 1 } else { 0 } as f64);
+        metrics::gauge!("in_next_vset_p36", if self.validator_list_status.next.is_some() { 1 } else { 0 } as f64);
         return Ok(!self.validator_list_status.curr.is_none() || !self.validator_list_status.next.is_none());
     }
 
@@ -854,7 +848,8 @@ impl ValidatorManagerImpl {
         // Shards that will eventually be started (in later masterstates): need to prepare
         let mut future_shards: HashSet<ShardIdent> = HashSet::new();
         // Validator sets for shards that will eventually be started
-        let mut our_future_shards: HashMap<ShardIdent, (ValidatorSubsetInfo, u32, ValidatorListHash)> = HashMap::new();
+        let mut our_future_shards: 
+            HashMap<ShardIdent, (ValidatorSubsetInfo, u32, ValidatorListHash)> = HashMap::new();
         let mut blocks_before_split: HashSet<BlockIdExt> = HashSet::new();
 
         new_shards.insert(ShardIdent::masterchain(), vec![last_masterchain_block.clone()]);
@@ -975,6 +970,24 @@ impl ValidatorManagerImpl {
             };
 
             let next_cc_seqno = cc_seqno_from_state + 1;
+
+        //     #[cfg(feature = "fast_finality")]
+        //     let next_subset_opt = if !ident.is_masterchain() {
+        //         //let block_seqno = Self::get_first_block_seqno_after_prevs(new_shards.get(ident))?;
+        //         try_calc_next_subset_for_workchain_fast_finality(
+        //             &future_validator_set, 
+        //             future_validator_set.cc_seqno(), 
+        //             &mc_state, 
+        //             ident
+        //         )?
+        //     } else {
+        //         try_calc_subset_for_workchain_standard(
+        //             &future_validator_set, 
+        //             mc_state.config_params()?, 
+        //             ident, 
+        //             next_cc_seqno
+        //         )?
+        //     };
 
             let next_subset_opt = try_calc_subset_for_workchain_standard(
                 &future_validator_set, mc_state.config_params()?, ident, next_cc_seqno)?;
@@ -1174,13 +1187,13 @@ impl ValidatorManagerImpl {
                 log::debug!(target: "validator_manager", "Processing slashing masterblock {}", mc_handle.id().seq_no);
                 self.slashing_manager.handle_masterchain_block(&mc_handle, &mc_state, &local_id, &self.engine).await;
             }
-            log::trace!(target: "validator_manager", "Updaing shards for masterblock {}", mc_handle.id().seq_no);
             if let Some(block_observer) = &block_observer {
                 if mc_handle.id().seq_no() != 0 {
                     let mc_blockstuff = self.engine.load_block(&mc_handle).await?;
                     block_observer.send((mc_blockstuff, self.get_masterchain_seqno(mc_state.clone())?))?;
                 }
             }
+            log::trace!(target: "validator_manager", "Updaing shards for masterblock {}", mc_handle.id().seq_no);
             self.update_shards(mc_state).await?;
 
             mc_handle = loop {
@@ -1213,6 +1226,7 @@ pub fn start_validator_manager(
 ) {
     const CHECK_VALIDATOR_TIMEOUT: u64 = 60;    //secs
     runtime.clone().spawn(async move {
+        log::info!("checking if current node is a validator during {CHECK_VALIDATOR_TIMEOUT} secs");
         engine.acquire_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
         while !engine.get_validator_status() {
             log::trace!("is not a validator");

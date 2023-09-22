@@ -18,7 +18,7 @@ use crate::{
 };
 use catchain::{serialize_tl_boxed_object, profiling::ResultStatusCounter};
 use rand::Rng;
-use std::{collections::HashMap, fmt, sync::Arc, time::{Duration, SystemTime}};
+use std::{collections::HashMap, fmt, time::{Duration, SystemTime}};
 use ton_api::IntoBoxed;
 use ton_types::{Result, UInt256};
 
@@ -46,6 +46,7 @@ impl Default for SessionOptions {
             max_block_size: 4 << 20,
             max_collated_data_size: 4 << 20,
             new_catchain_ids: false,
+            skip_single_node_session_validations: false,
         }
     }
 }
@@ -76,7 +77,7 @@ pub(crate) struct SessionDescriptionImpl {
     self_idx: u32,                            //index of this validator in a list of sources
     rng: rand::rngs::ThreadRng,               //random generator
     current_time: Option<std::time::SystemTime>, //current time for log replaying
-    metrics_receiver: Arc<metrics_runtime::Receiver>, //receiver for profiling metrics
+    metrics_receiver: catchain::utils::MetricsHandle, //receiver for profiling metrics
     sent_blocks_instance_counter: CachedInstanceCounter, //instance counter for sent blocks
     block_candidate_signatures_instance_counter: CachedInstanceCounter, //instance counter for block candidate signatures
     block_candidates_instance_counter: CachedInstanceCounter, //instance counter for block candidates
@@ -361,7 +362,7 @@ impl SessionDescription for SessionDescriptionImpl {
         Metrics
     */
 
-    fn get_metrics_receiver(&self) -> &metrics_runtime::Receiver {
+    fn get_metrics_receiver(&self) -> &catchain::utils::MetricsHandle {
         &self.metrics_receiver
     }
 
@@ -529,7 +530,7 @@ impl SessionDescriptionImpl {
         options: &SessionOptions,
         nodes: &Vec<SessionNode>,
         local_id: &PublicKeyHash,
-        metrics_receiver: Option<Arc<metrics_runtime::Receiver>>,
+        metrics_receiver: Option<catchain::utils::MetricsHandle>,
     ) -> Self {
         let mut total_weight = 0;
         let mut sources = Vec::new();
@@ -570,11 +571,7 @@ impl SessionDescriptionImpl {
         let metrics_receiver = if let Some(metrics_receiver) = metrics_receiver {
             metrics_receiver.clone()
         } else {
-            Arc::new(
-                metrics_runtime::Receiver::builder()
-                    .build()
-                    .expect("failed to create validator session metrics receiver"),
-            )
+                catchain::utils::MetricsHandle::new(None)
         };
 
         let body = Self {

@@ -17,9 +17,6 @@ use crossbeam_channel::Receiver;
 use catchain::utils::get_hash;
 use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, ValidatorDescr};
 use ton_types::{fail, error, Result, UInt256};
-#[cfg(feature = "slashing")]
-use validator_session::SlashingValidatorStat;
-
 use validator_session::{
     BlockHash, BlockPayloadPtr, CatchainOverlayManagerPtr,
     SessionId, SessionPtr, SessionListenerPtr, SessionFactory,
@@ -27,14 +24,17 @@ use validator_session::{
     PublicKey, PrivateKey, PublicKeyHash,
     ValidatorBlockCandidateCallback, ValidatorBlockCandidateDecisionCallback
 };
-use validator_utils::{
-    validatordescr_to_session_node,
-    validator_query_candidate_to_validator_block_candidate, ValidatorListHash
-};
+#[cfg(feature = "slashing")]
+use validator_session::SlashingValidatorStat;
 use validator_session_listener::{
     process_validation_queue,
     ValidatorSessionListener, ValidationAction,
 };
+use validator_utils::{
+    validatordescr_to_session_node, validator_query_candidate_to_validator_block_candidate, 
+    ValidatorListHash
+};
+use validator_utils::get_first_block_seqno_after_prevs;
 use reliable_message_queue::RmqQueueManager;
 use remp_manager::RempManager;
 
@@ -46,7 +46,7 @@ use crate::{
         catchain_overlay::CatchainOverlayManagerImpl,
         mutex_wrapper::MutexWrapper,
         validator_utils::GeneralSessionInfo,
-    }
+    }, validating_utils::{fmt_next_block_descr_from_next_seqno, append_rh_to_next_block_descr}
 };
 
 #[cfg(feature = "slashing")]
@@ -102,7 +102,10 @@ pub struct ValidatorGroupImpl {
     on_generate_slot_invoked: bool,
     on_candidate_invoked: bool,
 
-    status: ValidatorGroupStatus
+    status: ValidatorGroupStatus,
+
+    next_block_seqno: Option<u32>,
+    next_block_descr: Arc<String>,
 }
 
 impl Drop for ValidatorGroupImpl {
@@ -136,6 +139,10 @@ impl ValidatorGroupImpl {
         if self.status != ValidatorGroupStatus::Active {
             fail!("Inactive session cannot be started! {}", self.info())
         }
+
+        self.next_block_seqno = get_first_block_seqno_after_prevs(&prev);
+        self.next_block_descr = Arc::new(fmt_next_block_descr_from_next_seqno(&self.shard, self.next_block_seqno));
+
         log::info!(target: "validator", "Starting session {}", self.info());
 
         self.prev_block_ids = prev;
@@ -158,17 +165,34 @@ impl ValidatorGroupImpl {
             g.general_session_info.catchain_seqno
         );
 
-        let session_ptr = SessionFactory::create_session(
-            &g.config,
-            &g.session_id,
-            &nodes,
-            &g.local_key,
-            db_path,
-            db_suffix,
-            g.allow_unsafe_self_blocks_resync,
-            overlay_manager,
-            session_listener,
-        );
+        let session_ptr = if nodes.len() == 1 {
+            //special case for single node session
+
+            let mut options = g.config.clone();
+
+            options.skip_single_node_session_validations = true;
+
+            SessionFactory::create_single_node_session(
+                &options,
+                &g.session_id,
+                &g.local_key,
+                db_path,
+                db_suffix,
+                session_listener,
+            )
+        } else {
+            SessionFactory::create_session(
+                &g.config,
+                &g.session_id,
+                &nodes,
+                &g.local_key,
+                db_path,
+                db_suffix,
+                g.allow_unsafe_self_blocks_resync,
+                overlay_manager,
+                session_listener,
+            )
+        };
 
         if let Some(remp_manager) = &g.remp_manager {
             if start_remp_session {
@@ -217,8 +241,10 @@ impl ValidatorGroupImpl {
 
     pub fn info_round(&self, round: u32) -> String {
 
-        return format!("session_status: id {:x}, shard {}, {}, round {}, prevs {}",
-                       self.session_id, self.shard, self.status,
+        return format!("session_status: id {:x}, shard {}{}, {}, round {}, prevs {}",
+                       self.session_id, self.shard,
+                       self.next_block_seqno.map_or("".to_owned(), |seqno| format!(", {} next seqno", seqno)),
+                       self.status,
                        round, prevs_to_string(&self.prev_block_ids)
         );
     }
@@ -240,6 +266,7 @@ impl ValidatorGroupImpl {
         shard: ShardIdent,
         session_id: validator_session::SessionId,
     ) -> ValidatorGroupImpl {
+        let next_block_descr = Arc::new(fmt_next_block_descr_from_next_seqno(&shard, None));
         log::info!(target: "validator", "Initializing session {:x}, shard {}", session_id, shard);
 
         ValidatorGroupImpl {
@@ -256,7 +283,10 @@ impl ValidatorGroupImpl {
 
             on_candidate_invoked: false,
             on_generate_slot_invoked: false,
-            replay_finished: false
+            replay_finished: false,
+
+            next_block_seqno: None,
+            next_block_descr,
         }
     }
 
@@ -361,6 +391,12 @@ impl ValidatorGroup {
             last_validation_time: AtomicU64::new(0),
             last_collation_time: AtomicU64::new(0)
         }
+    }
+
+    /// Mutex used inside. Needs to cache the result
+    pub async fn get_next_block_descr(&self) -> Arc<String> {
+        let next_block_descr = self.group_impl.execute_sync(|group_impl| group_impl.next_block_descr.clone()).await;
+        next_block_descr
     }
 
     pub fn shard(&self) -> &ShardIdent {
@@ -527,9 +563,12 @@ impl ValidatorGroup {
     }
 
     pub async fn on_generate_slot(&self, round: u32, callback: ValidatorBlockCandidateCallback) {
+        let next_block_descr = self.get_next_block_descr().await;
+
         log::info!(
             target: "validator", 
-            "SessionListener::on_generate_slot: collator request, {}",
+            "({}): SessionListener::on_generate_slot: collator request, {}",
+            next_block_descr,
             self.info_round(round).await
         );
 
@@ -538,7 +577,8 @@ impl ValidatorGroup {
 
         if let Some(rmq) = self.get_reliable_message_queue().await {
             if let Err(e) = rmq.collect_messages_for_collation().await {
-                log::error!(target: "validator", "Error collecting messages for {}: `{}`",
+                log::error!(target: "validator", "({}): Error collecting messages for {}: `{}`",
+                    next_block_descr,
                     self.info_round(round).await,
                     e
                 )
@@ -581,7 +621,8 @@ impl ValidatorGroup {
                     )).await {
                         Ok(b) => b,
                         Err(e) => {
-                            log::error!(target: "validator", "Validator group {}: cannot generate next block id: `{}`",
+                            log::error!(target: "validator", "({}): Validator group {}: cannot generate next block id: `{}`",
+                                next_block_descr,
                                 self.info_round(round).await, e
                             );
                             BlockIdExt::default()
@@ -589,7 +630,9 @@ impl ValidatorGroup {
                     };
                     if let Err(e) = self.engine.finalize_remp_messages_as_ignored(&block_id) {
                         log::error!(target: "remp", 
-                            "RMQ {}: cannot finalize remp messages as ignored by block {}: `{}`", rmq, block_id, e
+                            "({}): RMQ {}: cannot finalize remp messages as ignored by block {}: `{}`",
+                            next_block_descr,
+                            rmq, block_id, e
                         );
                     }
                 }
@@ -599,14 +642,16 @@ impl ValidatorGroup {
 
         if let Some(rmq) = self.get_reliable_message_queue().await {
             if let Err(e) = rmq.process_collation_result().await {
-                log::error!(target: "validator", "Error processing collation results for {}: `{}`",
+                log::error!(target: "validator", "({}): Error processing collation results for {}: `{}`",
+                    next_block_descr,
                     self.info_round(round).await,
                     e
                 )
             }
         }
 
-        log::info!(target: "validator", "SessionListener::on_generate_slot: {}, {}",
+        log::info!(target: "validator", "({}): SessionListener::on_generate_slot: {}, {}",
+            next_block_descr,
             self.info_round(round).await, result_message
         );
 
@@ -625,8 +670,12 @@ impl ValidatorGroup {
         collated_data: BlockPayloadPtr,
         callback: ValidatorBlockCandidateDecisionCallback,
     ) {
+        let next_block_descr = self.get_next_block_descr().await;
+        let next_block_descr = append_rh_to_next_block_descr(&next_block_descr, &root_hash);
+
         let candidate_id = format!("source {}, rh {:x}", source.id(), root_hash);
-        log::trace!(target: "validator", "SessionListener::on_candidate: {}, {}",
+        log::trace!(target: "validator", "({}): SessionListener::on_candidate: {}, {}",
+            next_block_descr,
             candidate_id, self.info_round(round).await);
 
         let mut candidate = super::BlockCandidate {
@@ -641,7 +690,7 @@ impl ValidatorGroup {
             let (lk_round, prev_block_ids, mm_block_id, min_ts) =
                 self.group_impl.execute_sync(|group_impl| group_impl.update_round(round)).await;
             if round < lk_round {
-                log::error!(target: "validator", "round {} < self.last_known_round {}", round, lk_round);
+                log::error!(target: "validator", "({}): round {} < self.last_known_round {}", next_block_descr, round, lk_round);
                 return;
             }
             let next_block_id = match self.group_impl.execute_sync(|group_impl|
@@ -651,7 +700,7 @@ impl ValidatorGroup {
                     self.shard().clone()
                 )
             ).await {
-                Err(x) => { log::error!(target: "validator", "{}", x); return },
+                Err(x) => { log::error!(target: "validator", "({}): {}", next_block_descr, x); return },
                 Ok(x) => x
             };
             candidate.block_id = next_block_id;
@@ -693,11 +742,13 @@ impl ValidatorGroup {
         };
         self.group_impl.execute_sync(|group_impl| group_impl.on_candidate_invoked = true).await;
 
-        log::info!(target: "validator", "SessionListener::on_candidate: {}, {}, {}",
+        log::info!(target: "validator", "({}): SessionListener::on_candidate: {}, {}, {}",
+            next_block_descr,
             candidate_id, self.info_round(round).await, result_message
         );
         callback(result);
-        log::trace!(target: "validator", "SessionListener::on_candidate: {}, {}, {}, callback called",
+        log::trace!(target: "validator", "({}): SessionListener::on_candidate: {}, {}, {}, callback called",
+            next_block_descr,
             candidate_id, self.info_round(round).await, result_message
         );
     }
@@ -716,11 +767,15 @@ impl ValidatorGroup {
         sig_set: Vec<(PublicKeyHash, BlockPayloadPtr)>,
         approve_sig_set: Vec<(PublicKeyHash, BlockPayloadPtr)>,
     ) {
+        let next_block_descr = self.get_next_block_descr().await;
+        let next_block_descr = append_rh_to_next_block_descr(&next_block_descr, &root_hash);
+
         let data_vec = data.data().to_vec();
         let we_generated = source.id() == self.local_key.id();
 
         log::info!(target: "validator", 
-            "SessionListener::on_block_committed: source {}, data size = {}, {}" ,
+            "({}): SessionListener::on_block_committed: source {}, data size = {}, {}" ,
+            next_block_descr,
             source.id(), data_vec.len(), self.info_round(round).await
         );
 
@@ -736,13 +791,13 @@ impl ValidatorGroup {
                 }
             }).await
         {
-            Err(x) => { log::error!(target: "validator", "Error creating next block id: {}", x); return },
+            Err(x) => { log::error!(target: "validator", "({}): Error creating next block id: {}", next_block_descr, x); return },
             Ok(result) => result
         };
 
-
         log::info!(target: "validator", 
-            "SessionListener::on_block_committed: source {}, id {}, data size = {}, {}",
+            "({}): SessionListener::on_block_committed: source {}, id {}, data size = {}, {}",
+            next_block_descr,
             source.id(), next_block_id, data_vec.len(), self.info_round(round).await
         );
 
@@ -781,20 +836,25 @@ impl ValidatorGroup {
             };
 
             group_impl.prev_block_ids = vec![next_block_id];
+            group_impl.next_block_seqno = get_first_block_seqno_after_prevs(&group_impl.prev_block_ids);
+            group_impl.next_block_descr = Arc::new(fmt_next_block_descr_from_next_seqno(&group_impl.shard, group_impl.next_block_seqno));
+            
             (full_result, prevs_to_string(&group_impl.prev_block_ids))
         }).await;
 
         match full_result {
             Ok(()) => log::info!(
                 target: "validator", 
-                "SessionListener::on_block_committed: success!, source {}, {}, new prevs {}",
+                "({}): SessionListener::on_block_committed: success!, source {}, {}, new prevs {}",
+                next_block_descr,
                 source.id(),
                 self.info_round(round).await,
                 new_prevs
             ),
             Err(err) => log::error!(
                 target: "validator", 
-                "SessionListener::on_block_committed: error!, source {}, error message: `{}`, {}, new prevs {}",
+                "({}): SessionListener::on_block_committed: error!, source {}, error message: `{}`, {}, new prevs {}",
+                next_block_descr,
                 source.id(),
                 err,
                 self.info_round(round).await,
@@ -806,7 +866,8 @@ impl ValidatorGroup {
     pub async fn on_block_skipped(&self, round: u32) {
         log::info!(
             target: "validator", 
-            "SessionListener::on_block_skipped, {}", 
+            "({}): SessionListener::on_block_skipped, {}",
+            self.get_next_block_descr().await,
             self.info_round(round).await
         );
 
@@ -825,9 +886,13 @@ impl ValidatorGroup {
         _collated_data_hash: BlockHash,
         callback: ValidatorBlockCandidateCallback)
     {
+        let next_block_descr = self.get_next_block_descr().await;
+        let next_block_descr = append_rh_to_next_block_descr(&next_block_descr, &root_hash);
+
         log::info!(
             target: "validator", 
-            "SessionListener::on_get_approved_candidate rh {:x}, fh {:x}, {}", 
+            "({}): SessionListener::on_get_approved_candidate rh {:x}, fh {:x}, {}",
+            next_block_descr,
             root_hash, file_hash, self.info().await
         );
         let result = self.engine.load_block_candidate(&self.session_id, &root_hash);
@@ -837,7 +902,8 @@ impl ValidatorGroup {
         };
         log::info!(
             target: "validator", 
-            "SessionListener::on_get_approved_candidate {}, {}", 
+            "({}): SessionListener::on_get_approved_candidate {}, {}",
+            next_block_descr,
             result_txt, self.info().await
         );
         callback(result);
@@ -847,7 +913,8 @@ impl ValidatorGroup {
     pub fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat) {
         log::debug!(
             target: "validator", 
-            "SessionListener::on_slashing_statistics round {}, stat {:?}", 
+            "({}): SessionListener::on_slashing_statistics round {}, stat {:?}",
+            self.get_next_block_descr().await,
             round, stat
         );
         #[cfg(feature = "slashing")]

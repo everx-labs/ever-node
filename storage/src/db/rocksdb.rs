@@ -188,8 +188,20 @@ impl RocksDb {
         // If true, missing column families will be automatically created.
         options.create_missing_column_families(true);
         
+        options.set_max_total_wal_size(1024 * 1024 * 1024);
+
         options.enable_statistics();
         options.set_dump_malloc_stats(true);
+
+        // Specify the maximal size of the info log file. If the log file
+        // is larger than `max_log_file_size`, a new info log file will
+        // be created.
+        // If max_log_file_size == 0, all logs will be written to one log file.
+        options.set_max_log_file_size(1024 * 1024 * 100);
+
+        // Maximal info log files to be kept.
+        // Default: 1000
+        options.set_keep_log_file_num(3);
 
         options
     }

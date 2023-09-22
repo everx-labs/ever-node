@@ -12,21 +12,24 @@ hex = '0.4'
 lazy_static = '1.4.0'
 log = '0.4'
 log4rs = '1.2'
+lru = '0.11.0'
+metrics = '0.21.1'
+parking_lot = '0.12.1'
 serde = '1.0.114'
 serde_cbor = '0.11.1'
 serde_derive = '1.0.114'
 strum = '0.18.0'
 strum_macros = '0.18.0'
-adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.8.19' }
+adnl = { git = 'ssh://git@github.com/tonlabs/ever-adnl.git', tag = 'pre_ci-test-publish' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 rand = { features = [ 'small_rng' ], version = '0.8' }
 tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.24' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.88' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.18' }
+ton_api = { git = 'ssh://git@github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = 'pre_ci-test-publish' }
+ton_block = { git = 'ssh://git@github.com/tonlabs/ever-block.git', tag = 'pre_ci-test-publish' }
+ton_types = { git = 'ssh://git@github.com/tonlabs/ever-types.git', tag = 'pre_ci-test-publish' }
 
 [build-dependencies]
-cc = { features = [ 'parallel' ], version = '=1.0.61' }
+cc = { features = [ 'parallel' ], version = '1.0.61' }
 
 [features]
 default = [  ]

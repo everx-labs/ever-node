@@ -15,16 +15,14 @@ use std::{
     sync::Arc,
     time::SystemTime,
 };
-use super::validator_utils::{validator_query_candidate_to_validator_block_candidate, pairvec_to_cryptopair_vec};
+use super::validator_utils::{validator_query_candidate_to_validator_block_candidate, pairvec_to_cryptopair_vec, get_first_block_seqno_after_prevs};
 use crate::{
     collator_test_bundle::CollatorTestBundle, engine_traits::EngineOperations, 
-    validator::{CollatorSettings, validate_query::ValidateQuery, collator}
+    validator::{CollatorSettings, validate_query::ValidateQuery, collator}, validating_utils::{fmt_next_block_descr_from_next_seqno, fmt_next_block_descr}
 };
 use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, Deserializable};
 use ton_types::{Result, UInt256};
 use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
-#[cfg(feature = "metrics")]
-use crate::engine::STATSD;
 
 #[allow(dead_code)]
 pub async fn run_validate_query_any_candidate(
@@ -61,17 +59,20 @@ pub async fn run_validate_query(
     _timeout: SystemTime,
 ) -> Result<SystemTime> {
 
+    let next_block_descr = fmt_next_block_descr(&block.block_id);
+
     let seqno = prev.iter().fold(0, |a, b| u32::max(a, b.seq_no));
     log::info!(
         target: "validator", 
-        "before validator query shard: {}, min: {}, seqno: {}",
+        "({}): before validator query shard: {}, min: {}, seqno: {}",
+        next_block_descr,
         shard,
         min_masterchain_block_id,
         seqno + 1
     );
 
-    #[cfg(feature = "metrics")]
-    STATSD.incr(&format!("run_validators_{}", shard));
+    let labels = [("shard", shard.to_string())];
+    metrics::increment_gauge!("run_validators", 1.0 ,&labels);
 
     let test_bundles_config = &engine.test_bundles_config().validator;
     let validator_result = if !test_bundles_config.is_enable() {
@@ -111,14 +112,14 @@ pub async fn run_validate_query(
                                 shard, min_masterchain_block_id, prev, block, &engine
                             ).await {
                                 Err(e) => log::error!(
-                                    "Error while test bundle for {} building: {}", id, e
+                                    "({}): Error while test bundle for {} building: {}", next_block_descr, id, e
                                 ),
                                 Ok(mut b) => {
                                     b.set_notes(err_str);
                                     if let Err(e) = b.save(&path) {
-                                        log::error!("Error while test bundle for {} saving: {}", id, e)
+                                        log::error!("({}): Error while test bundle for {} saving: {}", next_block_descr, id, e)
                                     } else {
-                                        log::info!("Built test bundle for {}", id)
+                                        log::info!("({}): Built test bundle for {}", next_block_descr, id)
                                     }
                                 }
                             }
@@ -130,18 +131,15 @@ pub async fn run_validate_query(
         validator_result
     };
 
-    #[cfg(feature = "metrics")]
-    STATSD.decr(&format!("run_validators_{}", shard));
+    metrics::decrement_gauge!("run_validators", 1.0, &labels);
 
     match validator_result {
         Ok(_) => {
-            #[cfg(feature = "metrics")]
-            STATSD.incr(&format!("succeessful_validations_{}", shard));
+            metrics::increment_counter!("successful_validations", &labels);
             Ok(SystemTime::now())
         }
         Err(e) =>  {
-            #[cfg(feature = "metrics")]
-            STATSD.incr(&format!("failed_validations_{}", shard));
+            metrics::increment_counter!("failed_validations", &labels);
 
             #[cfg(feature = "telemetry")]
             engine.validator_telemetry().failed_attempt(&shard, &e.to_string());
@@ -186,8 +184,10 @@ pub async fn run_collate_query (
     engine: Arc<dyn EngineOperations>,
 ) -> Result<ValidatorBlockCandidate>
 {
-    #[cfg(feature = "metrics")]
-    STATSD.incr(&format!("run_collators_{}", shard));
+    let labels = [("shard", shard.to_string())];
+    metrics::increment_gauge!("run_collators", 1.0, &labels);
+
+    let next_block_descr = fmt_next_block_descr_from_next_seqno(&shard, get_first_block_seqno_after_prevs(&prev));
 
     let collator = collator::Collator::new(
         shard.clone(),
@@ -201,19 +201,19 @@ pub async fn run_collate_query (
     )?;
     let collator_result = collator.collate().await;
 
-    #[cfg(feature = "metrics")]
-    STATSD.decr(&format!("run_collators_{}", shard));
+
+    let labels = [("shard", shard.to_string())];
+    metrics::decrement_gauge!("run_collators", 1.0, &labels);
 
     match collator_result {
         Ok((candidate, _)) => {
-            #[cfg(feature = "metrics")]
-            STATSD.incr(&format!("succeessful_collations_{}", shard));
+            metrics::increment_counter!("successful_collations", &labels);
 
             return Ok(validator_query_candidate_to_validator_block_candidate(collator_id, candidate))
         }
         Err(err) => {
-            #[cfg(feature = "metrics")]
-            STATSD.incr(&format!("failed_collations_{}", shard));
+            let labels = [("shard", shard.to_string())];
+            metrics::increment_counter!("failed_collations", &labels);
             let test_bundles_config = &engine.test_bundles_config().collator;
 
             let err_str = if test_bundles_config.is_enable() {
@@ -238,13 +238,13 @@ pub async fn run_collate_query (
                         let engine = engine.clone();
                         tokio::spawn(async move {
                             match CollatorTestBundle::build_for_collating_block(prev, &engine).await {
-                                Err(e) => log::error!("Error while test bundle for {} building: {}", id, e),
+                                Err(e) => log::error!("({}): Error while test bundle for {} building: {}", next_block_descr, id, e),
                                 Ok(mut b) => {
                                     b.set_notes(err_str.to_string());
                                     if let Err(e) = b.save(&path) {
-                                        log::error!("Error while test bundle for {} saving: {}", id, e);
+                                        log::error!("({}): Error while test bundle for {} saving: {}", next_block_descr, id, e);
                                     } else {
-                                        log::info!("Built test bundle for {}", id);
+                                        log::info!("({}): Built test bundle for {}", next_block_descr, id);
                                     }
                                 }
                             }
