@@ -14,6 +14,7 @@
 #![allow(dead_code, unused_variables)]
 
 use crate::{
+    config::CollatorConfig,
     engine_traits::EngineOperations,
     ext_messages::EXT_MESSAGES_TRACE_TARGET,
     rng::random::secure_256_bits,
@@ -250,6 +251,7 @@ struct CollatorData {
     shards_max_end_lt: u64,
     before_split: bool,
     now_upper_limit: u32,
+    pre_add_out_msg_to_block: bool,
 
     // Split/merge
     want_merge: bool,
@@ -275,6 +277,7 @@ impl CollatorData {
         usage_tree: UsageTree,
         prev_data: &PrevData,
         is_masterchain: bool,
+        collator_config: &CollatorConfig,
     ) -> Result<Self> {
         let limits = Arc::new(config.raw_config().block_limits(is_masterchain)?);
         let ret = Self {
@@ -298,6 +301,7 @@ impl CollatorData {
             start_lt: None,
             value_flow: ValueFlow::default(),
             now_upper_limit: u32::MAX,
+            pre_add_out_msg_to_block: collator_config.pre_add_out_msg_to_block,
             shards_max_end_lt: 0,
             min_ref_mc_seqno: None,
             prev_stuff: None,
@@ -388,11 +392,12 @@ impl CollatorData {
                     let enq = MsgEnqueueStuff::new(msg.clone(), &shard, fwd_fee, use_hypercube)?;
                     self.enqueue_count += 1;
                     self.out_msg_queue_info.add_message(&enq)?;
-                    // Add to message block here for counting time later it may be replaced
-                    let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
-                    self.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
-                    self.new_messages.push(NewMessage::new((info.created_lt, msg_hash), msg, tr_cell.clone(), enq.next_prefix().clone()));
-
+                    if self.pre_add_out_msg_to_block {
+                        // Add to message block here for counting time later it may be replaced
+                        let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
+                        self.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
+                        self.new_messages.push(NewMessage::new((info.created_lt, msg_hash), msg, tr_cell.clone(), enq.next_prefix().clone()));
+                    }
                 }
                 CommonMsgInfo::ExtOutMsgInfo(_) => {
                     let out_msg = OutMsg::external(msg_cell, tr_cell.clone());
@@ -653,6 +658,7 @@ struct ExecutionManager {
     receive_tr: tokio::sync::mpsc::UnboundedReceiver<Option<(Arc<AsyncMessage>, Result<Transaction>)>>,
     wait_tr: Arc<Wait<(Arc<AsyncMessage>, Result<Transaction>)>>,
     max_collate_threads: usize,
+    finish_time: Instant,
     libraries: Libraries,
     gen_utime: u32,
 
@@ -685,6 +691,7 @@ impl ExecutionManager {
         libraries: Libraries,
         config: BlockchainConfig,
         max_collate_threads: usize,
+        finish_time: Instant,
         collated_block_descr: Arc<String>,
         debug: bool,
     ) -> Result<Self> {
@@ -695,6 +702,7 @@ impl ExecutionManager {
             receive_tr,
             wait_tr,
             max_collate_threads,
+            finish_time,
             libraries,
             config,
             start_lt,
@@ -789,9 +797,19 @@ impl ExecutionManager {
         let min_lt = self.min_lt.clone();
         let max_lt = self.max_lt.clone();
         let libraries = self.libraries.clone().inner();
+        let finish_time = self.finish_time;
+        let max_collate_threads = self.max_collate_threads;
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Arc<AsyncMessage>>();
         let handle = tokio::spawn(async move {
+            let mut block_full = false;
             while let Some(new_msg) = receiver.recv().await {
+                if block_full || max_collate_threads == 1 && Instant::now() > finish_time {
+                    log::warn!("{}: skipping transaction for {:x} because finish time is expired for ({}ms)",
+                        collated_block_descr, shard_acc.account_addr(), finish_time.elapsed().as_millis());
+                    block_full = true;
+                    wait_tr.respond(None);
+                    continue;
+                }
                 log::trace!("{}: new message for {:x}", collated_block_descr, shard_acc.account_addr());
                 let config = config.clone(); // TODO: use Arc
 
@@ -1249,6 +1267,7 @@ impl Collator {
             usage_tree,
             &prev_data,
             is_masterchain,
+            &self.engine.collator_config(),
         )?;
         if !self.shard.is_masterchain() {
             let (now_upper_limit, before_split, _accept_msgs) = check_this_shard_mc_info(
@@ -1355,6 +1374,7 @@ impl Collator {
             mc_data.libraries()?.clone(),
             collator_data.config.clone(),
             self.engine.collator_config().max_collate_threads as usize,
+            self.get_internal_messages_finish_time(),
             self.collated_block_descr.clone(),
             self.debug,
         )?;
@@ -2466,9 +2486,7 @@ impl Collator {
                 let info = msg.int_header().ok_or_else(|| error!("message is not internal"))?;
                 let fwd_fee = *info.fwd_fee();
                 enqueue_only |= collator_data.block_full | self.check_cutoff_timeout();
-                if enqueue_only || !self.shard.contains_address(&info.dst)? {
-                    // everything was made in new_transaction
-                } else {
+                if !enqueue_only && self.shard.contains_address(&info.dst)? {
                     CHECK!(info.created_at.as_u32(), collator_data.gen_utime);
                     let key = OutMsgQueueKey::with_account_prefix(&prefix, hash.clone());
                     collator_data.out_msg_queue_info.del_message(&key)?;
@@ -2480,7 +2498,11 @@ impl Collator {
                     let msg = AsyncMessage::New(env, tr_cell);
                     log::debug!("{}: message {:x} sent to execution", self.collated_block_descr, key.hash);
                     exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
-                };
+                } else if self.engine.collator_config().pre_add_out_msg_to_block {
+                    let env = MsgEnvelopeStuff::new(msg, &self.shard, fwd_fee, use_hypercube)?;
+                    let out_msg = OutMsg::new(env.inner().serialize()?, tr_cell);
+                    collator_data.add_out_msg_to_block(hash, &out_msg)?;
+                }
                 self.check_stop_flag()?;
             }
             exec_manager.wait_transactions(collator_data).await?;
@@ -3527,6 +3549,11 @@ impl Collator {
         });
     }
 
+    fn get_internal_messages_finish_time(&self) -> Instant {
+        let cutoff_timeout = self.engine.collator_config().cutoff_timeout_ms;
+        self.started + Duration::from_millis(cutoff_timeout as u64)
+    }
+
     fn check_cutoff_timeout(&self) -> bool {
         let cutoff_timeout = self.engine.collator_config().cutoff_timeout_ms;
         self.started.elapsed().as_millis() as u32 > cutoff_timeout
@@ -3605,4 +3632,3 @@ pub fn report_collation_metrics(
     metrics::histogram!("gas_rate_collator", gas_rate as f64,  &labels);
     metrics::histogram!("block_size", block_size as f64,  &labels);
 }
-

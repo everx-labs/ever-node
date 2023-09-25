@@ -86,7 +86,8 @@ pub struct CollatorConfig {
     pub max_collate_threads: u32,
     pub retry_if_empty: bool,
     pub finalize_empty_after_ms: u32,
-    pub empty_collation_sleep_ms: u32
+    pub empty_collation_sleep_ms: u32,
+    pub pre_add_out_msg_to_block: bool,
 }
 impl Default for CollatorConfig {
     fn default() -> Self {
@@ -99,7 +100,8 @@ impl Default for CollatorConfig {
             max_collate_threads: 10,
             retry_if_empty: false,
             finalize_empty_after_ms: 800,
-            empty_collation_sleep_ms: 100
+            empty_collation_sleep_ms: 100,
+            pre_add_out_msg_to_block: false,
         }
     }
 }
