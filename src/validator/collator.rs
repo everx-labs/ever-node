@@ -14,6 +14,7 @@
 #![allow(dead_code, unused_variables)]
 
 use crate::{
+    config::CollatorConfig,
     engine_traits::EngineOperations,
     ext_messages::EXT_MESSAGES_TRACE_TARGET,
     rng::random::secure_256_bits,
@@ -248,6 +249,7 @@ struct CollatorData {
     shards_max_end_lt: u64,
     before_split: bool,
     now_upper_limit: u32,
+    pre_add_out_msg_to_block: bool,
 
     // Split/merge
     want_merge: bool,
@@ -273,6 +275,7 @@ impl CollatorData {
         usage_tree: UsageTree,
         prev_data: &PrevData,
         is_masterchain: bool,
+        collator_config: &CollatorConfig,
     ) -> Result<Self> {
         let limits = Arc::new(config.raw_config().block_limits(is_masterchain)?);
         let ret = Self {
@@ -296,6 +299,7 @@ impl CollatorData {
             start_lt: None,
             value_flow: ValueFlow::default(),
             now_upper_limit: u32::MAX,
+            pre_add_out_msg_to_block: collator_config.pre_add_out_msg_to_block,
             shards_max_end_lt: 0,
             min_ref_mc_seqno: None,
             prev_stuff: None,
@@ -386,11 +390,12 @@ impl CollatorData {
                     let enq = MsgEnqueueStuff::new(msg.clone(), &shard, fwd_fee, use_hypercube)?;
                     self.enqueue_count += 1;
                     self.out_msg_queue_info.add_message(&enq)?;
-                    // Add to message block here for counting time later it may be replaced
-                    let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
-                    self.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
-                    self.new_messages.push(NewMessage::new((info.created_lt, msg_hash), msg, tr_cell.clone(), enq.next_prefix().clone()));
-
+                    if self.pre_add_out_msg_to_block {
+                        // Add to message block here for counting time later it may be replaced
+                        let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
+                        self.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
+                        self.new_messages.push(NewMessage::new((info.created_lt, msg_hash), msg, tr_cell.clone(), enq.next_prefix().clone()));
+                    }
                 }
                 CommonMsgInfo::ExtOutMsgInfo(_) => {
                     let out_msg = OutMsg::external(msg_cell, tr_cell.clone());
@@ -1242,6 +1247,7 @@ impl Collator {
             usage_tree,
             &prev_data,
             is_masterchain,
+            &self.engine.collator_config(),
         )?;
         if !self.shard.is_masterchain() {
             let (now_upper_limit, before_split, _accept_msgs) = check_this_shard_mc_info(
@@ -2412,9 +2418,7 @@ impl Collator {
                 let info = msg.int_header().ok_or_else(|| error!("message is not internal"))?;
                 let fwd_fee = *info.fwd_fee();
                 enqueue_only |= collator_data.block_full | self.check_cutoff_timeout();
-                if enqueue_only || !self.shard.contains_address(&info.dst)? {
-                    // everything was made in new_transaction
-                } else {
+                if !enqueue_only && self.shard.contains_address(&info.dst)? {
                     CHECK!(info.created_at.as_u32(), collator_data.gen_utime);
                     let key = OutMsgQueueKey::with_account_prefix(&prefix, hash.clone());
                     collator_data.out_msg_queue_info.del_message(&key)?;
@@ -2425,7 +2429,11 @@ impl Collator {
                     collator_data.update_last_proc_int_msg((created_lt, hash))?;
                     let msg = AsyncMessage::New(env, tr_cell);
                     exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
-                };
+                } else if self.engine.collator_config().pre_add_out_msg_to_block {
+                    let env = MsgEnvelopeStuff::new(msg, &self.shard, fwd_fee, use_hypercube)?;
+                    let out_msg = OutMsg::new(env.inner().serialize()?, tr_cell);
+                    collator_data.add_out_msg_to_block(hash, &out_msg)?;
+                }
                 self.check_stop_flag()?;
             }
             exec_manager.wait_transactions(collator_data).await?;

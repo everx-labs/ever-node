@@ -507,7 +507,8 @@ impl CollatorTestBundle {
                 max_collate_threads: 1,
                 retry_if_empty: false,
                 finalize_empty_after_ms: 0,
-                empty_collation_sleep_ms: 0
+                empty_collation_sleep_ms: 0,
+                ..Default::default()
             },
             split_queues_cache: lockfree::map::Map::new(),
         })

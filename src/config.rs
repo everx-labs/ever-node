@@ -98,7 +98,8 @@ pub struct CollatorConfig {
     pub max_collate_threads: u32,
     pub retry_if_empty: bool,
     pub finalize_empty_after_ms: u32,
-    pub empty_collation_sleep_ms: u32
+    pub empty_collation_sleep_ms: u32,
+    pub pre_add_out_msg_to_block: bool,
 }
 impl Default for CollatorConfig {
     fn default() -> Self {
@@ -108,7 +109,8 @@ impl Default for CollatorConfig {
             max_collate_threads: 1,
             retry_if_empty: false,
             finalize_empty_after_ms: 800,
-            empty_collation_sleep_ms: 100
+            empty_collation_sleep_ms: 100,
+            pre_add_out_msg_to_block: false,
         }
     }
 }
@@ -1104,7 +1106,7 @@ impl NodeConfigHandler {
                         let adnl_key_id = KeyId::from_data(adnl_key_id[..].try_into()?);
                         let election_id = key.election_id;
                         let subscribers = subscribers.clone();
-                        self.clone().runtime_handle.spawn(async move {
+                        self.runtime_handle.spawn(async move {
                             for subscriber in subscribers.iter() {
                                 if let Err(e) = subscriber.event(
                                     ConfigEvent::AddValidatorAdnlKey(adnl_key_id.clone(), election_id)

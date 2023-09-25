@@ -869,7 +869,7 @@ impl EngineOperations for Engine {
         if !is_resend {
             let id = tbd.proof_for();
             if let Err(e) = self.shard_blocks().process_shard_block(
-                id, cc_seqno, || Ok(tbd.clone()), false, self.deref()).await {
+                id, cc_seqno, || Ok(tbd.clone()), false, self).await {
                 log::error!("Can't add own shard top block {}: {}", id, e);
             }
         }

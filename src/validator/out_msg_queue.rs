@@ -509,7 +509,7 @@ impl OutMsgQueueInfoStuff {
     ) -> Result<()> {
         let workchain = self.shard().workchain_id();
         let masterchain = workchain == ton_block::MASTERCHAIN_ID;
-        for mut entry in &mut self.entries {
+        for entry in &mut self.entries {
             if entry.ref_shards.is_none() {
                 check_stop_flag(stop_flag)?;
                 if next_shards.is_some() && masterchain && entry.seqno == seqno + 1 {
