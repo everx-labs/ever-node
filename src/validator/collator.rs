@@ -234,7 +234,7 @@ struct CollatorData {
     out_msgs: OutMsgDescr,
     /// * key - msg_sync_key
     /// * value - list of out msgs descrs hashes
-    out_msgs_descr_history: HashMap<usize, Vec<UInt256>>,
+    out_msgs_descr_history: HashMap<usize, Vec<(UInt256, Option<SliceData>)>>,
     accounts: ShardAccountBlocks,
     out_msg_queue_info: OutMsgQueueInfoStuff,
     /// * key - msg_sync_key
@@ -321,6 +321,9 @@ struct CollatorData {
     execute_count: usize,
     out_msg_count: usize,
     in_msg_count: usize,
+
+    // string with format like `-1:8000000000000000, 100500`, is used for logging.
+    collated_block_descr: Arc<String>,
 }
 
 impl CollatorData {
@@ -331,6 +334,7 @@ impl CollatorData {
         usage_tree: UsageTree,
         prev_data: &PrevData,
         is_masterchain: bool,
+        collated_block_descr: Arc<String>,
     ) -> Result<Self> {
         let limits = Arc::new(config.raw_config().block_limits(is_masterchain)?);
         let ret = Self {
@@ -392,6 +396,7 @@ impl CollatorData {
             out_msg_count: 0,
             in_msg_count: 0,
             before_split: false,
+            collated_block_descr,
         };
         Ok(ret)
     }
@@ -412,14 +417,25 @@ impl CollatorData {
 
     /// Stores processed internal message LT HASH to buffer
     fn add_last_proc_int_msg_to_buffer(&mut self, src_msg_sync_key: usize, lt_hash: (u64, UInt256)) {
+        log::trace!(
+            "{}: added last_proc_int_msg {}: ({}, {:x}) to buffer",
+            self.collated_block_descr,
+            src_msg_sync_key, lt_hash.0, lt_hash.1,
+        );
         self.last_proc_int_msg_buffer.insert(src_msg_sync_key, lt_hash);
     }
     /// Clean out processed internal message LT HASH from buffer by src msg
     fn revert_last_proc_int_msg_by_src_msg(&mut self, src_msg_sync_key: &usize) {
-        self.last_proc_int_msg_buffer.remove(src_msg_sync_key);
+        let lt_hash = self.last_proc_int_msg_buffer.remove(src_msg_sync_key);
+        log::trace!(
+            "{}: removed last_proc_int_msg {}: ({:?}) to buffer",
+            self.collated_block_descr,
+            src_msg_sync_key, lt_hash,
+        );
     }
     /// Updates last processed internal message LT HASH from not reverted in buffer
     fn commit_last_proc_int_msg(&mut self) -> Result<()> {
+        log::trace!("{}: last_proc_int_msg_buffer: {:?}", self.collated_block_descr, self.last_proc_int_msg_buffer);
         while let Some((_, lt_hash)) = self.last_proc_int_msg_buffer.pop_first() {
             self.update_last_proc_int_msg(lt_hash)?;
         }
@@ -429,10 +445,11 @@ impl CollatorData {
     fn update_last_proc_int_msg(&mut self, new_lt_hash: (u64, UInt256)) -> Result<()> {
         if self.last_proc_int_msg < new_lt_hash {
             CHECK!(new_lt_hash.0 > 0);
-            log::trace!("last_proc_int_msg updated to ({},{:x})", new_lt_hash.0, new_lt_hash.1);
+            log::trace!("{}: last_proc_int_msg updated to ({},{:x})", self.collated_block_descr, new_lt_hash.0, new_lt_hash.1);
             self.last_proc_int_msg = new_lt_hash;
         } else {
-            log::error!("processed message ({},{:x}) AFTER message ({},{:x})", new_lt_hash.0, new_lt_hash.1,
+            log::error!("{}: processed message ({},{:x}) AFTER message ({},{:x})",
+                self.collated_block_descr, new_lt_hash.0, new_lt_hash.1,
                 self.last_proc_int_msg.0, self.last_proc_int_msg.1);
             self.last_proc_int_msg.0 = std::u64::MAX;
             fail!("internal message processing order violated!")
@@ -503,8 +520,8 @@ impl CollatorData {
                     self.add_add_out_queue_msg_op_to_buffer(src_msg_sync_key, enq);
 
                     // Add to message block here for counting time later it may be replaced
-                    self.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
-                    self.add_out_msg_descr_to_history(src_msg_sync_key, msg_hash);
+                    let prev_out_msg_slice_opt = self.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
+                    self.add_out_msg_descr_to_history(src_msg_sync_key, msg_hash, prev_out_msg_slice_opt);
 
                     self.add_new_message_to_buffer(src_msg_sync_key, new_msg);
 
@@ -512,8 +529,8 @@ impl CollatorData {
                 CommonMsgInfo::ExtOutMsgInfo(_) => {
                     let out_msg = OutMsg::external(msg_cell, tr_cell.clone());
                     let msg_hash = out_msg.read_message_hash()?;
-                    self.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
-                    self.add_out_msg_descr_to_history(src_msg_sync_key, msg_hash);
+                    let prev_out_msg_slice_opt = self.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
+                    self.add_out_msg_descr_to_history(src_msg_sync_key, msg_hash, prev_out_msg_slice_opt);
                 }
                 CommonMsgInfo::ExtInMsgInfo(_) => fail!("External inbound message cannot be output")
             };
@@ -553,29 +570,51 @@ impl CollatorData {
     }
 
     /// put OutMsg to block
-    fn add_out_msg_to_block(&mut self, key: UInt256, out_msg: &OutMsg) -> Result<()> {
+    fn add_out_msg_to_block(&mut self, key: UInt256, out_msg: &OutMsg) -> Result<Option<SliceData>> {
         self.out_msg_count += 1;
-        self.out_msgs.insert_with_key(key, out_msg)?;
+
+        let prev_value = self.out_msgs.insert_with_key_return_prev(key, out_msg)?;
 
         let msg_cell = out_msg.serialize()?;
-        self.block_limit_status.register_out_msg_op(&msg_cell, &self.out_msgs_root()?)
+        self.block_limit_status.register_out_msg_op(&msg_cell, &self.out_msgs_root()?)?;
+
+        Ok(prev_value)
+    }
+    /// put OutMsg to block, does not update block_limit_status
+    fn add_out_msg_to_block_without_limits_update(&mut self, key: UInt256, out_msg: &OutMsg) -> Result<Option<SliceData>> {
+        self.out_msg_count += 1;
+
+        self.out_msgs.insert_with_key_return_prev(key, out_msg)
     }
 
     /// Stores out_msg descr hash by src msg
-    fn add_out_msg_descr_to_history(&mut self, src_msg_sync_key: usize, out_msg_hash: UInt256) {
+    fn add_out_msg_descr_to_history(
+        &mut self,
+        src_msg_sync_key: usize,
+        out_msg_hash: UInt256,
+        prev_out_msg_slice_opt: Option<SliceData>,
+    ) {
         if let Some(v) = self.out_msgs_descr_history.get_mut(&src_msg_sync_key) {
-            v.push(out_msg_hash);
+            v.push((out_msg_hash, prev_out_msg_slice_opt));
         } else {
-            self.out_msgs_descr_history.insert(src_msg_sync_key, vec![out_msg_hash]);
+            self.out_msgs_descr_history.insert(src_msg_sync_key, vec![(out_msg_hash, prev_out_msg_slice_opt)]);
         }
     }
     /// Removes all out_msg descrs created by src msg. Does not update block_limit_status
     fn revert_out_msgs_descr_by_src_msg(&mut self, src_msg_sync_key: &usize) -> Result<()> {
         if let Some(msgs_history) = self.out_msgs_descr_history.remove(src_msg_sync_key) {
-            for msg_hash in msgs_history {
+            for (msg_hash, prev_out_msg_slice_opt) in msgs_history {
                 self.out_msg_count -= 1;
-                let key = SliceData::load_builder(msg_hash.write_to_new_cell()?)?;
-                self.out_msgs.remove(key)?;
+
+                // return prev out msg descr to map if exists
+                if let Some(mut prev_out_msg_slice) = prev_out_msg_slice_opt {
+                    log::debug!("{}: previous out msg descr {:x} reverted to block", self.collated_block_descr, msg_hash);
+                    let prev_out_msg = OutMsg::construct_from(&mut prev_out_msg_slice)?;
+                    self.add_out_msg_to_block_without_limits_update(msg_hash, &prev_out_msg)?;
+                } else {
+                    let key = SliceData::load_builder(msg_hash.write_to_new_cell()?)?;
+                    self.out_msgs.remove(key)?;
+                }
             }
         }
         Ok(())
@@ -618,7 +657,7 @@ impl CollatorData {
 
     /// delete message from state queue
     fn del_out_msg_from_state(&mut self, key: &OutMsgQueueKey) -> Result<EnqueuedMsg> {
-        log::debug!("del_out_msg_from_state {:x}", key);
+        log::debug!("{}: del_out_msg_from_state {:x}", self.collated_block_descr, key);
         self.dequeue_count += 1;
         let enq = self.out_msg_queue_info.del_message(key)?;
         self.block_limit_status.register_out_msg_queue_op(
@@ -645,13 +684,13 @@ impl CollatorData {
     }
     /// Deletes msgs from out queue
     fn commit_del_out_queue_msg_ops(&mut self) -> Result<()> {
-        let exist_msgs_for_delete = !self.del_out_queue_msg_ops_buffer.is_empty();
+        let del_out_msg_ops_count = !self.del_out_queue_msg_ops_buffer.len();
         for (_, (key, is_new)) in self.del_out_queue_msg_ops_buffer.drain() {
-            log::debug!("commit_del_out_queue_msg_op (is_new: {}) {:x}", is_new, key);
+            log::debug!("{}: commit_del_out_queue_msg_op (is_new: {}) {:x}", self.collated_block_descr, is_new, key);
             if is_new { self.enqueue_count -= 1; } else { self.dequeue_count += 1; }
             self.out_msg_queue_info.del_message(&key)?;
         }
-        if exist_msgs_for_delete {
+        if del_out_msg_ops_count > 0 {
             self.block_limit_status.register_out_msg_queue_op(
                 self.out_msg_queue_info.out_queue()?.data(),
                 &self.usage_tree,
@@ -687,12 +726,14 @@ impl CollatorData {
     }
     /// Adds msgs to out queue
     fn commit_add_out_queue_msg_ops(&mut self) -> Result<()> {
+        let new_msgs_count = self.add_out_queue_msg_ops_buffer.len();
         for (_, msgs) in self.add_out_queue_msg_ops_buffer.drain() {
             for enq_stuff in msgs {
                 self.enqueue_count += 1;
                 self.out_msg_queue_info.add_message(&enq_stuff)?;
             }
         }
+        log::debug!("{}: {} new created messages added to out queue from buffer", self.collated_block_descr, new_msgs_count);
         Ok(())
     }
 
@@ -710,11 +751,20 @@ impl CollatorData {
     }
     /// Adds new internal msgs to new_messages queue for processing
     fn commit_new_messages(&mut self) {
+        let new_msgs_count = self.new_messages_buffer.len();
         while let Some((_, msgs)) = self.new_messages_buffer.pop_first() {
             for new_msg in msgs {
+                log::trace!(
+                    "{}: committed new created msg {:x} (bounced: {:?}) from {:x} to account {:x} from buffer to new_messages",
+                    self.collated_block_descr, new_msg.lt_hash.1,
+                    new_msg.msg.int_header().map(|h| h.bounced),
+                    new_msg.msg.src().unwrap_or_default().address(),
+                    new_msg.msg.dst().unwrap_or_default().address(),
+                );
                 self.new_messages.push(new_msg);
             }
         }
+        log::debug!("{}: {} new created messages committed from buffer to new_messages", self.collated_block_descr, new_msgs_count);
     }
 
     /// Stores mint message in buffer by src msg
@@ -918,7 +968,7 @@ impl CollatorData {
     fn shard_conf_adjusted(&self) -> bool { self.shard_conf_adjusted }
     fn set_shard_conf_adjusted(&mut self) { self.shard_conf_adjusted = true; }
 
-    fn dequeue_message(&mut self, enq: MsgEnqueueStuff, deliver_lt: u64, short: bool) -> Result<()> {
+    fn dequeue_message(&mut self, enq: MsgEnqueueStuff, deliver_lt: u64, short: bool) -> Result<Option<SliceData>> {
         self.dequeue_count += 1;
         let out_msg = match short {
             true => OutMsg::dequeue_short(enq.envelope_hash(), enq.next_prefix(), deliver_lt),
@@ -1127,21 +1177,22 @@ impl ExecutionManager {
         check_finalize_parallel_timeout: impl Fn() -> (bool, u32),
     ) -> Result<()> {
         log::trace!("{}: wait_transactions", self.collated_block_descr);
+        #[cfg(feature = "revert_collat_changes")]
+        if self.is_parallel_processing_cancelled() {
+            log::debug!("{}: parallel collation was already stopped, do not wait transactions anymore", self.collated_block_descr);
+            return Ok(());
+        }
         while self.wait_tr.count() > 0 {
+            log::trace!("{}: wait_tr count = {}", self.collated_block_descr, self.wait_tr.count());
             self.wait_transaction(collator_data).await?;
 
-            // stop parallel collation if block limits or finalize timeout reached
-            if !collator_data.block_limit_status.fits(ParamLimitIndex::Medium) {
-                log::debug!("{}: BLOCK FULL (>= Hard), stop parallel collation", self.collated_block_descr);
-                self.cancellation_token.cancel();
-                break;
-            }
+            // stop parallel collation if finalize timeout reached
             let check_finalize_parallel = check_finalize_parallel_timeout();
             if check_finalize_parallel.0 {
                 log::warn!("{}: FINALIZE PARALLEL TIMEOUT ({}ms) is elapsed, stop parallel collation",
                     self.collated_block_descr, check_finalize_parallel.1,
                 );
-                self.cancellation_token.cancel();
+                self.cancel_parallel_processing();
                 break;
             }
         }
@@ -1247,6 +1298,7 @@ impl ExecutionManager {
                         new_msg.0,
                         shard_acc.account_addr(),
                     );
+                    exec_mgr_wait_tr.respond(None);
                     break;
                 }
 
@@ -1295,6 +1347,7 @@ impl ExecutionManager {
                         new_msg.0,
                         shard_acc.account_addr(),
                     );
+                    exec_mgr_wait_tr.respond(None);
                     break;
                 }
 
@@ -1355,8 +1408,7 @@ impl ExecutionManager {
         let wait_op = self.wait_tr.wait(&mut self.receive_tr, false).await;
         if let Some(Some((new_msg, transaction_res, tx_last_lt))) = wait_op {
             // we can safely decrease parallel_msgs_counter because
-            // * wait_tr counter decreases only when wait_op is some as well
-            // * and sender always sends some in this case
+            // sender sends some until parallel processing not cancelled
             let account_id = self.finalize_transaction(&new_msg, transaction_res, tx_last_lt, collator_data)?;
             // decrease account msgs counter to control parallel processing limits
             self.parallel_msgs_counter.sub_account_msgs_counter(account_id).await;
@@ -1406,8 +1458,8 @@ impl ExecutionManager {
                 if *our {
                     let out_msg = OutMsg::dequeue_immediate(enq.envelope_cell(), in_msg.serialize()?);
                     let msg_hash = enq.message_hash();
-                    collator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
-                    collator_data.add_out_msg_descr_to_history(*msg_sync_key, msg_hash);
+                    let prev_out_msg_slice_opt = collator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
+                    collator_data.add_out_msg_descr_to_history(*msg_sync_key, msg_hash, prev_out_msg_slice_opt);
                     collator_data.add_del_out_queue_msg_op_to_buffer(*msg_sync_key, enq.out_msg_key(), false)?;
                 }
                 Some(in_msg)
@@ -1417,8 +1469,8 @@ impl ExecutionManager {
                 let in_msg = InMsg::immediate(env_cell.clone(), tr_cell.clone(), env.fwd_fee_remaining().clone());
                 let out_msg = OutMsg::immediate(env_cell, prev_tr_cell.clone(), in_msg.serialize()?);
                 let msg_hash = env.message_hash();
-                collator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
-                collator_data.add_out_msg_descr_to_history(*msg_sync_key, msg_hash);
+                let prev_out_msg_slice_opt = collator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
+                collator_data.add_out_msg_descr_to_history(*msg_sync_key, msg_hash, prev_out_msg_slice_opt);
                 collator_data.add_del_out_queue_msg_op_to_buffer(*msg_sync_key, env.out_msg_key(), true)?;
                 Some(in_msg)
             }
@@ -1499,8 +1551,12 @@ impl ExecutionManager {
         }
     }
 
-    /// When cancellation_token was cancelled due to a block limit or finalizing timeout
-    pub fn parallel_processing_cancelled(&self) -> bool {
+    /// Signal to cancellation_token due to a finalizing timeout
+    pub fn cancel_parallel_processing(&mut self) {
+        self.cancellation_token.cancel();
+    }
+    /// When cancellation_token was cancelled due to a finalizing timeout
+    pub fn is_parallel_processing_cancelled(&self) -> bool {
         self.cancellation_token.is_cancelled()
     }
 
@@ -1899,6 +1955,7 @@ impl Collator {
             usage_tree,
             &prev_data,
             is_masterchain,
+            self.collated_block_descr.clone(),
         )?;
         if !self.shard.is_masterchain() {
             let (now_upper_limit, before_split, _accept_msgs) = check_this_shard_mc_info(
@@ -2940,6 +2997,7 @@ impl Collator {
                 self.check_inbound_internal_message(&key, &enq, created_lt, block_id.shard())
                     .map_err(|err| error!("problem processing internal inbound message \
                         with hash {:x} : {}", key.hash, err))?;
+                let src_addr = enq.message().src().unwrap_or_default().address();
                 let our = self.shard.contains_full_prefix(&enq.cur_prefix());
                 let to_us = self.shard.contains_full_prefix(&enq.dst_prefix());
                 if to_us {
@@ -2947,8 +3005,8 @@ impl Collator {
                     let msg = AsyncMessage::Int(enq, our);
                     let msg_sync_key = exec_manager.execute(account_id.clone(), msg, prev_data, collator_data).await?;
                     log::debug!(
-                        "{}: int message {:x} (sync_key: {:?}) sent to execution to account {:x}",
-                        self.collated_block_descr, key.hash, msg_sync_key, account_id,
+                        "{}: int message {:x} (sync_key: {:?}) from {:x} sent to execution to account {:x}",
+                        self.collated_block_descr, key.hash, msg_sync_key, src_addr, account_id,
                     );
                 } else {
                     // println!("{:x} {:#}", key, enq);
@@ -3017,7 +3075,7 @@ impl Collator {
             return Ok(())
         }
 
-        if exec_manager.parallel_processing_cancelled() {
+        if exec_manager.is_parallel_processing_cancelled() {
             log::debug!("{}: parallel processing cancelled, skipping processing of inbound external messages", self.collated_block_descr);
             return Ok(())
         }
@@ -3127,31 +3185,35 @@ impl Collator {
         collator_data: &mut CollatorData,
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
-        if exec_manager.parallel_processing_cancelled() {
+        if exec_manager.is_parallel_processing_cancelled() {
             log::debug!("{}: parallel processing cancelled, skipping processing of new messages", self.collated_block_descr);
             return Ok(())
         }
 
         log::debug!("{}: process_new_messages", self.collated_block_descr);
         let use_hypercube = !collator_data.config.has_capability(GlobalCapabilities::CapOffHypercube);
-        while !collator_data.new_messages.is_empty() {
+        let mut stop_processing = false;
+        while !stop_processing && !collator_data.new_messages.is_empty() {
 
             // In the iteration we execute only existing messages.
             // Newly generating messages will be executed next itaration (only after waiting).
 
             let mut new_messages = std::mem::take(&mut collator_data.new_messages);
+            log::debug!("{}: new_messages count: {}", self.collated_block_descr, new_messages.len());
             // we can get sorted items somehow later
             while let Some(NewMessage{ lt_hash: (created_lt, hash), msg, tr_cell, prefix }) = new_messages.pop() {
                 let info = msg.int_header().ok_or_else(|| error!("message is not internal"))?;
 
                 if !collator_data.block_limit_status.fits(ParamLimitIndex::Soft) {
                     log::debug!("{}: BLOCK FULL (>= Medium), stop processing new messages", self.collated_block_descr);
+                    stop_processing = true;
                     break;
                 }
                 if self.check_cutoff_timeout() {
                     log::warn!("{}: TIMEOUT ({}ms) is elapsed, stop processing new messages",
                         self.collated_block_descr, self.engine.collator_config().cutoff_timeout_ms,
                     );
+                    stop_processing = true;
                     break;
                 }
 
@@ -4317,4 +4379,3 @@ pub fn report_collation_metrics(
     metrics::histogram!("gas_rate_collator", gas_rate as f64,  &labels);
     metrics::histogram!("block_size", block_size as f64,  &labels);
 }
-
