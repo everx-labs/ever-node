@@ -1256,11 +1256,11 @@ impl ValidateQuery {
                 base.now(), mc_data.state.state()?.gen_time())
         }
 
-        /*
-        if base.now() > (unsigned)std::time(nullptr) + 15 {
-            reject_query!("block has creation time " << base.now() too much in the future (it is only " << (unsigned)std::time(nullptr) now)");
+        let now = self.engine.now();
+        if base.now() > now + 15 {
+            reject_query!("block has creation time {} too much in the future (it is only {} now)",
+                base.now(), now)
         }
-        */
         if base.info.start_lt() <= mc_data.state.state()?.gen_lt() {
             reject_query!("block has start_lt {} less than or equal to lt {} of the reference masterchain state",
                 base.info.start_lt(), mc_data.state.state()?.gen_lt())
