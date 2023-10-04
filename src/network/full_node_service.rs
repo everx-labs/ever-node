@@ -332,15 +332,16 @@ impl FullNodeOverlayService {
             if prev_handle.has_next1() {
                 let next_id = self.engine.load_block_next1(&query.prev_block).await?;
                 if let Some(next_handle) = self.engine.load_block_handle(&next_id)? {
-                    let mut is_link = false;
-                    if next_handle.has_data() && next_handle.has_proof_or_link(&mut is_link) {
+                    let has_proof_link = next_handle.has_proof_link();
+                    let has_proof = next_handle.has_proof();
+                    if next_handle.has_data() && (has_proof || has_proof_link) {
                         let block = self.engine.load_block_raw(&next_handle).await?;
-                        let proof = self.engine.load_block_proof_raw(&next_handle, is_link).await?;
+                        let proof = self.engine.load_block_proof_raw(&next_handle, has_proof_link).await?;
                         answer = DataFull {
                             id: next_id.into(),
                             proof: ton::bytes(proof),
                             block: ton::bytes(block),
-                            is_link: if is_link { 
+                            is_link: if has_proof_link { 
                                 ton::Bool::BoolTrue 
                             } else { 
                                 ton::Bool::BoolFalse 
@@ -367,15 +368,16 @@ impl FullNodeOverlayService {
     ) -> Result<TaggedObject<DataFullBoxed>> {
         let mut answer = DataFullBoxed::TonNode_DataFullEmpty;
         if let Some(handle) = self.engine.load_block_handle(&query.block)? {
-            let mut is_link = false;
-            if handle.has_data() && handle.has_proof_or_link(&mut is_link) {
+            let has_proof_link = handle.has_proof_link();
+            let has_proof = handle.has_proof();
+            if handle.has_data() && (has_proof || has_proof_link) {
                 let block = self.engine.load_block_raw(&handle).await?;
-                let proof = self.engine.load_block_proof_raw(&handle, is_link).await?;
+                let proof = self.engine.load_block_proof_raw(&handle, has_proof_link).await?;
                 answer = DataFull {
                     id: query.block,
                     proof: ton_api::ton::bytes(proof),
                     block: ton_api::ton::bytes(block),
-                    is_link: if is_link { ton::Bool::BoolTrue } else { ton::Bool::BoolFalse }
+                    is_link: if has_proof_link { ton::Bool::BoolTrue } else { ton::Bool::BoolFalse }
                 }.into_boxed();
             }
         }

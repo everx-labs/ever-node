@@ -1,3 +1,16 @@
+/*
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific TON DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     engine_traits::RempDuplicateStatus,
     ext_messages::{
@@ -27,7 +40,7 @@ use ton_block::{
     Deserializable, Message, Serializable, MsgAddressInt, MsgAddrStd, 
     ExternalInboundMessageHeader, BlockIdExt
 };
-use ton_types::{error, fail, BuilderData, KeyId, SliceData, Result, UInt256};
+use ton_types::{error, fail, KeyId, SliceData, Result, UInt256};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RmqMessage {
@@ -104,10 +117,9 @@ impl RmqMessage {
             import_fee: Default::default()
         }, body.clone());
 
-        let mut builder = BuilderData::new();
-        msg.write_to(&mut builder).unwrap();
+        let builder = msg.write_to_new_cell().unwrap();
 
-        let mut reader: SliceData = SliceData::load_builder(builder)?;
+        let mut reader = SliceData::load_builder(builder)?;
         let mut msg = Message::default();
         msg.read_from(&mut reader).unwrap();
 

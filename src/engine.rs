@@ -13,10 +13,6 @@
 
 use crate::{
     block::{BlockStuff, BlockIdExtExtention}, block_proof::BlockProofStuff, boot,
-    config::{
-        TonNodeConfig, KafkaConsumerConfig, CollatorTestBundlesGeneralConfig, 
-        ValidatorManagerConfig, CollatorConfig
-    },
     engine_traits::{
         ExternalDb, EngineAlloc, EngineOperations,
         OverlayOperations, PrivateOverlayOperations, Server,
@@ -71,17 +67,11 @@ use adnl::telemetry::{Metric, MetricBuilder, TelemetryItem, TelemetryPrinter};
 use overlay::QueriesConsumer;
 use std::{
     ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering, AtomicU64}},
-    time::Duration, collections::{HashMap, HashSet},
+    time::{Duration, SystemTime}, collections::{HashMap, HashSet}, fmt::Write, path::Path
 };
-#[cfg(feature = "metrics")]
-use std::env;
-#[cfg(feature = "slashing")]
-use std::collections::HashSet;
 use storage::{StorageAlloc, block_handle_db::BlockHandle};
 #[cfg(feature = "telemetry")]
-use storage::types::StorageCell;
-#[cfg(feature = "telemetry")]
-use storage::StorageTelemetry;
+use storage::{StorageTelemetry, types::StorageCell};
 use ton_api::ton::ton_node::{
     Broadcast, 
     broadcast::{
@@ -97,6 +87,10 @@ use ton_types::{error, fail, KeyId, Result, UInt256};
 use ton_types::HashmapType;
 #[cfg(feature = "telemetry")]
 use ton_types::Cell;
+use crate::config::{
+    CollatorConfig, CollatorTestBundlesGeneralConfig, KafkaConsumerConfig,
+    TonNodeConfig, ValidatorManagerConfig
+};
 
 #[cfg(feature = "slashing")]
 //maximum number of validated block stats entries in engine's queue
@@ -111,7 +105,7 @@ pub struct Engine {
     next_block_applying_awaiters: AwaitersPool<BlockIdExt, BlockIdExt>,
     download_block_awaiters: AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)>,
     download_queue_update_awaiters: AwaitersPool<BlockIdExt, BlockStuff>,
-    external_messages: MessagesPool,
+    external_messages: Arc<MessagesPool>,
     servers: lockfree::queue::Queue<Server>,
     stopper: Arc<Stopper>,
 
@@ -121,7 +115,8 @@ pub struct Engine {
 
     zero_state_id: BlockIdExt,
     init_mc_block_id: BlockIdExt,
-    initial_sync_disabled: bool,
+    hardforks: Vec<BlockIdExt>,
+    flags: EngineFlags,
     pub network: Arc<NodeNetwork>,
     archives_life_time: Option<u32>,
     // enable_shard_state_persistent_gc: bool,
@@ -394,18 +389,22 @@ impl Downloader for ZeroStateDownloader {
 
 pub struct Stopper {
     stop: Arc<AtomicU32>,
+    token: Arc<tokio_util::sync::CancellationToken>
 }
 
 impl Stopper {
+
     pub fn new() -> Self {
         Stopper {
             stop: Arc::new(AtomicU32::new(0)),
+            token: Arc::new(tokio_util::sync::CancellationToken::new())
         }
     }
 
     pub fn set_stop(&self) {
         let stop = self.stop.fetch_or(Engine::MASK_STOP, Ordering::Relaxed);
         Self::log_stop_status(stop);
+        self.token.cancel();
     }
 
     pub async fn wait_stop(self: Arc<Self>) {
@@ -440,6 +439,9 @@ impl Stopper {
         if bitmap & Engine::MASK_SERVICE_PSS_KEEPER != 0 {
             ss.push_str("persistent states storer, ");
         }
+        if bitmap & Engine::MASK_SERVICE_SS_CACHE_KEEPER != 0 {
+            ss.push_str("states cache cleaner, ");
+        }
         if bitmap & Engine::MASK_SERVICE_SHARDCHAIN_BROADCAST_LISTENER != 0 {
             ss.push_str("shardchains broadcasts listener, ");
         }
@@ -472,6 +474,7 @@ impl Stopper {
     pub fn release_stop(&self, mask: u32) {
         self.stop.fetch_and(!mask, Ordering::Relaxed);
     }
+
 }
 
 impl Engine {
@@ -490,6 +493,7 @@ impl Engine {
     pub const MASK_SERVICE_BOOT: u32                           = 0x0200;
     pub const MASK_SERVICE_DB_RESTORE: u32                     = 0x0400;
     pub const MASK_SERVICE_ARCHIVES_GC: u32                    = 0x0800;
+    pub const MASK_SERVICE_SS_CACHE_KEEPER: u32                = 0x1000;
 
     // Sync status
     pub const SYNC_STATUS_START_BOOT: u32           = 0x0001;
@@ -509,8 +513,7 @@ impl Engine {
     pub async fn new(
         general_config: TonNodeConfig, 
         ext_db: Vec<Arc<dyn ExternalDb>>, 
-        initial_sync_disabled : bool,
-        force_check_db: bool,
+        flags: EngineFlags,
         stopper: Arc<Stopper>
     ) -> Result<Arc<Self>> {
 
@@ -582,6 +585,8 @@ impl Engine {
         let cells_lifetime_sec = general_config.cells_gc_config().cells_lifetime_sec;
         let enable_shard_state_persistent_gc = general_config.enable_shard_state_persistent_gc();
         let skip_saving_persistent_states = general_config.skip_saving_persistent_states();
+        let states_cache_mode = general_config.states_cache_mode();
+        let states_cache_cleanup_diff = general_config.states_cache_cleanup_diff();
         let restore_db = general_config.restore_db();
         let processed_workchain = general_config.workchain();
 
@@ -592,13 +597,15 @@ impl Engine {
             cells_db_config: cells_db_config.clone(),
         };
         let control_config = general_config.control_server()?;
-        let global_config = general_config.load_global_config()?;
-        let test_bundles_config = general_config.test_bundles_config().clone();
         let collator_config = general_config.collator_config().clone();
         let low_memory_mode = general_config.low_memory_mode();
+        let boot_from_zerostate = general_config.boot_from_zerostate();
+        let global_config = general_config.load_global_config()?;
+        let test_bundles_config = general_config.test_bundles_config().clone();
 
         let network = NodeNetwork::new(
             general_config,
+            stopper.token.clone(),
             #[cfg(feature = "telemetry")]
             engine_telemetry.clone(),
             engine_allocated.clone()
@@ -628,7 +635,7 @@ impl Engine {
         let db = open_db(
             db_config, 
             restore_db,
-            force_check_db,
+            flags.force_check_db,
             if let Some(status_reporter) = status_reporter.as_ref() {
                 Some(&status_reporter.is_broken)
             } else {
@@ -648,10 +655,26 @@ impl Engine {
         let db = db?;
 
         let zero_state_id = global_config.zero_state().expect("check zero state settings");
-        let mut init_mc_block_id = global_config.init_block()?.unwrap_or_else(|| zero_state_id.clone());
-        if let Ok(Some(block_id)) = db.load_full_node_state(INITIAL_MC_BLOCK) {
-            if block_id.seq_no > init_mc_block_id.seq_no {
-                init_mc_block_id = block_id.deref().clone()
+        let mut init_mc_block_id = match global_config.init_block()? {
+            Some(init_mc_block_id) if !boot_from_zerostate => {
+                log::info!("zero state substitued by init block {}", init_mc_block_id);
+                init_mc_block_id
+            }
+            _ => zero_state_id.clone()
+        };
+        let mut hardforks = global_config.hardforks()?;
+        hardforks.sort_by(|a, b| a.seq_no.cmp(&b.seq_no));
+        if !boot_from_zerostate {
+            if let Some(block_id) = hardforks.last() {
+                if block_id.seq_no > init_mc_block_id.seq_no {
+                    fail!("global config contains init_block and hardforks sections so int_block {} \
+                        must be after last hard_fork {}", init_mc_block_id.seq_no, block_id.seq_no)
+                }
+            }
+            if let Ok(Some(block_id)) = db.load_full_node_state(INITIAL_MC_BLOCK) {
+                if block_id.seq_no > init_mc_block_id.seq_no {
+                    init_mc_block_id = block_id.deref().clone()
+                }
             }
         }
 
@@ -681,6 +704,8 @@ impl Engine {
             db.clone(),
             enable_shard_state_persistent_gc,
             skip_saving_persistent_states,
+            states_cache_mode,
+            states_cache_cleanup_diff,
             cells_lifetime_sec,
             stopper.clone(),
             cells_db_config.states_db_queue_len + 10,
@@ -714,6 +739,7 @@ impl Engine {
         #[cfg(feature = "slashing")]
         let (validated_block_stats_sender, validated_block_stats_receiver) = 
             crossbeam_channel::bounded(MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT);
+        let now = now_duration().as_secs() as u32;
         let engine = Arc::new(Engine {
             db,
             ext_db,
@@ -748,7 +774,7 @@ impl Engine {
                 engine_telemetry.clone(),
                 engine_allocated.clone()
             ),
-            external_messages: MessagesPool::new(),
+            external_messages: Arc::new(MessagesPool::new(now)),
             servers: lockfree::queue::Queue::new(),
             remp_client,
             remp_service,
@@ -756,7 +782,8 @@ impl Engine {
             stopper,
             zero_state_id,
             init_mc_block_id,
-            initial_sync_disabled,
+            hardforks,
+            flags,
             archives_life_time,
             network,
             shard_blocks: shard_blocks_pool,
@@ -823,9 +850,9 @@ impl Engine {
     }
 
     pub async fn wait_stop(self: Arc<Self>) {
+
         // set stop flag
         self.stopper.set_stop();
-
         self.network.delete_overlays().await;
 
         // stop servers
@@ -856,8 +883,8 @@ impl Engine {
 
         // wait while all node's services will stop
         self.stopper.clone().wait_stop().await;
-
         self.network.stop_adnl().await;
+
     }
 
     pub fn stopper(&self) -> &Stopper {
@@ -880,9 +907,11 @@ impl Engine {
 
     pub fn init_mc_block_id(&self) -> &BlockIdExt {&self.init_mc_block_id}
 
-    pub fn initial_sync_disabled(&self) -> bool {self.initial_sync_disabled}
+    pub fn flags(&self) -> &EngineFlags { &self.flags }
 
-    pub fn shard_states_keeper(&self) -> &ShardStatesKeeper { &self.shard_states_keeper }
+    pub fn hardforks(&self) -> &[BlockIdExt] { &self.hardforks }
+
+    pub fn shard_states_keeper(&self) -> Arc<ShardStatesKeeper> { self.shard_states_keeper.clone() }
 
     pub async fn get_masterchain_overlay(&self) -> Result<Arc<dyn FullNodeOverlayClient>> {
         self.get_full_node_overlay(ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL).await
@@ -934,7 +963,7 @@ impl Engine {
         &self.download_queue_update_awaiters
     }
 
-    pub fn external_messages(&self) -> &MessagesPool {
+    pub fn external_messages(&self) -> &Arc<MessagesPool> {
         &self.external_messages
     }
 
@@ -1178,7 +1207,6 @@ impl Engine {
                     None,
                     self.download_block_worker(id, attempts, timeout)
                 ).await? {
-
                     let downloading_time = now.elapsed().as_millis();
 
                     let now = std::time::Instant::now();
@@ -1205,6 +1233,73 @@ impl Engine {
                 }
             }
         }
+    }
+
+    pub async fn apply_hardfork_block(
+        self: Arc<Self>,
+        handle: &Arc<BlockHandle>,
+        block: &BlockStuff,
+    ) -> Result<()> {
+        if !block.id().is_masterchain() {
+            fail!("we apply only masterchain hardfork blocks, but {}", block.id())
+        }
+        if !block.is_key_block()? {
+            fail!("we apply only keyblock hardfork {}", block.id())
+        }
+
+        /*let (prev_block_id, _) = block.construct_prev_id()?;  // TODO remove check?
+        let prev_state = self.load_state(&prev_block_id).await?;
+        let (old_set, _) = prev_state.read_cur_validator_set_and_cc_conf()?;
+        let (new_set, _) = block.read_cur_validator_set_and_cc_conf()?;
+        for old in old_set.list() {
+            if new_set.list().iter().position(|new| new.public_key == old.public_key).is_some() {
+                fail!("old and new validator sets contain at least one common node with id {}",
+                    hex::encode(old.public_key.key_bytes()))
+            }
+        }*/
+
+        if handle.is_applied() {
+            log::trace!("apply_hardfork_block: block is already applied {}", handle.id());
+            return Ok(())
+        }
+
+        log::debug!("Start applying block... {}", block.id());
+
+        apply_block(
+            handle,
+            block,
+            block.id().seq_no,
+            &(self.clone() as Arc<dyn EngineOperations>),
+            false,
+            0
+        ).await?;
+
+        log::debug!("After applying block... {}", block.id());
+        let gen_utime = block.gen_utime()?;
+        let ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i32 - gen_utime as i32;
+        self.save_last_applied_mc_block_id(block.id())?;
+        metrics::gauge!("last_applied_mc_block", block.id().seq_no() as f64);
+        metrics::gauge!("timediff", ago as f64);
+        self.shard_blocks().update_shard_blocks(&self.load_state(block.id()).await?).await?;
+
+        let first_time_applied = self.set_applied(handle, block.id().seq_no).await?;
+
+        if let Err(e) = self.mc_block_post_apply(block, gen_utime, first_time_applied).await {
+            log::error!("Error after apply block {}: {}", block.id(), e);
+        }
+
+        log::info!(
+            "Applied block {}, {} seconds old",
+            block.id(),
+            ago
+        );
+
+        log::info!("Start generating persistent state... {}", block.id());
+        self.shard_states_keeper.save_persistent_state(&self, handle.clone()).await?;
+        log::info!("Persistent state for block {} is generated", block.id());
+
+        Ok(())
     }
 
     pub async fn apply_block_worker(
@@ -1275,8 +1370,8 @@ impl Engine {
                         log::error!("Can't save last applied mc block {}: {}", block.id(), e);
                     }
                 }
-                STATSD.gauge("last_applied_mc_block", block.id().seq_no() as f64);
-                STATSD.gauge("timediff", ago as f64);
+                metrics::gauge!("last_applied_mc_block", block.id().seq_no() as f64);
+                metrics::gauge!("timediff", ago as f64);
 
                 if let Err(e) = self.mc_block_post_apply(block, gen_utime, first_time_applied).await {
                     log::error!("Error after apply block {}: {}", block.id(), e);
@@ -1336,6 +1431,65 @@ impl Engine {
         }
         log::debug!("Split queues cache GC: total {total}, removed {removed}");
 
+        Ok(())
+    }
+
+    fn log_workers_stats(&self) -> Result<()> {
+        // Node workers stats:
+        //                  seqno      diff    gen utime  diff    root hash                                        file hash   
+        // mc client        14000000      0    1682084115    1    000000000000000000000000000000000000000000000000 000000000000000000000000000000000000000000000000
+        // "{:<17} {:>10} {:>7} {:>10} {:>7} {:<64} {:<64}"
+
+        let now = self.now();
+        let mut report = String::default();
+        writeln!(&mut report,
+            "Node workers stats:\n{:<17} {:>10} {:>7} {:>10} {:>7} {:<64} {:<64}", 
+            "", "seqno", "diff", "gen utime", "diff", "root hash", "file hash"
+        )?;
+        let mut mc_seqno = None;
+
+        let mut log_worker_stat = |
+            result: Result<Option<Arc<BlockIdExt>>>,
+            name: &str 
+        | -> Result<()> {
+            write!(report, "{:<17} ", name)?;
+            match result {
+                Ok(Some(block_id)) => {
+                    // seqno
+                    write!(report, "{:>10} ", block_id.seq_no())?;
+                    // seqno diff
+                    if let Some(mc_seqno) = mc_seqno.as_ref() {
+                        let diff = *mc_seqno - block_id.seq_no();
+                        write!(report, "{:>7} ", diff)?;
+                    } else {
+                        write!(report, "{:>7} ", "")?;
+                        mc_seqno = Some(block_id.seq_no());
+                    }
+                    // timestamp, timediff
+                    match self.load_block_handle(&block_id) {
+                        Ok(Some(handle)) => {
+                            let utime = handle.gen_utime().unwrap_or_default();
+                            write!(report, "{:>10} {:>7} ", utime, now - utime)?
+                        }
+                        Ok(None) => write!(report, "handle is none     ")?,
+                        Err(_) => write!(report, "can't load handle  ")?,
+                    };
+                    // hashes
+                    write!(report, "{:<64x} {:<64x}", block_id.root_hash(), block_id.file_hash())?
+                }
+                Ok(None) => write!(report, "none")?,
+                Err(e) => write!(report, "can't load id: {}", e)?,
+            };
+            report.push('\n');
+            Ok(())
+        };
+
+        log_worker_stat(self.load_last_applied_mc_block_id(), "mc client")?;
+        log_worker_stat(self.load_shard_client_mc_block_id(), "shard client")?;
+        log_worker_stat(self.load_pss_keeper_mc_block_id(), "pss keeper")?;
+        log_worker_stat(self.load_archives_gc_mc_block_id(), "archives gc")?;
+        log_worker_stat(self.load_last_rotation_block_id(), "last rotation")?;
+        log::info!("{}", report);
         Ok(())
     }
 
@@ -1440,7 +1594,8 @@ impl Engine {
                 shard_states: create_metric("Alloc NODE shard states"),
                 top_blocks: create_metric("Alloc NODE top blocks"),
                 validator_peers: create_metric("Alloc NODE validator peers"),
-                validator_sets: create_metric("Alloc NODE validator sets")
+                validator_sets: create_metric("Alloc NODE validator sets"),
+                old_state_cell_load_time: Metric::with_total_average("Old state cell load time (nanos)", Engine::TIMEOUT_TELEMETRY_SEC),
             }
         );
         let metrics = vec![
@@ -1464,7 +1619,8 @@ impl Engine {
             TelemetryItem::Metric(engine_telemetry.shard_states.clone()),
             TelemetryItem::Metric(engine_telemetry.top_blocks.clone()),
             TelemetryItem::Metric(engine_telemetry.validator_peers.clone()),
-            TelemetryItem::Metric(engine_telemetry.validator_sets.clone())
+            TelemetryItem::Metric(engine_telemetry.validator_sets.clone()),
+            TelemetryItem::Metric(engine_telemetry.old_state_cell_load_time.clone())
         ];
         (metrics, engine_telemetry)
 
@@ -2042,7 +2198,9 @@ impl Engine {
                         // visited_pss_blocks:         4            3            2            1
                         //                    ↑ we may delete blocks starting at least here (before 4th pss)
                         
-                        if engine.shard_states_keeper.allow_state_gc(keyblock.id())? {
+                        let pss_block = engine.load_pss_keeper_mc_block_id()?
+                            .ok_or_else(|| error!("Cannot load pss keeper mc block id"))?;
+                        if keyblock.id().seq_no() < pss_block.seq_no() {
                             if visited_pss_blocks >= 4 {
                                 let gen_time = keyblock.gen_utime()? as u64;
                                 let gc_max_date = gc_max_date.as_secs();
@@ -2184,7 +2342,7 @@ pub(crate) async fn load_zero_state(engine: &Arc<Engine>, path: &str) -> Result<
 
 }
 
-async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>) 
+async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>, hardfork_path: impl AsRef<Path>)
 -> Result<(BlockIdExt, BlockIdExt, BlockIdExt, BlockIdExt)> {
     log::info!("Booting...");
     engine.set_sync_status(Engine::SYNC_STATUS_START_BOOT);
@@ -2193,21 +2351,27 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>)
         load_zero_state(&engine, zerostate_path).await?;
     }
 
-    let (last_applied_mc_block, cold) = match engine.load_last_applied_mc_state().await {
-        Ok(state) => {
+    let result = match engine.load_last_applied_mc_block_id() {
+        Ok(Some(id)) => crate::boot::warm_boot(engine.clone(), id, hardfork_path).await,
+        Ok(None) => Err(error!("No last applied MC block, warm boot is not possible")),
+        Err(x) => Err(x)
+    };
+
+    let (last_applied_mc_block, cold) = match result {
+        Ok(block_id) => {
+            let state = engine.load_state(&block_id).await?;
             engine.remp_capability.store(
                 state.config_params()?.has_capability(GlobalCapabilities::CapRemp),
                 Ordering::Relaxed
             );
-            (state.block_id().clone(), false)
+            (block_id.clone(), false)
         }
         Err(err) => {
             log::debug!("before cold boot: {}", err);
-
             engine.acquire_stop(Engine::MASK_SERVICE_BOOT);
-            let id = boot::cold_boot(engine.clone()).await;
+            let result = boot::cold_boot(engine.clone()).await;
             engine.release_stop(Engine::MASK_SERVICE_BOOT);
-            let id = id?;
+            let id = result?.id().clone();
             engine.save_last_applied_mc_block_id(&id)?;
             (id, true)
         }
@@ -2256,13 +2420,19 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>)
     Ok((last_applied_mc_block, shard_client_mc_block, ss_keeper_mc_block, archives_gc_block))
 }
 
+#[derive(Default)]
+pub struct EngineFlags {
+    pub initial_sync_disabled: bool,
+    pub starting_block_disabled: bool,
+    pub force_check_db: bool,
+}
+
 pub async fn run(
     node_config: TonNodeConfig,
     zerostate_path: Option<&str>, 
     ext_db: Vec<Arc<dyn ExternalDb>>,
     validator_runtime: tokio::runtime::Handle, 
-    initial_sync_disabled : bool,
-    force_check_db: bool,
+    flags: EngineFlags,
     stopper: Arc<Stopper>,
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
     log::info!("Engine::run");
@@ -2276,138 +2446,173 @@ pub async fn run(
     );
     let wc_from_config = node_config.workchain();
     let remp_client_pool = node_config.remp_config().remp_client_pool();
+    let configs_dir = node_config.build_config_path("");
 
     // Create engine
-    let engine = Engine::new(node_config, ext_db, initial_sync_disabled, force_check_db, stopper).await?;
+    let engine = Engine::new(node_config, ext_db, flags, stopper.clone()).await?;
+    let engine_ret = engine.clone();
+    let result = async move {
 
-    #[cfg(feature = "telemetry")]
-    telemetry_logger(engine.clone());
-    // Console service - run first to allow console to connect to generate new keys 
-    // while node is looking for net
-    if let Some(config) = control_server_config {
-        let server = Server::ControlServer(
-            ControlServer::with_params(
-                config,
-                DataSource::Engine(engine.clone()),
-                engine.network().config_handler(),
-                engine.network().config_handler(),
-                Some(engine.network().clone())
-            ).await?
+        #[cfg(feature = "telemetry")]
+        telemetry_logger(engine.clone());
+
+        // Console service - run first to allow console to connect to generate new keys
+        // while node is looking for net
+        if let Some(config) = control_server_config {
+            let server = Server::ControlServer(
+                ControlServer::with_params(
+                    config,
+                    DataSource::Engine(engine.clone()),
+                    engine.network().config_handler(),
+                    engine.network().config_handler(),
+                    Some(engine.network().clone())
+                ).await?
+            );
+            engine.register_server(server)
+        };
+
+        // Messages from external DB (usually kafka)
+        start_external_broadcast_process(engine.clone(), &consumer_config)?;
+
+        let full_node_service = FullNodeOverlayService::new(
+            Arc::clone(&engine) as Arc<dyn EngineOperations>
         );
-        engine.register_server(server)
-    };
+        let full_node_service: Arc<dyn QueriesConsumer> = Arc::new(full_node_service);
 
-    // Messages from external DB (usually kafka)
-    start_external_broadcast_process(engine.clone(), &consumer_config)?;
-
-    let full_node_service = FullNodeOverlayService::new(Arc::clone(&engine) as Arc<dyn EngineOperations>);
-    let full_node_service: Arc<dyn QueriesConsumer> = Arc::new(full_node_service);
-
-    // Overlays, depends on 'workchain' option is set or not
-    let network = engine.network();
-    if let Some(wc) = &wc_from_config {
-        log::info!("Processed workchain from config: {wc}");
-
-        engine.add_full_node_overlay(*wc, SHARD_FULL, false).await?;
-        network.add_consumer(
-            &network.calc_overlay_id(*wc, SHARD_FULL)?.0, full_node_service.clone())?;
-
-        if *wc != MASTERCHAIN_ID {
-            engine.add_full_node_overlay(MASTERCHAIN_ID, SHARD_FULL, true).await?;
+        // Overlays, depends on 'workchain' option is set or not
+        let network = engine.network();
+        if let Some(wc) = &wc_from_config {
+            log::info!("Processed workchain from config: {wc}");
+            engine.add_full_node_overlay(*wc, SHARD_FULL, false).await?;
             network.add_consumer(
-                &network.calc_overlay_id(MASTERCHAIN_ID, SHARD_FULL)?.0, full_node_service.clone())?;
-        }
-    } else {
-        // Legacy mode.
-        log::info!("Processed workchain was not specifed. LEGACY MODE");
-
-        engine.add_full_node_overlay(BASE_WORKCHAIN_ID, SHARD_FULL, false).await?;
-        network.add_consumer(
-            &network.calc_overlay_id(BASE_WORKCHAIN_ID, SHARD_FULL)?.0, full_node_service.clone())?;
-
-        engine.add_full_node_overlay(MASTERCHAIN_ID, SHARD_FULL, false).await?;
-        network.add_consumer(
-            &network.calc_overlay_id(MASTERCHAIN_ID, SHARD_FULL)?.0, full_node_service.clone())?;
-    }
-
-    // Boot
-    let (mut last_applied_mc_block, mut shard_client_mc_block, ss_keeper_block, archives_gc_block) =
-        boot(&engine, zerostate_path).await?;
-
-    // Broadcasts (blocks, external messages etc.)
-    if let Some(wc) = &wc_from_config {
-        Arc::clone(&engine).listen_broadcasts(
-            ShardIdent::with_tagged_prefix(*wc, SHARD_FULL)?,
-            if *wc == MASTERCHAIN_ID {
-                Engine::MASK_SERVICE_MASTERCHAIN_BROADCAST_LISTENER
-            } else {
-                Engine::MASK_SERVICE_SHARDCHAIN_BROADCAST_LISTENER
+                &network.calc_overlay_id(*wc, SHARD_FULL)?.0, 
+                full_node_service.clone()
+            )?;
+            if *wc != MASTERCHAIN_ID {
+                engine.add_full_node_overlay(MASTERCHAIN_ID, SHARD_FULL, true).await?;
+                network.add_consumer(
+                    &network.calc_overlay_id(MASTERCHAIN_ID, SHARD_FULL)?.0, 
+                    full_node_service.clone()
+                )?;
             }
-        ).await?;
-    } else {
-        Arc::clone(&engine).listen_broadcasts(
-            ShardIdent::masterchain(),
-            Engine::MASK_SERVICE_MASTERCHAIN_BROADCAST_LISTENER
-        ).await?;
-        Arc::clone(&engine).listen_broadcasts(
-            ShardIdent::with_tagged_prefix(BASE_WORKCHAIN_ID, SHARD_FULL)?,
-            Engine::MASK_SERVICE_SHARDCHAIN_BROADCAST_LISTENER
-        ).await?;
-    }
-
-    let _ = Engine::start_archives_gc(engine.clone(), archives_gc_block)?;
-
-    engine.shard_states_keeper.clone().start(
-        engine.clone(),
-        last_applied_mc_block.clone(),
-        shard_client_mc_block.clone(),
-        ss_keeper_block
-    ).await?;
-
-    if remp_config.is_client_enabled() {
-        engine.remp_client.as_ref()
-            .ok_or_else(|| error!("Remp client is None, while beeing enabled in config"))?
-            .clone().start(engine.clone(), remp_client_pool).await?;
-    }
-    // Start validator manager, which will start validator sessions when necessary
-    start_validator_manager(
-        Arc::clone(&engine) as Arc<dyn EngineOperations>,
-        validator_runtime,
-        vm_config,
-        remp_config,
-    );
-
-    // Sync by archives
-    if !engine.check_sync().await? {
-        // temporary remove sync with archives
-        struct FakeSync;
-        #[async_trait::async_trait]
-        impl crate::sync::StopSyncChecker for FakeSync {
-            async fn check(&self, _engine: &Arc<dyn EngineOperations>) -> bool { true }
+        } else {
+            // Legacy mode.
+            log::info!("Processed workchain was not specifed. LEGACY MODE");
+            engine.add_full_node_overlay(BASE_WORKCHAIN_ID, SHARD_FULL, false).await?;
+            network.add_consumer(
+                &network.calc_overlay_id(BASE_WORKCHAIN_ID, SHARD_FULL)?.0, 
+                full_node_service.clone()
+            )?;
+            engine.add_full_node_overlay(MASTERCHAIN_ID, SHARD_FULL, false).await?;
+            network.add_consumer(
+                &network.calc_overlay_id(MASTERCHAIN_ID, SHARD_FULL)?.0, 
+                full_node_service.clone()
+            )?;
         }
 
-        crate::sync::start_sync(Arc::clone(&engine) as Arc<dyn EngineOperations>, Some(&FakeSync)).await?;
-        
-        last_applied_mc_block = engine.load_last_applied_mc_block_id()?.ok_or_else(
-            || error!("INTERNAL ERROR: No last applied MC block after boot")
-        )?.deref().clone();
-        shard_client_mc_block = engine.load_shard_client_mc_block_id()?.ok_or_else(
-            || error!("INTERNAL ERROR: No shard client MC block after boot")
-        )?.deref().clone();
-    }
-    // top shard blocks
-    resend_top_shard_blocks_worker(engine.clone());
-    // blocks download clients
-    engine.set_sync_status(Engine::SYNC_STATUS_SYNC_BLOCKS);
-    Engine::check_finish_sync(Arc::clone(&engine));
-    let join_shards = start_shards_client(engine.clone(), shard_client_mc_block)?;
-    let join_master = start_masterchain_client(engine.clone(), last_applied_mc_block)?;
-    let join_engine = tokio::spawn(
-        async move {
-            let (_, _) = tokio::join!(join_master, join_shards);
+        // Boot
+        let (
+            mut last_applied_mc_block,
+            mut shard_client_mc_block,
+            ss_keeper_block,
+            archives_gc_block
+        ) = boot(&engine, zerostate_path, configs_dir).await?;
+
+        // Broadcasts (blocks, external messages etc.)
+        if let Some(wc) = &wc_from_config {
+            Arc::clone(&engine).listen_broadcasts(
+                ShardIdent::with_tagged_prefix(*wc, SHARD_FULL)?,
+                if *wc == MASTERCHAIN_ID {
+                    Engine::MASK_SERVICE_MASTERCHAIN_BROADCAST_LISTENER
+                } else {
+                    Engine::MASK_SERVICE_SHARDCHAIN_BROADCAST_LISTENER
+                }
+            ).await?;
+        } else {
+            Arc::clone(&engine).listen_broadcasts(
+                ShardIdent::masterchain(),
+                Engine::MASK_SERVICE_MASTERCHAIN_BROADCAST_LISTENER
+            ).await?;
+            Arc::clone(&engine).listen_broadcasts(
+                ShardIdent::with_tagged_prefix(BASE_WORKCHAIN_ID, SHARD_FULL)?,
+                Engine::MASK_SERVICE_SHARDCHAIN_BROADCAST_LISTENER
+            ).await?;
         }
-    );   
-    Ok((engine, join_engine))
+
+        let _ = Engine::start_archives_gc(engine.clone(), archives_gc_block)?;
+      
+        engine.shard_states_keeper.clone().start(
+            engine.clone(),
+            last_applied_mc_block.clone(),
+            shard_client_mc_block.clone(),
+            ss_keeper_block
+        ).await?;
+
+        if remp_config.is_client_enabled() {
+            engine.remp_client.as_ref()
+                .ok_or_else(|| error!("Remp client is None, while beeing enabled in config"))?
+                .clone()
+                .start(engine.clone(), remp_client_pool).await?;
+        }
+
+        // Start validator manager, which will start validator sessions when necessary
+        start_validator_manager(
+            Arc::clone(&engine) as Arc<dyn EngineOperations>,
+            validator_runtime,
+            vm_config,
+            remp_config,
+        );
+
+        // Sync by archives
+        if !engine.check_sync().await? {
+            // temporary remove sync with archives
+            struct FakeSync;
+            #[async_trait::async_trait]
+            impl crate::sync::StopSyncChecker for FakeSync {
+                async fn check(&self, _engine: &Arc<dyn EngineOperations>) -> bool { 
+                    true 
+                }
+            }
+            crate::sync::start_sync(
+                Arc::clone(&engine) as Arc<dyn EngineOperations>, 
+                Some(&FakeSync)
+            ).await?;
+            last_applied_mc_block = engine.load_last_applied_mc_block_id()?.ok_or_else(
+                || error!("INTERNAL ERROR: No last applied MC block after boot")
+            )?.deref().clone();
+            shard_client_mc_block = engine.load_shard_client_mc_block_id()?.ok_or_else(
+                || error!("INTERNAL ERROR: No shard client MC block after boot")
+            )?.deref().clone();
+        }
+
+        // top shard blocks
+        resend_top_shard_blocks_worker(engine.clone());
+
+        // blocks download clients
+        engine.set_sync_status(Engine::SYNC_STATUS_SYNC_BLOCKS);
+        Engine::check_finish_sync(Arc::clone(&engine));
+        let join_shards = start_shards_client(engine.clone(), shard_client_mc_block)?;
+        let join_master = start_masterchain_client(engine.clone(), last_applied_mc_block)?;
+        Ok((join_shards, join_master))
+
+    }.await;
+   
+    match result {
+        Err(e) => {
+            if stopper.check_stop() {
+                engine_ret.wait_stop().await
+            }
+            Err(e)
+        },
+        Ok((join_shards, join_master)) => {  
+            let join_engine = tokio::spawn(
+                async move {
+                    let (_, _) = tokio::join!(join_master, join_shards);
+                }
+            );
+            Ok((engine_ret, join_engine))
+        }
+    }
 }
 
 #[cfg(feature = "telemetry")]
@@ -2513,6 +2718,9 @@ fn telemetry_logger(engine: Arc<Engine>) {
                     engine.remp_core_telemetry().report()
                 );
             }
+            if let Err(e) = engine.log_workers_stats() {
+                log::warn!("Can't log workers stats: {}", e);
+            }
         }
     });
 }
@@ -2551,38 +2759,43 @@ pub fn start_external_broadcast_process(
     Ok(())
 }
 
-#[cfg(feature = "metrics")]
-lazy_static::lazy_static! {
-    pub static ref STATSD: statsd::client::Client = {
-        let mut statsd_endp = env::var("STATSD_DOMAIN").expect("STATSD_DOMAIN env variable not found");
-        let statsd_port = env::var("STATSD_PORT").expect("STATSD_PORT env variable not found");
-        statsd_endp.push_str(&statsd_port);
-        let statsd_client = match statsd::client::Client::new(statsd_endp, "rnode"){
-            Ok(client) => client,
-            Err(e) => {
-                panic!("Can't init statsd client: {:?}", e);
-            }
-        };
-        statsd_client
-    };
+#[cfg(feature = "statsd")]
+pub fn init_statsd_exporter(){
+    use metrics_exporter_statsd::StatsdBuilder;
+    #[cfg(feature = "prometheus")]
+    compile_error!("You can't use both metrics exporters at the same time");
+
+    let statsd_endp = std::env::var("STATSD_DOMAIN").expect("STATSD_DOMAIN env variable not found");
+    let statsd_port = std::env::var("STATSD_PORT").expect("STATSD_PORT env variable not found")
+        .parse().expect("STATSD_PORT env variable is not a number");
+
+    let recorder = StatsdBuilder::from(statsd_endp,statsd_port)
+        .with_queue_size(5000)
+        .with_buffer_size(1024)
+        .build(Some("rnode"))
+        .expect("Could not create StatsdRecorder");
+    metrics::set_boxed_recorder(Box::new(recorder)).expect("Could not set global recorder");
 }
 
-#[cfg(not(feature = "metrics"))]
-pub struct StatsdClient {}
+#[cfg(feature = "prometheus")]
+pub fn init_prometheus_exporter() {
+    use std::net::SocketAddr;
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use metrics_exporter_prometheus::Matcher;
 
-#[cfg(not(feature = "metrics"))]
-#[allow(dead_code)]
-impl StatsdClient {
-    pub fn new() -> StatsdClient { StatsdClient{} }
-    pub fn gauge(&self, _metric_name: &str, _value: f64) {}
-    pub fn incr(&self, _metric_name: &str) {}
-    #[allow(dead_code)]
-    pub fn histogram(&self, _metric_name: &str, _value: f64) {}
-    #[cfg(feature = "external_db")]
-    pub fn timer(&self, _metric_name: &str, _value: f64) {}
+    const EXPONENTIAL_SECONDS: &[f64] = &[
+        0.000001, 0.0001, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+        60.0, 120.0, 300.0, 600.0, 3600.0
+    ];
+    let prometheus_port = std::env::var("PROMETHEUS_PORT").expect("PROMETHEUS_PORT env variable not found")
+        .parse().expect("PROMETHEUS_PORT env variable is not a number");
+
+    PrometheusBuilder::new()
+        .set_buckets_for_metric(Matcher::Suffix("time".to_owned()), EXPONENTIAL_SECONDS).expect("values are not empty")
+        .with_http_listener(SocketAddr::new([0, 0, 0, 0].into(), prometheus_port))
+        .install().expect("Could not create PrometheusRecorder");
 }
 
-#[cfg(not(feature = "metrics"))]
-lazy_static::lazy_static! {
-    pub static ref STATSD: StatsdClient = StatsdClient::new();
+pub fn now_duration() -> Duration {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default()
 }

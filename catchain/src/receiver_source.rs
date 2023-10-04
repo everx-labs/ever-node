@@ -379,3 +379,22 @@ impl ReceiverSourceImpl {
         )))
     }
 }
+
+impl Drop for ReceiverSourceImpl {
+    fn drop(&mut self) {
+        log::trace!(
+            "...dropping source #{} with public_key_hash={}, adnl_id={}",
+            self.id,
+            self.public_key_hash,
+            self.adnl_id
+        );
+
+        //avoid stack overflow for long block chains (single-node mode with fast block generation)
+
+        while let Some((key, _item)) = self.blocks.iter().next_back() {
+            let key = key.clone();
+            //remove block with max height (because it has smallest dropping chain)
+            self.blocks.remove(&key);
+        }
+    }
+}

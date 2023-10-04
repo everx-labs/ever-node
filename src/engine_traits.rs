@@ -12,12 +12,13 @@
 */
 
 use crate::{
-    block::BlockStuff, config::{CollatorTestBundlesGeneralConfig, CollatorConfig}, 
+    block::BlockStuff,
     block_proof::BlockProofStuff, config::TonNodeConfig, internal_db::BlockResult,
+    engine::EngineFlags,
     network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
     shard_state::ShardStateStuff,
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
-    validator::validator_manager::ValidationStatus,
+    validator::validator_manager::ValidationStatus, engine::now_duration,
 };
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::ValidatedBlockStat;
@@ -37,7 +38,7 @@ use catchain::{
 use overlay::{
     BroadcastSendInfo, OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId
 };
-use std::{collections::HashSet, sync::{Arc, atomic::AtomicU64}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::HashSet, sync::{Arc, atomic::AtomicU64}};
 use storage::{StorageAlloc, block_handle_db::BlockHandle};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
@@ -51,6 +52,7 @@ use ton_block::{
 };
 use ton_types::{error, AccountId, KeyId, KeyOption, Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
+use crate::config::{CollatorConfig, CollatorTestBundlesGeneralConfig};
 
 #[cfg(feature = "telemetry")]
 pub struct EngineTelemetry {
@@ -63,7 +65,8 @@ pub struct EngineTelemetry {
     pub shard_states: Arc<Metric>,
     pub top_blocks: Arc<Metric>,
     pub validator_peers: Arc<Metric>,
-    pub validator_sets: Arc<Metric>
+    pub validator_sets: Arc<Metric>,
+    pub old_state_cell_load_time: Arc<Metric>,
 }
 
 pub struct EngineAlloc {
@@ -81,7 +84,6 @@ pub struct EngineAlloc {
 #[async_trait::async_trait]
 pub trait OverlayOperations : Sync + Send {
     async fn start(&self) -> Result<()>;
-    async fn get_peers_count(&self, masterchain_zero_state_id: &BlockIdExt) -> Result<usize>;
     async fn get_overlay(
         &self, 
         overlay_id: &OverlayShortId
@@ -169,6 +171,10 @@ pub trait EngineOperations : Sync + Send {
 
     fn remove_last_collation_time(&self, shard: &ShardIdent) {
         unimplemented!()
+    }
+
+    fn get_config_for_hardfork(&self) -> Option<ConfigParams>{
+        None
     }
 
     // Validator specific operations
@@ -299,6 +305,9 @@ pub trait EngineOperations : Sync + Send {
     async fn find_mc_block_by_seq_no(&self, seqno: u32) -> Result<Arc<BlockHandle>> {
         unimplemented!()
     }
+    fn find_full_block_id(&self, root_hash: &UInt256) -> Result<Option<BlockIdExt>> {
+        unimplemented!()
+    }
     async fn apply_block(
         self: Arc<Self>, 
         handle: &Arc<BlockHandle>, 
@@ -344,7 +353,7 @@ pub trait EngineOperations : Sync + Send {
     async fn download_next_block(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
         unimplemented!()
     }
-    async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, priority: u32) -> Result<(Vec<BlockIdExt>, bool)> {
+    async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt) -> Result<Vec<BlockIdExt>> {
         unimplemented!()
     }
     async fn store_block(
@@ -399,6 +408,13 @@ pub trait EngineOperations : Sync + Send {
     async fn process_chain_range_in_ext_db(
         &self,
         chain_range: &ChainRange)
+    -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn process_shard_hashes_in_ext_db(
+        &self,
+        shard_hashes: &Vec<BlockIdExt>)
     -> Result<()> {
         unimplemented!()
     }
@@ -566,6 +582,12 @@ pub trait EngineOperations : Sync + Send {
     fn get_external_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
         unimplemented!()
     }
+    fn get_external_messages_iterator(
+        &self, 
+        shard: ShardIdent
+    ) -> Box<dyn Iterator<Item = (Arc<Message>, UInt256)> + Send + Sync> {
+        unimplemented!()
+    }
     fn complete_external_messages(&self, to_delay: Vec<UInt256>, to_delete: Vec<UInt256>) -> Result<()> {
         unimplemented!()
     }
@@ -596,11 +618,11 @@ pub trait EngineOperations : Sync + Send {
     // Utils
 
     fn now(&self) -> u32 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as u32
+        now_duration().as_secs() as u32
     }
 
     fn now_ms(&self) -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+        now_duration().as_millis() as u64
     }
 
     fn is_persistent_state(&self, block_time: u32, prev_time: u32, pss_period_bits: u32) -> bool {
@@ -615,15 +637,15 @@ pub trait EngineOperations : Sync + Send {
 
     // Options
 
-    fn get_last_fork_masterchain_seqno(&self) -> u32 { 0 }
+    fn get_last_fork_masterchain_seqno(&self) -> u32 {
+        self.hardforks().last().map_or(0, |block_id| block_id.seq_no)
+    }
 
-    fn get_hardforks(&self) { todo!("WTF") }
+    fn hardforks(&self) -> &[BlockIdExt] { unimplemented!() }
 
-    // True to allow sync from initial block, but it fail if it is not key block
-    fn initial_sync_disabled(&self) -> bool { false } 
-
-    // time for loading key blocks chain
-    fn time_for_blockchain_init(&self) -> u32 { 600 }
+    fn flags(&self) -> &EngineFlags {
+        unimplemented!()
+    }
 
     // Time in past to get blocks in
     fn sync_blocks_before(&self) -> u32  { 0 }
@@ -631,11 +653,6 @@ pub trait EngineOperations : Sync + Send {
     fn key_block_utime_step(&self) -> u32 {
         86400 // One day period
     }
-
-    fn need_db_truncate(&self) -> bool { false }
-
-    // Parameter outside of node
-    fn truncate_seqno(&self) -> u32 { 0 } 
 
     fn need_monitor(&self, _shard: &ShardIdent) -> bool { false }
 
@@ -661,6 +678,10 @@ pub trait EngineOperations : Sync + Send {
     }
 
     fn produce_chain_ranges_enabled(&self) -> bool {
+        unimplemented!()
+    }
+
+    fn produce_shard_hashes_enabled(&self) -> bool {
         unimplemented!()
     }
 
@@ -870,6 +891,8 @@ pub trait ExternalDb : Sync + Send {
     async fn process_full_state(&self, state: &Arc<ShardStateStuff>) -> Result<()>;
     fn process_chain_range_enabled(&self) -> bool;
     async fn process_chain_range(&self, range: &ChainRange) -> Result<()>;
+    fn process_shard_hashes_enabled(&self) -> bool;
+    async fn process_shard_hashes(&self, shard_hashes: &[BlockIdExt]) -> Result<()>;
     async fn process_remp_msg_status(
         &self,
         id: &UInt256,

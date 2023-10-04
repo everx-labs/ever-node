@@ -18,7 +18,7 @@
         "run_attempt_timeout_ms": 1000
     },
     "remp": {
-        "client_enabled": true,
+        "client_enabled": false,
         "service_enabled": false
     },
     "external_db_config": {

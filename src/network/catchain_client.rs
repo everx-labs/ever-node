@@ -86,7 +86,8 @@ impl CatchainClient {
             Some(runtime_handle.clone()), 
             overlay_id, 
             &local_adnl_key, 
-            &peers
+            &peers,
+            network_context.broadcast_hops
         )?;
         let consumer = Arc::new(
             CatchainClientConsumer::new(overlay_id.clone(), catchain_listener)
@@ -201,6 +202,7 @@ impl CatchainClient {
             "<send_query> result (overlay: {}, data: {:08x}, key_id: {}): {:?}({}ms)",
             &overlay_id, tag, &receiver_id, result, elapsed.as_millis()
         );
+        metrics::histogram!("catchain_overlay_query_time", elapsed);
         let result = result.ok_or_else(|| error!("answer is None!"))?;
         let mut data: catchain::RawBuffer = catchain::RawBuffer::default();
         let mut serializer = ton_api::Serializer::new(&mut data.0);
@@ -379,6 +381,7 @@ impl CatchainOverlay for CatchainClient {
         if elapsed.as_micros() > 500 {
             log::trace!(target: Self::TARGET, "message elapsed: {}", elapsed.as_millis());
         };
+        metrics::histogram!("catchain_send_message_time", elapsed);
     }
 
     /// Send message to multiple sources
@@ -464,7 +467,6 @@ impl CatchainOverlay for CatchainClient {
         let msg = payload.clone();
         let overlay_id = self.overlay_id.clone();
         let overlay = self.network_context.overlay.clone();
-        let broadcast_hops = self.network_context.broadcast_hops;
         let local_validator_key = self.local_validator_key.clone();
         self.runtime_handle.spawn(
             async move {
@@ -477,7 +479,7 @@ impl CatchainOverlay for CatchainClient {
                     &overlay_id, 
                     &msg, 
                     Some(&local_validator_key),
-                    broadcast_hops
+                    false
                 ).await;
                 log::trace!(target: Self::TARGET, "send_broadcast_fec_ex status: {:?}", result);
             }
@@ -573,6 +575,7 @@ impl QueriesConsumer for CatchainClientConsumer {
             let elapsed = now.elapsed();
             log::trace!(target: CatchainClient::TARGET, "query elapsed: {}", elapsed.as_millis());
         };
+        metrics::histogram!("catchain_client_query_time", now.elapsed());
         self.worker_waiters.remove(&id.as_nanos());
         res
     }

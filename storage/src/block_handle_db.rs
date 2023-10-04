@@ -25,11 +25,11 @@ use adnl::{
         CountedObject, Counter
     }
 };
-use std::{io::{Cursor, Write}, sync::{Arc, Weak}};
+use std::{io::{Cursor, Write, Read}, sync::{Arc, Weak}};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use ton_block::{BlockIdExt, ShardIdent};
-use ton_types::{error, fail, Result, UInt256};
+use ton_types::{error, fail, Result, UInt256, ByteOrderRead};
 
 const FLAG_DATA: u32                             = 0x00000001;
 const FLAG_PROOF: u32                            = 0x00000002;
@@ -46,9 +46,11 @@ pub(crate) const FLAG_KEY_BLOCK: u32             = 0x00000800;
 const FLAG_MOVED_TO_ARCHIVE: u32                 = 0x00002000;
 pub(crate) const FLAG_IS_QUEUE_UPDATE: u32       = 0x00004000;
 pub(crate) const FLAG_IS_EMPTY_QUEUE_UPDATE: u32 = 0x00008000;
+const FLAG_STATE_SAVED: u32                      = 0x00010000;
+const FLAG_HAS_FULL_ID: u32                      = 0x00020000;
 
-// not serializing flags
-const FLAG_ARCHIVING: u32            = 0x80000000;
+// not serializing flags (possible flags - 1, 2, 4, 8)
+const FLAG_ARCHIVING: u32 = 0x80000000;
 
 /// Meta information related to block
 #[derive(Debug)]
@@ -84,8 +86,71 @@ impl BlockHandle {
         }
     }
 
-    pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
-        self.meta.serialize(writer)
+    fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
+        self.meta.serialize(writer)?;
+        let id = self.id();
+        writer.write_all(&id.shard().workchain_id().to_le_bytes())?;
+        writer.write_all(&id.shard().shard_prefix_with_tag().to_le_bytes())?;
+        writer.write_all(&id.seq_no().to_le_bytes())?;
+        writer.write_all(id.file_hash().as_slice())?;
+        Ok(())
+    }
+
+    fn deserialize<R: Read>(id: &BlockIdExt, read: &mut R) -> Result<BlockMeta> {
+        let meta = BlockMeta::deserialize(read)?;
+        if (meta.flags() & FLAG_HAS_FULL_ID) == FLAG_HAS_FULL_ID {
+            let workchain_id = read.read_le_u32()? as i32;
+            if workchain_id != id.shard().workchain_id() {
+                fail!(
+                    "BlockHandle::deserialize: workchain_id mismatch: {} != {}",
+                    workchain_id,
+                    id.shard().workchain_id()
+                )
+            }
+            let shard_prefix = read.read_le_u64()?;
+            if shard_prefix != id.shard().shard_prefix_with_tag() {
+                fail!(
+                    "BlockHandle::deserialize: shard_prefix mismatch: {} != {}",
+                    shard_prefix,
+                    id.shard().shard_prefix_with_tag()
+                )
+            }
+            let seq_no = read.read_le_u32()?;
+            if seq_no != id.seq_no() {
+                fail!(
+                    "BlockHandle::deserialize: seq_no mismatch: {} != {}",
+                    seq_no,
+                    id.seq_no()
+                )
+            }
+            let file_hash = UInt256::with_array(read.read_u256()?);
+            if file_hash != *id.file_hash() {
+                fail!(
+                    "BlockHandle::deserialize: file_hash mismatch: {} != {}",
+                    file_hash,
+                    id.file_hash()
+                )
+            }
+        }
+        Ok(meta)
+    }
+
+    fn deserialize_full_id<R: Read>(root_hash: &UInt256, read: &mut R) -> Result<Option<BlockIdExt>> {
+        let meta = BlockMeta::deserialize(read)?;
+        if (meta.flags() & FLAG_HAS_FULL_ID) == FLAG_HAS_FULL_ID {
+            let workchain_id = read.read_le_u32()? as i32;
+            let shard_prefix = read.read_le_u64()?;
+            let seq_no = read.read_le_u32()?;
+            let file_hash = UInt256::with_array(read.read_u256()?);
+            Ok(Some(BlockIdExt::with_params(
+                ShardIdent::with_tagged_prefix(workchain_id, shard_prefix)?,
+                seq_no,
+                root_hash.clone(),
+                file_hash,
+            ))) 
+        } else {
+            Ok(None)
+        }
     }
 
 /*
@@ -138,6 +203,10 @@ impl BlockHandle {
 
     pub fn set_state(&self) -> bool {
         self.set_flag(FLAG_STATE)
+    }
+
+    pub fn set_state_saved(&self) -> bool {
+        self.set_flag(FLAG_STATE_SAVED)
     }
 
     pub fn set_persistent_state(&self) -> bool {
@@ -223,8 +292,12 @@ impl BlockHandle {
         self.is_flag_set(FLAG_STATE)
     }
 
+    pub fn has_saved_state(&self) -> bool {
+        self.is_flag_set(FLAG_STATE_SAVED)
+    }
+
     pub fn reset_state(&self) {
-        self.meta.reset(FLAG_STATE, false);
+        self.meta.reset(FLAG_STATE | FLAG_STATE_SAVED, false);
     }
 
     pub fn has_persistent_state(&self) -> bool {
@@ -387,12 +460,15 @@ impl BlockHandle {
 
 impl Drop for BlockHandle {
     fn drop(&mut self) {
-        self.block_handle_cache.remove_with(&self.id, |(_id, weak)| {
+        self.block_handle_cache.remove_with(self.id.root_hash(), |(_id, weak)| {
             weak.object.strong_count() == 0
         });
     }
 }
 
+// Real value is
+// - BlockMeta if FLAG_HAS_FULL_ID is not set
+// - BlockMeta + wc (i32) + shard (u64) + seqno (u32) + file_hash (UInt256) if FLAG_HAS_FULL_ID is set
 db_impl_serializable!(BlockHandleDb, KvcWriteable, BlockIdExt, BlockMeta);
 
 declare_counted!(
@@ -401,7 +477,7 @@ declare_counted!(
     }
 );
 
-type BlockHandleCache = lockfree::map::Map<BlockIdExt, HandleObject>;
+type BlockHandleCache = lockfree::map::Map<UInt256, HandleObject>;
 
 #[derive(Debug)]
 pub enum StoreJob {
@@ -469,10 +545,16 @@ impl BlockHandleStorage {
                     }
                 }
 
+                fn save_handle(handle: &BlockHandle, db: &BlockHandleDb) -> Result<()> {
+                    let mut value = Vec::new();
+                    handle.serialize(&mut value)?;
+                    db.put_raw(handle.id().root_hash().as_slice(), &value)
+                }
+
                 while let Some((job, callback)) = reader.recv().await {
                     let ok = match &job {
                         StoreJob::SaveHandle(handle) => {
-                            if let Err(e) = handle_db.put_value(handle.id(), handle.meta()) {
+                            if let Err(e) = save_handle(handle, &handle_db) {
                                 log::error!(
                                     target: TARGET, 
                                     "{} while storing handle {}", 
@@ -534,6 +616,7 @@ impl BlockHandleStorage {
         meta: BlockMeta,
         callback: Option<Arc<dyn Callback>>
     ) -> Result<Option<Arc<BlockHandle>>> {
+        meta.set_flags(FLAG_HAS_FULL_ID);
         self.create_handle_and_store(id, meta, callback, true)
     }
 
@@ -550,15 +633,36 @@ impl BlockHandleStorage {
     pub fn load_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
         log::trace!(target: TARGET, "load block handle {}", id);
         let ret = loop {
-            let weak = self.handle_cache.get(id);
+            let weak = self.handle_cache.get(id.root_hash());
             if let Some(Some(handle)) = weak.map(|weak| weak.val().object.upgrade()) {
                 break Some(handle)
             }
-            if let Some(meta) = self.handle_db.try_get_value(id)? {
+            if let Some(data) = self.handle_db.try_get_raw(id.root_hash().as_slice())? {
+                let mut cursor = Cursor::new(data);
+                let meta = BlockHandle::deserialize(id, &mut cursor)?;
+                meta.set_flags(FLAG_HAS_FULL_ID);
+
                 let handle = self.create_handle_and_store(id.clone(), meta, None, false)?;
                 if let Some(handle) = handle {
                     break Some(handle)
                 }
+            } else {
+                break None
+            }
+        };
+        Ok(ret)
+    }
+
+    pub fn load_full_block_id(&self, root_hash: &UInt256) -> Result<Option<BlockIdExt>> {
+        log::trace!(target: TARGET, "load_full_block_id {:x}", root_hash);
+        let ret = loop {
+            let weak = self.handle_cache.get(root_hash);
+            if let Some(Some(handle)) = weak.map(|weak| weak.val().object.upgrade()) {
+                break Some(handle.id.clone())
+            }
+            if let Some(data) = self.handle_db.try_get_raw(root_hash.as_slice())? {
+                let mut cursor = Cursor::new(data);
+                break BlockHandle::deserialize_full_id(root_hash, &mut cursor)?
             } else {
                 break None
             }
@@ -615,7 +719,7 @@ impl BlockHandleStorage {
         id: BlockIdExt, 
         callback: Option<Arc<dyn Callback>>
     ) -> Result<()> {
-        let _ = self.handle_cache.remove(&id);
+        let _ = self.handle_cache.remove(id.root_hash());
         self.storer.send((StoreJob::DropHandle(id.clone()), callback)).map_err(
             |_| error!("Cannot drop handle {}: storer thread dropped", id)
         )?;
@@ -644,7 +748,7 @@ impl BlockHandleStorage {
         let ret = Arc::new(BlockHandle::with_values(id.clone(), meta, self.handle_cache.clone()));
         let added = add_counted_object_to_map(
             &self.handle_cache, 
-            id, 
+            id.root_hash().clone(), 
             || {
                 let ret = HandleObject {
                     object: Arc::downgrade(&ret),

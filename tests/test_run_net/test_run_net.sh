@@ -1,17 +1,18 @@
-REMP_TEST=$1
-NODES=6
-# WORKCHAINS=true
+REMP_TEST=false
+NODES=5
+WORKCHAINS=false
 CURRENT_BRANCH="$(git branch --show-current)"
 echo "Current branch: $CURRENT_BRANCH"
+ROOT="./tmp"
 
-apt update
-apt install jq
+# apt update
+# apt install jq
 
 if [ ! "$REMP_TEST" == "true" ]
 then
     echo "No Remp testing: $REMP_TEST"
 else
-    echo "Remp testing in progress"
+    echo "Remp testing in progress. Make sure you have enabled a REMP capability in a zerostate."
 fi
 
 if [ "$WORKCHAINS" == "true" ]
@@ -31,7 +32,7 @@ NODE_TARGET=$TEST_ROOT/../../target/release/
 ./remove_junk.sh $NODE_TARGET $NODES > /dev/null 2>&1
 echo "Building $(pwd)"
 
-if ! cargo build --release --features "telemetry"
+if ! cargo build --release
 then
     exit 1
 fi
@@ -61,15 +62,17 @@ NOWDATE=$(date +"%s")
 NOWIP="127.0.0.1"
 echo "  IP = $NOWIP"
 
-declare -A VALIDATOR_PUB_KEY_HEX=();
-declare -A VALIDATOR_PUB_KEY_BASE64=();
+declare -a VALIDATOR_PUB_KEY_HEX=();
+declare -a VALIDATOR_PUB_KEY_BASE64=();
 
 # Fake config just to start nodes
 cat $TEST_ROOT/ton-global.config_1.json > $NODE_TARGET/ton-global.config.json
 cat $TEST_ROOT/ton-global.config_2.json >> $NODE_TARGET/ton-global.config.json
 
-rm -rd tmp > /dev/null 2>&1
-mkdir tmp
+mkdir tmp > /dev/null 2>&1
+rm -rd tmp/* > /dev/null 2>&1
+mkdir tmp/blocks/ > /dev/null 2>&1
+
 
 # 0 is full node
 for (( N=0; N <= $NODES; N++ ))
@@ -79,7 +82,7 @@ do
     echo "Cleaning up #$N..."
     rm -r -d node_db_$N > /dev/null 2>&1
     rm -r -d configs_$N > /dev/null 2>&1
-    rm /shared/output_$N.log > /dev/null 2>&1
+    rm $ROOT/output_$N.log > /dev/null 2>&1
 
 
     echo "Validator's #$N config generating..."
@@ -126,8 +129,8 @@ do
 
     rm tmp_output > /dev/null 2>&1
     ./ton_node --configs . --ckey "$(cat console_public_json)" > tmp_output &
-    echo "  waiting for 20 secs"
-    sleep 20
+    echo "  waiting for 5 secs"
+    sleep 5
     if [ ! -f "console_config.json" ]; then
         echo "ERROR: console_config.json does not exist"
         exit 1
@@ -239,48 +242,52 @@ do
     sed "s/NODE_NUM/$N/g" $TEST_ROOT/log_cfg.yml > $NODE_TARGET/configs_$N/log_cfg_$N.yml
     cp $TEST_ROOT/tmp/ton-global.config.json $NODE_TARGET/configs_$N/ton-global.config.json
 
-    # rm /shared/output_$N.log
-    ./ton_node --configs configs_$N -z . > "/shared/node_$N.output" 2>&1 &
+    # rm $ROOT/output_$N.log
+    ./ton_node --configs configs_$N -z . > "$ROOT/node_$N.output" 2>&1 &
 
 done
 
 date
-echo "Waiting 10mins for 200th master block"
-sleep 600
+echo "Started"
 
-function find_block {
-    for (( N=1; N <= $NODES; N++ ))
-    do
-        if cat "/shared/output_$N.log" | egrep -q "Applied(.*)$1"
-        then
-            echo "Applied block ($1) - FOUND on node #$N!"
-        else
-            echo "ERROR: Can't find applied block ($1) on node #$N!"
-        fi
-    done
-}
+exit 0
 
-find_block "-1\:8000000000000000, 200"
+# echo "Waiting 10mins for 200th master block"
+# sleep 600
 
-if [ ! "$REMP_TEST" == "true" ]
-then
-    echo "Waiting more for all shard's 200th blocks"
-    sleep 600
-    find_block "0\:2000000000000000, 200"
-    find_block "0\:6000000000000000, 200"
-    find_block "0\:a000000000000000, 200"
-    find_block "0\:e000000000000000, 200"
+# function find_block {
+#     for (( N=1; N <= $NODES; N++ ))
+#     do
+#         if cat "$ROOT/output_$N.log" | egrep -q "Applied(.*)$1"
+#         then
+#             echo "Applied block ($1) - FOUND on node #$N!"
+#         else
+#             echo "ERROR: Can't find applied block ($1) on node #$N!"
+#         fi
+#     done
+# }
 
-    if [ "$WORKCHAINS" == "true" ]
-    then
-        find_block "1\:2000000000000000, 200"
-        find_block "1\:6000000000000000, 200"
-        find_block "1\:a000000000000000, 200"
-	find_block "1\:e000000000000000, 200"
-    fi
-fi
+# find_block "-1\:8000000000000000, 200"
 
-# pkill ton_node
+# if [ ! "$REMP_TEST" == "true" ]
+# then
+#     echo "Waiting more for all shard's 200th blocks"
+#     sleep 600
+#     find_block "0\:2000000000000000, 200"
+#     find_block "0\:6000000000000000, 200"
+#     find_block "0\:a000000000000000, 200"
+#     find_block "0\:e000000000000000, 200"
+
+#     if [ "$WORKCHAINS" == "true" ]
+#     then
+#         find_block "1\:2000000000000000, 200"
+#         find_block "1\:6000000000000000, 200"
+#         find_block "1\:a000000000000000, 200"
+# 	find_block "1\:e000000000000000, 200"
+#     fi
+# fi
+
+# # pkill ton_node
 
 
-echo "TEST PASSED"
+# echo "TEST PASSED"

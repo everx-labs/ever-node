@@ -11,6 +11,11 @@
 * limitations under the License.
 */
 
+use crate::{
+    block::BlockStuff, block_proof::BlockProofStuff, engine_traits::{ChainRange, ExternalDb}, 
+    error::NodeError, external_db::WriteData, shard_state::ShardStateStuff
+};
+
 use std::{
     collections::{hash_set::HashSet, BTreeMap, HashMap},
     convert::TryInto,
@@ -34,12 +39,6 @@ use ton_api::ton::ton_node::RempReceipt;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::{
-    block::BlockStuff, block_proof::BlockProofStuff, engine::STATSD,
-    engine_traits::{ChainRange, ExternalDb}, error::NodeError, external_db::WriteData,
-    shard_state::ShardStateStuff,
-};
-
 lazy_static::lazy_static!(
     static ref ACCOUNT_NONE_HASH: UInt256 = Account::default().serialize().unwrap().repr_hash();
     static ref MINTER_ADDRESS: MsgAddressInt = 
@@ -47,13 +46,14 @@ lazy_static::lazy_static!(
 );
 
 enum DbRecord {
-    Empty,
+    _Empty,
     Message(String, String),
     Transaction(String, String),
     Account(String, String, Option<u32>),
     BlockProof(String, String, Option<u32>),
+    RawBlockProof([u8; 32], Vec<u8>, Option<u32>),
     Block(String, String),
-    RawBlock([u8; 32], [u8; 32], Vec<u8>, u32, Option<u32>)
+    RawBlock([u8; 32], [u8; 32], Vec<u8>, u32, Option<u32>),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -68,36 +68,70 @@ struct ChainRangeData {
     pub shard_blocks_ids: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct ShardHashData {
+    pub workchain: i32,
+	pub seqno: u32,
+	pub shard: String,
+	pub root_hash: String,
+}
+
+impl From<&BlockIdExt> for ShardHashData {
+    fn from(value: &BlockIdExt) -> Self {
+        Self {
+            workchain: value.shard_id.workchain_id(),
+            seqno: value.seq_no,
+            shard: value.shard_id.shard_prefix_as_str_with_tag(),
+            root_hash: value.root_hash.to_hex_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ShardHashesData {
+    pub shards: Vec<ShardHashData>,
+}
+
+impl From<&[BlockIdExt]> for ShardHashesData {
+    fn from(value: &[BlockIdExt]) -> Self {
+        Self {
+            shards: value.iter().map(ShardHashData::from).collect::<Vec<_>>()
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Writers<T: 'static + WriteData> {
+    pub write_block: T,
+    pub write_raw_block: T,
+    pub write_message: T,
+    pub write_transaction: T,
+    pub write_account: T,
+    pub write_block_proof: T,
+    pub write_raw_block_proof: T,
+    pub write_chain_range: T,
+    pub write_remp_statuses: T,
+    pub write_shard_hashes: T,
+}
+
 pub(super) struct Processor<T: 'static + WriteData> {
-    write_block: T,
-    write_raw_block: T,
-    write_message: T,
-    write_transaction: T,
-    write_account: T,
-    write_block_proof: T,
-    write_chain_range: T,
-    write_remp_statuses: T,
+    writers: Writers<T>,
     //remp_statuses_sender: tokio::sync::mpsc::UnboundedSender<(String, String)>,
     //remp_statuses_in_channel: Arc<AtomicU64>,
     bad_blocks_storage: String,
     front_workchain_ids: Vec<i32>, // write only this workchain, or write all if None
     max_account_bytes_size: Option<usize>,
+    control_id: String,
 }
 
 impl<T: 'static + WriteData> Processor<T> {
 
     pub fn new(
-        write_block: T,
-        write_raw_block: T,
-        write_message: T,
-        write_transaction: T,
-        write_account: T,
-        write_block_proof: T,
-        write_chain_range: T,
-        write_remp_statuses: T,
+        writers: Writers<T>,
         bad_blocks_storage: String,
         front_workchain_ids: Vec<i32>,
         max_account_bytes_size: Option<usize>,
+        control_id: [u8; 32],
     ) 
     -> Self {
         log::trace!("Processor::new workchains {:?}", front_workchain_ids);
@@ -113,19 +147,13 @@ impl<T: 'static + WriteData> Processor<T> {
         // });
 
         Processor {
-            write_block,
-            write_raw_block,
-            write_message,
-            write_transaction,
-            write_account,
-            write_block_proof,
-            write_chain_range,
-            write_remp_statuses,
+            writers,
             //remp_statuses_sender,
             //remp_statuses_in_channel,
             bad_blocks_storage,
             front_workchain_ids,
             max_account_bytes_size,
+            control_id: hex::encode(&control_id),
         }
     }
 
@@ -268,6 +296,9 @@ impl<T: 'static + WriteData> Processor<T> {
         max_account_bytes_size: Option<usize>,
         last_trans_chain_order: Option<String>,
     ) -> Result<DbRecord> {
+        let mut boc1 = None;
+        let mut boc = vec![];
+        let mut skip_data = false;
         if let Some(max_size) = max_account_bytes_size {
             let size = account.storage_info()
                 .map(|si| si.used().bits() / 8)
@@ -278,18 +309,18 @@ impl<T: 'static + WriteData> Processor<T> {
                     account.get_addr().map(|a| a.to_string()).unwrap_or_else(|| "unknown".into()),
                     size
                 );
-                return Ok(DbRecord::Empty)
+                skip_data = true;
             }
         }
-        
-        let mut boc1 = None;
-        if account.init_code_hash().is_some() {
-            // new format
-            let mut builder = BuilderData::new();
-            account.write_original_format(&mut builder)?;
-            boc1 = Some(write_boc(&builder.into_cell()?)?);
+        if !skip_data {
+            if account.init_code_hash().is_some() {
+                // new format
+                let mut builder = BuilderData::new();
+                account.write_original_format(&mut builder)?;
+                boc1 = Some(write_boc(&builder.into_cell()?)?);
+            }
+            boc = write_boc(&account.serialize()?.into())?;
         }
-        let boc = write_boc(&account.serialize()?.into())?;
 
         let account_id = match account.get_id() {
             Some(id) => id,
@@ -405,6 +436,17 @@ impl<T: 'static + WriteData> Processor<T> {
         ))
     }
 
+    fn prepare_raw_block_proof_record(
+        proof: &BlockProof,
+        partition_key: Option<u32>,
+    ) -> Result<DbRecord> {
+        Ok(DbRecord::RawBlockProof(
+            *proof.proof_for.root_hash().as_array(),
+            proof.write_to_bytes()?,
+            partition_key,
+        ))
+    }
+
     fn process_parsing_error(&self, block: &BlockStuff, e: failure::Error) {
         log::error!(
             "Error while parsing block (before put into kafka): {}   block: {}", 
@@ -440,12 +482,13 @@ impl<T: 'static + WriteData> Processor<T> {
         if !self.process_workchain(block_stuff.id().shard().workchain_id()) {
             return Ok(())
         }
-        let process_block = self.write_block.enabled();
-        let process_raw_block = self.write_raw_block.enabled();
-        let process_message = self.write_message.enabled();
-        let process_transaction = self.write_transaction.enabled();
-        let process_account = self.write_account.enabled();
-        let process_block_proof = self.write_block_proof.enabled();
+        let process_block = self.writers.write_block.enabled();
+        let process_raw_block = self.writers.write_raw_block.enabled();
+        let process_message = self.writers.write_message.enabled();
+        let process_transaction = self.writers.write_transaction.enabled();
+        let process_account = self.writers.write_account.enabled();
+        let process_block_proof = self.writers.write_block_proof.enabled();
+        let process_raw_block_proof = self.writers.write_raw_block_proof.enabled();
         let block_id = block_stuff.id().clone();
         let block = block_stuff.block()?.clone();
         let proof = block_proof.map(|p| p.proof().clone());
@@ -455,10 +498,11 @@ impl<T: 'static + WriteData> Processor<T> {
         let block_order = ton_block_json::block_order(&block, mc_seq_no)?;
         let workchain_id = block.read_info()?.shard().workchain_id();
         let shard_accounts = state.map(|s| s.state()?.read_accounts()).transpose()?;
-        let accounts_sharding_depth = self.write_account.sharding_depth();
+        let accounts_sharding_depth = self.writers.write_account.sharding_depth();
         let max_account_bytes_size = self.max_account_bytes_size;
-        let block_proofs_sharding_depth = self.write_block_proof.sharding_depth();
-        let raw_blocks_sharding_depth = self.write_raw_block.sharding_depth();
+        let block_proofs_sharding_depth = self.writers.write_block_proof.sharding_depth();
+        let raw_block_proofs_sharding_depth = self.writers.write_raw_block_proof.sharding_depth();
+        let raw_blocks_sharding_depth = self.writers.write_raw_block.sharding_depth();
 
         let (prev_shard_accounts1, prev_shard_accounts2, prev_shard1) = match prev_states {
             Some((prev1, Some(prev2))) => {
@@ -624,8 +668,8 @@ impl<T: 'static + WriteData> Processor<T> {
                         }
                     }
                     log::trace!("TIME: accounts {} {}ms;   {}", changed_acc.len(), now.elapsed().as_millis(), block_id);
-                    STATSD.timer("accounts_parsing_time", now.elapsed().as_micros() as f64 / 1000f64);
-                    STATSD.histogram("parsed_accounts_count", changed_acc.len() as f64);
+                    metrics::histogram!("accounts_parsing_time", now.elapsed());
+                    metrics::histogram!("parsed_accounts_count", changed_acc.len() as f64);
                 }
             }
 
@@ -646,13 +690,25 @@ impl<T: 'static + WriteData> Processor<T> {
 
             // Block proof
             if process_block_proof {
-                if let Some(proof) = proof {
+                if let Some(proof) = &proof {
                     let now = std::time::Instant::now();
                     let partition_key = Self::get_block_partition_key(&block_id, block_proofs_sharding_depth);
                     db_records.push(
-                        Self::prepare_block_proof_record(&proof, partition_key, block_order)?
+                        Self::prepare_block_proof_record(proof, partition_key, block_order)?
                     );
                     log::trace!("TIME: block proof {}ms;   {}", now.elapsed().as_millis(), block_id);
+                }
+            }
+
+            // Raw block proof
+            if process_raw_block_proof {
+                if let Some(proof) = &proof {
+                    let now = std::time::Instant::now();
+                    let partition_key = Self::get_block_partition_key(&block_id, raw_block_proofs_sharding_depth);
+                    db_records.push(
+                        Self::prepare_raw_block_proof_record(proof, partition_key)?
+                    );
+                    log::trace!("TIME: raw block proof {}ms;   {}", now.elapsed().as_millis(), block_id);
                 }
             }
 
@@ -688,13 +744,14 @@ impl<T: 'static + WriteData> Processor<T> {
         let mut send_tasks = vec!();
         for record in db_records {
             match record {
-                DbRecord::Message(key, value) => send_tasks.push(self.write_message.write_data(key, value, None, None)),
-                DbRecord::Transaction(key, value) => send_tasks.push(self.write_transaction.write_data(key, value, None, None)),
-                DbRecord::Account(key, value, partition_key) => send_tasks.push(self.write_account.write_data(key, value, None, partition_key)),
-                DbRecord::Block(key, value) => send_tasks.push(self.write_block.write_data(key, value, None, None)),
-                DbRecord::BlockProof(key, value, partition_key) => send_tasks.push(self.write_block_proof.write_data(key, value, None, partition_key)),
+                DbRecord::Message(key, value) => send_tasks.push(self.writers.write_message.write_data(key, value, None, None)),
+                DbRecord::Transaction(key, value) => send_tasks.push(self.writers.write_transaction.write_data(key, value, None, None)),
+                DbRecord::Account(key, value, partition_key) => send_tasks.push(self.writers.write_account.write_data(key, value, None, partition_key)),
+                DbRecord::Block(key, value) => send_tasks.push(self.writers.write_block.write_data(key, value, None, None)),
+                DbRecord::BlockProof(key, value, partition_key) => send_tasks.push(self.writers.write_block_proof.write_data(key, value, None, partition_key)),
+                DbRecord::RawBlockProof(key, value, partition_key) => send_tasks.push(self.writers.write_raw_block_proof.write_raw_data(key.to_vec(), value, None, partition_key)),
                 DbRecord::RawBlock(key, file_hash, value, mc_seq_no, partition_key) =>  send_tasks.push(Box::pin(self.send_raw_block(key, value, mc_seq_no, file_hash, partition_key))),
-                DbRecord::Empty => {}
+                DbRecord::_Empty => {}
             } 
         }
 
@@ -721,7 +778,7 @@ impl<T: 'static + WriteData> Processor<T> {
             ("file_hash", &file_hash[..]),
             ("raw_block_timestamp", &raw_block_timestamp.to_be_bytes()[..]),
         ];
-        self.write_raw_block.write_raw_data(key.to_vec(), value, Some(&attributes), partition_key).await
+        self.writers.write_raw_block.write_raw_data(key.to_vec(), value, Some(&attributes), partition_key).await
     }
 
     #[allow(dead_code)]
@@ -761,7 +818,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
             return Ok(())
         }
 
-        if self.write_account.enabled() {
+        if self.writers.write_account.enabled() {
             let mut total_accounts = 0;
             let mut last_portion = false;
             let mut iterator = HashmapIterator::from_hashmap(&state.state()?.read_accounts()?);
@@ -782,7 +839,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
                     let record = Self::prepare_account_record(
                         acc, 
                         None,
-                        self.write_account.sharding_depth(),
+                        self.writers.write_account.sharding_depth(),
                         self.max_account_bytes_size,
                         None,
                     )?;
@@ -792,8 +849,8 @@ impl<T: WriteData> ExternalDb for Processor<T> {
                 futures::future::join_all(
                     accounts.into_iter().map(|r| {
                         match r {
-                            DbRecord::Account(key, value, partition_key) => self.write_account.write_data(key, value, None, partition_key),
-                            DbRecord::Empty => Box::pin(async{Ok(())}),
+                            DbRecord::Account(key, value, partition_key) => self.writers.write_account.write_data(key, value, None, partition_key),
+                            DbRecord::_Empty => Box::pin(async{Ok(())}),
                             _ => unreachable!(),
                         }
                     })
@@ -804,8 +861,8 @@ impl<T: WriteData> ExternalDb for Processor<T> {
                 .unwrap_or(Ok(()))?;
             }
 
-            STATSD.timer("full_state_parsing_time", now.elapsed().as_micros() as f64 / 1000f64);
-            STATSD.histogram("full_state_accounts_count", total_accounts as f64);
+            metrics::histogram!("full_state_parsing_time", now.elapsed());
+            metrics::histogram!("full_state_accounts_count", total_accounts as f64);
         }
 
         log::trace!("TIME: process_full_state {}ms;   {}", now.elapsed().as_millis(), state.block_id());
@@ -813,11 +870,11 @@ impl<T: WriteData> ExternalDb for Processor<T> {
     }
 
     fn process_chain_range_enabled(&self) -> bool {
-        self.write_chain_range.enabled()
+        self.writers.write_chain_range.enabled()
     }
 
     async fn process_chain_range(&self, range: &ChainRange) -> Result<()> {
-        if self.write_chain_range.enabled() {
+        if self.writers.write_chain_range.enabled() {
             let master_block_id = range.master_block.root_hash().to_hex_string();
             let mut data = ChainRangeData {
                 master_block: ChainRangeMasterBlock {
@@ -831,7 +888,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
                 data.shard_blocks_ids.push(block.root_hash().to_hex_string());
             }
 
-            self.write_chain_range.write_data(
+            self.writers.write_chain_range.write_data(
                 format!("\"{}\"", master_block_id),
                 serde_json::to_string(&data)?,
                 None,
@@ -860,7 +917,24 @@ impl<T: WriteData> ExternalDb for Processor<T> {
         let key = format!("{:x}", id);
         let val = format!("{:#}", 
             serde_json::json!(ton_block_json::db_serialize_remp_status(status, signature)?));
-        self.write_remp_statuses.write_data(key, val, None, None).await?;
+        self.writers.write_remp_statuses.write_data(key, val, None, None).await?;
+        Ok(())
+    }
+
+    fn process_shard_hashes_enabled(&self) -> bool {
+        self.writers.write_shard_hashes.enabled()
+    }
+
+    async fn process_shard_hashes(&self, shard_hashes: &[BlockIdExt]) -> Result<()> {
+        if self.writers.write_shard_hashes.enabled() {
+            self.writers.write_shard_hashes.write_data(
+                self.control_id.clone(),
+                serde_json::to_string(&ShardHashesData::from(shard_hashes))?,
+                None,
+                None
+            ).await?;
+        }
+
         Ok(())
     }
 }

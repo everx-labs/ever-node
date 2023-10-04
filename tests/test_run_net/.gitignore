@@ -9,6 +9,8 @@
 !run_full_node.sh
 !test_run_net.sh
 !test_run_net_ci.sh
+!test_run_net_ci_public.sh
+!test_run_net_ci_venom.sh
 !test_run_workchains.sh
 !ton-global.config_1.json
 !ton-global.config_2.json

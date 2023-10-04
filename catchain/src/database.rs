@@ -12,8 +12,10 @@
 */
 
 use crate::{
-    check_execution_time, instrument, BlockHash, Database, DatabasePtr, RawBuffer
-}; 
+    check_execution_time, instrument, BlockHash, Database, DatabasePtr, RawBuffer,
+    utils::MetricsHandle
+};
+use metrics::Recorder; 
 use std::{path::Path, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 use storage::catchain_persistent_db::CatchainPersistentDb;
 use ton_types::{fail, Result};
@@ -24,8 +26,8 @@ use ton_types::{fail, Result};
 
 pub struct DatabaseImpl {
     db: CatchainPersistentDb,                       //persistent storage
-    put_tx_counter: metrics_runtime::data::Counter, //DB put transactions counter
-    get_tx_counter: metrics_runtime::data::Counter, //DB get transactions counter
+    put_tx_counter: metrics::Counter, //DB put transactions counter
+    get_tx_counter: metrics::Counter, //DB get transactions counter
     destroy_db: Arc<AtomicBool>,                    //DB should be destroyed at drop
 }
 
@@ -64,7 +66,7 @@ impl Database for DatabaseImpl {
         check_execution_time!(50000);
         instrument!();
 
-        self.get_tx_counter.increment();
+        self.get_tx_counter.increment(1);
 
         match self.db.get(hash) {
             Ok(ref data) => Ok(ton_api::ton::bytes(data.as_ref().to_vec())),
@@ -76,7 +78,7 @@ impl Database for DatabaseImpl {
         check_execution_time!(50000);
         instrument!();
 
-        self.put_tx_counter.increment();
+        self.put_tx_counter.increment(1);
 
         match self.db.put(&hash, &data) {
             Err(err) => log::error!("Block {} DB saving error: {:?}", hash, err),
@@ -128,12 +130,12 @@ impl DatabaseImpl {
     pub(crate) fn create(
         path: &str,
         name: &str,
-        metrics_receiver: &metrics_runtime::Receiver,
+        metrics_receiver: &MetricsHandle
     ) -> Result<DatabasePtr> {
         log::debug!("Creating catchain table in DB at path '{}'", path);
 
-        let put_tx_counter = metrics_receiver.sink().counter("db_put_txs");
-        let get_tx_counter = metrics_receiver.sink().counter("db_get_txs");
+        let put_tx_counter = metrics_receiver.sink().register_counter(&"db_put_txs".into());
+        let get_tx_counter = metrics_receiver.sink().register_counter(&"db_get_txs".into());
         let db = CatchainPersistentDb::with_path(path, name)?;
 
         let ret = Self {

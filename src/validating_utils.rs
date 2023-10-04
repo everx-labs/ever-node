@@ -51,7 +51,7 @@ pub fn supported_capabilities() -> u64 {
 }
 
 pub fn supported_version() -> u32 {
-    43
+    44
 }
 
 pub fn check_this_shard_mc_info(
@@ -66,6 +66,8 @@ pub fn check_this_shard_mc_info(
     is_validate: bool,
     now: u32,
 ) -> Result<(u32, bool, bool)> {
+    let next_block_descr = fmt_next_block_descr(block_id);
+
     let mut now_upper_limit = u32::MAX;
     // let mut before_split = false;
     // let mut accept_msgs = false;
@@ -91,7 +93,7 @@ pub fn check_this_shard_mc_info(
     let mut split_allowed = false;
     if !mc_state_extra.shards().has_workchain(shard.workchain_id())? {
         // creating first block for a new workchain
-        log::debug!(target: "validator", "creating first block for workchain {}", shard.workchain_id());
+        log::debug!(target: "validator", "({}): creating first block for workchain {}", next_block_descr, shard.workchain_id());
         fail!("cannot create first block for workchain {} after previous block {} \
             because no shard for this workchain is declared yet",
                 shard.workchain_id(), prev_blocks[0])
@@ -102,7 +104,7 @@ pub fn check_this_shard_mc_info(
     // log::info!(target: "validator", "left for {} is {:?}", block_id(), left.descr());
     if left.shard() == shard {
 
-        log::trace!("check_this_shard_mc_info, block: {} left: {:?}", block_id, left);
+        log::trace!("({}): check_this_shard_mc_info, block: {} left: {:?}", next_block_descr, block_id, left);
 
         // no split/merge
         if after_merge || after_split {
@@ -135,7 +137,7 @@ pub fn check_this_shard_mc_info(
                 if now >= left.descr().fsm_utime() && now + 13 < left.descr().fsm_utime_end() {
                     now_upper_limit = left.descr().fsm_utime_end() - 11;  // ultimate value of now_ must be at most now_upper_limit_
                     before_split = true;
-                    log::info!("BEFORE_SPLIT set for the new block of shard {}", shard);
+                    log::info!("({}): BEFORE_SPLIT set for the new block of shard {}", next_block_descr, shard);
                 }
             }
         }
@@ -327,7 +329,7 @@ pub fn may_update_shard_block_info(
     let mut old_cc_seqno = 0;
     for ob in old_blkids {
 
-        let odef = shards
+        let old_info = shards
             .get_shard(ob.shard())
             .unwrap_or_default()
             .ok_or_else(|| {
@@ -338,8 +340,8 @@ pub fn may_update_shard_block_info(
                 )
             })?;
 
-        if odef.block_id().seq_no() != ob.seq_no() ||
-            &odef.block_id().root_hash != ob.root_hash() || &odef.block_id().file_hash != ob.file_hash() {
+        if old_info.block_id().seq_no() != ob.seq_no() ||
+            &old_info.block_id().root_hash != ob.root_hash() || &old_info.block_id().file_hash != ob.file_hash() {
             fail!(
                 "the start block {} of a top shard block update is not contained \
                 in the previous shard configuration",
@@ -347,7 +349,7 @@ pub fn may_update_shard_block_info(
             )
         }
 
-        old_cc_seqno = max(old_cc_seqno, odef.descr.next_catchain_seqno);
+        old_cc_seqno = max(old_cc_seqno, old_info.descr.next_catchain_seqno);
 
         if let Some(shards_updated) = shards_updated {
             if shards_updated.contains(ob.shard()) {
@@ -359,22 +361,22 @@ pub fn may_update_shard_block_info(
             }
         }
 
-        if odef.descr.before_split != before_split {
+        if old_info.descr.before_split != before_split {
             fail!(
                 "the shard of the start block {} has before_split={} \
                 but the top shard block update is valid only if before_split={}",
                 ob,
-                odef.descr.before_split,
+                old_info.descr.before_split,
                 before_split,
             )
         }
 
-        if odef.descr.before_merge != before_merge {
+        if old_info.descr.before_merge != before_merge {
             fail!(
                 "the shard of the start block {} has before_merge={} \
                 but the top shard block update is valid only if before_merge={}",
                 ob,
-                odef.descr.before_merge,
+                old_info.descr.before_merge,
                 before_merge,
             )
         }
@@ -387,7 +389,7 @@ pub fn may_update_shard_block_info(
                     new_info.block_id()
                 )
             }
-            if odef.descr.is_fsm_merge() || odef.descr.is_fsm_none() {
+            if old_info.descr.is_fsm_merge() || old_info.descr.is_fsm_none() {
                 fail!(
                     "cannot register a before-split block {} because fsm_split state was not \
                     set for this shard beforehand",
@@ -395,49 +397,44 @@ pub fn may_update_shard_block_info(
                 )
             }
 
-            if new_info.descr.gen_utime < odef.descr.fsm_utime() ||
-                new_info.descr.gen_utime >= odef.descr.fsm_utime() + odef.descr.fsm_interval() {
+            if new_info.descr.gen_utime < old_info.descr.fsm_utime() ||
+                new_info.descr.gen_utime >= old_info.descr.fsm_utime() + old_info.descr.fsm_interval() {
                 fail!(
                     "cannot register a before-split block {} because fsm_split state was \
                     enabled for unixtime {} .. {} but the block is generated at {}",
                     new_info.block_id(),
-                    odef.descr.fsm_utime(),
-                    odef.descr.fsm_utime() + odef.descr.fsm_interval(),
+                    old_info.descr.fsm_utime(),
+                    old_info.descr.fsm_utime() + old_info.descr.fsm_interval(),
                     new_info.descr.gen_utime
                 )
             }
 
         }
         if before_merge {
-            if odef.descr.is_fsm_split() || odef.descr.is_fsm_none() {
+            if old_info.descr.is_fsm_split() || old_info.descr.is_fsm_none() {
                 fail!(
                     "cannot register a merged block {} because fsm_merge state was not \
                     set for shard {} beforehand",
                     new_info.block_id(),
-                    odef.block_id().shard()
+                    old_info.block_id().shard()
                 )
             }
-            if new_info.descr.gen_utime < odef.descr.fsm_utime() ||
-                new_info.descr.gen_utime >= odef.descr.fsm_utime() + odef.descr.fsm_interval() {
+            if new_info.descr.gen_utime < old_info.descr.fsm_utime() ||
+                new_info.descr.gen_utime >= old_info.descr.fsm_utime() + old_info.descr.fsm_interval() {
                 fail!(
                     "cannot register merged block {} because fsm_merge state was \
                     enabled for shard {} for unixtime {} .. {} but the block is generated at {}",
                     new_info.block_id(),
-                    odef.block_id().shard(),
-                    odef.descr.fsm_utime(),
-                    odef.descr.fsm_utime() + odef.descr.fsm_interval(),
+                    old_info.block_id().shard(),
+                    old_info.descr.fsm_utime(),
+                    old_info.descr.fsm_utime() + old_info.descr.fsm_interval(),
                     new_info.descr.gen_utime
                 )
             }
-
-            // TODO FAST FINALITY check collator ranges
-            // if shard is preparing to split/merge - it connot be collated by next collator without split/merge
-            // before_split and before_merge must be set at the last block of the range
-            //
         }
 
         if !before_merge && !before_split {
-            ancestor = Some(odef);
+            ancestor = Some(old_info);
         }
     }
 
@@ -472,3 +469,56 @@ pub fn calc_remp_msg_ordering_hash<'a>(msg_id: &UInt256, prev_blocks_ids: impl I
     UInt256::from(hasher.finalize().as_slice())
 }
 
+pub fn fmt_block_id_short(block_id: &BlockIdExt) -> String {
+    let rh_part = &block_id.root_hash().as_slice()[0..2];
+    let rh_part = hex::encode(rh_part);
+    format!(
+        "{}:{}, {}, rh {}",
+        block_id.shard().workchain_id(),
+        block_id.shard().shard_prefix_as_str_with_tag(),
+        block_id.seq_no(),
+        rh_part,
+    )
+}
+
+pub fn fmt_next_block_descr(next_block_id: &BlockIdExt) -> String {
+    let rh_part = &next_block_id.root_hash().as_slice()[0..2];
+    let rh_part = hex::encode(rh_part);
+    format!(
+        "{}:{}, {}, rh {}",
+        next_block_id.shard().workchain_id(),
+        next_block_id.shard().shard_prefix_as_str_with_tag(),
+        next_block_id.seq_no(),
+        rh_part,
+    )
+}
+
+pub fn fmt_next_block_descr_from_next_seqno(
+    shard_ident: &ShardIdent,
+    next_seqno_opt: Option<u32>,
+) -> String {
+    match next_seqno_opt {
+        None => format!("{}:{}",
+            shard_ident.workchain_id(), 
+            shard_ident.shard_prefix_as_str_with_tag(),
+        ),
+        Some(next_seqno) => format!("{}:{}, {}",
+            shard_ident.workchain_id(), 
+            shard_ident.shard_prefix_as_str_with_tag(),
+            next_seqno,
+        ),
+    }
+}
+
+pub fn append_rh_to_next_block_descr(
+    next_block_descr: &str,
+    root_hash: &UInt256,
+) -> String {
+    let rh_part = &root_hash.as_slice()[0..2];
+    let rh_part = hex::encode(rh_part);
+    format!(
+        "{}, rh {}",
+        next_block_descr,
+        rh_part,
+    )
+}

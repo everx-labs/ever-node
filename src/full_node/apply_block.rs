@@ -13,7 +13,7 @@
 
 use crate::{
     block::BlockStuff, engine_traits::EngineOperations, shard_state::ShardStateStuff,
-    validating_utils::UNREGISTERED_CHAIN_MAX_LEN
+    validating_utils::{UNREGISTERED_CHAIN_MAX_LEN, fmt_block_id_short}
 };
 use std::{ops::Deref, sync::Arc};
 use storage::block_handle_db::BlockHandle;
@@ -56,9 +56,16 @@ pub async fn apply_block(
         set_prev_ids(&handle, &prev_ids, engine.deref())?;
         if !pre_apply {
             set_next_ids(&handle, &prev_ids, engine.deref())?;
+            let now = std::time::Instant::now();
             engine.process_block_in_ext_db(
                 handle, &block, None, &shard_state, (&prev_states.0, prev_states.1.as_ref()), mc_seq_no
             ).await?;
+            let millis = now.elapsed().as_millis();
+            if millis > 50 {
+                log::warn!("TIME: process_block_in_ext_db {}ms   {}", millis, handle.id());
+            } else {
+                log::trace!("TIME: process_block_in_ext_db {}ms   {}", millis, handle.id());
+            }
         }
     }
     Ok(())
@@ -101,8 +108,9 @@ pub async fn calc_shard_state(
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
     engine: &Arc<dyn EngineOperations>
 ) -> Result<(Arc<ShardStateStuff>, (Arc<ShardStateStuff>, Option<Arc<ShardStateStuff>>))> {
+    let block_descr = fmt_block_id_short(block.id());
 
-    log::trace!("calc_shard_state: block: {}", block.id());
+    log::trace!("({}): calc_shard_state: block: {}", block_descr, block.id());
 
     let (prev_ss_root, prev_ss) = match prev_ids {
         (prev1, Some(prev2)) => {
@@ -124,12 +132,21 @@ pub async fn calc_shard_state(
     let block_id = block.id().clone();
     let engine_cloned = engine.clone();
 
+    let block_descr_clone = block_descr.clone();
     let ss = tokio::task::spawn_blocking(
         move || -> Result<Arc<ShardStateStuff>> {
             let now = std::time::Instant::now();
-            let ss_root = merkle_update.apply_for(&prev_ss_root)?;
-            log::trace!("TIME: calc_shard_state: applied Merkle update {}ms   {}",
-                now.elapsed().as_millis(), block_id);
+            let (ss_root, metrics) = merkle_update.apply_for_with_metrics(&prev_ss_root)?;            
+            let elapsed = now.elapsed();
+            log::trace!("({}): TIME: calc_shard_state: applied Merkle update {}ms   {}",
+                block_descr_clone,
+                elapsed.as_millis(), block_id);
+            #[cfg(feature = "telemetry")]
+            if metrics.loaded_old_cells != 0 {
+                let one_cell_time = metrics.loaded_old_cells_time.as_nanos() / metrics.loaded_old_cells as u128;
+                engine_cloned.engine_telemetry().old_state_cell_load_time.update(one_cell_time as u64);
+            }
+            metrics::histogram!("calc_shard_state_merkle_update_time", elapsed);
             ShardStateStuff::from_state_root_cell(
                 block_id.clone(), 
                 ss_root,
@@ -140,10 +157,7 @@ pub async fn calc_shard_state(
         }
     ).await??;
 
-    let now = std::time::Instant::now();
     let ss = engine.store_state(handle, ss).await?;
-    log::trace!("TIME: calc_shard_state: store_state {}ms   {}",
-            now.elapsed().as_millis(), handle.id());
     Ok((ss, prev_ss))
 }
 
@@ -182,9 +196,16 @@ pub async fn calc_out_msg_queue(
     let ss = tokio::task::spawn_blocking(
         move || -> Result<Arc<ShardStateStuff>> {
             let now = std::time::Instant::now();
-            let ss_root = merkle_update.apply_for(&prev_ss_root)?;
+            let (ss_root, metrics) = merkle_update.apply_for_with_metrics(&prev_ss_root)?;
+            let elapsed = now.elapsed();
             log::trace!("TIME: calc_out_msg_queue: applied Merkle update {}ms   {}",
-                now.elapsed().as_millis(), block_id);
+                elapsed.as_millis(), block_id);
+            #[cfg(feature = "telemetry")]
+            if metrics.loaded_old_cells != 0 {
+                let one_cell_time = metrics.loaded_old_cells_time.as_nanos() / metrics.loaded_old_cells as u128;
+                engine_cloned.engine_telemetry().old_state_cell_load_time.update(one_cell_time as u64);
+            }
+            metrics::histogram!("calc_out_msg_queue_merkle_update_time", elapsed);
             ShardStateStuff::from_out_msg_queue_root_cell(
                 block_id.clone(),
                 ss_root,
@@ -200,6 +221,7 @@ pub async fn calc_out_msg_queue(
     engine.store_state(handle, ss).await?;
     log::trace!("TIME: calc_out_msg_queue: store_state {}ms   {}",
             now.elapsed().as_millis(), handle.id());
+    metrics::histogram!("calc_out_msg_queue_store_state_time", now.elapsed());
     Ok(())
 }
 

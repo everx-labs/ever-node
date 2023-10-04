@@ -90,7 +90,7 @@ impl BlockMeta {
 impl Serializable for BlockMeta {
 
     fn serialize<W: Write>(&self, writer: &mut W) -> Result<()> {
-        const FLAG_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+        const FLAG_MASK: u64 = 0x0FFF_FFFF_FFFF_FFFF;
         let flags = self.flags.load(Ordering::Relaxed) & FLAG_MASK;
         writer.write_all(&flags.to_le_bytes())?;
         writer.write_all(&self.gen_utime.to_le_bytes())?;

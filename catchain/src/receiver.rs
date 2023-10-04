@@ -19,8 +19,9 @@ use crate::{
     ReceiverListenerPtr, ReceiverPtr, ReceiverSourcePtr, ReceiverListener, 
     ReceiverTaskQueue, ReceiverTaskQueuePtr, SessionId, 
     profiling::{InstanceCounter, ResultStatusCounter}, received_block::ReceivedBlockImpl, 
-    ton, utils
+    ton, utils::{self, get_elapsed_time, MetricsHandle}
 };
+use metrics::Recorder;
 use rand::Rng;
 use std::{
     cell::RefCell, collections::{HashMap, VecDeque}, convert::TryInto, sync::Arc, 
@@ -28,7 +29,6 @@ use std::{
 };
 use ton_api::IntoBoxed;
 use ton_types::{error, fail, base64_encode_url_safe, Ed25519KeyOption, Result};
-use crate::utils::get_elapsed_time;
 
 /*
     Constants
@@ -77,13 +77,13 @@ pub(crate) struct ReceiverImpl {
     total_forks: usize,            //total forks number for this receiver
     neighbours: Vec<usize>,        //list of neighbour indices to synchronize
     listener: ReceiverListenerPtr, //listener for callbacks
-    metrics_receiver: Arc<metrics_runtime::Receiver>, //receiver for profiling metrics
+    metrics_receiver: utils::MetricsHandle, //receiver for profiling metrics
     received_blocks_instance_counter: InstanceCounter, //received blocks instances
     in_queries_counter: ResultStatusCounter, //result status counter for queries
     out_queries_counter: ResultStatusCounter, //result status counter for queries
-    in_messages_counter: metrics_runtime::data::Counter, //incoming messages counter
-    out_messages_counter: metrics_runtime::data::Counter, //outgoing messages counter
-    in_broadcasts_counter: metrics_runtime::data::Counter, //incoming broadcasts counter
+    in_messages_counter: metrics::Counter, //incoming messages counter
+    out_messages_counter: metrics::Counter, //outgoing messages counter
+    in_broadcasts_counter: metrics::Counter, //incoming broadcasts counter
     pending_in_db: i32,            //blocks pending to read from DB
     db: Option<DatabasePtr>,       //database with (BlockHash, Payload)
     read_db: bool,                 //flag to indicate receiver is in reading DB mode
@@ -417,7 +417,7 @@ impl Receiver for ReceiverImpl {
     ) -> Result<ReceivedBlockPtr> {
         instrument!();
 
-        self.in_messages_counter.increment();
+        self.in_messages_counter.increment(1);
 
         if let Some(ref source) = self.get_source_by_adnl_id(adnl_id) {
             source.borrow_mut().get_mut_statistics().in_messages_count += 1;
@@ -477,7 +477,7 @@ impl Receiver for ReceiverImpl {
             return;
         }
 
-        self.in_broadcasts_counter.increment();
+        self.in_broadcasts_counter.increment(1);
 
         self.notify_on_broadcast(source_key_hash, &data);
     }
@@ -629,7 +629,7 @@ impl Receiver for ReceiverImpl {
         Profiling tools
     */
 
-    fn get_metrics_receiver(&self) -> &metrics_runtime::Receiver {
+    fn get_metrics_receiver(&self) -> &utils::MetricsHandle {
         &self.metrics_receiver
     }
 
@@ -1704,7 +1704,7 @@ impl ReceiverImpl {
                                 self.process_get_difference_query(
                                     adnl_id,
                                     &message,
-                                    get_elapsed_time(&data.get_creation_time()),
+                                    get_elapsed_time(&data.get_creation_time())
                                 ),
                             ),
                         )
@@ -2229,7 +2229,7 @@ impl ReceiverImpl {
                 source.borrow_mut().get_mut_statistics().out_messages_count += 1;
             }
 
-            self.out_messages_counter.increment();
+            self.out_messages_counter.increment(1);
 
             listener.borrow_mut().send_message(
                 receiver_adnl_id,
@@ -2254,7 +2254,7 @@ impl ReceiverImpl {
                 serialized_block_with_payload
             );
 
-            self.out_messages_counter.increment();
+            self.out_messages_counter.increment(1);
 
             for receiver_adnl_id in receiver_adnl_ids {
                 if let Some(ref source) = self.get_source_by_adnl_id(receiver_adnl_id) {
@@ -2424,16 +2424,12 @@ impl ReceiverImpl {
         path: String,
         db_suffix: String,
         allow_unsafe_self_blocks_resync: bool,
-        metrics_receiver: Option<Arc<metrics_runtime::Receiver>>,
+        metrics_receiver: Option<MetricsHandle>,
     ) -> Result<Self> {
         let metrics_receiver = if let Some(metrics_receiver) = metrics_receiver {
             metrics_receiver.clone()
         } else {
-            Arc::new(
-                metrics_runtime::Receiver::builder()
-                    .build()
-                    .expect("failed to create metrics receiver"),
-            )
+            MetricsHandle::new(Some(Duration::from_secs(30)))
         };
         let received_blocks_instance_counter =
             InstanceCounter::new(&metrics_receiver, &"received_blocks".to_owned());
@@ -2441,9 +2437,9 @@ impl ReceiverImpl {
             ResultStatusCounter::new(&metrics_receiver, &"receiver_out_queries".to_owned());
         let in_queries_counter =
             ResultStatusCounter::new(&metrics_receiver, &"receiver_in_queries".to_owned());
-        let out_messages_counter = metrics_receiver.sink().counter("receiver_out_messages");
-        let in_messages_counter = metrics_receiver.sink().counter("receiver_in_messages");
-        let in_broadcasts_counter = metrics_receiver.sink().counter("receiver_in_broadcasts");
+        let out_messages_counter = metrics_receiver.sink().register_counter(&"receiver_out_messages".into());
+        let in_messages_counter = metrics_receiver.sink().register_counter(&"receiver_in_messages".into());
+        let in_broadcasts_counter = metrics_receiver.sink().register_counter(&"receiver_in_broadcasts".into());
 
         let sources_count = ids.len();
 
@@ -2597,7 +2593,7 @@ impl ReceiverImpl {
         path: String,
         db_suffix: String,
         allow_unsafe_self_blocks_resync: bool,
-        metrics: Option<Arc<metrics_runtime::Receiver>>,
+        metrics: Option<MetricsHandle>,
     ) -> Result<ReceiverPtr> {
         let ret = ReceiverImpl::new(
             listener,

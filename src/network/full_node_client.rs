@@ -23,14 +23,14 @@ use adnl::{
     node::AdnlNode
 };
 use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
-use std::{io::Cursor, time::Instant, sync::Arc, time::Duration};
+use std::{io::Cursor, time::Instant, sync::Arc, time::Duration, collections::HashSet};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
 use ton_api::{
     serialize_boxed, serialize_boxed_append, 
     BoxedSerialize, BoxedDeserialize, Deserializer, IntoBoxed,
     ton::{
-        self, TLObject, Bool,
+        self, TLObject,
         rpc::ton_node::{
             DownloadNextBlockFull, DownloadPersistentStateSlice, DownloadZeroState,
             PreparePersistentState, DownloadBlockProof, DownloadBlockProofLink,
@@ -89,7 +89,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
         &self, 
         id: &BlockIdExt
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)>;
-    async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, max_size: i32) -> Result<(Vec<BlockIdExt>, bool)>;
+    async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, max_size: i32) -> Result<Vec<BlockIdExt>>;
     async fn download_next_block_full(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
     async fn download_archive(
         &self, 
@@ -269,7 +269,10 @@ impl NodeClientOverlay {
             &self.overlay_id, 
             timeout
         ).await?;
-        let roundtrip = now.elapsed().as_millis() as u64;
+        let elapsed = now.elapsed();
+        let roundtrip = elapsed.as_millis() as u64;
+        let labels = [("peer", peer.id().to_string())];
+        metrics::histogram!("adnl_query_roundtrip_time", elapsed, &labels);
 
         if let Some(answer) = answer {
             match answer.downcast::<D>() {
@@ -465,7 +468,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             &self.overlay_id, 
             &broadcast, 
             None,
-            self.network_context.broadcast_hops
+            false
         ).await
     }
     
@@ -480,7 +483,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             &self.overlay_id, 
             &broadcast, 
             None,
-            self.network_context.broadcast_hops
+            false
         ).await?;
         log::trace!(
             "send_block_broadcast {} (overlay {}) sent to {} nodes", 
@@ -501,7 +504,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             &self.overlay_id,
             &broadcast,
             None,
-            self.network_context.broadcast_hops
+            false
         ).await?;
         log::trace!(
             "send_queue_update_broadcast {} for wc {} (overlay {}) sent to {} nodes", 
@@ -523,7 +526,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             &self.overlay_id, 
             &broadcast, 
             None,
-            self.network_context.broadcast_hops
+            true
         ).await?;
         log::trace!(
             "send_top_shard_block_description {} (overlay {}) sent to {} nodes", 
@@ -918,23 +921,35 @@ Ok(if key_block {
     // tonNode.getNextKeyBlockIds block:tonNode.blockIdExt max_size:int = tonNode.KeyBlocks;
     async fn download_next_key_blocks_ids(
         &self, 
-        block_id: &BlockIdExt, 
-        max_size: i32, 
-    ) -> Result<(Vec<BlockIdExt>, bool)> {
-        let query = TaggedObject {
-            object: GetNextKeyBlockIds {
-                block: block_id.clone(),
-                max_size
-            },
-            #[cfg(feature = "telemetry")]
-            tag: self.tag_get_next_key_block_ids
-        };
-        let (ids, _): (KeyBlocks, _) = self.send_adnl_query(query, None, None, None).await?;
+        block_id: &BlockIdExt,
+        max_size: i32,
+    ) -> Result<Vec<BlockIdExt>> {
+        let max_attempts = 100;
+        let max_neighbours = 10;
+        let mut neighbours = HashSet::new();
         let mut vec = Vec::new();
-        for id in ids.blocks().iter() {
-            vec.push(id.clone());
+        for _ in 0..max_attempts {
+            let query = TaggedObject {
+                object: GetNextKeyBlockIds {
+                    block: block_id.clone(),
+                    max_size,
+                },
+                #[cfg(feature = "telemetry")]
+                tag: self.tag_get_next_key_block_ids
+            };
+            let (ids, neighbour): (KeyBlocks, _) = self.send_adnl_query(query, None, None, None).await?;
+            if !ids.blocks().is_empty() {
+                for id in ids.blocks().iter() {
+                    vec.push(id.clone());
+                }
+                break;
+            }
+            neighbours.insert(neighbour.id().clone());
+            if neighbours.len() == max_neighbours {
+                break;
+            }
         }
-        Ok((vec, ids.incomplete() == &Bool::BoolTrue))
+        Ok(vec)
     }
 
     // tonNode.downloadNextBlockFull prev_block:tonNode.blockIdExt = tonNode.DataFull;

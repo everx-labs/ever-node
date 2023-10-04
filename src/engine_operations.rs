@@ -13,8 +13,7 @@
 
 use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, 
-    config::{CollatorTestBundlesGeneralConfig, CollatorConfig},
-    engine::{Engine, STATSD},
+    config::{CollatorTestBundlesGeneralConfig, CollatorConfig}, engine::{Engine, EngineFlags},
     engine_traits::{
         ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, Server,
         RempCoreInterface, RempDuplicateStatus
@@ -251,6 +250,10 @@ impl EngineOperations for Engine {
         )
     }
 
+    fn find_full_block_id(&self, root_hash: &UInt256) -> Result<Option<BlockIdExt>> {
+        self.db().find_full_block_id(root_hash)
+    }
+
     async fn load_last_applied_mc_block(&self) -> Result<BlockStuff> {
         match self.load_last_applied_mc_block_id()? {
             Some(block_id) => {
@@ -285,7 +288,7 @@ impl EngineOperations for Engine {
     }
 
     fn save_shard_client_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
-        STATSD.gauge("shards_client_mc_block", id.seq_no() as f64);
+        metrics::gauge!("shards_client_mc_block", id.seq_no() as f64);
         self.db().save_full_node_state(SHARD_CLIENT_MC_BLOCK, id)
     }
 
@@ -401,7 +404,7 @@ impl EngineOperations for Engine {
     }
 
     async fn download_block_proof(&self, id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff> {
-        self.download_block_proof_worker(id, is_link, key_block, None).await
+        self.download_block_proof_worker(id, is_link, key_block, Some(1)).await
     }
 
     async fn download_next_block(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
@@ -671,6 +674,17 @@ impl EngineOperations for Engine {
         Ok(())
     }
 
+    async fn process_shard_hashes_in_ext_db(
+        &self,
+        shard_hashes: &Vec<BlockIdExt>)
+    -> Result<()> {
+        for db in self.ext_db() {
+            db.process_shard_hashes(shard_hashes).await?;
+        }
+
+        Ok(())
+    }
+
     async fn process_full_state_in_ext_db(&self, state: &Arc<ShardStateStuff>)-> Result<()> {
         for db in self.ext_db() {
             db.process_full_state(state).await?;
@@ -700,8 +714,7 @@ impl EngineOperations for Engine {
     async fn download_next_key_blocks_ids(
         &self, 
         block_id: &BlockIdExt, 
-        _priority: u32
-    ) -> Result<(Vec<BlockIdExt>, bool)> {
+    ) -> Result<Vec<BlockIdExt>> {
         let mc_overlay = self.get_masterchain_overlay().await?;
         mc_overlay.download_next_key_blocks_ids(block_id, 5).await
     }
@@ -727,7 +740,13 @@ impl EngineOperations for Engine {
         }
     }
 
-    fn initial_sync_disabled(&self) -> bool { Engine::initial_sync_disabled(self) }
+    fn hardforks(&self) -> &[BlockIdExt] {
+        self.hardforks()
+    }
+
+    fn flags(&self) -> &EngineFlags {
+        Engine::flags(self)
+    }
 
     fn init_mc_block_id(&self) -> &BlockIdExt { 
         (self as &Engine).init_mc_block_id() 
@@ -869,7 +888,7 @@ impl EngineOperations for Engine {
         if !is_resend {
             let id = tbd.proof_for();
             if let Err(e) = self.shard_blocks().process_shard_block(
-                id, cc_seqno, || Ok(tbd.clone()), false, self.deref()).await {
+                id, cc_seqno, || Ok(tbd.clone()), false, self).await {
                 log::error!("Can't add own shard top block {}: {}", id, e);
             }
         }
@@ -911,8 +930,11 @@ impl EngineOperations for Engine {
         self.external_messages().new_message(id, message, self.now())
     }
 
-    fn get_external_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
-        self.external_messages().get_messages(shard, self.now())
+    fn get_external_messages_iterator(
+        &self, 
+        shard: ShardIdent
+    ) -> Box<dyn Iterator<Item = (Arc<Message>, UInt256)> + Send + Sync> {
+        Box::new(self.external_messages().clone().iter(shard, self.now()))
     }
 
     fn complete_external_messages(&self, to_delay: Vec<UInt256>, to_delete: Vec<UInt256>) -> Result<()> {
@@ -990,6 +1012,10 @@ impl EngineOperations for Engine {
 
     fn produce_chain_ranges_enabled(&self) -> bool {
         self.ext_db().iter().any(|ext_db| ext_db.process_chain_range_enabled())
+    }
+
+    fn produce_shard_hashes_enabled(&self) -> bool {
+        self.ext_db().iter().any(|ext_db| ext_db.process_shard_hashes_enabled())
     }
 
     #[cfg(feature = "telemetry")]

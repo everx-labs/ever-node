@@ -372,13 +372,13 @@ impl ShardStateStuff {
     pub fn config_params(&self) -> Result<&ConfigParams> {
         Ok(&self.shard_state_extra()?.config)
     }
-// Unused
-//    pub fn has_prev_block(&self, block_id: &BlockIdExt) -> Result<bool> {
-//        Ok(self.shard_state_extra()?
-//            .prev_blocks.get(&block_id.seq_no())?
-//            .map(|id| &id.blk_ref().root_hash == block_id.root_hash() && &id.blk_ref().file_hash == block_id.file_hash())
-//            .unwrap_or_default())
-//    }
+
+   pub fn has_prev_block(&self, block_id: &BlockIdExt) -> Result<bool> {
+       Ok(self.shard_state_extra()?
+           .prev_blocks.get(&block_id.seq_no())?
+           .map(|id| &id.blk_ref().root_hash == block_id.root_hash() && &id.blk_ref().file_hash == block_id.file_hash())
+           .unwrap_or_default())
+   }
 
 // Unused
 //    pub fn prev_key_block_id(&self) -> BlockIdExt {

@@ -17,6 +17,7 @@ use crate::{
     shard_state::{ShardHashesStuff, ShardStateStuff},
     types::messages::MsgEnqueueStuff,
 };
+use super::out_msg_queue_cleaner;
 use std::{
     cmp::max, iter::Iterator, sync::{Arc, atomic::{AtomicBool, Ordering}},
     collections::{btree_map::{self, BTreeMap}, HashMap, HashSet},
@@ -29,7 +30,7 @@ use ton_block::{
     HashmapAugType, ShardStateUnsplit,
 };
 use ton_types::{
-    error, fail, BuilderData, Cell, SliceData, IBitstring, Result, UInt256,
+    error, fail, BuilderData, Cell, LabelReader, SliceData, IBitstring, Result, UInt256, 
     HashmapType, HashmapFilterResult, HashmapRemover, UsageTree, HashmapSubtree,
 };
 
@@ -232,7 +233,7 @@ impl OutMsgQueueInfoStuff {
                 0x5777784F96FB1CFFu64,
                 "05aa297e3a2e003e1449e1297742d64f188985dc029c620edc84264f9786c0c3".parse().unwrap()
             );
-            let key = SliceData::load_builder(key.write_to_new_cell()?)?;
+            let key = SliceData::load_bitstring(key.write_to_new_cell()?)?;
             out_queue.remove(key)?;
         }
 
@@ -287,6 +288,9 @@ impl OutMsgQueueInfoStuff {
             let (key, mut value) = item?;
             let key = ProcessedInfoKey::construct_from(&mut SliceData::load_builder(key)?)?;
             let value = ProcessedUpto::construct_from(&mut value)?;
+            if value.original_shard.is_some() {
+                fail!("ProcessedUpto could not contain original_shard");
+            }
 
             let entry = {
                 if key.mc_seqno < min_seqno {
@@ -493,6 +497,7 @@ impl OutMsgQueueInfoStuff {
             let value = ProcessedUpto::with_params(
                 entry.last_msg_lt, 
                 entry.last_msg_hash.clone(), 
+                 None,
             );
             proc_info.set(&key, &value)?
         }
@@ -509,7 +514,7 @@ impl OutMsgQueueInfoStuff {
     ) -> Result<()> {
         let workchain = self.shard().workchain_id();
         let masterchain = workchain == ton_block::MASTERCHAIN_ID;
-        for mut entry in &mut self.entries {
+        for entry in &mut self.entries {
             if entry.ref_shards.is_none() {
                 check_stop_flag(stop_flag)?;
                 if next_shards.is_some() && masterchain && entry.seqno == seqno + 1 {
@@ -579,12 +584,16 @@ impl OutMsgQueueInfoStuff {
     }
 
     pub fn add_message(&mut self, enq: &MsgEnqueueStuff) -> Result<()> {
+        let labels = [("shard", self.shard().to_string())];
+        metrics::counter!("out_msg_queue_add", 1, &labels);
         let key = enq.out_msg_key();
         self.out_queue_mut()?.set(&key, enq.enqueued(), &enq.created_lt())
     }
 
     pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<()> {
-        if self.out_queue_mut()?.remove(SliceData::load_builder(key.write_to_new_cell()?)?)?.is_none() {
+        let labels = [("shard", self.shard().to_string())];
+        metrics::counter!("out_msg_queue_del", 1, &labels);
+        if self.out_queue_mut()?.remove(SliceData::load_bitstring(key.write_to_new_cell()?)?)?.is_none() {
             fail!("error deleting from out_msg_queue dictionary: {:x}", key)
         }
         Ok(())
@@ -736,6 +745,7 @@ pub struct MsgQueueManager {
     prev_out_queue_info: OutMsgQueueInfoStuff,
     next_out_queue_info: OutMsgQueueInfoStuff,
     neighbors: Vec<OutMsgQueueInfoStuff>,
+    block_descr: Arc<String>,
 }
 
 impl MsgQueueManager {
@@ -753,7 +763,10 @@ impl MsgQueueManager {
         stop_flag: Option<&AtomicBool>,
         usage_tree: Option<&UsageTree>,
         imported_visited: Option<&mut HashSet<UInt256>>,
+        block_descr: Option<Arc<String>>,
     ) -> Result<Self> {
+        let block_descr = block_descr.unwrap_or_else(|| Arc::new(String::default()));
+
         let mut cached_states = CachedStates::new(engine);
         cached_states.insert(last_mc_state.clone());
 
@@ -770,15 +783,15 @@ impl MsgQueueManager {
             None => 0,
         };
 
-        log::debug!("request a preliminary list of neighbors for {}", shard);
+        log::debug!("{}: request a preliminary list of neighbors for {}", block_descr, shard);
         let shards = ShardHashesStuff::from(shards.clone());
         let neighbor_list = shards.neighbours_for(&shard)?;
         let mut neighbors = vec![];
-        log::debug!("got a preliminary list of {} neighbors for {}", neighbor_list.len(), shard);
+        log::debug!("{}: got a preliminary list of {} neighbors for {}", block_descr, neighbor_list.len(), shard);
         for (i, nb_shard_record) in neighbor_list.iter().enumerate() {
             let nb_block_id = nb_shard_record.block_id();
 
-            log::debug!("neighbors #{} ---> {:#}", i + 1, nb_block_id.shard());
+            log::debug!("{}: neighbors #{} ---> {:#}", block_descr, i + 1, nb_block_id.shard());
 
             let nb = if nb_block_id.shard().is_masterchain() ||
                 nb_block_id.shard().workchain_id() == shard.workchain_id()
@@ -786,9 +799,9 @@ impl MsgQueueManager {
                 let shard_state = engine.clone().wait_state(nb_block_id, Some(1_000), true).await?;
                 cached_states.insert(shard_state.clone());
 
-                Self::load_out_queue_info(&shard_state, &last_mc_state, &mut cached_states).await?
+                Self::load_out_queue_info(&shard_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?
             } else {
-                log::debug!("loading OutMsgQueueInfo of neighbor {:#}", nb_shard_record.block_id());
+                log::debug!("{}: loading OutMsgQueueInfo of neighbor {:#}", block_descr, nb_shard_record.block_id());
                 let queue_part = 
                     engine.clone().wait_state(nb_shard_record.block_id(), Some(1_000), true).await?;
 
@@ -817,25 +830,25 @@ impl MsgQueueManager {
 
         // TODO: `shards.is_empty()` might not be needed
         if shards.is_empty() || last_mc_state.block_id().seq_no() != 0 {
-            let nb = Self::load_out_queue_info(&last_mc_state, &last_mc_state, &mut cached_states).await?;
+            let nb = Self::load_out_queue_info(&last_mc_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?;
             neighbors.push(nb);
         }
 
         let mut next_out_queue_info;
-        let mut prev_out_queue_info = Self::load_out_queue_info(&prev_states[0], &last_mc_state, &mut cached_states).await?;
+        let mut prev_out_queue_info = Self::load_out_queue_info(&prev_states[0], &last_mc_state, &mut cached_states, block_descr.clone()).await?;
         if prev_out_queue_info.block_id().seq_no != 0 {
             if let Some(state) = prev_states.get(1) {
                 CHECK!(after_merge);
-                let merge_out_queue_info = Self::load_out_queue_info(state, &last_mc_state, &mut cached_states).await?;
-                log::debug!("prepare merge for states {} and {}", prev_out_queue_info.block_id(), merge_out_queue_info.block_id());
+                let merge_out_queue_info = Self::load_out_queue_info(state, &last_mc_state, &mut cached_states, block_descr.clone()).await?;
+                log::debug!("{}: prepare merge for states {} and {}", block_descr, prev_out_queue_info.block_id(), merge_out_queue_info.block_id());
                 prev_out_queue_info.merge(&merge_out_queue_info)?;
-                Self::add_trivial_neighbor_after_merge(&mut neighbors, &shard, &prev_out_queue_info, prev_states, &stop_flag)?;
+                Self::add_trivial_neighbor_after_merge(&mut neighbors, &shard, &prev_out_queue_info, prev_states, &stop_flag, block_descr.clone())?;
                 next_out_queue_info = match next_state_opt {
-                    Some(next_state) => Self::load_out_queue_info(next_state, &last_mc_state, &mut cached_states).await?,
+                    Some(next_state) => Self::load_out_queue_info(next_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?,
                     None => prev_out_queue_info.clone()
                 };
             } else if after_split {
-                log::debug!("prepare split for state {}", prev_out_queue_info.block_id());
+                log::debug!("{}: prepare split for state {}", block_descr, prev_out_queue_info.block_id());
                 let own_usage_tree;
                 let usage_tree = if let Some(ut) = usage_tree {
                     ut
@@ -855,22 +868,22 @@ impl MsgQueueManager {
                 };
                 let sibling_out_queue_info = prev_out_queue_info.split(shard.clone(), engine, &usage_tree, imported_visited)?;
                 Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, 
-                    Some(sibling_out_queue_info), prev_states[0].shard(), &stop_flag)?;
+                    Some(sibling_out_queue_info), prev_states[0].shard(), &stop_flag, block_descr.clone())?;
                 next_out_queue_info = match next_state_opt {
-                    Some(next_state) => Self::load_out_queue_info(next_state, &last_mc_state, &mut cached_states).await?,
+                    Some(next_state) => Self::load_out_queue_info(next_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?,
                     None => prev_out_queue_info.clone()
                 };
             } else {
                 Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, None, 
-                    prev_out_queue_info.shard(), &stop_flag)?;
+                    prev_out_queue_info.shard(), &stop_flag, block_descr.clone())?;
                 next_out_queue_info = match next_state_opt {
-                    Some(next_state) => Self::load_out_queue_info(next_state, &last_mc_state, &mut cached_states).await?,
+                    Some(next_state) => Self::load_out_queue_info(next_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?,
                     None => prev_out_queue_info.clone()
                 };
             }
         } else {
             next_out_queue_info = match next_state_opt {
-                Some(next_state) => Self::load_out_queue_info(next_state, &last_mc_state, &mut cached_states).await?,
+                Some(next_state) => Self::load_out_queue_info(next_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?,
                 None => prev_out_queue_info.clone()
             };
         }
@@ -896,6 +909,7 @@ impl MsgQueueManager {
             prev_out_queue_info,
             next_out_queue_info,
             neighbors,
+            block_descr,
         })
     }
 
@@ -903,8 +917,9 @@ impl MsgQueueManager {
         state: &Arc<ShardStateStuff>,
         last_mc_state: &Arc<ShardStateStuff>,
         cached_states: &mut CachedStates,
+        block_descr: Arc<String>,
     ) -> Result<OutMsgQueueInfoStuff> {
-        log::debug!("unpacking OutMsgQueueInfo of neighbor {:#}", state.block_id());
+        log::debug!("{}: unpacking OutMsgQueueInfo of neighbor {:#}", block_descr, state.block_id());
         let nb = OutMsgQueueInfoStuff::from_shard_state(&state, cached_states).await?;
         // if (verbosity >= 2) {
         //     block::gen::t_ProcessedInfo.print(std::cerr, qinfo.proc_info);
@@ -934,14 +949,38 @@ impl MsgQueueManager {
         Ok((false, 0))
     }
 
+    fn get_max_processed_lt_from_queue_info(&self) -> u64 {
+        let current_shard = self.prev_out_queue_info.shard();
+        let mut max_lt = 0;
+        for neighbor in &self.neighbors {
+            if neighbor.shard().workchain_id() != -1 || neighbor.shard() == current_shard {
+                for entry in &neighbor.entries {
+                    if entry.last_msg_lt > max_lt {
+                        max_lt = entry.last_msg_lt;
+                    }
+                }
+            }
+            log::trace!(
+                "{}: get_max_processed_lt: (current shard {} != neighbor shard {}) = {}, max_lt {}",
+                self.block_descr,
+                current_shard,
+                neighbor.shard(),
+                neighbor.shard() != current_shard,
+                max_lt,
+            );
+        }
+        max_lt
+    }
+
     fn add_trivial_neighbor_after_merge(
         neighbors: &mut Vec<OutMsgQueueInfoStuff>,
         shard: &ShardIdent,
         real_out_queue_info: &OutMsgQueueInfoStuff,
         prev_states: &Vec<Arc<ShardStateStuff>>,
         stop_flag: &Option<&AtomicBool>,
+        block_descr: Arc<String>,
     ) -> Result<()> {
-        log::debug!("in add_trivial_neighbor_after_merge()");
+        log::debug!("{}: in add_trivial_neighbor_after_merge()", block_descr);
         CHECK!(prev_states.len(), 2);
         let mut found = 0;
         let n = neighbors.len();
@@ -949,7 +988,7 @@ impl MsgQueueManager {
             if shard.intersect_with(neighbors[i].shard()) {
                 let nb = &neighbors[i];
                 found += 1;
-                log::debug!("neighbor #{} : {} intersects our shard {}", i, nb.block_id(), shard);
+                log::debug!("{}: neighbor #{} : {} intersects our shard {}", block_descr, i, nb.block_id(), shard);
                 if !shard.is_parent_for(nb.shard()) || found > 2 {
                     fail!("impossible shard configuration in add_trivial_neighbor_after_merge()")
                 }
@@ -960,12 +999,12 @@ impl MsgQueueManager {
                 }
                 if found == 1 {
                     neighbors[i] = real_out_queue_info.clone();
-                    log::debug!("adjusted neighbor #{} : {} with shard expansion \
-                        (immediate after-merge adjustment)", i, neighbors[i].block_id());
+                    log::debug!("{}: adjusted neighbor #{} : {} with shard expansion \
+                        (immediate after-merge adjustment)", block_descr, i, neighbors[i].block_id());
                 } else {
                     neighbors[i].disable();
-                    log::debug!("disabling neighbor #{} : {} \
-                        (immediate after-merge adjustment)", i, neighbors[i].block_id());
+                    log::debug!("{}: disabling neighbor #{} : {} \
+                        (immediate after-merge adjustment)", block_descr, i, neighbors[i].block_id());
                 }
 
                 check_stop_flag(stop_flag)?;
@@ -982,8 +1021,9 @@ impl MsgQueueManager {
         sibling_out_queue_info: Option<OutMsgQueueInfoStuff>,
         prev_shard: &ShardIdent,
         stop_flag: &Option<&AtomicBool>,
+        block_descr: Arc<String>,
     ) -> Result<()> {
-        log::debug!("in add_trivial_neighbor()");
+        log::debug!("{}: in add_trivial_neighbor()", block_descr);
         // Possible cases are:
         // 1. prev_shard = shard = one of neighbors
         //    => replace neighbor by (more recent) prev_shard info
@@ -1005,13 +1045,13 @@ impl MsgQueueManager {
             if shard.intersect_with(neighbors[i].shard()) {
                 let nb = &neighbors[i];
                 found += 1;
-                log::debug!("neighbor #{} : {} intersects our shard {}", i, nb.block_id(), shard);
+                log::debug!("{}: neighbor #{} : {} intersects our shard {}", block_descr, i, nb.block_id(), shard);
                 if nb.shard() == prev_shard {
                     if prev_shard == shard {
                         // case 1. Normal.
                         CHECK!(found == 1);
                         neighbors[i] = real_out_queue_info.clone();
-                        log::debug!("adjusted neighbor #{} : {} (simple replacement)", i, neighbors[i].block_id());
+                        log::debug!("{}: adjusted neighbor #{} : {} (simple replacement)", block_descr, i, neighbors[i].block_id());
                         cs = 1;
                     } else if nb.shard().is_parent_for(&shard) {
                         // case 2. Immediate after-split.
@@ -1021,12 +1061,12 @@ impl MsgQueueManager {
                             neighbors[i] = sibling.clone();
                             neighbors[i].set_shard(shard.clone());
                         }
-                        log::debug!("adjusted neighbor #{} : {} with shard \
-                            shrinking to our sibling (immediate after-split adjustment)", i, neighbors[i].block_id());
+                        log::debug!("{}: adjusted neighbor #{} : {} with shard \
+                            shrinking to our sibling (immediate after-split adjustment)", block_descr, i, neighbors[i].block_id());
 
                         let nb = real_out_queue_info.clone();
-                        log::debug!("created neighbor #{} : {} with shard \
-                            shrinking to our (immediate after-split adjustment)", n, nb.block_id());
+                        log::debug!("{}: created neighbor #{} : {} with shard \
+                            shrinking to our (immediate after-split adjustment)", block_descr, n, nb.block_id());
                         neighbors.push(nb);
                         cs = 2;
                     } else {
@@ -1045,12 +1085,12 @@ impl MsgQueueManager {
                         .map_err(|err| error!("cannot filter virtual sibling's OutMsgQueue from that of \
                             the last common ancestor: {}", err))?;
                     neighbors[i].set_shard(sib_shard);
-                    log::debug!("adjusted neighbor #{} : {} with shard shrinking \
-                        to our sibling (continued after-split adjustment)", i, neighbors[i].block_id());
+                    log::debug!("{}: adjusted neighbor #{} : {} with shard shrinking \
+                        to our sibling (continued after-split adjustment)", block_descr, i, neighbors[i].block_id());
 
                     let nb = real_out_queue_info.clone();
-                    log::debug!("created neighbor #{} : {} from our preceding state \
-                        (continued after-split adjustment)", n, nb.block_id());
+                    log::debug!("{}: created neighbor #{} : {} from our preceding state \
+                        (continued after-split adjustment)", block_descr, n, nb.block_id());
                     neighbors.push(nb);
                     cs = 3;
                 } else if shard.is_parent_for(nb.shard()) && shard == prev_shard {
@@ -1062,12 +1102,12 @@ impl MsgQueueManager {
                     CHECK!(found <= 2);
                     if found == 1 {
                         neighbors[i] = real_out_queue_info.clone();
-                        log::debug!("adjusted neighbor #{} : {} with shard expansion \
-                            (continued after-merge adjustment)", i, neighbors[i].block_id());
+                        log::debug!("{}: adjusted neighbor #{} : {} with shard expansion \
+                            (continued after-merge adjustment)", block_descr, i, neighbors[i].block_id());
                     } else {
                         neighbors[i].disable();
-                        log::debug!("disabling neighbor #{} : {} (continued after-merge adjustment)",
-                            i, neighbors[i].block_id());
+                        log::debug!("{}: disabling neighbor #{} : {} (continued after-merge adjustment)",
+                        block_descr, i, neighbors[i].block_id());
                     }
                 } else {
                     fail!("impossible shard configuration in add_trivial_neighbor()")
@@ -1082,20 +1122,19 @@ impl MsgQueueManager {
         Ok(())
     }
 
-    pub fn clean_out_msg_queue(
-        &mut self, 
+    pub async fn clean_out_msg_queue(
+        &mut self,
+        clean_timeout_nanos: i128,
+        optimistic_clean_percentage_points: u32,
         mut on_message: impl FnMut(Option<(MsgEnqueueStuff, u64)>, Option<&Cell>) -> Result<bool>
-    ) -> Result<bool> {
-        log::debug!("in clean_out_msg_queue: cleaning output messages imported by neighbors");
+    ) -> Result<(bool, i32, i32)> {
+        let timer = std::time::Instant::now();
+
+        log::debug!("{}: in clean_out_msg_queue: cleaning output messages imported by neighbors", self.block_descr);
         if self.next_out_queue_info.out_queue()?.is_empty() {
-            return Ok(false)
+            return Ok((false, 0, 0))
         }
-        // if (verbosity >= 2) {
-        //     auto rt = out_msg_queue_->get_root();
-        //     std::cerr << "old out_msg_queue is ";
-        //     block::gen::t_OutMsgQueue.print(std::cerr, *rt);
-        //     rt->print_rec(std::cerr);
-        // }
+
         for neighbor in self.neighbors.iter() {
             if !neighbor.is_disabled() && !neighbor.can_check_processed() {
                 fail!(
@@ -1107,80 +1146,177 @@ impl MsgQueueManager {
         let mut block_full = false;
         let mut partial = false;
         let mut queue = self.next_out_queue_info.out_queue()?.clone();
-        let mut skipped = 0;
         let mut deleted = 0;
+        let mut skipped = 0;
 
-        // Temp fix. Need to review and fix limits management further.
-        // TODO: put it to config
-        let mut processed_count_limit = 25_000; 
+        let ordered_cleaning_timeout_nanos = clean_timeout_nanos * (optimistic_clean_percentage_points as i128) / 1000;
+        let random_cleaning_timeout_nanos = clean_timeout_nanos - ordered_cleaning_timeout_nanos;
 
-        queue.hashmap_filter(|_key, mut slice| {
-            if block_full {
-                log::warn!("BLOCK FULL when fast cleaning output queue, cleanup is partial");
-                partial = true;
-                return Ok(HashmapFilterResult::Stop)
-            }
+        log::debug!(
+            "{}: clean_out_msg_queue: clean_timeout = {} nanos, ordered_cleaning_timeout = {} nanos, random_cleaning_timeout = {} nanos",
+            self.block_descr,
+            clean_timeout_nanos,
+            ordered_cleaning_timeout_nanos,
+            random_cleaning_timeout_nanos,
+        );
 
-            // Temp fix. Need to review and fix limits management further.
-            if processed_count_limit == 0 {
-                log::warn!("clean_out_msg_queue: stopped fast cleaning messages queue because of count limit");
-                partial = true;
-                return Ok(HashmapFilterResult::Stop)
-            }
-            processed_count_limit -= 1;
+        if ordered_cleaning_timeout_nanos > 0 {
+            let max_processed_lt = self.get_max_processed_lt_from_queue_info();
 
-            let lt = u64::construct_from(&mut slice)?;
-            let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
-            // log::debug!("Scanning outbound {}", enq);
-            let (processed, end_lt) = self.already_processed(&enq)?;
-            if processed {
-                // log::debug!("Outbound {} has beed already delivered, dequeueing fast", enq);
-                block_full = on_message(Some((enq, end_lt)), self.next_out_queue_info.out_queue()?.data())?;
-                deleted += 1;
-                return Ok(HashmapFilterResult::Remove)
-            }
-            skipped += 1;
-            Ok(HashmapFilterResult::Accept)
-        })?;
-        // we reached processed_count_limit - try to remove slow by LT_HASH
-        if processed_count_limit == 0 {
-            // TODO: put it to config
-            processed_count_limit = 50;
-            let mut iter = MsgQueueMergerIterator::from_queue(&queue)?;
-            while let Some(k_v) = iter.next() {
-                let (key, enq, _created_lt, _) = k_v?;
-                if block_full {
-                    log::warn!("BLOCK FULL when slow cleaning output queue, cleanup is partial");
-                    partial = true;
-                    break;
-                }
-                if processed_count_limit == 0 {
-                    log::warn!("clean_out_msg_queue: stopped slow cleaning messages queue because of count limit");
-                    partial = true;
-                    break;
-                }
-                processed_count_limit -= 1;
-                let (processed, end_lt) = self.already_processed(&enq)?;
-                if !processed {
-                    break;
-                }
-                // log::debug!("Outbound {} has beed already delivered, dequeueing slow", enq);
-                queue.remove(SliceData::load_builder(key.write_to_new_cell()?)?)?;
-                block_full = on_message(Some((enq, end_lt)), self.next_out_queue_info.out_queue()?.data())?;
-                deleted += 1;
-            }
-            queue.after_remove()?;
+            let mut clean_timeout_check = 50_000_000;
+            let max_clean_timeout_check = 550_000_000;
+
+            partial = out_msg_queue_cleaner::hashmap_filter_ordered_by_lt_hash(
+                &mut queue,
+                max_processed_lt,
+                ordered_cleaning_timeout_nanos,
+                |node_obj| {
+                    if block_full {
+                        log::debug!("{}: BLOCK FULL when ordered cleaning output queue, cleanup is partial", self.block_descr);
+                        partial = true;
+                        return Ok(HashmapFilterResult::Stop);
+                    }
+
+                    let elapsed_nanos = timer.elapsed().as_nanos() as i128;
+                    if clean_timeout_check <= max_clean_timeout_check && elapsed_nanos >= clean_timeout_check {
+                        log::debug!(
+                            "{}: clean_out_msg_queue: ordered cleaning time elapsed {} nanos: processed = {}, deleted = {}, skipped = {}",
+                            self.block_descr, elapsed_nanos, deleted + skipped, deleted, skipped,
+                        );
+                        clean_timeout_check += 50_000_000;
+                    }
+
+                    let lt = node_obj.lt();
+                    let mut data_and_refs = node_obj.data_and_refs()?;
+                    let enq = MsgEnqueueStuff::construct_from(&mut data_and_refs, lt)?;
+
+                    let (processed, end_lt) = self.already_processed(&enq)?;
+                    if processed {
+                        block_full = on_message(
+                            Some((enq, end_lt)),
+                            self.next_out_queue_info.out_queue()?.data(),
+                        )?;
+                        deleted += 1;
+                        return Ok(HashmapFilterResult::Remove);
+                    }
+                    skipped += 1;
+                    Ok(HashmapFilterResult::Accept)
+                },
+                Some(format!("{}: ", self.block_descr)),
+            ).map_err(|e| {
+                log::error!(
+                    "{}: clean_out_msg_queue: error while ordered cleaning output queue, last state was:{} processed = {}, deleted = {}, skipped = {}: e = {}",
+                    self.block_descr,
+                    if partial { " partial," } else { "" },
+                    deleted + skipped, deleted, skipped,
+                    e,
+                );
+                e
+            })?;
+
+            let ordered_clean_elapsed = timer.elapsed().as_nanos() as i128;
+
+            log::debug!(
+                "{}: clean_out_msg_queue: cleaning finished (ordered) in {} nanos:{} processed = {}, deleted = {}, skipped = {}",
+                self.block_descr,
+                ordered_clean_elapsed,
+                if partial { " partial," } else { "" },
+                deleted + skipped, deleted, skipped,
+            );
+        } else {
+            // not time limit on the ordered clean = queue not cleaned = partial
+            partial = true;
         }
-        log::debug!("Deleted {} messages from out_msg_queue, skipped {}", deleted, skipped);
+
+        if random_cleaning_timeout_nanos > 0 && partial {
+            partial = false;
+
+            let mut random_deleted = 0;
+            let mut random_skipped = 0;
+
+            let random_clean_timer = std::time::Instant::now();
+
+            let mut clean_timeout_check = 50_000_000;
+            let max_clean_timeout_check = 550_000_000;
+
+            queue.hashmap_filter(|_key, mut slice| {
+                if block_full {
+                    log::debug!("{}: BLOCK FULL when random cleaning output queue, cleanup is partial", self.block_descr);
+                    partial = true;
+                    return Ok(HashmapFilterResult::Stop)
+                }
+
+                let elapsed_nanos = random_clean_timer.elapsed().as_nanos() as i128;
+
+                if clean_timeout_check <= max_clean_timeout_check && elapsed_nanos >= clean_timeout_check {
+                    log::debug!(
+                        "{}: clean_out_msg_queue: random cleaning time elapsed {} nanos: processed = {}, deleted = {}, skipped = {}",
+                        self.block_descr, elapsed_nanos,
+                        random_deleted + random_skipped, random_deleted, random_skipped,
+                    );
+                    clean_timeout_check += 50_000_000;
+                }
+
+                // stop when reached the time limit
+                if elapsed_nanos >= random_cleaning_timeout_nanos {
+                    log::debug!(
+                        "{}: clean_out_msg_queue: stopped random cleaning output queue because of time elapsed {} nanos >= {} nanos limit",
+                        self.block_descr, elapsed_nanos, random_cleaning_timeout_nanos,
+                    );
+                    partial = true;
+                    return Ok(HashmapFilterResult::Stop)
+                }
+
+                let lt = u64::construct_from(&mut slice)?;
+                let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
+                let (processed, end_lt) = self.already_processed(&enq)?;
+                if processed {
+                    block_full = on_message(Some((enq, end_lt)), self.next_out_queue_info.out_queue()?.data())?;
+                    random_deleted += 1;
+                    return Ok(HashmapFilterResult::Remove)
+                }
+                random_skipped += 1;
+                Ok(HashmapFilterResult::Accept)
+            }).map_err(|e| {
+                log::error!(
+                    "{}: clean_out_msg_queue: error while random cleaning output queue, last state was:{} processed = {}, deleted = {}, skipped = {}: e = {}",
+                    self.block_descr,
+                    if partial { " partial," } else { "" },
+                    random_deleted + random_skipped, random_deleted, random_skipped,
+                    e,
+                );
+                e
+            })?;
+
+            let random_clean_elapsed = random_clean_timer.elapsed().as_nanos() as i128;
+
+            log::debug!(
+                "{}: clean_out_msg_queue: cleaning finished (random) in {} nanos:{} processed = {}, deleted = {}, skipped = {}",
+                self.block_descr,
+                random_clean_elapsed,
+                if partial { " partial," } else { "" },
+                random_deleted + random_skipped, random_deleted, random_skipped,
+            );
+
+            deleted += random_deleted;
+            skipped += random_skipped;
+        }
+
+        let total_clean_elapsed_nanos = timer.elapsed().as_nanos();
+
+        log::debug!(
+            "{}: clean_out_msg_queue: cleaning finished (total) in {} nanos:{} processed = {}, deleted = {}, skipped = {}",
+            self.block_descr,
+            total_clean_elapsed_nanos,
+            if partial { " partial," } else { "" },
+            deleted + skipped, deleted, skipped,
+        );
+
         self.next_out_queue_info.out_queue = Some(queue);
-        // if (verbosity >= 2) {
-        //     std::cerr << "new out_msg_queue is ";
-        //     block::gen::t_OutMsgQueue.print(std::cerr, *rt);
-        //     rt->print_rec(std::cerr);
-        // }
-        // CHECK(block::gen::t_OutMsgQueue.validate_upto(100000, *rt));  // DEBUG, comment later if SLOW
+
         on_message(None, self.next_out_queue_info.out_queue()?.data())?;
-        Ok(partial)
+
+        Ok((partial, deleted + skipped, deleted))
     }
 }
 
@@ -1265,6 +1401,7 @@ impl MsgQueueManager {
     }
     pub fn prev(&self) -> &OutMsgQueueInfoStuff { &self.prev_out_queue_info }
     pub fn next(&self) -> &OutMsgQueueInfoStuff { &self.next_out_queue_info }
+    pub fn next_mut(&mut self) -> &mut OutMsgQueueInfoStuff { &mut self.next_out_queue_info }
     pub fn take_next(&mut self) -> OutMsgQueueInfoStuff { std::mem::take(&mut self.next_out_queue_info) }
 // Unused
 //    pub fn shard(&self) -> &ShardIdent { &self.shard }
@@ -1372,13 +1509,6 @@ impl MsgQueueMergerIterator<BlockIdExt> {
 }
 
 impl MsgQueueMergerIterator<u8> {
-    pub fn from_queue(out_queue: &OutMsgQueue) -> Result<Self> {
-        let mut roots = Vec::new();
-        if let Some(cell) = out_queue.data() {
-            roots.push(RootRecord::from_cell(cell, out_queue.bit_len(), 0)?);
-        }
-        Ok(Self { roots })
-    }
 }
 
 impl<T: Clone + Eq> MsgQueueMergerIterator<T> {
@@ -1399,7 +1529,7 @@ impl<T: Clone + Eq> MsgQueueMergerIterator<T> {
                 let mut cursor = SliceData::load_cell(root.cursor.reference(idx)?)?;
                 let mut key = root.key.clone();
                 key.append_bit_bool(idx == 1)?;
-                key = cursor.get_label_raw(&mut bit_len, key)?;
+                key = LabelReader::read_label_raw(&mut cursor, &mut bit_len, key)?;
                 let lt = cursor.get_next_u64()?;
                 self.insert(RootRecord::new(lt, cursor, bit_len, key, root.id.clone()));
             }

@@ -17,7 +17,7 @@ use crate::{
     validator::validator_utils::{
         check_crypto_signatures, calc_subset_for_masterchain,
     },
-    shard_state::ShardStateStuff,
+    shard_state::ShardStateStuff, validating_utils::fmt_block_id_short,
 };
 use crate::validator::validator_utils::calc_subset_for_workchain_standard;
 
@@ -175,7 +175,7 @@ async fn load_shard_blocks_cycle(
     shards_mc_block_id: &BlockIdExt
 ) -> Result<()> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(SHARD_CLIENT_WINDOW));
-    let mut mc_handle = engine.load_block_handle(shards_mc_block_id)?.ok_or_else(
+    let mut mc_handle = engine.load_block_handle(&shards_mc_block_id)?.ok_or_else(
         || error!("Cannot load handle for shard master block {}", shards_mc_block_id)
     )?;
     loop {
@@ -204,8 +204,13 @@ async fn load_shard_blocks_cycle(
                 log::error!("FATAL!!! Unexpected error in shard blocks processing for mc block {}: {:?}", mc_block.id(), e);
             }
             if engine.produce_chain_ranges_enabled() {
-                if let Err(err) = produce_chain_range(engine, &mc_block).await {
+                if let Err(err) = produce_chain_range(engine.clone(), &mc_block).await {
                     log::error!("Unexpected error in chain range processing for mc block {}: {:?}", mc_block.id(), err);
+                }
+            }
+            if engine.produce_shard_hashes_enabled() {
+                if let Err(err) = produce_shard_hashes(engine, &mc_block).await {
+                    log::error!("Unexpected error in shard hashes processing for mc block {}: {:?}", mc_block.id(), err);
                 }
             }
         });
@@ -255,6 +260,19 @@ pub async fn produce_chain_range(
     }
 
     engine.process_chain_range_in_ext_db(&range).await?;
+
+    Ok(())
+}
+
+pub async fn produce_shard_hashes(
+    engine: Arc<dyn EngineOperations>,
+    mc_block: &BlockStuff,
+) -> Result<()> {
+    let mut shards = mc_block.top_blocks_all()?;
+    let mc_block_id = engine.load_last_applied_mc_block_id()?
+            .ok_or_else(|| error!("Cannot load load_last_applied_mc_block_id"))?;
+    shards.push(mc_block_id.as_ref().clone());
+    engine.process_shard_hashes_in_ext_db(&shards).await?;
 
     Ok(())
 }
@@ -556,8 +574,8 @@ pub async fn process_block_broadcast(
     engine: &Arc<dyn EngineOperations>, 
     broadcast: &dyn BlockOrQueueUpdateBroadcast
 ) -> Result<Option<BlockStuff>> {
-
-    log::trace!("process_block_broadcast: {}", broadcast.id());
+    let block_descr = fmt_block_id_short(broadcast.id());
+    log::trace!("({}): process_block_broadcast: {}", block_descr, broadcast.id());
     if let Some(handle) = engine.load_block_handle(broadcast.id())? {
         if handle.has_data() {
             #[cfg(feature = "telemetry")] {
@@ -600,6 +618,13 @@ pub async fn process_block_broadcast(
 
         validate_brodcast(broadcast, &last_applied_mc_state, broadcast.id())?;
 
+        log::trace!(
+            "({}): validated that broadcast {} is from right validators set, last_applied_mc_state {}",
+            block_descr,
+            broadcast.id(),
+            last_applied_mc_state.block_id(),
+        );
+
     } else if let Some(proof_data) = broadcast.proof() {
 
         let proof = BlockProofStuff::deserialize(
@@ -612,14 +637,21 @@ pub async fn process_block_broadcast(
         let prev_key_block_seqno = block_info.prev_key_block_seqno();
         if prev_key_block_seqno > last_applied_mc_state.block_id().seq_no() {
             log::debug!(
-                "Skipped block broadcast {} because it refers too new key block: {}, \
+                "({}): Skipped block broadcast {} because it refers too new key block: {}, \
                 but last processed mc block is {})",
-                broadcast.id(), prev_key_block_seqno, last_applied_mc_state.block_id().seq_no()
+                block_descr, broadcast.id(), prev_key_block_seqno, last_applied_mc_state.block_id().seq_no()
             );
             return Ok(None);
         }
 
         validate_brodcast(broadcast, &last_applied_mc_state, broadcast.id())?;
+
+        log::trace!(
+            "({}): validated that broadcast {} is from right validators set, last_applied_mc_state {}",
+            block_descr,
+            broadcast.id(),
+            last_applied_mc_state.block_id(),
+        );
 
         // Build and save block and proof
         if is_master {
@@ -640,7 +672,8 @@ pub async fn process_block_broadcast(
         handle
     } else {
         log::debug!(
-            "Skipped apply for block {} broadcast because block is already in processing",
+            "({}): Skipped apply for block {} broadcast because block is already in processing",
+            block_descr,
             block.id()
         );
         return Ok(None);
@@ -656,7 +689,8 @@ pub async fn process_block_broadcast(
                 handle
             } else {
                 log::debug!(
-                    "Skipped apply for block {} broadcast because block is already in processing",
+                    "({}): Skipped apply for block {} broadcast because block is already in processing",
+                    block_descr,
                     block.id()
                 );
                 return Ok(None);
@@ -676,7 +710,8 @@ pub async fn process_block_broadcast(
             engine.clone().apply_block(&handle, &block, block.id().seq_no(), false).await?;
         } else {
             log::debug!(
-                "Skipped apply for block broadcast {} because it is too new (last master block: {})",
+                "({}): Skipped apply for block broadcast {} because it is too new (last master block: {})",
+                block_descr,
                 block.id(), last_applied_mc_state.block_id().seq_no()
             )
         }
@@ -695,7 +730,8 @@ pub async fn process_block_broadcast(
             engine.clone().apply_block(&handle, &block, shard_client_mc_block_id.seq_no(), true).await?;
         } else {
             log::debug!(
-                "Skipped pre-apply for block broadcast {} because it refers to master block {}, but shard client is on {}",
+                "({}): Skipped pre-apply for block broadcast {} because it refers to master block {}, but shard client is on {}",
+                block_descr,
                 block.id(), master_ref.master.seq_no, shard_client_mc_block_id.seq_no()
             )
         }

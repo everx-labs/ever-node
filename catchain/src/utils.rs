@@ -21,6 +21,8 @@ use std::{collections::{BTreeMap, HashMap, HashSet}, convert::TryInto};
 use ton_api::{deserialize_typed, IntoBoxed};
 use ton_types::{Ed25519KeyOption, KeyId, Result, UInt256};
 
+mod metrics;
+pub use self::metrics::MetricsHandle;
 /*
     to string conversions
 */
@@ -417,50 +419,40 @@ impl MetricsDumper {
         );
     }
 
-    pub fn update(&mut self, metrics_receiver: &metrics_runtime::Receiver) {
+    pub fn update(&mut self, metrics_receiver: &metrics::MetricsHandle) {
         //convert metrics
 
         let mut metrics: BTreeMap<String, Metric> = BTreeMap::new();
 
-        for (key, value) in &metrics_receiver.controller().snapshot().into_measurements() {
-            let key = key.name().to_string();
+        let snapshot = metrics_receiver.snapshot();
 
-            match value {
-                metrics_runtime::Measurement::Counter(value) => {
-                    metrics.insert(
-                        key,
-                        Metric {
-                            value: *value,
-                            usage: MetricUsage::Counter,
-                        },
-                    );
-                }
-                metrics_runtime::Measurement::Histogram(value) => {
-                    self.update_histogram(&mut metrics, key, value.decompress());
-                }
-                metrics_runtime::Measurement::Gauge(value) => {
-                    let mut usage = MetricUsage::Counter;
-                    let mut key = key.to_string();
+        for (k, v) in snapshot.counters {
+            metrics.insert(k.to_string(), Metric {
+                value: v,
+                usage: MetricUsage::Counter,
+            });
+        }
 
-                    if let Some(stripped_basic_key) = key.strip_prefix("percents:") {
-                        usage = MetricUsage::Percents;
-                        key = stripped_basic_key.to_string();
-                    } else {
-                        if let Some(stripped_basic_key) = key.strip_prefix("float:") {
-                            key = stripped_basic_key.to_string();
-                            usage = MetricUsage::Float;
-                        }
-                    }
+        for (mut key, v) in snapshot.gauges {
+            let mut usage = MetricUsage::Counter;
 
-                    metrics.insert(
-                        key,
-                        Metric {
-                            value: *value as u64,
-                            usage: usage,
-                        },
-                    );
+            if let Some(stripped_basic_key) = key.strip_prefix("percents:") {
+                usage = MetricUsage::Percents;
+                key = stripped_basic_key.to_string();
+            } else {
+                if let Some(stripped_basic_key) = key.strip_prefix("float:") {
+                    key = stripped_basic_key.to_string();
+                    usage = MetricUsage::Float;
                 }
             }
+            metrics.insert(key, Metric {
+                value: v as u64,
+                usage,
+            });
+        }
+
+        for (k, v) in snapshot.histograms {
+            self.update_histogram(&mut metrics, k.to_string(), v);
         }
 
         //snapshot time

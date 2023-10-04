@@ -194,7 +194,8 @@ pub fn create_engine_telemetry() -> Arc<EngineTelemetry> {
             shard_states: Metric::without_totals("", 1),
             top_blocks: Metric::without_totals("", 1),
             validator_peers: Metric::without_totals("", 1),
-            validator_sets: Metric::without_totals("", 1)
+            validator_sets: Metric::without_totals("", 1),
+            old_state_cell_load_time: Metric::with_total_average("", 10),
         }
     )
 }
@@ -507,7 +508,8 @@ impl CollatorTestBundle {
                 max_collate_threads: 1,
                 retry_if_empty: false,
                 finalize_empty_after_ms: 0,
-                empty_collation_sleep_ms: 0
+                empty_collation_sleep_ms: 0,
+                ..Default::default()
             },
             split_queues_cache: lockfree::map::Map::new(),
         })
@@ -600,7 +602,7 @@ impl CollatorTestBundle {
         //
         // external messages
         //
-        let external_messages = engine.get_external_messages(&shard)?;
+        let external_messages = engine.get_external_messages_iterator(shard.clone()).collect::<Vec<_>>();
 
         // 
         // neighbors
@@ -756,7 +758,7 @@ impl CollatorTestBundle {
         //
         // external messages
         //
-        let external_messages = engine.get_external_messages(&shard)?;
+        let external_messages = engine.get_external_messages_iterator(shard.clone()).collect::<Vec<_>>();
 
         // 
         // neighbors
@@ -1269,8 +1271,11 @@ impl EngineOperations for CollatorTestBundle {
         fail!("Masterblock with seq_no {} is not found in the bundle", seq_no);
     }
 
-    fn get_external_messages(&self, _shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
-        self.get_messages(false)
+    fn get_external_messages_iterator(
+        &self, 
+        _shard: ShardIdent
+    ) -> Box<dyn Iterator<Item = (Arc<Message>, UInt256)> + Send + Sync> {
+        Box::new(self.external_messages.clone().into_iter())
     }
 
     async fn get_shard_blocks(&self,
