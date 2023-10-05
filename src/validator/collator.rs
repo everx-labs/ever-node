@@ -2022,27 +2022,23 @@ impl Collator {
         // loads out queues from neighbors and out queue of current shard
         let mut output_queue_manager = self.request_neighbor_msg_queues(mc_data, prev_data, collator_data).await?;
 
-        let mut out_queue_cleaned_partial = false;
-        let mut out_queue_clean_deleted = 0;
+        // indicates if initial out queue clean was partial
+        let mut initial_out_queue_clean_partial = false;
+        // stores the deleted messages count during the inital clean
+        let mut initial_out_queue_clean_deleted_count = 0;
 
+        // delete delivered messages from output queue for a limited time
         if !self.after_split {
-            // delete delivered messages from output queue for a limited time
-            let now = std::time::Instant::now();
-            let cc = self.engine.collator_config();
-            let clean_timeout_nanos = (cc.cutoff_timeout_ms as i128) * 1_000_000 * (cc.clean_timeout_percentage_points as i128) / 1000;
-            let processed;
-            (out_queue_cleaned_partial, processed, out_queue_clean_deleted) =
-                self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager, clean_timeout_nanos, cc.optimistic_clean_percentage_points).await?;
-            let elapsed = now.elapsed().as_millis();
+            let clean_timeout_nanos = self.get_initial_clean_timeout();
+            let elapsed;
+            (initial_out_queue_clean_partial, initial_out_queue_clean_deleted_count, elapsed) =
+                self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager,
+                    clean_timeout_nanos, self.engine.collator_config().optimistic_clean_percentage_points, "initial",
+                ).await?;
             log::debug!("{}: TIME: clean_out_msg_queue initial {}ms;", self.collated_block_descr, elapsed);
-            let labels = [("shard", self.shard.to_string()), ("step", "initial".to_owned())];
-            metrics::gauge!("clean_out_msg_queue_partial", if out_queue_cleaned_partial { 1.0 } else { 0.0 }, &labels);
-            metrics::gauge!("clean_out_msg_queue_elapsed", elapsed as f64, &labels);
-            metrics::gauge!("clean_out_msg_queue_processed", processed as f64, &labels);
-            metrics::gauge!("clean_out_msg_queue_deleted", out_queue_clean_deleted as f64, &labels);
         } else {
-            log::debug!("{}: TIME: clean_out_msg_queue initial SKIPPED because of after_split block",
-                self.collated_block_descr);
+            log::debug!("{}: TIME: clean_out_msg_queue initial SKIPPED because of after_split block", self.collated_block_descr);
+            self.push_out_queue_clean_empty_metrics("initial");
         }
 
         // copy out msg queue from next state which is cleared compared to previous
@@ -2130,41 +2126,32 @@ impl Collator {
                 self.collated_block_descr);
         }
 
+        // perform secondary out queue clean
+        // if block limits not reached, inital clean was partial and not messages were deleted
         let clean_remaining_timeout_nanos = self.get_remaining_clean_time_limit_nanos();
-
-        if !collator_data.block_full && out_queue_cleaned_partial && out_queue_clean_deleted == 0 && clean_remaining_timeout_nanos > 10_000_000 {
+        if self.check_should_perform_secondary_clean(
+            collator_data.block_full,
+            initial_out_queue_clean_partial,
+            initial_out_queue_clean_deleted_count,
+            clean_remaining_timeout_nanos,
+        ) {
             if !self.after_split {
-                // we have collation time left and out msg queue was not fully processed
-                // so will try to clean more for a remaining time only by random algorithm
-                let now = std::time::Instant::now();
-
                 // set current out msg queue to manager to process new clean
                 *output_queue_manager.next_mut() = std::mem::take(&mut collator_data.out_msg_queue_info);
 
-                let processed;
-                (out_queue_cleaned_partial, processed, out_queue_clean_deleted) =
-                    self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager, clean_remaining_timeout_nanos, 0).await?;
-                let elapsed = now.elapsed().as_millis();
+                let (_, _, elapsed) =
+                    self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager, clean_remaining_timeout_nanos, 0, "remaining").await?;
                 log::debug!("{}: TIME: clean_out_msg_queue remaining {}ms;", self.collated_block_descr, elapsed);
-                let labels = [("shard", self.shard.to_string()), ("step", "remaining".to_owned())];
-                metrics::gauge!("clean_out_msg_queue_partial", if out_queue_cleaned_partial { 1.0 } else { 0.0 }, &labels);
-                metrics::gauge!("clean_out_msg_queue_elapsed", elapsed as f64, &labels);
-                metrics::gauge!("clean_out_msg_queue_processed", processed as f64, &labels);
-                metrics::gauge!("clean_out_msg_queue_deleted", out_queue_clean_deleted as f64, &labels);
-
+    
                 // copy out msg queue from manager after clean
                 collator_data.out_msg_queue_info = output_queue_manager.take_next();
                 collator_data.out_msg_queue_info.forced_fix_out_queue()?;
             } else {
-                log::debug!("{}: TIME: clean_out_msg_queue remaining SKIPPED because of after_split block",
-                    self.collated_block_descr);
+                log::debug!("{}: TIME: clean_out_msg_queue remaining SKIPPED because of after_split block", self.collated_block_descr);
+                self.push_out_queue_clean_empty_metrics("remaining");
             }
         } else {
-            let labels = [("shard", self.shard.to_string()), ("step", "remaining".to_owned())];
-            metrics::gauge!("clean_out_msg_queue_partial", 0.0, &labels);
-            metrics::gauge!("clean_out_msg_queue_elapsed", 0.0, &labels);
-            metrics::gauge!("clean_out_msg_queue_processed", 0.0, &labels);
-            metrics::gauge!("clean_out_msg_queue_deleted", 0.0, &labels);
+            self.push_out_queue_clean_empty_metrics("remaining");
         }
 
         // split prepare / split install
@@ -2213,11 +2200,18 @@ impl Collator {
         output_queue_manager: &mut MsgQueueManager,
         clean_timeout_nanos: i128,
         optimistic_clean_percentage_points: u32,
-    ) -> Result<(bool, i32, i32)> {
+        clean_step: &str,
+    ) -> Result<(bool, i32, u128)> {
         log::debug!("{}: clean_out_msg_queue", self.collated_block_descr);
         let short = mc_data.config().has_capability(GlobalCapabilities::CapShortDequeue);
 
-        output_queue_manager.clean_out_msg_queue(clean_timeout_nanos, optimistic_clean_percentage_points, |message, root| {
+        let now = std::time::Instant::now();
+
+        let (
+            out_queue_cleaned_partial,
+            messages_processed,
+            out_queue_clean_deleted_count,
+        ) = output_queue_manager.clean_out_msg_queue(clean_timeout_nanos, optimistic_clean_percentage_points, |message, root| {
             self.check_stop_flag()?;
             if let Some((enq, deliver_lt)) = message {
                 log::trace!("{}: dequeue message: {:x}", self.collated_block_descr, enq.message_hash());
@@ -2230,7 +2224,25 @@ impl Collator {
                 collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, true)?;
                 Ok(true)
             }
-        }).await
+        }).await?;
+
+        let elapsed = now.elapsed().as_millis();
+
+        let labels = [("shard", self.shard.to_string()), ("step", clean_step.to_owned())];
+        metrics::gauge!("clean_out_msg_queue_partial", if out_queue_cleaned_partial { 1.0 } else { 0.0 }, &labels);
+        metrics::gauge!("clean_out_msg_queue_elapsed", elapsed as f64, &labels);
+        metrics::gauge!("clean_out_msg_queue_processed", messages_processed as f64, &labels);
+        metrics::gauge!("clean_out_msg_queue_deleted", out_queue_clean_deleted_count as f64, &labels);
+
+        Ok((out_queue_cleaned_partial, out_queue_clean_deleted_count, elapsed))
+    }
+
+    fn push_out_queue_clean_empty_metrics(&self, clean_step: &str) {
+        let labels = [("shard", self.shard.to_string()), ("step", clean_step.to_owned())];
+        metrics::gauge!("clean_out_msg_queue_partial", 0.0, &labels);
+        metrics::gauge!("clean_out_msg_queue_elapsed", 0.0, &labels);
+        metrics::gauge!("clean_out_msg_queue_processed", 0.0, &labels);
+        metrics::gauge!("clean_out_msg_queue_deleted", 0.0, &labels);
     }
 
     //
@@ -4310,11 +4322,26 @@ impl Collator {
         cutoff_timeout_nanos - elapsed_nanos
     }
 
+    fn get_initial_clean_timeout(&self) -> i128 {
+        let cc = self.engine.collator_config();
+        (cc.cutoff_timeout_ms as i128) * 1_000_000 * (cc.clean_timeout_percentage_points as i128) / 1000
+    }
+
     fn get_remaining_clean_time_limit_nanos(&self) -> i128 {
         let remaining_cutoff_timeout_nanos = self.get_remaining_cutoff_time_limit_nanos();
         let cc = self.engine.collator_config();
         let max_secondary_clean_timeout_nanos = (cc.cutoff_timeout_ms as i128) * 1_000_000 * (cc.max_secondary_clean_timeout_percentage_points as i128) / 1000;
         remaining_cutoff_timeout_nanos.min(max_secondary_clean_timeout_nanos)
+    }
+
+    fn check_should_perform_secondary_clean(
+        &self,
+        block_full: bool,
+        prev_out_queue_cleaned_partial: bool,
+        prev_out_queue_clean_deleted_count: i32,
+        clean_timeout_nanos: i128,
+    ) -> bool {
+        !block_full && prev_out_queue_cleaned_partial && prev_out_queue_clean_deleted_count == 0 && clean_timeout_nanos >= 10_000_000
     }
 
     fn check_stop_flag(&self) -> Result<()> {

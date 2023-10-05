@@ -1126,7 +1126,7 @@ impl MsgQueueManager {
     pub async fn clean_out_msg_queue(
         &mut self,
         clean_timeout_nanos: i128,
-        optimistic_clean_percentage_points: u32,
+        ordered_clean_percentage_points: u32,
         mut on_message: impl FnMut(Option<(MsgEnqueueStuff, u64)>, Option<&Cell>) -> Result<bool>
     ) -> Result<(bool, i32, i32)> {
         let timer = std::time::Instant::now();
@@ -1150,7 +1150,7 @@ impl MsgQueueManager {
         let mut deleted = 0;
         let mut skipped = 0;
 
-        let ordered_cleaning_timeout_nanos = clean_timeout_nanos * (optimistic_clean_percentage_points as i128) / 1000;
+        let ordered_cleaning_timeout_nanos = clean_timeout_nanos * (ordered_clean_percentage_points as i128) / 1000;
         let random_cleaning_timeout_nanos = clean_timeout_nanos - ordered_cleaning_timeout_nanos;
 
         log::debug!(
