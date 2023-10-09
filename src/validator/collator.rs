@@ -3595,12 +3595,15 @@ pub fn report_collation_metrics(
     let labels = [("shard", shard.to_string())];
     // divide by 1000 because buckets are in seconds
     metrics::histogram!("collation_time", (time as f64) / 1000.0, &labels);
-    metrics::increment_counter!("dequeue_msg_count", dequeue_msg_count as f64, &labels);
-    metrics::increment_counter!("enqueue_msg_count",  enqueue_msg_count as f64, &labels);
-    metrics::increment_counter!("in_msg_count",  in_msg_count as f64, &labels);
-    metrics::increment_counter!("out_msg_count", out_msg_count as f64, &labels,);
-    metrics::increment_counter!("transit_msg_count", transit_msg_count as f64, &labels);
-    metrics::increment_counter!("executed_trs_count", executed_trs_count as f64, &labels);
+    #[cfg(not(feature = "statsd"))]
+    {
+        metrics::increment_gauge!("dequeue_msg_count", dequeue_msg_count as f64, &labels);
+        metrics::increment_gauge!("enqueue_msg_count",  enqueue_msg_count as f64, &labels);
+        metrics::increment_gauge!("in_msg_count",  in_msg_count as f64, &labels);
+        metrics::increment_gauge!("out_msg_count", out_msg_count as f64, &labels,);
+        metrics::increment_gauge!("transit_msg_count", transit_msg_count as f64, &labels);
+        metrics::increment_gauge!("executed_trs_count", executed_trs_count as f64, &labels);
+    }
     metrics::histogram!("gas_used", gas_used as f64, &labels);
     metrics::histogram!("gas_rate_collator", gas_rate as f64,  &labels);
     metrics::histogram!("block_size", block_size as f64,  &labels);

@@ -186,6 +186,7 @@ pub async fn run_collate_query (
     engine: Arc<dyn EngineOperations>,
 ) -> Result<ValidatorBlockCandidate>
 {
+    #[cfg(not(feature = "statsd"))]
     let labels = [("shard", shard.to_string())];
     #[cfg(not(feature = "statsd"))]
     metrics::increment_gauge!("run_collators", 1.0, &labels);
