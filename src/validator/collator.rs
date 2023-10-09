@@ -3604,7 +3604,6 @@ pub fn report_collation_metrics(
         metrics::increment_gauge!("transit_msg_count", transit_msg_count as f64, &labels);
         metrics::increment_gauge!("executed_trs_count", executed_trs_count as f64, &labels);
     }
-
     metrics::histogram!("gas_used", gas_used as f64, &labels);
     metrics::histogram!("gas_rate_collator", gas_rate as f64,  &labels);
     metrics::histogram!("block_size", block_size as f64,  &labels);
