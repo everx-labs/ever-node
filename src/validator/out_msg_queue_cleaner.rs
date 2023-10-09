@@ -762,24 +762,6 @@ impl HashmapOrderedFilterCursor {
             }
         }
 
-        // TODO: review and may be fix this because there can be many msgs with same LT
-        // stop pocessing when max_lt reached
-        #[cfg(not(feature = "only_sorted_clean"))]
-        if current.node_obj_ref().lt() == self.max_lt {
-            log::debug!(
-                "clean_out_msg_queue: hop {}: stop processing when current node (bottom_bit_len = {}, key = {}) lt {} == max_lt {}, elapsed = {} nanos",
-                self.hops_counter,
-                current.bottom_bit_len(),
-                current.node_obj_ref().key_hex(),
-                current.node_obj_ref().lt(),
-                self.max_lt,
-                self.timer.elapsed().as_nanos(),
-            );
-
-            self.stop_processing = true;
-            self.stopped_by_max_lt = true;
-        }
-
         current.is_processed = true;
 
         self.processed_count += 1;
