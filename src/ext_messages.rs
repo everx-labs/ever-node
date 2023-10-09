@@ -180,6 +180,7 @@ impl MessagesPool {
         let workchain_id = message.dst_workchain_id().unwrap_or_default();
         let prefix = message.int_dst_account_id().map_or(0, |mut slice| slice.get_next_u64().unwrap_or_default());
         self.messages.insert(id.clone(), MessageKeeper::new(message));
+        #[cfg(not(feature = "statsd"))]
         metrics::increment_gauge!("ext_messages_len", 1f64);
 
         add_unbound_object_to_map_with_update(&self.order, now, |map| {
@@ -209,6 +210,7 @@ impl MessagesPool {
                 true
             });
             if result.is_some() {
+                #[cfg(not(feature = "statsd"))]
                 metrics::decrement_gauge!("ext_messages_len", 1f64);
             }
         }
@@ -232,6 +234,7 @@ impl MessagesPool {
                     "complete_messages: removing external message {:x} because can't postpone",
                     id,
                 );
+                #[cfg(not(feature = "statsd"))]
                 metrics::decrement_gauge!("ext_messages_len", 1f64);
             }
         }
@@ -271,7 +274,9 @@ impl MessagePoolIter {
         while self.seqno < order.seqno.load(Ordering::Relaxed) {
             if let Some(guard) = order.map.remove(&self.seqno) {
                 if let Some(guard) = self.pool.messages.remove(&guard.val().id) {
+                    #[cfg(not(feature = "statsd"))]
                     metrics::increment_gauge!("ext_messages_expired", 1f64);
+                    #[cfg(not(feature = "statsd"))]
                     metrics::decrement_gauge!("ext_messages_len", 1f64);
                     log::debug!(
                         target: EXT_MESSAGES_TRACE_TARGET,

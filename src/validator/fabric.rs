@@ -72,6 +72,7 @@ pub async fn run_validate_query(
     );
 
     let labels = [("shard", shard.to_string())];
+    #[cfg(not(feature = "statsd"))]
     metrics::increment_gauge!("run_validators", 1.0 ,&labels);
 
     let test_bundles_config = &engine.test_bundles_config().validator;
@@ -131,6 +132,7 @@ pub async fn run_validate_query(
         validator_result
     };
 
+    #[cfg(not(feature = "statsd"))]
     metrics::decrement_gauge!("run_validators", 1.0, &labels);
 
     match validator_result {
@@ -185,6 +187,7 @@ pub async fn run_collate_query (
 ) -> Result<ValidatorBlockCandidate>
 {
     let labels = [("shard", shard.to_string())];
+    #[cfg(not(feature = "statsd"))]
     metrics::increment_gauge!("run_collators", 1.0, &labels);
 
     let next_block_descr = fmt_next_block_descr_from_next_seqno(&shard, get_first_block_seqno_after_prevs(&prev));
@@ -203,6 +206,7 @@ pub async fn run_collate_query (
 
 
     let labels = [("shard", shard.to_string())];
+    #[cfg(not(feature = "statsd"))]
     metrics::decrement_gauge!("run_collators", 1.0, &labels);
 
     match collator_result {
