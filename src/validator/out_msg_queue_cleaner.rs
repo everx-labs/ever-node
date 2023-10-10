@@ -1246,7 +1246,8 @@ where
         cursor_creation_elapsed,
     );
 
-    let partial = filter_cursor.stop_processing | filter_cursor.cancel_processing;
+    let partial = (filter_cursor.stop_processing | filter_cursor.cancel_processing)
+        && !filter_cursor.stopped_by_max_lt;
 
     Ok(partial)
 }
