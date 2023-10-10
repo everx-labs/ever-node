@@ -238,11 +238,11 @@ struct CollatorData {
     accounts: ShardAccountBlocks,
     out_msg_queue_info: OutMsgQueueInfoStuff,
     /// * key - msg_sync_key
-    /// * value - out msg key and flag is_new
-    del_out_queue_msg_ops_buffer: HashMap<usize, (OutMsgQueueKey, bool)>,
+    /// * value - removed out msg key, EnqueuedMsg and is_new flag
+    del_out_queue_msg_history: HashMap<usize, (OutMsgQueueKey, EnqueuedMsg, bool)>,
     /// * key - msg_sync_key
-    /// * value - new out msg
-    add_out_queue_msg_ops_buffer: HashMap<usize, Vec<MsgEnqueueStuff>>,
+    /// * value - msg key in out queue
+    add_out_queue_msg_history: HashMap<usize, Vec<OutMsgQueueKey>>,
     shard_fees: ShardFees,
     shard_top_block_descriptors: Vec<Arc<TopBlockDescrStuff>>,
     block_create_count: HashMap<UInt256, u64>,
@@ -344,8 +344,8 @@ impl CollatorData {
             out_msgs_descr_history: Default::default(),
             accounts: ShardAccountBlocks::default(),
             out_msg_queue_info: OutMsgQueueInfoStuff::default(),
-            del_out_queue_msg_ops_buffer: Default::default(),
-            add_out_queue_msg_ops_buffer: Default::default(),
+            del_out_queue_msg_history: Default::default(),
+            add_out_queue_msg_history: Default::default(),
             shard_fees: ShardFees::default(),
             shard_top_block_descriptors: Vec::new(),
             block_create_count: HashMap::new(),
@@ -517,7 +517,7 @@ impl CollatorData {
                     let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
                     let new_msg = NewMessage::new((info.created_lt, msg_hash.clone()), msg, tr_cell.clone(), enq.next_prefix().clone());
 
-                    self.add_add_out_queue_msg_op_to_buffer(src_msg_sync_key, enq);
+                    self.add_out_queue_msg_with_history(src_msg_sync_key, enq)?;
 
                     // Add to message block here for counting time later it may be replaced
                     let prev_out_msg_slice_opt = self.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
@@ -668,35 +668,33 @@ impl CollatorData {
         Ok(enq)
     }
 
-    /// Stores out queue msg key for deletion in buffer, updates stats
-    fn add_del_out_queue_msg_op_to_buffer(&mut self, src_msg_sync_key: usize, key: OutMsgQueueKey, is_new: bool) -> Result<()> {
-        self.del_out_queue_msg_ops_buffer.insert(src_msg_sync_key, (key, is_new));
+    /// Removes msg from out queue, stores msg in the history to be able to revert it futher
+    fn del_out_queue_msg_with_history(&mut self, src_msg_sync_key: usize, key: OutMsgQueueKey, is_new: bool) -> Result<()> {
+        log::debug!("{}: del_out_queue_msg_with_history {:x}", self.collated_block_descr, key);
+        if is_new { self.enqueue_count -= 1; } else { self.dequeue_count += 1; }
+        let enq = self.out_msg_queue_info.del_message(&key)?;
         self.block_limit_status.register_out_msg_queue_op(
             self.out_msg_queue_info.out_queue()?.data(),
             &self.usage_tree,
             false
         )?;
+        self.del_out_queue_msg_history.insert(src_msg_sync_key, (key, enq, is_new));
         Ok(())
     }
-    /// Clean out queue msg key from deletion buffer, does not update block_limit_status
-    fn revert_del_out_queue_msg_op_by_src_msg(&mut self, src_msg_sync_key: &usize) {
-        self.del_out_queue_msg_ops_buffer.remove(src_msg_sync_key);
+    /// Reverts previously removed msg from out queue
+    fn revert_del_out_queue_msg(&mut self, src_msg_sync_key: &usize) -> Result<()> {
+        if let Some((key, enq, is_new)) = self.del_out_queue_msg_history.remove(src_msg_sync_key) {
+            if is_new { self.enqueue_count += 1; } else { self.dequeue_count -= 1; }
+            let enq_stuff = MsgEnqueueStuff::from_enqueue(enq)?;
+            self.out_msg_queue_info.add_message(&enq_stuff)?;
+            log::debug!("{}: reverted del_out_queue_msg {:x}", self.collated_block_descr, key);
+        }
+        Ok(())
     }
-    /// Deletes msgs from out queue
-    fn commit_del_out_queue_msg_ops(&mut self) -> Result<()> {
-        let del_out_msg_ops_count = !self.del_out_queue_msg_ops_buffer.len();
-        for (_, (key, is_new)) in self.del_out_queue_msg_ops_buffer.drain() {
-            log::debug!("{}: commit_del_out_queue_msg_op (is_new: {}) {:x}", self.collated_block_descr, is_new, key);
-            if is_new { self.enqueue_count -= 1; } else { self.dequeue_count += 1; }
-            self.out_msg_queue_info.del_message(&key)?;
-        }
-        if del_out_msg_ops_count > 0 {
-            self.block_limit_status.register_out_msg_queue_op(
-                self.out_msg_queue_info.out_queue()?.data(),
-                &self.usage_tree,
-                false
-            )?;
-        }
+    /// Cleans out queue msgs removing history
+    fn commit_del_out_queue_msgs(&mut self) -> Result<()> {
+        self.del_out_queue_msg_history.clear();
+        self.del_out_queue_msg_history.shrink_to_fit();
         Ok(())
     }
 
@@ -712,28 +710,35 @@ impl CollatorData {
         Ok(())
     }
 
-    /// Stores new out queue msg, created by src msg, in buffer
-    fn add_add_out_queue_msg_op_to_buffer(&mut self, src_msg_sync_key: usize, enq_stuff: MsgEnqueueStuff) {
-        if let Some(v) = self.add_out_queue_msg_ops_buffer.get_mut(&src_msg_sync_key) {
-            v.push(enq_stuff);
+    /// Adds new msg to out queue, stores history to be able to revert futher
+    fn add_out_queue_msg_with_history(&mut self, src_msg_sync_key: usize, enq_stuff: MsgEnqueueStuff) -> Result<()> {
+        self.enqueue_count += 1;
+        self.out_msg_queue_info.add_message(&enq_stuff)?;
+        let key = enq_stuff.out_msg_key();
+        if let Some(v) = self.add_out_queue_msg_history.get_mut(&src_msg_sync_key) {
+            v.push(key);
         } else {
-            self.add_out_queue_msg_ops_buffer.insert(src_msg_sync_key, vec![enq_stuff]);
+            self.add_out_queue_msg_history.insert(src_msg_sync_key, vec![key]);
         }
+        Ok(())
     }
-    /// Clean out queue msgs, created by src msg, from buffer
-    fn revert_add_out_queue_msg_op_by_src_msg(&mut self, src_msg_sync_key: &usize) {
-        self.add_out_queue_msg_ops_buffer.remove(src_msg_sync_key);
-    }
-    /// Adds msgs to out queue
-    fn commit_add_out_queue_msg_ops(&mut self) -> Result<()> {
-        let new_msgs_count = self.add_out_queue_msg_ops_buffer.len();
-        for (_, msgs) in self.add_out_queue_msg_ops_buffer.drain() {
-            for enq_stuff in msgs {
-                self.enqueue_count += 1;
-                self.out_msg_queue_info.add_message(&enq_stuff)?;
+    /// Removes previously added new msgs from out queue
+    fn revert_add_out_queue_msgs(&mut self, src_msg_sync_key: &usize) -> Result<()> {
+        if let Some(keys) = self.add_out_queue_msg_history.remove(src_msg_sync_key) {
+            let remove_count = keys.len();
+            for key in keys {
+                self.enqueue_count -= 1;
+                self.out_msg_queue_info.del_message(&key)?;
             }
+            log::debug!("{}: {} new created messages removed from out queue", self.collated_block_descr, remove_count);
         }
-        log::debug!("{}: {} new created messages added to out queue from buffer", self.collated_block_descr, new_msgs_count);
+        Ok(())
+    }
+    /// Cleans out queue msgs adding history
+    #[cfg(feature = "revert_collat_changes")]
+    fn commit_add_out_queue_msgs(&mut self) -> Result<()> {
+        self.add_out_queue_msg_history.clear();
+        self.add_out_queue_msg_history.shrink_to_fit();
         Ok(())
     }
 
@@ -1460,7 +1465,7 @@ impl ExecutionManager {
                     let msg_hash = enq.message_hash();
                     let prev_out_msg_slice_opt = collator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
                     collator_data.add_out_msg_descr_to_history(*msg_sync_key, msg_hash, prev_out_msg_slice_opt);
-                    collator_data.add_del_out_queue_msg_op_to_buffer(*msg_sync_key, enq.out_msg_key(), false)?;
+                    collator_data.del_out_queue_msg_with_history(*msg_sync_key, enq.out_msg_key(), false)?;
                 }
                 Some(in_msg)
             }
@@ -1471,7 +1476,7 @@ impl ExecutionManager {
                 let msg_hash = env.message_hash();
                 let prev_out_msg_slice_opt = collator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
                 collator_data.add_out_msg_descr_to_history(*msg_sync_key, msg_hash, prev_out_msg_slice_opt);
-                collator_data.add_del_out_queue_msg_op_to_buffer(*msg_sync_key, env.out_msg_key(), true)?;
+                collator_data.del_out_queue_msg_with_history(*msg_sync_key, env.out_msg_key(), true)?;
                 Some(in_msg)
             }
             AsyncMessage::Mint(msg) |
@@ -1616,8 +1621,8 @@ impl ExecutionManager {
         collator_data.revert_out_msgs_descr_by_src_msg(msg_sync_key)?;
         collator_data.revert_accepted_ext_message_by_src_msg(msg_sync_key);
         collator_data.revert_rejected_ext_message_by_src_msg(msg_sync_key);
-        collator_data.revert_del_out_queue_msg_op_by_src_msg(msg_sync_key);
-        collator_data.revert_add_out_queue_msg_op_by_src_msg(msg_sync_key);
+        collator_data.revert_del_out_queue_msg(msg_sync_key)?;
+        collator_data.revert_add_out_queue_msgs(msg_sync_key)?;
         collator_data.revert_new_messages_by_src_msg(msg_sync_key);
         collator_data.revert_mint_msg_by_src_msg(msg_sync_key);
         collator_data.revert_recover_create_msg_by_src_msg(msg_sync_key);
@@ -1633,8 +1638,8 @@ impl ExecutionManager {
         collator_data.commit_out_msgs_descr_by_src_msg();
         collator_data.commit_accepted_ext_messages();
         collator_data.commit_rejected_ext_messages();
-        collator_data.commit_del_out_queue_msg_ops()?;
-        collator_data.commit_add_out_queue_msg_ops()?;
+        collator_data.commit_del_out_queue_msgs()?;
+        collator_data.commit_add_out_queue_msgs()?;
         collator_data.commit_new_messages();
 
         collator_data.commit_mint_msg();
