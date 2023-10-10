@@ -1164,9 +1164,6 @@ impl MsgQueueManager {
         if ordered_cleaning_timeout_nanos > 0 {
             let max_processed_lt = self.get_max_processed_lt_from_queue_info();
 
-            let mut clean_timeout_check = 50_000_000;
-            let max_clean_timeout_check = 550_000_000;
-
             partial = out_msg_queue_cleaner::hashmap_filter_ordered_by_lt_hash(
                 &mut queue,
                 max_processed_lt,
@@ -1176,15 +1173,6 @@ impl MsgQueueManager {
                         log::debug!("{}: BLOCK FULL (>= Soft) when ordered cleaning output queue, cleanup is partial", self.block_descr);
                         partial = true;
                         return Ok(HashmapFilterResult::Stop);
-                    }
-
-                    let elapsed_nanos = timer.elapsed().as_nanos() as i128;
-                    if clean_timeout_check <= max_clean_timeout_check && elapsed_nanos >= clean_timeout_check {
-                        log::debug!(
-                            "{}: clean_out_msg_queue: ordered cleaning time elapsed {} nanos: processed = {}, deleted = {}, skipped = {}",
-                            self.block_descr, elapsed_nanos, deleted + skipped, deleted, skipped,
-                        );
-                        clean_timeout_check += 50_000_000;
                     }
 
                     let lt = node_obj.lt();
@@ -1237,9 +1225,6 @@ impl MsgQueueManager {
 
             let random_clean_timer = std::time::Instant::now();
 
-            let mut clean_timeout_check = 50_000_000;
-            let max_clean_timeout_check = 550_000_000;
-
             queue.hashmap_filter(|_key, mut slice| {
                 if block_full {
                     log::debug!("{}: BLOCK FULL (>= Soft) when random cleaning output queue, cleanup is partial", self.block_descr);
@@ -1247,18 +1232,8 @@ impl MsgQueueManager {
                     return Ok(HashmapFilterResult::Stop)
                 }
 
-                let elapsed_nanos = random_clean_timer.elapsed().as_nanos() as i128;
-
-                if clean_timeout_check <= max_clean_timeout_check && elapsed_nanos >= clean_timeout_check {
-                    log::debug!(
-                        "{}: clean_out_msg_queue: random cleaning time elapsed {} nanos: processed = {}, deleted = {}, skipped = {}",
-                        self.block_descr, elapsed_nanos,
-                        random_deleted + random_skipped, random_deleted, random_skipped,
-                    );
-                    clean_timeout_check += 50_000_000;
-                }
-
                 // stop when reached the time limit
+                let elapsed_nanos = random_clean_timer.elapsed().as_nanos() as i128;
                 if elapsed_nanos >= random_cleaning_timeout_nanos {
                     log::debug!(
                         "{}: clean_out_msg_queue: stopped random cleaning output queue because of time elapsed {} nanos >= {} nanos limit",
