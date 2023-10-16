@@ -322,6 +322,8 @@ struct CollatorData {
 
     // string with format like `-1:8000000000000000, 100500`, is used for logging.
     collated_block_descr: Arc<String>,
+
+    metrics: CollatorMetrics,
 }
 
 impl CollatorData {
@@ -333,6 +335,7 @@ impl CollatorData {
         prev_data: &PrevData,
         is_masterchain: bool,
         collated_block_descr: Arc<String>,
+        shard: ShardIdent,
     ) -> Result<Self> {
         let limits = Arc::new(config.raw_config().block_limits(is_masterchain)?);
         let ret = Self {
@@ -395,6 +398,7 @@ impl CollatorData {
             in_msg_count: 0,
             before_split: false,
             collated_block_descr,
+            metrics: CollatorMetrics::new(shard),
         };
         Ok(ret)
     }
@@ -523,6 +527,7 @@ impl CollatorData {
 
                     self.add_new_message_to_buffer(src_msg_sync_key, new_msg);
 
+                    self.metrics.created_new_msgs_count += 1;
                 }
                 CommonMsgInfo::ExtOutMsgInfo(_) => {
                     let out_msg = OutMsg::external(msg_cell, tr_cell.clone());
@@ -628,8 +633,8 @@ impl CollatorData {
         self.accepted_ext_messages_buffer.insert(src_msg_sync_key, msg_id);
     }
     /// Clean accepted ext message id from buffer
-    fn revert_accepted_ext_message_by_src_msg(&mut self, src_msg_sync_key: &usize) {
-        self.accepted_ext_messages_buffer.remove(src_msg_sync_key);
+    fn revert_accepted_ext_message_by_src_msg(&mut self, src_msg_sync_key: &usize) -> bool {
+        self.accepted_ext_messages_buffer.remove(src_msg_sync_key).is_some()
     }
     /// Add accepted ext messages from buffer to collator data
     fn commit_accepted_ext_messages(&mut self) {
@@ -643,8 +648,8 @@ impl CollatorData {
         self.rejected_ext_messages_buffer.insert(src_msg_sync_key, rejected_msg);
     }
     /// Clean rejected ext message info from buffer
-    fn revert_rejected_ext_message_by_src_msg(&mut self, src_msg_sync_key: &usize) {
-        self.rejected_ext_messages_buffer.remove(src_msg_sync_key);
+    fn revert_rejected_ext_message_by_src_msg(&mut self, src_msg_sync_key: &usize) -> bool {
+        self.rejected_ext_messages_buffer.remove(src_msg_sync_key).is_some()
     }
     /// Add rejected ext messages info from buffer to collator data
     fn commit_rejected_ext_messages(&mut self) {
@@ -680,14 +685,20 @@ impl CollatorData {
         Ok(())
     }
     /// Reverts previously removed msg from out queue
-    fn revert_del_out_queue_msg(&mut self, src_msg_sync_key: &usize) -> Result<()> {
+    fn revert_del_out_queue_msg_by_src_msg(&mut self, src_msg_sync_key: &usize) -> Result<Option<bool>> {
         if let Some((key, enq, is_new)) = self.del_out_queue_msg_history.remove(src_msg_sync_key) {
-            if is_new { self.enqueue_count += 1; } else { self.dequeue_count -= 1; }
+            if is_new {
+                self.enqueue_count += 1;
+            } else {
+                self.dequeue_count -= 1;
+            }
             let enq_stuff = MsgEnqueueStuff::from_enqueue(enq)?;
             self.out_msg_queue_info.add_message(&enq_stuff)?;
             log::debug!("{}: reverted del_out_queue_msg {:x}", self.collated_block_descr, key);
+            Ok(Some(is_new))
+        } else {
+            Ok(None)
         }
-        Ok(())
     }
     /// Cleans out queue msgs removing history
     fn commit_del_out_queue_msgs(&mut self) -> Result<()> {
@@ -721,7 +732,7 @@ impl CollatorData {
         Ok(())
     }
     /// Removes previously added new msgs from out queue
-    fn revert_add_out_queue_msgs(&mut self, src_msg_sync_key: &usize) -> Result<()> {
+    fn revert_add_out_queue_msgs_by_src_msg(&mut self, src_msg_sync_key: &usize) -> Result<()> {
         if let Some(keys) = self.add_out_queue_msg_history.remove(src_msg_sync_key) {
             let remove_count = keys.len();
             for key in keys {
@@ -748,8 +759,8 @@ impl CollatorData {
         }
     }
     /// Clean out new internal msgs, created by src msg, from buffer
-    fn revert_new_messages_by_src_msg(&mut self, src_msg_sync_key: &usize) {
-        self.new_messages_buffer.remove(src_msg_sync_key);
+    fn revert_new_messages_by_src_msg(&mut self, src_msg_sync_key: &usize) -> Option<usize> {
+        self.new_messages_buffer.remove(src_msg_sync_key).map(|removed| removed.len())
     }
     /// Adds new internal msgs to new_messages queue for processing
     fn commit_new_messages(&mut self) {
@@ -1005,6 +1016,325 @@ impl CollatorData {
         self.accepted_remp_messages = accepted;
         self.rejected_remp_messages = rejected;
         self.ignored_remp_messages = ignored;
+    }
+}
+
+#[derive(Default)]
+struct CollatorMetrics {
+    shard: ShardIdent,
+
+    elapsed_on_empty_collations_ms: u128,
+    elapsed_on_prepare_data_ms: u128,
+    elapsed_on_initial_clean_ms: u128,
+    elapsed_on_internals_processed_ms: u128,
+    elapsed_on_remp_processed_ms: u128,
+    elapsed_on_externals_processed_ms: u128,
+    elapsed_on_new_processed_ms: u128,
+    elapsed_on_secondary_clean_ms: u128,
+    elapsed_on_finalize_ms: u128,
+
+    stopped_on_timeout: CollationStoppedOnTimeoutStep,
+
+    stopped_on_soft_limit: CollationStoppedOnBlockLimitStep,
+    stopped_on_remp_limit: CollationStoppedOnBlockLimitStep,
+    stopped_on_medium_limit: CollationStoppedOnBlockLimitStep,
+
+    processed_in_int_msgs_count: usize,
+    dequeued_our_out_int_msgs_count: usize,
+    processed_remp_msgs_count: usize,
+    processed_in_ext_msgs_count: usize,
+    created_new_msgs_count: usize,
+    processed_new_msgs_count: usize,
+
+    reverted_transactions_count: usize,
+
+    not_all_internals_processed: bool,
+    not_all_remp_processed: bool,
+    not_all_externals_processed: bool,
+    not_all_new_messages_processed: bool,
+
+    initial_out_queue_clean: CleanOutQueueMetrics,
+    secondary_out_queue_clean: CleanOutQueueMetrics,
+}
+
+#[derive(Default)]
+struct CleanOutQueueMetrics {
+    partial: bool,
+    elapsed: u128,
+    processed: i32,
+    deleted: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CollationStoppedOnTimeoutStep {
+    NoTimeout = 0,
+    NewMessages,
+    Externals,
+    Remp,
+    Internals,
+}
+impl Default for CollationStoppedOnTimeoutStep {
+    fn default() -> Self {
+        Self::NoTimeout
+    }
+}
+#[derive(Debug, Clone, Copy)]
+enum CollationStoppedOnBlockLimitStep {
+    NotStopped = 0,
+    Internals,
+    InitialClean,
+    Remp,
+    NewMessages,
+    Externals,
+}
+impl Default for CollationStoppedOnBlockLimitStep {
+    fn default() -> Self {
+        Self::NotStopped
+    }
+}
+
+impl CollatorMetrics {
+    fn new(shard: ShardIdent) -> Self {
+        Self {
+            shard,
+            ..Default::default()
+        }
+    }
+
+    fn save_elapsed_on_empty_collations(&mut self, collator: &Collator) {
+        self.elapsed_on_empty_collations_ms = collator.started.elapsed().as_millis();
+    }
+    fn save_elapsed_on_prepare_data(&mut self, collator: &Collator) {
+        self.elapsed_on_prepare_data_ms = collator.started.elapsed().as_millis();
+    }
+    fn save_elapsed_on_initial_clean(&mut self, collator: &Collator) {
+        self.elapsed_on_initial_clean_ms = collator.started.elapsed().as_millis();
+    }
+    fn save_elapsed_on_internals_processed(&mut self, collator: &Collator) {
+        self.elapsed_on_internals_processed_ms = collator.started.elapsed().as_millis();
+    }
+    fn save_elapsed_on_remp_processed(&mut self, collator: &Collator) {
+        self.elapsed_on_remp_processed_ms = collator.started.elapsed().as_millis();
+    }
+    fn save_elapsed_on_externals_processed(&mut self, collator: &Collator) {
+        self.elapsed_on_externals_processed_ms = collator.started.elapsed().as_millis();
+    }
+    fn save_elapsed_on_new_processed(&mut self, collator: &Collator) {
+        self.elapsed_on_new_processed_ms = collator.started.elapsed().as_millis();
+    }
+    fn save_elapsed_on_secondary_clean(&mut self, collator: &Collator) {
+        self.elapsed_on_secondary_clean_ms = collator.started.elapsed().as_millis();
+    }
+    fn save_elapsed_on_finalize(&mut self, collator: &Collator) {
+        self.elapsed_on_finalize_ms = collator.started.elapsed().as_millis();
+    }
+
+    fn recalculate_elapsed_time(&mut self) {
+        if self.elapsed_on_prepare_data_ms < self.elapsed_on_empty_collations_ms {
+            self.elapsed_on_prepare_data_ms = self.elapsed_on_empty_collations_ms;
+        }
+        if self.elapsed_on_initial_clean_ms < self.elapsed_on_prepare_data_ms {
+            self.elapsed_on_initial_clean_ms = self.elapsed_on_prepare_data_ms;
+        }
+        if self.elapsed_on_internals_processed_ms < self.elapsed_on_initial_clean_ms {
+            self.elapsed_on_internals_processed_ms = self.elapsed_on_initial_clean_ms;
+        }
+        if self.elapsed_on_remp_processed_ms < self.elapsed_on_internals_processed_ms {
+            self.elapsed_on_remp_processed_ms = self.elapsed_on_internals_processed_ms;
+        }
+        if self.elapsed_on_externals_processed_ms < self.elapsed_on_remp_processed_ms {
+            self.elapsed_on_externals_processed_ms = self.elapsed_on_remp_processed_ms;
+        }
+        if self.elapsed_on_new_processed_ms < self.elapsed_on_externals_processed_ms {
+            self.elapsed_on_new_processed_ms = self.elapsed_on_externals_processed_ms;
+        }
+        if self.elapsed_on_secondary_clean_ms < self.elapsed_on_new_processed_ms {
+            self.elapsed_on_secondary_clean_ms = self.elapsed_on_new_processed_ms;
+        }
+        if self.elapsed_on_finalize_ms < self.elapsed_on_secondary_clean_ms {
+            self.elapsed_on_finalize_ms = self.elapsed_on_secondary_clean_ms;
+        }
+    }
+
+    fn save_stopped_by_timeout_on(&mut self, step: CollationStoppedOnTimeoutStep) {
+        if self.stopped_on_timeout == CollationStoppedOnTimeoutStep::NoTimeout {
+            self.stopped_on_timeout = step;
+        }
+    }
+
+    fn save_stopped_by_limits_on_initial_clean(&mut self) {
+        self.stopped_on_soft_limit = CollationStoppedOnBlockLimitStep::InitialClean;
+    }
+    fn save_stopped_by_limits_on_internals(&mut self) {
+        self.stopped_on_soft_limit = CollationStoppedOnBlockLimitStep::Internals;
+    }
+    fn save_stopped_by_limits_on_remp(&mut self) {
+        self.stopped_on_remp_limit = CollationStoppedOnBlockLimitStep::Remp;
+    }
+    fn save_stopped_by_limits_on_externals(&mut self) {
+        self.stopped_on_medium_limit = CollationStoppedOnBlockLimitStep::Externals;
+    }
+    fn save_stopped_by_limits_on_new_messages(&mut self) {
+        self.stopped_on_medium_limit = CollationStoppedOnBlockLimitStep::NewMessages;
+    }
+
+    fn save_clean_out_queue_metrics(&mut self, is_initial: bool, partial: bool, elapsed: u128, processed: i32, deleted: i32) {
+        let metrics = if is_initial { &mut self.initial_out_queue_clean } else { &mut self.secondary_out_queue_clean };
+        metrics.partial = partial;
+        metrics.elapsed = elapsed;
+        metrics.processed = processed;
+        metrics.deleted = deleted;
+    }
+
+    fn set_not_all_internals_processed(&mut self) {
+        self.not_all_internals_processed = true;
+    }
+    fn set_not_all_remp_processed(&mut self) {
+        self.not_all_remp_processed = true;
+    }
+    fn set_not_all_externals_processed(&mut self) {
+        self.not_all_externals_processed = true;
+    }
+    fn set_not_all_new_messages_processed(&mut self) {
+        self.not_all_new_messages_processed = true;
+    }
+
+    fn report_metrics(&mut self) {
+        self.recalculate_elapsed_time();
+
+        let shard_label = self.shard.to_string();
+        let labels = [("shard", shard_label.clone())];
+
+        metrics::gauge!("collator_elapsed_on_empty_collations", self.elapsed_on_empty_collations_ms as f64, &labels);
+        metrics::gauge!("collator_elapsed_on_prepare_data", self.elapsed_on_prepare_data_ms as f64, &labels);
+        metrics::gauge!("collator_elapsed_on_initial_clean", self.elapsed_on_initial_clean_ms as f64, &labels);
+        metrics::gauge!("collator_elapsed_on_internals_processed", self.elapsed_on_internals_processed_ms as f64, &labels);
+        metrics::gauge!("collator_elapsed_on_remp_processed", self.elapsed_on_remp_processed_ms as f64, &labels);
+        metrics::gauge!("collator_elapsed_on_externals_processed", self.elapsed_on_externals_processed_ms as f64, &labels);
+        metrics::gauge!("collator_elapsed_on_new_processed", self.elapsed_on_new_processed_ms as f64, &labels);
+        metrics::gauge!("collator_elapsed_on_secondary_clean", self.elapsed_on_secondary_clean_ms as f64, &labels);
+        metrics::gauge!("collator_elapsed_on_finalize", self.elapsed_on_finalize_ms as f64, &labels);
+
+        metrics::gauge!("collator_stopped_on_timeout", (self.stopped_on_timeout as i32) as f64, &labels);
+
+        self.report_stopped_on_block_limit_metric(shard_label.clone());
+        self.report_not_all_msgs_processed_metric(shard_label.clone());
+
+        metrics::gauge!("collator_processed_in_int_msgs_count", self.processed_in_int_msgs_count as f64, &labels);
+        metrics::gauge!("collator_dequeued_our_out_int_msgs_count", self.dequeued_our_out_int_msgs_count as f64, &labels);
+        metrics::gauge!("collator_processed_remp_msgs_count", self.processed_remp_msgs_count as f64, &labels);
+        metrics::gauge!("collator_processed_in_ext_msgs_count", self.processed_in_ext_msgs_count as f64, &labels);
+        metrics::gauge!("collator_created_new_msgs_count", self.created_new_msgs_count as f64, &labels);
+        metrics::gauge!("collator_reverted_transactions_count", self.reverted_transactions_count as f64, &labels);
+
+        self.report_clean_out_queue_metrics(&self.initial_out_queue_clean, shard_label.clone(), "initial".into());
+        self.report_clean_out_queue_metrics(&self.secondary_out_queue_clean, shard_label.clone(), "secondary".into());
+    }
+
+    /// If internals processing was stopped by reaching the Soft block limit and then
+    /// new messages processing stopped when the Medium block limit was reached, then we will push:
+    /// ```
+    /// 5 = 1 (CollationStoppedOnBlockLimitStep::Internals) + 4 (CollationStoppedOnBlockLimitStep::NewMessages)
+    /// ```
+    /// Any combination of `stopped_on_soft_limit`, `stopped_on_remp_limit`, and `stopped_on_medium_limit`
+    /// will result into unique integer value so we are able to recognize a case in the metrics view.
+    fn report_stopped_on_block_limit_metric(&self, shard_label: String) {
+        let labels = [("shard", shard_label)];
+        let value = self.stopped_on_soft_limit as i32 + self.stopped_on_remp_limit as i32 + self.stopped_on_medium_limit as i32;
+        metrics::gauge!("collator_stopped_on_block_limit", value as f64, &labels);
+    }
+
+    /// * 1 = new messages processed partially
+    /// * 2 = externals processed partially
+    /// * 4 = remp processed partially
+    /// * 8 = internals processed partially
+    /// 
+    /// If internals and externals processed partially, the metric value will be:
+    /// ```
+    /// 5 = 1 + 4
+    /// ```
+    fn report_not_all_msgs_processed_metric(&self, shard_label: String) {
+        let labels = [("shard", shard_label)];
+        let mut value = 0;
+        if self.not_all_new_messages_processed { value += 1; }
+        if self.not_all_externals_processed { value += 2; }
+        if self.not_all_remp_processed { value += 4; }
+        if self.not_all_internals_processed { value += 8; }
+        metrics::gauge!("collator_not_all_msgs_processed", value as f64, &labels);
+    }
+
+    fn report_clean_out_queue_metrics(&self, metrics: &CleanOutQueueMetrics, shard_label: String, step: String) {
+        let labels = [("shard", shard_label), ("step", step)];
+        metrics::gauge!("collator_clean_out_queue_partial", if metrics.partial { 1.0 } else { 0.0 }, &labels);
+        metrics::gauge!("collator_clean_out_queue_elapsed", metrics.elapsed as f64, &labels);
+        metrics::gauge!("collator_clean_out_queue_processed", metrics.processed as f64, &labels);
+        metrics::gauge!("collator_clean_out_queue_deleted", metrics.deleted as f64, &labels);
+    }
+
+    fn log_metrics(&mut self, collated_block_descr: Arc<String>) {
+
+        log::debug!(
+            "{}: collator_elapsed_on: empty_collations = {} ms, prepare_data = {} ms, 
+            initial_clean = {} ms, internal_processed = {} ms, remp_processed = {} ms, 
+            external_processed = {} ms, new_processed = {} ms, secondary_clean = {} ms, finalize = {} ms",
+            collated_block_descr,
+            self.elapsed_on_empty_collations_ms, self.elapsed_on_prepare_data_ms,
+            self.elapsed_on_initial_clean_ms, self.elapsed_on_internals_processed_ms,
+            self.elapsed_on_remp_processed_ms, self.elapsed_on_externals_processed_ms,
+            self.elapsed_on_new_processed_ms, self.elapsed_on_secondary_clean_ms,
+            self.elapsed_on_finalize_ms,
+        );
+
+        log::debug!("{}: collator_stopped_on_timeout = {:?}", collated_block_descr, self.stopped_on_timeout);
+
+        self.log_stopped_on_block_limit_metric(collated_block_descr.clone());
+        self.log_not_all_msgs_processed_metric(collated_block_descr.clone());
+
+        log::debug!(
+            "{}: collator_counts: processed_in_int_msgs = {}, dequeued_our_out_int_msgs = {}, processed_remp_msgs = {}
+            processed_in_ext_msgs = {}, created_new_msgs = {}, reverted_transactions {}",
+            collated_block_descr,
+            self.processed_in_int_msgs_count, self.dequeued_our_out_int_msgs_count,
+            self.processed_remp_msgs_count, self.processed_in_ext_msgs_count,
+            self.created_new_msgs_count, self.reverted_transactions_count,
+        );
+
+        self.log_clean_out_queue_metrics(&self.initial_out_queue_clean, collated_block_descr.clone(), "initial".into());
+        self.log_clean_out_queue_metrics(&self.secondary_out_queue_clean, collated_block_descr.clone(), "secondary".into());
+    }
+
+    fn log_stopped_on_block_limit_metric(&self, collated_block_descr: Arc<String>) {
+        let value = self.stopped_on_soft_limit as i32 + self.stopped_on_remp_limit as i32 + self.stopped_on_medium_limit as i32;
+        log::debug!(
+            "{}: collator_stopped_on_block_limit = {}: stopped_on_soft_limit = {:?}, 
+            stopped_on_remp_limit = {:?}, stopped_on_medium_limit = {:?}",
+            collated_block_descr, value,
+            self.stopped_on_soft_limit, self.stopped_on_remp_limit, self.stopped_on_medium_limit,
+        );
+    }
+
+    fn log_not_all_msgs_processed_metric(&self, collated_block_descr: Arc<String>) {
+        let mut value = 0;
+        if self.not_all_new_messages_processed { value += 1; }
+        if self.not_all_externals_processed { value += 2; }
+        if self.not_all_remp_processed { value += 4; }
+        if self.not_all_internals_processed { value += 8; }
+        log::debug!(
+            "{}: collator_not_all_msgs_processed = {}: not_all_new_messages_processed = {},
+            not_all_externals_processed = {}, not_all_remp_processed = {}, not_all_internals_processed = {}",
+            collated_block_descr, value,
+            self.not_all_new_messages_processed, self.not_all_externals_processed,
+            self.not_all_remp_processed, self.not_all_internals_processed,
+        );
+    }
+
+    fn log_clean_out_queue_metrics(&self, metrics: &CleanOutQueueMetrics, collated_block_descr: Arc<String>, step: String) {
+        log::debug!(
+            "{}: {} collator_clean_out_queue metrics: partial = {}, elapsed = {} ms, processed = {}, deleted = {}",
+            collated_block_descr, step,
+            metrics.partial, metrics.elapsed,
+            metrics.processed, metrics.deleted,
+        );
     }
 }
 
@@ -1464,7 +1794,9 @@ impl ExecutionManager {
                     let prev_out_msg_slice_opt = collator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
                     collator_data.add_out_msg_descr_to_history(*msg_sync_key, msg_hash, prev_out_msg_slice_opt);
                     collator_data.del_out_queue_msg_with_history(*msg_sync_key, enq.out_msg_key(), false)?;
+                    collator_data.metrics.dequeued_our_out_int_msgs_count += 1;
                 }
+                collator_data.metrics.processed_in_int_msgs_count += 1;
                 Some(in_msg)
             }
             AsyncMessage::New(env, prev_tr_cell, _created_lt) => {
@@ -1475,6 +1807,7 @@ impl ExecutionManager {
                 let prev_out_msg_slice_opt = collator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
                 collator_data.add_out_msg_descr_to_history(*msg_sync_key, msg_hash, prev_out_msg_slice_opt);
                 collator_data.del_out_queue_msg_with_history(*msg_sync_key, env.out_msg_key(), true)?;
+                collator_data.metrics.processed_new_msgs_count += 1;
                 Some(in_msg)
             }
             AsyncMessage::Mint(msg) |
@@ -1488,6 +1821,7 @@ impl ExecutionManager {
             }
             AsyncMessage::Ext(msg) => {
                 let in_msg = InMsg::external(msg.serialize()?, tr_cell.clone());
+                collator_data.metrics.processed_in_ext_msgs_count += 1;
                 Some(in_msg)
             }
             AsyncMessage::TickTock(_) => None
@@ -1584,7 +1918,7 @@ impl ExecutionManager {
                 }
             }
         }
-        metrics::gauge!("reverted_transactions", msgs_to_revert.len() as f64);
+        collator_data.metrics.reverted_transactions_count += msgs_to_revert.len();
         for (account_addr, msg_sync_key, msg_hash) in msgs_to_revert.into_iter().rev() {
             if let Some(msg_info) = self.msgs_queue.get_mut(msg_sync_key) {
                 msg_info.1 = false;
@@ -1616,11 +1950,33 @@ impl ExecutionManager {
 
         collator_data.revert_in_msgs_descr_by_src_msg(msg_sync_key)?;
         collator_data.revert_out_msgs_descr_by_src_msg(msg_sync_key)?;
-        collator_data.revert_accepted_ext_message_by_src_msg(msg_sync_key);
-        collator_data.revert_rejected_ext_message_by_src_msg(msg_sync_key);
-        collator_data.revert_del_out_queue_msg(msg_sync_key)?;
-        collator_data.revert_add_out_queue_msgs(msg_sync_key)?;
-        collator_data.revert_new_messages_by_src_msg(msg_sync_key);
+
+        let mut reverted_ext_msg = false;
+        if collator_data.revert_accepted_ext_message_by_src_msg(msg_sync_key) ||
+            collator_data.revert_rejected_ext_message_by_src_msg(msg_sync_key) {
+                collator_data.metrics.processed_in_ext_msgs_count -= 1;
+                reverted_ext_msg = true;
+        }
+
+        let mut reverted_new_msg = false;
+        if let Some(is_new) = collator_data.revert_del_out_queue_msg_by_src_msg(msg_sync_key)? {
+            if is_new {
+                collator_data.metrics.processed_new_msgs_count -= 1;
+                reverted_new_msg = true;
+            } else {
+                collator_data.metrics.dequeued_our_out_int_msgs_count -= 1;
+            }
+        }
+        collator_data.revert_add_out_queue_msgs_by_src_msg(msg_sync_key)?;
+        if let Some(reverted_count) = collator_data.revert_new_messages_by_src_msg(msg_sync_key) {
+            collator_data.metrics.created_new_msgs_count -= reverted_count;
+        }
+
+        // if current reverted message is not external and not new then it is inbound internal
+        if !reverted_ext_msg && !reverted_new_msg {
+            collator_data.metrics.processed_in_int_msgs_count -= 1;
+        }
+
         collator_data.revert_mint_msg_by_src_msg(msg_sync_key);
         collator_data.revert_recover_create_msg_by_src_msg(msg_sync_key);
         collator_data.revert_copyleft_msg_by_src_msg(msg_sync_key);
@@ -1822,6 +2178,8 @@ impl Collator {
                     e
                 })?;
 
+            collator_data.metrics.save_elapsed_on_prepare_data(&self);
+
             // load messages and process them to produce block candidate
             let result = self.do_collate(&mc_data, &prev_data, &mut collator_data).await
                 .map_err(|e| {
@@ -1829,6 +2187,9 @@ impl Collator {
                         self.collated_block_descr, self.started.elapsed().as_millis(), e);
                     e
                 });
+            if result.is_err() {
+                collator_data.metrics.log_metrics(self.collated_block_descr.clone());
+            }
             duration = attempt_started.elapsed().as_millis() as u32;
             if let Some(result) = result? {
                 break result;
@@ -1844,6 +2205,8 @@ impl Collator {
             );
 
             tokio::time::sleep(Duration::from_millis(sleep as u64)).await;
+
+            collator_data.metrics.save_elapsed_on_empty_collations(&self);
         };
 
         let ratio = match duration {
@@ -1861,6 +2224,10 @@ impl Collator {
             exec_manager.total_trans_duration.load(Ordering::Relaxed) / 1000,
             candidate.block_id,
         );
+
+        #[cfg(feature = "log_metrics")]
+        collator_data.metrics.report_metrics();
+        collator_data.metrics.log_metrics(self.collated_block_descr.clone());
 
         #[cfg(feature = "log_metrics")]
         report_collation_metrics(
@@ -1955,6 +2322,7 @@ impl Collator {
             &prev_data,
             is_masterchain,
             self.collated_block_descr.clone(),
+            self.shard.clone(),
         )?;
         if !self.shard.is_masterchain() {
             let (now_upper_limit, before_split, _accept_msgs) = check_this_shard_mc_info(
@@ -2029,16 +2397,16 @@ impl Collator {
 
         // delete delivered messages from output queue for a limited time
         if !self.after_split {
-            let clean_timeout_nanos = self.get_initial_clean_timeout();
+            let clean_timeout_nanos = self.get_initial_clean_timeout_nanos();
             let elapsed;
             (initial_out_queue_clean_partial, initial_out_queue_clean_deleted_count, elapsed) =
                 self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager,
-                    clean_timeout_nanos, self.engine.collator_config().optimistic_clean_percentage_points, "initial",
+                    clean_timeout_nanos, self.engine.collator_config().optimistic_clean_percentage_points, true,
                 ).await?;
+            collator_data.metrics.save_elapsed_on_initial_clean(&self);
             log::debug!("{}: TIME: clean_out_msg_queue initial {}ms;", self.collated_block_descr, elapsed);
         } else {
             log::debug!("{}: TIME: clean_out_msg_queue initial SKIPPED because of after_split block", self.collated_block_descr);
-            self.push_out_queue_clean_empty_metrics("initial");
         }
 
         // copy out msg queue from next state which is cleared compared to previous
@@ -2092,6 +2460,7 @@ impl Collator {
             let now = std::time::Instant::now();
             self.process_inbound_internal_messages(prev_data, collator_data, &output_queue_manager,
                 &mut exec_manager).await?;
+            collator_data.metrics.save_elapsed_on_internals_processed(&self);
             log::debug!("{}: TIME: process_inbound_internal_messages {}ms;", 
                 self.collated_block_descr, now.elapsed().as_millis());
 
@@ -2099,8 +2468,10 @@ impl Collator {
                 // import remp messages (if space&gas left)
                 let now = std::time::Instant::now();
                 let total = remp_messages.len();
-                let processed = self.process_remp_messages(prev_data, collator_data, &mut exec_manager, 
-                    remp_messages).await?;
+                let processed = self.process_remp_messages(
+                    prev_data, collator_data, &mut exec_manager, remp_messages
+                ).await?;
+                collator_data.metrics.save_elapsed_on_remp_processed(&self);
                 log::debug!("{}: TIME: process_remp_messages {}ms, processed {}, ignored {}", 
                     self.collated_block_descr, now.elapsed().as_millis(), processed, total - processed);
             }
@@ -2108,8 +2479,12 @@ impl Collator {
             // import inbound external messages (if space&gas left)
             let now = std::time::Instant::now();
             self.process_inbound_external_messages(prev_data, collator_data, &mut exec_manager).await?;
-            log::debug!("{}: TIME: process_inbound_external_messages {}ms;", 
-                self.collated_block_descr, now.elapsed().as_millis());
+            collator_data.metrics.save_elapsed_on_externals_processed(&self);
+            log::debug!(
+                "{}: TIME: process_inbound_external_messages {}ms;",
+                self.collated_block_descr,
+                now.elapsed().as_millis(),
+            );
             metrics::histogram!("collator_process_inbound_external_messages_time", now.elapsed());
 
             // process newly-generated messages (if space&gas left)
@@ -2117,6 +2492,7 @@ impl Collator {
             let now = std::time::Instant::now();
             if collator_data.inbound_queues_empty {
                 self.process_new_messages(prev_data, collator_data, &mut exec_manager).await?;
+                collator_data.metrics.save_elapsed_on_new_processed(&self);
             }
             log::debug!("{}: TIME: process_new_messages {}ms;", 
                 self.collated_block_descr, now.elapsed().as_millis());
@@ -2128,30 +2504,28 @@ impl Collator {
 
         // perform secondary out queue clean
         // if block limits not reached, inital clean was partial and not messages were deleted
-        let clean_remaining_timeout_nanos = self.get_remaining_clean_time_limit_nanos();
+        let secondary_clean_timeout_nanos = self.get_secondary_clean_timeout_nanos();
         if self.check_should_perform_secondary_clean(
             collator_data.block_full,
             initial_out_queue_clean_partial,
             initial_out_queue_clean_deleted_count,
-            clean_remaining_timeout_nanos,
+            secondary_clean_timeout_nanos,
         ) {
             if !self.after_split {
                 // set current out msg queue to manager to process new clean
                 *output_queue_manager.next_mut() = std::mem::take(&mut collator_data.out_msg_queue_info);
 
                 let (_, _, elapsed) =
-                    self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager, clean_remaining_timeout_nanos, 0, "remaining").await?;
-                log::debug!("{}: TIME: clean_out_msg_queue remaining {}ms;", self.collated_block_descr, elapsed);
+                    self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager, secondary_clean_timeout_nanos, 0, false).await?;
+                collator_data.metrics.save_elapsed_on_secondary_clean(&self);
+                log::debug!("{}: TIME: clean_out_msg_queue secondary {}ms;", self.collated_block_descr, elapsed);
     
                 // copy out msg queue from manager after clean
                 collator_data.out_msg_queue_info = output_queue_manager.take_next();
                 collator_data.out_msg_queue_info.forced_fix_out_queue()?;
             } else {
-                log::debug!("{}: TIME: clean_out_msg_queue remaining SKIPPED because of after_split block", self.collated_block_descr);
-                self.push_out_queue_clean_empty_metrics("remaining");
+                log::debug!("{}: TIME: clean_out_msg_queue secondary SKIPPED because of after_split block", self.collated_block_descr);
             }
-        } else {
-            self.push_out_queue_clean_empty_metrics("remaining");
         }
 
         // split prepare / split install
@@ -2190,6 +2564,8 @@ impl Collator {
         let result = self.finalize_block(
             mc_data, prev_data, collator_data, exec_manager, new_state_copyleft_rewards).await?;
 
+        collator_data.metrics.save_elapsed_on_finalize(&self);
+
         Ok(Some(result))
     }
 
@@ -2200,17 +2576,15 @@ impl Collator {
         output_queue_manager: &mut MsgQueueManager,
         clean_timeout_nanos: i128,
         optimistic_clean_percentage_points: u32,
-        clean_step: &str,
+        is_initial: bool,
     ) -> Result<(bool, i32, u128)> {
-        log::debug!("{}: clean_out_msg_queue", self.collated_block_descr);
+        log::debug!("{}: clean_out_msg_queue {}", self.collated_block_descr, if is_initial { "initial" } else { "secondary" });
         let short = mc_data.config().has_capability(GlobalCapabilities::CapShortDequeue);
 
         let now = std::time::Instant::now();
 
         let (
-            out_queue_cleaned_partial,
-            messages_processed,
-            out_queue_clean_deleted_count,
+            partial, processed, deleted,
         ) = output_queue_manager.clean_out_msg_queue(clean_timeout_nanos, optimistic_clean_percentage_points, |message, root| {
             self.check_stop_flag()?;
             if let Some((enq, deliver_lt)) = message {
@@ -2219,6 +2593,9 @@ impl Collator {
                 collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, false)?;
                 // normal limit reached, but we can add for soft and hard limit
                 let stop = !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
+                if stop && is_initial {
+                    collator_data.metrics.save_stopped_by_limits_on_initial_clean();
+                }
                 Ok(stop)
             } else {
                 collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, true)?;
@@ -2228,21 +2605,9 @@ impl Collator {
 
         let elapsed = now.elapsed().as_millis();
 
-        let labels = [("shard", self.shard.to_string()), ("step", clean_step.to_owned())];
-        metrics::gauge!("clean_out_msg_queue_partial", if out_queue_cleaned_partial { 1.0 } else { 0.0 }, &labels);
-        metrics::gauge!("clean_out_msg_queue_elapsed", elapsed as f64, &labels);
-        metrics::gauge!("clean_out_msg_queue_processed", messages_processed as f64, &labels);
-        metrics::gauge!("clean_out_msg_queue_deleted", out_queue_clean_deleted_count as f64, &labels);
+        collator_data.metrics.save_clean_out_queue_metrics(is_initial, partial, elapsed, processed, deleted);
 
-        Ok((out_queue_cleaned_partial, out_queue_clean_deleted_count, elapsed))
-    }
-
-    fn push_out_queue_clean_empty_metrics(&self, clean_step: &str) {
-        let labels = [("shard", self.shard.to_string()), ("step", clean_step.to_owned())];
-        metrics::gauge!("clean_out_msg_queue_partial", 0.0, &labels);
-        metrics::gauge!("clean_out_msg_queue_elapsed", 0.0, &labels);
-        metrics::gauge!("clean_out_msg_queue_processed", 0.0, &labels);
-        metrics::gauge!("clean_out_msg_queue_deleted", 0.0, &labels);
+        Ok((partial, deleted, elapsed))
     }
 
     //
@@ -3034,10 +3399,12 @@ impl Collator {
                 }
             }
             if collator_data.block_full {
+                collator_data.metrics.save_stopped_by_limits_on_internals();
                 log::debug!("{}: BLOCK FULL (>= Soft), stop processing internal messages", self.collated_block_descr);
                 break
             }
             if self.check_cutoff_timeout() {
+                collator_data.metrics.save_stopped_by_timeout_on(CollationStoppedOnTimeoutStep::Internals);
                 log::warn!("{}: TIMEOUT ({}ms) is elapsed, stop processing internal messages",
                 self.collated_block_descr, self.engine.collator_config().cutoff_timeout_ms);
                 break
@@ -3046,6 +3413,7 @@ impl Collator {
         }
         // all internal messages are processed
         collator_data.inbound_queues_empty = iter.next().is_none();
+        collator_data.metrics.not_all_internals_processed = !collator_data.inbound_queues_empty;
         Ok(())
     }
 
@@ -3098,10 +3466,14 @@ impl Collator {
         log::debug!("{}: process_inbound_external_messages", self.collated_block_descr);
         for (msg, id) in self.engine.get_external_messages_iterator(self.shard.clone()) {
             if !collator_data.block_limit_status.fits(ParamLimitIndex::Soft) {
+                collator_data.metrics.save_stopped_by_limits_on_externals();
+                collator_data.metrics.not_all_externals_processed = true;
                 log::debug!("{}: BLOCK FULL (>= Medium), stop processing external messages", self.collated_block_descr);
                 break;
             }
             if self.check_cutoff_timeout() {
+                collator_data.metrics.save_stopped_by_timeout_on(CollationStoppedOnTimeoutStep::Externals);
+                collator_data.metrics.not_all_externals_processed = true;
                 log::warn!("{}: TIMEOUT ({}ms) is elapsed, stop processing external messages",
                     self.collated_block_descr, self.engine.collator_config().cutoff_timeout_ms,
                 );
@@ -3159,10 +3531,14 @@ impl Collator {
                 is not external inbound message", id))?;
             if self.shard.contains_address(&header.dst)? {
                 if !collator_data.block_limit_status.fits_normal(REMP_CUTOFF_LIMIT) {
+                    collator_data.metrics.save_stopped_by_limits_on_remp();
+                    collator_data.metrics.not_all_remp_processed = true;
                     log::trace!("{}: block is loaded enough, stop processing remp messages", self.collated_block_descr);
                     ignored.push(id);
                     ignore = true;
                 } else if self.check_cutoff_timeout() {
+                    collator_data.metrics.save_stopped_by_timeout_on(CollationStoppedOnTimeoutStep::Remp);
+                    collator_data.metrics.not_all_remp_processed = true;
                     log::warn!("{}: TIMEOUT is elapsed, stop processing remp messages",
                         self.collated_block_descr);
                     ignored.push(id);
@@ -3188,6 +3564,8 @@ impl Collator {
         exec_manager.wait_transactions(collator_data).await?;
         let (accepted, rejected) = collator_data.withdraw_ext_msg_statuses();
         let processed = accepted.len() + rejected.len();
+        collator_data.metrics.processed_remp_msgs_count += processed;
+        //let accepted = accepted.into_iter().map(|(id, _)| id).collect();
         collator_data.set_remp_msg_statuses(accepted, rejected, ignored);
         Ok(processed)
     }
@@ -3218,11 +3596,13 @@ impl Collator {
                 let info = msg.int_header().ok_or_else(|| error!("message is not internal"))?;
 
                 if !collator_data.block_limit_status.fits(ParamLimitIndex::Soft) {
+                    collator_data.metrics.save_stopped_by_limits_on_new_messages();
                     log::debug!("{}: BLOCK FULL (>= Medium), stop processing new messages", self.collated_block_descr);
                     stop_processing = true;
                     break;
                 }
                 if self.check_cutoff_timeout() {
+                    collator_data.metrics.save_stopped_by_timeout_on(CollationStoppedOnTimeoutStep::NewMessages);
                     log::warn!("{}: TIMEOUT ({}ms) is elapsed, stop processing new messages",
                         self.collated_block_descr, self.engine.collator_config().cutoff_timeout_ms,
                     );
@@ -3247,8 +3627,14 @@ impl Collator {
                 };
                 self.check_stop_flag()?;
             }
+            if !new_messages.is_empty() {
+                collator_data.metrics.not_all_new_messages_processed = true;
+            }
             exec_manager.wait_transactions(collator_data).await?;
             self.check_stop_flag()?;
+        }
+        if !collator_data.new_messages.is_empty() {
+            collator_data.metrics.not_all_new_messages_processed = true;
         }
 
         Ok(())
@@ -4322,12 +4708,12 @@ impl Collator {
         cutoff_timeout_nanos - elapsed_nanos
     }
 
-    fn get_initial_clean_timeout(&self) -> i128 {
+    fn get_initial_clean_timeout_nanos(&self) -> i128 {
         let cc = self.engine.collator_config();
         (cc.cutoff_timeout_ms as i128) * 1_000_000 * (cc.clean_timeout_percentage_points as i128) / 1000
     }
 
-    fn get_remaining_clean_time_limit_nanos(&self) -> i128 {
+    fn get_secondary_clean_timeout_nanos(&self) -> i128 {
         let remaining_cutoff_timeout_nanos = self.get_remaining_cutoff_time_limit_nanos();
         let cc = self.engine.collator_config();
         let max_secondary_clean_timeout_nanos = (cc.cutoff_timeout_ms as i128) * 1_000_000 * (cc.max_secondary_clean_timeout_percentage_points as i128) / 1000;
