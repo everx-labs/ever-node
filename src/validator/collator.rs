@@ -2768,7 +2768,6 @@ impl Collator {
             new_state.update_config_smc()?;
         }
 
-
         if log::log_enabled!(log::Level::Trace) {
             new_state
                 .read_out_msg_queue_info()?

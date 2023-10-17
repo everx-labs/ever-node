@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.64
+
+- Write `last_trans_lt` to account's json for deleted accounts.
+
 ## Version 0.55.63
 
 - Fixed a possible hang-up while saving a shard state

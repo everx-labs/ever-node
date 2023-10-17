@@ -175,10 +175,10 @@ impl SessionProcessor for SessionProcessorImpl {
         Stop processing
     */
 
-    fn stop(&mut self) {
+    fn stop(&mut self, destroy_catchain_db: bool) {
         log::debug!("Stopping ValidatorSession processor...");
 
-        self.catchain.stop(false);
+        self.catchain.stop(destroy_catchain_db);
 
         log::debug!("ValidatorSession processor has been stopped");
     }
