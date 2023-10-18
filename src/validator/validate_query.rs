@@ -4407,7 +4407,6 @@ impl ValidateQuery {
         let labels = [("shard", base.block_id().shard().to_string())];
         metrics::gauge!("gas_rate_validator", ratio as f64, &labels);
 
-
         #[cfg(feature = "telemetry")]
         self.engine.validator_telemetry().succeeded_attempt(
             &self.shard,

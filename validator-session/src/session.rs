@@ -406,6 +406,7 @@ impl LoopbackOverlayManager {
 
 pub(crate) struct SessionImpl {
     stop_flag: Arc<AtomicBool>, //atomic flag to indicate that all processing threads should be stopped
+    destroy_catchain_db_flag: Arc<AtomicBool>, //indicates catchain has to destroy DB
     main_processing_thread_stopped: Arc<AtomicBool>, //atomic flag to indicate that processing thread has been stopped
     session_callbacks_processing_thread_stopped: Arc<AtomicBool>, //atomic flag to indicate that processing thread has been stopped
     _main_task_queue: TaskQueuePtr, //task queue for main thread tasks processing
@@ -459,6 +460,10 @@ impl SessionImpl {
     */
 
     fn stop_impl(&self, destroy_catchain_db: bool) {
+        if destroy_catchain_db {
+            self.destroy_catchain_db_flag.store(true, Ordering::SeqCst);
+        }
+
         self.stop_flag.store(true, Ordering::Release);
 
         loop {
@@ -502,6 +507,7 @@ impl SessionImpl {
     fn main_loop(
         should_stop_flag: Arc<AtomicBool>,
         is_stopped_flag: Arc<AtomicBool>,
+        destroy_catchain_db_flag: Arc<AtomicBool>,
         task_queue: TaskQueuePtr,
         completion_task_queue: TaskQueuePtr,
         callbacks_task_queue: CallbackTaskQueuePtr,
@@ -893,7 +899,7 @@ impl SessionImpl {
                 //check if the main loop should be stopped
 
                 if should_stop_flag.load(Ordering::Relaxed) {
-                    processor.borrow_mut().stop();
+                    processor.borrow_mut().stop(destroy_catchain_db_flag.load(Ordering::Relaxed));
                     break;
                 }
 
@@ -1227,6 +1233,7 @@ impl SessionImpl {
         //create threads
 
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let destroy_catchain_db_flag = Arc::new(AtomicBool::new(false));
         let main_processing_thread_stopped = Arc::new(AtomicBool::new(false));
         let session_callbacks_processing_thread_stopped = Arc::new(AtomicBool::new(false));
         let session_activity_node = catchain::CatchainFactory::create_activity_node(format!(
@@ -1235,6 +1242,7 @@ impl SessionImpl {
         ));
         let body: SessionImpl = SessionImpl {
             stop_flag: stop_flag.clone(),
+            destroy_catchain_db_flag: destroy_catchain_db_flag.clone(),
             main_processing_thread_stopped: main_processing_thread_stopped.clone(),
             session_callbacks_processing_thread_stopped:
                 session_callbacks_processing_thread_stopped.clone(),
@@ -1269,6 +1277,7 @@ impl SessionImpl {
                 SessionImpl::main_loop(
                     stop_flag_for_main_loop,
                     main_processing_thread_stopped,
+                    destroy_catchain_db_flag,
                     main_task_queue,
                     session_callbacks_responses_task_queue,
                     session_callbacks_task_queue_for_main_loop,

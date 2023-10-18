@@ -12,7 +12,7 @@
 */
 
 use crate::{
-    block::BlockStuff, block_proof::BlockProofStuff, engine_traits::{ChainRange, ExternalDb}, 
+    block::BlockStuff, block_proof::BlockProofStuff, engine_traits::{ChainRange, ExternalDb},
     error::NodeError, external_db::WriteData, shard_state::ShardStateStuff
 };
 
@@ -41,7 +41,7 @@ use serde_json::{Map, Value};
 
 lazy_static::lazy_static!(
     static ref ACCOUNT_NONE_HASH: UInt256 = Account::default().serialize().unwrap().repr_hash();
-    static ref MINTER_ADDRESS: MsgAddressInt = 
+    static ref MINTER_ADDRESS: MsgAddressInt =
         MsgAddressInt::AddrStd(MsgAddrStd::with_address(None, -1, [0; 32].into()));
 );
 
@@ -132,7 +132,7 @@ impl<T: 'static + WriteData> Processor<T> {
         front_workchain_ids: Vec<i32>,
         max_account_bytes_size: Option<usize>,
         control_id: [u8; 32],
-    ) 
+    )
     -> Self {
         log::trace!("Processor::new workchains {:?}", front_workchain_ids);
 
@@ -184,7 +184,7 @@ impl<T: 'static + WriteData> Processor<T> {
         if let Some(message_cell) = transaction.in_msg_cell() {
             let message = Message::construct_from_cell(message_cell.clone())?;
             let message_id = message_cell.repr_hash();
-            let mut doc = 
+            let mut doc =
                 if message.is_inbound_external() || message.src_ref() == Some(&MINTER_ADDRESS) {
                     Self::prepare_message_json(
                         message_cell,
@@ -201,14 +201,14 @@ impl<T: 'static + WriteData> Processor<T> {
                             doc
                         })
                 };
-    
+
             doc.insert(
                 "dst_chain_order".into(),
                 format!("{}{}", tr_chain_order, ton_block_json::u64_to_string(0)).into());
-    
+
             messages.insert(message_id, doc);
         };
-    
+
         let mut index: u64 = 1;
         transaction.out_msgs.iterate_slices(|slice| {
             let message_cell = slice.reference(0)?;
@@ -221,17 +221,17 @@ impl<T: 'static + WriteData> Processor<T> {
                 block_id.clone(),
                 None, // transaction_now affects ExtIn messages only
             )?;
-    
+
             // messages are ordered by created_lt
             doc.insert(
                 "src_chain_order".into(),
                 format!("{}{}", tr_chain_order, ton_block_json::u64_to_string(index)).into());
-    
+
             index += 1;
             messages.insert(message_id, doc);
             Ok(true)
         })?;
-    
+
         Ok(())
     }
 
@@ -246,7 +246,7 @@ impl<T: 'static + WriteData> Processor<T> {
         let proof = block_root_for_proof
             .map(|cell| write_boc(&message.prepare_proof(true, cell)?))
             .transpose()?;
-    
+
         let set = ton_block_json::MessageSerializationSet {
             message,
             id: message_cell.repr_hash(),
@@ -262,7 +262,7 @@ impl<T: 'static + WriteData> Processor<T> {
     }
 
     fn prepare_transaction_json(
-        tr_cell: Cell, 
+        tr_cell: Cell,
         transaction: Transaction,
         block_root: &Cell,
         block_id: UInt256,
@@ -334,7 +334,7 @@ impl<T: 'static + WriteData> Processor<T> {
             boc1,
             ..Default::default()
         };
-        
+
         let partition_key = Self::calc_account_partition_key(sharding_depth, account_id.clone())?;
         let mut doc = ton_block_json::db_serialize_account("id", &set)?;
         if let Some(last_trans_chain_order) = last_trans_chain_order {
@@ -353,6 +353,7 @@ impl<T: 'static + WriteData> Processor<T> {
         sharding_depth: u32,
         prev_account_state: Option<Account>,
         last_trans_chain_order: Option<String>,
+        last_trans_lt: Option<u64>,
     ) -> Result<DbRecord> {
         let partition_key = Self::calc_account_partition_key(sharding_depth, account_id.clone())?;
         let set = ton_block_json::DeletedAccountSerializationSet {
@@ -365,6 +366,9 @@ impl<T: 'static + WriteData> Processor<T> {
         let mut doc = ton_block_json::db_serialize_deleted_account("id", &set)?;
         if let Some(last_trans_chain_order) = last_trans_chain_order {
             doc.insert("last_trans_chain_order".to_owned(), last_trans_chain_order.into());
+        }
+        if let Some(lt) = last_trans_lt {
+            doc.insert("last_trans_lt".to_owned(), ton_block_json::u64_to_string(lt).into());
         }
         Ok(DbRecord::Account(
             doc["id"].to_string(),
@@ -449,7 +453,7 @@ impl<T: 'static + WriteData> Processor<T> {
 
     fn process_parsing_error(&self, block: &BlockStuff, e: failure::Error) {
         log::error!(
-            "Error while parsing block (before put into kafka): {}   block: {}", 
+            "Error while parsing block (before put into kafka): {}   block: {}",
             block.id(), e);
         let root = std::path::Path::new(&self.bad_blocks_storage);
         let name = block.id().to_string();
@@ -469,7 +473,7 @@ impl<T: 'static + WriteData> Processor<T> {
 
 
     pub async fn process_block_impl(
-        &self, 
+        &self,
         block_stuff: &BlockStuff,
         block_proof: Option<&BlockProofStuff>,
         state: Option<&Arc<ShardStateStuff>>,
@@ -518,14 +522,14 @@ impl<T: 'static + WriteData> Processor<T> {
 
             let mut db_records = Vec::new();
 
-            
             // Accounts, transactions and messages
             if process_account || process_transaction || process_message {
-                
+
                 // Prepare sorted ton_block transactions and addresses of changed accounts
                 let mut changed_acc = HashSet::new();
                 let mut deleted_acc = HashSet::new();
                 let mut acc_last_trans_chain_order = HashMap::new();
+                let mut acc_last_trans_lt = HashMap::new();
                 let now = std::time::Instant::now();
                 let mut tr_count = 0;
                 let mut transactions = BTreeMap::new();
@@ -563,7 +567,7 @@ impl<T: 'static + WriteData> Processor<T> {
                 let mut messages = Default::default();
                 for (_, (cell, transaction)) in transactions.into_iter() {
                     let tr_chain_order = format!("{}{}", block_order, ton_block_json::u64_to_string(index as u64));
-                    
+
                     if process_message {
                         Self::prepare_messages_from_transaction(
                             &transaction,
@@ -576,12 +580,15 @@ impl<T: 'static + WriteData> Processor<T> {
 
                     if process_account {
                         let account_id = transaction.account_id().clone();
-                        acc_last_trans_chain_order.insert(account_id, tr_chain_order.clone());
+                        acc_last_trans_chain_order.insert(account_id.clone(), tr_chain_order.clone());
+                        let last_trans_lt = transaction.logical_time() +
+                                transaction.out_msgs.len().unwrap_or(0) as u64 + 1;
+                        acc_last_trans_lt.insert(account_id, last_trans_lt);
                     }
 
                     if process_transaction {
                         let mut doc = Self::prepare_transaction_json(
-                            cell, 
+                            cell,
                             transaction,
                             &block_root,
                             block_root.repr_hash(),
@@ -595,7 +602,7 @@ impl<T: 'static + WriteData> Processor<T> {
                                 format!("{:#}", serde_json::json!(doc))
                             ));
                     }
-                    
+
                     index += 1;
                 }
                 let msg_count = messages.len(); // is 0 if not process_message
@@ -614,7 +621,6 @@ impl<T: 'static + WriteData> Processor<T> {
                     block_id,
                 );
 
-                
                 // Prepare accounts (changed and deleted)
                 if process_account {
                     let now = std::time::Instant::now();
@@ -637,7 +643,7 @@ impl<T: 'static + WriteData> Processor<T> {
 
                         for account_id in changed_acc.iter() {
                             let acc = shard_accounts.account(account_id)?
-                                .ok_or_else(|| 
+                                .ok_or_else(||
                                     NodeError::InvalidData(
                                         "Block and shard state mismatch: \
                                         state doesn't contain changed account".to_string()
@@ -658,12 +664,14 @@ impl<T: 'static + WriteData> Processor<T> {
                         for account_id in deleted_acc {
                             let prev_acc = get_prev_state(account_id.clone())?;
                             let last_trans_chain_order = acc_last_trans_chain_order.remove(&account_id);
+                            let last_trans_lt = acc_last_trans_lt.remove(&account_id);
                             db_records.push(Self::prepare_deleted_account_record(
                                 account_id,
                                 workchain_id,
                                 accounts_sharding_depth,
                                 prev_acc,
                                 last_trans_chain_order,
+                                last_trans_lt
                             )?);
                         }
                     }
@@ -752,7 +760,7 @@ impl<T: 'static + WriteData> Processor<T> {
                 DbRecord::RawBlockProof(key, value, partition_key) => send_tasks.push(self.writers.write_raw_block_proof.write_raw_data(key.to_vec(), value, None, partition_key)),
                 DbRecord::RawBlock(key, file_hash, value, mc_seq_no, partition_key) =>  send_tasks.push(Box::pin(self.send_raw_block(key, value, mc_seq_no, file_hash, partition_key))),
                 DbRecord::_Empty => {}
-            } 
+            }
         }
 
         log::trace!("TIME: must be zero {}ms;   {}", now.elapsed().as_millis(), block_stuff.id());
@@ -800,9 +808,9 @@ const ACCOUNTS_PORTION_LEN: usize = 1000;
 #[async_trait::async_trait]
 impl<T: WriteData> ExternalDb for Processor<T> {
     async fn process_block(
-        &self, 
+        &self,
         block_stuff: &BlockStuff,
-        proof: Option<&BlockProofStuff>, 
+        proof: Option<&BlockProofStuff>,
         state: &Arc<ShardStateStuff>,
         prev_states: (&Arc<ShardStateStuff>, Option<&Arc<ShardStateStuff>>),
         mc_seq_no: u32,
@@ -837,7 +845,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
                         }
                     };
                     let record = Self::prepare_account_record(
-                        acc, 
+                        acc,
                         None,
                         self.writers.write_account.sharding_depth(),
                         self.max_account_bytes_size,
@@ -915,7 +923,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
         // Ok(())
 
         let key = format!("{:x}", id);
-        let val = format!("{:#}", 
+        let val = format!("{:#}",
             serde_json::json!(ton_block_json::db_serialize_remp_status(status, signature)?));
         self.writers.write_remp_statuses.write_data(key, val, None, None).await?;
         Ok(())

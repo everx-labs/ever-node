@@ -1293,7 +1293,7 @@ pub trait SessionProcessor: CompletionHandlerProcessor + fmt::Display {
     fn get_next_awake_time(&self) -> std::time::SystemTime;
 
     /// Stop all further session processing
-    fn stop(&mut self);
+    fn stop(&mut self, destroy_catchain_db: bool);
 
     /// Returns implementation specific details
     fn get_impl(&self) -> &dyn Any;
