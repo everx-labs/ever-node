@@ -1101,8 +1101,8 @@ impl CollatorMetrics {
         }
     }
 
-    fn save_elapsed_on_empty_collations(&mut self, collator: &Collator) {
-        self.elapsed_on_empty_collations_ms = collator.started.elapsed().as_millis();
+    fn set_elapsed_on_empty_collations(&mut self, elapsed: u128) {
+        self.elapsed_on_empty_collations_ms = elapsed;
     }
     fn save_elapsed_on_prepare_data(&mut self, collator: &Collator) {
         self.elapsed_on_prepare_data_ms = collator.started.elapsed().as_millis();
@@ -1225,6 +1225,7 @@ impl CollatorMetrics {
         metrics::gauge!("collator_processed_remp_msgs_count", self.processed_remp_msgs_count as f64, &labels);
         metrics::gauge!("collator_processed_in_ext_msgs_count", self.processed_in_ext_msgs_count as f64, &labels);
         metrics::gauge!("collator_created_new_msgs_count", self.created_new_msgs_count as f64, &labels);
+        metrics::gauge!("collator_processed_new_msgs_count", self.processed_new_msgs_count as f64, &labels);
         metrics::gauge!("collator_reverted_transactions_count", self.reverted_transactions_count as f64, &labels);
 
         self.report_clean_out_queue_metrics(&self.initial_out_queue_clean, shard_label.clone(), "initial".into());
@@ -1238,6 +1239,20 @@ impl CollatorMetrics {
     /// ```
     /// Any combination of `stopped_on_soft_limit`, `stopped_on_remp_limit`, and `stopped_on_medium_limit`
     /// will result into unique integer value so we are able to recognize a case in the metrics view.
+    /// 
+    /// `stopped_on_soft_limit` possible values:
+    /// * 0 = NotStopped
+    /// * 1 = Internals
+    /// * 2 = InitialClean
+    /// 
+    /// `stopped_on_remp_limit` possible values:
+    /// * 0 = NotStopped
+    /// * 3 = Remp
+    /// 
+    /// `stopped_on_medium_limit` possible values:
+    /// * 0 = NotStopped
+    /// * 4 = NewMessages
+    /// * 5 = Externals
     fn report_stopped_on_block_limit_metric(&self, shard_label: String) {
         let labels = [("shard", shard_label)];
         let value = self.stopped_on_soft_limit as i32 + self.stopped_on_remp_limit as i32 + self.stopped_on_medium_limit as i32;
@@ -2155,6 +2170,7 @@ impl Collator {
         let mut collator_data;
         let mut attempt = 0;
         let mut duration;
+        let mut elapsed_on_empty_collation = 0;
         // inside the loop try to collate new block
         let (candidate, state, exec_manager) = loop {
 
@@ -2178,6 +2194,7 @@ impl Collator {
                     e
                 })?;
 
+            collator_data.metrics.set_elapsed_on_empty_collations(elapsed_on_empty_collation);
             collator_data.metrics.save_elapsed_on_prepare_data(&self);
 
             // load messages and process them to produce block candidate
@@ -2206,7 +2223,7 @@ impl Collator {
 
             tokio::time::sleep(Duration::from_millis(sleep as u64)).await;
 
-            collator_data.metrics.save_elapsed_on_empty_collations(&self);
+            elapsed_on_empty_collation = self.started.elapsed().as_millis();
         };
 
         let ratio = match duration {
