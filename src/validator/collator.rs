@@ -1020,7 +1020,7 @@ impl CollatorData {
 }
 
 #[derive(Default)]
-struct CollatorMetrics {
+pub(super) struct CollatorMetrics {
     shard: ShardIdent,
 
     elapsed_on_empty_collations_ms: u128,
@@ -1197,6 +1197,11 @@ impl CollatorMetrics {
     }
     fn set_not_all_new_messages_processed(&mut self) {
         self.not_all_new_messages_processed = true;
+    }
+
+    pub(super) fn report_zero_metrics(shard: ShardIdent) {
+        let mut metrics = Self::new(shard);
+        metrics.report_metrics();
     }
 
     fn report_metrics(&mut self) {
