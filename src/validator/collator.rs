@@ -1154,6 +1154,15 @@ impl CollatorMetrics {
         if self.elapsed_on_finalize_ms < self.elapsed_on_secondary_clean_ms {
             self.elapsed_on_finalize_ms = self.elapsed_on_secondary_clean_ms;
         }
+
+        // substract empty collations time from collation cumulative flow times for better graph view
+        self.elapsed_on_finalize_ms -= self.elapsed_on_empty_collations_ms;
+        self.elapsed_on_secondary_clean_ms -= self.elapsed_on_empty_collations_ms;
+        self.elapsed_on_new_processed_ms -= self.elapsed_on_empty_collations_ms;
+        self.elapsed_on_externals_processed_ms -= self.elapsed_on_empty_collations_ms;
+        self.elapsed_on_remp_processed_ms -= self.elapsed_on_empty_collations_ms;
+        self.elapsed_on_internals_processed_ms -= self.elapsed_on_empty_collations_ms;
+        self.elapsed_on_initial_clean_ms -= self.elapsed_on_empty_collations_ms;
     }
 
     fn save_stopped_by_timeout_on(&mut self, step: CollationStoppedOnTimeoutStep) {
