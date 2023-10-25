@@ -1278,7 +1278,7 @@ impl CollatorMetrics {
     /// * 4 = remp processed partially
     /// * 8 = internals processed partially
     /// 
-    /// If internals and externals processed partially, the metric value will be:
+    /// If new messages and externals processed partially, the metric value will be:
     /// ```
     /// 5 = 1 + 4
     /// ```
