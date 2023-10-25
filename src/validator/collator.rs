@@ -1163,6 +1163,7 @@ impl CollatorMetrics {
         self.elapsed_on_remp_processed_ms -= self.elapsed_on_empty_collations_ms;
         self.elapsed_on_internals_processed_ms -= self.elapsed_on_empty_collations_ms;
         self.elapsed_on_initial_clean_ms -= self.elapsed_on_empty_collations_ms;
+        self.elapsed_on_prepare_data_ms -= self.elapsed_on_empty_collations_ms;
     }
 
     fn save_stopped_by_timeout_on(&mut self, step: CollationStoppedOnTimeoutStep) {
@@ -2219,6 +2220,8 @@ impl Collator {
                     e
                 });
             if result.is_err() {
+                #[cfg(feature = "log_metrics")]
+                collator_data.metrics.report_metrics();
                 collator_data.metrics.log_metrics(self.collated_block_descr.clone());
             }
             duration = attempt_started.elapsed().as_millis() as u32;
