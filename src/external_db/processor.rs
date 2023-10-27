@@ -291,7 +291,7 @@ impl<T: 'static + WriteData> Processor<T> {
 
     fn prepare_account_record(
         account: Account,
-        prev_account_state: Option<Account>,
+        prev_code_hash: Option<UInt256>,
         sharding_depth: u32,
         max_account_bytes_size: Option<usize>,
         last_trans_chain_order: Option<String>,
@@ -328,7 +328,7 @@ impl<T: 'static + WriteData> Processor<T> {
         };
         let set = ton_block_json::AccountSerializationSet {
             account,
-            prev_account_state,
+            prev_code_hash,
             proof: None,
             boc,
             boc1,
@@ -351,7 +351,7 @@ impl<T: 'static + WriteData> Processor<T> {
         account_id: AccountId,
         workchain_id: i32,
         sharding_depth: u32,
-        prev_account_state: Option<Account>,
+        prev_code_hash: Option<UInt256>,
         last_trans_chain_order: Option<String>,
         last_trans_lt: Option<u64>,
     ) -> Result<DbRecord> {
@@ -359,7 +359,7 @@ impl<T: 'static + WriteData> Processor<T> {
         let set = ton_block_json::DeletedAccountSerializationSet {
             account_id,
             workchain_id,
-            prev_account_state,
+            prev_code_hash,
             ..Default::default()
         };
 
@@ -654,7 +654,7 @@ impl<T: 'static + WriteData> Processor<T> {
                             let prev_acc = get_prev_state(account_id.clone())?;
                             db_records.push(Self::prepare_account_record(
                                 acc,
-                                prev_acc,
+                                prev_acc.map(|x|x.get_code_hash()).flatten(),
                                 accounts_sharding_depth,
                                 max_account_bytes_size,
                                 acc_last_trans_chain_order.remove(account_id),
@@ -669,7 +669,7 @@ impl<T: 'static + WriteData> Processor<T> {
                                 account_id,
                                 workchain_id,
                                 accounts_sharding_depth,
-                                prev_acc,
+                                prev_acc.map(|x|x.get_code_hash()).flatten(),
                                 last_trans_chain_order,
                                 last_trans_lt
                             )?);

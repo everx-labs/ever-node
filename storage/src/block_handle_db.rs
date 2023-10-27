@@ -485,7 +485,8 @@ pub enum StoreJob {
     DropHandle(BlockIdExt),
     SaveFullNodeState((&'static str, Arc<BlockIdExt>)),
     SaveValidatorState((&'static str, Arc<BlockIdExt>)),
-    DropValidatorState(&'static str)
+    DropValidatorState(&'static str),
+    DropFullNodeState(&'static str)
 }
 
 #[async_trait::async_trait]
@@ -594,6 +595,19 @@ impl BlockHandleStorage {
                                 true
                             }
                         }
+                        StoreJob::DropFullNodeState(key) => {
+                            let result = full_node_state_db.delete(key);
+                            if let Err(e) = result {
+                                log::error!(
+                                    target: TARGET, 
+                                    "{} while clearing state {}", 
+                                    e, key
+                                );
+                                false
+                            } else {
+                                true
+                            }
+                        }
                     };
                     if let Some(callback) = callback {
                         callback.invoke(job, ok).await;
@@ -627,6 +641,16 @@ impl BlockHandleStorage {
         self.delete_state(key)?;
         self.storer.send((StoreJob::DropValidatorState(key), None)).map_err(
             |_| error!("Cannot drop validator state {}: storer thread dropped", key)
+        )
+    }
+
+    pub fn drop_full_node_state(
+        &self,
+        key: &'static str,
+    ) -> Result<()> {
+        self.delete_state(key)?;
+        self.storer.send((StoreJob::DropFullNodeState(key), None)).map_err(
+            |_| error!("Cannot drop fullnode state {}: storer thread dropped", key)
         )
     }
 

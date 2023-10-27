@@ -31,7 +31,7 @@ use crate::{
         candidate_db::CandidateDb,
         validator_manager::ValidationStatus,
         validator_utils::validatordescr_to_catchain_node,
-    }
+    }, shard_states_keeper::PinnedShardStateGuard
 };
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::ValidatedBlockStat;
@@ -41,6 +41,8 @@ use crate::{
     network::telemetry::FullNodeNetworkTelemetry, 
     validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
 };
+#[cfg(feature = "external_db")]
+use crate::internal_db::EXTERNAL_DB_BLOCK;
 
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
@@ -283,6 +285,16 @@ impl EngineOperations for Engine {
         self.db().save_full_node_state(LAST_APPLIED_MC_BLOCK, id)
     }
 
+    #[cfg(feature = "external_db")]
+    fn save_external_db_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
+        metrics::gauge!("external_db_mc_block", id.seq_no() as f64);
+        self.db().save_full_node_state(EXTERNAL_DB_BLOCK, id)
+    }
+    #[cfg(feature = "external_db")]
+    fn load_external_db_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+        self.db().load_full_node_state(EXTERNAL_DB_BLOCK)
+    }
+
     fn load_shard_client_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
         self.db().load_full_node_state(SHARD_CLIENT_MC_BLOCK)
     }
@@ -520,6 +532,11 @@ impl EngineOperations for Engine {
         self.shard_states_keeper().load_state(block_id).await
     }
 
+    // It is prohibited to use any cell from the state after the guard's disposal.
+    async fn load_and_pin_state(&self, block_id: &BlockIdExt) -> Result<PinnedShardStateGuard> {
+        self.shard_states_keeper().load_and_pin_state(block_id).await
+    }
+
     async fn load_persistent_state_size(&self, block_id: &BlockIdExt) -> Result<u64> {
         self.db().load_shard_state_persistent_size(block_id).await
     }
@@ -648,9 +665,15 @@ impl EngineOperations for Engine {
     )
     -> Result<()> {
         if self.ext_db().len() > 0 {
+
+            log::trace!("process_block_in_ext_db {}", handle.id());
+
             if proof.is_some() && !handle.id().shard().is_masterchain() {
                 fail!("Non master blocks should be processed without proof")
             }
+
+            let now = std::time::Instant::now();
+
             if proof.is_none() && handle.id().shard().is_masterchain() {
                 let proof = self.load_block_proof(handle, false).await?;
                 for db in self.ext_db() {
@@ -661,8 +684,14 @@ impl EngineOperations for Engine {
                     db.process_block(block, proof, state, prev_states, mc_seq_no).await?;
                 }
             }
+
+            let millis = now.elapsed().as_millis();
+            if millis > 50 {
+                log::warn!("TIME: process_block_in_ext_db {}ms   {}", millis, handle.id());
+            } else {
+                log::trace!("TIME: process_block_in_ext_db {}ms   {}", millis, handle.id());
+            }
         }
-//        self.db().store_block_processed_in_ext_db(handle)?;
         Ok(())
     }
 

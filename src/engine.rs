@@ -29,7 +29,7 @@ use crate::{
     },
     internal_db::{
         InternalDb, InternalDbConfig, 
-        INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, PSS_KEEPER_MC_BLOCK, ARCHIVES_GC_BLOCK,
+        INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, PSS_KEEPER_MC_BLOCK, ARCHIVES_GC_BLOCK
     },
     network::{
         control::{ControlServer, DataSource, StatusReporter},
@@ -49,7 +49,9 @@ use crate::{
     }
 };
 #[cfg(feature = "external_db")]
-use crate::external_db::kafka_consumer::KafkaConsumer;
+use crate::external_db::{kafka_consumer::KafkaConsumer, start_external_db_worker};
+#[cfg(not(feature = "external_db"))]
+use crate::internal_db::EXTERNAL_DB_BLOCK;
 #[cfg(feature = "slashing")]
 use crate::validator::{
     slashing::{ValidatedBlockStat, ValidatedBlockStatNode},
@@ -67,8 +69,10 @@ use adnl::telemetry::{Metric, MetricBuilder, TelemetryItem, TelemetryPrinter};
 use overlay::QueriesConsumer;
 use std::{
     ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering, AtomicU64}},
-    time::{Duration, SystemTime}, collections::{HashMap, HashSet}, fmt::Write, path::Path
+    time::{Duration, SystemTime}, collections::{HashMap, HashSet}, path::Path
 };
+#[cfg(feature = "telemetry")]
+use std::fmt::Write;
 use storage::{StorageAlloc, block_handle_db::BlockHandle};
 #[cfg(feature = "telemetry")]
 use storage::{StorageTelemetry, types::StorageCell};
@@ -460,6 +464,10 @@ impl Stopper {
         if bitmap & Engine::MASK_SERVICE_ARCHIVES_GC != 0 {
             ss.push_str("archives gc, ");
         }
+        #[cfg(feature = "external_db")]
+        if bitmap & Engine::MASK_SERVICE_EXTERNAL_DB != 0 {
+            ss.push_str("external db, ");
+        }
         log::warn!("These services are still stopping ({:04x}): {}", bitmap, ss);
     }
 
@@ -494,6 +502,8 @@ impl Engine {
     pub const MASK_SERVICE_DB_RESTORE: u32                     = 0x0400;
     pub const MASK_SERVICE_ARCHIVES_GC: u32                    = 0x0800;
     pub const MASK_SERVICE_SS_CACHE_KEEPER: u32                = 0x1000;
+    #[cfg(feature = "external_db")]
+    pub const MASK_SERVICE_EXTERNAL_DB: u32                    = 0x2000;
 
     // Sync status
     pub const SYNC_STATUS_START_BOOT: u32           = 0x0001;
@@ -1434,6 +1444,7 @@ impl Engine {
         Ok(())
     }
 
+    #[cfg(feature = "telemetry")]
     fn log_workers_stats(&self) -> Result<()> {
         // Node workers stats:
         //                  seqno      diff    gen utime  diff    root hash                                        file hash   
@@ -1489,6 +1500,8 @@ impl Engine {
         log_worker_stat(self.load_pss_keeper_mc_block_id(), "pss keeper")?;
         log_worker_stat(self.load_archives_gc_mc_block_id(), "archives gc")?;
         log_worker_stat(self.load_last_rotation_block_id(), "last rotation")?;
+        #[cfg(feature = "external_db")]
+        log_worker_stat(self.load_external_db_mc_block_id(), "external db")?;
         log::info!("{}", report);
         Ok(())
     }
@@ -2272,6 +2285,12 @@ impl Engine {
                 self.save_archives_gc_mc_block_id(&prev_block_id)?;
             }
         }
+        #[cfg(feature = "external_db")]
+        if let Some(block_id) = self.load_external_db_mc_block_id()? {
+            if block_id.seq_no > prev_block_id.seq_no {
+                self.save_external_db_mc_block_id(&prev_block_id)?;
+            }
+        }
         Ok(())
     }
 
@@ -2343,7 +2362,7 @@ pub(crate) async fn load_zero_state(engine: &Arc<Engine>, path: &str) -> Result<
 }
 
 async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>, hardfork_path: impl AsRef<Path>)
--> Result<(BlockIdExt, BlockIdExt, BlockIdExt, BlockIdExt)> {
+-> Result<(BlockIdExt, BlockIdExt, BlockIdExt, BlockIdExt, BlockIdExt)> {
     log::info!("Booting...");
     engine.set_sync_status(Engine::SYNC_STATUS_START_BOOT);
 
@@ -2405,11 +2424,26 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>, hardfork_path:
         Ok(Some(id)) => id.deref().clone(),
         _ => {
             // for compatibility don't catch error if there isn't state
-            engine.save_archives_gc_mc_block_id(&ss_keeper_mc_block)?;
-            log::info!("Archives gc MC block reset to ss_keeper_mc_block");
+            engine.save_archives_gc_mc_block_id(&last_applied_mc_block)?;
+            log::info!("Archives gc MC block reset to last_applied_mc_block");
             last_applied_mc_block.clone()
         }
     };
+
+    #[cfg(feature = "external_db")]
+    let external_db_block = match engine.load_external_db_mc_block_id() {
+        Ok(Some(id)) => id.deref().clone(),
+        _ => {
+            // for compatibility don't catch error if there isn't state
+            engine.save_external_db_mc_block_id(&last_applied_mc_block)?;
+            log::info!("External db MC block reset to last_applied_mc_block");
+            last_applied_mc_block.clone()
+        }
+    };
+    #[cfg(not(feature = "external_db"))]
+    let external_db_block = BlockIdExt::default();
+    #[cfg(not(feature = "external_db"))]
+    engine.db().drop_full_node_state(EXTERNAL_DB_BLOCK)?;
 
     engine.set_sync_status(Engine::SYNC_STATUS_FINISH_BOOT);
     log::info!("Boot complete.");
@@ -2417,7 +2451,8 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>, hardfork_path:
     log::info!("shard_client_mc_block: {}", shard_client_mc_block);
     log::info!("ss_keeper_mc_block: {}", ss_keeper_mc_block);
     log::info!("archives_gc_block: {}", archives_gc_block);
-    Ok((last_applied_mc_block, shard_client_mc_block, ss_keeper_mc_block, archives_gc_block))
+    log::info!("external_db_block: {}", external_db_block);
+    Ok((last_applied_mc_block, shard_client_mc_block, ss_keeper_mc_block, archives_gc_block, external_db_block))
 }
 
 #[derive(Default)]
@@ -2515,7 +2550,8 @@ pub async fn run(
             mut last_applied_mc_block,
             mut shard_client_mc_block,
             ss_keeper_block,
-            archives_gc_block
+            archives_gc_block,
+            external_db_block,
         ) = boot(&engine, zerostate_path, configs_dir).await?;
 
         // Broadcasts (blocks, external messages etc.)
@@ -2540,7 +2576,11 @@ pub async fn run(
         }
 
         let _ = Engine::start_archives_gc(engine.clone(), archives_gc_block)?;
-      
+
+        #[cfg(not(feature = "external_db"))] let _ = external_db_block;
+        #[cfg(feature = "external_db")]
+        let _ = start_external_db_worker(engine.clone(), external_db_block)?;
+
         engine.shard_states_keeper.clone().start(
             engine.clone(),
             last_applied_mc_block.clone(),

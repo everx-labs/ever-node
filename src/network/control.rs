@@ -15,7 +15,7 @@ use crate::{
     collator_test_bundle::CollatorTestBundle, config::{KeyRing, NodeConfigHandler},
     engine_traits::EngineOperations, engine::Engine, network::node_network::NodeNetwork,
     validator::validator_utils::validatordescr_to_catchain_node,
-    validating_utils::{supported_version, supported_capabilities}
+    validating_utils::{supported_version, supported_capabilities}, shard_states_keeper::PinnedShardStateGuard
 };
 
 use adnl::{
@@ -168,11 +168,15 @@ impl ControlQuerySubscriber {
         Self::convert_account_meta(self.find_account_by_block(account_id, block_root_hash).await?)
     }
 
-    async fn find_account(&self, address: AccountAddress) -> Result<Option<ShardAccount>> {
+    async fn find_account(
+        &self, address: AccountAddress
+    ) -> Result<Option<(ShardAccount, PinnedShardStateGuard)>> {
         let engine = self.engine()?;
         let addr: MsgAddressInt = address.account_address.parse()?;
         let state = if addr.is_masterchain() {
-            engine.load_last_applied_mc_state().await?
+            let mc_block_id = engine.load_last_applied_mc_block_id()?
+                .ok_or_else(|| error!("Cannot load last_applied_mc_block_id!"))?;
+            engine.load_and_pin_state(&mc_block_id).await?
         } else {
             let mc_block_id = engine.load_shard_client_mc_block_id()?;
             let mc_block_id = mc_block_id.ok_or_else(
@@ -182,7 +186,7 @@ impl ControlQuerySubscriber {
             let mut shard_state = None;
             for id in mc_state.top_blocks(addr.workchain_id())? {
                 if id.shard().contains_account(addr.address().clone())? {
-                    shard_state = engine.load_state(&id).await.ok();
+                    shard_state = engine.load_and_pin_state(&id).await.ok();
                     break;
                 }
             }
@@ -190,29 +194,37 @@ impl ControlQuerySubscriber {
                 || error!("Cannot find actual shard for account {}", &address.account_address)
             )?
         };
-        Ok(state.shard_account(&addr.address())?)
+        Ok(state.state().shard_account(&addr.address())?.map(|acc| (acc, state)))
     }
 
-    async fn find_account_by_block(&self, account_id: UInt256, block_root_hash: UInt256) -> Result<Option<ShardAccount>> {
+    async fn find_account_by_block(
+        &self, account_id: UInt256, block_root_hash: UInt256
+    ) -> Result<Option<(ShardAccount, PinnedShardStateGuard)>> {
         let engine = self.engine()?;
         let block_id = engine.find_full_block_id(&block_root_hash)?
             .ok_or_else(|| error!("Cannot find full block id by root hash"))?;
-        let shard_state = engine.load_state(&block_id).await?;
-        Ok(shard_state.shard_account(&ton_types::SliceData::load_cell(account_id.serialize()?)?)?)
+        let shard_state = engine.load_and_pin_state(&block_id).await?;
+        Ok(shard_state.state().shard_account(&account_id.into())?.map(|acc| (acc, shard_state)))
     }
 
-    fn convert_account_state(shard_account: Option<ShardAccount>) -> Result<ShardAccountStateBoxed> {
+    fn convert_account_state(
+        shard_account: Option<(ShardAccount, PinnedShardStateGuard)>
+    ) -> Result<ShardAccountStateBoxed> {
         Ok(match shard_account {
-            Some(account) => ShardAccountStateBoxed::Raw_ShardAccountState(ShardAccountState {
-                shard_account: ton_api::ton::bytes(account.write_to_bytes()?)
-            }),
+            Some((account, _state_guard)) => ShardAccountStateBoxed::Raw_ShardAccountState(
+                ShardAccountState {
+                    shard_account: ton_api::ton::bytes(account.write_to_bytes()?)
+                }
+            ),
             None => ShardAccountStateBoxed::Raw_ShardAccountNone
         })
     }
 
-    fn convert_account_meta(shard_account: Option<ShardAccount>) -> Result<ShardAccountMetaBoxed> {
+    fn convert_account_meta(
+        shard_account: Option<(ShardAccount, PinnedShardStateGuard)>
+    ) -> Result<ShardAccountMetaBoxed> {
         Ok(match shard_account {
-            Some(shard_account) => {
+            Some((shard_account, _state_guard)) => {
                 let account = shard_account.read_account()?;
                 let code = account.get_code().map(|cell| cell.repr_hash());
                 let data = account.get_data().map(|cell| cell.repr_hash());
@@ -553,12 +565,12 @@ impl ControlQuerySubscriber {
     }
 
     async fn try_consume_query_impl(&self, object: TLObject, _peers: &AdnlPeers) -> Result<QueryResult> {
-        log::info!("recieve object (control server): {:?}", object);
+        log::debug!("recieve object (control server): {:?}", object);
         let query = match object.downcast::<ControlQuery>() {
             Ok(query) => deserialize_boxed(&query.data[..])?,
             Err(object) => return Ok(QueryResult::Rejected(object))
         };
-        log::info!("query (control server): {:?}", query);
+        log::debug!("query (control server): {:?}", query);
         let query = match query.downcast::<GenerateKeyPair>() {
             Ok(_) => return QueryResult::consume(
                 self.process_generate_keypair().await?,
@@ -774,7 +786,8 @@ impl ControlQuerySubscriber {
 #[async_trait::async_trait]
 impl Subscriber for ControlQuerySubscriber {
     async fn try_consume_query(&self, object: TLObject, peers: &AdnlPeers) -> Result<QueryResult> {
-        match self.try_consume_query_impl(object, peers).await {
+        let now = std::time::Instant::now();
+        let result = match self.try_consume_query_impl(object, peers).await {
             Ok(result) => Ok(result),
             Err(err) => QueryResult::consume_boxed(
                 ton::engine::validator::ControlQueryError::Engine_Validator_ControlQueryError(
@@ -786,7 +799,9 @@ impl Subscriber for ControlQuerySubscriber {
                 #[cfg(feature = "telemetry")]
                 None
             )
-        }
+        };
+        log::trace!("Control server operation {} TIME", now.elapsed().as_millis());
+        result
     }
 }
 

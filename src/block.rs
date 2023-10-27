@@ -266,6 +266,7 @@ impl BlockStuff {
         Ok(shards)
     }
 
+    #[cfg(feature = "external_db")]
     pub fn top_blocks_all(&self) -> Result<Vec<BlockIdExt>> {
         let mut shards = Vec::new();
         self
@@ -284,9 +285,8 @@ impl BlockStuff {
                 shards.push(last_shard_block);
                 Ok(true)
             })?;
-
         Ok(shards)
-    }
+   }
 
    pub fn get_config_params(&self) -> Result<ConfigParams> {
        self.block()?

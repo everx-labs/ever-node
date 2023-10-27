@@ -445,10 +445,9 @@ impl DynamicBocDb {
         use_cache: bool,
     ) -> Result<Arc<StorageCell>> {
 
-        if !use_cache {
+        if use_cache {
             if let Some(cell) = self.cells.lock().get(cell_id) {
-                log::trace!(target: TARGET,
-                    "DynamicBocDb::load_cell  from cache  id {cell_id:x}  use_cache {use_cache}");
+                log::trace!(target: TARGET, "DynamicBocDb::load_cell  from cache  id {cell_id:x}");
                 return Ok(cell.clone());
             }
         }
