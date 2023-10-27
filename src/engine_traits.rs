@@ -18,7 +18,7 @@ use crate::{
     network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
     shard_state::ShardStateStuff,
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
-    validator::validator_manager::ValidationStatus, engine::now_duration,
+    validator::validator_manager::ValidationStatus, engine::now_duration, shard_states_keeper::PinnedShardStateGuard,
 };
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::ValidatedBlockStat;
@@ -246,6 +246,14 @@ pub trait EngineOperations : Sync + Send {
     fn save_last_applied_mc_block_id(&self, last_mc_block: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
+    #[cfg(feature = "external_db")]
+    fn save_external_db_mc_block_id(&self, id: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
+    #[cfg(feature = "external_db")]
+    fn load_external_db_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
+        unimplemented!()
+    }
     async fn load_actual_config_params(&self) -> Result<ConfigParams> {
         match self.load_last_applied_mc_block_id()? {
             Some(block_id) => {
@@ -469,6 +477,11 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
     async fn load_state(&self, block_id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
+        unimplemented!()
+    }
+
+    // It is prohibited to use any cell from the state after the guard's disposal.
+    async fn load_and_pin_state(&self, block_id: &BlockIdExt) -> Result<PinnedShardStateGuard> {
         unimplemented!()
     }
     async fn load_persistent_state_size(&self, block_id: &BlockIdExt) -> Result<u64> {

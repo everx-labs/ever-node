@@ -16,7 +16,7 @@ use crate::{
     db::{rocksdb::RocksDbTable, traits::{DbKey, KvcWriteable}},
     dynamic_boc_rc_db::{DynamicBocDb, DoneCellsStorageAdapter, OrderedCellsStorageAdapter, CellsCounters, CellByHashStorageAdapter},
     traits::Serializable,
-    TARGET,
+    TARGET, error::StorageError,
 };
 #[cfg(feature = "telemetry")]
 use crate::StorageTelemetry;
@@ -28,7 +28,8 @@ use std::{
 };
 use ton_block::BlockIdExt;
 use ton_types::{
-    ByteOrderRead, Cell, Result, fail, error, DoneCellsStorage, OrderedCellsStorage, CellByHashStorage, UInt256
+    ByteOrderRead, Cell, Result, fail, error, DoneCellsStorage, OrderedCellsStorage, 
+    CellByHashStorage, UInt256,
 };
 
 pub trait AllowStateGcResolver: Send + Sync {
@@ -444,7 +445,19 @@ impl ShardStateDb {
     }
 
     pub fn get(&self, id: &BlockIdExt, use_cache: bool) -> Result<Cell> {
-        let db_entry = DbEntry::from_slice(&self.shardstate_db.get(id)?)?;
+        let data = match self.shardstate_db.get(id) {
+            Ok(data) => data,
+            Err(e) => {
+                if let Some(gc_resolver) = self.gc_resolver.get() {
+                    if gc_resolver.allow_state_gc(id, 0, 0)? {
+                        fail!(StorageError::StateIsAllowedToGc(id.clone()))
+                    }
+                }
+                return Err(e);
+            },
+        };
+        let db_entry = DbEntry::from_slice(&data)?;
+
         log::debug!(
             target: TARGET,
             "ShardStateDb::get  id {}  cell_id {:x}  use_cache {}",
@@ -454,7 +467,7 @@ impl ShardStateDb {
         if let Some(gc_resolver) = self.gc_resolver.get() {
             let utime_now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             if gc_resolver.allow_state_gc(&db_entry.block_id, db_entry.save_utime, utime_now)? {
-                fail!("Attempt to load state {} which is already allowed to GC", db_entry.block_id);
+                fail!(StorageError::StateIsAllowedToGc(db_entry.block_id))
             }
         }
 

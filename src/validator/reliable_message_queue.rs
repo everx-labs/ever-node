@@ -248,14 +248,17 @@ impl MessageQueue {
     }
 
     async fn add_pending_collation(&self, rmq_message: Arc<RmqMessage>, status_to_send: Option<RempMessageStatus>) -> Result<()> {
-        let (added_to_queue, len) = self.queues.execute_sync(
+        let (added_to_queue, _len) = self.queues.execute_sync(
             |catchain| catchain.add_to_collation_queue(
                 &rmq_message.message_id, rmq_message.timestamp, true
             )
         ).await?;
 
         #[cfg(feature = "telemetry")]
-        self.engine.remp_core_telemetry().pending_collation(&self.catchain_info.general_session_info.shard, len);
+        self.engine.remp_core_telemetry().pending_collation(
+            &self.catchain_info.general_session_info.shard, 
+            _len
+        );
 
         if added_to_queue {
             log::trace!(target: "remp",

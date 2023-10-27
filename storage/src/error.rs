@@ -11,6 +11,8 @@
 * limitations under the License.
 */
 
+use ton_block::BlockIdExt;
+
 #[derive(Debug, PartialEq, failure::Fail)]
 pub enum StorageError {
     /// Key not found  
@@ -34,4 +36,7 @@ pub enum StorageError {
     /// Reading out of buffer range
     #[fail(display = "Reading out of buffer range")]
     OutOfRange,
+
+    #[fail(display = "Attempt to load state {} which is already allowed to GC", 0)]
+    StateIsAllowedToGc(BlockIdExt),
 }

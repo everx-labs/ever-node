@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ton_node'
-version = '0.55.64'
+version = '0.55.69'
 
 [workspace]
 members = [ 'storage' ]
@@ -57,10 +57,10 @@ tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
 ton_abi = { git = 'https://github.com/tonlabs/ever-abi.git', optional = true, tag = '2.3.147' }
 ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.41' }
 ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.104' }
-ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git', tag = '0.7.187' }
-ton_executor = { git = 'https://github.com/tonlabs/ever-executor.git', tag = '1.16.82' }
+ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git', tag = '0.7.189' }
+ton_executor = { git = 'https://github.com/tonlabs/ever-executor.git', tag = '1.16.83' }
 ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.28' }
-ton_vm = { git = 'https://github.com/tonlabs/ever-vm.git', tag = '1.8.211' }
+ton_vm = { git = 'https://github.com/tonlabs/ever-vm.git', tag = '1.8.212' }
 validator_session = { path = 'validator-session' }
 
 [features]

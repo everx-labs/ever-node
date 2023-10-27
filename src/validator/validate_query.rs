@@ -1932,28 +1932,40 @@ impl ValidateQuery {
             let (_workchain_id, addr) = msg.dst_ref().ok_or_else(|| error!("No dest address"))
                 .and_then(|addr| addr.extract_std_address(true))?;
             if &addr != transaction.account_id() {
-                reject_query!("InMsg corresponding to inbound message with hash {} and destination address {} \
-                   claims that the message is processed by transaction {} of another account {}",
-                        key.to_hex_string(), addr.to_hex_string(), transaction.logical_time(), transaction.account_id().to_hex_string())
+                reject_query!(
+                    "InMsg corresponding to inbound message with hash {} and destination address {} \
+                    claims that the message is processed by transaction {} of another account {}",
+                    key.to_hex_string(), addr.to_hex_string(), 
+                    transaction.logical_time(), transaction.account_id().to_hex_string()
+                )
             }
         }
         let fwd_fee = match in_msg {
             // msg_import_ext$000 msg:^(Message Any) transaction:^Transaction
             // importing an inbound external message
             InMsg::External(_) => {
-                let dst = msg.dst_ref().ok_or_else(|| error!("destination of inbound external message with hash {:x} \
-                    is an invalid blockchain address", key))?;
-                let dest_prefix = AccountIdPrefixFull::prefix(dst)?;
+                let header = msg.ext_in_header().ok_or_else(
+                    || error!("non-external message in `msg_import_ext` with hash {key:x}")
+                )?;
+                let dest_prefix = AccountIdPrefixFull::prefix(&header.dst)?;
                 if !dest_prefix.is_valid() {
-                    reject_query!("destination of inbound external message with hash {:x} \
-                        is an invalid blockchain address", key)
+                    reject_query!(
+                        "destination of inbound external message with hash {key:x} \
+                        is an invalid blockchain address"
+                    )
                 }
                 if !base.shard().contains_full_prefix(&dest_prefix) {
-                    reject_query!("inbound external message with hash {} has destination address \
-                        {}... not in this shard", key.to_hex_string(), dest_prefix)
+                    reject_query!(
+                        "inbound external message with hash {} has destination address \
+                        {}... not in this shard", 
+                        key.to_hex_string(), dest_prefix
+                    )
                 }
-                if dst.extract_std_address(true).is_err()  {
-                    reject_query!("cannot unpack destination address of inbound external message with hash {}", key.to_hex_string())
+                if header.dst.extract_std_address(true).is_err()  {
+                    reject_query!(
+                        "cannot unpack destination address of inbound external message with hash {}", 
+                        key.to_hex_string()
+                    )
                 }
                 return Ok(()) // nothing to check more for external messages
             }

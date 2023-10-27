@@ -36,8 +36,9 @@ use storage::shardstate_db_async::{self, AllowStateGcResolver, ShardStateDb};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
 use ton_block::{Block, BlockIdExt, INVALID_WORKCHAIN_ID};
-use ton_types::{error, fail, Result, UInt256, Cell, BocWriterStack, MAX_SAFE_DEPTH};
-use ton_types::{DoneCellsStorage};
+use ton_types::{
+    error, fail, Result, UInt256, Cell, BocWriterStack, MAX_SAFE_DEPTH, DoneCellsStorage
+};
 
 /// Full node state keys
 pub const INITIAL_MC_BLOCK: &str         = "InitMcBlockId";
@@ -45,6 +46,7 @@ pub const LAST_APPLIED_MC_BLOCK: &str    = "LastMcBlockId";
 pub const PSS_KEEPER_MC_BLOCK: &str      = "PssKeeperBlockId";
 pub const SHARD_CLIENT_MC_BLOCK: &str    = "ShardsClientMcBlockId";
 pub const ARCHIVES_GC_BLOCK: &str        = "ArchivesGcMcBlockId";
+pub const EXTERNAL_DB_BLOCK: &str        = "ExternalDBMcBlockId";
 pub const ASSUME_OLD_FORMAT_CELLS: &str  = "AssumeOldFormatCells";
 pub const LAST_UNNEEDED_KEY_BLOCK: &str  = storage::db::rocksdb::LAST_UNNEEDED_KEY_BLOCK;
 pub const DB_VERSION: &str  = "DbVersion";
@@ -1079,7 +1081,12 @@ impl InternalDb {
             Ok(())
         })
     }
-    
+
+    pub fn drop_full_node_state(&self, key: &'static str) -> Result<()> {
+        let _tc = TimeChecker::new(format!("drop_full_node_state {}", key), 30);
+        self.block_handle_storage.drop_full_node_state(key)
+    }
+
     pub fn load_full_node_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>> {
         let _tc = TimeChecker::new(format!("load_full_node_state {}", key), 30);
         self.block_handle_storage.load_full_node_state(key)

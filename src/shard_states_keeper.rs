@@ -12,7 +12,7 @@ use crate::{
 use crate::engine_traits::EngineTelemetry;
 use storage::{
     block_handle_db::BlockHandle, shardstate_db_async::AllowStateGcResolver, 
-    shardstate_db_async::SsNotificationCallback,
+    shardstate_db_async::SsNotificationCallback, error::StorageError,
 };
 use storage::shardstate_db_async::Callback as SsDbCallback;
 use storage::shardstate_db_async::Job as SsDbJob;
@@ -20,6 +20,43 @@ use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{fail, error, Result, UInt256, BocReader, Cell};
 use adnl::common::add_unbound_object_to_map_with_update;
 use std::{ time::Duration, ops::Deref, sync::Arc };
+
+pub struct PinnedShardStateGuard {
+    state: Arc<ShardStateStuff>,
+    gc_resolver: Arc<AllowStateGcSmartResolver>,
+}
+impl PinnedShardStateGuard {
+    pub fn new(state: Arc<ShardStateStuff>, gc_resolver: Arc<AllowStateGcSmartResolver>) -> Result<Self> {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        // used a gen time as a save time because can't get save time here
+        if !gc_resolver.pin_state(state.block_id(), state.state_or_queue()?.gen_time() as u64, now)? {
+            fail!(StorageError::StateIsAllowedToGc(state.block_id().clone()))
+        }
+        Ok(Self { state, gc_resolver })
+    }
+    pub fn state(&self) -> &ShardStateStuff {
+        &self.state
+    }
+}
+impl Clone for PinnedShardStateGuard {
+    fn clone(&self) -> Self {
+        if let Err(e) = self.gc_resolver.add_pin_for_state(self.state.block_id()) {
+            log::error!("INTERNAL ERROR: {}", e);
+        }
+        Self {
+            state: self.state.clone(),
+            gc_resolver: self.gc_resolver.clone(),
+        }
+    }
+}
+impl Drop for PinnedShardStateGuard {
+    fn drop(&mut self) {
+        if let Err(e) = self.gc_resolver.unpin_state(self.state.block_id()) {
+            log::error!("INTERNAL ERROR: {}", e);
+        }
+    }
+}
+
 
 /// This structs works beetween engine and db.
 /// ValidatorManager  Collator  ValidatorQuery  etc.   <- high level node commponents
@@ -170,7 +207,12 @@ impl ShardStatesKeeper {
                     log::trace!("load_state {} FROM DB", block_id);
                     s
                 }
-                Err(_e) => {
+                Err(error) => {
+                    if let Ok(error) = error.downcast::<StorageError>() {
+                        if matches!(error, StorageError::StateIsAllowedToGc(_)) {
+                            fail!(error)
+                        }
+                    }
                     let s = self.catch_up_state(block_id).await?;
                     log::trace!("load_state {} RESTORED", block_id);
                     s
@@ -178,6 +220,13 @@ impl ShardStatesKeeper {
             };
             Ok(state)
         }
+    }
+
+    // It is prohibited to use any cell from the state after the guard's disposal.
+    pub async fn load_and_pin_state(self: &Arc<Self>, block_id: &BlockIdExt) -> Result<PinnedShardStateGuard> {
+        log::trace!("load_and_pin_state {}", block_id);
+        let state = self.load_state(block_id).await?;
+        PinnedShardStateGuard::new(state, self.gc_resolver.clone())
     }
 
     pub async fn store_state(
@@ -485,9 +534,7 @@ impl ShardStatesKeeper {
         let top_id = id.clone();
         let mut stack = vec!(handle);
         loop {
-
             self.check_stop()?;
-
 
             let handle = stack.last().ok_or_else(|| error!("INTERNAL ERROR: restore_state_recursive: stask is empty"))?;
             log::trace!("restore_state_recursive: stack size: {}, handle: {}", stack.len(), handle.id());
@@ -765,6 +812,14 @@ impl ShardStatesKeeper {
             .ok_or_else(|| error!("INTERNAL ERROR: No archives GC block id in ss keeper worker"))?;
         if archives_gc.seq_no() < min_id.seq_no() { 
             min_id = archives_gc;
+        }
+
+        #[cfg(feature = "external_db")] {
+            let ext_db = engine.load_external_db_mc_block_id()?
+                .ok_or_else(|| error!("INTERNAL ERROR: No external DB block id in ss keeper worker"))?;
+            if ext_db.seq_no() < min_id.seq_no() { 
+                min_id = ext_db;
+            }
         }
 
         Ok(min_id.clone())

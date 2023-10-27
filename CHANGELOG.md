@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.69
+
+- FIX: breaking compat in ever-block-json
+
+## Version 0.55.68
+
+- Correct cleanup of catchain DBs
+
+## Version 0.55.67
+
+- Added EngineTraits::load_and_pin_state method to work with states which may be deleted by GC.
+- Fixed bug when ShardStatesKeeper tried to restore already deleted (by GC) shard state.
+
+## Version 0.55.66
+
+- Use tcmalloc without debug functionality (stability+)
+
+## Version 0.55.65
+
+- Sending blocks to Kafka was moved to separate worker
+
 ## Version 0.55.64
 
 - Write `last_trans_lt` to account's json for deleted accounts.

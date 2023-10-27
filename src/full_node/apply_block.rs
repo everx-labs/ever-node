@@ -33,7 +33,7 @@ pub async fn apply_block(
     if handle.id() != block.id() {
         fail!("Block id mismatch in apply block: {} vs {}", handle.id(), block.id())
     }
-    let prev_ids = block.construct_prev_id()?;    
+    let prev_ids = block.construct_prev_id()?;
     check_prev_blocks(&prev_ids, engine, mc_seq_no, pre_apply, recursion_depth).await?;
 
     if handle.is_queue_update() {
@@ -41,31 +41,12 @@ pub async fn apply_block(
         set_prev_ids(&handle, &prev_ids, engine.deref())?;
         set_next_ids(&handle, &prev_ids, engine.deref())?;
     } else {
-        let (shard_state, prev_states) = if handle.has_state() {
-            let shard_state = engine.load_state(handle.id()).await?;
-            let prev1 = engine.load_state(&prev_ids.0).await?;
-            let prev2 = if let Some(id) = &prev_ids.1 {
-                Some(engine.load_state(id).await?)
-            } else {
-                None
-            };
-            (shard_state, (prev1, prev2))
-        } else {
-            calc_shard_state(handle, block, &prev_ids, engine).await?
-        };
+        if !handle.has_state() {
+            calc_shard_state(handle, block, &prev_ids, engine).await?;
+        }
         set_prev_ids(&handle, &prev_ids, engine.deref())?;
         if !pre_apply {
             set_next_ids(&handle, &prev_ids, engine.deref())?;
-            let now = std::time::Instant::now();
-            engine.process_block_in_ext_db(
-                handle, &block, None, &shard_state, (&prev_states.0, prev_states.1.as_ref()), mc_seq_no
-            ).await?;
-            let millis = now.elapsed().as_millis();
-            if millis > 50 {
-                log::warn!("TIME: process_block_in_ext_db {}ms   {}", millis, handle.id());
-            } else {
-                log::trace!("TIME: process_block_in_ext_db {}ms   {}", millis, handle.id());
-            }
         }
     }
     Ok(())
@@ -136,15 +117,17 @@ pub async fn calc_shard_state(
     let ss = tokio::task::spawn_blocking(
         move || -> Result<Arc<ShardStateStuff>> {
             let now = std::time::Instant::now();
-            let (ss_root, metrics) = merkle_update.apply_for_with_metrics(&prev_ss_root)?;            
+            let (ss_root, _metrics) = merkle_update.apply_for_with_metrics(&prev_ss_root)?;
             let elapsed = now.elapsed();
             log::trace!("({}): TIME: calc_shard_state: applied Merkle update {}ms   {}",
                 block_descr_clone,
                 elapsed.as_millis(), block_id);
             #[cfg(feature = "telemetry")]
-            if metrics.loaded_old_cells != 0 {
-                let one_cell_time = metrics.loaded_old_cells_time.as_nanos() / metrics.loaded_old_cells as u128;
-                engine_cloned.engine_telemetry().old_state_cell_load_time.update(one_cell_time as u64);
+            if _metrics.loaded_old_cells != 0 {
+                let one_cell_time = 
+                    _metrics.loaded_old_cells_time.as_nanos() / _metrics.loaded_old_cells as u128;
+                engine_cloned.engine_telemetry().old_state_cell_load_time
+                    .update(one_cell_time as u64);
             }
             metrics::histogram!("calc_shard_state_merkle_update_time", elapsed);
             ShardStateStuff::from_state_root_cell(
@@ -196,14 +179,16 @@ pub async fn calc_out_msg_queue(
     let ss = tokio::task::spawn_blocking(
         move || -> Result<Arc<ShardStateStuff>> {
             let now = std::time::Instant::now();
-            let (ss_root, metrics) = merkle_update.apply_for_with_metrics(&prev_ss_root)?;
+            let (ss_root, _metrics) = merkle_update.apply_for_with_metrics(&prev_ss_root)?;
             let elapsed = now.elapsed();
             log::trace!("TIME: calc_out_msg_queue: applied Merkle update {}ms   {}",
                 elapsed.as_millis(), block_id);
             #[cfg(feature = "telemetry")]
-            if metrics.loaded_old_cells != 0 {
-                let one_cell_time = metrics.loaded_old_cells_time.as_nanos() / metrics.loaded_old_cells as u128;
-                engine_cloned.engine_telemetry().old_state_cell_load_time.update(one_cell_time as u64);
+            if _metrics.loaded_old_cells != 0 {
+                let one_cell_time = 
+                    _metrics.loaded_old_cells_time.as_nanos() / _metrics.loaded_old_cells as u128;
+                engine_cloned.engine_telemetry().old_state_cell_load_time
+                    .update(one_cell_time as u64);
             }
             metrics::histogram!("calc_out_msg_queue_merkle_update_time", elapsed);
             ShardStateStuff::from_out_msg_queue_root_cell(

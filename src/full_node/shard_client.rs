@@ -13,7 +13,7 @@
 
 use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, engine::Engine, 
-    engine_traits::{ChainRange, EngineOperations}, error::NodeError,
+    engine_traits::EngineOperations, error::NodeError,
     validator::validator_utils::{
         check_crypto_signatures, calc_subset_for_masterchain,
     },
@@ -21,7 +21,7 @@ use crate::{
 };
 use crate::validator::validator_utils::calc_subset_for_workchain_standard;
 
-use std::{sync::Arc, mem::drop, time::Duration, collections::HashMap};
+use std::{sync::Arc, mem::drop, time::Duration};
 use ton_block::{
     BlockIdExt, BlockSignaturesPure, CryptoSignaturePair, CryptoSignature, 
     GlobalCapabilities, ProofChain, MerkleProof, Deserializable, Block, Serializable,
@@ -203,78 +203,8 @@ async fn load_shard_blocks_cycle(
             if let Err(e) = load_shard_blocks(engine.clone(), semaphore_permit, &mc_block).await {
                 log::error!("FATAL!!! Unexpected error in shard blocks processing for mc block {}: {:?}", mc_block.id(), e);
             }
-            if engine.produce_chain_ranges_enabled() {
-                if let Err(err) = produce_chain_range(engine.clone(), &mc_block).await {
-                    log::error!("Unexpected error in chain range processing for mc block {}: {:?}", mc_block.id(), err);
-                }
-            }
-            if engine.produce_shard_hashes_enabled() {
-                if let Err(err) = produce_shard_hashes(engine, &mc_block).await {
-                    log::error!("Unexpected error in shard hashes processing for mc block {}: {:?}", mc_block.id(), err);
-                }
-            }
         });
     }
-}
-
-pub async fn produce_chain_range(
-    engine: Arc<dyn EngineOperations>,
-    mc_block: &BlockStuff,
-) -> Result<()> {
-    let mut range = ChainRange {
-        master_block: mc_block.id().clone(),
-        shard_blocks: Vec::new(),
-    };
-
-    let processed_wc = engine.processed_workchain().unwrap_or(BASE_WORKCHAIN_ID);
-    let prev_master = engine.load_block_prev1(mc_block.id())?;
-    let prev_master = engine.load_block_handle(&prev_master)?
-        .ok_or_else(|| NodeError::InvalidData(format!("Can not load block handle for {}", prev_master)))?;
-    let prev_master = engine.load_block(&prev_master).await?;
-    let prev_blocks = prev_master.top_blocks(processed_wc)?;
-    let mut prev_master_shards = HashMap::new();
-    for id in prev_blocks {
-        prev_master_shards.insert(id.shard().clone(), id);
-    }
-
-    let mut blocks = mc_block.top_blocks(processed_wc)?;
-    // for new rust let mut blocks: Vec<BlockIdExt> = mc_block.top_blocks(processed_wc)?.into_values().collect();
-
-    while let Some(block_id) = blocks.pop() {
-        let handle = engine.load_block_handle(&block_id)?
-            .ok_or_else(|| NodeError::InvalidData(format!("Can not load block handle for {}", block_id)))?;
-
-        if prev_master_shards.get(handle.id().shard()) != Some(handle.id()) {
-            if handle.has_prev1() {
-                blocks.push(engine.load_block_prev1(&block_id)?)
-            }
-            if handle.has_prev2() {
-                blocks.push(
-                    engine.load_block_prev2(&block_id)?.ok_or_else(
-                        || error!("No assigned prev2 for block {} in DB", block_id)
-                    )?
-                )
-            }
-            range.shard_blocks.push(block_id);
-        }
-    }
-
-    engine.process_chain_range_in_ext_db(&range).await?;
-
-    Ok(())
-}
-
-pub async fn produce_shard_hashes(
-    engine: Arc<dyn EngineOperations>,
-    mc_block: &BlockStuff,
-) -> Result<()> {
-    let mut shards = mc_block.top_blocks_all()?;
-    let mc_block_id = engine.load_last_applied_mc_block_id()?
-            .ok_or_else(|| error!("Cannot load load_last_applied_mc_block_id"))?;
-    shards.push(mc_block_id.as_ref().clone());
-    engine.process_shard_hashes_in_ext_db(&shards).await?;
-
-    Ok(())
 }
 
 pub async fn load_shard_blocks(

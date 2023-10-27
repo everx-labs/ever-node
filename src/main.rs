@@ -71,7 +71,7 @@ use ton_types::error;
 use ton_types::Result;
 
 #[cfg(target_os = "linux")]
-#[link(name = "tcmalloc", kind = "dylib")]
+#[link(name = "tcmalloc_minimal", kind = "dylib")]
 extern "C" {
     pub fn tc_memalign(alignment: usize, size: usize) -> *mut c_void;
     pub fn tc_free(ptr: *mut c_void);

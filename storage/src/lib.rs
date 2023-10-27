@@ -19,7 +19,7 @@ pub mod catchain_persistent_db;
 mod cell_db;
 pub mod db;
 pub mod dynamic_boc_rc_db;
-mod error;
+pub mod error;
 mod macros; 
 pub mod node_state_db;
 pub mod shardstate_db_async;
