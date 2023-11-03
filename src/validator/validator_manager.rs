@@ -163,6 +163,27 @@ fn get_session_options(opts: &ConsensusConfig) -> validator_session::SessionOpti
     }
 }
 
+async fn clear_catchains_cache(path_str: String) -> Result<()>{
+    log::info!(target: "validator_manager", "Clearing catchains cache...");
+    let removed = tokio::task::spawn_blocking(move || -> Result<u32> {
+        let entries = std::fs::read_dir(path_str)?;
+        let mut removed = 0;
+        for entry in entries {
+            let path = entry?.path();
+            if path.is_dir() {
+                if let Err(err) = std::fs::remove_dir_all(path.clone()) {
+                    log::warn!("Error clearing catchains cache {}: {}", path.display(), err);
+                } else {
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
+    }).await??;
+    log::info!(target: "validator_manager", "Cleared catchains cache, removed {} entries", removed);
+    Ok(())
+}
+
 #[repr(u8)]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
 pub enum ValidationStatus {
@@ -584,6 +605,12 @@ impl ValidatorManagerImpl {
             ValidationStatus::Countdown => {
                 for (_, group) in self.validator_sessions.iter() {
                     if group.get_status().await == ValidatorGroupStatus::Active {
+                        let path_str: String = self.engine.db_root_dir()?.to_owned()+"/catchains";
+                        tokio::spawn( async move {
+                            if let Err(err) = clear_catchains_cache(path_str).await {
+                                log::warn!("Error clearing catchains cache: {}", err);
+                            }
+                        });
                         self.engine.set_validation_status(ValidationStatus::Active);
                         break
                     }

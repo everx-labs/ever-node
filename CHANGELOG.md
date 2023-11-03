@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.71
+
+- Move cleaning outdated Catchain caches on node startup into separate thread
+
+## Version 0.55.70
+
+- Cleaning outdated Catchain caches on node startup
+
 ## Version 0.55.69
 
 - FIX: breaking compat in ever-block-json
