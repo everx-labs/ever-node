@@ -277,6 +277,7 @@ pub struct RempConfig {
     client_enabled: bool,
     remp_client_pool: Option<u8>,
     service_enabled: bool,
+    message_queue_max_len: Option<usize>,
 }
 
 impl RempConfig {
@@ -289,14 +290,17 @@ impl RempConfig {
         self.service_enabled
     }
 
+    pub fn get_message_queue_max_len(&self) -> Option<usize> {
+        self.message_queue_max_len
+    }
+
     pub fn get_catchain_options(&self) -> Option<catchain::Options> {
         if self.is_service_enabled() {
-            Some(catchain::Options {
-                idle_timeout: std::time::Duration::from_secs(5),
-                max_deps: 2,
-                debug_disable_db: false,
-                skip_processed_blocks: false
-            })
+            let mut opts = catchain::Options::default();
+            opts.idle_timeout = std::time::Duration::from_secs(5);
+            opts.max_deps = 2;
+
+            Some(opts)
         } else {
             None
         }

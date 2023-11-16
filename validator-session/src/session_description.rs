@@ -35,10 +35,18 @@ const TEMP_CACHE_SIZE: usize = 10000;
 
 impl Default for SessionOptions {
     fn default() -> Self {
+        let catchain_defaults = catchain::Options::default();
+
         Self {
-            catchain_idle_timeout: Duration::from_millis(16000),
-            catchain_max_deps: 4,
-            catchain_skip_processed_blocks: false,
+            catchain_idle_timeout: catchain_defaults.idle_timeout,
+            catchain_max_deps: catchain_defaults.max_deps,
+            catchain_skip_processed_blocks: catchain_defaults.skip_processed_blocks,
+            catchain_receiver_max_neighbours_count: catchain_defaults.receiver_max_neighbours_count,
+            catchain_receiver_neighbours_sync_min_period: catchain_defaults.receiver_neighbours_sync_min_period,
+            catchain_receiver_neighbours_sync_max_period: catchain_defaults.receiver_neighbours_sync_max_period,
+            catchain_receiver_max_sources_sync_attempts: catchain_defaults.receiver_max_sources_sync_attempts,
+            catchain_receiver_neighbours_rotate_min_period: catchain_defaults.receiver_neighbours_rotate_min_period,
+            catchain_receiver_neighbours_rotate_max_period: catchain_defaults.receiver_neighbours_rotate_max_period,
             round_candidates: 3,
             next_candidate_delay: Duration::from_millis(2000),
             round_attempt_duration: Duration::from_millis(16000),

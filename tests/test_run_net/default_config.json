@@ -12,8 +12,8 @@
     },
     "validation_countdown_mode": "except-zerostate",
     "remp": {
-        "client_enabled": false,
-        "service_enabled": false
+        "client_enabled": true,
+        "service_enabled": true
     },
     "kafka_consumer_config": {
         "group_id": "101",
