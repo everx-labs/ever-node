@@ -18,14 +18,16 @@ use crate::{
 #[cfg(feature = "telemetry")]
 use crate::StorageTelemetry;
 use std::{
-    ops::{Deref, DerefMut}, 
-    sync::{Arc, atomic::{AtomicU32, Ordering}}, 
+    ops::{Deref, DerefMut},
+    sync::{Arc, atomic::{AtomicU32, Ordering}},
     io::Cursor,
     path::Path,
     borrow::Cow,
     time::Duration,
-    fs::write, num::NonZeroUsize,
+    fs::write,
 };
+use bytes::Bytes;
+use quick_cache::sync::{Cache, DefaultLifecycle};
 //#[cfg(test)]
 //use std::path::Path;
 use ton_types::{
@@ -37,7 +39,6 @@ pub const BROKEN_CELL_BEACON_FILE: &str = "ton_node.broken_cell";
 
 // FnvHashMap is a standard HashMap with FNV hasher. This hasher is bit faster than default one.
 pub(crate) type CellsCounters = fnv::FnvHashMap<UInt256, u32>;
-type CellsCache = lru::LruCache<UInt256, Arc<StorageCell>>;
 
 enum VisitedCell {
     New {
@@ -115,7 +116,7 @@ impl VisitedCell {
             VisitedCell::New{parents_count, ..} => *parents_count,
             VisitedCell::Updated{parents_count, ..} => *parents_count,
             VisitedCell::UpdatedOldFormat{parents_count, ..} => *parents_count,
-         }
+        }
     }
 
     fn serialize_counter(&self) -> ([u8; 33], [u8; 4]) {
@@ -167,7 +168,7 @@ pub struct DynamicBocDb {
     db: Arc<CellDb>,
     db_root_path: String,
     assume_old_cells: bool,
-    cells: parking_lot::Mutex<CellsCache>,
+    raw_cells_cache: RawCellsCache,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<StorageTelemetry>,
     allocated: Arc<StorageAlloc>
@@ -179,18 +180,18 @@ impl DynamicBocDb {
         db: Arc<CellDb>,
         db_root_path: &str,
         assume_old_cells: bool,
-        cells_lru_size: usize,
+        cache_size_bytes: u64,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>
     ) -> Self {
-        let cells_lru_size = NonZeroUsize::new(cells_lru_size).or(NonZeroUsize::new(1_000_000)).unwrap();
+        let raw_cells_cache = RawCellsCache::new(cache_size_bytes);
         Self {
             db: Arc::clone(&db),
             db_root_path: db_root_path.to_string(),
             assume_old_cells,
-            cells: parking_lot::Mutex::new(CellsCache::new(cells_lru_size)),
             #[cfg(feature = "telemetry")]
+            raw_cells_cache,
             telemetry,
             allocated
         }
@@ -200,9 +201,9 @@ impl DynamicBocDb {
         &self.db
     }
 
-    pub fn cells_cache(&self) -> &parking_lot::Mutex<CellsCache> {
-        &self.cells
-    }
+    // pub fn cells_cache(&self) -> &parking_lot::Mutex<CellsCache> {
+    //     &self.cells
+    // }
 
     // Is not thread-safe!
     pub fn save_boc(
@@ -237,7 +238,7 @@ impl DynamicBocDb {
         )?;
 
         log::debug!(
-            target: TARGET, 
+            target: TARGET,
             "DynamicBocDb::save_boc  {:x}  save_cells_recursive TIME {}", root_id,
             now.elapsed().as_millis()
         );
@@ -257,7 +258,7 @@ impl DynamicBocDb {
             transaction.put_raw(&k, &v)?;
         }
         log::debug!(
-            target: TARGET, 
+            target: TARGET,
             "DynamicBocDb::save_boc  {:x}  transaction build TIME {}", root_id,
             now.elapsed().as_millis()
         );
@@ -265,7 +266,7 @@ impl DynamicBocDb {
         let now = std::time::Instant::now();
         transaction.commit()?;
         log::debug!(
-            target: TARGET, 
+            target: TARGET,
             "DynamicBocDb::save_boc  {:x}  transaction commit TIME {}", root_id,
             now.elapsed().as_millis()
         );
@@ -297,7 +298,7 @@ impl DynamicBocDb {
 
     pub fn check_and_update_cells(&mut self) -> Result<()> {
         log::debug!(
-            target: TARGET, 
+            target: TARGET,
             "DynamicBocDb::check_and_update_cells  started",
         );
 
@@ -314,7 +315,7 @@ impl DynamicBocDb {
                 if let Ok(cell_data) = CellData::deserialize(&mut reader) {
                     let references_count = cell_data.references_count();
                     let tail_len = 32 * references_count +  // references
-                                   2 * 8;  // tree_bits_count, tree_cell_count
+                        2 * 8;  // tree_bits_count, tree_cell_count
                     if value.len() - reader.position() as usize == tail_len {
                         // check if there is no counter in new format
                         let counter_key = build_counter_key(key);
@@ -332,7 +333,7 @@ impl DynamicBocDb {
 
                 if total_cells % 100_000 == 0 {
                     log::info!(
-                        target: TARGET, 
+                        target: TARGET,
                         "DynamicBocDb::check_and_update_cells  processed {}, updated {}",
                         total_cells, updated_cells,
                     );
@@ -347,7 +348,7 @@ impl DynamicBocDb {
         self.assume_old_cells = false;
 
         log::info!(
-            target: TARGET, 
+            target: TARGET,
             "DynamicBocDb::check_and_update_cells  processed {}, updated {}, enum TIME {}, commit TIME {}",
             total_cells, updated_cells, enum_time, now.elapsed().as_millis() - enum_time,
         );
@@ -368,7 +369,7 @@ impl DynamicBocDb {
                 cells_counters.insert(cell_id, counter);
                 if cells_counters.len() % 1_000_000 == 0 {
                     log::info!(
-                        target: TARGET, 
+                        target: TARGET,
                         "DynamicBocDb::fill_counters  processed {}",
                         cells_counters.len(),
                     );
@@ -389,11 +390,11 @@ impl DynamicBocDb {
         full_filled_counters: bool,
     ) -> Result<()> {
         log::debug!(target: TARGET, "DynamicBocDb::delete_boc  {:x}", root_cell_id);
-        
+
         if full_filled_counters && self.assume_old_cells {
             fail!("Full filled counters is not supported with assume_old_cells");
         }
-        
+
         let mut visited = fnv::FnvHashMap::default();
         self.delete_cells_recursive(
             root_cell_id,
@@ -446,10 +447,22 @@ impl DynamicBocDb {
     ) -> Result<Arc<StorageCell>> {
 
         if use_cache {
-            if let Some(cell) = self.cells.lock().get(cell_id) {
-                log::trace!(target: TARGET, "DynamicBocDb::load_cell  from cache  id {cell_id:x}");
-                return Ok(cell.clone());
-            }
+            match self
+                .raw_cells_cache
+                .get_raw(&self.db, cell_id)
+            {
+                Ok(value) => {
+                    if let Ok((cell, _)) =StorageCell::deserialize(self, &value, use_cache, false)
+                        .or_else(|_| StorageCell::deserialize(self, &value, use_cache, true)){
+                        log::trace!(target: TARGET, "DynamicBocDb::load_cell  from cache  id {cell_id:x}");
+                        return Ok(Arc::new(cell));
+                    }
+                }
+                Err(e) => {
+                    log::trace!(target: TARGET, "DynamicBocDb::load_cell  from cache  id {cell_id:x} error - {e}");
+                },
+            };
+
         }
 
         let storage_cell_data = match self.db.get(cell_id) {
@@ -458,10 +471,10 @@ impl DynamicBocDb {
                 log::error!("FATAL!");
                 log::error!("FATAL! Can't load cell {:x} from db, error: {:?}", cell_id, e);
                 log::error!("FATAL!");
-                
+
                 let path = Path::new(&self.db_root_path).join(BROKEN_CELL_BEACON_FILE);
                 write(&path, "")?;
-                
+
                 std::thread::sleep(Duration::from_millis(100));
                 std::process::exit(0xFF);
             }
@@ -478,10 +491,10 @@ impl DynamicBocDb {
                     cell_id, hex::encode(storage_cell_data), e
                 );
                 log::error!("FATAL!");
-                
+
                 let path = Path::new(&self.db_root_path).join(BROKEN_CELL_BEACON_FILE);
                 write(&path, "")?;
-                
+
                 std::thread::sleep(Duration::from_millis(100));
                 std::process::exit(0xFF);
             }
@@ -489,10 +502,6 @@ impl DynamicBocDb {
 
         #[cfg(feature = "telemetry")]
         self.telemetry.storage_cells.update(self.allocated.storage_cells.load(Ordering::Relaxed));
-
-        if use_cache {
-            self.cells.lock().push(cell_id.clone(), storage_cell.clone());
-        }
 
         log::trace!(target: TARGET,
             "DynamicBocDb::load_cell  from DB  id {cell_id:x}  use_cache {use_cache}");
@@ -605,7 +614,7 @@ impl DynamicBocDb {
             }
         } else {
             log::warn!(
-                "DynamicBocDb::delete_cells_recursive  unknown cell with id {:x}  root_cell_id {:x}", 
+                "DynamicBocDb::delete_cells_recursive  unknown cell with id {:x}  root_cell_id {:x}",
                 cell_id, root_id
             );
         }
@@ -763,9 +772,9 @@ db_impl_base!(IndexedUint32Db, KvcTransactional, UInt256);
 pub struct CellByHashStorageAdapter {
     boc_db: Arc<DynamicBocDb>,
     use_cache: bool,
- }
+}
 
- impl CellByHashStorageAdapter {
+impl CellByHashStorageAdapter {
     pub fn new(
         boc_db: Arc<DynamicBocDb>,
         use_cache: bool,
@@ -775,16 +784,16 @@ pub struct CellByHashStorageAdapter {
             use_cache,
         })
     }
- }
+}
 
- impl CellByHashStorage for CellByHashStorageAdapter {
+impl CellByHashStorage for CellByHashStorageAdapter {
     fn get_cell_by_hash(&self, hash: &UInt256) -> Result<Cell> {
         let cell = Cell::with_cell_impl_arc(self.boc_db.clone().load_cell(&hash, self.use_cache)?);
         Ok(cell)
     }
- }
+}
 
-// This is adapter for DynamicBocDb wich allows to use it as OrderedCellsStorage 
+// This is adapter for DynamicBocDb wich allows to use it as OrderedCellsStorage
 // while serialising BOC. All cells sent to 'push_cell' should be already saved into DynamicBocDb!
 pub struct OrderedCellsStorageAdapter {
     boc_db: Arc<DynamicBocDb>,
@@ -874,5 +883,78 @@ impl OrderedCellsStorage for OrderedCellsStorageAdapter {
         self.index1.destroy()?;
         self.index2.destroy()?;
         Ok(())
+    }
+}
+
+
+struct RawCellsCache(Cache<UInt256, Bytes, CellSizeEstimator, ahash::RandomState>);
+
+#[derive(Clone, Copy)]
+pub struct CellSizeEstimator;
+impl quick_cache::Weighter<UInt256, Bytes> for CellSizeEstimator {
+    fn weight(&self, _key: &UInt256, val: &Bytes) -> u32 {
+        const BYTES_SIZE: usize = std::mem::size_of::<usize>() * 4;
+        let len = std::mem::size_of::<UInt256>() + val.len() + BYTES_SIZE;
+        len as u32
+    }
+}
+
+impl RawCellsCache {
+    fn new(size_in_bytes: u64) -> Self {
+        // Percentile 0.1%    from 96 to 127  => 1725119 count
+        // Percentile 10%     from 128 to 191  => 82838849 count
+        // Percentile 25%     from 128 to 191  => 82838849 count
+        // Percentile 50%     from 128 to 191  => 82838849 count
+        // Percentile 75%     from 128 to 191  => 82838849 count
+        // Percentile 90%     from 192 to 255  => 22775080 count
+        // Percentile 95%     from 192 to 255  => 22775080 count
+        // Percentile 99%     from 192 to 255  => 22775080 count
+        // Percentile 99.9%   from 256 to 383  => 484002 count
+        // Percentile 99.99%  from 256 to 383  => 484002 count
+        // Percentile 99.999% from 256 to 383  => 484002 count
+
+        // from 64  to 95  - 15_267
+        // from 96  to 127 - 1_725_119
+        // from 128 to 191 - 82_838_849
+        // from 192 to 255 - 22_775_080
+        // from 256 to 383 - 484_002
+
+        // we assume that 75% of cells are in range 128..191
+        // so we can use use 192 as size for value in cache
+
+        const MAX_CELL_SIZE: u64 = 192;
+        const KEY_SIZE: u64 = 32;
+
+        let estimated_cell_cache_capacity = size_in_bytes / (KEY_SIZE + MAX_CELL_SIZE);
+        log::trace!(
+            "{estimated_cell_cache_capacity},{size_in_bytes}",
+        );
+
+        let raw_cache = Cache::with(
+            estimated_cell_cache_capacity as usize,
+            size_in_bytes,
+            CellSizeEstimator,
+            ahash::RandomState::default(),
+            DefaultLifecycle::default(),
+        );
+
+        Self(raw_cache)
+    }
+
+    fn get_raw(&self, db: &Arc<CellDb>, key: &UInt256) -> Result<Bytes> {
+        if let Some(value) = self.0.get(key) {
+            return Ok(value);
+        }
+
+        let value = Bytes::copy_from_slice(&db.get(key)?);
+        self.0.insert(key.clone(), value.clone());
+
+        Ok(value)
+    }
+
+    #[allow(unused)] // TODO: Check whether it is not needed
+    pub fn insert(&self, key: UInt256, value: &[u8]) {
+        let value = Bytes::copy_from_slice(value);
+        self.0.insert(key, value);
     }
 }
