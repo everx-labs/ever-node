@@ -901,6 +901,7 @@ impl ExecutionManager {
                     "{}: account {:x} accepted inbound external message {:x}",
                     self.collated_block_descr, account_id, msg_id,
                 );
+                collator_data.accepted_ext_messages.push(msg_id);
             }
         }
         let tr = transaction_res?;
