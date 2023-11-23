@@ -74,7 +74,7 @@ loggers:
     level: error
 
   validator:
-    level: info
+    level: debug
 
   validator_manager:
     level: trace

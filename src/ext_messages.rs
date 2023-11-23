@@ -160,12 +160,12 @@ impl MessagesPool {
         }
     }
 
-    pub fn new_message_raw(&self, data: &[u8], now: u32) -> Result<UInt256> {
+    pub fn new_message_raw(&self, data: &[u8], now: u32) -> Result<()> {
         let (id, message) = create_ext_message(data)?;
         let message = Arc::new(message);
 
         self.new_message(id.clone(), message, now)?;
-        Ok(id)
+        Ok(())
     }
 
     pub fn new_message(&self, id: UInt256, message: Arc<Message>, now: u32) -> Result<()> {
@@ -199,21 +199,7 @@ impl MessagesPool {
         MessagePoolIter::new(self, shard, now)
     }
 
-    pub fn complete_messages(&self, to_delay: Vec<UInt256>, to_delete: Vec<UInt256>, now: u32) -> Result<()> {
-        for id in &to_delete {
-            let result = self.messages.remove_with(id, |_| {
-                log::debug!(
-                    target: EXT_MESSAGES_TRACE_TARGET,
-                    "complete_messages: removing external message {:x} while enumerating to_delete list",
-                    id,
-                );
-                true
-            });
-            if result.is_some() {
-                #[cfg(not(feature = "statsd"))]
-                metrics::decrement_gauge!("ext_messages_len", 1f64);
-            }
-        }
+    pub fn complete_messages(&self, to_delay: Vec<UInt256>, _to_delete: Vec<UInt256>, now: u32) -> Result<()> {
         for id in &to_delay {
             let result = self.messages.remove_with(id, |(_, keeper)| {
                 if keeper.can_postpone() {
@@ -364,13 +350,13 @@ pub fn create_ext_message(data: &[u8]) -> Result<(UInt256, Message)> {
 
 pub fn get_level_and_level_change(status: &RempMessageStatus) -> (RempMessageLevel, i32) {
     match status {
-        RempMessageStatus::TonNode_RempNew => (RempMessageLevel::TonNode_RempQueue, 0),
         RempMessageStatus::TonNode_RempAccepted(a) => (a.level.clone(), 1),
         RempMessageStatus::TonNode_RempRejected(r) => (r.level.clone(), -1),
         RempMessageStatus::TonNode_RempIgnored(i) => (i.level.clone(), -1),
         RempMessageStatus::TonNode_RempTimeout => (RempMessageLevel::TonNode_RempQueue, -1),
-        RempMessageStatus::TonNode_RempDuplicate(_) => (RempMessageLevel::TonNode_RempQueue, 0),
         RempMessageStatus::TonNode_RempSentToValidators(_) => (RempMessageLevel::TonNode_RempFullnode, 0),
+        /*RempMessageStatus::TonNode_RempDuplicate*/
+        _ /*RempMessageStatus::TonNode_RempNew*/ => (RempMessageLevel::TonNode_RempQueue, 0)
     }
 }
 
@@ -397,13 +383,6 @@ pub fn is_finally_accepted(status: &RempMessageStatus) -> bool {
         (RempMessageLevel::TonNode_RempMasterchain, chg) => chg > 0,
         _ => false
     }
-}
-
-pub fn validate_status_change(old_status: &RempMessageStatus, new_status: &RempMessageStatus) -> bool {
-    let (_old_lvl, _old_chg) = get_level_and_level_change(old_status);
-    let (_new_lvl, _) = get_level_and_level_change(new_status);
-
-    return true // TODO: proper check
 }
 
 pub struct RempMessagesPool {
