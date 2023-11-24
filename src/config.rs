@@ -274,29 +274,33 @@ pub struct ExternalDbConfig {
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone)]
 pub struct RempConfig {
-    client_enabled: bool,
+    client_enabled: Option<bool>,
     remp_client_pool: Option<u8>,
-    service_enabled: bool,
+    service_enabled: Option<bool>,
+    message_queue_max_len: Option<usize>,
 }
 
 impl RempConfig {
 
     pub fn is_client_enabled(&self) -> bool {
-        self.client_enabled
+        self.client_enabled.unwrap_or(true)
     }
 
     pub fn is_service_enabled(&self) -> bool {
-        self.service_enabled
+        self.service_enabled.unwrap_or(true)
+    }
+
+    pub fn get_message_queue_max_len(&self) -> Option<usize> {
+        self.message_queue_max_len
     }
 
     pub fn get_catchain_options(&self) -> Option<catchain::Options> {
         if self.is_service_enabled() {
-            Some(catchain::Options {
-                idle_timeout: std::time::Duration::from_secs(5),
-                max_deps: 2,
-                debug_disable_db: false,
-                skip_processed_blocks: false
-            })
+            let mut opts = catchain::Options::default();
+            opts.idle_timeout = std::time::Duration::from_secs(5);
+            opts.max_deps = 2;
+
+            Some(opts)
         } else {
             None
         }

@@ -1209,6 +1209,12 @@ impl SessionImpl {
             max_deps: options.catchain_max_deps,
             skip_processed_blocks: options.catchain_skip_processed_blocks,
             debug_disable_db: false,
+            receiver_max_neighbours_count: options.catchain_receiver_max_neighbours_count,
+            receiver_neighbours_sync_min_period: options.catchain_receiver_neighbours_sync_min_period,
+            receiver_neighbours_sync_max_period: options.catchain_receiver_neighbours_sync_max_period,
+            receiver_max_sources_sync_attempts: options.catchain_receiver_max_sources_sync_attempts,
+            receiver_neighbours_rotate_min_period: options.catchain_receiver_neighbours_rotate_min_period,
+            receiver_neighbours_rotate_max_period: options.catchain_receiver_neighbours_rotate_max_period,
         };
         let catchain_nodes = ids
             .iter()

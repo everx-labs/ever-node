@@ -100,6 +100,7 @@ pub async fn accept_block(
     if id.shard().is_masterchain() {
         log::debug!(target: "validator", "({}): Applying block", block_descr);
         engine.clone().apply_block(&handle, &block, id.seq_no(), false).await?;
+        log::trace!(target: "validator", "acccept_block {}: applied block", id);
     } else {
         let last_mc_state = choose_mc_state(&block, &engine).await?;
 
@@ -778,6 +779,8 @@ fn build_block_broadcast(
 
 ) -> Result<BlockBroadcast> {
 
+    log::trace!(target: "validator", "accept_block {}: build_block_broadcast", block.id());
+
     let mut packed_signatures = vec!();
 
     signatures.pure_signatures.signatures().iterate_slices(|ref mut _key, ref mut slice| {
@@ -808,6 +811,8 @@ fn build_queue_update_broadcasts(
     validator_set: &ValidatorSet,
     signatures: &BlockSignatures,
 ) -> Result<Vec<QueueUpdateBroadcast>> {
+
+    log::trace!(target: "validator", "accept_block {}: build_queue_update_broadcasts", block.id());
 
     let mut packed_signatures = vec!();
     let mut broadcasts = vec!();

@@ -751,6 +751,14 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
+    async fn push_message_to_remp(&self, data: ton_api::ton::bytes) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn remp_capability(&self) -> bool { 
+        false 
+    }
+
     async fn update_validators(
         &self,
         to_resolve: Vec<CatchainNode>,
