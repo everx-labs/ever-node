@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.80
+
+- Updates in REMP protocol
+
+## Version 0.55.78
+
+- More support for BLS TL structures
+
 ## Version 0.55.77
 
 - Support BLS TL structures
