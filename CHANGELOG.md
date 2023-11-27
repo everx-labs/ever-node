@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.83
+
+- Try to use old persistent states in cold boot if newest one is not ready yet
+
 ## Version 0.55.82
 
 - Fixed persistent shard states GC
