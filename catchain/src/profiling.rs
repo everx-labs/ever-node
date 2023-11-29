@@ -525,16 +525,16 @@ macro_rules! function {
 macro_rules! instrument {
     () => {
         lazy_static::lazy_static! {
-            static ref INSTRUMENT_CODE_LINE: crate::profiling::ProfileCodeLine =
-                crate::profiling::ProfileCodeLine {
+            static ref INSTRUMENT_CODE_LINE: $crate::profiling::ProfileCodeLine =
+                $crate::profiling::ProfileCodeLine {
                     file_name: file!(),
-                    function_name: crate::function!(85),
+                    function_name: $crate::function!(85),
                     line: line!(),
                 };
         }
 
         let _instrument_guard =
-            crate::profiling::ProfileGuard::new(&INSTRUMENT_CODE_LINE);
+            $crate::profiling::ProfileGuard::new(&INSTRUMENT_CODE_LINE);
     };
 }
 
@@ -543,17 +543,17 @@ macro_rules! instrument {
 macro_rules! check_execution_time {
     ($max_duration_microseconds:expr) => {
         lazy_static::lazy_static! {
-            static ref CHECK_EXECUTION_TIME_CODE_LINE: crate::profiling::ProfileCodeLine =
-                crate::profiling::ProfileCodeLine {
+            static ref CHECK_EXECUTION_TIME_CODE_LINE: $crate::profiling::ProfileCodeLine =
+                $crate::profiling::ProfileCodeLine {
                     file_name: file!(),
-                    function_name: crate::function!(95),
+                    function_name: $crate::function!(95),
                     line: line!(),
                 };
             static ref CHECK_EXECUTION_TIME_MAX_DURATION: std::time::Duration =
                 std::time::Duration::from_micros($max_duration_microseconds);
         }
 
-        let _check_execution_time_guard = crate::profiling::ExecutionTimeGuard::new(
+        let _check_execution_time_guard = $crate::profiling::ExecutionTimeGuard::new(
             &CHECK_EXECUTION_TIME_CODE_LINE,
             &CHECK_EXECUTION_TIME_MAX_DURATION,
         );

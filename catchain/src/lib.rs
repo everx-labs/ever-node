@@ -26,7 +26,7 @@ pub mod utils;
 
 use crate::{profiling::InstanceCounter, utils::MetricsHandle};
 use adnl::node::AdnlNode;
-use adnl::PrivateOverlayShortId;
+pub use adnl::PrivateOverlayShortId;
 use std::{
     any::Any, cell::RefCell, fmt, path::Path, rc::{Rc, Weak}, sync::Arc,
     time::SystemTime,

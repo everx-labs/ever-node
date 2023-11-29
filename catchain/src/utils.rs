@@ -13,10 +13,10 @@
 
 /// Imports
 use crate::{
-    serialize_tl_boxed_object, 
     BlockHash, BlockPayloadPtr, CatchainFactory, PrivateKey, PublicKey, PublicKeyHash, 
     RawBuffer, Receiver, SessionId, ton, utils
 };
+use crate::serialize_tl_boxed_object;
 use std::{collections::{BTreeMap, HashMap, HashSet}, convert::TryInto};
 use ton_api::{deserialize_typed, IntoBoxed};
 use ton_types::{Ed25519KeyOption, KeyId, Result, UInt256};
@@ -173,7 +173,7 @@ pub fn public_key_hash_to_int256(v: &PublicKeyHash) -> UInt256 {
 }
 
 pub fn get_overlay_id(first_block: &ton_api::ton::catchain::FirstBlock) -> Result<SessionId> {
-    let serialized_first_block = serialize_tl_boxed_object!(first_block);
+    let serialized_first_block = crate::serialize_tl_boxed_object!(first_block);
     let overlay_id = ::ton_api::ton::pub_::publickey::Overlay {
         name: serialized_first_block.into(),
     };
@@ -504,6 +504,25 @@ impl MetricsDumper {
         //update state
 
         self.prev_metrics = metrics;
+    }
+
+    pub fn enumerate_as_f64<F>(&self, handler: F)
+    where
+        F: Fn(String, f64),
+    {
+        for (key, metric) in &self.prev_metrics {
+            use MetricUsage::*;
+
+            let value = match metric.usage {
+                Counter => metric.value as f64,
+                Derivative => metric.value as f64 / Self::METRIC_DERIVATIVE_MULTIPLIER,
+                Percents => (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER * 100.0,
+                Float => (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER,
+                Latency => (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER,
+            };
+
+            handler(key.clone(), value);
+        }
     }
 
     pub fn dump<F>(&self, handler: F)

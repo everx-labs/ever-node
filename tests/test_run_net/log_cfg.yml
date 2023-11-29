@@ -16,7 +16,7 @@ appenders:
   rolling_logfile:
     kind: rolling_file
     encoder:
-      pattern: "{d(%Y-%m-%d %H:%M:%S.%f)} {l} [{h({t})}] {I}: {m}{n}"
+      pattern: "{d(%Y-%m-%d %H:%M:%S.%f)} {l} [{h({t})}@{file}(({line}))] {I}: {m}{n}"
     path: '/shared/output_NODE_NUM.log'
     policy:
       kind: compound
@@ -80,6 +80,9 @@ loggers:
     level: trace
 
   remp:
+    level: trace
+
+  verificator:
     level: trace
 
   catchain:

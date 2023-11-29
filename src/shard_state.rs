@@ -20,8 +20,8 @@ use adnl::{declare_counted, common::{CountedObject, Counter}};
 use std::sync::atomic::Ordering;
 use std::{io::Write, sync::Arc};
 use ton_block::{
-    BlockIdExt, ShardAccount, ShardIdent, ShardStateUnsplit, ShardStateSplit, ValidatorSet, 
-    CatchainConfig, Serializable, Deserializable, ConfigParams, McShardRecord, 
+    BlockIdExt, ShardAccount, ShardIdent, ShardStateUnsplit, ShardStateSplit, 
+    Serializable, Deserializable, ConfigParams, McShardRecord, 
     McStateExtra, ShardDescr, ShardHashes, HashmapAugType, InRefValue, BinTree, 
     BinTreeType, WorkchainDescr, OutMsgQueue, ProcessedInfo, MerkleProof,
 };
@@ -414,10 +414,6 @@ impl ShardStateStuff {
             Ok(true)
         })?;
         Ok(vec)
-    }
-
-    pub fn read_cur_validator_set_and_cc_conf(&self) -> Result<(ValidatorSet, CatchainConfig)> {
-        self.config_params()?.read_cur_validator_set_and_cc_conf()
     }
 
 // Unused

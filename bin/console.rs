@@ -15,6 +15,12 @@ use adnl::{
     common::TaggedTlObject, client::{AdnlClient, AdnlClientConfig, AdnlClientConfigJson}
 };
 use std::{convert::TryInto, env, str::FromStr, time::Duration};
+use std::collections::HashMap;
+use num_bigint::BigUint;
+use ton_abi::TokenValue;
+use ton_abi::Token;
+use ton_abi::Contract;
+use ton_abi::Uint;
 use ton_api::{
     serialize_boxed,
     ton::{
@@ -34,6 +40,10 @@ use ton_types::{
 };
 
 include!("../common/src/test.rs");
+
+const ELECTOR_ABI: &[u8] = include_bytes!("Elector.abi.json"); //elector's ABI
+const ELECTOR_PROCESS_NEW_STAKE_FUNC_NAME: &str = "process_new_stake"; //elector process_new_stake function name
+const USE_FIFTH_ELECTOR: bool = true;
 
 trait SendReceive {
     fn send<Q: ToString>(params: impl Iterator<Item = Q>) -> Result<TLObject>;
@@ -90,6 +100,7 @@ commands! {
     AddValidatorAdnlAddr, "addvalidatoraddr", "addvalidatoraddr <permkeyhash> <keyhash> <expireat>\tadd validator ADNL addr"
     AddValidatorPermKey, "addpermkey", "addpermkey <keyhash> <election-date> <expire-at>\tadd validator permanent key"
     AddValidatorTempKey, "addtempkey", "addtempkey <permkeyhash> <keyhash> <expire-at>\tadd validator temp key"
+    AddValidatorBlsKey, "addblskey", "addblskey <permkeyhash> <keyhash> <expire-at>\t add validator bls key"
     Bundle, "bundle", "bundle <block_id>\tprepare bundle"
     ExportPub, "exportpub", "exportpub <keyhash>\texports public key by key hash"
     FutureBundle, "future_bundle", "future_bundle <block_id>\tprepare future bundle"
@@ -225,8 +236,18 @@ impl SendReceive for GetSessionStats {
 }
 
 impl SendReceive for NewKeypair {
-    fn send<Q: ToString>(_params: impl Iterator<Item = Q>) -> Result<TLObject> {
-        Ok(TLObject::new(ton::rpc::engine::validator::GenerateKeyPair))
+    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+        match params.next() {
+            None => Ok(TLObject::new(ton::rpc::engine::validator::GenerateKeyPair)),
+            Some(param) => {
+                let mut param = param.to_string();
+                param.make_ascii_lowercase();
+                match param.as_ref() {
+                    "bls" => Ok(TLObject::new(ton::rpc::engine::validator::GenerateBlsKeyPair)),
+                    _ => fail!("invalid parameters!")
+                }
+            },
+        }
     }
     fn receive<Q: ToString>(
         answer: TLObject, 
@@ -254,11 +275,14 @@ impl SendReceive for ExportPub {
         mut _params: impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
         let answer = downcast::<ton_api::ton::PublicKey>(answer)?;
-        let pub_key = answer
-            .key()
-            .ok_or_else(|| error!("Public key not found in answer!"))?
-            .as_slice()
-            .to_vec();
+        let pub_key = match answer.key() {
+            Some(key) => key.clone().into_vec(),
+            None => {
+                answer.bls_key()
+                    .ok_or_else(|| error!("Public key not found in answer!"))?
+                    .clone()
+            }
+        };
         let msg = format!("imported key: {} {}", hex::encode(&pub_key), base64_encode(&pub_key));
         Ok((msg, pub_key))
     }
@@ -295,6 +319,19 @@ impl SendReceive for AddValidatorPermKey {
         Ok(TLObject::new(ton::rpc::engine::validator::AddValidatorPermanentKey {
             key_hash,
             election_date,
+            ttl
+        }))
+    }
+}
+
+impl SendReceive for AddValidatorBlsKey {
+    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+        let permanent_key_hash = parse_int256(params.next(), "permanent_key_hash")?;
+        let key_hash =  parse_int256(params.next(), "key_hash")?;
+        let ttl = parse_int(params.next(), "expire_at")? - now();
+        Ok(TLObject::new(ton::rpc::engine::validator::AddValidatorBlsKey {
+            permanent_key_hash,
+            key_hash,
             ttl
         }))
     }
@@ -602,6 +639,14 @@ impl ControlClient {
         Ok((format!("Message body is {} saved to path {}", base64_encode(&data), path), data))
     }
 
+    fn convert_to_uint(value: &[u8], bytes_count: usize) -> TokenValue {
+        assert!(value.len() == bytes_count);
+        TokenValue::Uint(Uint {
+            number: BigUint::from_bytes_be(value),
+            size: value.len() * 8,
+        })
+    }
+
     // @input elect_time expire_time <validator-query.boc>
     // @output validator-query.boc
     async fn process_election_bid<Q: ToString>(
@@ -677,19 +722,68 @@ impl ControlClient {
         Ed25519KeyOption::from_public_key(&pub_key[..].try_into()?)
             .verify(&data, &signature)?;
 
-        let query_id = now() as u64;
-        // validator-elect-signed.fif
-        let mut data = 0x4E73744Bu32.to_be_bytes().to_vec();
-        data.extend_from_slice(&query_id.to_be_bytes());
-        data.extend_from_slice(&pub_key);
-        data.extend_from_slice(&elect_time.to_be_bytes());
-        data.extend_from_slice(&max_factor.to_be_bytes());
-        data.extend_from_slice(&adnl);
-        let len = data.len() * 8;
-        let mut body = BuilderData::with_raw(data, len)?;
-        let len = signature.len() * 8;
-        body.checked_append_reference(BuilderData::with_raw(signature, len)?.into_cell()?)?;
-        let body = body.into_cell()?;
+        let body = if USE_FIFTH_ELECTOR {
+            let query_id = now() as u64;
+            // validator-elect-signed.fif
+            let mut data = 0x4E73744Bu32.to_be_bytes().to_vec();
+            data.extend_from_slice(&query_id.to_be_bytes());
+            data.extend_from_slice(&pub_key);
+            data.extend_from_slice(&elect_time.to_be_bytes());
+            data.extend_from_slice(&max_factor.to_be_bytes());
+            data.extend_from_slice(&adnl);
+            let len = data.len() * 8;
+            let mut body = BuilderData::with_raw(data, len)?;
+            let len = signature.len() * 8;
+            body.checked_append_reference(BuilderData::with_raw(signature, len)?.into_cell()?)?;
+            let body = body.into_cell()?;
+            body
+        } else {
+            let (s, bls) = self.process_command("newkey", vec!["bls"].iter()).await?;
+            log::trace!("{}", s);
+            let bls_str = &hex::encode_upper(&bls)[..];
+
+            let (s, bls_pub_key) = self.process_command("exportpub", vec![bls_str].iter()).await?;
+            log::trace!("{}", s);
+
+            let (s, _) = self.process_command("addblskey", vec![perm_str.clone(), bls_str.to_string(), elect_time_str].iter()).await?;
+            log::trace!("{}", s);
+
+            let contract = Contract::load(ELECTOR_ABI).expect("Elector's ABI must be valid");
+            let process_new_stake_fn = contract
+                .function(ELECTOR_PROCESS_NEW_STAKE_FUNC_NAME)
+                .expect("Elector contract must have 'process_new_stake' function for elections")
+                .clone();
+            log::trace!("Use process new stake function '{}' with id={:08X}",
+                ELECTOR_PROCESS_NEW_STAKE_FUNC_NAME, process_new_stake_fn.get_function_id());
+
+            let time_now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            let header: HashMap<_, _> = vec![("time".to_owned(), TokenValue::Time(time_now_ms))]
+                .into_iter()
+                .collect();
+
+            let query_id = now() as u64;
+
+            let parameters = [
+                Token::new("query_id", Self::convert_to_uint(&query_id.to_be_bytes(), 8)),
+                Token::new("validator_pubkey", Self::convert_to_uint(&pub_key, 32)),
+                Token::new("stake_at", Self::convert_to_uint(&elect_time.to_be_bytes(), 4)),
+                Token::new("max_factor", Self::convert_to_uint(&max_factor.to_be_bytes(), 4)),
+                Token::new("adnl_addr", Self::convert_to_uint(&adnl, 32)),
+                Token::new("bls_key1", Self::convert_to_uint(&bls_pub_key[0..32], 32)), //256 bits
+                Token::new("bls_key2", Self::convert_to_uint(&bls_pub_key[32..], 16)), //128 bits
+                Token::new("signature", TokenValue::Bytes(signature.to_vec())),
+            ];
+
+            const INTERNAL_CALL: bool = true; //internal message
+
+            let body = process_new_stake_fn
+                .encode_input(&header, &parameters, INTERNAL_CALL, None, None)
+                .and_then(|builder| builder.into_cell())?;
+            body
+        };
         log::trace!("message body {}", body);
         let data = ton_types::write_boc(&body)?;
         let path = params.next().map(

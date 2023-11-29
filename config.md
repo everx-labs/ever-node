@@ -57,3 +57,6 @@ Enables participation in validator REMP protocols. Default value is `true`.
   for longer periods will be easily identified as duplicates (the validator will
   already have the same message received through Catchain from another validtor). 
   The parameter specifies maximal delay. 
+
+* `smft_disabled`: manually disables participation of the node in SMFT protocol even if corresponding network config is set; false by default
+
