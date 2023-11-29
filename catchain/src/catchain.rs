@@ -72,6 +72,12 @@ impl Default for Options {
             max_deps: 4,
             debug_disable_db: false,
             skip_processed_blocks: false,
+            receiver_max_neighbours_count: 5,
+            receiver_neighbours_sync_min_period: Duration::from_millis(100),
+            receiver_neighbours_sync_max_period: Duration::from_millis(200),
+            receiver_max_sources_sync_attempts: 3,
+            receiver_neighbours_rotate_min_period: Duration::from_millis(60000),
+            receiver_neighbours_rotate_max_period: Duration::from_millis(120000),
         }
     }
 }

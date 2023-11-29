@@ -16,11 +16,11 @@ metrics = '0.21.0'
 metrics-core = '0.5'
 rand = '0.8'
 catchain = { path = '../catchain' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.6.240' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.11' }
 storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.41' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.104' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.28' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.53' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.117' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.31' }
 
 [features]
 slashing = [  ]
