@@ -216,7 +216,13 @@ pub async fn accept_block_routine(
     let block = match block_opt {
         Some(b) => b,
         None => {
-            let (block, _proof) = engine.download_block(&id, Some(10)).await?;
+            let block = match &handle_opt {
+                Some(h) if h.has_data() => engine.load_block(h).await?,
+                _ => {
+                    let (block, _proof) = engine.download_block(&id, Some(10)).await?;
+                    block
+                }
+            };
             precheck_header(&block, prev, is_fake, is_fork)?;
             block
         }
