@@ -36,6 +36,11 @@ use crate::{
     },
     CHECK,
 };
+#[cfg(feature = "fast_finality")]
+use crate::validating_utils::{
+    LOST_COLLATOR_TIMEOUT, COLLATOR_RANGE_LEN,
+    calc_next_collator_index, calc_collator_index
+};
 use adnl::common::Wait;
 use futures::try_join;
 use rand::Rng;
@@ -60,6 +65,10 @@ use ton_block::{
     Transaction, TransactionTickTock, UnixTime32, ValidatorSet, ValueFlow, WorkchainDescr,
     Workchains, Account, AccountIdPrefixFull, OutQueueUpdates, OutMsgQueueInfo, MASTERCHAIN_ID
 };
+#[cfg(feature = "fast_finality")]
+use crate::validating_utils::SPLIT_MERGE_INTERVAL_BLOCKS;
+#[cfg(feature = "fast_finality")]
+use ton_block::{ShardCollators, CollatorRange};
 use ton_executor::{
     BlockchainConfig, ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor,
     TransactionExecutor,
@@ -89,6 +98,8 @@ pub struct PrevData {
     state_root: Cell, // pure cell without used tree my be no need
     accounts: ShardAccounts,
     gen_utime: u32,
+    #[cfg(feature = "fast_finality")]
+    gen_utime_ms: u64,
     gen_lt: u64,
     total_validator_fees: CurrencyCollection,
     overload_history: u64,
@@ -104,6 +115,8 @@ impl PrevData {
         subshard: Option<&ShardIdent>,
     ) -> Result<Self> {
         let mut gen_utime = states[0].state()?.gen_time();
+        #[cfg(feature = "fast_finality")]
+        let mut gen_utime_ms = states[0].state()?.gen_time_ms();
         let mut gen_lt = states[0].state()?.gen_lt();
         let mut accounts = states[0].state()?.read_accounts()?;
         let mut total_validator_fees = states[0].state()?.total_validator_fees().clone();
@@ -118,6 +131,9 @@ impl PrevData {
         let mut underload_history = 0;
         if let Some(state) = states.get(1) {
             gen_utime = std::cmp::max(gen_utime, state.state()?.gen_time());
+            #[cfg(feature = "fast_finality")] {
+                gen_utime_ms = std::cmp::max(gen_utime_ms, state.state()?.gen_time_ms());
+            }
             gen_lt = std::cmp::max(gen_lt, state.state()?.gen_lt());
             let key = state.shard().merge()?.shard_key(false);
             accounts.merge(&state.state()?.read_accounts()?, &key)?;
@@ -138,6 +154,8 @@ impl PrevData {
             state_root,
             accounts,
             gen_utime,
+            #[cfg(feature = "fast_finality")]
+            gen_utime_ms,
             gen_lt,
             total_validator_fees,
             overload_history,
@@ -150,6 +168,8 @@ impl PrevData {
     fn overload_history(&self) -> u64 { self.overload_history }
     fn underload_history(&self) -> u64 { self.underload_history }
     fn prev_state_utime(&self) -> u32 { self.gen_utime }
+    #[cfg(feature = "fast_finality")]
+    fn prev_state_utime_ms(&self) -> u64 { self.gen_utime_ms }
     fn prev_state_lt(&self) -> u64 { self.gen_lt }
     fn shard_libraries(&self) -> Result<&Libraries> { Ok(self.states[0].state()?.libraries()) }
     fn prev_vert_seqno(&self) -> Result<u32> { Ok(self.states[0].state()?.vert_seq_no()) }
@@ -227,6 +247,8 @@ struct CollatorData {
 
     // determined fields
     gen_utime: u32,
+    #[cfg(feature = "fast_finality")]
+    gen_utime_ms: u64,
     config: BlockchainConfig,
 
     // fields, uninitialized by default
@@ -271,6 +293,8 @@ impl CollatorData {
 
     pub fn new(
         gen_utime: u32,
+        #[cfg(feature = "fast_finality")]
+        gen_utime_ms: u64,
         config: BlockchainConfig, 
         usage_tree: UsageTree,
         prev_data: &PrevData,
@@ -294,6 +318,8 @@ impl CollatorData {
             usage_tree,
             imported_visited: HashSet::new(),
             gen_utime,
+            #[cfg(feature = "fast_finality")]
+            gen_utime_ms,
             config,
             start_lt: None,
             value_flow: ValueFlow::default(),
@@ -329,6 +355,9 @@ impl CollatorData {
     }
 
     fn gen_utime(&self) -> u32 { self.gen_utime }
+
+    #[cfg(feature = "fast_finality")]
+    fn gen_utime_ms(&self) -> u64 { self.gen_utime_ms }
 
     //
     // Lists
@@ -901,6 +930,7 @@ impl ExecutionManager {
                     "{}: account {:x} accepted inbound external message {:x}",
                     self.collated_block_descr, account_id, msg_id,
                 );
+                collator_data.accepted_ext_messages.push(msg_id);
             }
         }
         let tr = transaction_res?;
@@ -1172,6 +1202,7 @@ impl Collator {
             duration,
         );
 
+        #[cfg(not(test))]
         #[cfg(feature = "telemetry")]
         self.engine.collator_telemetry().succeeded_attempt(
             &self.shard,
@@ -1204,7 +1235,28 @@ impl Collator {
                         self.import_prev_stuff(),
                     )?;
 
+                #[cfg(not(feature = "fast_finality"))]
                 let top_shard_blocks_descr = Vec::new();
+
+                #[cfg(feature = "fast_finality")]
+                let top_shard_blocks_descr = {
+                    // Wait until all blocks referenced in master are applied.
+                    //
+                    // NOTE: sequential await is ok, because we are waiting for a notification,
+                    // while the operation is initiated somewhere in the background.
+                    for block_id in mc_state.shard_hashes()?.top_blocks_all()? {
+                        self.engine.wait_applied_block(&block_id, Some(1000)).await?;
+                    }
+
+                    let mut actual_mc_seqno = mc_state.block_id().seq_no;
+                    match self.engine.get_shard_blocks(
+                        &mc_state, Some(&mut actual_mc_seqno)
+                    ).await {
+                        Ok(top_blocks) => top_blocks,
+                        Err(_) if actual_mc_seqno != mc_state.block_id().seq_no => continue,
+                        Err(e) => return Err(e),
+                    }
+                };
 
                 break Ok(ImportedData {
                     mc_state,
@@ -1241,10 +1293,16 @@ impl Collator {
         let is_masterchain = self.shard.is_masterchain();
         self.check_stop_flag()?;
 
+        #[cfg(not(feature = "fast_finality"))]
         let now = self.init_utime(&mc_data, &prev_data)?;
+        #[cfg(feature = "fast_finality")]
+        let now_ms = self.init_utime_ms(&mc_data, &prev_data)?;
+        #[cfg(feature = "fast_finality")]
+        let now = (now_ms / 1000) as u32;
         let config = BlockchainConfig::with_config(mc_data.config().clone())?;
         let mut collator_data = CollatorData::new(
             now,
+            #[cfg(feature = "fast_finality")] now_ms,
             config,
             usage_tree,
             &prev_data,
@@ -1289,6 +1347,13 @@ impl Collator {
                 &mut collator_data
             )?;
         } else {
+            #[cfg(feature = "fast_finality")]
+            self.import_new_shard_top_blocks_for_shard(
+                imported_data.top_shard_blocks_descr,
+                &prev_data,
+                &mc_data,
+                &mut collator_data,
+            )?;
         }
 
         self.init_lt(&mc_data, &prev_data, &mut collator_data)?;
@@ -1679,6 +1744,7 @@ impl Collator {
         Ok(usage_tree)
     }
 
+    #[cfg(not(feature = "fast_finality"))]
     fn init_utime(&self, mc_data: &McData, prev_data: &PrevData) -> Result<u32> {
 
         // consider unixtime and lt from previous block(s) of the same shardchain
@@ -1686,6 +1752,18 @@ impl Collator {
         let prev = max(mc_data.state().state()?.gen_time(), prev_now);
         log::trace!("{}: init_utime prev_time: {}", self.collated_block_descr, prev);
         let time = max(prev + 1, self.engine.now());
+
+        Ok(time)
+    }
+
+    #[cfg(feature = "fast_finality")]
+    fn init_utime_ms(&self, mc_data: &McData, prev_data: &PrevData) -> Result<u64> {
+
+        // consider unixtime and lt from previous block(s) of the same shardchain
+        let prev_now = prev_data.prev_state_utime_ms();
+        let prev = max(mc_data.state().state()?.gen_time_ms(), prev_now);
+        log::trace!("{}: init_utime prev_time: {}ms", self.collated_block_descr, prev);
+        let time = max(prev, self.engine.now_ms());
 
         Ok(time)
     }
@@ -1755,11 +1833,17 @@ impl Collator {
     -> Result<()> {
         log::trace!("{}: init_lt", self.collated_block_descr);
 
+        #[cfg(not(feature = "fast_finality"))]
         let mut start_lt = if !self.shard.is_masterchain() {
             max(mc_data.state().state()?.gen_lt(), prev_data.prev_state_lt())
         } else {
             max(mc_data.state().state()?.gen_lt(), collator_data.shards_max_end_lt())
         };
+        #[cfg(feature = "fast_finality")]
+        let mut start_lt = max(
+            max(mc_data.state().state()?.gen_lt(), prev_data.prev_state_lt()),
+            collator_data.shards_max_end_lt()
+        );
 
         let align = mc_data.get_lt_align();
         let incr = align - start_lt % align;
@@ -1817,6 +1901,7 @@ impl Collator {
                 if !shards.has_workchain(wc_id)? {
                     log::info!("{}: adjust_shard_config added new wc {wc_id}", self.collated_block_descr);
                     collator_data.set_shard_conf_adjusted();
+                    #[cfg(not(feature = "fast_finality"))]
                     shards.add_workchain(
                         wc_id,
                         self.new_block_id_part.seq_no(),
@@ -1824,6 +1909,37 @@ impl Collator {
                         wc_info.zerostate_file_hash,
                         None
                     )?;
+
+                    #[cfg(feature = "fast_finality")] {
+                        let shard = ShardIdent::full(wc_id);
+                        
+                        log::trace!("{}: update collators for {shard}: init", self.collated_block_descr);
+                        let val_set_len = mc_data.config().validator_set()?.list().len() as u16;
+                        let current = CollatorRange {
+                            collator: calc_collator_index(&shard, val_set_len),
+                            start: 1,
+                            finish: COLLATOR_RANGE_LEN - 1,
+                        };
+                        let next = CollatorRange {
+                            collator: calc_next_collator_index(current.collator, val_set_len),
+                            start: current.finish + 1,
+                            finish: current.finish + COLLATOR_RANGE_LEN,
+                        };
+                        let collators = ShardCollators {
+                            current,
+                            next,
+                            updated_at: collator_data.gen_utime,
+                            ..Default::default()
+                        };
+
+                        shards.add_workchain(
+                            wc_id,
+                            self.new_block_id_part.seq_no(),
+                            wc_info.zerostate_root_hash,
+                            wc_info.zerostate_file_hash,
+                            Some(collators)
+                        )?;
+                    }
 
                     collator_data.store_shard_fees_zero(&ShardIdent::with_workchain_id(wc_id)?)?;
                     self.check_stop_flag()?;
@@ -1849,7 +1965,10 @@ impl Collator {
             return Ok(());
         }
 
+        #[cfg(not(feature = "fast_finality"))]
         let lt_limit = prev_data.prev_state_lt() + mc_data.config().get_max_lt_growth();
+        #[cfg(feature = "fast_finality")]
+        let lt_limit = prev_data.prev_state_lt() + mc_data.config().get_max_lt_growth_fast_finality();
         shard_top_blocks.sort_by(|a, b| cmp_shard_block_descr(a, b));
         let mut shards_updated = HashSet::new();
         let mut tb_act = 0;
@@ -1884,6 +2003,19 @@ impl Collator {
                     continue
                 }
             };
+            #[cfg(feature = "fast_finality")]
+            if sh_bd.gen_utime_ms() >= collator_data.gen_utime_ms() {
+                log::warn!(
+                    "{}: ShardTopBlockDescr for {} skipped: it claims to be generated at {} \
+                    while it is still {}",
+                    self.collated_block_descr,
+                    sh_bd.proof_for(),
+                    sh_bd.gen_utime_ms(),
+                    collator_data.gen_utime_ms()
+                );
+                continue;
+            }
+            #[cfg(not(feature = "fast_finality"))]
             if sh_bd.gen_utime() >= collator_data.gen_utime {
                 log::debug!(
                     "{}: ShardTopBlockDescr for {} skipped: it claims to be generated at {} \
@@ -2017,6 +2149,7 @@ impl Collator {
                     }
                 }
             }
+            #[cfg(not(feature = "fast_finality"))]
             if self.check_cutoff_timeout() {
                 log::warn!("{}: TIMEOUT is elapsed, stop processing import_new_shard_top_blocks_for_masterchain",
                         self.collated_block_descr);
@@ -2050,6 +2183,236 @@ impl Collator {
         collator_data.value_flow.fees_collected.add(&shard_fees.fees)?;
         collator_data.value_flow.fees_imported = shard_fees.fees;
 
+        Ok(())
+    }
+
+    #[cfg(feature = "fast_finality")]
+    fn import_new_shard_top_blocks_for_shard(
+        &self,
+        shard_top_blocks: Vec<Arc<TopBlockDescrStuff>>,
+        prev_data: &PrevData,
+        mc_data: &McData,
+        collator_data: &mut CollatorData,
+    ) -> Result<()> {
+        use std::collections::hash_map;
+        use ton_block::{BinTree, RefShardBlocks, ShardBlockRef};
+        use crate::validating_utils::build_shard_hashes_tree;
+
+        fn make_shard_descr_stub(block_ref: &ShardBlockRef) -> ShardDescr {
+            ShardDescr {
+                seq_no: block_ref.seq_no,
+                root_hash: block_ref.root_hash.clone(),
+                file_hash: block_ref.file_hash.clone(),
+                end_lt: block_ref.end_lt,
+                ..Default::default()
+            }
+        }
+
+        fn make_brief_shard_descr(shard_descr: &ShardDescr) -> ShardBlockRef {
+            ShardBlockRef {
+                seq_no: shard_descr.seq_no,
+                root_hash: shard_descr.root_hash.clone(),
+                file_hash: shard_descr.file_hash.clone(),
+                end_lt: shard_descr.end_lt,
+            }
+        }
+
+        type ShardsTree = BinTree<ShardDescr>;
+
+        enum PrevRefs<'a> {
+            AfterZeroState,
+            Single(&'a RefShardBlocks),
+            AfterMerge {
+                left: &'a RefShardBlocks,
+                right: &'a RefShardBlocks,
+            },
+        }
+
+        impl<'a> PrevRefs<'a> {
+            fn new(new_block_id: &BlockIdExt, prev_states: &'a [Arc<ShardStateStuff>]) -> Result<Self> {
+                fn load_refs(s: &ShardStateStuff) -> Result<&RefShardBlocks> {
+                    s.state()?.ref_shard_blocks().ok_or_else(|| error!("No ref_shard_blocks in prev state"))
+                }
+
+                if new_block_id.seq_no <= 1 {
+                    return Ok(Self::AfterZeroState);
+                }
+
+                match prev_states {
+                    [single] => {
+                        load_refs(single.as_ref()).map(Self::Single)
+                    },
+                    [left, right] => Ok(Self::AfterMerge {
+                        left: load_refs(left.as_ref())?,
+                        right: load_refs(right.as_ref())?,
+                    }),
+                    _ => fail!("Invalid previous states"),
+                }
+            }
+
+            fn fill_shard_top_blocks(
+                &self,
+                shard_ident: &ShardIdent,
+                shard_descr: &ShardDescr,
+                shard_top_blocks: &mut HashMap<u64, ShardBlockRef>,
+            ) -> Result<()> {
+                // Adds a new shard block ref
+                let mut insert_top_block = |shard: &ShardIdent, top_blocks: ShardBlockRef| {
+                    if top_blocks.seq_no <= shard_descr.seq_no {
+                        // Masterchain already contains a newer state for this shard
+                        return false;
+                    }
+                    match shard_top_blocks.entry(shard.shard_prefix_with_tag()) {
+                        // Just insert a new block ref if it doesn't exist
+                        hash_map::Entry::Vacant(entry) => {
+                            entry.insert(top_blocks);
+                            true
+                        }
+                        // Update block ref only with a newer one
+                        hash_map::Entry::Occupied(mut entry) => {
+                            let entry = entry.get_mut();
+                            let newer = top_blocks.seq_no > entry.seq_no;
+                            if newer {
+                                *entry = top_blocks;
+                            }
+                            newer
+                        }
+                    }
+                };
+
+                // Tries to fill shard block references from the specified refs
+                let mut update_ref = |refs: &RefShardBlocks| {
+                    if shard_descr.before_split {
+                        // Try to find left AND right shard block references if the shard is going to split
+                        let (left, right) = shard_ident.split()?;
+                        match (refs.ref_shard_block(&left)?, refs.ref_shard_block(&right)?) {
+                            (Some(left_ref), Some(right_ref)) => {
+                                return Ok(insert_top_block(&left, left_ref)
+                                    || insert_top_block(&right, right_ref));
+                            }
+                            (None, None) => {}
+                            _ => fail!("Invalid ref_shard_blocks in prev states"),
+                        }
+                    } else if shard_descr.before_merge {
+                        // Try to find parent shard block reference if the shard is going to merge
+                        let parent = shard_ident.merge()?;
+                        if let Some(shard_ref) = refs.ref_shard_block(&parent)? {
+                            return Ok(insert_top_block(&parent, shard_ref));
+                        }
+                    }
+
+                    // Find the exact shard block reference if shard wasn't changed
+                    Result::Ok(match refs.ref_shard_block(shard_ident)? {
+                        Some(shard_ref) => insert_top_block(&shard_ident, shard_ref),
+                        None => false,
+                    })
+                };
+
+                let updated = match self {
+                    // Just use block ref from shard description for the first block
+                    Self::AfterZeroState => false,
+                    // Use references from the previous state
+                    Self::Single(refs) => update_ref(refs)?,
+                    // Use the latest references from the previous states
+                    Self::AfterMerge { left, right } => update_ref(left)? || update_ref(right)?,
+                };
+
+                if !updated {
+                    // Use a block reference from the shard description if no suitable refs were found
+                    let top_block = make_brief_shard_descr(shard_descr);
+                    shard_top_blocks.insert(shard_ident.shard_prefix_with_tag(), top_block);
+                }
+
+                Ok(())
+            }
+        }
+
+        log::trace!("{}: import_new_shard_top_blocks_for_shard", self.collated_block_descr);
+
+        // Group new resolved top block descriptions by workchain and shard
+        let mut all_shard_top_blocks = HashMap::<i32, HashMap<u64, _>>::new();
+        for tbds in shard_top_blocks {
+            let id = tbds.proof_for().clone();
+            let value = ShardBlockRef {
+                seq_no: id.seq_no,
+                file_hash: id.file_hash,
+                root_hash: id.root_hash,
+                end_lt: tbds.end_lt(),
+            };
+
+            collator_data.update_shards_max_end_lt(tbds.end_lt());
+
+            all_shard_top_blocks
+                .entry(id.shard_id.workchain_id())
+                .or_default()
+                .insert(id.shard_id.shard_prefix_with_tag(), value);
+
+            collator_data.add_top_block_descriptor(tbds);
+        }
+
+        // Adjust shard top blocks to contain a full set of shard ids
+        let prev_refs = PrevRefs::new(&self.new_block_id_part, &prev_data.states)?;
+        mc_data.state().shards()?.iterate_shards(|shard, descr| {
+            let shard_top_blocks = all_shard_top_blocks.entry(shard.workchain_id()).or_default();
+
+            // Check whether resolved map contains all shards
+            let has_top_block = if descr.before_split {
+                let (left, right) = shard.split()?;
+                let has_top_block = shard_top_blocks.contains_key(&left.shard_prefix_with_tag()) 
+                    && shard_top_blocks.contains_key(&right.shard_prefix_with_tag());
+
+                if !has_top_block {
+                    shard_top_blocks.remove(&left.shard_prefix_with_tag());
+                    shard_top_blocks.remove(&right.shard_prefix_with_tag());
+                }
+
+                has_top_block
+            } else if descr.before_merge {
+                let shard = shard.merge()?;
+                shard_top_blocks.contains_key(&shard.shard_prefix_with_tag())
+            } else {
+                shard_top_blocks.contains_key(&shard.shard_prefix_with_tag())
+            };
+
+            if !has_top_block {
+                prev_refs.fill_shard_top_blocks(&shard, &descr, shard_top_blocks)?;
+            }
+
+            Ok(true)
+        })?;
+
+        // Ensure that shard_top_blocks has descriptions for previous states
+        for state in &prev_data.states {
+            let block_id = state.block_id();
+            match all_shard_top_blocks
+                .get(&block_id.shard().workchain_id())
+                .and_then(|blocks| {
+                    blocks.get(&block_id.shard().shard_prefix_with_tag())
+                })
+            {
+                // Referenced block must be included into shard block refs with the exact id
+                Some(block_ref) => {
+                    if block_id.seq_no != block_ref.seq_no
+                        || block_id.root_hash != block_ref.root_hash
+                        || block_id.file_hash != block_ref.file_hash
+                        || state.gen_lt()? != block_ref.end_lt
+                    {
+                        fail!(
+                            "Resolver has invalid description for prev state: \
+                            block_ref: {:?}, prev_block_id: {}, state_gen_lt: {}",
+                            block_ref, block_id, state.gen_lt()?
+                        );
+                    }
+                }
+                None => {
+                    fail!("Resolver didn't found prev for the current block: {}", self.new_block_id_part);
+                }
+            }
+        }
+
+        // Build shard hashes tree
+        let shards = build_shard_hashes_tree(all_shard_top_blocks)?;
+        collator_data.set_shards(shards)?;
         Ok(())
     }
 
@@ -2499,9 +2862,12 @@ impl Collator {
         };
 
         // Use masterchain seqno for `ProcessedUptoStuff` for the old implementation
+        #[cfg(not(feature = "fast_finality"))]
         let seqno = ref_mc_seqno;
 
         // Use shard seqno for `ProcessedUptoStuff` for the new implementation
+        #[cfg(feature = "fast_finality")]
+        let seqno = self.new_block_id_part.seq_no;
 
         collator_data.update_min_mc_seqno(ref_mc_seqno);
         let lt = collator_data.last_proc_int_msg.0;
@@ -2509,6 +2875,8 @@ impl Collator {
             let hash = collator_data.last_proc_int_msg.1.clone();
             collator_data.out_msg_queue_info.add_processed_upto(
                 seqno, 
+                #[cfg(feature = "fast_finality")] 
+                ref_mc_seqno, 
                 lt, 
                 hash
             )?;
@@ -2518,6 +2886,8 @@ impl Collator {
             if let Some(lt) = mc_data.state().state()?.gen_lt().checked_sub(1) {
                 collator_data.out_msg_queue_info.add_processed_upto(
                     seqno, 
+                    #[cfg(feature = "fast_finality")]
+                    ref_mc_seqno, 
                     lt, 
                     UInt256::MAX
                 )?;
@@ -2712,7 +3082,10 @@ impl Collator {
         info.set_seq_no(self.new_block_id_part.seq_no)?;
         info.set_start_lt(collator_data.start_lt()?);
         info.set_end_lt(collator_data.block_limit_status.lt() + 1);
+        #[cfg(not(feature = "fast_finality"))]
         info.set_gen_utime(UnixTime32::new(collator_data.gen_utime()));
+        #[cfg(feature = "fast_finality")]
+        info.set_gen_utime_ms(collator_data.gen_utime_ms());
         info.set_gen_validator_list_hash_short(gen_validator_list_hash_short);
         info.set_gen_catchain_seqno(self.validator_set.catchain_seqno());
         info.set_min_ref_mc_seqno(collator_data.min_mc_seqno()?);
@@ -2737,7 +3110,10 @@ impl Collator {
         let mut new_state = ShardStateUnsplit::with_ident(self.shard.clone());
         new_state.set_global_id(prev_data.state().state()?.global_id());
         new_state.set_seq_no(self.new_block_id_part.seq_no);
+        #[cfg(not(feature = "fast_finality"))]
         new_state.set_gen_time(collator_data.gen_utime);
+        #[cfg(feature = "fast_finality")]
+        new_state.set_gen_time_ms(collator_data.gen_utime_ms());
         new_state.set_gen_lt(info.end_lt());
         new_state.set_before_split(info.before_split());
         new_state.set_overload_history(overload_history);
@@ -2766,6 +3142,28 @@ impl Collator {
         new_state.write_custom(mc_state_extra.as_ref())?;
         if self.engine.get_config_for_hardfork().is_some() {
             new_state.update_config_smc()?;
+        }
+
+        #[cfg(feature = "fast_finality")]
+        if !self.shard.is_masterchain() {
+            if let Some(shards) = &collator_data.shards {
+                let mut ids = Vec::new();
+
+                // TODO: impl bin tree value update
+                shards.iterate_shards(|shard_id, descr| {
+                    let block_id = BlockIdExt {
+                        shard_id,
+                        seq_no: descr.seq_no,
+                        file_hash: descr.file_hash,
+                        root_hash: descr.root_hash,
+                    };
+                    ids.push((block_id, descr.end_lt));
+                    Ok(true)
+                })?;
+
+                let ref_shard_blocks = ton_block::RefShardBlocks::with_ids(ids.iter())?;
+                new_state.set_ref_shard_blocks(Some(ref_shard_blocks));
+            }
         }
 
         if log::log_enabled!(log::Level::Trace) {
@@ -2828,6 +3226,13 @@ impl Collator {
         }
         extra.rand_seed = self.rand_seed.clone();
         extra.created_by = self.created_by.clone();
+
+        #[cfg(feature = "fast_finality")]
+        if !self.shard.is_masterchain() {
+            if let Some(ref_shard_blocks) = new_state.ref_shard_blocks() {
+                extra.set_ref_shard_blocks(ref_shard_blocks.clone());
+            }
+        }
 
         // construct block
         let new_block = Block::with_out_queue_updates(
@@ -3051,13 +3456,20 @@ impl Collator {
         let ccvc = config.catchain_config()?;
 
         let workchains = config.workchains()?;
+        #[cfg(not(feature = "fast_finality"))]
         let update_shard_cc = {
             let lifetimes = now / ccvc.shard_catchain_lifetime;
             let prev_lifetimes = prev_now / ccvc.shard_catchain_lifetime;
             is_key_block || (lifetimes > prev_lifetimes)
         };
+        #[cfg(feature = "fast_finality")]
+        let update_shard_cc = is_key_block;
         let min_ref_mc_seqno = self.update_shard_config(
             collator_data, &workchains, update_shard_cc,
+            #[cfg(feature = "fast_finality")]
+            prev_now,
+            #[cfg(feature = "fast_finality")]
+            if is_key_block { Some(&config) } else { None }
         )?;
         // 3. save new shard_hashes
         // just take collator_data.shards()
@@ -3084,8 +3496,11 @@ impl Collator {
         // t-node calculates subset with valid catchain_seqno and then subset_hash_short with zero one...
         let hash_short = ValidatorSet::calc_subset_hash_short(&subset.validators, 0)?; 
 
-         {
+        #[cfg(not(feature = "fast_finality"))] {
             validator_info.nx_cc_updated = cc_updated & update_shard_cc;
+        }
+        #[cfg(feature = "fast_finality")] {
+            validator_info.nx_cc_updated = cc_updated;
         }
 
         validator_info.validator_list_hash_short = hash_short;
@@ -3158,6 +3573,10 @@ impl Collator {
         collator_data: &mut CollatorData,
         wc_set: &Workchains,
         update_cc: bool,
+        #[cfg(feature = "fast_finality")]
+        prev_now: u32,
+        #[cfg(feature = "fast_finality")]
+        new_config: Option<&ConfigParams>,
     ) -> Result<u32> {
         log::trace!("{}: update_shard_config, (update_cc: {})", self.collated_block_descr, update_cc);
 
@@ -3199,6 +3618,26 @@ impl Collator {
                 &collator_data.config.raw_config(),
             )?;
 
+            #[cfg(feature = "fast_finality")]
+            let (updated, updated_sibling) = if let Some(new_config) = new_config {
+                self.reinit_shard_collators(&shard, &mut descr, new_config, now)?;
+                if let Some(sibling) = sibling.as_mut() {
+                    self.reinit_shard_collators(&shard.sibling(), sibling, new_config, now)?;
+                }
+                (true, true)
+            } else {
+                match self.check_and_replace_shard_collator(
+                    &shard,
+                    &mut descr,
+                    sibling.as_mut(),
+                    now,
+                    &collator_data.config.raw_config(),
+                    prev_now,
+                )? {
+                    (u, u_s) => (updated || u, updated_sibling || u_s),
+                }
+            };
+
             if updated_sibling {
                 if let Some(s) = sibling {
                     changed_shards.insert(shard.sibling(), s);
@@ -3218,6 +3657,7 @@ impl Collator {
         Ok(min_ref_mc_seqno)
     }
 
+    #[cfg(not(feature = "fast_finality"))]
     fn update_one_shard(
         &self,
         shard: &ShardIdent,
@@ -3314,6 +3754,355 @@ impl Collator {
         Ok(changed)
     }
 
+    #[cfg(feature = "fast_finality")]
+    fn update_one_shard(
+        &self,
+        shard: &ShardIdent,
+        info: &mut ShardDescr,
+        sibling: Option<&ShardDescr>,
+        wc_info: Option<&WorkchainDescr>, // new wc config (with changes made in the current block)
+        now: u32,
+        _update_cc: bool,
+        config: &ConfigParams,
+    ) -> Result<bool> {
+        log::trace!("{}: update_one_shard {}", self.collated_block_descr, shard);
+
+        let mut changed = false;
+        let old_before_merge = info.before_merge;
+        info.before_merge = false;
+
+        let collators = info.collators.as_ref()
+            .ok_or_else(|| error!("Shard {} has no collators", shard))?;
+
+        let is_finish = info.seq_no == collators.current.finish;
+
+        if !info.is_fsm_none() && info.before_split {
+            info.split_merge_at = FutureSplitMerge::None;
+            changed = true;
+        } else if info.is_fsm_merge() && sibling.is_none() {
+            info.split_merge_at = FutureSplitMerge::None;
+            changed = true;
+        }
+
+        if !info.before_split {
+            if let Some(wc_info) = &wc_info {
+                // workchain present in configuration?
+                let depth = shard.prefix_len();
+                if !is_finish &&                                        // it is not finish block in current collator range
+                   info.is_fsm_none() &&                                // split/merge is not in progress
+                   (info.want_split || depth < wc_info.min_split()) &&  // shard want splits (because of limits) or min_split was increased ↑ (in current or prev blocks)
+                   depth < wc_info.max_split() &&                       // max_split allows split
+                   depth < 60                                           // hardcoded max max split allows split
+                {
+                    info.split_merge_at = FutureSplitMerge::Split {
+                        split_utime: 0,
+                        interval: 0,
+                    };
+
+                    let val_set_len = config.validator_set()?.list().len() as u16;
+                    let collators = info.collators.as_mut()
+                        .ok_or_else(|| error!("INTERNAL ERROR collators is None"))?;
+                            let (shard1, shard2) = shard.split()?;
+    
+                    let desired_finish = info.seq_no + SPLIT_MERGE_INTERVAL_BLOCKS;
+                    if collators.current.finish > desired_finish {
+                        collators.current.finish = desired_finish;
+                    }
+    
+                    collators.next = CollatorRange {
+                        collator: calc_collator_index(&shard1, val_set_len),
+                        start: collators.current.finish + 1,
+                        finish: collators.current.finish + COLLATOR_RANGE_LEN,
+                    };
+    
+                    collators.next2 = Some(CollatorRange {
+                        collator: calc_collator_index(&shard2, val_set_len),
+                        start: collators.current.finish + 1,
+                        finish: collators.current.finish + COLLATOR_RANGE_LEN,
+                    });
+
+                    collators.updated_at = now;
+
+                    log::trace!(
+                        "{}: update collators for {shard}: prepare split after {}",
+                        self.collated_block_descr, collators.current.finish
+                    );
+
+                    changed = true;
+                    log::debug!("{}: preparing to split shard {} during {}..{}",
+                        self.collated_block_descr, shard, info.fsm_utime(), info.fsm_utime_end());
+
+                } else {
+                    if let Some(sibling) = sibling {
+                        let is_sibling_finish = sibling.collators.as_ref()
+                            .ok_or_else(|| error!("Shard {} has no collators", shard))?
+                            .current.finish == sibling.seq_no;
+                        if !is_finish && !is_sibling_finish &&                  // it is not finish block in current collator range
+                           info.is_fsm_none() &&                                // split/merge is not in progress
+                           depth > wc_info.min_split() &&                       // current min_split allows merge
+                           (info.want_merge || depth > wc_info.max_split()) &&  // shard wants merge (because of limits) or max_split was decreased ↓ (in current or prev blocks)
+                           !sibling.before_split && sibling.is_fsm_none() &&    // sibling shard is not going to split/merge now
+                           (sibling.want_merge || depth > wc_info.max_split())  // sibling shard want merge or need merge (because of max_split)
+                        {
+                            // prepare merge
+                            info.split_merge_at = FutureSplitMerge::Merge {
+                                merge_utime: 0,
+                                interval: 0,
+                            };
+
+                            let val_set_len = config.validator_set()?.list().len() as u16;
+                            let collators = info.collators.as_mut()
+                                .ok_or_else(|| error!("INTERNAL ERROR collators is None"))?;
+                            let merged_shard = shard.merge()?;
+
+                            collators.current.finish = info.seq_no + SPLIT_MERGE_INTERVAL_BLOCKS;
+
+                            let next_start = std::cmp::max(
+                                collators.current.finish + 1, 
+                                sibling.seq_no + SPLIT_MERGE_INTERVAL_BLOCKS + 1
+                            );
+
+                            collators.next = CollatorRange {
+                                collator: calc_collator_index(&merged_shard, val_set_len),
+                                start: next_start,
+                                finish: next_start + COLLATOR_RANGE_LEN,
+                            };
+                            collators.next2 = None;
+                            collators.updated_at = now;
+
+                            log::trace!(
+                                "{}: update collators for {shard}: prepare merge after {}",
+                                self.collated_block_descr, collators.current.finish
+                            );
+                            
+                            changed = true;
+                            log::debug!("{}: preparing to merge shard {} with {} during {}..{}",
+                                self.collated_block_descr, shard, shard.sibling(), info.fsm_utime(),
+                                info.fsm_utime_end());
+
+                        } else if info.is_fsm_merge() &&                                               // merge is in progress
+                             depth > wc_info.min_split() &&                                            // min_split allows merge
+                            !sibling.before_split &&                                                   // sibling is not going to split
+                             sibling.is_fsm_merge() &&                                                 // sibling is in merge progress too
+                            (depth > wc_info.max_split() || (info.want_merge && sibling.want_merge))   // max_split was decreased or both shardes want merge
+                        {
+                            let collators = info.collators.as_ref()
+                                .ok_or_else(|| error!("collators not found"))?;
+                            let sibling_collators = sibling.collators.as_ref()
+                                .ok_or_else(|| error!("collators not found"))?;
+                            if info.seq_no == collators.current.finish &&
+                               sibling.seq_no == sibling_collators.current.finish 
+                            {
+                                // force merge
+                                info.before_merge = true;
+                                changed = true;
+                                log::debug!("{}: force immediate merging of shard {} with {}",
+                                    self.collated_block_descr, shard, shard.sibling());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if changed {
+            log::trace!("{}: update_one_shard {} changed {:?}", self.collated_block_descr, shard, info);
+        }
+
+        Ok(changed)
+    }
+
+    #[cfg(feature = "fast_finality")]
+    fn check_and_replace_shard_collator(
+        &self,
+        shard: &ShardIdent,
+        info: &mut ShardDescr,
+        sibling: Option<&mut ShardDescr>,
+        now: u32,
+        config: &ConfigParams,
+        prev_now: u32,
+    ) -> Result<(bool, bool)> {
+
+        // If masterchain had no blocks for a long time, we should not update shard collators
+        if now - prev_now > LOST_COLLATOR_TIMEOUT {
+            return Ok((false, false));
+        }
+
+        let mut changed_sibling = false;
+
+        if let Some(sibling) = sibling {
+
+            // If merge is in progress
+            if (info.before_merge || info.is_fsm_merge()) && (sibling.before_merge || sibling.is_fsm_merge()) {
+
+                let sibling_shard = shard.sibling();
+
+                log::trace!(
+                    "{}: check_and_replace_shard_collator for {shard} and {sibling_shard}: merge in progress",
+                    self.collated_block_descr
+                );
+
+                // All is OK
+                if info.gen_utime >= now || now - info.gen_utime < LOST_COLLATOR_TIMEOUT ||
+                   sibling.gen_utime >= now || now - sibling.gen_utime < LOST_COLLATOR_TIMEOUT
+                {
+                    log::trace!(
+                        "{}: check_and_replace_shard_collator for {shard} and {sibling_shard}: all is OK",
+                        self.collated_block_descr
+                    );
+                    return Ok((false, false));
+                }
+
+                let collators = info.collators.as_mut().ok_or_else(|| error!("collators is None"))?;
+                let sibling_collators = sibling.collators.as_mut().ok_or_else(|| error!("collators is None"))?;
+
+                // Collators are already updated some time ago
+                if collators.updated_at >= now || now - collators.updated_at < LOST_COLLATOR_TIMEOUT ||
+                   sibling_collators.updated_at >= now || now - sibling_collators.updated_at < LOST_COLLATOR_TIMEOUT
+                {
+                    log::trace!(
+                        "{}: check_and_replace_shard_collator for {shard} and {sibling_shard}: already updated",
+                        self.collated_block_descr
+                    );
+
+                    return Ok((false, false));
+                }
+
+                collators.updated_at = now; 
+                sibling_collators.updated_at = now;
+
+                info.next_catchain_seqno += 1;
+                sibling.next_catchain_seqno += 1;
+
+                let val_set_len = config.validator_set()?.list().len() as u16;
+
+                if info.before_merge && sibling.before_merge {
+                    // define new next collator for both shards
+
+                    collators.next.collator = calc_next_collator_index(collators.next.collator, val_set_len);
+                    sibling_collators.next.collator = collators.next.collator;
+
+                    log::warn!(
+                        "{}: update collators for {shard} and {sibling_shard}: replaced next collators",
+                        self.collated_block_descr
+                    );
+                } else {
+                    // cancel merge and redefine next collators for both shards
+
+                    info.before_merge = false;
+                    info.split_merge_at = FutureSplitMerge::None;
+                    collators.current.finish = info.seq_no;
+                    collators.next.collator = 
+                        calc_next_collator_index(collators.current.collator, val_set_len);
+                    collators.next.start = info.seq_no + 1;
+                    collators.next.finish = info.seq_no + COLLATOR_RANGE_LEN;
+
+                    sibling.before_merge = false;
+                    sibling.split_merge_at = FutureSplitMerge::None;
+                    sibling_collators.current.finish = sibling.seq_no;
+                    sibling_collators.next.collator = 
+                        calc_next_collator_index(sibling_collators.current.collator, val_set_len);
+                    sibling_collators.next.start = sibling.seq_no + 1;
+                    sibling_collators.next.finish = sibling.seq_no + COLLATOR_RANGE_LEN;
+
+                    log::warn!(
+                        "{}: update collators for {shard} and {sibling_shard}: merge cancelled, replaced next collators",
+                        self.collated_block_descr
+                    );
+                }
+
+                return Ok((true, true));
+            }
+
+            // There is no merge - check each shard separately
+
+            changed_sibling = self.check_and_replace_one_shard_collator(
+                &shard.sibling(), sibling, now, config, prev_now)?;
+        }
+
+        let changed = self.check_and_replace_one_shard_collator(shard, info, now, config, prev_now)?;
+
+        if changed {
+            let labels = [("shard", shard.to_string())];
+            metrics::increment_counter!("forcibly_replaced_collator", &labels);
+        }
+        if changed_sibling {
+            let labels = [("shard", shard.sibling().to_string())];
+            metrics::increment_counter!("forcibly_replaced_collator", &labels);
+        }
+
+        Ok((changed, changed_sibling))
+    }
+
+    #[cfg(feature = "fast_finality")]
+    fn check_and_replace_one_shard_collator(
+        &self,
+        shard: &ShardIdent,
+        info: &mut ShardDescr,
+        now: u32,
+        config: &ConfigParams,
+        prev_now: u32,
+    ) -> Result<bool> {
+
+        log::trace!("{}: check_and_replace_one_shard_collator for {}",
+            self.collated_block_descr, shard);
+
+        // All is OK
+        if info.gen_utime >= now || now - info.gen_utime < LOST_COLLATOR_TIMEOUT {
+            log::trace!("{}: check_and_replace_one_shard_collator for {shard}: all is OK",
+                self.collated_block_descr);
+            return Ok(false);
+        }
+
+        // Collators are already updated some time ago
+        let updated_at = info.collators.as_ref().ok_or_else(|| error!("collators is None"))?.updated_at;
+        if updated_at >= now || now - updated_at < LOST_COLLATOR_TIMEOUT {
+            log::trace!("{}: check_and_replace_one_shard_collator for {shard}: already updated",
+                self.collated_block_descr);
+            return Ok(false);
+        }
+
+        let val_set_len = config.validator_set()?.list().len() as u16;
+        let collators = info.collators.as_mut().ok_or_else(|| error!("collators is None"))?;
+
+        collators.updated_at = now;
+        info.next_catchain_seqno += 1;
+
+        info.split_merge_at = FutureSplitMerge::None;
+
+        if info.seq_no == collators.current.finish {
+            // Next collator can't collate block. Replace it
+            collators.next.collator =
+                calc_next_collator_index(collators.next.collator, val_set_len);
+            if let Some(next2) = collators.next2.as_mut() {
+                if !info.before_split {
+                    fail!("Invalid shard config for {}: next2 is Some, but before_split is false", shard);
+                }
+                next2.collator = calc_next_collator_index(next2.collator, val_set_len);
+            } else {
+                collators.next.start = info.seq_no + 1;
+                collators.next.finish = info.seq_no + COLLATOR_RANGE_LEN;
+            }
+            log::warn!(
+                "{}: update collators for {shard}: replaced next collator",
+                self.collated_block_descr
+            );
+        } else {
+            // Current collator can't collate block. Replace it to the next collator.
+            collators.current.finish = info.seq_no;
+            collators.next.start = info.seq_no + 1;
+            collators.next.finish = info.seq_no + COLLATOR_RANGE_LEN;
+            // In case of future split - cancel it.
+            collators.next2 = None;
+            log::warn!(
+                "{}: update collators for {shard}: current collator's finish set to {}",
+                self.collated_block_descr, info.seq_no
+            );
+        }
+
+        Ok(true)
+    }
+
     pub fn update_shard_block_info(
         &self,
         shardes: &mut ShardHashes,
@@ -3342,12 +4131,23 @@ impl Collator {
         let shard = new_info.shard().clone();
     
         if old_blkids.len() == 2 {
+            #[cfg(not(feature = "fast_finality"))]
             shardes.merge_shards(&shard, |_, _| Ok(new_info.descr))?;
+    
+            #[cfg(feature = "fast_finality")]
+            shardes.merge_shards(&shard, |left, right| {
+                self.merge_shard_collators(&shard, left, right, new_info.descr, config, now)
+            })?;
     
         } else {
             
+            #[cfg(not(feature = "fast_finality"))]
             shardes.update_shard(&shard, |_| Ok(new_info.descr))?;
             
+            #[cfg(feature = "fast_finality")]
+            shardes.update_shard(&shard, |old_info| {
+                self.update_shard_collators(&shard, old_info, new_info.descr, config, now)
+            })?;
         }
     
         if let Some(shards_updated) = shards_updated {
@@ -3381,7 +4181,15 @@ impl Collator {
     
         let shard1 = new_info1.shard().clone();
     
+        #[cfg(not(feature = "fast_finality"))]
         shardes.split_shard(&new_info1.shard().merge()?, |_| Ok((new_info1.descr, new_info2.descr)))?;
+    
+        #[cfg(feature = "fast_finality")] {
+            let shard = new_info1.shard().merge()?;
+            shardes.split_shard(&shard, |info| {
+                self.split_shards_collators(&shard, info, new_info1.descr, new_info2.descr, config, now)
+            })?;
+        }
     
         if let Some(shards_updated) = shards_updated {
             shards_updated.insert(shard1);
@@ -3391,6 +4199,169 @@ impl Collator {
     }
 
     // reinit shard collators when new network config is applied
+    #[cfg(feature = "fast_finality")]
+    fn reinit_shard_collators(
+        &self,
+        shard: &ShardIdent,
+        descr: &mut ShardDescr,
+        new_config: &ConfigParams,
+        now: u32,
+    ) -> Result<()> {
+
+        log::trace!("{}: update collators for {shard}: reinit", self.collated_block_descr);
+
+        let val_set_len = new_config.validator_set()?.list().len() as u16;
+
+        descr.next_catchain_seqno += 1;
+        descr.split_merge_at = FutureSplitMerge::None;
+        descr.before_merge = false;
+        let collators = descr.collators.as_mut().ok_or_else(
+            || error!("INTERNAL ERROR collators is None")
+        )?;
+        collators.updated_at = now;
+        collators.current.finish = descr.seq_no;
+        collators.next.start = descr.seq_no + 1;
+        collators.next.finish = descr.seq_no + COLLATOR_RANGE_LEN;
+        if descr.before_split {
+            let (s1, s2) = shard.split()?;
+            collators.next.collator = calc_collator_index(&s1, val_set_len);
+            if let Some(next2) = &mut collators.next2 {
+                next2.collator = calc_collator_index(&s2, val_set_len);
+                next2.start = descr.seq_no + 1;
+                next2.finish = descr.seq_no + COLLATOR_RANGE_LEN;
+            }
+        } else {
+            descr.next_catchain_seqno += 1;
+            descr.split_merge_at = FutureSplitMerge::None;
+            descr.before_merge = false;
+            collators.next.collator = calc_collator_index(shard, val_set_len);
+            collators.next2 = None;
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "fast_finality")]
+    fn merge_shard_collators(
+        &self,
+        shard: &ShardIdent,
+        old_descr1: ShardDescr,
+        old_descr2: ShardDescr,
+        mut new_descr: ShardDescr,
+        config: &ConfigParams,
+        now: u32,
+    ) -> Result<ShardDescr> {
+        
+        log::trace!("{}: update collators for {shard}: merge", self.collated_block_descr);
+        let val_set_len = config.validator_set()?.list().len() as u16;
+
+        let old_collators1 = old_descr1.collators
+            .ok_or_else(|| error!("INTERNAL ERROR collators is None"))?;
+        let old_collators2 = old_descr2.collators
+            .ok_or_else(|| error!("INTERNAL ERROR collators is None"))?;
+
+        if old_collators1.next != old_collators2.next {
+            fail!("Cannot merge shards because their next collators are different");
+        }
+
+        let mut collators = ShardCollators::default();
+        collators.prev = old_collators1.current;
+        collators.prev2 = Some(old_collators2.current);
+        collators.current = old_collators1.next;
+        collators.next = CollatorRange {
+            collator: calc_next_collator_index(collators.current.collator, val_set_len),
+            start: collators.current.finish + 1,
+            finish: collators.current.finish + COLLATOR_RANGE_LEN,
+        };
+        collators.next2 = None;
+        collators.updated_at = now;
+        new_descr.collators = Some(collators);
+        Ok(new_descr)
+    }
+    
+    #[cfg(feature = "fast_finality")]
+    fn split_shards_collators(
+        &self,
+        shard: &ShardIdent,
+        old_descr: ShardDescr,
+        mut new_descr1: ShardDescr,
+        mut new_descr2: ShardDescr,
+        config: &ConfigParams,
+        now: u32,
+    ) -> Result<(ShardDescr, ShardDescr)> {
+
+        log::trace!("{}: update collators for {shard}: split", self.collated_block_descr);
+        let val_set_len = config.validator_set()?.list().len() as u16;
+
+        let collators = old_descr.collators
+            .ok_or_else(|| error!("INTERNAL ERROR collators is None"))?;
+
+        let mut collators1 = ShardCollators::default();
+        collators1.prev = collators.current.clone();
+        collators1.prev2 = None;
+        collators1.current = collators.next.clone();
+        collators1.next = CollatorRange {
+            collator: calc_next_collator_index(collators1.current.collator, val_set_len),
+            start: collators1.current.finish + 1,
+            finish: collators1.current.finish + COLLATOR_RANGE_LEN,
+        };
+        collators1.next2 = None;
+        collators1.updated_at = now;
+        new_descr1.collators = Some(collators1);
+
+        let mut collators2 = ShardCollators::default();
+        collators2.prev = collators.current.clone();
+        collators2.prev2 = None;
+        collators2.current = collators.next2.clone()
+            .ok_or_else(|| error!("No next2 collator after split"))?;
+        collators2.next = CollatorRange {
+            collator: calc_next_collator_index(collators2.current.collator, val_set_len),
+            start: collators2.current.finish + 1,
+            finish: collators2.current.finish + COLLATOR_RANGE_LEN,
+        };
+        collators2.next2 = None;
+        collators2.updated_at = now;
+        new_descr2.collators = Some(collators2);
+
+        Ok((new_descr1, new_descr2))
+    }
+    
+    #[cfg(feature = "fast_finality")]
+    fn update_shard_collators(
+        &self,
+        shard: &ShardIdent,
+        old_descr: ShardDescr,
+        mut new_descr: ShardDescr,
+        config: &ConfigParams,
+        now: u32,
+    ) -> Result<ShardDescr> {
+        let mut collators = old_descr.collators
+            .ok_or_else(|| error!("update_shard_collators: collators for shard {shard} is None"))?;
+
+        if new_descr.seq_no == collators.current.finish {
+            new_descr.next_catchain_seqno += 1;
+        } else if new_descr.seq_no > collators.current.finish {
+            log::trace!(
+                "{}: update collators for {shard}: rotate collators (seqno {} > {} finish)", 
+                self.collated_block_descr, new_descr.seq_no, collators.current.finish
+            );
+
+            let val_set_len = config.validator_set()?.list().len() as u16;
+            collators.prev = collators.current.clone();
+            collators.prev2 = None;
+            collators.current = collators.next.clone();
+            collators.next = CollatorRange {
+                collator: calc_next_collator_index(collators.current.collator, val_set_len),
+                start: collators.current.finish + 1,
+                finish: collators.current.finish + COLLATOR_RANGE_LEN,
+            };
+            collators.updated_at = now;
+        }
+
+        new_descr.collators = Some(collators);
+
+        Ok(new_descr)
+    }
 
     fn update_block_creator_stats(
         &self,
@@ -3608,3 +4579,6 @@ pub fn report_collation_metrics(
     metrics::histogram!("block_size", block_size as f64,  &labels);
 }
 
+#[cfg(test)]
+#[path = "tests/test_collator.rs"]
+mod tests;

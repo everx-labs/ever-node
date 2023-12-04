@@ -228,6 +228,11 @@ impl RempClient {
         });
     }
 
+    #[cfg(test)]
+    pub fn messages_history(&self) -> &lockfree::map::Map<UInt256, RempMessageHistory> {
+        &self.messages
+    }
+
     async fn messages_worker(&self) -> Result<()> {
 
         let engine = self.engine.get().ok_or_else(|| error!("engine was not set"))?;
@@ -1060,7 +1065,6 @@ pub fn remp_status_short_name(status: &RempReceipt) -> String {
                 RempMessageLevel::TonNode_RempShardchain => "Accepted_Shardchain",
             }
         },
-        RempMessageStatus::TonNode_RempDuplicate(_) => "Duplicate",
         RempMessageStatus::TonNode_RempIgnored(ign) => {
             match ign.level {
                 RempMessageLevel::TonNode_RempCollator => "Ignored_Collator",
@@ -1081,7 +1085,11 @@ pub fn remp_status_short_name(status: &RempReceipt) -> String {
             }
         },
         RempMessageStatus::TonNode_RempSentToValidators(_) => "SentToValidators",
-        RempMessageStatus::TonNode_RempTimeout => "Timeout",
+        /*RempMessageStatus::TonNode_RempDuplicate*/
+        _ /*RempMessageStatus::TonNode_RempTimeout*/ => "Timeout",
     }.to_owned()
 }
 
+#[cfg(test)]
+#[path = "../tests/test_remp_client.rs"]
+mod tests;

@@ -17,6 +17,10 @@
 
 use openssl::rand::rand_bytes;
 
+#[cfg(test)]
+#[path = "tests/test_random.rs"]
+mod tests;
+
 /*
 pub struct Randbuf {
     buf: Vec<u8>,

@@ -11,6 +11,9 @@
 * limitations under the License.
 */
 
+#[cfg(test)]
+mod tests;
+
 mod block_id;
 mod block_meta;
 mod db_slice;

@@ -18,15 +18,27 @@ metrics-util = '0.15.0'
 quanta = '0.11.1'
 rand = '0.8'
 regex = '1.3.1'
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.1' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.6.240' }
-rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.7.232' }
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.17' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.13' }
+rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.8.10' }
 storage = { path = '../storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.41' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.28' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.54' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.31' }
+
+[dev-dependencies]
+chrono = '0.4.10'
+env_logger = '0.7.1'
+pretty_assertions = '1.3'
 
 [features]
 default = [  ]
 export_key = [ 'ton_types/export_key' ]
+
+[target.'cfg(unix)'.dev-dependencies.rocksdb]
+features = [ 'jemalloc' ]
+git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
+
+[target.'cfg(windows)'.dev-dependencies.rocksdb]
+git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
 

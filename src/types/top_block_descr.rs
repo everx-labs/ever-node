@@ -17,6 +17,9 @@ use crate::{
     validator::validator_utils::check_crypto_signatures, 
     validating_utils::UNREGISTERED_CHAIN_MAX_LEN,
 };
+#[cfg(feature = "fast_finality")]
+use crate::validator::workchains_fast_finality::calc_subset_for_workchain_fast_finality;
+#[cfg(not(feature = "fast_finality"))]
 use crate::validator::validator_utils::calc_subset_for_workchain_standard;
 
 use bitflags::bitflags;
@@ -34,6 +37,9 @@ use ton_types::{
 };
 use ton_api::ton::ton_node::newshardblock::NewShardBlock;
 
+#[cfg(feature = "fast_finality")]
+pub use self::id::{TopBlockDescrGroup, TopBlockDescrId};
+#[cfg(not(feature = "fast_finality"))]
 pub use self::id::TopBlockDescrId;
 
 bitflags! {
@@ -56,6 +62,8 @@ pub struct TopBlockDescrStuff {
     chain_fees: Vec<ProofFunds>,
     chain_head_prev: Vec<BlockIdExt>,
     creators: Vec<UInt256>,
+    #[cfg(feature = "fast_finality")]
+    ref_shard_blocks: Vec<(BlockIdExt, u64)>,
     is_fake: bool,
     is_own: bool,
     signarutes_validation_result: AtomicI8, // 0 did not check, -1 bad, 1 good
@@ -127,6 +135,17 @@ impl TopBlockDescrStuff {
                 e
             ))?;
 
+            #[cfg(feature = "fast_finality")]
+            if parsed.cur_info.gen_utime().as_u32() != (parsed.cur_info.gen_utime_ms() / 1000) as u32 {
+                fail!(
+                    "invalid gen_utime in ShardTopBlockDescr for {}: \
+                    gen_utime_ms = {}, gen_utime = {}",
+                    tbd.proof_for(),
+                    parsed.cur_info.gen_utime(),
+                    parsed.cur_info.gen_utime_ms(),
+                );
+            }
+
             if i == 0 {
                 info = BriefBlockInfo::from(&parsed.cur_info);
             }
@@ -146,6 +165,9 @@ impl TopBlockDescrStuff {
             cur_id = parsed.prev1_id;
         }
 
+        #[cfg(feature = "fast_finality")]
+        let ref_shard_blocks = get_ref_shard_blocks(&tbd)?;
+
         Ok(
             Self {
                 tbd,
@@ -155,6 +177,8 @@ impl TopBlockDescrStuff {
                 chain_fees,
                 chain_head_prev,
                 creators,
+                #[cfg(feature = "fast_finality")]
+                ref_shard_blocks,
                 is_fake,
                 is_own,
                 signarutes_validation_result: AtomicI8::new(0),
@@ -193,6 +217,16 @@ impl TopBlockDescrStuff {
         self.info.gen_utime
     }
 
+    #[cfg(feature = "fast_finality")] 
+    pub fn gen_utime_ms(&self) -> u64 {
+        self.info.gen_utime_ms
+    }
+
+    #[cfg(feature = "fast_finality")]
+    pub fn end_lt(&self) -> u64 {
+        self.info.end_lt
+    }
+
     pub fn get_prev_at(&self, index: usize) -> Vec<BlockIdExt> {
         if index < self.size() {
             vec!(self.chain_blk_ids[index].clone())
@@ -221,6 +255,10 @@ impl TopBlockDescrStuff {
     }
 
     // Returns a list of referenced shard blocks with their end_lt
+    #[cfg(feature = "fast_finality")]
+    pub fn ref_shard_blocks(&self) -> &Vec<(BlockIdExt, u64)> {
+        &self.ref_shard_blocks
+    }
 
     pub fn is_own(&self) -> bool {
         self.is_own
@@ -431,12 +469,24 @@ impl TopBlockDescrStuff {
                 fail!("intermediate link for block {} is declared to be before a split", cur_id)
             }
 
+            #[cfg(not(feature = "fast_finality"))]
             if info.gen_utime().as_u32() > next_info.gen_utime().as_u32() {
                 fail!(
                     "block creation unixtime goes back from {} to {} in intermediate link \
                     for blocks {} and {}",
                     info.gen_utime(),
                     next_info.gen_utime(),
+                    cur_id,
+                    next_id
+                )
+            }
+            #[cfg(feature = "fast_finality")]
+            if info.gen_utime_ms() > next_info.gen_utime_ms() {
+                fail!(
+                    "block creation unixtime goes back from {} to {} in intermediate link \
+                    for blocks {} and {}",
+                    info.gen_utime_ms(),
+                    next_info.gen_utime_ms(),
                     cur_id,
                     next_id
                 )
@@ -752,6 +802,10 @@ impl TopBlockDescrStuff {
 
         let mut vset_ok = false;
         let shard_id = self.proof_for().shard();
+        #[cfg(feature = "fast_finality")]
+        let mut subset = calc_subset_for_workchain_fast_finality(
+            &cur_validator_set, cc_seqno, last_mc_state, shard_id, self.proof_for().seq_no())?;
+        #[cfg(not(feature = "fast_finality"))]
         let mut subset = calc_subset_for_workchain_standard(
             &cur_validator_set, &last_mc_state_extra.config, shard_id, cc_seqno)?;
 
@@ -772,6 +826,10 @@ impl TopBlockDescrStuff {
             vset_ok = true;
         } else if mode.intersects(Mode::ALLOW_NEXT_VSET) {
             let next_validator_set = last_mc_state_extra.config.next_validator_set()?;
+            #[cfg(feature = "fast_finality")]
+            let next_subset = calc_subset_for_workchain_fast_finality(
+                &next_validator_set, cc_seqno, last_mc_state, shard_id, self.proof_for().seq_no())?;
+            #[cfg(not(feature = "fast_finality"))]
             let next_subset = calc_subset_for_workchain_standard(
                 &next_validator_set, &last_mc_state_extra.config, shard_id, cc_seqno)?;
             if (cc_seqno == signatures.validator_info.catchain_seqno) &&
@@ -797,6 +855,58 @@ impl TopBlockDescrStuff {
         }
 
         // check range
+        #[cfg(feature = "fast_finality")] {
+            let range = subset.get_single_collator_range()?.ok_or_else(
+                || error!("{} has no collator range in val. set", self.proof_for())
+            )?;
+
+            let start = range.start;
+            let finish = range.finish;
+            let seq_no = self.proof_for().seq_no();
+            if !(start..=finish).contains(&seq_no) {
+                fail!(
+                    "ShardTopBlockDescr for {id} is invalid because it refers to a collator range \
+                    {start}..={finish} but its seqno is {seq_no}",
+                    id = self.proof_for()
+                )
+            }
+
+            if let Some(ref descr) = last_mc_state_extra.shards().get_shard(shard_id)? {
+                let check_range_for = |event: &str| -> Result<&ton_block::ShardCollators> {
+                    let collators = descr.descr.collators.as_ref()
+                        .ok_or_else(|| error!("There is no collators in shard descr"))?;
+
+                    if range != collators.current {
+                        fail!(
+                            "ShardTopBlockDescr for {id} is invalid because it prepared to {} but \
+                            refers to next collator range {start}..={finish}, \
+                            current range for the shard is {current_start}..={current_finish}",
+                            event,
+                            id = self.proof_for(),
+                            start = range.start,
+                            finish = range.finish,
+                            current_start = collators.current.start,
+                            current_finish = collators.current.finish,
+                        );
+                    }
+                    Ok(collators)
+                };
+
+                if descr.descr.is_fsm_merge() {
+                    check_range_for("merge")?;
+                } else if descr.descr.is_fsm_split() {
+                    let collators = check_range_for("split")?;
+
+                    if seq_no == collators.current.finish && !self.info.before_split {
+                        fail!(
+                            "ShardTopBlockDescr for {id} is invalid because it prepared to split but \
+                            'before_split' in the latest block in current range is false",
+                            id = self.proof_for(),
+                        );
+                    }
+                }
+            }
+        }
 
         // check signatures
 
@@ -879,6 +989,12 @@ struct ParsedProof {
 struct BriefBlockInfo {
     vert_seq_no: u32,
     gen_utime: u32,
+    #[cfg(feature = "fast_finality")]
+    gen_utime_ms: u64,
+    #[cfg(feature = "fast_finality")]
+    end_lt: u64,
+    #[cfg(feature = "fast_finality")]
+    before_split: bool,
 }
 
 impl From<&BlockInfo> for BriefBlockInfo {
@@ -886,6 +1002,12 @@ impl From<&BlockInfo> for BriefBlockInfo {
         Self {
             vert_seq_no: info.vert_seq_no(),
             gen_utime: info.gen_utime().as_u32(),
+            #[cfg(feature = "fast_finality")]
+            gen_utime_ms: info.gen_utime_ms(),
+            #[cfg(feature = "fast_finality")]
+            end_lt: info.end_lt(),
+            #[cfg(feature = "fast_finality")]
+            before_split: info.before_split(),
         }
     }
 }
@@ -895,6 +1017,32 @@ struct ProofFunds {
     fees_collected: CurrencyCollection,
     funds_created: CurrencyCollection,
     copyleft_rewards: CopyleftRewards,
+}
+
+#[cfg(feature = "fast_finality")]
+fn get_ref_shard_blocks(tbd: &TopBlockDescr) -> Result<Vec<(BlockIdExt, u64)>> {
+    let Some(latest_proof) = tbd.chain().first() else {
+        return Ok(Default::default());
+    };
+
+    let merkle_proof = MerkleProof::construct_from_cell(latest_proof.clone())?;
+    let block_virt_root = merkle_proof.proof.clone().virtualize(1);
+    let block = Block::construct_from_cell(block_virt_root)?;
+
+    let mut ref_shard_blocks = Vec::new();
+    let extra = block.read_extra()?;
+    extra.ref_shard_blocks().iterate_shard_block_refs(|id, end_lt| {
+        let block_id = BlockIdExt {
+            shard_id: id.shard_id,
+            seq_no: id.seq_no,
+            root_hash: id.root_hash,
+            file_hash: id.file_hash,
+        };
+        ref_shard_blocks.push((block_id, end_lt));
+        Ok(true)
+    })?;
+
+    Ok(ref_shard_blocks)
 }
 
 // see cmp_shard_block_descr_ref in t-node
@@ -914,6 +1062,85 @@ pub fn cmp_shard_block_descr(a: &TopBlockDescrStuff, b: &TopBlockDescrStuff) -> 
     }
 }
 
+#[cfg(feature = "fast_finality")]
+mod id {
+    use super::*;
+
+    #[derive(Default, Debug, PartialEq, Eq, Hash, Clone, Ord, PartialOrd)]
+    pub struct TopBlockDescrGroup {
+        pub shard_ident: ShardIdent,
+        pub cc_seqno: u32,
+    }
+
+    impl TopBlockDescrGroup {
+        pub fn new(shard_ident: ShardIdent, cc_seqno: u32) -> Self {
+            Self { shard_ident, cc_seqno }
+        }
+
+        pub fn with_seqno(self, seqno: u32) -> TopBlockDescrId {
+            TopBlockDescrId { group: self, seqno }
+        }
+    }
+
+    impl fmt::Display for TopBlockDescrGroup {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "({}/{})", self.shard_ident, self.cc_seqno)
+        }
+    }
+
+    #[derive(Default, Debug, PartialEq, Eq, Hash, Clone, Ord, PartialOrd)]
+    pub struct TopBlockDescrId {
+        pub group: TopBlockDescrGroup,
+        pub seqno: u32,
+    }
+
+    impl TopBlockDescrId {
+        pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+            if bytes.len() != std::mem::size_of::<i32>() +
+                              std::mem::size_of::<u64>() +
+                              std::mem::size_of::<u32>() +
+                              std::mem::size_of::<u32>()
+            {
+                fail!("Invalid data len to read TopBlockDescrId from");
+            }
+            let (wc_bytes, rest) = bytes.split_at(std::mem::size_of::<i32>());
+            let (shard_bytes, rest) = rest.split_at(std::mem::size_of::<u64>());
+            let (cc_seqno, rest) = rest.split_at(std::mem::size_of::<u32>());
+            let (seqno, _) = rest.split_at(std::mem::size_of::<u32>());
+
+            let group = TopBlockDescrGroup {
+                shard_ident: ShardIdent::with_tagged_prefix(
+                    i32::from_le_bytes(wc_bytes.try_into()?),
+                    u64::from_le_bytes(shard_bytes.try_into()?),
+                )?,
+                cc_seqno: u32::from_le_bytes(cc_seqno.try_into()?),
+            };
+
+            Ok(Self {
+                group,
+                seqno: u32::from_le_bytes(seqno.try_into()?),
+            })
+        }
+
+        pub fn to_bytes(&self) -> Result<Vec<u8>> {
+            let mut writer = Cursor::new(vec!());
+            writer.write_all(&self.group.shard_ident.workchain_id().to_le_bytes())?;
+            writer.write_all(&self.group.shard_ident.shard_prefix_with_tag().to_le_bytes())?;
+            writer.write_all(&self.group.cc_seqno.to_le_bytes())?;
+            writer.write_all(&self.seqno.to_le_bytes())?;
+            Ok(writer.into_inner())
+        }
+
+    }
+
+    impl fmt::Display for TopBlockDescrId {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "({}/{}, {})", self.group.shard_ident, self.group.cc_seqno, self.seqno)
+        }
+    }
+}
+
+#[cfg(not(feature = "fast_finality"))]
 mod id {
     use super::*;
 

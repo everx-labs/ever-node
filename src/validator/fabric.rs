@@ -23,6 +23,8 @@ use crate::{
 use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, Deserializable};
 use ton_types::{Result, UInt256};
 use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
+#[cfg(feature = "fast_finality")]
+use ton_block::CollatorRange;
 
 #[allow(dead_code)]
 pub async fn run_validate_query_any_candidate(
@@ -156,6 +158,8 @@ pub async fn run_accept_block_query(
     data: Option<Vec<u8>>,
     prev: Vec<BlockIdExt>,
     set: ValidatorSet,
+    #[cfg(feature = "fast_finality")]
+    collator_range: &Option<CollatorRange>,
     signatures: Vec<(PublicKeyHash, BlockPayloadPtr)>,
     approve_signatures: Vec<(PublicKeyHash, BlockPayloadPtr)>,
     send_broadcast: bool,
@@ -168,6 +172,8 @@ pub async fn run_accept_block_query(
         data,
         prev,
         set,
+        #[cfg(feature = "fast_finality")]
+        collator_range,
         sigs,
         approve_sigs,
         send_broadcast,

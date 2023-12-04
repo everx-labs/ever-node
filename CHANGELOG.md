@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.82
+
+- Fixed accept block when block data already saved
+
+## Version 0.55.81
+
+- Added REMP broadcast message delayer
+- Removed delay for direct REMP messages
+
+## Version 0.55.80
+
+- Updates in REMP protocol
+
+## Version 0.55.78
+
+- More support for BLS TL structures
+
+## Version 0.55.77
+
+- Support BLS TL structures
+
+## Version 0.55.76
+
+- Catchain low-level receiver configuration options
+
+## Version 0.55.75
+
+- Added command line option `--process-conf-and-exit`.
+
+## Version 0.55.74
+
+- Run TVM control requests
+
+## Version 0.55.73
+
+- Remove deprecated level_mask_mut() call
+
 ## Version 0.55.72
 
 - Fixed the blocks parser for newly synchronized nodes
@@ -37,6 +74,7 @@ All notable changes to this project will be documented in this file.
 
 ## Version 0.55.64
 
+- Revert workflow with external messages
 - Write `last_trans_lt` to account's json for deleted accounts.
 
 ## Version 0.55.63
@@ -96,8 +134,14 @@ All notable changes to this project will be documented in this file.
 
 - Speed up node shutdown
 
+## Version 0.55.46
+
+- Improved previous sessions calculation
+- Improved sessions validator info logging
+
 ## Version 0.55.45
 
+- Added parameter to default_config to limit maximal REMP queue length
 - Added shard states cache modes ("states_cache_mode" param in config.json)
     - "Off" - states are saved synchronously and not cached.
     - "Moderate" - *recommended* - states are saved asiynchronously. Number of cached cells (in the state's BOCs) is minimal.
@@ -127,7 +171,7 @@ All notable changes to this project will be documented in this file.
 ## Version 0.55.40
 
 - Validation fixes for single-node sessions
-  
+
 ## Version 0.55.39
 
 - Fixed shard states GC stopping
@@ -144,6 +188,7 @@ All notable changes to this project will be documented in this file.
 - Update session creation for single node sessions
 - Fix for deep recursion on catchain blocks dropping
 - Increase package version
+- Now message REMP history before session start is properly collected
 
 ## Version 0.55.36
 

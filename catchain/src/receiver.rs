@@ -34,12 +34,6 @@ use ton_types::{error, fail, base64_encode_url_safe, Ed25519KeyOption, Result};
     Constants
 */
 
-const MAX_NEIGHBOURS_COUNT: usize = 5; //max number of neighbours to synchronize
-const CATCHAIN_NEIGHBOURS_SYNC_MIN_PERIOD_MS: u64 = 100; //min time for catchain sync with neighbour nodes
-const CATCHAIN_NEIGHBOURS_SYNC_MAX_PERIOD_MS: u64 = 200; //max time for catchain sync with neighbour nodes
-const CATCHAIN_NEIGHBOURS_ROTATE_MIN_PERIOD_MS: u64 = 60000; //min time for catchain neighbours rotation
-const CATCHAIN_NEIGHBOURS_ROTATE_MAX_PERIOD_MS: u64 = 120000; //max time for catchain neighbours rotation
-const MAX_SOURCES_SYNC_ATTEMPS: usize = 3; //max number of attempts to find a source to synchronize
 const MAX_UNSAFE_INITIAL_SYNC_COMPLETE_TIME_SECS: u64 = 300; //max time to finish synchronization (unsafe mode)
 const MAX_SAFE_INITIAL_SYNC_COMPLETE_TIME_SECS: u64 = 5; //max time to finish synchronization (safe mode)
 const INFINITE_INITIAL_SYNC_COMPLETE_TIME_SECS: u64 = 10 * 365 * 24 * 3600; //inifinite time to finish synchronization
@@ -652,8 +646,11 @@ impl Receiver for ReceiverImpl {
         if let Ok(_elapsed) = self.next_sync_time.elapsed() {
             self.synchronize();
 
+            let neighbours_sync_min_period_ms = self.options.receiver_neighbours_sync_min_period.as_millis() as u64;
+            let neighbours_sync_max_period_ms = self.options.receiver_neighbours_sync_max_period.as_millis() as u64;
+
             let delay = Duration::from_millis(self.rng.gen_range(
-                CATCHAIN_NEIGHBOURS_SYNC_MIN_PERIOD_MS..CATCHAIN_NEIGHBOURS_SYNC_MAX_PERIOD_MS + 1,
+                neighbours_sync_min_period_ms..neighbours_sync_max_period_ms + 1,
             ));
 
             self.next_sync_time = now + delay;
@@ -670,9 +667,11 @@ impl Receiver for ReceiverImpl {
         if let Ok(_elapsed) = self.next_neighbours_rotate_time.elapsed() {
             self.choose_neighbours();
 
+            let neighbours_rotate_min_period_ms = self.options.receiver_neighbours_rotate_min_period.as_millis() as u64;
+            let neighbours_rotate_max_period_ms = self.options.receiver_neighbours_rotate_max_period.as_millis() as u64;
+
             let delay = Duration::from_millis(self.rng.gen_range(
-                CATCHAIN_NEIGHBOURS_ROTATE_MIN_PERIOD_MS
-                    ..CATCHAIN_NEIGHBOURS_ROTATE_MAX_PERIOD_MS + 1,
+                neighbours_rotate_min_period_ms..neighbours_rotate_max_period_ms + 1,
             ));
 
             self.next_neighbours_rotate_time = now + delay;
@@ -1255,9 +1254,12 @@ impl ReceiverImpl {
 
         let now = SystemTime::now();
 
+        let neighbours_rotate_min_period_ms = self.options.receiver_neighbours_rotate_min_period.as_millis() as u64;
+        let neighbours_rotate_max_period_ms = self.options.receiver_neighbours_rotate_max_period.as_millis() as u64;
+
         self.next_neighbours_rotate_time = now
             + Duration::from_millis(self.rng.gen_range(
-                CATCHAIN_NEIGHBOURS_ROTATE_MIN_PERIOD_MS..CATCHAIN_NEIGHBOURS_ROTATE_MAX_PERIOD_MS,
+                neighbours_rotate_min_period_ms..neighbours_rotate_max_period_ms,
             ));
         self.next_sync_time =
             now + Duration::from_millis(((0.001 * self.rng.gen_range(0.0..60.0)) * 1000.0) as u64);
@@ -1473,7 +1475,7 @@ impl ReceiverImpl {
 
         let sources_count = self.get_sources_count();
         let mut new_neighbours: Vec<usize> = Vec::new();
-        let mut items_count = MAX_NEIGHBOURS_COUNT;
+        let mut items_count = self.options.receiver_max_neighbours_count;
 
         log::trace!(
             "...choose {} neighbours from {} sources",
@@ -1514,8 +1516,9 @@ impl ReceiverImpl {
         log::trace!("Synchronize with other validators");
 
         let sources_count = self.get_sources_count();
+        let max_sources_sync_attempts = self.options.receiver_max_sources_sync_attempts;
 
-        for _i in 0..MAX_SOURCES_SYNC_ATTEMPS {
+        for _i in 0..max_sources_sync_attempts {
             let source_index = self.rng.gen_range(0..sources_count);
             let source = self.get_source(source_index);
 
@@ -2509,12 +2512,7 @@ impl ReceiverImpl {
             adnl_id_to_source: adnl_id_to_source,
             source_public_key_hashes: source_public_key_hashes,
             incarnation: incarnation.clone(),
-            options: Options {
-                idle_timeout: std::time::Duration::new(16, 0),
-                max_deps: 4,
-                debug_disable_db: false,
-                skip_processed_blocks: false,
-            },
+            options: Options::default(),
             blocks: HashMap::new(),
             blocks_to_run: VecDeque::new(),
             root_block: root_block.clone(),

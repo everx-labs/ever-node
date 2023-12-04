@@ -16,10 +16,23 @@ use ton_block::{
     ShardIdent, BlockIdExt, ConfigParams, McStateExtra, ShardHashes, ValidatorSet, McShardRecord,
     INVALID_WORKCHAIN_ID, MASTERCHAIN_ID, GlobalCapabilities,
 };
+#[cfg(feature = "fast_finality")]
+use ton_block::{RefShardBlocks, ShardBlockRef};
 use ton_types::{fail, error, Result, Sha256, UInt256};
 use std::{collections::HashSet, cmp::max, iter::Iterator};
+#[cfg(feature = "fast_finality")]
+use std::collections::HashMap;
 
+#[cfg(feature = "fast_finality")]
+pub const UNREGISTERED_CHAIN_MAX_LEN: u32 = 32;
+#[cfg(feature = "fast_finality")]
+pub const SPLIT_MERGE_INTERVAL_BLOCKS: u32 = 128;
+#[cfg(not(feature = "fast_finality"))]
 pub const UNREGISTERED_CHAIN_MAX_LEN: u32 = 8;
+#[cfg(feature = "fast_finality")]
+pub const COLLATOR_RANGE_LEN: u32 = 5000;
+#[cfg(feature = "fast_finality")]
+pub const LOST_COLLATOR_TIMEOUT: u32 = 60; // sec
 
 pub fn supported_capabilities() -> u64 {
     let caps =
@@ -47,11 +60,13 @@ pub fn supported_capabilities() -> u64 {
     let caps = caps | GlobalCapabilities::CapDiff as u64;
     #[cfg(feature = "signature_with_id")] 
     let caps = caps | GlobalCapabilities::CapSignatureWithId as u64;
+    #[cfg(feature = "fast_finality")]
+    let caps = caps | GlobalCapabilities::CapFastFinality as u64;
     caps
 }
 
 pub fn supported_version() -> u32 {
-    45
+    46
 }
 
 pub fn check_this_shard_mc_info(
@@ -68,6 +83,9 @@ pub fn check_this_shard_mc_info(
 ) -> Result<(u32, bool, bool)> {
     let next_block_descr = fmt_next_block_descr(block_id);
 
+    #[cfg(feature = "fast_finality")]
+    let now_upper_limit = u32::MAX;
+    #[cfg(not(feature = "fast_finality"))]
     let mut now_upper_limit = u32::MAX;
     // let mut before_split = false;
     // let mut accept_msgs = false;
@@ -126,18 +144,41 @@ pub fn check_this_shard_mc_info(
         }
         if left.descr().is_fsm_split() {
             if is_validate {
+                #[cfg(not(feature = "fast_finality"))]
                 if now >= left.descr().fsm_utime() && now < left.descr().fsm_utime_end() {
                     split_allowed = true;
+                }
+                #[cfg(feature = "fast_finality")] {
+                    let collators = left.descr.collators.as_ref()
+                        .ok_or_else(|| error!("No collators for {}", shard))?;
+                    if collators.next2.is_none() {
+                        fail!("Shard {} doesn't have next2 collator but fsm is split", shard);
+                    }
+                    if block_id.seq_no() == collators.current.finish {
+                        split_allowed = true;
+                    }
                 }
             } else {
                 // t-node's collator contains next code:
                 // auto tmp_now = std::max<td::uint32>(config_->utime, (unsigned)std::time(nullptr));
                 // but `now` parameter passed to this function is already initialized same way.
                 // `13` and `11` is a magic from t-node
+                #[cfg(not(feature = "fast_finality"))]
                 if now >= left.descr().fsm_utime() && now + 13 < left.descr().fsm_utime_end() {
                     now_upper_limit = left.descr().fsm_utime_end() - 11;  // ultimate value of now_ must be at most now_upper_limit_
                     before_split = true;
                     log::info!("({}): BEFORE_SPLIT set for the new block of shard {}", next_block_descr, shard);
+                }
+                #[cfg(feature = "fast_finality")] {
+                    let collators = left.descr.collators.as_ref()
+                        .ok_or_else(|| error!("No collators for {}", shard))?;
+                    if collators.next2.is_none() {
+                        fail!("Shard {} doesn't have next2 collator but fsm is split", shard);
+                    }
+                    if block_id.seq_no() == collators.current.finish {
+                        before_split = true;
+                        log::info!("({}): BEFORE_SPLIT set for the new block of shard {}", next_block_descr, shard);
+                    }
                 }
             }
         }
@@ -397,6 +438,7 @@ pub fn may_update_shard_block_info(
                 )
             }
 
+            #[cfg(not(feature = "fast_finality"))]
             if new_info.descr.gen_utime < old_info.descr.fsm_utime() ||
                 new_info.descr.gen_utime >= old_info.descr.fsm_utime() + old_info.descr.fsm_interval() {
                 fail!(
@@ -409,6 +451,16 @@ pub fn may_update_shard_block_info(
                 )
             }
 
+            #[cfg(feature = "fast_finality")] {
+                let collators = old_info.descr.collators.as_ref().ok_or_else(|| error!("collators not set"))?;
+                if new_info.descr.seq_no != collators.current.finish {
+                    fail!(
+                        "cannot register a before_split block {} because current collator's finish is {}",
+                        new_info.block_id(),
+                        collators.current.finish,
+                    )
+                }
+            }
         }
         if before_merge {
             if old_info.descr.is_fsm_split() || old_info.descr.is_fsm_none() {
@@ -419,6 +471,7 @@ pub fn may_update_shard_block_info(
                     old_info.block_id().shard()
                 )
             }
+            #[cfg(not(feature = "fast_finality"))]
             if new_info.descr.gen_utime < old_info.descr.fsm_utime() ||
                 new_info.descr.gen_utime >= old_info.descr.fsm_utime() + old_info.descr.fsm_interval() {
                 fail!(
@@ -467,6 +520,107 @@ pub fn calc_remp_msg_ordering_hash<'a>(msg_id: &UInt256, prev_blocks_ids: impl I
     }
     hasher.update(msg_id.as_slice());
     UInt256::from(hasher.finalize().as_slice())
+}
+
+#[cfg(feature = "fast_finality")]
+// TODO: need to refactor update one hashmaptree to another with using intermidiate structures
+pub fn extend_ref_shard_blocks(ref_shard_blocks: &RefShardBlocks) -> Result<ShardHashes> {
+    let mut shard_top_blocks = HashMap::<i32, HashMap<u64, _>>::default();
+
+    ref_shard_blocks.iterate_shard_block_refs(|block_id, end_lt| {
+        let shard_top_blocks = shard_top_blocks.entry(block_id.shard().workchain_id()).or_default();
+
+        shard_top_blocks.insert(block_id.shard().shard_prefix_with_tag(), ShardBlockRef {
+            seq_no: block_id.seq_no,
+            root_hash: block_id.root_hash,
+            file_hash: block_id.file_hash,
+            end_lt,
+        });
+
+        Ok(true)
+    })?;
+
+    build_shard_hashes_tree(shard_top_blocks)
+}
+
+#[cfg(feature = "fast_finality")]
+pub fn build_shard_hashes_tree(
+    ref_shard_blocks: HashMap::<i32, HashMap<u64, ShardBlockRef>>,
+) -> Result<ShardHashes> {
+    use ton_block::{BinTree, ShardDescr, InRefValue};
+
+    fn make_shard_descr_stub(block_ref: &ShardBlockRef) -> ShardDescr {
+        ShardDescr {
+            seq_no: block_ref.seq_no,
+            root_hash: block_ref.root_hash.clone(),
+            file_hash: block_ref.file_hash.clone(),
+            end_lt: block_ref.end_lt,
+            ..Default::default()
+        }
+    }
+
+    type ShardsTree = BinTree<ShardDescr>;
+
+    let mut result = ShardHashes::default();
+    for (workchain_id, ref_shard_blocks) in ref_shard_blocks {
+        let key = ShardIdent::full(workchain_id);
+
+        let mut bintree;
+        match ref_shard_blocks.get(&key.shard_prefix_with_tag()) {
+            Some(descr) => {
+                bintree = ShardsTree::with_item(&make_shard_descr_stub(descr))?;
+            },
+            None => {
+                bintree = ShardsTree::with_item(&Default::default())?;
+                let mut stack = vec![key];
+                while let Some(key) = stack.pop() {
+                    bintree.split(key.shard_key(false), |_| {
+                        let (left, right) = key.split()?;
+
+                        let left_val = ref_shard_blocks
+                            .get(&left.shard_prefix_with_tag())
+                            .map(make_shard_descr_stub)
+                            .unwrap_or_else(|| {
+                                stack.push(left);
+                                Default::default()
+                            });
+
+                        let right_val = ref_shard_blocks
+                            .get(&right.shard_prefix_with_tag())
+                            .map(make_shard_descr_stub)
+                            .unwrap_or_else(|| {
+                                stack.push(right);
+                                Default::default()
+                            });
+
+                        Ok((left_val, right_val))
+                    })?;
+                }
+            }
+        };
+
+        result.set(&workchain_id, &InRefValue(bintree))?;
+    }
+
+    Ok(result)
+}
+
+#[cfg(feature = "fast_finality")]
+#[inline]
+pub fn calc_collator_index(shard: &ShardIdent, val_set_len: u16) -> u16 {
+    let prefix = shard.shard_prefix_with_tag();
+    let prefix = prefix >> prefix.trailing_zeros();
+    prefix as u16 % val_set_len
+}
+
+#[cfg(feature = "fast_finality")]
+#[inline]
+pub fn calc_next_collator_index(current: u16, val_set_len: u16) -> u16 {
+    if current + 1 >= val_set_len as u16 {
+        0
+    } else {
+        current + 1
+    }
 }
 
 pub fn fmt_block_id_short(block_id: &BlockIdExt) -> String {

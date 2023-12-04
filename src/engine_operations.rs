@@ -55,7 +55,7 @@ use ton_api::{
     ton::ton_node::{
         RempMessage, RempMessageStatus, RempReceipt, 
         broadcast::{BlockBroadcast, QueueUpdateBroadcast}
-    }
+    }, IntoBoxed
 };
 use ton_block::{
     MASTERCHAIN_ID, SHARD_FULL, GlobalCapabilities, OutMsgQueue,
@@ -358,7 +358,7 @@ impl EngineOperations for Engine {
         while !((pre_apply && handle.has_state()) || handle.is_applied()) {
             self.block_applying_awaiters().do_or_wait(
                 handle.id(),
-                None,
+                Some(1000),
                 self.clone().apply_block_worker(handle, block, mc_seq_no, pre_apply, recursion_depth)
             ).await?;
         }
@@ -382,7 +382,8 @@ impl EngineOperations for Engine {
     ) -> Result<(BlockStuff, Option<BlockProofStuff>)> {
         loop {
             if let Some(handle) = self.load_block_handle(id)? {
-                if handle.has_data() {
+                let mut is_link = false;
+                if handle.has_data() && handle.has_proof_or_link(&mut is_link) {
                     let block = self.load_block(&handle).await?;
                     let proof = if !handle.is_queue_update() {
                         Some(self.load_block_proof(&handle, !id.shard().is_masterchain()).await?)
@@ -999,6 +1000,24 @@ impl EngineOperations for Engine {
             .ok_or_else(|| error!("Can't get message status because remp service was not set"))?
             .remp_core_interface()?
             .check_remp_duplicate(message_id)
+    }
+
+    async fn push_message_to_remp(&self, data: ton_api::ton::bytes) -> Result<()> {
+        let (id, _message) = create_ext_message(&data.0)?;
+        let remp_message = ton_api::ton::ton_node::rempmessage::RempMessage {
+            message: data,
+            id: id.clone(),
+            timestamp: 0,
+            signature: Vec::new().into()
+        }.into_boxed();
+        let zero_source = Arc::new(KeyId::from_data([0; 32]));
+        self.network().remp().messages_subscriber()?.new_remp_message(
+            remp_message, &zero_source).await?;
+        Ok(())
+    }
+
+    fn remp_capability(&self) -> bool {
+        Engine::remp_capability(self)
     }
 
     // Get current list of new shard blocks with respect to last mc block.

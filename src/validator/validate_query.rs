@@ -29,6 +29,11 @@ use crate::{
     validator::{out_msg_queue::MsgQueueManager, validator_utils::calc_subset_for_masterchain},
     CHECK,
 };
+#[cfg(feature = "fast_finality")]
+use crate::validating_utils::{
+    LOST_COLLATOR_TIMEOUT, COLLATOR_RANGE_LEN, SPLIT_MERGE_INTERVAL_BLOCKS,
+    calc_next_collator_index, calc_collator_index
+};
 
 use adnl::common::add_unbound_object_to_map_with_update;
 use std::{
@@ -50,6 +55,8 @@ use ton_block::{
     TransactionDescr, ValidatorSet, ValueFlow, WorkchainDescr, INVALID_WORKCHAIN_ID,
     MASTERCHAIN_ID, U15, OutMsgQueueInfo, OutQueueUpdate, MAX_SPLIT_DEPTH
 };
+#[cfg(feature = "fast_finality")]
+use ton_block::{CollatorRange, ShardCollators};
 use ton_executor::{
     BlockchainConfig, CalcMsgFwdFees, ExecuteParams, OrdinaryTransactionExecutor,
     TickTockTransactionExecutor, TransactionExecutor,
@@ -62,9 +69,15 @@ use ton_types::{
 use crate::engine_traits::RempDuplicateStatus;
 use crate::validator::validator_utils::is_remp_enabled;
 
+#[cfg(test)]
+#[path = "tests/test_validate_query.rs"]
+mod tests;
+
 // pub const SPLIT_MERGE_DELAY: u32 = 100;        // prepare (delay) split/merge for 100 seconds
 // pub const SPLIT_MERGE_INTERVAL: u32 = 100;     // split/merge is enabled during 60 second interval
+#[cfg(not(feature = "fast_finality"))]
 pub const MIN_SPLIT_MERGE_INTERVAL: u32 = 30;  // split/merge interval must be at least 30 seconds
+#[cfg(not(feature = "fast_finality"))]
 pub const MAX_SPLIT_MERGE_DELAY: u32 = 1000;   // end of split/merge interval must be at most 1000 seconds in the future
 
 macro_rules! error {
@@ -375,7 +388,10 @@ impl ValidateQuery {
     // init_parse
     fn init_parse(base: &mut ValidateBase) -> Result<()> {
         base.global_id = base.block.block()?.global_id();
+        #[cfg(not(feature = "fast_finality"))]
         let allow_v2 = false;
+        #[cfg(feature = "fast_finality")]
+        let allow_v2 = true;
         base.info.read_from_ex(
             &mut SliceData::load_cell(base.block.block()?.info_cell())?,
             allow_v2
@@ -433,6 +449,7 @@ impl ValidateQuery {
             reject_query!("after_merge value mismatch in block header")
         }
         base.extra = base.block.block()?.read_extra()?;
+        #[cfg(not(feature = "fast_finality"))]
         if !base.extra.ref_shard_blocks().is_empty() {
             reject_query!("block extra could not contain ref_shard_blocks")
         }
@@ -572,7 +589,10 @@ impl ValidateQuery {
         self.new_mc_shards = if base.shard().is_masterchain() {
             base.mc_extra.shards().clone()
         } else {
-             {
+            #[cfg(feature = "fast_finality")] {
+                crate::validating_utils::extend_ref_shard_blocks(base.extra.ref_shard_blocks())?
+            }
+            #[cfg(not(feature = "fast_finality"))] {
                 self.old_mc_shards.clone()
             }
         };
@@ -674,9 +694,11 @@ impl ValidateQuery {
         if next_state.state()?.custom_cell().is_some() != base.shard().is_masterchain() {
             reject_query!("McStateExtra in the new state of a non-masterchain block, or conversely")
         }
+        #[cfg(not(feature = "fast_finality"))]
         if next_state.state()?.ref_shard_blocks().is_some() {
             reject_query!("new state could not contain ref_shard_blocks")
         }
+        #[cfg(not(feature = "fast_finality"))]
         if next_state.state()?.gen_time_ms_part() != 0 {
             reject_query!("new state could not contain gen_time_ms_part")
         }
@@ -844,6 +866,7 @@ impl ValidateQuery {
             reject_query!("new shard configuration for shard {} contains different next_validator_shard {}",
                 shard, info.descr.next_validator_shard)
         }
+        #[cfg(not(feature = "fast_finality"))]
         if info.descr.collators.is_some() {
             reject_query!("Configuration for shard {} could not contain collators", shard);
         }
@@ -981,7 +1004,7 @@ impl ValidateQuery {
             // shard was not created, split or merged; it is a successor of `prev`
             fsm_inherited = !prev.descr().is_fsm_none() && prev.descr().fsm_equal(info.descr());
             old_before_merge = prev.descr.before_merge;
-             {
+            #[cfg(not(feature = "fast_finality"))] {
                 if  !prev.descr().is_fsm_none() &&               // fsm was not none
                     !prev.descr().fsm_equal(info.descr()) &&     // fsm was changed
                     base.now() < prev.descr().fsm_utime_end() && // split/merge time is not come
@@ -1020,7 +1043,7 @@ impl ValidateQuery {
                          (sibling.map(|s| s.descr.want_merge).unwrap_or_default() || depth > wc_info.max_split());
 
         if !fsm_inherited && !info.descr().is_fsm_none() {
-             {
+            #[cfg(not(feature = "fast_finality"))] {
                 let fsm_begin = info.descr().fsm_utime();
                 let fsm_end = info.descr().fsm_utime_end();
                 if  fsm_begin < base.now() || 
@@ -1032,6 +1055,15 @@ impl ValidateQuery {
                         "incorrect future split/merge interval {} .. {} \
                         set for shard {} in new shard configuration (it is {} now)",
                         fsm_begin, fsm_end, shard, base.now()
+                    );
+                }
+            }
+            #[cfg(feature = "fast_finality")] {
+                // fsm_utime and fsm_utime_end are not used in fast finality
+                if info.descr().fsm_utime() != 0 || info.descr().fsm_utime_end() != 0 {
+                    reject_query!(
+                        "incorrect future split/merge intervals for shard {shard} in new shard \
+                        configuration (it must be 0, 0 in fast finality mode)"
                     );
                 }
             }
@@ -1070,6 +1102,7 @@ impl ValidateQuery {
         }
         CHECK!(cc_seqno != !0);
         let cc_updated = info.descr.next_catchain_seqno != cc_seqno;
+        #[cfg(not(feature = "fast_finality"))]
         if info.descr.next_catchain_seqno != cc_seqno + cc_updated as u32 {
             reject_query!(
                 "new shard configuration for shard {} changed catchain seqno \
@@ -1077,6 +1110,7 @@ impl ValidateQuery {
                 shard, cc_seqno, info.descr.next_catchain_seqno
             )
         }
+        #[cfg(not(feature = "fast_finality"))]
         if !cc_updated && self.update_shard_cc {
             reject_query!(
                 "new shard configuration for shard {} has unchanged catchain seqno {}, \
@@ -1092,6 +1126,7 @@ impl ValidateQuery {
                 shard, cc_seqno
             )
         }
+        #[cfg(not(feature = "fast_finality"))]
         if cc_updated && !(self.update_shard_cc || bm_cleared) {
             reject_query!(
                 "new shard configuration for shard {} has increased catchain seqno {} \
@@ -1099,11 +1134,804 @@ impl ValidateQuery {
                 shard, cc_seqno
             )
         }
+        #[cfg(feature = "fast_finality")]
+        if cc_updated {
+            let collators = info.descr.collators.as_ref()
+                .ok_or_else(|| error!("no collators in shard {}", shard))?;
+
+            if info.descr.seq_no != collators.current.finish {
+                reject_query!(
+                    "new shard configuration for shard {} has increased catchain seqno {} \
+                    without a good reason", 
+                    shard, cc_seqno
+                )
+            }
+        }
+
+        #[cfg(feature = "fast_finality")]
+        self.check_one_shard_collators(base, mc_data, info, cc_updated, prev.as_ref(), sibling)
+            .map_err(|e| {
+                let labels = [("shard", self.shard.to_string())];
+                metrics::increment_counter!("failed_shard_collators_validations", &labels);
+                error!("Error while checking shard collators: {}", e)
+            })?;
 
         base.result.min_shard_ref_mc_seqno.fetch_min(info.descr.min_ref_mc_seqno, Ordering::Relaxed);
         base.result.max_shard_utime.fetch_max(info.descr.gen_utime, Ordering::Relaxed);
         base.result.max_shard_lt.fetch_max(info.descr.end_lt, Ordering::Relaxed);
         // dbg!(base.min_shard_ref_mc_seqno, base.max_shard_utime, base.max_shard_lt);
+        Ok(())
+    }
+
+    #[cfg(feature = "fast_finality")]
+    fn check_one_shard_collators(
+        &mut self,
+        base: &ValidateBase,
+        mc_data: &McData,
+        info: &McShardRecord,
+        cc_updated: bool,
+        prev: Option<&McShardRecord>,
+        sibling: Option<&McShardRecord>,
+    ) -> Result<()> {
+
+        fn collators_rotation(
+            val_set_len: u16,
+            now: u32,
+            collators: &mut ShardCollators
+        ) -> Result<()> {
+            collators.prev = collators.current.clone();
+            collators.prev2 = None;
+            collators.current = collators.next.clone();
+            collators.next = CollatorRange {
+                collator: calc_next_collator_index(collators.current.collator, val_set_len),
+                start: collators.current.finish + 1,
+                finish: collators.current.finish + COLLATOR_RANGE_LEN,
+            };
+            collators.updated_at = now;
+            Ok(())
+        }
+
+        fn prepare_split(
+            shard: &ShardIdent,
+            seq_no: u32,
+            val_set_len: u16,
+            now: u32,
+            collators: &mut ShardCollators
+        ) -> Result<()> {
+
+            let (shard1, shard2) = shard.split()?;
+
+            let desired_finish = seq_no + SPLIT_MERGE_INTERVAL_BLOCKS;
+            if collators.current.finish > desired_finish {
+                collators.current.finish = desired_finish;
+            }
+
+            collators.next = CollatorRange {
+                collator: calc_collator_index(&shard1, val_set_len),
+                start: collators.current.finish + 1,
+                finish: collators.current.finish + COLLATOR_RANGE_LEN,
+            };
+
+            collators.next2 = Some(CollatorRange {
+                collator: calc_collator_index(&shard2, val_set_len),
+                start: collators.current.finish + 1,
+                finish: collators.current.finish + COLLATOR_RANGE_LEN,
+            });
+
+            collators.updated_at = now;
+            Ok(())
+
+        }
+
+        fn prepare_merge(
+            shard: &ShardIdent,
+            seq_no: u32,
+            sibling_seqno: u32,
+            val_set_len: u16,
+            now: u32,
+            collators: &mut ShardCollators
+        ) -> Result<()> {
+            let merged_shard = shard.merge()?;
+            collators.current.finish = seq_no + SPLIT_MERGE_INTERVAL_BLOCKS;
+
+            let next_start = std::cmp::max(
+                collators.current.finish + 1, 
+                sibling_seqno + SPLIT_MERGE_INTERVAL_BLOCKS + 1
+            );
+
+            collators.next = CollatorRange {
+                collator: calc_collator_index(&merged_shard, val_set_len),
+                start: next_start,
+                finish: next_start + COLLATOR_RANGE_LEN,
+            };
+            collators.next2 = None;
+            collators.updated_at = now;
+            Ok(())
+        }
+
+        fn reinit_collators(
+            shard: &ShardIdent,
+            seq_no: u32,
+            before_split: bool,
+            val_set_len: u16,
+            now: u32,
+            collators: &mut ShardCollators
+        ) -> Result<()> {
+            collators.current.finish = seq_no;
+            if before_split {
+                let (shard1, shard2) = shard.split()?;
+                collators.next.collator = calc_collator_index(&shard1, val_set_len);
+                collators.next.start = seq_no + 1;
+                collators.next.finish = seq_no + COLLATOR_RANGE_LEN;
+                collators.next2 = Some(CollatorRange {
+                    collator: calc_collator_index(&shard2, val_set_len),
+                    start: seq_no + 1,
+                    finish: seq_no + COLLATOR_RANGE_LEN,
+                });
+            } else {
+                collators.next.collator = calc_collator_index(shard, val_set_len);
+                collators.next.start = seq_no + 1;
+                collators.next.finish = seq_no + COLLATOR_RANGE_LEN;
+                collators.next2 = None;
+            }
+            collators.updated_at = now;
+            Ok(())
+        }
+
+        fn lost_collator_cancel_merge(
+            seq_no: u32,
+            val_set_len: u16,
+            collators: &mut ShardCollators
+        ) -> Result<()> {
+
+            collators.current.finish = seq_no;
+            collators.next.collator = calc_next_collator_index(
+                collators.current.collator, val_set_len);
+            collators.next.start = seq_no + 1;
+            collators.next.finish = seq_no + COLLATOR_RANGE_LEN;
+            Ok(())
+        }
+
+        fn lost_collator(
+            shard: &ShardIdent,
+            seq_no: u32,
+            now: u32,
+            before_split: bool,
+            val_set_len: u16,
+            collators: &mut ShardCollators
+        ) -> Result<bool> {
+            collators.updated_at = now;
+            if seq_no == collators.current.finish {
+
+                // Next collator can't collate block. Replace it
+                collators.next.collator =
+                    calc_next_collator_index(collators.next.collator, val_set_len);
+                if let Some(next2) = collators.next2.as_mut() {
+                    if !before_split {
+                        reject_query!("Invalid shard config for {}: next2 is Some, \
+                            but before_split is false", shard);
+                    }
+                    next2.collator = calc_next_collator_index(next2.collator, val_set_len);
+                }
+                Ok(false)
+            } else {
+                // Current collator can't collate block. Replace it to the next collator.
+                collators.current.finish = seq_no;
+                collators.next.start = seq_no + 1;
+                collators.next.finish = seq_no + COLLATOR_RANGE_LEN;
+                // In case of future split - cancel it.
+                collators.next2 = None;
+                Ok(true)
+            }
+        }
+
+        fn after_split(
+            shard: &ShardIdent,
+            val_set_len: u16,
+            collators: &mut ShardCollators
+        ) -> Result<()> {
+            collators.prev = collators.current.clone();
+            collators.prev2 = None;
+            if shard.is_left_child() {
+                collators.current = collators.next.clone();
+            } else {
+                collators.current = collators.next2.clone()
+                    .ok_or_else(|| error!("No next2 collator after split"))?;
+            }
+            collators.next = CollatorRange {
+                collator: calc_next_collator_index(collators.current.collator, val_set_len),
+                start: collators.current.finish + 1,
+                finish: collators.current.finish + COLLATOR_RANGE_LEN,
+            };
+            collators.next2 = None;
+            Ok(())
+        }
+
+        fn after_merge(
+            shard: &ShardIdent,
+            old_mc_shards: &ShardHashes,
+            val_set_len: u16,
+            collators: &mut ShardCollators
+        ) -> Result<()> {
+
+            let prev2 = old_mc_shards.find_shard(&shard.right_ancestor_mask()?)?
+                .ok_or_else(|| error!("Can't find prev2 shard after merge"))?;
+            let prev_collators2 = prev2.descr.collators.as_ref()
+                .ok_or_else(|| error!("prev2 collators is None"))?;
+
+
+            collators.prev = collators.current.clone();
+            collators.prev2 = Some(prev_collators2.current.clone());
+            collators.current = collators.next.clone();
+            collators.next = CollatorRange {
+                collator: calc_next_collator_index(collators.current.collator, val_set_len),
+                start: collators.current.finish + 1,
+                finish: collators.current.finish + COLLATOR_RANGE_LEN,
+            };
+            collators.next2 = None;
+            Ok(())
+        }
+
+        fn init_colltors(
+            shard: &ShardIdent,
+            val_set_len: u16,
+            now: u32,
+            collators: &mut ShardCollators
+        ) -> Result<()> {
+            collators.current = CollatorRange {
+                collator: calc_collator_index(&shard, val_set_len),
+                start: 1,
+                finish: COLLATOR_RANGE_LEN - 1,
+            };
+            collators.next = CollatorRange {
+                collator: calc_next_collator_index(collators.current.collator, val_set_len),
+                start: collators.current.finish + 1,
+                finish: collators.current.finish + COLLATOR_RANGE_LEN,
+            };
+            collators.updated_at = now;
+            Ok(())
+        }
+
+
+        let shard = info.shard();
+        let descr = info.descr();
+        let collators = descr.collators.as_ref()
+            .ok_or_else(|| error!("no collators in shard descr"))?;
+        let val_set_len = mc_data.config().validator_set()?.list().len() as u16;
+
+        if descr.seq_no != 0 && 
+           (descr.seq_no < collators.current.start || descr.seq_no > collators.current.finish) 
+        {
+            reject_query!(
+                "new shard configuration for shard {shard} has incorrect seqno {} (it must be in range {} .. {})",
+                descr.seq_no, collators.current.start, collators.current.finish
+            );
+        }
+
+        // The only one reason to increase next_catchain_seqno is achieving the finish block
+        if descr.seq_no != collators.current.finish && cc_updated {
+            reject_query!(
+                "next_catchain_seqno for shard {shard} has changed ",
+            );
+        }
+
+        let mut operations = String::new();
+        let mut collators2 = ShardCollators::default();
+
+        if let Some(prev) = prev.map(|p| &p.descr) {
+
+            // Shard was not created, split or merged
+
+            // At the finish block next_catchain_seqno is increased by one
+            if prev.seq_no != descr.seq_no && descr.seq_no == collators.current.finish &&
+               prev.next_catchain_seqno == descr.next_catchain_seqno 
+            {
+                reject_query!(
+                    "next_catchain_seqno for shard {shard} was not updated \
+                    at the finish block of current collator range",
+                );
+            }
+
+            let prev_collators = prev.collators.as_ref()
+                .ok_or_else(|| error!("no collators in prev shard descr"))?;
+            let mut unexpected_collators_change = false;
+
+            let mut collators_changed_wo_reason = true;
+
+            if collators != prev_collators {
+
+                collators2 = prev_collators.clone();
+
+                if prev.seq_no == prev_collators.current.finish &&
+                   descr.seq_no > prev_collators.current.finish 
+                {
+                    // Collators rotation (see Collator::update_shard_collators)
+                    collators_rotation(val_set_len, base.now(), &mut collators2)?;
+                    operations += "collators rotation, ";
+                    collators_changed_wo_reason = false;
+                }
+
+                if prev.is_fsm_none() && descr.is_fsm_split() {
+                    if collators.current.finish == descr.seq_no {
+                        fail!("Future split can't be set on the collator range finish block");
+                    }
+
+                    // Prepare split (see Collator::update_one_shard)
+                    prepare_split(shard, descr.seq_no, val_set_len, base.now(), &mut collators2)?;
+                    operations += "prepare split, ";
+                    collators_changed_wo_reason = false;
+                }
+
+                if prev.is_fsm_none() && descr.is_fsm_merge() {
+                    if collators.current.finish == descr.seq_no {
+                        fail!("Future merge can't be set on the collator range finish block");
+                    }
+
+                    // Prepare merge (see Collator::update_one_shard)
+                    let sibling_seqno = sibling
+                        .map(|s| s.descr().seq_no)
+                        .ok_or_else(|| error!("No sibling while checking future merge info"))?;
+                    prepare_merge(shard, descr.seq_no, sibling_seqno, val_set_len,
+                            base.now(), &mut collators2)?;
+                    operations += "prepare merge, ";
+                    collators_changed_wo_reason = false;
+                }
+                if base.info.key_block() {
+                    // Reinit collators if new key block created (see Collator::reinit_shard_collators)
+
+                    if prev.next_catchain_seqno == descr.next_catchain_seqno {
+                        reject_query!("next_catchain_seqno for shard {shard} must be changed \
+                            at the key block");
+                    }
+                    if !descr.is_fsm_none() {
+                        reject_query!("split_merge_at for shard {shard} must be None \
+                            at the key block");
+                    }
+                    if descr.before_merge {
+                        reject_query!("before_merge for shard {shard} must be false \
+                            at the key block");
+                    }
+                    reinit_collators(shard, descr.seq_no, descr.before_split, val_set_len,
+                        base.now(), &mut collators2)?;
+                    unexpected_collators_change = true;
+                    operations += "reinit after keyblock, ";
+                    collators_changed_wo_reason = false;
+                } else if 
+                   base.now() - base.prev_states[0].state()?.gen_time() <= LOST_COLLATOR_TIMEOUT && // mc block hasn't delayed 
+                   base.now() - prev.gen_utime >= LOST_COLLATOR_TIMEOUT && // shard block has delayed
+                   base.now() - collators2.updated_at >= LOST_COLLATOR_TIMEOUT // collators were not already updated
+                {
+                    // Lost collator (see Collator::check_and_replace_shard_collator)
+
+                    'lost_collator: {
+                        if let Some(sibling) = sibling.map(|s| s.descr()) {
+
+                            let sibling_shard = shard.sibling();
+                            let prev_sibling = self.old_mc_shards.find_shard(&sibling_shard)?
+                                .ok_or_else(|| error!("prev sibling shard {} not found", sibling_shard))?
+                                .descr;
+
+                            if (prev.before_merge || prev.is_fsm_merge()) &&
+                               (prev_sibling.before_merge || prev_sibling.is_fsm_merge()) 
+                            {
+                                if prev_sibling.gen_utime > base.now() {
+                                    reject_query!("Shard configuration for {sibling_shard} \
+                                        has incorrect gen_utime: it's in the future")
+                                }
+                                if base.now() - prev_sibling.gen_utime < LOST_COLLATOR_TIMEOUT {
+                                    break 'lost_collator;
+                                }
+
+                                
+                                let prev_sibling_collators = prev_sibling.collators.as_ref()
+                                    .ok_or_else(|| error!("sibling collators is None"))?;
+
+                                if prev_sibling_collators.updated_at > base.now() {
+                                    reject_query!("Shard configuration for {sibling_shard} \
+                                        has incorrect collators update time: it's in the future")
+                                }
+                                if base.now() - prev_sibling_collators.updated_at < LOST_COLLATOR_TIMEOUT {
+                                    break 'lost_collator;
+                                }
+
+                                if prev.next_catchain_seqno + 1 != descr.next_catchain_seqno {
+                                    reject_query!("next_catchain_seqno for shard {shard} \
+                                        must be changed when collator is lost");
+                                }
+
+                                if descr.before_merge && sibling.before_merge {
+                                    // redefine next collator
+                                    collators2.next.collator = calc_next_collator_index(
+                                        collators2.next.collator, val_set_len);
+
+                                    operations += "replace lost collator (before merge), ";
+                                } else {
+                                    // cancel merge, cut current collator range and redefine next collators
+
+                                    if descr.before_merge {
+                                        reject_query!("Invalid shard configuration for {shard}: \
+                                            before_merge is true when collator is lost");
+                                    }
+                                    if !descr.is_fsm_none() {
+                                        reject_query!("Invalid shard configuration for {shard}: \
+                                            fsm != none when collator is lost");
+                                    }
+                                    lost_collator_cancel_merge(
+                                        descr.seq_no, val_set_len, &mut collators2)?;
+                                    unexpected_collators_change = true;
+
+                                    operations += "replace lost collator (cancel merge), ";
+                                }
+                                collators2.updated_at = base.now();
+                                collators_changed_wo_reason = false;
+                                break 'lost_collator;
+                            }
+                        }
+
+                        // no merge
+
+                        if prev.next_catchain_seqno + 1 != descr.next_catchain_seqno {
+                            reject_query!("next_catchain_seqno for shard {shard} \
+                                must be changed when collator is lost");
+                        }
+                        if !descr.is_fsm_none() {
+                            reject_query!("Invalid shard configuration for {shard}: \
+                                fsm != none when collator is lost");
+                        }
+
+                        unexpected_collators_change = lost_collator(shard, descr.seq_no, base.now(),
+                            descr.before_split, val_set_len, &mut collators2)?;
+
+                        operations += "replace lost collator, ";
+                        collators_changed_wo_reason = false;
+                    }
+                }
+
+                if collators_changed_wo_reason {
+                    reject_query!(
+                        "new shard configuration for shard {shard} has changed collators \
+                        without a good reason (old {:?}, changed {:?})",
+                        prev_collators, collators
+                    );
+                }
+
+                if collators != &collators2 {
+                    reject_query!(
+                        "new shard configuration for shard {shard} has incorrect collators \
+                        after: {} (expected {:?}, found {:?})",
+                        operations, collators2, collators
+                    );
+                }
+            }
+
+            if  !prev.is_fsm_none() &&                      // fsm was not none
+                !prev.fsm_equal(info.descr()) &&            // fsm was changed
+                descr.seq_no != collators.current.finish && // split/merge time is not come
+                !info.descr.before_split &&                 // fsm is cleaned when before_split is set
+                !unexpected_collators_change                // 
+            {
+                reject_query!(
+                    "future split/merge information for shard {shard} has been changed \
+                    without a good reason"
+                )
+            }
+            if unexpected_collators_change && !descr.is_fsm_none() {
+                reject_query!(
+                    "future split/merge information for shard {shard} must be empty in case of \
+                    unexpected collators change"
+                )
+            }
+        } else {
+
+            // Shard was created or after split/merge
+
+            let prev = self.old_mc_shards.find_shard(&shard.left_ancestor_mask()?)?;
+
+            if let Some(prev) = prev {
+
+                let prev_collators = prev.descr.collators.as_ref()
+                    .ok_or_else(|| error!("prev collators is None"))?;
+                collators2 = prev_collators.clone();
+                collators2.updated_at = base.now();
+
+                if prev.shard().is_parent_for(shard) {
+                    // After split (see Collator::split_shard_collators)
+                    after_split(shard, val_set_len, &mut collators2)?;
+                    operations += "split, ";
+                } else {
+                    // After merge (see Collator::merge_shard_collators)
+                    after_merge(shard, &self.old_mc_shards, val_set_len, &mut collators2)?;
+                    operations += "merge, ";
+                }
+
+                // if before split/merge
+
+                if descr.is_fsm_split() {
+                    prepare_split(shard, descr.seq_no, val_set_len, base.now(), &mut collators2)?;
+                    operations += "prepare split";
+                } else if descr.is_fsm_merge() {
+                    let sibling = sibling
+                        .ok_or_else(|| error!("no sibling but set future merge for shard {shard}"))?;
+                    prepare_merge(shard, descr.seq_no, sibling.descr.seq_no,
+                        val_set_len, base.now(), &mut collators2)?;
+                    operations += "prepare split";
+                }
+            } else {
+                // Shard was created (see Collator::adjust_shard_config)
+                init_colltors(&shard, val_set_len, base.now(), &mut collators2)?;
+                operations += "shard creation";
+                if descr.is_fsm_split() {
+                    prepare_split(shard, 0, val_set_len, base.now(), &mut collators2)?;
+                    operations += "prepare split";
+                }
+            }
+
+            if collators != &collators2 {
+                reject_query!(
+                    "new shard configuration for shard {shard} has incorrect \
+                    collators after {operations} (expected {:?}, found {:?})",
+                    collators2, collators
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "fast_finality")]
+    async fn check_ref_shard_blocks(&mut self, base: &ValidateBase, mc_data: &McData) -> Result<()> {
+        use std::time::Instant;
+        use ton_block::{ShardDescr, SHARD_FULL};
+
+        let d = &self.next_block_descr;
+
+        log::debug!(target: "validate_query", "({d}): check_ref_shard_blocks");
+
+        enum RefBlockStatus {
+            ToCheck(BlockIdExt),
+            Checking(BlockIdExt),
+        }
+        #[derive(Debug)]
+        enum KnownBlockStatus {
+            NotCommited,
+            Commited,
+            Applied,
+            Checked,
+        }
+
+        fn remember_block(
+            known_blocks: &mut HashMap<BlockIdExt, KnownBlockStatus>,
+            id: BlockIdExt,
+            status: KnownBlockStatus,
+            block_descr: &str
+        ) {
+            log::trace!(target: "validate_query", "({block_descr}): remember {:?} {}", status, id);
+            known_blocks.insert(id, status);
+        }
+
+        // We have next categories of blocks:
+        // 1. Applied - blocks that are commited into masterchain and applied at current node;
+        // 2. Commited - blocks that are commited into masterchain but not applied at current node;
+        // 3. Not commited - blocks that are not commited into masterchain. It is possible to have forks among them.
+        // 
+        // Among not commited blocks we have:
+        // 1. Top shards blocks - headers of shards
+        // 2. Blocks older than top shards blocks
+        // 3. Blocks newer than top shards blocks
+        //
+        // Check ref shard blocks algorithm:
+        // 1. collect all commited blocks
+        // 2. collect all top blocks and blocks older than top blocks downto last applied (or commited)
+        // 3. recursively check that all ref shard blocks refer to previosly collected blocks 
+        //    or applied blocks. Applied blocks can't be newer than top blocks in same shard.
+
+        let mut known_blocks = HashMap::new();
+        let mut top_blocks = Vec::new();
+
+        // 1. Collecting all commited blocks.
+        // It is easy to detect applied blocks using block handle.
+        // But to detect commited blocks we need to check masterchain blocks.
+
+        let now = Instant::now();
+        let mut stack = mc_data.state.top_blocks_all()?;
+        while let Some(id) = stack.pop() {
+            let handle = self.engine.load_block_handle(&id)?
+                .ok_or_else(|| error!("Can't load handle for block {}", id))?;
+            if handle.is_applied() {
+                remember_block(&mut known_blocks, id, KnownBlockStatus::Applied, d);
+            } else {
+                stack.push(self.engine.load_block_prev1(&id)?);
+                if let Some(prev2) = self.engine.load_block_prev2(&id)? {
+                    stack.push(prev2);
+                }
+                remember_block(&mut known_blocks, id, KnownBlockStatus::Commited, d);
+            }
+        }
+        let elapsed = now.elapsed();
+        metrics::histogram!("check_refs__collect_commited_time", elapsed);
+        if elapsed.as_millis() > 10 {
+            log::warn!(target: "validate_query", "({d}): Collecting commited blocks TIME {} ms",
+                elapsed.as_millis());
+        }
+        // For first block - remember shard's zerostate
+        if base.block_id().seq_no() == 1 && base.shard().is_masterchain() {
+            let workchains = mc_data.config().workchains()?;
+            workchains.iterate_with_keys(|wc_id, wc| {
+                let zs_id = BlockIdExt {
+                    shard_id: ShardIdent::with_tagged_prefix(wc_id, SHARD_FULL)?,
+                    seq_no: 0,
+                    root_hash: wc.zerostate_root_hash,
+                    file_hash: wc.zerostate_file_hash,
+                };
+                remember_block(&mut known_blocks, zs_id, KnownBlockStatus::Applied, d);
+                Ok(true)
+            })?;
+        }
+
+        // 2. collect all top blocks and blocks older than top blocks
+
+        let mut collect_known_chain = |top_block_id: &BlockIdExt, known_blocks: &mut HashMap<BlockIdExt, KnownBlockStatus>| -> Result<()> {
+            log::trace!(target: "validate_query", "({d}): collect_known_chain({})", top_block_id);
+            top_blocks.push(top_block_id.clone());
+            let mut stack = vec!(top_block_id.clone());
+            // Collect prev blocks upto first applied
+            while let Some(id) = stack.pop() {
+                match known_blocks.get(&id) {
+                    Some(KnownBlockStatus::Checked) => {
+                        fail!("INTERNAL ERROR: KnownBlockStatus::Checked is impossible \
+                            status at collect_known_chain {} ", id);
+                    },
+                    None => {
+                        stack.push(self.engine.load_block_prev1(&id)?);
+                        if let Some(prev2) = self.engine.load_block_prev2(&id)? {
+                            stack.push(prev2);
+                        }
+                        remember_block(known_blocks, id, KnownBlockStatus::NotCommited, d);
+                    }
+                    _ => ()
+                }
+            }
+            Ok(())
+        };
+
+        let now = Instant::now();
+        if base.shard().is_masterchain() {
+            self.new_mc_shards.iterate_shards(|shard: ShardIdent, descr: ShardDescr| {
+                let top_block = BlockIdExt {
+                    shard_id: shard,
+                    seq_no: descr.seq_no,
+                    root_hash: descr.root_hash,
+                    file_hash: descr.file_hash,
+                };
+                collect_known_chain(&top_block, &mut known_blocks)?;
+                Ok(true)
+            })?;
+        } else {
+            base.block.block()?.read_extra()?.ref_shard_blocks().iterate_shard_block_refs(|id, end_lt| {
+                let top_block = BlockIdExt {
+                    shard_id: id.shard_id,
+                    seq_no: id.seq_no,
+                    root_hash: id.root_hash,
+                    file_hash: id.file_hash,
+                };
+                // Remember max LT for future checks in check_utime_lt
+                base.result.max_shard_lt.fetch_max(end_lt, Ordering::Relaxed);
+
+                // Check top block descr if need
+                if !top_block.shard().intersect_with(base.shard()) {
+                    // for this moment known_blocks contains only applied or commited blocks
+                    // so if it doesn't contain our block it means we maybe need to check it
+                    if !known_blocks.contains_key(&top_block) {
+                        // if ref block is updated we must check it
+                        for prev_state in &base.prev_states {
+                            if prev_state.state()?.ref_shard_blocks()
+                                .ok_or_else(|| error!("No ref_shard_blocks in prev state"))?
+                                .ref_shard_block(top_block.shard())?
+                                .map(|rsb| rsb.root_hash != top_block.root_hash)
+                                .unwrap_or(true)
+                            {
+                                let _ = self.check_tsbd(base, mc_data, &top_block)?; 
+                                break;
+                            }
+                        }
+                    }
+                } else { //if base.block_id().seq_no() > 1 {
+                    if !base.prev_blocks_ids.contains(&top_block) {
+                        fail!("Top block {} is not a prev block", top_block);
+                    }
+                }
+
+                collect_known_chain(&top_block, &mut known_blocks)?;
+                Ok(true)
+            })?;
+        }
+        let elapsed = now.elapsed();
+        metrics::histogram!("check_refs__collect_chains_time", elapsed);
+        if elapsed.as_millis() > 10 {
+            log::warn!(target: "validate_query", "({d}): Collecting allowed blocks chains TIME {} ms",
+                elapsed.as_millis());
+        }
+
+        // 3. dependency checking
+
+        let now = Instant::now();
+        let mut whitespace = String::new();
+        for top_block in &top_blocks {
+            let mut stack = Vec::new();
+            stack.push(RefBlockStatus::ToCheck(top_block.clone()));
+            while let Some(checked_id) = stack.pop() {
+                match checked_id {
+                    RefBlockStatus::ToCheck(checked_id) => {
+
+                        log::debug!(target: "validate_query", "({d}):{whitespace}checking {checked_id}");
+
+                        match known_blocks.get(&checked_id) {
+                            Some(KnownBlockStatus::Applied) => {
+                                log::debug!(target: "validate_query", "({d}):{whitespace}{checked_id} is applied (cached)");
+                                continue;
+                            },
+                            Some(KnownBlockStatus::Checked) => {
+                                log::debug!(target: "validate_query", "({d}):{whitespace}{checked_id} is already checked");
+                                continue;
+                            },
+                            Some(KnownBlockStatus::Commited) => {
+                                log::debug!(target: "validate_query", "({d}):{whitespace}{checked_id} will be commited");
+                                continue;
+                            },
+                            Some(KnownBlockStatus::NotCommited) => {
+                                let state = self.engine.clone().wait_state(&checked_id, Some(1_000), false).await?;
+
+                                stack.push(RefBlockStatus::Checking(checked_id.clone()));
+                                if log::log_enabled!(target: "validate_query", log::Level::Debug) {
+                                    whitespace.push('|'); 
+                                }
+        
+                                state.state()?.ref_shard_blocks().ok_or_else(
+                                    || error!("RefBlock {} has no ref_shard_blocks", checked_id)
+                                )?.iterate_shard_block_refs(|ref_block_id, _| {
+                                    stack.push(RefBlockStatus::ToCheck(ref_block_id));
+                                    Ok(true)
+                                })?;
+                            },
+                            None => {
+                                let handle = self.engine.load_block_handle(&checked_id)?
+                                    .ok_or_else(|| error!("RefBlock {} can't load handle", checked_id))?;
+                                if handle.is_applied() {
+                                    // Check that block is not too new
+                                    let top_block = top_blocks.iter()
+                                        .filter(|t| t.shard().intersect_with(handle.id().shard()))
+                                        .max_by_key(|t| t.seq_no)
+                                        .ok_or_else(|| error!("Ref block {checked_id} can't find the top \
+                                            block of the proper shard"))?;
+                                    if checked_id.seq_no() > top_block.seq_no() {
+                                        reject_query!("Ref block {checked_id} is \
+                                            newer than top block in this shard");
+                                    }
+
+                                    known_blocks.insert(checked_id.clone(), KnownBlockStatus::Applied);
+                                    log::debug!(target: "validate_query", "({d}):{whitespace}{checked_id} is applied");
+                                } else {
+                                    reject_query!("Ref block {checked_id} is unknown");
+                                }
+                            }
+                        }
+                    }
+                    RefBlockStatus::Checking(checked_id) => {
+                        if log::log_enabled!(target: "validate_query", log::Level::Debug) {
+                            whitespace.pop(); 
+                        }
+                        log::debug!(target: "validate_query", "({d}):{whitespace}{checked_id} checked");
+                        known_blocks.insert(checked_id, KnownBlockStatus::Checked);
+                    }
+                }
+            }
+        }
+        let elapsed = now.elapsed();
+        metrics::histogram!("check_refs__deps_time", elapsed);
+        if elapsed.as_millis() > 10 {
+            log::warn!(target: "validate_query", "({d}): Dependency checking TIME {} ms",
+                elapsed.as_millis());
+        }
         Ok(())
     }
 
@@ -1122,7 +1950,7 @@ impl ValidateQuery {
         let ccvc = base.next_state_extra.config.catchain_config()?;
         let wc_set = base.next_state_extra.config.workchains()?;
         self.update_shard_cc = base.info.key_block();
-         {
+        #[cfg(not(feature = "fast_finality"))] {
             self.update_shard_cc |= 
                 base.now() / ccvc.shard_catchain_lifetime > prev_now / ccvc.shard_catchain_lifetime;
         }
@@ -1229,7 +2057,12 @@ impl ValidateQuery {
         log::debug!(target: "validate_query", "({}): masterchain validator set hash changed from {} to {}",
             self.next_block_descr,
             old_info.validator_list_hash_short, vlist_hash);
+        #[cfg(not(feature = "fast_finality"))]
         if new_info.nx_cc_updated != cc_updated & self.update_shard_cc {
+            reject_query!("new_info.nx_cc_updated has incorrect value {}", new_info.nx_cc_updated)
+        }
+        #[cfg(feature = "fast_finality")]
+        if new_info.nx_cc_updated != cc_updated {
             reject_query!("new_info.nx_cc_updated has incorrect value {}", new_info.nx_cc_updated)
         }
 
@@ -1245,14 +2078,33 @@ impl ValidateQuery {
                 reject_query!("block has start_lt {} less than or equal to lt {} of the previous state",
                     base.info.start_lt(), state.state()?.gen_lt())
             }
+            #[cfg(not(feature = "fast_finality"))]
             if base.now() <= state.state()?.gen_time() {
                 reject_query!("block has creation time {} less than or equal to that of the previous state ({})",
                     base.now(), state.state()?.gen_time())
             }
+            #[cfg(feature = "fast_finality")] {
+                if base.now() < state.state()?.gen_time() {
+                    reject_query!("block has creation time {} less that of the previous state ({})",
+                        base.now(), state.state()?.gen_time())
+                }
+                if base.now() as u64 != base.info.gen_utime_ms() / 1000 {
+                    reject_query!("block creation time {} and milliseconds creation time {} mismatch",
+                        base.now(), base.info.gen_utime_ms())
+                }
+
+            }
             gen_lt = std::cmp::max(gen_lt, state.state()?.gen_lt());
         }
+        #[cfg(not(feature = "fast_finality"))]
         if base.now() <= mc_data.state.state()?.gen_time() {
             reject_query!("block has creation time {} less than or equal to that of the reference masterchain state ({})",
+                base.now(), mc_data.state.state()?.gen_time())
+        }
+
+        #[cfg(feature = "fast_finality")]
+        if base.now() < mc_data.state.state()?.gen_time() {
+            reject_query!("block has creation time {} less than creation time of the reference masterchain state ({})",
                 base.now(), mc_data.state.state()?.gen_time())
         }
 
@@ -1273,7 +2125,10 @@ impl ValidateQuery {
                 base.info.start_lt(), lt_bound + 1)
         }
 
+        #[cfg(not(feature = "fast_finality"))]
         let max_lt_growth = mc_data.config().get_max_lt_growth();
+        #[cfg(feature = "fast_finality")]
+        let max_lt_growth = mc_data.config().get_max_lt_growth_fast_finality();
         if base.shard().is_masterchain() && base.info.start_lt() - gen_lt > max_lt_growth {
             reject_query!("block increases logical time from previous state by {} which exceeds the limit ({})",
                 base.info.start_lt() - gen_lt, max_lt_growth)
@@ -2657,7 +3512,7 @@ impl ValidateQuery {
                 reject_query!("newly-added ProcessedInfo entry refers to shard {} distinct from the current shard {}",
                     ShardIdent::with_tagged_prefix(base.shard().workchain_id(), upd.shard)?, base.shard())
             }
-             {
+            #[cfg(not(feature = "fast_finality"))] {
                 let ref_mc_seqno = match base.shard().is_masterchain() {
                     true => base.block_id().seq_no,
                     false => mc_data.state.state()?.seq_no()
@@ -2667,6 +3522,22 @@ impl ValidateQuery {
                         "newly-added ProcessedInfo entry refers to masterchain block {} but \
                         the processed inbound message queue belongs to masterchain block {}",
                         upd.mc_seqno(), ref_mc_seqno
+                    )
+                }
+            }
+            #[cfg(feature = "fast_finality")] {
+                if upd.seqno != base.block_id().seq_no {
+                    reject_query!(
+                        "newly-added ProcessedInfo entry refers to block {} but \
+                        the processed inbound message queue belongs to block {}",
+                        upd.seqno, base.block_id().seq_no
+                    )
+                }
+                if !base.shard().is_masterchain() && upd.mc_seqno() != mc_data.state.state()?.seq_no() {
+                    reject_query!(
+                        "newly-added ProcessedInfo entry refers to masterchain block {} but \
+                        the processed inbound message queue belongs to masterchain block {}",
+                        upd.mc_seqno(), mc_data.state.state()?.seq_no()
                     )
                 }
             }
@@ -3255,6 +4126,10 @@ impl ValidateQuery {
                 &trans, 
                 &trans_execute
             );
+            #[cfg(test)]
+            Self::prepare_transaction_for_test(
+                base, _old_account_root, &trans, "account hash wrong".to_string()
+            )?;
             reject_query!("transaction {} of {:x} is invalid: it claims that the new \
                 account state hash is {:x} but the re-computed value is {:x}",
                     lt, account_addr, state_update.new_hash, new_hash)
@@ -3267,6 +4142,10 @@ impl ValidateQuery {
                 &trans, 
                 &trans_execute
             );
+            #[cfg(test)]
+            Self::prepare_transaction_for_test(
+                base, _old_account_root, &trans, "account hash wrong".to_string()
+            )?;
             reject_query!("transaction {} of {:x} is invalid: it has produced a set of \
                 outbound messages different from that listed in the transaction",
                     lt, account_addr)
@@ -3292,6 +4171,14 @@ impl ValidateQuery {
                 &trans, 
                 &trans_execute
             );
+            #[cfg(test)]
+            if let Err(err) = crate::test_helper::compare_transactions(
+                &trans, &trans_execute, true
+            ) {
+                Self::prepare_transaction_for_test(
+                    base, _old_account_root, &trans, err.to_string()
+                )?;
+            }
             reject_query!("re created transaction {} doesn't correspond", lt)
         }
         // check new balance and value flow
@@ -3316,6 +4203,10 @@ impl ValidateQuery {
                 &trans, 
                 &trans_execute
             );
+            #[cfg(test)]
+            Self::prepare_transaction_for_test(
+                base, _old_account_root, &trans, "balance incorrect".to_string()
+            )?;
             reject_query!("transaction {} of {} violates the currency flow condition: \
                 old balance={} + imported={} does not equal new balance={} + exported=\
                 {} + total_fees={}", lt, account_addr.to_hex_string(),
@@ -3797,7 +4688,7 @@ impl ValidateQuery {
                 which is not allowed for non-masterchain blocks"
             )
         }
-         {
+        #[cfg(not(feature = "fast_finality"))] {
             if next_state.ref_shard_blocks().is_some() {
                 reject_query!("new state could not contain ref_shard_blocks");
             }
@@ -4349,6 +5240,14 @@ impl ValidateQuery {
         let manager = self.init_output_queue_manager(&mc_data, &base).await?;
         self.check_shard_layout(&base, &mc_data)?;
 
+        #[cfg(feature = "fast_finality")]
+        self.check_ref_shard_blocks(&base, &mc_data).await
+            .map_err(|e| {
+                let labels = [("shard", self.shard.to_string())];
+                metrics::increment_counter!("failed_ref_shard_blocks_validations", &labels);
+                error!("Error while checking ref blocks: {}", e)
+            })?;
+
         check_cur_validator_set(
             &self.validator_set,
             base.block_id(),
@@ -4419,6 +5318,7 @@ impl ValidateQuery {
         let labels = [("shard", base.block_id().shard().to_string())];
         metrics::gauge!("gas_rate_validator", ratio as f64, &labels);
 
+        #[cfg(not(test))]
         #[cfg(feature = "telemetry")]
         self.engine.validator_telemetry().succeeded_attempt(
             &self.shard,
@@ -4427,6 +5327,37 @@ impl ValidateQuery {
             gas_used as u32
         );
 
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl ValidateQuery {
+    fn prepare_transaction_for_test(
+        base: &ValidateBase,
+        account_root: Cell,
+        trans: &Transaction,
+        err: String
+    ) -> Result<()> {
+        let path = format!("./target/check/validator/{},{},{}",
+            base.shard().workchain_id(),
+            base.shard().shard_prefix_as_str_with_tag(),
+            base.block_id().seq_no()
+        );
+        std::fs::create_dir_all(&path).ok();
+        let account_addr = trans.account_id();
+        // sometimes it can be usable if it is the last transaction for this account
+        // comment next two lines if it is not last transaction in account block
+        let new_shard_acc = base.next_state_accounts.get_serialized(account_addr.clone())?.unwrap_or_default();
+        // let new_shard_acc = ShardAccount::construct_from(&mut new_shard_acc)?;
+        let new_account_root = new_shard_acc.account_cell();
+        let config_cell = base.config_params.serialize()?;
+        let trans_root = trans.serialize()?;
+        let msg_cell = trans.in_msg_cell().map(|cell| cell.clone()).unwrap_or_default();
+        std::fs::write(format!("{}/{}.txt", path, trans_root.repr_hash().to_hex_string()), err.as_bytes())?;
+        crate::test_helper::prepare_data_for_executor_test(
+            &path, &account_root, &new_account_root, &msg_cell, &trans_root, &config_cell
+        )?;
         Ok(())
     }
 }

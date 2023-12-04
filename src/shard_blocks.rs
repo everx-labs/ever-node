@@ -34,6 +34,10 @@ use std::{
 };
 use rand::Rng;
 
+#[cfg(test)]
+#[path = "tests/test_shard_blocks.rs"]
+mod tests;
+
 pub enum StoreAction {
     Save(TopBlockDescrId, Arc<TopBlockDescrStuff>),
     Remove(TopBlockDescrId)

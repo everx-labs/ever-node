@@ -31,6 +31,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, fail, Result, UInt256, ByteOrderRead};
 
+#[cfg(test)]
+#[path = "tests/test_block_handle_db.rs"]
+mod tests;
+
 const FLAG_DATA: u32                             = 0x00000001;
 const FLAG_PROOF: u32                            = 0x00000002;
 const FLAG_PROOF_LINK: u32                       = 0x00000004;
@@ -838,3 +842,6 @@ impl BlockHandleStorage {
 
 }
 
+#[cfg(test)]
+impl BlockHandleStorage {
+}

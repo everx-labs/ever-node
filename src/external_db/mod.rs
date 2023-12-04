@@ -28,6 +28,10 @@ pub mod kafka_consumer;
 #[cfg(not(feature = "external_db"))]
 mod stub_producer;
 
+#[cfg(test)]
+#[path = "tests/test.rs"]
+mod tests;
+
 #[async_trait::async_trait]
 pub trait WriteData : Sync + Send {
     fn enabled(&self) -> bool;
@@ -275,9 +279,8 @@ pub async fn external_db_worker(
             produce_shard_hashes(engine, &block).await?;
         }
         engine.process_chain_range_in_ext_db(&range).await?;
-
+    
         engine.save_external_db_mc_block_id(handle.id())?;
     }
     Ok(())
-
 }

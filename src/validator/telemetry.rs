@@ -375,6 +375,7 @@ pub struct RempCoreTelemetry {
     got_from_fullnode: AtomicUsize,
     in_channel_from_fullnode: Arc<Metric>,
     pending_from_fullnode: Arc<Metric>,
+    rejected_overload_from_fullnode: Arc<Metric>,
     
     queues: lockfree::map::Map<ShardIdent, RempQueueTelemetry>,
     
@@ -383,7 +384,6 @@ pub struct RempCoreTelemetry {
     deleted_from_cache: AtomicUsize,
     
     cache_size: Arc<Metric>,
-    cache_mutex_awaiting: Arc<Metric>,
     incoming_queue_size: Arc<Metric>,
     incoming_mutex_awaiting: Arc<Metric>,
     collator_receipt_queue_size: Arc<Metric>,
@@ -408,12 +408,12 @@ impl RempCoreTelemetry {
             got_from_fullnode: AtomicUsize::default(),
             in_channel_from_fullnode: Metric::without_totals("in channel from fullnode", period_sec),
             pending_from_fullnode: Metric::without_totals("pending from fullnode", period_sec),
+            rejected_overload_from_fullnode: Metric::with_total_amount_and_average("rejected from fullnode (overload)", period_sec),
             queues: lockfree::map::Map::new(),
             add_to_cache_attempts: AtomicUsize::default(),
             added_to_cache: AtomicUsize::default(),
             deleted_from_cache: AtomicUsize::default(),
             cache_size: Metric::without_totals("messages cache size", period_sec),
-            cache_mutex_awaiting: Metric::without_totals("cache mutex awaiting", period_sec),
             incoming_queue_size: Metric::without_totals("incoming queue size", period_sec),
             incoming_mutex_awaiting: Metric::without_totals("incoming mutex awaiting", period_sec),
             collator_receipt_queue_size: Metric::without_totals("collator receipt queue size", period_sec),
@@ -449,6 +449,10 @@ impl RempCoreTelemetry {
 
     pub fn pending_from_fullnode(&self, length: usize) {
         self.pending_from_fullnode.update(length as u64);
+    }
+
+    pub fn rejected_overload_from_fullnode(&self, length: usize) {
+        self.rejected_overload_from_fullnode.update(length as u64);
     }
 
     pub fn messages_from_fullnode_for_shard(&self, shard: &ShardIdent, new_messages: usize) {
@@ -505,10 +509,6 @@ impl RempCoreTelemetry {
 
     pub fn deleted_from_cache(&self, deleted_messages: usize) {
         self.deleted_from_cache.fetch_add(deleted_messages, Ordering::Relaxed);
-    }
-
-    pub fn cache_mutex_metric(&self) -> Arc<Metric> {
-        self.cache_mutex_awaiting.clone()
     }
 
     pub fn incoming_queue_size_metric(&self) -> Arc<Metric> {
@@ -639,7 +639,6 @@ impl RempCoreTelemetry {
         reset_and_print_single_metric(&self.deleted_from_cache, "deleted from cache", &mut report);
         
         reset_and_print_metric(&self.cache_size, &mut report);
-        reset_and_print_metric(&self.cache_mutex_awaiting, &mut report);
         reset_and_print_metric(&self.incoming_queue_size, &mut report);
         reset_and_print_metric(&self.incoming_mutex_awaiting, &mut report);
         reset_and_print_metric(&self.collator_receipt_queue_size, &mut report);
@@ -657,3 +656,6 @@ impl RempCoreTelemetry {
     }
 }
 
+#[cfg(test)]
+#[path = "tests/test_telemetry.rs"]
+mod tests;
