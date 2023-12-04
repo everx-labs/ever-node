@@ -251,6 +251,11 @@ impl MessageQueue {
     }
 
     pub async fn put_message_to_rmq(&self, old_message: Arc<RmqMessage>) -> Result<()> {
+        if self.queues.execute_sync(|q| q.pending_collation_set.contains_key(&old_message.message_id)).await {
+            log::trace!(target: "remp", "Point 3. RMQ {}; computing message {} delay --- already have it in local queue, should be skipped", self, old_message);
+            return Ok(())
+        }
+
         let msg = Arc::new(old_message.new_with_updated_source_idx(self.catchain_info.local_idx as u32));
         log::trace!(target: "remp", "Point 3. Pushing to RMQ {}; message {}", self, msg);
         self.catchain_instance.pending_messages_queue_send(msg.as_rmq_record(self.catchain_info.get_master_cc_seqno()))?;
@@ -1159,12 +1164,12 @@ impl RmqQueueManager {
                 match self.remp_manager.poll_incoming(&self.shard).await {
                     (Some(rmq_message), _) => {
                         if let Some((overload_message, status)) = cur_queue.is_queue_overloaded().await {
-                            log::warn!(target: "remp", "RMQ {}: {}, ignoring message {}", self, overload_message, rmq_message);
+                            log::warn!(target: "remp", "Point 3. RMQ {}: {}, ignoring incoming message {}", self, overload_message, rmq_message);
                             cur_queue.send_response_to_fullnode(rmq_message, status);
                             cnt_rejected_overload+=1;
                         }
                         else if let Err(e) = self.put_message_to_rmq(rmq_message.clone()).await {
-                            log::warn!(target: "remp", "Error sending RMQ {} message {:?}: {}; returning back to incoming queue",
+                            log::warn!(target: "remp", "Point 3. Error sending RMQ {} message {:?}: {}; returning back to incoming queue",
                                 self, rmq_message, e
                             );
                             self.remp_manager.return_to_incoming(rmq_message, &self.shard).await;

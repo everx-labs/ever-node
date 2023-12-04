@@ -278,6 +278,7 @@ pub struct RempConfig {
     remp_client_pool: Option<u8>,
     service_enabled: Option<bool>,
     message_queue_max_len: Option<usize>,
+    max_incoming_broadcast_delay_millis: Option<u32>,
 }
 
 impl RempConfig {
@@ -293,6 +294,8 @@ impl RempConfig {
     pub fn get_message_queue_max_len(&self) -> Option<usize> {
         self.message_queue_max_len
     }
+
+    pub fn get_max_incoming_broadcast_delay_millis(&self) -> u32 { self.max_incoming_broadcast_delay_millis.unwrap_or(1000) }
 
     pub fn get_catchain_options(&self) -> Option<catchain::Options> {
         if self.is_service_enabled() {

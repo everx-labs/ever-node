@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.81
+
+- Added REMP broadcast message delayer
+- Removed delay for direct REMP messages
+
 ## Version 0.55.80
 
 - Updates in REMP protocol

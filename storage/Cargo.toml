@@ -22,10 +22,10 @@ serde_derive = '1.0.114'
 strum = '0.18.0'
 strum_macros = '0.18.0'
 tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
-adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.9' }
+adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.15' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.48' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.110' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.53' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.117' }
 ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.31' }
 
 [build-dependencies]

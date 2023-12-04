@@ -1457,7 +1457,7 @@ pub fn start_validator_manager(
 ) {
     const CHECK_VALIDATOR_TIMEOUT: u64 = 60;    //secs
     runtime.clone().spawn(async move {
-        log::info!("checking if current node is a validator during {CHECK_VALIDATOR_TIMEOUT} secs");
+        log::info!(target: "validator_manager", "checking if current node is a validator during {CHECK_VALIDATOR_TIMEOUT} secs");
         engine.acquire_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
         while !engine.get_validator_status() {
             log::trace!(target: "validator_manager", "Not a validator, waiting...");
@@ -1465,6 +1465,7 @@ pub fn start_validator_manager(
             for _ in 0..CHECK_VALIDATOR_TIMEOUT {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 if engine.check_stop() {
+                    log::error!(target: "validator_manager", "Engine is stopped. exiting");
                     engine.release_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
                     return;
                 }
