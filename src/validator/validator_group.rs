@@ -497,7 +497,7 @@ impl ValidatorGroup {
         Ok(())
     }
 
-    pub async fn stop(self: Arc<ValidatorGroup>, rt: tokio::runtime::Handle, _new_master_cc_range: Option<RangeInclusive<u32>>) -> Result<()> {
+    pub async fn stop(self: Arc<ValidatorGroup>, rt: tokio::runtime::Handle, new_master_cc_range: Option<RangeInclusive<u32>>) -> Result<()> {
         self.set_status(ValidatorGroupStatus::Stopping).await?;
         let group_impl = self.group_impl.clone();
         rt.spawn({
@@ -508,9 +508,9 @@ impl ValidatorGroup {
                         (group_impl.reliable_queue.clone(), group_impl.session_ptr.clone())
                     ).await;
                 if let Some(rmq) = reliable_message_queue {
-                    //if let Some(new_cc_range) = new_master_cc_range {
-                    //    rmq.forward_messages(&new_cc_range, self.local_key.clone()).await;
-                    //}
+                    if let Some(new_cc_range) = new_master_cc_range {
+                        rmq.forward_messages(&new_cc_range, self.local_key.clone()).await;
+                    }
                     rmq.stop().await;
                 }
                 if let Some(s_ptr) = session_ptr {
