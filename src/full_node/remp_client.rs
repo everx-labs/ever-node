@@ -39,7 +39,7 @@ use ton_api::{
 };
 use ton_block::{
     Message, ShardIdent, FutureSplitMerge, ShardAccount, BlockIdExt, ValidatorDescr, MASTERCHAIN_ID,
-    HashmapAugType
+    HashmapAugType, CommonMessage
 };
 use ton_executor::{
     BlockchainConfig, OrdinaryTransactionExecutor, TransactionExecutor, ExecuteParams,
@@ -226,6 +226,11 @@ impl RempClient {
                 }
             }
         });
+    }
+
+    #[cfg(test)]
+    pub fn messages_history(&self) -> &lockfree::map::Map<UInt256, RempMessageHistory> {
+        &self.messages
     }
 
     async fn messages_worker(&self) -> Result<()> {
@@ -864,9 +869,10 @@ impl RempClient {
         };
         let now = Instant::now();
         let mut account_root = account.account_cell();
+        let common_msg = CommonMessage::Std(message);
         let execution_result = tokio::task::block_in_place(|| {
             let executor = OrdinaryTransactionExecutor::new(config);
-            executor.execute_with_libs_and_params(Some(&message), &mut account_root, params)
+            executor.execute_with_libs_and_params(Some(&common_msg), &mut account_root, params)
         });
 
         let duration = now.elapsed().as_micros() as u64;
@@ -1060,7 +1066,6 @@ pub fn remp_status_short_name(status: &RempReceipt) -> String {
                 RempMessageLevel::TonNode_RempShardchain => "Accepted_Shardchain",
             }
         },
-        RempMessageStatus::TonNode_RempDuplicate(_) => "Duplicate",
         RempMessageStatus::TonNode_RempIgnored(ign) => {
             match ign.level {
                 RempMessageLevel::TonNode_RempCollator => "Ignored_Collator",
@@ -1081,7 +1086,11 @@ pub fn remp_status_short_name(status: &RempReceipt) -> String {
             }
         },
         RempMessageStatus::TonNode_RempSentToValidators(_) => "SentToValidators",
-        RempMessageStatus::TonNode_RempTimeout => "Timeout",
+        /*RempMessageStatus::TonNode_RempDuplicate*/
+        _ /*RempMessageStatus::TonNode_RempTimeout*/ => "Timeout",
     }.to_owned()
 }
 
+#[cfg(test)]
+#[path = "../tests/test_remp_client.rs"]
+mod tests;

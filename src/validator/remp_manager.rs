@@ -11,6 +11,20 @@
 * limitations under the License.
 */
 
+use std::{
+    fmt, fmt::{Display, Formatter},
+    collections::{HashMap, HashSet, VecDeque},
+    ops::RangeInclusive,
+    sync::Arc,
+    time::Duration
+};
+use std::cmp::{max, Reverse};
+use std::collections::BinaryHeap;
+
+use ton_block::{BlockIdExt, CatchainConfig, Message, ShardIdent, UnixTime32};
+use ton_api::ton::ton_node::RempMessageStatus;
+use ton_types::{error, fail, KeyId, Result, SliceData, UInt256};
+
 use crate::{
     config::RempConfig,
     engine_traits::{EngineOperations, RempCoreInterface, RempDuplicateStatus},
@@ -22,13 +36,13 @@ use crate::{
 };
 
 #[cfg(feature = "telemetry")]
-use adnl::telemetry::Metric;
-use std::{collections::{HashMap, HashSet, VecDeque}, fmt, sync::Arc, time::Duration};
-#[cfg(feature = "telemetry")]
 use std::time::Instant;
-use ton_api::ton::ton_node::RempMessageStatus;
-use ton_block::{ShardIdent, Message};
-use ton_types::{error, KeyId, Result, SliceData, UInt256};
+use std::time::SystemTime;
+#[cfg(feature = "telemetry")]
+use adnl::telemetry::Metric;
+use chrono::{DateTime, Utc};
+use crossbeam_channel::TryRecvError;
+use rand::Rng;
 
 pub struct RempInterfaceQueues {
     message_cache: Arc<MessageCache>,
@@ -38,6 +52,109 @@ pub struct RempInterfaceQueues {
         crossbeam_channel::Sender<Arc<RmqMessage>>,
     pub response_receiver: 
         crossbeam_channel::Receiver<(UInt256, Arc<RmqMessage>, RempMessageStatus)>
+}
+
+pub struct RempDelayer {
+    max_incoming_broadcast_delay_millis: u32,
+    random_seed: u64,
+
+    pub incoming_receiver: crossbeam_channel::Receiver<Arc<RmqMessage>>,
+    pub delayed_incoming_sender: crossbeam_channel::Sender<Arc<RmqMessage>>,
+    delay_heap: MutexWrapper<(BinaryHeap<(Reverse<SystemTime>, UInt256)>, HashMap<UInt256, Arc<RmqMessage>>)>,
+}
+
+impl RempDelayer {
+    pub fn new (random_seed: u64, options: &RempConfig,
+                incoming_receiver: crossbeam_channel::Receiver<Arc<RmqMessage>>,
+                delayed_incoming_sender: crossbeam_channel::Sender<Arc<RmqMessage>>) -> Self {
+        Self {
+            max_incoming_broadcast_delay_millis: options.get_max_incoming_broadcast_delay_millis(),
+            random_seed,
+            incoming_receiver,
+            delayed_incoming_sender,
+            delay_heap: MutexWrapper::new((BinaryHeap::new(), HashMap::new()), "DelayerHeap".to_string()),
+        }
+    }
+
+    async fn push_delayer(&self, activation_time: SystemTime, msg: Arc<RmqMessage>) {
+        let tm: DateTime<Utc> = activation_time.into();
+        self.delay_heap.execute_sync(|(h,m)| {
+            if !m.contains_key(&msg.message_id) {
+                log::trace!(target: "remp", "Delaying REMP message {} till {}", msg, tm.format("%T"));
+                h.push((Reverse(activation_time), msg.message_id.clone()));
+                m.insert(msg.message_id.clone(), msg);
+            }
+            else {
+                log::trace!(target: "remp", "REMP message {} is already waiting", msg);
+            }
+        }).await
+    }
+
+    async fn pop_delayer(&self) -> Option<Arc<RmqMessage>> {
+        let now = SystemTime::now();
+        let res = self.delay_heap.execute_sync(|(h,m)| {
+            match h.peek() {
+                Some((Reverse(tm), _)) if tm > &now => return None,
+                None => return None,
+                _ => ()
+            };
+
+            match h.pop() {
+                Some((tm, id)) => m.remove(&id).map(|msg| (tm,msg)),
+                None => return None
+            }
+        }).await;
+
+        if let Some((tm,msg)) = res {
+            let tm: DateTime<Utc> = tm.0.into();
+            log::trace!(target: "remp", "Sending further REMP message {}, delayed till {}", msg, tm.format("%T"));
+            Some(msg)
+        }
+        else {
+            None
+        }
+    }
+
+    pub async fn len(&self) -> usize {
+        let (h,m) = self.delay_heap.execute_sync(|(h,m)| (h.len(),m.len())).await;
+        if h != m {
+            log::error!(target: "remp", "Different number of entries in Delay BinaryHeap and Delay HashMap: {} != {}", h, m);
+        }
+        max (h,m)
+    }
+
+    async fn poll_incoming_once(&self) -> Result<Option<Arc<RmqMessage>>> {
+        if let Some(msg) = self.pop_delayer().await {
+            return Ok(Some(msg))
+        }
+
+        loop {
+            match self.incoming_receiver.try_recv() {
+                Ok(msg) => {
+                    if msg.has_no_source_key() && self.max_incoming_broadcast_delay_millis > 0 {
+                        let delay = (msg.message_id.first_u64() + self.random_seed) % (self.max_incoming_broadcast_delay_millis as u64);
+                        self.push_delayer(SystemTime::now() + Duration::from_millis(delay), msg).await;
+                    }
+                    else {
+                        // self.push_delayer(SystemTime::now() + Duration::from_millis(100), msg).await; // TODO: debugging code
+                        return Ok(Some(msg));
+                    }
+                }
+                Err(TryRecvError::Empty) => return Ok(None),
+                Err(TryRecvError::Disconnected) => fail!("REMP incoming queue disconnected")
+            }
+        }
+    }
+
+    pub async fn poll_incoming(&self) -> Result<usize> {
+        let mut cnt = 0;
+        while let Some(msg) = self.poll_incoming_once().await? {
+            cnt += 1;
+            self.delayed_incoming_sender.send(msg)?;
+        }
+        log::debug!(target: "remp", "Polling incoming REMP messages delayer: {} forwarded, {} waiting", cnt, self.len().await);
+        Ok(cnt)
+    }
 }
 
 #[async_trait::async_trait]
@@ -286,11 +403,42 @@ impl fmt::Display for CollatorResult {
 // Point 6. collator receipt queue -         with dispatcher     @ RempManager
 // Point 7.          ... then returns back to step 5
 
+#[derive(Default)]
+pub struct RempSessionStats {
+    pub total: usize,
+    pub accepted_in_session: usize,
+    pub rejected_in_session: usize,
+    pub has_only_header: usize,
+    pub incorrect: usize
+}
+
+impl Display for RempSessionStats {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{} total ({} finally accepted, {} finally rejected, {} lost), {} only status in cache, {} incorrect state",
+               self.total, self.accepted_in_session, self.rejected_in_session,
+               self.total - self.accepted_in_session - self.rejected_in_session,
+               self.has_only_header,
+               self.incorrect
+        )
+    }
+}
+
+impl RempSessionStats {
+    pub fn add(&mut self, addtional: &RempSessionStats) {
+        self.total += addtional.total;
+        self.accepted_in_session += addtional.accepted_in_session;
+        self.rejected_in_session += addtional.rejected_in_session;
+        self.has_only_header += addtional.has_only_header;
+        self.incorrect += addtional.incorrect;
+    }
+}
+
 pub struct RempManager {
     pub options: RempConfig,
 
     pub catchain_store: Arc<RempCatchainStore>,
     pub message_cache: Arc<MessageCache>,
+    incoming_delayer: RempDelayer,
     incoming_dispatcher: RempQueueDispatcher<RmqMessage, RempIncomingQueue>,
     pub collator_receipt_dispatcher: RempQueueDispatcher<CollatorResult, CollatorInterfaceWrapper>,
     pub response_sender: crossbeam_channel::Sender<(UInt256, Arc<RmqMessage>, RempMessageStatus)>
@@ -301,22 +449,24 @@ impl RempManager {
         -> (Self, RempInterfaceQueues) 
     {
         let (incoming_sender, incoming_receiver) = crossbeam_channel::unbounded();
+        let (delayed_incoming_sender, delayed_incoming_receiver) = crossbeam_channel::unbounded();
         let (response_sender, response_receiver) = crossbeam_channel::unbounded();
         let message_cache = Arc::new(MessageCache::with_metrics(
             #[cfg(feature = "telemetry")]
-            engine.remp_core_telemetry().cache_mutex_metric(),
-            #[cfg(feature = "telemetry")]
-            engine.remp_core_telemetry().cache_size_metric(),
+            engine.remp_core_telemetry().cache_size_metric()
         ));
 
+        let mut delay_random_rng = rand::thread_rng();
+        let delay_random_seed: u64 = delay_random_rng.gen();
         let collator_interface_wrapper = CollatorInterfaceWrapper::new(engine.clone());
         return (RempManager {
-            options: opt,
+            options: opt.clone(),
             catchain_store: Arc::new(RempCatchainStore::new()),
             message_cache: message_cache.clone(),
+            incoming_delayer: RempDelayer::new(delay_random_seed, &opt, incoming_receiver, delayed_incoming_sender),
             incoming_dispatcher: RempQueueDispatcher::with_metric(
                 "incoming".to_string(),
-                RempIncomingQueue::new(engine.clone(), incoming_receiver),
+                RempIncomingQueue::new(engine.clone(), delayed_incoming_receiver),
                 #[cfg(feature = "telemetry")]
                 engine.remp_core_telemetry().incoming_queue_size_metric(),
                 #[cfg(feature = "telemetry")]
@@ -354,6 +504,14 @@ impl RempManager {
     }
 
     pub async fn poll_incoming(&self, shard: &ShardIdent) -> (Option<Arc<RmqMessage>>, usize) {
+        match self.incoming_delayer.poll_incoming().await {
+            Ok(n) => {
+                log::trace!(target: "remp", "Polling REMP incoming delayer queue: {} messages processed", n);
+            },
+            Err(e) => {
+                log::error!(target: "remp", "Cannot poll REMP incoming delayer queue: {}", e);
+            }
+        }
         return self.incoming_dispatcher.poll(shard).await;
     }
 
@@ -366,12 +524,30 @@ impl RempManager {
         Ok(())
     }
 
-    pub async fn gc_old_messages(&self, current_master_cc_seqno: u32) -> usize {
-        let (total, accepted, rejected, only_status, incorrect) = self.message_cache.get_old_messages(current_master_cc_seqno).await;
-        log::info!(target: "remp", "GC old messages: {} total ({} finally accepted, {} finally rejected, {} lost), {} only status in cache, {} incorrect cache state",
-            total, accepted, rejected, total - accepted - rejected, only_status, incorrect
-        );
-        total
+    /// Garbage collects all messages from message cache, which are older than master cc `actual_lwb`
+    pub async fn gc_old_messages(&self, actual_lwb: u32) -> RempSessionStats {
+        self.message_cache.gc_old_messages(actual_lwb).await
+    }
+
+    pub fn create_master_cc_session(&self, new_cc_seqno: u32, new_time: UnixTime32, inf_blocks: Vec<BlockIdExt>) -> Result<()> {
+        self.message_cache.try_set_master_cc_start_time(new_cc_seqno, new_time, inf_blocks)
+    }
+
+    // Returns None if no reliable lwb was found
+    pub fn compute_lwb_for_upb(&self, starting_lwb: u32, new_cc_seqno: u32, rp_guarantee: Duration) -> Result<Option<u32>> {
+        self.message_cache.compute_lwb_for_upb(starting_lwb, new_cc_seqno, rp_guarantee)
+    }
+
+    pub fn set_master_cc_range(&self, new_range: &RangeInclusive<u32>) -> Result<()> {
+        self.message_cache.set_master_cc_range(new_range)
+    }
+
+    pub fn advance_master_cc(&self, new_cc_seqno: u32, rp_guarantee: Duration) -> Result<RangeInclusive<u32>> {
+        self.message_cache.update_master_cc_ranges(new_cc_seqno, rp_guarantee)
+    }
+
+    pub fn calc_rp_guarantee(&self, config: &CatchainConfig) -> Duration {
+        Duration::from_secs(config.mc_catchain_lifetime as u64)
     }
 }
 
@@ -443,7 +619,7 @@ impl RempInterfaceQueues {
                 Ok((local_key_id, msg,status)) => 
                     self.send_response_to_fullnode(local_key_id, msg, status).await,
                 Err(crossbeam_channel::TryRecvError::Empty) => 
-                    tokio::time::sleep(Duration::from_millis(10)).await,
+                    tokio::time::sleep(Duration::from_millis(1)).await,
                 Err(crossbeam_channel::TryRecvError::Disconnected) => return
             }
         }
@@ -464,7 +640,7 @@ impl RempCoreInterface for RempInterfaceQueues {
             0
         )?);
 
-        if self.message_cache.get_message(&message_id).is_some() {
+        if self.message_cache.get_message(&message_id)?.is_some() {
             log::trace!(target: "remp",
                 "Point 1. We already know about message {:x}, no forwarding to incoming queue is necessary",
                 message_id

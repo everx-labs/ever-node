@@ -35,6 +35,14 @@ mod validating_utils;
 mod validator;
 mod shard_states_keeper;
 
+#[cfg(feature = "fast_finality")]
+mod shard_blocks_fast_finality;
+#[cfg(feature = "fast_finality")]
+mod shard_blocks {
+    pub use crate::shard_blocks_fast_finality::*;
+}
+
+#[cfg(not(feature = "fast_finality"))]
 mod shard_blocks;
 
 #[cfg(feature = "tracing")]
@@ -69,6 +77,10 @@ use std::{
 #[cfg(feature = "external_db")]
 use ton_types::error;
 use ton_types::Result;
+
+#[cfg(test)]
+#[path = "tests/test_helper.rs"]
+pub mod test_helper;
 
 #[cfg(target_os = "linux")]
 #[link(name = "tcmalloc_minimal", kind = "dylib")]
@@ -394,7 +406,10 @@ fn main() {
         .arg(clap::Arg::with_name("force_check_db")
             .short("f")
             .long("force-check-db")
-            .help("start check & restore db process forcedly with refilling cells database"));
+            .help("start check & restore db process forcedly with refilling cells database"))
+        .arg(clap::Arg::with_name("process_conf_and_exit")
+            .long("process-conf-and-exit")
+            .help("finish node after config file processing (reading or generating)."));
 
     let matches = app.get_matches();
 
@@ -403,6 +418,7 @@ fn main() {
         starting_block_disabled: matches.is_present("starting_block_disabled"),
         force_check_db: matches.is_present("force_check_db"),
     };
+    let process_conf_and_exit = matches.is_present("process_conf_and_exit");
 
     let config_dir_path = match matches.value_of("config") {
         Some(config) => {
@@ -430,6 +446,11 @@ fn main() {
         },
         Ok(c) => c
     };
+
+    if process_conf_and_exit {
+        println!("Finish node because of --process-conf-and-exit flag is set");
+        return;
+    }
 
     init_logger(config.log_config_path());
     log::info!("{}", version);

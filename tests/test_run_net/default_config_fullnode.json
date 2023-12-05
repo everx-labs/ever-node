@@ -18,8 +18,8 @@
         "run_attempt_timeout_ms": 1000
     },
     "remp": {
-        "client_enabled": false,
-        "service_enabled": false
+        "client_enabled": true,
+        "service_enabled": true
     },
     "external_db_config": {
         "block_producer": {

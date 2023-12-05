@@ -16,7 +16,7 @@ use crate::network::node_network::NetworkContext;
 use adnl::{
     declare_counted, 
     common::{
-        AdnlPeers, Answer, CountedObject, Counter, QueryResult, 
+        AdnlPeers, Answer, CountedObject, Counter, QueryAnswer, QueryResult, 
         TaggedByteSlice, TaggedTlObject, Wait
     },
     node::AdnlNode,
@@ -474,7 +474,7 @@ impl CatchainOverlay for CatchainClient {
                     object: &msg.data().0,
                     #[cfg(feature = "telemetry")]
                     tag: 0x80000002 // Catchain broadcast
-                }; 
+                };                                                         
                 let result = overlay.broadcast(
                     &overlay_id, 
                     &msg, 
@@ -491,7 +491,7 @@ struct CatchainClientConsumer {
     catchain_listener: CatchainOverlayListenerPtr,
     is_stop: AtomicBool,
     overlay_id: Arc<PrivateOverlayShortId>,
-    worker_waiters: lockfree::map::Map<u128, Arc<Wait<Result<QueryResult>>>>
+    worker_waiters: Arc<lockfree::map::Map<u128, Arc<Wait<Result<Option<Answer>>>>>>
 }
 
 impl CatchainClientConsumer {
@@ -503,7 +503,7 @@ impl CatchainClientConsumer {
             catchain_listener: catchain_listener,
             is_stop: AtomicBool::new(false),
             overlay_id: overlay_id, 
-            worker_waiters: lockfree::map::Map::new()
+            worker_waiters: Arc::new(lockfree::map::Map::new())
         }
     }
 }
@@ -527,56 +527,79 @@ impl QueriesConsumer for CatchainClientConsumer {
                 fail!(e)
             }
         };
-        let (wait, mut queue_reader) = Wait::new();
-        self.worker_waiters.insert(id.as_nanos(), wait.clone());
-        
-        if let Some(listener) = self.catchain_listener.upgrade() {
-            let wait = wait.clone();
-            wait.request();
-            listener
-                .on_query(
-                    peers.other().clone(),
-                    &catchain::CatchainFactory::create_block_payload(::ton_api::ton::bytes(data)),
-                    Box::new(move |result: Result<BlockPayloadPtr> | {
-                        let result = match result {
-                            Ok(answer) => {
-                                let answer: Result<TLObject> = Deserializer::new(
-                                    &mut Cursor::new(&answer.data().0)
-                                ).read_boxed();
-                                match answer {
-                                    Ok(answer) => { 
-                                        #[cfg(feature = "telemetry")]
-                                        let tag = tag_from_boxed_object(&answer);
-                                        let answer = TaggedTlObject {
-                                            object: answer,
-                                            #[cfg(feature = "telemetry")]
-                                            tag
-                                        };
-                                        Ok(QueryResult::Consumed(Some(Answer::Object(answer)))) 
+
+        // Spawn the task to let catchain query processed asynchronously
+        let catchain_listener = self.catchain_listener.clone();
+        let peers = peers.clone();
+        let worker_waiters = self.worker_waiters.clone();
+        let handle = tokio::spawn(
+            async move {
+                let (wait, mut queue_reader) = Wait::new();
+                worker_waiters.insert(id.as_nanos(), wait.clone());        
+                if let Some(listener) = catchain_listener.upgrade() {
+                    let wait = wait.clone();
+                    wait.request();
+                    listener.on_query(
+                        peers.other().clone(),
+                        &catchain::CatchainFactory::create_block_payload(
+                            ::ton_api::ton::bytes(data)
+                        ),
+                        Box::new(
+                            move |result: Result<BlockPayloadPtr> | {
+                                let result = match result {
+                                    Ok(answer) => {
+                                        let answer: Result<TLObject> = Deserializer::new(
+                                            &mut Cursor::new(&answer.data().0)
+                                        ).read_boxed();
+                                        match answer {
+                                            Ok(answer) => { 
+                                                #[cfg(feature = "telemetry")]
+                                                let tag = tag_from_boxed_object(&answer);
+                                                let answer = TaggedTlObject {
+                                                    object: answer,
+                                                    #[cfg(feature = "telemetry")]
+                                                    tag
+                                                };
+                                                let ret = Answer::Object(answer);
+                                                Ok(Some(ret))
+                                            },
+                                            Err(e) => Err(e)
+                                        }
                                     },
                                     Err(e) => Err(e)
-                                }
-                            },
-                            Err(e) => Err(e)
-                        };
-                        wait.respond(Some(result));
-                    })
-                );
-        }
-        let res = match wait.wait(&mut queue_reader, true).await {
-            Some(None) => fail!("Answer was not set!"),
-            Some(Some(answer)) => answer,
-            None => {
-                log::warn!(target: CatchainClient::TARGET, "Waiting returned an internal error (query: {:?})", query);
-                fail!("Waiting returned an internal error!");
+                                };
+                                wait.respond(Some(result));
+                            }
+                        )
+                    );
+                }
+                let res = match wait.wait(&mut queue_reader, true).await {
+                    Some(None) => fail!("Answer was not set!"),
+                    Some(Some(answer)) => answer,
+                    None => {
+                        log::warn!(
+                            target: CatchainClient::TARGET, 
+                            "Waiting returned an internal error (query: {:?})", 
+                            query
+                        );
+                        fail!("Waiting returned an internal error!");
+                    }
+                };
+                if log::log_enabled!(log::Level::Trace) {
+                    let elapsed = now.elapsed();
+                    log::trace!(
+                        target: CatchainClient::TARGET, 
+                        "query elapsed: {}", 
+                        elapsed.as_millis()
+                    );
+                };
+                metrics::histogram!("catchain_client_query_time", now.elapsed());
+                worker_waiters.remove(&id.as_nanos());
+                res
             }
-        };
-        if log::log_enabled!(log::Level::Trace) {
-            let elapsed = now.elapsed();
-            log::trace!(target: CatchainClient::TARGET, "query elapsed: {}", elapsed.as_millis());
-        };
-        metrics::histogram!("catchain_client_query_time", now.elapsed());
-        self.worker_waiters.remove(&id.as_nanos());
-        res
+        );
+
+        Ok(QueryResult::Consumed(QueryAnswer::Pending(handle)))
+
     }
 }

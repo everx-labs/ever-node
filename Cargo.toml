@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ton_node'
-version = '0.55.71'
+version = '0.55.81'
 
 [workspace]
 members = [ 'storage' ]
@@ -42,31 +42,39 @@ spin = '0.7.1'
 stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
 tokio-util = '0.7'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.1' }
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = 'pre_feature-common-message' }
 catchain = { path = 'catchain' }
 ctrlc = { features = [ 'termination' ], version = '3.4.0' }
-dht = { git = 'https://github.com/tonlabs/ever-dht.git', tag = '0.6.61' }
+dht = { git = 'https://github.com/tonlabs/ever-dht.git', tag = 'pre_feature-common-message' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 metrics-exporter-prometheus = { optional = true, version = '0.12.1' }
 metrics-exporter-statsd = { optional = true, version = '0.5.0' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.6.240' }
-rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.7.232' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = 'pre_feature-common-message' }
+rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = 'pre_feature-common-message' }
 statsd = { optional = true, version = '0.15' }
 storage = { path = 'storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_abi = { git = 'https://github.com/tonlabs/ever-abi.git', optional = true, tag = '2.3.147' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.41' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.104' }
-ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git', tag = '0.7.189' }
-ton_executor = { git = 'https://github.com/tonlabs/ever-executor.git', tag = '1.16.83' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.28' }
-ton_vm = { git = 'https://github.com/tonlabs/ever-vm.git', tag = '1.8.212' }
+ton_abi = { git = 'https://github.com/tonlabs/ever-abi.git', optional = true, tag = 'pre_feature-common-message' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = 'pre_feature-common-message' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = 'pre_feature-common-message' }
+ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git', tag = 'pre_feature-common-message' }
+ton_executor = { git = 'https://github.com/tonlabs/ever-executor.git', tag = 'pre_feature-common-message' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = 'pre_feature-common-message' }
+ton_vm = { git = 'https://github.com/tonlabs/ever-vm.git', tag = 'pre_feature-common-message' }
 validator_session = { path = 'validator-session' }
+
+[dev-dependencies]
+difference = '2.0'
+ed25519-dalek = '1.0.1'
+external-ip = '4.1.0'
+pretty_assertions = '1.3'
+tokio = { features = [ 'macros' ], version = '1.5' }
 
 [features]
 default = [ 'telemetry' ]
 export_key = [ 'catchain/export_key', 'ton_types/export_key' ]
 external_db = [ 'rdkafka' ]
+fast_finality = [  ]
 gosh = [ 'ton_block/gosh', 'ton_vm/gosh' ]
 log_metrics = [  ]
 prometheus = [ 'metrics-exporter-prometheus', 'log_metrics' ]

@@ -1187,6 +1187,18 @@ impl InternalDb {
         Ok(result)
     }
 
+    #[cfg(test)]
+    pub fn load_all_top_shard_blocks_raw(&self) -> Result<HashMap<TopBlockDescrId, Vec<u8>>> {
+        let _tc = TimeChecker::new(format!("load_all_top_shard_blocks_raw"), 100);
+        let mut result = HashMap::<TopBlockDescrId, Vec<u8>>::new();
+        self.shard_top_blocks_db.for_each(&mut |id_bytes, tsb_bytes| {
+            let id = TopBlockDescrId::from_bytes(&id_bytes)?;
+            result.insert(id, tsb_bytes.to_vec());
+            Ok(true)
+        })?;
+        Ok(result)
+    }
+
     pub fn remove_top_shard_block(&self, id: &TopBlockDescrId) -> Result<()> {
         let _tc = TimeChecker::new(format!("remove_top_shard_block {}", id), 50);
         self.shard_top_blocks_db.delete(&id.to_bytes()?)
@@ -1322,3 +1334,44 @@ impl InternalDb {
     }
 }
 
+#[cfg(test)]
+impl InternalDb {
+    // return previous block berore split
+    pub fn find_all_split(&self) -> Result<Vec<BlockIdExt>> {
+        log::trace!("find_all_split");
+        let mut res = vec![];
+        self.next2_block_db.for_each(&mut |_handle_bytes, id_bytes| {
+            let mut cursor = Cursor::new(&id_bytes);
+            let block_id = BlockIdExt::deserialize(&mut cursor)?;
+            if let Ok(id_bytes) = self.prev1_block_db.get(&block_id) {
+                let mut cursor = Cursor::new(&id_bytes);
+                res.push(BlockIdExt::deserialize(&mut cursor)?);
+            }
+            Ok(true)
+        })?;
+        res.sort_by(|a, b| a.seq_no().cmp(&b.seq_no()));
+        Ok(res)
+    }
+    // return next block after merge
+    pub fn find_all_merge(&self) -> Result<Vec<BlockIdExt>> {
+        log::trace!("find_all_merge");
+        let mut res = vec![];
+        self.prev2_block_db.for_each(&mut |_handle_bytes, id_bytes| {
+            let mut cursor = Cursor::new(&id_bytes);
+            let block_id = BlockIdExt::deserialize(&mut cursor)?;
+            if let Ok(id_bytes) = self.next1_block_db.get(&block_id) {
+                let mut cursor = Cursor::new(&id_bytes);
+                res.push(BlockIdExt::deserialize(&mut cursor)?);
+            } else {
+                res.push(block_id);
+            }
+            Ok(true)
+        })?;
+        res.sort_by(|a, b| a.seq_no().cmp(&b.seq_no()));
+        Ok(res)
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/test_internal_db.rs"]
+mod tests;

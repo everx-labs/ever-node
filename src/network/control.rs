@@ -13,7 +13,7 @@
 
 use crate::{
     collator_test_bundle::CollatorTestBundle, config::{KeyRing, NodeConfigHandler},
-    engine_traits::EngineOperations, engine::Engine, network::node_network::NodeNetwork,
+    engine_traits::EngineOperations, engine::{Engine, now_duration}, network::node_network::NodeNetwork,
     validator::validator_utils::validatordescr_to_catchain_node,
     validating_utils::{supported_version, supported_capabilities}, shard_states_keeper::PinnedShardStateGuard
 };
@@ -22,7 +22,7 @@ use adnl::{
     common::{QueryResult, Subscriber, AdnlPeers},
     server::{AdnlServer, AdnlServerConfig}
 };
-use std::sync::Arc;
+use std::{sync::Arc, str::FromStr};
 use ton_api::{
     deserialize_boxed,
     ton::{
@@ -43,12 +43,32 @@ use ton_api::{
             AddAdnlId, AddValidatorAdnlAddress, AddValidatorPermanentKey, AddValidatorTempKey,
             ControlQuery, ExportPublicKey, GenerateKeyPair, Sign, GetBundle, GetFutureBundle
         },
+        smc::{
+            runtvmresult::RunTvmResultOk,
+            runtvmresult::RunTvmResultException,
+            RunTvmResult as RunTvmResultBoxed,
+        },
     },
     IntoBoxed,
 };
-use ton_block::{BlockIdExt, MsgAddressInt, Serializable, ShardIdent, MASTERCHAIN_ID, MerkleProof, ShardAccount};
+use ton_block::{BlockIdExt, MsgAddressInt, Serializable, ShardIdent, MASTERCHAIN_ID, MerkleProof, ShardAccount, Deserializable};
 use ton_block_json::serialize_config_param;
-use ton_types::{error, fail, KeyId, read_single_root_boc, Result, UInt256};
+use ton_types::{error, fail, KeyId, read_single_root_boc, Result, UInt256, SliceData, HashmapType, AccountId};
+use ton_vm::stack::StackItem;
+use ton_vm::stack::integer::IntegerData;
+
+enum CallTvmResult {
+    Ok(ton_vm::executor::Engine, i32),
+    Exception(ton_vm::stack::StackItem, i32),
+}
+
+enum RunTvmMode {
+    Stack = 0x1,
+    C7 = 0x2,
+    Messages = 0x4,
+    Data = 0x8,
+    Code = 0xA,
+}
 
 pub struct ControlServer {
     adnl: AdnlServer
@@ -152,27 +172,366 @@ impl ControlQuerySubscriber {
         Ok(config_info)
     }
 
+    fn stack_item_from_tl(item: ton::tvm::StackEntry) -> Result<ton_vm::stack::StackItem> {
+        Ok(match item {
+            ton::tvm::StackEntry::Tvm_StackEntryBuilder(ton::tvm::stackentry::StackEntryBuilder { builder }) => {
+                ton_vm::stack::StackItem::builder(ton_types::BuilderData::from_cell(&read_single_root_boc(&builder.bytes.0)?)?)
+            },
+            ton::tvm::StackEntry::Tvm_StackEntryCell(ton::tvm::stackentry::StackEntryCell { cell }) => {
+                ton_vm::stack::StackItem::cell(read_single_root_boc(&cell.bytes.0)?)
+            },
+            ton::tvm::StackEntry::Tvm_StackEntrySlice(ton::tvm::stackentry::StackEntrySlice { slice }) => {
+                let cell = read_single_root_boc(&slice.bytes)?;
+                let slice = ton_vm::stack::slice_deserialize(&mut SliceData::load_cell(cell)?)?;
+                ton_vm::stack::StackItem::slice(slice)
+            },
+            ton::tvm::StackEntry::Tvm_StackEntryList(ton::tvm::stackentry::StackEntryList { list }) => {
+                let mut list = list.only().elements.0;
+                let mut result = ton_vm::stack::StackItem::None;
+                while let Some(item) = list.pop() {
+                    result = ton_vm::stack::StackItem::tuple(vec![Self::stack_item_from_tl(item)?, result]);
+                }   
+                result
+            },
+            ton::tvm::StackEntry::Tvm_StackEntryTuple(ton::tvm::stackentry::StackEntryTuple { tuple }) => {
+                let mut result = vec![];
+                for item in tuple.only().elements.0 {
+                    result.push(Self::stack_item_from_tl(item)?);
+                }
+                ton_vm::stack::StackItem::tuple(result)
+            },
+            ton::tvm::StackEntry::Tvm_StackEntryNumber(ton::tvm::stackentry::StackEntryNumber { number }) => {
+                if number.number().eq_ignore_ascii_case("nan") {
+                    ton_vm::stack::StackItem::nan()
+                } else {
+                    ton_vm::stack::StackItem::integer(
+                        ton_vm::stack::integer::IntegerData::from_str(number.number())
+                            .map_err(|_| error!("invalid number stack item {}", number.number()))?
+                    )
+                }
+            },
+            ton::tvm::StackEntry::Tvm_StackEntryNull | ton::tvm::StackEntry::Tvm_StackEntryUnsupported => {
+                ton_vm::stack::StackItem::None
+            },
+        })
+    }
+
+    fn convert_stack_from_tl(stack: Vec<ton::tvm::StackEntry>) -> Result<ton_vm::stack::Stack> {
+        let mut result = ton_vm::stack::Stack::new();
+        for entry in stack {
+            result.push(Self::stack_item_from_tl(entry)?);
+        }
+        Ok(result)
+    }
+
+    fn try_tuple_to_list(
+        mut tuple_items: &[ton_vm::stack::StackItem],
+    ) -> Result<Option<Vec<ton::tvm::StackEntry>>> {
+        let mut result = vec![];
+        let item_type = tuple_items.get(0).map(|item| std::mem::discriminant(item));
+
+        loop {
+            if tuple_items.len() != 2 || Some(std::mem::discriminant(&tuple_items[0])) != item_type {
+                return Ok(None);
+            }
+            result.push(Self::stack_item_to_tl(&tuple_items[0])?);
+            match &tuple_items[1] {
+                ton_vm::stack::StackItem::Tuple(items) => tuple_items = items.as_ref(),
+                ton_vm::stack::StackItem::None => break,
+                _ => return Ok(None),
+            }
+        }
+
+        Ok(Some(result))
+    }
+
+    fn stack_item_to_tl(item: &ton_vm::stack::StackItem) -> Result<ton::tvm::StackEntry> {
+        Ok(match item {
+            ton_vm::stack::StackItem::Builder(builder) => {
+                ton::tvm::StackEntry::Tvm_StackEntryBuilder(ton::tvm::stackentry::StackEntryBuilder {
+                    builder: ton::tvm::builder::Builder {
+                        bytes: ton_types::boc::write_boc(&builder.as_ref().clone().into_cell()?)?.into()
+                    }
+                })
+            }
+            ton_vm::stack::StackItem::Continuation(_) => {
+                ton::tvm::StackEntry::Tvm_StackEntryUnsupported
+            }
+            ton_vm::stack::StackItem::Integer(int) => {
+                ton::tvm::StackEntry::Tvm_StackEntryNumber(ton::tvm::stackentry::StackEntryNumber {
+                    number: ton_api::ton::tvm::Number::Tvm_NumberDecimal(ton::tvm::numberdecimal::NumberDecimal {
+                        number: int.to_str_radix(10)
+                    })
+                })
+            }
+            ton_vm::stack::StackItem::None => {
+                ton::tvm::StackEntry::Tvm_StackEntryNull
+            }
+            ton_vm::stack::StackItem::Cell(cell) => {
+                ton::tvm::StackEntry::Tvm_StackEntryCell(ton::tvm::stackentry::StackEntryCell {
+                    cell: ton::tvm::cell::Cell {
+                        bytes: ton_api::ton::bytes(ton_types::boc::write_boc(&cell)?)
+                    }
+                })
+            }
+            ton_vm::stack::StackItem::Slice(slice) => {
+                ton::tvm::StackEntry::Tvm_StackEntrySlice(ton::tvm::stackentry::StackEntrySlice {
+                    slice: ton::tvm::slice::Slice {
+                        bytes: ton_types::boc::write_boc(&ton_vm::stack::slice_serialize(&slice)?.into_cell()?)?.into()
+                    }
+                })
+            }
+            ton_vm::stack::StackItem::Tuple(items) => {
+                if let Some(elements) = Self::try_tuple_to_list(items)? {
+                    ton::tvm::StackEntry::Tvm_StackEntryList(ton::tvm::stackentry::StackEntryList {
+                        list: ton_api::ton::tvm::List::Tvm_List(ton::tvm::list::List { elements: elements.into() })
+                    })
+                } else {
+                    let mut elements = Vec::with_capacity(items.len());
+                    for item in items.as_ref() {
+                        elements.push(Self::stack_item_to_tl(item)?);
+                    }
+                    ton::tvm::StackEntry::Tvm_StackEntryTuple(ton::tvm::stackentry::StackEntryTuple {
+                        tuple: ton_api::ton::tvm::Tuple::Tvm_Tuple(ton::tvm::tuple::Tuple { elements: elements.into() })
+                    })
+                }
+
+            }
+        })
+    }
+
+    fn convert_stack_to_tl(stack: &ton_vm::stack::Stack) -> Result<Vec<ton::tvm::StackEntry>> {
+        let mut result = Vec::with_capacity(stack.depth());
+        for item in stack.iter() {
+            result.push(Self::stack_item_to_tl(item)?);
+        }
+        Ok(result)
+    }
+
+    async fn run_account_on_tvm(
+        &self,
+        stack: ton_vm::stack::Stack,
+        account: ShardAccount,
+        state_guard: PinnedShardStateGuard,
+        mode: i32,
+    ) -> Result<RunTvmResultBoxed> {
+        let config_state_guard = if state_guard.state().block_id().shard().is_masterchain() {
+            state_guard.clone()
+        } else {
+            let master_ref = state_guard
+                .state()
+                .state()?
+                .master_ref()
+                .ok_or_else(|| error!("No master ref in shard state"))?;
+            self.engine()?.load_and_pin_state(&master_ref.master.clone().master_block_id().1).await?
+        };
+
+        let config = config_state_guard.state().config_params()?;
+        let mut account = account.read_account()?;
+
+        match Self::call_tvm(&mut account, stack, config)? {
+            CallTvmResult::Ok(engine, exit_code) => {
+                let mut result = RunTvmResultOk::default();
+                result.block_root_hash = state_guard.state().block_id().root_hash.clone();
+                result.mode = mode;
+                result.exit_code = exit_code;
+
+                if mode & RunTvmMode::Stack as i32 != 0 {
+                    result.stack = Some(Self::convert_stack_to_tl(engine.stack())?.into());
+                }
+                if mode & RunTvmMode::C7 as i32 != 0 {
+                    result.init_c7 = Some(Self::stack_item_to_tl(engine.ctrl(7)?)?);
+                }
+                if mode & RunTvmMode::Code as i32 != 0 {
+                    result.code = Some(ton_types::boc::write_boc(&account.get_code().unwrap_or_default())?.into());
+                }
+                if mode & RunTvmMode::Data as i32 != 0 {
+                    result.data = Some(ton_types::boc::write_boc(&account.get_data().unwrap_or_default())?.into());
+                }
+                if mode & RunTvmMode::Messages as i32 != 0 {
+                    let actions_cell = engine.get_actions().as_cell()?.clone();
+                    let actions = ton_block::OutActions::construct_from_cell(actions_cell)?;
+                
+                    let mut msgs = vec![];
+                    for action in actions.iter().rev() {
+                        match action {
+                            ton_block::OutAction::SendMsg { out_msg, .. } => {
+                                msgs.push(out_msg.write_to_bytes()?.into());
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    result.messages = Some(msgs.into());
+                }
+
+                Ok(RunTvmResultBoxed::Smc_RunTvmResultOk(result))
+            }
+            CallTvmResult::Exception(exit_arg, exit_code) => {
+                Ok(RunTvmResultBoxed::Smc_RunTvmResultException(
+                    RunTvmResultException {
+                        block_root_hash: state_guard.state().block_id().root_hash.clone() ,
+                        exit_code,
+                        exit_arg: Self::stack_item_to_tl(&exit_arg)?,
+                    }
+                ))
+            }
+        }
+    }
+
+    async fn run_tvm_stack_by_block(&self, params: ton::rpc::smc::RunTvmByBlock) -> Result<RunTvmResultBoxed> {
+        let stack = Self::convert_stack_from_tl(params.stack.0)?;
+
+        let (account, state_guard) = self.find_account_by_block(&params.account_id.clone().into(), &params.block_root_hash)
+            .await?
+            .ok_or_else(|| error!("Account {} does not exist in block {}", params.account_id, params.block_root_hash))?;
+
+        self.run_account_on_tvm(stack, account, state_guard, params.mode).await
+    }
+
+    async fn run_tvm_stack(&self, params: ton::rpc::smc::RunTvm) -> Result<RunTvmResultBoxed> {
+        let stack = Self::convert_stack_from_tl(params.stack.0)?;
+
+        let address: MsgAddressInt = params.account_address.account_address.parse()?;
+        let (account, state_guard) = self.find_account(&address)
+            .await?
+            .ok_or_else(|| error!("Account {} does not exist", params.account_address.account_address))?;
+
+        self.run_account_on_tvm(stack, account, state_guard, params.mode).await
+    }
+
+    fn create_stack_with_message(
+        account: &ShardAccount,
+        message: &ton_block::Message,
+        message_cell: ton_types::Cell,
+    ) -> Result<ton_vm::stack::Stack> {
+        let acc_balance = account.read_account()?.balance().cloned().unwrap_or_default();
+
+        let mut stack = ton_vm::stack::Stack::new();
+        stack
+            .push(ton_vm::int!(acc_balance.grams.as_u128()))
+            .push(ton_vm::int!(0))
+            .push(ton_vm::stack::StackItem::Cell(message_cell))
+            .push(ton_vm::stack::StackItem::Slice(message.body().unwrap_or_default()))
+            .push(ton_vm::int!(-1));
+
+        Ok(stack)
+    }
+
+    async fn run_tvm_msg_by_block(&self, params: ton::rpc::smc::RunTvmMsgByBlock) -> Result<RunTvmResultBoxed> {
+        let msg_cell = ton_types::read_single_root_boc(&params.message.0)?;
+        let msg = ton_block::Message::construct_from_cell(msg_cell.clone())?;
+        let header = msg.ext_in_header()
+            .ok_or_else(|| error!("Wrong message type: only external inbound messages supported"))?;
+
+        let (account, state_guard) = self.find_account_by_block(&header.dst.address(), &params.block_root_hash)
+            .await?
+            .ok_or_else(|| error!("Account {} does not exist in block {}", header.dst, params.block_root_hash))?;
+        
+        let stack = Self::create_stack_with_message(&account, &msg, msg_cell)?;
+        self.run_account_on_tvm(stack, account, state_guard, params.mode).await
+    }
+
+    async fn run_tvm_msg(&self, params: ton::rpc::smc::RunTvmMsg) -> Result<RunTvmResultBoxed> {
+        let msg_cell = ton_types::read_single_root_boc(&params.message.0)?;
+        let msg = ton_block::Message::construct_from_cell(msg_cell.clone())?;
+        let header = msg.ext_in_header()
+            .ok_or_else(|| error!("Wrong message type: only external inbound messages supported"))?;
+
+        let (account, state_guard) = self.find_account(&header.dst)
+            .await?
+            .ok_or_else(|| error!("Account {} does not exist", header.dst))?;
+
+        let stack = Self::create_stack_with_message(&account, &msg, msg_cell)?;
+        self.run_account_on_tvm(stack, account, state_guard, params.mode).await
+    }
+    
+    fn call_tvm(
+        account: &mut ton_block::Account,
+        stack: ton_vm::stack::Stack,
+        config: &ton_block::ConfigParams,
+    ) -> Result<CallTvmResult> {
+        let code = account
+            .get_code()
+            .ok_or_else(|| error!("Account has no code"))?;
+        let data = account.get_data().unwrap_or_default();
+        let addr = account
+            .get_addr()
+            .ok_or_else(|| error!("Account has no address"))?;
+        let balance = account
+            .balance()
+            .ok_or_else(|| error!("Account has no balance"))?;
+
+        let mut ctrls = ton_vm::stack::savelist::SaveList::new();
+        ctrls
+            .put(4, &mut ton_vm::stack::StackItem::Cell(data))
+            .map_err(|err| error!("can not put data to registers: {}", err))?;
+
+        let smc_info = ton_vm::SmartContractInfo {
+            capabilities: config.capabilities(),
+            myself: SliceData::load_builder(addr.write_to_new_cell().unwrap_or_default()).unwrap(),
+            balance: balance.clone(),
+            config_params: config.config_params.data().cloned(),
+            unix_time: now_duration().as_secs() as u32,
+            ..Default::default()
+        };
+        ctrls
+            .put(7, &mut smc_info.into_temp_data_item())?;
+
+        let mut engine = ton_vm::executor::Engine::with_capabilities(
+            config.capabilities()
+        ).setup(
+            SliceData::load_cell(code)?,
+            Some(ctrls),
+            Some(stack),
+            None,
+        );
+
+        match engine.execute() {
+            Err(err) => {
+                let exception = ton_vm::error::tvm_exception(err)?;
+                let code = if let Some(code) = exception.custom_code() {
+                    code
+                } else {
+                    !(exception
+                        .exception_code()
+                        .unwrap_or(ton_types::ExceptionCode::UnknownError) as i32)
+                };
+
+                Ok(CallTvmResult::Exception(exception.value, code))
+            }
+            Ok(exit_code) => match engine.get_committed_state().get_root() {
+                ton_vm::stack::StackItem::Cell(data) => {
+                    account.set_data(data.clone());
+                    Ok(CallTvmResult::Ok(engine, exit_code))
+                }
+                _ => Err(error!("invalid committed state")),
+            },
+        }
+    }
+
     async fn get_account_state(&self, address: AccountAddress) -> Result<ShardAccountStateBoxed> {
-        Self::convert_account_state(self.find_account(address).await?)
+        let address: MsgAddressInt = address.account_address.parse()?;
+        Self::convert_account_state(self.find_account(&address).await?)
     }
 
     async fn get_account_by_block(&self, account_id: UInt256, block_root_hash: UInt256) -> Result<ShardAccountStateBoxed> {
-        Self::convert_account_state(self.find_account_by_block(account_id, block_root_hash).await?)
+        Self::convert_account_state(self.find_account_by_block(&account_id.into(), &block_root_hash).await?)
     }
 
     async fn get_account_meta(&self, address: AccountAddress) -> Result<ShardAccountMetaBoxed> {
-        Self::convert_account_meta(self.find_account(address).await?)
+        let address: MsgAddressInt = address.account_address.parse()?;
+        Self::convert_account_meta(self.find_account(&address).await?)
     }
 
     async fn get_account_meta_by_block(&self, account_id: UInt256, block_root_hash: UInt256) -> Result<ShardAccountMetaBoxed> {
-        Self::convert_account_meta(self.find_account_by_block(account_id, block_root_hash).await?)
+        Self::convert_account_meta(self.find_account_by_block(&account_id.into(), &block_root_hash).await?)
     }
 
     async fn find_account(
-        &self, address: AccountAddress
+        &self, addr: &MsgAddressInt
     ) -> Result<Option<(ShardAccount, PinnedShardStateGuard)>> {
         let engine = self.engine()?;
-        let addr: MsgAddressInt = address.account_address.parse()?;
         let state = if addr.is_masterchain() {
             let mc_block_id = engine.load_last_applied_mc_block_id()?
                 .ok_or_else(|| error!("Cannot load last_applied_mc_block_id!"))?;
@@ -182,29 +541,29 @@ impl ControlQuerySubscriber {
             let mc_block_id = mc_block_id.ok_or_else(
                 || error!("Cannot load shard_client_mc_block_id!")
             )?;
-            let mc_state = engine.load_state(&mc_block_id).await?;
+            let mc_state = engine.load_and_pin_state(&mc_block_id).await?;
             let mut shard_state = None;
-            for id in mc_state.top_blocks(addr.workchain_id())? {
+            for id in mc_state.state().top_blocks(addr.workchain_id())? {
                 if id.shard().contains_account(addr.address().clone())? {
                     shard_state = engine.load_and_pin_state(&id).await.ok();
                     break;
                 }
             }
             shard_state.ok_or_else(
-                || error!("Cannot find actual shard for account {}", &address.account_address)
+                || error!("Cannot find actual shard for account {}", addr)
             )?
         };
         Ok(state.state().shard_account(&addr.address())?.map(|acc| (acc, state)))
     }
 
     async fn find_account_by_block(
-        &self, account_id: UInt256, block_root_hash: UInt256
+        &self, account_id: &AccountId, block_root_hash: &UInt256
     ) -> Result<Option<(ShardAccount, PinnedShardStateGuard)>> {
         let engine = self.engine()?;
-        let block_id = engine.find_full_block_id(&block_root_hash)?
+        let block_id = engine.find_full_block_id(block_root_hash)?
             .ok_or_else(|| error!("Cannot find full block id by root hash"))?;
         let shard_state = engine.load_and_pin_state(&block_id).await?;
-        Ok(shard_state.state().shard_account(&account_id.into())?.map(|acc| (acc, shard_state)))
+        Ok(shard_state.state().shard_account(account_id)?.map(|acc| (acc, shard_state)))
     }
 
     fn convert_account_state(
@@ -571,6 +930,105 @@ impl ControlQuerySubscriber {
             Err(object) => return Ok(QueryResult::Rejected(object))
         };
         log::debug!("query (control server): {:?}", query);
+        let query = match query.downcast::<ton::rpc::raw::GetShardAccountState>() {
+            Ok(account) => {
+                let answer = self.get_account_state(account.account_address).await?;
+                return QueryResult::consume_boxed(
+                    answer,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::raw::GetShardAccountMeta>() {
+            Ok(account) => {
+                let answer = self.get_account_meta(account.account_address).await?;
+                return QueryResult::consume_boxed(
+                    answer,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::raw::GetAccountByBlock>() {
+            Ok(account) => {
+                let answer = self.get_account_by_block(account.account_id, account.block_root_hash).await?;
+                return QueryResult::consume_boxed(
+                    answer,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::raw::GetAccountMetaByBlock>() {
+            Ok(account) => {
+                let answer = self.get_account_meta_by_block(account.account_id, account.block_root_hash).await?;
+                return QueryResult::consume_boxed(
+                    answer,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::raw::GetAppliedShardsInfo>() {
+            Ok(_) => {
+                let answer = self.get_applied_shards_info().await?;
+                return QueryResult::consume_boxed(
+                    answer,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::smc::RunTvm>() {
+            Ok(params) => {
+                let answer = self.run_tvm_stack(params).await?;
+                return QueryResult::consume_boxed(
+                    answer,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::smc::RunTvmByBlock>() {
+            Ok(params) => {
+                let answer = self.run_tvm_stack_by_block(params).await?;
+                return QueryResult::consume_boxed(
+                    answer,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::smc::RunTvmMsg>() {
+            Ok(params) => {
+                let answer = self.run_tvm_msg(params).await?;
+                return QueryResult::consume_boxed(
+                    answer,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::smc::RunTvmMsgByBlock>() {
+            Ok(params) => {
+                let answer = self.run_tvm_msg_by_block(params).await?;
+                return QueryResult::consume_boxed(
+                    answer,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
         let query = match query.downcast::<GenerateKeyPair>() {
             Ok(_) => return QueryResult::consume(
                 self.process_generate_keypair().await?,
@@ -667,61 +1125,6 @@ impl ControlQuerySubscriber {
             }
             Err(query) => query
         };
-        let query = match query.downcast::<ton::rpc::raw::GetShardAccountState>() {
-            Ok(account) => {
-                let answer = self.get_account_state(account.account_address).await?;
-                return QueryResult::consume_boxed(
-                    answer,
-                    #[cfg(feature = "telemetry")]
-                    None
-                )
-            },
-            Err(query) => query
-        };
-        let query = match query.downcast::<ton::rpc::raw::GetShardAccountMeta>() {
-            Ok(account) => {
-                let answer = self.get_account_meta(account.account_address).await?;
-                return QueryResult::consume_boxed(
-                    answer,
-                    #[cfg(feature = "telemetry")]
-                    None
-                )
-            },
-            Err(query) => query
-        };
-        let query = match query.downcast::<ton::rpc::raw::GetAccountByBlock>() {
-            Ok(account) => {
-                let answer = self.get_account_by_block(account.account_id, account.block_root_hash).await?;
-                return QueryResult::consume_boxed(
-                    answer,
-                    #[cfg(feature = "telemetry")]
-                    None
-                )
-            },
-            Err(query) => query
-        };
-        let query = match query.downcast::<ton::rpc::raw::GetAccountMetaByBlock>() {
-            Ok(account) => {
-                let answer = self.get_account_meta_by_block(account.account_id, account.block_root_hash).await?;
-                return QueryResult::consume_boxed(
-                    answer,
-                    #[cfg(feature = "telemetry")]
-                    None
-                )
-            },
-            Err(query) => query
-        };
-        let query = match query.downcast::<ton::rpc::raw::GetAppliedShardsInfo>() {
-            Ok(_) => {
-                let answer = self.get_applied_shards_info().await?;
-                return QueryResult::consume_boxed(
-                    answer,
-                    #[cfg(feature = "telemetry")]
-                    None
-                )
-            },
-            Err(query) => query
-        };
         let query = match query.downcast::<ton::rpc::lite_server::GetConfigParams>() {
             Ok(query) => {
                 let param_number = query.param_list.iter().next().ok_or_else(|| error!("Invalid param_number"))?;
@@ -805,3 +1208,6 @@ impl Subscriber for ControlQuerySubscriber {
     }
 }
 
+#[cfg(test)]
+#[path = "../tests/test_control.rs"]
+mod tests;

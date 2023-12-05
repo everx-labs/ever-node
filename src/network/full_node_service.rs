@@ -16,7 +16,7 @@ use crate::{
     network::neighbours::{PROTOCOL_CAPABILITIES, PROTOCOL_VERSION}
 };
 
-use adnl::common::{AdnlPeers, Answer, QueryResult, TaggedByteVec, TaggedObject};
+use adnl::common::{AdnlPeers, Answer, QueryAnswer, QueryResult, TaggedByteVec, TaggedObject};
 use overlay::QueriesConsumer;
 use std::{cmp::min, fmt::Debug, sync::Arc};
 #[cfg(feature = "telemetry")]
@@ -703,7 +703,7 @@ impl FullNodeOverlayService {
                             return Err(e)
                         }
                     };
-                    Ok(QueryResult::Consumed(Some(Answer::Raw(answer))))
+                    Ok(QueryResult::Consumed(QueryAnswer::Ready(Some(Answer::Raw(answer)))))
                 },
                 Err(query) => Err(query)
             }
@@ -750,7 +750,7 @@ impl FullNodeOverlayService {
                             return Err(e)
                         }
                     };
-                    Ok(QueryResult::Consumed(Some(Answer::Raw(answer))))
+                    Ok(QueryResult::Consumed(QueryAnswer::Ready(Some(Answer::Raw(answer)))))
                 },
                 Err(query) => Err(query)
             }

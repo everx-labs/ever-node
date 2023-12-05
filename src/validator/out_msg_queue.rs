@@ -34,6 +34,10 @@ use ton_types::{
     HashmapType, HashmapFilterResult, HashmapRemover, UsageTree, HashmapSubtree,
 };
 
+#[cfg(test)]
+#[path = "tests/test_out_msg_queue.rs"]
+mod tests;
+
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ProcessedUptoStuff {
     /// An abstract at-least-an-ancestor shard which can refer to
@@ -51,7 +55,11 @@ pub struct ProcessedUptoStuff {
     pub last_msg_hash: UInt256,
 
     /// An original shard in case of altering [`ProcessedUptoStuff::shard`].
+    #[cfg(feature = "fast_finality")]
+    original_shard: Option<u64>,
     /// A computed masterchain block seqno.
+    #[cfg(feature = "fast_finality")]
+    real_mc_seqno: u32,
 
     mc_end_lt: u64,
     ref_shards: Option<ShardHashes>,
@@ -63,17 +71,35 @@ impl ProcessedUptoStuff {
         seqno: u32,
         last_msg_lt: u64,
         last_msg_hash: UInt256,
+        #[cfg(feature = "fast_finality")]
+        original_shard: Option<u64>,
+        #[cfg(feature = "fast_finality")]
+        real_mc_seqno: u32,
     ) -> Self {
         Self {
             shard,
             seqno,
             last_msg_lt,
             last_msg_hash,
+            #[cfg(feature = "fast_finality")]
+            original_shard,
+            #[cfg(feature = "fast_finality")]
+            real_mc_seqno,
             mc_end_lt: 0,
             ref_shards: None,
         }
     }
 
+    #[cfg(feature = "fast_finality")]
+    pub fn exact_shard(&self) -> u64 {
+        self.original_shard.unwrap_or(self.shard)
+    }
+
+    #[cfg(feature = "fast_finality")]
+    pub fn mc_seqno(&self) -> u32 {
+        self.real_mc_seqno
+    }
+    #[cfg(not(feature = "fast_finality"))]
     pub fn mc_seqno(&self) -> u32 {
         self.seqno
     }
@@ -278,6 +304,7 @@ impl OutMsgQueueInfoStuff {
         cached_states: &mut CachedStates,
     ) -> Result<Self> {
         // NOTE: no new states are loaded for an old implementation
+        #[cfg(not(feature = "fast_finality"))]
         let _ = cached_states;
 
         // unpack ProcessedUptoStuff
@@ -288,10 +315,12 @@ impl OutMsgQueueInfoStuff {
             let (key, mut value) = item?;
             let key = ProcessedInfoKey::construct_from(&mut SliceData::load_builder(key)?)?;
             let value = ProcessedUpto::construct_from(&mut value)?;
+            #[cfg(not(feature = "fast_finality"))]
             if value.original_shard.is_some() {
                 fail!("ProcessedUpto could not contain original_shard");
             }
 
+            #[cfg(not(feature = "fast_finality"))]
             let entry = {
                 if key.mc_seqno < min_seqno {
                     min_seqno = key.mc_seqno;
@@ -301,6 +330,39 @@ impl OutMsgQueueInfoStuff {
                     key.mc_seqno,
                     value.last_msg_lt,
                     value.last_msg_hash,
+                )
+            };
+
+            #[cfg(feature = "fast_finality")]
+            let entry = {
+                let real_mc_seqno = if block_id.shard().is_masterchain() {
+                    key.mc_seqno
+                } else {
+                    let shard = ShardIdent::with_tagged_prefix(
+                        block_id.shard().workchain_id(),
+                        value.original_shard.unwrap_or(key.shard),
+                    )?;
+    
+                    let state = cached_states
+                        .request_shard_state(shard, key.mc_seqno, Some(10_000))
+                        .await?;
+
+                    state.state_or_queue()?.master_ref()
+                        .ok_or_else(|| error!("shard state {block_id} doesn't have master_ref"))?
+                        .master.seq_no
+                };
+    
+                if real_mc_seqno < min_seqno {
+                    min_seqno = real_mc_seqno;
+                };
+    
+                ProcessedUptoStuff::with_params(
+                    key.shard,
+                    key.mc_seqno,
+                    value.last_msg_lt,
+                    value.last_msg_hash,
+                    value.original_shard,
+                    real_mc_seqno,
                 )
             };
 
@@ -449,6 +511,9 @@ impl OutMsgQueueInfoStuff {
         for mut entry in std::mem::take(&mut self.entries).drain(..) {
             if ShardIdent::shard_intersects(entry.shard, sibling.shard_prefix_with_tag()) {
                 let mut entry = entry.clone();
+                #[cfg(feature = "fast_finality")] {
+                    entry.original_shard = Some(entry.exact_shard());
+                }
                 entry.shard = ShardIdent::shard_intersection(entry.shard, sibling.shard_prefix_with_tag());
                 log::debug!("to sibling {}", entry);
                 if min_seqno > entry.mc_seqno() {
@@ -457,6 +522,9 @@ impl OutMsgQueueInfoStuff {
                 entries.push(entry);
             }
             if ShardIdent::shard_intersects(entry.shard, subshard.shard_prefix_with_tag()) {
+                #[cfg(feature = "fast_finality")] {
+                    entry.original_shard = Some(entry.exact_shard());
+                }
                 entry.shard = ShardIdent::shard_intersection(entry.shard, subshard.shard_prefix_with_tag());
                 log::debug!("to us {}", entry);
                 if self.min_seqno > entry.mc_seqno() {
@@ -497,7 +565,8 @@ impl OutMsgQueueInfoStuff {
             let value = ProcessedUpto::with_params(
                 entry.last_msg_lt, 
                 entry.last_msg_hash.clone(), 
-                 None,
+                #[cfg(feature = "fast_finality")] entry.original_shard,
+                #[cfg(not(feature = "fast_finality"))] None,
             );
             proc_info.set(&key, &value)?
         }
@@ -521,7 +590,14 @@ impl OutMsgQueueInfoStuff {
                     entry.mc_end_lt = next_mc_end_lt;
                     entry.ref_shards = next_shards.cloned();
                 } else {
+                    #[cfg(not(feature = "fast_finality"))]
                     let (shard, seqno) = (ShardIdent::masterchain(), std::cmp::min(entry.seqno, seqno));
+
+                    #[cfg(feature = "fast_finality")]
+                    let (shard, seqno) = (
+                        ShardIdent::with_tagged_prefix(workchain, entry.exact_shard())?,
+                        entry.seqno
+                    );
 
                     let (mc_end_lt, ref_shards) = cached_states.get_entry_data(&shard, seqno)?;
 
@@ -630,6 +706,8 @@ impl OutMsgQueueInfoStuff {
     pub fn add_processed_upto(
         &mut self,
         seqno: u32,
+        #[cfg(feature = "fast_finality")]
+        real_mc_seqno: u32,
         last_msg_lt: u64,
         last_msg_hash: UInt256,
     ) -> Result<()> {
@@ -638,6 +716,10 @@ impl OutMsgQueueInfoStuff {
             seqno,
             last_msg_lt,
             last_msg_hash,
+            #[cfg(feature = "fast_finality")]
+            real_mc_seqno,
+            #[cfg(feature = "fast_finality")]
+            original_shard: None,
             mc_end_lt: 0,
             ref_shards: None
         };
@@ -772,6 +854,10 @@ impl MsgQueueManager {
 
         // NOTE: cached previous states (for shard) are not needed for the
         // original queue manager implementation.
+        #[cfg(feature = "fast_finality")]
+        for prev_state in prev_states {
+            cached_states.insert(prev_state.clone());
+        }
 
         // Cache the next state if exists and precompute the next `mc_end_lt`
         // to reduce the compute of state queries in `fix_processed_upto`
@@ -806,6 +892,8 @@ impl MsgQueueManager {
                     engine.clone().wait_state(nb_shard_record.block_id(), Some(1_000), true).await?;
 
                 // Non-masterchain shard states are only required for the new implementation
+                #[cfg(feature = "fast_finality")]
+                cached_states.insert(queue_part.clone());
 
                 let nb = OutMsgQueueInfoStuff::from_queue_part(
                     nb_block_id.clone(),
@@ -816,11 +904,18 @@ impl MsgQueueManager {
                 ).await?;
 
                 // Request masterchain states of neighbours for the old implementation
+                #[cfg(not(feature = "fast_finality"))]
                 for entry in nb.entries() {
                     cached_states.request_mc_state(last_mc_state, entry.mc_seqno(), Some(10_000)).await?;
                 }
 
                 // Request exact shard states of neighbours for the new implementation
+                #[cfg(feature = "fast_finality")]
+                for entry in nb.entries() {
+                    let shard = 
+                        ShardIdent::with_tagged_prefix(nb_block_id.shard().workchain_id(), entry.exact_shard())?;
+                    cached_states.request_shard_state(shard, entry.seqno, Some(10_000)).await?;
+                }
 
                 nb
             };
@@ -889,12 +984,15 @@ impl MsgQueueManager {
         }
 
         // `ProcessedUptoStuff` seqno is a masterchain seqno for the old implementation
+        #[cfg(not(feature = "fast_finality"))]
         let seqno = {
             _ = new_seq_no; // unused
             last_mc_state.block_id().seq_no()
         };
 
         // `ProcessedUptoStuff` seqno is an exact shard seqno for the new implementation
+        #[cfg(feature = "fast_finality")]
+        let seqno = new_seq_no;
 
         prev_out_queue_info.fix_processed_upto(seqno, 0, None, &cached_states, &stop_flag)?;
         next_out_queue_info.fix_processed_upto(seqno, next_mc_end_lt, Some(shards.as_ref()), &cached_states, &stop_flag)?;
@@ -932,10 +1030,18 @@ impl MsgQueueManager {
         for entry in nb.entries() {
             // TODO add loop and stop_flag checking
 
-             {
+            #[cfg(not(feature = "fast_finality"))] {
                 cached_states.request_mc_state(last_mc_state, entry.seqno, Some(10_000)).await?;
             }
 
+            #[cfg(feature = "fast_finality")] {
+                if state.shard().is_masterchain() {
+                    cached_states.request_mc_state(last_mc_state, entry.seqno, Some(10_000)).await?;
+                } else {
+                    let shard = ShardIdent::with_tagged_prefix(state.shard().workchain_id(), entry.exact_shard())?;
+                    cached_states.request_shard_state(shard, entry.seqno, Some(10_000)).await?;
+                }
+            }
         }
         Ok(nb)
     }
@@ -1343,7 +1449,19 @@ impl CachedStates {
                     Some(master_ref) => master_ref.master.end_lt,
                 };
 
+                #[cfg(not(feature = "fast_finality"))]
                 let shard_hashes = state_stuff.shards()?.clone();
+
+                #[cfg(feature = "fast_finality")]
+                let shard_hashes = match state_stuff.shard_hashes_raw_opt() {
+                    Some(shard_hashes) => shard_hashes.clone(),
+                    // TODO: replace shard hashes with something more optimal
+                    None => state
+                        .ref_shard_blocks()
+                        .map(crate::validating_utils::extend_ref_shard_blocks)
+                        .transpose()?
+                        .unwrap_or_default(),
+                };
 
                 return Ok((mc_end_lt, shard_hashes));
             }
@@ -1383,6 +1501,132 @@ impl CachedStates {
         Ok(())
     }
 
+    #[cfg(feature = "fast_finality")]
+    pub async fn request_shard_state(
+        &mut self,
+        shard: ShardIdent,
+        seq_no: u32,
+        timeout_ms: Option<u64>,
+    ) -> Result<Arc<ShardStateStuff>> {
+        let has_requested_shard = match self.states.get(&shard) {
+            Some(shard) => {
+                if let Some(shard_state) = shard.get(&seq_no) {
+                    return Ok(shard_state.clone())
+                }
+                true
+            }
+            None => false,
+        };
+
+        let mut closest_state = None;
+
+        // Fast path if the specified path already exists
+        if has_requested_shard {
+            if let Some(states) = &self.states.get(&shard) {
+                if let Some((_, state)) = states.range(seq_no..).next() {
+                    closest_state = Some(state.clone());
+                }
+            }
+        }
+
+        // Slow path is there were splits or merges for the specified shard
+        if closest_state.is_none() {
+            for (known_shard, states) in &self.states {
+                // Ignore shards where we will not find some references
+                if !shard.intersect_with(known_shard) {
+                    continue;
+                }
+
+                // Find the closest state in some shard
+                let Some((_, state)) = states.range(seq_no..).next() else {
+                    continue;
+                };
+
+                // Update the closest state if the found one is closer
+                if !matches!(&closest_state, Some(closest_state) if closest_state.seq_no() <= state.seq_no()) {
+                    closest_state = Some(state.clone());
+                }
+            }
+        }
+
+        if log::log_enabled!(log::Level::Trace) {
+            let mut cached_list = string_builder::Builder::default();
+            for (shard, states) in &self.states {
+                for seqno in states.keys() {
+                    cached_list.append(format!("\n{shard}:{seqno}"));
+                }
+            }
+            log::trace!("Cached states for {shard}:{seq_no}: {}", cached_list.string().unwrap_or_default());
+        }
+
+        // Find full block id
+        let is_target_block = |block_id: &BlockIdExt| {
+            block_id.shard() == &shard && block_id.seq_no == seq_no
+        };
+        let is_possible_block = |block_id: &BlockIdExt| {
+            block_id.shard().intersect_with(&shard) && block_id.seq_no > seq_no
+        };
+
+        let mut closest_block_id = match closest_state {
+            Some(state) => state.block_id().clone(),
+            None => fail!("Failed to find the closest state for {}:{}", shard, seq_no),
+        };
+        log::trace!("Closest block id for {shard}:{seq_no} is {closest_block_id}");
+
+        // TODO: simplify
+        let block_id = loop {
+            let prev1 = self.engine.load_block_prev1(&closest_block_id)?;
+            log::trace!("Found prev1 for {shard}:{seq_no} = {prev1}");
+
+            // Fast check if the target block was found
+            if is_target_block(&prev1) {
+                break Some(prev1);
+            }
+
+            // Check if left shard is ok
+            let suits_prev1 = is_possible_block(&prev1);
+
+            if closest_block_id.shard().is_parent_for(prev1.shard()) {
+                if let Some(prev2) = self.engine.load_block_prev2(&closest_block_id)? {
+                    log::trace!("Found prev2 for {shard}:{seq_no} = {prev2}");
+
+                    // Fast check if the target block was found
+                    if is_target_block(&prev2) {
+                        break Some(prev2);
+                    }
+
+                    // Check if right shard is ok
+                    let suits_prev2 = is_possible_block(&prev2);
+                    if suits_prev1 && suits_prev2 {
+                        // Choose the closest if both shards are ok
+                        closest_block_id = if prev1.seq_no < prev2.seq_no {
+                            prev1
+                        } else {
+                            prev2
+                        };
+                        continue;
+                    } else if suits_prev2 {
+                        // Choose right shard if it is the only suitable one
+                        closest_block_id = prev2;
+                        continue;
+                    }
+                }
+            }
+
+            if suits_prev1 {
+                // Choose left shard if it is the only suitable one
+                closest_block_id = prev1;
+            } else {
+                // No suitable shards found
+                break None;
+            }
+        }.ok_or_else(|| error!("Failed to find the full shard block id for {}:{}", shard, seq_no))?;
+
+        let state = self.engine.clone().wait_state(&block_id, timeout_ms, true).await?;
+        self.states.entry(shard).or_default().insert(block_id.seq_no, state.clone());
+
+        Ok(state)
+    }
 }
 
 impl MsgQueueManager {
@@ -1509,6 +1753,14 @@ impl MsgQueueMergerIterator<BlockIdExt> {
 }
 
 impl MsgQueueMergerIterator<u8> {
+    #[cfg(test)]
+    pub fn from_queue(out_queue: &OutMsgQueue) -> Result<Self> {
+        let mut roots = Vec::new();
+        if let Some(cell) = out_queue.data() {
+            roots.push(RootRecord::from_cell(cell, out_queue.bit_len(), 0)?);
+        }
+        Ok(Self { roots })
+    }
 }
 
 impl<T: Clone + Eq> MsgQueueMergerIterator<T> {

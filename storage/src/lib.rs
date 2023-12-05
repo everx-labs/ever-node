@@ -26,6 +26,8 @@ pub mod shardstate_db_async;
 pub mod traits;
 pub mod types;
 pub mod shard_top_blocks_db;
+#[cfg(test)]
+mod tests;
 
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::{Metric, MetricBuilder};

@@ -13,6 +13,8 @@
 
 use crate::{block_handle_db, traits::Serializable};
 use std::{io::{Read, Write}, sync::atomic::{AtomicU64, Ordering}};
+#[cfg(test)]
+use std::sync::atomic::AtomicU32;
 use ton_block::{Block, INVALID_WORKCHAIN_ID};
 use ton_types::{ByteOrderRead, Result};
 
@@ -22,6 +24,8 @@ pub struct BlockMeta {
     pub gen_utime: u32,
     pub gen_lt: u64,
     pub queue_update_for: i32,
+    #[cfg(test)]
+    pub test_counter: AtomicU32,
 }
 
 impl BlockMeta {
@@ -57,6 +61,8 @@ impl BlockMeta {
             gen_utime,
             gen_lt,
             queue_update_for,
+            #[cfg(test)]
+            test_counter: AtomicU32::new(0),
         }
     }
 
@@ -98,6 +104,8 @@ impl Serializable for BlockMeta {
         if self.flags() & block_handle_db::FLAG_IS_QUEUE_UPDATE != 0 {
             writer.write_all(&self.queue_update_for.to_le_bytes())?;
         }
+        #[cfg(test)]
+        writer.write_all(&self.test_counter.load(Ordering::SeqCst).to_le_bytes())?;
         Ok(())
     }
 
@@ -113,6 +121,10 @@ impl Serializable for BlockMeta {
             INVALID_WORKCHAIN_ID
         };
         let bm = Self::with_data(flags, gen_utime, gen_lt, masterchain_ref_seq_no, queue_update_for);
+        #[cfg(test)] {
+            let test_counter = reader.read_le_u32().unwrap_or_default();
+            bm.test_counter.store(test_counter, Ordering::Relaxed);
+        }
         Ok(bm)
     }
 

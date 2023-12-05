@@ -18,9 +18,19 @@ use ton_types::{Result, types::UInt256, fail, read_boc};
 use adnl::common::{add_unbound_object_to_map, add_unbound_object_to_map_with_update};
 use ton_api::ton::ton_node::{RempMessageStatus, RempMessageLevel};
 
+#[cfg(test)]
+#[path = "tests/test_ext_messages.rs"]
+mod tests;
+
+#[cfg(not(feature = "fast_finality"))]
 const MESSAGE_LIFETIME: u32 = 600; // seconds
+#[cfg(not(feature = "fast_finality"))]
 const MESSAGE_MAX_GENERATIONS: u8 = 3;
 
+#[cfg(feature = "fast_finality")]
+const MESSAGE_LIFETIME: u32 = 60; // seconds
+#[cfg(feature = "fast_finality")]
+const MESSAGE_MAX_GENERATIONS: u8 = 0;
 const MAX_EXTERNAL_MESSAGE_DEPTH: u16 = 512;
 const MAX_EXTERNAL_MESSAGE_SIZE: usize = 65535;
 
@@ -146,6 +156,10 @@ pub struct MessagesPool {
     // minimal timestamp
     min_timestamp: AtomicU32,
 
+    #[cfg(test)]
+    total_messages: AtomicU32,
+    #[cfg(test)]
+    total_in_order: AtomicU32,
 }
 
 impl MessagesPool {
@@ -157,15 +171,19 @@ impl MessagesPool {
             messages: Map::with_hasher(Default::default()),
             order: Map::with_hasher(Default::default()),
             min_timestamp: AtomicU32::new(now),
+            #[cfg(test)]
+            total_messages: AtomicU32::new(0),
+            #[cfg(test)]
+            total_in_order: AtomicU32::new(0),
         }
     }
 
-    pub fn new_message_raw(&self, data: &[u8], now: u32) -> Result<UInt256> {
+    pub fn new_message_raw(&self, data: &[u8], now: u32) -> Result<()> {
         let (id, message) = create_ext_message(data)?;
         let message = Arc::new(message);
 
         self.new_message(id.clone(), message, now)?;
-        Ok(id)
+        Ok(())
     }
 
     pub fn new_message(&self, id: UInt256, message: Arc<Message>, now: u32) -> Result<()> {
@@ -180,6 +198,10 @@ impl MessagesPool {
         let workchain_id = message.dst_workchain_id().unwrap_or_default();
         let prefix = message.int_dst_account_id().map_or(0, |mut slice| slice.get_next_u64().unwrap_or_default());
         self.messages.insert(id.clone(), MessageKeeper::new(message));
+        #[cfg(test)]
+        self.total_messages.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        self.total_in_order.fetch_add(1, Ordering::Relaxed);
         #[cfg(not(feature = "statsd"))]
         metrics::increment_gauge!("ext_messages_len", 1f64);
 
@@ -199,8 +221,9 @@ impl MessagesPool {
         MessagePoolIter::new(self, shard, now)
     }
 
-    pub fn complete_messages(&self, to_delay: Vec<UInt256>, to_delete: Vec<UInt256>, now: u32) -> Result<()> {
-        for id in &to_delete {
+    pub fn complete_messages(&self, to_delay: Vec<UInt256>, _to_delete: Vec<UInt256>, now: u32) -> Result<()> {
+        #[cfg(feature = "fast_finality")]
+        for id in &_to_delete {
             let result = self.messages.remove_with(id, |_| {
                 log::debug!(
                     target: EXT_MESSAGES_TRACE_TARGET,
@@ -212,6 +235,8 @@ impl MessagesPool {
             if result.is_some() {
                 #[cfg(not(feature = "statsd"))]
                 metrics::decrement_gauge!("ext_messages_len", 1f64);
+                #[cfg(test)]
+                self.total_messages.fetch_sub(1, Ordering::Relaxed);
             }
         }
         for id in &to_delay {
@@ -236,9 +261,27 @@ impl MessagesPool {
                 );
                 #[cfg(not(feature = "statsd"))]
                 metrics::decrement_gauge!("ext_messages_len", 1f64);
+                #[cfg(test)]
+                self.total_messages.fetch_sub(1, Ordering::Relaxed);
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl MessagesPool {
+    #[cfg(not(feature = "fast_finality"))]
+    fn get_messages(self: &Arc<Self>, shard: &ShardIdent, now: u32) -> Result<Vec<(Arc<Message>, UInt256)>> {
+        Ok(self.clone().iter(shard.clone(), now).collect())
+    }
+
+    pub fn has_messages(&self) -> bool {
+        self.messages.iter().next().is_some()
+    }
+
+    pub fn clear(&mut self) {
+        self.messages.clear()
     }
 }
 
@@ -282,7 +325,11 @@ impl MessagePoolIter {
                         target: EXT_MESSAGES_TRACE_TARGET,
                         "removing external message {:x} because it is expired", guard.key()
                     );
+                    #[cfg(test)]
+                    self.pool.total_messages.fetch_sub(1, Ordering::Relaxed);
                 }
+                #[cfg(test)]
+                self.pool.total_in_order.fetch_sub(1, Ordering::Relaxed);
             }
             self.seqno += 1;
         }
@@ -364,13 +411,13 @@ pub fn create_ext_message(data: &[u8]) -> Result<(UInt256, Message)> {
 
 pub fn get_level_and_level_change(status: &RempMessageStatus) -> (RempMessageLevel, i32) {
     match status {
-        RempMessageStatus::TonNode_RempNew => (RempMessageLevel::TonNode_RempQueue, 0),
         RempMessageStatus::TonNode_RempAccepted(a) => (a.level.clone(), 1),
         RempMessageStatus::TonNode_RempRejected(r) => (r.level.clone(), -1),
         RempMessageStatus::TonNode_RempIgnored(i) => (i.level.clone(), -1),
         RempMessageStatus::TonNode_RempTimeout => (RempMessageLevel::TonNode_RempQueue, -1),
-        RempMessageStatus::TonNode_RempDuplicate(_) => (RempMessageLevel::TonNode_RempQueue, 0),
         RempMessageStatus::TonNode_RempSentToValidators(_) => (RempMessageLevel::TonNode_RempFullnode, 0),
+        /*RempMessageStatus::TonNode_RempDuplicate*/
+        _ /*RempMessageStatus::TonNode_RempNew*/ => (RempMessageLevel::TonNode_RempQueue, 0)
     }
 }
 
@@ -397,13 +444,6 @@ pub fn is_finally_accepted(status: &RempMessageStatus) -> bool {
         (RempMessageLevel::TonNode_RempMasterchain, chg) => chg > 0,
         _ => false
     }
-}
-
-pub fn validate_status_change(old_status: &RempMessageStatus, new_status: &RempMessageStatus) -> bool {
-    let (_old_lvl, _old_chg) = get_level_and_level_change(old_status);
-    let (_new_lvl, _) = get_level_and_level_change(new_status);
-
-    return true // TODO: proper check
 }
 
 pub struct RempMessagesPool {

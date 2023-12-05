@@ -14,20 +14,28 @@
 use crate::{
     engine_traits::EngineOperations, shard_state::ShardStateStuff,
 };
+#[cfg(feature = "fast_finality")]
+use crate::validator::workchains_fast_finality::{
+    calc_subset_for_workchain_fast_finality, try_calc_subset_for_workchain_fast_finality
+};
 
 use catchain::{BlockPayloadPtr, CatchainNode, PublicKey, PublicKeyHash};
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
-use ton_block::{
-    BlockIdExt, BlockSignatures, BlockSignaturesPure, ConfigParams, CryptoSignature, 
-    CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, Serializable, 
-    ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet
-};
+
+use ton_block::{BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, ConfigParams, CryptoSignature, CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, Serializable, ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet};
+#[cfg(feature = "fast_finality")]
+use ton_block::CollatorRange;
 use ton_types::{
     error, fail, BuilderData, HashmapType, Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson, 
     Result, Sha256, UInt256
 };
 use validator_session::SessionNode;
+use crate::block::BlockIdExtExtention;
+
+#[cfg(test)]
+#[path = "tests/test_validator_utils.rs"]
+mod tests;
 
 pub fn sigpubkey_to_publickey(k: &SigPubKey) -> PublicKey {
     Ed25519KeyOption::from_public_key(k.key_bytes())
@@ -132,10 +140,11 @@ pub fn validator_query_candidate_to_validator_block_candidate(
 pub fn validatorset_to_string(vs: &ValidatorSet) -> String {
     let mut res = string_builder::Builder::default();
     let vs_list = vs.list();
+    res.append(format!("val_set.cc_seqno = {} ", vs.cc_seqno()));
     for i in 0..vs_list.len() {
         if let Some(x) = vs_list.get(i) {
             let adnl = x.adnl_addr.clone().map_or("** no-addr **".to_string(), |x| x.to_hex_string());
-            res.append(format!("val_set.{}.pk = {} val_set.{}.weigth = {} val_set.{}.addr = {} ",
+            res.append(format!("val_set.{}.pk = {} val_set.{}.weight = {} val_set.{}.adnl = {} ",
                                i, hex::encode(x.public_key.key_bytes()), i, x.weight, i, adnl
             ));
         }
@@ -214,7 +223,16 @@ pub fn compute_validator_set_cc(
     let workchain_info = if shard.is_masterchain() {
         calc_subset_for_masterchain(&vset, config, *cc_seqno_delta)?
     } else {
-         {
+        #[cfg(feature = "fast_finality")] {
+            calc_subset_for_workchain_fast_finality(
+                &vset, 
+                *cc_seqno_delta, 
+                mc_state, 
+                shard, 
+                seq_no
+            )?
+        }
+        #[cfg(not(feature = "fast_finality"))] {
             let _ = seq_no;
             calc_subset_for_workchain_standard(&vset, config, shard, *cc_seqno_delta)?
         }
@@ -235,12 +253,39 @@ fn calc_workchain_id_by_adnl_id(adnl_id: &[u8]) -> i32 {
 pub struct ValidatorSubsetInfo {
     pub validators: Vec<ValidatorDescr>,
     pub short_hash: u32,
+    #[cfg(feature = "fast_finality")]
+    pub collator_range: Vec<CollatorRange>
 }
 
 impl ValidatorSubsetInfo {
     pub fn compute_validator_set(&self, cc_seqno: u32) -> Result<ValidatorSet> {
         ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno, self.validators.clone())
     }
+
+    #[cfg(feature = "fast_finality")]
+    pub fn get_single_collator_range(&self) -> Result<Option<CollatorRange>> {
+        match &self.collator_range[..] {
+            [a] => Ok(Some(a.clone())),
+            [] => Ok(None),
+            [..] => {
+                fail!("too many collator ranges in val. set: [{}]",
+                    self.collator_range.iter().map(|c| format!("{} ", c)).collect::<String>()
+                )
+            }
+        }
+    }
+/*
+        if self.collator_range.len() > 1 {
+            fail!("{} has too many collators: [{}]",
+                self.proof_for(),
+                subset.collator_range.iter().map(|c| format!("{} ", c)).collect::<String>()
+            )
+        }
+
+        let range = subset.collator_range.get(0).ok_or_else(
+            || error!("{} has no collator range in val. set", self.proof_for())
+        )?;
+ */
 }
 
 pub fn try_calc_subset_for_workchain_standard(
@@ -291,6 +336,8 @@ pub fn try_calc_subset_for_workchain_standard(
             Ok(Some(ValidatorSubsetInfo {
                 validators: ws,
                 short_hash: hash,
+                #[cfg(feature = "fast_finality")]
+                collator_range: Default::default()
             }))
         } else {
             // not enough validators -- config is ok, but we cannot validate the shard at the moment
@@ -301,6 +348,8 @@ pub fn try_calc_subset_for_workchain_standard(
         Ok(Some(ValidatorSubsetInfo {
             validators: ws,
             short_hash: hash,
+            #[cfg(feature = "fast_finality")]
+            collator_range: vec!()
         }))
     }
 }
@@ -314,6 +363,17 @@ pub fn try_calc_subset_for_workchain(
 ) -> Result<Option<ValidatorSubsetInfo>> {
     let config = mc_state.config_params()?;
 
+    #[cfg(feature = "fast_finality")]
+    if !shard_id.is_masterchain() {
+        return try_calc_subset_for_workchain_fast_finality(
+            vset, 
+            cc_seqno, 
+            mc_state, 
+            shard_id, 
+            block_seqno
+        );
+    }
+    #[cfg(not(feature = "fast_finality"))]
     let _ = block_seqno;
 
     return try_calc_subset_for_workchain_standard(vset, config, shard_id, cc_seqno);
@@ -334,6 +394,7 @@ pub fn calc_subset_for_masterchain(
     }
 }
 
+#[cfg(not(feature = "fast_finality"))]
 pub fn calc_subset_for_workchain_standard(
     vset: &ValidatorSet,
     config: &ConfigParams,
@@ -379,27 +440,6 @@ pub fn get_first_block_seqno_after_prevs(prevs: &Vec<BlockIdExt>) -> Option<u32>
     prevs.iter().map(|blk| blk.seq_no).max().map(|x| x + 1)
 }
 
-#[derive(Clone,PartialEq)]
-pub struct GeneralSessionInfo {
-    pub shard: ShardIdent,
-    pub opts_hash: UInt256,
-    pub catchain_seqno: u32,
-    pub key_seqno: u32,
-    pub max_vertical_seqno: u32,
-}
-
-impl std::fmt::Display for GeneralSessionInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}, cc {}", self.shard, self.catchain_seqno)
-    }
-}
-
-impl GeneralSessionInfo {
-    pub fn with_cc_seqno(&self, new_cc_seqno: u32) -> Self {
-        Self { catchain_seqno: new_cc_seqno, ..self.clone() }
-    }
-}
-
 pub fn get_group_members_by_validator_descrs(iterator: &Vec<ValidatorDescr>, dst: &mut Vec<GroupMember>)  {
     for descr in iterator.iter() {
         let node_id = descr.compute_node_id_short();
@@ -426,12 +466,60 @@ pub fn get_message_uid(msg: &Message) -> UInt256 {
     }
 }
 
+pub async fn get_masterchain_seqno(engine: Arc<dyn EngineOperations>, mc_state: &ShardStateStuff) -> Result<u32> {
+    let mc_state_extra = mc_state.shard_state_extra()?;
+    let master_cc_seqno = mc_state_extra.validator_info.catchain_seqno;
+
+    // Just paranoidal check
+    let block_id = mc_state.block_id();
+    if block_id.seq_no > 0 {
+        let handle = engine.load_block_handle(block_id)?.ok_or_else(|| error!("No block {}", block_id))?;
+        let block = engine.load_block(&handle).await?;
+        let gen_catchain_seqno = block.block()?.read_info()?.gen_catchain_seqno();
+        let nx_increment = mc_state_extra.validator_info.nx_cc_updated as u32;
+        if gen_catchain_seqno + nx_increment != master_cc_seqno {
+            fail!("get_masterchain_seqno: different cc_seqno: {} + {} /= {}",
+                gen_catchain_seqno, nx_increment, master_cc_seqno
+            )
+        }
+    }
+
+    Ok(master_cc_seqno)
+}
+
+async fn try_get_block_info_by_id(engine: Arc<dyn EngineOperations>, mc_block_id: &BlockIdExt) -> Result<Option<(BlockInfo, Vec<BlockIdExt>)>> {
+    let mc_handle = match engine.load_block_handle(mc_block_id)? {
+        Some(h) => h,
+        None => return Ok(None)
+    };
+
+    let block = engine.load_block(&mc_handle).await?;
+    let tops = block
+        .top_blocks_all_headers()?.iter()
+        .map(|(blk,_shard)| blk.clone()).collect();
+    Ok(Some((block.block()?.read_info()?, tops)))
+}
+
+pub async fn get_block_info_by_id(engine: Arc<dyn EngineOperations>, mc_block_id: &BlockIdExt) -> Result<(BlockInfo, Vec<BlockIdExt>)> {
+    let (info, mut tops) = try_get_block_info_by_id(engine, mc_block_id).await?.ok_or_else(||
+        error!("Cannot get block info for block {}", mc_block_id)
+    )?;
+    if !tops.contains(mc_block_id) {
+        if tops.iter().any(|blk| blk.is_masterchain()) {
+            fail!("Top blocks for {} should not contain masterblocks: {:?}", mc_block_id, tops)
+        }
+        tops.push(mc_block_id.clone());
+    }
+    Ok((info, tops))
+}
+
 /// Lock-free map to small set (small set means 1-10 records in one typical map cell)
 pub struct LockfreeMapSet<K, V> where V: Ord, V: Clone+Debug, K: Clone+Hash+Ord+Debug {
     map: dashmap::DashMap<K,Vec<V>>
 }
 
 impl<K,V> LockfreeMapSet<K,V> where V: Ord, V: Clone+Debug, K: Clone+Hash+Ord+Debug {
+    #[allow(dead_code)]
     fn remove_and_sort(src: &Vec<V>, old_to_remove: &V) -> Vec<V> {
         let mut canonized: Vec<V> = src.iter().filter(|x| *x != old_to_remove).cloned().collect();
         canonized.sort();
@@ -479,6 +567,7 @@ impl<K,V> LockfreeMapSet<K,V> where V: Ord, V: Clone+Debug, K: Clone+Hash+Ord+De
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn remove_from_set(&self, msg_uid: &K, msg_id: &V) -> Result<()> {
         if let Some(mut t) = self.map.get_mut(msg_uid) {
             *t = Self::remove_and_sort(t.value(), msg_id)
@@ -492,6 +581,11 @@ impl<K,V> LockfreeMapSet<K,V> where V: Ord, V: Clone+Debug, K: Clone+Hash+Ord+De
             None => Vec::new(),
             Some(kv) => kv.value().clone()
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn get_lowest(&self, msg_uid: &K) -> Option<V> {
+        self.map.get(msg_uid).map(|v| v.value().get(0).cloned()).flatten()
     }
 
     #[allow(dead_code)]

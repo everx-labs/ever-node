@@ -28,6 +28,10 @@ pub mod kafka_consumer;
 #[cfg(not(feature = "external_db"))]
 mod stub_producer;
 
+#[cfg(test)]
+#[path = "tests/test.rs"]
+mod tests;
+
 #[async_trait::async_trait]
 pub trait WriteData : Sync + Send {
     fn enabled(&self) -> bool;
@@ -148,129 +152,18 @@ pub async fn external_db_worker(
     let mut handle = engine.load_block_handle(&external_db_block)?.ok_or_else(
         || error!("Cannot load handle for external_db_block {}", external_db_block)
     )?;
-    let mut block = if handle.id().seq_no() > 0 {
-        Some(engine.load_block(&handle).await?)
-    } else {
-        None
-    };
+    let mut block;
     'm: loop {
         if engine.check_stop() {
             break 'm;
         }
-
-        if let Some(block) = &block {
-            let mc_seq_no = handle.id().seq_no();
-            let mut tasks: Vec<tokio::task::JoinHandle<Result<Vec<BlockIdExt>>>> = vec!();
-            let mut range = ChainRange {
-                master_block: block.id().clone(),
-                shard_blocks: Vec::new(),
-            };
-
-            // Master block
-            let state = engine.load_state(handle.id()).await?;
-            let prev_ids = block.construct_prev_id()?;
-            let prev_state = engine.load_state(&prev_ids.0).await?;
-            tasks.push(tokio::spawn({
-                let engine = engine.clone();
-                let handle = handle.clone();
-                let block = block.clone();
-                let prev_state = prev_state.clone();
-                async move {
-                    engine.process_block_in_ext_db(
-                        &handle, &block, None, &state, (&prev_state, None), mc_seq_no).await?;
-                    Ok(vec!())
-                }
-            }));
-
-            // Shard blocks
-            let prev_top_blocks = prev_state.top_blocks_all()?;
-            for id in block.top_blocks_all()? {
-                if id.seq_no() != 0 {
-                    let prev_top_block = prev_top_blocks.iter()
-                        .find(|p_id| p_id.shard().intersect_with(&id.shard()))
-                        .ok_or_else(|| error!("Cannot find prev top block for {}", id))?.clone();
-
-                    let engine = engine.clone();
-                    let mut id = id.clone();
-                    tasks.push(tokio::spawn(async move {
-                        let mut chain = vec!();
-                        while id != prev_top_block && id.seq_no() != 0 {
-                            let handle = loop {
-                                match engine.clone().wait_applied_block(&id, Some(10_000)).await {
-                                    Ok(h) => break h,
-                                    Err(_) => {
-                                        if engine.check_stop() {
-                                            return Ok(vec!());
-                                        }
-                                        log::warn!(
-                                            "External DB worker: wait_applied_block({}): timeout", id);
-                                    }
-                                }
-                            };
-                            let block = engine.load_block(&handle).await?;
-                            let prev_ids = block.construct_prev_id()?;
-                            chain.push((handle, block));
-                            if prev_ids.1.is_some() {
-                                // after merge. "Before marge" block is always commited in MC.
-                                break;
-                            }
-                            id = prev_ids.0;
-                            if engine.check_stop() {
-                                return Ok(vec!())
-                            }
-                        }
-
-                        let mut range = vec!();
-                        while let Some((handle, block)) = chain.pop() {
-                            let state = engine.load_state(handle.id()).await?;
-                            let prev_ids = block.construct_prev_id()?;
-                            let prev_state = engine.load_state(&prev_ids.0).await?;
-                            let prev_state_2 = if let Some(id) = prev_ids.1 {
-                                Some(engine.load_state(&id).await?)
-                            } else {
-                                None
-                            };
-                            engine.process_block_in_ext_db(
-                                &handle, &block, None, &state,
-                                (&prev_state, prev_state_2.as_ref()), mc_seq_no
-                            ).await?;
-                            range.push(block.id().clone());
-                            if engine.check_stop() {
-                                return Ok(vec!())
-                            }
-                        }
-                        Ok(range)
-                    }));
-                }
-            }
-
-            for r in futures::future::join_all(tasks)
-                .await
-                .into_iter()
-            {
-                for id in r?? {
-                    range.shard_blocks.push(id)
-                }
-            }
-
-            if engine.check_stop() {
-                return Ok(())
-            }
-
-            // Shard hashes must be processed after all shard blocks
-            if engine.produce_shard_hashes_enabled() {
-                produce_shard_hashes(engine, &block).await?;
-            }
-            engine.process_chain_range_in_ext_db(&range).await?;
-        }
-        engine.save_external_db_mc_block_id(handle.id())?;
 
         // Wait for next master block
         loop {
             match engine.wait_next_applied_mc_block(&handle, Some(15000)).await {
                 Ok(r) => {
                     handle = r.0;
-                    block = Some(r.1);
+                    block = r.1;
                     break;
                 }
                 Err(_) => {
@@ -282,7 +175,112 @@ pub async fn external_db_worker(
                 }
             }
         };
+
+        let mc_seq_no = handle.id().seq_no();
+        let mut tasks: Vec<tokio::task::JoinHandle<Result<Vec<BlockIdExt>>>> = vec!();
+        let mut range = ChainRange {
+            master_block: block.id().clone(),
+            shard_blocks: Vec::new(),
+        };
+
+        // Master block
+        let state = engine.load_state(handle.id()).await?;
+        let prev_ids = block.construct_prev_id()?;
+        let prev_state = engine.load_state(&prev_ids.0).await?;
+        tasks.push(tokio::spawn({
+            let engine = engine.clone();
+            let handle = handle.clone();
+            let block = block.clone();
+            let prev_state = prev_state.clone();
+            async move {
+                engine.process_block_in_ext_db(
+                    &handle, &block, None, &state, (&prev_state, None), mc_seq_no).await?;
+                Ok(vec!())
+            }
+        }));
+
+        // Shard blocks
+        let prev_top_blocks = prev_state.top_blocks_all()?;
+        for id in block.top_blocks_all()? {
+            if id.seq_no() != 0 {
+                let prev_top_block = prev_top_blocks.iter()
+                    .find(|p_id| p_id.shard().intersect_with(&id.shard()))
+                    .ok_or_else(|| error!("Cannot find prev top block for {}", id))?.clone();
+
+                let engine = engine.clone();
+                let mut id = id.clone();
+                tasks.push(tokio::spawn(async move {
+                    let mut chain = vec!();
+                    while id != prev_top_block && id.seq_no() != 0 {
+                        let handle = loop {
+                            match engine.clone().wait_applied_block(&id, Some(10_000)).await {
+                                Ok(h) => break h,
+                                Err(_) => {
+                                    if engine.check_stop() {
+                                        return Ok(vec!());
+                                    }
+                                    log::warn!(
+                                        "External DB worker: wait_applied_block({}): timeout", id);
+                                }
+                            }
+                        };
+                        let block = engine.load_block(&handle).await?;
+                        let prev_ids = block.construct_prev_id()?;
+                        chain.push((handle, block));
+                        if prev_ids.1.is_some() {
+                            // after merge. "Before marge" block is always commited in MC.
+                            break;
+                        }
+                        id = prev_ids.0;
+                        if engine.check_stop() {
+                            return Ok(vec!())
+                        }
+                    }
+
+                    let mut range = vec!();
+                    while let Some((handle, block)) = chain.pop() {
+                        let state = engine.load_state(handle.id()).await?;
+                        let prev_ids = block.construct_prev_id()?;
+                        let prev_state = engine.load_state(&prev_ids.0).await?;
+                        let prev_state_2 = if let Some(id) = prev_ids.1 {
+                            Some(engine.load_state(&id).await?)
+                        } else {
+                            None
+                        };
+                        engine.process_block_in_ext_db(
+                            &handle, &block, None, &state,
+                            (&prev_state, prev_state_2.as_ref()), mc_seq_no
+                        ).await?;
+                        range.push(block.id().clone());
+                        if engine.check_stop() {
+                            return Ok(vec!())
+                        }
+                    }
+                    Ok(range)
+                }));
+            }
+        }
+
+        for r in futures::future::join_all(tasks)
+            .await
+            .into_iter()
+        {
+            for id in r?? {
+                range.shard_blocks.push(id)
+            }
+        }
+
+        if engine.check_stop() {
+            return Ok(())
+        }
+
+        // Shard hashes must be processed after all shard blocks
+        if engine.produce_shard_hashes_enabled() {
+            produce_shard_hashes(engine, &block).await?;
+        }
+        engine.process_chain_range_in_ext_db(&range).await?;
+    
+        engine.save_external_db_mc_block_id(handle.id())?;
     }
     Ok(())
-
 }

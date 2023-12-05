@@ -17,17 +17,18 @@ use crate::validator::telemetry::RempCoreTelemetry;
 use adnl::{common::{AdnlPeers, Subscriber, TaggedByteSlice}, node::AdnlNode};
 use std::{
     cmp::min, collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}},
-    time::{Duration, Instant},
+    time::{Duration, Instant}, ops::Deref,
 };
 use ton_api::{
     ton::ton_node::{
         RempMessage, RempReceipt, RempMessageStatus, RempMessageStatusCompact, 
-        RempReceiptCompact, RempCombinedReceipt
+        RempReceiptCompact, RempCombinedReceipt, RempMessageLevel
     },
     serialize_boxed, deserialize_boxed,
 };
 #[cfg(feature = "telemetry")]
 use ton_api::tag_from_boxed_type;
+
 use ton_block::BlockIdExt;
 use ton_types::{error, fail, KeyId, Result, UInt256};
 
@@ -166,6 +167,11 @@ impl RempNode {
         Ok(())
     }
 
+    pub fn messages_subscriber(&self) -> Result<&dyn RempMessagesSubscriber> {
+        self.messages_subscriber.get().ok_or_else(|| error!("messages_subscriber is not set"))
+            .map(|ms| ms.deref())
+    }
+
     pub fn set_receipts_subscriber(&self, subscriber: Arc<dyn RempReceiptsSubscriber>) -> Result<()> {
         self.receipts_subscriber.set(subscriber).map_err(|_| error!("Can't set remp receipts subscriber"))?;
         Ok(())
@@ -231,9 +237,8 @@ impl Subscriber for RempNode {
                 };
                 match object.downcast::<RempMessage>() {
                     Ok(query) => {
-                        let subscriber = self.messages_subscriber.get()
-                            .ok_or_else(|| error!("messages_subscriber is not set"))?;
-                        subscriber.new_remp_message(query, peers.other()).await?;
+                        self.messages_subscriber()?
+                            .new_remp_message(query, peers.other()).await?;
                         return Ok(true);
                     }
                     Err(_) => return Ok(false)
@@ -540,9 +545,11 @@ fn expand_combined_receipt(combined_receipt: &RempCombinedReceipt) -> Result<Vec
                 )
             },
             RempMessageStatusCompact::TonNode_RempDuplicateCompact(d) => {
-                RempMessageStatus::TonNode_RempDuplicate(
-                    ton_api::ton::ton_node::rempmessagestatus::RempDuplicate {
-                        block_id: get_block_id(d.block_id_index)?
+                RempMessageStatus::TonNode_RempAccepted(
+                    ton_api::ton::ton_node::rempmessagestatus::RempAccepted {
+                        level: RempMessageLevel::TonNode_RempShardchain,
+                        block_id: get_block_id(d.block_id_index)?,
+                        master_id: BlockIdExt::default()
                     }
                 )
             },
@@ -631,13 +638,6 @@ fn build_combined_receipt_from(receipts: &[&LastReceipt]) -> Result<(RempCombine
                         }
                     )
                 },
-                RempMessageStatus::TonNode_RempDuplicate(d) => {
-                    RempMessageStatusCompact::TonNode_RempDuplicateCompact(
-                        ton_api::ton::ton_node::rempmessagestatuscompact::RempDuplicateCompact {
-                            block_id_index: get_block_id_index(&d.block_id)
-                        }
-                    )
-                },
                 RempMessageStatus::TonNode_RempIgnored(ign) => {
                     RempMessageStatusCompact::TonNode_RempIgnoredCompact(
                         ton_api::ton::ton_node::rempmessagestatuscompact::RempIgnoredCompact {
@@ -669,6 +669,17 @@ fn build_combined_receipt_from(receipts: &[&LastReceipt]) -> Result<(RempCombine
                 RempMessageStatus::TonNode_RempTimeout => {
                     RempMessageStatusCompact::TonNode_RempTimeoutCompact
                 },
+                _ => RempMessageStatusCompact::TonNode_RempTimeoutCompact
+                /*
+                RempMessageStatus::TonNode_RempDuplicate(d) => {
+                    RempMessageStatusCompact::TonNode_RempDuplicateCompact(
+                        ton_api::ton::ton_node::rempmessagestatuscompact::RempDuplicateCompact {
+                            block_id_index: get_block_id_index(&d.block_id)
+                        }
+                    )
+                },
+
+                 */
             };
 
             if source_id == UInt256::default() {
@@ -770,3 +781,6 @@ fn mark_as_sent(
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "tests/test_remp.rs"]
+mod tests;
