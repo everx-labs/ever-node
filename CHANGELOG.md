@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.72
+
+- Fixed the blocks parser for newly synchronized nodes
+
 ## Version 0.55.71
 
 - Move cleaning outdated Catchain caches on node startup into separate thread
