@@ -511,7 +511,7 @@ impl ValidatorGroup {
                     if let Some(new_cc_range) = new_master_cc_range {
                         rmq.forward_messages(&new_cc_range, self.local_key.clone()).await;
                     }
-                    rmq.stop().await;
+                    //rmq.stop().await;
                 }
                 if let Some(s_ptr) = session_ptr {
                     s_ptr.stop();

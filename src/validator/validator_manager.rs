@@ -1444,6 +1444,7 @@ impl ValidatorManagerImpl {
             }
         }
 
+        log::info!(target: "validator_manager", "Engine is stopped. exiting from invocation loop");
         Ok(())
     }
 }
@@ -1490,6 +1491,7 @@ pub fn start_validator_manager(
         if let Err(e) = manager.invoke().await {
             log::error!(target: "validator_manager", "FATAL!!! Unexpected error in validator manager: {:?}", e);
         }
+        log::info!(target: "validator_manager", "Exiting, validator manager is stopped");
         engine.release_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
     });
 }

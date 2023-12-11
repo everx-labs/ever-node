@@ -656,7 +656,8 @@ impl RempCatchainStore {
 
         let mut res = Vec::new();
         for (info, status) in sessions_to_list {
-            res.push(format!("remp_catchain_status: session_id {:x}, shard {}, {}", info.queue_id, info.general_session_info, status));
+            res.push(format!("remp_catchain_status: session_id {:x}, shard {}, master_cc {}..={}, {}",
+                             info.queue_id, info.general_session_info, info.master_cc_range.start(), info.master_cc_range.end(), status));
         }
         return res;
     }
