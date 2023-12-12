@@ -11,11 +11,13 @@
 * limitations under the License.
 */
 
+use std::default;
 use std::{cmp::max, sync::Arc};
 use std::io::Write;
 use ton_block::{
     Block, BlockIdExt, BlkPrevInfo, Deserializable, ExtBlkRef, ShardDescr, ShardIdent, 
-    ShardHashes, HashmapAugType, MerkleProof, Serializable, ConfigParams, OutQueueUpdate,
+    ShardHashes, HashmapAugType, MerkleProof, Serializable, ConfigParams, OutQueueUpdate, 
+    MeshUpdate, MeshKit, MeshMsgQueueUpdates, MeshMsgQueuesKit,
 };
 use ton_types::{
     Cell, Result, types::UInt256, BocReader, error, fail, HashmapType, UsageTree,
@@ -38,6 +40,28 @@ pub struct BlockPrevStuff {
     pub after_split: bool
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum BlockKind {
+    Block(Block),
+    QueueUpdate {
+        block_part: Block,
+        queue_update_for: i32,
+    },
+    MeshUpdate {
+        block_part: Block,
+        queue_updates: MeshMsgQueueUpdates,
+    },
+    MeshKit {
+        block_part: Block,
+        queues: MeshMsgQueuesKit,
+    }
+}
+impl Default for BlockKind {
+    fn default() -> Self {
+        Self::Block(Block::default())
+    }
+}
+
 /// It is a wrapper around various block's representations and properties.
 /// # Remark
 /// Because of no deterministic of a bag of cells's serialization need to store `data` 
@@ -45,9 +69,7 @@ pub struct BlockPrevStuff {
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct BlockStuff {
     id: BlockIdExt,
-    block: Option<Block>,
-    queue_update: Option<Block>, // virtual block with queue update, info, ...
-    queue_update_for: i32,
+    block: BlockKind,
     root: Cell,
     data: Arc<Vec<u8>>, // Arc is used to make cloning more lightweight
 }
@@ -68,7 +90,7 @@ impl BlockStuff {
         if id.root_hash != root.repr_hash() {
             fail!("wrong root hash for {}", id)
         }
-        let block = Some(Block::construct_from_cell(root.clone())?);
+        let block = BlockKind::Block(Block::construct_from_cell(root.clone())?);
         Ok(Self { id, block, root, data, ..Default::default() })
     }
 
@@ -79,8 +101,8 @@ impl BlockStuff {
         if id.root_hash != merkle_proof.hash {
             fail!("wrong merkle proof hash for {}", id)
         }
-        let queue_update = Some(merkle_proof.virtualize()?);
-        Ok(Self { id, queue_update, queue_update_for, root, data, ..Default::default() })
+        let block = BlockKind::QueueUpdate{block_part: merkle_proof.virtualize()?, queue_update_for};
+        Ok(Self { id, block, root, data, ..Default::default() })
     }
 
     #[cfg(test)]
@@ -117,7 +139,7 @@ impl BlockStuff {
         }
         Ok(BlockStuff {
             id,
-            block: Some(block),
+            block: BlockKind::Block(block),
             root: Cell::default(),
             data: Arc::new(vec!(0xfe; 10_000)),
             ..Default::default()
@@ -125,25 +147,25 @@ impl BlockStuff {
     }
 
     pub fn block(&self) -> Result<&Block> {
-        self.block.as_ref().ok_or_else(|| {
-            error!("the block {} is not full, it contains only queue update for WC {}", 
-                self.id, self.queue_update_for)
-        })
+        if let BlockKind::Block(block) = &self.block {
+            Ok(block)
+        } else {
+            fail!("Block {} is not a BlockKind::Block", self.id)
+        }
     }
 
     pub fn block_or_queue_update(&self) -> Result<&Block> {
-        if let Some(block) = self.block.as_ref() {
-            Ok(block)
-        } else if let Some(virt_block) = self.queue_update.as_ref() {
-            Ok(virt_block)
-        } else {
-            fail!("INTERNAL ERROR: both block and queue_update fields are None in {}", self.id)
+        match &self.block {
+            BlockKind::Block(block) => Ok(block),
+            BlockKind::QueueUpdate{block_part, ..} => Ok(block_part),
+            BlockKind::MeshUpdate{block_part, ..} => Ok(block_part),
+            BlockKind::MeshKit{block_part, ..} => Ok(block_part),
         }
     }
 
     pub fn get_queue_update_for(&self, workchain_id: i32) -> Result<OutQueueUpdate> {
-        if self.is_queue_update() && self.queue_update_for != workchain_id {
-            fail!("This queue update is for wc {}, not {}", self.queue_update_for, workchain_id)
+        if matches!(self.is_queue_update_for(), Some(workchain_id)) {
+            fail!("{} is not queue update is for wc {}", self.id(), workchain_id)
         }
         self
             .block_or_queue_update()?
@@ -159,21 +181,20 @@ impl BlockStuff {
     pub fn fake_with_block(id: BlockIdExt, block: Block) -> Self {
         BlockStuff {
             id,
-            block: Some(block),
+            block: BlockKind::Block(block),
             root: Cell::default(),
             data: Arc::new(vec!(0xfe; 10_000)),
-            queue_update: None,
-            queue_update_for: 0,
         }
     }
 
-    pub fn is_queue_update(&self) -> bool { self.queue_update.is_some() }
+    pub fn is_queue_update(&self) -> bool {
+        matches!(self.block, BlockKind::QueueUpdate{..})
+    }
 
     pub fn is_queue_update_for(&self) -> Option<i32> {
-        if self.is_queue_update() {
-            Some(self.queue_update_for)
-        } else {
-            None
+        match &self.block {
+            BlockKind::QueueUpdate{queue_update_for, ..} => Some(*queue_update_for),
+            _ => None
         }
     }
     
