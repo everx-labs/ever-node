@@ -64,7 +64,7 @@ use ton_block::{
     ShardFees, ShardHashes, ShardIdent, ShardStateSplit, ShardStateUnsplit, TopBlockDescrSet,
     Transaction, TransactionTickTock, UnixTime32, ValidatorSet, ValueFlow, WorkchainDescr,
     Workchains, Account, AccountIdPrefixFull, OutQueueUpdates, OutMsgQueueInfo, MASTERCHAIN_ID, 
-    CommonMessage, ChildCell, SERDE_OPTS_COMMON_MESSAGE, SERDE_OPTS_EMPTY,
+    CommonMessage, ChildCell, SERDE_OPTS_COMMON_MESSAGE, SERDE_OPTS_EMPTY, MeshHashes,
 };
 #[cfg(feature = "fast_finality")]
 use crate::validating_utils::SPLIT_MERGE_INTERVAL_BLOCKS;
@@ -3635,6 +3635,7 @@ impl Collator {
                 block_create_stats, 
                 global_balance,
                 state_copyleft_rewards: CopyleftRewards::default(),
+                mesh: MeshHashes::default(),
             }, 
             min_ref_mc_seqno
         ))
