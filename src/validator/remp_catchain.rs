@@ -42,6 +42,15 @@ use ton_types::{error, fail, KeyId, Result, UInt256};
 
 const REMP_CATCHAIN_START_POLLING_INTERVAL: Duration = Duration::from_millis(50);
 
+fn get_remp_catchain_record_info(r: &RempCatchainRecord) -> String {
+    match r {
+        RempCatchainRecord::TonNode_RempCatchainMessage(msg) =>
+            format!("msg_id: {:x}", msg.message_id),
+        RempCatchainRecord::TonNode_RempCatchainMessageDigest(msg) =>
+            format!("digest, master_seqno={}, len={}", msg.masterchain_seqno, msg.messages.len())
+    }
+}
+
 pub struct RempCatchainInstanceImpl {
     pub catchain_ptr: CatchainPtr,
 
@@ -402,14 +411,11 @@ impl CatchainListener for RempCatchain {
 
     fn process_blocks(&self, blocks: Vec<BlockPtr>) {
         log::trace!(target: "remp", "Processing RMQ {}: new external messages, len = {}", self, blocks.len());
-        //if blocks.len() > 0 {
-        //    for x in blocks {
-        //        self.unpack_payload(x.get_payload(), x.get_source_id());
-        //    }
-        //}
 
         let mut msg_vect: Vec<::ton_api::ton::validator_session::round::Message> = Vec::new();
-        while let Ok(Some(msg)) = self.instance.pending_messages_queue_try_recv() {
+        let mut msg_ids: Vec<String> = Vec::new();
+
+        if let Ok(Some(msg)) = self.instance.pending_messages_queue_try_recv() {
             let msg_body = ::ton_api::ton::validator_session::round::validator_session::message::message::Commit {
                 round: 0,
                 candidate: Default::default(),
@@ -420,10 +426,8 @@ impl CatchainListener for RempCatchain {
             );
 
             msg_vect.push(msg_body);
-        };
-
-        #[cfg(feature = "telemetry")]
-            let sent_to_catchain = msg_vect.len();
+            msg_ids.push(get_remp_catchain_record_info(&msg));
+        }
 
         let payload = ::ton_api::ton::validator_session::blockupdate::BlockUpdate {
             ts: 0, //ts as i64,
@@ -438,16 +442,18 @@ impl CatchainListener for RempCatchain {
                     catchain::CatchainFactory::create_block_payload(
                         serialized_payload.clone(),
                     ), false, false);
-                log::trace!(target: "remp", "Point 3. RMQ {} sent message: {:?}",
-                    self, serialized_payload
+                log::trace!(target: "remp", "Point 3. RMQ {} sent messages: '{:?}'",
+                    self, msg_ids
                 );
                 #[cfg(feature = "telemetry")]
                 self.engine.remp_core_telemetry().sent_to_catchain(
                     &self.info.general_session_info.shard, 
-                    sent_to_catchain
+                    msg_ids.len()
                 );
             },
-            None => log::error!("RMQ: Catchain session is not initialized!")
+            None => {
+                log::error!(target: "remp", "Point 3. RMQ {}: catchain session is not initialized, messages will not be sent: '{:?}'", self, msg_ids);
+            }
         }
     }
 
