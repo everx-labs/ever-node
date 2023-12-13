@@ -30,7 +30,7 @@ use crate::{
             ValidatorListHash, ValidatorSubsetInfo
         },
         out_msg_queue::OutMsgQueueInfoStuff,
-    },                                                                                                  
+    },
 };
 use crate::validator::validator_utils::try_calc_subset_for_workchain_standard;
 
@@ -1281,6 +1281,7 @@ impl ValidatorManagerImpl {
                 log::info!(target: "validator_manager", "{}", s);
             }
         }
+        log::trace!(target: "validator_manager", "======= sessions stats over =======");
     }
 
     /// For block `upper_id` find master cc range and block id --- shortest range with proper history.
@@ -1409,11 +1410,13 @@ impl ValidatorManagerImpl {
                         log::debug!(target: "validator_manager", "Processing slashing masterblock {}", mc_handle.id().seq_no);
                         self.slashing_manager.handle_masterchain_block(&mc_handle, &mc_state, &local_id, &self.engine).await;
                     }
-                    log::trace!(target: "validator_manager", "Updaing shards for masterblock {}", mc_handle.id().seq_no);
+                    log::trace!(target: "validator_manager", "Processing messages from masterblock {}", mc_handle.id().seq_no);
                     if let Some(bo) = &self.block_observer {
                         bo.process_master_block_handle(&mc_handle).await?;
                     }
+                    log::trace!(target: "validator_manager", "Updating shards according to masterblock {}", mc_handle.id().seq_no);
                     self.update_shards(mc_state).await?;
+                    log::trace!(target: "validator_manager", "Shards for masterblock {} updated", mc_handle.id().seq_no);
                 },
                 Err(e) => {
                     if self.engine.validation_status().allows_validate() {
@@ -1426,13 +1429,24 @@ impl ValidatorManagerImpl {
             }
 
             mc_handle = loop {
+                log::trace!(target: "validator_manager", "Checking stop engine");
                 if self.engine.check_stop() {
+                    log::trace!(target: "validator_manager", "Engine is stoped. Exiting from invocation loop (while loading block)");
                     return Ok(())
                 }
+                log::trace!(target: "validator_manager", "Checked stop engine: going on");
                 self.stats().await;
                 log::trace!(target: "validator_manager", "Waiting next applied masterblock after {}", mc_handle.id().seq_no);
                 match timeout(self.config.update_interval, self.engine.wait_next_applied_mc_block(&mc_handle, None)).await {
-                    Ok(r_res) => break r_res?.0,
+                    Ok(r_res) => {
+                        log::trace!(target: "validator_manager", "Got next applied master block (result): {}",
+                            match &r_res {
+                                Err(e) => format!("Err({})", e),
+                                Ok((h, _bs)) => format!("Ok({})", h.id())
+                            }
+                        );
+                        break r_res?.0
+                    },
                     Err(tokio::time::error::Elapsed{..}) => {
                         log::warn!(
                             target: "validator_manager", 
@@ -1444,7 +1458,7 @@ impl ValidatorManagerImpl {
             }
         }
 
-        log::info!(target: "validator_manager", "Engine is stopped. exiting from invocation loop");
+        log::info!(target: "validator_manager", "Engine is stopped. Exiting from invocation loop (while applying state)");
         Ok(())
     }
 }
