@@ -352,16 +352,30 @@ pub trait EngineOperations : Sync + Send {
     ) -> Result<()> {
         unimplemented!()
     }
-    async fn download_block(&self, id: &BlockIdExt, limit: Option<u32>) -> Result<(BlockStuff, Option<BlockProofStuff>)> {
+    async fn download_block(
+        &self,
+        id: &BlockIdExt,
+        limit: Option<u32>
+    ) -> Result<(BlockStuff, Option<BlockProofStuff>)> {
         unimplemented!()
     }
-    async fn download_block_proof(&self, id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff> {
+    async fn download_block_proof(
+        &self,
+        mesh_nw_id: u32, // zero for own network
+        id: &BlockIdExt,
+        is_link: bool,
+        key_block: bool
+    ) -> Result<BlockProofStuff> {
         unimplemented!()
     }
     async fn download_next_block(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
         unimplemented!()
     }
-    async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt) -> Result<Vec<BlockIdExt>> {
+    async fn download_next_key_blocks_ids(
+        &self,
+        mesh_nw_id: u32, // zero for own network
+        block_id: &BlockIdExt,
+    ) -> Result<Vec<BlockIdExt>> {
         unimplemented!()
     }
     async fn store_block(
@@ -371,7 +385,8 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
     async fn store_block_proof(
-        &self, 
+        &self,
+        mesh_nw_id: u32, // zero for own network
         id: &BlockIdExt, 
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff
@@ -468,8 +483,9 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
     async fn download_zerostate(
-        &self, 
-        id: &BlockIdExt
+        &self,
+        mesh_nw_id: u32, // zero for own network
+        id: &BlockIdExt,
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         unimplemented!()
     }
@@ -890,6 +906,34 @@ pub trait EngineOperations : Sync + Send {
     ) -> Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)> {
         unimplemented!();
     }
+
+    // THE MESH
+
+    fn load_last_mesh_key_block_id(&self, nw_id: u32) -> Result<Option<Arc<BlockIdExt>>> {
+        unimplemented!()
+    }
+
+    fn save_last_mesh_key_block_id(&self, nw_id: u32, id: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn load_last_mesh_processed_hardfork(&self, nw_id: u32) -> Result<Option<Arc<BlockIdExt>>> {
+        unimplemented!()
+    }
+
+    fn save_last_mesh_processed_hardfork(&self, nw_id: u32, id: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn download_mesh_kit(&self, nw_id: u32, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
+        unimplemented!()
+    }
+
+    async fn download_latest_mesh_kit(&self, nw_id: u32) -> Result<(BlockStuff, BlockProofStuff)> {
+        unimplemented!()
+    }
+
+
 
 }
 

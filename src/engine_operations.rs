@@ -415,7 +415,13 @@ impl EngineOperations for Engine {
         }
     }
 
-    async fn download_block_proof(&self, id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff> {
+    async fn download_block_proof(
+        &self,
+        mesh_nw_id: u32, // zero for own network
+        id: &BlockIdExt,
+        is_link: bool,
+        key_block: bool
+    ) -> Result<BlockProofStuff> {
         self.download_block_proof_worker(id, is_link, key_block, Some(1)).await
     }
 
@@ -465,6 +471,7 @@ impl EngineOperations for Engine {
 
     async fn download_zerostate(
         &self, 
+        mesh_nw_id: u32, // zero for own network
         id: &BlockIdExt
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         self.download_zerostate_worker(id, None).await
@@ -487,6 +494,7 @@ impl EngineOperations for Engine {
 
     async fn store_block_proof(
         &self, 
+        mesh_nw_id: u32, // zero for own network
         id: &BlockIdExt,
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff,
@@ -503,7 +511,7 @@ impl EngineOperations for Engine {
             .ok_or_else(|| error!("Block {} is not a queue update", block.id()))?;
         self.db().create_or_load_block_handle(
             block.id(),
-            Some(block.block_or_queue_update()?),
+            Some(block.virt_block()?),
             Some((target_wc, true)),
             None,
             None
@@ -742,6 +750,7 @@ impl EngineOperations for Engine {
 
     async fn download_next_key_blocks_ids(
         &self, 
+        mesh_nw_id: u32, // zero for own network
         block_id: &BlockIdExt, 
     ) -> Result<Vec<BlockIdExt>> {
         let mc_overlay = self.get_masterchain_overlay().await?;

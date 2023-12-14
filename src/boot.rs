@@ -73,11 +73,11 @@ async fn run_cold(
         }
 
         log::info!(target: "boot", "download init block proof {}", block_id);
-        match engine.download_block_proof(&block_id, false, true).await {
+        match engine.download_block_proof(0, &block_id, false, true).await {
             Ok(proof) => match proof.check_proof_as_link() {
                 Ok(_) => {
                     log::info!(target: "boot", "block proof downloaded {}", block_id);
-                    let handle = engine.store_block_proof(&block_id, handle, &proof).await? 
+                    let handle = engine.store_block_proof(0, &block_id, handle, &proof).await? 
                         .to_non_created()
                         .ok_or_else( 
                             || error!(
@@ -103,10 +103,10 @@ async fn run_cold(
         futures_timer::Delay::new(Duration::from_secs(1)).await;
 
         log::info!(target: "boot", "download init block proof link {}", block_id);
-        match engine.download_block_proof(&block_id, true, true).await {
+        match engine.download_block_proof(0, &block_id, true, true).await {
             Ok(proof) => match proof.check_proof_link() {
                 Ok(_) => {
-                    let handle = engine.store_block_proof(&block_id, handle, &proof).await? 
+                    let handle = engine.store_block_proof(0, &block_id, handle, &proof).await? 
                         .to_non_created()
                         .ok_or_else( 
                             || error!(
@@ -158,7 +158,7 @@ async fn get_key_blocks(
         }
         log::info!(target: "boot", "download_next_key_blocks_ids {}", handle.id());
         // this information is not trusted
-        let ids = match engine.download_next_key_blocks_ids(handle.id()).await {
+        let ids = match engine.download_next_key_blocks_ids(0, handle.id()).await {
             Err(err) => {
                 log::warn!(target: "boot", "download_next_key_blocks_ids {}: {}", handle.id(), err);
                 futures_timer::Delay::new(Duration::from_secs(1)).await;
@@ -323,8 +323,8 @@ async fn download_start_blocks_and_states(
             let handle = if let Some(handle) = engine.load_block_handle(block_id)? {
                 handle
             } else if engine.flags().starting_block_disabled {
-                let proof = engine.download_block_proof(block_id, true, false).await?;
-                let handle = engine.store_block_proof(block_id, None, &proof).await?
+                let proof = engine.download_block_proof(0, block_id, true, false).await?;
+                let handle = engine.store_block_proof(0, block_id, None, &proof).await?
                     .to_non_created()
                     .ok_or_else(
                         || error!("INTERNAL ERROR: Bad result in store block {} proof", block_id)
@@ -338,7 +338,7 @@ async fn download_start_blocks_and_states(
                         || error!("INTERNAL ERROR: Bad result in store block {} proof", block_id)
                     )?;
                 if let Some(proof) = proof {
-                    engine.store_block_proof(block_id, Some(handle.clone()), &proof).await?
+                    engine.store_block_proof(0, block_id, Some(handle.clone()), &proof).await?
                         .to_updated()
                         .ok_or_else(
                             || error!("INTERNAL ERROR: Bad result in store block {} proof", block_id)
@@ -371,7 +371,7 @@ pub(crate) async fn download_zerostate(
         if engine.check_stop() {
             fail!("Boot was stopped");
         }
-        match engine.download_zerostate(block_id).await {
+        match engine.download_zerostate(0, block_id).await {
             Ok((state, state_bytes)) => {
                 log::info!(target: "boot", "zero state {} received", block_id);
                 let (state, handle) = engine.store_zerostate(state, &state_bytes).await?;
@@ -402,7 +402,7 @@ async fn download_and_check_key_block_proof(
         if engine.check_stop() {
             fail!("Boot was stopped");
         }
-        let proof = engine.download_block_proof(block_id, false, true).await?;
+        let proof = engine.download_block_proof(0, block_id, false, true).await?;
         let result = if let Some(prev_block_proof) = prev_block_proof {
             proof.check_with_prev_key_block_proof(prev_block_proof)
         } else if let Some(zero_state) = zero_state {
@@ -412,7 +412,7 @@ async fn download_and_check_key_block_proof(
         };
         match result {
             Ok(_) => {
-                let handle = engine.store_block_proof(block_id, None, &proof).await?
+                let handle = engine.store_block_proof(0, block_id, None, &proof).await?
                     .to_non_created()
                     .ok_or_else(
                         || error!("INTERNAL ERROR: Bad result in store block {} proof", block_id)
@@ -447,7 +447,7 @@ async fn download_state(
             )?;
             if !handle.has_proof() {
                 if let Some(proof) = proof {
-                    engine.store_block_proof(handle.id(), Some(handle.clone()), &proof).await?
+                    engine.store_block_proof(0, handle.id(), Some(handle.clone()), &proof).await?
                         .to_updated()
                         .ok_or_else(
                             || error!(
@@ -469,7 +469,7 @@ async fn download_state(
         } else {
             fail!("handle for has neither proof nor proof link {}", handle.id())
         };
-        // let state_update = block.block_or_queue_update()?.read_state_update()?;
+        // let state_update = block.virt_block()?.read_state_update()?;
         let (block, _) = proof.virtualize_block()?;
         let state_update = block.read_state_update()?;
         let state = engine.download_and_store_state(
@@ -623,7 +623,7 @@ async fn check_hardforks(
     if proof.is_none() {
         let proof = create_new_proof_link(&block)
             .map_err(|err| error!("cannot create proof link for crafted block : {}", err))?;
-        engine.store_block_proof(hardfork_id, Some(handle.clone()), &proof).await?;
+        engine.store_block_proof(0, hardfork_id, Some(handle.clone()), &proof).await?;
         log::info!(
             target: "boot",
             "the proof for crafted block is created and stored to the database"

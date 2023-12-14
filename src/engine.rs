@@ -1231,7 +1231,7 @@ impl Engine {
                     } else {
                         continue
                     };
-                    let handle = self.store_block_proof(id, Some(handle), &proof).await?;
+                    let handle = self.store_block_proof(0, id, Some(handle), &proof).await?;
                     let handle = handle.to_non_created().ok_or_else(
                         || error!("INTERNAL ERROR: bad result for store block {} proof", id)
                         )?;

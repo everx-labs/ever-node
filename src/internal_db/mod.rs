@@ -533,7 +533,7 @@ impl InternalDb {
         let _tc = TimeChecker::new(format!("store_block_data {}", block.id()), 100);
         let mut result = self.create_or_load_block_handle(
             block.id(),
-            Some(block.block_or_queue_update()?),
+            Some(block.virt_block()?),
             block.is_queue_update_for().map(|o| (o, false)),
             None,
             callback.clone()

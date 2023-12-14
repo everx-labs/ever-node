@@ -11,13 +11,13 @@
 * limitations under the License.
 */
 
-use std::default;
+use std::collections::HashMap;
 use std::{cmp::max, sync::Arc};
 use std::io::Write;
 use ton_block::{
     Block, BlockIdExt, BlkPrevInfo, Deserializable, ExtBlkRef, ShardDescr, ShardIdent, 
     ShardHashes, HashmapAugType, MerkleProof, Serializable, ConfigParams, OutQueueUpdate, 
-    MeshUpdate, MeshKit, MeshMsgQueueUpdates, MeshMsgQueuesKit,
+    MeshMsgQueueUpdates, MeshMsgQueuesKit, ConnectedNwDescrExt,
 };
 use ton_types::{
     Cell, Result, types::UInt256, BocReader, error, fail, HashmapType, UsageTree,
@@ -154,7 +154,7 @@ impl BlockStuff {
         }
     }
 
-    pub fn block_or_queue_update(&self) -> Result<&Block> {
+    pub fn virt_block(&self) -> Result<&Block> {
         match &self.block {
             BlockKind::Block(block) => Ok(block),
             BlockKind::QueueUpdate{block_part, ..} => Ok(block_part),
@@ -164,11 +164,13 @@ impl BlockStuff {
     }
 
     pub fn get_queue_update_for(&self, workchain_id: i32) -> Result<OutQueueUpdate> {
-        if matches!(self.is_queue_update_for(), Some(workchain_id)) {
-            fail!("{} is not queue update is for wc {}", self.id(), workchain_id)
+        if let Some(wc) = self.is_queue_update_for() {
+            if wc != workchain_id {
+                fail!("{} is not queue update for wc {}", self.id(), workchain_id)
+            }
         }
         self
-            .block_or_queue_update()?
+            .virt_block()?
             .out_msg_queue_updates.as_ref().ok_or_else(|| {
                 error!("Block {} doesn't contain queue updates at all", self.id())
             })?
@@ -215,15 +217,15 @@ impl BlockStuff {
 //    }
 
     pub fn gen_utime(&self) -> Result<u32> {
-        Ok(self.block_or_queue_update()?.read_info()?.gen_utime().as_u32())
+        Ok(self.virt_block()?.read_info()?.gen_utime().as_u32())
     }
 
    pub fn is_key_block(&self) -> Result<bool> {
-       Ok(self.block_or_queue_update()?.read_info()?.key_block())
+       Ok(self.virt_block()?.read_info()?.key_block())
    }
 
     pub fn construct_prev_id(&self) -> Result<(BlockIdExt, Option<BlockIdExt>)> {
-        let header = self.block_or_queue_update()?.read_info()?;
+        let header = self.virt_block()?.read_info()?;
         match header.read_prev_ref()? {
             BlkPrevInfo::Block{prev} => {
                 let shard_id = if header.after_split() {
@@ -268,7 +270,7 @@ impl BlockStuff {
 
     pub fn get_master_id(&self) -> Result<ExtBlkRef> {
         Ok(self
-            .block_or_queue_update()?
+            .virt_block()?
             .read_info()?
             .read_master_ref()?
             .ok_or_else(|| error!("Can't get master ref: given block is a master block"))?
@@ -344,6 +346,28 @@ impl BlockStuff {
             })?;
 
         Ok(shards)
+    }
+
+    // Commited master block for each connected network
+    pub fn mesh_top_blocks(&self) -> Result<HashMap<u32, BlockIdExt>> {
+        let mut tbs = HashMap::new();
+        self
+            .block()?
+            .read_extra()?
+            .read_custom()?
+            .ok_or_else(|| error!("Given block is not a master block."))?
+            .mesh_descr()
+            .iterate_with_keys(|id: u32, descr: ConnectedNwDescrExt| {
+                let block = BlockIdExt {
+                    shard_id: ShardIdent::masterchain(),
+                    seq_no: descr.descr.seq_no,
+                    root_hash: descr.descr.root_hash,
+                    file_hash: descr.descr.file_hash
+                };
+                tbs.insert(id, block);
+                Ok(true)
+            })?;
+        Ok(tbs)
     }
 
     #[cfg(feature = "external_db")]

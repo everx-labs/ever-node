@@ -274,7 +274,7 @@ pub async fn accept_block_routine(
         collator_range,
         signatures)?;
 
-    handle = engine.store_block_proof(&id, Some(handle), &proof).await?
+    handle = engine.store_block_proof(0, &id, Some(handle), &proof).await?
         .to_non_created()
         .ok_or_else(
             || error!("INTERNAL ERROR: accept for block {} proof mismatch", id)

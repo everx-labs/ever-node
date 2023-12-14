@@ -154,7 +154,7 @@ async fn load_next_master_block(
         }
     };
     if !next_handle.has_proof() {
-        next_handle = engine.store_block_proof(block.id(), Some(next_handle), &proof).await?
+        next_handle = engine.store_block_proof(0, block.id(), Some(next_handle), &proof).await?
             .to_non_created()
             .ok_or_else(
                 || error!(
@@ -617,7 +617,7 @@ pub async fn process_block_broadcast(
 
     if let Some(proof) = proof_opt.as_ref() {
         if !handle.has_proof() {
-            let result = engine.store_block_proof(block.id(), Some(handle), proof).await?;
+            let result = engine.store_block_proof(0, block.id(), Some(handle), proof).await?;
             handle = if let Some(handle) = result.to_updated() {
                 handle
             } else {
@@ -650,7 +650,7 @@ pub async fn process_block_broadcast(
         }
     } else {
         let master_ref = block
-            .block_or_queue_update()?
+            .virt_block()?
             .read_info()?
             .read_master_ref()?
             .ok_or_else(|| NodeError::InvalidData(format!(
