@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ton_node'
-version = '0.55.71'
+version = '0.55.72'
 
 [workspace]
 members = [ 'storage' ]
