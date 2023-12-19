@@ -212,6 +212,7 @@ impl RempCatchainInfo {
             if !adnl_hash.contains(&next_cn.adnl_id) {
                 nodes.push(next_cn);
                 nodes_vdescr.push(next_nn.clone());
+                adnl_hash.insert(next_cn.adnl_id.clone());
             }
         }
 
