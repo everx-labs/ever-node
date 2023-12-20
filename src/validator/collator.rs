@@ -61,7 +61,7 @@ use ton_block::{
     ShardFees, ShardHashes, ShardIdent, ShardStateSplit, ShardStateUnsplit, TopBlockDescrSet,
     Transaction, TransactionTickTock, UnixTime32, ValidatorSet, ValueFlow, WorkchainDescr,
     Workchains, Account, AccountIdPrefixFull, OutQueueUpdates, OutMsgQueueInfo, MASTERCHAIN_ID,
-    EnqueuedMsg
+    EnqueuedMsg, GetRepresentationHash
 };
 use ton_executor::{
     BlockchainConfig, ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor,
@@ -180,7 +180,7 @@ impl AsyncMessage {
     fn is_external(&self) -> bool { matches!(self, Self::Ext(_)) }
     fn compute_message_hash(&self) -> Result<Option<UInt256>> {
         let hash_opt = match self {
-            Self::Recover(msg) | Self::Mint(msg) | Self::Copyleft(msg) | Self::Ext(msg) => Some(msg.serialize()?.repr_hash()),
+            Self::Recover(msg) | Self::Mint(msg) | Self::Copyleft(msg) | Self::Ext(msg) => Some(msg.hash()?),
             Self::Int(enq, _) => Some(enq.message_hash()),
             Self::New(env, _, _) => Some(env.message_hash()),
             Self::TickTock(_) => None,
@@ -735,7 +735,6 @@ impl CollatorData {
         Ok(())
     }
     /// Cleans out queue msgs adding history
-    #[cfg(feature = "revert_collat_changes")]
     fn commit_add_out_queue_msgs(&mut self) -> Result<()> {
         self.add_out_queue_msg_history.clear();
         self.add_out_queue_msg_history.shrink_to_fit();
@@ -1182,7 +1181,6 @@ impl ExecutionManager {
         check_finalize_parallel_timeout: impl Fn() -> (bool, u32),
     ) -> Result<()> {
         log::trace!("{}: wait_transactions", self.collated_block_descr);
-        #[cfg(feature = "revert_collat_changes")]
         if self.is_parallel_processing_cancelled() {
             log::debug!("{}: parallel collation was already stopped, do not wait transactions anymore", self.collated_block_descr);
             return Ok(());
