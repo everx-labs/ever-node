@@ -191,6 +191,27 @@ impl RempCatchainInfo {
         UInt256::calc_file_hash(&serialized.0)
     }
 
+    fn append_validator_list(nodes: &mut Vec<CatchainNode>, nodes_vdescr: &mut Vec<ValidatorDescr>, adnl_hash: &mut HashSet<Arc<KeyId>>, c: &Vec<ValidatorDescr>) {
+        for next_nn in c.iter() {
+            let next_cn = validatordescr_to_catchain_node(next_nn);
+            if !adnl_hash.contains(&next_cn.adnl_id) {
+                adnl_hash.insert(next_cn.adnl_id.clone());
+                nodes.push(next_cn);
+                nodes_vdescr.push(next_nn.clone());
+            }
+        }
+    }
+
+    fn check_unique(nodes: &Vec<CatchainNode>) -> Result<()> {
+        let mut adnl_hash = HashSet::new();
+        for next_cn in nodes.iter() {
+            if adnl_hash.contains(&next_cn.adnl_id) { fail!("Duplicate adnl id {}", next_cn.adnl_id); }
+
+            adnl_hash.insert(next_cn.adnl_id.clone());
+        }
+        Ok(())
+    }
+
     pub fn create(
         general_session_info: Arc<GeneralSessionInfo>,
         master_cc_range: &RangeInclusive<u32>,
@@ -199,10 +220,15 @@ impl RempCatchainInfo {
         local: &PublicKey,
         node_list_id: ValidatorListHash
     ) -> Result<Self> {
-        let mut nodes: Vec<CatchainNode> = curr.iter().map(validatordescr_to_catchain_node).collect();
+        let mut nodes: Vec<CatchainNode> = Vec::new();
         let mut nodes_vdescr = curr.clone();
-
         let mut adnl_hash: HashSet<Arc<KeyId>> = HashSet::new();
+
+        Self::append_validator_list(&mut nodes, &mut nodes_vdescr, &mut adnl_hash, curr);
+        Self::append_validator_list(&mut nodes, &mut nodes_vdescr, &mut adnl_hash, next);
+
+        Self::check_unique(&nodes)?;
+/*
         for nn in nodes.iter() {
             adnl_hash.insert(nn.adnl_id.clone());
         }
@@ -215,6 +241,7 @@ impl RempCatchainInfo {
                 nodes_vdescr.push(next_nn.clone());
             }
         }
+*/
 
         let local_key_id = local.id().data().into();
         let local_idx = get_validator_key_idx(local, &nodes)?;
