@@ -210,9 +210,9 @@ impl RempCatchainInfo {
         for next_nn in next.iter() {
             let next_cn = validatordescr_to_catchain_node(next_nn);
             if !adnl_hash.contains(&next_cn.adnl_id) {
+                adnl_hash.insert(next_cn.adnl_id.clone());
                 nodes.push(next_cn);
                 nodes_vdescr.push(next_nn.clone());
-                adnl_hash.insert(next_cn.adnl_id.clone());
             }
         }
 
