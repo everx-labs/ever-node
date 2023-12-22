@@ -11,7 +11,7 @@
 * limitations under the License.
 */
 
-use crate::{block_handle_db, traits::Serializable};
+use crate::{block_handle_db, traits::Serializable, block_db};
 use std::{io::{Read, Write}, sync::atomic::{AtomicU64, Ordering}};
 #[cfg(test)]
 use std::sync::atomic::AtomicU32;
@@ -23,7 +23,8 @@ pub struct BlockMeta {
     flags: AtomicU64,
     pub gen_utime: u32,
     pub gen_lt: u64,
-    pub queue_update_for: i32,
+    pub params: u32, // for queue update it is target workchain id
+                     // for mesh update/kit it is source network id
     #[cfg(test)]
     pub test_counter: AtomicU32,
 }
@@ -37,7 +38,7 @@ impl BlockMeta {
         } else {
             0
         };
-        Ok(Self::with_data(flags, info.gen_utime().as_u32(), info.start_lt(), 0, INVALID_WORKCHAIN_ID))
+        Ok(Self::with_data(flags, info.gen_utime().as_u32(), info.start_lt(), 0, 0))
     }
 
     pub fn from_queue_update(block: &Block, queue_update_for: i32, is_empty: bool) -> Result<Self> {
@@ -46,7 +47,18 @@ impl BlockMeta {
         if is_empty {
             flags |= block_handle_db::FLAG_IS_EMPTY_QUEUE_UPDATE;
         }
-        Ok(Self::with_data(flags, info.gen_utime().as_u32(), info.start_lt(), 0, queue_update_for))
+        Ok(Self::with_data(flags, info.gen_utime().as_u32(), info.start_lt(), 0, queue_update_for as u32))
+    }
+
+    pub fn from_mesh_update(block: &Block, source_network_id: u32) -> Result<Self> {
+        let info = block.read_info()?;
+        Ok(Self::with_data(
+            block_handle_db::FLAG_IS_MESH_UPDATE, 
+            info.gen_utime().as_u32(),
+            info.start_lt(),
+            0,
+            source_network_id
+        ))
     }
 
     pub fn with_data(
@@ -54,13 +66,13 @@ impl BlockMeta {
         gen_utime: u32, 
         gen_lt: u64, 
         masterchain_ref_seq_no: u32,
-        queue_update_for: i32,
+        params: u32,
     ) -> Self {
         Self {
             flags: AtomicU64::new(((flags as u64) << 32) | masterchain_ref_seq_no as u64),
             gen_utime,
             gen_lt,
-            queue_update_for,
+            params,
             #[cfg(test)]
             test_counter: AtomicU32::new(0),
         }
@@ -101,8 +113,11 @@ impl Serializable for BlockMeta {
         writer.write_all(&flags.to_le_bytes())?;
         writer.write_all(&self.gen_utime.to_le_bytes())?;
         writer.write_all(&self.gen_lt.to_le_bytes())?;
-        if self.flags() & block_handle_db::FLAG_IS_QUEUE_UPDATE != 0 {
-            writer.write_all(&self.queue_update_for.to_le_bytes())?;
+        let flags = block_handle_db::FLAG_IS_QUEUE_UPDATE | 
+                    block_handle_db::FLAG_IS_EMPTY_QUEUE_UPDATE |
+                    block_handle_db::FLAG_IS_MESH_UPDATE;
+        if self.flags() & flags != 0 {
+            writer.write_all(&self.params.to_le_bytes())?;
         }
         #[cfg(test)]
         writer.write_all(&self.test_counter.load(Ordering::SeqCst).to_le_bytes())?;
@@ -115,12 +130,15 @@ impl Serializable for BlockMeta {
         let gen_lt = reader.read_le_u64()?;
         let masterchain_ref_seq_no = flags as u32;
         let flags = (flags >> 32) as u32;
-        let queue_update_for = if flags & block_handle_db::FLAG_IS_QUEUE_UPDATE != 0{
-            reader.read_le_u32()? as i32
+        let checked_flags = block_handle_db::FLAG_IS_QUEUE_UPDATE | 
+                            block_handle_db::FLAG_IS_EMPTY_QUEUE_UPDATE |
+                            block_handle_db::FLAG_IS_MESH_UPDATE;
+        let params = if flags & checked_flags != 0{
+            reader.read_le_u32()?
         } else {
-            INVALID_WORKCHAIN_ID
+            0
         };
-        let bm = Self::with_data(flags, gen_utime, gen_lt, masterchain_ref_seq_no, queue_update_for);
+        let bm = Self::with_data(flags, gen_utime, gen_lt, masterchain_ref_seq_no, params);
         #[cfg(test)] {
             let test_counter = reader.read_le_u32().unwrap_or_default();
             bm.test_counter.store(test_counter, Ordering::Relaxed);

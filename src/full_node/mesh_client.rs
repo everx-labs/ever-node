@@ -1,16 +1,50 @@
-use crate::{
-    block_proof::BlockProofStuff, engine_traits::EngineOperations, 
-    shard_state::ShardStateStuff,
-};
-
-use std::borrow::Cow;
 use std::{ops::Deref, sync::Arc, time::Duration};
-use storage::block_handle_db::BlockHandle;
+
 use ton_block::{BlockIdExt, ConnectedNwConfig};
 use ton_types::{error, fail,  Result};
-use crate::block::BlockStuff;
 
-pub const PSS_PERIOD_BITS: u32 = 17;
+use storage::block_handle_db::BlockHandle;
+use crate::{
+    block_proof::BlockProofStuff, engine_traits::EngineOperations, 
+    shard_state::ShardStateStuff, block::BlockStuff, boot::PSS_PERIOD_BITS,
+};
+
+#[derive(Clone)]
+enum BlockProofOrZerostate {
+    KeyBlock(BlockProofStuff),
+    Zerostate(Arc<ShardStateStuff>),
+    None,
+}
+
+impl BlockProofOrZerostate {
+    pub fn with_zerostate(zerostate: Arc<ShardStateStuff>) -> Self {
+        Self::Zerostate(zerostate)
+    }
+    pub fn with_key_block(proof: BlockProofStuff) -> Self {
+        Self::KeyBlock(proof)
+    }
+    pub fn block_proof(&self) -> Option<&BlockProofStuff> {
+        match self {
+            Self::KeyBlock(proof) => Some(proof),
+            Self::Zerostate(_) => None,
+            Self::None => None,
+        }
+    }
+    pub fn zerostate(&self) -> Option<&ShardStateStuff> {
+        match self {
+            Self::KeyBlock(_) => None,
+            Self::Zerostate(zerostate) => Some(zerostate.deref()),
+            Self::None => None,
+        }
+    }
+    pub fn id(&self) -> Option<&BlockIdExt> {
+        match self {
+            Self::KeyBlock(proof) => Some(proof.id()),
+            Self::Zerostate(zerostate) => Some(zerostate.block_id()),
+            Self::None => None,
+        }
+    }
+}
 
 struct Boot<'a> {
     nw_id: u32,
@@ -25,7 +59,7 @@ impl<'a> Boot<'a> {
         nw_id: u32,
         nw_config: &'a ConnectedNwConfig,
         last_commited_block: Option<BlockIdExt>,
-    ) -> Result<BlockStuff> {
+    ) -> Result<(Arc<BlockHandle>, BlockProofOrZerostate)> {
         let descr = format!("boot into {}", nw_id);
         let boot = Self { nw_id, nw_config, engine, descr };
 
@@ -33,21 +67,18 @@ impl<'a> Boot<'a> {
 
         let last_commited_block = boot.process_hardforks(last_commited_block)?;
 
-        let (handle, zerostate, init_block_proof) = boot.get_init_point().await?;
+        let (handle, init_block_proof_or_zs) = boot.get_init_point().await?;
 
-        let mut key_blocks = 
-            boot.get_key_blocks(handle, zerostate.as_ref().map(|zs| zs.deref()), init_block_proof.as_ref()).await?;
+        let last_block_proof_or_zs = boot.get_key_blocks(handle, init_block_proof_or_zs).await?;
 
-        let last_key_block = key_blocks.pop().ok_or_else(|| error!("INTERNAL ERROR: 'key_blocks' is empty"))?;
+        log::info!("{}: last key block {}", boot.descr, last_block_proof_or_zs.id().ok_or_else(
+            || error!("INTERNAL ERROR: last key block is none")
+        )?);
 
-        log::info!("{}: last key block {}", boot.descr, last_key_block.id());
+        let latest_block_handle =
+            boot.get_latest_block(last_commited_block.as_ref(), &last_block_proof_or_zs).await?;
 
-        boot.get_latest_block(
-            last_commited_block.as_ref(),
-            zerostate.as_ref().map(|zs| zs.deref()),
-            init_block_proof.as_ref()
-        ).await
-
+        Ok((latest_block_handle, last_block_proof_or_zs))
     }
 
     pub fn check_nw_config(&self) -> Result<()> {
@@ -126,7 +157,7 @@ impl<'a> Boot<'a> {
     }
 
     async fn get_init_point(&self)
-    -> Result<(Arc<BlockHandle>, Option<Arc<ShardStateStuff>>, Option<BlockProofStuff>)> {
+    -> Result<(Arc<BlockHandle>, BlockProofOrZerostate)> {
 
         log::debug!("{}: get_init_point", self.descr);
 
@@ -159,7 +190,7 @@ impl<'a> Boot<'a> {
                         let (zerostate, handle) = 
                             self.engine.store_zerostate(zerostate, &bytes).await?;
                         self.engine.set_applied(&handle, 0).await?;
-                        return Ok((handle, Some(zerostate), None));
+                        return Ok((handle, BlockProofOrZerostate::with_zerostate(zerostate)));
                     }
                     Err(e) => {
                         log::warn!("{}: Can't download zerostate {}: {}", self.descr, block_id, e);
@@ -168,9 +199,11 @@ impl<'a> Boot<'a> {
                 }
             } else { 
                 log::info!("{}: downloading & checking init block proof {}", self.descr, block_id);
-                match self.download_and_check_block_proof(block_id, true, is_hardfork, None, None).await {
+                match self.download_and_check_block_proof(
+                    block_id, true, is_hardfork, &BlockProofOrZerostate::None
+                ).await {
                     Ok((handle, proof)) => {
-                        return Ok((handle, None, Some(proof)))
+                        return Ok((handle, BlockProofOrZerostate::with_key_block(proof)))
                     }
                     Err(e) => {
                         log::warn!("{}: {}", self.descr, e);
@@ -185,14 +218,12 @@ impl<'a> Boot<'a> {
     async fn get_key_blocks(
         &self,
         handle: Arc<BlockHandle>,
-        zerostate: Option<&ShardStateStuff>,
-        prev_block_proof: Option<&BlockProofStuff>,
-    ) -> Result<Vec<Arc<BlockHandle>>> {
+        mut prev_block_proof: BlockProofOrZerostate,
+    ) -> Result<BlockProofOrZerostate> {
 
         let mut got_last_block_at = 0;
         let mut key_blocks = vec!(handle.clone());
         let mut prev_handle = handle;
-        let mut prev_block_proof = prev_block_proof.map(|p| Cow::Borrowed(p));
 
         'main_loop: loop {
             if self.engine.check_stop() {
@@ -230,13 +261,11 @@ impl<'a> Boot<'a> {
                     continue 'main_loop;
                 }
 
-                match self.download_and_check_block_proof(
-                    next_id, false, false, zerostate, prev_block_proof.as_ref().map(|c| c.deref())
-                ).await {
+                match self.download_and_check_block_proof(next_id, false, false, &prev_block_proof).await {
                     Ok((next_handle, proof)) => {
                         prev_handle = next_handle;
                         key_blocks.push(prev_handle.clone());
-                        prev_block_proof = Some(Cow::Owned(proof));
+                        prev_block_proof = BlockProofOrZerostate::with_key_block(proof);
                         got_last_block_at = got_at;
                         self.engine.save_last_mesh_key_block_id(self.nw_id, next_id)?;
                         log::info!("{}: {} is OK", self.descr, next_id);
@@ -256,7 +285,7 @@ impl<'a> Boot<'a> {
             // if we got last key block more then 15 min ago - finish
             if now - got_last_block_at > 15 * 60 {
                 log::warn!("{}: finish because of timeout", self.descr);
-                return Ok(key_blocks);
+                return Ok(prev_block_proof);
             }
 
             // if we got last key block more then 30 sec ago
@@ -266,7 +295,7 @@ impl<'a> Boot<'a> {
                 let last_block_utime = prev_handle.gen_utime()?;
                 if last_block_utime + pss_interval > now {
                     log::info!("{}: finish because of last block + pss interval", self.descr);
-                    return Ok(key_blocks);
+                    return Ok(prev_block_proof);
                 }
             }
         }
@@ -277,8 +306,7 @@ impl<'a> Boot<'a> {
         block_id: &BlockIdExt,
         is_init_block: bool,
         is_hardfork: bool,
-        zerostate: Option<&ShardStateStuff>,
-        prev_key_block_proof: Option<&BlockProofStuff>,
+        prev_key_block_proof_or_zs: &BlockProofOrZerostate,
     ) -> Result<(Arc<BlockHandle>, BlockProofStuff)> {
         log::debug!("{}: download_and_check_block_proof {}", self.descr, block_id);
 
@@ -300,10 +328,10 @@ impl<'a> Boot<'a> {
             proof.check_proof_link()
                 .map_err(|e| error!("Block proof link {} check failed: {}", block_id, e))?;
         } else {
-            if let Some(zerostate) = zerostate {
+            if let Some(zerostate) = prev_key_block_proof_or_zs.zerostate() {
                 proof.check_with_master_state(zerostate)
                     .map_err(|e| error!("Block proof {} check failed: {}", block_id, e))?;
-            } else if let Some(prev_key_block_proof) = prev_key_block_proof {
+            } else if let Some(prev_key_block_proof) = prev_key_block_proof_or_zs.block_proof() {
                 proof.check_with_prev_key_block_proof(prev_key_block_proof)
                     .map_err(|e| error!("Block proof {} check failed: {}", block_id, e))?;
             } else {
@@ -328,9 +356,8 @@ impl<'a> Boot<'a> {
     async fn get_latest_block(
         &self,
         mut id: Option<&BlockIdExt>,
-        zerostate: Option<&ShardStateStuff>,
-        last_key_block_proof: Option<&BlockProofStuff>
-    ) -> Result<BlockStuff> {
+        last_key_block_proof: &BlockProofOrZerostate
+    ) -> Result<Arc<BlockHandle>> {
 
         if let Some(id) = id {
             log::info!("{}: downloading mesh kit {}", self.descr, id);
@@ -369,7 +396,7 @@ impl<'a> Boot<'a> {
 
             // Check proof
             let key_block_seqno = block.virt_block()?.read_info()?.prev_key_block_seqno();
-            if let Some(zerostate) = zerostate {
+            if let Some(zerostate) = last_key_block_proof.zerostate() {
                 if key_block_seqno != 0 {
                     if id.is_some() {
                         log::warn!(
@@ -393,7 +420,7 @@ impl<'a> Boot<'a> {
                     continue 'top;
                 }
 
-            } else if let Some(last_key_block_proof) = last_key_block_proof {
+            } else if let Some(last_key_block_proof) = last_key_block_proof.block_proof() {
 
                 if key_block_seqno != last_key_block_proof.id().seq_no() {
                     if id.is_some() {
@@ -422,9 +449,15 @@ impl<'a> Boot<'a> {
                 fail!("INTERNAL ERROR: there is no both zerostate and prev key block proof");
             }
 
-            // TODO: Save? In memory?
+            // TODO: Save
 
-            return Ok(block);
+
+            // TODO: Apply
+
+
+            unimplemented!()
+            
+            // return Ok(handle)
         }
     }
 
@@ -443,59 +476,142 @@ impl ConnectedNwClient {
         nw_id: u32,
         nw_config: ConnectedNwConfig
     ) {
-        tokio::spawn(async move {
+        let descr = format!("mesh nw client {}", nw_id);
+        let client = Arc::new(Self { engine, nw_id, descr});
 
-            let descr = format!("mesh nw client {}", nw_id);
-            let client = Self { engine, nw_id, descr};
+        tokio::spawn({
+            let client = client.clone();
+            async move {
 
-            // Boot
-            let last_mesh_kit = 'l: loop {
-                match Boot::boot(
-                    client.engine.clone(), client.nw_id, &nw_config, last_block_id.clone()
-                ).await {
-                    Ok(id) => {
-                        log::info!("{}: boot finished", client.descr);
-                        break 'l id;
+                // Boot
+                let (last_mesh_kit, last_key_block) = 'l: loop {
+                    match Boot::boot(
+                        client.engine.clone(), client.nw_id, &nw_config, last_block_id.clone()
+                    ).await {
+                        Ok(id) => {
+                            log::info!("{}: boot finished", client.descr);
+                            break 'l id;
+                        }
+                        Err(e) => {
+                            log::warn!("{}: Can't boot: {}", client.descr, e);
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
                     }
-                    Err(e) => {
-                        log::warn!("{}: Can't boot: {}", client.descr, e);
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        continue;
-                    }
-                }
-            };
+                };
 
-
-            
-
-
-
-
-            // Start worker
-
-                // download next mc block and queues updates
-
-                // apply block and update queues
-
-
-            unimplemented!()
+                // Start worker
+                // client.worker(last_mesh_kit).await;
+                unimplemented!()
+            }
         });
     }
 
-    fn process_broadcast(&self) -> Result<()> {
+    pub fn process_broadcast(&self) -> Result<()> {
 
         // process broadcast with mc block and queues updates - check proof and save block and updates
 
         unimplemented!()
     }
 
-    fn process_commited(&self, block_id: BlockIdExt) -> Result<()> {
+    pub fn process_commited(&self, block_id: BlockIdExt) -> Result<()> {
 
         // new block of connected nw was commited into masterchain
 
         // if we don't know about this block - download it
 
         unimplemented!()
+    }
+
+    async fn worker(
+        self: Arc<Self>,
+        mut last_mc_block: Arc<BlockHandle>,
+        mut last_key_block_proof: BlockProofOrZerostate,
+    ) -> Result<()> {
+
+        loop {
+            if self.engine.check_stop() {
+                log::info!("{}: stopped", self.descr);
+                return Ok(());
+            }
+
+            if last_mc_block.gen_utime()? + 5 > self.engine.now() {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+
+            if last_mc_block.has_next1() {
+                let next = self.engine.load_block_next1(last_mc_block.id()).await?;
+                if let Some(next_mc_block) = self.engine.load_block_handle(&next)? {
+                    if next_mc_block.is_applied() {
+                        last_mc_block = next_mc_block;
+                        continue;
+                    }
+                }
+            }
+
+            log::trace!("{}: downloading next block... prev: {}", self.descr, last_mc_block.id());
+
+            // TODO: after receiving a single data structure, FullNodeOverlayClient creates from it
+            //       BlockStuff with MeshUpdate inside and BlockProofStuff with signatures inside.
+            //       Same tree of cells with a fragment of the block stores inside both structs.
+
+            let (mesh_update, proof) =
+                self.engine.download_next_block(self.nw_id, last_mc_block.id()).await?;
+            log::trace!("{}: downloading next block: got {}", self.descr, mesh_update.id());
+
+            if mesh_update.id().seq_no != last_mc_block.id().seq_no + 1 ||
+               mesh_update.id().shard_id != last_mc_block.id().shard_id 
+            {
+                log::warn!("{}: invalid next master block, got: {}, prev: {}",
+                    self.descr, mesh_update.id(), last_mc_block.id());
+            }
+
+            // Check proof
+            if let Some(zerostate) = last_key_block_proof.zerostate() {
+                log::trace!("{}: checking with zerostate, mesh update: {}", self.descr, mesh_update.id());
+                if let Err(e) = proof.check_with_master_state(zerostate) {
+                    log::warn!(
+                        "{}: mesh kit {} check with zerostate failed: {}",
+                        self.descr, mesh_update.id(), e
+                    );
+                    futures_timer::Delay::new(Duration::from_secs(1)).await;
+                    continue;
+                } 
+            } else if let Some(key_block_proof) = last_key_block_proof.block_proof() {
+                log::trace!(
+                    "{}: checking with prev key block proof {}, mesh update: {}",
+                    self.descr, key_block_proof.id(), mesh_update.id()
+                );
+                if let Err(e) = proof.check_with_prev_key_block_proof(key_block_proof) {
+                    log::warn!(
+                        "{}: mesh kit {} check with prev key block proof {} failed: {}",
+                        self.descr, mesh_update.id(), key_block_proof.id(), e
+                    );
+                    futures_timer::Delay::new(Duration::from_secs(1)).await;
+                    continue;
+                }
+            } else {
+                fail!("INTERNAL ERROR: there is no both zerostate and prev key block proof");
+            }
+
+            // save
+            log::trace!("{}: saving mesh update {}...", self.descr, mesh_update.id());
+            let handle = self.engine.store_block(&mesh_update).await?.to_any();
+
+            // apply
+            log::trace!("{}: applying mesh update {}...", self.descr, mesh_update.id());
+            self.engine.clone().apply_block(&handle, &mesh_update, 0, false).await?;
+
+            if mesh_update.is_key_block()? {
+                log::trace!("{}: update last key block to: {}", self.descr, mesh_update.id());
+                last_key_block_proof = BlockProofOrZerostate::with_key_block(proof);
+            }
+
+            last_mc_block = handle;
+            log::trace!("{}: applied {}", self.descr, mesh_update.id());
+        }
+
     }
 
 }

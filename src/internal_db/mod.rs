@@ -88,7 +88,7 @@ impl BlockResult {
     }
 
     /// Any result 
-    pub fn _to_any(self) -> Arc<BlockHandle> {
+    pub fn to_any(self) -> Arc<BlockHandle> {
         self.handle
     }
 
@@ -504,7 +504,7 @@ impl InternalDb {
             }
         } else if id.seq_no == 0 {
             if let Some(utime) = utime {
-                BlockMeta::with_data(0, utime, 0, 0, INVALID_WORKCHAIN_ID)
+                BlockMeta::with_data(0, utime, 0, 0, INVALID_WORKCHAIN_ID as u32)
             } else {
                 fail!("Cannot create handle for zero block {} without UNIX time")
             }

@@ -17,7 +17,7 @@ use std::io::Write;
 use ton_block::{
     Block, BlockIdExt, BlkPrevInfo, Deserializable, ExtBlkRef, ShardDescr, ShardIdent, 
     ShardHashes, HashmapAugType, MerkleProof, Serializable, ConfigParams, OutQueueUpdate, 
-    MeshMsgQueueUpdates, MeshMsgQueuesKit, ConnectedNwDescrExt,
+    MeshMsgQueueUpdates, MeshMsgQueuesKit, ConnectedNwDescrExt, MerkleUpdate,
 };
 use ton_types::{
     Cell, Result, types::UInt256, BocReader, error, fail, HashmapType, UsageTree,
@@ -50,10 +50,12 @@ enum BlockKind {
     MeshUpdate {
         block_part: Block,
         queue_updates: MeshMsgQueueUpdates,
+        network_id: u32,
     },
     MeshKit {
         block_part: Block,
         queues: MeshMsgQueuesKit,
+        network_id: u32,
     }
 }
 impl Default for BlockKind {
@@ -118,7 +120,7 @@ impl BlockStuff {
             root_hash: root.repr_hash(),
             file_hash,
         };
-        Ok(Self { id, block: Some(block), root, data: data, ..Default::default() })
+        Ok(Self { id, block: BlockKind::Block(block), root, data: data, ..Default::default() })
     }
 
     #[cfg(test)]
@@ -199,8 +201,28 @@ impl BlockStuff {
             _ => None
         }
     }
-    
+
+    pub fn is_mesh_update(&self) -> bool {
+        matches!(self.block, BlockKind::MeshUpdate{..})
+    }
+
+    pub fn is_mesh_kit(&self) -> bool {
+        matches!(self.block, BlockKind::MeshKit{..})
+    }
+
+    pub fn is_usual_block(&self) -> bool {
+        matches!(self.block, BlockKind::Block(_))
+    }
+
     pub fn id(&self) -> &BlockIdExt { &self.id }
+
+    pub fn network_short_id(&self) -> u32 {
+        match &self.block {
+            BlockKind::MeshUpdate{network_id, ..} => *network_id,
+            BlockKind::MeshKit{network_id, ..} => *network_id,
+            _ => 0
+        }
+    }
 
 // Unused
 //    pub fn shard(&self) -> &ShardIdent { 
@@ -416,6 +438,17 @@ impl BlockStuff {
         })?;
         log::trace!("calculate_tr_count: transactions {}, TIME: {}ms, block: {}", tr_count, now.elapsed().as_millis(), self.id());
         Ok(tr_count)
+    }
+
+    pub fn mesh_update(&self, src_shard: &ShardIdent) -> Result<MerkleUpdate> {
+        match &self.block {
+            BlockKind::MeshUpdate{queue_updates, ..} => {
+                let mut update = queue_updates.get_queue_update(src_shard)?
+                    .ok_or_else(|| error!("Block {} doesn't contain queue update for shard {}", self.id(), src_shard))?;
+                Ok(update)
+            },
+            _ => fail!("Block {} is not a mesh update", self.id())
+        }
     }
 }
 

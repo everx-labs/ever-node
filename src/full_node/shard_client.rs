@@ -130,7 +130,7 @@ async fn load_next_master_block(
     };
 
     log::trace!("load_next_master_block: downloading next block... prev: {}", prev_id);
-    let (block, proof) = engine.download_next_block(prev_id).await?;
+    let (block, proof) = engine.download_next_block(0, prev_id).await?;
     log::trace!("load_next_master_block: got next block: {}", prev_id);
     if block.id().seq_no != prev_id.seq_no + 1 {
         fail!("Invalid next master block got: {}, prev: {}", block.id(), prev_id);

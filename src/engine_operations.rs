@@ -425,7 +425,7 @@ impl EngineOperations for Engine {
         self.download_block_proof_worker(id, is_link, key_block, Some(1)).await
     }
 
-    async fn download_next_block(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
+    async fn download_next_block(&self, mesh_nw_id: u32, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
         self.download_next_block_worker(prev_id, None).await
     }
 

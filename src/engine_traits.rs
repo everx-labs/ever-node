@@ -50,7 +50,7 @@ use ton_block::{
     AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, ShardAccount,
     MASTERCHAIN_ID, Deserializable, ConfigParams, OutMsgQueue
 };
-use ton_types::{error, AccountId, KeyId, KeyOption, Result, UInt256};
+use ton_types::{error, AccountId, KeyId, KeyOption, Result, UInt256, Cell};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
 use crate::config::{CollatorConfig, CollatorTestBundlesGeneralConfig};
 
@@ -368,7 +368,11 @@ pub trait EngineOperations : Sync + Send {
     ) -> Result<BlockProofStuff> {
         unimplemented!()
     }
-    async fn download_next_block(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
+    async fn download_next_block(
+        &self,
+        mesh_nw_id: u32, // zero for own network
+        prev_id: &BlockIdExt
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
         unimplemented!()
     }
     async fn download_next_key_blocks_ids(
@@ -909,6 +913,10 @@ pub trait EngineOperations : Sync + Send {
 
     // THE MESH
 
+    fn network_short_id(&self) -> u32 {
+        unimplemented!()
+    }
+
     fn load_last_mesh_key_block_id(&self, nw_id: u32) -> Result<Option<Arc<BlockIdExt>>> {
         unimplemented!()
     }
@@ -930,6 +938,25 @@ pub trait EngineOperations : Sync + Send {
     }
 
     async fn download_latest_mesh_kit(&self, nw_id: u32) -> Result<(BlockStuff, BlockProofStuff)> {
+        unimplemented!()
+    }
+
+    fn store_mesh_queue(
+        &self,
+        nw_id: u32,
+        handle: &BlockIdExt,
+        shard: &ShardIdent,
+        queue_root: Cell
+    ) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn load_mesh_queue(
+        &self,
+        nw_id: u32,
+        mc_block_id: &BlockIdExt,
+        shard: &ShardIdent
+    ) -> Result<Cell> {
         unimplemented!()
     }
 
