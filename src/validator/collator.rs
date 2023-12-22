@@ -50,6 +50,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use std::collections::BTreeMap;
 use ton_block::{
     AddSub, BlkPrevInfo, Block, BlockCreateStats, BlockExtra, BlockIdExt, BlockInfo, CommonMsgInfo,
     ConfigParams, CopyleftRewards, CreatorStats, CurrencyCollection, Deserializable, ExtBlkRef,
@@ -59,13 +60,15 @@ use ton_block::{
     ParamLimitIndex, Serializable, ShardAccount, ShardAccountBlocks, ShardAccounts, ShardDescr,
     ShardFees, ShardHashes, ShardIdent, ShardStateSplit, ShardStateUnsplit, TopBlockDescrSet,
     Transaction, TransactionTickTock, UnixTime32, ValidatorSet, ValueFlow, WorkchainDescr,
-    Workchains, Account, AccountIdPrefixFull, OutQueueUpdates, OutMsgQueueInfo, MASTERCHAIN_ID
+    Workchains, Account, AccountIdPrefixFull, OutQueueUpdates, OutMsgQueueInfo, MASTERCHAIN_ID,
+    EnqueuedMsg
 };
 use ton_executor::{
     BlockchainConfig, ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor,
     TransactionExecutor,
 };
 use ton_types::{error, fail, AccountId, Cell, HashmapType, Result, UInt256, UsageTree, SliceData};
+use ton_types::HashmapRemover;
 
 use crate::validator::validator_utils::is_remp_enabled;
 
@@ -169,12 +172,21 @@ enum AsyncMessage {
     Copyleft(Message),
     Ext(Message),
     Int(MsgEnqueueStuff, bool),
-    New(MsgEnvelopeStuff, Cell), // prev_trans_cell
+    New(MsgEnvelopeStuff, Cell, u64), // prev_trans_cell
     TickTock(TransactionTickTock),
 }
 
 impl AsyncMessage {
     fn is_external(&self) -> bool { matches!(self, Self::Ext(_)) }
+    fn compute_message_hash(&self) -> Result<Option<UInt256>> {
+        let hash_opt = match self {
+            Self::Recover(msg) | Self::Mint(msg) | Self::Copyleft(msg) | Self::Ext(msg) => Some(msg.serialize()?.repr_hash()),
+            Self::Int(enq, _) => Some(enq.message_hash()),
+            Self::New(env, _, _) => Some(env.message_hash()),
+            Self::TickTock(_) => None,
+        };
+        Ok(hash_opt)
+    }
 }
 
 #[derive(Debug)]
@@ -211,23 +223,49 @@ impl PartialOrd for NewMessage {
     }
 }
 
+type TxLastLt = u64;
+
 struct CollatorData {
     // lists, empty by default
     in_msgs: InMsgDescr,
+    /// * key - msg_sync_key
+    /// * value - in msg descr hash
+    in_msgs_descr_history: HashMap<usize, UInt256>,
     out_msgs: OutMsgDescr,
+    /// * key - msg_sync_key
+    /// * value - list of out msgs descrs hashes
+    out_msgs_descr_history: HashMap<usize, Vec<UInt256>>,
     accounts: ShardAccountBlocks,
     out_msg_queue_info: OutMsgQueueInfoStuff,
+    /// * key - msg_sync_key
+    /// * value - out msg key and flag is_new
+    del_out_queue_msg_ops_buffer: HashMap<usize, (OutMsgQueueKey, bool)>,
+    /// * key - msg_sync_key
+    /// * value - new out msg
+    add_out_queue_msg_ops_buffer: HashMap<usize, Vec<MsgEnqueueStuff>>,
     shard_fees: ShardFees,
     shard_top_block_descriptors: Vec<Arc<TopBlockDescrStuff>>,
     block_create_count: HashMap<UInt256, u64>,
     new_messages: BinaryHeap<NewMessage>, // using for priority queue
+    /// * key - msg_sync_key
+    /// * value - list of new msgs
+    new_messages_buffer: BTreeMap<usize, Vec<NewMessage>>,
     accepted_ext_messages: Vec<UInt256>,
+    /// * key - msg_sync_key
+    /// * value - ext msg id
+    accepted_ext_messages_buffer: HashMap<usize, UInt256>,
+    /// * key - msg_sync_key
+    /// * value - ext msg id and error info
     rejected_ext_messages: Vec<(UInt256, String)>,
+    rejected_ext_messages_buffer: HashMap<usize, (UInt256, String)>,
     accepted_remp_messages: Vec<UInt256>,
     rejected_remp_messages: Vec<(UInt256, String)>,
     ignored_remp_messages: Vec<UInt256>,
     usage_tree: UsageTree,
     imported_visited: HashSet<UInt256>,
+    /// * key - msg_sync_key
+    /// * value - last account lt after msg processing
+    tx_last_lt_buffer: HashMap<usize, TxLastLt>,
 
     // determined fields
     gen_utime: u32,
@@ -240,17 +278,31 @@ struct CollatorData {
     prev_stuff: Option<BlkPrevInfo>,
     shards: Option<ShardHashes>,
     mint_msg: Option<InMsg>,
+    /// * key - msg_sync_key
+    /// * value - mint msg descr
+    mint_msg_buffer: BTreeMap<usize, Option<InMsg>>,
     recover_create_msg: Option<InMsg>,
+    /// * key - msg_sync_key
+    /// * value - recover create msg descr
+    recover_create_msg_buffer: BTreeMap<usize, Option<InMsg>>,
     copyleft_msgs: Vec<InMsg>,
+    /// * key - msg_sync_key
+    /// * value - list of copyleft msgs
+    copyleft_msgs_buffer: BTreeMap<usize, InMsg>,
 
     // fields with default values
     skip_topmsgdescr: bool,
     skip_extmsg: bool,
     shard_conf_adjusted: bool,
+    // Will not support history. When parallel collation cancelled
+    // no new msgs can be processed so we do not need to check limits anymore
     block_limit_status: BlockLimitStatus,
     block_create_total: u64,
     inbound_queues_empty: bool,
+    /// * key - msg_sync_key
+    /// * value - incoming internal msg LT HASH
     last_proc_int_msg: (u64, UInt256),
+    last_proc_int_msg_buffer: BTreeMap<usize, (u64, UInt256)>,
     shards_max_end_lt: u64,
     before_split: bool,
     now_upper_limit: u32,
@@ -283,20 +335,28 @@ impl CollatorData {
         let limits = Arc::new(config.raw_config().block_limits(is_masterchain)?);
         let ret = Self {
             in_msgs: InMsgDescr::default(),
+            in_msgs_descr_history: Default::default(),
             out_msgs: OutMsgDescr::default(),
+            out_msgs_descr_history: Default::default(),
             accounts: ShardAccountBlocks::default(),
             out_msg_queue_info: OutMsgQueueInfoStuff::default(),
+            del_out_queue_msg_ops_buffer: Default::default(),
+            add_out_queue_msg_ops_buffer: Default::default(),
             shard_fees: ShardFees::default(),
             shard_top_block_descriptors: Vec::new(),
             block_create_count: HashMap::new(),
             new_messages: Default::default(),
+            new_messages_buffer: Default::default(),
             accepted_ext_messages: Default::default(),
+            accepted_ext_messages_buffer: Default::default(),
             rejected_ext_messages: Default::default(),
+            rejected_ext_messages_buffer: Default::default(),
             accepted_remp_messages: Default::default(),
             rejected_remp_messages: Default::default(),
             ignored_remp_messages: Default::default(),
             usage_tree,
             imported_visited: HashSet::new(),
+            tx_last_lt_buffer: Default::default(),
             gen_utime,
             config,
             start_lt: None,
@@ -307,8 +367,11 @@ impl CollatorData {
             prev_stuff: None,
             shards: None,
             mint_msg: None,
+            mint_msg_buffer: BTreeMap::new(),
             recover_create_msg: None,
+            recover_create_msg_buffer: BTreeMap::new(),
             copyleft_msgs: Default::default(),
+            copyleft_msgs_buffer: BTreeMap::new(),
             skip_topmsgdescr: false,
             skip_extmsg: false,
             shard_conf_adjusted: false,
@@ -316,6 +379,7 @@ impl CollatorData {
             block_create_total: 0,
             inbound_queues_empty: false,
             last_proc_int_msg: (0, UInt256::default()),
+            last_proc_int_msg_buffer: Default::default(),
             want_merge: false,
             underload_history: prev_data.underload_history() << 1,
             want_split: false,
@@ -346,6 +410,22 @@ impl CollatorData {
         self.out_msgs.data().cloned().ok_or_else(|| error!("out msg descr is empty"))
     }
 
+    /// Stores processed internal message LT HASH to buffer
+    fn add_last_proc_int_msg_to_buffer(&mut self, src_msg_sync_key: usize, lt_hash: (u64, UInt256)) {
+        self.last_proc_int_msg_buffer.insert(src_msg_sync_key, lt_hash);
+    }
+    /// Clean out processed internal message LT HASH from buffer by src msg
+    fn revert_last_proc_int_msg_by_src_msg(&mut self, src_msg_sync_key: &usize) {
+        self.last_proc_int_msg_buffer.remove(src_msg_sync_key);
+    }
+    /// Updates last processed internal message LT HASH from not reverted in buffer
+    fn commit_last_proc_int_msg(&mut self) -> Result<()> {
+        while let Some((_, lt_hash)) = self.last_proc_int_msg_buffer.pop_first() {
+            self.update_last_proc_int_msg(lt_hash)?;
+        }
+        Ok(())
+    }
+
     fn update_last_proc_int_msg(&mut self, new_lt_hash: (u64, UInt256)) -> Result<()> {
         if self.last_proc_int_msg < new_lt_hash {
             CHECK!(new_lt_hash.0 > 0);
@@ -361,12 +441,37 @@ impl CollatorData {
     }
 
     fn update_lt(&mut self, lt: u64) {
-        self.block_limit_status.update_lt(lt);
+        self.block_limit_status.update_lt(lt, false);
+    }
+
+    /// Stores transaction last LT to buffer by src msg, updates block_limit_status
+    fn add_tx_last_lt_to_buffer(&mut self, src_msg_sync_key: usize, tx_last_lt: TxLastLt) {
+        self.tx_last_lt_buffer.insert(src_msg_sync_key, tx_last_lt);
+        self.block_limit_status.update_lt(tx_last_lt, false);
+    }
+    /// Clean transaction last LT from buffer by src msg
+    fn revert_tx_last_lt_by_src_msg(&mut self, src_msg_sync_key: &usize) {
+        self.tx_last_lt_buffer.remove(src_msg_sync_key);
+    }
+    /// Saves max transaction last LT to block_limit_status and returns value
+    fn commit_tx_last_lt(&mut self) -> Option<TxLastLt> {
+        if let Some(max_lt) = self.tx_last_lt_buffer.values().reduce(|curr, next| curr.max(next)) {
+            self.block_limit_status.update_lt(*max_lt, true);
+            Some(*max_lt)
+        } else {
+            None
+        }
     }
 
 
     /// add in and out messages from to block, and to new message queue
-    fn new_transaction(&mut self, transaction: &Transaction, tr_cell: Cell, in_msg_opt: Option<&InMsg>) -> Result<()> {
+    fn new_transaction(
+        &mut self,
+        transaction: &Transaction,
+        tr_cell: Cell,
+        in_msg_opt: Option<&InMsg>,
+        src_msg_sync_key: usize,
+    ) -> Result<()> {
         // log::trace!(
         //     "new transaction, message {:x}\n{}",
         //     in_msg_opt.map(|m| m.message_cell().unwrap().repr_hash()).unwrap_or_default(),
@@ -378,6 +483,7 @@ impl CollatorData {
         self.block_limit_status.add_transaction(transaction.logical_time() == self.start_lt()? + 1);
         if let Some(in_msg) = in_msg_opt {
             self.add_in_msg_to_block(in_msg)?;
+            self.add_in_msg_descr_to_history(src_msg_sync_key, in_msg)?;
         }
         let shard = self.out_msg_queue_info.shard().clone();
         transaction.out_msgs.iterate_slices(|slice| {
@@ -390,17 +496,24 @@ impl CollatorData {
                     let use_hypercube = !self.config.has_capability(GlobalCapabilities::CapOffHypercube);
                     let fwd_fee = *info.fwd_fee();
                     let enq = MsgEnqueueStuff::new(msg.clone(), &shard, fwd_fee, use_hypercube)?;
-                    self.enqueue_count += 1;
-                    self.out_msg_queue_info.add_message(&enq)?;
-                    // Add to message block here for counting time later it may be replaced
+
                     let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
+                    let new_msg = NewMessage::new((info.created_lt, msg_hash.clone()), msg, tr_cell.clone(), enq.next_prefix().clone());
+
+                    self.add_add_out_queue_msg_op_to_buffer(src_msg_sync_key, enq);
+
+                    // Add to message block here for counting time later it may be replaced
                     self.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
-                    self.new_messages.push(NewMessage::new((info.created_lt, msg_hash), msg, tr_cell.clone(), enq.next_prefix().clone()));
+                    self.add_out_msg_descr_to_history(src_msg_sync_key, msg_hash);
+
+                    self.add_new_message_to_buffer(src_msg_sync_key, new_msg);
 
                 }
                 CommonMsgInfo::ExtOutMsgInfo(_) => {
                     let out_msg = OutMsg::external(msg_cell, tr_cell.clone());
-                    self.add_out_msg_to_block(out_msg.read_message_hash()?, &out_msg)?;
+                    let msg_hash = out_msg.read_message_hash()?;
+                    self.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
+                    self.add_out_msg_descr_to_history(src_msg_sync_key, msg_hash);
                 }
                 CommonMsgInfo::ExtInMsgInfo(_) => fail!("External inbound message cannot be output")
             };
@@ -412,9 +525,31 @@ impl CollatorData {
     /// put InMsg to block
     fn add_in_msg_to_block(&mut self, in_msg: &InMsg) -> Result<()> {
         self.in_msg_count += 1;
-        let msg_cell = in_msg.serialize()?;
         self.in_msgs.insert(in_msg)?;
+
+        let msg_cell = in_msg.serialize()?;
         self.block_limit_status.register_in_msg_op(&msg_cell, &self.in_msgs_root()?)
+    }
+
+    /// Stores in_msg descr hash by src msg
+    fn add_in_msg_descr_to_history(&mut self, src_msg_sync_key: usize, in_msg: &InMsg) -> Result<()> {
+        let msg_hash = in_msg.message_cell()?.repr_hash();
+        self.in_msgs_descr_history.insert(src_msg_sync_key, msg_hash);
+        Ok(())
+    }
+    /// Removes in_msg descr created by src msg. Does not update block_limit_status
+    fn revert_in_msgs_descr_by_src_msg(&mut self, src_msg_sync_key: &usize) -> Result<()> {
+        if let Some(msg_hash) = self.in_msgs_descr_history.remove(src_msg_sync_key) {
+            self.in_msg_count -= 1;
+            let key = SliceData::load_builder(msg_hash.write_to_new_cell()?)?;
+            self.in_msgs.remove(key)?;
+        }
+        Ok(())
+    }
+    /// Clean out in_msg descr history
+    fn commit_in_msgs_descr_by_src_msg(&mut self) {
+        self.in_msgs_descr_history.clear();
+        self.in_msgs_descr_history.shrink_to_fit();
     }
 
     /// put OutMsg to block
@@ -426,16 +561,103 @@ impl CollatorData {
         self.block_limit_status.register_out_msg_op(&msg_cell, &self.out_msgs_root()?)
     }
 
+    /// Stores out_msg descr hash by src msg
+    fn add_out_msg_descr_to_history(&mut self, src_msg_sync_key: usize, out_msg_hash: UInt256) {
+        if let Some(v) = self.out_msgs_descr_history.get_mut(&src_msg_sync_key) {
+            v.push(out_msg_hash);
+        } else {
+            self.out_msgs_descr_history.insert(src_msg_sync_key, vec![out_msg_hash]);
+        }
+    }
+    /// Removes all out_msg descrs created by src msg. Does not update block_limit_status
+    fn revert_out_msgs_descr_by_src_msg(&mut self, src_msg_sync_key: &usize) -> Result<()> {
+        if let Some(msgs_history) = self.out_msgs_descr_history.remove(src_msg_sync_key) {
+            for msg_hash in msgs_history {
+                self.out_msg_count -= 1;
+                let key = SliceData::load_builder(msg_hash.write_to_new_cell()?)?;
+                self.out_msgs.remove(key)?;
+            }
+        }
+        Ok(())
+    }
+    /// Clean out out_msg descrs history
+    fn commit_out_msgs_descr_by_src_msg(&mut self) {
+        self.out_msgs_descr_history.clear();
+        self.out_msgs_descr_history.shrink_to_fit();
+    }
+
+    /// Stores accepted ext message id in buffer of accepted by src msg sync id
+    fn add_accepted_ext_message_to_buffer(&mut self, src_msg_sync_key: usize, msg_id: UInt256) {
+        self.accepted_ext_messages_buffer.insert(src_msg_sync_key, msg_id);
+    }
+    /// Clean accepted ext message id from buffer
+    fn revert_accepted_ext_message_by_src_msg(&mut self, src_msg_sync_key: &usize) {
+        self.accepted_ext_messages_buffer.remove(src_msg_sync_key);
+    }
+    /// Add accepted ext messages from buffer to collator data
+    fn commit_accepted_ext_messages(&mut self) {
+        for (_, msg_id) in self.accepted_ext_messages_buffer.drain() {
+            self.accepted_ext_messages.push(msg_id);
+        }
+    }
+
+    /// Stores rejected ext message info in buffer of accepted by src msg sync id
+    fn add_rejected_ext_message_to_buffer(&mut self, src_msg_sync_key: usize, rejected_msg: (UInt256, String)) {
+        self.rejected_ext_messages_buffer.insert(src_msg_sync_key, rejected_msg);
+    }
+    /// Clean rejected ext message info from buffer
+    fn revert_rejected_ext_message_by_src_msg(&mut self, src_msg_sync_key: &usize) {
+        self.rejected_ext_messages_buffer.remove(src_msg_sync_key);
+    }
+    /// Add rejected ext messages info from buffer to collator data
+    fn commit_rejected_ext_messages(&mut self) {
+        for (_, msg_info) in self.rejected_ext_messages_buffer.drain() {
+            self.rejected_ext_messages.push(msg_info);
+        }
+    }
+
     /// delete message from state queue
-    fn del_out_msg_from_state(&mut self, key: &OutMsgQueueKey) -> Result<()> {
+    fn del_out_msg_from_state(&mut self, key: &OutMsgQueueKey) -> Result<EnqueuedMsg> {
         log::debug!("del_out_msg_from_state {:x}", key);
         self.dequeue_count += 1;
-        self.out_msg_queue_info.del_message(key)?;
+        let enq = self.out_msg_queue_info.del_message(key)?;
         self.block_limit_status.register_out_msg_queue_op(
             self.out_msg_queue_info.out_queue()?.data(),
             &self.usage_tree,
             false
         )?;
+        Ok(enq)
+    }
+
+    /// Stores out queue msg key for deletion in buffer, updates stats
+    fn add_del_out_queue_msg_op_to_buffer(&mut self, src_msg_sync_key: usize, key: OutMsgQueueKey, is_new: bool) -> Result<()> {
+        self.del_out_queue_msg_ops_buffer.insert(src_msg_sync_key, (key, is_new));
+        self.block_limit_status.register_out_msg_queue_op(
+            self.out_msg_queue_info.out_queue()?.data(),
+            &self.usage_tree,
+            false
+        )?;
+        Ok(())
+    }
+    /// Clean out queue msg key from deletion buffer, does not update block_limit_status
+    fn revert_del_out_queue_msg_op_by_src_msg(&mut self, src_msg_sync_key: &usize) {
+        self.del_out_queue_msg_ops_buffer.remove(src_msg_sync_key);
+    }
+    /// Deletes msgs from out queue
+    fn commit_del_out_queue_msg_ops(&mut self) -> Result<()> {
+        let exist_msgs_for_delete = !self.del_out_queue_msg_ops_buffer.is_empty();
+        for (_, (key, is_new)) in self.del_out_queue_msg_ops_buffer.drain() {
+            log::debug!("commit_del_out_queue_msg_op (is_new: {}) {:x}", is_new, key);
+            if is_new { self.enqueue_count -= 1; } else { self.dequeue_count += 1; }
+            self.out_msg_queue_info.del_message(&key)?;
+        }
+        if exist_msgs_for_delete {
+            self.block_limit_status.register_out_msg_queue_op(
+                self.out_msg_queue_info.out_queue()?.data(),
+                &self.usage_tree,
+                false
+            )?;
+        }
         Ok(())
     }
 
@@ -449,6 +671,95 @@ impl CollatorData {
             force
         )?;
         Ok(())
+    }
+
+    /// Stores new out queue msg, created by src msg, in buffer
+    fn add_add_out_queue_msg_op_to_buffer(&mut self, src_msg_sync_key: usize, enq_stuff: MsgEnqueueStuff) {
+        if let Some(v) = self.add_out_queue_msg_ops_buffer.get_mut(&src_msg_sync_key) {
+            v.push(enq_stuff);
+        } else {
+            self.add_out_queue_msg_ops_buffer.insert(src_msg_sync_key, vec![enq_stuff]);
+        }
+    }
+    /// Clean out queue msgs, created by src msg, from buffer
+    fn revert_add_out_queue_msg_op_by_src_msg(&mut self, src_msg_sync_key: &usize) {
+        self.add_out_queue_msg_ops_buffer.remove(src_msg_sync_key);
+    }
+    /// Adds msgs to out queue
+    fn commit_add_out_queue_msg_ops(&mut self) -> Result<()> {
+        for (_, msgs) in self.add_out_queue_msg_ops_buffer.drain() {
+            for enq_stuff in msgs {
+                self.enqueue_count += 1;
+                self.out_msg_queue_info.add_message(&enq_stuff)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Stores new internal msg, created by src msg, to buffer
+    fn add_new_message_to_buffer(&mut self, src_msg_sync_key: usize, new_msg: NewMessage) {
+        if let Some(v) = self.new_messages_buffer.get_mut(&src_msg_sync_key) {
+            v.push(new_msg);
+        } else {
+            self.new_messages_buffer.insert(src_msg_sync_key, vec![new_msg]);
+        }
+    }
+    /// Clean out new internal msgs, created by src msg, from buffer
+    fn revert_new_messages_by_src_msg(&mut self, src_msg_sync_key: &usize) {
+        self.new_messages_buffer.remove(src_msg_sync_key);
+    }
+    /// Adds new internal msgs to new_messages queue for processing
+    fn commit_new_messages(&mut self) {
+        while let Some((_, msgs)) = self.new_messages_buffer.pop_first() {
+            for new_msg in msgs {
+                self.new_messages.push(new_msg);
+            }
+        }
+    }
+
+    /// Stores mint message in buffer by src msg
+    fn add_mint_msg_to_buffer(&mut self, src_msg_sync_key: usize, msg: Option<InMsg>) {
+        self.mint_msg_buffer.insert(src_msg_sync_key, msg);
+    }
+    /// Clean mint message from buffer by src msg
+    fn revert_mint_msg_by_src_msg(&mut self, src_msg_sync_key: &usize) {
+        self.mint_msg_buffer.remove(src_msg_sync_key);
+    }
+    /// Save the last processed and not reverted mint message to collator data
+    fn commit_mint_msg(&mut self) {
+        if let Some((k, v)) = self.mint_msg_buffer.pop_last() {
+            self.mint_msg = v;
+        }
+    }
+
+    /// Stores recover create message in buffer by src msg
+    fn add_recover_create_msg_to_buffer(&mut self, src_msg_sync_key: usize, msg: Option<InMsg>) {
+        self.recover_create_msg_buffer.insert(src_msg_sync_key, msg);
+    }
+    /// Clean recover create message from buffer by src msg
+    fn revert_recover_create_msg_by_src_msg(&mut self, src_msg_sync_key: &usize) {
+        self.recover_create_msg_buffer.remove(src_msg_sync_key);
+    }
+    /// Save the last processed and not reverted recover create message to collator data
+    fn commit_recover_create_msg(&mut self) {
+        if let Some((k, v)) = self.recover_create_msg_buffer.pop_last() {
+            self.recover_create_msg = v;
+        }
+    }
+
+    /// Stores copyleft message in buffer by src msg
+    fn add_copyleft_msg_to_buffer(&mut self, src_msg_sync_key: usize, msg: InMsg) {
+        self.copyleft_msgs_buffer.insert(src_msg_sync_key, msg);
+    }
+    /// Clean copyleft message from buffer by src msg
+    fn revert_copyleft_msg_by_src_msg(&mut self, src_msg_sync_key: &usize) {
+        self.copyleft_msgs_buffer.remove(src_msg_sync_key);
+    }
+    /// Save all not reverted copyleft messages to collator data
+    fn commit_copyleft_msgs(&mut self) {
+        while let Some((_, msg)) = self.copyleft_msgs_buffer.pop_first() {
+            self.copyleft_msgs.push(msg);
+        }
     }
 
     fn enqueue_transit_message(
@@ -539,7 +850,7 @@ impl CollatorData {
         if self.start_lt.is_some() {
             fail!("`start_lt` is already initialized")
         }
-        self.block_limit_status.update_lt(lt);
+        self.block_limit_status.update_lt(lt, false);
         self.start_lt = Some(lt);
         Ok(())
     }
@@ -727,13 +1038,13 @@ struct ExecutionManager {
         )
     >,
 
-    msgs_queue: Vec<(AccountId, bool)>,
+    msgs_queue: Vec<(AccountId, bool, Option<UInt256>)>,
     accounts_processed_msgs: HashMap<AccountId, Vec<usize>>,
 
     cancellation_token: tokio_util::sync::CancellationToken,
 
-    receive_tr: tokio::sync::mpsc::UnboundedReceiver<Option<(Arc<AsyncMessageSync>, Result<Transaction>)>>,
-    wait_tr: Arc<Wait<(Arc<AsyncMessageSync>, Result<Transaction>)>>,
+    receive_tr: tokio::sync::mpsc::UnboundedReceiver<Option<(Arc<AsyncMessageSync>, Result<Transaction>, TxLastLt)>>,
+    wait_tr: Arc<Wait<(Arc<AsyncMessageSync>, Result<Transaction>, TxLastLt)>>,
     max_collate_threads: usize,
     libraries: Libraries,
     gen_utime: u32,
@@ -743,7 +1054,7 @@ struct ExecutionManager {
     // bloc's start logical time
     start_lt: u64,
     // actual maximum logical time
-    max_lt: Arc<AtomicU64>,
+    max_lt: u64,
     // this time is used if account's lt is smaller
     min_lt: Arc<AtomicU64>,
     // block random seed
@@ -757,6 +1068,9 @@ struct ExecutionManager {
     collated_block_descr: Arc<String>,
     debug: bool,
     config: BlockchainConfig,
+
+    #[cfg(test)]
+    test_msg_process_sleep: u64,
 }
 
 impl ExecutionManager {
@@ -791,12 +1105,19 @@ impl ExecutionManager {
             seed_block,
             #[cfg(feature = "signature_with_id")]
             signature_id, 
-            max_lt: Arc::new(AtomicU64::new(start_lt + 1)),
+            max_lt: start_lt + 1,
             min_lt: Arc::new(AtomicU64::new(start_lt + 1)),
             total_trans_duration: Arc::new(AtomicU64::new(0)),
             collated_block_descr,
             debug,
+            #[cfg(test)]
+            test_msg_process_sleep: 0,
         })
+    }
+
+    #[cfg(test)]
+    pub fn set_test_msg_process_sleep(&mut self, sleep_timeout: u64) {
+        self.test_msg_process_sleep = sleep_timeout;
     }
 
     // waits and finalizes all parallel tasks
@@ -824,7 +1145,8 @@ impl ExecutionManager {
                 break;
             }
         }
-        self.min_lt.fetch_max(self.max_lt.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.commit_processed_msgs_changes(collator_data)?;
+        self.min_lt.fetch_max(self.max_lt, Ordering::Relaxed);
         Ok(())
     }
 
@@ -843,9 +1165,21 @@ impl ExecutionManager {
         msg: AsyncMessage,
         prev_data: &PrevData,
         collator_data: &mut CollatorData,
-    ) -> Result<()> {
+    ) -> Result<Option<usize>> {
         log::trace!("{}: execute (adding into queue): {:x}", self.collated_block_descr, account_id);
         let msg_sync_key = self.get_next_msg_sync_key();
+
+        // store last processed internal (incl. New) message LT HASH in buffer
+        if let Some(lt_hash) = match &msg {
+            AsyncMessage::Int(enq, _) => Some((enq.created_lt(), enq.message_hash())),
+            AsyncMessage::New(env, _, created_lt) => Some((*created_lt, env.message_hash())),
+            _ => None,
+        } {
+            collator_data.add_last_proc_int_msg_to_buffer(msg_sync_key, lt_hash);
+        }
+
+        let msg_hash = msg.compute_message_hash()?;
+
         let msg = Arc::new(AsyncMessageSync(msg_sync_key, msg));
         if let Some((sender, _handle)) = self.changed_accounts.get(&account_id) {
             self.wait_tr.request();
@@ -854,7 +1188,7 @@ impl ExecutionManager {
             let shard_acc = if let Some(shard_acc) = prev_data.accounts().account(&account_id)? {
                 shard_acc
             } else if msg.1.is_external() {
-                return Ok(()); // skip external messages for unexisting accounts
+                return Ok(None); // skip external messages for unexisting accounts
             } else {
                 ShardAccount::default()
             };
@@ -867,12 +1201,12 @@ impl ExecutionManager {
             self.changed_accounts.insert(account_id.clone(), (sender, handle));
         };
 
-        self.append_msgs_queue(msg_sync_key, &account_id);
+        self.append_msgs_queue(msg_sync_key, &account_id, msg_hash);
         self.parallel_msgs_counter.add_account_msgs_counter(account_id).await;
 
         self.check_parallel_transactions(collator_data).await?;
 
-        Ok(())
+        Ok(Some(msg_sync_key))
     }
 
     fn start_account_job(
@@ -899,20 +1233,28 @@ impl ExecutionManager {
         let exec_mgr_wait_tr = self.wait_tr.clone();
         let config = self.config.clone();
         let exec_mgr_min_lt_ro = self.min_lt.clone();
-        let exec_mgr_max_lt_rw = self.max_lt.clone();
         let libraries = self.libraries.clone().inner();
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Arc<AsyncMessageSync>>();
         let cancellation_token = self.cancellation_token.clone();
+        #[cfg(test)]
+        let test_msg_process_sleep = self.test_msg_process_sleep;
         let handle = tokio::spawn(async move {
             while let Some(new_msg) = receiver.recv().await {
                 if cancellation_token.is_cancelled() {
                     log::debug!(
-                        "{}: parallel collation was canceled before message {} processing on {:x}",
+                        "{}: parallel collation was cancelled before message {} processing on {:x}",
                         collated_block_descr,
                         new_msg.0,
                         shard_acc.account_addr(),
                     );
                     break;
+                }
+
+                #[cfg(test)]
+                {
+                    let sleep_ms = test_msg_process_sleep;
+                    log::trace!("{}: (msg_sync_key: {}) sleep {}ms to emulate hard load and slow smart contract...", collated_block_descr, new_msg.0, sleep_ms);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
                 }
 
                 log::trace!("{}: new message for {:x}", collated_block_descr, shard_acc.account_addr());
@@ -948,7 +1290,7 @@ impl ExecutionManager {
 
                 if cancellation_token.is_cancelled() {
                     log::debug!(
-                        "{}: parallel collation was canceled after message {} processing on {:x}",
+                        "{}: parallel collation was cancelled after message {} processing on {:x}",
                         collated_block_descr,
                         new_msg.0,
                         shard_acc.account_addr(),
@@ -967,19 +1309,15 @@ impl ExecutionManager {
                 // * account.last_tr_time() == params.last_tr_lt == 1014 or 1104 or 1024
                 // * tx_last_lt == params.last_tr_lt == 1014 or 1104 or 1024
 
-                // TODO: apply transaction only when it finished?
-                shard_acc.apply_transaction_res(new_msg.0, tx_last_lt.load(Ordering::Relaxed), &mut transaction_res, account_root)?;
-                // if let Ok(transaction) = transaction_res.as_mut() {
-                //     shard_acc.add_transaction(transaction, account_root)?;
-                // }
+                let tx_last_lt = tx_last_lt.load(Ordering::Relaxed);
+
+                shard_acc.apply_transaction_res(new_msg.0, tx_last_lt, &mut transaction_res, account_root)?;
+
                 exec_mgr_total_trans_duration_rw.fetch_add(duration, Ordering::Relaxed);
                 log::trace!("{}: account {:x} TIME execute {}μ;", 
                     collated_block_descr, shard_acc.account_addr(), duration);
 
-                // TODO: move this to wait_transaction()?
-                exec_mgr_max_lt_rw.fetch_max(shard_acc.lt(), Ordering::Relaxed); // 1014 or 1104 or 1024
-
-                exec_mgr_wait_tr.respond(Some((new_msg, transaction_res)));
+                exec_mgr_wait_tr.respond(Some((new_msg, transaction_res, tx_last_lt)));
             }
             Ok(shard_acc)
         });
@@ -996,7 +1334,7 @@ impl ExecutionManager {
             AsyncMessage::Int(enq, _our) => {
                 (Box::new(OrdinaryTransactionExecutor::new(config)), Some(enq.message()))
             }
-            AsyncMessage::New(env, _prev_tr_cell) => {
+            AsyncMessage::New(env, _prev_tr_cell, _created_lt) => {
                 (Box::new(OrdinaryTransactionExecutor::new(config)), Some(env.message()))
             }
             AsyncMessage::Recover(msg) | AsyncMessage::Mint(msg) | AsyncMessage::Ext(msg) => {
@@ -1015,11 +1353,11 @@ impl ExecutionManager {
     async fn wait_transaction(&mut self, collator_data: &mut CollatorData) -> Result<()> {
         log::trace!("{}: wait_transaction", self.collated_block_descr);
         let wait_op = self.wait_tr.wait(&mut self.receive_tr, false).await;
-        if let Some(Some((new_msg, transaction_res))) = wait_op {
+        if let Some(Some((new_msg, transaction_res, tx_last_lt))) = wait_op {
             // we can safely decrease parallel_msgs_counter because
             // * wait_tr counter decreases only when wait_op is some as well
             // * and sender always sends some in this case
-            let account_id = self.finalize_transaction(&new_msg.1, transaction_res, collator_data)?;
+            let account_id = self.finalize_transaction(&new_msg, transaction_res, tx_last_lt, collator_data)?;
             // decrease account msgs counter to control parallel processing limits
             self.parallel_msgs_counter.sub_account_msgs_counter(account_id).await;
 
@@ -1031,10 +1369,12 @@ impl ExecutionManager {
 
     fn finalize_transaction(
         &mut self,
-        new_msg: &AsyncMessage,
+        new_msg_sync: &AsyncMessageSync,
         transaction_res: Result<Transaction>,
+        tx_last_lt: TxLastLt,
         collator_data: &mut CollatorData
     ) -> Result<AccountId> {
+        let AsyncMessageSync(msg_sync_key, new_msg) = new_msg_sync;
         if let AsyncMessage::Ext(ref msg) = new_msg {
             let msg_id = msg.serialize()?.repr_hash();
             let account_id = msg.int_dst_account_id().unwrap_or_default();
@@ -1044,7 +1384,7 @@ impl ExecutionManager {
                     "{}: account {:x} rejected inbound external message {:x}, by reason: {}",
                     self.collated_block_descr, account_id, msg_id, err
                 );
-                collator_data.rejected_ext_messages.push((msg_id, err.to_string()));
+                collator_data.add_rejected_ext_message_to_buffer(*msg_sync_key, (msg_id, err.to_string()));
                 return Ok(account_id)
             } else {
                 log::debug!(
@@ -1065,16 +1405,21 @@ impl ExecutionManager {
                 let in_msg = InMsg::final_msg(enq.envelope_cell(), tr_cell.clone(), enq.fwd_fee_remaining().clone());
                 if *our {
                     let out_msg = OutMsg::dequeue_immediate(enq.envelope_cell(), in_msg.serialize()?);
-                    collator_data.add_out_msg_to_block(enq.message_hash(), &out_msg)?;
-                    collator_data.del_out_msg_from_state(&enq.out_msg_key())?;
+                    let msg_hash = enq.message_hash();
+                    collator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
+                    collator_data.add_out_msg_descr_to_history(*msg_sync_key, msg_hash);
+                    collator_data.add_del_out_queue_msg_op_to_buffer(*msg_sync_key, enq.out_msg_key(), false)?;
                 }
                 Some(in_msg)
             }
-            AsyncMessage::New(env, prev_tr_cell) => {
+            AsyncMessage::New(env, prev_tr_cell, _created_lt) => {
                 let env_cell = env.inner().serialize()?;
                 let in_msg = InMsg::immediate(env_cell.clone(), tr_cell.clone(), env.fwd_fee_remaining().clone());
                 let out_msg = OutMsg::immediate(env_cell, prev_tr_cell.clone(), in_msg.serialize()?);
-                collator_data.add_out_msg_to_block(env.message_hash(), &out_msg)?;
+                let msg_hash = env.message_hash();
+                collator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
+                collator_data.add_out_msg_descr_to_history(*msg_sync_key, msg_hash);
+                collator_data.add_del_out_queue_msg_op_to_buffer(*msg_sync_key, env.out_msg_key(), true)?;
                 Some(in_msg)
             }
             AsyncMessage::Mint(msg) |
@@ -1099,27 +1444,31 @@ impl ExecutionManager {
                 tr.in_msg_cell().unwrap_or_default().repr_hash()
             );
         }
-        collator_data.new_transaction(&tr, tr_cell, in_msg_opt.as_ref())?;
 
-        collator_data.update_lt(self.max_lt.load(Ordering::Relaxed));
+        collator_data.new_transaction(&tr, tr_cell, in_msg_opt.as_ref(), *msg_sync_key)?;
+
+        collator_data.add_tx_last_lt_to_buffer(*msg_sync_key, tx_last_lt);
 
         match new_msg {
-            AsyncMessage::Mint(_) => collator_data.mint_msg = in_msg_opt,
-            AsyncMessage::Recover(_) => collator_data.recover_create_msg = in_msg_opt,
-            AsyncMessage::Copyleft(_) => collator_data.copyleft_msgs.push(in_msg_opt.ok_or_else(|| error!("Can't unwrap `in_msg_opt`"))?),
+            AsyncMessage::Mint(_) => collator_data.add_mint_msg_to_buffer(*msg_sync_key, in_msg_opt),
+            AsyncMessage::Recover(_) => collator_data.add_recover_create_msg_to_buffer(*msg_sync_key, in_msg_opt),
+            AsyncMessage::Copyleft(_) => collator_data.add_copyleft_msg_to_buffer(*msg_sync_key, in_msg_opt.ok_or_else(|| error!("Can't unwrap `in_msg_opt`"))?),
             _ => ()
         }
+
+        // Will not support history. When parallel collation cancelled
+        // no new msgs can be processed so we do not need to check limits anymore
         collator_data.block_full |= !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
 
         Ok(account_id)
     }
 
+    /// Actually the length of messages queue
     fn get_next_msg_sync_key(&self) -> usize {
         self.msgs_queue.len()
     }
-    fn append_msgs_queue(&mut self, msg_sync_key: usize, account_addr: &AccountId) {
-        self.msgs_queue.insert(msg_sync_key, (account_addr.clone(), false));
-        //log::debug!("append_msgs_queue: msgs_queue: {:?}", self.msgs_queue);
+    fn append_msgs_queue(&mut self, msg_sync_key: usize, account_addr: &AccountId, msg_hash_opt: Option<UInt256>) {
+        self.msgs_queue.insert(msg_sync_key, (account_addr.clone(), false, msg_hash_opt));
     }
     fn set_msg_processed(&mut self, msg_sync_key: usize) {
         if let Some(entry) = self.msgs_queue.get_mut(msg_sync_key) {
@@ -1128,8 +1477,11 @@ impl ExecutionManager {
                 .entry(entry.0.clone())
                 .and_modify(|list| list.push(msg_sync_key))
                 .or_insert([msg_sync_key].into());
-            //log::debug!("set_msg_processed: msgs_queue: {:?}", self.msgs_queue);
-            //log::debug!("set_msg_processed: accounts_processed_msgs: {:?}", self.accounts_processed_msgs);
+        }
+    }
+    fn revert_last_account_processed_msg(&mut self, account_addr: &AccountId) {
+        if let Some(list) = self.accounts_processed_msgs.get_mut(account_addr) {
+            list.pop();
         }
     }
 
@@ -1145,6 +1497,102 @@ impl ExecutionManager {
         } else {
             None
         }
+    }
+
+    /// When cancellation_token was cancelled due to a block limit or finalizing timeout
+    pub fn parallel_processing_cancelled(&self) -> bool {
+        self.cancellation_token.is_cancelled()
+    }
+
+    fn commit_processed_msgs_changes(&mut self, collator_data: &mut CollatorData) -> Result<()> {
+        // revert processed messages which going after first unprocessed
+        let mut msgs_to_revert = vec![];
+        let mut msgs_to_revert_last_proc_int = vec![];
+        let mut found_first_unprocessed = false;
+        for msg_sync_key in 0..self.msgs_queue.len() {
+            if let Some((account_addr, processed, msg_hash)) = self.msgs_queue.get(msg_sync_key) {
+                if *processed {
+                    // collect all processed messages which going after first unprocessed
+                    if found_first_unprocessed {
+                        msgs_to_revert.push((account_addr.clone(), msg_sync_key, msg_hash.clone()));
+                        msgs_to_revert_last_proc_int.push(msg_sync_key);
+                    }
+                } else {
+                    if !found_first_unprocessed {
+                        found_first_unprocessed = true;
+                    }
+                    msgs_to_revert_last_proc_int.push(msg_sync_key);
+                }
+            }
+        }
+        msgs_to_revert.reverse();
+        metrics::gauge!("reverted_transactions", msgs_to_revert.len() as f64);
+        for (account_addr, msg_sync_key, msg_hash) in msgs_to_revert {
+            if let Some(msg_info) = self.msgs_queue.get_mut(msg_sync_key) {
+                msg_info.1 = false;
+            }
+            self.revert_msg_changes(collator_data, &msg_sync_key, &account_addr)?;
+            log::debug!(
+                "{}: reverted changes from message {:x} (sync_key: {}) on account {:x}",
+                self.collated_block_descr, msg_hash.unwrap_or_default(), msg_sync_key, account_addr,
+            );
+        }
+        for msg_sync_key in msgs_to_revert_last_proc_int {
+            collator_data.revert_last_proc_int_msg_by_src_msg(&msg_sync_key);
+        }
+
+        // commit all not reverted changes
+        self.commit_not_reverted_changes(collator_data)?;
+
+        log::debug!("{}: all not reverted account changes committed", self.collated_block_descr);
+        
+        Ok(())
+    }
+    fn revert_msg_changes(
+        &mut self,
+        collator_data: &mut CollatorData,
+        msg_sync_key: &usize,
+        account_addr: &AccountId,
+    ) -> Result<()> {
+        collator_data.execute_count -= 1;
+
+        collator_data.revert_in_msgs_descr_by_src_msg(msg_sync_key)?;
+        collator_data.revert_out_msgs_descr_by_src_msg(msg_sync_key)?;
+        collator_data.revert_accepted_ext_message_by_src_msg(msg_sync_key);
+        collator_data.revert_rejected_ext_message_by_src_msg(msg_sync_key);
+        collator_data.revert_del_out_queue_msg_op_by_src_msg(msg_sync_key);
+        collator_data.revert_add_out_queue_msg_op_by_src_msg(msg_sync_key);
+        collator_data.revert_new_messages_by_src_msg(msg_sync_key);
+        collator_data.revert_mint_msg_by_src_msg(msg_sync_key);
+        collator_data.revert_recover_create_msg_by_src_msg(msg_sync_key);
+        collator_data.revert_copyleft_msg_by_src_msg(msg_sync_key);
+        collator_data.revert_tx_last_lt_by_src_msg(msg_sync_key);
+
+        self.revert_last_account_processed_msg(account_addr);
+
+        Ok(())
+    }
+    fn commit_not_reverted_changes(&mut self, collator_data: &mut CollatorData) -> Result<()> {
+        collator_data.commit_in_msgs_descr_by_src_msg();
+        collator_data.commit_out_msgs_descr_by_src_msg();
+        collator_data.commit_accepted_ext_messages();
+        collator_data.commit_rejected_ext_messages();
+        collator_data.commit_del_out_queue_msg_ops()?;
+        collator_data.commit_add_out_queue_msg_ops()?;
+        collator_data.commit_new_messages();
+
+        collator_data.commit_mint_msg();
+        collator_data.commit_recover_create_msg();
+        collator_data.commit_copyleft_msgs();
+
+        collator_data.commit_last_proc_int_msg()?;
+
+        // save max lt
+        if let Some(max_lt) = collator_data.commit_tx_last_lt() {
+            self.max_lt = max_lt;
+        }
+
+        Ok(())
     }
 }
 
@@ -1170,6 +1618,9 @@ pub struct Collator {
     stop_flag: Arc<AtomicBool>,
 
     finalize_parallel_timeout_ms: u32,
+
+    #[cfg(test)]
+    test_msg_process_sleep: u64,
 }
 
 impl Collator {
@@ -1181,7 +1632,7 @@ impl Collator {
         created_by: UInt256,
         engine: Arc<dyn EngineOperations>,
         rand_seed: Option<UInt256>,
-        collator_settings: CollatorSettings
+        collator_settings: CollatorSettings,
     ) -> Result<Self> {
 
         log::debug!(
@@ -1270,7 +1721,14 @@ impl Collator {
             started: Instant::now(),
             stop_flag: Arc::new(AtomicBool::new(false)),
             finalize_parallel_timeout_ms,
+            #[cfg(test)]
+            test_msg_process_sleep: 0,
         })
+    }
+
+    #[cfg(test)]
+    pub fn set_test_msg_process_sleep(&mut self, sleep_timeout: u64) {
+        self.test_msg_process_sleep = sleep_timeout;
     }
 
     pub async fn collate(mut self) -> Result<(BlockCandidate, ShardStateUnsplit)> {
@@ -1551,6 +2009,9 @@ impl Collator {
             self.collated_block_descr.clone(),
             self.debug,
         )?;
+
+        #[cfg(test)]
+        exec_manager.set_test_msg_process_sleep(self.test_msg_process_sleep);
 
         // tick & special transactions
         if self.shard.is_masterchain() {
@@ -2467,7 +2928,9 @@ impl Collator {
                 "{}: message {:x}, lt: {}, enq lt: {}",
                 self.collated_block_descr, key, created_lt, enq.enqueued_lt()
             );
-            collator_data.update_last_proc_int_msg((created_lt, enq.message_hash()))?;
+
+            // Do not need to update last processed int message LT_HASH here
+            // if it is already processed or not sent to us
             if collator_data.out_msg_queue_info.already_processed(&enq)? {
                 log::trace!(
                     "{}: message {:x} has been already processed by us before, skipping",
@@ -2481,9 +2944,12 @@ impl Collator {
                 let to_us = self.shard.contains_full_prefix(&enq.dst_prefix());
                 if to_us {
                     let account_id = enq.dst_account_id()?;
-                    log::debug!("{}: message {:x} sent to execution to account {:x}", self.collated_block_descr, key.hash, account_id);
                     let msg = AsyncMessage::Int(enq, our);
-                    exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
+                    let msg_sync_key = exec_manager.execute(account_id.clone(), msg, prev_data, collator_data).await?;
+                    log::debug!(
+                        "{}: int message {:x} (sync_key: {:?}) sent to execution to account {:x}",
+                        self.collated_block_descr, key.hash, msg_sync_key, account_id,
+                    );
                 } else {
                     // println!("{:x} {:#}", key, enq);
                     // println!("cur: {}, dst: {}", enq.cur_prefix(), enq.dst_prefix());
@@ -2551,6 +3017,11 @@ impl Collator {
             return Ok(())
         }
 
+        if exec_manager.parallel_processing_cancelled() {
+            log::debug!("{}: parallel processing cancelled, skipping processing of inbound external messages", self.collated_block_descr);
+            return Ok(())
+        }
+
         log::debug!("{}: process_inbound_external_messages", self.collated_block_descr);
         for (msg, id) in self.engine.get_external_messages_iterator(self.shard.clone()) {
             if !collator_data.block_limit_status.fits(ParamLimitIndex::Soft) {
@@ -2568,8 +3039,11 @@ impl Collator {
             if self.shard.contains_address(&header.dst)? {
                 let (_, account_id) = header.dst.extract_std_address(true)?;
                 let msg = AsyncMessage::Ext(msg.deref().clone());
-                log::debug!("{}: message {:x} sent to execution", self.collated_block_descr, id);
-                exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
+                let msg_sync_key = exec_manager.execute(account_id.clone(), msg, prev_data, collator_data).await?;
+                log::debug!(
+                    "{}: ext message {:x} (sync_key: {:?}) sent to execution to account {:x}",
+                    self.collated_block_descr, id, msg_sync_key, account_id,
+                );
             } else {
                 // usually node collates more than one shard, the message can belong another one,
                 // so we can't postpone it
@@ -2623,8 +3097,11 @@ impl Collator {
                 } else {
                     let (_, account_id) = header.dst.extract_std_address(true)?;
                     let msg = AsyncMessage::Ext(msg.deref().clone());
-                    log::trace!("{}: remp message {:x} sent to execution", self.collated_block_descr, id);
-                    exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
+                    let msg_sync_key = exec_manager.execute(account_id.clone(), msg, prev_data, collator_data).await?;
+                    log::trace!(
+                        "{}: remp message {:x} (sync_key: {:?}) sent to execution to account {:x}",
+                        self.collated_block_descr, id, msg_sync_key, account_id,
+                    );
                 }
             } else {
                 log::warn!(
@@ -2650,6 +3127,11 @@ impl Collator {
         collator_data: &mut CollatorData,
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
+        if exec_manager.parallel_processing_cancelled() {
+            log::debug!("{}: parallel processing cancelled, skipping processing of new messages", self.collated_block_descr);
+            return Ok(())
+        }
+
         log::debug!("{}: process_new_messages", self.collated_block_descr);
         let use_hypercube = !collator_data.config.has_capability(GlobalCapabilities::CapOffHypercube);
         while !collator_data.new_messages.is_empty() {
@@ -2677,17 +3159,16 @@ impl Collator {
                     // everything was made in new_transaction
                 } else {
                     CHECK!(info.created_at.as_u32(), collator_data.gen_utime);
-                    let key = OutMsgQueueKey::with_account_prefix(&prefix, hash.clone());
-                    collator_data.out_msg_queue_info.del_message(&key)?;
-                    collator_data.enqueue_count -= 1;
 
                     let fwd_fee = *info.fwd_fee();
                     let env = MsgEnvelopeStuff::new(msg, &self.shard, fwd_fee, use_hypercube)?;
                     let account_id = env.message().int_dst_account_id().unwrap_or_default();
-                    collator_data.update_last_proc_int_msg((created_lt, hash))?;
-                    let msg = AsyncMessage::New(env, tr_cell);
-                    log::debug!("{}: message {:x} sent to execution", self.collated_block_descr, key.hash);
-                    exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
+                    let msg = AsyncMessage::New(env, tr_cell, created_lt);
+                    let msg_sync_key = exec_manager.execute(account_id.clone(), msg, prev_data, collator_data).await?;
+                    log::debug!(
+                        "{}: new int message {:x} (sync_key: {:?}) sent to execution to account {:x}",
+                        self.collated_block_descr, hash, msg_sync_key, account_id,
+                    );
                 };
                 self.check_stop_flag()?;
             }

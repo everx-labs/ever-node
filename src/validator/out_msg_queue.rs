@@ -27,7 +27,7 @@ use ton_block::{
     OutMsgQueueInfo, OutMsgQueue, OutMsgQueueKey, IhrPendingInfo,
     ProcessedInfo, ProcessedUpto, ProcessedInfoKey,
     ShardHashes, AccountIdPrefixFull,
-    HashmapAugType, ShardStateUnsplit,
+    HashmapAugType, ShardStateUnsplit, EnqueuedMsg,
 };
 use ton_types::{
     error, fail, BuilderData, Cell, LabelReader, SliceData, IBitstring, Result, UInt256, 
@@ -590,13 +590,14 @@ impl OutMsgQueueInfoStuff {
         self.out_queue_mut()?.set(&key, enq.enqueued(), &enq.created_lt())
     }
 
-    pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<()> {
+    pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<EnqueuedMsg> {
         let labels = [("shard", self.shard().to_string())];
         metrics::counter!("out_msg_queue_del", 1, &labels);
-        if self.out_queue_mut()?.remove(SliceData::load_bitstring(key.write_to_new_cell()?)?)?.is_none() {
+        if let Some(mut msg_data) = self.out_queue_mut()?.remove(SliceData::load_bitstring(key.write_to_new_cell()?)?)? {
+            EnqueuedMsg::construct_from(&mut msg_data)
+        } else {
             fail!("error deleting from out_msg_queue dictionary: {:x}", key)
         }
-        Ok(())
     }
 
     // remove all messages which are not from new_shard

@@ -81,15 +81,14 @@ impl ShardAccountStuff {
     pub fn commit(mut self, on_msg_sync_key: usize) -> Result<Option<Self>> {
         while let Some(current_update_msg_sync_key) = self.update_msg_sync_key {
             if current_update_msg_sync_key == on_msg_sync_key {
-                log::debug!("account {:x} was committed by processed message {} in the queue", self.account_addr(), on_msg_sync_key);
+                log::debug!("account {:x} state committed by processed message {} in the queue", self.account_addr(), on_msg_sync_key);
                 return Ok(Some(self));
             } else {
-                log::debug!("current account {:x} state does not match processed message {} in the queue", self.account_addr(), on_msg_sync_key);
                 if !self.revert()? {
-                    log::debug!("unable to revert account {:x} state, current state is first in history", self.account_addr());
+                    log::debug!("unable to revert account {:x} state, current state is a first in history", self.account_addr());
                     return Ok(None);
                 } else {
-                    log::debug!("account {:x} state reverted one step back to msg {:?}", self.account_addr(), self.update_msg_sync_key);
+                    log::debug!("account {:x} state reverted one step back to message {:?} in the queue", self.account_addr(), self.update_msg_sync_key);
                 }
             }
         }
