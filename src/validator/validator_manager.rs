@@ -1276,11 +1276,14 @@ impl ValidatorManagerImpl {
         }
  
         if let Some(rm) = &self.remp_manager {
+            metrics::histogram!("remp_queue_length", rm.message_cache.all_messages_count() as f64);
             log::info!(target: "validator_manager", "Remp message cache stats: {}", rm.message_cache.message_stats());
+
             for s in rm.catchain_store.list_catchain_sessions().await.iter() {
                 log::info!(target: "validator_manager", "{}", s);
             }
         }
+
         log::trace!(target: "validator_manager", "======= sessions stats over =======");
     }
 
