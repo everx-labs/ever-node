@@ -11,9 +11,15 @@
 * limitations under the License.
 */
 
-pub use super::*;
-use crate::ton_api::ton::Hashable;
-use crate::ton_api::IntoBoxed;
+use crate::{
+    BlockCandidate, BlockCandidateSignature, BlockHash, CachedInstanceCounter, 
+    HashableObject, HashType, Merge, MovablePoolObject, OldRoundState, PoolPtr, 
+    RoundAttemptState, SessionCache, SessionDescription, SortedVector, SortingPredicate, 
+    TypeDesc, Vector, VectorMerge, VoteCandidate, ton
+};
+use catchain::serialize_tl_boxed_object;
+use std::fmt;
+use ton_api::{IntoBoxed, ton::Hashable};
 
 pub const CASTAGNOLI: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISCSI);
 
@@ -42,8 +48,7 @@ pub(crate) fn compute_hash<T>(hashable: T) -> HashType
 where
     T: IntoBoxed<Boxed = Hashable>,
 {
-    let serialized_object = catchain::utils::serialize_tl_boxed_object!(&hashable.into_boxed());
-
+    let serialized_object = serialize_tl_boxed_object!(&hashable.into_boxed());
     compute_hash_from_bytes(&serialized_object)
 }
 

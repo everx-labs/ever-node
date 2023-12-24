@@ -180,13 +180,28 @@ impl RocksDb {
         // compaction. Calling this function will set it up such that total of
         // `total_threads` is used. Good value for `total_threads` is the number of
         // cores.
-        options.increase_parallelism(4);
+        let num_cpus = std::thread::available_parallelism().unwrap().get();
+        options.set_max_subcompactions(std::cmp::max(num_cpus as u32 / 2, 1));
+        options.set_max_background_jobs(std::cmp::max(num_cpus as i32 / 2, 2));
+        options.increase_parallelism(num_cpus as i32);
 
         // If true, missing column families will be automatically created.
         options.create_missing_column_families(true);
         
+        options.set_max_total_wal_size(1024 * 1024 * 1024);
+
         options.enable_statistics();
         options.set_dump_malloc_stats(true);
+
+        // Specify the maximal size of the info log file. If the log file
+        // is larger than `max_log_file_size`, a new info log file will
+        // be created.
+        // If max_log_file_size == 0, all logs will be written to one log file.
+        options.set_max_log_file_size(1024 * 1024 * 100);
+
+        // Maximal info log files to be kept.
+        // Default: 1000
+        options.set_keep_log_file_num(3);
 
         options
     }

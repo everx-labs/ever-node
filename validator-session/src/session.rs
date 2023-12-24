@@ -11,21 +11,24 @@
 * limitations under the License.
 */
 
-pub use super::*;
-
-use super::task_queue::*;
-use catchain::check_execution_time;
-use catchain::profiling::instrument;
-use catchain::utils::compute_instance_counter;
-use catchain::utils::MetricsDumper;
-use catchain::BlockPtr;
-use catchain::CatchainListener;
-use catchain::CatchainPtr;
-use catchain::ExternalQueryResponseCallback;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
-use std::time::SystemTime;
+use crate::{
+    Any, BlockPayloadPtr, CallbackTaskQueuePtr, CatchainNode, CatchainOverlayManagerPtr, 
+    CatchainOverlayPtr, LogReplayOptions, PrivateKey, PublicKeyHash, Session, SessionFactory,
+    SessionId, SessionListenerPtr, SessionOptions, SessionNode, SessionPtr, SessionProcessor, 
+    SessionReplayListenerPtr, 
+    task_queue::{CallbackTaskPtr, TaskPtr, TaskQueue, TaskQueuePtr}
+};
+use catchain::{
+    check_execution_time, instrument, 
+    ActivityNodePtr, BlockPtr, CatchainListener, CatchainOverlay, CatchainOverlayListenerPtr,
+    CatchainOverlayManager, CatchainOverlayLogReplayListenerPtr, CatchainPtr, 
+    ExternalQueryResponseCallback, 
+    profiling::Profiler, utils::{compute_instance_counter, get_elapsed_time, MetricsDumper}
+};
+use metrics::Recorder;
+use overlay::PrivateOverlayShortId;
+use std::{fmt, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, SystemTime}};
+use ton_types::Result;
 
 /*
     Constants
@@ -69,8 +72,8 @@ struct TaskQueueImpl<FuncPtr> {
     name: String,                                                         //queue name
     queue_sender: crossbeam::channel::Sender<Box<TaskDesc<FuncPtr>>>, //queue sender from outer world to the ValidatorSession
     queue_receiver: crossbeam::channel::Receiver<Box<TaskDesc<FuncPtr>>>, //queue receiver from outer world to the ValidatorSession
-    post_counter: metrics_runtime::data::Counter,                         //counter for queue posts
-    pull_counter: metrics_runtime::data::Counter,                         //counter for queue pull
+    post_counter: metrics::Counter,                         //counter for queue posts
+    pull_counter: metrics::Counter,                         //counter for queue pull
     is_overloaded: Arc<AtomicBool>, //atomic flag to indicate that queue is overloaded
     linked_queue: Option<Arc<dyn TaskQueue<FuncPtr>>>, //linked task queue to wake up
 }
@@ -97,9 +100,9 @@ where
             creation_time: std::time::SystemTime::now(),
         });
         if let Err(send_error) = self.queue_sender.send(task_desc) {
-            error!("ValidatorSession method post closure error: {}", send_error);
+            log::error!("ValidatorSession method post closure error: {}", send_error);
         } else {
-            self.post_counter.increment();
+            self.post_counter.increment(1);
 
             if let Some(ref linked_queue) = &self.linked_queue {
                 linked_queue.post_closure(FuncPtr::create_default_task());
@@ -114,13 +117,19 @@ where
     ) -> Option<FuncPtr> {
         match self.queue_receiver.recv_timeout(timeout) {
             Ok(task_desc) => {
-                let processing_latency = task_desc.creation_time.elapsed().unwrap();
+                let processing_latency = get_elapsed_time(&task_desc.creation_time);
                 if processing_latency > TASK_QUEUE_WARN_PROCESSING_LATENCY {
                     self.is_overloaded.store(true, Ordering::Release);
 
                     if let Ok(warn_elapsed) = last_warn_dump_time.elapsed() {
                         if warn_elapsed > TASK_QUEUE_LATENCY_WARN_DUMP_PERIOD {
-                            warn!("ValidatorSession {} task queue latency is {:.3}s (expected max latency is {:.3}s)", self.name, processing_latency.as_secs_f64(), TASK_QUEUE_WARN_PROCESSING_LATENCY.as_secs_f64());
+                            log::warn!(
+                                "ValidatorSession {} task queue latency is {:.3}s \
+                                (expected max latency is {:.3}s)", 
+                                self.name, 
+                                processing_latency.as_secs_f64(), 
+                                TASK_QUEUE_WARN_PROCESSING_LATENCY.as_secs_f64()
+                            );
                             *last_warn_dump_time = SystemTime::now();
                         }
                     }
@@ -128,7 +137,7 @@ where
                     self.is_overloaded.store(false, Ordering::Release);
                 }
 
-                self.pull_counter.increment();
+                self.pull_counter.increment(1);
 
                 Some(task_desc.task)
             }
@@ -137,6 +146,12 @@ where
 
                 None
             }
+        }
+    }
+
+    fn flush(&self) {
+        while !self.queue_receiver.is_empty() {
+            let _result = self.queue_receiver.try_recv();
         }
     }
 }
@@ -154,14 +169,14 @@ where
         queue_sender: crossbeam::channel::Sender<Box<TaskDesc<FuncPtr>>>,
         queue_receiver: crossbeam::channel::Receiver<Box<TaskDesc<FuncPtr>>>,
         linked_queue: Option<Arc<dyn TaskQueue<FuncPtr>>>,
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: catchain::utils::MetricsHandle,
     ) -> Self {
         let pull_counter = metrics_receiver
             .sink()
-            .counter(format!("{}_queue.pulls", name));
+            .register_counter(&format!("{}_queue.pulls", name).into());
         let post_counter = metrics_receiver
             .sink()
-            .counter(format!("{}_queue.posts", name));
+            .register_counter(&format!("{}_queue.posts", name).into());
 
         Self {
             name: name,
@@ -254,6 +269,133 @@ impl CatchainListenerImpl {
 
 /*
 ===================================================================================================
+    Loopback overlay with manager
+===================================================================================================
+*/
+
+struct LoopbackOverlay {
+    listener: CatchainOverlayListenerPtr,
+}
+
+impl CatchainOverlay for LoopbackOverlay {
+    /// Send message
+    fn send_message(
+        &self,
+        _receiver_id: &PublicKeyHash,
+        _sender_id: &PublicKeyHash,
+        _message: &BlockPayloadPtr,
+    ) {
+        // no need to send message to itself
+        /*if let Some(listener) = self.listener.upgrade() {
+            listener.on_message(sender_id.clone(), message);
+        }*/
+    }
+
+    /// Send message to multiple sources
+    fn send_message_multicast(
+        &self,
+        _receiver_ids: &[PublicKeyHash],
+        _sender_id: &PublicKeyHash,
+        _message: &BlockPayloadPtr,
+    ) {
+        // no need to send message to itself
+        /*if let Some(listener) = self.listener.upgrade() {
+            listener.on_message(sender_id.clone(), message);
+        }*/
+    }
+
+    /// Send query
+    fn send_query(
+        &self,
+        _receiver_id: &PublicKeyHash,
+        sender_id: &PublicKeyHash,
+        _name: &str,
+        _timeout: std::time::Duration,
+        message: &BlockPayloadPtr,
+        response_callback: ExternalQueryResponseCallback,
+    ) {
+        if let Some(listener) = self.listener.upgrade() {
+            listener.on_query(sender_id.clone(), message, response_callback);
+        }
+    }
+
+    /// Send query via RLDP (ADNL ID of the current node should be registered for the query)
+    fn send_query_via_rldp(
+        &self,
+        dst_adnl_id: PublicKeyHash,
+        _name: String,
+        response_callback: ExternalQueryResponseCallback,
+        _timeout: std::time::SystemTime,
+        query: BlockPayloadPtr,
+        _max_answer_size: u64,
+    ) {
+        if let Some(listener) = self.listener.upgrade() {
+            listener.on_query(dst_adnl_id, &query, response_callback);
+        }
+    }
+
+    /// Send broadcast
+    fn send_broadcast_fec_ex(
+        &self,
+        _sender_id: &PublicKeyHash,
+        _send_as: &PublicKeyHash,
+        _payload: BlockPayloadPtr,
+    ) {
+        // no need to send broadcast to itself
+        /*if let Some(listener) = self.listener.upgrade() {
+            listener.on_broadcast(send_as.clone(), &payload);
+        }*/
+    }
+
+    /// Implementation specific
+    fn get_impl(&self) -> &dyn Any {
+        self
+    }
+}
+
+struct LoopbackOverlayManager {
+    overlay_created: Arc<AtomicBool>, //only one loopback overlay manager may be created for now
+}
+
+impl CatchainOverlayManager for LoopbackOverlayManager {
+    /// Create new overlay
+    fn start_overlay(
+        &self,
+        _local_id: &PublicKeyHash,
+        overlay_short_id: &Arc<PrivateOverlayShortId>,
+        _nodes: &Vec<CatchainNode>,
+        overlay_listener: CatchainOverlayListenerPtr,
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
+    ) -> Result<CatchainOverlayPtr> {
+        if let Err(_prev) = self.overlay_created.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
+            failure::bail!("Loopback overlay {} has been already created", overlay_short_id);
+        }
+        
+        Ok(Arc::new(LoopbackOverlay {
+            listener: overlay_listener,
+        }))
+    }
+
+    /// Stop existing overlay
+    fn stop_overlay(
+        &self,
+        _overlay_short_id: &Arc<PrivateOverlayShortId>,
+        _overlay: &CatchainOverlayPtr,
+    ) {
+      //no implementaion, no owning
+    }
+}
+
+impl LoopbackOverlayManager {
+    fn create() -> CatchainOverlayManagerPtr {
+        Arc::new(LoopbackOverlayManager {
+            overlay_created: Arc::new(AtomicBool::new(false))
+        })
+    }
+}
+
+/*
+===================================================================================================
     Session
 ===================================================================================================
 */
@@ -264,6 +406,7 @@ impl CatchainListenerImpl {
 
 pub(crate) struct SessionImpl {
     stop_flag: Arc<AtomicBool>, //atomic flag to indicate that all processing threads should be stopped
+    destroy_catchain_db_flag: Arc<AtomicBool>, //indicates catchain has to destroy DB
     main_processing_thread_stopped: Arc<AtomicBool>, //atomic flag to indicate that processing thread has been stopped
     session_callbacks_processing_thread_stopped: Arc<AtomicBool>, //atomic flag to indicate that processing thread has been stopped
     _main_task_queue: TaskQueuePtr, //task queue for main thread tasks processing
@@ -301,7 +444,7 @@ impl fmt::Display for SessionImpl {
 
 impl Drop for SessionImpl {
     fn drop(&mut self) {
-        debug!("Dropping ValidatorSession...");
+        log::debug!("Dropping ValidatorSession...");
 
         self.stop_impl(false);
     }
@@ -317,14 +460,11 @@ impl SessionImpl {
     */
 
     fn stop_impl(&self, destroy_catchain_db: bool) {
+        if destroy_catchain_db {
+            self.destroy_catchain_db_flag.store(true, Ordering::SeqCst);
+        }
+
         self.stop_flag.store(true, Ordering::Release);
-
-        debug!(
-            "...stopping Catchain (session_id is {})",
-            self.session_id.to_hex_string()
-        );
-
-        self.catchain.stop(destroy_catchain_db);
 
         loop {
             if self
@@ -335,7 +475,7 @@ impl SessionImpl {
                 break;
             }
 
-            info!(
+            log::info!(
                 "...waiting for ValidatorSession threads (session_id is {})",
                 self.session_id.to_hex_string()
             );
@@ -345,7 +485,16 @@ impl SessionImpl {
             std::thread::sleep(CHECKING_INTERVAL);
         }
 
-        info!(
+        //order is important: catchain retains blocks and controls their GC without deep recursion during automatic destroying
+
+        log::debug!(
+            "...stopping Catchain (session_id is {})",
+            self.session_id.to_hex_string()
+        );
+
+        self.catchain.stop(destroy_catchain_db);
+
+        log::info!(
             "ValidatorSession has been stopped (session_id is {})",
             self.session_id.to_hex_string()
         );
@@ -358,6 +507,7 @@ impl SessionImpl {
     fn main_loop(
         should_stop_flag: Arc<AtomicBool>,
         is_stopped_flag: Arc<AtomicBool>,
+        destroy_catchain_db_flag: Arc<AtomicBool>,
         task_queue: TaskQueuePtr,
         completion_task_queue: TaskQueuePtr,
         callbacks_task_queue: CallbackTaskQueuePtr,
@@ -369,22 +519,23 @@ impl SessionImpl {
         catchain: CatchainPtr,
         session_activity_node: ActivityNodePtr,
         session_creation_time: std::time::SystemTime,
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: catchain::utils::MetricsHandle,
     ) {
-        info!(
-            "ValidatorSession main loop is started (session_id is {}); session thread creation time is {:.3}ms",
+        log::info!(
+            "ValidatorSession main loop is started (session_id is {}); \
+            session thread creation time is {:.3}ms",
             session_id.to_hex_string(),
-            session_creation_time.elapsed().unwrap().as_secs_f64() * 1000.0,
+            get_elapsed_time(&session_creation_time).as_secs_f64() * 1000.0,
         );
 
         //configure metrics
 
         let loop_counter = metrics_receiver
             .sink()
-            .counter("validator_session_main_loop_iterations");
+            .register_counter(&"validator_session_main_loop_iterations".into());
         let loop_overloads_counter = metrics_receiver
             .sink()
-            .counter("validator_session_main_loop_overloads");
+            .register_counter(&"validator_session_main_loop_overloads".into());
 
         //create session processor
 
@@ -743,19 +894,19 @@ impl SessionImpl {
                 instrument!();
 
                 session_activity_node.tick();
-                loop_counter.increment();
+                loop_counter.increment(1);
 
                 //check if the main loop should be stopped
 
                 if should_stop_flag.load(Ordering::Relaxed) {
-                    processor.borrow_mut().stop();
+                    processor.borrow_mut().stop(destroy_catchain_db_flag.load(Ordering::Relaxed));
                     break;
                 }
 
                 //check overload flag
 
                 if task_queue.is_overloaded() {
-                    loop_overloads_counter.increment();
+                    loop_overloads_counter.increment(1);
                 }
 
                 //handle session event with timeout
@@ -775,7 +926,7 @@ impl SessionImpl {
                     instrument!();
 
                     if completion_task_queue.is_empty()
-                        || last_unprioritized_closure_pulled.elapsed().unwrap()
+                        || get_elapsed_time(&last_unprioritized_closure_pulled)
                             > MAX_UNPRIORITIZED_PULLS_TIMEOUT
                     {
                         last_unprioritized_closure_pulled = now;
@@ -814,12 +965,12 @@ impl SessionImpl {
 
                 metrics_dumper.update(&processor.borrow().get_description().get_metrics_receiver());
 
-                if log_enabled!(log::Level::Debug) {
+                if log::log_enabled!(log::Level::Debug) {
                     let session_id_str = session_id.to_hex_string();
-                    debug!("ValidatorSession {} metrics:", &session_id_str);
+                    log::debug!("ValidatorSession {} metrics:", &session_id_str);
 
                     metrics_dumper.dump(|string| {
-                        debug!("{}{}", session_id_str, string);
+                        log::debug!("{}{}", session_id_str, string);
                     });
                 }
 
@@ -833,11 +984,11 @@ impl SessionImpl {
                 instrument!();
                 check_execution_time!(50_000);
 
-                if log_enabled!(log::Level::Debug) {
-                    let profiling_dump = profiling::Profiler::local_instance()
+                if log::log_enabled!(log::Level::Debug) {
+                    let profiling_dump = Profiler::local_instance()
                         .with(|profiler| profiler.borrow().dump());
 
-                    debug!(
+                    log::debug!(
                         "ValidatorSession {} profiling: {}",
                         &session_id.to_hex_string(),
                         profiling_dump
@@ -851,7 +1002,10 @@ impl SessionImpl {
 
         //finishing routines
 
-        info!(
+        task_queue.flush();
+        completion_task_queue.flush();
+
+        log::info!(
             "ValidatorSession main loop is finished (session_id is {})",
             session_id.to_hex_string()
         );
@@ -864,9 +1018,9 @@ impl SessionImpl {
         is_stopped_flag: Arc<AtomicBool>,
         task_queue: CallbackTaskQueuePtr,
         session_id: SessionId,
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: catchain::utils::MetricsHandle,
     ) {
-        info!(
+        log::info!(
             "ValidatorSession session callbacks processing loop is started (session_id is {})",
             session_id.to_hex_string()
         );
@@ -880,18 +1034,18 @@ impl SessionImpl {
 
         let loop_counter = metrics_receiver
             .sink()
-            .counter("validator_session_callbacks_loop_iterations");
+            .register_counter(&"validator_session_callbacks_loop_iterations".into());
         let loop_overloads_counter = metrics_receiver
             .sink()
-            .counter("validator_session_callbacks_loop_overloads");
+            .register_counter(&"validator_session_callbacks_loop_overloads".into());
 
         //session callbacks processing loop
 
         let mut last_warn_dump_time = std::time::SystemTime::now();
-
+                                                                                              
         loop {
             activity_node.tick();
-            loop_counter.increment();
+            loop_counter.increment(1);
 
             //check if the loop should be stopped
 
@@ -902,7 +1056,7 @@ impl SessionImpl {
             //check overload flag
 
             if task_queue.is_overloaded() {
-                loop_overloads_counter.increment();
+                loop_overloads_counter.increment(1);
             }
 
             //handle session outgoing event with timeout
@@ -920,7 +1074,9 @@ impl SessionImpl {
 
         //finishing routines
 
-        info!(
+        task_queue.flush();
+
+        log::info!(
             "ValidatorSession session callbacks processing loop is finished (session_id is {})",
             session_id.to_hex_string()
         );
@@ -935,7 +1091,7 @@ impl SessionImpl {
     pub(crate) fn create_task_queue(
         name: String,
         linked_queue: Option<TaskQueuePtr>,
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: catchain::utils::MetricsHandle,
     ) -> TaskQueuePtr {
         type ChannelPair = (
             crossbeam::channel::Sender<Box<TaskDesc<TaskPtr>>>,
@@ -955,7 +1111,7 @@ impl SessionImpl {
     }
 
     pub(crate) fn create_callback_task_queue(
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: catchain::utils::MetricsHandle,
     ) -> CallbackTaskQueuePtr {
         type ChannelPair = (
             crossbeam::channel::Sender<Box<TaskDesc<CallbackTaskPtr>>>,
@@ -974,6 +1130,36 @@ impl SessionImpl {
         task_queue
     }
 
+    pub(crate) fn create_single(
+        options: &SessionOptions,
+        session_id: &SessionId,
+        local_key: &PrivateKey,
+        path: String,
+        db_suffix: String,
+        listener: SessionListenerPtr,
+    ) -> SessionPtr {
+        let nodes = vec![SessionNode {
+            adnl_id: local_key.id().clone(),
+            public_key: local_key.clone(),
+            weight: 1,
+        }];
+
+        let mut updated_options = options.clone();
+        updated_options.catchain_idle_timeout = Duration::from_millis(1);
+
+        Self::create(
+            &updated_options,
+            session_id,
+            &nodes,
+            local_key,
+            path,
+            db_suffix,
+            false,
+            LoopbackOverlayManager::create(),
+            listener
+        )
+    }
+
     pub(crate) fn create(
         options: &SessionOptions,
         session_id: &SessionId,
@@ -985,7 +1171,7 @@ impl SessionImpl {
         overlay_manager: CatchainOverlayManagerPtr,
         listener: SessionListenerPtr,
     ) -> SessionPtr {
-        debug!("Creating ValidatorSession...");
+        log::debug!("Creating ValidatorSession...");
 
         let session_creation_time = std::time::SystemTime::now();
 
@@ -1001,11 +1187,8 @@ impl SessionImpl {
 
         //create metrics receiver
 
-        let metrics_receiver = Arc::new(
-            metrics_runtime::Receiver::builder()
-                .build()
-                .expect("failed to create validator session metrics receiver"),
-        );
+        let metrics_receiver =
+            catchain::utils::MetricsHandle::new(Some(Duration::from_secs(30)));
 
         //create task queues
 
@@ -1050,6 +1233,7 @@ impl SessionImpl {
         //create threads
 
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let destroy_catchain_db_flag = Arc::new(AtomicBool::new(false));
         let main_processing_thread_stopped = Arc::new(AtomicBool::new(false));
         let session_callbacks_processing_thread_stopped = Arc::new(AtomicBool::new(false));
         let session_activity_node = catchain::CatchainFactory::create_activity_node(format!(
@@ -1058,6 +1242,7 @@ impl SessionImpl {
         ));
         let body: SessionImpl = SessionImpl {
             stop_flag: stop_flag.clone(),
+            destroy_catchain_db_flag: destroy_catchain_db_flag.clone(),
             main_processing_thread_stopped: main_processing_thread_stopped.clone(),
             session_callbacks_processing_thread_stopped:
                 session_callbacks_processing_thread_stopped.clone(),
@@ -1092,6 +1277,7 @@ impl SessionImpl {
                 SessionImpl::main_loop(
                     stop_flag_for_main_loop,
                     main_processing_thread_stopped,
+                    destroy_catchain_db_flag,
                     main_task_queue,
                     session_callbacks_responses_task_queue,
                     session_callbacks_task_queue_for_main_loop,

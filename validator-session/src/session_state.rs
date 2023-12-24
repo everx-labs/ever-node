@@ -11,7 +11,15 @@
 * limitations under the License.
 */
 
-pub use super::*;
+use crate::{
+    Any, BlockCandidateSignatureVectorPtr, BlockId, CachedInstanceCounter, CacheObject, 
+    HashableObject, HashType, Merge, MovablePoolObject, OldRoundState, OldRoundStateWrapper, 
+    PoolObject, PoolPtr, RoundStatePtr, RoundStateWrapper, SentBlockPtr, SessionCache, 
+    SessionDescription, SessionFactory, SessionPool, SessionState, SessionStatePtr, 
+    SessionStateWrapper, Vector, VectorMerge, VectorWrapper, ton
+};
+use catchain::instrument;
+use std::fmt;
 
 /*
     Constants
@@ -141,7 +149,7 @@ impl SessionState for SessionStateImpl {
         desc: &dyn SessionDescription,
         src_idx: u32,
     ) -> Vec<SentBlockPtr> {
-        profiling::instrument!();
+        instrument!();
 
         self.current_round.choose_blocks_to_approve(desc, src_idx)
     }
@@ -185,7 +193,7 @@ impl SessionState for SessionStateImpl {
         src_idx: u32,
         attempt_id: u32,
     ) -> ton::Message {
-        profiling::instrument!();
+        instrument!();
 
         self.current_round
             .generate_vote_for(desc, src_idx, attempt_id)
@@ -216,7 +224,7 @@ impl SessionState for SessionStateImpl {
         desc: &dyn SessionDescription,
         src_idx: u32,
     ) -> Option<SentBlockPtr> {
-        profiling::instrument!();
+        instrument!();
 
         if self.current_round.check_block_is_signed_by(src_idx) {
             return None;
@@ -254,9 +262,9 @@ impl SessionState for SessionStateImpl {
         block_creation_time: std::time::SystemTime,
         block_payload_creation_time: std::time::SystemTime,
     ) -> SessionStatePtr {
-        profiling::instrument!();
+        instrument!();
 
-        trace!(
+        log::trace!(
             "...received message from node #{} with public key hash {}",
             src_idx,
             desc.get_source_public_key_hash(src_idx)
@@ -267,7 +275,7 @@ impl SessionState for SessionStateImpl {
         let current_attempt_id_for_node = *self.attempt_ids.at(src_idx as usize);
 
         if attempt_id < current_attempt_id_for_node {
-            warn!(
+            log::warn!(
                 "...received message with invalid timestamp which goes back: {} -> {}",
                 current_attempt_id_for_node, attempt_id
             );
@@ -276,7 +284,7 @@ impl SessionState for SessionStateImpl {
         }
 
         if attempt_id < MIN_ATTEMPT_ID {
-            warn!(
+            log::warn!(
                 "...received message with invalid timestamp which is too small {}",
                 attempt_id
             );
@@ -284,7 +292,7 @@ impl SessionState for SessionStateImpl {
             attempt_id = MIN_ATTEMPT_ID;
         }
 
-        trace!("...clamped attempt ID is {}", attempt_id);
+        log::trace!("...clamped attempt ID is {}", attempt_id);
 
         //update attempts state
 
@@ -298,7 +306,7 @@ impl SessionState for SessionStateImpl {
         if round_id > current_round_id {
             //attempt to update non existing future round
 
-            warn!(
+            log::warn!(
                 "...too big round ID {} (current round is {})",
                 round_id, current_round_id
             );
@@ -312,7 +320,7 @@ impl SessionState for SessionStateImpl {
         }
 
         if round_id == current_round_id {
-            trace!("...forward action applying to a round #{}", round_id);
+            log::trace!("...forward action applying to a round #{}", round_id);
 
             let mut new_current_round = self.current_round.apply_action(
                 desc,
@@ -327,7 +335,7 @@ impl SessionState for SessionStateImpl {
             if new_current_round.check_block_is_signed(desc) {
                 //if new signed block appeared in the current round - create the new round and save previous round in old rounds
 
-                trace!(
+                log::trace!(
                     "...mark round #{} as old round and create new current round",
                     round_id
                 );
@@ -345,7 +353,7 @@ impl SessionState for SessionStateImpl {
         } else {
             //change state of one of the old rounds
 
-            trace!("...update state of old round #{}", round_id);
+            log::trace!("...update state of old round #{}", round_id);
 
             let new_old_round = self
                 .old_rounds
@@ -370,7 +378,7 @@ impl SessionState for SessionStateImpl {
         src_idx: u32,
         attempt_id: u32,
     ) -> Option<ton::Message> {
-        profiling::instrument!();
+        instrument!();
 
         self.current_round.create_action(desc, src_idx, attempt_id)
     }
@@ -380,7 +388,7 @@ impl SessionState for SessionStateImpl {
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn SessionState> {
-        profiling::instrument!();
+        instrument!();
 
         let self_cloned = Self::new(
             self.attempt_ids.move_to_persistent(cache),
@@ -398,7 +406,7 @@ impl SessionState for SessionStateImpl {
     */
 
     fn dump(&self, desc: &dyn SessionDescription) -> String {
-        profiling::instrument!();
+        instrument!();
 
         self.current_round.dump(desc)
     }
@@ -415,9 +423,9 @@ impl SessionStateWrapper for SessionStatePtr {
         src_idx: u32,
         attempt_id: u32,
     ) -> SessionStatePtr {
-        profiling::instrument!();
+        instrument!();
 
-        trace!("...actualizing state");
+        log::trace!("...actualizing state");
 
         let mut state = self.clone();
 
@@ -440,7 +448,7 @@ impl SessionStateWrapper for SessionStatePtr {
 
 impl Merge<PoolPtr<dyn SessionState>> for PoolPtr<dyn SessionState> {
     fn merge(&self, right: &Self, desc: &mut dyn SessionDescription) -> Self {
-        profiling::instrument!();
+        instrument!();
 
         let left = &get_impl(&**self);
         let right = &get_impl(&**right);
@@ -504,7 +512,7 @@ impl Merge<PoolPtr<dyn SessionState>> for PoolPtr<dyn SessionState> {
         let result = SessionStateImpl::create(desc, attempt_ids, round, old_rounds);
 
         if DEBUG_DUMP_MERGE {
-            trace!(
+            log::trace!(
                 "leftstate={:?} ============= rightstate={:?} =========== mergedstate={:?}",
                 left,
                 right,
@@ -618,9 +626,9 @@ impl SessionStateImpl {
         mut attempt_id: u32,
         default_state: SessionStatePtr,
     ) -> (SessionStatePtr, bool) {
-        profiling::instrument!();
+        instrument!();
 
-        trace!(
+        log::trace!(
             "......actualizing state (source={}, attempt={})",
             src_idx,
             attempt_id
@@ -632,7 +640,7 @@ impl SessionStateImpl {
         let current_attempt_id_for_node = *attempt_ids.at(src_idx as usize);
 
         if attempt_id < current_attempt_id_for_node {
-            warn!(
+            log::warn!(
                 "Node {} generated has invalid attempt ID which goes back ({} -> {})",
                 desc.get_source_public_key_hash(src_idx),
                 current_attempt_id_for_node,
@@ -643,7 +651,7 @@ impl SessionStateImpl {
         }
 
         if attempt_id < MIN_ATTEMPT_ID {
-            warn!(
+            log::warn!(
                 "Node {} has invalid attempt ID {} which is too small",
                 desc.get_source_public_key_hash(src_idx),
                 attempt_id
@@ -652,14 +660,14 @@ impl SessionStateImpl {
             attempt_id = MIN_ATTEMPT_ID;
         }
 
-        trace!("......clamped attempt ID is {}", attempt_id);
+        log::trace!("......clamped attempt ID is {}", attempt_id);
 
         let (attempt_ids, time_updated) = if current_attempt_id_for_node >= attempt_id {
             (attempt_ids, false)
         } else {
             let attempt_ids = attempt_ids.change(desc, src_idx as usize, attempt_id);
 
-            warn!(
+            log::warn!(
                 "Node {} updating time in make_all()",
                 desc.get_source_public_key_hash(src_idx)
             );
@@ -679,7 +687,7 @@ impl SessionStateImpl {
 
         //update state
 
-        trace!("......create updated state");
+        log::trace!("......create updated state");
 
         let state = Self::create(desc, attempt_ids, round, self.old_rounds.clone());
 
@@ -729,7 +737,7 @@ impl SessionStateImpl {
         current_round: RoundStatePtr,
         old_rounds: OldRoundVector,
     ) -> SessionStatePtr {
-        profiling::instrument!();
+        instrument!();
 
         let hash = Self::compute_hash(&attempt_ids, &current_round, &old_rounds);
         let body = Self::new(

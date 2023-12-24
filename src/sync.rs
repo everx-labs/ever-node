@@ -15,8 +15,8 @@ use crate::{
     block::{BlockIdExtExtention, BlockStuff}, block_proof::BlockProofStuff, boot,
     engine_traits::EngineOperations
 };
+
 use adnl::common::Wait;
-use ever_crypto::KeyId;
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 use storage::{
     archives::{
@@ -25,9 +25,8 @@ use storage::{
     },
     block_handle_db::BlockHandle
 };
-use tokio::task::JoinHandle;
-use ton_block::BlockIdExt;
-use ton_types::{error, fail, Result};
+use ton_block::{BlockIdExt, BASE_WORKCHAIN_ID};
+use ton_types::{error, fail, KeyId, Result};
 
 //type PreDownloadTask = (u32, JoinHandle<Result<Vec<u8>>>);
 
@@ -443,7 +442,7 @@ async fn read_package(data: &Vec<u8>) -> Result<BlockMaps> {
                 maps.blocks.entry(Arc::clone(&id))
                     .or_insert_with(|| BlocksEntry::default())
                     .block = Some(Arc::new(
-                    BlockStuff::deserialize_checked((*id).clone(), entry.take_data())?
+                    BlockStuff::deserialize_block_checked((*id).clone(), entry.take_data())?
                 ));
                 if id.is_masterchain() {
                     maps.mc_blocks_ids.insert(id.seq_no(), id);
@@ -541,7 +540,7 @@ struct BlockMaps {
     blocks: BTreeMap<Arc<BlockIdExt>, BlocksEntry>,
 }
 
-async fn wait_for(tasks: Vec<JoinHandle<Result<()>>>) -> Result<()> {
+async fn wait_for(tasks: Vec<tokio::task::JoinHandle<Result<()>>>) -> Result<()> {
     futures::future::join_all(tasks).await
         .into_iter().find(|r| match r {
             Err(_) => true,
@@ -619,7 +618,7 @@ async fn import_shard_blocks(
         Some(id) => id,
         None => fail!("INTERNAL ERROR: No shard client MC block set in sync")
     };
-    let (_master, workchain_id) = engine.processed_workchain().await?;
+    let workchain_id = engine.processed_workchain().unwrap_or(BASE_WORKCHAIN_ID);
     for mc_block_id in maps.mc_blocks_ids.values() {
         let mc_seq_no = mc_block_id.seq_no();
         if mc_seq_no <= shard_client_mc_block_id.seq_no() {
@@ -638,9 +637,9 @@ async fn import_shard_blocks(
         )?;
         let mc_block = engine.load_block(&mc_handle).await?;
 
-        let shard_blocks = mc_block.shards_blocks(workchain_id)?;
+        let shard_blocks = mc_block.top_blocks(workchain_id)?;
         let mut tasks = Vec::with_capacity(shard_blocks.len());
-        for (_shard, id) in shard_blocks {
+        for id in shard_blocks {
             let engine = Arc::clone(engine);
             let mc_handle = Arc::clone(&mc_handle);
             let maps = Arc::clone(&maps);

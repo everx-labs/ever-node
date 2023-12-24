@@ -16,7 +16,6 @@ use std::{io::SeekFrom, path::{Path, PathBuf}, sync::atomic::{AtomicU64, Orderin
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use ton_types::{error, fail, Result};
 
-
 #[derive(Debug)]
 pub struct Package {
     path: PathBuf,
@@ -167,7 +166,6 @@ impl<R: tokio::io::AsyncReadExt + Unpin> PackageReader<R> {
         PackageEntry::read_from(&mut self.reader).await
     }
 }
-
 
 pub async fn read_package_from<R: tokio::io::AsyncReadExt + Unpin>(
     reader: R

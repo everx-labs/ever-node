@@ -26,13 +26,14 @@ pub mod internal_db;
 pub mod macros;
 pub mod network;
 pub mod rng;
-pub mod shard_blocks;
 pub mod shard_state;
 pub mod sync;
 pub mod types;
 pub mod validating_utils;
 pub mod validator;
 pub mod shard_states_keeper;
+
+mod shard_blocks;
 
 include!("../common/src/info.rs");
 

@@ -2,6 +2,352 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.72
+
+- Fixed the blocks parser for newly synchronized nodes
+
+## Version 0.55.71
+
+- Move cleaning outdated Catchain caches on node startup into separate thread
+
+## Version 0.55.70
+
+- Cleaning outdated Catchain caches on node startup
+
+## Version 0.55.69
+
+- FIX: breaking compat in ever-block-json
+
+## Version 0.55.68
+
+- Correct cleanup of catchain DBs
+
+## Version 0.55.67
+
+- Added EngineTraits::load_and_pin_state method to work with states which may be deleted by GC.
+- Fixed bug when ShardStatesKeeper tried to restore already deleted (by GC) shard state.
+
+## Version 0.55.66
+
+- Use tcmalloc without debug functionality (stability+)
+
+## Version 0.55.65
+
+- Sending blocks to Kafka was moved to separate worker
+
+## Version 0.55.64
+
+- Write `last_trans_lt` to account's json for deleted accounts.
+
+## Version 0.55.63
+
+- Fixed a possible hang-up while saving a shard state
+
+## Version 0.55.62
+
+- Refactor processing of external messages
+
+## Version 0.55.61
+
+- Support hardforking in node
+  
+## Version 0.55.60
+
+- Remove time limit for boot
+
+## Version 0.55.59
+
+- Support hops check for old-fashioned broadcasts
+
+## Version 0.55.58
+
+- Fix build for front node
+
+## Version 0.55.57
+
+- Fixed loop to request peers from queue (add_overlay_peers)
+
+## Version 0.55.56
+
+- Save persistent state with BocWriterStack
+
+## Version 0.55.55
+
+- Update for fast finality
+
+## Version 0.55.54
+
+- Bugfixes for states cache optimisations
+
+## Version 0.55.53
+
+- Added control queries `GetAccountByBlock`, `GetShardAccountMeta`, `GetShardAccountMetaByBlock`, `GetAppliedShardsInfo`
+- Produce applied shard hashes and raw block proofs to Kafka
+
+## Version 0.55.52
+
+- Bump cc crate version
+
+## Version 0.55.51
+
+- Supported ton_block library without fast-finality feature
+
+## Version 0.55.50
+
+- Speed up node shutdown
+
+## Version 0.55.45
+
+- Added shard states cache modes ("states_cache_mode" param in config.json)
+    - "Off" - states are saved synchronously and not cached.
+    - "Moderate" - *recommended* - states are saved asiynchronously. Number of cached cells (in the state's BOCs) is minimal.
+    - "Full" - states saved asynchronously. The number of cells in memory is continuously growing.
+- Added "cache_cells_counters" param in config.json. If it is set to true, then cell counters are cached in memory.
+  It speeds up cells' DB but takes more memory. This cache was always enabled before.
+- Added limit for cells DB cache size ("cells_lru_size" param in config.json). Zero value means default limit - 1000000.
+- Fixed stopping of node (in part of a cells GC)
+
+## Version 0.55.44
+
+- Limit for rocksdb log file: max 3 files, 100MB each
+
+## Version 0.55.43
+
+- Refactor boot procedure
+- Simplify procedure to get next key blocks
+
+## Version 0.55.42
+
+- Fixed migration of DB from v4 to v5
+
+## Version 0.55.41
+
+- Adjusted the total WAL size limit for RocksDB
+
+## Version 0.55.40
+
+- Validation fixes for single-node sessions
+  
+## Version 0.55.39
+
+- Fixed shard states GC stopping
+
+## Version 0.55.38
+
+- New cleaning algorithm for shard states cache. Now it lives less in case of a persistent state saving.
+- Pretty logging for major workers' positions
+
+## Version 0.55.37
+
+- Skip validations for single node sessions
+- Validator manager fix for single-node sessions
+- Update session creation for single node sessions
+- Fix for deep recursion on catchain blocks dropping
+- Increase package version
+
+## Version 0.55.36
+
+- Different fixes
+  
+## Version 0.55.33
+
+- Fix of SystemTime::elapsed() unwrap call
+
+## Version 0.55.32
+
+- Prohibited big cells in ext messages
+
+## Version 0.55.31
+
+- Peristent state heuristics
+
+## Version 0.55.30
+
+- Remove ever-crypto crate
+
+## Version 0.55.28
+
+- Fast finality prototype
+
+## Version 0.55.27
+
+- Stabilization of fast finality feature
+
+## Version 0.55.26
+
+- Supported new version of BocWriter::with_params with fixed cell lifetime
+
+## Version 0.55.25
+
+- Filled gen_utime_ms for block and state
+
+## Version 0.55.24
+
+- Remp collation check for uid duplicates added
+
+## Version: 0.55.22
+
+- Limited the number of attempts in accept block routine (was infinite)
+
+## Version 0.55.21
+
+- Fixed setup of special settings for the "cells" column family in RocksDB
+
+## Version 0.55.20
+
+- Fix got GetStats during boot
+
+## Version 0.55.18
+
+- Optimistic consensus: supported key blocks
+- Improve node requests logging
+
+## Version 0.55.17
+
+- Process lost collator
+
+## Version 0.55.16
+
+- Support for different formats of validator statistics
+
+## Version 0.55.15
+
+- Disable debug symbols in release
+
+## Version 0.55.10
+
+- Improve log messages about neighbours
+
+## Version 0.55.9
+
+- Stopping validation in validator_group after all blocks in range are generated
+- Increase package version
+
+## Version 0.55.8
+
+- Preliminary changes for status merge
+- Refactored REMP message forwarding criteria: now a forwarded message is collated if it has at least one non-reject status from previous sessions
+- Test for status merges in REMP
+- Fixes in check_message_duplicates: now same-block duplicate checks are properly performed
+- log::error to log::trace for no validator_group
+- Updated version number in Cargo.toml
+
+## Version 0.55.7
+
+- Merge shards MVP
+- Add script to restart specific node
+- Optimistic consensus: fixed cc rotating
+- Update restart_nodes.sh
+- Added 'validation_countdown_mode' option
+- Printing valIdation_countdown_mode
+- Changed default config for test_run_net - no countdown for zerostate
+- Increase package version
+
+## Version 0.55.6                                      
+
+- Disable timeout for catchain processing after restart
+- Increase package version
+
+## Version 0.55.5
+
+- Added precalculation of out message queues for split
+- Refactored limits and timeout in collator
+- Skiped collator phases for after_split block
+- Added processed_count_limit into clean_out_msg_queue
+- Speeded up cleanup of huge output queue
+- Added GlobalCapabilities::CapSuspendedList to supported_capabilities
+- Supported new rocksdb interface
+
+## Version 0.55.4
+
+- Some changes for better test
+- Added more statistic metrics
+- Fix build errors
+- Increase package version
+
+## Version 0.55.3
+
+- Fix boot wrong next key block sequence
+- Fix boot from init block
+
+## Version 0.55.2
+
+- Optimistic consensus - part one
+
+## Version 0.55.0
+
+- No new validator lists for Remp; message rerouting in Remp fixed; less load when Remp caps is off
+- Message duplicate checks using message unique ids (body hashes) in Remp
+
+## Version 0.54.6
+
+- Fixed compilation for build without telemetry feature
+
+## Version: 0.54.5
+
+- Stabilize internal DB tests
+- Increase package version
+
+## Version: 0.54.4
+
+- Fixed bug in ShardStateKeeper: 'is_queue_update_for' had been called wrong way.
+
+## Version: 0.54.3
+
+- Prototype flexible build process
+- Add ever-types to flexible build
+- Increase package version
+- Mokup package version for flex build
+
+## Version: 0.54.2
+
+- Open catchain tests
+- Open archive tests
+- Open storage tests
+- Open node tests
+- Increase node version
+
+## Version: 0.54.1
+
+- Fast validator session configuration
+- Ready to use fast single session code
+- SessionFactory::create_single_node_session has been added
+- Move shardstate DB performance test to becnhes
+- Fix script to run local test network
+- Increase node version
+
+## Version: 0.52.7
+
+### Fixed
+
+- Fixed bug in DB restore: LAST_ROTATION_MC_BLOCK pointer is not truncated.
+
+
+## Version 0.52.6
+
+### New
+
+- Added ability to send the validator status to the console
+- Fixed compilation after auto bumped rocks_db version
+
+## Version: 0.52.5
+
+### New
+
+- Supported ever-types version 2.0
+
+## Version: 0.52.4
+
+### Fixed
+
+- Fixed bug in external messages storage. It was not properly cleaned up when node collated blocks only in workchain or masterchain.
+
+## Version: 0.52.3
+
+### Fixed
+
+- Fixed bug in archives GC. Now it checks if shard state related to block is allowed to be deleted.
+
 ## Version: 0.52.2
 
 ### New
@@ -14,6 +360,33 @@ All notable changes to this project will be documented in this file.
 
 - Bumped block version to 37
 - Supported CapFeeInGasUnits capability
+
+## Version: 0.52.0
+### New
+
+- New version of cells DB with separated values for cells counters. New version works faster.
+  By-default old version is used (no need to refill DB). To migrate to new version it is need
+  to run node with `--force-check-db` flag.
+- Added new section in config.json.
+  ```json
+  "cells_db_config": {
+      "states_db_queue_len": 1000,
+      "max_pss_slowdown_mcs": 750,
+      "prefill_cells_cunters": false
+  }
+  ```
+  Description for flags see below.
+- Added in-memory cache for all cells counters. It speeds up cells DB but takes more memory.
+  Enabled by `prefill_cells_cunters` flag. By-default it is disabled.
+- Abjusteble queue length for states DB. It is a throttling threshold - node slows down 
+  if the queue is full. Abjusted by `states_db_queue_len` flag in config.json. Default value is 1000.
+- Slow down of persistent state saving. It reduces load on cells DB when it is overloaded.
+  Maksimum slowdown time (pause before next cell saving) is set by `max_pss_slowdown_mcs`
+  flag in config.json. Default value is 750 microseconds.
+- Setup Bloom filters and increased caches in the cells DB. It gives significant performance boost
+  on databases with a lot of cells (more than 10 millions).
+- Fast database recovery. It works by optimistic scenario - doesn't check all cells.
+  If cell lost while node works - it restarts and runs cells DB full recovery.
 
 ## Version: 0.50.23
 

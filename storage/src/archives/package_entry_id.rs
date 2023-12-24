@@ -18,8 +18,7 @@ use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
 use ton_block::{BlockIdExt, ShardIdent};
-use ton_types::{error, fail, Result, UInt256};
-
+use ton_types::{error, fail, base64_encode, Result, UInt256};
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub enum PackageEntryId<B, U256, PK>
@@ -255,7 +254,7 @@ impl FromFileName for BlockIdExt {
 
 impl GetFileName for UInt256 {
     fn filename(&self) -> String {
-        base64::encode(self)
+        base64_encode(self)
     }
 }
 

@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -11,8 +11,6 @@
 * limitations under the License.
 */
 
-#[cfg(feature = "metrics")]
-use crate::engine::STATSD;
 use crate::{engine_traits::EngineOperations, shard_state::ShardStateStuff, validator::UInt256};
 use ever_crypto::Ed25519KeyOption;
 use num_bigint::BigUint;
@@ -25,12 +23,12 @@ use ton_block::{
     ConfigParamEnum, ExternalInboundMessageHeader, HashmapAugType, Message, MsgAddressExt,
     MsgAddressInt, Serializable, SigPubKey, SlashingConfig,
 };
-use ton_types::{error, Result, serialize_toc, SliceData};
+use ton_types::{error, Result, write_boc, SliceData};
 use validator_session::{
     PrivateKey, PublicKey, SlashingAggregatedMetric, SlashingMetric, SlashingNode,
     SlashingValidatorStat,
 };
-#[cfg(feature = "metrics")]
+#[cfg(feature = "log_metrics")]
 use validator_session::{PublicKeyHash, SlashingAggregatedValidatorStat};
 
 const ELECTOR_ABI: &[u8] = include_bytes!("Elector.abi.json"); //elector's ABI
@@ -236,7 +234,7 @@ impl SlashingManager {
         }
 
         if slashed_validators.len() > 0 {
-            #[cfg(feature = "metrics")]
+            #[cfg(feature = "log_metrics")]
             Self::report_slashing_metrics(&aggregated_stat, local_key.id());
         }
     }
@@ -312,7 +310,7 @@ impl SlashingManager {
             .encode_input(&header, &parameters, INTERNAL_CALL, None, Some(dst.clone()))
             .and_then(|builder| SliceData::load_builder(builder))
             .map_err(|err| error!("SlashingManager::prepare_slash_validator_message: failed to encode input: {:?}", err))?;
-        log::trace!(target: "slashing", "message body {}", base64::encode(&serialize_toc(&body.cell())?));
+        log::trace!(target: "slashing", "message body {}", base64_encode(&write_boc(&body.cell())?));
 
         //prepare header of the message
 
@@ -331,11 +329,13 @@ impl SlashingManager {
                     .slashing_messages
                     .push((message_id.clone(), message.clone()));
 
-                if let Err(err) = engine.redirect_external_message(&serialized_message).await {
+                if let Err(err) = engine.redirect_external_message(
+                                    &serialized_message, message_id.clone()).await 
+                {
                     log::warn!(target: "slashing", "can't send message: {:?}, error: {:?}", message, err);
                 } else {
                     log::info!(target: "slashing", "message: {:?} -> {} has been successfully sent",
-                            message_id, base64::encode(&serialized_message));
+                            message_id, base64_encode(&serialized_message));
                 }
             }
             Err(err) => {
@@ -347,7 +347,7 @@ impl SlashingManager {
     fn serialize_message(message: &Arc<Message>) -> Result<(UInt256, Vec<u8>)> {
         let cell = message.serialize()?;
         let id = cell.repr_hash();
-        let bytes = ton_types::serialize_toc(&cell)?;
+        let bytes = ton_types::write_boc(&cell)?;
 
         Ok((id, bytes))
     }
@@ -361,7 +361,7 @@ impl SlashingManager {
         let msg_desc = engine
             .load_block(block_handle)
             .await
-            .and_then(|block| block.block().read_extra()?.read_in_msg_descr());
+            .and_then(|block| block.block()?.read_extra()?.read_in_msg_descr());
 
         let mut slashing_messages = std::mem::take(&mut self.manager.lock().slashing_messages);
         for (message_id, message) in slashing_messages.drain(..) {
@@ -378,7 +378,7 @@ impl SlashingManager {
         }
     }
 
-    #[cfg(feature = "metrics")]
+    #[cfg(feature = "log_metrics")]
     pub fn report_slashing_metrics(
         aggregated_stat: &SlashingAggregatedValidatorStat,
         reporter_key: &PublicKeyHash,
@@ -395,12 +395,8 @@ impl SlashingManager {
             _ => (-1.0, -1.0),
         };
 
-        let mut pipeline = STATSD.pipeline();
-
-        pipeline.gauge("validation_score", validation_score);
-        pipeline.gauge("slashing_score", slashing_score);
-
-        pipeline.send(&STATSD);
+        metrics::gauge!("validation_score", validation_score);
+        metrics::gauge!("slashing_score", slashing_score);
     }
 }
 

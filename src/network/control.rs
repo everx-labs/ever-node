@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -14,24 +14,31 @@
 use crate::{
     collator_test_bundle::CollatorTestBundle, config::{KeyRing, NodeConfigHandler},
     engine_traits::EngineOperations, engine::Engine, network::node_network::NodeNetwork,
-    validator::validator_utils::validatordescr_to_catchain_node
+    validator::validator_utils::validatordescr_to_catchain_node,
+    validating_utils::{supported_version, supported_capabilities}, shard_states_keeper::PinnedShardStateGuard
 };
+
 use adnl::{
     common::{QueryResult, Subscriber, AdnlPeers},
     server::{AdnlServer, AdnlServerConfig}
 };
-use ever_crypto::KeyId;
-use std::{fmt::Write, ops::Deref, sync::Arc, str::FromStr, time::{SystemTime, UNIX_EPOCH}, io::Cursor};
-use serde_json::Map;
+use std::sync::Arc;
 use ton_api::{
     deserialize_boxed,
     ton::{
-        self, bytes, PublicKey, TLObject, accountaddress::AccountAddress, 
+        self, PublicKey, TLObject, accountaddress::AccountAddress,
         engine::validator::{
             keyhash::KeyHash, onestat::OneStat, signature::Signature, stats::Stats, Success
         },
-        lite_server::configinfo::ConfigInfo, 
-        raw::{ShardAccountState as ShardAccountStateBoxed, shardaccountstate::ShardAccountState},
+        lite_server::configinfo::ConfigInfo,
+        raw::{
+            shardaccountstate::ShardAccountState,
+            shardaccountmeta::ShardAccountMeta,
+            appliedshardsinfo::AppliedShardsInfo,
+            ShardAccountState as ShardAccountStateBoxed,
+            ShardAccountMeta as ShardAccountMetaBoxed,
+            AppliedShardsInfo as AppliedShardsInfoBoxed
+        },
         rpc::engine::validator::{
             AddAdnlId, AddValidatorAdnlAddress, AddValidatorPermanentKey, AddValidatorTempKey,
             ControlQuery, ExportPublicKey, GenerateKeyPair, Sign, GetBundle, GetFutureBundle
@@ -39,9 +46,9 @@ use ton_api::{
     },
     IntoBoxed,
 };
-use ton_types::{fail, error, Result, UInt256, cells_serialization::deserialize_tree_of_cells};
-use ton_block::{BlockIdExt, MsgAddressInt, Serializable, ShardIdent};
+use ton_block::{BlockIdExt, MsgAddressInt, Serializable, ShardIdent, MASTERCHAIN_ID, MerkleProof, ShardAccount};
 use ton_block_json::serialize_config_param;
+use ton_types::{error, fail, KeyId, read_single_root_boc, Result, UInt256};
 
 pub struct ControlServer {
     adnl: AdnlServer
@@ -57,13 +64,13 @@ impl ControlServer {
     ) -> Result<Self> {
         let ret = Self {
             adnl: AdnlServer::listen(
-                config, 
+                config,
                 vec![
                     Arc::new(
                         ControlQuerySubscriber::new(data_source, key_ring, node_config, network)?
                     )
                 ]
-            ).await? 
+            ).await?
         };
         Ok(ret)
     }
@@ -83,7 +90,7 @@ pub enum DataSource {
 
 struct ControlQuerySubscriber {
     data_source: DataSource,
-    key_ring: Arc<dyn KeyRing>, 
+    key_ring: Arc<dyn KeyRing>,
     config: Arc<NodeConfigHandler>,
     public_overlay_adnl_id: Option<Arc<KeyId>>
 }
@@ -91,8 +98,8 @@ struct ControlQuerySubscriber {
 impl ControlQuerySubscriber {
 
     fn new(
-        data_source: DataSource, 
-        key_ring: Arc<dyn KeyRing>, 
+        data_source: DataSource,
+        key_ring: Arc<dyn KeyRing>,
         config: Arc<NodeConfigHandler>,
         network: Option<&NodeNetwork>,
     ) -> Result<Self> {
@@ -121,7 +128,7 @@ impl ControlQuerySubscriber {
         let engine = self.engine()?;
         let mc_state = engine.load_last_applied_mc_state().await?;
         let block_id = mc_state.block_id();
-        let config_params = mc_state.config_params()?;        
+        let config_params = mc_state.config_params()?;
         let config_info = ConfigInfo {
             mode: 0,
             id: block_id.clone(),
@@ -146,10 +153,30 @@ impl ControlQuerySubscriber {
     }
 
     async fn get_account_state(&self, address: AccountAddress) -> Result<ShardAccountStateBoxed> {
+        Self::convert_account_state(self.find_account(address).await?)
+    }
+
+    async fn get_account_by_block(&self, account_id: UInt256, block_root_hash: UInt256) -> Result<ShardAccountStateBoxed> {
+        Self::convert_account_state(self.find_account_by_block(account_id, block_root_hash).await?)
+    }
+
+    async fn get_account_meta(&self, address: AccountAddress) -> Result<ShardAccountMetaBoxed> {
+        Self::convert_account_meta(self.find_account(address).await?)
+    }
+
+    async fn get_account_meta_by_block(&self, account_id: UInt256, block_root_hash: UInt256) -> Result<ShardAccountMetaBoxed> {
+        Self::convert_account_meta(self.find_account_by_block(account_id, block_root_hash).await?)
+    }
+
+    async fn find_account(
+        &self, address: AccountAddress
+    ) -> Result<Option<(ShardAccount, PinnedShardStateGuard)>> {
         let engine = self.engine()?;
-        let addr = MsgAddressInt::from_str(&address.account_address)?;
+        let addr: MsgAddressInt = address.account_address.parse()?;
         let state = if addr.is_masterchain() {
-            engine.load_last_applied_mc_state().await?
+            let mc_block_id = engine.load_last_applied_mc_block_id()?
+                .ok_or_else(|| error!("Cannot load last_applied_mc_block_id!"))?;
+            engine.load_and_pin_state(&mc_block_id).await?
         } else {
             let mc_block_id = engine.load_shard_client_mc_block_id()?;
             let mc_block_id = mc_block_id.ok_or_else(
@@ -159,7 +186,7 @@ impl ControlQuerySubscriber {
             let mut shard_state = None;
             for id in mc_state.top_blocks(addr.workchain_id())? {
                 if id.shard().contains_account(addr.address().clone())? {
-                    shard_state = engine.load_state(&id).await.ok();
+                    shard_state = engine.load_and_pin_state(&id).await.ok();
                     break;
                 }
             }
@@ -167,16 +194,64 @@ impl ControlQuerySubscriber {
                 || error!("Cannot find actual shard for account {}", &address.account_address)
             )?
         };
-        let shard_account_opt = state.shard_account(&addr.address())?;
-        let result = match shard_account_opt {
-            Some(shard_account) => {
+        Ok(state.state().shard_account(&addr.address())?.map(|acc| (acc, state)))
+    }
+
+    async fn find_account_by_block(
+        &self, account_id: UInt256, block_root_hash: UInt256
+    ) -> Result<Option<(ShardAccount, PinnedShardStateGuard)>> {
+        let engine = self.engine()?;
+        let block_id = engine.find_full_block_id(&block_root_hash)?
+            .ok_or_else(|| error!("Cannot find full block id by root hash"))?;
+        let shard_state = engine.load_and_pin_state(&block_id).await?;
+        Ok(shard_state.state().shard_account(&account_id.into())?.map(|acc| (acc, shard_state)))
+    }
+
+    fn convert_account_state(
+        shard_account: Option<(ShardAccount, PinnedShardStateGuard)>
+    ) -> Result<ShardAccountStateBoxed> {
+        Ok(match shard_account {
+            Some((account, _state_guard)) => ShardAccountStateBoxed::Raw_ShardAccountState(
                 ShardAccountState {
-                    shard_account: bytes(shard_account.write_to_bytes()?),
-                }.into_boxed()
-            },
+                    shard_account: ton_api::ton::bytes(account.write_to_bytes()?)
+                }
+            ),
             None => ShardAccountStateBoxed::Raw_ShardAccountNone
-        };
-        Ok(result)
+        })
+    }
+
+    fn convert_account_meta(
+        shard_account: Option<(ShardAccount, PinnedShardStateGuard)>
+    ) -> Result<ShardAccountMetaBoxed> {
+        Ok(match shard_account {
+            Some((shard_account, _state_guard)) => {
+                let account = shard_account.read_account()?;
+                let code = account.get_code().map(|cell| cell.repr_hash());
+                let data = account.get_data().map(|cell| cell.repr_hash());
+                let libs = account.libraries().root().map(|cell| cell.repr_hash());
+
+                let cell = shard_account.account_cell();
+                let proof = MerkleProof::create(
+                    &cell,
+                    |hash| Some(hash) != code.as_ref() && Some(hash) != data.as_ref() && Some(hash) != libs.as_ref()
+                ).unwrap();
+                ShardAccountMetaBoxed::Raw_ShardAccountMeta(ShardAccountMeta {
+                    shard_account_meta: ton_api::ton::bytes(proof.write_to_bytes()?)
+                })
+            },
+            None => ShardAccountMetaBoxed::Raw_ShardAccountMetaNone
+        })
+    }
+
+    async fn get_applied_shards_info(&self) -> Result<AppliedShardsInfoBoxed> {
+        let engine = self.engine()?;
+        let mc_block_id = engine.load_last_applied_mc_block_id()?
+            .ok_or_else(|| error!("Cannot load load_last_applied_mc_block_id"))?;
+        let shards_mc_block_id = engine.load_shard_client_mc_block_id()?
+            .ok_or_else(|| error!("Cannot load shard_client_mc_block_id"))?;
+        let mut applied_blocks = engine.load_state(&shards_mc_block_id).await?.top_blocks_all()?;
+        applied_blocks.push(mc_block_id.as_ref().clone());
+        Ok(AppliedShardsInfoBoxed::Raw_AppliedShardsInfo(AppliedShardsInfo { shards: applied_blocks.into() }))
     }
 
     fn convert_sync_status(&self, sync_status: u32 ) -> String {
@@ -193,17 +268,13 @@ impl ControlQuerySubscriber {
         }
     }
 
-    fn block_id_to_json(&self, block_id: &BlockIdExt) -> Result<String> {
-        let mut root_hash = String::new();
-        write!(root_hash, "{:x}", block_id.root_hash())?;
-        let mut json_map = Map::new();
-        let mut file_hash = String::new();
-        write!(file_hash, "{:x}", block_id.file_hash())?;
-        json_map.insert("shard".to_string(), block_id.shard().to_string().into());
-        json_map.insert("seq_no".to_string(), block_id.seq_no().into());
-        json_map.insert("rh".to_string(), root_hash.into());
-        json_map.insert("fh".to_string(), file_hash.into());
-        Ok(serde_json::to_string(&json_map)?)
+    fn block_id_to_json(block_id: &BlockIdExt) -> String {
+        serde_json::json!({
+            "shard":  block_id.shard().to_string(),
+            "seq_no": block_id.seq_no(),
+            "rh":     format!("{:x}", block_id.root_hash),
+            "fh":     format!("{:x}", block_id.file_hash)
+        }).to_string()
     }
 
     fn add_stats(stats: &mut Vec<OneStat>, key: impl ToString, value: impl ToString) {
@@ -214,47 +285,63 @@ impl ControlQuerySubscriber {
     }
 
     fn statistics_to_json(
-        &self, 
-        map: &lockfree::map::Map<ShardIdent, u64>, 
-        now: u64
-    ) -> Result<String> {
-        let mut json_map = Map::new();
+        map: &lockfree::map::Map<ShardIdent, u64>,
+        now: i64,
+        new_format: bool
+    ) -> String {
+        let mut json_map = serde_json::Map::new();
         for item in map.iter() {
-            let info = if *item.val() == 0 {
-                "never".to_string()
+            let value = if new_format {
+                match *item.val() {
+                    0 => -1,
+                    value => now - value as i64
+                }.into()
             } else {
-                format!("{} sec ago", now - item.val())
+                match *item.val() {
+                    0 => "never".to_string(),
+                    value => format!("{} sec ago", now - value as i64)
+                }.into()
             };
-            json_map.insert(item.key().to_string(), info.into());
+            json_map.insert(item.key().to_string(), value);
         }
-        Ok(serde_json::to_string_pretty(&json_map)?)
+        format!("{:#}", serde_json::Value::from(json_map))
     }
 
-    fn get_shards_time_diff(engine: &Arc<dyn EngineOperations>, now: &i32) -> Result<i32> {
+    fn get_shards_time_diff(engine: &Arc<dyn EngineOperations>, now: u32) -> Result<u32> {
         let shard_client_mc_block_id = engine.load_shard_client_mc_block_id()?
             .ok_or_else(|| error!("Cannot load shard_mc_block_id"))?;
         let shard_client_mc_block_handle = engine.load_block_handle(&shard_client_mc_block_id)?
             .ok_or_else(|| error!("Cannot load handle for block {}", &shard_client_mc_block_id))?;
-        Ok(now - shard_client_mc_block_handle.gen_utime()? as i32)
+        Ok(now - shard_client_mc_block_handle.gen_utime()?)
     }
 
-    async fn get_stats(&self) -> Result<Stats> {
+    async fn get_selected_stats(&self, filter: Option<&str>) -> Result<Stats> {
 
         let mut stats = Vec::new();
+        let new_format = filter.is_some();
 
         // sync status
         let sync_status = match &self.data_source {
             DataSource::Engine(engine) => engine.get_sync_status(),
             DataSource::Status(status) => status.get_report()
-        }; 
+        };
         let sync_status = format!("\"{}\"", self.convert_sync_status(sync_status));
-        Self::add_stats(&mut stats, "sync_status", sync_status);
+        Self::add_stats(
+            &mut stats,
+            if new_format {
+                "node_status"
+            } else {
+                "sync_status"
+            },
+            sync_status
+        );
         if let DataSource::Status(_) = &self.data_source {
             return Ok(Stats {stats: stats.into()})
         }
-      
+
         let engine = self.engine()?;
- 
+        let now = engine.now();
+
         let mc_block_id = if let Some(id) = engine.load_last_applied_mc_block_id()? {
             id
         } else {
@@ -262,88 +349,119 @@ impl ControlQuerySubscriber {
             return Ok(Stats {stats: stats.into()})
         };
 
-        // masterchainblocktime
         let mc_block_handle = engine.load_block_handle(&mc_block_id)?
             .ok_or_else(|| error!("Cannot load handle for block {}", &mc_block_id))?;
-        
+
+        // masterchainblocktime
         Self::add_stats(&mut stats, "masterchainblocktime", mc_block_handle.gen_utime()?);
 
         // masterchainblocknumber
         Self::add_stats(&mut stats, "masterchainblocknumber", mc_block_handle.id().seq_no());
 
         Self::add_stats(&mut stats, "node_version", format!("\"{}\"", env!("CARGO_PKG_VERSION")));
-        let public_overlay_adnl_id = self.public_overlay_adnl_id.as_ref().ok_or_else(|| 
+        let public_overlay_adnl_id = self.public_overlay_adnl_id.as_ref().ok_or_else(||
             error!("Public overlay key id didn`t set!")
         )?;
         Self::add_stats(&mut stats, "public_overlay_key_id", format!("\"{}\"", &public_overlay_adnl_id));
 
-        // timediff
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i32;
-        let diff = now - mc_block_handle.gen_utime()? as i32;
+        if new_format {
+            Self::add_stats(&mut stats, "supported_block", supported_version());
+            Self::add_stats(&mut stats, "supported_capabilities", supported_capabilities());
+        }
 
+        // timediff
+        let diff = now - mc_block_handle.gen_utime()?;
         Self::add_stats(&mut stats, "timediff", diff);
 
         // shards timediff
-        match Self::get_shards_time_diff(engine, &now) {
+        match Self::get_shards_time_diff(engine, now) {
             Err(_) => Self::add_stats(&mut stats, "shards_timediff", "\"unknown\""),
             Ok(shards_timediff) => Self::add_stats(&mut stats, "shards_timediff", shards_timediff),
         };
 
+        let mc_state = engine.load_last_applied_mc_state().await.ok();
+
+        // global network ID
+        if new_format {
+            if let Some(mc_state) = &mc_state {
+                Self::add_stats(&mut stats, "global_id", mc_state.state()?.global_id())
+            } else {
+                Self::add_stats(&mut stats, "global_id", "\"unknown\"")
+            }
+        }
+
         // in_current_vset_p34
         let adnl_ids = self.config.get_actual_validator_adnl_ids()?;
-        let mc_state = engine.load_last_applied_mc_state().await?;
-        let current = mc_state.config_params()?.validator_set()?.list().iter().any(|val| {
-            let catchain_node = validatordescr_to_catchain_node(val);
-            let is_validator = adnl_ids.contains(&catchain_node.adnl_id);
-            if is_validator {
-                Self::add_stats(&mut stats,
-                    "current_vset_p34_adnl_id",
-                    format!("\"{}\"", &catchain_node.adnl_id)
-                );
-            }
-            is_validator
-        });
-        Self::add_stats(&mut stats, "in_current_vset_p34", current);
+        if let Some(mc_state) = &mc_state {
+            let current = mc_state.config_params()?.validator_set()?.list().iter().any(|val| {
+                let catchain_node = validatordescr_to_catchain_node(val);
+                let is_validator = adnl_ids.contains(&catchain_node.adnl_id);
+                if is_validator {
+                    Self::add_stats(&mut stats,
+                        "current_vset_p34_adnl_id",
+                        format!("\"{}\"", &catchain_node.adnl_id)
+                    );
+                }
+                is_validator
+            });
+            Self::add_stats(&mut stats, "in_current_vset_p34", current)
+        } else {
+            Self::add_stats(&mut stats, "in_current_vset_p34", "\"unknown\"")
+        }
 
         // in_next_vset_p36
-        let next = mc_state.config_params()?.next_validator_set()?.list().iter().any(|val| {
-            let catchain_node = validatordescr_to_catchain_node(val);
-            let is_validator = adnl_ids.contains(&catchain_node.adnl_id);
-            if is_validator {
-                Self::add_stats(&mut stats,
-                    "next_vset_p36_adnl_id",
-                    format!("\"{}\"", &catchain_node.adnl_id)
-                );
-            }
-            is_validator
-        });
-        Self::add_stats(&mut stats, "in_next_vset_p36", next);
+        if let Some(mc_state) = &mc_state {
+            let next = mc_state.config_params()?.next_validator_set()?.list().iter().any(|val| {
+                let catchain_node = validatordescr_to_catchain_node(val);
+                let is_validator = adnl_ids.contains(&catchain_node.adnl_id);
+                if is_validator {
+                    Self::add_stats(&mut stats,
+                        "next_vset_p36_adnl_id",
+                        format!("\"{}\"", &catchain_node.adnl_id)
+                    );
+                }
+                is_validator
+            });
+            Self::add_stats(&mut stats, "in_next_vset_p36", next)
+        } else {
+            Self::add_stats(&mut stats, "in_next_vset_p36", "\"unknown\"")
+        }
 
-        let value = match engine.load_last_applied_mc_state_or_zerostate().await {
-            Ok(mc_state) => self.block_id_to_json(mc_state.block_id())?,
-            Err(err) => format!("\"{}\"", err.to_string())
+        let value = match engine.load_last_applied_mc_block_id() {
+            Ok(Some(block_id)) => Self::block_id_to_json(&block_id),
+            Ok(None) => "\"no last applied masterchain block{}\"".to_string(),
+            Err(err) => format!("\"{}\"", err)
         };
         Self::add_stats(&mut stats, "last_applied_masterchain_block_id", value);
 
-        let value = match engine.processed_workchain().await {
-            Ok((true, _workchain_id)) => "\"masterchain\"".to_string(),
-            Ok((false, workchain_id)) => format!("\"{}\"", workchain_id),
-            Err(err) => err.to_string()
+        let value = match engine.processed_workchain() {
+            Some(MASTERCHAIN_ID) => "\"masterchain\"".to_string(),
+            Some(workchain_id) => format!("\"{}\"", workchain_id),
+            None => "\"not specified\"".to_string(),
         };
         Self::add_stats(&mut stats, "processed_workchain", value);
 
-        let ago = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-        // validation_stats
-        let validation_stats = engine.validation_status();
+        let value = Self::statistics_to_json(
+            engine.last_validation_time(),
+            now as i64,
+            new_format
+        );
+        if new_format {
+            Self::add_stats(&mut stats, "last_validation_ago_sec", value)
+        } else {
+            Self::add_stats(&mut stats, "validation_stats", value)
+        }
 
-        let validation_stats_json = self.statistics_to_json(&validation_stats, ago)?;
-        Self::add_stats(&mut stats, "validation_stats", validation_stats_json);
-
-        // collation_stats
-        let collation_stats = engine.collation_status();
-
-        let collation_stats_json = self.statistics_to_json(&collation_stats, ago)?;
-        Self::add_stats(&mut stats, "collation_stats", collation_stats_json);
+        let value = Self::statistics_to_json(
+            engine.last_collation_time(),
+            now as i64,
+            new_format
+        );
+        if new_format {
+            Self::add_stats(&mut stats, "last_collation_ago_sec", value)
+        } else {
+            Self::add_stats(&mut stats, "collation_stats", value)
+        }
 
         // tps_10
         if let Ok(tps) = engine.calc_tps(10) {
@@ -355,7 +473,9 @@ impl ControlQuerySubscriber {
             Self::add_stats(&mut stats, "tps_300", tps);
         }
 
-        Ok(Stats {stats: stats.into()})
+        Self::add_stats(&mut stats, "validation_status", format!("\"{:?}\"", engine.validation_status()));
+
+        Ok(Stats { stats: stats.into() })
 
     }
 
@@ -368,7 +488,7 @@ impl ControlQuerySubscriber {
 
     fn export_public_key(&self, key_hash: &[u8; 32]) -> Result<PublicKey> {
         let private = self.key_ring.find(key_hash)?;
-        private.into_public_key_tl()
+        (&private).try_into()
     }
 
     fn process_sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Signature> {
@@ -377,9 +497,9 @@ impl ControlQuerySubscriber {
     }
 
     async fn add_validator_permanent_key(
-        &self, 
-        key_hash: &[u8; 32], 
-        election_date: ton::int, 
+        &self,
+        key_hash: &[u8; 32],
+        election_date: ton::int,
         _ttl: ton::int
     ) -> Result<Success> {
         self.config.add_validator_key(key_hash, election_date).await?;
@@ -387,31 +507,31 @@ impl ControlQuerySubscriber {
     }
 
     fn add_validator_temp_key(
-        &self, 
-        _perm_key_hash: &[u8; 32], 
-        _key_hash: &[u8; 32], 
+        &self,
+        _perm_key_hash: &[u8; 32],
+        _key_hash: &[u8; 32],
         _ttl: ton::int
     ) -> Result<Success> {
         Ok(Success::Engine_Validator_Success)
     }
 
     async fn add_validator_adnl_address(
-        &self, 
-        perm_key_hash: &[u8; 32], 
-        key_hash: &[u8; 32], 
+        &self,
+        perm_key_hash: &[u8; 32],
+        key_hash: &[u8; 32],
         _ttl: ton::int
     ) -> Result<Success> {
         self.config.add_validator_adnl_key(perm_key_hash, key_hash).await?;
         Ok(Success::Engine_Validator_Success)
     }
-    
+
     fn add_adnl_address(&self, _key_hash: &[u8; 32], _category: ton::int) -> Result<Success> {
         Ok(Success::Engine_Validator_Success)
     }
 
     async fn prepare_bundle(&self, block_id: BlockIdExt) -> Result<Success> {
         if let DataSource::Engine(ref engine) = self.data_source {
-            let bundle = CollatorTestBundle::build_with_ethalon(&block_id, engine.deref()).await?;
+            let bundle = CollatorTestBundle::build_with_ethalon(&block_id, engine).await?;
             tokio::task::spawn_blocking(move || {
                 bundle.save("target/bundles").ok();
             });
@@ -422,7 +542,7 @@ impl ControlQuerySubscriber {
     async fn prepare_future_bundle(&self, prev_block_ids: Vec<BlockIdExt>) -> Result<Success> {
         if let DataSource::Engine(ref engine) = self.data_source {
             let bundle = CollatorTestBundle::build_for_collating_block(
-                prev_block_ids, engine.deref()
+                prev_block_ids, engine
             ).await?;
             tokio::task::spawn_blocking(move || {
                 bundle.save("target/bundles").ok();
@@ -433,8 +553,7 @@ impl ControlQuerySubscriber {
 
     async fn redirect_external_message(&self, message_data: &[u8]) -> Result<Success> {
         let engine = self.engine()?;
-        let mut cursor = Cursor::new(message_data);
-        let id = deserialize_tree_of_cells(&mut cursor)?.repr_hash();
+        let id = read_single_root_boc(message_data)?.repr_hash();
         engine.redirect_external_message(message_data, id).await?;
         Ok(Success::Engine_Validator_Success)
     }
@@ -445,17 +564,13 @@ impl ControlQuerySubscriber {
         Ok(Success::Engine_Validator_Success)
     }
 
-}
-
-#[async_trait::async_trait]
-impl Subscriber for ControlQuerySubscriber {
-    async fn try_consume_query(&self, object: TLObject, _peers: &AdnlPeers) -> Result<QueryResult> {
-        log::info!("recieve object (control server): {:?}", object);
+    async fn try_consume_query_impl(&self, object: TLObject, _peers: &AdnlPeers) -> Result<QueryResult> {
+        log::debug!("recieve object (control server): {:?}", object);
         let query = match object.downcast::<ControlQuery>() {
             Ok(query) => deserialize_boxed(&query.data[..])?,
             Err(object) => return Ok(QueryResult::Rejected(object))
         };
-        log::info!("query (control server): {:?}", query);
+        log::debug!("query (control server): {:?}", query);
         let query = match query.downcast::<GenerateKeyPair>() {
             Ok(_) => return QueryResult::consume(
                 self.process_generate_keypair().await?,
@@ -521,7 +636,7 @@ impl Subscriber for ControlQuerySubscriber {
         let query = match query.downcast::<GetBundle>() {
             Ok(query) => {
                 return QueryResult::consume_boxed(
-                    self.prepare_bundle(query.block_id.clone()).await?, 
+                    self.prepare_bundle(query.block_id.clone()).await?,
                 #[cfg(feature = "telemetry")]
                 None
                 )
@@ -556,7 +671,51 @@ impl Subscriber for ControlQuerySubscriber {
             Ok(account) => {
                 let answer = self.get_account_state(account.account_address).await?;
                 return QueryResult::consume_boxed(
-                    answer, 
+                    answer,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::raw::GetShardAccountMeta>() {
+            Ok(account) => {
+                let answer = self.get_account_meta(account.account_address).await?;
+                return QueryResult::consume_boxed(
+                    answer,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::raw::GetAccountByBlock>() {
+            Ok(account) => {
+                let answer = self.get_account_by_block(account.account_id, account.block_root_hash).await?;
+                return QueryResult::consume_boxed(
+                    answer,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::raw::GetAccountMetaByBlock>() {
+            Ok(account) => {
+                let answer = self.get_account_meta_by_block(account.account_id, account.block_root_hash).await?;
+                return QueryResult::consume_boxed(
+                    answer,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::raw::GetAppliedShardsInfo>() {
+            Ok(_) => {
+                let answer = self.get_applied_shards_info().await?;
+                return QueryResult::consume_boxed(
+                    answer,
                     #[cfg(feature = "telemetry")]
                     None
                 )
@@ -589,7 +748,18 @@ impl Subscriber for ControlQuerySubscriber {
         };
         let query = match query.downcast::<ton::rpc::engine::validator::GetStats>() {
             Ok(_) => {
-                let answer = self.get_stats().await?;
+                let answer = self.get_selected_stats(None).await?;
+                return QueryResult::consume_boxed(
+                    answer.into_boxed(),
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::engine::validator::GetSelectedStats>() {
+            Ok(get_stats) => {
+                let answer = self.get_selected_stats(Some(&get_stats.filter)).await?;
                 return QueryResult::consume_boxed(
                     answer.into_boxed(),
                     #[cfg(feature = "telemetry")]
@@ -609,7 +779,29 @@ impl Subscriber for ControlQuerySubscriber {
             Err(query) => query
         };
         log::warn!("Unsupported ControlQuery (control server): {:?}", query);
-        fail!("Unsupported ControlQuery {:?}", query)
+        Ok(QueryResult::Rejected(query))
+    }
+}
+
+#[async_trait::async_trait]
+impl Subscriber for ControlQuerySubscriber {
+    async fn try_consume_query(&self, object: TLObject, peers: &AdnlPeers) -> Result<QueryResult> {
+        let now = std::time::Instant::now();
+        let result = match self.try_consume_query_impl(object, peers).await {
+            Ok(result) => Ok(result),
+            Err(err) => QueryResult::consume_boxed(
+                ton::engine::validator::ControlQueryError::Engine_Validator_ControlQueryError(
+                    ton::engine::validator::controlqueryerror::ControlQueryError {
+                        code: -1,
+                        message: err.to_string()
+                    }
+                ),
+                #[cfg(feature = "telemetry")]
+                None
+            )
+        };
+        log::trace!("Control server operation {} TIME", now.elapsed().as_millis());
+        result
     }
 }
 

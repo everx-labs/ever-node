@@ -384,7 +384,9 @@ pub struct RempCoreTelemetry {
     
     cache_size: Arc<Metric>,
     cache_mutex_awaiting: Arc<Metric>,
+    incoming_queue_size: Arc<Metric>,
     incoming_mutex_awaiting: Arc<Metric>,
+    collator_receipt_queue_size: Arc<Metric>,
     collator_receipt_mutex_awaiting: Arc<Metric>,
     receipts_queue_size: Arc<Metric>,
     receipts_queue_in_rate: Arc<MetricBuilder>,
@@ -412,7 +414,9 @@ impl RempCoreTelemetry {
             deleted_from_cache: AtomicUsize::default(),
             cache_size: Metric::without_totals("messages cache size", period_sec),
             cache_mutex_awaiting: Metric::without_totals("cache mutex awaiting", period_sec),
+            incoming_queue_size: Metric::without_totals("incoming queue size", period_sec),
             incoming_mutex_awaiting: Metric::without_totals("incoming mutex awaiting", period_sec),
+            collator_receipt_queue_size: Metric::without_totals("collator receipt queue size", period_sec),
             collator_receipt_mutex_awaiting: Metric::without_totals("collator receipt mutex awaiting", period_sec),
 
             receipts_queue_size: Metric::without_totals("receipts queue size", period_sec),
@@ -503,20 +507,29 @@ impl RempCoreTelemetry {
         self.deleted_from_cache.fetch_add(deleted_messages, Ordering::Relaxed);
     }
 
-    pub fn cache_size(&self, size: usize) {
-        self.cache_size.update(size as u64);
-    }
-
     pub fn cache_mutex_metric(&self) -> Arc<Metric> {
         self.cache_mutex_awaiting.clone()
+    }
+
+    pub fn incoming_queue_size_metric(&self) -> Arc<Metric> {
+        self.incoming_queue_size.clone()
     }
 
     pub fn incoming_mutex_metric(&self) -> Arc<Metric> {
         self.incoming_mutex_awaiting.clone()
     }
 
+    pub fn collator_receipt_queue_size_metric(&self) -> Arc<Metric> {
+        self.collator_receipt_queue_size.clone()
+    }
+
     pub fn collator_receipt_mutex_metric(&self) -> Arc<Metric> {
         self.collator_receipt_mutex_awaiting.clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn cache_size(&self, size: usize) {
+        self.cache_size.update(size as u64);
     }
 
     pub fn cache_size_metric(&self) -> Arc<Metric> {
@@ -627,7 +640,9 @@ impl RempCoreTelemetry {
         
         reset_and_print_metric(&self.cache_size, &mut report);
         reset_and_print_metric(&self.cache_mutex_awaiting, &mut report);
+        reset_and_print_metric(&self.incoming_queue_size, &mut report);
         reset_and_print_metric(&self.incoming_mutex_awaiting, &mut report);
+        reset_and_print_metric(&self.collator_receipt_queue_size, &mut report);
         reset_and_print_metric(&self.collator_receipt_mutex_awaiting, &mut report);
         reset_and_print_metric(&self.receipts_queue_size, &mut report);
         reset_and_print_metric(self.receipts_queue_in_rate.metric(), &mut report);

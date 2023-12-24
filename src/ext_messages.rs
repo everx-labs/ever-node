@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -11,53 +11,48 @@
 * limitations under the License.
 */
 
-use std::{io::Cursor, sync::{Arc, atomic::{AtomicU64, Ordering}}};
+use std::sync::{Arc, atomic::{AtomicU64, Ordering, AtomicU32}};
+use lockfree::map::Map;
 use ton_block::{Deserializable, ShardIdent, Message, AccountIdPrefixFull, BlockIdExt};
-use ton_types::{Result, types::UInt256, deserialize_tree_of_cells, fail};
-use adnl::common::add_unbound_object_to_map;
+use ton_types::{Result, types::UInt256, fail, read_boc};
+use adnl::common::{add_unbound_object_to_map, add_unbound_object_to_map_with_update};
 use ton_api::ton::ton_node::{RempMessageStatus, RempMessageLevel};
 
-
 const MESSAGE_LIFETIME: u32 = 600; // seconds
-const MESSAGE_MAX_GENERATIONS: u8 = 2;
+const MESSAGE_MAX_GENERATIONS: u8 = 3;
+
 const MAX_EXTERNAL_MESSAGE_DEPTH: u16 = 512;
 const MAX_EXTERNAL_MESSAGE_SIZE: usize = 65535;
 
 pub const EXT_MESSAGES_TRACE_TARGET: &str = "ext_messages";
 
+#[derive(Clone)]
 struct MessageKeeper {
     message: Arc<Message>,
 
     // active: bool,            0x1_00_00000000
     // generation: u8,          0x0_ff_00000000
     // reactivate_at: u32,      0x0_00_ffffffff
-    atomic_storage: AtomicU64,
-
-    delete_at: u32,
+    atomic_storage: Arc<AtomicU64>,
 }
 
 impl MessageKeeper {
 
-    pub fn new(message: Arc<Message>, now: u32) -> Self {
+    fn new(message: Arc<Message>) -> Self {
         let mut atomic_storage = 0;
         Self::set_active(&mut atomic_storage, true);
         
         Self {
             message,
-            atomic_storage: AtomicU64::new(atomic_storage),
-            delete_at: now + MESSAGE_LIFETIME
+            atomic_storage: Arc::new(AtomicU64::new(atomic_storage)),
         }
     }
 
-    pub fn message(&self) -> &Message {
+    fn message(&self) -> &Arc<Message> {
         &self.message
     }
 
-    pub fn clone_message(&self) -> Arc<Message> {
-        Arc::clone(&self.message)
-    }
-
-    pub fn check_active(&self, now: u32) -> bool {
+    fn check_active(&self, now: u32) -> bool {
         let mut atomic_storage = self.atomic_storage.load(Ordering::Relaxed);
         let active = Self::fetch_active(atomic_storage);
         let generation = Self::fetch_generation(atomic_storage);
@@ -73,12 +68,12 @@ impl MessageKeeper {
         }
     }
 
-    pub fn can_postpone(&self) -> bool {
+    fn can_postpone(&self) -> bool {
         let atomic_storage = self.atomic_storage.load(Ordering::Relaxed);
-        Self::fetch_generation(atomic_storage) <= MESSAGE_MAX_GENERATIONS
+        Self::fetch_generation(atomic_storage) < MESSAGE_MAX_GENERATIONS
     }
 
-    pub fn postpone(&self, now: u32) {
+    fn postpone(&self, now: u32) {
         let mut atomic_storage = self.atomic_storage.load(Ordering::Relaxed);
         let active = Self::fetch_active(atomic_storage);
 
@@ -88,10 +83,6 @@ impl MessageKeeper {
             Self::set_reactivate_at(&mut atomic_storage, now + generation as u32 * 5);
             self.atomic_storage.store(atomic_storage, Ordering::Relaxed);
         }
-    }
-
-    pub fn expired(&self, now: u32) -> bool {
-        self.delete_at <= now
     }
 
     fn fetch_active(atomic_storage: u64) -> bool { 
@@ -122,16 +113,52 @@ impl MessageKeeper {
     }
 }
 
+#[derive(Clone)]
+struct MessageDescription {
+    id: UInt256,
+    workchain_id: i32,
+    prefix: u64,
+}
+
+struct OrderMap {
+    seqno: Arc<AtomicU32>,
+    map: Map<u32, MessageDescription>,
+}
+
+impl OrderMap {
+    fn new(id: UInt256, workchain_id: i32, prefix: u64) -> Self {
+        let seqno = Arc::new(AtomicU32::new(1));
+        let map = Map::new();
+        map.insert(0, MessageDescription { id, workchain_id, prefix });
+        Self { seqno, map }
+    }
+    fn insert(&self, id: UInt256, workchain_id: i32, prefix: u64) {
+        let seqno = self.seqno.fetch_add(1, Ordering::Relaxed);
+        self.map.insert(seqno, MessageDescription { id, workchain_id, prefix });
+    }
+}
+
 pub struct MessagesPool {
-    messages: lockfree::map::Map<UInt256, MessageKeeper>
+    // map by hash of message
+    messages: Map<UInt256, MessageKeeper>,
+    // map by timestamp, inside map by seqno for hash of message, workchain_id and prefix of dst address
+    order: Map<u32, Arc<OrderMap>>,
+    // minimal timestamp
+    min_timestamp: AtomicU32,
+
 }
 
 impl MessagesPool {
 
-    pub fn new() -> Self {
-        Self{ messages: lockfree::map::Map::new() }
+    pub fn new(now: u32) -> Self {
+        metrics::gauge!("ext_messages_len", 0f64);
+        metrics::gauge!("ext_messages_expired", 0f64);
+        Self {
+            messages: Map::with_hasher(Default::default()),
+            order: Map::with_hasher(Default::default()),
+            min_timestamp: AtomicU32::new(now),
+        }
     }
-
 
     pub fn new_message_raw(&self, data: &[u8], now: u32) -> Result<UInt256> {
         let (id, message) = create_ext_message(data)?;
@@ -141,80 +168,170 @@ impl MessagesPool {
         Ok(id)
     }
 
-
     pub fn new_message(&self, id: UInt256, message: Arc<Message>, now: u32) -> Result<()> {
-        add_unbound_object_to_map(
-            &self.messages,
-            id,
-            || Ok(MessageKeeper::new(message.clone(), now))
-        )?;
+        let timestamp = self.min_timestamp.load(Ordering::Relaxed);
+        if now < timestamp {
+            fail!("now {} is less than minimum {} for {:x}", now, timestamp, id)
+        }
+        if self.messages.get(&id).is_some() {
+            return Ok(());
+        }
+        log::debug!(target: EXT_MESSAGES_TRACE_TARGET, "adding external message {:x}", id);
+        let workchain_id = message.dst_workchain_id().unwrap_or_default();
+        let prefix = message.int_dst_account_id().map_or(0, |mut slice| slice.get_next_u64().unwrap_or_default());
+        self.messages.insert(id.clone(), MessageKeeper::new(message));
+        #[cfg(not(feature = "statsd"))]
+        metrics::increment_gauge!("ext_messages_len", 1f64);
+
+        add_unbound_object_to_map_with_update(&self.order, now, |map| {
+            if let Some(map) = map {
+                map.insert(id.clone(), workchain_id, prefix);
+                Ok(None)
+            } else {
+                let entry = Arc::new(OrderMap::new(id.clone(), workchain_id, prefix));
+                Ok(Some(entry))
+            }
+        })?;
         Ok(())
     }
 
-    pub fn get_messages(&self, shard: &ShardIdent, now: u32) -> Result<Vec<(Arc<Message>, UInt256)>> {
-        let mut result = vec!();
-        let mut ids = String::new();
-        for guard in self.messages.iter() {
-            if let Some(dst) = guard.val().message().dst_ref() {
-                if let Ok(prefix) = AccountIdPrefixFull::prefix(dst) {
-                    if shard.contains_full_prefix(&prefix) {
-                        if guard.val().expired(now) {
-                            log::debug!(
-                                target: EXT_MESSAGES_TRACE_TARGET,
-                                "get_messages: removing external message {:x} because it is expired",
-                                guard.key(),
-                            );
-                            self.messages.remove(guard.key());
-                        } else if guard.val().check_active(now) {
-                            result.push((guard.val().clone_message(), guard.key().clone()));
-                            ids.push_str(&format!("{:x} ", guard.key()));
-                        }
-                    }
-                }
-            }
-        }
-
-        log::debug!(
-            target: EXT_MESSAGES_TRACE_TARGET,
-            "get_messages: shard {}, messages: {}",
-            shard, ids
-        );
-
-        Ok(result)
+    pub fn iter(self: Arc<MessagesPool>, shard: ShardIdent, now: u32) -> MessagePoolIter {
+        MessagePoolIter::new(self, shard, now)
     }
 
     pub fn complete_messages(&self, to_delay: Vec<UInt256>, to_delete: Vec<UInt256>, now: u32) -> Result<()> {
-        for id in to_delete.iter() {
-            log::debug!(
-                target: EXT_MESSAGES_TRACE_TARGET,
-                "complete_messages: removing external message {:x} while enumerating to_delete list",
-                id,
-            );
-            self.messages.remove(id);
+        for id in &to_delete {
+            let result = self.messages.remove_with(id, |_| {
+                log::debug!(
+                    target: EXT_MESSAGES_TRACE_TARGET,
+                    "complete_messages: removing external message {:x} while enumerating to_delete list",
+                    id,
+                );
+                true
+            });
+            if result.is_some() {
+                #[cfg(not(feature = "statsd"))]
+                metrics::decrement_gauge!("ext_messages_len", 1f64);
+            }
         }
-        for id in to_delay.iter() {
-            if let Some(guard) = self.messages.get(id) {
-                if guard.val().can_postpone() {
+        for id in &to_delay {
+            let result = self.messages.remove_with(id, |(_, keeper)| {
+                if keeper.can_postpone() {
                     log::debug!(
                         target: EXT_MESSAGES_TRACE_TARGET,
                         "complete_messages: postponed external message {:x} while enumerating to_delay list",
                         id,
                     );
-                    guard.val().postpone(now);
+                    keeper.postpone(now);
+                    false
                 } else {
-                    log::debug!(
-                        target: EXT_MESSAGES_TRACE_TARGET,
-                        "complete_messages: removing external message {:x} because can't postpone",
-                        id,
-                    );
-                    self.messages.remove(id);
+                    true
                 }
+            });
+            if result.is_some() {
+                log::debug!(
+                    target: EXT_MESSAGES_TRACE_TARGET,
+                    "complete_messages: removing external message {:x} because can't postpone",
+                    id,
+                );
+                #[cfg(not(feature = "statsd"))]
+                metrics::decrement_gauge!("ext_messages_len", 1f64);
             }
         }
         Ok(())
     }
+}
 
+pub struct MessagePoolIter {
+    pool: Arc<MessagesPool>,
+    shard: ShardIdent,
+    now: u32,
+    timestamp: u32,
+    seqno: u32,
+}
 
+impl MessagePoolIter {
+    fn new(pool: Arc<MessagesPool>, shard: ShardIdent, now: u32) -> Self {
+        let timestamp = pool.min_timestamp.load(Ordering::Relaxed);
+        Self {
+            pool,
+            shard,
+            now,
+            timestamp,
+            seqno: 0,
+        }
+    }
+
+    fn clear_expired_messages(&mut self) {
+        let order = match self.pool.order.remove(&self.timestamp) {
+            Some(guard) => guard.val().clone(),
+            None => return
+        };
+        log::debug!(
+            target: EXT_MESSAGES_TRACE_TARGET,
+            "removing order map for timestamp {} because it is expired", self.timestamp
+        );
+        while self.seqno < order.seqno.load(Ordering::Relaxed) {
+            if let Some(guard) = order.map.remove(&self.seqno) {
+                if let Some(guard) = self.pool.messages.remove(&guard.val().id) {
+                    #[cfg(not(feature = "statsd"))]
+                    metrics::increment_gauge!("ext_messages_expired", 1f64);
+                    #[cfg(not(feature = "statsd"))]
+                    metrics::decrement_gauge!("ext_messages_len", 1f64);
+                    log::debug!(
+                        target: EXT_MESSAGES_TRACE_TARGET,
+                        "removing external message {:x} because it is expired", guard.key()
+                    );
+                }
+            }
+            self.seqno += 1;
+        }
+    }
+
+    fn find_in_map(&mut self, map: &Map<u32, MessageDescription>) -> Option<(Arc<Message>, UInt256)> {
+        // if link is valid we check if message is for desired shard and is active
+        let descr = map.get(&self.seqno)?;
+        let keeper = self.pool.messages.get(&descr.val().id)?;
+        if self.shard.contains_prefix(descr.val().workchain_id, descr.val().prefix) && keeper.val().check_active(self.now) {
+            return Some((keeper.val().message().clone(), descr.val().id.clone()));
+        }
+        // let descr = map.get(&self.seqno)?.1.clone();
+        // let keeper = self.pool.messages.get(&descr.id)?.1.clone();
+        // if self.shard.contains_prefix(descr.workchain_id, descr.prefix) && keeper.check_active(self.now) {
+        //     return Some((keeper.message().clone(), descr.id));
+        // }
+        None
+    }
+}
+
+impl Iterator for MessagePoolIter {
+    type Item = (Arc<Message>, UInt256);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // iterate timestamp
+        while self.timestamp <= self.now {
+            // check if this order map is expired
+            if self.timestamp + MESSAGE_LIFETIME < self.now {
+                self.clear_expired_messages();
+                // level was removed or not present try to move bottom margin
+                let _ = self.pool.min_timestamp.compare_exchange(self.timestamp, self.timestamp + 1, Ordering::Relaxed, Ordering::Relaxed);
+            } else if let Some(order) = self.pool.order.get(&self.timestamp).map(|guard| guard.val().clone()) {
+                while self.seqno < order.seqno.load(Ordering::Relaxed) {
+                    let result = self.find_in_map(&order.map);
+                    self.seqno += 1;
+                    if result.is_some() {
+                        return result;
+                    }
+                }
+            } else if self.timestamp < self.now {
+                // level is not present try to move bottom margin
+                let _ = self.pool.min_timestamp.compare_exchange(self.timestamp, self.timestamp + 1, Ordering::Relaxed, Ordering::Relaxed);
+            }
+            self.timestamp += 1;
+            self.seqno = 0;
+        }
+        None
+    }
 }
 
 pub fn create_ext_message(data: &[u8]) -> Result<(UInt256, Message)> {
@@ -222,7 +339,12 @@ pub fn create_ext_message(data: &[u8]) -> Result<(UInt256, Message)> {
     if data.len() > MAX_EXTERNAL_MESSAGE_SIZE {
         fail!("External message is too large: {}", data.len())
     }
-    let root = deserialize_tree_of_cells(&mut Cursor::new(data))?;
+
+    let read_result = read_boc(&data)?;
+    if read_result.header.big_cells_count > 0 {
+        fail!("External message contains big cells")
+    }
+    let root = read_result.withdraw_single_root()?;
     if root.level() != 0 {
         fail!("External message must have zero level, but has {}", root.level())
     }
@@ -252,6 +374,16 @@ pub fn get_level_and_level_change(status: &RempMessageStatus) -> (RempMessageLev
     }
 }
 
+pub fn get_level_numeric_value(lvl: &RempMessageLevel) -> i32 {
+    match lvl {
+        RempMessageLevel::TonNode_RempFullnode => 0,
+        RempMessageLevel::TonNode_RempQueue => 1,
+        RempMessageLevel::TonNode_RempCollator => 2,
+        RempMessageLevel::TonNode_RempShardchain => 3,
+        RempMessageLevel::TonNode_RempMasterchain => 4
+    }
+}
+
 /// A message with "rejected" status or a timed-out message are finally rejected
 pub fn is_finally_rejected(status: &RempMessageStatus) -> bool {
     match status {
@@ -275,7 +407,7 @@ pub fn validate_status_change(old_status: &RempMessageStatus, new_status: &RempM
 }
 
 pub struct RempMessagesPool {
-    messages: lockfree::map::Map<UInt256, Arc<Message>>,
+    messages: Map<UInt256, Arc<Message>>,
     statuses_queue: lockfree::queue::Queue<(UInt256, Arc<Message>, RempMessageStatus)>,
 }
 
@@ -283,7 +415,7 @@ impl RempMessagesPool {
 
     pub fn new() -> Self {
         Self {
-            messages: lockfree::map::Map::new(),
+            messages: Map::new(),
             statuses_queue: lockfree::queue::Queue::new(),
         }
     }

@@ -11,13 +11,17 @@
 * limitations under the License.
 */
 
-pub use super::*;
-use crate::ton_api::IntoBoxed;
-use std::cmp;
-use std::collections::HashMap;
-use std::fmt;
-use std::str::FromStr;
-use utils::*;
+use crate::{
+    serialize_tl_boxed_object, 
+    Any, BlockHash, BlockHeight, BlockPayloadPtr, BlockSignature, CatchainFactory, 
+    PublicKeyHash, ReceivedBlock, ReceivedBlockPtr, ReceivedBlockState, Receiver, 
+    SessionId, profiling::InstanceCounter, ton, utils
+};
+use std::{
+    cell::RefCell, cmp, collections::HashMap, fmt, rc::{Rc, Weak}, str::FromStr
+};
+use ton_api::IntoBoxed;
+use ton_types::{error, fail, Result, UInt256};
 
 /*
     Constants
@@ -221,7 +225,7 @@ impl ReceivedBlock for ReceivedBlockImpl {
             return;
         }
 
-        warn!("Ill block detected: {}", self.get_hash().to_hex_string());
+        log::warn!("Ill block detected: {}", self.get_hash().to_hex_string());
 
         receiver
             .get_source(self.source_id)
@@ -249,8 +253,8 @@ impl ReceivedBlock for ReceivedBlockImpl {
             return Ok(());
         }
 
-        if log_enabled!(log::Level::Debug) {
-            trace!(
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
                 "...initialize block {:?} with payload of {} bytes",
                 self.hash,
                 payload.data().len()
@@ -271,45 +275,41 @@ impl ReceivedBlock for ReceivedBlockImpl {
         self.signature = block.signature.clone();
         self.state = ReceivedBlockState::Initialized;
 
-        if log_enabled!(log::Level::Debug) {
-            trace!(
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
                 "...check prev block and dependencies for {:?} to be initialized",
                 self.hash
             );
         }
 
         if prev.borrow().get_state() == ReceivedBlockState::Ill {
-            let message = format!(
+            let warning = error!(
                 "...prev block {:?} for block {:?} is ill",
                 self.hash,
                 prev.borrow().get_hash()
             );
 
-            warn!("{}", message);
-
+            log::warn!("{}", warning);
             self.set_ill(receiver);
-
-            return Err(err_msg(message));
+            return Err(warning);
         }
 
         for dep in &self.block_deps {
             if dep.borrow().get_state() == ReceivedBlockState::Ill {
-                let message = format!(
+                let warning = error!(
                     "...dependency block {:?} for block {:?} is ill",
                     self.hash,
                     dep.borrow().get_hash()
                 );
 
-                warn!("{}", message);
-
+                log::warn!("{}", warning);
                 self.set_ill(receiver);
-
-                return Err(err_msg(message));
+                return Err(warning);
             }
         }
 
-        if log_enabled!(log::Level::Debug) {
-            trace!("...compute forks dependency heights for {:?}", self.hash);
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!("...compute forks dependency heights for {:?}", self.hash);
         }
 
         let mut pending_deps: usize = 0;
@@ -340,8 +340,8 @@ impl ReceivedBlock for ReceivedBlockImpl {
 
         self.pending_deps = pending_deps;
 
-        if log_enabled!(log::Level::Debug) {
-            trace!(
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
                 "...pending {} dependencies for {:?}",
                 self.pending_deps,
                 self.hash
@@ -352,8 +352,8 @@ impl ReceivedBlock for ReceivedBlockImpl {
             get_mut_impl(self).schedule(receiver);
         }
 
-        if log_enabled!(log::Level::Debug) {
-            trace!(
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
                 "...notify source #{} about new received block {:?}",
                 self.source_id,
                 self.hash
@@ -396,8 +396,8 @@ impl ReceivedBlock for ReceivedBlockImpl {
 
         self.in_db = true;
 
-        if log_enabled!(log::Level::Debug) {
-            trace!(
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
                 "...block {:?} has been written to DB, pending deps is {}",
                 &self.hash,
                 self.pending_deps
@@ -526,8 +526,12 @@ impl ReceivedBlock for ReceivedBlockImpl {
             }
         }
 
-        format!("ReceivedBlock(hash={}, state={:?}, source_id={}, height={}, fork={}, prev={}, deps=[{}], signature={})", self.hash.to_hex_string(), self.state, self.source_id, self.height, self.fork_id,
-      prev_hash, deps_string, bytes_to_string(&self.signature))
+        format!(
+            "ReceivedBlock(hash={}, state={:?}, source_id={}, height={}, fork={}, \
+            prev={}, deps=[{}], signature={})", 
+            self.hash.to_hex_string(), self.state, self.source_id, self.height, 
+            self.fork_id, prev_hash, deps_string, utils::bytes_to_string(&self.signature)
+        )
     }
 }
 
@@ -574,8 +578,8 @@ impl ReceivedBlockImpl {
     */
 
     fn schedule(&mut self, receiver: &mut dyn Receiver) {
-        if log_enabled!(log::Level::Debug) {
-            trace!("...schedule block {:?} for delivering", &self.hash);
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!("...schedule block {:?} for delivering", &self.hash);
         }
 
         receiver.run_block(self.get_self());
@@ -585,8 +589,8 @@ impl ReceivedBlockImpl {
         assert!(self.state == ReceivedBlockState::Initialized);
         assert!(self.fork_id == 0);
 
-        if log_enabled!(log::Level::Debug) {
-            trace!(
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
                 "...initialize fork for block {:?} at height {} from source {}",
                 &self.hash,
                 self.height,
@@ -625,8 +629,8 @@ impl ReceivedBlockImpl {
             return;
         }
 
-        if log_enabled!(log::Level::Debug) {
-            trace!(
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
                 "...check block {:?} dependencies before delivering (pre-deliver)",
                 &self.hash
             );
@@ -655,10 +659,14 @@ impl ReceivedBlockImpl {
                 if dep.get_fork_id() < prev_forks_dep_heights.len()
                     && dep.get_height() <= prev_forks_dep_heights[dep.get_fork_id()]
                 {
-                    warn!(concat!("Block {:?} has direct dependency {:?} with fork_id={} and height={} from source #{} and prev block {:?} ",
-            "has newer indirect dependency with the same fork and height={}"),
-            dep.get_hash(), dep.get_hash(), dep.get_fork_id(), dep.get_height(), dep_source.get_id(), prev.borrow().get_hash(),
-            prev_forks_dep_heights[dep.get_fork_id()]);
+                    log::warn!(
+                        "Block {:?} has direct dependency {:?} with fork_id={} and height={} \
+                        from source #{} and prev block {:?} has newer indirect dependency \
+                        with the same fork and height={}",
+                        dep.get_hash(), dep.get_hash(), dep.get_fork_id(), dep.get_height(), 
+                        dep_source.get_id(), prev.borrow().get_hash(),
+                        prev_forks_dep_heights[dep.get_fork_id()]
+                    );
 
                     self.set_ill(receiver);
 
@@ -677,10 +685,14 @@ impl ReceivedBlockImpl {
                         continue;
                     }
 
-                    warn!(concat!("Block {:?} has direct dependency {:?} with fork_id={} and height={} from source #{} and prev block ",
-            "{:?} has indirect dependency to another fork fork_id={} and height={} of the same source"),
-            dep.get_hash(), dep.get_hash(), dep.get_fork_id(), dep.get_height(), dep_source.get_id(), prev.borrow().get_hash(),
-            dep_source_fork_id, prev_forks_dep_heights[dep_source_fork_id]);
+                    log::warn!(
+                        "Block {:?} has direct dependency {:?} with fork_id={} and height={} \
+                        from source #{} and prev block {:?} has indirect dependency \
+                        to another fork fork_id={} and height={} of the same source",
+                        dep.get_hash(), dep.get_hash(), dep.get_fork_id(), dep.get_height(), 
+                        dep_source.get_id(), prev.borrow().get_hash(),
+                        dep_source_fork_id, prev_forks_dep_heights[dep_source_fork_id]
+                    );
 
                     source
                         .borrow_mut()
@@ -704,10 +716,14 @@ impl ReceivedBlockImpl {
                         continue;
                     }
 
-                    warn!(concat!("Block {:?} has direct dependency {:?} with fork_id={} and height={} from source #{} and prev block ",
-            "{:?} has indirect dependency to fork fork_id={} and height={} which is known to blame this source"),
-            dep.get_hash(), dep.get_hash(), dep.get_fork_id(), dep.get_height(), dep_source.get_id(), prev.borrow().get_hash(),
-            fork_id, dep_source_blamed_heights[fork_id]);
+                    log::warn!(
+                        "Block {:?} has direct dependency {:?} with fork_id={} and height={} \
+                        from source #{} and prev block {:?} has indirect dependency \
+                        to fork fork_id={} and height={} which is known to blame this source",
+                        dep.get_hash(), dep.get_hash(), dep.get_fork_id(), dep.get_height(), 
+                        dep_source.get_id(), prev.borrow().get_hash(),
+                        fork_id, dep_source_blamed_heights[fork_id]
+                    );
 
                     source
                         .borrow_mut()
@@ -729,12 +745,12 @@ impl ReceivedBlockImpl {
                     let right = message.right.only();
 
                     if let Err(err) = receiver.validate_block_dependency(&left) {
-                        warn!("Incorrect fork blame: left is ivalid: {:?}", err);
+                        log::warn!("Incorrect fork blame: left is ivalid: {:?}", err);
                         self.set_ill(receiver);
                         return;
                     }
                     if let Err(err) = receiver.validate_block_dependency(&right) {
-                        warn!("Incorrect fork blame: right is ivalid: {:?}", err);
+                        log::warn!("Incorrect fork blame: right is ivalid: {:?}", err);
                         self.set_ill(receiver);
                         return;
                     }
@@ -743,7 +759,7 @@ impl ReceivedBlockImpl {
                         || left.src != right.src
                         || left.data_hash == right.data_hash
                     {
-                        warn!(
+                        log::warn!(
                             "Incorrect fork blame, not a fork: {}/{}, {}/{}, {:?}/{:?}",
                             left.height,
                             right.height,
@@ -778,8 +794,8 @@ impl ReceivedBlockImpl {
             return;
         }
 
-        if log_enabled!(log::Level::Debug) {
-            trace!("...prepare block {:?} for delivering", &self.hash);
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!("...prepare block {:?} for delivering", &self.hash);
         }
 
         assert!(self.state == ReceivedBlockState::Initialized);
@@ -790,8 +806,8 @@ impl ReceivedBlockImpl {
 
         self.state = ReceivedBlockState::Delivered;
 
-        if log_enabled!(log::Level::Debug) {
-            trace!("...block {:?} has been delivered", self.get_hash());
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!("...block {:?} has been delivered", self.get_hash());
         }
 
         for rev_dep_it in &self.rev_deps {
@@ -802,8 +818,8 @@ impl ReceivedBlockImpl {
 
         self.rev_deps.clear();
 
-        if log_enabled!(log::Level::Debug) {
-            trace!(
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
                 "...notify source #{} about new block {:?} which is ready to be delivered",
                 self.get_source_id(),
                 self.get_hash()
@@ -841,20 +857,20 @@ impl ReceivedBlockImpl {
         block: &ton::BlockDep,
     ) -> Result<()> {
         if block.height < 0 {
-            bail!("Invalid height {}", block.height);
+            fail!("Invalid height {}", block.height);
         }
 
         if block.height > 0 {
             if block.src < 0 || block.src as usize >= receiver.get_sources_count() {
-                bail!("Invalid source {}", block.src);
+                fail!("Invalid source {}", block.src);
             }
         } else {
             if block.src < 0 || block.src as usize != receiver.get_sources_count() {
-                bail!("Invalid source (first block) {}", block.src);
+                fail!("Invalid source (first block) {}", block.src);
             }
 
             if (&block.data_hash != receiver.get_incarnation()) || (block.signature.len() != 0) {
-                bail!("Invalid first block");
+                fail!("Invalid first block");
             }
         }
 
@@ -867,39 +883,39 @@ impl ReceivedBlockImpl {
         payload: &BlockPayloadPtr,
     ) -> Result<()> {
         if &block.incarnation != receiver.get_incarnation() {
-            bail!("Invalid session ID".to_string());
+            fail!("Invalid session ID");
         }
 
         if block.height <= 0 {
-            bail!("Invalid height {}", block.height);
+            fail!("Invalid height {}", block.height);
         }
 
         if block.src < 0 || block.src as usize >= receiver.get_sources_count() {
-            bail!("Invalid source {}", block.src);
+            fail!("Invalid source {}", block.src);
         }
 
         if block.data.prev.src < 0 {
-            bail!("Invalid prev block source {}", block.data.prev.src);
+            fail!("Invalid prev block source {}", block.data.prev.src);
         }
 
         if block.data.deps.len() > receiver.get_options().max_deps as usize {
-            bail!("Too many deps");
+            fail!("Too many deps");
         }
 
         let prev_src = block.data.prev.src as usize;
 
         if block.height > 1 {
             if prev_src != block.src as usize {
-                bail!("Invalid prev block source {}", block.data.prev.src);
+                fail!("Invalid prev block source {}", block.data.prev.src);
             }
         } else {
             if prev_src != receiver.get_sources_count() {
-                bail!("Invalid prev(first) block source {}", block.data.prev.src);
+                fail!("Invalid prev(first) block source {}", block.data.prev.src);
             }
         }
 
         if block.data.prev.height + 1 != block.height {
-            bail!(
+            fail!(
                 "Invalid prev block height {} (our {})",
                 block.data.prev.height,
                 block.height
@@ -914,7 +930,7 @@ impl ReceivedBlockImpl {
 
         for dep in &block.data.deps.0 {
             if used.contains(&dep.src) {
-                bail!("Two deps from the same source");
+                fail!("Two deps from the same source");
             }
 
             used.insert(dep.src);
@@ -927,7 +943,7 @@ impl ReceivedBlockImpl {
         }
 
         if payload.data().len() == 0 {
-            bail!("Empty payload");
+            fail!("Empty payload");
         }
 
         Ok(())
@@ -989,19 +1005,19 @@ impl ReceivedBlockImpl {
                     body.source_id = FromStr::from_str(value).unwrap();
                 }
                 if id == "hash" {
-                    body.hash = parse_hex_as_int256(value);
+                    body.hash = utils::parse_hex_as_int256(value);
                 }
                 if id == "data_hash" {
-                    body.data_hash = parse_hex_as_int256(value);
+                    body.data_hash = utils::parse_hex_as_int256(value);
                 }
                 if id == "signature" {
-                    body.signature = parse_hex_as_bytes(value);
+                    body.signature = utils::parse_hex_as_bytes(value);
                 }
                 if id == "payload" {
-                    body.payload = parse_hex_as_block_payload(value);
+                    body.payload = utils::parse_hex_as_block_payload(value);
                 }
                 if id == "deps" {
-                    let dep_hash: BlockHash = parse_hex_as_int256(value);
+                    let dep_hash: BlockHash = utils::parse_hex_as_int256(value);
                     let dep = match receiver.get_block_by_hash(&dep_hash) {
                         None => panic!("Block with hash {} not found", value),
                         Some(x) => x,
@@ -1020,16 +1036,24 @@ impl ReceivedBlockImpl {
         instance_counter: &InstanceCounter,
     ) -> ReceivedBlockPtr {
         let mut body: ReceivedBlockImpl = ReceivedBlockImpl::new(instance_counter);
-        let block_id = get_root_block_id(incarnation);
+        let block_id = utils::get_root_block_id(incarnation);
 
         body.source_id = source_id;
         body.data_hash = incarnation.clone();
         body.state = ReceivedBlockState::Delivered;
-        body.hash = get_block_id_hash(&block_id);
+        body.hash = utils::get_block_id_hash(&block_id);
         body.incarnation = incarnation.clone();
 
-        if log_enabled!(log::Level::Debug) {
-            trace!("...create root block: hash={:?}, source_id={}, height={}, data_hash={:?}, signature={:?}", body.hash, body.source_id, body.height, body.data_hash, body.signature);
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
+                "...create root block: \
+                hash={:?}, source_id={}, height={}, data_hash={:?}, signature={:?}", 
+                body.hash, 
+                body.source_id, 
+                body.height, 
+                body.data_hash, 
+                body.signature
+            );
         }
 
         ReceivedBlockImpl::wrap(&mut Rc::new(RefCell::new(body)))
@@ -1042,22 +1066,22 @@ impl ReceivedBlockImpl {
     ) -> Result<ReceivedBlockPtr> {
         let mut body: ReceivedBlockImpl =
             ReceivedBlockImpl::new(receiver.get_received_blocks_instance_counter());
-        let block_id = get_block_id(
+        let block_id = utils::get_block_id(
             &receiver.get_incarnation(),
             receiver.get_source_public_key_hash(block.src as usize),
             block.height,
             payload.data(),
         );
 
-        body.data_hash = get_hash(payload.data());
+        body.data_hash = utils::get_hash(payload.data());
         body.signature = block.signature.clone();
-        body.hash = get_block_id_hash(&block_id);
+        body.hash = utils::get_block_id_hash(&block_id);
         body.source_id = block.src as usize;
         body.height = block.height as BlockHeight;
         body.incarnation = receiver.get_incarnation().clone();
 
-        if log_enabled!(log::Level::Debug) {
-            trace!(
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
                 "...create new block with payload: \
                 hash={:?}, source_id={}, height={}, data_hash={:?}, signature={:?}",
                 body.hash,
@@ -1089,13 +1113,13 @@ impl ReceivedBlockImpl {
 
         body.data_hash = block.data_hash.clone();
         body.signature = block.signature.clone();
-        body.hash = get_block_dependency_hash(block, receiver);
+        body.hash = utils::get_block_dependency_hash(block, receiver);
         body.source_id = block.src as usize;
         body.height = block.height as BlockHeight;
         body.incarnation = receiver.get_incarnation().clone();
 
-        if log_enabled!(log::Level::Debug) {
-            trace!(
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
                 "...create new block dependency: \
                 hash={:?}, source_id={}, height={}, data_hash={:?}, signature={:?}",
                 body.hash,

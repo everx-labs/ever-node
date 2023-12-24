@@ -11,31 +11,9 @@
 * limitations under the License.
 */
 
-#[macro_use]
-extern crate lazy_static;
-
-extern crate catchain;
-extern crate metrics_runtime;
-extern crate rand;
-extern crate sha2;
-extern crate ton_api;
-extern crate ton_types;
-
-#[macro_use]
-extern crate log;
-
-#[macro_use]
-extern crate failure;
-
 //const TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG: bool = false; //compatibility with Telegram Node: bug in hashes computation for attempt and round
 const TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG: bool = true; //compatibility with Telegram Node: bug in hashes computation for attempt and round
 
-use std::any::Any;
-use std::cell::RefCell;
-use std::fmt;
-use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::Weak;
 mod block_candidate;
 mod cache;
 mod old_round;
@@ -55,14 +33,11 @@ mod vector_bool;
 mod vote_candidate;
 
 pub use cache::*;
-pub use catchain::ActivityNodePtr;
-use catchain::CatchainPtr;
-pub use catchain::CatchainReplayListener;
-use task_queue::CallbackTaskQueuePtr;
-use task_queue::CompletionHandlerProcessor;
-use task_queue::TaskQueuePtr;
+use catchain::{function, CatchainPtr};
+use task_queue::{CallbackTaskQueuePtr, CompletionHandlerProcessor, TaskQueuePtr};
+use std::{any::Any, cell::RefCell, fmt, rc::Rc, sync::{Arc, Weak}};
 
-pub mod profiling {
+mod profiling {
     pub use catchain::profiling::*;
 }
 
@@ -126,7 +101,7 @@ pub type PublicKeyHash = ::catchain::PublicKeyHash;
 /// Block ID
 pub type BlockId = BlockHash;
 
-lazy_static! {
+lazy_static::lazy_static! {
   /// Block candidate identifier for skip round (optional case to identify candidate as empty)
   pub static ref SKIP_ROUND_CANDIDATE_BLOCKID : BlockId = ton_types::UInt256::default();
 
@@ -275,6 +250,7 @@ pub type SlashingAggregatedMetric = slashing::AggregatedMetric;
 #[derive(Clone, Copy, Debug)]
 pub struct SessionOptions {
     /// Catchain processing timeout
+    /// (will be ignored for single-node sessions)
     pub catchain_idle_timeout: std::time::Duration,
 
     /// Maximum number of dependencies to merge
@@ -303,6 +279,9 @@ pub struct SessionOptions {
 
     /// Allow new catchain IDs
     pub new_catchain_ids: bool,
+
+    /// Skip validations for single node sessions
+    pub skip_single_node_session_validations: bool,
 }
 
 /// Merge wrapper
@@ -1136,7 +1115,7 @@ pub trait SessionDescription: fmt::Display + fmt::Debug + cache::SessionCache {
     fn is_in_past(&self, time: std::time::SystemTime) -> bool;
 
     /// Receiver for metrics
-    fn get_metrics_receiver(&self) -> &metrics_runtime::Receiver;
+    fn get_metrics_receiver(&self) -> &catchain::utils::MetricsHandle;
 
     /// Sent block instance counter
     fn get_sent_blocks_instance_counter(&self) -> &CachedInstanceCounter;
@@ -1314,7 +1293,7 @@ pub trait SessionProcessor: CompletionHandlerProcessor + fmt::Display {
     fn get_next_awake_time(&self) -> std::time::SystemTime;
 
     /// Stop all further session processing
-    fn stop(&mut self);
+    fn stop(&mut self, destroy_catchain_db: bool);
 
     /// Returns implementation specific details
     fn get_impl(&self) -> &dyn Any;
@@ -1479,7 +1458,7 @@ impl SessionFactory {
 
     /// Create session callbacks task queue
     pub fn create_callback_task_queue(
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: catchain::utils::MetricsHandle,
     ) -> CallbackTaskQueuePtr {
         session::SessionImpl::create_callback_task_queue(metrics_receiver)
     }
@@ -1505,6 +1484,25 @@ impl SessionFactory {
             db_suffix,
             allow_unsafe_self_blocks_resync,
             overlay_manager,
+            listener,
+        )
+    }
+
+    /// Create session
+    pub fn create_single_node_session(
+        options: &SessionOptions,
+        session_id: &SessionId,
+        local_key: &PrivateKey,
+        db_path: String,
+        db_suffix: String,
+        listener: SessionListenerPtr,
+    ) -> SessionPtr {
+        session::SessionImpl::create_single(
+            options,
+            session_id,
+            local_key,
+            db_path,
+            db_suffix,
             listener,
         )
     }
@@ -1535,7 +1533,7 @@ impl SessionFactory {
         completion_task_queue: TaskQueuePtr,
         callbacks_task_queue: CallbackTaskQueuePtr,
         session_creation_time: std::time::SystemTime,
-        metrics: Option<Arc<metrics_runtime::Receiver>>,
+        metrics: Option<catchain::utils::MetricsHandle>,
     ) -> SessionProcessorPtr {
         session_processor::SessionProcessorImpl::create(
             options,
