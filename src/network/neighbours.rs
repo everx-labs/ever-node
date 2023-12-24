@@ -21,7 +21,6 @@ use std::{
     cmp::min,
     sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicI32, AtomicU64, AtomicI64, Ordering}},
     time::{Duration, Instant},
-    future::Future,
 };
 use ton_api::ton::{TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities};
 #[cfg(feature = "telemetry")]
@@ -314,7 +313,7 @@ impl Neighbours {
     }
 
     pub fn start_reload(self: Arc<Self>) {
-      NodeNetwork::spawn_background_task(
+        NodeNetwork::spawn_background_task(
             self.cancellation_token.clone(),
             async move {
                 loop {
@@ -613,25 +612,6 @@ impl Neighbours {
         }
     }
 
-    fn spawn_background_task<P, F>(self: &Arc<Self>, p: P) 
-    where 
-        P: FnOnce(Arc<Self>) -> F + Send + 'static,
-        F: Future<Output = ()> + Send + Sync + 'static
-    {
-        let cancellation_token = self.cancellation_token.clone();
-        let neighbours = self.clone();
-        tokio::spawn(async move {
-            tokio::pin!(
-                let cancelled = cancellation_token.cancelled();
-                let fut = p(neighbours);
-            );
-
-            tokio::select! {
-                _ = fut => {},
-                _ = cancelled => {},
-            }
-        });
-    }
 }
 
 #[derive(Clone)]
