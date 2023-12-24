@@ -373,7 +373,7 @@ impl Neighbours {
                                     }
                                 }
                                 if !new_peers.is_empty() {
-                                    neighbours.clone().add_new_peers(new_peers);
+                                    self.clone().add_new_peers(new_peers);
                                 }
                             },
                             Err(e) => log::warn!(
