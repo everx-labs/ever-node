@@ -20,7 +20,7 @@ use rand::Rng;
 use std::{
     cmp::min,
     sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicI32, AtomicU64, AtomicI64, Ordering}},
-    time::{Duration, Instant},
+    time::{Duration, Instant}
 };
 use ton_api::ton::{TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities};
 #[cfg(feature = "telemetry")]
