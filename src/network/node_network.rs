@@ -688,8 +688,6 @@ impl NodeNetwork {
                     }                                    
                     if breaker.load(Ordering::Relaxed) {
                         break;
-                    } else {
-                        log::info!("search_validator_keys: numbers lost validator keys: {}", current_validators.len());
                     }
                     tokio::time::sleep(Self::TIMEOUT_SEARCH_VALIDATOR_KEYS).await;
                 }
