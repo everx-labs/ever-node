@@ -1258,14 +1258,19 @@ impl ValidatorManagerImpl {
         log::info!(target: "validator_manager", "{:32} {}", "session id", "st round shard");
         log::info!(target: "validator_manager", "{:-64}", "");
 
+        let mut queue_lengths : HashMap<UInt256, usize> = HashMap::new();
+
         // Validation shards statistics
         for (_, group) in self.validator_sessions.iter() {
-            /*
-            let remp_info_str = match group.get_reliable_message_queue().await {
-                Some(s) => format!(", remp {}", s.stats_string().await),
-                None => "".to_owned()
+            if let Some(qm) = group.get_reliable_message_queue().await {
+                match qm.get_messages_cnt().await {
+                    Some((session, cnt)) => {
+                        queue_lengths.insert(session, cnt);
+                        metrics::gauge!("remp_queue_len", cnt as f64, &[("shard", group.shard().to_string())]);
+                    }
+                    None => log::warn!(target: "remp", "Validator group {} has no current REMP session", group.info().await)
+                }
             };
-             */
 
             log::info!(target: "validator_manager", "{}", group.info().await);
             let status = group.get_status().await;
@@ -1276,11 +1281,15 @@ impl ValidatorManagerImpl {
         }
  
         if let Some(rm) = &self.remp_manager {
-            metrics::histogram!("remp_queue_length", rm.message_cache.all_messages_count() as f64);
+            metrics::gauge!("remp_message_cache_size", rm.message_cache.all_messages_count() as f64);
             log::info!(target: "validator_manager", "Remp message cache stats: {}", rm.message_cache.message_stats());
 
-            for s in rm.catchain_store.list_catchain_sessions().await.iter() {
-                log::info!(target: "validator_manager", "{}", s);
+            for (s, shard_ident) in rm.catchain_store.list_catchain_sessions().await.iter() {
+                let queue_len = match queue_lengths.get(shard_ident) {
+                    Some(len) => format!(", queue_len = {}", len),
+                    None => "".to_owned()
+                };
+                log::info!(target: "validator_manager", "{}{}", s, queue_len);
             }
         }
 

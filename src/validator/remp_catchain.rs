@@ -679,7 +679,7 @@ impl RempCatchainStore {
         }).await
     }
 
-    pub async fn list_catchain_sessions(&self) -> Vec<String> {
+    pub async fn list_catchain_sessions(&self) -> Vec<(String, UInt256)> {
         let sessions_to_list = self.catchains.execute_sync(|x| {
             let mut sessions_to_list = Vec::new();
             for (_id,remp_cc) in x.iter_mut() {
@@ -690,8 +690,11 @@ impl RempCatchainStore {
 
         let mut res = Vec::new();
         for (info, status) in sessions_to_list {
-            res.push(format!("remp_catchain_status: session_id {:x}, shard {}, master_cc {}..={}, {}",
-                             info.queue_id, info.general_session_info, info.master_cc_range.start(), info.master_cc_range.end(), status));
+            let displayed = format!(
+                "remp_catchain_status: session_id {:x}, shard {}, master_cc {}..={}, {}",
+                info.queue_id, info.general_session_info, info.master_cc_range.start(), info.master_cc_range.end(), status
+            );
+            res.push((displayed, info.queue_id.clone()))
         }
         return res;
     }

@@ -1244,6 +1244,16 @@ impl RmqQueueManager {
         }
     }
 
+    pub async fn get_messages_cnt(&self) -> Option<(UInt256, usize)> {
+        match &self.cur_queue {
+            Some(cq) => Some((
+                cq.catchain_info.queue_id.clone(),
+                cq.queues.execute_sync(|q| q.pending_collation_set.len()).await
+            )),
+            None => None
+        }
+    }
+
     pub fn get_sessions(&self) -> Vec<UInt256> {
         let mut sessions = Vec::new();
         if let Some(cur) = &self.cur_queue {
