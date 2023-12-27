@@ -33,6 +33,8 @@ pub async fn apply_block(
     if handle.id() != block.id() {
         fail!("Block id mismatch in apply block: {} vs {}", handle.id(), block.id())
     }
+    log::trace!("apply_block: block: {}", handle.id());
+
     let prev_ids = block.construct_prev_id()?;
     check_prev_blocks(&prev_ids, engine, mc_seq_no, pre_apply, recursion_depth).await?;
 
@@ -216,6 +218,7 @@ pub fn set_next_ids(
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
     engine: &dyn EngineOperations
 ) -> Result<()> {
+    log::trace!("set_next_ids: block: {}", handle.id());
     match prev_ids {
         (prev_id1, Some(prev_id2)) => {
             // After merge
@@ -251,6 +254,7 @@ pub fn set_prev_ids(
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
     engine: &dyn EngineOperations
 ) -> Result<()> {
+    log::trace!("set_prev_ids: block: {}", handle.id());
     match prev_ids {
         (prev_id1, Some(prev_id2)) => {
             // After merge

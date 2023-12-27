@@ -1060,7 +1060,6 @@ pub fn remp_status_short_name(status: &RempReceipt) -> String {
                 RempMessageLevel::TonNode_RempShardchain => "Accepted_Shardchain",
             }
         },
-        RempMessageStatus::TonNode_RempDuplicate(_) => "Duplicate",
         RempMessageStatus::TonNode_RempIgnored(ign) => {
             match ign.level {
                 RempMessageLevel::TonNode_RempCollator => "Ignored_Collator",
@@ -1081,7 +1080,8 @@ pub fn remp_status_short_name(status: &RempReceipt) -> String {
             }
         },
         RempMessageStatus::TonNode_RempSentToValidators(_) => "SentToValidators",
-        RempMessageStatus::TonNode_RempTimeout => "Timeout",
+        /*RempMessageStatus::TonNode_RempDuplicate*/
+        _ /*RempMessageStatus::TonNode_RempTimeout*/ => "Timeout",
     }.to_owned()
 }
 
