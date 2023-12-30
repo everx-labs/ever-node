@@ -90,6 +90,11 @@ pub struct CollatorConfig {
     pub finalize_empty_after_ms: u32,
     pub empty_collation_sleep_ms: u32
 }
+impl CollatorConfig {
+    pub fn get_finalize_parallel_timeout_ms(&self) -> u32 {
+        self.stop_timeout_ms * self.finalize_parallel_percentage_points / 1000
+    }
+}
 impl Default for CollatorConfig {
     fn default() -> Self {
         Self {
