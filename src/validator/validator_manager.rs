@@ -931,6 +931,10 @@ impl ValidatorManagerImpl {
                 }
             } else {
                 log::trace!(target: "validator_manager", "We are not in subset for {}", ident);
+
+                // push zero metrics after restart for shards which are not validated by current node
+                #[cfg(feature = "log_metrics")]
+                super::collator::CollatorMetrics::report_zero_metrics(ident.clone());
             }
             log::trace!(target: "validator_manager", "Session {} started (if necessary)", ident);
         }

@@ -356,4 +356,8 @@ pub async fn process_validation_queue(
         }
     }
     log::info!(target: "validator", "({}): Exiting from validation queue processing: {}", g.get_next_block_descr().await, g.info().await);
+
+    //push zero metrics when node finished processing validation queue
+    #[cfg(feature = "log_metrics")]
+    super::collator::CollatorMetrics::report_zero_metrics(g.shard().clone());
 }
