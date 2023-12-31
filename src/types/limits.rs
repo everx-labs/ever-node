@@ -107,8 +107,8 @@ impl BlockLimitStatus {
     }
 
     /// Update logical time
-    pub fn update_lt(&mut self, lt: u64) {
-        self.lt_current = max(self.lt_current, lt);
+    pub fn update_lt(&mut self, lt: u64, force: bool) {
+        self.lt_current = if force { lt } else { max(self.lt_current, lt) };
         if self.lt_start > self.lt_current {
             self.lt_start = lt;
         }

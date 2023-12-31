@@ -77,6 +77,11 @@ impl MsgEnvelopeStuff {
     pub fn message(&self) -> &Message { &self.msg }
     pub fn message_hash(&self) -> UInt256 { self.env.message_hash() }
     pub fn message_cell(&self) -> Cell { self.env.message_cell() }
+    pub fn out_msg_key(&self) -> OutMsgQueueKey {
+        OutMsgQueueKey::with_account_prefix(&self.next_prefix(), self.message_hash())
+    }
+    #[cfg(test)]
+    pub fn src_prefix(&self) -> &AccountIdPrefixFull { &self.src_prefix }
     pub fn dst_prefix(&self) -> &AccountIdPrefixFull { &self.dst_prefix }
     pub fn cur_prefix(&self) -> &AccountIdPrefixFull { &self.cur_prefix }
     pub fn next_prefix(&self) -> &AccountIdPrefixFull { &self.next_prefix }
