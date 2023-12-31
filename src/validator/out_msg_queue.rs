@@ -27,7 +27,7 @@ use ton_block::{
     OutMsgQueueInfo, OutMsgQueue, OutMsgQueueKey, IhrPendingInfo,
     ProcessedInfo, ProcessedUpto, ProcessedInfoKey,
     ShardHashes, AccountIdPrefixFull,
-    HashmapAugType, ShardStateUnsplit,
+    HashmapAugType, ShardStateUnsplit, EnqueuedMsg,
 };
 use ton_types::{
     error, fail, BuilderData, Cell, LabelReader, SliceData, IBitstring, Result, UInt256, 
@@ -590,13 +590,14 @@ impl OutMsgQueueInfoStuff {
         self.out_queue_mut()?.set(&key, enq.enqueued(), &enq.created_lt())
     }
 
-    pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<()> {
+    pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<EnqueuedMsg> {
         let labels = [("shard", self.shard().to_string())];
         metrics::counter!("out_msg_queue_del", 1, &labels);
-        if self.out_queue_mut()?.remove(SliceData::load_bitstring(key.write_to_new_cell()?)?)?.is_none() {
+        if let Some(mut msg_data) = self.out_queue_mut()?.remove(SliceData::load_bitstring(key.write_to_new_cell()?)?)? {
+            EnqueuedMsg::construct_from(&mut msg_data)
+        } else {
             fail!("error deleting from out_msg_queue dictionary: {:x}", key)
         }
-        Ok(())
     }
 
     // remove all messages which are not from new_shard
@@ -1125,7 +1126,7 @@ impl MsgQueueManager {
     pub async fn clean_out_msg_queue(
         &mut self,
         clean_timeout_nanos: i128,
-        optimistic_clean_percentage_points: u32,
+        ordered_clean_percentage_points: u32,
         mut on_message: impl FnMut(Option<(MsgEnqueueStuff, u64)>, Option<&Cell>) -> Result<bool>
     ) -> Result<(bool, i32, i32)> {
         let timer = std::time::Instant::now();
@@ -1149,7 +1150,7 @@ impl MsgQueueManager {
         let mut deleted = 0;
         let mut skipped = 0;
 
-        let ordered_cleaning_timeout_nanos = clean_timeout_nanos * (optimistic_clean_percentage_points as i128) / 1000;
+        let ordered_cleaning_timeout_nanos = clean_timeout_nanos * (ordered_clean_percentage_points as i128) / 1000;
         let random_cleaning_timeout_nanos = clean_timeout_nanos - ordered_cleaning_timeout_nanos;
 
         log::debug!(
@@ -1163,27 +1164,15 @@ impl MsgQueueManager {
         if ordered_cleaning_timeout_nanos > 0 {
             let max_processed_lt = self.get_max_processed_lt_from_queue_info();
 
-            let mut clean_timeout_check = 50_000_000;
-            let max_clean_timeout_check = 550_000_000;
-
             partial = out_msg_queue_cleaner::hashmap_filter_ordered_by_lt_hash(
                 &mut queue,
                 max_processed_lt,
                 ordered_cleaning_timeout_nanos,
                 |node_obj| {
                     if block_full {
-                        log::debug!("{}: BLOCK FULL when ordered cleaning output queue, cleanup is partial", self.block_descr);
+                        log::debug!("{}: BLOCK FULL (>= Soft) when ordered cleaning output queue, cleanup is partial", self.block_descr);
                         partial = true;
                         return Ok(HashmapFilterResult::Stop);
-                    }
-
-                    let elapsed_nanos = timer.elapsed().as_nanos() as i128;
-                    if clean_timeout_check <= max_clean_timeout_check && elapsed_nanos >= clean_timeout_check {
-                        log::debug!(
-                            "{}: clean_out_msg_queue: ordered cleaning time elapsed {} nanos: processed = {}, deleted = {}, skipped = {}",
-                            self.block_descr, elapsed_nanos, deleted + skipped, deleted, skipped,
-                        );
-                        clean_timeout_check += 50_000_000;
                     }
 
                     let lt = node_obj.lt();
@@ -1236,28 +1225,15 @@ impl MsgQueueManager {
 
             let random_clean_timer = std::time::Instant::now();
 
-            let mut clean_timeout_check = 50_000_000;
-            let max_clean_timeout_check = 550_000_000;
-
             queue.hashmap_filter(|_key, mut slice| {
                 if block_full {
-                    log::debug!("{}: BLOCK FULL when random cleaning output queue, cleanup is partial", self.block_descr);
+                    log::debug!("{}: BLOCK FULL (>= Soft) when random cleaning output queue, cleanup is partial", self.block_descr);
                     partial = true;
                     return Ok(HashmapFilterResult::Stop)
                 }
 
-                let elapsed_nanos = random_clean_timer.elapsed().as_nanos() as i128;
-
-                if clean_timeout_check <= max_clean_timeout_check && elapsed_nanos >= clean_timeout_check {
-                    log::debug!(
-                        "{}: clean_out_msg_queue: random cleaning time elapsed {} nanos: processed = {}, deleted = {}, skipped = {}",
-                        self.block_descr, elapsed_nanos,
-                        random_deleted + random_skipped, random_deleted, random_skipped,
-                    );
-                    clean_timeout_check += 50_000_000;
-                }
-
                 // stop when reached the time limit
+                let elapsed_nanos = random_clean_timer.elapsed().as_nanos() as i128;
                 if elapsed_nanos >= random_cleaning_timeout_nanos {
                     log::debug!(
                         "{}: clean_out_msg_queue: stopped random cleaning output queue because of time elapsed {} nanos >= {} nanos limit",
