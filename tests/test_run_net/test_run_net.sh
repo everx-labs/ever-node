@@ -1,16 +1,22 @@
-REMP_TEST=false
-NODES=5
+NODES=6
 WORKCHAINS=false
 CURRENT_BRANCH="$(git branch --show-current)"
+
+if "$ROOT" == ""
+then
+    ROOT="./tmp"
+fi
+
 echo "Current branch: $CURRENT_BRANCH"
-ROOT="./tmp"
+echo "Current root: $ROOT"
 
 # apt update
 # apt install jq
 
 if [ ! "$REMP_TEST" == "true" ]
 then
-    echo "No Remp testing: $REMP_TEST"
+    echo "No Remp testing: '$REMP_TEST'"
+    REMP_TEST=false
 else
     echo "Remp testing in progress. Make sure you have enabled a REMP capability in a zerostate."
 fi

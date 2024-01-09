@@ -1533,7 +1533,7 @@ impl Engine {
                                 self.clone().process_queue_update_broadcast(broadcast, src);
                             }
                             Broadcast::TonNode_ExternalMessageBroadcast(broadcast) => {
-                                self.process_ext_msg_broadcast(broadcast, src);
+                                self.process_ext_msg_broadcast(broadcast, src).await;
                             }
                             Broadcast::TonNode_IhrMessageBroadcast(broadcast) => {
                                 log::trace!("TonNode_IhrMessageBroadcast from {}: {:?}", src, broadcast);
@@ -1544,6 +1544,7 @@ impl Engine {
                             Broadcast::TonNode_ConnectivityCheckBroadcast(broadcast) => {
                                 self.network.clone().process_connectivity_broadcast(broadcast);
                             }
+                            Broadcast::TonNode_BlockCandidateBroadcast(_) => { }
                         }
                     }
                 }
@@ -1759,7 +1760,7 @@ impl Engine {
         });
     }
 
-    fn process_ext_msg_broadcast(&self, broadcast: ExternalMessageBroadcast, src: Arc<KeyId>) {
+    async fn process_ext_msg_broadcast(&self, broadcast: ExternalMessageBroadcast, src: Arc<KeyId>) {
         let remp = self.remp_capability();
         // just add to list
         if !self.is_validator() {
@@ -1768,26 +1769,26 @@ impl Engine {
                 "Skipped ext message broadcast {}bytes from {}: NOT A VALIDATOR",
                 broadcast.message.data.0.len(), src
             );
-        } else if remp {
-            log::warn!(
-                "Skipped ext message broadcast {}bytes from {}: REMP CAPABILITY IS ENABLED",
-                broadcast.message.data.0.len(), src
-            );
         } else {
-            log::trace!("Processing ext message broadcast {}bytes from {}", broadcast.message.data.0.len(), src);
-            match self.external_messages().new_message_raw(&broadcast.message.data.0, self.now()) {
+            let bytes_len = broadcast.message.data.0.len();
+            let result = if remp {
+                self.push_message_to_remp(broadcast.message.data).await
+            } else {
+                self.external_messages().new_message_raw(&broadcast.message.data.0, self.now())
+            };
+            match result {
                 Err(e) => {
                     log::error!(
                         target: EXT_MESSAGES_TRACE_TARGET,
                         "Error while processing ext message broadcast {}bytes from {}: {}",
-                        broadcast.message.data.0.len(), src, e
+                        bytes_len, src, e
                     );
                 }
-                Ok(id) => {
+                Ok(_) => {
                     log::debug!(
                         target: EXT_MESSAGES_TRACE_TARGET,
-                        "Processed ext message broadcast {:x} {}bytes from {} (added into collator's queue)",
-                        id, broadcast.message.data.0.len(), src
+                        "Processed ext message broadcast {}bytes from {} (added into remp's queue)",
+                        bytes_len, src
                     );
                 }
             }
