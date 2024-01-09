@@ -135,6 +135,17 @@ impl BlockHandle {
         Ok(meta)
     }
 
+    fn deserialize_nonchecked<R: Read>(id: &mut BlockIdExt, read: &mut R) -> Result<BlockMeta> {
+        let meta = BlockMeta::deserialize(read)?;
+        if (meta.flags() & FLAG_HAS_FULL_ID) == FLAG_HAS_FULL_ID {
+            id.shard_id = 
+                ShardIdent::with_tagged_prefix(read.read_le_u32()? as i32, read.read_le_u64()?)?;
+            id.seq_no = read.read_le_u32()?;
+            id.file_hash = UInt256::with_array(read.read_u256()?);
+        }
+        Ok(meta)
+    }
+
     fn deserialize_full_id<R: Read>(root_hash: &UInt256, read: &mut R) -> Result<Option<BlockIdExt>> {
         let meta = BlockMeta::deserialize(read)?;
         if (meta.flags() & FLAG_HAS_FULL_ID) == FLAG_HAS_FULL_ID {
@@ -665,6 +676,32 @@ impl BlockHandleStorage {
                 let mut cursor = Cursor::new(data);
                 let meta = BlockHandle::deserialize(id, &mut cursor)?;
                 meta.set_flags(FLAG_HAS_FULL_ID);
+
+                let handle = self.create_handle_and_store(id.clone(), meta, None, false)?;
+                if let Some(handle) = handle {
+                    break Some(handle)
+                }
+            } else {
+                break None
+            }
+        };
+        Ok(ret)
+    }
+
+    pub fn load_handle_by_root_hash(&self, rh: &UInt256) -> Result<Option<Arc<BlockHandle>>> {
+        log::trace!(target: TARGET, "load block handle by root hash {:x}", rh);
+        let ret = loop {
+            let weak = self.handle_cache.get(rh);
+            if let Some(Some(handle)) = weak.map(|weak| weak.val().object.upgrade()) {
+                break Some(handle)
+            }
+            if let Some(data) = self.handle_db.try_get_raw(rh.as_slice())? {
+                let mut cursor = Cursor::new(data);
+                let mut id = BlockIdExt {
+                    root_hash: rh.clone(),
+                    ..Default::default()
+                };
+                let meta = BlockHandle::deserialize_nonchecked(&mut id, &mut cursor)?;
 
                 let handle = self.create_handle_and_store(id.clone(), meta, None, false)?;
                 if let Some(handle) = handle {
