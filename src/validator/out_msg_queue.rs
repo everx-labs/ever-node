@@ -409,37 +409,42 @@ impl OutMsgQueueInfoStuff {
         engine: &Arc<dyn EngineOperations>,
         usage_tree: &UsageTree,
         imported_visited: Option<&mut HashSet<UInt256>>,
+        split_queues: bool,
     ) -> Result<Self> {
-
-        let (s0, _s1) = self.block_id().shard().split()?;
-        let sibling_queue = if let Some((q0, q1, visited)) = engine.get_split_queues(self.block_id()) {
-            if let Some(imported_visited) = imported_visited {
-                for cell_id in visited {
-                    imported_visited.insert(cell_id);
-                }
-            }
-            log::info!("Use split queues from cache (prev block {})", self.block_id());
-            if s0 == subshard {
-                self.out_queue = Some(q0);
-                q1
-            } else {
-                self.out_queue = Some(q1);
-                q0
-            }
+        let sibling_queue = if !split_queues {
+            // we don't split out message queue and clean it slow on each block. need to check it in collator and validator
+            self.out_queue_or_part()?.clone()
         } else {
-            let now = std::time::Instant::now();
-            let sibling_queue = Self::calc_split_queues(self.out_queue_mut()?, &subshard)?;
-            let (q0, q1) = if s0 == subshard {
-                (self.out_queue()?.clone(), sibling_queue.clone())
+            let (s0, _s1) = self.block_id().shard().split()?;
+            if let Some((q0, q1, visited)) = engine.get_split_queues(self.block_id()) {
+                if let Some(imported_visited) = imported_visited {
+                    for cell_id in visited {
+                        imported_visited.insert(cell_id);
+                    }
+                }
+                log::info!("Use split queues from cache (prev block {})", self.block_id());
+                if s0 == subshard {
+                    self.out_queue = Some(q0);
+                    q1
+                } else {
+                    self.out_queue = Some(q1);
+                    q0
+                }
             } else {
-                (sibling_queue.clone(), self.out_queue()?.clone())
-            };
-            let visited = usage_tree.build_visited_set();
-            engine.set_split_queues(self.block_id(), q0, q1, visited);
-            log::warn!(
-                "There is no precalculated split queues (prev block {}), calculated TIME {}ms", 
-                self.block_id(), now.elapsed().as_millis());
-            sibling_queue
+                let now = std::time::Instant::now();
+                let sibling_queue = Self::calc_split_queues(self.out_queue_mut()?, &subshard)?;
+                let (q0, q1) = if s0 == subshard {
+                    (self.out_queue()?.clone(), sibling_queue.clone())
+                } else {
+                    (sibling_queue.clone(), self.out_queue()?.clone())
+                };
+                let visited = usage_tree.build_visited_set();
+                engine.set_split_queues(self.block_id(), q0, q1, visited);
+                log::warn!(
+                    "There is no precalculated split queues (prev block {}), calculated TIME {}ms", 
+                    self.block_id(), now.elapsed().as_millis());
+                sibling_queue
+            }
         };
 
         let sibling = subshard.sibling();
@@ -744,8 +749,7 @@ impl OutMsgQueueInfoStuff {
 }
 
 pub struct MsgQueueManager {
-// Unused
-//    shard: ShardIdent,
+    shard: ShardIdent,
     prev_out_queue_info: OutMsgQueueInfoStuff,
     next_out_queue_info: OutMsgQueueInfoStuff,
     neighbors: Vec<OutMsgQueueInfoStuff>,
@@ -764,6 +768,7 @@ impl MsgQueueManager {
         next_state_opt: Option<&Arc<ShardStateStuff>>,
         after_merge: bool,
         after_split: bool,
+        split_queues: bool,
         stop_flag: Option<&AtomicBool>,
         usage_tree: Option<&UsageTree>,
         imported_visited: Option<&mut HashSet<UInt256>>,
@@ -870,7 +875,7 @@ impl MsgQueueManager {
                     prev_out_queue_info = OutMsgQueueInfoStuff::from_shard_state(&usage_state, &mut cached_states).await?;
                     &own_usage_tree
                 };
-                let sibling_out_queue_info = prev_out_queue_info.split(shard.clone(), engine, &usage_tree, imported_visited)?;
+                let sibling_out_queue_info = prev_out_queue_info.split(shard.clone(), engine, &usage_tree, imported_visited, split_queues)?;
                 Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, 
                     Some(sibling_out_queue_info), prev_states[0].shard(), &stop_flag, block_descr.clone())?;
                 next_out_queue_info = match next_state_opt {
@@ -908,8 +913,7 @@ impl MsgQueueManager {
         }
 
         Ok(MsgQueueManager {
-        //Unused
-          // shard,
+            shard,
             prev_out_queue_info,
             next_out_queue_info,
             neighbors,
@@ -1130,7 +1134,8 @@ impl MsgQueueManager {
         &mut self,
         clean_timeout_nanos: i128,
         optimistic_clean_percentage_points: u32,
-        mut on_message: impl FnMut(Option<(MsgEnqueueStuff, u64)>, Option<&Cell>) -> Result<bool>
+        split_queues: bool,
+        mut on_message: impl FnMut(Option<MsgEnqueueStuff>, Option<u64>, Option<&Cell>) -> Result<bool>
     ) -> Result<(bool, i32, i32)> {
         let timer = std::time::Instant::now();
 
@@ -1194,10 +1199,21 @@ impl MsgQueueManager {
                     let mut data_and_refs = node_obj.data_and_refs()?;
                     let enq = MsgEnqueueStuff::construct_from(&mut data_and_refs, lt)?;
 
+                    if !split_queues && !self.shard.contains_full_prefix(enq.cur_prefix()) {
+                        block_full = on_message(
+                            Some(enq),
+                            None,
+                            self.next_out_queue_info.out_queue()?.data(),
+                        )?;
+                        deleted += 1;
+                        return Ok(HashmapFilterResult::Remove);
+                    }
+
                     let (processed, end_lt) = self.already_processed(&enq)?;
                     if processed {
                         block_full = on_message(
-                            Some((enq, end_lt)),
+                            Some(enq),
+                            Some(end_lt),
                             self.next_out_queue_info.out_queue()?.data(),
                         )?;
                         deleted += 1;
@@ -1273,9 +1289,22 @@ impl MsgQueueManager {
 
                 let lt = u64::construct_from(&mut slice)?;
                 let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
+                if !split_queues && !self.shard.contains_full_prefix(enq.cur_prefix()) {
+                    block_full = on_message(
+                        Some(enq),
+                        None,
+                        self.next_out_queue_info.out_queue()?.data(),
+                    )?;
+                    deleted += 1;
+                    return Ok(HashmapFilterResult::Remove);
+                }
                 let (processed, end_lt) = self.already_processed(&enq)?;
                 if processed {
-                    block_full = on_message(Some((enq, end_lt)), self.next_out_queue_info.out_queue()?.data())?;
+                    block_full = on_message(
+                        Some(enq),
+                        Some(end_lt),
+                        self.next_out_queue_info.out_queue()?.data()
+                    )?;
                     random_deleted += 1;
                     return Ok(HashmapFilterResult::Remove)
                 }
@@ -1318,7 +1347,7 @@ impl MsgQueueManager {
 
         self.next_out_queue_info.out_queue = Some(queue);
 
-        on_message(None, self.next_out_queue_info.out_queue()?.data())?;
+        on_message(None, None, self.next_out_queue_info.out_queue()?.data())?;
 
         Ok((partial, deleted + skipped, deleted))
     }

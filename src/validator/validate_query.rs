@@ -132,6 +132,7 @@ struct ValidateBase {
     // TODO: maybe make some fileds Option
     // data from block_candidate
     capabilities: u64,
+    split_queues: bool,
     block: BlockStuff,
     info: BlockInfo,
     value_flow: ValueFlow,
@@ -789,6 +790,7 @@ impl ValidateQuery {
             base.next_state.as_ref(),
             base.after_merge,
             base.after_split,
+            base.split_queues,
             None,
             None,
             None,
@@ -1735,6 +1737,7 @@ impl ValidateQuery {
 
     // checks that any change in OutMsgQueue in the state is accompanied by an OutMsgDescr record in the block
     // also checks that the keys are correct
+    // Message can be removed from queue if it was not from this shard - split case
     fn precheck_one_message_queue_update(
         base: &ValidateBase,
         out_msg_id: &OutMsgQueueKey,
@@ -1748,7 +1751,14 @@ impl ValidateQuery {
                 but the key did not change", out_msg_id)
         } else if new_value.is_some() {
             "en"
-        } else if old_value.is_some() {
+        } else if let Some((enq, created_lt)) = &old_value {
+            if !base.split_queues {
+                let enq = MsgEnqueueStuff::from_enqueue_and_lt(enq.clone(), *created_lt)?;
+                if !base.shard().contains_full_prefix(enq.cur_prefix()) {
+                    // allow foreign messages to remove from queue without OutMsg
+                    return Ok(())
+                }
+            }
             "de"
         } else {
             ""
@@ -2842,6 +2852,10 @@ impl ValidateQuery {
         let mut iter = manager.merge_out_queue_iter(base.shard())?;
         while let Some(k_v) = iter.next() {
             let (msg_key, enq, lt, nb_block_id) = k_v?;
+            if !base.split_queues && !nb_block_id.shard().contains_full_prefix(enq.cur_prefix()) {
+                // this case from shard split result without splitting queues 
+                continue;
+            }
             log::debug!(target: "validate_query", "({}): processing inbound message with \
                 (lt,hash)=({},{:x}) from neighbor - {}", base.next_block_descr, lt, msg_key.hash, nb_block_id);
             // if (verbosity > 3) {
@@ -4340,6 +4354,7 @@ impl ValidateQuery {
         self.unpack_prev_state(&mut base)?;
         self.unpack_next_state(&mut base, &mc_data)?;
         base.config_params = mc_data.state().config_params()?.clone();
+        base.split_queues = !base.config_params.has_capability(GlobalCapabilities::CapNoSplitOutQueue);
         base.capabilities = base.config_params.capabilities();
         Self::load_block_data(&mut base)?;
         Ok((base, mc_data))
