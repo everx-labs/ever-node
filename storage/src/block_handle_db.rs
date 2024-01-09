@@ -679,7 +679,7 @@ impl BlockHandleStorage {
 
     pub fn load_full_block_id(&self, root_hash: &UInt256) -> Result<Option<BlockIdExt>> {
         log::trace!(target: TARGET, "load_full_block_id {:x}", root_hash);
-        let ret = loop {               
+        let ret = loop {
             let weak = self.handle_cache.get(root_hash);
             if let Some(Some(handle)) = weak.map(|weak| weak.val().object.upgrade()) {
                 break Some(handle.id.clone())
