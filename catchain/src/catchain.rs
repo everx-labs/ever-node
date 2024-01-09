@@ -614,7 +614,7 @@ impl ReceiverListener for ReceiverListenerImpl {
         //TODO: call processor directly instead of posting closure
         if CATCHAIN_POSTPONED_SEND_TO_OVERLAY {
             let overlay = Arc::downgrade(&self.overlay);
-            let receiver_ids: Vec<PublicKeyHash> = receiver_ids.clone().into();
+            let receiver_ids: Vec<PublicKeyHash> = receiver_ids.into();
             let sender_id = sender_id.clone();
             let message = message.clone();
 
@@ -663,7 +663,7 @@ impl ReceiverListener for ReceiverListenerImpl {
         if CATCHAIN_POSTPONED_SEND_TO_OVERLAY {
             let overlay = Arc::downgrade(&self.overlay);
             let receiver_id = receiver_id.clone();
-            let name: String = name.clone().into();
+            let name: String = name.into();
             let sender_id = sender_id.clone();
             let message = message.clone();
 

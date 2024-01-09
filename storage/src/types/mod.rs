@@ -18,7 +18,6 @@ mod shard_ident_key;
 mod status_key;
 mod storage_cell;
 
-pub use block_id::*;
 pub use block_meta::*;
 pub use db_slice::*;
 pub use shard_ident_key::*;

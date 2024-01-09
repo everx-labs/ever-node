@@ -2501,7 +2501,7 @@ pub async fn run(
                     DataSource::Engine(engine.clone()),
                     engine.network().config_handler(),
                     engine.network().config_handler(),
-                    Some(engine.network().clone())
+                    Some(engine.network())
                 ).await?
             );
             engine.register_server(server)
