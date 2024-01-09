@@ -34,6 +34,10 @@ use ton_types::{
     HashmapType, HashmapFilterResult, HashmapRemover, UsageTree, HashmapSubtree,
 };
 
+#[cfg(test)]
+#[path = "tests/test_out_msg_queue.rs"]
+mod tests;
+
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ProcessedUptoStuff {
     /// An abstract at-least-an-ancestor shard which can refer to
@@ -1509,6 +1513,14 @@ impl MsgQueueMergerIterator<BlockIdExt> {
 }
 
 impl MsgQueueMergerIterator<u8> {
+    #[cfg(test)]
+    pub fn from_queue(out_queue: &OutMsgQueue) -> Result<Self> {
+        let mut roots = Vec::new();
+        if let Some(cell) = out_queue.data() {
+            roots.push(RootRecord::from_cell(cell, out_queue.bit_len(), 0)?);
+        }
+        Ok(Self { roots })
+    }
 }
 
 impl<T: Clone + Eq> MsgQueueMergerIterator<T> {

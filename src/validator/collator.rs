@@ -1173,6 +1173,7 @@ impl Collator {
             duration,
         );
 
+        #[cfg(not(test))]
         #[cfg(feature = "telemetry")]
         self.engine.collator_telemetry().succeeded_attempt(
             &self.shard,
@@ -3609,3 +3610,6 @@ pub fn report_collation_metrics(
     metrics::histogram!("block_size", block_size as f64,  &labels);
 }
 
+#[cfg(test)]
+#[path = "tests/test_collator.rs"]
+mod tests;

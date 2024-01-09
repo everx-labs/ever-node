@@ -51,3 +51,6 @@ pub mod jaeger {
 #[cfg(feature = "external_db")]
 mod external_db;
 
+#[cfg(test)]
+#[path = "tests/test_helper.rs"]
+pub mod test_helper;

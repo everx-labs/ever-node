@@ -781,3 +781,6 @@ fn mark_as_sent(
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "tests/test_remp.rs"]
+mod tests;

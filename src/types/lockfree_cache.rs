@@ -91,3 +91,6 @@ impl<K, V> TimeBasedCache<K, V> where
     }
 }
 
+#[cfg(test)]
+#[path = "tests/test_lockfree_cache.rs"]
+mod tests;

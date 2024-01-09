@@ -14,6 +14,10 @@
 use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
 use ton_types::{Result, fail};
 
+#[cfg(test)]
+#[path = "tests/test_mpmc_channel.rs"]
+mod tests;
+
 pub struct MpmcChannel<T> {
     queue: lockfree::queue::Queue<T>,
     sync: lockfree::queue::Queue<tokio::sync::oneshot::Sender<()>>,

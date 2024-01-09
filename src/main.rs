@@ -70,6 +70,10 @@ use std::{
 use ton_types::error;
 use ton_types::Result;
 
+#[cfg(test)]
+#[path = "tests/test_helper.rs"]
+pub mod test_helper;
+
 #[cfg(target_os = "linux")]
 #[link(name = "tcmalloc_minimal", kind = "dylib")]
 extern "C" {

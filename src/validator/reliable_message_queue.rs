@@ -1287,3 +1287,6 @@ impl fmt::Display for RmqQueueManager {
     }
 }
 
+#[cfg(test)]
+#[path = "tests/test_rmq_messages.rs"]
+mod tests;

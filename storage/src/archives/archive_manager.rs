@@ -30,6 +30,10 @@ use ton_block::{
 };
 use ton_types::{error, fail, Result, UInt256};
 
+#[cfg(test)]
+#[path = "tests/test_archive_manager.rs"]
+mod tests;
+
 pub struct ArchiveManager {
     db: Arc<RocksDb>,
     db_root_path: Arc<PathBuf>,

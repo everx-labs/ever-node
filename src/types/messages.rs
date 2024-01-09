@@ -20,6 +20,10 @@ use ton_block::{
 use ton_executor::{BlockchainConfig, CalcMsgFwdFees};
 use ton_types::{error, fail, Result, AccountId, Cell, SliceData, UInt256};
 
+#[cfg(test)]
+#[path = "tests/test_messages.rs"]
+mod tests;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MsgEnvelopeStuff {
     env: MsgEnvelope,
@@ -77,6 +81,8 @@ impl MsgEnvelopeStuff {
     pub fn message(&self) -> &Message { &self.msg }
     pub fn message_hash(&self) -> UInt256 { self.env.message_hash() }
     pub fn message_cell(&self) -> Cell { self.env.message_cell() }
+    #[cfg(test)]
+    pub fn src_prefix(&self) -> &AccountIdPrefixFull { &self.src_prefix }
     pub fn dst_prefix(&self) -> &AccountIdPrefixFull { &self.dst_prefix }
     pub fn cur_prefix(&self) -> &AccountIdPrefixFull { &self.cur_prefix }
     pub fn next_prefix(&self) -> &AccountIdPrefixFull { &self.next_prefix }

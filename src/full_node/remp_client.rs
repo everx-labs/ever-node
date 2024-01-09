@@ -228,6 +228,11 @@ impl RempClient {
         });
     }
 
+    #[cfg(test)]
+    pub fn messages_history(&self) -> &lockfree::map::Map<UInt256, RempMessageHistory> {
+        &self.messages
+    }
+
     async fn messages_worker(&self) -> Result<()> {
 
         let engine = self.engine.get().ok_or_else(|| error!("engine was not set"))?;
@@ -1085,3 +1090,6 @@ pub fn remp_status_short_name(status: &RempReceipt) -> String {
     }.to_owned()
 }
 
+#[cfg(test)]
+#[path = "../tests/test_remp_client.rs"]
+mod tests;

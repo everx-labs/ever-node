@@ -560,6 +560,11 @@ impl TonNodeConfig {
         self.gc.as_ref().map(|c| c.enable_for_shard_state_persistent).unwrap_or(false)
     }
     
+    #[cfg(test)]
+    pub fn set_internal_db_path(&mut self, path: String) {
+        self.internal_db_path.replace(path);
+    }
+
     pub fn default_rldp_roundtrip(&self) -> Option<u32> {
         self.default_rldp_roundtrip_ms
     }

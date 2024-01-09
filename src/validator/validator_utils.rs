@@ -27,6 +27,10 @@ use ton_types::{
 use validator_session::SessionNode;
 use crate::block::BlockIdExtExtention;
 
+#[cfg(test)]
+#[path = "tests/test_validator_utils.rs"]
+mod tests;
+
 pub fn sigpubkey_to_publickey(k: &SigPubKey) -> PublicKey {
     Ed25519KeyOption::from_public_key(k.key_bytes())
 }

@@ -64,3 +64,6 @@ impl LogParser {
     }
 }
 
+#[cfg(test)]
+#[path = "tests/test_log_parser.rs"]
+mod tests;

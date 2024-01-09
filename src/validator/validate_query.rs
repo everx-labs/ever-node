@@ -62,6 +62,10 @@ use ton_types::{
 use crate::engine_traits::RempDuplicateStatus;
 use crate::validator::validator_utils::is_remp_enabled;
 
+#[cfg(test)]
+#[path = "tests/test_validate_query.rs"]
+mod tests;
+
 // pub const SPLIT_MERGE_DELAY: u32 = 100;        // prepare (delay) split/merge for 100 seconds
 // pub const SPLIT_MERGE_INTERVAL: u32 = 100;     // split/merge is enabled during 60 second interval
 pub const MIN_SPLIT_MERGE_INTERVAL: u32 = 30;  // split/merge interval must be at least 30 seconds
@@ -4419,6 +4423,7 @@ impl ValidateQuery {
         let labels = [("shard", base.block_id().shard().to_string())];
         metrics::gauge!("gas_rate_validator", ratio as f64, &labels);
 
+        #[cfg(not(test))]
         #[cfg(feature = "telemetry")]
         self.engine.validator_telemetry().succeeded_attempt(
             &self.shard,

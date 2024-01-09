@@ -1522,3 +1522,6 @@ pub fn start_validator_manager(
     });
 }
 
+#[cfg(test)]
+#[path = "tests/test_session_id.rs"]
+mod tests;
