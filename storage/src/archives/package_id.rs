@@ -15,6 +15,10 @@ use crate::archives::{ARCHIVE_SIZE, KEY_ARCHIVE_SIZE};
 use std::{cmp::Ordering, ffi::OsString, path::{Path, PathBuf}};
 use ton_block::UnixTime32;
 
+#[cfg(test)]
+#[path = "tests/test_package_id.rs"]
+mod tests;
+
 #[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PackageType {
     Blocks,

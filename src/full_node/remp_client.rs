@@ -216,7 +216,7 @@ impl RempClient {
         }
     }
 
-    #[cfg(feature = "slashing")]
+    #[cfg(any(test, feature = "slashing"))]
     pub fn process_new_block(self: Arc<Self>, block: BlockStuff) {
         tokio::spawn(async move {
             match self.process_block(&block, true, None) {
@@ -226,6 +226,11 @@ impl RempClient {
                 }
             }
         });
+    }
+
+    #[cfg(test)]
+    pub fn messages_history(&self) -> &lockfree::map::Map<UInt256, RempMessageHistory> {
+        &self.messages
     }
 
     async fn messages_worker(&self) -> Result<()> {
@@ -1085,3 +1090,6 @@ pub fn remp_status_short_name(status: &RempReceipt) -> String {
     }.to_owned()
 }
 
+#[cfg(test)]
+#[path = "../tests/test_remp_client.rs"]
+mod tests;

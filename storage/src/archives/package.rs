@@ -16,6 +16,10 @@ use std::{io::SeekFrom, path::{Path, PathBuf}, sync::atomic::{AtomicU64, Orderin
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use ton_types::{error, fail, Result};
 
+#[cfg(test)]
+#[path = "tests/test_package.rs"]
+mod tests;
+
 #[derive(Debug)]
 pub struct Package {
     path: PathBuf,
@@ -165,6 +169,19 @@ impl<R: tokio::io::AsyncReadExt + Unpin> PackageReader<R> {
     pub async fn next(&mut self) -> Result<Option<PackageEntry>> {
         PackageEntry::read_from(&mut self.reader).await
     }
+}
+
+#[cfg(test)]
+pub async fn read_package_from_file(
+    path: impl AsRef<Path>
+) -> Result<PackageReader<tokio::fs::File>> {
+    read_package_from(
+        tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .create(false)
+            .open(path).await?
+    ).await
 }
 
 pub async fn read_package_from<R: tokio::io::AsyncReadExt + Unpin>(

@@ -21,10 +21,16 @@ use ton_types::{
     Cell, Result, types::UInt256, BocReader, error, fail, HashmapType, UsageTree,
 };
 
+#[cfg(test)]
+use ton_block::{BlockInfo, BlkMasterInfo};
 use crate::{
     shard_state::ShardHashesStuff,
     validator::accept_block::visit_block_for_proof,
 };
+
+#[cfg(test)]
+#[path = "tests/test_block.rs"]
+mod tests;
 
 pub struct BlockPrevStuff {
     pub mc_block_id: BlockIdExt,
@@ -77,6 +83,47 @@ impl BlockStuff {
         Ok(Self { id, queue_update, queue_update_for, root, data, ..Default::default() })
     }
 
+    #[cfg(test)]
+    pub fn read_block_from_file(filename: &str) -> Result<Self> {
+        let data = Arc::new(std::fs::read(filename)?);
+        let file_hash = UInt256::calc_file_hash(&data);
+        let root = BocReader::new().read_inmem(data.clone())?.withdraw_single_root()?;
+        let block = Block::construct_from_cell(root.clone())?;
+        let block_info = block.read_info()?;
+        let id = BlockIdExt {
+            shard_id: block_info.shard().clone(),
+            seq_no: block_info.seq_no(),
+            root_hash: root.repr_hash(),
+            file_hash,
+        };
+        Ok(Self { id, block: Some(block), root, data: data, ..Default::default() })
+    }
+
+    #[cfg(test)]
+    pub fn fake_block(id: BlockIdExt, mc_block_id: Option<BlockIdExt>, is_key_block: bool) -> Result<Self> {
+        let mut block = Block::default();
+        if let Some(mc_block_id) = mc_block_id {
+            let mut info = BlockInfo::default();
+            info.write_master_ref(Some(&BlkMasterInfo {
+                master: ExtBlkRef {
+                    end_lt: 0,
+                    seq_no: mc_block_id.seq_no,
+                    root_hash: mc_block_id.root_hash,
+                    file_hash: mc_block_id.file_hash,
+                }
+            }))?;
+            info.set_key_block(is_key_block);
+            block.write_info(&info)?;
+        }
+        Ok(BlockStuff {
+            id,
+            block: Some(block),
+            root: Cell::default(),
+            data: Arc::new(vec!(0xfe; 10_000)),
+            ..Default::default()
+        })
+    }
+
     pub fn block(&self) -> Result<&Block> {
         self.block.as_ref().ok_or_else(|| {
             error!("the block {} is not full, it contains only queue update for WC {}", 
@@ -106,6 +153,18 @@ impl BlockStuff {
             .get(&workchain_id)?.ok_or_else(|| {
                 error!("Block {} doesn't contain queue update for wc {}", self.id(), workchain_id)
             })
+    }
+
+    #[cfg(test)]
+    pub fn fake_with_block(id: BlockIdExt, block: Block) -> Self {
+        BlockStuff {
+            id,
+            block: Some(block),
+            root: Cell::default(),
+            data: Arc::new(vec!(0xfe; 10_000)),
+            queue_update: None,
+            queue_update_for: 0,
+        }
     }
 
     pub fn is_queue_update(&self) -> bool { self.queue_update.is_some() }

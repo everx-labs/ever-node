@@ -100,6 +100,10 @@ use crate::config::{
 //maximum number of validated block stats entries in engine's queue
 const MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT: usize = 10000; 
 
+#[cfg(test)]
+#[path = "tests/test_engine.rs"]
+mod tests;
+
 pub struct Engine {
     db: Arc<InternalDb>,
     ext_db: Vec<Arc<dyn ExternalDb>>,

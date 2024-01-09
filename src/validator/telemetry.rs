@@ -656,3 +656,6 @@ impl RempCoreTelemetry {
     }
 }
 
+#[cfg(test)]
+#[path = "tests/test_telemetry.rs"]
+mod tests;

@@ -432,3 +432,6 @@ impl fmt::Debug for ValidatedBlockStat {
     }
 }
 
+#[cfg(test)]
+#[path = "tests/test_slashing.rs"]
+mod tests;

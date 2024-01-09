@@ -22,5 +22,10 @@ ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api',
 ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.117' }
 ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.31' }
 
+[dev-dependencies]
+chrono = '0.4'
+colored = '1.9'
+env_logger = '0.7'
+
 [features]
 slashing = [  ]
