@@ -1801,6 +1801,7 @@ impl Collator {
         collator_data: &mut CollatorData
     ) -> Result<MsgQueueManager> {
         log::debug!("{}: request_neighbor_msg_queues", self.collated_block_descr);
+        let split_queues = !collator_data.config.has_capability(GlobalCapabilities::CapNoSplitOutQueue);
         MsgQueueManager::init(
             &self.engine,
             mc_data.state(),
@@ -2284,6 +2285,7 @@ impl Collator {
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
         log::debug!("{}: process_inbound_internal_messages", self.collated_block_descr);
+        let split_queues = !collator_data.config.has_capability(GlobalCapabilities::CapNoSplitOutQueue);
         let mut iter = output_queue_manager.merge_out_queue_iter(&self.shard)?;
         while let Some(k_v) = iter.next() {
             let (key, enq, created_lt, block_id) = k_v?;
