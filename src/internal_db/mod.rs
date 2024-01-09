@@ -522,7 +522,7 @@ impl InternalDb {
 
     pub fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
         let _tc = TimeChecker::new(format!("load_block_handle {}", id), 30);
-        self.block_handle_storage.load_handle(id)
+        self.block_handle_storage.load_handle_by_id(id)
     }
 
     pub async fn store_block_data(
