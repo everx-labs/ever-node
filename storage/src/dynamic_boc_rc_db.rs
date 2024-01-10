@@ -190,8 +190,8 @@ impl DynamicBocDb {
             db: Arc::clone(&db),
             db_root_path: db_root_path.to_string(),
             assume_old_cells,
-            #[cfg(feature = "telemetry")]
             raw_cells_cache,
+            #[cfg(feature = "telemetry")]
             telemetry,
             allocated
         }
