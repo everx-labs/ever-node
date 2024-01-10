@@ -18,21 +18,14 @@ use crate::{
 #[cfg(feature = "telemetry")]
 use crate::StorageTelemetry;
 use std::{
-    ops::{Deref, DerefMut},
-    sync::{Arc, atomic::{AtomicU32, Ordering}},
-    io::Cursor,
-    path::Path,
-    borrow::Cow,
-    time::Duration,
-    fs::write,
+    borrow::Cow, fs::write, io::Cursor, mem::size_of, ops::{Deref, DerefMut}, path::Path,
+    sync::{Arc, atomic::{AtomicU32, Ordering}}, time::Duration
 };
-use bytes::Bytes;
-use quick_cache::sync::{Cache, DefaultLifecycle};
 //#[cfg(test)]
 //use std::path::Path;
-use ton_types::{
-    Cell, Result, MAX_LEVEL, fail, DoneCellsStorage, UInt256, OrderedCellsStorage, CellByHashStorage,
-    ByteOrderRead, error, CellData,
+use ton_types::{             
+    error, fail, ByteOrderRead, Cell, CellByHashStorage, CellData, DoneCellsStorage, 
+    MAX_LEVEL, OrderedCellsStorage, Result, UInt256, 
 };
 
 pub const BROKEN_CELL_BEACON_FILE: &str = "ton_node.broken_cell";
@@ -190,8 +183,8 @@ impl DynamicBocDb {
             db: Arc::clone(&db),
             db_root_path: db_root_path.to_string(),
             assume_old_cells,
-            #[cfg(feature = "telemetry")]
             raw_cells_cache,
+            #[cfg(feature = "telemetry")]
             telemetry,
             allocated
         }
@@ -449,7 +442,7 @@ impl DynamicBocDb {
         if use_cache {
             match self
                 .raw_cells_cache
-                .get_raw(&self.db, cell_id)
+                .get_or_insert(&self.db, cell_id)
             {
                 Ok(value) => {
                     if let Ok((cell, _)) =StorageCell::deserialize(self, &value, use_cache, false)
@@ -887,21 +880,25 @@ impl OrderedCellsStorage for OrderedCellsStorageAdapter {
 }
 
 
-struct RawCellsCache(Cache<UInt256, Bytes, CellSizeEstimator, ahash::RandomState>);
+struct RawCellsCache(
+    quick_cache::sync::Cache<UInt256, bytes::Bytes, CellSizeEstimator, ahash::RandomState>
+);
 
 #[derive(Clone, Copy)]
 pub struct CellSizeEstimator;
-impl quick_cache::Weighter<UInt256, Bytes> for CellSizeEstimator {
-    fn weight(&self, _key: &UInt256, val: &Bytes) -> u32 {
-        const BYTES_SIZE: usize = std::mem::size_of::<usize>() * 4;
-        let len = std::mem::size_of::<UInt256>() + val.len() + BYTES_SIZE;
+impl quick_cache::Weighter<UInt256, bytes::Bytes> for CellSizeEstimator {
+    fn weight(&self, _key: &UInt256, val: &bytes::Bytes) -> u32 {
+        const BYTES_SIZE: usize = size_of::<usize>() * 4;
+        let len = size_of::<UInt256>() + val.len() + BYTES_SIZE;
         len as u32
     }
 }
 
 impl RawCellsCache {
+
     fn new(size_in_bytes: u64) -> Self {
-        // Percentile 0.1%    from 96 to 127  => 1725119 count
+
+        // Percentile 0.1%    from  96 to 127  => 1725119 count
         // Percentile 10%     from 128 to 191  => 82838849 count
         // Percentile 25%     from 128 to 191  => 82838849 count
         // Percentile 50%     from 128 to 191  => 82838849 count
@@ -926,35 +923,25 @@ impl RawCellsCache {
         const KEY_SIZE: u64 = 32;
 
         let estimated_cell_cache_capacity = size_in_bytes / (KEY_SIZE + MAX_CELL_SIZE);
-        log::trace!(
-            "{estimated_cell_cache_capacity},{size_in_bytes}",
-        );
-
-        let raw_cache = Cache::with(
+        log::trace!("{estimated_cell_cache_capacity},{size_in_bytes}");
+        let raw_cache = quick_cache::sync::Cache::with(
             estimated_cell_cache_capacity as usize,
             size_in_bytes,
             CellSizeEstimator,
             ahash::RandomState::default(),
-            DefaultLifecycle::default(),
+            quick_cache::sync::DefaultLifecycle::default()
         );
-
         Self(raw_cache)
+
     }
 
-    fn get_raw(&self, db: &Arc<CellDb>, key: &UInt256) -> Result<Bytes> {
+    fn get_or_insert(&self, db: &Arc<CellDb>, key: &UInt256) -> Result<bytes::Bytes> {
         if let Some(value) = self.0.get(key) {
             return Ok(value);
         }
-
-        let value = Bytes::copy_from_slice(&db.get(key)?);
+        let value = bytes::Bytes::copy_from_slice(&db.get(key)?);
         self.0.insert(key.clone(), value.clone());
-
         Ok(value)
     }
 
-    #[allow(unused)] // TODO: Check whether it is not needed
-    pub fn insert(&self, key: UInt256, value: &[u8]) {
-        let value = Bytes::copy_from_slice(value);
-        self.0.insert(key, value);
-    }
 }
