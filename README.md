@@ -34,6 +34,15 @@ cd ever-node
 cargo build --release
 ```
 
+### Running tests
+
+```
+cargo test --release --package catchain -- --nocapture --test-threads=1 
+cargo test --release --package storage -- --nocapture --test-threads=1 
+cargo test --release --package validator_session -- --nocapture --test-threads=1 
+cargo test --release -- --nocapture --test-threads=1
+```
+
 ## Usage
 
 To get help about command line arguments, run
