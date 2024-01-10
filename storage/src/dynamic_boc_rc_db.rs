@@ -23,7 +23,7 @@ use std::{
 };
 //#[cfg(test)]
 //use std::path::Path;
-use ton_types::{             
+use ton_types::{
     error, fail, ByteOrderRead, Cell, CellByHashStorage, CellData, DoneCellsStorage, 
     MAX_LEVEL, OrderedCellsStorage, Result, UInt256, 
 };
@@ -878,7 +878,6 @@ impl OrderedCellsStorage for OrderedCellsStorageAdapter {
         Ok(())
     }
 }
-
 
 struct RawCellsCache(
     quick_cache::sync::Cache<UInt256, bytes::Bytes, CellSizeEstimator, ahash::RandomState>
