@@ -184,7 +184,7 @@ async fn test_scenario_keyblocks_10m() -> Result<()> {
 
         let block_id = BlockIdExt::with_params(ShardIdent::masterchain(), mc_seq_no, 
             UInt256::from_le_bytes(&mc_seq_no.to_le_bytes()), UInt256::default());
-        let handle = block_handle_storage.load_handle_by_id(&block_id)?
+        let handle = block_handle_storage.load_handle(&block_id)?
             .ok_or_else(|| error!("Cannot load handle for block {}", block_id))?;
         assert!(handle.has_proof());
         assert!(handle.is_archived());
@@ -328,20 +328,20 @@ impl TestArchiveManager {
         self.archive_manager.trunc(&trunc_block_id, &|id: &BlockIdExt| id.seq_no() >= trunc_block_id.seq_no()).await.unwrap();
 
         let block_id = Self::master_block_id(mc_seq_no - 1, version);
-        let handle = self.block_handle_storage.load_handle_by_id(&block_id).unwrap().unwrap();
+        let handle = self.block_handle_storage.load_handle(&block_id).unwrap().unwrap();
         let entry_id = PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::Block(&block_id);
         self.archive_manager.get_file(&handle, &entry_id).await.unwrap();
         let entry_id = PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::Proof(&block_id);
         self.archive_manager.get_file(&handle, &entry_id).await.unwrap();
 
-        let handle = self.block_handle_storage.load_handle_by_id(&trunc_block_id).unwrap().unwrap();
+        let handle = self.block_handle_storage.load_handle(&trunc_block_id).unwrap().unwrap();
         let entry_id = PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::Block(&trunc_block_id);
         self.archive_manager.get_file(&handle, &entry_id).await.expect_err("block should not be read");
         let entry_id = PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::Proof(&trunc_block_id);
         self.archive_manager.get_file(&handle, &entry_id).await.expect_err("proof should not be read");
 
         let block_id = Self::master_block_id(mc_seq_no + 1, version);
-        let handle = self.block_handle_storage.load_handle_by_id(&block_id).unwrap().unwrap();
+        let handle = self.block_handle_storage.load_handle(&block_id).unwrap().unwrap();
         let entry_id = PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::Block(&block_id);
         self.archive_manager.get_file(&handle, &entry_id).await.expect_err("block should not be read");
         let entry_id = PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::Proof(&block_id);

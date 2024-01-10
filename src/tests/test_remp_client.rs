@@ -612,7 +612,7 @@ impl EngineOperations for TestRempClientEngine {
             }
             Ok(Some(handle))
         } else {
-            self.block_handle_storage.load_handle_by_id(id)
+            self.block_handle_storage.load_handle(id)
         }
     }
 
