@@ -29,4 +29,3 @@ env_logger = '0.7'
 
 [features]
 slashing = [  ]
-

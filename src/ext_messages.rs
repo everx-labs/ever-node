@@ -22,7 +22,6 @@ use ton_api::ton::ton_node::{RempMessageStatus, RempMessageLevel};
 #[path = "tests/test_ext_messages.rs"]
 mod tests;
 
-#[cfg(not(feature = "fast_finality"))]
 const MESSAGE_LIFETIME: u32 = 600; // seconds
 #[cfg(not(feature = "fast_finality"))]
 const MESSAGE_MAX_GENERATIONS: u8 = 3;
@@ -222,23 +221,6 @@ impl MessagesPool {
     }
 
     pub fn complete_messages(&self, to_delay: Vec<UInt256>, _to_delete: Vec<UInt256>, now: u32) -> Result<()> {
-        #[cfg(feature = "fast_finality")]
-        for id in &_to_delete {
-            let result = self.messages.remove_with(id, |_| {
-                log::debug!(
-                    target: EXT_MESSAGES_TRACE_TARGET,
-                    "complete_messages: removing external message {:x} while enumerating to_delete list",
-                    id,
-                );
-                true
-            });
-            if result.is_some() {
-                #[cfg(not(feature = "statsd"))]
-                metrics::decrement_gauge!("ext_messages_len", 1f64);
-                #[cfg(test)]
-                self.total_messages.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
         for id in &to_delay {
             let result = self.messages.remove_with(id, |(_, keeper)| {
                 if keeper.can_postpone() {
@@ -271,7 +253,6 @@ impl MessagesPool {
 
 #[cfg(test)]
 impl MessagesPool {
-    #[cfg(not(feature = "fast_finality"))]
     fn get_messages(self: &Arc<Self>, shard: &ShardIdent, now: u32) -> Result<Vec<(Arc<Message>, UInt256)>> {
         Ok(self.clone().iter(shard.clone(), now).collect())
     }

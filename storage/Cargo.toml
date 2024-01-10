@@ -46,4 +46,3 @@ git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
 
 [target.'cfg(windows)'.dependencies.rocksdb]
 git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
-

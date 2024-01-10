@@ -382,7 +382,8 @@ impl EngineOperations for Engine {
     ) -> Result<(BlockStuff, Option<BlockProofStuff>)> {
         loop {
             if let Some(handle) = self.load_block_handle(id)? {
-                if handle.has_data() {
+                let mut is_link = false;
+                if handle.has_data() && handle.has_proof_or_link(&mut is_link) {
                     let block = self.load_block(&handle).await?;
                     let proof = if !handle.is_queue_update() {
                         Some(self.load_block_proof(&handle, !id.shard().is_masterchain()).await?)

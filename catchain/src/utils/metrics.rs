@@ -57,10 +57,10 @@ impl Inner {
             histogram.get_inner().clear_with(|hist| data.extend_from_slice(hist));
             let entry =
                 histograms.entry(name).or_default();
-            *entry = data;
+            *entry = data.iter().map(|&x| x as u64).collect();
         }
 
-        Snapshot { counters, gauges, histograms: Default::default() }
+        Snapshot { counters, gauges, histograms }
     }
 }
 

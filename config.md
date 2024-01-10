@@ -45,4 +45,15 @@ Enables participation in validator REMP protocols. Default value is `true`.
 
   Before being sent to validators, any external REMP message is executed in test mode on a client
   (proper blockchain state is constructed, virtual machine is activated etc), and if the message
-  processing results in error, it is rejected on the client and not sent to validators.   
+  processing results in error, it is rejected on the client and not sent to validators.
+
+* `max_incoming_broadcast_delay_millis`: non-negative integer value. When external 
+  messages are sent to validators via broadcast (legacy mechanism), they come to all nodes 
+  in the network simultaneously, which may create a significant overload in 
+  REMP Catchain. To overcome this, the messages coming to the validators may be 
+  delayed for a random time, in a hope that only one copy of the message is
+  processed and transferred to REMP Catchain. The random time distribution of the message
+  copies gives enough time for the network to propagate message over it, so copies delayed
+  for longer periods will be easily identified as duplicates (the validator will
+  already have the same message received through Catchain from another validtor). 
+  The parameter specifies maximal delay. 

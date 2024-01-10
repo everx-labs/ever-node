@@ -24,6 +24,10 @@ use ton_types::{error, fail, Result, AccountId, SliceData, UInt256};
 #[path = "tests/test_messages.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "tests/test_messages.rs"]
+mod tests;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MsgEnvelopeStuff {
     env: MsgEnvelope,

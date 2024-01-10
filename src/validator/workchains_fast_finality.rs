@@ -139,69 +139,7 @@ fn get_possible_next_collator_range_for_shard(
     Ok(shards.get(0).map(|(_,collator)| collator.clone()))
 } */
 
-#[cfg(feature = "fast_finality")]
-fn get_validator_descrs_by_collator_range(
-    vset: &ValidatorSet,
-    cc_seqno: u32,
-    possible_validators: &Vec<CollatorRange>,
-    validator_must_be_single: bool,
-) -> Result<Option<ValidatorSubsetInfo>> {
-    if possible_validators.len() == 0 {
-        return Ok(None);
-    }
-
-    if validator_must_be_single && possible_validators.len() != 1 {
-        fail!("Too many validators for collating block");
-    }
-
-    let vset_len = vset.list().len();
-    let subset = possible_validators.iter().map(|rng|
-        vset.list().get(rng.collator as usize % vset_len)
-            .ok_or_else(|| error!("No validator no {} in validator set {:?}", rng.collator, vset))?
-            .clone()
-    ).collect();
-
-    let short_hash = ValidatorSet::calc_subset_hash_short(subset.as_slice(), cc_seqno)?;
-
-    Ok(Some(ValidatorSubsetInfo { validators: subset, short_hash, collator_range: possible_validators.clone() }))
-}
-
-#[cfg(feature = "fast_finality")]
-pub fn try_calc_prev_subset_for_workchain_fast_finality(
-    vset: &ValidatorSet,
-    cc_seqno: u32,
-    mc_state: &ShardStateStuff,
-    prev_shard: &ShardIdent
-) -> Result<Option<ValidatorSubsetInfo>> {
-
-    log::debug!(
-        target: "validator_manager",
-        "try_calc_prev_subset_for_workchain_fast_finality: mc_state: {}, prev_shard {}",
-        mc_state.block_id(), prev_shard
-    );
-
-    let shards = mc_state.shards()?;
-    let mut possible_validators = Vec::new();
-
-    shards.iterate_shards_for_workchain(prev_shard.workchain_id(), |ident, descr| {
-        let collators = descr.collators.ok_or_else(|| error!("{} has no collator info", ident))?;
-        let possible_next = get_possible_prev_collator_range_for_shard(&collators, &ident, &prev_shard)?;
-        if let Some(rng) = possible_next {
-            if !possible_validators.contains(&rng) {
-                possible_validators.push(rng);
-            }
-        };
-        Ok(true)
-    })?;
-
-    get_validator_descrs_by_collator_range(&vset, cc_seqno, &possible_validators, false)
-}
-
 /*
-#[cfg(feature = "fast_finality")]
-pub fn calc_session_validators_info_from_collator_range(v: &CollatorRange) -> Vec<Arc<SessionValidatorsInfo>> {
-    SessionValidatorsInfo::new()
-}
 */
 
 /* #[cfg(feature = "fast_finality")]

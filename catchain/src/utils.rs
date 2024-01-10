@@ -462,9 +462,13 @@ impl MetricsDumper {
 
         //compute metrics
 
+        let mut unprocessed_handlers = HashSet::new();
+
         for (key, handler) in &self.compute_handlers {
             if let Some(value) = handler(key, &metrics) {
                 metrics.insert(key.to_string(), value);
+            } else {
+                unprocessed_handlers.insert(key.to_string());
             }
         }
 
@@ -484,6 +488,16 @@ impl MetricsDumper {
                         },
                     );
                 }
+            }
+        }
+
+        //second pass for recursive compute handlers
+
+        for key in unprocessed_handlers {
+            if let Some(handler) = self.compute_handlers.get(&key) {
+                if let Some(value) = handler(&key, &metrics) {
+                    metrics.insert(key.to_string(), value);
+                }   
             }
         }
 

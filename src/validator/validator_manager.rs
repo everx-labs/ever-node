@@ -30,7 +30,7 @@ use crate::{
             ValidatorListHash, ValidatorSubsetInfo
         },
         out_msg_queue::OutMsgQueueInfoStuff,
-    },                                                                                                  
+    },
 };
 #[cfg(feature = "fast_finality")]
 use crate::validator::workchains_fast_finality::{
@@ -1283,14 +1283,19 @@ impl ValidatorManagerImpl {
         log::info!(target: "validator_manager", "{:32} {}", "session id", "st round shard");
         log::info!(target: "validator_manager", "{:-64}", "");
 
+        let mut queue_lengths : HashMap<UInt256, usize> = HashMap::new();
+
         // Validation shards statistics
         for (_, group) in self.validator_sessions.iter() {
-            /*
-            let remp_info_str = match group.get_reliable_message_queue().await {
-                Some(s) => format!(", remp {}", s.stats_string().await),
-                None => "".to_owned()
+            if let Some(qm) = group.get_reliable_message_queue().await {
+                match qm.get_messages_cnt().await {
+                    Some((session, cnt)) => {
+                        queue_lengths.insert(session, cnt);
+                        metrics::gauge!("remp_queue_len", cnt as f64, &[("shard", group.shard().to_string())]);
+                    }
+                    None => log::warn!(target: "remp", "Validator group {} has no current REMP session", group.info().await)
+                }
             };
-             */
 
             log::info!(target: "validator_manager", "{}", group.info().await);
             let status = group.get_status().await;
@@ -1301,11 +1306,19 @@ impl ValidatorManagerImpl {
         }
  
         if let Some(rm) = &self.remp_manager {
+            metrics::gauge!("remp_message_cache_size", rm.message_cache.all_messages_count() as f64);
             log::info!(target: "validator_manager", "Remp message cache stats: {}", rm.message_cache.message_stats());
-            for s in rm.catchain_store.list_catchain_sessions().await.iter() {
-                log::info!(target: "validator_manager", "{}", s);
+
+            for (s, shard_ident) in rm.catchain_store.list_catchain_sessions().await.iter() {
+                let queue_len = match queue_lengths.get(shard_ident) {
+                    Some(len) => format!(", queue_len = {}", len),
+                    None => "".to_owned()
+                };
+                log::info!(target: "validator_manager", "{}{}", s, queue_len);
             }
         }
+
+        log::trace!(target: "validator_manager", "======= sessions stats over =======");
     }
 
     /// For block `upper_id` find master cc range and block id --- shortest range with proper history.
@@ -1434,11 +1447,13 @@ impl ValidatorManagerImpl {
                         log::debug!(target: "validator_manager", "Processing slashing masterblock {}", mc_handle.id().seq_no);
                         self.slashing_manager.handle_masterchain_block(&mc_handle, &mc_state, &local_id, &self.engine).await;
                     }
-                    log::trace!(target: "validator_manager", "Updaing shards for masterblock {}", mc_handle.id().seq_no);
+                    log::trace!(target: "validator_manager", "Processing messages from masterblock {}", mc_handle.id().seq_no);
                     if let Some(bo) = &self.block_observer {
                         bo.process_master_block_handle(&mc_handle).await?;
                     }
+                    log::trace!(target: "validator_manager", "Updating shards according to masterblock {}", mc_handle.id().seq_no);
                     self.update_shards(mc_state).await?;
+                    log::trace!(target: "validator_manager", "Shards for masterblock {} updated", mc_handle.id().seq_no);
                 },
                 Err(e) => {
                     if self.engine.validation_status().allows_validate() {
@@ -1451,13 +1466,24 @@ impl ValidatorManagerImpl {
             }
 
             mc_handle = loop {
+                log::trace!(target: "validator_manager", "Checking stop engine");
                 if self.engine.check_stop() {
+                    log::trace!(target: "validator_manager", "Engine is stoped. Exiting from invocation loop (while loading block)");
                     return Ok(())
                 }
+                log::trace!(target: "validator_manager", "Checked stop engine: going on");
                 self.stats().await;
                 log::trace!(target: "validator_manager", "Waiting next applied masterblock after {}", mc_handle.id().seq_no);
                 match timeout(self.config.update_interval, self.engine.wait_next_applied_mc_block(&mc_handle, None)).await {
-                    Ok(r_res) => break r_res?.0,
+                    Ok(r_res) => {
+                        log::trace!(target: "validator_manager", "Got next applied master block (result): {}",
+                            match &r_res {
+                                Err(e) => format!("Err({})", e),
+                                Ok((h, _bs)) => format!("Ok({})", h.id())
+                            }
+                        );
+                        break r_res?.0
+                    },
                     Err(tokio::time::error::Elapsed{..}) => {
                         log::warn!(
                             target: "validator_manager", 
@@ -1469,6 +1495,7 @@ impl ValidatorManagerImpl {
             }
         }
 
+        log::info!(target: "validator_manager", "Engine is stopped. Exiting from invocation loop (while applying state)");
         Ok(())
     }
 }
@@ -1482,7 +1509,7 @@ pub fn start_validator_manager(
 ) {
     const CHECK_VALIDATOR_TIMEOUT: u64 = 60;    //secs
     runtime.clone().spawn(async move {
-        log::info!("checking if current node is a validator during {CHECK_VALIDATOR_TIMEOUT} secs");
+        log::info!(target: "validator_manager", "checking if current node is a validator during {CHECK_VALIDATOR_TIMEOUT} secs");
         engine.acquire_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
         while !engine.get_validator_status() {
             log::trace!(target: "validator_manager", "Not a validator, waiting...");
@@ -1490,6 +1517,7 @@ pub fn start_validator_manager(
             for _ in 0..CHECK_VALIDATOR_TIMEOUT {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 if engine.check_stop() {
+                    log::error!(target: "validator_manager", "Engine is stopped. exiting");
                     engine.release_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
                     return;
                 }
@@ -1514,6 +1542,7 @@ pub fn start_validator_manager(
         if let Err(e) = manager.invoke().await {
             log::error!(target: "validator_manager", "FATAL!!! Unexpected error in validator manager: {:?}", e);
         }
+        log::info!(target: "validator_manager", "Exiting, validator manager is stopped");
         engine.release_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
     });
 }

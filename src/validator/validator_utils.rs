@@ -24,8 +24,6 @@ use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
 
 use ton_block::{BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, ConfigParams, CryptoSignature, CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, Serializable, ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet};
-#[cfg(feature = "fast_finality")]
-use ton_block::CollatorRange;
 use ton_types::{
     error, fail, BuilderData, HashmapType, Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson, 
     Result, Sha256, UInt256
@@ -262,18 +260,6 @@ impl ValidatorSubsetInfo {
         ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno, self.validators.clone())
     }
 
-    #[cfg(feature = "fast_finality")]
-    pub fn get_single_collator_range(&self) -> Result<Option<CollatorRange>> {
-        match &self.collator_range[..] {
-            [a] => Ok(Some(a.clone())),
-            [] => Ok(None),
-            [..] => {
-                fail!("too many collator ranges in val. set: [{}]",
-                    self.collator_range.iter().map(|c| format!("{} ", c)).collect::<String>()
-                )
-            }
-        }
-    }
 /*
         if self.collator_range.len() > 1 {
             fail!("{} has too many collators: [{}]",
