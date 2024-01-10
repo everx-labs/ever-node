@@ -31,6 +31,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use ton_block::BlockIdExt;
 use ton_types::{error, fail, Result, UInt256};
 
+#[cfg(test)]
+#[path = "tests/test_archive_slice.rs"]
+mod tests;
+
 const DEFAULT_PKG_VERSION: u32 = 1;
 
 //#[derive(Debug)]

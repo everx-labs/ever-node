@@ -432,6 +432,36 @@ impl ShardStateStuff {
 
 }
 
+#[cfg(test)]
+impl ShardStateStuff {
+    pub fn read_from_file(
+        id: BlockIdExt, 
+        filename: impl AsRef<std::path::Path>,
+        #[cfg(feature = "telemetry")]
+        telemetry: &Arc<EngineTelemetry>,
+        allocated: &Arc<EngineAlloc>
+    ) -> Result<Arc<Self>> {
+        let mut bytes = std::fs::read(filename)?;
+        match id.seq_no() {
+            0 => Self::deserialize_zerostate(
+                id, 
+                &mut bytes,
+                #[cfg(feature = "telemetry")]
+                telemetry,
+                allocated
+            ),
+            _ => Self::deserialize_state_inmem(
+                id, 
+                Arc::new(bytes),
+                #[cfg(feature = "telemetry")]
+                telemetry,
+                allocated,
+                &|| false
+            )
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ShardHashesStuff {
     shards: ShardHashes
@@ -508,3 +538,6 @@ impl Deserializable for ShardHashesStuff {
     }
 }
 
+#[cfg(test)]
+#[path = "tests/test_shard_state.rs"]
+mod tests;

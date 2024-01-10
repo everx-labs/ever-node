@@ -18,6 +18,10 @@ use ton_types::{Result, types::UInt256, fail, read_boc};
 use adnl::common::{add_unbound_object_to_map, add_unbound_object_to_map_with_update};
 use ton_api::ton::ton_node::{RempMessageStatus, RempMessageLevel};
 
+#[cfg(test)]
+#[path = "tests/test_ext_messages.rs"]
+mod tests;
+
 const MESSAGE_LIFETIME: u32 = 600; // seconds
 const MESSAGE_MAX_GENERATIONS: u8 = 3;
 
@@ -225,6 +229,21 @@ impl MessagesPool {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl MessagesPool {
+    fn get_messages(self: &Arc<Self>, shard: &ShardIdent, now: u32) -> Result<Vec<(Arc<Message>, UInt256)>> {
+        Ok(self.clone().iter(shard.clone(), now).collect())
+    }
+
+    pub fn has_messages(&self) -> bool {
+        self.messages.iter().next().is_some()
+    }
+
+    pub fn clear(&mut self) {
+        self.messages.clear()
     }
 }
 

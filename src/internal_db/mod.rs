@@ -1187,6 +1187,18 @@ impl InternalDb {
         Ok(result)
     }
 
+    #[cfg(test)]
+    pub fn load_all_top_shard_blocks_raw(&self) -> Result<HashMap<TopBlockDescrId, Vec<u8>>> {
+        let _tc = TimeChecker::new(format!("load_all_top_shard_blocks_raw"), 100);
+        let mut result = HashMap::<TopBlockDescrId, Vec<u8>>::new();
+        self.shard_top_blocks_db.for_each(&mut |id_bytes, tsb_bytes| {
+            let id = TopBlockDescrId::from_bytes(&id_bytes)?;
+            result.insert(id, tsb_bytes.to_vec());
+            Ok(true)
+        })?;
+        Ok(result)
+    }
+
     pub fn remove_top_shard_block(&self, id: &TopBlockDescrId) -> Result<()> {
         let _tc = TimeChecker::new(format!("remove_top_shard_block {}", id), 50);
         self.shard_top_blocks_db.delete(&id.to_bytes()?)
@@ -1322,3 +1334,6 @@ impl InternalDb {
     }
 }
 
+#[cfg(test)]
+#[path = "../tests/test_internal_db.rs"]
+mod tests;

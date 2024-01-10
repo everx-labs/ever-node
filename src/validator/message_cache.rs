@@ -53,6 +53,10 @@ use ton_block::{
 };
 use ton_types::{error, fail, KeyId, SliceData, Result, UInt256};
 
+#[cfg(test)]
+#[path = "tests/test_message_cache.rs"]
+mod tests;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RmqMessage {
     pub message: Arc<Message>,

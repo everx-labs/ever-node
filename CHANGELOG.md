@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 - Added REMP broadcast message delayer
 - Removed delay for direct REMP messages
+- Added node tests
 
 ## Version 0.55.80
 
