@@ -12,7 +12,7 @@
 */
 
 use crate::{
-    block::{BlockStuff, BlockIdExtExtention}, block_proof::BlockProofStuff, boot,
+    block::{BlockStuff, BlockIdExtExtention, BlockKind}, block_proof::BlockProofStuff, boot,
     engine_traits::{
         ExternalDb, EngineAlloc, EngineOperations,
         OverlayOperations, PrivateOverlayOperations, Server,
@@ -506,6 +506,7 @@ impl Engine {
     pub const MASK_SERVICE_DB_RESTORE: u32                     = 0x0400;
     pub const MASK_SERVICE_ARCHIVES_GC: u32                    = 0x0800;
     pub const MASK_SERVICE_SS_CACHE_KEEPER: u32                = 0x1000;
+    pub const MASK_SERVICE_MESH_QUEUES_KEEPER: u32             = 0x2000;
     #[cfg(feature = "external_db")]
     pub const MASK_SERVICE_EXTERNAL_DB: u32                    = 0x2000;
 
@@ -1340,29 +1341,32 @@ impl Engine {
 
         let is_empty_queue_update = handle.is_empty_queue_update();
         let op_name = if pre_apply { "pre-applying" } else { "applying" };
-        let block_name = if let Some(wc) = handle.is_queue_update_for() {
-            if is_empty_queue_update {
-                format!("empty queue update for {}", wc)
-            } else {
-                format!("queue update for {}", wc)
-            }
-        } else {
-            "block".to_owned()
+        let block_name = match block.kind() {
+            BlockKind::Block => "block".to_owned(),
+            BlockKind::QueueUpdate { queue_update_for, empty } if !empty => 
+                format!("queue update for {}", queue_update_for),
+            BlockKind::QueueUpdate { queue_update_for, empty } if empty => 
+                format!("empty queue update for {}", queue_update_for),
+            BlockKind::MeshUpdate { network_id: u32 } => format!("mesh update from {}", u32),
+            kind => fail!("INTERNAL ERROR: unexpected block kind: {:?}", kind)
         };
+
         let id = block.id();
         log::debug!("Start {op_name} {block_name} {id}");
 
         let mut is_link = false;
-        let has_proof = handle.has_proof_or_link(&mut is_link);
-        let has_data = handle.has_data();
-        let is_queue_update = handle.is_queue_update();
-
-        if !((has_proof || is_queue_update) && (has_data || is_empty_queue_update)) {
-            fail!(
-                "Block must have proof ({}) or be queue update ({}) and data ({}) \
-                or be empty queue update ({}) saved before applying",
-                has_proof, is_queue_update, has_data, is_empty_queue_update
-            );
+        match block.kind() {
+            BlockKind::Block => {
+                if !handle.has_data() || !handle.has_proof_or_link(&mut is_link) {
+                    fail!("Block must have proof and data saved before applying");
+                }
+            },
+            BlockKind::QueueUpdate { queue_update_for, empty } => {
+                if !handle.has_data() && !empty {
+                    fail!("Queue update must have data saved before applying");
+                }
+            },
+            _ => ()
         }
 
         apply_block(handle, block, mc_seq_no, &(self.clone() as Arc<dyn EngineOperations>),
@@ -1371,7 +1375,7 @@ impl Engine {
         let gen_utime = block.gen_utime()?;
         let ago = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i32 - gen_utime as i32;
-        if block.id().shard().is_masterchain() {
+        if !block.is_mesh() && block.id().shard().is_masterchain() {
             if !pre_apply {
                 self.shard_blocks()
                     .update_shard_blocks(&self.load_state(block.id()).await?)

@@ -18,7 +18,7 @@ use crate::{
 use std::{ops::Deref, sync::Arc, time::Instant};
 use storage::block_handle_db::BlockHandle;
 use ton_types::{error, fail, Result};
-use ton_block::{BlockIdExt, MerkleProof, Deserializable, Serializable, ConnectedNwDescr, ShardIdent, ConnectedNwOutDescr};
+use ton_block::{BlockIdExt, MerkleProof, Deserializable, Serializable, ShardIdent, ConnectedNwOutDescr, OutMsgQueueInfo};
 
 pub const MAX_RECURSION_DEPTH: u32 = UNREGISTERED_CHAIN_MAX_LEN * 2;
 
@@ -42,7 +42,7 @@ pub async fn apply_block(
         calc_out_msg_queue(handle, block, &prev_ids, engine).await?;
         set_prev_ids(&handle, &prev_ids, engine.deref())?;
         set_next_ids(&handle, &prev_ids, engine.deref())?;
-    } else if handle.is_mesh_update() {
+    } else if handle.is_mesh() {
         calc_mesh_queues(handle, block, &prev_ids, engine).await?;
         set_prev_ids(&handle, &prev_ids, engine.deref())?;
         set_next_ids(&handle, &prev_ids, engine.deref())?;
@@ -230,11 +230,12 @@ pub async fn calc_mesh_queues(
         prev_ids: &(BlockIdExt, Option<BlockIdExt>),
         engine: &Arc<dyn EngineOperations>
     ) -> Result<()> {
-        let old_queue_root = engine.load_mesh_queue(
+        let old_queue = engine.load_mesh_queue(
             mesh_update.network_short_id(),
             &prev_ids.0,
             &src_shard
         )?;
+        let old_queue_root = old_queue.write_to_new_cell()?.into_cell()?;
 
         let old_hash = old_queue_root.repr_hash();
         if old_hash != cn_descr.out_queue_update.old_hash {
@@ -244,7 +245,7 @@ pub async fn calc_mesh_queues(
             );
         }
 
-        let new_queue_root = if cn_descr.out_queue_update.old_hash != cn_descr.out_queue_update.new_hash {
+        let new_queue = if cn_descr.out_queue_update.old_hash != cn_descr.out_queue_update.new_hash {
             let new_queue_root = mesh_update.mesh_update(&src_shard)?.apply_for(&old_queue_root)?;
             let new_hash = new_queue_root.repr_hash();
             if new_queue_root.repr_hash() != cn_descr.out_queue_update.new_hash {
@@ -253,16 +254,16 @@ pub async fn calc_mesh_queues(
                     mesh_update.id(), src_shard, new_hash, cn_descr.out_queue_update.new_hash
                 );
             }
-            new_queue_root
+            Arc::new(OutMsgQueueInfo::construct_from_cell(new_queue_root)?)
         } else {
-            old_queue_root
+            old_queue
         };
 
         engine.store_mesh_queue(
             mesh_update.network_short_id(),
             &mesh_update.id(),
             &src_shard,
-            new_queue_root
+            new_queue
         )?;
 
         Ok(())

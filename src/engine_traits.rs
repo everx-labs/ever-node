@@ -48,9 +48,9 @@ use ton_api::ton::ton_node::{
 };
 use ton_block::{
     AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, ShardAccount,
-    MASTERCHAIN_ID, Deserializable, ConfigParams, OutMsgQueue
+    MASTERCHAIN_ID, Deserializable, ConfigParams, OutMsgQueue, OutMsgQueueInfo
 };
-use ton_types::{error, AccountId, KeyId, KeyOption, Result, UInt256, Cell};
+use ton_types::{error, AccountId, KeyId, KeyOption, Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
 use crate::config::{CollatorConfig, CollatorTestBundlesGeneralConfig};
 
@@ -944,9 +944,9 @@ pub trait EngineOperations : Sync + Send {
     fn store_mesh_queue(
         &self,
         nw_id: u32,
-        handle: &BlockIdExt,
+        mc_block_id: &BlockIdExt,
         shard: &ShardIdent,
-        queue_root: Cell
+        queue: Arc<OutMsgQueueInfo>
     ) -> Result<()> {
         unimplemented!()
     }
@@ -956,10 +956,16 @@ pub trait EngineOperations : Sync + Send {
         nw_id: u32,
         mc_block_id: &BlockIdExt,
         shard: &ShardIdent
-    ) -> Result<Cell> {
+    ) -> Result<Arc<OutMsgQueueInfo>> {
         unimplemented!()
     }
 
+    fn create_handle_for_mesh(
+        &self,
+        block: &BlockStuff // mesh kit or update
+    ) -> Result<BlockResult> {
+        unimplemented!()
+    }
 
 
 }

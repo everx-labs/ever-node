@@ -34,6 +34,7 @@ mod types;
 mod validating_utils;
 mod validator;
 mod shard_states_keeper;
+mod mesh_queues_keeper;
 
 #[cfg(feature = "fast_finality")]
 mod shard_blocks_fast_finality;

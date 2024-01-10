@@ -11,11 +11,11 @@
 * limitations under the License.
 */
 
-use crate::{block_handle_db, traits::Serializable, block_db};
+use crate::{block_handle_db, traits::Serializable};
 use std::{io::{Read, Write}, sync::atomic::{AtomicU64, Ordering}};
 #[cfg(test)]
 use std::sync::atomic::AtomicU32;
-use ton_block::{Block, INVALID_WORKCHAIN_ID};
+use ton_block::Block;
 use ton_types::{ByteOrderRead, Result};
 
 #[derive(Debug, Default)]
@@ -50,10 +50,10 @@ impl BlockMeta {
         Ok(Self::with_data(flags, info.gen_utime().as_u32(), info.start_lt(), 0, queue_update_for as u32))
     }
 
-    pub fn from_mesh_update(block: &Block, source_network_id: u32) -> Result<Self> {
+    pub fn from_mesh(block: &Block, source_network_id: u32) -> Result<Self> {
         let info = block.read_info()?;
         Ok(Self::with_data(
-            block_handle_db::FLAG_IS_MESH_UPDATE, 
+            block_handle_db::FLAG_IS_MESH, 
             info.gen_utime().as_u32(),
             info.start_lt(),
             0,
@@ -115,7 +115,7 @@ impl Serializable for BlockMeta {
         writer.write_all(&self.gen_lt.to_le_bytes())?;
         let flags = block_handle_db::FLAG_IS_QUEUE_UPDATE | 
                     block_handle_db::FLAG_IS_EMPTY_QUEUE_UPDATE |
-                    block_handle_db::FLAG_IS_MESH_UPDATE;
+                    block_handle_db::FLAG_IS_MESH;
         if self.flags() & flags != 0 {
             writer.write_all(&self.params.to_le_bytes())?;
         }
@@ -132,7 +132,7 @@ impl Serializable for BlockMeta {
         let flags = (flags >> 32) as u32;
         let checked_flags = block_handle_db::FLAG_IS_QUEUE_UPDATE | 
                             block_handle_db::FLAG_IS_EMPTY_QUEUE_UPDATE |
-                            block_handle_db::FLAG_IS_MESH_UPDATE;
+                            block_handle_db::FLAG_IS_MESH;
         let params = if flags & checked_flags != 0{
             reader.read_le_u32()?
         } else {

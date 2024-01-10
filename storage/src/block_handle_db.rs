@@ -52,7 +52,7 @@ pub(crate) const FLAG_IS_QUEUE_UPDATE: u32       = 0x00004000;
 pub(crate) const FLAG_IS_EMPTY_QUEUE_UPDATE: u32 = 0x00008000;
 const FLAG_STATE_SAVED: u32                      = 0x00010000;
 const FLAG_HAS_FULL_ID: u32                      = 0x00020000;
-pub(crate) const FLAG_IS_MESH_UPDATE: u32        = 0x00040000;
+pub(crate) const FLAG_IS_MESH: u32               = 0x00040000;
 
 
 // not serializing flags (possible flags - 1, 2, 4, 8)
@@ -393,8 +393,8 @@ impl BlockHandle {
         self.is_flag_set(FLAG_IS_QUEUE_UPDATE)
     }
 
-    pub fn is_mesh_update(&self) -> bool {
-        self.is_flag_set(FLAG_IS_MESH_UPDATE)
+    pub fn is_mesh(&self) -> bool {
+        self.is_flag_set(FLAG_IS_MESH)
     }
 
     pub fn is_empty_queue_update(&self) -> bool {

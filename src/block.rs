@@ -17,7 +17,7 @@ use std::io::Write;
 use ton_block::{
     Block, BlockIdExt, BlkPrevInfo, Deserializable, ExtBlkRef, ShardDescr, ShardIdent, 
     ShardHashes, HashmapAugType, MerkleProof, Serializable, ConfigParams, OutQueueUpdate, 
-    MeshMsgQueueUpdates, MeshMsgQueuesKit, ConnectedNwDescrExt, MerkleUpdate,
+    MeshMsgQueueUpdates, MeshMsgQueuesKit, ConnectedNwDescrExt, MerkleUpdate, OutMsgQueueInfo,
 };
 use ton_types::{
     Cell, Result, types::UInt256, BocReader, error, fail, HashmapType, UsageTree,
@@ -41,11 +41,20 @@ pub struct BlockPrevStuff {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-enum BlockKind {
+pub enum BlockKind {
+    Block,
+    QueueUpdate { queue_update_for: i32, empty: bool },
+    MeshKit { network_id: u32 },
+    MeshUpdate { network_id: u32 },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum BlockOrigin {
     Block(Block),
     QueueUpdate {
         block_part: Block,
         queue_update_for: i32,
+        empty: bool,
     },
     MeshUpdate {
         block_part: Block,
@@ -58,7 +67,7 @@ enum BlockKind {
         network_id: u32,
     }
 }
-impl Default for BlockKind {
+impl Default for BlockOrigin {
     fn default() -> Self {
         Self::Block(Block::default())
     }
@@ -71,7 +80,7 @@ impl Default for BlockKind {
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct BlockStuff {
     id: BlockIdExt,
-    block: BlockKind,
+    block: BlockOrigin,
     root: Cell,
     data: Arc<Vec<u8>>, // Arc is used to make cloning more lightweight
 }
@@ -92,18 +101,27 @@ impl BlockStuff {
         if id.root_hash != root.repr_hash() {
             fail!("wrong root hash for {}", id)
         }
-        let block = BlockKind::Block(Block::construct_from_cell(root.clone())?);
+        let block = BlockOrigin::Block(Block::construct_from_cell(root.clone())?);
         Ok(Self { id, block, root, data, ..Default::default() })
     }
 
-    pub fn deserialize_queue_update(id: BlockIdExt, queue_update_for: i32, data: Vec<u8>) -> Result<Self> {
+    pub fn deserialize_queue_update(
+        id: BlockIdExt,
+        queue_update_for: i32,
+        empty: bool,
+        data: Vec<u8>
+    ) -> Result<Self> {
         let data = Arc::new(data);
         let root = BocReader::new().read_inmem(data.clone())?.withdraw_single_root()?;
         let merkle_proof = MerkleProof::construct_from_cell(root.clone())?;
         if id.root_hash != merkle_proof.hash {
             fail!("wrong merkle proof hash for {}", id)
         }
-        let block = BlockKind::QueueUpdate{block_part: merkle_proof.virtualize()?, queue_update_for};
+        let block = BlockOrigin::QueueUpdate{
+            block_part: merkle_proof.virtualize()?, 
+            queue_update_for,
+            empty
+        };
         Ok(Self { id, block, root, data, ..Default::default() })
     }
 
@@ -120,7 +138,7 @@ impl BlockStuff {
             root_hash: root.repr_hash(),
             file_hash,
         };
-        Ok(Self { id, block: BlockKind::Block(block), root, data: data, ..Default::default() })
+        Ok(Self { id, block: BlockOrigin::Block(block), root, data: data, ..Default::default() })
     }
 
     #[cfg(test)]
@@ -141,15 +159,25 @@ impl BlockStuff {
         }
         Ok(BlockStuff {
             id,
-            block: BlockKind::Block(block),
+            block: BlockOrigin::Block(block),
             root: Cell::default(),
             data: Arc::new(vec!(0xfe; 10_000)),
             ..Default::default()
         })
     }
 
+    pub fn kind(&self) -> BlockKind {
+        match &self.block {
+            BlockOrigin::Block(_) => BlockKind::Block,
+            BlockOrigin::QueueUpdate{queue_update_for, empty, ..} =>
+                BlockKind::QueueUpdate{queue_update_for: *queue_update_for, empty: *empty },
+            BlockOrigin::MeshUpdate{network_id, ..} => BlockKind::MeshUpdate{network_id: *network_id},
+            BlockOrigin::MeshKit{network_id, ..} => BlockKind::MeshKit{network_id: *network_id},
+        }
+    }
+
     pub fn block(&self) -> Result<&Block> {
-        if let BlockKind::Block(block) = &self.block {
+        if let BlockOrigin::Block(block) = &self.block {
             Ok(block)
         } else {
             fail!("Block {} is not a BlockKind::Block", self.id)
@@ -158,10 +186,10 @@ impl BlockStuff {
 
     pub fn virt_block(&self) -> Result<&Block> {
         match &self.block {
-            BlockKind::Block(block) => Ok(block),
-            BlockKind::QueueUpdate{block_part, ..} => Ok(block_part),
-            BlockKind::MeshUpdate{block_part, ..} => Ok(block_part),
-            BlockKind::MeshKit{block_part, ..} => Ok(block_part),
+            BlockOrigin::Block(block) => Ok(block),
+            BlockOrigin::QueueUpdate{block_part, ..} => Ok(block_part),
+            BlockOrigin::MeshUpdate{block_part, ..} => Ok(block_part),
+            BlockOrigin::MeshKit{block_part, ..} => Ok(block_part),
         }
     }
 
@@ -185,41 +213,45 @@ impl BlockStuff {
     pub fn fake_with_block(id: BlockIdExt, block: Block) -> Self {
         BlockStuff {
             id,
-            block: BlockKind::Block(block),
+            block: BlockOrigin::Block(block),
             root: Cell::default(),
             data: Arc::new(vec!(0xfe; 10_000)),
         }
     }
 
     pub fn is_queue_update(&self) -> bool {
-        matches!(self.block, BlockKind::QueueUpdate{..})
+        matches!(self.block, BlockOrigin::QueueUpdate{..})
     }
 
     pub fn is_queue_update_for(&self) -> Option<i32> {
         match &self.block {
-            BlockKind::QueueUpdate{queue_update_for, ..} => Some(*queue_update_for),
+            BlockOrigin::QueueUpdate{queue_update_for, ..} => Some(*queue_update_for),
             _ => None
         }
     }
 
-    pub fn is_mesh_update(&self) -> bool {
-        matches!(self.block, BlockKind::MeshUpdate{..})
+    pub fn is_mesh(&self) -> bool {
+        matches!(self.block, BlockOrigin::MeshUpdate{..} | BlockOrigin::MeshKit{..})
     }
 
     pub fn is_mesh_kit(&self) -> bool {
-        matches!(self.block, BlockKind::MeshKit{..})
+        matches!(self.block, BlockOrigin::MeshKit{..})
+    }
+
+    pub fn is_mesh_update(&self) -> bool {
+        matches!(self.block, BlockOrigin::MeshUpdate{..})
     }
 
     pub fn is_usual_block(&self) -> bool {
-        matches!(self.block, BlockKind::Block(_))
+        matches!(self.block, BlockOrigin::Block(_))
     }
 
     pub fn id(&self) -> &BlockIdExt { &self.id }
 
     pub fn network_short_id(&self) -> u32 {
         match &self.block {
-            BlockKind::MeshUpdate{network_id, ..} => *network_id,
-            BlockKind::MeshKit{network_id, ..} => *network_id,
+            BlockOrigin::MeshUpdate{network_id, ..} => *network_id,
+            BlockOrigin::MeshKit{network_id, ..} => *network_id,
             _ => 0
         }
     }
@@ -392,7 +424,6 @@ impl BlockStuff {
         Ok(tbs)
     }
 
-    #[cfg(feature = "external_db")]
     pub fn top_blocks_all(&self) -> Result<Vec<BlockIdExt>> {
         let mut shards = Vec::new();
         self
@@ -442,7 +473,7 @@ impl BlockStuff {
 
     pub fn mesh_update(&self, src_shard: &ShardIdent) -> Result<MerkleUpdate> {
         match &self.block {
-            BlockKind::MeshUpdate{queue_updates, ..} => {
+            BlockOrigin::MeshUpdate{queue_updates, ..} => {
                 let mut update = queue_updates.get_queue_update(src_shard)?
                     .ok_or_else(|| error!("Block {} doesn't contain queue update for shard {}", self.id(), src_shard))?;
                 Ok(update)
@@ -450,6 +481,18 @@ impl BlockStuff {
             _ => fail!("Block {} is not a mesh update", self.id())
         }
     }
+
+    pub fn mesh_queue(&self, src_shard: &ShardIdent) -> Result<Arc<OutMsgQueueInfo>> {
+        match &self.block {
+            BlockOrigin::MeshKit{queues, ..} => {
+                let q = queues.get_queue(src_shard)?
+                    .ok_or_else(|| error!("Block {} doesn't contain queue from shard {}", self.id(), src_shard))?;
+                Ok(Arc::new(q))
+            },
+            _ => fail!("Block {} is not a mesh kit", self.id())
+        }
+    }
+
 }
 
 pub trait BlockIdExtExtention {
@@ -580,7 +623,7 @@ pub fn construct_and_check_prev_stuff(
 #[allow(dead_code)]
 pub fn make_queue_update_from_block(block_stuff: &BlockStuff, update_for_wc: i32) -> Result<BlockStuff> {
     let queue_update_bytes = make_queue_update_from_block_raw(block_stuff, update_for_wc)?;
-    BlockStuff::deserialize_queue_update(block_stuff.id().clone(), update_for_wc, queue_update_bytes)
+    BlockStuff::deserialize_queue_update(block_stuff.id().clone(), update_for_wc, false, queue_update_bytes)
 }
 
 pub fn make_queue_update_from_block_raw(block_stuff: &BlockStuff, update_for_wc: i32) -> Result<Vec<u8>> {

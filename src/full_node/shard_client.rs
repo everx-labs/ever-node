@@ -422,7 +422,7 @@ pub async fn apply_proof_chain(
         log::trace!("apply_proof_chain: next proof {}", id);
 
         let data = merkle_proof.write_to_bytes()?;
-        let block_stuff = BlockStuff::deserialize_queue_update(id.clone(), own_wc, data)?;
+        let block_stuff = BlockStuff::deserialize_queue_update(id.clone(), own_wc, true, data)?;
         let queue_update = block_stuff.get_queue_update_for(own_wc)?;
 
         log::trace!("apply_proof_chain: apply {}, is_empty {}", id, queue_update.is_empty);
@@ -545,7 +545,8 @@ pub async fn process_block_broadcast(
         block = BlockStuff::deserialize_queue_update(
             broadcast.id().clone(),
             target_wc,
-            broadcast.data()
+            false,
+            broadcast.data(),
         )?;
         BlockProofStuff::check_queue_update(&block)?;
 

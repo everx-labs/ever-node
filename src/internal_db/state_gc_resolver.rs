@@ -25,6 +25,7 @@ pub struct AllowStateGcSmartResolver {
     last_processed_block: AtomicU32,
     min_ref_mc_block: AtomicU32,
     min_actual_ss: lockfree::map::Map<ShardIdent, AtomicU32>,
+    min_mesh_mc_block: lockfree::map::Map<u32, AtomicU32>,
     life_time_sec: u64,
     pinned_roots: parking_lot::RwLock<HashMap<BlockIdExt, u32>>,
 }
@@ -35,6 +36,7 @@ impl AllowStateGcSmartResolver {
             last_processed_block: AtomicU32::new(0),
             min_ref_mc_block: AtomicU32::new(0),
             min_actual_ss: lockfree::map::Map::new(),
+            min_mesh_mc_block: lockfree::map::Map::new(),
             life_time_sec,
             pinned_roots: parking_lot::RwLock::new(HashMap::new()),
         }
@@ -98,6 +100,30 @@ impl AllowStateGcSmartResolver {
                         );
                     }
                 }
+
+                let top_mesh_blocks = min_mc_state.mesh_top_blocks()?;
+                for (nw_id, id) in top_mesh_blocks {
+                    add_unbound_object_to_map_with_update(
+                        &self.min_mesh_mc_block,
+                        nw_id,
+                        |found| if let Some(a) = found {
+                            let old_val = a.fetch_max(id.seq_no(), Ordering::Relaxed);
+                            if old_val != id.seq_no() {
+                                log::info!(
+                                    "AllowStateGcSmartResolver::advance: updated min mesh block for network {}: {} -> {}",
+                                    nw_id, old_val, id.seq_no()
+                                );
+                            }
+                            Ok(None)
+                        } else {
+                            log::info!(
+                                "AllowStateGcSmartResolver::advance: added min mesh block for network {}: {}",
+                                nw_id, id.seq_no()
+                            );
+                            Ok(Some(AtomicU32::new(id.seq_no())))
+                        }
+                    )?;
+                }
             }
             Ok(true)
         } else {
@@ -107,7 +133,7 @@ impl AllowStateGcSmartResolver {
 
     pub fn pin_state(&self, block_id: &BlockIdExt, saved_at: u64, gc_utime: u64) -> Result<bool> {
         let mut pinned_roots = self.pinned_roots.write();
-        let allow = AllowStateGcSmartResolver::allow_state_gc(self, block_id, saved_at, gc_utime)?;
+        let allow = AllowStateGcSmartResolver::allow_state_gc(self, 0, block_id, saved_at, gc_utime)?;
         if allow {
             return Ok(false);
         }
@@ -150,25 +176,42 @@ impl AllowStateGcSmartResolver {
         Ok(())
     }
 
-    fn allow_state_gc(&self, block_id: &BlockIdExt, saved_at: u64, gc_utime: u64) -> Result<bool> {
+    fn allow_state_gc(
+        &self,
+        nw_id: u32, // connected network id; zero for own.
+        block_id: &BlockIdExt,
+        saved_at: u64,
+        gc_utime: u64
+    ) -> Result<bool> {
         if gc_utime > saved_at && gc_utime - saved_at < self.life_time_sec {
             return Ok(false)
         }
-        if block_id.shard().is_masterchain() {
-            if block_id.seq_no() != 0 { // we need zerostate
-                let min_ref_mc_block = self.min_ref_mc_block.load(Ordering::Relaxed);
-                return Ok(block_id.seq_no() < min_ref_mc_block);
+        if nw_id == 0 {
+            if block_id.shard().is_masterchain() {
+                if block_id.seq_no() != 0 { // we need zerostate
+                    let min_ref_mc_block = self.min_ref_mc_block.load(Ordering::Relaxed);
+                    return Ok(block_id.seq_no() < min_ref_mc_block);
+                }
+            } else {
+                if let Some(kv) = self.min_actual_ss.get(block_id.shard()) {
+                    let min_actual = kv.val().load(Ordering::Relaxed);
+                    return Ok(block_id.seq_no() < min_actual);
+                } else {
+                    for kv in self.min_actual_ss.iter() {
+                        if block_id.shard().intersect_with(kv.key()) {
+                            let min_actual = kv.val().load(Ordering::Relaxed); 
+                            return Ok(block_id.seq_no() < min_actual);
+                        }
+                    }
+                }
             }
         } else {
-            if let Some(kv) = self.min_actual_ss.get(block_id.shard()) {
-                let min_actual = kv.val().load(Ordering::Relaxed);
-                return Ok(block_id.seq_no() < min_actual);
+            if !block_id.shard().is_masterchain() {
+                fail!("Non-masterchain block id is not supported for a connected network (mesh)")
             } else {
-                for kv in self.min_actual_ss.iter() {
-                    if block_id.shard().intersect_with(kv.key()) {
-                        let min_actual = kv.val().load(Ordering::Relaxed); 
-                        return Ok(block_id.seq_no() < min_actual);
-                    }
+                if let Some(kv) = self.min_mesh_mc_block.get(&nw_id) {
+                    let min_mesh = kv.val().load(Ordering::Relaxed);
+                    return Ok(block_id.seq_no() < min_mesh);
                 }
             }
         }
@@ -177,10 +220,16 @@ impl AllowStateGcSmartResolver {
 }
 
 impl AllowStateGcResolver for AllowStateGcSmartResolver {
-    fn allow_state_gc(&self, block_id: &BlockIdExt, saved_at: u64, gc_utime: u64) -> Result<bool> {
-        Ok(
-            AllowStateGcSmartResolver::allow_state_gc(self, block_id, saved_at, gc_utime)? &&
-            self.pinned_roots.read().get(block_id).map(|c| *c == 0).unwrap_or(true)
-        )
+    fn allow_state_gc(
+        &self,
+        nw_id: u32, // connected network id; zero for own.
+        block_id: &BlockIdExt,
+        saved_at: u64,
+        gc_utime: u64
+    ) -> Result<bool> {
+        let old = AllowStateGcSmartResolver::allow_state_gc(self, nw_id, block_id, saved_at, gc_utime)?;
+        let pinned = nw_id == 0 &&
+                     self.pinned_roots.read().get(block_id).map(|c| *c == 0).unwrap_or(true);
+        Ok(old && !pinned)
     }
 }

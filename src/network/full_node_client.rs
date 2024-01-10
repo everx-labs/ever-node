@@ -777,7 +777,7 @@ Ok(if key_block {
                     good_peer,
                     0
                 ).await?;
-                BlockStuff::deserialize_queue_update(id.clone(), target_wc, update_bytes)
+                BlockStuff::deserialize_queue_update(id.clone(), target_wc, false, update_bytes)
             }
         }
     }

@@ -700,7 +700,7 @@ async fn test_stats() {
             db.create_or_load_block_handle(
                 &master_state_id,
                 None,
-                None,
+                BlockKind::Block,
                 Some(1),
                 None
             ).unwrap()._to_created().unwrap();

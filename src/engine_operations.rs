@@ -12,7 +12,7 @@
 */
 
 use crate::{
-    block::BlockStuff, block_proof::BlockProofStuff, 
+    block::{BlockStuff, BlockKind}, block_proof::BlockProofStuff, 
     config::{CollatorTestBundlesGeneralConfig, CollatorConfig}, engine::{Engine, EngineFlags},
     engine_traits::{
         ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, Server,
@@ -59,7 +59,7 @@ use ton_api::{
 };
 use ton_block::{
     MASTERCHAIN_ID, SHARD_FULL, GlobalCapabilities, OutMsgQueue,
-    BlockIdExt, AccountIdPrefixFull, ShardIdent, Message
+    BlockIdExt, AccountIdPrefixFull, ShardIdent, Message, OutMsgQueueInfo
 };
 #[cfg(feature="workchains")]
 use ton_block::{BASE_WORKCHAIN_ID, INVALID_WORKCHAIN_ID};
@@ -507,12 +507,29 @@ impl EngineOperations for Engine {
         block: &BlockStuff // virt block constructed from proof of update 
                            // (block's BOC contains only queue update, other cells are pruned)
     ) -> Result<BlockResult> {
-        let target_wc = block.is_queue_update_for()
-            .ok_or_else(|| error!("Block {} is not a queue update", block.id()))?;
+        if !block.is_queue_update() {
+            fail!("{} is not a queue update", block.id());
+        }
         self.db().create_or_load_block_handle(
             block.id(),
             Some(block.virt_block()?),
-            Some((target_wc, true)),
+            block.kind(),
+            None,
+            None
+        )
+    }
+
+    fn create_handle_for_mesh(
+        &self,
+        block: &BlockStuff // mesh kit or update
+    ) -> Result<BlockResult> {
+        if !block.is_mesh() {
+            fail!("{} is not a mesh kit or update", block.id());
+        }
+        self.db().create_or_load_block_handle(
+            block.id(),
+            Some(block.virt_block()?),
+            block.kind(),
             None,
             None
         )
@@ -614,7 +631,7 @@ impl EngineOperations for Engine {
         let handle = self.db().create_or_load_block_handle(
             state.block_id(), 
             None,
-            None,
+            BlockKind::Block,
             Some(state.state()?.gen_time()),
             None
         )?.to_non_updated().ok_or_else(
@@ -765,9 +782,11 @@ impl EngineOperations for Engine {
         if handle.is_applied() {
             return Ok(false);
         }
-        self.db().assign_mc_ref_seq_no(handle, mc_seq_no, None)?;
-        if handle.id().seq_no() != 0 {
-            self.db().archive_block(handle.id(), None).await?;
+        if !handle.is_mesh() {
+            self.db().assign_mc_ref_seq_no(handle, mc_seq_no, None)?;
+            if handle.id().seq_no() != 0 {
+                self.db().archive_block(handle.id(), None).await?;
+            }
         }
         if self.db().store_block_applied(handle, None)? {
             #[cfg(feature = "telemetry")]
@@ -1266,6 +1285,56 @@ impl EngineOperations for Engine {
             }
         }
         None
+    }
+
+    // THE MESH
+
+    fn network_short_id(&self) -> u32 {
+        unimplemented!()
+    }
+
+    fn load_last_mesh_key_block_id(&self, nw_id: u32) -> Result<Option<Arc<BlockIdExt>>> {
+        unimplemented!()
+    }
+
+    fn save_last_mesh_key_block_id(&self, nw_id: u32, id: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn load_last_mesh_processed_hardfork(&self, nw_id: u32) -> Result<Option<Arc<BlockIdExt>>> {
+        unimplemented!()
+    }
+
+    fn save_last_mesh_processed_hardfork(&self, nw_id: u32, id: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn download_mesh_kit(&self, nw_id: u32, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
+        unimplemented!()
+    }
+
+    async fn download_latest_mesh_kit(&self, nw_id: u32) -> Result<(BlockStuff, BlockProofStuff)> {
+        unimplemented!()
+    }
+
+    fn store_mesh_queue(
+        &self,
+        nw_id: u32,
+        mc_block_id: &BlockIdExt,
+        shard: &ShardIdent,
+        queue: Arc<OutMsgQueueInfo>
+    ) -> Result<()> {
+        self.shard_states_keeper()
+            .mesh_queues_keeper().store_mesh_queue(nw_id, mc_block_id, shard, queue)
+    }
+
+    fn load_mesh_queue(
+        &self,
+        nw_id: u32,
+        mc_block_id: &BlockIdExt,
+        shard: &ShardIdent
+    ) -> Result<Arc<OutMsgQueueInfo>> {
+        self.shard_states_keeper().mesh_queues_keeper().load_mesh_queue(nw_id, mc_block_id, shard)
     }
 }
 

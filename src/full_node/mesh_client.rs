@@ -371,7 +371,7 @@ impl<'a> Boot<'a> {
             }
 
             // Download given mesh kit (mc block + queues) or latest one
-            let (block, proof) = if let Some(id) = id {
+            let (mesh_kit, mesh_kit_proof) = if let Some(id) = id {
                 log::info!("{}: downloading mesh kit {}...", self.descr, id);
                 match self.engine.download_mesh_kit(self.nw_id, id).await {
                     Ok(r) => r,
@@ -392,30 +392,30 @@ impl<'a> Boot<'a> {
                     }
                 }
             };
-            log::info!("{}: downloaded mesh kit {}", self.descr, block.id());
+            log::info!("{}: downloaded mesh kit {}", self.descr, mesh_kit.id());
 
             // Check proof
-            let key_block_seqno = block.virt_block()?.read_info()?.prev_key_block_seqno();
+            let key_block_seqno = mesh_kit.virt_block()?.read_info()?.prev_key_block_seqno();
             if let Some(zerostate) = last_key_block_proof.zerostate() {
                 if key_block_seqno != 0 {
                     if id.is_some() {
                         log::warn!(
                             "{}: mesh kit {} is signed by block #{}, not by zerostate. \
                             Will try to download latest mesh kit.",
-                            self.descr, block.id(), key_block_seqno
+                            self.descr, mesh_kit.id(), key_block_seqno
                         );
                         id = None;
                         continue 'top;
                     } else {
                         log::warn!("{}: mesh kit {} is signed by block #{}, not by zerostate",
-                            self.descr, block.id(), key_block_seqno);
+                            self.descr, mesh_kit.id(), key_block_seqno);
                         futures_timer::Delay::new(Duration::from_secs(1)).await;
                         continue 'top;
                     }
                 }
 
-                if let Err(e) = proof.check_with_master_state(zerostate) {
-                    log::warn!("{}: mesh kit {} check failed: {}", self.descr, block.id(), e);
+                if let Err(e) = mesh_kit_proof.check_with_master_state(zerostate) {
+                    log::warn!("{}: mesh kit {} check failed: {}", self.descr, mesh_kit.id(), e);
                     futures_timer::Delay::new(Duration::from_secs(1)).await;
                     continue 'top;
                 }
@@ -427,21 +427,21 @@ impl<'a> Boot<'a> {
                         log::warn!(
                             "{}: mesh kit {} is signed by block #{}, not by {}. \
                             Will try to download latest mesh kit.",
-                            self.descr, block.id(), key_block_seqno, last_key_block_proof.id()
+                            self.descr, mesh_kit.id(), key_block_seqno, last_key_block_proof.id()
                         );
                         id = None;
                         futures_timer::Delay::new(Duration::from_secs(1)).await;
                         continue 'top;
                     } else {
                         log::warn!("{}: mesh kit {} is signed by block #{}, not by {}",
-                            self.descr, block.id(), key_block_seqno, last_key_block_proof.id());
+                            self.descr, mesh_kit.id(), key_block_seqno, last_key_block_proof.id());
                         futures_timer::Delay::new(Duration::from_secs(1)).await;
                         continue 'top;
                     }
                 }
 
-                if let Err(e) = proof.check_with_prev_key_block_proof(last_key_block_proof) {
-                    log::warn!("{}: mesh kit {} check failed: {}", self.descr, block.id(), e);
+                if let Err(e) = mesh_kit_proof.check_with_prev_key_block_proof(last_key_block_proof) {
+                    log::warn!("{}: mesh kit {} check failed: {}", self.descr, mesh_kit.id(), e);
                     futures_timer::Delay::new(Duration::from_secs(1)).await;
                     continue 'top;
                 }
@@ -449,15 +449,35 @@ impl<'a> Boot<'a> {
                 fail!("INTERNAL ERROR: there is no both zerostate and prev key block proof");
             }
 
-            // TODO: Save
+            // Save queues
+            let mut ids = mesh_kit.top_blocks_all()?;
+            ids.push(mesh_kit.id().clone());
 
+            for id in ids {
+                let queue = match mesh_kit.mesh_queue(id.shard()) {
+                    Ok(queue) => queue,
+                    Err(e) => {
+                        log::warn!(
+                            "{}: Can't get queue for shard {} from {}: {}",
+                            self.descr, id.shard(), mesh_kit.id(), e
+                        );
+                        futures_timer::Delay::new(Duration::from_secs(1)).await;
+                        continue 'top;
+                    }
+                };
+                self.engine.store_mesh_queue(
+                    self.nw_id,
+                    mesh_kit.id(),
+                    id.shard(),
+                    queue
+                )?;
+            }
 
-            // TODO: Apply
+            let handle = self.engine.create_handle_for_mesh(&mesh_kit)?.to_any();
 
+            self.engine.set_applied(&handle, 0).await?;
 
-            unimplemented!()
-            
-            // return Ok(handle)
+            return Ok(handle)
         }
     }
 
@@ -484,7 +504,7 @@ impl ConnectedNwClient {
             async move {
 
                 // Boot
-                let (last_mesh_kit, last_key_block) = 'l: loop {
+                let (last_mc_block, last_key_block) = 'l: loop {
                     match Boot::boot(
                         client.engine.clone(), client.nw_id, &nw_config, last_block_id.clone()
                     ).await {
@@ -501,8 +521,9 @@ impl ConnectedNwClient {
                 };
 
                 // Start worker
-                // client.worker(last_mesh_kit).await;
-                unimplemented!()
+                if let Err(e) = client.worker(last_mc_block, last_key_block).await {
+                    log::error!("{}: FATAL: worker failed: {}", client.descr, e);
+                }
             }
         });
     }
@@ -524,7 +545,7 @@ impl ConnectedNwClient {
     }
 
     async fn worker(
-        self: Arc<Self>,
+        &self,
         mut last_mc_block: Arc<BlockHandle>,
         mut last_key_block_proof: BlockProofOrZerostate,
     ) -> Result<()> {
@@ -705,7 +726,7 @@ impl MeshClient {
 
             for (nw_id, block_id) in mc_block.mesh_top_blocks()? {
                 if let Some(client) = self.clients.get(&nw_id) {
-                    client.val().process_commited(block_id)?;
+                    // TODO client.val().process_commited(block_id)?;
                 } else {
                     log::warn!("Found commit block {block_id} of unknown network {nw_id}");
                 }

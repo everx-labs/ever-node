@@ -12,7 +12,7 @@
 */
 
 use crate::{
-    block::BlockStuff, block_proof::BlockProofStuff, engine_traits::EngineAlloc, error::NodeError,
+    block::{BlockStuff, BlockKind}, block_proof::BlockProofStuff, engine_traits::EngineAlloc, error::NodeError,
     shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrId, TopBlockDescrStuff},
     internal_db::restore::check_db,
 
@@ -487,7 +487,7 @@ impl InternalDb {
         &self, 
         id: &BlockIdExt, 
         block: Option<&Block>,
-        is_queue_update: Option<(i32, bool)>, // (update for, is_empty)
+        kind: BlockKind,
         utime: Option<u32>,
         callback: Option<Arc<dyn block_handle_db::Callback>>
     ) -> Result<BlockResult> {
@@ -497,10 +497,16 @@ impl InternalDb {
             return Ok(BlockResult::with_status(handle, DataStatus::Fetched))
         }
         let meta = if let Some(block) = block {
-            if let Some((target_wc, is_empty)) = is_queue_update {
-                BlockMeta::from_queue_update(block, target_wc, is_empty)?
-            } else {
-                BlockMeta::from_block(block)?
+            match kind {
+                BlockKind::Block => {
+                    BlockMeta::from_block(block)?
+                },
+                BlockKind::QueueUpdate { queue_update_for, empty } => {
+                    BlockMeta::from_queue_update(block, queue_update_for, empty)?
+                },
+                BlockKind::MeshKit { network_id } | BlockKind::MeshUpdate { network_id } => {
+                    BlockMeta::from_mesh(block, network_id)?
+                },
             }
         } else if id.seq_no == 0 {
             if let Some(utime) = utime {
@@ -534,7 +540,7 @@ impl InternalDb {
         let mut result = self.create_or_load_block_handle(
             block.id(),
             Some(block.virt_block()?),
-            block.is_queue_update_for().map(|o| (o, false)),
+            block.kind(),
             None,
             callback.clone()
         )?;
@@ -562,7 +568,7 @@ impl InternalDb {
         let _tc = TimeChecker::new(format!("load_block_data {}", handle.id()), 100);
         let raw_block = self.load_block_data_raw(handle).await?;
         if let Some(target_wc)= handle.is_queue_update_for() {
-            BlockStuff::deserialize_queue_update(handle.id().clone(), target_wc, raw_block)
+            BlockStuff::deserialize_queue_update(handle.id().clone(), target_wc, false, raw_block)
         } else {
             BlockStuff::deserialize_block(handle.id().clone(), raw_block)
         }
@@ -633,7 +639,7 @@ impl InternalDb {
             BlockResult::with_status(handle, DataStatus::Fetched)
         } else {
             let (virt_block, _) = proof.virtualize_block()?;
-            self.create_or_load_block_handle(id, Some(&virt_block), None, None, callback.clone())?
+            self.create_or_load_block_handle(id, Some(&virt_block), BlockKind::Block, None, callback.clone())?
         };
         let handle = result.clone().to_non_updated().ok_or_else(
             || error!("INTERNAL ERROR: block {} result mismatch in store_block_proof", id)

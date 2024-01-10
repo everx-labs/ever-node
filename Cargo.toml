@@ -97,3 +97,5 @@ features = [ 'cmake_build' ]
 optional = true
 version = '0.26.0'
 
+[patch.'https://github.com/tonlabs/ever-block.git']
+ton_block = { path = '../ever-block' }

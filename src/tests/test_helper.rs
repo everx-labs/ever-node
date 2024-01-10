@@ -950,7 +950,7 @@ impl EngineOperations for TestEngine {
         let handle = self.db.create_or_load_block_handle(
             state.block_id(), 
             None,
-            None,
+            BlockKind::Block,
             Some(state.state()?.gen_time()),
             None
         )?.to_non_updated().ok_or_else(
