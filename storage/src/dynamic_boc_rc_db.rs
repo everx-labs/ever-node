@@ -439,23 +439,26 @@ impl DynamicBocDb {
         use_cache: bool,
     ) -> Result<Arc<StorageCell>> {
 
-        if use_cache {
-            match self
-                .raw_cells_cache
-                .get_or_insert(&self.db, cell_id)
-            {
-                Ok(value) => {
-                    if let Ok((cell, _)) =StorageCell::deserialize(self, &value, use_cache, false)
-                        .or_else(|_| StorageCell::deserialize(self, &value, use_cache, true)){
-                        log::trace!(target: TARGET, "DynamicBocDb::load_cell  from cache  id {cell_id:x}");
-                        return Ok(Arc::new(cell));
-                    }
-                }
-                Err(e) => {
-                    log::trace!(target: TARGET, "DynamicBocDb::load_cell  from cache  id {cell_id:x} error - {e}");
-                },
-            };
+        let deserialize = |value: &[u8]| {
+            StorageCell::deserialize(self, value, use_cache, false).or_else(
+                |_| StorageCell::deserialize(self, value, use_cache, true)
+            ) 
+        };
 
+        if use_cache {
+            match self.raw_cells_cache.get_or_insert(&self.db, cell_id) {
+                Ok(value) => if let Ok((cell, _)) = deserialize(&value) {
+                    log::trace!(
+                        target: TARGET, 
+                        "DynamicBocDb::load_cell from cache id {cell_id:x}"
+                    );
+                    return Ok(Arc::new(cell))
+                },
+                Err(e) => log::trace!(
+                    target: TARGET, 
+                    "DynamicBocDb::load_cell from cache id {cell_id:x} error - {e}"
+                )
+            }
         }
 
         let storage_cell_data = match self.db.get(cell_id) {
@@ -473,9 +476,7 @@ impl DynamicBocDb {
             }
         };
 
-        let storage_cell = match StorageCell::deserialize(self, &storage_cell_data, use_cache, false)
-            .or_else(|_| StorageCell::deserialize(self, &storage_cell_data, use_cache, true))
-        {
+        let storage_cell = match deserialize(&storage_cell_data) {
             Ok((cell, _)) => Arc::new(cell),
             Err(e) => {
                 log::error!("FATAL!");
@@ -496,8 +497,10 @@ impl DynamicBocDb {
         #[cfg(feature = "telemetry")]
         self.telemetry.storage_cells.update(self.allocated.storage_cells.load(Ordering::Relaxed));
 
-        log::trace!(target: TARGET,
-            "DynamicBocDb::load_cell  from DB  id {cell_id:x}  use_cache {use_cache}");
+        log::trace!(
+            target: TARGET,
+            "DynamicBocDb::load_cell from DB id {cell_id:x} use_cache {use_cache}"
+        );
 
         Ok(storage_cell)
     }
