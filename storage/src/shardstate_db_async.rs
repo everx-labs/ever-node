@@ -35,7 +35,7 @@ use ton_types::{
 pub trait AllowStateGcResolver: Send + Sync {
     fn allow_state_gc(
         &self,
-        nw_id: u32, // connected network id; zero for own.
+        nw_id: i32, // connected network id; zero for own.
         block_id: &BlockIdExt,
         save_utime: u64,
         gc_utime: u64

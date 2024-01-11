@@ -50,14 +50,14 @@ impl BlockMeta {
         Ok(Self::with_data(flags, info.gen_utime().as_u32(), info.start_lt(), 0, queue_update_for as u32))
     }
 
-    pub fn from_mesh(block: &Block, source_network_id: u32) -> Result<Self> {
+    pub fn from_mesh(block: &Block, source_network_id: i32) -> Result<Self> {
         let info = block.read_info()?;
         Ok(Self::with_data(
             block_handle_db::FLAG_IS_MESH, 
             info.gen_utime().as_u32(),
             info.start_lt(),
             0,
-            source_network_id
+            source_network_id as u32
         ))
     }
 

@@ -21,7 +21,7 @@ use crate::{
     },
     shard_state::ShardStateStuff, test_helper::{gen_master_state, gen_shard_state},
     validating_utils::{supported_capabilities, supported_version},
-    validator::validator_manager::ValidationStatus, shard_states_keeper::PinnedShardStateGuard,
+    validator::validator_manager::ValidationStatus, shard_states_keeper::PinnedShardStateGuard, block::BlockKind,
 };
 #[cfg(feature = "telemetry")]
 use crate::collator_test_bundle::create_engine_telemetry;

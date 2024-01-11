@@ -13,7 +13,7 @@
 
 #![allow(dead_code)]
 use crate::{
-    block::BlockStuff, block_proof::BlockProofStuff, config::{CollatorConfig, TonNodeConfig}, 
+    block::{BlockStuff, BlockKind}, block_proof::BlockProofStuff, config::{CollatorConfig, TonNodeConfig}, 
     collator_test_bundle::create_engine_allocated,
     full_node::apply_block::apply_block,
     internal_db::{
@@ -914,6 +914,7 @@ impl EngineOperations for TestEngine {
 
     async fn store_block_proof(
         &self, 
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt, 
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff

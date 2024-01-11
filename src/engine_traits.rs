@@ -361,7 +361,7 @@ pub trait EngineOperations : Sync + Send {
     }
     async fn download_block_proof(
         &self,
-        mesh_nw_id: u32, // zero for own network
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt,
         is_link: bool,
         key_block: bool
@@ -370,14 +370,14 @@ pub trait EngineOperations : Sync + Send {
     }
     async fn download_next_block(
         &self,
-        mesh_nw_id: u32, // zero for own network
+        mesh_nw_id: i32, // zero for own network
         prev_id: &BlockIdExt
     ) -> Result<(BlockStuff, BlockProofStuff)> {
         unimplemented!()
     }
     async fn download_next_key_blocks_ids(
         &self,
-        mesh_nw_id: u32, // zero for own network
+        mesh_nw_id: i32, // zero for own network
         block_id: &BlockIdExt,
     ) -> Result<Vec<BlockIdExt>> {
         unimplemented!()
@@ -390,7 +390,7 @@ pub trait EngineOperations : Sync + Send {
     }
     async fn store_block_proof(
         &self,
-        mesh_nw_id: u32, // zero for own network
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt, 
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff
@@ -488,7 +488,7 @@ pub trait EngineOperations : Sync + Send {
     }
     async fn download_zerostate(
         &self,
-        mesh_nw_id: u32, // zero for own network
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt,
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         unimplemented!()
@@ -913,37 +913,37 @@ pub trait EngineOperations : Sync + Send {
 
     // THE MESH
 
-    fn network_short_id(&self) -> u32 {
+    fn network_global_id(&self) -> i32 {
         unimplemented!()
     }
 
-    fn load_last_mesh_key_block_id(&self, nw_id: u32) -> Result<Option<Arc<BlockIdExt>>> {
+    fn load_last_mesh_key_block_id(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
         unimplemented!()
     }
 
-    fn save_last_mesh_key_block_id(&self, nw_id: u32, id: &BlockIdExt) -> Result<()> {
+    fn save_last_mesh_key_block_id(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
 
-    fn load_last_mesh_processed_hardfork(&self, nw_id: u32) -> Result<Option<Arc<BlockIdExt>>> {
+    fn load_last_mesh_processed_hardfork(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
         unimplemented!()
     }
 
-    fn save_last_mesh_processed_hardfork(&self, nw_id: u32, id: &BlockIdExt) -> Result<()> {
+    fn save_last_mesh_processed_hardfork(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
 
-    async fn download_mesh_kit(&self, nw_id: u32, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
+    async fn download_mesh_kit(&self, nw_id: i32, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
         unimplemented!()
     }
 
-    async fn download_latest_mesh_kit(&self, nw_id: u32) -> Result<(BlockStuff, BlockProofStuff)> {
+    async fn download_latest_mesh_kit(&self, nw_id: i32) -> Result<(BlockStuff, BlockProofStuff)> {
         unimplemented!()
     }
 
     fn store_mesh_queue(
         &self,
-        nw_id: u32,
+        nw_id: i32,
         mc_block_id: &BlockIdExt,
         shard: &ShardIdent,
         queue: Arc<OutMsgQueueInfo>
@@ -953,7 +953,7 @@ pub trait EngineOperations : Sync + Send {
 
     fn load_mesh_queue(
         &self,
-        nw_id: u32,
+        nw_id: i32,
         mc_block_id: &BlockIdExt,
         shard: &ShardIdent
     ) -> Result<Arc<OutMsgQueueInfo>> {

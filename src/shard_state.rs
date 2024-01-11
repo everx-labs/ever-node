@@ -327,11 +327,11 @@ impl ShardStateStuff {
         self.shard_hashes()?.top_blocks_all()
     }
 
-    pub fn mesh_top_blocks(&self) -> Result<HashMap<u32, BlockIdExt>> {
+    pub fn mesh_top_blocks(&self) -> Result<HashMap<i32, BlockIdExt>> {
         let mut tbs = HashMap::new();
         self.shard_state_extra()?
             .mesh
-            .iterate_with_keys(|id: u32, descr: ConnectedNwDescr| {
+            .iterate_with_keys(|id: i32, descr: ConnectedNwDescr| {
                 let block = BlockIdExt {
                     shard_id: ShardIdent::masterchain(),
                     seq_no: descr.seq_no,

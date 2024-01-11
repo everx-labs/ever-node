@@ -217,7 +217,7 @@ pub async fn calc_out_msg_queue(
 }
 
 pub async fn calc_mesh_queues(
-    handle: &Arc<BlockHandle>,
+    _handle: &Arc<BlockHandle>,
     mesh_update: &BlockStuff,
     prev_ids: &(BlockIdExt, Option<BlockIdExt>),
     engine: &Arc<dyn EngineOperations>
@@ -231,7 +231,7 @@ pub async fn calc_mesh_queues(
         engine: &Arc<dyn EngineOperations>
     ) -> Result<()> {
         let old_queue = engine.load_mesh_queue(
-            mesh_update.network_short_id(),
+            mesh_update.network_global_id(),
             &prev_ids.0,
             &src_shard
         )?;
@@ -260,7 +260,7 @@ pub async fn calc_mesh_queues(
         };
 
         engine.store_mesh_queue(
-            mesh_update.network_short_id(),
+            mesh_update.network_global_id(),
             &mesh_update.id(),
             &src_shard,
             new_queue
@@ -270,10 +270,10 @@ pub async fn calc_mesh_queues(
     }
 
     log::trace!("calc_mesh_queues: network: {}, mesh update: {}",
-        mesh_update.network_short_id(), mesh_update.id());
+        mesh_update.network_global_id(), mesh_update.id());
     let now = Instant::now();
 
-    let host_network_id = engine.network_short_id();
+    let host_network_id = engine.network_global_id();
 
     let cn_descr = mesh_update
         .virt_block()?
@@ -293,7 +293,7 @@ pub async fn calc_mesh_queues(
     })?;
 
     log::trace!("calc_mesh_queues: network: {}, mesh update: {}, DONE TIME: {}ms",
-        mesh_update.network_short_id(), mesh_update.id(), now.elapsed().as_millis());
+        mesh_update.network_global_id(), mesh_update.id(), now.elapsed().as_millis());
     metrics::histogram!("calc_mesh_queues_time", now.elapsed());
 
     Ok(())

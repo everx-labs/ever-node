@@ -68,7 +68,7 @@ use crate::{
 use adnl::telemetry::{Metric, MetricBuilder, TelemetryItem, TelemetryPrinter};
 use overlay::QueriesConsumer;
 use std::{
-    ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering, AtomicU64}},
+    ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering, AtomicU64, AtomicI32}},
     time::{Duration, SystemTime}, collections::{HashMap, HashSet}, path::Path
 };
 #[cfg(feature = "telemetry")]
@@ -135,6 +135,7 @@ pub struct Engine {
     sync_status: AtomicU32,
     low_memory_mode: bool,
     remp_capability: AtomicBool,
+    network_global_id: AtomicI32,
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
     collator_config: CollatorConfig,
@@ -506,7 +507,6 @@ impl Engine {
     pub const MASK_SERVICE_DB_RESTORE: u32                     = 0x0400;
     pub const MASK_SERVICE_ARCHIVES_GC: u32                    = 0x0800;
     pub const MASK_SERVICE_SS_CACHE_KEEPER: u32                = 0x1000;
-    pub const MASK_SERVICE_MESH_QUEUES_KEEPER: u32             = 0x2000;
     #[cfg(feature = "external_db")]
     pub const MASK_SERVICE_EXTERNAL_DB: u32                    = 0x2000;
 
@@ -808,6 +808,7 @@ impl Engine {
             sync_status: AtomicU32::new(0),
             low_memory_mode,
             remp_capability: AtomicBool::new(false),
+            network_global_id: AtomicI32::new(0),
             test_bundles_config,
             collator_config,
             shard_states_keeper: shard_states_keeper.clone(),
@@ -1106,6 +1107,10 @@ impl Engine {
         self.remp_capability.load(Ordering::Relaxed)
     }
 
+    pub fn network_global_id(&self) -> i32 {
+        self.network_global_id.load(Ordering::Relaxed)
+    }
+
     pub fn set_remp_capability(&self, value: bool) {
         self.remp_capability.store(value, Ordering::Relaxed);
     }
@@ -1339,7 +1344,6 @@ impl Engine {
                 handle.id(), recursion_depth, apply_block::MAX_RECURSION_DEPTH);
         }
 
-        let is_empty_queue_update = handle.is_empty_queue_update();
         let op_name = if pre_apply { "pre-applying" } else { "applying" };
         let block_name = match block.kind() {
             BlockKind::Block => "block".to_owned(),
@@ -1361,7 +1365,7 @@ impl Engine {
                     fail!("Block must have proof and data saved before applying");
                 }
             },
-            BlockKind::QueueUpdate { queue_update_for, empty } => {
+            BlockKind::QueueUpdate { empty, .. } => {
                 if !handle.has_data() && !empty {
                     fail!("Queue update must have data saved before applying");
                 }
@@ -2392,6 +2396,7 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>, hardfork_path:
                 state.config_params()?.has_capability(GlobalCapabilities::CapRemp),
                 Ordering::Relaxed
             );
+            engine.network_global_id.store(state.state()?.global_id(), Ordering::Relaxed);
             (block_id.clone(), false)
         }
         Err(err) => {
@@ -2401,6 +2406,13 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>, hardfork_path:
             engine.release_stop(Engine::MASK_SERVICE_BOOT);
             let id = result?.id().clone();
             engine.save_last_applied_mc_block_id(&id)?;
+
+            let state = match engine.load_mc_zero_state().await {
+                Err(_) => engine.load_last_applied_mc_state().await?,
+                Ok(s) => s
+            };
+            engine.network_global_id.store(state.state()?.global_id(), Ordering::Relaxed);
+
             (id, true)
         }
     };

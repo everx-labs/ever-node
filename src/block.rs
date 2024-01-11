@@ -44,8 +44,8 @@ pub struct BlockPrevStuff {
 pub enum BlockKind {
     Block,
     QueueUpdate { queue_update_for: i32, empty: bool },
-    MeshKit { network_id: u32 },
-    MeshUpdate { network_id: u32 },
+    MeshKit { network_id: i32 },
+    MeshUpdate { network_id: i32 },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -59,12 +59,12 @@ enum BlockOrigin {
     MeshUpdate {
         block_part: Block,
         queue_updates: MeshMsgQueueUpdates,
-        network_id: u32,
+        network_id: i32,
     },
     MeshKit {
         block_part: Block,
         queues: MeshMsgQueuesKit,
-        network_id: u32,
+        network_id: i32,
     }
 }
 impl Default for BlockOrigin {
@@ -248,7 +248,7 @@ impl BlockStuff {
 
     pub fn id(&self) -> &BlockIdExt { &self.id }
 
-    pub fn network_short_id(&self) -> u32 {
+    pub fn network_global_id(&self) -> i32 {
         match &self.block {
             BlockOrigin::MeshUpdate{network_id, ..} => *network_id,
             BlockOrigin::MeshKit{network_id, ..} => *network_id,

@@ -25,7 +25,7 @@ pub struct AllowStateGcSmartResolver {
     last_processed_block: AtomicU32,
     min_ref_mc_block: AtomicU32,
     min_actual_ss: lockfree::map::Map<ShardIdent, AtomicU32>,
-    min_mesh_mc_block: lockfree::map::Map<u32, AtomicU32>,
+    min_mesh_mc_block: lockfree::map::Map<i32, AtomicU32>,
     life_time_sec: u64,
     pinned_roots: parking_lot::RwLock<HashMap<BlockIdExt, u32>>,
 }
@@ -178,7 +178,7 @@ impl AllowStateGcSmartResolver {
 
     fn allow_state_gc(
         &self,
-        nw_id: u32, // connected network id; zero for own.
+        nw_id: i32, // connected network id; zero for own.
         block_id: &BlockIdExt,
         saved_at: u64,
         gc_utime: u64
@@ -222,7 +222,7 @@ impl AllowStateGcSmartResolver {
 impl AllowStateGcResolver for AllowStateGcSmartResolver {
     fn allow_state_gc(
         &self,
-        nw_id: u32, // connected network id; zero for own.
+        nw_id: i32, // connected network id; zero for own.
         block_id: &BlockIdExt,
         saved_at: u64,
         gc_utime: u64

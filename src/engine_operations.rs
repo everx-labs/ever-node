@@ -418,7 +418,7 @@ impl EngineOperations for Engine {
 
     async fn download_block_proof(
         &self,
-        mesh_nw_id: u32, // zero for own network
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt,
         is_link: bool,
         key_block: bool
@@ -426,7 +426,7 @@ impl EngineOperations for Engine {
         self.download_block_proof_worker(id, is_link, key_block, Some(1)).await
     }
 
-    async fn download_next_block(&self, mesh_nw_id: u32, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
+    async fn download_next_block(&self, mesh_nw_id: i32, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
         self.download_next_block_worker(prev_id, None).await
     }
 
@@ -472,7 +472,7 @@ impl EngineOperations for Engine {
 
     async fn download_zerostate(
         &self, 
-        mesh_nw_id: u32, // zero for own network
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         self.download_zerostate_worker(id, None).await
@@ -495,7 +495,7 @@ impl EngineOperations for Engine {
 
     async fn store_block_proof(
         &self, 
-        mesh_nw_id: u32, // zero for own network
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt,
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff,
@@ -768,7 +768,7 @@ impl EngineOperations for Engine {
 
     async fn download_next_key_blocks_ids(
         &self, 
-        mesh_nw_id: u32, // zero for own network
+        mesh_nw_id: i32, // zero for own network
         block_id: &BlockIdExt, 
     ) -> Result<Vec<BlockIdExt>> {
         let mc_overlay = self.get_masterchain_overlay().await?;
@@ -1290,37 +1290,37 @@ impl EngineOperations for Engine {
 
     // THE MESH
 
-    fn network_short_id(&self) -> u32 {
+    fn network_global_id(&self) -> i32 {
+        Engine::network_global_id(self)
+    }
+
+    fn load_last_mesh_key_block_id(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
         unimplemented!()
     }
 
-    fn load_last_mesh_key_block_id(&self, nw_id: u32) -> Result<Option<Arc<BlockIdExt>>> {
+    fn save_last_mesh_key_block_id(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
 
-    fn save_last_mesh_key_block_id(&self, nw_id: u32, id: &BlockIdExt) -> Result<()> {
+    fn load_last_mesh_processed_hardfork(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
         unimplemented!()
     }
 
-    fn load_last_mesh_processed_hardfork(&self, nw_id: u32) -> Result<Option<Arc<BlockIdExt>>> {
+    fn save_last_mesh_processed_hardfork(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
 
-    fn save_last_mesh_processed_hardfork(&self, nw_id: u32, id: &BlockIdExt) -> Result<()> {
+    async fn download_mesh_kit(&self, nw_id: i32, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
         unimplemented!()
     }
 
-    async fn download_mesh_kit(&self, nw_id: u32, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
-        unimplemented!()
-    }
-
-    async fn download_latest_mesh_kit(&self, nw_id: u32) -> Result<(BlockStuff, BlockProofStuff)> {
+    async fn download_latest_mesh_kit(&self, nw_id: i32) -> Result<(BlockStuff, BlockProofStuff)> {
         unimplemented!()
     }
 
     fn store_mesh_queue(
         &self,
-        nw_id: u32,
+        nw_id: i32,
         mc_block_id: &BlockIdExt,
         shard: &ShardIdent,
         queue: Arc<OutMsgQueueInfo>
@@ -1331,7 +1331,7 @@ impl EngineOperations for Engine {
 
     fn load_mesh_queue(
         &self,
-        nw_id: u32,
+        nw_id: i32,
         mc_block_id: &BlockIdExt,
         shard: &ShardIdent
     ) -> Result<Arc<OutMsgQueueInfo>> {

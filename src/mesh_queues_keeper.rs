@@ -6,10 +6,10 @@ use crate::engine_traits::EngineTelemetry;
 use storage::shardstate_db_async::AllowStateGcResolver;
 
 use ton_block::{BlockIdExt, ShardIdent, OutMsgQueueInfo};
-use ton_types::{Result, fail, error};
+use ton_types::{Result, fail};
 
 pub struct MeshQueuesKeeper {
-    queues: lockfree::map::Map<(u32, BlockIdExt, ShardIdent), Arc<OutMsgQueueInfo>>,
+    queues: lockfree::map::Map<(i32, BlockIdExt, ShardIdent), Arc<OutMsgQueueInfo>>,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<EngineTelemetry>,
     allocated: Arc<EngineAlloc>,
@@ -55,7 +55,7 @@ impl MeshQueuesKeeper {
 
     pub fn store_mesh_queue(
         &self,
-        nw_id: u32,
+        nw_id: i32,
         mc_block_id: &BlockIdExt,
         shard: &ShardIdent,
         queue: Arc<OutMsgQueueInfo>
@@ -67,7 +67,7 @@ impl MeshQueuesKeeper {
 
     pub fn load_mesh_queue(
         &self,
-        nw_id: u32,
+        nw_id: i32,
         mc_block_id: &BlockIdExt,
         shard: &ShardIdent
     ) -> Result<Arc<OutMsgQueueInfo>> {

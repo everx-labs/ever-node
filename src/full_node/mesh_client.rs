@@ -47,7 +47,7 @@ impl BlockProofOrZerostate {
 }
 
 struct Boot<'a> {
-    nw_id: u32,
+    nw_id: i32,
     nw_config: &'a ConnectedNwConfig,
     engine: Arc<dyn EngineOperations>,
     descr: String,
@@ -56,7 +56,7 @@ struct Boot<'a> {
 impl<'a> Boot<'a> {
     pub async fn boot(
         engine: Arc<dyn EngineOperations>,
-        nw_id: u32,
+        nw_id: i32,
         nw_config: &'a ConnectedNwConfig,
         last_commited_block: Option<BlockIdExt>,
     ) -> Result<(Arc<BlockHandle>, BlockProofOrZerostate)> {
@@ -485,7 +485,7 @@ impl<'a> Boot<'a> {
 
 pub struct ConnectedNwClient {
     engine: Arc<dyn EngineOperations>,
-    nw_id: u32,
+    nw_id: i32,
     descr: String,
 }
 
@@ -493,7 +493,7 @@ impl ConnectedNwClient {
     pub async fn start(
         engine: Arc<dyn EngineOperations>,
         last_block_id: Option<BlockIdExt>,
-        nw_id: u32,
+        nw_id: i32,
         nw_config: ConnectedNwConfig
     ) {
         let descr = format!("mesh nw client {}", nw_id);
@@ -703,7 +703,6 @@ impl MeshClient {
         let mut mc_block: BlockStuff;
         let mut mc_block_handle = self.engine.load_block_handle(mc_block_id)?
             .ok_or_else(|| error!("Can't load handle for mc block {}", mc_block_id))?;
-        std::mem::drop(mc_block_id);
 
         loop {
 
