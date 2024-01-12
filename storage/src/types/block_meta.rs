@@ -52,8 +52,12 @@ impl BlockMeta {
 
     pub fn from_mesh(block: &Block, source_network_id: i32) -> Result<Self> {
         let info = block.read_info()?;
+        let mut flags = block_handle_db::FLAG_IS_MESH;
+        if info.key_block() {
+            flags &= block_handle_db::FLAG_KEY_BLOCK;
+        }
         Ok(Self::with_data(
-            block_handle_db::FLAG_IS_MESH, 
+            flags, 
             info.gen_utime().as_u32(),
             info.start_lt(),
             0,

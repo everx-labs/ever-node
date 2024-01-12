@@ -21,7 +21,6 @@ pub mod db;
 pub mod dynamic_boc_rc_db;
 pub mod error;
 mod macros; 
-pub mod node_state_db;
 pub mod shardstate_db_async;
 pub mod traits;
 pub mod types;

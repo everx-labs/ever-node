@@ -30,7 +30,7 @@ use std::{
 };
 use storage::{
     StorageAlloc, block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage}, 
-    node_state_db::NodeStateDb, types::BlockMeta  
+    block_handle_db::NodeStateDb, types::BlockMeta  
 };
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;

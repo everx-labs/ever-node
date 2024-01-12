@@ -21,7 +21,7 @@ use crate::{
     error::NodeError,
     internal_db::{
         INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, LAST_ROTATION_MC_BLOCK, SHARD_CLIENT_MC_BLOCK,
-        BlockResult,
+        BlockResult, LAST_MESH_HARDFORK_BLOCK, LAST_MESH_KEYBLOCK,
     },
     shard_state::ShardStateStuff,
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
@@ -500,7 +500,14 @@ impl EngineOperations for Engine {
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff,
     ) -> Result<BlockResult> {
-        self.db().store_block_proof(id, handle, proof, None).await
+
+        if mesh_nw_id == 0 ||
+           mesh_nw_id == self.network_global_id() 
+        {
+            self.db().store_block_proof(id, handle, proof, None).await
+        } else {
+            self.db().store_mesh_block_proof(id, mesh_nw_id, handle, proof, None).await
+        }
     }
 
     fn create_handle_for_empty_queue_update(
@@ -1295,19 +1302,19 @@ impl EngineOperations for Engine {
     }
 
     fn load_last_mesh_key_block_id(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
-        unimplemented!()
+        self.db().load_full_node_mesh_state(nw_id, LAST_MESH_KEYBLOCK)
     }
 
     fn save_last_mesh_key_block_id(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
-        unimplemented!()
+        self.db().save_full_node_mesh_state(nw_id, LAST_MESH_KEYBLOCK, id)
     }
 
     fn load_last_mesh_processed_hardfork(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
-        unimplemented!()
+        self.db().load_full_node_mesh_state(nw_id, LAST_MESH_HARDFORK_BLOCK)
     }
 
     fn save_last_mesh_processed_hardfork(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
-        unimplemented!()
+        self.db().save_full_node_mesh_state(nw_id, LAST_MESH_HARDFORK_BLOCK, id)
     }
 
     async fn download_mesh_kit(&self, nw_id: i32, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {

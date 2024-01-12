@@ -28,7 +28,7 @@ use storage::{
     TimeChecker,
     archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId},
     block_handle_db::{self, BlockHandle, BlockHandleDb, BlockHandleStorage}, 
-    block_info_db::BlockInfoDb, db::rocksdb::RocksDb, node_state_db::NodeStateDb, 
+    block_info_db::BlockInfoDb, db::rocksdb::RocksDb, block_handle_db::NodeStateDb, 
     types::BlockMeta, db::filedb::FileDb,
     shard_top_blocks_db::ShardTopBlocksDb, StorageAlloc, traits::Serializable, shardstate_db_async::CellsDbConfig,
 };
@@ -49,6 +49,10 @@ pub const ARCHIVES_GC_BLOCK: &str        = "ArchivesGcMcBlockId";
 pub const EXTERNAL_DB_BLOCK: &str        = "ExternalDBMcBlockId";
 pub const ASSUME_OLD_FORMAT_CELLS: &str  = "AssumeOldFormatCells";
 pub const LAST_UNNEEDED_KEY_BLOCK: &str  = storage::db::rocksdb::LAST_UNNEEDED_KEY_BLOCK;
+
+pub const LAST_MESH_KEYBLOCK: &str       = "LastMeshKeyBlockId";
+pub const LAST_MESH_HARDFORK_BLOCK: &str = "LastMeshHardforkBlockId";
+
 pub const DB_VERSION: &str  = "DbVersion";
 
 pub const DB_VERSION_0: u32  = 0;
@@ -188,6 +192,7 @@ pub struct InternalDb {
     archive_manager: Arc<ArchiveManager>,
     shard_top_blocks_db: ShardTopBlocksDb,
     full_node_state_db: Arc<NodeStateDb>,
+    mesh_key_block_proofs_db: BlockInfoDb,
 
     config: InternalDbConfig,
     cells_gc_interval: Arc<AtomicU32>,
@@ -327,6 +332,7 @@ impl InternalDb {
             archive_manager,
             shard_top_blocks_db: ShardTopBlocksDb::with_db(db.clone(), "shard_top_blocks_db", true)?,
             full_node_state_db,
+            mesh_key_block_proofs_db: BlockInfoDb::with_db(db.clone(), "mesh_key_block_proofs_db", true)?,
 
             cells_gc_interval: Arc::new(AtomicU32::new(config.cells_gc_interval_sec)),
             config,
@@ -682,6 +688,67 @@ impl InternalDb {
         Ok(result)
     }
 
+    pub async fn store_mesh_block_proof(
+        &self, 
+        id: &BlockIdExt,
+        nw_id: i32,
+        handle: Option<Arc<BlockHandle>>, 
+        proof: &BlockProofStuff,
+        callback: Option<Arc<dyn block_handle_db::Callback>>
+    ) -> Result<BlockResult> {
+
+        let _tc = TimeChecker::new(format!("store_mesh_block_proof {}", proof.id()), 100);
+
+        if let Some(handle) = &handle {
+            if handle.id() != id {
+                fail!("Block handle and id mismatch: {} vs {}", handle.id(), id)
+            }
+            if !matches!(handle.mesh_nw_id(), Some(nw_id)) {
+                fail!("Block handle and nw_id mismatch: {:?} vs {}", handle.mesh_nw_id(), nw_id)
+            }
+        }
+        if id != proof.id() {
+            fail!(NodeError::InvalidArg("`proof` and `id` mismatch".to_string()))
+        }
+
+        let mut result = if let Some(handle) = handle {
+            BlockResult::with_status(handle, DataStatus::Fetched)
+        } else {
+            let (virt_block, _) = proof.virtualize_block()?;
+            if !virt_block.read_info()?.key_block() {
+                fail!("Attempt to save non key mesh block proof {}", id);
+            }
+            self.create_or_load_block_handle(
+                id,
+                Some(&virt_block),
+                BlockKind::MeshUpdate { network_id: nw_id },
+                None,
+                callback.clone()
+            )?
+        };
+        let handle = result.clone().to_non_updated().ok_or_else(
+            || error!("INTERNAL ERROR: block {} result mismatch in store_mesh_block_proof", id)
+        )?;
+        if proof.is_link() {
+            if !handle.has_proof_link() {
+                self.mesh_key_block_proofs_db.put(id, proof.data())?;
+                if handle.set_proof_link() {
+                    self.store_block_handle(&handle, callback)?;
+                    result = BlockResult::with_status(handle.clone(), DataStatus::Updated)
+                }
+            }
+        } else {
+            if !handle.has_proof() {
+                self.mesh_key_block_proofs_db.put(id, proof.data())?;
+                if handle.set_proof() {
+                    self.store_block_handle(&handle, callback)?;
+                    result = BlockResult::with_status(handle.clone(), DataStatus::Updated)
+                }
+            }
+        }
+        Ok(result)
+    }
+
     pub async fn load_block_proof(&self, handle: &BlockHandle, is_link: bool) -> Result<BlockProofStuff> {
         let _tc = TimeChecker::new(format!("load_block_proof {} {}", if is_link {"link"} else {""}, handle.id()), 100);
         let raw_proof = self.load_block_proof_raw_(handle, is_link).await?;
@@ -694,15 +761,22 @@ impl InternalDb {
     }
 
     async fn load_block_proof_raw_(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>> {
-        let (entry_id, inited) = if is_link {
-            (PackageEntryId::<_, UInt256, UInt256>::ProofLink(handle.id()), handle.has_proof_link())
+        if handle.is_mesh() {
+            if !handle.is_key_block() {
+                fail!("Attempt to save non key mesh block proof {}", handle.block_id());
+            }
+            self.mesh_key_block_proofs_db.get(handle.id()).map(|slice| slice.to_vec())
         } else {
-            (PackageEntryId::<_, UInt256, UInt256>::Proof(handle.id()), handle.has_proof())
-        };
-        if !inited {
-            fail!("This proof{} is not in the archive: {:?}", if is_link { "link" } else { "" }, handle);
+            let (entry_id, inited) = if is_link {
+                (PackageEntryId::<_, UInt256, UInt256>::ProofLink(handle.id()), handle.has_proof_link())
+            } else {
+                (PackageEntryId::<_, UInt256, UInt256>::Proof(handle.id()), handle.has_proof())
+            };
+            if !inited {
+                fail!("This proof{} is not in the archive: {:?}", if is_link { "link" } else { "" }, handle);
+            }
+            self.archive_manager.get_file(handle, &entry_id).await
         }
-        self.archive_manager.get_file(handle, &entry_id).await
     }
 
     pub async fn store_shard_state_dynamic(
@@ -1090,7 +1164,7 @@ impl InternalDb {
 
     pub fn drop_full_node_state(&self, key: &'static str) -> Result<()> {
         let _tc = TimeChecker::new(format!("drop_full_node_state {}", key), 30);
-        self.block_handle_storage.drop_full_node_state(key)
+        self.block_handle_storage.drop_full_node_state(key.to_string())
     }
 
     pub fn load_full_node_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>> {
@@ -1100,12 +1174,30 @@ impl InternalDb {
 
     pub fn save_full_node_state(&self, key: &'static str, block_id: &BlockIdExt) -> Result<()> {
         let _tc = TimeChecker::new(format!("save_full_node_state {}", key), 30);
+        self.block_handle_storage.save_full_node_state(key.to_string(), block_id)
+    }
+
+    pub fn drop_full_node_mesh_state(&self, nw_id: i32, key: &'static str) -> Result<()> {
+        let key = format!("{key}{nw_id}");
+        let _tc = TimeChecker::new(format!("drop_full_node_mesh_state {}", key), 30);
+        self.block_handle_storage.drop_full_node_state(key)
+    }
+
+    pub fn load_full_node_mesh_state(&self, nw_id: i32, key: &'static str) -> Result<Option<Arc<BlockIdExt>>> {
+        let key = format!("{key}{nw_id}");
+        let _tc = TimeChecker::new(format!("load_full_node_mesh_state {}", key), 30);
+        self.block_handle_storage.load_full_node_state(&key)
+    }
+
+    pub fn save_full_node_mesh_state(&self, nw_id: i32, key: &'static str, block_id: &BlockIdExt) -> Result<()> {
+        let key = format!("{key}{nw_id}");
+        let _tc = TimeChecker::new(format!("save_full_node_mesh_state {}", key), 30);
         self.block_handle_storage.save_full_node_state(key, block_id)
     }
 
     pub fn drop_validator_state(&self, key: &'static str) -> Result<()> {
         let _tc = TimeChecker::new(format!("drop_validator_state {}", key), 30);
-        self.block_handle_storage.drop_validator_state(key)
+        self.block_handle_storage.drop_validator_state(key.to_string())
     }
 
     pub fn load_validator_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>> {
@@ -1115,7 +1207,7 @@ impl InternalDb {
 
     pub fn save_validator_state(&self, key: &'static str, block_id: &BlockIdExt) -> Result<()> {
         let _tc = TimeChecker::new(format!("save_validator_state {}", key), 30);
-        self.block_handle_storage.save_validator_state(key, block_id)
+        self.block_handle_storage.save_validator_state(key.to_string(), block_id)
     }
 
     pub async fn get_archive_id(&self, mc_seq_no: u32) -> Option<u64> {
