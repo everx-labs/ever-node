@@ -136,7 +136,7 @@ async fn test_handle_db() {
     for mc_seq_no in 0..20 {
         let block_id = BlockIdExt::with_params(ShardIdent::masterchain(), mc_seq_no, 
             UInt256::from_le_bytes(&mc_seq_no.to_le_bytes()), UInt256::default());
-        let handle = block_handle_storage.load_handle(&block_id).unwrap().unwrap();
+        let handle = block_handle_storage.load_handle_by_id(&block_id).unwrap().unwrap();
         if mc_seq_no % 13 == 0 {
             assert!(handle.is_key_block().unwrap());
         }

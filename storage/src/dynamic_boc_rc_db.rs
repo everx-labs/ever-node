@@ -194,9 +194,9 @@ impl DynamicBocDb {
         &self.db
     }
 
-    // pub fn cells_cache(&self) -> &parking_lot::Mutex<CellsCache> {
-    //     &self.cells
-    // }
+    pub fn cells_cache_len(&self) -> usize {
+        self.raw_cells_cache.0.len()
+    }
 
     // Is not thread-safe!
     pub fn save_boc(
