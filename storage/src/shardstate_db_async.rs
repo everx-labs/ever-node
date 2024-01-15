@@ -111,7 +111,7 @@ pub struct CellsDbConfig {
     pub max_pss_slowdown_mcs: u32,
     pub prefill_cells_counters: bool,
     pub cache_cells_counters: bool,
-    pub cells_lru_size: usize,
+    pub cache_size_bytes: u64,
 }
 
 impl Default for CellsDbConfig {
@@ -121,7 +121,7 @@ impl Default for CellsDbConfig {
             max_pss_slowdown_mcs: 750,
             prefill_cells_counters: false,
             cache_cells_counters: false,
-            cells_lru_size: 1_000_000,
+            cache_size_bytes: 1_000_000_000,
         }
     }
 }
@@ -172,7 +172,7 @@ impl ShardStateDb {
             Arc::new(CellDb::with_db(db.clone(), cell_db_path, true)?),
             db_root_path,
             assume_old_cells,
-            config.cells_lru_size,
+            config.cache_size_bytes,
             #[cfg(feature = "telemetry")]
             telemetry.clone(),
             allocated.clone()
