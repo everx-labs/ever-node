@@ -53,7 +53,7 @@ fn test_dynamic_boc_rc_db() -> Result<()> {
     let loaded_boc = boc_db.load_boc(&root_cell.repr_hash().into(), true)?;
     let fetched_count = count_tree_unique_cells(loaded_boc.clone());
     assert_eq!(fetched_count, initial_cell_count);
-    assert_eq!(boc_db.cells_cache().lock().len(), initial_cell_count);
+    assert_eq!(boc_db.cells_cache_len(), initial_cell_count);
 
     let root_cell_2 = get_another_test_tree_of_cells();
     boc_db.save_boc(root_cell_2.clone(), true, &|| Ok(()), &mut cells_counters, false)?;

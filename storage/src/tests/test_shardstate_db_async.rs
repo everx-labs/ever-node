@@ -68,7 +68,7 @@ async fn test_shardstate_db_async() -> Result<()> {
             max_pss_slowdown_mcs: 1000,
             prefill_cells_counters: false,
             cache_cells_counters: true,
-            cells_lru_size: 1000000,
+            cache_size_bytes: 10000000,
         },
         #[cfg(feature = "telemetry")]
         Arc::new(StorageTelemetry::default()),
