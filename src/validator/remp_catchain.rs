@@ -42,6 +42,15 @@ use ton_types::{error, fail, KeyId, Result, UInt256};
 
 const REMP_CATCHAIN_START_POLLING_INTERVAL: Duration = Duration::from_millis(50);
 
+fn get_remp_catchain_record_info(r: &RempCatchainRecord) -> String {
+    match r {
+        RempCatchainRecord::TonNode_RempCatchainMessage(msg) =>
+            format!("msg_id: {:x}", msg.message_id),
+        RempCatchainRecord::TonNode_RempCatchainMessageDigest(msg) =>
+            format!("digest, master_seqno={}, len={}", msg.masterchain_seqno, msg.messages.len())
+    }
+}
+
 pub struct RempCatchainInstanceImpl {
     pub catchain_ptr: CatchainPtr,
 
@@ -182,6 +191,27 @@ impl RempCatchainInfo {
         UInt256::calc_file_hash(&serialized.0)
     }
 
+    fn append_validator_list(nodes: &mut Vec<CatchainNode>, nodes_vdescr: &mut Vec<ValidatorDescr>, adnl_hash: &mut HashSet<Arc<KeyId>>, c: &Vec<ValidatorDescr>) {
+        for next_nn in c.iter() {
+            let next_cn = validatordescr_to_catchain_node(next_nn);
+            if !adnl_hash.contains(&next_cn.adnl_id) {
+                adnl_hash.insert(next_cn.adnl_id.clone());
+                nodes.push(next_cn);
+                nodes_vdescr.push(next_nn.clone());
+            }
+        }
+    }
+
+    fn check_unique(nodes: &Vec<CatchainNode>) -> Result<()> {
+        let mut adnl_hash = HashSet::new();
+        for next_cn in nodes.iter() {
+            if adnl_hash.contains(&next_cn.adnl_id) { fail!("Duplicate adnl id {}", next_cn.adnl_id); }
+
+            adnl_hash.insert(next_cn.adnl_id.clone());
+        }
+        Ok(())
+    }
+
     pub fn create(
         general_session_info: Arc<GeneralSessionInfo>,
         master_cc_range: &RangeInclusive<u32>,
@@ -190,10 +220,15 @@ impl RempCatchainInfo {
         local: &PublicKey,
         node_list_id: ValidatorListHash
     ) -> Result<Self> {
-        let mut nodes: Vec<CatchainNode> = curr.iter().map(validatordescr_to_catchain_node).collect();
+        let mut nodes: Vec<CatchainNode> = Vec::new();
         let mut nodes_vdescr = curr.clone();
-
         let mut adnl_hash: HashSet<Arc<KeyId>> = HashSet::new();
+
+        Self::append_validator_list(&mut nodes, &mut nodes_vdescr, &mut adnl_hash, curr);
+        Self::append_validator_list(&mut nodes, &mut nodes_vdescr, &mut adnl_hash, next);
+
+        Self::check_unique(&nodes)?;
+/*
         for nn in nodes.iter() {
             adnl_hash.insert(nn.adnl_id.clone());
         }
@@ -201,10 +236,12 @@ impl RempCatchainInfo {
         for next_nn in next.iter() {
             let next_cn = validatordescr_to_catchain_node(next_nn);
             if !adnl_hash.contains(&next_cn.adnl_id) {
+                adnl_hash.insert(next_cn.adnl_id.clone());
                 nodes.push(next_cn);
                 nodes_vdescr.push(next_nn.clone());
             }
         }
+*/
 
         let local_key_id = local.id().data().into();
         let local_idx = get_validator_key_idx(local, &nodes)?;
@@ -402,14 +439,11 @@ impl CatchainListener for RempCatchain {
 
     fn process_blocks(&self, blocks: Vec<BlockPtr>) {
         log::trace!(target: "remp", "Processing RMQ {}: new external messages, len = {}", self, blocks.len());
-        //if blocks.len() > 0 {
-        //    for x in blocks {
-        //        self.unpack_payload(x.get_payload(), x.get_source_id());
-        //    }
-        //}
 
         let mut msg_vect: Vec<::ton_api::ton::validator_session::round::Message> = Vec::new();
-        while let Ok(Some(msg)) = self.instance.pending_messages_queue_try_recv() {
+        let mut msg_ids: Vec<String> = Vec::new();
+
+        if let Ok(Some(msg)) = self.instance.pending_messages_queue_try_recv() {
             let msg_body = ::ton_api::ton::validator_session::round::validator_session::message::message::Commit {
                 round: 0,
                 candidate: Default::default(),
@@ -420,10 +454,8 @@ impl CatchainListener for RempCatchain {
             );
 
             msg_vect.push(msg_body);
-        };
-
-        #[cfg(feature = "telemetry")]
-            let sent_to_catchain = msg_vect.len();
+            msg_ids.push(get_remp_catchain_record_info(&msg));
+        }
 
         let payload = ::ton_api::ton::validator_session::blockupdate::BlockUpdate {
             ts: 0, //ts as i64,
@@ -438,16 +470,18 @@ impl CatchainListener for RempCatchain {
                     catchain::CatchainFactory::create_block_payload(
                         serialized_payload.clone(),
                     ), false, false);
-                log::trace!(target: "remp", "Point 3. RMQ {} sent message: {:?}",
-                    self, serialized_payload
+                log::trace!(target: "remp", "Point 3. RMQ {} sent messages: '{:?}'",
+                    self, msg_ids
                 );
                 #[cfg(feature = "telemetry")]
                 self.engine.remp_core_telemetry().sent_to_catchain(
                     &self.info.general_session_info.shard, 
-                    sent_to_catchain
+                    msg_ids.len()
                 );
             },
-            None => log::error!("RMQ: Catchain session is not initialized!")
+            None => {
+                log::error!(target: "remp", "Point 3. RMQ {}: catchain session is not initialized, messages will not be sent: '{:?}'", self, msg_ids);
+            }
         }
     }
 
@@ -645,7 +679,7 @@ impl RempCatchainStore {
         }).await
     }
 
-    pub async fn list_catchain_sessions(&self) -> Vec<String> {
+    pub async fn list_catchain_sessions(&self) -> Vec<(String, UInt256)> {
         let sessions_to_list = self.catchains.execute_sync(|x| {
             let mut sessions_to_list = Vec::new();
             for (_id,remp_cc) in x.iter_mut() {
@@ -656,7 +690,11 @@ impl RempCatchainStore {
 
         let mut res = Vec::new();
         for (info, status) in sessions_to_list {
-            res.push(format!("remp_catchain_status: session_id {:x}, shard {}, {}", info.queue_id, info.general_session_info, status));
+            let displayed = format!(
+                "remp_catchain_status: session_id {:x}, shard {}, master_cc {}..={}, {}",
+                info.queue_id, info.general_session_info, info.master_cc_range.start(), info.master_cc_range.end(), status
+            );
+            res.push((displayed, info.queue_id.clone()))
         }
         return res;
     }

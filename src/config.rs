@@ -86,7 +86,10 @@ pub struct CollatorConfig {
     pub max_collate_threads: u32,
     pub retry_if_empty: bool,
     pub finalize_empty_after_ms: u32,
-    pub empty_collation_sleep_ms: u32
+    pub empty_collation_sleep_ms: u32,
+    pub external_messages_timeout_percentage_points: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_messages_maximum_queue_length: Option<u32>, // None - unlimited
 }
 impl Default for CollatorConfig {
     fn default() -> Self {
@@ -102,7 +105,9 @@ impl Default for CollatorConfig {
             #[cfg(feature = "fast_finality")] 
             retry_if_empty: true,
             finalize_empty_after_ms: 800,
-            empty_collation_sleep_ms: 100
+            empty_collation_sleep_ms: 100,
+            external_messages_timeout_percentage_points: 100, // 0.1 = 10% = 100ms
+            external_messages_maximum_queue_length: None,
         }
     }
 }

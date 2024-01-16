@@ -184,7 +184,6 @@ async fn get_key_blocks(
                     log::warn!("somebody sent next key block id with seq_no less or equal to already got {}", block_id);
                     continue;
                 }
-
                 // we need to check presence and correctness of every hardfork
                 if let Some(hardfork_id) = hardfork {
                     if hardfork_id.seq_no == block_id.seq_no {

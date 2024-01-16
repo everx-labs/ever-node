@@ -13,8 +13,9 @@
 
 #![allow(dead_code)]
 use crate::{
-    block::BlockStuff, block_proof::BlockProofStuff, config::{CollatorConfig, TonNodeConfig}, 
+    block::BlockStuff, block_proof::BlockProofStuff,
     collator_test_bundle::create_engine_allocated,
+    config::{CollatorConfig, TonNodeConfig}, 
     full_node::apply_block::apply_block,
     internal_db::{
         LAST_APPLIED_MC_BLOCK, SHARD_CLIENT_MC_BLOCK,
@@ -546,7 +547,7 @@ impl TestEngine {
             db,
             res_path: res_path.map(|s| s.to_string()),
             now: Arc::new(AtomicU32::new(0)),
-            ext_messages: Arc::new(MessagesPool::new(0)),
+            ext_messages: Arc::new(MessagesPool::new(0, None)),
             shard_states: Default::default(),
             check_only_transactions: false,
             check_only_masterchain: false,
@@ -1083,12 +1084,13 @@ impl EngineOperations for TestEngine {
         self.ext_messages.new_message(id, message, self.now())
     }
     fn get_external_messages_iterator(
-        &self, 
-        shard: ShardIdent
+        &self,
+        shard: ShardIdent,
+        finish_time_ms: u64
     ) -> Box<dyn Iterator<Item = (Arc<Message>, UInt256)> + Send + Sync> {
-        Box::new(self.ext_messages.clone().iter(shard, self.now()))
+        Box::new(self.ext_messages.clone().iter(shard, self.now(), finish_time_ms))
     }
-    fn complete_external_messages(&self, to_delay: Vec<UInt256>, to_delete: Vec<UInt256>) -> Result<()> {
+    fn complete_external_messages(&self, to_delay: Vec<(UInt256, String)>, to_delete: Vec<(UInt256, i32)>) -> Result<()> {
         self.ext_messages.complete_messages(to_delay, to_delete, self.now())
     }
     async fn get_shard_blocks(

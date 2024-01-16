@@ -121,6 +121,10 @@ macro_rules! db_impl_single {
             pub fn path(&self) -> &std::path::Path {
                 self.db.path()
             }
+
+            pub fn db(&self) -> &std::sync::Arc<$crate::db::rocksdb::RocksDb> {
+                &self.db
+            }
         }
 
         impl std::ops::Deref for $type {

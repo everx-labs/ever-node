@@ -166,7 +166,10 @@ struct CatchainProcessor {
     process_blocks_responses_counter: metrics::Counter, //counter for processed_block
     process_blocks_skip_responses_counter: metrics::Counter, //counter for processed_block with may_be_skipped=true
     process_blocks_batching_requests_counter: metrics::Counter, //counter for processed_block with batching request
-
+    out_bytes: metrics::Counter, //outgoing traffic
+    out_queries_bytes: metrics::Counter, //outgoing queries traffic
+    out_broadcasts_bytes: metrics::Counter, //outgoing broadcasts traffic
+    processed_block_payload_size_histogram: metrics::Histogram, //histogram for processed blocks sizes
     blocks_storage: BlocksStorage, //must be last field to force drop order; 
                                    //storage for catchain blocks; 
                                    //is needed only to avoid stack overflow on dropping very long chains of blocks during destruction
@@ -197,6 +200,14 @@ pub(crate) struct CatchainImpl {
     main_thread_pull_counter: metrics::Counter, //counter for main queue pull
     utility_thread_post_counter: metrics::Counter, //counter for utility queue posts
     _utility_thread_pull_counter: metrics::Counter, //counter for utility queue pull
+    in_queries_bytes: metrics::Counter, //incoming queries traffic
+    out_queries_bytes: metrics::Counter, //outgoing queries traffic
+    in_messages_bytes: metrics::Counter, //incoming messages traffic
+    out_messages_bytes: metrics::Counter, //outgoing messages traffic
+    in_broadcasts_bytes: metrics::Counter, //incoming broadcasts traffic
+    out_broadcasts_bytes: metrics::Counter, //outgoing broadcasts traffic
+    in_bytes: metrics::Counter, //incoming traffic
+    out_bytes: metrics::Counter, //outgoing traffic
 }
 
 /*
@@ -205,6 +216,12 @@ pub(crate) struct CatchainImpl {
 
 struct OverlayListenerImpl {
     catchain: CatchainImplWeakPtr, //back weak reference to a CatchainImpl
+    in_queries_bytes: metrics::Counter, //incoming queries traffic
+    out_queries_bytes: metrics::Counter, //outgoing queries traffic
+    in_messages_bytes: metrics::Counter, //incoming messages traffic
+    in_broadcasts_bytes: metrics::Counter, //incoming broadcasts traffic
+    in_bytes: metrics::Counter, //incoming traffic
+    out_bytes: metrics::Counter, //outgoing traffic
 }
 
 impl CatchainOverlayLogReplayListener for OverlayListenerImpl {
@@ -219,6 +236,9 @@ impl CatchainOverlayLogReplayListener for OverlayListenerImpl {
 
 impl CatchainOverlayListener for OverlayListenerImpl {
     fn on_message(&self, adnl_id: PublicKeyHash, data: &BlockPayloadPtr) {
+        self.in_messages_bytes.increment(data.data().len() as u64);
+        self.in_bytes.increment(data.data().len() as u64);
+
         if let Some(catchain) = self.catchain.upgrade() {
             let adnl_id = adnl_id.clone();
             let data = data.clone();
@@ -230,6 +250,9 @@ impl CatchainOverlayListener for OverlayListenerImpl {
     }
 
     fn on_broadcast(&self, source_key_hash: PublicKeyHash, data: &BlockPayloadPtr) {
+        self.in_broadcasts_bytes.increment(data.data().len() as u64);
+        self.in_bytes.increment(data.data().len() as u64);
+
         if let Some(catchain) = self.catchain.upgrade() {
             let source_key_hash_clone = source_key_hash.clone();
             let data_clone = data.clone();
@@ -244,8 +267,22 @@ impl CatchainOverlayListener for OverlayListenerImpl {
         &self,
         adnl_id: PublicKeyHash,
         data: &BlockPayloadPtr,
-        response_callback: ExternalQueryResponseCallback,
+        _response_callback: ExternalQueryResponseCallback,
     ) {
+        self.in_queries_bytes.increment(data.data().len() as u64);
+        self.in_bytes.increment(data.data().len() as u64);
+
+        let out_queries_bytes = self.out_queries_bytes.clone();
+        let out_bytes = self.out_bytes.clone();
+
+        let response_callback : Box<dyn FnOnce(Result<BlockPayloadPtr>) + Send> = Box::new(move |result: Result<BlockPayloadPtr>| {
+            if let Ok(payload) = &result {
+                out_queries_bytes.increment(payload.data().len() as u64);
+                out_bytes.increment(payload.data().len() as u64);
+            }
+            _response_callback(result);
+        });
+
         if let Some(catchain) = self.catchain.upgrade() {
             if !Self::catchain_main_thread_overloaded_flag(&catchain) {
                 let adnl_id = adnl_id.clone();
@@ -299,8 +336,16 @@ impl CatchainOverlayListener for OverlayListenerImpl {
 }
 
 impl OverlayListenerImpl {
-    fn create(catchain: CatchainImplWeakPtr) -> OverlayListenerRcPtr {
-        Arc::new(Self { catchain })
+    fn create(catchain: &CatchainImplPtr) -> OverlayListenerRcPtr {
+        Arc::new(Self {
+            catchain: Arc::downgrade(catchain),
+            in_bytes: catchain.in_bytes.clone(),
+            out_bytes: catchain.out_bytes.clone(),
+            in_messages_bytes: catchain.in_messages_bytes.clone(),
+            in_broadcasts_bytes: catchain.in_broadcasts_bytes.clone(),
+            in_queries_bytes: catchain.in_queries_bytes.clone(),
+            out_queries_bytes: catchain.out_queries_bytes.clone(),
+        })
     }
 
     fn catchain_main_thread_overloaded_flag(catchain: &CatchainImplPtr) -> bool {
@@ -393,6 +438,11 @@ struct ReceiverListenerImpl {
     overlay: CatchainOverlayPtr,   //network layer for outgoing catchain events
     next_completion_handler_available_index: CompletionHandlerId, //index of next available complete handler
     completion_handlers: HashMap<CompletionHandlerId, Box<dyn CompletionHandler>>, //complete handlers
+    in_queries_bytes: metrics::Counter, //incoming queries traffic
+    out_queries_bytes: metrics::Counter, //outgoing queries traffic
+    out_messages_bytes: metrics::Counter, //outgoing messages traffic
+    in_bytes: metrics::Counter, //incoming traffic
+    out_bytes: metrics::Counter, //outgoing traffic
 }
 
 impl ReceiverListener for ReceiverListenerImpl {
@@ -524,6 +574,9 @@ impl ReceiverListener for ReceiverListenerImpl {
         check_execution_time!(20000);
         instrument!();
 
+        self.out_messages_bytes.increment(message.data().len() as u64);
+        self.out_bytes.increment(message.data().len() as u64);
+
         //TODO: call processor directly instead of posting closure
         if can_be_postponed || CATCHAIN_POSTPONED_SEND_TO_OVERLAY {
             let overlay = Arc::downgrade(&self.overlay);
@@ -554,10 +607,13 @@ impl ReceiverListener for ReceiverListenerImpl {
         check_execution_time!(20000);
         instrument!();
 
+        self.out_messages_bytes.increment((message.data().len() * receiver_ids.len()) as u64);
+        self.out_bytes.increment((message.data().len() * receiver_ids.len()) as u64);
+
         //TODO: call processor directly instead of posting closure
         if CATCHAIN_POSTPONED_SEND_TO_OVERLAY {
             let overlay = Arc::downgrade(&self.overlay);
-            let receiver_ids: Vec<PublicKeyHash> = receiver_ids.clone().into();
+            let receiver_ids: Vec<PublicKeyHash> = receiver_ids.into();
             let sender_id = sender_id.clone();
             let message = message.clone();
 
@@ -588,13 +644,25 @@ impl ReceiverListener for ReceiverListenerImpl {
         check_execution_time!(20000);
         instrument!();
 
-        let completion_handler = self.create_completion_handler(response_callback);
+        self.out_queries_bytes.increment(message.data().len() as u64);
+        self.out_bytes.increment(message.data().len() as u64);
+
+        let in_queries_bytes = self.in_queries_bytes.clone();
+        let in_bytes = self.in_bytes.clone();
+
+        let completion_handler = self.create_completion_handler(Box::new(move |result: Result<BlockPayloadPtr>, receiver: &mut dyn Receiver| {
+            if let Ok(payload) = &result {
+                in_queries_bytes.increment(payload.data().len() as u64);
+                in_bytes.increment(payload.data().len() as u64);
+            }
+            response_callback(result, receiver);
+        }));
 
         //TODO: call processor directly instead of posting closure
         if CATCHAIN_POSTPONED_SEND_TO_OVERLAY {
             let overlay = Arc::downgrade(&self.overlay);
             let receiver_id = receiver_id.clone();
-            let name: String = name.clone().into();
+            let name: String = name.into();
             let sender_id = sender_id.clone();
             let message = message.clone();
 
@@ -736,13 +804,19 @@ impl ReceiverListenerImpl {
         Listener creation
     */
 
-    fn create(catchain: CatchainImplWeakPtr, overlay: CatchainOverlayPtr) -> ReceiverListenerRcPtr {
+    fn create(catchain: &CatchainImplPtr, overlay: CatchainOverlayPtr) -> ReceiverListenerRcPtr {
+        let catchain_weak = Arc::downgrade(catchain);
         let body = ReceiverListenerImpl {
-            task_queue: ReceiverTaskQueueImpl::create(catchain.clone()),
-            catchain: catchain,
+            task_queue: ReceiverTaskQueueImpl::create(catchain_weak.clone()),
+            catchain: catchain_weak,
             overlay: overlay,
             next_completion_handler_available_index: 1,
             completion_handlers: HashMap::new(),
+            in_bytes: catchain.in_bytes.clone(),
+            out_bytes: catchain.out_bytes.clone(),
+            in_queries_bytes: catchain.in_queries_bytes.clone(),
+            out_queries_bytes: catchain.out_queries_bytes.clone(),
+            out_messages_bytes: catchain.out_messages_bytes.clone(),
         };
 
         let receiver_listener: ReceiverListenerRcPtr = Rc::new(RefCell::new(body));
@@ -962,6 +1036,51 @@ impl CatchainProcessor {
         metrics_dumper.add_derivative_metric("process_blocks_responses".to_string());
         metrics_dumper.add_derivative_metric("process_blocks_skip_responses".to_string());
         metrics_dumper.add_derivative_metric("process_blocks_batching_requests".to_string());
+
+        metrics_dumper.add_derivative_metric("overlay_in_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_out_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_in_messages_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_out_messages_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_in_queries_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_out_queries_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_in_broadcasts_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_out_broadcasts_bytes".to_string());
+
+        utils::add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"overlay_in_messages.avg_size".to_string(),
+            &"overlay_in_messages_bytes".to_string(),
+            &"receiver_in_messages".to_string(),
+            0.0,
+        );
+        utils::add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"overlay_out_messages.avg_size".to_string(),
+            &"overlay_out_messages_bytes".to_string(),
+            &"receiver_out_messages".to_string(),
+            0.0,
+        );
+        utils::add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"overlay_in_queries.avg_size".to_string(),
+            &"overlay_in_queries_bytes".to_string(),
+            &"receiver_in_queries.total".to_string(),
+            0.0,
+        );
+        utils::add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"overlay_out_queries.avg_size".to_string(),
+            &"overlay_out_queries_bytes".to_string(),
+            &"receiver_out_queries.total".to_string(),
+            0.0,
+        );
+        utils::add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"overlay_in_broadcasts.avg_size".to_string(),
+            &"overlay_in_broadcasts_bytes".to_string(),
+            &"receiver_in_broadcasts".to_string(),
+            0.0,
+        );
 
         utils::add_compute_percentage_metric(
             &mut metrics_dumper,
@@ -1614,6 +1733,7 @@ impl CatchainProcessor {
         instrument!();
 
         self.process_blocks_responses_counter.increment(1);
+        self.processed_block_payload_size_histogram.record(payload.data().len() as f64);
 
         assert!(self.receiver_started);
 
@@ -2027,6 +2147,9 @@ impl CatchainProcessor {
     fn send_broadcast(&mut self, payload: BlockPayloadPtr) {
         instrument!();
 
+        self.out_broadcasts_bytes.increment(payload.data().len() as u64);
+        self.out_bytes.increment(payload.data().len() as u64);
+
         let source = self.receiver.borrow().get_source(self.local_idx);
         let source = source.borrow();
         let adnl_id = source.get_adnl_id();
@@ -2060,6 +2183,9 @@ impl CatchainProcessor {
         max_answer_size: u64,
     ) {
         instrument!();
+
+        self.out_queries_bytes.increment(query.data().len() as u64);
+        self.out_bytes.increment(query.data().len() as u64);
 
         if CATCHAIN_POSTPONED_SEND_TO_OVERLAY {
             let overlay = Arc::downgrade(&self.overlay);
@@ -2140,7 +2266,7 @@ impl CatchainProcessor {
         .into_boxed();
         let overlay_id = utils::get_overlay_id(&first_block)?;
         let overlay_short_id = OverlayUtils::calc_private_overlay_short_id(&first_block)?;
-        let overlay_listener = OverlayListenerImpl::create(Arc::downgrade(&catchain));
+        let overlay_listener = OverlayListenerImpl::create(&catchain);
         let overlay_data_listener: Arc<dyn CatchainOverlayListener + Send + Sync> =
             overlay_listener.clone();
         let overlay_replay_listener: Arc<dyn CatchainOverlayLogReplayListener + Send + Sync> =
@@ -2165,6 +2291,9 @@ impl CatchainProcessor {
         let process_blocks_batching_requests_counter = metrics_receiver
             .sink()
             .register_counter(&"process_blocks_batching_requests".into());
+        let processed_block_payload_size_histogram = metrics_receiver
+            .sink()
+            .register_histogram(&"processed_block_payload_size".into());
 
         log::debug!(
             "CatchainProcessor: starting up overlay \
@@ -2175,7 +2304,7 @@ impl CatchainProcessor {
         //receiver creation
 
         let receiver_listener =
-            ReceiverListenerImpl::create(Arc::downgrade(&catchain), overlay.clone());
+            ReceiverListenerImpl::create(&catchain, overlay.clone());
         let receiver = CatchainFactory::create_receiver(
             Rc::downgrade(&receiver_listener),
             &overlay_id,
@@ -2225,6 +2354,10 @@ impl CatchainProcessor {
             process_blocks_responses_counter,
             process_blocks_skip_responses_counter,
             process_blocks_batching_requests_counter,
+            out_queries_bytes: catchain.out_queries_bytes.clone(),
+            out_broadcasts_bytes: catchain.out_broadcasts_bytes.clone(),
+            out_bytes: catchain.out_bytes.clone(),
+            processed_block_payload_size_histogram,
         };
 
         Ok(body)
@@ -2538,6 +2671,15 @@ impl CatchainImpl {
         let utility_thread_post_counter = metrics_receiver.sink().register_counter(&"utility_queue.posts".into());
         let utility_thread_pull_counter = metrics_receiver.sink().register_counter(&"utility_queue.pulls".into());
 
+        let in_messages_bytes = metrics_receiver.sink().register_counter(&"overlay_in_messages_bytes".into());
+        let out_messages_bytes = metrics_receiver.sink().register_counter(&"overlay_out_messages_bytes".into());
+        let in_queries_bytes = metrics_receiver.sink().register_counter(&"overlay_in_queries_bytes".into());
+        let out_queries_bytes = metrics_receiver.sink().register_counter(&"overlay_out_queries_bytes".into());
+        let in_broadcasts_bytes = metrics_receiver.sink().register_counter(&"overlay_in_broadcasts_bytes".into());
+        let out_broadcasts_bytes = metrics_receiver.sink().register_counter(&"overlay_out_broadcasts_bytes".into());
+        let in_bytes = metrics_receiver.sink().register_counter(&"overlay_in_bytes".into());
+        let out_bytes = metrics_receiver.sink().register_counter(&"overlay_out_bytes".into());
+
         let body: CatchainImpl = CatchainImpl {
             main_queue_sender,
             utility_queue_sender,
@@ -2553,6 +2695,14 @@ impl CatchainImpl {
             main_thread_pull_counter,
             utility_thread_post_counter,
             _utility_thread_pull_counter: utility_thread_pull_counter.clone(),
+            in_queries_bytes,
+            out_queries_bytes,
+            in_messages_bytes,
+            out_messages_bytes,
+            in_broadcasts_bytes,
+            out_broadcasts_bytes,
+            in_bytes,
+            out_bytes,
         };
 
         let catchain = Arc::new(body);

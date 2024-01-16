@@ -279,7 +279,6 @@ pub async fn external_db_worker(
             produce_shard_hashes(engine, &block).await?;
         }
         engine.process_chain_range_in_ext_db(&range).await?;
-    
         engine.save_external_db_mc_block_id(handle.id())?;
     }
     Ok(())

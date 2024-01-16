@@ -25,12 +25,12 @@ use std::{
     sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}}, time::{UNIX_EPOCH, Duration}, ops::Deref
 };
 use storage::{
-    TimeChecker,
+    StorageAlloc, TimeChecker,
     archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId},
     block_handle_db::{self, BlockHandle, BlockHandleDb, BlockHandleStorage}, 
-    block_info_db::BlockInfoDb, db::rocksdb::RocksDb, node_state_db::NodeStateDb, 
-    types::BlockMeta, db::filedb::FileDb,
-    shard_top_blocks_db::ShardTopBlocksDb, StorageAlloc, traits::Serializable, shardstate_db_async::CellsDbConfig,
+    block_info_db::BlockInfoDb, db::{filedb::FileDb, rocksdb::RocksDb}, 
+    node_state_db::NodeStateDb, shard_top_blocks_db::ShardTopBlocksDb, 
+    shardstate_db_async::CellsDbConfig, traits::Serializable, types::BlockMeta
 };
 use storage::shardstate_db_async::{self, AllowStateGcResolver, ShardStateDb};
 #[cfg(feature = "telemetry")]

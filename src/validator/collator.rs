@@ -186,14 +186,10 @@ enum AsyncMessage {
     Recover(Message),
     Mint(Message),
     Copyleft(Message),
-    Ext(Message),
+    Ext(Message, UInt256),
     Int(MsgEnqueueStuff, bool),
     New(MsgEnvelopeStuff, Cell), // prev_trans_cell
     TickTock(TransactionTickTock),
-}
-
-impl AsyncMessage {
-    fn is_external(&self) -> bool { matches!(self, Self::Ext(_)) }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -237,8 +233,8 @@ struct CollatorData {
     shard_top_block_descriptors: Vec<Arc<TopBlockDescrStuff>>,
     block_create_count: HashMap<UInt256, u64>,
     new_messages: BinaryHeap<NewMessage>, // using for priority queue
-    accepted_ext_messages: Vec<UInt256>,
-    rejected_ext_messages: Vec<(UInt256, String)>,
+    accepted_ext_messages: Vec<(UInt256, i32)>, // message id and wokchain id
+    rejected_ext_messages: Vec<(UInt256, String)>, // message id and reject reason
     accepted_remp_messages: Vec<UInt256>,
     rejected_remp_messages: Vec<(UInt256, String)>,
     ignored_remp_messages: Vec<UInt256>,
@@ -652,7 +648,7 @@ impl CollatorData {
     fn before_split(&self) -> bool { self.before_split }
     fn set_before_split(&mut self, value: bool) { self.before_split = value }
 
-    fn withdraw_ext_msg_statuses(&mut self) -> (Vec<UInt256>, Vec<(UInt256, String)>) {
+    fn withdraw_ext_msg_statuses(&mut self) -> (Vec<(UInt256, i32)>, Vec<(UInt256, String)>) {
         (std::mem::take(&mut self.accepted_ext_messages),
          std::mem::take(&mut self.rejected_ext_messages))
     }
@@ -766,14 +762,14 @@ impl ExecutionManager {
         collator_data: &mut CollatorData,
     ) -> Result<()> {
         log::trace!("{}: execute (adding into queue): {:x}", self.collated_block_descr, account_id);
-        let msg = Arc::new(msg);
         if let Some((sender, _handle)) = self.changed_accounts.get(&account_id) {
             self.wait_tr.request();
-            sender.send(msg)?;
+            sender.send(Arc::new(msg))?;
         } else {
             let shard_acc = if let Some(shard_acc) = prev_data.accounts().account(&account_id)? {
                 shard_acc
-            } else if msg.is_external() {
+            } else if let AsyncMessage::Ext(_, msg_id) = msg {
+                collator_data.rejected_ext_messages.push((msg_id, format!("account {:x} not found", account_id)));
                 return Ok(()); // skip external messages for unexisting accounts
             } else {
                 ShardAccount::default()
@@ -783,7 +779,7 @@ impl ExecutionManager {
                 shard_acc,
             )?;
             self.wait_tr.request();
-            sender.send(msg)?;
+            sender.send(Arc::new(msg))?;
             self.changed_accounts.insert(account_id, (sender, handle));
         }
 
@@ -885,7 +881,7 @@ impl ExecutionManager {
             AsyncMessage::New(env, _prev_tr_cell) => {
                 (Box::new(OrdinaryTransactionExecutor::new(config)), Some(env.message()))
             }
-            AsyncMessage::Recover(msg) | AsyncMessage::Mint(msg) | AsyncMessage::Ext(msg) => {
+            AsyncMessage::Recover(msg) | AsyncMessage::Mint(msg) | AsyncMessage::Ext(msg, _) => {
                 (Box::new(OrdinaryTransactionExecutor::new(config)), Some(msg))
             }
             AsyncMessage::Copyleft(msg) => {
@@ -913,8 +909,7 @@ impl ExecutionManager {
         transaction_res: Result<Transaction>,
         collator_data: &mut CollatorData
     ) -> Result<()> {
-        if let AsyncMessage::Ext(ref msg) = new_msg.deref() {
-            let msg_id = msg.serialize()?.repr_hash();
+        if let AsyncMessage::Ext(msg, msg_id) = new_msg.deref() {
             let account_id = msg.int_dst_account_id().unwrap_or_default();
             if let Err(err) = transaction_res {
                 log::warn!(
@@ -922,7 +917,7 @@ impl ExecutionManager {
                     "{}: account {:x} rejected inbound external message {:x}, by reason: {}",
                     self.collated_block_descr, account_id, msg_id, err
                 );
-                collator_data.rejected_ext_messages.push((msg_id, err.to_string()));
+                collator_data.rejected_ext_messages.push((msg_id.clone(), err.to_string()));
                 return Ok(())
             } else {
                 log::debug!(
@@ -930,7 +925,9 @@ impl ExecutionManager {
                     "{}: account {:x} accepted inbound external message {:x}",
                     self.collated_block_descr, account_id, msg_id,
                 );
-                collator_data.accepted_ext_messages.push(msg_id);
+                collator_data.accepted_ext_messages.push(
+                    (msg_id.clone(), msg.dst_workchain_id().unwrap_or_default())
+                );
             }
         }
         let tr = transaction_res?;
@@ -963,7 +960,7 @@ impl ExecutionManager {
                 let env = MsgEnvelopeStuff::new(msg.clone(), &ShardIdent::masterchain(), Grams::default(), false)?;
                 Some(InMsg::immediate(env.inner().serialize()?, tr_cell.clone(), Grams::default()))
             }
-            AsyncMessage::Ext(msg) => {
+            AsyncMessage::Ext(msg, _) => {
                 let in_msg = InMsg::external(msg.serialize()?, tr_cell.clone());
                 Some(in_msg)
             }
@@ -1449,8 +1446,9 @@ impl Collator {
                 // import remp messages (if space&gas left)
                 let now = std::time::Instant::now();
                 let total = remp_messages.len();
-                let processed = self.process_remp_messages(prev_data, collator_data, &mut exec_manager, 
-                    remp_messages).await?;
+                let processed = self.process_remp_messages(
+                    prev_data, collator_data, &mut exec_manager, remp_messages
+                ).await?;
                 log::debug!("{}: TIME: process_remp_messages {}ms, processed {}, ignored {}", 
                     self.collated_block_descr, now.elapsed().as_millis(), processed, total - processed);
             }
@@ -1458,8 +1456,12 @@ impl Collator {
             // import inbound external messages (if space&gas left)
             let now = std::time::Instant::now();
             self.process_inbound_external_messages(prev_data, collator_data, &mut exec_manager).await?;
-            log::debug!("{}: TIME: process_inbound_external_messages {}ms;", 
-                self.collated_block_descr, now.elapsed().as_millis());
+            log::debug!(
+                "{}: TIME: process_inbound_external_messages {}ms; messages left: {}", 
+                self.collated_block_descr,
+                now.elapsed().as_millis(),
+                self.engine.get_external_messages_len(),
+            );
             metrics::histogram!("collator_process_inbound_external_messages_time", now.elapsed());
 
             // process newly-generated messages (if space&gas left)
@@ -2718,11 +2720,11 @@ impl Collator {
             log::debug!("{}: skipping processing of inbound external messages", self.collated_block_descr);
             return Ok(())
         }
-
+        let finish_time_ms = self.get_external_messages_finish_time_micros();
         log::debug!("{}: process_inbound_external_messages", self.collated_block_descr);
-        for (msg, id) in self.engine.get_external_messages_iterator(self.shard.clone()) {
-            let header = msg.ext_in_header().ok_or_else(|| error!("message {:x} \
-                is not external inbound message", id))?;
+        for (msg, msg_id) in self.engine.get_external_messages_iterator(self.shard.clone(), finish_time_ms) {
+            let header = msg.ext_in_header()
+                .ok_or_else(|| error!("message {:x} is not external inbound message", msg_id))?;
             if self.shard.contains_address(&header.dst)? {
                 if !collator_data.block_limit_status.fits(ParamLimitIndex::Soft) {
                     log::debug!("{}: BLOCK FULL, stop processing external messages", self.collated_block_descr);
@@ -2733,9 +2735,9 @@ impl Collator {
                         self.collated_block_descr);
                     break
                 }
+                log::debug!("{}: message {:x} sent to execution", self.collated_block_descr, msg_id);
                 let (_, account_id) = header.dst.extract_std_address(true)?;
-                let msg = AsyncMessage::Ext(msg.deref().clone());
-                log::debug!("{}: message {:x} sent to execution", self.collated_block_descr, id);
+                let msg = AsyncMessage::Ext(msg.deref().clone(), msg_id);
                 exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
             } else {
                 // usually node collates more than one shard, the message can belong another one,
@@ -2747,10 +2749,7 @@ impl Collator {
         }
         exec_manager.wait_transactions(collator_data).await?;
         let (accepted, rejected) = collator_data.withdraw_ext_msg_statuses();
-        self.engine.complete_external_messages(
-            rejected.into_iter().map(|(id, _)| id).collect(),
-            accepted,
-        )?;
+        self.engine.complete_external_messages(rejected, accepted)?;
         Ok(())
     }
 
@@ -2789,8 +2788,8 @@ impl Collator {
                     ignore = true;
                 } else {
                     let (_, account_id) = header.dst.extract_std_address(true)?;
-                    let msg = AsyncMessage::Ext(msg.deref().clone());
                     log::trace!("{}: remp message {:x} sent to execution", self.collated_block_descr, id);
+                    let msg = AsyncMessage::Ext(msg.deref().clone(), id);
                     exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
                 }
             } else {
@@ -2805,6 +2804,7 @@ impl Collator {
         exec_manager.wait_transactions(collator_data).await?;
         let (accepted, rejected) = collator_data.withdraw_ext_msg_statuses();
         let processed = accepted.len() + rejected.len();
+        let accepted = accepted.into_iter().map(|(id, _)| id).collect();
         collator_data.set_remp_msg_statuses(accepted, rejected, ignored);
         Ok(processed)
     }
@@ -4513,6 +4513,12 @@ impl Collator {
         let cc = self.engine.collator_config();
         let max_secondary_clean_timeout_nanos = (cc.cutoff_timeout_ms as i128) * 1_000_000 * (cc.max_secondary_clean_timeout_percentage_points as i128) / 1000;
         remaining_cutoff_timeout_nanos.min(max_secondary_clean_timeout_nanos)
+    }
+
+    fn get_external_messages_finish_time_micros(&self) -> u64 {
+        let now = self.engine.now_ms();
+        let cc = self.engine.collator_config();
+        now + (cc.cutoff_timeout_ms * cc.external_messages_timeout_percentage_points / 1000) as u64
     }
 
     fn check_stop_flag(&self) -> Result<()> {

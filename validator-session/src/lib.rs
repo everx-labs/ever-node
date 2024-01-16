@@ -44,7 +44,6 @@ mod profiling {
 pub mod ton {
     pub use ton_api::ton::int;
     pub use ton_api::ton::rpc::validator_session::*;
-    pub use ton_api::ton::validator_session::round::validator_session::*;
     pub use ton_api::ton::validator_session::*;
 
     pub mod blockid {

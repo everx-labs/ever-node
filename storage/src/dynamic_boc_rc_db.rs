@@ -29,8 +29,8 @@ use std::{
 //#[cfg(test)]
 //use std::path::Path;
 use ton_types::{
-    Cell, Result, MAX_LEVEL, fail, DoneCellsStorage, UInt256, OrderedCellsStorage, CellByHashStorage,
-    ByteOrderRead, error, CellData,
+    Cell, Result, MAX_LEVEL, fail, DoneCellsStorage, UInt256, OrderedCellsStorage, 
+    CellByHashStorage, ByteOrderRead, error, CellData,
 };
 
 pub const BROKEN_CELL_BEACON_FILE: &str = "ton_node.broken_cell";

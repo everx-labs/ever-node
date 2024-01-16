@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.87
+
+- Decrease test memory usage
+  
+## Version 0.55.86
+
+- Fixed compile warnings
+
+## Version 0.55.85
+
+- Updates in REMP protocol
+
+## Version 0.55.84
+
+- Optimizations on external messages processing
+
+## Version 0.55.83
+
+- Front node functionality isolation
+
 ## Version 0.55.82
 
 - Fixed accept block when block data already saved
@@ -74,7 +94,6 @@ All notable changes to this project will be documented in this file.
 
 ## Version 0.55.64
 
-- Revert workflow with external messages
 - Write `last_trans_lt` to account's json for deleted accounts.
 
 ## Version 0.55.63

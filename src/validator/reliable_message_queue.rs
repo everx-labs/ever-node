@@ -914,6 +914,7 @@ impl RmqQueueManager {
             self, new_cc_range.start(), new_cc_range.end()
         );
         let mut sent = 0;
+        let mut sent_rejects = 0;
 
         if let Some(queue) = &self.cur_queue {
             let next_queue_infos: Vec<Arc<RempCatchainInfo>> = self.get_next_queues();
@@ -952,7 +953,8 @@ impl RmqQueueManager {
                 }
             }
 
-            let mut rejected_message_digests: HashMap<u32, ton_api::ton::ton_node::rempcatchainrecord::RempCatchainMessageDigest> = HashMap::default();
+            //let mut rejected_message_digests: HashMap<u32, ton_api::ton::ton_node::rempcatchainrecord::RempCatchainMessageDigest> = HashMap::default();
+            let mut rejected_message_digests: Vec<RempCatchainMessageDigest> = Vec::new();
 
             for msgid in to_forward.iter() {
                 let (message, message_status, message_cc) = match self.remp_manager.message_cache.get_message_with_status_cc(msgid) {
@@ -990,6 +992,7 @@ impl RmqQueueManager {
                 // All other messages are not forwarded
 
                 if is_finally_rejected(&message_status) {
+/*
                     if let Some(digest) = rejected_message_digests.get_mut (&message_cc) {
                         digest.messages.0.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
                             id: message.message_id.clone(),
@@ -1005,6 +1008,14 @@ impl RmqQueueManager {
                         });
                         rejected_message_digests.insert(message_cc, digest);
                     }
+*/
+                    let mut digest = RempCatchainMessageDigest::default();
+                    digest.masterchain_seqno = message_cc as i32;
+                    digest.messages.0.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
+                        id: message.message_id.clone(),
+                        uid: message.message_uid.clone()
+                    });
+                    rejected_message_digests.push(digest);
                 }
                 else if !is_finally_accepted(&message_status) {
                     if MessageQueue::is_final_status(&message_status) {
@@ -1027,7 +1038,8 @@ impl RmqQueueManager {
                 }
             }
 
-            for (master_cc, digest) in rejected_message_digests.into_iter() {
+            for digest in rejected_message_digests.into_iter() {
+/*
                 if !digest.messages.0.is_empty() {
                     let digest_len = digest.messages.0.len();
                     let msg = ton_api::ton::ton_node::RempCatchainRecord::TonNode_RempCatchainMessageDigest(digest);
@@ -1041,14 +1053,29 @@ impl RmqQueueManager {
                             sent = sent + 1;
                         }
                     }
+ */
+                let digest_len = digest.messages.0.len();
+                let msg = ton_api::ton::ton_node::RempCatchainRecord::TonNode_RempCatchainMessageDigest(digest);
+                for new in next_queues.iter() {
+                    if let Err(x) = new.catchain_instance.pending_messages_queue_send(msg.clone()) {
+                        log::error!(target: "remp",
+                            "Point 5a. RMQ {}: message digest (len={}) cannot be put to new queue {}: `{}`",
+                            self, digest_len, new, x
+                        )
+                    } else {
+                        sent = sent + 1;
+                        sent_rejects = sent_rejects + 1;
+                    }
                 }
+ /*
                 else {
                     log::error!(target: "remp", "RMQ {}: rejected message digest for {} is empty, but present in cache!", self, master_cc)
                 }
+ */
             }
 
-            log::info!(target: "remp", "RMQ {}: forwarding messages to new RMQ, total {}, actually sent {}",
-                self, to_forward.len(), sent
+            log::info!(target: "remp", "RMQ {}: forwarding messages to new RMQ, total {}, actually sent {} (with {} rejects of them)",
+                self, to_forward.len(), sent, sent_rejects
             );
         }
         else {
@@ -1068,6 +1095,7 @@ impl RmqQueueManager {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn stop(&self) {
         log::trace!(target: "remp", "Stopping RMQ {}. First, stopping qurrent queue", self);
         if let Some(q) = &self.cur_queue {
@@ -1213,6 +1241,16 @@ impl RmqQueueManager {
         }
         else {
             format!("ReliableMessageQueue for shard {}: disabled", self.shard)
+        }
+    }
+
+    pub async fn get_messages_cnt(&self) -> Option<(UInt256, usize)> {
+        match &self.cur_queue {
+            Some(cq) => Some((
+                cq.catchain_info.queue_id.clone(),
+                cq.queues.execute_sync(|q| q.pending_collation_set.len()).await
+            )),
+            None => None
         }
     }
 
