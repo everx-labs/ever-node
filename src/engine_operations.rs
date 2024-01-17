@@ -423,11 +423,15 @@ impl EngineOperations for Engine {
         is_link: bool,
         key_block: bool
     ) -> Result<BlockProofStuff> {
-        self.download_block_proof_worker(id, is_link, key_block, Some(1)).await
+        self.download_block_proof_worker(mesh_nw_id, id, is_link, key_block, Some(1)).await
     }
 
     async fn download_next_block(&self, mesh_nw_id: i32, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
-        self.download_next_block_worker(prev_id, None).await
+        if mesh_nw_id == 0 || mesh_nw_id == self.network_global_id() {
+            self.download_next_block_worker(prev_id, None).await
+        } else {
+            self.download_next_mesh_update_worker(mesh_nw_id, prev_id, None, None).await
+        }
     }
 
     async fn download_and_store_state(
@@ -447,7 +451,7 @@ impl EngineOperations for Engine {
             (None, handle.id().shard().workchain_id())
         };
 
-        let overlay = self.get_full_node_overlay(overlay_wc, SHARD_FULL).await?;
+        let overlay = self.get_full_node_overlay(0, overlay_wc, SHARD_FULL).await?;
 
         let data = crate::full_node::state_helper::download_persistent_state(
             handle.id(),
@@ -475,7 +479,7 @@ impl EngineOperations for Engine {
         mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
-        self.download_zerostate_worker(id, None).await
+        self.download_zerostate_worker(mesh_nw_id, id, None).await
     }
 
     async fn store_block(&self, block: &BlockStuff) -> Result<BlockResult> {
@@ -501,9 +505,7 @@ impl EngineOperations for Engine {
         proof: &BlockProofStuff,
     ) -> Result<BlockResult> {
 
-        if mesh_nw_id == 0 ||
-           mesh_nw_id == self.network_global_id() 
-        {
+        if mesh_nw_id == 0 || mesh_nw_id == self.network_global_id() {
             self.db().store_block_proof(id, handle, proof, None).await
         } else {
             self.db().store_mesh_block_proof(id, mesh_nw_id, handle, proof, None).await
@@ -778,7 +780,8 @@ impl EngineOperations for Engine {
         mesh_nw_id: i32, // zero for own network
         block_id: &BlockIdExt, 
     ) -> Result<Vec<BlockIdExt>> {
-        let mc_overlay = self.get_masterchain_overlay().await?;
+        let mc_overlay = self.get_full_node_overlay(
+            mesh_nw_id, ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL).await?;
         mc_overlay.download_next_key_blocks_ids(block_id, 5).await
     }
 
@@ -826,7 +829,7 @@ impl EngineOperations for Engine {
         to: &AccountIdPrefixFull, 
         data: &[u8]
     ) -> Result<BroadcastSendInfo> {
-        let overlay = self.get_full_node_overlay(to.workchain_id, to.prefix).await?;
+        let overlay = self.get_full_node_overlay(0, to.workchain_id, to.prefix).await?;
         overlay.broadcast_external_message(data).await
     }
 
@@ -919,7 +922,7 @@ impl EngineOperations for Engine {
 
         for wc in target_wcs {
             log::trace!("send_block_broadcast {} to {}", broadcast.id, wc);
-            let overlay = self.get_full_node_overlay(wc, SHARD_FULL).await?;
+            let overlay = self.get_full_node_overlay(0, wc, SHARD_FULL).await?;
             overlay.send_block_broadcast(broadcast.clone()).await?;
         }
 
@@ -932,6 +935,7 @@ impl EngineOperations for Engine {
     async fn send_queue_update_broadcast(&self, broadcast: QueueUpdateBroadcast) -> Result<()> {
         // TODO select right overlay
         let overlay = self.get_full_node_overlay(
+            0,
             broadcast.target_wc,
             SHARD_FULL, //broadcast.id.shard as u64
         ).await?;
@@ -967,7 +971,7 @@ impl EngineOperations for Engine {
         }
 
         for wc in target_wcs {
-            let overlay = self.get_full_node_overlay(wc, SHARD_FULL).await?;
+            let overlay = self.get_full_node_overlay(0, wc, SHARD_FULL).await?;
             overlay.send_top_shard_block_description(&tbd).await?;
         }
 
@@ -1318,11 +1322,27 @@ impl EngineOperations for Engine {
     }
 
     async fn download_mesh_kit(&self, nw_id: i32, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
-        unimplemented!()
+        loop {
+            if let Some((block, proof)) = self.download_mesh_kit_awaiters().do_or_wait(
+                &id,
+                None,
+                self.download_mesh_kit_worker(nw_id, id, Some(10), None)
+            ).await? {
+                return Ok((block, proof))
+            }
+        }
     }
 
     async fn download_latest_mesh_kit(&self, nw_id: i32) -> Result<(BlockStuff, BlockProofStuff)> {
-        unimplemented!()
+        loop {
+            if let Some((block, proof)) = self.download_latest_mesh_kit_awaiters().do_or_wait(
+                &nw_id,
+                None,
+                self.download_latest_mesh_kit_worker(nw_id, Some(10), None)
+            ).await? {
+                return Ok((block, proof))
+            }
+        }
     }
 
     fn store_mesh_queue(

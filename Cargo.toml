@@ -99,3 +99,6 @@ version = '0.26.0'
 
 [patch.'https://github.com/tonlabs/ever-block.git']
 ton_block = { path = '../ever-block' }
+
+[patch.'https://github.com/tonlabs/ever-tl.git']
+ton_api = { path = '../ever-tl/ton_api' }

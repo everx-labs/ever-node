@@ -762,8 +762,8 @@ impl InternalDb {
 
     async fn load_block_proof_raw_(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>> {
         if handle.is_mesh() {
-            if !handle.is_key_block() {
-                fail!("Attempt to save non key mesh block proof {}", handle.block_id());
+            if !handle.is_key_block()? {
+                fail!("Attempt to save non key mesh block proof {}", handle.id());
             }
             self.mesh_key_block_proofs_db.get(handle.id()).map(|slice| slice.to_vec())
         } else {

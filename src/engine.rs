@@ -113,6 +113,9 @@ pub struct Engine {
     next_block_applying_awaiters: AwaitersPool<BlockIdExt, BlockIdExt>,
     download_block_awaiters: AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)>,
     download_queue_update_awaiters: AwaitersPool<BlockIdExt, BlockStuff>,
+    download_mesh_kit_awaiters: AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)>,
+    download_latest_mesh_kit_awaiters: AwaitersPool<i32, (BlockStuff, BlockProofStuff)>,
+    next_mesh_update_awaiters: AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)>,
     external_messages: Arc<MessagesPool>,
     servers: lockfree::queue::Queue<Server>,
     stopper: Arc<Stopper>,
@@ -393,6 +396,65 @@ impl Downloader for ZeroStateDownloader {
             }
         }
         context.client.download_zero_state(context.id).await
+    }
+}
+
+struct MeshKitDownloader {
+    network_id: i32
+}
+ 
+#[async_trait::async_trait]
+impl Downloader for MeshKitDownloader {
+    type Item = (BlockStuff, BlockProofStuff);
+    async fn try_download(
+        &self, 
+        context: &DownloadContext<'_, Self::Item>,
+    ) -> Result<Self::Item> {
+        context.client.download_mesh_kit(
+            self.network_id,
+            context.id,
+            context.engine.network_global_id()
+        ).await
+    }
+}
+
+struct LatestMeshKitDownloader {
+    network_id: i32
+}
+ 
+#[async_trait::async_trait]
+impl Downloader for LatestMeshKitDownloader {
+    type Item = (BlockStuff, BlockProofStuff);
+    async fn try_download(
+        &self, 
+        context: &DownloadContext<'_, Self::Item>,
+    ) -> Result<Self::Item> {
+        context.client.download_latest_mesh_kit(
+            self.network_id,
+            context.engine.network_global_id()
+        ).await
+    }
+}
+
+struct NextMeshUpdateDownloader {
+    network_id: i32
+}
+ 
+#[async_trait::async_trait]
+impl Downloader for NextMeshUpdateDownloader {
+    type Item = (BlockStuff, BlockProofStuff);
+    async fn try_download(
+        &self, 
+        context: &DownloadContext<'_, Self::Item>,
+    ) -> Result<Self::Item> {
+        // if let Some(handle) = context.engine.db.load_block_handle(context.id)? {
+        //     TODO
+        // }
+        context.client.download_next_mesh_update(
+            self.network_id,
+            context.id,
+            context.engine.network_global_id()
+        ).await
     }
 }
 
@@ -789,6 +851,24 @@ impl Engine {
                 engine_telemetry.clone(),
                 engine_allocated.clone()
             ),
+            download_mesh_kit_awaiters: AwaitersPool::new(
+                "download_mesh_kit_awaiters",
+                #[cfg(feature = "telemetry")]
+                engine_telemetry.clone(),
+                engine_allocated.clone()
+            ),
+            download_latest_mesh_kit_awaiters: AwaitersPool::new(
+                "download_latest_mesh_kit_awaiters",
+                #[cfg(feature = "telemetry")]
+                engine_telemetry.clone(),
+                engine_allocated.clone()
+            ),
+            next_mesh_update_awaiters: AwaitersPool::new(
+                "next_mesh_update_awaiters",
+                #[cfg(feature = "telemetry")]
+                engine_telemetry.clone(),
+                engine_allocated.clone()
+            ),
             external_messages: Arc::new(MessagesPool::new(now)),
             servers: lockfree::queue::Queue::new(),
             remp_client,
@@ -930,10 +1010,20 @@ impl Engine {
     pub fn shard_states_keeper(&self) -> Arc<ShardStatesKeeper> { self.shard_states_keeper.clone() }
 
     pub async fn get_masterchain_overlay(&self) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        self.get_full_node_overlay(ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL).await
+        self.get_full_node_overlay(0, ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL).await
     }
 
-    pub async fn get_full_node_overlay(&self, workchain: i32, shard: u64) -> Result<Arc<dyn FullNodeOverlayClient>> {
+    pub async fn get_full_node_overlay(
+        &self,
+        mesh_nw_id: i32,
+        workchain: i32,
+        shard: u64
+    ) -> Result<Arc<dyn FullNodeOverlayClient>> {
+
+        if mesh_nw_id != 0 && mesh_nw_id != self.network_global_id() {
+            fail!("get_full_node_overlay is not yet implemented for the Mesh");
+        }
+
         let id = self.overlay_operations.calc_overlay_id(workchain, shard)?;
         if let Some(overlay) = self.overlay_operations.get_overlay(&id.0).await {
             Ok(overlay)
@@ -977,6 +1067,18 @@ impl Engine {
 
     pub fn download_queue_update_awaiters(&self) -> &AwaitersPool<BlockIdExt, BlockStuff> {
         &self.download_queue_update_awaiters
+    }
+
+    pub fn download_mesh_kit_awaiters(&self) -> &AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)> {
+        &self.download_mesh_kit_awaiters
+    }
+
+    pub fn download_latest_mesh_kit_awaiters(&self) -> &AwaitersPool<i32, (BlockStuff, BlockProofStuff)> {
+        &self.download_latest_mesh_kit_awaiters
+    }
+
+    pub fn next_mesh_update_awaiters(&self) -> &AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)> {
+        &self.next_mesh_update_awaiters
     }
 
     pub fn external_messages(&self) -> &Arc<MessagesPool> {
@@ -1521,6 +1623,7 @@ impl Engine {
     async fn listen_broadcasts(self: Arc<Self>, shard_ident: ShardIdent, mask: u32) -> Result<()> {
         log::debug!("Started listening overlay for shard {}", shard_ident);
         let client = self.get_full_node_overlay(
+            0,
             shard_ident.workchain_id(),
             shard_ident.shard_prefix_with_tag()
         ).await?;
@@ -1929,6 +2032,7 @@ impl Engine {
     async fn create_download_context<'a, T>(
         &'a self,
         downloader: Arc<dyn Downloader<Item = T>>,
+        mesh_nw_id: i32, // zero for own network
         id: &'a BlockIdExt, 
         limit: Option<u32>,
         log_error_limit: u32,
@@ -1937,6 +2041,7 @@ impl Engine {
     ) -> Result<DownloadContext<'a, T>> {
         let ret = DownloadContext {
             client: self.get_full_node_overlay(
+                mesh_nw_id,
                 id.shard().workchain_id(),
                 id.shard().shard_prefix_with_tag()
             ).await?,
@@ -1961,6 +2066,7 @@ impl Engine {
         }
         self.create_download_context(
             Arc::new(NextBlockDownloader),
+            0,
             prev_id, 
             limit,
             10,
@@ -1977,6 +2083,7 @@ impl Engine {
     ) -> Result<(BlockStuff, BlockProofStuff)> {
         self.create_download_context(
             Arc::new(BlockDownloader),
+            0,
             id, 
             limit,
             0,
@@ -1994,6 +2101,7 @@ impl Engine {
     ) -> Result<BlockStuff> {
         self.create_download_context(
             Arc::new(QueueUpdateDownloader{ update_for_wc }),
+            0,
             id, 
             limit,
             0,
@@ -2004,6 +2112,7 @@ impl Engine {
 
     pub async fn download_block_proof_worker(
         &self,
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt,
         is_link: bool,
         key_block: bool,
@@ -2019,6 +2128,7 @@ impl Engine {
                     key_block
                 }
             ),
+            mesh_nw_id,
             id, 
             limit,
             0,
@@ -2029,16 +2139,71 @@ impl Engine {
 
     pub async fn download_zerostate_worker(
         &self,
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt,
         limit: Option<u32>
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         self.create_download_context(
             Arc::new(ZeroStateDownloader),
+            mesh_nw_id,
             id, 
             limit,
             0,
             "download_zerostate_worker", 
             Some((10, 12, 3000))
+        ).await?.download().await
+    }
+
+    pub async fn download_mesh_kit_worker(
+        &self,
+        network_id: i32,
+        id: &BlockIdExt,
+        limit: Option<u32>,
+        timeout: Option<(u64, u64, u64)>
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
+        self.create_download_context(
+            Arc::new(MeshKitDownloader{network_id}),
+            0,
+            id,
+            limit,
+            0,
+            "download_mesh_kit_worker", 
+            timeout
+        ).await?.download().await
+    }
+
+    pub async fn download_latest_mesh_kit_worker(
+        &self,
+        network_id: i32,
+        limit: Option<u32>,
+        timeout: Option<(u64, u64, u64)>
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
+        self.create_download_context(
+            Arc::new(LatestMeshKitDownloader{network_id}),
+            0,
+            &BlockIdExt::default(),
+            limit,
+            0,
+            "download_latest_mesh_kit_worker", 
+            timeout
+        ).await?.download().await
+    }
+
+    pub async fn download_next_mesh_update_worker(
+        &self,
+        network_id: i32,
+        id: &BlockIdExt,
+        limit: Option<u32>,
+        timeout: Option<(u64, u64, u64)>
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
+        self.create_download_context(
+            Arc::new(NextMeshUpdateDownloader{network_id}),
+            0,
+            id, 
+            limit,
+            0,
+            "download_mesh_kit_worker", 
+            timeout
         ).await?.download().await
     }
 

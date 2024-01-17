@@ -573,9 +573,6 @@ impl ConnectedNwClient {
 
             log::trace!("{}: downloading next block... prev: {}", self.descr, last_mc_block.id());
 
-            // TODO: after receiving a single data structure, FullNodeOverlayClient creates from it
-            //       BlockStuff with MeshUpdate inside and BlockProofStuff with signatures inside.
-            //       Same tree of cells with a fragment of the block stores inside both structs.
 
             let (mesh_update, proof) =
                 self.engine.download_next_block(self.nw_id, last_mc_block.id()).await?;
