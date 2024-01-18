@@ -86,7 +86,10 @@ pub struct CollatorConfig {
     pub max_collate_threads: u32,
     pub retry_if_empty: bool,
     pub finalize_empty_after_ms: u32,
-    pub empty_collation_sleep_ms: u32
+    pub empty_collation_sleep_ms: u32,
+    pub external_messages_timeout_percentage_points: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_messages_maximum_queue_length: Option<u32>, // None - unlimited
 }
 impl Default for CollatorConfig {
     fn default() -> Self {
@@ -97,9 +100,14 @@ impl Default for CollatorConfig {
             optimistic_clean_percentage_points: 1000, // 1.000 = 100% = 150ms
             max_secondary_clean_timeout_percentage_points: 350, // 0.350 = 35% = 350ms
             max_collate_threads: 10,
+            #[cfg(not(feature = "fast_finality"))] 
             retry_if_empty: false,
+            #[cfg(feature = "fast_finality")] 
+            retry_if_empty: true,
             finalize_empty_after_ms: 800,
-            empty_collation_sleep_ms: 100
+            empty_collation_sleep_ms: 100,
+            external_messages_timeout_percentage_points: 100, // 0.1 = 10% = 100ms
+            external_messages_maximum_queue_length: None,
         }
     }
 }
@@ -282,6 +290,16 @@ pub struct RempConfig {
 }
 
 impl RempConfig {
+    #[cfg(test)]
+    pub fn create_empty() -> Self {
+        Self {
+            client_enabled: None,
+            remp_client_pool: None,
+            service_enabled: None,
+            message_queue_max_len: None,
+            max_incoming_broadcast_delay_millis: None,
+        }
+    }
 
     pub fn is_client_enabled(&self) -> bool {
         self.client_enabled.unwrap_or(true)
@@ -603,6 +621,11 @@ impl TonNodeConfig {
     }
     pub fn cells_db_config(&self) -> &CellsDbConfig {
         &self.cells_db_config
+    }
+
+    #[cfg(test)]
+    pub fn set_port(&mut self, port: u16) {
+        self.port.replace(port);
     }
 
     pub fn collator_config(&self) -> &CollatorConfig {

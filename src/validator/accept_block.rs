@@ -28,6 +28,8 @@ use ton_block::{
     Deserializable, BlockSignatures, ValidatorSet, BlockProof, Serializable, BlockSignaturesPure, 
     ValidatorBaseInfo, OutQueueUpdate
 };
+#[cfg(feature = "fast_finality")]
+use ton_block::{BinTreeType, CollatorRange};
 use ton_types::{error, Result, fail, UInt256, UsageTree, HashmapType};
 use ton_api::ton::ton_node::{
     blocksignature::BlockSignature, broadcast::{BlockBroadcast, QueueUpdateBroadcast}
@@ -38,6 +40,8 @@ pub async fn accept_block(
     data: Option<Vec<u8>>,
     prev: Vec<BlockIdExt>,
     validator_set: ValidatorSet,
+    #[cfg(feature = "fast_finality")]
+    collator_range: &Option<CollatorRange>,
     signatures: Vec<CryptoSignaturePair>,
     _approve_signatures: Vec<CryptoSignaturePair>, // is not actually used by t-node
     send_block_broadcast: bool,
@@ -68,6 +72,8 @@ pub async fn accept_block(
             block_opt.clone(),
             &prev,
             &validator_set,
+            #[cfg(feature = "fast_finality")]
+            collator_range,
             &signatures,
             &engine,
             is_fake,
@@ -122,6 +128,9 @@ pub async fn accept_block(
             // so in case with a single collator we need to wait until this broadcast
             // will be processed. Otherwise there are data races, which are acceptable
             // for multiple collators per session.
+            #[cfg(feature = "fast_finality")]
+            macro_rules! spawn_resend(($expr:expr) => { $expr };);
+            #[cfg(not(feature = "fast_finality"))]
             macro_rules! spawn_resend(($expr:expr) => { tokio::spawn(async move { $expr }); };);
 
             let block_descr = block_descr.clone();
@@ -192,6 +201,8 @@ pub async fn accept_block_routine(
     block_opt: Option<BlockStuff>,
     prev: &[BlockIdExt],
     validator_set: &ValidatorSet,
+    #[cfg(feature = "fast_finality")]
+    collator_range: &Option<CollatorRange>,
     signatures: &[CryptoSignaturePair],
     engine: &Arc<dyn EngineOperations>,
     is_fake: bool,
@@ -265,6 +276,8 @@ pub async fn accept_block_routine(
     let (proof, signatures) = create_new_proof(
         &block,
         &validator_set,
+        #[cfg(feature = "fast_finality")]
+        collator_range,
         signatures)?;
 
     handle = engine.store_block_proof(&id, Some(handle), &proof).await?
@@ -384,6 +397,8 @@ fn precheck_header(
 pub fn create_new_proof(
     block_stuff: &BlockStuff,
     validator_set: &ValidatorSet,
+    #[cfg(feature = "fast_finality")]
+    _collator_range: &Option<CollatorRange>,
     signatures: &[CryptoSignaturePair]
 ) -> Result<(BlockProofStuff, BlockSignatures)> {
     create_new_proof_internal(block_stuff, validator_set, signatures, false)
@@ -517,6 +532,11 @@ pub fn visit_block_for_proof(block: &Block, id: &BlockIdExt) -> Result<()> {
     if !info.shard().is_masterchain() && info.key_block() {
         fail!("non-masterchain block header of {} announces this block to be a key block", id);
     }
+
+    #[cfg(feature = "fast_finality")]
+    extra.ref_shard_blocks().iterate(|shards| {
+        shards.iterate(|_prefix, _block_id| Ok(true))
+    })?;
 
     // check state update
     let _state_update = block.read_state_update()?;

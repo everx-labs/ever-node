@@ -12,20 +12,29 @@
 */
 
 use crate::{
-    engine_traits::EngineOperations, shard_state::ShardStateStuff,
+    block::BlockIdExtExtention, engine_traits::EngineOperations, 
+    shard_state::ShardStateStuff
+};
+#[cfg(feature = "fast_finality")]
+use crate::validator::workchains_fast_finality::{
+    calc_subset_for_workchain_fast_finality, try_calc_subset_for_workchain_fast_finality
 };
 
 use catchain::{BlockPayloadPtr, CatchainNode, PublicKey, PublicKeyHash};
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
-
-use ton_block::{BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, ConfigParams, CryptoSignature, CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, Serializable, ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet};
+use ton_block::{
+    BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, ConfigParams, CryptoSignature, 
+    CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, Serializable, 
+    ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet
+};
+#[cfg(feature = "fast_finality")]
+use ton_block::CollatorRange;
 use ton_types::{
     error, fail, BuilderData, HashmapType, Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson, 
     Result, Sha256, UInt256
 };
 use validator_session::SessionNode;
-use crate::block::BlockIdExtExtention;
 
 #[cfg(test)]
 #[path = "tests/test_validator_utils.rs"]
@@ -217,7 +226,16 @@ pub fn compute_validator_set_cc(
     let workchain_info = if shard.is_masterchain() {
         calc_subset_for_masterchain(&vset, config, *cc_seqno_delta)?
     } else {
-         {
+        #[cfg(feature = "fast_finality")] {
+            calc_subset_for_workchain_fast_finality(
+                &vset, 
+                *cc_seqno_delta, 
+                mc_state, 
+                shard, 
+                seq_no
+            )?
+        }
+        #[cfg(not(feature = "fast_finality"))] {
             let _ = seq_no;
             calc_subset_for_workchain_standard(&vset, config, shard, *cc_seqno_delta)?
         }
@@ -238,6 +256,8 @@ fn calc_workchain_id_by_adnl_id(adnl_id: &[u8]) -> i32 {
 pub struct ValidatorSubsetInfo {
     pub validators: Vec<ValidatorDescr>,
     pub short_hash: u32,
+    #[cfg(feature = "fast_finality")]
+    pub collator_range: Vec<CollatorRange>
 }
 
 impl ValidatorSubsetInfo {
@@ -245,6 +265,18 @@ impl ValidatorSubsetInfo {
         ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno, self.validators.clone())
     }
 
+    #[cfg(feature = "fast_finality")]
+    pub fn get_single_collator_range(&self) -> Result<Option<CollatorRange>> {
+        match &self.collator_range[..] {
+            [a] => Ok(Some(a.clone())),
+            [] => Ok(None),
+            [..] => {
+                fail!("too many collator ranges in val. set: [{}]",
+                    self.collator_range.iter().map(|c| format!("{} ", c)).collect::<String>()
+                )
+            }
+        }
+    }
 /*
         if self.collator_range.len() > 1 {
             fail!("{} has too many collators: [{}]",
@@ -307,6 +339,8 @@ pub fn try_calc_subset_for_workchain_standard(
             Ok(Some(ValidatorSubsetInfo {
                 validators: ws,
                 short_hash: hash,
+                #[cfg(feature = "fast_finality")]
+                collator_range: Default::default()
             }))
         } else {
             // not enough validators -- config is ok, but we cannot validate the shard at the moment
@@ -317,6 +351,8 @@ pub fn try_calc_subset_for_workchain_standard(
         Ok(Some(ValidatorSubsetInfo {
             validators: ws,
             short_hash: hash,
+            #[cfg(feature = "fast_finality")]
+            collator_range: vec!()
         }))
     }
 }
@@ -330,6 +366,17 @@ pub fn try_calc_subset_for_workchain(
 ) -> Result<Option<ValidatorSubsetInfo>> {
     let config = mc_state.config_params()?;
 
+    #[cfg(feature = "fast_finality")]
+    if !shard_id.is_masterchain() {
+        return try_calc_subset_for_workchain_fast_finality(
+            vset, 
+            cc_seqno, 
+            mc_state, 
+            shard_id, 
+            block_seqno
+        );
+    }
+    #[cfg(not(feature = "fast_finality"))]
     let _ = block_seqno;
 
     return try_calc_subset_for_workchain_standard(vset, config, shard_id, cc_seqno);
@@ -350,6 +397,7 @@ pub fn calc_subset_for_masterchain(
     }
 }
 
+#[cfg(not(feature = "fast_finality"))]
 pub fn calc_subset_for_workchain_standard(
     vset: &ValidatorSet,
     config: &ConfigParams,

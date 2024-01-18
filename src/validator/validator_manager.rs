@@ -32,6 +32,11 @@ use crate::{
         out_msg_queue::OutMsgQueueInfoStuff,
     },
 };
+#[cfg(feature = "fast_finality")]
+use crate::validator::workchains_fast_finality::{
+    try_calc_prev_subset_for_workchain_fast_finality
+};
+#[cfg(not(feature = "fast_finality"))]
 use crate::validator::validator_utils::try_calc_subset_for_workchain_standard;
 
 #[cfg(feature = "slashing")]
@@ -47,7 +52,11 @@ use std::{
 };
 use tokio::time::timeout;
 use ton_api::IntoBoxed;
-use ton_block::{BlockIdExt, ConfigParamEnum, ConsensusConfig, FutureSplitMerge, McStateExtra, ShardDescr, ShardIdent, ValidatorDescr, ValidatorSet, BASE_WORKCHAIN_ID, MASTERCHAIN_ID, GlobalCapabilities, CatchainConfig, UnixTime32};
+use ton_block::{
+    BlockIdExt, ConfigParamEnum, ConsensusConfig, FutureSplitMerge, McStateExtra, ShardDescr, ShardIdent, 
+    ValidatorDescr, ValidatorSet, BASE_WORKCHAIN_ID, MASTERCHAIN_ID, GlobalCapabilities, CatchainConfig, 
+    UnixTime32
+};
 use ton_types::{error, fail, Result, UInt256};
 
 use crate::block::BlockIdExtExtention;
@@ -895,6 +904,8 @@ impl ValidatorManagerImpl {
                         session_id.clone(),
                         validator_list_id.clone(),
                         vsubset.clone(),
+                        #[cfg(feature = "fast_finality")]
+                        &subset.get_single_collator_range()?,
                         session_options,
                         remp_manager,
                         engine,
@@ -903,6 +914,13 @@ impl ValidatorManagerImpl {
                         slashing_manager,
                     ))
                 );
+
+                #[cfg(feature = "fast_finality")]
+                if !general_session_info.shard.is_masterchain() {
+                    if let Some(range) = &subset.collator_range {
+                        session.set_collator_range(range).await;
+                    }
+                }
 
                 let session_status = session.get_status().await;
                 let session_clone = session.clone();
@@ -999,7 +1017,11 @@ impl ValidatorManagerImpl {
         // Shards that will eventually be started (in later masterstates): need to prepare
         let mut future_shards: HashSet<ShardIdent> = HashSet::new();
         // Validator sets for shards that will eventually be started
+        #[cfg(not(feature = "fast_finality"))]
         let mut our_future_shards: 
+            HashMap<ShardIdent, (ValidatorSubsetInfo, u32, ValidatorListHash)> = HashMap::new();
+        #[cfg(feature = "fast_finality")]
+        let our_future_shards: 
             HashMap<ShardIdent, (ValidatorSubsetInfo, u32, ValidatorListHash)> = HashMap::new();
         let mut blocks_before_split: HashSet<BlockIdExt> = HashSet::new();
 
@@ -1088,10 +1110,14 @@ impl ValidatorManagerImpl {
 
         // Initializing future shards
         log::debug!(target: "validator_manager", "Future shards initialization:");
+        #[cfg(not(feature = "fast_finality"))]
         let next_validator_set = mc_state_extra.config.next_validator_set()?;
+        #[cfg(not(feature = "fast_finality"))]
         let full_validator_set = mc_state_extra.config.validator_set()?;
+        #[cfg(not(feature = "fast_finality"))]
         let possible_validator_change = next_validator_set.total() > 0;
 
+        #[cfg(not(feature = "fast_finality"))]
         for ident in future_shards.iter() {
             log::trace!(target: "validator_manager", "Future shard {}", ident);
             let (cc_seqno_from_state, cc_lifetime) = if ident.is_masterchain() {
@@ -1139,6 +1165,7 @@ impl ValidatorManagerImpl {
         //         )?
         //     };
 
+            #[cfg(not(feature = "fast_finality"))]
             let next_subset_opt = try_calc_subset_for_workchain_standard(
                 &future_validator_set, mc_state.config_params()?, ident, next_cc_seqno)?;
 
@@ -1207,6 +1234,8 @@ impl ValidatorManagerImpl {
                         session_id.clone(),
                         next_val_list_id.clone(),
                         wc.compute_validator_set(*next_cc_seqno)?,
+                        #[cfg(feature = "fast_finality")]
+                        &wc.get_single_collator_range()?,
                         session_options,
                         self.remp_manager.clone(),
                         self.engine.clone(),

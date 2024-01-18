@@ -19,6 +19,9 @@ use crate::{
     },
     shard_state::ShardStateStuff, validating_utils::fmt_block_id_short,
 };
+#[cfg(feature = "fast_finality")]
+use crate::validator::workchains_fast_finality::calc_subset_for_workchain_fast_finality;
+#[cfg(not(feature = "fast_finality"))]
 use crate::validator::validator_utils::calc_subset_for_workchain_standard;
 
 use std::{sync::Arc, mem::drop, time::Duration};
@@ -683,7 +686,11 @@ fn validate_brodcast(
     let subset = if block_id.shard().is_masterchain() {
         calc_subset_for_masterchain(&val_set, config, cc_seqno)?
     } else {
-         {
+        #[cfg(feature = "fast_finality")] {
+            calc_subset_for_workchain_fast_finality(
+                &val_set, cc_seqno, mc_state, block_id.shard(), block_id.seq_no())?
+        }
+        #[cfg(not(feature = "fast_finality"))] {
             calc_subset_for_workchain_standard(&val_set, config, block_id.shard(), cc_seqno)?
         }
     };

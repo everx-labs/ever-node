@@ -33,6 +33,14 @@ pub mod validating_utils;
 pub mod validator;
 pub mod shard_states_keeper;
 
+#[cfg(feature = "fast_finality")]
+mod shard_blocks_fast_finality;
+#[cfg(feature = "fast_finality")]
+mod shard_blocks {
+    pub use crate::shard_blocks_fast_finality::*;
+}
+
+#[cfg(not(feature = "fast_finality"))]
 mod shard_blocks;
 
 include!("../common/src/info.rs");

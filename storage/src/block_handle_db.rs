@@ -878,3 +878,6 @@ impl BlockHandleStorage {
 
 }
 
+#[cfg(test)]
+impl BlockHandleStorage {
+}

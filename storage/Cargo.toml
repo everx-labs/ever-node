@@ -4,9 +4,9 @@ name = 'storage'
 version = '0.5.0'
 
 [dependencies]
-ahash = "0.8"
+ahash = '0.8'
 async-trait = '0.1.31'
-bytes = "1.1.0"
+bytes = '1.1.0'
 failure = '0.1'
 fnv = '1.0.6'
 futures = '0.3.4'
@@ -17,18 +17,19 @@ log4rs = '1.2'
 lru = '0.11.0'
 metrics = '0.21.1'
 parking_lot = '0.12.1'
-quick_cache = "0.4.0"
-rand = { features = [ 'small_rng' ], version = '0.8' }
+quick_cache = '0.4.0'
+rocksdb = '0.21'
 serde = '1.0.114'
 serde_cbor = '0.11.1'
 serde_derive = '1.0.114'
 strum = '0.18.0'
 strum_macros = '0.18.0'
-tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
-adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.15' }
+adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.20' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.53' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.117' }
+rand = { features = [ 'small_rng' ], version = '0.8' }
+tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.57' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.121' }
 ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.31' }
 
 [build-dependencies]
@@ -43,9 +44,3 @@ harness = false
 name = 'shardstate_db'
 path = 'benches/shardstate_db.rs'
 
-[target.'cfg(unix)'.dependencies.rocksdb]
-features = [ 'jemalloc' ]
-git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
-
-[target.'cfg(windows)'.dependencies.rocksdb]
-git = 'https://github.com/rust-rocksdb/rust-rocksdb.git'
