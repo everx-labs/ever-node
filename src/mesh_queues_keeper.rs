@@ -10,22 +10,12 @@ use ton_types::{Result, fail};
 
 pub struct MeshQueuesKeeper {
     queues: lockfree::map::Map<(i32, BlockIdExt, ShardIdent), Arc<OutMsgQueueInfo>>,
-    #[cfg(feature = "telemetry")]
-    telemetry: Arc<EngineTelemetry>,
-    allocated: Arc<EngineAlloc>,
 }
 
 impl MeshQueuesKeeper {
-    pub fn new(
-        #[cfg(feature = "telemetry")]
-        telemetry: Arc<EngineTelemetry>,
-        allocated: Arc<EngineAlloc>,
-    ) -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
             queues: lockfree::map::Map::new(),
-            #[cfg(feature = "telemetry")]
-            telemetry,
-            allocated,
         })
     }
 
@@ -47,7 +37,7 @@ impl MeshQueuesKeeper {
             }
         }
         log::debug!(
-            "MeshQueuesKeeper::gc: finished TIME {time}ms, cleaned: {cleaned}, total: {cleaned}",
+            "MeshQueuesKeeper::gc: finished TIME {time}ms, cleaned: {cleaned}, total: {total}",
             time = now.elapsed().as_millis()
         );
         Ok(())

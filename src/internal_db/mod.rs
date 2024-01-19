@@ -703,7 +703,7 @@ impl InternalDb {
             if handle.id() != id {
                 fail!("Block handle and id mismatch: {} vs {}", handle.id(), id)
             }
-            if !matches!(handle.mesh_nw_id(), Some(nw_id)) {
+            if !matches!(handle.mesh_nw_id(), Some(_nw_id)) {
                 fail!("Block handle and nw_id mismatch: {:?} vs {}", handle.mesh_nw_id(), nw_id)
             }
         }

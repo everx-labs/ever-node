@@ -110,11 +110,7 @@ impl ShardStatesKeeper {
             fail!("states_cache_cleanup_diff must be greater than 0");
         }
 
-        let mesh_queues_keeper = MeshQueuesKeeper::new(
-            #[cfg(feature = "telemetry")]
-            telemetry.clone(),
-            allocated.clone(),
-        );
+        let mesh_queues_keeper = MeshQueuesKeeper::new();
 
         Ok(Arc::new(ShardStatesKeeper {
             db,

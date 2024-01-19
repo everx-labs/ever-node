@@ -535,7 +535,7 @@ impl BlockStuff {
     }
 
     // Commited master block for each connected network
-    pub fn mesh_top_blocks(&self) -> Result<HashMap<u32, BlockIdExt>> {
+    pub fn mesh_top_blocks(&self) -> Result<HashMap<i32, BlockIdExt>> {
         let mut tbs = HashMap::new();
         self
             .block()?
@@ -543,7 +543,7 @@ impl BlockStuff {
             .read_custom()?
             .ok_or_else(|| error!("Given block is not a master block."))?
             .mesh_descr()
-            .iterate_with_keys(|id: u32, descr: ConnectedNwDescrExt| {
+            .iterate_with_keys(|id: i32, descr: ConnectedNwDescrExt| {
                 let block = BlockIdExt {
                     shard_id: ShardIdent::masterchain(),
                     seq_no: descr.descr.seq_no,

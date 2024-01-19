@@ -1,4 +1,4 @@
-use std::{ops::Deref, sync::Arc, time::Duration};
+use std::{ops::Deref, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration, collections::HashMap};
 
 use ton_block::{BlockIdExt, ConnectedNwConfig};
 use ton_types::{error, fail,  Result};
@@ -65,7 +65,7 @@ impl<'a> Boot<'a> {
 
         boot.check_nw_config()?;
 
-        let last_commited_block = boot.process_hardforks(last_commited_block)?;
+        let last_commited_block = boot.process_hardforks(last_commited_block.clone())?;
 
         let (handle, init_block_proof_or_zs) = boot.get_init_point().await?;
 
@@ -487,6 +487,7 @@ pub struct ConnectedNwClient {
     engine: Arc<dyn EngineOperations>,
     nw_id: i32,
     descr: String,
+    stop: AtomicBool,
 }
 
 impl ConnectedNwClient {
@@ -495,9 +496,9 @@ impl ConnectedNwClient {
         last_block_id: Option<BlockIdExt>,
         nw_id: i32,
         nw_config: ConnectedNwConfig
-    ) {
+    ) -> Arc<Self> {
         let descr = format!("mesh nw client {}", nw_id);
-        let client = Arc::new(Self { engine, nw_id, descr});
+        let client = Arc::new(Self { engine, nw_id, descr, stop: AtomicBool::new(false) });
 
         tokio::spawn({
             let client = client.clone();
@@ -526,6 +527,12 @@ impl ConnectedNwClient {
                 }
             }
         });
+
+        client
+    }
+
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
     }
 
     pub fn process_broadcast(&self) -> Result<()> {
@@ -551,7 +558,7 @@ impl ConnectedNwClient {
     ) -> Result<()> {
 
         loop {
-            if self.engine.check_stop() {
+            if self.engine.check_stop() || self.stop.load(Ordering::Relaxed) {
                 log::info!("{}: stopped", self.descr);
                 return Ok(());
             }
@@ -624,6 +631,7 @@ impl ConnectedNwClient {
             if mesh_update.is_key_block()? {
                 log::trace!("{}: update last key block to: {}", self.descr, mesh_update.id());
                 last_key_block_proof = BlockProofOrZerostate::with_key_block(proof);
+                self.engine.save_last_mesh_key_block_id(self.nw_id, mesh_update.id())?;
             }
 
             last_mc_block = handle;
@@ -637,11 +645,11 @@ impl ConnectedNwClient {
 
 pub struct MeshClient {
     engine: Arc<dyn EngineOperations>,
-    clients: lockfree::map::Map<u32, Arc<ConnectedNwClient>>,
+    clients: lockfree::map::Map<i32, Arc<ConnectedNwClient>>,
 }
 
 impl MeshClient {
-    pub async fn start(engine: Arc<dyn EngineOperations>) -> Result<()> {
+    pub async fn start(engine: Arc<dyn EngineOperations>) -> Result<Arc<Self>> {
 
         // on the start
         // - get last master block
@@ -649,21 +657,19 @@ impl MeshClient {
 
         // Later - observe next master blocks
 
-        let client = Self { engine, clients: lockfree::map::Map::new() };
+        let mesh_client = Arc::new(Self { engine, clients: lockfree::map::Map::new() });
 
-        let last_mc_block_id = client.engine.load_last_applied_mc_block_id()?
+        let last_mc_block_id = mesh_client.engine.load_last_applied_mc_block_id()?
             .ok_or_else(|| error!("No last mc block"))?;
 
-        
+        mesh_client.update_clients(mesh_client.engine.load_state(&last_mc_block_id).await?.deref()).await?;
 
+        mesh_client.clone().start_worker(last_mc_block_id);
 
-
-        client.start_worker(last_mc_block_id);
-
-        Ok(())
+        Ok(mesh_client)
     }
 
-    fn start_worker(self: Self, mut last_mc_block_id: Arc<BlockIdExt>) {
+    fn start_worker(self: Arc<Self>, mut last_mc_block_id: Arc<BlockIdExt>) {
         tokio::spawn(async move {
             loop {
                 match self.worker(&last_mc_block_id).await {
@@ -733,17 +739,59 @@ impl MeshClient {
                 log::debug!("MeshClient: process key block {}", mc_block.id());
 
                 // If key block with new connected nw info appered - create ConnectedNwClient.
-                // *Remark*. If connected nw is added to config but not activatad yet - 
-                //           collator will not commit its blocks, but the client have to download them 
-                //           to be ready to activation.
+                
 
-                // If connected nw is removed from config - stop client.
 
-                // If hardfork appered - recreate client with the hf block.
+                // 
 
                 unimplemented!()
             }
         }
+    }
+
+    async fn update_clients(&self, mc_state: &ShardStateStuff) -> Result<()> {
+        let Some(mesh_config) = mc_state.config_params()?.mesh_config()? else {
+            log::debug!("MeshClient: there is no mesh config in mc block {}", mc_state.block_id());
+            return Ok(());
+        };
+
+        let mesh_top_blocks = mc_state.mesh_top_blocks()?;
+        let mut to_start = HashMap::new();
+
+        mesh_config.iterate_with_keys(|nw_id: i32, nw_config: ConnectedNwConfig| {
+
+            // *Remark*. If connected nw is added to config but not activatad yet - 
+            //           collator will not commit its blocks, but the client have to download them 
+            //           to be ready to activation.
+
+            if let Some(client) = self.clients.get(&nw_id) {
+                // TODO: if hardfork appered - recreate client with the hf block.
+            } else {
+                to_start.insert(nw_id, nw_config);
+            }
+
+            Ok(true)
+        })?;
+        for (nw_id, nw_config) in to_start {
+            let last_commited_id = mesh_top_blocks.get(&nw_id).cloned();
+            let client = ConnectedNwClient::start(
+                self.engine.clone(), last_commited_id, nw_id, nw_config).await;
+            self.clients.insert(nw_id, client);
+        }
+
+        let mut to_delete = vec!();
+        for guard in self.clients.iter() {
+            // If connected nw is removed from config - stop client.
+            if mesh_config.get(guard.key())?.is_none() {
+                guard.val().stop();
+                to_delete.push(*guard.key());
+            }
+        }
+        for nw_id in to_delete {
+            self.clients.remove(&nw_id);
+        }
+
+        Ok(())
     }
 
     fn process_broadcast(&self) -> Result<()> {

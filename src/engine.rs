@@ -25,7 +25,7 @@ use crate::{
             SHARD_BROADCAST_WINDOW, apply_proof_chain,
         },
         counters::TpsCounter,
-        remp_client::RempClient,
+        remp_client::RempClient, mesh_client::MeshClient,
     },
     internal_db::{
         InternalDb, InternalDbConfig, 
@@ -115,7 +115,6 @@ pub struct Engine {
     download_queue_update_awaiters: AwaitersPool<BlockIdExt, BlockStuff>,
     download_mesh_kit_awaiters: AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)>,
     download_latest_mesh_kit_awaiters: AwaitersPool<i32, (BlockStuff, BlockProofStuff)>,
-    next_mesh_update_awaiters: AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)>,
     external_messages: Arc<MessagesPool>,
     servers: lockfree::queue::Queue<Server>,
     stopper: Arc<Stopper>,
@@ -177,6 +176,8 @@ pub struct Engine {
     tps_counter: TpsCounter,
 
     pub out_queues_cache: std::sync::Mutex<std::collections::HashMap<ShardIdent, ton_block::OutMsgQueue>>,
+
+    mesh_client: tokio::sync::OnceCell<Arc<MeshClient>>,
 }
 
 struct DownloadContext<'a, T> {
@@ -863,12 +864,6 @@ impl Engine {
                 engine_telemetry.clone(),
                 engine_allocated.clone()
             ),
-            next_mesh_update_awaiters: AwaitersPool::new(
-                "next_mesh_update_awaiters",
-                #[cfg(feature = "telemetry")]
-                engine_telemetry.clone(),
-                engine_allocated.clone()
-            ),
             external_messages: Arc::new(MessagesPool::new(now)),
             servers: lockfree::queue::Queue::new(),
             remp_client,
@@ -925,6 +920,8 @@ impl Engine {
             tps_counter: TpsCounter::new(),
 
             out_queues_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+
+            mesh_client: tokio::sync::OnceCell::new()
         });
 
         if let Some(rs) = engine.remp_service() {
@@ -1075,10 +1072,6 @@ impl Engine {
 
     pub fn download_latest_mesh_kit_awaiters(&self) -> &AwaitersPool<i32, (BlockStuff, BlockProofStuff)> {
         &self.download_latest_mesh_kit_awaiters
-    }
-
-    pub fn next_mesh_update_awaiters(&self) -> &AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)> {
-        &self.next_mesh_update_awaiters
     }
 
     pub fn external_messages(&self) -> &Arc<MessagesPool> {
@@ -2813,6 +2806,9 @@ pub async fn run(
 
         // top shard blocks
         resend_top_shard_blocks_worker(engine.clone());
+
+        let mesh_client = MeshClient::start(engine.clone()).await?;
+        engine.mesh_client.set(mesh_client).map_err(|_| error!("Attempt to set mesh_client twice"))?;
 
         // blocks download clients
         engine.set_sync_status(Engine::SYNC_STATUS_SYNC_BLOCKS);

@@ -41,7 +41,7 @@ use ton_api::{
             DownloadMeshUpdate, DownloadLatestMeshKit, DownloadNextMeshUpdate, DownloadMeshKit
         },
         ton_node::{ 
-            ArchiveInfo, Broadcast, Data,
+            ArchiveInfo, Broadcast,
             DataFull, KeyBlocks, Prepared, PreparedProof, PreparedState, 
             broadcast::{
                 BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast,
@@ -1198,7 +1198,7 @@ Ok(if key_block {
         log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request.object);
 
         // Download
-        let (data_full, peer): (DataFull, _) = self.send_rldp_query_typed(
+        let (data_full, _peer): (DataFull, _) = self.send_rldp_query_typed(
             &request,
             peer,
             0
