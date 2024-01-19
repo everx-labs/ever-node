@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.82
+
+- Fixed persistent shard states GC
+- Cells cache with improved performance  
+
 ## Version 0.55.81
 
 - Added REMP broadcast message delayer
