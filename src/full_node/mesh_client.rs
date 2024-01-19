@@ -727,7 +727,7 @@ impl MeshClient {
             log::debug!("MeshClient: got mc block {}", mc_block.id());
 
             for (nw_id, block_id) in mc_block.mesh_top_blocks()? {
-                if let Some(client) = self.clients.get(&nw_id) {
+                if let Some(_client) = self.clients.get(&nw_id) {
                     // TODO client.val().process_commited(block_id)?;
                 } else {
                     log::warn!("Found commit block {block_id} of unknown network {nw_id}");
@@ -764,7 +764,7 @@ impl MeshClient {
             //           collator will not commit its blocks, but the client have to download them 
             //           to be ready to activation.
 
-            if let Some(client) = self.clients.get(&nw_id) {
+            if let Some(_client) = self.clients.get(&nw_id) {
                 // TODO: if hardfork appered - recreate client with the hf block.
             } else {
                 to_start.insert(nw_id, nw_config);

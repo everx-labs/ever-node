@@ -606,7 +606,7 @@ impl BlockStuff {
     pub fn mesh_update(&self, src_shard: &ShardIdent) -> Result<MerkleUpdate> {
         match &self.block {
             BlockOrigin::MeshUpdate{queue_updates, ..} => {
-                let mut update = queue_updates.get_queue_update(src_shard)?
+                let update = queue_updates.get_queue_update(src_shard)?
                     .ok_or_else(|| error!("Block {} doesn't contain queue update for shard {}", self.id(), src_shard))?;
                 Ok(update)
             },

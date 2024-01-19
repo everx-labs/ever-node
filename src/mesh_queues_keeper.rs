@@ -1,10 +1,5 @@
 use std::sync::Arc;
-
-use crate::engine_traits::EngineAlloc;
-#[cfg(feature = "telemetry")]
-use crate::engine_traits::EngineTelemetry;
 use storage::shardstate_db_async::AllowStateGcResolver;
-
 use ton_block::{BlockIdExt, ShardIdent, OutMsgQueueInfo};
 use ton_types::{Result, fail};
 

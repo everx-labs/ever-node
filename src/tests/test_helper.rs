@@ -197,7 +197,7 @@ fn compare_in_msgs(msgs1: &InMsgDescr, msgs2: &InMsgDescr) -> Result<()> {
         // let _tr = msg_aug_1.as_ref().unwrap().0.read_transaction()?.unwrap();
         // dbg!(debug_transaction(_tr)?);
         if let (Some((msg1, aug1)), Some((msg2, aug2))) = (&msg_aug_1, &msg_aug_2) {
-            let mut check_trans;
+            let check_trans;
             if let (Some(tr1), Some(tr2)) = (msg1.read_transaction()?, msg2.read_transaction()?) {
                 compare_transactions(&tr1, &tr2, false)?;
                 check_trans = false;
@@ -914,7 +914,7 @@ impl EngineOperations for TestEngine {
 
     async fn store_block_proof(
         &self, 
-        mesh_nw_id: i32, // zero for own network
+        _mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt, 
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff
