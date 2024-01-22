@@ -14,8 +14,6 @@
 use catchain::{BlockHash, CatchainFactory};
 use storage::{db_impl_single, db::traits::{DbKey, KvcWriteable}, traits::Serializable};
 use std::{fmt::{Formatter, Display}, io::{Read, Write}, sync::Arc};
-#[cfg(feature = "fast_finality")]
-use std::collections::HashMap;
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{error, Result, UInt256};
 use validator_session::{ValidatorBlockCandidate, ValidatorBlockId};
@@ -156,30 +154,3 @@ impl CandidateDb {
     }
 }
 
-#[cfg(feature = "fast_finality")]
-#[derive(Default)]
-pub struct VirtualCandidateDb {
-    hash: HashMap<CandidateDbKey, Arc<ValidatorBlockCandidate>>
-}
-
-#[cfg(feature = "fast_finality")]
-impl VirtualCandidateDb {
-    pub fn new() -> Self {
-        Self { hash: HashMap::new() }
-    }
-
-    pub fn save(&mut self, candidate: ValidatorBlockCandidate) -> Result<()> {
-        let key = CandidateDbKey::from_candidate(&candidate);
-        let cc = Arc::new(candidate);
-        self.hash.insert(key, cc);
-        Ok(())
-    }
-
-    pub fn load(&self, root_hash: &BlockHash) -> Result<Arc<ValidatorBlockCandidate>> {
-        let key = CandidateDbKey { root_hash: root_hash.clone() };
-        match self.hash.get(&key) {
-            Some(candidate) => Ok(candidate.clone()),
-            None => Err(error!("Cannot find candidate for {:x} in VirtualCandidateDb", root_hash))
-        }
-    }
-}
