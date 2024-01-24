@@ -3761,8 +3761,7 @@ impl ValidateQuery {
                     and underload history (block cannot be both overloaded and underloaded)"
                 )
             }
-            if base.config_params.has_capability(GlobalCapabilities::CapNoSplitOutQueue) &&
-                next_state.underload_history() & 1 != 0 {
+            if base.split_queues && next_state.underload_history() & 1 != 0 {
                 Self::check_delivered_dequeued(&base, &manager)?;
             }
             if base.after_split || base.after_merge {
