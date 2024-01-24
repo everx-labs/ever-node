@@ -2879,11 +2879,11 @@ impl ValidateQuery {
         return Ok(true)
     }
 
-    // is not used because this check is too long and seems to be useless
     // checks that all messages imported from our outbound queue into neighbor shards have been dequeued
     // similar to Collator::out_msg_queue_cleanup()
     // (but scans new outbound queue instead of the old)
-    fn _check_delivered_dequeued(base: &ValidateBase, manager: &MsgQueueManager) -> Result<bool> {
+    // this operation could be long and must be called if outbound queue is short only
+    fn check_delivered_dequeued(base: &ValidateBase, manager: &MsgQueueManager) -> Result<bool> {
         log::debug!(target: "validate_query", "({}): scanning new outbound queue and checking delivery status of all messages", base.next_block_descr);
         for nb in manager.neighbors() {
             if !nb.is_disabled() && !nb.can_check_processed() {
@@ -2892,6 +2892,10 @@ impl ValidateQuery {
         }
         // TODO: warning may be too much messages
         manager.next().out_queue()?.iterate_with_keys_and_aug(|msg_key, enq, created_lt| {
+            if created_lt >= base.info.start_lt() {
+                log::debug!(target: "validate_query", "({}): stop scanning new outbound queue", base.next_block_descr);
+                return Ok(false)
+            }
             // log::debug!(target: "validate_query", "key is " << key.to_hex_string(n));
             let enq = MsgEnqueueStuff::from_enqueue_and_lt(enq, created_lt)?;
             if msg_key.hash != enq.message_hash() {
@@ -2904,17 +2908,18 @@ impl ValidateQuery {
                 // (instead of checking all neighbors)
                 if !nb.is_disabled() && nb.already_processed(&enq)? {
                     // the message has been delivered but not removed from queue!
-                    log::warn!(target: "validate_query", "({}): outbound queue not cleaned up completely (overfull block?): \
-                        outbound message with (lt,hash)=({},{}) enqueued_lt={} has been already delivered and \
+                    reject_query!("({}): outbound queue not cleaned up completely (overfull block?): \
+                        outbound message with (lt,hash)=({},{:x}) enqueued_lt={} has been already delivered and \
                         processed by neighbor {} but it has not been dequeued in this block and it is still \
-                        present in the new outbound queue", base.next_block_descr, created_lt, msg_key.hash.to_hex_string(),
+                        present in the new outbound queue", base.next_block_descr, created_lt, msg_key.hash,
                             enq.enqueued_lt(), nb.block_id());
-                    return Ok(false)
                 }
             }
-            if created_lt >= base.info.start_lt() {
-                log::debug!(target: "validate_query", "({}): stop scanning new outbound queue", base.next_block_descr);
-                return Ok(false)
+            if !base.shard().contains_full_prefix(enq.cur_prefix()) {
+                reject_query!("({}): outbound queue not cleaned up completely (overfull block?): \
+                    outbound message with (lt,hash)=({},{:x}) enqueued_lt={} has been left from split \
+                    and should be removed in underload block", base.next_block_descr, created_lt,
+                    msg_key.hash, enq.enqueued_lt())
             }
             Ok(true)
         })?;
@@ -3755,6 +3760,10 @@ impl ValidateQuery {
                     "lower-order bits both set in the new state's overload_history \
                     and underload history (block cannot be both overloaded and underloaded)"
                 )
+            }
+            if base.config_params.has_capability(GlobalCapabilities::CapNoSplitOutQueue) &&
+                next_state.underload_history() & 1 != 0 {
+                Self::check_delivered_dequeued(&base, &manager)?;
             }
             if base.after_split || base.after_merge {
                 if (next_state.overload_history() | next_state.underload_history()) & !1 != 0 {
