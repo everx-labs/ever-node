@@ -139,6 +139,17 @@ impl BlockHandle {
         Ok(meta)
     }
 
+    fn deserialize_nonchecked<R: Read>(id: &mut BlockIdExt, read: &mut R) -> Result<BlockMeta> {
+        let meta = BlockMeta::deserialize(read)?;
+        if (meta.flags() & FLAG_HAS_FULL_ID) == FLAG_HAS_FULL_ID {
+            id.shard_id = 
+                ShardIdent::with_tagged_prefix(read.read_le_u32()? as i32, read.read_le_u64()?)?;
+            id.seq_no = read.read_le_u32()?;
+            id.file_hash = UInt256::with_array(read.read_u256()?);
+        }
+        Ok(meta)
+    }
+
     fn deserialize_full_id<R: Read>(root_hash: &UInt256, read: &mut R) -> Result<Option<BlockIdExt>> {
         let meta = BlockMeta::deserialize(read)?;
         if (meta.flags() & FLAG_HAS_FULL_ID) == FLAG_HAS_FULL_ID {
@@ -658,27 +669,16 @@ impl BlockHandleStorage {
         )
     }
 
-    pub fn load_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
-        log::trace!(target: TARGET, "load block handle {}", id);
-        let ret = loop {
-            let weak = self.handle_cache.get(id.root_hash());
-            if let Some(Some(handle)) = weak.map(|weak| weak.val().object.upgrade()) {
-                break Some(handle)
-            }
-            if let Some(data) = self.handle_db.try_get_raw(id.root_hash().as_slice())? {
-                let mut cursor = Cursor::new(data);
-                let meta = BlockHandle::deserialize(id, &mut cursor)?;
-                meta.set_flags(FLAG_HAS_FULL_ID);
+    pub fn load_handle_by_id(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
+        self.load_handle(id.clone(), false)
+    }
 
-                let handle = self.create_handle_and_store(id.clone(), meta, None, false)?;
-                if let Some(handle) = handle {
-                    break Some(handle)
-                }
-            } else {
-                break None
-            }
+    pub fn load_handle_by_root_hash(&self, rh: &UInt256) -> Result<Option<Arc<BlockHandle>>> {
+        let id = BlockIdExt {
+            root_hash: rh.clone(),
+            ..Default::default()
         };
-        Ok(ret)
+        self.load_handle(id, true)
     }
 
     pub fn load_full_block_id(&self, root_hash: &UInt256) -> Result<Option<BlockIdExt>> {
@@ -773,10 +773,11 @@ impl BlockHandleStorage {
         callback: Option<Arc<dyn Callback>>,
         store: bool
     ) -> Result<Option<Arc<BlockHandle>>> {
-        let ret = Arc::new(BlockHandle::with_values(id.clone(), meta, self.handle_cache.clone()));
+        let rh = id.root_hash().clone();
+        let ret = Arc::new(BlockHandle::with_values(id, meta, self.handle_cache.clone()));
         let added = add_counted_object_to_map(
             &self.handle_cache, 
-            id.root_hash().clone(), 
+            rh, 
             || {
                 let ret = HandleObject {
                     object: Arc::downgrade(&ret),
@@ -821,6 +822,41 @@ impl BlockHandleStorage {
     ) -> Result<()> {
         self.state_cache.remove(key);
         Ok(())
+    }
+
+    fn load_handle(
+        &self, 
+        mut id: BlockIdExt,
+        rh_only: bool
+    ) -> Result<Option<Arc<BlockHandle>>> {
+        if rh_only {
+            log::trace!(target: TARGET, "load block handle by root hash {:x}", id.root_hash())
+        } else {
+            log::trace!(target: TARGET, "load block handle by id {}", &id)
+        }
+        let ret = loop {
+            let weak = self.handle_cache.get(id.root_hash());
+            if let Some(Some(handle)) = weak.map(|weak| weak.val().object.upgrade()) {
+                break Some(handle)
+            }
+            if let Some(data) = self.handle_db.try_get_raw(id.root_hash().as_slice())? {
+                let mut cursor = Cursor::new(data);
+                let meta = if rh_only {
+                    BlockHandle::deserialize_nonchecked(&mut id, &mut cursor)?
+                } else {
+                    let meta = BlockHandle::deserialize(&id, &mut cursor)?;
+                    meta.set_flags(FLAG_HAS_FULL_ID);
+                    meta
+                };
+                let handle = self.create_handle_and_store(id.clone(), meta, None, false)?;
+                if let Some(handle) = handle {
+                    break Some(handle)
+                }
+            } else {
+                break None
+            }
+        };
+        Ok(ret)
     }
 
     fn load_state(

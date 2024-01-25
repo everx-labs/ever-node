@@ -261,11 +261,10 @@ async fn choose_masterchain_state(
             let time_to_download = 3600; 
             if ttl > engine.now() + time_to_download {
                 log::info!(target: "boot", "best handle is {}", handle.id());
-                return Ok(handle)
             } else {
-               log::info!(target: "boot", "state is expiring shortly: expire_at={}", ttl);
-               return Ok(handle)
+                log::info!(target: "boot", "state is expiring shortly: expire_at={}", ttl);
             }
+            return Ok(handle);
         } else {
             log::info!(target: "boot", "ignoring: state is not persistent");
         }
@@ -487,11 +486,13 @@ async fn download_state(
 /// Must be used only zero_state or key_block id
 pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<Arc<BlockHandle>> {
     let (mut handle, zero_state, init_block_proof_link) = run_cold(engine.deref()).await?;
-    let key_blocks = get_key_blocks(
-        engine.deref(), handle, zero_state.as_ref(), init_block_proof_link
-    ).await?;
-    
-    handle = choose_masterchain_state(engine.deref(), key_blocks.clone(), PSS_PERIOD_BITS).await?;
+    if !engine.flags().initial_sync_disabled {
+        let key_blocks = get_key_blocks(
+            engine.deref(), handle, zero_state.as_ref(), init_block_proof_link
+        ).await?;
+        
+        handle = choose_masterchain_state(engine.deref(), key_blocks, PSS_PERIOD_BITS).await?;
+    }
 
     if handle.id().seq_no() == 0 {
         let Some(zero_state) = zero_state.as_ref() else {

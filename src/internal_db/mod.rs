@@ -522,7 +522,7 @@ impl InternalDb {
 
     pub fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
         let _tc = TimeChecker::new(format!("load_block_handle {}", id), 30);
-        self.block_handle_storage.load_handle(id)
+        self.block_handle_storage.load_handle_by_id(id)
     }
 
     pub async fn store_block_data(
@@ -910,15 +910,9 @@ impl InternalDb {
         let mut for_delete = HashSet::new();
         self.shard_state_persistent_db.for_each_key(&mut |key| {
 
-            // In `impl DbKey for BlockIdExt` you can see that only root hash is used, 
-            // so it is correct to build id next way, because key in shard_state_persistent_db
-            // is a block's root hash.
-            let id = BlockIdExt {
-                root_hash: UInt256::from(key),
-                ..Default::default()
-            };
+            let root_hash = UInt256::from(key);
 
-            if id.root_hash() == zerostate_id.root_hash() {
+            if &root_hash == zerostate_id.root_hash() {
                 log::info!("  Zerostate: {:x}", zerostate_id.root_hash());
                 return Ok(true);
             }
@@ -929,22 +923,23 @@ impl InternalDb {
                 ).naive_utc()
             };
 
-            match self.load_block_handle(&id)? {
-                None => log::warn!("shard_state_persistent_gc: can't load handle for {:x}", id.root_hash()),
+            match self.block_handle_storage.load_handle_by_root_hash(&root_hash)? {
+                None => log::warn!("shard_state_persistent_gc: can't load handle for {:x}", root_hash),
                 Some(handle) => {
                     let gen_utime = handle.gen_utime()?;
                     let (ttl, expired) = calc_ttl(gen_utime);
                     log::info!(
                         "{} Persistent state: {:x}, mc block: {}, gen_utime: {} UTC ({}), expired at: {} UTC ({})",
                         if expired {"X"} else {" "},
-                        handle.id().root_hash(),
+                        root_hash,
                         handle.masterchain_ref_seq_no(),
                         convert_to_utc(gen_utime),
                         handle.gen_utime()?,
                         convert_to_utc(ttl),
-                        ttl);
+                        ttl
+                    );
                     if expired {
-                        for_delete.insert(id);
+                        for_delete.insert(handle.id().clone());
                     }
                 }
             }

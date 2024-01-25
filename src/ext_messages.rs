@@ -23,15 +23,9 @@ use ton_types::{Result, types::UInt256, fail, read_boc};
 #[path = "tests/test_ext_messages.rs"]
 mod tests;
 
-#[cfg(not(feature = "fast_finality"))]
 const MESSAGE_LIFETIME: u32 = 600; // seconds
-#[cfg(not(feature = "fast_finality"))]
 const MESSAGE_MAX_GENERATIONS: u8 = 3;
 
-#[cfg(feature = "fast_finality")]
-const MESSAGE_LIFETIME: u32 = 60; // seconds
-#[cfg(feature = "fast_finality")]
-const MESSAGE_MAX_GENERATIONS: u8 = 0;
 const MAX_EXTERNAL_MESSAGE_DEPTH: u16 = 512;
 const MAX_EXTERNAL_MESSAGE_SIZE: usize = 65535;
 
@@ -245,19 +239,6 @@ impl MessagesPool {
         _to_delete: Vec<(UInt256, i32)>, 
         now: u32
     ) -> Result<()> {
-        #[cfg(feature = "fast_finality")]
-        for (id, workchain_id) in &_to_delete {
-            if workchain_id != &ton_block::MASTERCHAIN_ID && self.messages.remove(id).is_some() {
-                log::debug!(
-                    target: EXT_MESSAGES_TRACE_TARGET,
-                    "complete_messages: removing external message {:x} while enumerating to_delete list",
-                    id,
-                );
-                #[cfg(not(feature = "statsd"))]
-                metrics::decrement_gauge!("ext_messages_len", 1f64);
-                self.total_messages.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
         for (id, reason) in &to_delay {
             let result = self.messages.remove_with(id, |(_, keeper)| {
                 if keeper.can_postpone() {
@@ -329,7 +310,6 @@ impl MessagesPool {
 
 #[cfg(test)]
 impl MessagesPool {
-    #[cfg(not(feature = "fast_finality"))]
     fn get_messages(self: &Arc<Self>, shard: &ShardIdent, now: u32) -> Result<Vec<(Arc<Message>, UInt256)>> {
         Ok(self.clone().iter(shard.clone(), now, u64::MAX).collect())
     }

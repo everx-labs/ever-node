@@ -108,7 +108,6 @@ fn test_create_ext_message() {
 }
 
 #[test]
-#[cfg(not(feature = "fast_finality"))]
 fn test_message_keeper() {
     let m = Message::with_ext_in_header(ExternalInboundMessageHeader::default());
     let mk = MessageKeeper::new(Arc::new(m));
@@ -139,7 +138,6 @@ fn test_message_keeper() {
 }
 
 #[test]
-#[cfg(not(feature = "fast_finality"))]
 fn test_message_keeper_multithread() {
     let m = Message::with_ext_in_header(ExternalInboundMessageHeader::default());
     let mk = Arc::new(MessageKeeper::new(Arc::new(m)));
@@ -194,7 +192,6 @@ fn create_external_message(dst_shard: u8, salt: Vec<u8>) -> Arc<Message>  {
 include!("../../common/src/log.rs");
 
 #[test]
-#[cfg(not(feature = "fast_finality"))]
 fn test_messages_pool() {
     //init_log_without_config(log::LevelFilter::Trace, None);
     let mp = Arc::new(MessagesPool::new(0, None));

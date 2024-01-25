@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.90
+
+- Backport from public 
+
+## Version 0.55.89
+
+- Switch to rocksdb from crates.io
+
+## Version 0.55.88
+
+- Implement initial_sync_disabled node run parameter allowing node to sync from zero state  
+
 ## Version 0.55.87
 
 - Decrease test memory usage
@@ -21,15 +33,18 @@ All notable changes to this project will be documented in this file.
 ## Version 0.55.83
 
 - Front node functionality isolation
+- Fixed accept block when block data already saved
 
 ## Version 0.55.82
 
-- Fixed accept block when block data already saved
+- Fixed persistent shard states GC
+- Cells cache with improved performance  
 
 ## Version 0.55.81
 
 - Added REMP broadcast message delayer
 - Removed delay for direct REMP messages
+- Added node tests
 
 ## Version 0.55.80
 

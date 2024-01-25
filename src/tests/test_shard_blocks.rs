@@ -12,9 +12,7 @@
 */
 
 use super::*;
-#[cfg(not(feature = "fast_finality"))]
 use crate::test_helper::gen_master_state;
-#[cfg(not(feature = "fast_finality"))]
 use crate::collator_test_bundle::{create_block_handle_storage, create_engine_allocated};
 #[cfg(all(feature = "telemetry", not(feature = "fast_finality")))]
 use crate::collator_test_bundle::create_engine_telemetry;
@@ -83,7 +81,6 @@ impl EngineOperations for TestEngine {
 
 }
 
-#[cfg(not(feature = "fast_finality"))] 
 fn build_id(shard: u64, seq_no: u32) -> BlockIdExt {
     BlockIdExt {
         shard_id: ShardIdent::with_tagged_prefix(0, shard).unwrap(),
@@ -93,7 +90,6 @@ fn build_id(shard: u64, seq_no: u32) -> BlockIdExt {
     }
 }
 
-#[cfg(not(feature = "fast_finality"))] 
 #[tokio::test]
 async fn test_shard_blocks_pool() {
 
@@ -146,7 +142,6 @@ async fn test_shard_blocks_pool() {
     assert_eq!(engine.shard_blocks.lock().unwrap().len(), 1);
 }
 
-#[cfg(not(feature = "fast_finality"))] 
 #[tokio::test]
 async fn test_shard_blocks_pool_threads() {
 
@@ -211,7 +206,6 @@ async fn test_shard_blocks_pool_threads() {
 
 }
 
-#[cfg(not(feature = "fast_finality"))] 
 fn make_shard_state() -> Arc<ShardStateStuff> {
     // TODO: prepare proper masterchain state
     let block_id = BlockIdExt {

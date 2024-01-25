@@ -18,8 +18,6 @@ use crossbeam_channel::Receiver;
 use catchain::utils::get_hash;
 use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, ValidatorDescr};
 use ton_types::{fail, error, Result, UInt256};
-#[cfg(feature = "fast_finality")]
-use ton_block::CollatorRange;
 use validator_session::{
     BlockHash, BlockPayloadPtr, CatchainOverlayManagerPtr,
     SessionId, SessionPtr, SessionListenerPtr, SessionFactory,
@@ -55,9 +53,6 @@ use crate::{
         }
     }, validating_utils::{fmt_next_block_descr_from_next_seqno, append_rh_to_next_block_descr}
 };
-
-#[cfg(feature = "fast_finality")]
-use crate::validator::candidate_db::VirtualCandidateDb;
 
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::SlashingManagerPtr;
@@ -113,12 +108,6 @@ pub struct ValidatorGroupImpl {
     replay_finished: bool,
     on_generate_slot_invoked: bool,
     on_candidate_invoked: bool,
-
-    #[cfg(feature = "fast_finality")]
-    collator_range: Option<CollatorRange>,
-
-    #[cfg(feature = "fast_finality")]
-    single_validator_approved_cache: VirtualCandidateDb,
 
     status: ValidatorGroupStatus,
 
@@ -263,15 +252,6 @@ impl ValidatorGroupImpl {
     }
 
     pub fn info_round(&self, round: u32) -> String {
-        #[cfg(feature = "fast_finality")]
-        if let Some(range) = &self.collator_range {
-            return format!("session_status: id {:x}, shard {}{}, {}, limits {}-{}, round {}, prevs {}",
-                           self.session_id, self.shard,
-                           self.next_block_seqno.map_or("".to_owned(), |seqno| format!(", {} next seqno", seqno)),
-                           self.status, range.start, range.finish,
-                           round, prevs_to_string(&self.prev_block_ids)
-            );
-        }
 
         return format!("session_status: id {:x}, shard {}{}, {}, round {}, prevs {}",
                        self.session_id, self.shard,
@@ -293,8 +273,6 @@ impl ValidatorGroupImpl {
     pub fn new(
         shard: ShardIdent,
         session_id: validator_session::SessionId,
-        #[cfg(feature = "fast_finality")]
-        collator_range: Option<CollatorRange>
     ) -> ValidatorGroupImpl {
         let next_block_descr = Arc::new(fmt_next_block_descr_from_next_seqno(&shard, None));
         log::info!(target: "validator", "Initializing session {:x}, shard {}", session_id, shard);
@@ -310,12 +288,6 @@ impl ValidatorGroupImpl {
             session_ptr: None,
             reliable_queue: None,
             prev_block_ids: Vec::new(),
-
-            #[cfg(feature = "fast_finality")]
-            collator_range,
-
-            #[cfg(feature = "fast_finality")]
-            single_validator_approved_cache: VirtualCandidateDb::new(),
 
             on_candidate_invoked: false,
             on_generate_slot_invoked: false,
@@ -391,8 +363,6 @@ impl ValidatorGroup {
         session_id: SessionId,
         validator_list_id: ValidatorListHash,
         validator_set: ValidatorSet,
-        #[cfg(feature = "fast_finality")]
-        collator_range: &Option<CollatorRange>,
         config: SessionOptions,
         remp_manager: Option<Arc<RempManager>>,
         engine: Arc<dyn EngineOperations>,
@@ -403,8 +373,6 @@ impl ValidatorGroup {
         let group_impl = ValidatorGroupImpl::new(
             general_session_info.shard.clone(),
             session_id.clone(),
-            #[cfg(feature = "fast_finality")]
-            collator_range.clone()
         );
         let id = format!("Val. group {} {:x}", general_session_info.shard, session_id);
         let (listener, receiver) = ValidatorSessionListener::create();
@@ -567,34 +535,15 @@ impl ValidatorGroup {
         Ok(())
     }
 
-    #[cfg(feature = "fast_finality")]
-    fn is_single_node_fast_finality_shard(&self) -> bool {
-        self.validator_set.list().len() == 1 && !self.shard().is_masterchain()
-    }
-
     async fn save_block_candidate(&self, vb_candidate: ValidatorBlockCandidate) -> Result<()> {
-        #[cfg(feature = "fast_finality")]
-        if self.is_single_node_fast_finality_shard() {
-            return self.group_impl.execute_sync(|gi|
-                gi.single_validator_approved_cache.save(vb_candidate)
-            ).await
-        }
         self.engine.save_block_candidate(&self.session_id, vb_candidate)
     }
 
     async fn load_block_candidate(&self, root_hash: &UInt256) -> Result<Arc<ValidatorBlockCandidate>> {
-        #[cfg(feature = "fast_finality")]
-        if self.is_single_node_fast_finality_shard() {
-            return self.group_impl.execute_sync(|gi| gi.single_validator_approved_cache.load(root_hash)).await;
-        }
         self.engine.load_block_candidate(&self.session_id, root_hash)
     }
 
     pub async fn destroy_db(&self) -> Result<()> {
-        #[cfg(feature = "fast_finality")]
-        if self.is_single_node_fast_finality_shard() {
-            return Ok(())
-        }
 
         while !self.engine.destroy_block_candidates(&self.session_id)? {
             tokio::task::yield_now().await
@@ -614,20 +563,6 @@ impl ValidatorGroup {
         } else {
             fail!("Status cannot retreat, from {} to {}", group_impl.status, status)
         }).await
-    }
-
-    #[cfg(feature = "fast_finality")]
-    pub async fn set_collator_range(&self, collator_range: &CollatorRange) {
-        self.group_impl.execute_sync(|group_impl|
-            group_impl.collator_range = Some(collator_range.clone())
-        ).await;
-    }
-
-    #[cfg(feature = "fast_finality")]
-    pub async fn get_collator_range(&self) -> Option<CollatorRange> {
-        self.group_impl.execute_sync(|group_impl|
-            group_impl.collator_range.clone()
-        ).await
     }
 
     pub fn get_validator_list_id(&self) -> ValidatorListHash {
@@ -707,17 +642,6 @@ impl ValidatorGroup {
 
         let (_lk_round, prev_block_ids, mm_block_id, min_ts) =
             self.group_impl.execute_sync(|group_impl| group_impl.update_round (round)).await;
-
-        #[cfg(feature = "fast_finality")]
-        if let Some(range) = &self.get_collator_range().await {
-            if let Some(new_seqno) = get_first_block_seqno_after_prevs(&prev_block_ids) {
-                if new_seqno > range.finish {
-                    log::info!(target: "validator", "({}): Session {} collated all blocks, waiting till stopping...", next_block_descr, self.info_round(round).await);
-                    callback(Err(error!("Session collated all blocks, waiting till stopping.")));
-                    return;
-                }
-            }
-        }
 
         let include_external_messages = match self.check_in_sync(&prev_block_ids).await {
             Err(e) => {
@@ -980,8 +904,6 @@ impl ValidatorGroup {
             },
             prev_block_ids.clone(),
             self.validator_set.clone(),
-            #[cfg(feature = "fast_finality")]
-            &self.get_collator_range().await,
             sig_set,
             approve_sig_set,
             we_generated,

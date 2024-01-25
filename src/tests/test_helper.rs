@@ -90,36 +90,6 @@ pub fn are_shard_states_equal(ss1: &ShardStateStuff, ss2: &ShardStateStuff) -> b
     } 
 }
 
-#[cfg(feature = "fast_finality")]
-fn ref_shard_blocks(ref_shard_blocks: &RefShardBlocks) -> Result<Vec<BlockIdExt>> {
-    let mut shards = Vec::new();
-    ref_shard_blocks.iterate_shard_block_refs(&mut |id, _end_lt| {
-        shards.push(id);
-        Ok(true)
-    })?;
-    Ok(shards)
-}
-
-#[cfg(feature = "fast_finality")]
-async fn check_block_refs_loops(engine: &Arc<dyn EngineOperations>, block_stuff: &BlockStuff) -> Result<()> {
-    let shards = ref_shard_blocks(block_stuff.block()?.read_extra()?.ref_shard_blocks())?;
-    for block_id in &shards {
-        for id in shards.iter().filter(|id| *id != block_id) {
-            let handle = engine.load_block_handle(id)?.ok_or_else(
-                || error!("Cannot load handle for block {}", id)
-            )?;
-            let block = engine.load_block(&handle).await?;
-            let shards = ref_shard_blocks(block.block()?.read_extra()?.ref_shard_blocks())?;
-            for ref_id in &shards {
-                if ref_id.seq_no() > block_id.seq_no() && ref_id.shard().intersect_with(block_id.shard()) {
-                    fail!("for {} ref shard {} has reference to newer shard block {}", block_stuff.id(), block_id, ref_id)
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 fn compare_block_accounts(acc1: &ShardAccountBlocks, acc2: &ShardAccountBlocks) -> Result<()> {
     acc1.scan_diff_with_aug(&acc2, |key, acc_cur_1, acc_cur_2| {
         dbg!(&key);
@@ -334,8 +304,7 @@ pub fn gen_master_state(
             0,
             shard_state_id.root_hash.clone(),
             shard_state_id.file_hash.clone(),
-            #[cfg(feature = "fast_finality")] Some(ton_block::ShardCollators::default()),
-            #[cfg(not(feature = "fast_finality"))] None
+             None
         ).unwrap();
     }
     if let Some(master_state_id) = &master_state_id {
@@ -624,11 +593,7 @@ impl TestEngine {
             shard_blocks = mc_state.top_blocks_all()?;
         } else {
             let block = block_stuff.block()?;
-            #[cfg(feature = "fast_finality")] {
-                shard_blocks = ref_shard_blocks(block.read_extra()?.ref_shard_blocks())?;
-                // check_block_refs_loops(&engine, &block_stuff).await?;
-            }
-            #[cfg(not(feature = "fast_finality"))] {
+             {
                 shard_blocks = Vec::new();
             }
             let info = block.read_info()?;
@@ -1090,7 +1055,11 @@ impl EngineOperations for TestEngine {
     ) -> Box<dyn Iterator<Item = (Arc<Message>, UInt256)> + Send + Sync> {
         Box::new(self.ext_messages.clone().iter(shard, self.now(), finish_time_ms))
     }
-    fn complete_external_messages(&self, to_delay: Vec<(UInt256, String)>, to_delete: Vec<(UInt256, i32)>) -> Result<()> {
+    fn complete_external_messages(
+        &self, 
+        to_delay: Vec<(UInt256, String)>, 
+        to_delete: Vec<(UInt256, i32)>
+    ) -> Result<()> {
         self.ext_messages.complete_messages(to_delay, to_delete, self.now())
     }
     async fn get_shard_blocks(
