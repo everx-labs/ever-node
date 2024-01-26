@@ -58,9 +58,8 @@ TEST_ROOT=$(pwd);
 NODE_TARGET=$TEST_ROOT/../../target/release/
 
 ./remove_junk.sh $NODE_TARGET $NODES > /dev/null 2>&1 || true
-echo "Building $(pwd)"
-
-# cargo build --release
+echo "Building node"
+cargo build --release
 
 cd ../../../
 if ! [ -d "ever-node-tools" ]
@@ -75,8 +74,8 @@ cd ever-node-tools
 TOOLS_ROOT=$(pwd)
 
 # cargo update
-# echo "Building $(pwd)"
-# cargo build --release
+echo "Building tools"
+cargo build --release
 cd target/release/
 
 cd $TEST_ROOT

@@ -735,16 +735,9 @@ impl MeshClient {
             }
 
             if mc_block.block()?.read_info()?.key_block() {
-
                 log::debug!("MeshClient: process key block {}", mc_block.id());
-
-                // If key block with new connected nw info appered - create ConnectedNwClient.
-                
-
-
-                // 
-
-                unimplemented!()
+                let state = self.engine.load_state(mc_block.id()).await?;
+                self.update_clients(&state).await?;
             }
         }
     }
