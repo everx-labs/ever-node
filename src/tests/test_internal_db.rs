@@ -424,19 +424,6 @@ async fn test_top_shard_blocks_db_impl() -> Result<()> {
                         UInt256::default(),
                     );
 
-                    #[cfg(feature = "fast_finality")]
-                    let group = crate::types::top_block_descr::TopBlockDescrGroup {
-                        shard_ident: id.shard_id.clone(),
-                        cc_seqno,
-                    };
-
-                    #[cfg(feature = "fast_finality")]
-                    let tbds_id = TopBlockDescrId {
-                        group,
-                        seqno
-                    };
-
-                    #[cfg(not(feature = "fast_finality"))]
                     let tbds_id = TopBlockDescrId {
                         id: id.shard_id.clone(),
                         cc_seqno,
@@ -455,22 +442,8 @@ async fn test_top_shard_blocks_db_impl() -> Result<()> {
             for shard in 0..=0xf {
                 let shard_ident = ShardIdent::with_tagged_prefix(0, shard << 60 | 0x0800000000000000)?;
 
-                #[cfg(feature = "fast_finality")]
-                let group = crate::types::top_block_descr::TopBlockDescrGroup {
-                    shard_ident,
-                    cc_seqno: 44,
-                };
-
-                #[cfg(feature = "fast_finality")]
-                let tbds_id = TopBlockDescrId {
-                    group,
-                    seqno,
-                };
-
-                #[cfg(not(feature = "fast_finality"))]
                 let _ = seqno;
 
-                #[cfg(not(feature = "fast_finality"))]
                 let tbds_id = TopBlockDescrId {
                     id: shard_ident,
                     cc_seqno: 44,
@@ -481,10 +454,6 @@ async fn test_top_shard_blocks_db_impl() -> Result<()> {
         }
         // deleted 1600 tbd
 
-        #[cfg(feature = "fast_finality")]
-        assert_eq!(db.load_all_top_shard_blocks_raw()?.len(), 1616);
-
-        #[cfg(not(feature = "fast_finality"))]
         assert_eq!(db.load_all_top_shard_blocks_raw()?.len(), 16);
 
         stop_db(&db).await;
@@ -493,32 +462,14 @@ async fn test_top_shard_blocks_db_impl() -> Result<()> {
     {
         let db = create_db("test_top_shard_blocks_db").await?;
 
-        #[cfg(feature = "fast_finality")]
-        assert_eq!(db.load_all_top_shard_blocks_raw()?.len(), 1616);
-
-        #[cfg(not(feature = "fast_finality"))]
         assert_eq!(db.load_all_top_shard_blocks_raw()?.len(), 16);
 
         for seqno in 0..=100 {
             for shard in 0..=0xf {
                 let shard_ident = ShardIdent::with_tagged_prefix(0, shard << 60 | 0x0800000000000000)?;
 
-                #[cfg(feature = "fast_finality")]
-                let group = crate::types::top_block_descr::TopBlockDescrGroup {
-                    shard_ident,
-                    cc_seqno: 45,
-                };
-
-                #[cfg(feature = "fast_finality")]
-                let tbds_id = TopBlockDescrId {
-                    group,
-                    seqno,
-                };
-
-                #[cfg(not(feature = "fast_finality"))]
                 let _ = seqno;
 
-                #[cfg(not(feature = "fast_finality"))]
                 let tbds_id = TopBlockDescrId {
                     id: shard_ident,
                     cc_seqno: 45,

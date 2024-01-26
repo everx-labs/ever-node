@@ -170,7 +170,6 @@ struct CatchainProcessor {
     out_queries_bytes: metrics::Counter, //outgoing queries traffic
     out_broadcasts_bytes: metrics::Counter, //outgoing broadcasts traffic
     processed_block_payload_size_histogram: metrics::Histogram, //histogram for processed blocks sizes
-
     blocks_storage: BlocksStorage, //must be last field to force drop order; 
                                    //storage for catchain blocks; 
                                    //is needed only to avoid stack overflow on dropping very long chains of blocks during destruction

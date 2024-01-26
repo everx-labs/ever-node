@@ -25,12 +25,12 @@ use std::{
     sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}}, time::{UNIX_EPOCH, Duration}, ops::Deref
 };
 use storage::{
-    TimeChecker,
+    StorageAlloc, TimeChecker,
     archives::{archive_manager::ArchiveManager, package_entry_id::PackageEntryId},
     block_handle_db::{self, BlockHandle, BlockHandleDb, BlockHandleStorage}, 
-    block_info_db::BlockInfoDb, db::rocksdb::RocksDb, node_state_db::NodeStateDb, 
-    types::BlockMeta, db::filedb::FileDb,
-    shard_top_blocks_db::ShardTopBlocksDb, StorageAlloc, traits::Serializable, shardstate_db_async::CellsDbConfig,
+    block_info_db::BlockInfoDb, db::{filedb::FileDb, rocksdb::RocksDb}, 
+    node_state_db::NodeStateDb, shard_top_blocks_db::ShardTopBlocksDb, 
+    shardstate_db_async::CellsDbConfig, traits::Serializable, types::BlockMeta
 };
 use storage::shardstate_db_async::{self, AllowStateGcResolver, ShardStateDb};
 #[cfg(feature = "telemetry")]
@@ -1326,6 +1326,44 @@ impl InternalDb {
 
     pub fn find_full_block_id(&self, root_hash: &UInt256) -> Result<Option<BlockIdExt>> {
         self.block_handle_storage.load_full_block_id(root_hash)
+    }
+}
+
+#[cfg(test)]
+impl InternalDb {
+    // return previous block berore split
+    pub fn find_all_split(&self) -> Result<Vec<BlockIdExt>> {
+        log::trace!("find_all_split");
+        let mut res = vec![];
+        self.next2_block_db.for_each(&mut |_handle_bytes, id_bytes| {
+            let mut cursor = Cursor::new(&id_bytes);
+            let block_id = BlockIdExt::deserialize(&mut cursor)?;
+            if let Ok(id_bytes) = self.prev1_block_db.get(&block_id) {
+                let mut cursor = Cursor::new(&id_bytes);
+                res.push(BlockIdExt::deserialize(&mut cursor)?);
+            }
+            Ok(true)
+        })?;
+        res.sort_by(|a, b| a.seq_no().cmp(&b.seq_no()));
+        Ok(res)
+    }
+    // return next block after merge
+    pub fn find_all_merge(&self) -> Result<Vec<BlockIdExt>> {
+        log::trace!("find_all_merge");
+        let mut res = vec![];
+        self.prev2_block_db.for_each(&mut |_handle_bytes, id_bytes| {
+            let mut cursor = Cursor::new(&id_bytes);
+            let block_id = BlockIdExt::deserialize(&mut cursor)?;
+            if let Ok(id_bytes) = self.next1_block_db.get(&block_id) {
+                let mut cursor = Cursor::new(&id_bytes);
+                res.push(BlockIdExt::deserialize(&mut cursor)?);
+            } else {
+                res.push(block_id);
+            }
+            Ok(true)
+        })?;
+        res.sort_by(|a, b| a.seq_no().cmp(&b.seq_no()));
+        Ok(res)
     }
 }
 

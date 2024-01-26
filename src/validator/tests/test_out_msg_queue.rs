@@ -38,10 +38,6 @@ fn test_already_processed_enqueued_message() {
         73107,
         last_msg_lt,
         last_msg_hash,
-        #[cfg(feature = "fast_finality")]
-        None,
-        #[cfg(feature = "fast_finality")]
-        73107,
     );
 
     last_entry.ref_shards = Some(shards);
@@ -56,10 +52,6 @@ fn test_already_processed_enqueued_message() {
         73102,
         fake_msg_lt,
         fake_msg_hash,
-        #[cfg(feature = "fast_finality")]
-        None,
-        #[cfg(feature = "fast_finality")]
-        73102,
     );
 
     fake_entry.ref_shards = Some(shards);
@@ -106,20 +98,12 @@ fn test_contains_processed_up_to() {
         4,
         8_000_007,
         [0xff; 32].into(),
-        #[cfg(feature = "fast_finality")]
-        None,
-        #[cfg(feature = "fast_finality")]
-        4,
     );
     let put2 = ProcessedUptoStuff::with_params(
         0xC0,
         5,
         9_000_007,
         [0xff; 32].into(),
-        #[cfg(feature = "fast_finality")]
-        None,
-        #[cfg(feature = "fast_finality")]
-        5,
     );
     // and shard is merge result
     let put3 = ProcessedUptoStuff::with_params(
@@ -127,10 +111,6 @@ fn test_contains_processed_up_to() {
         6,
         9_000_007,
         [0xff; 32].into(),
-        #[cfg(feature = "fast_finality")]
-        None,
-        #[cfg(feature = "fast_finality")]
-        6,
     );
     assert!(!put2.contains(&put1));
     assert!(!put1.contains(&put2));
@@ -146,30 +126,18 @@ fn test_contains_processed_up_to() {
         5,
         9_000_007,
         [0x11; 32].into(),
-        #[cfg(feature = "fast_finality")]
-        None,
-        #[cfg(feature = "fast_finality")]
-        5,
     );
     let put2 = ProcessedUptoStuff::with_params(
         SHARD_FULL,
         5,
         9_000_007,
         [0xff; 32].into(),
-        #[cfg(feature = "fast_finality")]
-        None,
-        #[cfg(feature = "fast_finality")]
-        5,
     );
     let put3 = ProcessedUptoStuff::with_params(
         SHARD_FULL,
         6,
         11_000_007,
         [0xff; 32].into(),
-        #[cfg(feature = "fast_finality")]
-        None,
-        #[cfg(feature = "fast_finality")]
-        6,
     );
     assert!(put2.contains(&put1));
     assert!(!put1.contains(&put2));
@@ -206,20 +174,12 @@ fn test_contains_processed_up_to() {
         5,
         9_000_007,
         [0xff; 32].into(),
-        #[cfg(feature = "fast_finality")] 
-        None,
-        #[cfg(feature = "fast_finality")]
-        5,
     );
     let mut put_new = ProcessedUptoStuff::with_params(
         SHARD_FULL,
         6,
         11_000_007,
         [0xff; 32].into(),
-        #[cfg(feature = "fast_finality")]
-        None,
-        #[cfg(feature = "fast_finality")]
-        6,
     );
     put_old.mc_end_lt = 9000013;
     put_new.mc_end_lt = 11000013;
@@ -255,20 +215,12 @@ fn test_contains_processed_up_to() {
         2,
         3_000_012,
         [0xff; 32].into(),
-        #[cfg(feature = "fast_finality")]
-        None,
-        #[cfg(feature = "fast_finality")]
-        2
     );
     let mut put_new = ProcessedUptoStuff::with_params(
         SHARD_FULL,
         3,
         5_000_007,
         enq.message_hash(),
-        #[cfg(feature = "fast_finality")]
-        None,
-        #[cfg(feature = "fast_finality")]
-        2,
     );
     put_old.mc_end_lt = 3000013;
     put_new.mc_end_lt = 5000015;

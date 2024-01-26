@@ -11,12 +11,13 @@
 * limitations under the License.
 */
 
-use std::sync::{Arc, atomic::{AtomicU64, Ordering, AtomicU32}};
+use crate::engine::now_duration;
+use adnl::common::{add_unbound_object_to_map, add_unbound_object_to_map_with_update};
 use lockfree::map::Map;
+use std::sync::{Arc, atomic::{AtomicU64, Ordering, AtomicU32}};
+use ton_api::ton::ton_node::{RempMessageStatus, RempMessageLevel};
 use ton_block::{Deserializable, ShardIdent, Message, AccountIdPrefixFull, BlockIdExt};
 use ton_types::{Result, types::UInt256, fail, read_boc};
-use adnl::common::{add_unbound_object_to_map, add_unbound_object_to_map_with_update};
-use ton_api::ton::ton_node::{RempMessageStatus, RempMessageLevel};
 
 #[cfg(test)]
 #[path = "tests/test_ext_messages.rs"]
@@ -150,17 +151,28 @@ pub struct MessagesPool {
     // minimal timestamp
     min_timestamp: AtomicU32,
 
+    // maximum number of messages in pool
+    maximum_queue_length: Option<u32>,
+
+    // total number of messages in pool
+    total_messages: AtomicU32,
+    #[cfg(test)]
+    total_in_order: AtomicU32,
 }
 
 impl MessagesPool {
 
-    pub fn new(now: u32) -> Self {
+    pub fn new(now: u32, maximum_queue_length: Option<u32>) -> Self {
         metrics::gauge!("ext_messages_len", 0f64);
         metrics::gauge!("ext_messages_expired", 0f64);
         Self {
             messages: Map::with_hasher(Default::default()),
             order: Map::with_hasher(Default::default()),
             min_timestamp: AtomicU32::new(now),
+            maximum_queue_length,
+            total_messages: AtomicU32::new(0),
+            #[cfg(test)]
+            total_in_order: AtomicU32::new(0),
         }
     }
 
@@ -180,10 +192,23 @@ impl MessagesPool {
         if self.messages.get(&id).is_some() {
             return Ok(());
         }
+        for timestamp in self.min_timestamp.load(Ordering::Relaxed)..now.saturating_sub(MESSAGE_LIFETIME) {
+            self.clear_expired_messages(timestamp, u64::MAX);
+            self.increment_min_timestamp(timestamp);
+        }
+        if let Some(maximum_queue_length) = self.maximum_queue_length {
+            if self.total_messages.load(Ordering::Relaxed) >= maximum_queue_length {
+                fail!("maximum number of messages in pool is reached")
+            }
+        }
+
         log::debug!(target: EXT_MESSAGES_TRACE_TARGET, "adding external message {:x}", id);
         let workchain_id = message.dst_workchain_id().unwrap_or_default();
         let prefix = message.int_dst_account_id().map_or(0, |mut slice| slice.get_next_u64().unwrap_or_default());
         self.messages.insert(id.clone(), MessageKeeper::new(message));
+        self.total_messages.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        self.total_in_order.fetch_add(1, Ordering::Relaxed);
         #[cfg(not(feature = "statsd"))]
         metrics::increment_gauge!("ext_messages_len", 1f64);
 
@@ -199,18 +224,28 @@ impl MessagesPool {
         Ok(())
     }
 
-    pub fn iter(self: Arc<MessagesPool>, shard: ShardIdent, now: u32) -> MessagePoolIter {
-        MessagePoolIter::new(self, shard, now)
+    pub fn iter(
+        self: Arc<MessagesPool>,
+        shard: ShardIdent, // shard is used to filter messages
+        now: u32, // now is used to check if message is active
+        finish_time_ms: u64 // finish_time_ms is used to limit the time of iteration
+    ) -> MessagePoolIter {
+        MessagePoolIter::new(self, shard, now, finish_time_ms)
     }
 
-    pub fn complete_messages(&self, to_delay: Vec<UInt256>, _to_delete: Vec<UInt256>, now: u32) -> Result<()> {
-        for id in &to_delay {
+    pub fn complete_messages(
+        &self, 
+        to_delay: Vec<(UInt256, String)>, 
+        _to_delete: Vec<(UInt256, i32)>, 
+        now: u32
+    ) -> Result<()> {
+        for (id, reason) in &to_delay {
             let result = self.messages.remove_with(id, |(_, keeper)| {
                 if keeper.can_postpone() {
                     log::debug!(
                         target: EXT_MESSAGES_TRACE_TARGET,
-                        "complete_messages: postponed external message {:x} while enumerating to_delay list",
-                        id,
+                        "complete_messages: postponed external message {:x} with reason {} while enumerating to_delay list",
+                        id, reason
                     );
                     keeper.postpone(now);
                     false
@@ -221,21 +256,62 @@ impl MessagesPool {
             if result.is_some() {
                 log::debug!(
                     target: EXT_MESSAGES_TRACE_TARGET,
-                    "complete_messages: removing external message {:x} because can't postpone",
-                    id,
+                    "complete_messages: removing external message {:x} with reason {} because can't postpone",
+                    id, reason,
                 );
                 #[cfg(not(feature = "statsd"))]
                 metrics::decrement_gauge!("ext_messages_len", 1f64);
+                self.total_messages.fetch_sub(1, Ordering::Relaxed);
             }
         }
         Ok(())
+    }
+
+    pub fn total_messages(&self) -> u32 {
+        self.total_messages.load(Ordering::Relaxed)
+    }
+
+    fn increment_min_timestamp(&self, timestamp: u32) {
+        let _ = self.min_timestamp.compare_exchange(timestamp, timestamp + 1, Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    fn clear_expired_messages(&self, timestamp: u32, finish_time_ms: u64) -> bool {
+        let order = match self.order.get(&timestamp) {
+            Some(guard) => guard.val().clone(),
+            None => return true,
+        };
+        log::debug!(
+            target: EXT_MESSAGES_TRACE_TARGET,
+            "removing order map for timestamp {} because it is expired", timestamp
+        );
+        for seqno in 0..order.seqno.load(Ordering::Relaxed) {
+            if finish_time_ms < now_duration().as_millis() as u64 {
+                self.order.insert(timestamp, order);
+                return false;
+            }
+            if let Some(guard) = order.map.remove(&seqno) {
+                if let Some(guard) = self.messages.remove(&guard.val().id) {
+                    metrics::increment_gauge!("ext_messages_expired", 1f64);
+                    metrics::decrement_gauge!("ext_messages_len", 1f64);
+                    log::debug!(
+                        target: EXT_MESSAGES_TRACE_TARGET,
+                        "removing external message {:x} because it is expired", guard.key()
+                    );
+                    self.total_messages.fetch_sub(1, Ordering::Relaxed);
+                }
+                #[cfg(test)]
+                self.total_in_order.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+        self.order.remove(&timestamp);
+        true
     }
 }
 
 #[cfg(test)]
 impl MessagesPool {
     fn get_messages(self: &Arc<Self>, shard: &ShardIdent, now: u32) -> Result<Vec<(Arc<Message>, UInt256)>> {
-        Ok(self.clone().iter(shard.clone(), now).collect())
+        Ok(self.clone().iter(shard.clone(), now, u64::MAX).collect())
     }
 
     pub fn has_messages(&self) -> bool {
@@ -253,10 +329,11 @@ pub struct MessagePoolIter {
     now: u32,
     timestamp: u32,
     seqno: u32,
+    finish_time_ms: u64,
 }
 
 impl MessagePoolIter {
-    fn new(pool: Arc<MessagesPool>, shard: ShardIdent, now: u32) -> Self {
+    fn new(pool: Arc<MessagesPool>, shard: ShardIdent, now: u32, finish_time_ms: u64) -> Self {
         let timestamp = pool.min_timestamp.load(Ordering::Relaxed);
         Self {
             pool,
@@ -264,32 +341,7 @@ impl MessagePoolIter {
             now,
             timestamp,
             seqno: 0,
-        }
-    }
-
-    fn clear_expired_messages(&mut self) {
-        let order = match self.pool.order.remove(&self.timestamp) {
-            Some(guard) => guard.val().clone(),
-            None => return
-        };
-        log::debug!(
-            target: EXT_MESSAGES_TRACE_TARGET,
-            "removing order map for timestamp {} because it is expired", self.timestamp
-        );
-        while self.seqno < order.seqno.load(Ordering::Relaxed) {
-            if let Some(guard) = order.map.remove(&self.seqno) {
-                if let Some(guard) = self.pool.messages.remove(&guard.val().id) {
-                    #[cfg(not(feature = "statsd"))]
-                    metrics::increment_gauge!("ext_messages_expired", 1f64);
-                    #[cfg(not(feature = "statsd"))]
-                    metrics::decrement_gauge!("ext_messages_len", 1f64);
-                    log::debug!(
-                        target: EXT_MESSAGES_TRACE_TARGET,
-                        "removing external message {:x} because it is expired", guard.key()
-                    );
-                }
-            }
-            self.seqno += 1;
+            finish_time_ms,
         }
     }
 
@@ -315,22 +367,27 @@ impl Iterator for MessagePoolIter {
     fn next(&mut self) -> Option<Self::Item> {
         // iterate timestamp
         while self.timestamp <= self.now {
+            if self.finish_time_ms < now_duration().as_millis() as u64 {
+                return None;
+            }
             // check if this order map is expired
             if self.timestamp + MESSAGE_LIFETIME < self.now {
-                self.clear_expired_messages();
+                if !self.pool.clear_expired_messages(self.timestamp, self.finish_time_ms) {
+                    return None;
+                }
                 // level was removed or not present try to move bottom margin
-                let _ = self.pool.min_timestamp.compare_exchange(self.timestamp, self.timestamp + 1, Ordering::Relaxed, Ordering::Relaxed);
+                self.pool.increment_min_timestamp(self.timestamp);
             } else if let Some(order) = self.pool.order.get(&self.timestamp).map(|guard| guard.val().clone()) {
                 while self.seqno < order.seqno.load(Ordering::Relaxed) {
+                    if self.finish_time_ms < now_duration().as_millis() as u64 {
+                        return None;
+                    }
                     let result = self.find_in_map(&order.map);
                     self.seqno += 1;
                     if result.is_some() {
                         return result;
                     }
                 }
-            } else if self.timestamp < self.now {
-                // level is not present try to move bottom margin
-                let _ = self.pool.min_timestamp.compare_exchange(self.timestamp, self.timestamp + 1, Ordering::Relaxed, Ordering::Relaxed);
             }
             self.timestamp += 1;
             self.seqno = 0;
