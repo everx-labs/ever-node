@@ -441,7 +441,7 @@ impl OutMsgQueueInfoStuff {
         &mut self,
         subshard: ShardIdent,
         engine: &Arc<dyn EngineOperations>,
-        usage_tree: &UsageTree,
+        usage_tree: Option<&UsageTree>,
         imported_visited: Option<&mut HashSet<UInt256>>,
         split_queues: bool,
     ) -> Result<Self> {
@@ -472,11 +472,13 @@ impl OutMsgQueueInfoStuff {
                 } else {
                     (sibling_queue.clone(), self.out_queue()?.clone())
                 };
-                let visited = usage_tree.build_visited_set();
-                engine.set_split_queues(self.block_id(), q0, q1, visited);
-                log::warn!(
-                    "There is no precalculated split queues (prev block {}), calculated TIME {}ms", 
-                    self.block_id(), now.elapsed().as_millis());
+                if let Some(usage_tree) = usage_tree {
+                    let visited = usage_tree.build_visited_set();
+                    engine.set_split_queues(self.block_id(), q0, q1, visited);
+                    log::warn!(
+                        "There is no precalculated split queues (prev block {}), calculated TIME {}ms", 
+                        self.block_id(), now.elapsed().as_millis());
+                }
                 sibling_queue
             }
         };
@@ -878,38 +880,30 @@ impl MsgQueueManager {
         }
 
         let mut prev_out_queue_info = Self::load_out_queue_info(&prev_states[0], &last_mc_state, &mut cached_states, block_descr.clone()).await?;
-        if prev_out_queue_info.block_id().seq_no != 0 {
-            if let Some(state) = prev_states.get(1) {
+        if prev_states[0].block_id().seq_no != 0 {
+            if let Some(merge_state) = prev_states.get(1) {
                 CHECK!(after_merge);
-                let merge_out_queue_info = Self::load_out_queue_info(state, &last_mc_state, &mut cached_states, block_descr.clone()).await?;
-                log::debug!("{}: prepare merge for states {} and {}", block_descr, prev_out_queue_info.block_id(), merge_out_queue_info.block_id());
+                log::debug!("{}: prepare merge for states {} and {}", block_descr, prev_states[0].block_id(), merge_state.block_id());
+                let merge_out_queue_info = Self::load_out_queue_info(merge_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?;
                 prev_out_queue_info.merge(merge_out_queue_info, split_queues, next_state_opt.is_some())?;
                 Self::add_trivial_neighbor_after_merge(&mut neighbors, &shard, &prev_out_queue_info, prev_states, &stop_flag, block_descr.clone())?;
-            } else if after_split {
-                log::debug!("{}: prepare split for state {}", block_descr, prev_out_queue_info.block_id());
-                let own_usage_tree;
-                let usage_tree = if let Some(ut) = usage_tree {
-                    ut
-                } else {
-                    let ss = &prev_states[0];
-                    own_usage_tree = UsageTree::with_params(ss.root_cell().clone(), true);
-                    let root_cell = own_usage_tree.root_cell();
-                    let usage_state = ShardStateStuff::from_state(
-                        ss.block_id().clone(), 
-                        ShardStateUnsplit::construct_from_cell(root_cell)?,
-                        #[cfg(feature = "telemetry")]
-                        engine.engine_telemetry(),
-                        engine.engine_allocated()
-                    )?;
-                    prev_out_queue_info = OutMsgQueueInfoStuff::from_shard_state(&usage_state, &mut cached_states).await?;
-                    &own_usage_tree
-                };
-                let sibling_out_queue_info = prev_out_queue_info.split(shard.clone(), engine, &usage_tree, imported_visited, split_queues)?;
-                Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, 
-                    Some(sibling_out_queue_info), prev_states[0].shard(), &stop_flag, block_descr.clone())?;
             } else {
-                Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, None, 
-                    prev_out_queue_info.shard(), &stop_flag, block_descr.clone())?;
+                let sibling_out_queue_info = if after_split {
+                    log::debug!("{}: prepare split for state {}", block_descr, prev_states[0].block_id());
+                    Some(prev_out_queue_info.split(shard.clone(), engine, usage_tree, imported_visited, split_queues)?)
+                } else {
+                    None
+                };
+                Self::add_trivial_neighbor(
+                    &mut neighbors,
+                    &shard,
+                    &prev_out_queue_info, 
+                    sibling_out_queue_info,
+                    split_queues,
+                    prev_states[0].shard(),
+                    &stop_flag,
+                    block_descr.clone()
+                )?;
             }
         }
         let mut next_out_queue_info = match next_state_opt {
@@ -1046,7 +1040,8 @@ impl MsgQueueManager {
         neighbors: &mut Vec<OutMsgQueueInfoStuff>,
         shard: &ShardIdent,
         real_out_queue_info: &OutMsgQueueInfoStuff,
-        sibling_out_queue_info: Option<OutMsgQueueInfoStuff>,
+        mut sibling_out_queue_info: Option<OutMsgQueueInfoStuff>,
+        split_queues: bool,
         prev_shard: &ShardIdent,
         stop_flag: &Option<&AtomicBool>,
         block_descr: Arc<String>,
@@ -1070,79 +1065,79 @@ impl MsgQueueManager {
         let mut cs = 0;
         let n = neighbors.len();
         for i in 0..n {
-            if shard.intersect_with(neighbors[i].shard()) {
-                let nb = &neighbors[i];
-                found += 1;
-                log::debug!("{}: neighbor #{} : {} intersects our shard {}", block_descr, i, nb.block_id(), shard);
-                if nb.shard() == prev_shard {
-                    if prev_shard == shard {
-                        // case 1. Normal.
-                        CHECK!(found == 1);
-                        neighbors[i] = real_out_queue_info.clone();
-                        log::debug!("{}: adjusted neighbor #{} : {} (simple replacement)", block_descr, i, neighbors[i].block_id());
-                        cs = 1;
-                    } else if nb.shard().is_parent_for(&shard) {
-                        // case 2. Immediate after-split.
-                        CHECK!(found == 1);
-                        CHECK!(sibling_out_queue_info.is_some());
-                        if let Some(ref sibling) = sibling_out_queue_info {
-                            neighbors[i] = sibling.clone();
-                            neighbors[i].set_shard(shard.clone());
-                        }
-                        log::debug!("{}: adjusted neighbor #{} : {} with shard \
-                            shrinking to our sibling (immediate after-split adjustment)", block_descr, i, neighbors[i].block_id());
-
-                        let nb = real_out_queue_info.clone();
-                        log::debug!("{}: created neighbor #{} : {} with shard \
-                            shrinking to our (immediate after-split adjustment)", block_descr, n, nb.block_id());
-                        neighbors.push(nb);
-                        cs = 2;
-                    } else {
-                        fail!("impossible shard configuration in add_trivial_neighbor()")
-                    }
-                } else if nb.shard().is_parent_for(shard) && shard == prev_shard {
-                    // case 3. Continued after-split
+            let nb = &mut neighbors[i];
+            if !shard.intersect_with(nb.shard()) { continue; }
+            found += 1;
+            log::debug!("{}: neighbor #{} : {} intersects our shard {}", block_descr, i, nb.block_id(), shard);
+            if nb.shard() == prev_shard {
+                if prev_shard == shard {
+                    // case 1. Normal.
                     CHECK!(found == 1);
-                    CHECK!(sibling_out_queue_info.is_none());
-
-                    // compute the part of virtual sibling's OutMsgQueue with destinations in our shard
-                    let sib_shard = shard.sibling();
-                    let shard_prefix = shard.shard_key(true);
-                    neighbors[i].out_queue_mut()?.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
-                    neighbors[i].filter_messages(&sib_shard)
-                        .map_err(|err| error!("cannot filter virtual sibling's OutMsgQueue from that of \
-                            the last common ancestor: {}", err))?;
-                    neighbors[i].set_shard(sib_shard);
-                    log::debug!("{}: adjusted neighbor #{} : {} with shard shrinking \
-                        to our sibling (continued after-split adjustment)", block_descr, i, neighbors[i].block_id());
+                    *nb = real_out_queue_info.clone();
+                    log::debug!("{}: adjusted neighbor #{} : {} (simple replacement)", block_descr, i, nb.block_id());
+                    cs = 1;
+                } else if nb.shard().is_parent_for(&shard) {
+                    // case 2. Immediate after-split.
+                    CHECK!(found == 1);
+                    CHECK!(sibling_out_queue_info.is_some());
+                    if let Some(sibling) = sibling_out_queue_info.take() {
+                        *nb = sibling;
+                    }
+                    log::debug!("{}: adjusted neighbor #{} : {} with shard \
+                        shrinking to our sibling (immediate after-split adjustment)", block_descr, i, nb.block_id());
 
                     let nb = real_out_queue_info.clone();
-                    log::debug!("{}: created neighbor #{} : {} from our preceding state \
-                        (continued after-split adjustment)", block_descr, n, nb.block_id());
+                    log::debug!("{}: created neighbor #{} : {} with shard \
+                        shrinking to our (immediate after-split adjustment)",
+                        block_descr, n, nb.block_id());
                     neighbors.push(nb);
-                    cs = 3;
-                } else if shard.is_parent_for(nb.shard()) && shard == prev_shard {
-                    // case 4. Continued after-merge.
-                    if found == 1 {
-                        cs = 4;
-                    }
-                    CHECK!(cs == 4);
-                    CHECK!(found <= 2);
-                    if found == 1 {
-                        neighbors[i] = real_out_queue_info.clone();
-                        log::debug!("{}: adjusted neighbor #{} : {} with shard expansion \
-                            (continued after-merge adjustment)", block_descr, i, neighbors[i].block_id());
-                    } else {
-                        neighbors[i].disable();
-                        log::debug!("{}: disabling neighbor #{} : {} (continued after-merge adjustment)",
-                        block_descr, i, neighbors[i].block_id());
-                    }
+                    cs = 2;
                 } else {
                     fail!("impossible shard configuration in add_trivial_neighbor()")
                 }
+            } else if nb.shard().is_parent_for(shard) && shard == prev_shard {
+                // case 3. Continued after-split
+                CHECK!(found == 1);
+                CHECK!(sibling_out_queue_info.is_none());
 
-                check_stop_flag(stop_flag)?;
+                // compute the part of virtual sibling's OutMsgQueue with destinations in our shard
+                let sib_shard = shard.sibling();
+                let shard_prefix = shard.shard_key(true);
+                nb.out_queue_mut()?.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
+                if split_queues {
+                    nb.filter_messages(&sib_shard)
+                        .map_err(|err| error!("cannot filter virtual sibling's OutMsgQueue \
+                            from that of the last common ancestor: {}", err))?;
+                }
+                nb.set_shard(sib_shard);
+                log::debug!("{}: adjusted neighbor #{} : {} with shard shrinking \
+                    to our sibling (continued after-split adjustment)", block_descr, i, nb.block_id());
+
+                let nb = real_out_queue_info.clone();
+                log::debug!("{}: created neighbor #{} : {} from our preceding state \
+                    (continued after-split adjustment)", block_descr, n, nb.block_id());
+                neighbors.push(nb);
+                cs = 3;
+            } else if shard.is_parent_for(nb.shard()) && shard == prev_shard {
+                // case 4. Continued after-merge.
+                if found == 1 {
+                    cs = 4;
+                }
+                CHECK!(cs == 4);
+                CHECK!(found <= 2);
+                if found == 1 {
+                    *nb = real_out_queue_info.clone();
+                    log::debug!("{}: adjusted neighbor #{} : {} with shard expansion \
+                        (continued after-merge adjustment)", block_descr, i, nb.block_id());
+                } else {
+                    nb.disable();
+                    log::debug!("{}: disabling neighbor #{} : {} (continued after-merge adjustment)",
+                    block_descr, i, nb.block_id());
+                }
+            } else {
+                fail!("impossible shard configuration in add_trivial_neighbor()")
             }
+            check_stop_flag(stop_flag)?;
         }
         // dbg!(found, cs);
         CHECK!(found != 0 && cs != 0);
