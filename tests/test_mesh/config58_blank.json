@@ -1,0 +1,26 @@
+{
+    "p58": [
+        {
+            "network_id": network_id_value,
+            "zerostate": {
+                "wc": -1,
+                "shard": "8000000000000000",
+                "seqno": 0,
+                "root_hash": "root_hash_value",
+                "file_hash": "file_hash_value"
+            },
+            "is_active": false,
+            "currency_id": 0,
+            "init_block": {
+                "wc": -1,
+                "shard": "8000000000000000",
+                "seqno": 0,
+                "root_hash": "root_hash_value",
+                "file_hash": "file_hash_value"
+            },
+            "emergency_guard_addr": "37d750ace38f42502fac5d00fa5cdd082c4650eb766939591db7f858fd191174",
+            "pull_addr": "65e2188866c990f0b254727748cb5cc3253dc6f36b52f9b63370cfb70afd735a",
+            "minter_addr": "2735d7b9edb9fb1ed7a3031d4fd7560461ce13a472835f8a358d9250f3479817"
+        }
+    ]
+}
