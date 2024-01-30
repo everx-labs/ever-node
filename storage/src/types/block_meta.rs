@@ -54,7 +54,7 @@ impl BlockMeta {
         let info = block.read_info()?;
         let mut flags = block_handle_db::FLAG_IS_MESH;
         if info.key_block() {
-            flags &= block_handle_db::FLAG_KEY_BLOCK;
+            flags |= block_handle_db::FLAG_KEY_BLOCK;
         }
         Ok(Self::with_data(
             flags, 

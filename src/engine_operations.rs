@@ -545,6 +545,10 @@ impl EngineOperations for Engine {
         )
     }
 
+    async fn init_mesh_network(&self, nw_id: i32, zerostate: &BlockIdExt) -> Result<()> {
+        self.overlay_operations().init_mesh_network(nw_id, zerostate).await
+    }
+
     async fn load_block_proof(
         &self, 
         handle: &Arc<BlockHandle>, 

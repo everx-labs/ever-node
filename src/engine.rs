@@ -990,6 +990,8 @@ impl Engine {
 
     pub fn db(&self) -> &Arc<InternalDb> { &self.db }
 
+    pub fn overlay_operations(&self) -> &Arc<dyn OverlayOperations> { &self.overlay_operations }
+
     pub fn validator_network(&self) -> Arc<dyn PrivateOverlayOperations> { self.network.clone() }
 
     pub fn network(&self) -> &NodeNetwork { &self.network }
@@ -1017,21 +1019,24 @@ impl Engine {
         shard: u64
     ) -> Result<Arc<dyn FullNodeOverlayClient>> {
 
-        if mesh_nw_id != 0 && mesh_nw_id != self.network_global_id() {
-            fail!("get_full_node_overlay is not yet implemented for the Mesh");
-        }
+        let nw_id = if mesh_nw_id != 0 && mesh_nw_id != self.network_global_id() {
+            Some(mesh_nw_id)
+        } else {
+            None
+        };
 
-        let id = self.overlay_operations.calc_overlay_id(workchain, shard)?;
+        let id = self.overlay_operations.calc_overlay_id(nw_id, workchain, shard)?;
         if let Some(overlay) = self.overlay_operations.get_overlay(&id.0).await {
             Ok(overlay)
         } else {
             log::debug!(
-                "Overlay for workchain {workchain} was not found. Attempt to add foreign overlay."
+                "Overlay for network {mesh_nw_id} wc {workchain} was not found. Attempt to add foreign overlay."
             );
-            self.overlay_operations.clone().add_overlay(id.clone(), false).await?;
+            self.overlay_operations.clone().add_overlay(nw_id, id.clone(), false).await?;
             self.overlay_operations.get_overlay(&id.0).await
                 .ok_or_else(|| error!(
-                    "INTERNAL ERROR: overlay for workchain {workchain} was not found after calling add_overlay"
+                    "INTERNAL ERROR: overlay for network {mesh_nw_id} wc {workchain} \
+                    was not found after calling add_overlay"
                 ))
         }
     }
@@ -1042,8 +1047,8 @@ impl Engine {
         shard: u64,
         foreign: bool
     ) -> Result<()> {
-        let id = self.overlay_operations.calc_overlay_id(workchain, shard)?;
-        self.overlay_operations.clone().add_overlay(id, !foreign).await
+        let id = self.overlay_operations.calc_overlay_id(None, workchain, shard)?;
+        self.overlay_operations.clone().add_overlay(None, id, !foreign).await
     }
 
     pub fn shard_states_awaiters(&self) -> &AwaitersPool<BlockIdExt, Arc<ShardStateStuff>> {
@@ -2699,13 +2704,13 @@ pub async fn run(
             log::info!("Processed workchain from config: {wc}");
             engine.add_full_node_overlay(*wc, SHARD_FULL, false).await?;
             network.add_consumer(
-                &network.calc_overlay_id(*wc, SHARD_FULL)?.0, 
+                &network.calc_overlay_id(None, *wc, SHARD_FULL)?.0, 
                 full_node_service.clone()
             )?;
             if *wc != MASTERCHAIN_ID {
                 engine.add_full_node_overlay(MASTERCHAIN_ID, SHARD_FULL, true).await?;
                 network.add_consumer(
-                    &network.calc_overlay_id(MASTERCHAIN_ID, SHARD_FULL)?.0, 
+                    &network.calc_overlay_id(None, MASTERCHAIN_ID, SHARD_FULL)?.0, 
                     full_node_service.clone()
                 )?;
             }
@@ -2714,12 +2719,12 @@ pub async fn run(
             log::info!("Processed workchain was not specifed. LEGACY MODE");
             engine.add_full_node_overlay(BASE_WORKCHAIN_ID, SHARD_FULL, false).await?;
             network.add_consumer(
-                &network.calc_overlay_id(BASE_WORKCHAIN_ID, SHARD_FULL)?.0, 
+                &network.calc_overlay_id(None, BASE_WORKCHAIN_ID, SHARD_FULL)?.0, 
                 full_node_service.clone()
             )?;
             engine.add_full_node_overlay(MASTERCHAIN_ID, SHARD_FULL, false).await?;
             network.add_consumer(
-                &network.calc_overlay_id(MASTERCHAIN_ID, SHARD_FULL)?.0, 
+                &network.calc_overlay_id(None, MASTERCHAIN_ID, SHARD_FULL)?.0, 
                 full_node_service.clone()
             )?;
         }
@@ -2807,8 +2812,10 @@ pub async fn run(
         // top shard blocks
         resend_top_shard_blocks_worker(engine.clone());
 
-        let mesh_client = MeshClient::start(engine.clone()).await?;
-        engine.mesh_client.set(mesh_client).map_err(|_| error!("Attempt to set mesh_client twice"))?;
+        #[cfg(not(feature="external_db"))] {
+            let mesh_client = MeshClient::start(engine.clone()).await?;
+            engine.mesh_client.set(mesh_client).map_err(|_| error!("Attempt to set mesh_client twice"))?;
+        }
 
         // blocks download clients
         engine.set_sync_status(Engine::SYNC_STATUS_SYNC_BLOCKS);

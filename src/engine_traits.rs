@@ -84,22 +84,39 @@ pub struct EngineAlloc {
 #[async_trait::async_trait]
 pub trait OverlayOperations : Sync + Send {
     async fn start(&self) -> Result<()>;
+
     async fn get_overlay(
         &self, 
         overlay_id: &OverlayShortId
     ) -> Option<Arc<dyn FullNodeOverlayClient>>;
+
     async fn add_overlay(
         self: Arc<Self>,
+        network_id: Option<i32>,
         overlay_id: (Arc<OverlayShortId>, OverlayId),
         local: bool,
     ) -> Result<()>;
+
     async fn get_masterchain_overlay(self: Arc<Self>) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        let overlay_id = self.calc_overlay_id(ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL)?;
+        let overlay_id = self.calc_overlay_id(None, ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL)?;
         self.get_overlay(&overlay_id.0).await
             .ok_or_else(|| error!("INTERNAL ERROR: masterchain overlay was not found"))
     }
-    fn add_consumer(&self, overlay_id: &Arc<OverlayShortId>, consumer: Arc<dyn QueriesConsumer>) -> Result<()>;
-    fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<OverlayShortId>, OverlayId)> ;
+
+    fn add_consumer(
+        &self, 
+        overlay_id: &Arc<OverlayShortId>, 
+        consumer: Arc<dyn QueriesConsumer>
+    ) -> Result<()>;
+
+    fn calc_overlay_id(
+        &self,
+        network_id: Option<i32>,
+        workchain: i32,
+        shard: u64
+    ) -> Result<(Arc<OverlayShortId>, OverlayId)>;
+
+    async fn init_mesh_network(&self, network_id: i32, zerostate: &BlockIdExt) -> Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -967,6 +984,9 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
+    async fn init_mesh_network(&self, nw_id: i32, zerostate: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
 
 }
 

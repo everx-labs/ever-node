@@ -105,3 +105,6 @@ ton_block_json = { path = '../ever-block-json' }
 
 [patch.'https://github.com/tonlabs/ever-tl.git']
 ton_api = { path = '../ever-tl/ton_api' }
+
+[patch.'https://github.com/tonlabs/ever-dht.git']
+dht = { path = '../ever-dht' }

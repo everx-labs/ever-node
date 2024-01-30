@@ -20,7 +20,7 @@ use adnl::{
 };
 use storage::shardstate_db_async::CellsDbConfig;
 use std::{
-    collections::{HashMap, HashSet}, convert::TryInto, fs::File, fmt::{Display, Formatter},
+    collections::{HashMap, HashSet}, convert::TryInto, fs::{read_dir, File}, fmt::{Display, Formatter},
     io::BufReader, path::Path, sync::{Arc, atomic::{self, AtomicI32}}, time::{Duration}
 };
 use std::path::PathBuf;
@@ -136,6 +136,8 @@ fn default_states_cache_cleanup_diff() -> u32 { 1000 }
 pub struct TonNodeConfig {
     log_config_name: Option<String>,
     ton_global_config_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mesh_global_configs_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     workchain: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -637,6 +639,36 @@ impl TonNodeConfig {
             .map_err(|err| error!("Global config file is not found! : {}", err))?;
 */
         TonNodeGlobalConfig::from_json_file(global_config_path)
+    }
+
+    pub fn mesh_global_configs_dir(&self) -> String {
+        self.mesh_global_configs_dir.clone().unwrap_or(".".to_string())
+    }
+
+    pub fn load_global_config_of_network(
+        global_configs_dir: &str,
+        network_id: i32,
+        zerostate: &BlockIdExt,
+    ) -> Result<TonNodeGlobalConfig> {
+        for entry in read_dir(global_configs_dir)? {
+            if let Ok(entry) = entry {
+                if entry.file_type()?.is_file() &&
+                   entry.file_name().to_str().map(|n| n.ends_with(".json")).unwrap_or(false)
+                {
+                    if let Ok(config) = TonNodeGlobalConfig::from_json_file(entry.path()) {
+                        if let Ok(id) = config.0.zero_state() {
+                            if id == *zerostate {
+                                return Ok(config);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        fail!(
+            "Global config file for network {} with zerostate {} is not found in {}!",
+            network_id, zerostate, global_configs_dir,
+        );
     }
 
 // Unused

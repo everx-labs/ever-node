@@ -65,6 +65,8 @@ impl<'a> Boot<'a> {
 
         boot.check_nw_config()?;
 
+        boot.engine.init_mesh_network(nw_id, &boot.nw_config.zerostate).await?;
+
         let last_commited_block = boot.process_hardforks(last_commited_block.clone())?;
 
         let (handle, init_block_proof_or_zs) = boot.get_init_point().await?;
@@ -221,7 +223,7 @@ impl<'a> Boot<'a> {
         mut prev_block_proof: BlockProofOrZerostate,
     ) -> Result<BlockProofOrZerostate> {
 
-        let mut got_last_block_at = 0;
+        let mut got_last_block_at = self.engine.now();
         let mut key_blocks = vec!(handle.clone());
         let mut prev_handle = handle;
 
@@ -712,7 +714,7 @@ impl MeshClient {
             log::debug!("MeshClient: waiting next mc block {}", mc_block_handle.id());
 
             (mc_block_handle, mc_block) = loop {
-                if let Ok(r) = self.engine.wait_next_applied_mc_block(&mc_block_handle, Some(500)).await {
+                if let Ok(r) = self.engine.wait_next_applied_mc_block(&mc_block_handle, Some(1000)).await {
                     break r;
                 } else if self.engine.check_stop() {
                     return Ok(());

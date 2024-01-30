@@ -46,6 +46,7 @@ pub struct Neighbours {
     peers: NeighboursCache,
     all_peers: lockfree::set::Set<Arc<KeyId>>,
     overlay_id: Arc<OverlayShortId>,
+    network_id: Option<i32>,
     overlay: Arc<OverlayNode>,
     dht: Arc<DhtNode>,
     fail_attempts: AtomicU64,
@@ -200,6 +201,7 @@ impl Neighbours {
     pub fn new(
         start_peers: &Vec<Arc<KeyId>>,
         dht: &Arc<DhtNode>,
+        network_id: Option<i32>,
         overlay: &Arc<OverlayNode>,
         overlay_id: Arc<OverlayShortId>,
         default_rldp_roundtrip: &Option<u32>,
@@ -214,6 +216,7 @@ impl Neighbours {
             overlay: overlay.clone(),
             dht: dht.clone(),
             overlay_id,
+            network_id,
             fail_attempts: AtomicU64::new(0),
             all_attempts: AtomicU64::new(0),
             start: Instant::now(),
@@ -397,7 +400,7 @@ impl Neighbours {
         tokio::spawn(async move {
             for peer in peers.iter() {
                 log::trace!("add_new_peers: searching IP for peer {}...", peer);
-                match DhtNode::find_address(&this.dht, peer).await {
+                match DhtNode::find_address_in_network(&this.dht, peer, self.network_id).await {
                     Ok(Some((ip, _))) => {
                         log::info!("add_new_peers: peer {}, IP {}", peer, ip);
                         if !this.add_overlay_peer(peer.clone()) {

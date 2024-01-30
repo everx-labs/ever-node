@@ -40,10 +40,10 @@ use catchain::{
 };
 use dht::{DhtIterator, DhtNode};
 use overlay::{
-    BroadcastSendInfo, OverlayId, OverlayShortId, OverlayNode, QueriesConsumer, 
-    PrivateOverlayShortId
+    BroadcastSendInfo, OverlayId, OverlayNode, OverlayShortId, OverlayUtils, PrivateOverlayShortId, QueriesConsumer
 };
 use rldp::RldpNode;
+use ton_block::BlockIdExt;
 use std::{
     convert::TryInto, future::Future, hash::Hash, 
     sync::{Arc, atomic::{AtomicI32, AtomicU64, AtomicBool, Ordering}}, 
@@ -56,8 +56,6 @@ use ton_api::{
 };
 #[cfg(feature = "telemetry")]
 use ton_api::tag_from_bare_type;
-
-type Cache<K, T> = lockfree::map::Map<K, T>;
 
 pub (crate) struct NetworkContext {
     pub adnl: Arc<AdnlNode>,
@@ -75,7 +73,7 @@ pub (crate) struct NetworkContext {
 
 pub struct NodeNetwork {
     masterchain_overlay_short_id: Arc<OverlayShortId>,
-    overlays: Arc<Cache<Arc<OverlayShortId>, Arc<NodeClientOverlay>>>,
+    overlays: Arc<lockfree::map::Map<Arc<OverlayShortId>, Arc<NodeClientOverlay>>>,
     network_context: Arc<NetworkContext>,
     validator_context: ValidatorContext,
     overlay_awaiters: AwaitersPool<Arc<OverlayShortId>, Arc<dyn FullNodeOverlayClient>>,
@@ -85,7 +83,9 @@ pub struct NodeNetwork {
     default_rldp_roundtrip: Option<u32>,
     cancellation_token: Arc<tokio_util::sync::CancellationToken>,
     #[cfg(feature = "telemetry")]
-    tag_connectivity_check_broadcast: u32
+    tag_connectivity_check_broadcast: u32,
+    mesh_global_configs_dir: String,
+    zerostate_ids: lockfree::map::Map<i32, BlockIdExt>
 }
 
 declare_counted!(
@@ -95,11 +95,11 @@ declare_counted!(
 );
 
 struct ValidatorContext {
-    private_overlays: Arc<Cache<Arc<OverlayShortId>, Arc<CatchainClient>>>,
+    private_overlays: Arc<lockfree::map::Map<Arc<OverlayShortId>, Arc<CatchainClient>>>,
     actual_local_adnl_keys: Arc<lockfree::set::Set<Arc<KeyId>>>,
-    all_validator_peers: Arc<Cache<Arc<KeyId>, Arc<PeerContext>>>,
-    sets_contexts: Arc<Cache<UInt256, Arc<ValidatorSetContext>>>,
-    current_set: Arc<Cache<u8, UInt256>>, // zero or one element [0]
+    all_validator_peers: Arc<lockfree::map::Map<Arc<KeyId>, Arc<PeerContext>>>,
+    sets_contexts: Arc<lockfree::map::Map<UInt256, Arc<ValidatorSetContext>>>,
+    current_set: Arc<lockfree::map::Map<u8, UInt256>>, // zero or one element [0]
 }
 
 //#[derive(Default)]
@@ -119,7 +119,7 @@ declare_counted!(
         validator_key: Arc<dyn KeyOption>,
         validator_adnl_key: Arc<dyn KeyOption>,
         election_id: usize,
-        connectivity_stat: Arc<Cache<Arc<KeyId>, ConnectivityStat>> // (last short broadcast got, last long -//-)
+        connectivity_stat: Arc<lockfree::map::Map<Arc<KeyId>, ConnectivityStat>> // (last short broadcast got, last long -//-)
     }
 );
 
@@ -144,6 +144,7 @@ impl NodeNetwork {
     ) -> Result<Arc<Self>> {
 
         let global_config = config.load_global_config()?;
+        let global_configs_dir = config.mesh_global_configs_dir();
         let masterchain_zero_state_id = global_config.zero_state()?;
         let mut connectivity_check_config = config.connectivity_check_config().clone();
         connectivity_check_config.enabled = false;
@@ -154,7 +155,7 @@ impl NodeNetwork {
         if !config.extensions().disable_compression {
             adnl.set_options(AdnlNode::OPTION_FORCE_COMPRESSION)
         }
-        let dht = DhtNode::with_adnl_node(adnl.clone(), Self::TAG_DHT_KEY)?;
+        let dht = DhtNode::with_params(adnl.clone(), Self::TAG_DHT_KEY, None)?;
         let overlay = OverlayNode::with_adnl_node_and_zero_state(
             adnl.clone(), 
             masterchain_zero_state_id.file_hash.as_slice(),
@@ -168,7 +169,7 @@ impl NodeNetwork {
 
         let nodes = global_config.dht_nodes()?;
         for peer in nodes.iter() {
-            dht.add_peer(peer)?;
+            dht.add_peer_to_network(peer, None)?;
         }
 
         let masterchain_overlay_short_id = overlay.calc_overlay_short_id(
@@ -184,7 +185,7 @@ impl NodeNetwork {
 
         let default_rldp_roundtrip = config.default_rldp_roundtrip();
 
-        NodeNetwork::find_dht_nodes(dht.clone(), cancellation_token.clone());
+        NodeNetwork::find_dht_nodes(dht.clone(), None, cancellation_token.clone());
         let (config_handler, config_handler_context) = NodeConfigHandler::create(
             config, tokio::runtime::Handle::current()
         )?;
@@ -192,12 +193,15 @@ impl NodeNetwork {
      //   let validator_adnl_key = adnl.key_by_tag(Self::TAG_VALIDATOR_ADNL_KEY)?;
      //   NodeNetwork::periodic_store_ip_addr(dht.clone(), validator_adnl_key);
 
+        let zerostate_ids = lockfree::map::Map::new();
+        zerostate_ids.insert(0, masterchain_zero_state_id);
+
         let validator_context = ValidatorContext {
-            private_overlays: Arc::new(Cache::new()),
+            private_overlays: Arc::new(lockfree::map::Map::new()),
             actual_local_adnl_keys: Arc::new(lockfree::set::Set::new()),
-            all_validator_peers: Arc::new(Cache::new()),
-            sets_contexts: Arc::new(Cache::new()),
-            current_set: Arc::new(Cache::new()),
+            all_validator_peers: Arc::new(lockfree::map::Map::new()),
+            sets_contexts: Arc::new(lockfree::map::Map::new()),
+            current_set: Arc::new(lockfree::map::Map::new()),
         };
 
         let network_context = NetworkContext {
@@ -219,7 +223,7 @@ impl NodeNetwork {
 
         let node_network = NodeNetwork {
             masterchain_overlay_short_id,
-            overlays: Arc::new(Cache::new()),
+            overlays: Arc::new(lockfree::map::Map::new()),
             network_context: network_context.clone(),
             validator_context,
             overlay_awaiters: AwaitersPool::new(
@@ -236,6 +240,8 @@ impl NodeNetwork {
             #[cfg(feature = "telemetry")]
             tag_connectivity_check_broadcast: 
                 tag_from_bare_type::<ConnectivityCheckBroadcast>(),
+            mesh_global_configs_dir: global_configs_dir,
+            zerostate_ids,
         };
         let node_network = Arc::new(node_network);
 
@@ -282,18 +288,18 @@ impl NodeNetwork {
 
     fn try_add_new_elem<K: Hash + Ord + Clone, T: CountedObject>(
         &self,
-        cache: &Arc<Cache<K, Arc<T>>>,
+        map: &Arc<lockfree::map::Map<K, Arc<T>>>,
         id: &K,
         factory: impl FnMut() -> Result<Arc<T>>
     ) -> Result<Arc<T>> {
-        if let Some(found) = cache.get(id) { 
+        if let Some(found) = map.get(id) { 
             Ok(found.val().clone())
         } else { 
-            add_counted_object_to_map(cache, id.clone(), factory)?;
-            if let Some(found) = cache.get(id) { 
+            add_counted_object_to_map(map, id.clone(), factory)?;
+            if let Some(found) = map.get(id) { 
                 Ok(found.val().clone())
             } else {
-                fail!("Cannot add element to cache") 
+                fail!("Cannot add element to map") 
             } 
         }
     }
@@ -360,6 +366,7 @@ impl NodeNetwork {
     fn process_overlay_peers(
         neighbours: Arc<Neighbours>,
         dht: Arc<DhtNode>,
+        network_id: Option<i32>,
         overlay: Arc<OverlayNode>,
         overlay_id: Arc<OverlayShortId>,
         cancellation_token: Arc<tokio_util::sync::CancellationToken>
@@ -369,7 +376,7 @@ impl NodeNetwork {
             async move {
                 loop {
                     let got_peers =
-                      Self::add_overlay_peers(&neighbours, &dht, &overlay, &overlay_id).await.
+                      Self::add_overlay_peers(&neighbours, &dht, network_id, &overlay, &overlay_id).await.
                         unwrap_or_else(|e| { log::warn!("add_overlay_peers: {}", e); false } );
                     if got_peers {
                         // Do not sleep, get next one from queue
@@ -386,6 +393,7 @@ impl NodeNetwork {
     async fn add_overlay_peers(
         neighbours: &Arc<Neighbours>,
         dht: &Arc<DhtNode>,
+        network_id: Option<i32>,
         overlay: &Arc<OverlayNode>,
         overlay_id: &Arc<OverlayShortId>
     ) -> Result<bool> {
@@ -397,7 +405,7 @@ impl NodeNetwork {
                     if neighbours.contains_overlay_peer(peer_key.id()) {
                         continue;
                     }
-                    if let Some((ip, _)) = DhtNode::find_address(dht, peer_key.id()).await? {
+                    if let Some((ip, _)) = DhtNode::find_address_in_network(dht, peer_key.id(), network_id).await? {
                         overlay.add_public_peer(&ip, peer, overlay_id)?;
                         if neighbours.add_overlay_peer(peer_key.id().clone()) {
                             log::trace!("add_overlay_peers: add overlay peer {:?}, address: {}", peer, ip);
@@ -443,17 +451,19 @@ impl NodeNetwork {
 */
 
     async fn update_overlay_peers(
-        &self, 
+        &self,
+        network_id: Option<i32>,
         overlay_id: &Arc<OverlayShortId>,
         iter: &mut Option<DhtIterator>
     ) -> Result<Vec<Arc<KeyId>>> {
         let token = self.cancellation_token.clone();
         log::info!("Overlay {} node search in progress...", overlay_id);
         let nodes = tokio::select!{
-            nodes = DhtNode::find_overlay_nodes(
+            nodes = DhtNode::find_overlay_nodes_in_network(
                 &self.network_context.dht, 
                 overlay_id, 
-                iter
+                iter,
+                network_id,
             ) => nodes,
             _ = token.cancelled() => fail!("Overlay {} node search cancelled", overlay_id)
         }?;
@@ -472,9 +482,10 @@ impl NodeNetwork {
     async fn update_peers(
         &self,
         client_overlay: &Arc<NodeClientOverlay>,
+        network_id: Option<i32>,
         iter: &mut Option<DhtIterator>
     ) -> Result<()> {
-        let mut peers = self.update_overlay_peers(client_overlay.overlay_id(), iter).await?;
+        let mut peers = self.update_overlay_peers(network_id, client_overlay.overlay_id(), iter).await?;
         while let Some(peer) = peers.pop() {
             client_overlay.peers().add(peer)?;
         }
@@ -520,6 +531,7 @@ impl NodeNetwork {
 
     fn find_dht_nodes(
         dht: Arc<DhtNode>, 
+        network_id: Option<i32>,
         cancellation_token: Arc<tokio_util::sync::CancellationToken>
     ) {
         Self::spawn_background_task(
@@ -527,9 +539,24 @@ impl NodeNetwork {
             async move {
                 loop {
                     let mut iter = None;
-                    while let Some(id) = dht.get_known_peer(&mut iter) {
-                        if let Err(e) = dht.find_dht_nodes(&id).await {
-                            log::warn!("find_dht_nodes result: {:?}", e)
+                    loop {
+                        match dht.get_known_peer_of_network(&mut iter, network_id) {
+                            Err(e) => {
+                                log::warn!(
+                                    "get_known_peer_of_network {} result: {:?}",
+                                    network_id.unwrap_or_default(), e
+                                );
+                                break;
+                            }
+                            Ok(None) => break,
+                            Ok(Some(id)) => {
+                                if let Err(e) = dht.find_dht_nodes_in_network(&id, network_id).await {
+                                    log::warn!(
+                                        "find_dht_nodes_in_network {} result: {:?}",
+                                        network_id.unwrap_or_default(), e
+                                    )
+                                }
+                            }
                         }
                     }
                     tokio::time::sleep(Self::TIMEOUT_FIND_DHT_NODES).await;
@@ -538,7 +565,11 @@ impl NodeNetwork {
         )
     }
 
-    fn start_update_peers(self: Arc<Self>, client_overlay: &Arc<NodeClientOverlay>) {
+    fn start_update_peers(
+        self: Arc<Self>,
+        client_overlay: &Arc<NodeClientOverlay>,
+        network_id: Option<i32>,
+    ) {
         let client_overlay = client_overlay.clone();
         Self::spawn_background_task(
             self.cancellation_token.clone(),
@@ -546,7 +577,7 @@ impl NodeNetwork {
                 let mut iter = None;
                 loop {
                     log::trace!("find overlay nodes by dht...");
-                    if let Err(e) = self.update_peers(&client_overlay, &mut iter).await {
+                    if let Err(e) = self.update_peers(&client_overlay, network_id, &mut iter).await {
                         log::warn!("Error find overlay nodes by dht: {}", e);
                     }
                     if client_overlay.peers().count() >= neighbours::MAX_NEIGHBOURS {
@@ -561,6 +592,7 @@ impl NodeNetwork {
 
     async fn get_overlay_worker(
         self: Arc<Self>,
+        network_id: Option<i32>,
         overlay_id: (Arc<OverlayShortId>, OverlayId),
         local: bool,
     ) -> Result<Arc<dyn FullNodeOverlayClient>> {
@@ -588,7 +620,7 @@ impl NodeNetwork {
             self.cancellation_token.clone(),
         );
 
-        let peers = self.update_overlay_peers(&overlay_id_short, &mut None).await?;
+        let peers = self.update_overlay_peers(network_id, &overlay_id_short, &mut None).await?;
         if peers.first().is_none() {
             log::warn!("No nodes were found in overlay {}", &overlay_id_short);
         }
@@ -596,6 +628,7 @@ impl NodeNetwork {
         let neighbours = Neighbours::new(
             &peers,
             &self.network_context.dht,
+            network_id,
             &self.network_context.overlay,
             overlay_id_short.clone(),
             &self.default_rldp_roundtrip,
@@ -619,10 +652,11 @@ impl NodeNetwork {
         Neighbours::start_ping(Arc::clone(&peers));
         Neighbours::start_reload(Arc::clone(&peers));
         Neighbours::start_rnd_peers_process(Arc::clone(&peers));
-        NodeNetwork::start_update_peers(self.clone(), &client_overlay);
+        NodeNetwork::start_update_peers(self.clone(), &client_overlay, network_id);
         NodeNetwork::process_overlay_peers(
             peers.clone(), 
             self.network_context.dht.clone(), 
+            network_id,
             self.network_context.overlay.clone(), 
             overlay_id_short.clone(),
             self.cancellation_token.clone(),
@@ -699,7 +733,7 @@ impl NodeNetwork {
     fn search_validator_keys_for_validator(
         &self,
         local_adnl_id: Arc<KeyId>,
-        validators_contexts: Arc<Cache<UInt256, Arc<ValidatorSetContext>>>,
+        validators_contexts: Arc<lockfree::map::Map<UInt256, Arc<ValidatorSetContext>>>,
         validator_list_id: UInt256,
         validators: Vec<CatchainNode>,
     ) {
@@ -758,7 +792,7 @@ impl NodeNetwork {
     ) -> Result<Vec<CatchainNode>> {
         let mut lost_validators = Vec::new();
         for val in validators {
-            match DhtNode::find_address(dht, &val.adnl_id).await {
+            match DhtNode::find_address_in_network(dht, &val.adnl_id, None).await {
                 Ok(Some((addr, key))) => {
                     log::info!("addr found: {:?}, key: {:x?}", &addr, &key);
                     match full_node_callback {
@@ -1004,12 +1038,17 @@ impl OverlayOperations for NodeNetwork {
 
     fn calc_overlay_id(
         &self, 
+        network_id: Option<i32>,
         workchain: i32, 
         shard: u64
     ) -> Result<(Arc<OverlayShortId>, OverlayId)> {
         let shard = shard as i64;
-        let id = self.network_context.overlay.calc_overlay_id(workchain, shard)?;
-        let short_id = self.network_context.overlay.calc_overlay_short_id(workchain, shard)?;
+        let zerostate_id = self.zerostate_ids.get(&network_id.unwrap_or_default())
+            .ok_or_else(|| error!("Attempt to calc overlay id for unknown network"))?;
+        let zerostate_file_hash = zerostate_id.val().file_hash().as_slice();
+        
+        let id = OverlayUtils::calc_overlay_id(workchain, shard, zerostate_file_hash)?;
+        let short_id = OverlayUtils::calc_overlay_short_id(workchain, shard, zerostate_file_hash)?;
         Ok((short_id, id))
     }
 
@@ -1039,6 +1078,7 @@ impl OverlayOperations for NodeNetwork {
 
     async fn add_overlay(
         self: Arc<Self>,
+        network_id: Option<i32>,
         overlay_id: (Arc<OverlayShortId>, OverlayId),
         local: bool,
     ) -> Result<()> {
@@ -1049,7 +1089,7 @@ impl OverlayOperations for NodeNetwork {
                 let overlay_opt = self.overlay_awaiters.do_or_wait(
                     &overlay_id.0.clone(),
                     None,
-                    Arc::clone(&self).get_overlay_worker(overlay_id.clone(), local)
+                    Arc::clone(&self).get_overlay_worker(network_id, overlay_id.clone(), local)
                 ).await?;
                 if overlay_opt.is_some() {
                     break;
@@ -1068,6 +1108,39 @@ impl OverlayOperations for NodeNetwork {
         Ok(())
     }
 
+    async fn init_mesh_network(&self, network_id: i32, zerostate: &BlockIdExt) -> Result<()> {
+
+        let dht = &self.network_context.dht;
+
+        if !dht.add_network(network_id)? {
+            return Ok(())
+        }
+
+        self.zerostate_ids.insert(network_id, zerostate.clone());
+
+        let global_config = loop {
+            match TonNodeConfig::load_global_config_of_network(
+                &self.mesh_global_configs_dir,
+                network_id,
+                zerostate
+            ) {
+                Ok(config) => break config,
+                Err(e) => {
+                    log::warn!("{}", e);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        };
+
+        let network_id = Some(network_id);
+        let nodes = global_config.dht_nodes()?;
+        for peer in nodes.iter() {
+            dht.add_peer_to_network(peer, network_id)?;
+        }
+        Self::find_dht_nodes(dht.clone(), network_id, self.cancellation_token.clone());
+
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -1122,7 +1195,7 @@ impl PrivateOverlayOperations for NodeNetwork {
         let mut lost_validators = Vec::new();
         let mut peers_ids = Vec::new();
 
-        let connectivity_stat = Arc::new(Cache::new());
+        let connectivity_stat = Arc::new(lockfree::map::Map::new());
 
         for val in validators {
             if val.public_key.id() == local_validator_key.id() {
@@ -1148,7 +1221,7 @@ impl PrivateOverlayOperations for NodeNetwork {
                     Ok(ret)
                 }
             )?;
-            match self.network_context.dht.fetch_address(&val.adnl_id).await {
+            match self.network_context.dht.fetch_address_of_network(&val.adnl_id, None).await {
                 Ok(Some((addr, key))) => {
                     log::info!("addr: {:?}, key: {:x?}", &addr, &key);
                     peers.push((addr, key));
