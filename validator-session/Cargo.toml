@@ -6,7 +6,6 @@ version = '0.0.2'
 
 [dependencies]
 backtrace = '0.3'
-catchain = { path = '../catchain' }
 crc = '3.0'
 crossbeam = '0.7'
 failure = '0.1'
@@ -15,8 +14,9 @@ lazy_static = '1.4'
 log = '0.4'
 metrics = '0.21.0'
 metrics-core = '0.5'
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.18' }
 rand = '0.8'
+catchain = { path = '../catchain' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.18' }
 storage = { path = '../storage' }
 ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.58' }
 ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.122' }

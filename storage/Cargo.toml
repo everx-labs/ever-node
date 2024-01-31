@@ -4,7 +4,6 @@ name = 'storage'
 version = '0.5.0'
 
 [dependencies]
-adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.21' }
 ahash = '0.8'
 async-trait = '0.1.31'
 bytes = '1.1.0'
@@ -13,7 +12,6 @@ fnv = '1.0.6'
 futures = '0.3.4'
 hex = '0.4'
 lazy_static = '1.4.0'
-lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 log = '0.4'
 log4rs = '1.2'
 lru = '0.11.0'
@@ -28,6 +26,8 @@ serde_derive = '1.0.114'
 strum = '0.18.0'
 strum_macros = '0.18.0'
 tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
+adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.21' }
+lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.58' }
 ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.122' }
 ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.32' }
