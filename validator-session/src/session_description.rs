@@ -14,7 +14,7 @@
 use crate::{
     BlockId, BlockHash, BlockSignature, CachedInstanceCounter, CacheEntry, CatchainNode, 
     HashType, PublicKey, PublicKeyHash, SessionCache, SessionDescription, SessionNode, 
-    SessionOptions, SessionPool, ValidatorWeight
+    SessionOptions, SessionPool, ValidatorWeight, DynamicCollationTimeoutMode,
 };
 use catchain::{serialize_tl_boxed_object, profiling::ResultStatusCounter};
 use rand::Rng;
@@ -28,6 +28,8 @@ use ton_types::{Result, UInt256};
 
 const PERSISTENT_CACHE_SIZE: usize = 10000000;
 const TEMP_CACHE_SIZE: usize = 10000;
+
+const MAX_SKIPPED_ROUNDS_COUNT: u32 = 5; //collation delay may be increased maximum 2^5 = 32 times (for collation failures due to timeout)
 
 /*
     SessionOptions default
@@ -55,6 +57,7 @@ impl Default for SessionOptions {
             max_collated_data_size: 4 << 20,
             new_catchain_ids: false,
             skip_single_node_session_validations: false,
+            dynamic_collation_timeout_mode: DynamicCollationTimeoutMode::Disabled,
         }
     }
 }
@@ -272,17 +275,31 @@ impl SessionDescription for SessionDescriptionImpl {
         ((int_part as u64) << 32) + frac_part
     }
 
-    fn get_delay(&self, mut priority: u32) -> std::time::Duration {
+    fn get_delay(&self, mut priority: u32, mut prev_skipped_rounds_count: u32) -> std::time::Duration {
         //difference with original TON implementation: enable max performance for single node sessions
         if self.sources.len() > 1 && self.sources.len() < 5 {
             priority += 1;
         }
 
-        priority * self.options.next_candidate_delay
+        if prev_skipped_rounds_count > MAX_SKIPPED_ROUNDS_COUNT {
+            prev_skipped_rounds_count = MAX_SKIPPED_ROUNDS_COUNT;
+        }
+
+        match self.options.dynamic_collation_timeout_mode {
+            DynamicCollationTimeoutMode::Disabled => {
+                priority * self.options.next_candidate_delay
+            }
+            DynamicCollationTimeoutMode::DoubleTimeoutAfterSkippedRound => {
+                // each skipped round doubles the delay
+                let multiplier = 1 << prev_skipped_rounds_count;
+
+                priority * self.options.next_candidate_delay * multiplier                
+            }
+        }
     }
 
-    fn get_empty_block_delay(&self) -> std::time::Duration {
-        let mut delay = self.get_delay(self.get_max_priority() + 1);
+    fn get_empty_block_delay(&self, prev_skip_rounds_count: u32) -> std::time::Duration {
+        let mut delay = self.get_delay(self.get_max_priority() + 1, prev_skip_rounds_count);
 
         const MIN_DELAY: std::time::Duration = std::time::Duration::from_millis(1000);
 

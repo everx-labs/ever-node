@@ -97,6 +97,7 @@ pub(crate) struct SessionProcessorImpl {
     real_state: SessionStatePtr,                     //real state
     virtual_state: SessionStatePtr,                  //virtual state
     current_round: u32,                              //current round sequence number
+    prev_skipped_rounds_count: u32,                  //number of previous rounds to skip
     requested_new_block: bool,                       //new block has been requested in catchain
     requested_new_block_now: bool, //new block has been requested in catchain to be generated immediately
     session_creation_time: SystemTime, //session creation time
@@ -2059,12 +2060,20 @@ impl SessionProcessorImpl {
                         approve_signatures,
                     );
                 }
+
+                //reset skipped blocks counter
+
+                self.prev_skipped_rounds_count = 0;
             } else {
                 //no block was committed
 
                 log::trace!("...block is skipped for round {}", self.current_round);
 
                 self.notify_block_skipped(self.current_round);
+
+                //increment skipped blocks counter
+
+                self.prev_skipped_rounds_count += 1;
             }
 
             //update slashing statistics
@@ -2300,7 +2309,7 @@ impl SessionProcessorImpl {
         let block_generation_time = if DEBUG_IGNORE_PROPOSALS_PRIORITY {
             self.description.get_time()
         } else {
-            self.round_started_at + self.description.get_delay(priority as u32)
+            self.round_started_at + self.description.get_delay(priority as u32, self.prev_skipped_rounds_count)
         };
 
         let block_generation_time_end =
@@ -2567,8 +2576,9 @@ impl SessionProcessorImpl {
                 self.description
                     .get_node_priority(block.get_source_index(), self.current_round)
                     as u32,
+                self.prev_skipped_rounds_count
             ),
-            _ => self.description.get_empty_block_delay(),
+            _ => self.description.get_empty_block_delay(self.prev_skipped_rounds_count),
         };
         let block_proposal_time = self.round_started_at + block_round_proposal_delay;
 
@@ -2609,7 +2619,7 @@ impl SessionProcessorImpl {
         const BLOCK_VALIDATION_TIMEOUT: Duration = Duration::from_secs(2);
 
         let block_proposal_time = self.round_started_at
-            + self.description.get_delay(block.get_source_index())
+            + self.description.get_delay(block.get_source_index(), self.prev_skipped_rounds_count)
             + BLOCK_VALIDATION_TIMEOUT;
 
         log::trace!(
@@ -3548,6 +3558,7 @@ impl SessionProcessorImpl {
             real_state: initial_state.clone(),
             virtual_state: initial_state.clone(),
             current_round: 0,
+            prev_skipped_rounds_count: 0,
             next_awake_time: now,
             round_started_at: now,
             round_debug_at: now,

@@ -245,6 +245,16 @@ pub type SlashingMetric = slashing::Metric;
 #[cfg(feature="slashing")]
 pub type SlashingAggregatedMetric = slashing::AggregatedMetric;
 
+/// Dynamic collation timeout mode
+#[derive(Clone, Copy, Debug)]
+pub enum DynamicCollationTimeoutMode {
+    /// Use default behaviour - no dynamic timeouts
+    Disabled,
+
+    /// Double collation time
+    DoubleTimeoutAfterSkippedRound,
+}
+
 /// Validator session options
 #[derive(Clone, Copy, Debug)]
 pub struct SessionOptions {
@@ -299,6 +309,9 @@ pub struct SessionOptions {
 
     /// Skip validations for single node sessions
     pub skip_single_node_session_validations: bool,
+
+    /// Dynamic timeout mode
+    pub dynamic_collation_timeout_mode: DynamicCollationTimeoutMode,
 }
 
 /// Merge wrapper
@@ -1090,10 +1103,10 @@ pub trait SessionDescription: fmt::Display + fmt::Debug + cache::SessionCache {
     ) -> Result<()>;
 
     /// Get delay in seconds for specified priority
-    fn get_delay(&self, priority: u32) -> std::time::Duration;
+    fn get_delay(&self, priority: u32, prev_skipped_rounds_count: u32) -> std::time::Duration;
 
     /// Get delay to commit empty block
-    fn get_empty_block_delay(&self) -> std::time::Duration;
+    fn get_empty_block_delay(&self, prev_skipped_rounds_count: u32) -> std::time::Duration;
 
     /// "Vote-for" validator index for specified attempt
     fn get_vote_for_author(&self, attempt: u32) -> u32;

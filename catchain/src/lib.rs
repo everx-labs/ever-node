@@ -23,6 +23,7 @@ mod received_block;
 mod receiver;
 mod receiver_source;
 pub mod utils;
+mod inmem_overlay;
 
 use crate::{profiling::InstanceCounter, utils::MetricsHandle};
 use adnl::node::AdnlNode;
@@ -1113,8 +1114,13 @@ impl CatchainFactory {
         )
     }
 
-    /// Creaate activity node
+    /// Create activity node
     pub fn create_activity_node(name: String) -> ActivityNodePtr {
         activity_node::ActivityNodeManager::create_node(name)
+    }
+
+    /// Create in-memory overlay manager
+    pub fn create_inmemory_overlay_manager() -> Result<CatchainOverlayManagerPtr> {
+        inmem_overlay::InMemoryOverlayManager::get_instance()
     }
 }

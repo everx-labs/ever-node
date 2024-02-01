@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.91
+
+- Dynamic consensus timeout 
+
 ## Version 0.55.90
 
 - Backport from public 

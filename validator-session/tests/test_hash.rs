@@ -203,11 +203,11 @@ impl SessionDescription for SessionDescriptionImpl {
         ((int_part as u64) << 32) + frac_part
     }
 
-    fn get_delay(&self, mut _priority: u32) -> std::time::Duration {
+    fn get_delay(&self, mut _priority: u32, _prev_skipped_rounds_count: u32) -> std::time::Duration {
         std::time::Duration::from_millis(0)
     }
 
-    fn get_empty_block_delay(&self) -> std::time::Duration {
+    fn get_empty_block_delay(&self, _prev_skipped_rounds_count: u32) -> std::time::Duration {
         std::time::Duration::from_millis(0)
     }
 

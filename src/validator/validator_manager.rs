@@ -174,7 +174,8 @@ fn get_session_options(opts: &ConsensusConfig) -> validator_session::SessionOpti
         catchain_receiver_neighbours_sync_max_period: default_opts.catchain_receiver_neighbours_sync_max_period,
         catchain_receiver_max_sources_sync_attempts: default_opts.catchain_receiver_max_sources_sync_attempts,
         catchain_receiver_neighbours_rotate_min_period: default_opts.catchain_receiver_neighbours_rotate_min_period,
-        catchain_receiver_neighbours_rotate_max_period: default_opts.catchain_receiver_neighbours_rotate_max_period,    
+        catchain_receiver_neighbours_rotate_max_period: default_opts.catchain_receiver_neighbours_rotate_max_period,
+        dynamic_collation_timeout_mode: default_opts.dynamic_collation_timeout_mode,
     }
 }
 
