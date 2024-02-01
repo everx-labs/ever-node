@@ -89,7 +89,7 @@ impl BlockProcessor for RempMasterBlockIndexingProcessor {
         };
 
         if let Err(e) = self.message_cache.add_external_message_status(
-            message_id, message_uid, None, RempMessageStatus::TonNode_RempAccepted(accepted),
+            message_id, message_uid, None, None, RempMessageStatus::TonNode_RempAccepted(accepted),
             |_o,n| n.clone(), self.masterchain_seqno
         ).await {
             log::warn!(target: "remp", "Update message {:x}, uid {:x} status failed: {}", message_id, message_uid, e);

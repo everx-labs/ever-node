@@ -18,7 +18,7 @@ use std::ops::RangeInclusive;
 use crate::{
     engine_traits::EngineOperations,
     validator::{
-        catchain_overlay::CatchainOverlayManagerImpl, message_cache::RmqMessage,
+        catchain_overlay::CatchainOverlayManagerImpl, message_cache::RempMessageHeader,
         sessions_computing::GeneralSessionInfo,
         mutex_wrapper::MutexWrapper, remp_manager::RempManager,
         validator_utils::{
@@ -35,18 +35,18 @@ use catchain::{
     PublicKey, PublicKeyHash
 };
 use ton_api::{
-    IntoBoxed, ton::ton_node::RempCatchainRecord
+    IntoBoxed, ton::ton_node::RempCatchainRecordV2
 };
 use ton_block::ValidatorDescr;
 use ton_types::{error, fail, KeyId, Result, UInt256};
 
 const REMP_CATCHAIN_START_POLLING_INTERVAL: Duration = Duration::from_millis(50);
 
-fn get_remp_catchain_record_info(r: &RempCatchainRecord) -> String {
+fn get_remp_catchain_record_info(r: &RempCatchainRecordV2) -> String {
     match r {
-        RempCatchainRecord::TonNode_RempCatchainMessage(msg) =>
+        RempCatchainRecordV2::TonNode_RempCatchainMessageHeaderV2(msg) =>
             format!("msg_id: {:x}", msg.message_id),
-        RempCatchainRecord::TonNode_RempCatchainMessageDigest(msg) =>
+        RempCatchainRecordV2::TonNode_RempCatchainMessageDigestV2(msg) =>
             format!("digest, master_seqno={}, len={}", msg.masterchain_seqno, msg.messages.len())
     }
 }
@@ -54,11 +54,11 @@ fn get_remp_catchain_record_info(r: &RempCatchainRecord) -> String {
 pub struct RempCatchainInstanceImpl {
     pub catchain_ptr: CatchainPtr,
 
-    pending_messages_queue_receiver: crossbeam_channel::Receiver<RempCatchainRecord>,
-    pub pending_messages_queue_sender: crossbeam_channel::Sender<RempCatchainRecord>,
+    pending_messages_queue_receiver: crossbeam_channel::Receiver<RempCatchainRecordV2>,
+    pub pending_messages_queue_sender: crossbeam_channel::Sender<RempCatchainRecordV2>,
 
-    pub rmq_catchain_receiver: crossbeam_channel::Receiver<RempCatchainRecord>,
-    rmq_catchain_sender: crossbeam_channel::Sender<RempCatchainRecord>
+    pub rmq_catchain_receiver: crossbeam_channel::Receiver<RempCatchainRecordV2>,
+    rmq_catchain_sender: crossbeam_channel::Sender<RempCatchainRecordV2>
 }
 
 impl RempCatchainInstanceImpl {
@@ -106,7 +106,7 @@ impl RempCatchainInstance {
         self.instance_impl.load().map(|inst| inst.catchain_ptr.clone())
     }
 
-    pub fn pending_messages_queue_send(&self, msg: RempCatchainRecord) -> Result<()> {
+    pub fn pending_messages_queue_send(&self, msg: RempCatchainRecordV2) -> Result<()> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queue_sender.send(msg) {
             Ok(()) => Ok(()),
@@ -120,7 +120,7 @@ impl RempCatchainInstance {
         Ok(instance.pending_messages_queue_sender.len())
     }
 
-    pub fn pending_messages_queue_try_recv(&self) -> Result<Option<RempCatchainRecord>> {
+    pub fn pending_messages_queue_try_recv(&self) -> Result<Option<RempCatchainRecordV2>> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queue_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
@@ -134,7 +134,7 @@ impl RempCatchainInstance {
         Ok(instance.rmq_catchain_receiver.len())
     }
 
-    pub fn rmq_catchain_try_recv(&self) -> Result<Option<RempCatchainRecord>> {
+    pub fn rmq_catchain_try_recv(&self) -> Result<Option<RempCatchainRecordV2>> {
         let instance = self.get_instance_impl()?;
         match instance.rmq_catchain_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
@@ -143,7 +143,7 @@ impl RempCatchainInstance {
         }
     }
 
-    pub fn rmq_catchain_send(&self, msg: RempCatchainRecord) -> Result<()> {
+    pub fn rmq_catchain_send(&self, msg: RempCatchainRecordV2) -> Result<()> {
         let instance = self.get_instance_impl()?;
         match instance.rmq_catchain_sender.send(msg) {
             Ok(()) => Ok(()),
@@ -385,19 +385,19 @@ impl RempCatchain {
                 for msgbx in pld.actions.0.iter() {
                     match msgbx {
                         ::ton_api::ton::validator_session::round::Message::ValidatorSession_Message_Commit(msg) => {
-                            match RmqMessage::deserialize(&msg.signature) {
-                                Ok(unpacked_message) => {
+                            match RempMessageHeader::deserialize(&msg.signature) {
+                                Ok(record) => {
                                     #[cfg(feature = "telemetry")] {
                                         total += 1;
                                     }
                                     log::trace!(target: "remp",
                                         "Point 4. Message received from RMQ {}: {:?}, decoded {:?}, put to rmq_catchain queue",
-                                        self, msg.signature.0, unpacked_message //catchain.received_messages.len()
+                                        self, msg.signature.0, record //catchain.received_messages.len()
                                     );
-                                    if let Err(e) = self.instance.rmq_catchain_send(unpacked_message.clone()) {
+                                    if let Err(e) = self.instance.rmq_catchain_send(record.clone()) {
                                         log::error!(
                                             target: "remp", "Point 4. Cannot put message {:?} from RMQ {} to queue: {}",
-                                            unpacked_message, self, e
+                                            record, self, e
                                         )
                                     }
                                 },
@@ -447,7 +447,7 @@ impl CatchainListener for RempCatchain {
             let msg_body = ::ton_api::ton::validator_session::round::validator_session::message::message::Commit {
                 round: 0,
                 candidate: Default::default(),
-                signature: RmqMessage::serialize(&msg).unwrap()
+                signature: RempMessageHeader::serialize(&msg).unwrap()
             }.into_boxed();
             log::trace!(target: "remp", "Point 3. RMQ {} sending message: {:?}, decoded {:?}",
                 self, msg_body, msg
