@@ -82,7 +82,13 @@ impl RmqMessage {
     }
 
     pub fn as_rmq_record(&self) -> ton_api::ton::ton_node::RmqRecord {
-        unimplemented!("TBI")
+        ton_api::ton::ton_node::rmqrecord::RmqMessage {
+            message: self.message.write_to_bytes().unwrap().into(),
+            message_id: self.message_id.clone().into(),
+            source_key_id: UInt256::default(),
+            source_idx: 0,
+            masterchain_seqno: 0
+        }.into_boxed()
     }
 
     pub fn deserialize(raw: &ton_api::ton::bytes) -> Result<ton_api::ton::ton_node::RmqRecord> {
@@ -91,7 +97,17 @@ impl RmqMessage {
     }
 
     pub fn from_rmq_record(record: &ton_api::ton::ton_node::RmqRecord) -> Result<Self> {
-        unimplemented!("TBI")
+        match record {
+            ton_api::ton::ton_node::RmqRecord::TonNode_RmqMessage(rec) => {
+                let message_body = Arc::new(Message::construct_from_bytes(&rec.message)?);
+                Ok(Self {
+                    message: message_body.clone(),
+                    message_id: rec.message_id.clone().into(),
+                    message_uid: get_message_uid(&message_body)
+                })
+            },
+            _ => fail!("message_cache::from_rmq_record: not an RmqMessage is given: {:?}", record)
+        }
     }
 
     #[allow(dead_code)]
