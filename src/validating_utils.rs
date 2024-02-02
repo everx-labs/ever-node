@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2024 EverX. All Rights Reserved.
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -44,7 +44,6 @@ pub fn supported_capabilities() -> u64 {
         GlobalCapabilities::CapBounceAfterFailedAction as u64 |
         GlobalCapabilities::CapSuspendedList as u64 |
         GlobalCapabilities::CapsTvmBugfixes2022 as u64 |
-        GlobalCapabilities::CapNoSplitOutQueue as u64 |
         GlobalCapabilities::CapTvmV19 as u64;
     #[cfg(feature = "gosh")] 
     let caps = caps | GlobalCapabilities::CapDiff as u64;
@@ -54,7 +53,7 @@ pub fn supported_capabilities() -> u64 {
 }
 
 pub fn supported_version() -> u32 {
-    48
+    47
 }
 
 pub fn check_this_shard_mc_info(

@@ -4,8 +4,46 @@ edition = '2021'
 name = 'ton_node'
 version = '0.55.92'
 
+
 [workspace]
 members = [ 'storage' ]
+
+
+[[bin]]
+name = 'adnl_resolve'
+path = 'bin/adnl_resolve.rs'
+
+[[bin]]
+name = 'adnl_ping'
+path = 'bin/adnl_ping.rs'
+
+[[bin]]
+name = 'console'
+path = 'bin/console.rs'
+
+[[bin]]
+name = 'dhtscan'
+path = 'bin/dhtscan.rs'
+
+[[bin]]
+name = 'gendht'
+path = 'bin/gendht.rs'
+
+[[bin]]
+name = 'keygen'
+path = 'bin/keygen.rs'
+
+[[bin]]
+name = 'keyid'
+path = 'bin/keyid.rs'
+
+[[bin]]
+name = 'print'
+path = 'bin/print.rs'
+
+[[bin]]
+name = 'zerostate'
+path = 'bin/zerostate.rs'
 
 [dependencies]
 arc-swap = '0.3.11'
@@ -13,9 +51,10 @@ async-recursion = '0.3.2'
 async-trait = '0.1.22'
 bitflags = '1.2.1'
 chrono = '=0.4.19'
-clap = '2.33.1'
+clap = '2.33'
 colored = '1.9.3'
 crossbeam-channel = '0.4.2'
+ctrlc = { features = [ 'termination' ], version = '3.4.0' }
 dashmap = '5.4.0'
 dirs = '2.0.2'
 enum-as-inner = '=0.5.1'
@@ -29,6 +68,8 @@ log = '0.4'
 log4rs = '1.2'
 log4rs-rolling-file = '0.2.0'
 metrics = '0.21.0'
+metrics-exporter-prometheus = { optional = true, version = '0.12.1' }
+metrics-exporter-statsd = { optional = true, version = '0.5.0' }
 num-bigint = '0.4'
 num_cpus = '1.13'
 openssl = '0.10.35'
@@ -38,37 +79,37 @@ regex = '^1.3.0'
 serde = '1.0.105'
 serde_derive = '1.0.105'
 serde_json = '1.0.64'
+shell-words = '1.0'
 spin = '0.7.1'
+statsd = { optional = true, version = '0.15' }
 stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
-tokio-util = '0.7'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.20' }
-catchain = { path = 'catchain' }
-ctrlc = { features = [ 'termination' ], version = '3.4.0' }
-dht = { git = 'https://github.com/tonlabs/ever-dht.git', tag = '0.6.85' }
-lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-metrics-exporter-prometheus = { optional = true, version = '0.12.1' }
-metrics-exporter-statsd = { optional = true, version = '0.5.0' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.17' }
-rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.8.13' }
-statsd = { optional = true, version = '0.15' }
-storage = { path = 'storage' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_abi = { git = 'https://github.com/tonlabs/ever-abi.git', optional = true, tag = '2.4.13' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.57' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.121' }
-ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git', tag = '0.7.209' }
-ton_executor = { git = 'https://github.com/tonlabs/ever-executor.git', tag = '1.16.108' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.31' }
-ton_vm = { git = 'https://github.com/tonlabs/ever-vm.git', tag = '1.9.5' }
+tokio-util = '0.7'
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.22' }
+catchain = { path = 'catchain' }
+dht = { git = 'https://github.com/tonlabs/ever-dht.git', tag = '0.6.87' }
+lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.19' }
+rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.8.15' }
+storage = { path = 'storage' }
+ton_abi = { git = 'https://github.com/tonlabs/ever-abi.git', optional = true, tag = '2.4.14' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.59' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.122' }
+ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git', tag = '0.7.212' }
+ton_executor = { git = 'https://github.com/tonlabs/ever-executor.git', tag = '1.16.110' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.32' }
+ton_vm = { git = 'https://github.com/tonlabs/ever-vm.git', tag = '1.9.7' }
 validator_session = { path = 'validator-session' }
 
 [dev-dependencies]
+async-trait = '0.1'
 difference = '2.0'
 ed25519-dalek = '1.0.1'
 external-ip = '4.1.0'
 pretty_assertions = '1.3'
 tokio = { features = [ 'macros' ], version = '1.5' }
+
 
 [features]
 default = [ 'telemetry' ]
@@ -83,6 +124,7 @@ statsd = [ 'metrics-exporter-statsd', 'log_metrics', 'dep:statsd' ]
 telemetry = [ 'adnl/telemetry', 'dht/telemetry', 'rldp/telemetry', 'overlay/telemetry', 'storage/telemetry' ]
 trace_alloc = [  ]
 trace_alloc_detail = [ 'trace_alloc' ]
+
 
 [profile]
 

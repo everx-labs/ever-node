@@ -261,9 +261,6 @@ struct CollatorData {
     execute_count: usize,
     out_msg_count: usize,
     in_msg_count: usize,
-
-    // timings and global capabilities
-    split_queues: bool,
 }
 
 impl CollatorData {
@@ -276,7 +273,6 @@ impl CollatorData {
         is_masterchain: bool,
     ) -> Result<Self> {
         let limits = Arc::new(config.raw_config().block_limits(is_masterchain)?);
-        let split_queues = !config.has_capability(GlobalCapabilities::CapNoSplitOutQueue);
         let ret = Self {
             in_msgs: InMsgDescr::default(),
             out_msgs: OutMsgDescr::default(),
@@ -324,7 +320,6 @@ impl CollatorData {
             out_msg_count: 0,
             in_msg_count: 0,
             before_split: false,
-            split_queues,
         };
         Ok(ret)
     }
@@ -1148,13 +1143,11 @@ impl Collator {
             0 => collator_data.block_limit_status.gas_used(),
             duration => collator_data.block_limit_status.gas_used() / duration
         };
-        let estimate_size = collator_data.block_limit_status.estimate_block_size(None);
 
         log::info!(
-            "{}: ASYNC COLLATED SIZE: {} ESTIMATEED SiZE: {} GAS: {} TIME: {}ms GAS_RATE: {} TRANS: {}ms ID: {}",
+            "{}: ASYNC COLLATED SIZE: {} GAS: {} TIME: {}ms GAS_RATE: {} TRANS: {}ms ID: {}",
             self.collated_block_descr,
             candidate.data.len(),
-            estimate_size,
             collator_data.block_limit_status.gas_used(),
             duration,
             ratio,
@@ -1325,19 +1318,14 @@ impl Collator {
         let mut out_queue_cleaned_partial = false;
         let mut out_queue_clean_deleted = 0;
 
-        if !self.after_split || !collator_data.split_queues {
+        if !self.after_split {
             // delete delivered messages from output queue for a limited time
             let now = std::time::Instant::now();
             let cc = self.engine.collator_config();
             let clean_timeout_nanos = (cc.cutoff_timeout_ms as i128) * 1_000_000 * (cc.clean_timeout_percentage_points as i128) / 1000;
             let processed;
             (out_queue_cleaned_partial, processed, out_queue_clean_deleted) =
-                self.clean_out_msg_queue(
-                    collator_data,
-                    &mut output_queue_manager,
-                    clean_timeout_nanos,
-                    cc.optimistic_clean_percentage_points,
-                ).await?;
+                self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager, clean_timeout_nanos, cc.optimistic_clean_percentage_points).await?;
             let elapsed = now.elapsed().as_millis();
             log::debug!("{}: TIME: clean_out_msg_queue initial {}ms;", self.collated_block_descr, elapsed);
             let labels = [("shard", self.shard.to_string()), ("step", "initial".to_owned())];
@@ -1383,7 +1371,7 @@ impl Collator {
         // merge prepare / merge install
         // ** will be implemented later **
 
-        if !self.after_split || !collator_data.split_queues {
+        if !self.after_split {
             // import inbound internal messages, process or transit
             let now = std::time::Instant::now();
             self.process_inbound_internal_messages(prev_data, collator_data, &output_queue_manager,
@@ -1429,7 +1417,7 @@ impl Collator {
         let clean_remaining_timeout_nanos = self.get_remaining_clean_time_limit_nanos();
 
         if !collator_data.block_full && out_queue_cleaned_partial && out_queue_clean_deleted == 0 && clean_remaining_timeout_nanos > 10_000_000 {
-            if !self.after_split || !collator_data.split_queues {
+            if !self.after_split {
                 // we have collation time left and out msg queue was not fully processed
                 // so will try to clean more for a remaining time only by random algorithm
                 let now = std::time::Instant::now();
@@ -1439,7 +1427,7 @@ impl Collator {
 
                 let processed;
                 (out_queue_cleaned_partial, processed, out_queue_clean_deleted) =
-                    self.clean_out_msg_queue(collator_data, &mut output_queue_manager, clean_remaining_timeout_nanos, 0).await?;
+                    self.clean_out_msg_queue(mc_data, collator_data, &mut output_queue_manager, clean_remaining_timeout_nanos, 0).await?;
                 let elapsed = now.elapsed().as_millis();
                 log::debug!("{}: TIME: clean_out_msg_queue remaining {}ms;", self.collated_block_descr, elapsed);
                 let labels = [("shard", self.shard.to_string()), ("step", "remaining".to_owned())];
@@ -1492,7 +1480,7 @@ impl Collator {
         }
 
         // update block history
-        self.check_block_overload(collator_data, out_queue_cleaned_partial);
+        self.check_block_overload(collator_data);
 
         // update processed upto
         self.update_processed_upto(mc_data, collator_data)?;
@@ -1508,33 +1496,29 @@ impl Collator {
 
     async fn clean_out_msg_queue(
         &self,
+        mc_data: &McData,
         collator_data: &mut CollatorData,
         output_queue_manager: &mut MsgQueueManager,
         clean_timeout_nanos: i128,
         optimistic_clean_percentage_points: u32,
     ) -> Result<(bool, i32, i32)> {
         log::debug!("{}: clean_out_msg_queue", self.collated_block_descr);
-        let short = collator_data.config.has_capability(GlobalCapabilities::CapShortDequeue);
-        let result = output_queue_manager.clean_out_msg_queue(
-            clean_timeout_nanos,
-            optimistic_clean_percentage_points,
-            collator_data.split_queues,
-            |enq, deliver_lt, root| {
+        let short = mc_data.config().has_capability(GlobalCapabilities::CapShortDequeue);
+
+        output_queue_manager.clean_out_msg_queue(clean_timeout_nanos, optimistic_clean_percentage_points, |message, root| {
             self.check_stop_flag()?;
-            if let Some(deliver_lt) = deliver_lt {
+            if let Some((enq, deliver_lt)) = message {
                 log::trace!("{}: dequeue message: {:x}", self.collated_block_descr, enq.message_hash());
                 collator_data.dequeue_message(enq, deliver_lt, short)?;
+                collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, false)?;
+                // normal limit reached, but we can add for soft and hard limit
+                let stop = !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
+                Ok(stop)
             } else {
-                log::trace!("{}: remove split message: {:x}", self.collated_block_descr, enq.message_hash());
+                collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, true)?;
+                Ok(true)
             }
-            collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, false)?;
-            // normal limit reached, but we can add for soft and hard limit
-            let stop = !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
-            Ok(stop)
-        }).await?;
-        let root = output_queue_manager.next().out_queue_or_part()?.data();
-        collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, true)?;
-        Ok(result)
+        }).await
     }
 
     //
@@ -1813,7 +1797,6 @@ impl Collator {
             None,
             self.after_merge,
             self.after_split,
-            collator_data.split_queues,
             Some(&self.stop_flag),
             Some(&collator_data.usage_tree),
             Some(&mut collator_data.imported_visited),
@@ -1917,7 +1900,7 @@ impl Collator {
                 continue;
             }
             let mut descr = sh_bd.get_top_descr(chain_len)?;
-            if collator_data.config.has_capability(GlobalCapabilities::CapWorkchains) {
+            if mc_data.config().has_capability(GlobalCapabilities::CapWorkchains) {
                 descr.descr.proof_chain = Some(sh_bd.top_block_descr().chain().clone());
                 // for (i, cell) in descr.descr.proof_chain.as_ref().unwrap().iter().enumerate() {
                 //     log::trace!(
@@ -2289,10 +2272,6 @@ impl Collator {
         let mut iter = output_queue_manager.merge_out_queue_iter(&self.shard)?;
         while let Some(k_v) = iter.next() {
             let (key, enq, created_lt, block_id) = k_v?;
-            if !collator_data.split_queues && !block_id.shard().contains_full_prefix(&enq.cur_prefix()) {
-                // this message was left from split result
-                continue;
-            }
             log::trace!(
                 "{}: message {:x}, lt: {}, enq lt: {}",
                 self.collated_block_descr, key, created_lt, enq.enqueued_lt()
@@ -2550,12 +2529,12 @@ impl Collator {
         Ok(())
     }
 
-    fn check_block_overload(&self, collator_data: &mut CollatorData, out_queue_cleaned_partial: bool) {
+    fn check_block_overload(&self, collator_data: &mut CollatorData) {
         log::trace!("{}: check_block_overload", self.collated_block_descr);
         let class = collator_data.block_limit_status.classify();
         if class == ParamLimitIndex::Underload {
             // we don't want to merge if collation too long
-            if !self.check_cutoff_timeout() && !out_queue_cleaned_partial && !collator_data.before_split {
+            if !self.check_cutoff_timeout() {
                 collator_data.underload_history |= 1;
                 log::info!("{}: Block is underloaded", self.collated_block_descr);
             }
@@ -2983,7 +2962,7 @@ impl Collator {
 
         // Updates for foreign workchains
 
-        if !collator_data.config.has_capability(GlobalCapabilities::CapWorkchains) {
+        if !mc_data.config().has_capability(GlobalCapabilities::CapWorkchains) {
             return Ok((state_update, None))
         }
 

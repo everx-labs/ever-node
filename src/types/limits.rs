@@ -118,7 +118,7 @@ impl BlockLimitStatus {
         self.lt_current
     }
 
-    pub fn estimate_block_size(&self, extra: Option<&CellStorageStats>) -> u32 {
+    fn estimate_block_size(&self, extra: Option<&CellStorageStats>) -> u32 {
         let mut bits = 
             self.stats.cells_stats.bits + self.stats.proof_stats.bits;
         let mut cels = 
