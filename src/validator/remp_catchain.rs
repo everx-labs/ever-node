@@ -18,7 +18,7 @@ use std::ops::RangeInclusive;
 use crate::{
     engine_traits::EngineOperations,
     validator::{
-        catchain_overlay::CatchainOverlayManagerImpl, message_cache::RempMessageHeader,
+        catchain_overlay::CatchainOverlayManagerImpl, message_cache::{RmqMessage, RempMessageHeader},
         sessions_computing::GeneralSessionInfo,
         mutex_wrapper::MutexWrapper, remp_manager::RempManager,
         validator_utils::{
@@ -493,8 +493,10 @@ impl CatchainListener for RempCatchain {
         log::trace!(target: "remp", "MessageQueue {} started", self)
     }
 
-    fn process_broadcast(&self, _source_id: PublicKeyHash, _data: BlockPayloadPtr) {
-        log::trace!(target: "remp", "MessageQueue {} process broadcast", self)
+    fn process_broadcast(&self, source_id: PublicKeyHash, data: BlockPayloadPtr) {
+       log::trace!(target: "remp", "MessageQueue {} process broadcast from {}", self, source_id);
+
+       let message = RmqMessage::deserialize(data.data());
     }
 
     fn process_query(&self, source_id: PublicKeyHash, data: BlockPayloadPtr, _callback: ExternalQueryResponseCallback) {

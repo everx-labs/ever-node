@@ -81,6 +81,19 @@ impl RmqMessage {
         }.into_boxed()
     }
 
+    pub fn as_rmq_record(&self) -> ton_api::ton::ton_node::RmqRecord {
+        unimplemented!("TBI")
+    }
+
+    pub fn deserialize(raw: &ton_api::ton::bytes) -> Result<ton_api::ton::ton_node::RmqRecord> {
+        let rmq_record: ton_api::ton::ton_node::RmqRecord = catchain::utils::deserialize_tl_boxed_object(&raw)?;
+        Ok(rmq_record)
+    }
+
+    pub fn from_rmq_record(record: &ton_api::ton::ton_node::RmqRecord) -> Result<Self> {
+        unimplemented!("TBI")
+    }
+
     #[allow(dead_code)]
     pub fn make_test_message(body: &SliceData) -> Result<Self> {
         let address = UInt256::rand();

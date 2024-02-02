@@ -535,9 +535,9 @@ impl MessageQueue {
                     continue
                 }
                 Ok(None) => {
-                    log::error!(
+                    log::warn!(
                         target: "remp",
-                        "Point 5. RMQ {}: message {:x} found in pending_collation queue, but has no body/origin",
+                        "Point 5. RMQ {}: message {:x} found in pending_collation queue, but has no body/origin yet; will not be collated",
                         self, msgid
                     );
                     continue
