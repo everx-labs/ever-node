@@ -11,6 +11,8 @@
 * limitations under the License.
 */
 
+use std::{cmp::min, time::SystemTime};
+
 use super::*;
 use ton_block::{
     InternalMessageHeader, ExternalInboundMessageHeader, Serializable,
@@ -106,7 +108,6 @@ fn test_create_ext_message() {
 }
 
 #[test]
-#[cfg(not(feature = "fast_finality"))]
 fn test_message_keeper() {
     let m = Message::with_ext_in_header(ExternalInboundMessageHeader::default());
     let mk = MessageKeeper::new(Arc::new(m));
@@ -137,7 +138,6 @@ fn test_message_keeper() {
 }
 
 #[test]
-#[cfg(not(feature = "fast_finality"))]
 fn test_message_keeper_multithread() {
     let m = Message::with_ext_in_header(ExternalInboundMessageHeader::default());
     let mk = Arc::new(MessageKeeper::new(Arc::new(m)));
@@ -192,10 +192,9 @@ fn create_external_message(dst_shard: u8, salt: Vec<u8>) -> Arc<Message>  {
 include!("../../common/src/log.rs");
 
 #[test]
-#[cfg(not(feature = "fast_finality"))]
 fn test_messages_pool() {
-    init_log_without_config(log::LevelFilter::Trace, None);
-    let mp = Arc::new(MessagesPool::new(0));
+    //init_log_without_config(log::LevelFilter::Trace, None);
+    let mp = Arc::new(MessagesPool::new(0, None));
 
     // create 3 messages, 2 of them are with the prefix 0x01 and one with 0x22
     let m = create_external_message(1, vec!(1));
@@ -204,7 +203,7 @@ fn test_messages_pool() {
 
     let m = create_external_message(1, vec!(2));
     let id2 = m.hash().unwrap();
-    // mp.new_message(id2.clone(), m, 0).unwrap();
+    mp.new_message(id2.clone(), m, 0).unwrap();
 
     let m = create_external_message(0x22, vec!(2));
     let id3 = m.hash().unwrap();
@@ -212,7 +211,7 @@ fn test_messages_pool() {
 
     // get messages for shard 0x8000_0000_0000_0000 - total 3 messages
     let m1 = mp.get_messages(&ShardIdent::with_tagged_prefix(0, 0x8000_0000_0000_0000).unwrap(), 1).unwrap(); 
-    assert_eq!(m1.len(), 2);
+    assert_eq!(m1.len(), 3);
 
     // get messages for shard 0x3000_0000_0000_0000 - total 1 message with prefix 0x22
     let m1 = mp.get_messages(&ShardIdent::with_tagged_prefix(0, 0x3000_0000_0000_0000).unwrap(), 1).unwrap(); 
@@ -220,12 +219,14 @@ fn test_messages_pool() {
     assert_eq!(m1[0].0, m);
 
     // postpone message with prefix 0x22 for first time and delete second message with prefix 0x01
-    mp.complete_messages(vec!(id3.clone()), vec!(id2), 1).unwrap();
+    //mp.complete_messages(vec!((id3.clone(), String::new())), vec!((id2.clone(), 0)), 1).unwrap();
+    mp.complete_messages(vec!((id3.clone(), String::new())), vec!(), 1).unwrap();
 
-    // get messages for shard 0x1000_0000_0000_0000 - total 1 message with prefix 0x01
+    // get messages for shard 0x1000_0000_0000_0000 - total 2 messages with prefix 0x01
     let m1 = mp.get_messages(&ShardIdent::with_tagged_prefix(0, 0x1000_0000_0000_0000).unwrap(), 3).unwrap(); 
-    assert_eq!(m1.len(), 1);
+    assert_eq!(m1.len(), 2);
     assert_eq!(m1[0].1, id1);
+    assert_eq!(m1[1].1, id2);
 
     // get messages for shard 0x3000_0000_0000_0000 - total 1 message with prefix 0x22
     let m1 = mp.get_messages(&ShardIdent::with_tagged_prefix(0, 0x3000_0000_0000_0000).unwrap(), 4).unwrap(); 
@@ -233,7 +234,7 @@ fn test_messages_pool() {
     assert_eq!(m1[0].0, m);
 
     // postpone message with prefix 0x22 for second time
-    mp.complete_messages(vec!(id3.clone()), vec!(), 5).unwrap();
+    mp.complete_messages(vec!((id3.clone(), String::new())), vec!(), 5).unwrap();
 
     // get messages for shard 0x3000_0000_0000_0000 - no messages
     let m1 = mp.get_messages(&ShardIdent::with_tagged_prefix(0, 0x3000_0000_0000_0000).unwrap(), 6).unwrap(); 
@@ -244,14 +245,14 @@ fn test_messages_pool() {
     assert_eq!(m1.len(), 1);
 
     // postpone message with prefix 0x22 for third time
-    mp.complete_messages(vec!(id3.clone()), vec!(), 12).unwrap();
+    mp.complete_messages(vec!((id3.clone(), String::new())), vec!(), 12).unwrap();
 
     // get messages for shard 0x3000_0000_0000_0000 - total 1 message with prefix 0x22
     let m1 = mp.get_messages(&ShardIdent::with_tagged_prefix(0, 0x3000_0000_0000_0000).unwrap(), 30).unwrap(); 
     assert_eq!(m1.len(), 1);
 
     // try to postpone message with prefix 0x22 for fourth time - it will be deleted
-    mp.complete_messages(vec!(id3.clone()), vec!(), 42).unwrap();
+    mp.complete_messages(vec!((id3.clone(), String::new())), vec!(), 42).unwrap();
 
     // get messages for shard 0x3000_0000_0000_0000 - no messages
     let m1 = mp.get_messages(&ShardIdent::with_tagged_prefix(0, 0x3000_0000_0000_0000).unwrap(), 100).unwrap(); 
@@ -266,7 +267,7 @@ fn test_messages_pool() {
 async fn check_messages(mp: Arc<MessagesPool>, shard: ShardIdent, now: u32, expected_count: usize) -> Result<()> {
     for _ in 0..20 {
         // let count = mp.clone().get_messages(&shard, now).unwrap().len();
-        let count = mp.clone().iter(shard.clone(), now).count();
+        let count = mp.clone().iter(shard.clone(), now, u64::MAX).count();
         if count != expected_count {
             fail!("Wrong messages count for shard {} expected {}, got {}", shard, expected_count, count)
         }
@@ -277,7 +278,7 @@ async fn check_messages(mp: Arc<MessagesPool>, shard: ShardIdent, now: u32, expe
 #[tokio::test(flavor = "multi_thread")]
 async fn test_ext_messages_multi_threads() {
     const M: usize = 50;
-    let mp = Arc::new(MessagesPool::new(0));
+    let mp = Arc::new(MessagesPool::new(0, None));
 
     // for dst_shard in [0, 0x40, 0x80, 0xC0] {
     for dst_shard in [0, 0x20, 0x40, 0x60, 0x80, 0xA0, 0xC0, 0xE0] {
@@ -307,3 +308,43 @@ async fn test_ext_messages_multi_threads() {
     }
 }
 
+#[test]
+fn test_external_messages_maximum_queue_length() {
+    let maximum_queue_length = 10;
+    let mp = Arc::new(MessagesPool::new(0, Some(maximum_queue_length)));
+    for i in 0..maximum_queue_length {
+        let m = create_external_message(0, vec!(i as u8));
+        let id = m.hash().unwrap();
+        mp.new_message(id.clone(), m, 0).unwrap();
+    }
+    let m = create_external_message(0, vec!(maximum_queue_length as u8));
+    let id = m.hash().unwrap();
+    mp.new_message(id.clone(), m, 0).unwrap_err();
+}
+
+#[test]
+fn test_external_messages_big_load() {
+    let now = now_duration().as_secs() as u32 - MESSAGE_LIFETIME - 1;
+    let limit = 100; // milliseconds
+    let mp = Arc::new(MessagesPool::new(now, None));
+    let rate_per_second = 30_000;
+    let queue_seconds = min(MESSAGE_LIFETIME, 100);
+    for i in 0..queue_seconds {
+        for j in 0..rate_per_second {
+            let m = create_external_message(0, (i * rate_per_second + j).to_be_bytes().to_vec());
+            let id = m.hash().unwrap();
+            mp.new_message(id.clone(), m, now + i).unwrap();
+        }
+    }
+    let n = SystemTime::now();
+    let now = now_duration().as_millis() as u64;
+    let count = mp.clone().iter(
+        ShardIdent::full(0), 
+        (now / 1000) as u32, 
+        now + limit
+    ).take(100).count();
+    let n = n.elapsed().unwrap().as_millis();
+    println!("count = {}, time = {:?}", count, n);
+    assert_eq!(0, count);
+    assert!((n as u64) < limit * 3);
+}

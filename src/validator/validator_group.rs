@@ -24,7 +24,7 @@ use validator_session::{
     BlockHash, BlockPayloadPtr, CatchainOverlayManagerPtr,
     SessionId, SessionPtr, SessionListenerPtr, SessionFactory,
     SessionListener, SessionNode, SessionOptions,
-    PublicKey, PrivateKey, PublicKeyHash,
+    PublicKey, PrivateKey, PublicKeyHash, ValidatorBlockCandidate,
     ValidatorBlockCandidateCallback, ValidatorBlockCandidateDecisionCallback
 };
 
@@ -61,10 +61,7 @@ use crate::validator::slashing::SlashingManagerPtr;
 //#[cfg(feature = "fast_finality")]
 use crate::validator::validator_utils::get_first_block_seqno_after_prevs;
 // #[cfg(feature = "fast_finality")]
-// use crate::validator::{
-//     workchains_fast_finality::compute_actual_finish,
-//     validator_utils::get_first_block_seqno_after_prevs,
-// };
+// use crate::validator::workchains_fast_finality::compute_actual_finish;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum ValidatorGroupStatus {
@@ -180,7 +177,9 @@ impl ValidatorGroupImpl {
             g.general_session_info.catchain_seqno
         );
 
-        let session_ptr = if nodes.len() == 1 {
+        let session_ptr = 
+        /* Skip single node mode due to instabilities 
+        if nodes.len() == 1 {
             //special case for single node session
 
             let mut options = g.config.clone();
@@ -196,6 +195,7 @@ impl ValidatorGroupImpl {
                 session_listener,
             )
         } else {
+        */
             SessionFactory::create_session(
                 &g.config,
                 &g.session_id,
@@ -206,8 +206,8 @@ impl ValidatorGroupImpl {
                 g.allow_unsafe_self_blocks_resync,
                 overlay_manager,
                 session_listener,
-            )
-        };
+            );
+        /*};*/
 
         if let Some(remp_manager) = &g.remp_manager {
             if start_remp_session {
@@ -558,7 +558,16 @@ impl ValidatorGroup {
         Ok(())
     }
 
+    async fn save_block_candidate(&self, vb_candidate: ValidatorBlockCandidate) -> Result<()> {
+        self.engine.save_block_candidate(&self.session_id, vb_candidate)
+    }
+
+    async fn load_block_candidate(&self, root_hash: &UInt256) -> Result<Arc<ValidatorBlockCandidate>> {
+        self.engine.load_block_candidate(&self.session_id, root_hash)
+    }
+
     pub async fn destroy_db(&self) -> Result<()> {
+
         while !self.engine.destroy_block_candidates(&self.session_id)? {
             tokio::task::yield_now().await
         }
@@ -848,7 +857,8 @@ impl ValidatorGroup {
                 let vb_candidate = validator_query_candidate_to_validator_block_candidate(
                     source.clone(), candidate
                 );
-                match self.engine.save_block_candidate(&self.session_id, vb_candidate) {
+
+                match self.save_block_candidate(vb_candidate).await {
                     Ok(()) => {
                         self.last_validation_time.fetch_max(
                             x.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs(),
@@ -1018,7 +1028,8 @@ impl ValidatorGroup {
             next_block_descr,
             root_hash, file_hash, self.info().await
         );
-        let result = self.engine.load_block_candidate(&self.session_id, &root_hash);
+
+        let result = self.load_block_candidate(&root_hash).await;
         let result_txt = match &result {
             Ok(_) => format!("Ok"),
             Err(err) => format!("Candidate not found: {}", err)

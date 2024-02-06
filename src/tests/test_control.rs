@@ -16,7 +16,7 @@ use crate::{
     config::TonNodeConfig, engine::Engine, engine_traits::EngineOperations, 
     internal_db::{InternalDb, InternalDbConfig, state_gc_resolver::AllowStateGcSmartResolver}, 
     network::{
-        control::{ControlQuerySubscriber, ControlServer, DataSource, StatusReporter, RunTvmMode},
+        control::{ControlQuerySubscriber, ControlServer, DataSource, StatusReporter},
         node_network::NodeNetwork
     },
     shard_state::ShardStateStuff, test_helper::{gen_master_state, gen_shard_state},
@@ -35,24 +35,24 @@ use std::{
     time::SystemTime
 };
 use storage::block_handle_db::BlockHandle;
-use ton_api::{ serialize_boxed, tag_from_boxed_type, AnyBoxedSerialize,
+use ton_api::{ 
+    serialize_boxed, tag_from_boxed_type, AnyBoxedSerialize,
     ton::{
         self, TLObject, accountaddress::AccountAddress,
         engine::validator::{ControlQueryError, KeyHash, Stats},
         lite_server::ConfigInfo, raw::{ShardAccountState, AppliedShardsInfo},
         rpc::{
             engine::validator::{ControlQuery, GenerateKeyPair, GetSelectedStats, GetStats},
-            lite_server::GetConfigAll, raw::{GetShardAccountState, GetAccountByBlock, GetAppliedShardsInfo},
-            smc::{RunTvm, RunTvmMsg, RunTvmByBlock, RunTvmMsgByBlock}
-        },
-        tvm::{StackEntry, stackentry::StackEntryNumber, Number, numberdecimal::NumberDecimal}, smc::RunTvmResult
+            lite_server::GetConfigAll, 
+            raw::{GetShardAccountState, GetAccountByBlock, GetAppliedShardsInfo},
+        }
     }
 };
 use ton_api::ton::raw::ShardAccountMeta;
 use ton_api::ton::rpc::raw::{GetAccountMetaByBlock, GetShardAccountMeta};
 use ton_block::{
     Account, BlockIdExt, ConfigParamEnum, ConfigParams, Deserializable,
-    generate_test_account_by_init_code_hash, Message, Serializable, ShardIdent, BlkMasterInfo, ExtBlkRef, ExternalInboundMessageHeader, Block,
+    generate_test_account_by_init_code_hash, Message, Serializable, ShardIdent
 };
 use ton_types::{
     error, fail, base64_encode, Ed25519KeyOption, KeyId, KeyOption, Result, UInt256
@@ -877,206 +877,6 @@ async fn test_stats() {
         }
     ).await.unwrap();
     check_stats(&answer, &engine, &key_id, true);
-
-    client.shutdown().await.unwrap();
-    control.shutdown().await;
-
-}
-
-#[tokio::test]
-async fn test_run_tvm() {
-
-    struct TestEngine {
-        fake_account: Account,
-        stack_account: Account,
-        ref_master_state: (BlockIdExt, Arc<ShardStateStuff>),
-        master_state: (BlockIdExt, Arc<ShardStateStuff>),
-        shard_state: (BlockIdExt, Arc<ShardStateStuff>),
-    }
-
-    impl TestEngine {
-        fn new() -> Self {
-
-            #[cfg(feature = "telemetry")]
-            let telemetry = create_engine_telemetry();
-            let allocated = create_engine_allocated();
-
-            let fake_account = generate_test_account_by_init_code_hash(false);
-            let stack_account = Account::construct_from_bytes(include_bytes!("static/tvm_stack_account.boc")).unwrap();
-            let msg_account = Account::construct_from_bytes(include_bytes!("static/tvm_msg_account.boc")).unwrap();
-            let key_block = Block::construct_from_bytes(include_bytes!("static/tvm_key_block.boc")).unwrap();
-            let config = key_block.read_extra().unwrap().read_custom().unwrap().unwrap().config().unwrap().clone();
-
-            let ref_master_state = gen_master_state(
-                Some(config.clone()),
-                None,
-                None,
-                &[],
-                #[cfg(feature = "telemetry")]
-                Some(telemetry.clone()),
-                Some(allocated.clone())
-            );
-            let master_ref = BlkMasterInfo {
-                master: ExtBlkRef {
-                    end_lt: 0,
-                    seq_no: ref_master_state.0.seq_no,
-                    root_hash: ref_master_state.0.root_hash.clone(),
-                    file_hash: ref_master_state.0.file_hash.clone(),
-                }
-            };
-            let shard_state = gen_shard_state(
-                None,
-                &[&fake_account, &msg_account],
-                #[cfg(feature = "telemetry")]
-                Some(telemetry.clone()),
-                Some(allocated.clone()),
-                Some(master_ref),
-            );
-            let master_state = gen_master_state(
-                Some(config.clone()),
-                Some(shard_state.0.clone()),
-                None,
-                &[&stack_account],
-                #[cfg(feature = "telemetry")]
-                Some(telemetry.clone()),
-                Some(allocated.clone())
-            );
-
-            Self {
-                fake_account,
-                stack_account,
-                ref_master_state,
-                shard_state,
-                master_state,
-            }
-
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl EngineOperations for TestEngine {
-        fn load_shard_client_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
-            Ok(Some(Arc::new(self.master_state.0.clone())))
-        }
-
-        async fn load_and_pin_state(&self, block_id: &BlockIdExt) -> Result<PinnedShardStateGuard> {
-            if *block_id == self.master_state.0 {
-                PinnedShardStateGuard::new(
-                    self.master_state.1.clone(),
-                    Arc::new(AllowStateGcSmartResolver::new(10))
-                )
-            } else if *block_id == self.shard_state.0 {
-                PinnedShardStateGuard::new(
-                    self.shard_state.1.clone(),
-                    Arc::new(AllowStateGcSmartResolver::new(10))
-                )
-            } else if *block_id == self.ref_master_state.0 {
-                PinnedShardStateGuard::new(
-                    self.ref_master_state.1.clone(),
-                    Arc::new(AllowStateGcSmartResolver::new(10))
-                )
-            } else {
-                fail!("Wrong block ID {}", block_id)
-            }
-        }
-
-        fn find_full_block_id(&self, root_hash: &UInt256) -> Result<Option<BlockIdExt>> {
-            Ok(if *root_hash == self.master_state.0.root_hash {
-                Some(self.master_state.0.clone())
-            } else if *root_hash == self.shard_state.0.root_hash {
-                Some(self.shard_state.0.clone())
-            } else if *root_hash == self.ref_master_state.0.root_hash {
-                Some(self.ref_master_state.0.clone())
-            } else {
-                None
-            })
-        }
-
-    }
-
-    crate::test_helper::init_test_log();
-    let engine = Arc::new(TestEngine::new());
-    let control = start_control_with_options(
-        DataSource::Engine(engine.clone()),
-            None, true,
-    ).await.unwrap().0;
-
-    let mut client = recreate_client(None).await;
-    let account = AccountAddress {
-        account_address: format!("{}", engine.fake_account.get_addr().unwrap())
-    };
-    let answer: RunTvmResult = request(
-        &mut client, RunTvm {
-            account_address: account,
-            mode: 0,
-            stack: vec![StackEntry::Tvm_StackEntryNull].into(),
-        }
-    ).await.unwrap();
-    assert_eq!(answer.exit_code(), &-3);
-
-    let mut client = recreate_client(Some(client)).await;
-    let message = Message::with_ext_in_header(
-        ExternalInboundMessageHeader::new(
-            Default::default(),
-            engine.fake_account.get_addr().unwrap().clone()
-        )
-    );
-
-    let answer: RunTvmResult = request(
-        &mut client, RunTvmMsg {
-            mode: 0,
-            message: message.write_to_bytes().unwrap().into(),
-        }
-    ).await.unwrap();
-    assert_eq!(answer.exit_code(), &-3);
-
-    let mut client = recreate_client(Some(client)).await;
-    let answer: RunTvmResult = request(
-        &mut client, RunTvmByBlock {
-            account_id: UInt256::from(engine.stack_account.get_addr().unwrap().get_address().get_bytestring(0)),
-            block_root_hash: engine.master_state.0.root_hash.clone(),
-            mode: i32::MAX,
-            stack: vec![
-                StackEntry::Tvm_StackEntryNumber(
-                    StackEntryNumber {
-                        number: Number::Tvm_NumberDecimal(
-                            NumberDecimal {
-                                number: "81558".to_owned()
-                            }
-                        )
-                    }
-                )].into(),
-        }
-    ).await.unwrap();
-    assert_eq!(answer.exit_code(), &0);
-    assert_eq!(answer.stack().unwrap().0.len(), 1);
-    assert_eq!(answer.block_root_hash(), engine.master_state.0.root_hash());
-    assert!(answer.code().is_some());
-    assert!(answer.data().is_some());
-    assert!(answer.exit_arg().is_none());
-    assert!(answer.init_c7().is_some());
-    assert_eq!(answer.messages().unwrap().0, vec![]);
-    assert_eq!(answer.mode().unwrap(), &i32::MAX);
-
-    let mut client = recreate_client(Some(client)).await;
-    let message = Message::construct_from_base64("te6ccgEBAQEANQAAZYgBsA+V7b50+FdhbJIqwn2VOx4vlDvBcnG/uXc2n+YYikwAAAADFyANNPn////+tgGwsw==").unwrap();
-
-    let answer: RunTvmResult = request(
-        &mut client, RunTvmMsgByBlock {
-            mode: RunTvmMode::Messages as i32,
-            message: message.write_to_bytes().unwrap().into(),
-            block_root_hash: engine.shard_state.0.root_hash.clone(),
-        }
-    ).await.unwrap();
-    assert_eq!(answer.exit_code(), &0);
-    assert_eq!(answer.messages().unwrap().0, vec![hex::decode("b5ee9c7201010201003e00012bc0000000000000000000000000db00d85900000001c0010045d0005bcf6ee41e74658faed7c64e3e6d027ca7884c52f9c3d90e41c68cce0cd39f03c0").unwrap().into()]);
-    assert!(answer.stack().is_none());
-    assert_eq!(answer.block_root_hash(), engine.shard_state.0.root_hash());
-    assert!(answer.code().is_none());
-    assert!(answer.data().is_none());
-    assert!(answer.exit_arg().is_none());
-    assert!(answer.init_c7().is_none());
-    assert_eq!(*answer.mode().unwrap(), RunTvmMode::Messages as i32);
 
     client.shutdown().await.unwrap();
     control.shutdown().await;

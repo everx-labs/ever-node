@@ -12,7 +12,8 @@
 */
 
 use crate::{
-    engine_traits::EngineOperations, shard_state::ShardStateStuff,
+    block::BlockIdExtExtention, engine_traits::EngineOperations, 
+    shard_state::ShardStateStuff
 };
 #[cfg(feature = "fast_finality")]
 use crate::validator::workchains_fast_finality::{
@@ -22,14 +23,16 @@ use crate::validator::workchains_fast_finality::{
 use catchain::{BlockPayloadPtr, CatchainNode, PublicKey, PublicKeyHash};
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
-
-use ton_block::{BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, ConfigParams, CryptoSignature, CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, Serializable, ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet};
+use ton_block::{
+    BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, ConfigParams, CryptoSignature, 
+    CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, Serializable, 
+    ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet
+};
 use ton_types::{
     error, fail, BuilderData, HashmapType, Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson, 
     Result, Sha256, UInt256
 };
 use validator_session::SessionNode;
-use crate::block::BlockIdExtExtention;
 
 #[cfg(test)]
 #[path = "tests/test_validator_utils.rs"]
