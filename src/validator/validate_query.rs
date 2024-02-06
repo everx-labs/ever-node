@@ -3259,6 +3259,10 @@ impl ValidateQuery {
                 &trans, 
                 &trans_execute
             );
+            #[cfg(test)]
+            Self::prepare_transaction_for_test(
+                base, _old_account_root, &trans, "account hash wrong".to_string()
+            )?;
             reject_query!("transaction {} of {:x} is invalid: it claims that the new \
                 account state hash is {:x} but the re-computed value is {:x}",
                     lt, account_addr, state_update.new_hash, new_hash)
@@ -3271,6 +3275,10 @@ impl ValidateQuery {
                 &trans, 
                 &trans_execute
             );
+            #[cfg(test)]
+            Self::prepare_transaction_for_test(
+                base, _old_account_root, &trans, "account hash wrong".to_string()
+            )?;
             reject_query!("transaction {} of {:x} is invalid: it has produced a set of \
                 outbound messages different from that listed in the transaction",
                     lt, account_addr)
@@ -3296,6 +3304,14 @@ impl ValidateQuery {
                 &trans, 
                 &trans_execute
             );
+            #[cfg(test)]
+            if let Err(err) = crate::test_helper::compare_transactions(
+                &trans, &trans_execute, true
+            ) {
+                Self::prepare_transaction_for_test(
+                    base, _old_account_root, &trans, err.to_string()
+                )?;
+            }
             reject_query!("re created transaction {} doesn't correspond", lt)
         }
         // check new balance and value flow
@@ -3320,6 +3336,10 @@ impl ValidateQuery {
                 &trans, 
                 &trans_execute
             );
+            #[cfg(test)]
+            Self::prepare_transaction_for_test(
+                base, _old_account_root, &trans, "balance incorrect".to_string()
+            )?;
             reject_query!("transaction {} of {} violates the currency flow condition: \
                 old balance={} + imported={} does not equal new balance={} + exported=\
                 {} + total_fees={}", lt, account_addr.to_hex_string(),
@@ -4432,6 +4452,37 @@ impl ValidateQuery {
             gas_used as u32
         );
 
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl ValidateQuery {
+    fn prepare_transaction_for_test(
+        base: &ValidateBase,
+        account_root: Cell,
+        trans: &Transaction,
+        err: String
+    ) -> Result<()> {
+        let path = format!("./target/check/validator/{},{},{}",
+            base.shard().workchain_id(),
+            base.shard().shard_prefix_as_str_with_tag(),
+            base.block_id().seq_no()
+        );
+        std::fs::create_dir_all(&path).ok();
+        let account_addr = trans.account_id();
+        // sometimes it can be usable if it is the last transaction for this account
+        // comment next two lines if it is not last transaction in account block
+        let new_shard_acc = base.next_state_accounts.get_serialized(account_addr.clone())?.unwrap_or_default();
+        // let new_shard_acc = ShardAccount::construct_from(&mut new_shard_acc)?;
+        let new_account_root = new_shard_acc.account_cell();
+        let config_cell = base.config_params.serialize()?;
+        let trans_root = trans.serialize()?;
+        let msg_cell = trans.in_msg_cell().map(|cell| cell.clone()).unwrap_or_default();
+        std::fs::write(format!("{}/{}.txt", path, trans_root.repr_hash().to_hex_string()), err.as_bytes())?;
+        crate::test_helper::prepare_data_for_executor_test(
+            &path, &account_root, &new_account_root, &msg_cell, &trans_root, &config_cell
+        )?;
         Ok(())
     }
 }

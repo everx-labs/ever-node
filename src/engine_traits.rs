@@ -602,12 +602,18 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
     fn get_external_messages_iterator(
-        &self, 
-        shard: ShardIdent
+        &self,
+        shard: ShardIdent,
+        finish_time_ms: u64
     ) -> Box<dyn Iterator<Item = (Arc<Message>, UInt256)> + Send + Sync> {
         unimplemented!()
     }
-    fn complete_external_messages(&self, to_delay: Vec<UInt256>, to_delete: Vec<UInt256>) -> Result<()> {
+    fn get_external_messages_len(&self) -> u32 { 0 }
+    fn complete_external_messages(
+        &self, 
+        to_delay: Vec<(UInt256, String)>, 
+        to_delete: Vec<(UInt256, i32)>
+    ) -> Result<()> {
         unimplemented!()
     }
 

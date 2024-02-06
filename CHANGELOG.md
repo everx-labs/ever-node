@@ -2,9 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
-## Version 0.55.83
+## Version 0.55.91
 
 - Try to use old persistent states in cold boot if newest one is not ready yet
+
+## Version 0.55.90
+
+- Backport from public 
+
+## Version 0.55.89
+
+- Switch to rocksdb from crates.io
+
+## Version 0.55.88
+
+- Implement initial_sync_disabled node run parameter allowing node to sync from zero state  
+
+## Version 0.55.87
+
+- Decrease test memory usage
+  
+## Version 0.55.86
+
+- Fixed compile warnings
+
+## Version 0.55.85
+
+- Updates in REMP protocol
+
+## Version 0.55.84
+
+- Optimizations on external messages processing
+
+## Version 0.55.83
+
+- Front node functionality isolation
+- Fixed accept block when block data already saved
 
 ## Version 0.55.82
 
@@ -80,7 +113,6 @@ All notable changes to this project will be documented in this file.
 
 ## Version 0.55.64
 
-- Revert workflow with external messages
 - Write `last_trans_lt` to account's json for deleted accounts.
 
 ## Version 0.55.63

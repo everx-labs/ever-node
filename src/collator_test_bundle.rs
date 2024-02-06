@@ -602,7 +602,7 @@ impl CollatorTestBundle {
         //
         // external messages
         //
-        let external_messages = engine.get_external_messages_iterator(shard.clone()).collect::<Vec<_>>();
+        let external_messages = engine.get_external_messages_iterator(shard.clone(), 0).collect::<Vec<_>>();
 
         // 
         // neighbors
@@ -758,7 +758,7 @@ impl CollatorTestBundle {
         //
         // external messages
         //
-        let external_messages = engine.get_external_messages_iterator(shard.clone()).collect::<Vec<_>>();
+        let external_messages = engine.get_external_messages_iterator(shard.clone(), 0).collect::<Vec<_>>();
 
         // 
         // neighbors
@@ -1272,8 +1272,9 @@ impl EngineOperations for CollatorTestBundle {
     }
 
     fn get_external_messages_iterator(
-        &self, 
-        _shard: ShardIdent
+        &self,
+        _shard: ShardIdent,
+        _finish_time_ms: u64
     ) -> Box<dyn Iterator<Item = (Arc<Message>, UInt256)> + Send + Sync> {
         Box::new(self.external_messages.clone().into_iter())
     }
@@ -1303,7 +1304,7 @@ impl EngineOperations for CollatorTestBundle {
         Ok(vec!())
     }
 
-    fn complete_external_messages(&self, _to_delay: Vec<UInt256>, _to_delete: Vec<UInt256>) -> Result<()> {
+    fn complete_external_messages(&self, _to_delay: Vec<(UInt256, String)>, _to_delete: Vec<(UInt256, i32)>) -> Result<()> {
         Ok(())
     }
 

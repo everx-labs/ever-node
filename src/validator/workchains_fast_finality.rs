@@ -5,6 +5,10 @@ use crate::shard_state::ShardStateStuff;
 use crate::validator::sessions_computing::SessionValidatorsInfo;
 use crate::validator::validator_utils::ValidatorSubsetInfo;
 
+#[cfg(test)]
+#[path = "tests/test_workchains_fast_finality.rs"]
+mod tests;
+
 /* #[cfg(feature = "fast_finality")]
 fn get_possible_next_collator_range_for_shard(
     col: &ShardCollators, current_shard: &ShardIdent, shard_id: &ShardIdent

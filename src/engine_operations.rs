@@ -28,7 +28,6 @@ use crate::{
     ext_messages::{create_ext_message, EXT_MESSAGES_TRACE_TARGET},
     jaeger,
     validator::{
-        candidate_db::CandidateDb,
         validator_manager::ValidationStatus,
         validator_utils::validatordescr_to_catchain_node,
     }, shard_states_keeper::PinnedShardStateGuard
@@ -321,10 +320,7 @@ impl EngineOperations for Engine {
         session_id: &SessionId, 
         candidate: ValidatorBlockCandidate
     ) -> Result<()> {
-        CandidateDb::with_path(
-            self.db_root_dir()?,
-            &format!("catchains/candidates{:x}", session_id)
-        )?.save(candidate)
+        self.get_candidate_table(session_id)?.save(candidate)
     }
 
     fn load_block_candidate(
@@ -332,17 +328,11 @@ impl EngineOperations for Engine {
         session_id: &SessionId, 
         root_hash: &BlockHash
     ) -> Result<Arc<ValidatorBlockCandidate>> {
-        CandidateDb::with_path(
-            self.db_root_dir()?,
-            &format!("catchains/candidates{:x}", session_id)
-        )?.load(root_hash)
+        self.get_candidate_table(session_id)?.load(root_hash)
     }
 
     fn destroy_block_candidates(&self, session_id: &SessionId) -> Result<bool> {
-        CandidateDb::with_path(
-            self.db_root_dir()?,
-            &format!("catchains/candidates{:x}", session_id)
-        )?.destroy()
+        self.destroy_candidate_table(session_id)
     }
 
     async fn apply_block_internal(
@@ -965,13 +955,18 @@ impl EngineOperations for Engine {
     }
 
     fn get_external_messages_iterator(
-        &self, 
-        shard: ShardIdent
+        &self,
+        shard: ShardIdent,
+        finish_time_ms: u64
     ) -> Box<dyn Iterator<Item = (Arc<Message>, UInt256)> + Send + Sync> {
-        Box::new(self.external_messages().clone().iter(shard, self.now()))
+        Box::new(self.external_messages().clone().iter(shard, self.now(), finish_time_ms))
     }
 
-    fn complete_external_messages(&self, to_delay: Vec<UInt256>, to_delete: Vec<UInt256>) -> Result<()> {
+    fn get_external_messages_len(&self) -> u32 {
+        self.external_messages().total_messages()
+    }
+
+    fn complete_external_messages(&self, to_delay: Vec<(UInt256, String)>, to_delete: Vec<(UInt256, i32)>) -> Result<()> {
         self.external_messages().complete_messages(to_delay, to_delete, self.now())
     }
 

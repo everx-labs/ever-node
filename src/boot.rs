@@ -187,7 +187,6 @@ async fn get_key_blocks(
                     log::warn!("somebody sent next key block id with seq_no less or equal to already got {}", block_id);
                     continue;
                 }
-
                 // we need to check presence and correctness of every hardfork
                 if let Some(hardfork_id) = hardfork {
                     if hardfork_id.seq_no == block_id.seq_no {
@@ -268,7 +267,7 @@ async fn choose_masterchain_state(
             } else {
                 log::info!(target: "boot", "state is expiring shortly: expire_at={}", ttl);
             }
-            return Ok(handle)
+            return Ok(handle);
         } else {
             log::info!(target: "boot", "ignoring: state is not persistent");
         }
@@ -498,14 +497,17 @@ pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<Arc<BlockHan
     let mut bad_peers = HashSet::new();
     let (mut handle, zero_state, init_block_proof_link) = run_cold(engine.deref()).await?;
     let active_peers = Arc::new(lockfree::set::Set::new());
-    let mut key_blocks = get_key_blocks(
-        engine.deref(),
-        handle,
-        zero_state.as_ref(),
-        init_block_proof_link,
-        &active_peers,
-        &mut bad_peers,
-    ).await?;
+    let mut key_blocks = Vec::new();
+    if !engine.flags().initial_sync_disabled {
+        key_blocks = get_key_blocks(
+            engine.deref(),
+            handle,
+            zero_state.as_ref(),
+            init_block_proof_link,
+            &active_peers,
+            &mut bad_peers,
+        ).await?;
+    }
     
     let mut prev_err_opt = None;
     for _ in 0..5 {
@@ -513,7 +515,6 @@ pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<Arc<BlockHan
             log::warn!(target: "boot", "{}", err);
         }
         handle = choose_masterchain_state(engine.deref(), &mut key_blocks, PSS_PERIOD_BITS).await?;
-
         if handle.id().seq_no() == 0 {
             let Some(zero_state) = zero_state.as_ref() else {
                 fail!("Zero state is not set")

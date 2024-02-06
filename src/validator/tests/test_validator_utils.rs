@@ -12,26 +12,20 @@
 */
 
 use super::*;
-#[cfg(not(feature = "fast_finality"))]
 use crate::shard_state::ShardHashesStuff;
-#[cfg(not(feature = "fast_finality"))]
 use crate::{
     block::BlockStuff, error::NodeError,
     validator::accept_block::create_new_proof
 };
 
-#[cfg(not(feature = "fast_finality"))]
 use ton_block::{
     MASTERCHAIN_ID,
     Block, BlockIdExt, ConfigParamEnum, CryptoSignature, CryptoSignaturePair, Deserializable,
     SigPubKey, 
 };
-#[cfg(not(feature = "fast_finality"))]
 use ton_types::{error, HashmapType};
-#[cfg(not(feature = "fast_finality"))]
 use crate::validator::accept_block::create_new_proof_link;
 
-#[cfg(not(feature = "fast_finality"))]
 fn block_config(block_stuff: &BlockStuff) -> Result<ConfigParams> {
     block_stuff.block()?.read_extra()?.read_custom()?.and_then(
         |custom| custom.config().cloned()
@@ -68,7 +62,6 @@ fn test_calc_workchain_id_by_adnl_id() {
     assert_eq!(calc_workchain_id_by_adnl_id(&[3; 32]), 2);
 }
 
-#[cfg(not(feature = "fast_finality"))]
 #[tokio::test]
 async fn test_validator_set() {
     let block = Block::construct_from_file("src/tests/static/key_block.boc").unwrap();
@@ -109,15 +102,12 @@ async fn test_validator_set() {
     for workchain_id in -1..=1 {
         println!("workchain_id: {}", workchain_id);
         let subset = if workchain_id != -1 {
-            #[cfg(not(feature = "fast_finality"))]
             {
                 let shard = ShardIdent::with_workchain_id(workchain_id).unwrap();
                 calc_subset_for_workchain_standard(&vset, &config, &shard, cc_seqno).unwrap()
             }
 
             // TODO: update with a proper subset calculation
-            #[cfg(feature = "fast_finality")]
-            unimplemented!("STUB UNTIL MERGED");
         } else {
             calc_subset_for_masterchain(&vset, &config, cc_seqno).unwrap()
         };
@@ -133,7 +123,6 @@ async fn test_validator_set() {
     }
 }
 
-#[cfg(not(feature = "fast_finality"))]
 #[test]
 fn test_any_keyblock_validator_set() {
     check_any_keyblock_validator_set("src/tests/static/key_block.boc");
@@ -142,7 +131,6 @@ fn test_any_keyblock_validator_set() {
     // check_any_keyblock_validator_set("c:\\work\\!boc\\block_boc_863e8f3a0af67987adb26dc51cd772a750bafdc98338e9caef74da3d8a5ab81c.boc");
 }
 
-#[cfg(not(feature = "fast_finality"))]
 fn check_any_keyblock_validator_set(file_name: &str) {
     let block = Block::construct_from_file(file_name).unwrap();
     let custom = block.read_extra().unwrap().read_custom().unwrap().unwrap();
@@ -176,14 +164,11 @@ fn check_any_keyblock_validator_set(file_name: &str) {
             println!("{}", block_id.shard());
             let vset = config.validator_set().unwrap();
             let subset = if workchain_id != -1 {
-                #[cfg(not(feature = "fast_finality"))]
                 {
                     calc_subset_for_workchain_standard(&vset, &config, block_id.shard(), cc_seqno).unwrap()
                 }
 
                 // TODO: update with a proper subset calculation
-                #[cfg(feature = "fast_finality")]
-                unimplemented!("STUB UNTIL MERGED")
             } else {
                 calc_subset_for_masterchain(&vset, &config, cc_seqno).unwrap()
             };
@@ -197,7 +182,6 @@ fn check_any_keyblock_validator_set(file_name: &str) {
     }
 }
 
-#[cfg(not(feature = "fast_finality"))]
 #[test]
 fn test_create_new_proof_with_workchains() {
     let block_stuff = BlockStuff::read_block_from_file("src/tests/static/key_block.boc").unwrap();
@@ -242,8 +226,6 @@ fn test_create_new_proof_with_workchains() {
     let (proof, signatures) = create_new_proof(
         &block_stuff, 
         &validator_set, 
-        #[cfg(feature = "fast_finality")]
-        &Default::default(), 
         &signatures
     ).unwrap();
     assert_eq!(signatures.pure_signatures.signatures().len().unwrap(), 7);

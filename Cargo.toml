@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ton_node'
-version = '0.55.83'
+version = '0.55.91'
 
 [workspace]
 members = [ 'storage' ]
@@ -16,7 +16,6 @@ chrono = '=0.4.19'
 clap = '2.33.1'
 colored = '1.9.3'
 crossbeam-channel = '0.4.2'
-ctrlc = { features = [ 'termination' ], version = '3.4.0' }
 dashmap = '5.4.0'
 dirs = '2.0.2'
 enum-as-inner = '=0.5.1'
@@ -30,8 +29,6 @@ log = '0.4'
 log4rs = '1.2'
 log4rs-rolling-file = '0.2.0'
 metrics = '0.21.0'
-metrics-exporter-prometheus = { optional = true, version = '0.12.1' }
-metrics-exporter-statsd = { optional = true, version = '0.5.0' }
 num-bigint = '0.4'
 num_cpus = '1.13'
 openssl = '0.10.35'
@@ -42,25 +39,28 @@ serde = '1.0.105'
 serde_derive = '1.0.105'
 serde_json = '1.0.64'
 spin = '0.7.1'
-statsd = { optional = true, version = '0.15' }
 stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
-tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
 tokio-util = '0.7'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.15' }
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.20' }
 catchain = { path = 'catchain' }
-dht = { git = 'https://github.com/tonlabs/ever-dht.git', tag = '0.6.79' }
+ctrlc = { features = [ 'termination' ], version = '3.4.0' }
+dht = { git = 'https://github.com/tonlabs/ever-dht.git', tag = '0.6.85' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.11' }
-rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.8.8' }
+metrics-exporter-prometheus = { optional = true, version = '0.12.1' }
+metrics-exporter-statsd = { optional = true, version = '0.5.0' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.17' }
+rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.8.13' }
+statsd = { optional = true, version = '0.15' }
 storage = { path = 'storage' }
-ton_abi = { git = 'https://github.com/tonlabs/ever-abi.git', optional = true, tag = '2.4.8' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.53' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.117' }
-ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git', tag = '0.7.205' }
-ton_executor = { git = 'https://github.com/tonlabs/ever-executor.git', tag = '1.16.97' }
+tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
+ton_abi = { git = 'https://github.com/tonlabs/ever-abi.git', optional = true, tag = '2.4.13' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.57' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.121' }
+ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git', tag = '0.7.209' }
+ton_executor = { git = 'https://github.com/tonlabs/ever-executor.git', tag = '1.16.108' }
 ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.31' }
-ton_vm = { git = 'https://github.com/tonlabs/ever-vm.git', tag = '1.8.225' }
+ton_vm = { git = 'https://github.com/tonlabs/ever-vm.git', tag = '1.9.5' }
 validator_session = { path = 'validator-session' }
 
 [dev-dependencies]
@@ -84,6 +84,9 @@ telemetry = [ 'adnl/telemetry', 'dht/telemetry', 'rldp/telemetry', 'overlay/tele
 trace_alloc = [  ]
 trace_alloc_detail = [ 'trace_alloc' ]
 
+[profile]
+
+
 [target.'cfg(unix)'.dependencies.rdkafka]
 optional = true
 version = '0.26.0'
@@ -92,3 +95,4 @@ version = '0.26.0'
 features = [ 'cmake_build' ]
 optional = true
 version = '0.26.0'
+

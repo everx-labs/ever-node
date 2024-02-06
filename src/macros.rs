@@ -62,6 +62,8 @@ macro_rules! CHECK {
     };
     ($exp1:expr, $exp2:expr) => {{
         // TODO: remove for production
+        #[cfg(test)]
+        pretty_assertions::assert_eq!($exp1, $exp2);
         if $exp1 != $exp2 {
             return Err(failure::err_msg(format!("{} != {} {}:{}", stringify!($exp1), stringify!($exp2), file!(), line!())))
         }
