@@ -494,6 +494,9 @@ async fn download_state(
 /// Cold load best key block and its state
 /// Must be used only zero_state or key_block id
 pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<Arc<BlockHandle>> {
+
+    const MAX_RETRIES: usize = 5;
+
     let mut bad_peers = HashSet::new();
     let (handle, zero_state, init_block_proof_link) = run_cold(engine.deref()).await?;
     let active_peers = Arc::new(lockfree::set::Set::new());
@@ -510,25 +513,35 @@ pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<Arc<BlockHan
         vec![handle]
     };
     
-    let mut prev_err_opt = None;
-    for _ in 0..5 {
-        if let Some(err) = prev_err_opt {
-            log::warn!(target: "boot", "{}", err);
-        }
-        let handle = choose_masterchain_state(engine.deref(), &mut key_blocks, PSS_PERIOD_BITS).await?;
+    let mut i = 0;
+    loop {
+        let handle = choose_masterchain_state(
+            engine.deref(), 
+            &mut key_blocks, 
+            PSS_PERIOD_BITS
+        ).await?;
         if handle.id().seq_no() == 0 {
             let Some(zero_state) = zero_state.as_ref() else {
                 fail!("Zero state is not set")
             };
             download_wc_zerostates(engine.deref(), zero_state).await?;
-            return Ok(handle);
-        } else if let Err(err) = download_start_blocks_and_states(engine.deref(), &handle, &active_peers, &mut bad_peers).await {
-            prev_err_opt = Some(err)
+            break Ok(handle);
+        } else if let Err(err) = download_start_blocks_and_states(
+            engine.deref(), 
+            &handle, 
+            &active_peers, 
+            &mut bad_peers
+        ).await {
+            i += 1;
+            if i >= MAX_RETRIES {
+                break Err(err)
+            }
+            log::warn!(target: "boot", "{}", err)
         } else {
-            return Ok(handle);
+            break Ok(handle);
         }
     }
-    Err(prev_err_opt.unwrap())
+
 }
 
 pub async fn warm_boot(
