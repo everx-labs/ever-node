@@ -141,7 +141,7 @@ impl BlockStuff {
             mesh_update: &MeshUpdate,
             id: &BlockIdExt,
             shard: &ShardIdent,
-        ) -> Result<()> {
+        ) -> Result<bool> {
             if nw_descr.out_queue_update.new_hash != nw_descr.out_queue_update.old_hash {
                 let update = mesh_update.queue_updates.get_queue_update(&shard)?
                     .ok_or_else(|| error!("Can't load update from shard {} block {} {}",
@@ -152,8 +152,10 @@ impl BlockStuff {
                 if update.new_hash != nw_descr.out_queue_update.new_hash {
                     fail!("New update hash mismatch. Shard {} block {} {}", shard, nw_id, id);
                 }
+                Ok(true)
+            } else {
+                Ok(false)
             }
-            Ok(())
         }
 
         let data = Arc::new(data);
@@ -173,16 +175,20 @@ impl BlockStuff {
             .ok_or_else(|| error!("Can't load descr for {} from masterchain, mesh kit {} {}", 
                 target_nw_id, nw_id, id)
         )?;
-        check_update(&nw_descr.queue_descr, nw_id, &mesh_update, &id, &ShardIdent::masterchain())?;
+        let mut total_updates = 0;
+        if check_update(&nw_descr.queue_descr, nw_id, &mesh_update, &id, &ShardIdent::masterchain())? {
+            total_updates += 1;
+        }
 
         // Check updates for shards
-        let mut total_updates = 1;
         mc_extra.shards().iterate_shards(|ident: ShardIdent, descr: ShardDescr| {
             let nw_descr = descr.mesh_msg_queues.get(&target_nw_id)?
                 .ok_or_else(|| error!("Can't load descr for {} from shard {} block {} {}",
                     target_nw_id, ident, nw_id, id)
             )?;
-            check_update(&nw_descr, nw_id, &mesh_update, &id, &ident)?;
+            if check_update(&nw_descr, nw_id, &mesh_update, &id, &ident)? {
+                total_updates += 1;
+            }
             Ok(true)
         })?;
 
