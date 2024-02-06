@@ -24,13 +24,8 @@ use ton_types::{Result, types::UInt256, fail, read_boc};
 mod tests;
 
 const MESSAGE_LIFETIME: u32 = 600; // seconds
-#[cfg(not(feature = "fast_finality"))]
 const MESSAGE_MAX_GENERATIONS: u8 = 3;
 
-#[cfg(feature = "fast_finality")]
-const MESSAGE_LIFETIME: u32 = 60; // seconds
-#[cfg(feature = "fast_finality")]
-const MESSAGE_MAX_GENERATIONS: u8 = 0;
 const MAX_EXTERNAL_MESSAGE_DEPTH: u16 = 512;
 const MAX_EXTERNAL_MESSAGE_SIZE: usize = 65535;
 

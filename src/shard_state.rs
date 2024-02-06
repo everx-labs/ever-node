@@ -310,11 +310,6 @@ impl ShardStateStuff {
         Ok(ShardHashesStuff::from(self.shard_state_extra()?.shards().clone()))
     }
 
-    #[cfg(feature = "fast_finality")]
-    pub fn shard_hashes_raw_opt(&self) -> Option<&ShardHashes> {
-        self.shard_state_extra.as_ref().map(|extra| extra.shards())
-    }
-
     pub fn root_cell(&self) -> &Cell { &self.root }
 
     pub fn shard(&self) -> &ShardIdent { &self.block_id.shard() }
