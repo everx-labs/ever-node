@@ -1198,31 +1198,16 @@ Ok(if key_block {
         log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request.object);
 
         // Download
-        let (data_full, _peer): (DataFull, _) = self.send_rldp_query_typed(
+        let data = self.send_rldp_query_raw(
             &request,
             peer,
             0
         ).await?;
 
-        match data_full {
-            DataFull::TonNode_DataFullEmpty => {
-                fail!("prepareMeshUpdate receives Prepared, but DownloadMeshUpdate receives DataFullEmpty");
-            },
-            DataFull::TonNode_DataFull(data_full) => {
-                if id != &data_full.id {
-                    fail!("Answer for DownloadMeshUpdate has another id");
-                }
-                if data_full.proof.len() > 0 {
-                    fail!("Answer for DownloadMeshUpdate should have empty proof");
-                }
-                if data_full.is_link == Bool::BoolTrue {
-                    fail!("Answer for DownloadMeshUpdate should have is_link = false");
-                }
-                let (block, proof) = BlockStuff::deserialize_mesh_update(
-                    nw_id, id.clone(), target_nw_id, data_full.block.0)?;
-                Ok((block, proof))
-            }
-        }
+        // Parse
+        let (block, proof) = BlockStuff::deserialize_mesh_update(
+            nw_id, id.clone(), target_nw_id, data)?;
+        Ok((block, proof))
     }
 
     async fn download_latest_mesh_kit(
@@ -1300,34 +1285,17 @@ Ok(if key_block {
         log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request.object);
 
         // Download
-        let (data_full, peer): (DataFull, _) = self.send_rldp_query_typed(
+        let data = self.send_rldp_query_raw(
             &request,
             peer,
             0
         ).await?;
 
         // Parse
-        match data_full {
-            DataFull::TonNode_DataFullEmpty =>  {
-                fail!("DownloadMeshKit {}: got `TonNode_DataFullEmpty` from {}",
-                    nw_id, peer.id())
-            },
-            DataFull::TonNode_DataFull(data_full) => {
-                if id != &data_full.id {
-                    fail!("Answer for DownloadMeshKit has another id");
-                }
-                if data_full.proof.len() > 0 {
-                    fail!("Answer for DownloadMeshKit should have empty proof");
-                }
-                if data_full.is_link == Bool::BoolTrue {
-                    fail!("Answer for DownloadMeshKit should have is_link = false");
-                }
-                let (block, proof) = BlockStuff::deserialize_mesh_kit(
-                    nw_id, data_full.id, target_nw_id, data_full.block.0)?;
+        let (block, proof) = BlockStuff::deserialize_mesh_kit(
+            nw_id, id.clone(), target_nw_id, data)?;
 
-                Ok((block, proof))
-            }
-        }
+        Ok((block, proof))
     }
 
     async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>> {

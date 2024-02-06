@@ -55,4 +55,36 @@ REGISTER 23 in 48
 prepare_config tmp/global_config_23.json 23 tmp/config58_23_in_48.json
 ./update_config.sh tmp/console11.json 58 tmp/config58_23_in_48.json
 
+# copy global configs to the working directory of node (which is default path to find mesh global configs)
+cp tmp/global_config_48.json ../../target/release/
+cp tmp/global_config_23.json ../../target/release/
+
+
+exit 0
+
+
+echo "
+$(date +%H:%M:%S)  WAITING 10 min...
+"
+sleep 600
+
+# activate - 48 in 23
+echo "
+ACTIVATE 48 in 23
+"
+jq '.p58[0].is_active = true' tmp/config58_48_in_23.json > tmp/config58_48_in_23_.json
+mv tmp/config58_48_in_23_.json tmp/config58_48_in_23.json
+./update_config.sh tmp/console1.json 58 tmp/config58_48_in_23.json
+
+# activate - 23 in 48
+echo "
+ACTIVATE 23 in 48
+"
+jq '.p58[0].is_active = true' tmp/config58_23_in_48.json > tmp/config58_23_in_48_.json
+mv tmp/config58_48_in_23_.json tmp/config58_23_in_48.json
+./update_config.sh tmp/console11.json 58 tmp/config58_23_in_48.json
+
+
+
+
 

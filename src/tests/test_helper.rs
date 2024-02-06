@@ -988,7 +988,7 @@ impl EngineOperations for TestEngine {
         self.db.store_block_next1(handle, next, None)
     }
 
-    async fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         self.db.load_block_next1(id)
     }
 
@@ -996,7 +996,7 @@ impl EngineOperations for TestEngine {
         self.db.store_block_next2(handle, next2, None)
     }
 
-    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
+    fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         self.db.load_block_next2(id)
     }
 

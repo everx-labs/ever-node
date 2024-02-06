@@ -229,7 +229,7 @@ impl EngineOperations for Engine {
         }
         let handle = loop {
             if prev_handle.has_next1() {
-                let id = self.load_block_next1(prev_handle.id()).await?;
+                let id = self.load_block_next1(prev_handle.id())?;
                 break self.wait_applied_block(&id, timeout_ms).await?;
             } else {
                 if let Some(id) = self.next_block_applying_awaiters()
@@ -681,7 +681,7 @@ impl EngineOperations for Engine {
         self.db().store_block_next1(handle, next, None)
     }
 
-    async fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         self.db().load_block_next1(id)
     }
 
@@ -689,7 +689,7 @@ impl EngineOperations for Engine {
         self.db().store_block_next2(handle, next2, None)
     }
 
-    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
+    fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         self.db().load_block_next2(id)
     }
 

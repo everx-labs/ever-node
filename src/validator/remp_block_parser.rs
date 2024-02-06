@@ -220,7 +220,7 @@ impl RempMasterblockObserver {
             if &blk == upb {
                 return Ok(());
             }
-            blk = self.engine.load_block_next1(&blk).await?
+            blk = self.engine.load_block_next1(&blk)?
         }
     }
 }

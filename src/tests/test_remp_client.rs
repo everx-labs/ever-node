@@ -624,7 +624,7 @@ impl EngineOperations for TestRempClientEngine {
 
         tokio::time::sleep(Duration::from_millis(NEXT_BLOCK_TIMEOUT)).await;
 
-        let id = self.load_block_next1(prev_handle.id()).await?;
+        let id = self.load_block_next1(prev_handle.id())?;
         let handle = self.load_block_handle(&id)?.ok_or_else(|| error!("Can't load block handle {}", id))?;
         let block = self.blocks.get(&id).ok_or_else(|| error!("Can't load block {}", id))?;
         Ok((handle, block.clone()))
@@ -634,12 +634,12 @@ impl EngineOperations for TestRempClientEngine {
         None
     }
 
-    async fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         self.find_block(id.shard(), id.seq_no() + 1)
             .ok_or_else(|| error!("The is no next block for {}", id))
     }
 
-    async fn load_block_next2(&self, _id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
+    fn load_block_next2(&self, _id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         Ok(None)
         //fail!("The is no next 2 block")
     }

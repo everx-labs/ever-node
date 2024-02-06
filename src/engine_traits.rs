@@ -575,13 +575,13 @@ pub trait EngineOperations : Sync + Send {
     fn store_block_next1(&self, handle: &Arc<BlockHandle>, next: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
-    async fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         unimplemented!()
     }
     fn store_block_next2(&self, handle: &Arc<BlockHandle>, next2: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
-    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
+    fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         unimplemented!()
     }
 

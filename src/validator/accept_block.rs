@@ -157,6 +157,7 @@ pub async fn accept_block(
     if send_block_broadcast {
         let block_broadcast = build_block_broadcast(&block, &validator_set, &signatures, proof)?;
         let queue_update_broadcasts = build_queue_update_broadcasts(&block, &validator_set, &signatures)?;
+        // let mesh_update_broadcasts = build_mesh_update_broadcasts(&block, &validator_set, &signatures)?;
         let engine = engine.clone();
         let block_descr = block_descr.clone();
         tokio::spawn(async move {
@@ -872,4 +873,15 @@ fn build_queue_update_broadcasts(
     }
 
     Ok(broadcasts)
+}
+
+fn build_mesh_update_broadcasts(
+    block: &BlockStuff,
+    validator_set: &ValidatorSet,
+    signatures: &BlockSignatures,
+) -> Result<Vec<QueueUpdateBroadcast>> {
+
+    log::trace!(target: "validator", "accept_block {}: build_mesh_update_broadcasts", block.id());
+
+    unimplemented!()
 }

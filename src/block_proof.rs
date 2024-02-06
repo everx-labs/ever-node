@@ -13,7 +13,10 @@
 
 use std::sync::Arc;
 
-use ton_block::{Block, BlockIdExt, BlockInfo, BlockProof, ConfigParams, Deserializable, MerkleProof, Serializable};
+use ton_block::{
+    Block, BlockIdExt, BlockInfo, BlockProof, BlockSignatures, ConfigParams, Deserializable, 
+    MerkleProof, Serializable
+};
 use ton_types::{Cell, Result, fail, error, HashmapType, BocReader, write_boc};
 
 use crate::{
@@ -142,7 +145,6 @@ impl BlockProofStuff {
         &self.id
     }
 
-    #[cfg(feature="external_db")]
     pub fn proof(&self) -> &BlockProof {
         &self.proof
     }
@@ -156,6 +158,10 @@ impl BlockProofStuff {
         drop(self.root);
         debug_assert_eq!(Arc::strong_count(&self.data), 1);
         Arc::try_unwrap(self.data).unwrap_or_else(|s| (*s).clone())
+    }
+
+    pub fn drain_signatures(self) -> Result<BlockSignatures> {
+        self.proof.signatures.ok_or_else(|| error!("Proof doesn't contain signatures"))
     }
 
     pub fn check_with_prev_key_block_proof(&self, prev_key_block_proof: &BlockProofStuff) -> Result<()> {

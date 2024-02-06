@@ -1504,7 +1504,8 @@ impl Engine {
             log::info!("{op_name} {block_name} {id}, {ago} seconds old");
         } else {
             if !pre_apply {
-                if self.set_applied(handle, mc_seq_no).await? && !block.is_queue_update(){
+                let first_time_applied = self.set_applied(handle, mc_seq_no).await?;
+                if first_time_applied && block.is_usual_block() {
                     self.tps_counter.submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
                 }
             }
@@ -2161,7 +2162,7 @@ impl Engine {
     ) -> Result<(BlockStuff, BlockProofStuff)> {
         self.create_download_context(
             Arc::new(MeshKitDownloader{network_id}),
-            0,
+            network_id,
             id,
             limit,
             0,
@@ -2178,7 +2179,7 @@ impl Engine {
     ) -> Result<(BlockStuff, BlockProofStuff)> {
         self.create_download_context(
             Arc::new(LatestMeshKitDownloader{network_id}),
-            0,
+            network_id,
             &BlockIdExt::default(),
             limit,
             0,
@@ -2196,7 +2197,7 @@ impl Engine {
     ) -> Result<(BlockStuff, BlockProofStuff)> {
         self.create_download_context(
             Arc::new(NextMeshUpdateDownloader{network_id}),
-            0,
+            network_id,
             id, 
             limit,
             0,

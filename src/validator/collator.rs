@@ -55,16 +55,18 @@ use std::{
     time::{Duration, Instant}
 };
 use ton_block::{
-    AddSub, BlkPrevInfo, Block, BlockCreateStats, BlockExtra, BlockIdExt, BlockInfo, CommonMsgInfo,
-    ConfigParams, CopyleftRewards, CreatorStats, CurrencyCollection, Deserializable, ExtBlkRef,
-    FutureSplitMerge, GlobalCapabilities, GlobalVersion, Grams, HashmapAugType, InMsg, InMsgDescr,
-    InternalMessageHeader, KeyExtBlkRef, KeyMaxLt, Libraries, McBlockExtra, McShardRecord,
-    McStateExtra, MerkleUpdate, Message, MsgAddressInt, OutMsg, OutMsgDescr, OutMsgQueueKey,
-    ParamLimitIndex, Serializable, ShardAccount, ShardAccountBlocks, ShardAccounts, ShardDescr,
+    Account, AccountIdPrefixFull, AddSub, BlkPrevInfo, Block, BlockCreateStats, BlockExtra, 
+    BlockIdExt, BlockInfo, ChildCell, CommonMessage, CommonMsgInfo, ConfigParams, 
+    ConnectedNwDescrExt, ConnectedNwOutDescr, CopyleftRewards, CreatorStats, CurrencyCollection, 
+    Deserializable, ExtBlkRef, FutureSplitMerge, GetRepresentationHash, GlobalCapabilities, 
+    GlobalVersion, Grams, HashUpdate, HashmapAugType, InMsg, InMsgDescr, InRefValue, 
+    InternalMessageHeader, KeyExtBlkRef, KeyMaxLt, Libraries, McBlockExtra, McShardRecord, 
+    McStateExtra, MerkleUpdate, MeshHashes, MeshHashesExt, MeshMsgQueuesInfo, Message,
+    MsgAddressInt, OutMsg, OutMsgDescr, OutMsgQueueInfo, OutMsgQueueKey, OutQueueUpdates,
+    ParamLimitIndex, Serializable, ShardAccount, ShardAccountBlocks, ShardAccounts, ShardDescr, 
     ShardFees, ShardHashes, ShardIdent, ShardStateSplit, ShardStateUnsplit, TopBlockDescrSet,
-    Transaction, TransactionTickTock, UnixTime32, ValidatorSet, ValueFlow, WorkchainDescr,
-    Workchains, Account, AccountIdPrefixFull, OutQueueUpdates, OutMsgQueueInfo, MASTERCHAIN_ID, 
-    CommonMessage, ChildCell, SERDE_OPTS_COMMON_MESSAGE, SERDE_OPTS_EMPTY, MeshHashes,
+    Transaction, TransactionTickTock, UnixTime32, ValidatorSet, ValueFlow, VarUInteger32, 
+    WorkchainDescr, Workchains, MASTERCHAIN_ID, SERDE_OPTS_COMMON_MESSAGE, SERDE_OPTS_EMPTY
 };
 #[cfg(feature = "fast_finality")]
 use crate::validating_utils::SPLIT_MERGE_INTERVAL_BLOCKS;
@@ -266,6 +268,7 @@ struct CollatorData {
     min_ref_mc_seqno: Option<u32>,
     prev_stuff: Option<BlkPrevInfo>,
     shards: Option<ShardHashes>,
+    mesh: Option<MeshHashes>,
     mint_msg: Option<InMsg>,
     recover_create_msg: Option<InMsg>,
     copyleft_msgs: Vec<InMsg>,
@@ -339,6 +342,7 @@ impl CollatorData {
             min_ref_mc_seqno: None,
             prev_stuff: None,
             shards: None,
+            mesh: None,
             mint_msg: None,
             recover_create_msg: None,
             copyleft_msgs: Default::default(),
@@ -2092,6 +2096,23 @@ impl Collator {
                 //     );
                 // }
             }
+            if let Some(mesh_config) = mc_data.config().mesh_config()? {
+                mesh_config.iterate_with_keys(|nw_id: i32, nw_config| {
+                    // TODO the mesh: use proper queues instead empty
+                    let queue = OutMsgQueueInfo::default();
+                    let queue_hash = queue.hash()?;
+                    let queue_descr = ConnectedNwOutDescr {
+                        out_queue_update: HashUpdate {
+                            old_hash: queue_hash.clone(),
+                            new_hash: queue_hash
+                        },
+                        exported: VarUInteger32::zero()
+                    };
+                    descr.descr.mesh_msg_queues.set(&nw_id, &queue_descr)?;
+                    Ok(true)
+                })?;
+
+            }
             CHECK!(descr.block_id() == sh_bd.proof_for());
             let shard = descr.shard();
             let start_blks = sh_bd.get_prev_at(chain_len);
@@ -2466,6 +2487,23 @@ impl Collator {
         let shards = build_shard_hashes_tree(all_shard_top_blocks)?;
         collator_data.set_shards(shards)?;
         Ok(())
+    }
+
+    fn import_new_mesh_blocks(
+        &self
+    
+    
+    ) -> Result<()> {
+
+
+
+
+
+
+
+
+
+        unimplemented!()
     }
 
     //
@@ -3111,7 +3149,16 @@ impl Collator {
 
         // println!("{}", &value_flow);
 
-        let (out_msg_queue_info, min_ref_mc_seqno) = collator_data.out_msg_queue_info.serialize()?;
+        // TODO the mesh: use proper queues instead empty
+        let mut out_msg_queue_mesh = MeshMsgQueuesInfo::new();
+        if let Some(mesh_config) = mc_data.config().mesh_config()? {
+            mesh_config.iterate_with_keys(|nw_id: i32, nw_config| {
+                out_msg_queue_mesh.set(&nw_id, &InRefValue(OutMsgQueueInfo::default()))?;
+                Ok(true)
+            })?;
+        }
+
+        let (out_msg_queue_local, min_ref_mc_seqno) = collator_data.out_msg_queue_info.serialize()?;
         collator_data.update_min_mc_seqno(min_ref_mc_seqno);
         let (mut mc_state_extra, master_ref) = if self.shard.is_masterchain() {
             let (extra, min_seqno) = self.create_mc_state_extra(prev_data, collator_data, new_config_opt)?;
@@ -3161,7 +3208,7 @@ impl Collator {
             log::warn!("copyleft rewards in masterchain must be empty")
         }
 
-        let mut new_state = ShardStateUnsplit::with_ident(self.shard.clone());
+        let mut new_state = ShardStateUnsplit::with_ident_and_opts(self.shard.clone(), opts);
         new_state.set_global_id(prev_data.state().state()?.global_id());
         new_state.set_seq_no(self.new_block_id_part.seq_no);
         #[cfg(not(feature = "fast_finality"))]
@@ -3174,7 +3221,7 @@ impl Collator {
         new_state.set_underload_history(underload_history);
         new_state.set_min_ref_mc_seqno(collator_data.min_mc_seqno()?);
         new_state.write_accounts(&new_accounts)?;
-        new_state.write_out_msg_queue_info(&out_msg_queue_info)?;
+        new_state.write_out_msg_queues_info(out_msg_queue_local, out_msg_queue_mesh)?;
         new_state.set_master_ref(master_ref);
         new_state.set_total_balance(new_accounts.root_extra().balance().clone());
         if let Some(mc_state_extra) = &mut mc_state_extra {
@@ -3271,12 +3318,17 @@ impl Collator {
         // mc block extra
         if let Some(mc_state_extra) = mc_state_extra {
             log::trace!("{}: finalize_block: McBlockExtra", self.collated_block_descr);
-            let mut mc_block_extra = McBlockExtra::default();
+            let mut mc_block_extra = if collator_data.config.has_capability(GlobalCapabilities::CapCommonMessage) {
+                McBlockExtra::with_common_message_support()
+            } else {
+                McBlockExtra::default()
+            };
             *mc_block_extra.hashes_mut() = collator_data.shards.clone().unwrap();
             *mc_block_extra.fees_mut() = collator_data.shard_fees.clone();
             mc_block_extra.write_recover_create_msg(collator_data.recover_create_msg.as_ref())?;
             mc_block_extra.write_mint_msg(collator_data.mint_msg.as_ref())?;
             mc_block_extra.write_copyleft_msgs(&collator_data.copyleft_msgs)?;
+            *mc_block_extra.mesh_descr_mut() = self.create_block_mesh_descrs(prev_data, collator_data, mc_data)?;
             if mc_state_extra.after_key_block {
                 info.set_key_block(true);
                 *mc_block_extra.config_mut() = Some(mc_state_extra.config().clone());
@@ -3387,6 +3439,47 @@ impl Collator {
                 Self::_check_visited_integrity(&r, visited, visited_from_root);
             }
         }
+    }
+
+    fn create_block_mesh_descrs(
+        &self,
+        prev_data: &PrevData,
+        collator_data: &CollatorData,
+        mc_data: &McData,
+    ) -> Result<MeshHashesExt> {
+
+        log::trace!("{}: create_block_mesh_descrs", self.collated_block_descr);
+        let mut mesh_descr = MeshHashesExt::default();
+        if let Some(mesh_config) = mc_data.config().mesh_config()? {
+            mesh_config.iterate_with_keys(|nw_id: i32, nw_config| {
+                let descr = if nw_config.is_active {
+                    log::trace!("{}: create_block_mesh_descrs: {} is active",
+                        self.collated_block_descr, nw_id);
+                    collator_data.mesh.as_ref()
+                        .ok_or_else(|| error!("INTERNAL ERROR: collator_data.mesh is None"))?
+                        .get(&nw_id)? 
+                } else {
+                    log::trace!("{}: create_block_mesh_descrs: {} is not active",
+                        self.collated_block_descr, nw_id);
+                    None
+                };
+
+                // TODO the mesh: use proper queues instead empty
+                let queue = OutMsgQueueInfo::default();
+                let queue_hash = queue.hash()?;
+                let queue_descr = ConnectedNwOutDescr {
+                    out_queue_update: HashUpdate {
+                        old_hash: queue_hash.clone(),
+                        new_hash: queue_hash
+                    },
+                    exported: VarUInteger32::zero()
+                };
+
+                mesh_descr.set(&nw_id, &ConnectedNwDescrExt { queue_descr, descr })?;
+                Ok(true)
+            })?;
+        }
+        Ok(mesh_descr)
     }
 
     fn extract_new_config(
@@ -3503,7 +3596,7 @@ impl Collator {
         collator_data: &mut CollatorData,
         new_config_opt: Option<ConfigParams>,
     ) -> Result<(McStateExtra, u32)> {
-        log::trace!("{}: build_mc_state_extra", self.collated_block_descr);
+        log::trace!("{}: create_mc_state_extra", self.collated_block_descr);
         CHECK!(!self.after_merge);
         CHECK!(self.new_block_id_part.shard_id.is_masterchain());
 
@@ -3516,6 +3609,9 @@ impl Collator {
                     new_config.config_addr);
             }
             let is_key_block = new_config.important_config_parameters_changed(state_extra.config(), false)?;
+            if is_key_block {
+                log::info!("{}: IS KEY BLOCK", self.collated_block_descr);
+            }
             (new_config, is_key_block)
         } else {
             (old_config.clone(), false)

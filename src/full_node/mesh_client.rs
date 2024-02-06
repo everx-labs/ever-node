@@ -571,7 +571,7 @@ impl ConnectedNwClient {
             }
 
             if last_mc_block.has_next1() {
-                let next = self.engine.load_block_next1(last_mc_block.id()).await?;
+                let next = self.engine.load_block_next1(last_mc_block.id())?;
                 if let Some(next_mc_block) = self.engine.load_block_handle(&next)? {
                     if next_mc_block.is_applied() {
                         last_mc_block = next_mc_block;

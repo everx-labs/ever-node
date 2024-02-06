@@ -121,7 +121,7 @@ async fn load_next_master_block(
     log::trace!("load_next_master_block: prev block: {}", prev_id);
     if let Some(prev_handle) = engine.load_block_handle(prev_id)? {
         if prev_handle.has_next1() {
-            let next_id = engine.load_block_next1(prev_id).await?;
+            let next_id = engine.load_block_next1(prev_id)?;
             engine.clone().download_and_apply_block(&next_id, next_id.seq_no(), false).await?; 
             return Ok(next_id)
         }
