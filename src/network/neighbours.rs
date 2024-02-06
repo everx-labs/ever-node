@@ -70,7 +70,7 @@ impl Neighbour {
 
     pub fn new(id : Arc<KeyId>, default_rldp_roundtrip: u32) ->  Self {
         Self {
-            id: id,
+            id,
             last_ping: AtomicU64::new(0),
             proto_version: AtomicI32::new(0),
             capabilities: AtomicI64::new(0),
@@ -228,6 +228,10 @@ impl Neighbours {
         self.peers.count()
     }
 
+    pub fn new_neighbour(&self, peer: Arc<KeyId>) -> Arc<Neighbour> {
+        Arc::new(Neighbour::new(peer, self.peers.cache.default_rldp_roundtrip))
+    }
+
     pub fn add(&self, peer: Arc<KeyId>) -> Result<bool> {
         if self.count() >= MAX_NEIGHBOURS {
             return Ok(false);
@@ -249,6 +253,14 @@ impl Neighbours {
 
     pub fn remove_overlay_peer(&self, id: &Arc<KeyId>) {
         self.all_peers.remove(id);
+    }
+
+    pub fn all_peers(&self) -> &lockfree::set::Set<Arc<KeyId>> {
+        &self.all_peers
+    }
+
+    pub fn peer(&self, peer: &Arc<KeyId>) -> Option<Arc<Neighbour>> {
+        self.peers.get(peer)
     }
 
     pub fn got_neighbours(&self, peers: AddressCache) -> Result<()> {
@@ -774,14 +786,14 @@ impl NeighboursCacheCore {
         );
 
         if is_overflow {
-            failure::bail!("NeighboursCache overflow!");
+            fail!("NeighboursCache overflow!");
         }
 
         let status = match insertion {
             lockfree::map::Insertion::Created => true,
             lockfree::map::Insertion::Failed(_) => false,
             lockfree::map::Insertion::Updated(_) => {
-                failure::bail!("neighbours: unreachable Insertion::Updated")
+                fail!("neighbours: unreachable Insertion::Updated")
             },
         };
 
@@ -797,7 +809,7 @@ impl NeighboursCacheCore {
         let index = if let Some(index) = self.get_index(old) {
             index
         } else {
-            failure::bail!("replaced neighbour not found!")
+            fail!("replaced neighbour not found!")
         };
         log::info!("replace func use index: {} (old: {}, new: {})", &index, &old, &new);
         let status_insert = self.insert_ex(new.clone(), true)?;

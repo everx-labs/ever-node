@@ -23,6 +23,7 @@ use adnl::{
     node::AdnlNode
 };
 use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
+use rand::seq::SliceRandom;
 use std::{io::Cursor, time::Instant, sync::Arc, time::Duration, collections::HashSet};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
@@ -74,6 +75,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
         msg_queue_for: Option<i32>,
         masterchain_block_id: &BlockIdExt,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+        bad_peers: &mut HashSet<Arc<KeyId>>,
     ) -> Result<Option<Arc<Neighbour>>>;
     async fn download_persistent_state_part(
         &self,
@@ -89,7 +91,13 @@ pub trait FullNodeOverlayClient : Sync + Send {
         &self, 
         id: &BlockIdExt
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)>;
-    async fn download_next_key_blocks_ids(&self, block_id: &BlockIdExt, max_size: i32) -> Result<Vec<BlockIdExt>>;
+    async fn download_next_key_blocks_ids(
+        &self,
+        block_id: &BlockIdExt,
+        max_size: i32,
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+        bad_peers: &mut HashSet<Arc<KeyId>>,
+    ) -> Result<Vec<BlockIdExt>>;
     async fn download_next_block_full(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
     async fn download_archive(
         &self, 
@@ -310,6 +318,96 @@ impl NodeClientOverlay {
     }
 
     // use this function if request size and answer size < 768 bytes (send query via ADNL)
+    async fn send_adnl_query_to_peer_id<R, D>(
+        &self,
+        peer: &Arc<KeyId>,
+        data: &TaggedTlObject,
+        timeout: Option<u64>,
+    ) -> Result<(D, Arc<Neighbour>)>
+    where
+        R: ton_api::AnyBoxedSerialize,
+        D: ton_api::AnyBoxedSerialize
+    {
+        let peer = match self.peers.peer(peer) {
+            Some(peer) => peer,
+            None => {
+                if self.peers.add_overlay_peer(peer.clone()) {
+                    if let Some(peer) = self.peers.peer(&peer) {
+                        // add_peer = Some(peer.clone());
+                        peer
+                    } else {
+                        self.peers.new_neighbour(peer.clone())
+                    }
+                } else {
+                    self.peers.new_neighbour(peer.clone())
+                }
+            }
+        };
+        if let Ok(Some(answer)) = self.send_adnl_query_to_peer::<R, D>(&peer, data, timeout).await {
+            Ok((answer, peer))
+        } else {
+            fail!("Cannot send query {:?} to peer {}", data.object, peer.id())
+        }
+    }
+
+    // use this function if request size and answer size < 768 bytes (send query via ADNL)
+    async fn send_adnl_query_to_all_peers<R, D>(
+        &self,
+        request: TaggedObject<R>, 
+        timeout: Option<u64>,
+        active_peers: Option<&Arc<lockfree::set::Set<Arc<KeyId>>>>,
+        bad_peers: &mut HashSet<Arc<KeyId>>,
+        f: impl Fn(&D) -> bool
+    ) -> Result<(D, Arc<Neighbour>)>
+    where
+        R: ton_api::AnyBoxedSerialize,
+        D: ton_api::AnyBoxedSerialize
+    {
+        let data = TaggedTlObject {
+            object: TLObject::new(request.object),
+            #[cfg(feature = "telemetry")]
+            tag: request.tag
+        };
+
+        // first use active peers and add them to neighbour cache
+        if let Some(active_peers) = active_peers {
+            for peer in active_peers.iter() {
+                if let Ok((result, peer)) = self.send_adnl_query_to_peer_id::<R, D>(&peer, &data, timeout).await {
+                    if f(&result) {
+                        return Ok((result, peer));
+                    }
+                }
+                active_peers.remove(&*peer);
+            }
+        }
+        // next try to send to all peers
+        let mut all_peers = self.peers.all_peers().iter()
+            .map(|peer| peer.clone())
+            .collect::<Vec<_>>();
+        all_peers.shuffle(&mut rand::thread_rng());
+        for peer in &all_peers {
+            if let Some(active_peers) = active_peers {
+                if active_peers.contains(&*peer) {
+                    continue;
+                }
+            }
+            if bad_peers.contains(&*peer) {
+                continue;
+            }
+            if let Ok((result, peer)) = self.send_adnl_query_to_peer_id::<R, D>(&peer, &data, timeout).await {
+                if f(&result) {
+                    if let Some(active_peers) = active_peers {
+                        active_peers.insert(peer.id().clone()).ok();
+                    }
+                    return Ok((result, peer));
+                }
+            }
+            bad_peers.insert(peer.clone());
+        }
+        fail!("Cannot send query {:?} to all peers", data.object)
+    }
+
+    // use this function if request size and answer size < 768 bytes (send query via ADNL)
     async fn send_adnl_query<R, D>(
         &self, 
         request: TaggedObject<R>, 
@@ -336,20 +434,20 @@ impl NodeClientOverlay {
                 tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_NO_NEIGHBOURS)).await;
                 fail!("neighbour is not found!")
             };
-            if let Some(active_peers) = &active_peers {
+            if let Some(active_peers) = active_peers {
                 if active_peers.insert(peer.id().clone()).is_ok() {
                     continue;
                 }
             }
             match self.send_adnl_query_to_peer::<R, D>(&peer, &data, timeout).await {
                 Err(e) => {
-                    if let Some(active_peers) = &active_peers {
+                    if let Some(active_peers) = active_peers {
                         active_peers.remove(peer.id());
                     }
                     return Err(e) 
                 },
                 Ok(Some(answer)) => return Ok((answer, peer)),
-                Ok(None) => if let Some(active_peers) = &active_peers {
+                Ok(None) => if let Some(active_peers) = active_peers {
                     active_peers.remove(peer.id());
                 }
             }
@@ -790,8 +888,9 @@ Ok(if key_block {
         msg_queue_for: Option<i32>,
         masterchain_block_id: &BlockIdExt,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+        bad_peers: &mut HashSet<Arc<KeyId>>,
     ) -> Result<Option<Arc<Neighbour>>> {
-        let request = if let Some(target_wc) = msg_queue_for {
+        let object = if let Some(target_wc) = msg_queue_for {
             TLObject::new(
                 PreparePersistentMsgQueue {
                     block: block_id.clone(),
@@ -807,15 +906,17 @@ Ok(if key_block {
                 }
             )
         };
-        let (prepare, peer): (PreparedState, _) = self.send_adnl_query(
-            TaggedTlObject {
-                object: request,
-                #[cfg(feature = "telemetry")]
-                tag: self.tag_prepare_persistent_state
-            },
-            None,
-            Some(Self::TIMEOUT_PREPARE), 
-            Some(active_peers)
+        let request = TaggedTlObject {
+            object,
+            #[cfg(feature = "telemetry")]
+            tag: self.tag_prepare_persistent_state
+        };
+        let (prepare, peer): (PreparedState, _) = self.send_adnl_query_to_all_peers(
+            request,
+            Some(Self::TIMEOUT_PREPARE),
+            Some(active_peers),
+            bad_peers,
+            |result| result == &PreparedState::TonNode_PreparedState
         ).await?;
         match prepare {
             PreparedState::TonNode_NotFoundState => {
@@ -923,33 +1024,29 @@ Ok(if key_block {
         &self, 
         block_id: &BlockIdExt,
         max_size: i32,
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+        bad_peers: &mut HashSet<Arc<KeyId>>
     ) -> Result<Vec<BlockIdExt>> {
-        let max_attempts = 100;
-        let max_neighbours = 10;
-        let mut neighbours = HashSet::new();
-        let mut vec = Vec::new();
-        for _ in 0..max_attempts {
-            let query = TaggedObject {
-                object: GetNextKeyBlockIds {
-                    block: block_id.clone(),
-                    max_size,
-                },
-                #[cfg(feature = "telemetry")]
-                tag: self.tag_get_next_key_block_ids
-            };
-            let (ids, neighbour): (KeyBlocks, _) = self.send_adnl_query(query, None, None, None).await?;
-            if !ids.blocks().is_empty() {
-                for id in ids.blocks().iter() {
-                    vec.push(id.clone());
-                }
-                break;
-            }
-            neighbours.insert(neighbour.id().clone());
-            if neighbours.len() == max_neighbours {
-                break;
-            }
+        let request = TaggedObject {
+            object: GetNextKeyBlockIds {
+                block: block_id.clone(),
+                max_size,
+            },
+            #[cfg(feature = "telemetry")]
+            tag: self.tag_get_next_key_block_ids
+        };
+
+        let (ids, _): (KeyBlocks, _) = self.send_adnl_query_to_all_peers(
+            request,
+            None,
+            Some(active_peers),
+            bad_peers,
+            |result: &KeyBlocks| !result.blocks().is_empty()
+        ).await?;
+        if !ids.blocks().is_empty() {
+            return Ok(ids.only().blocks.into())
         }
-        Ok(vec)
+        return Ok(Vec::new());
     }
 
     // tonNode.downloadNextBlockFull prev_block:tonNode.blockIdExt = tonNode.DataFull;
