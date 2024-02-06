@@ -495,26 +495,27 @@ async fn download_state(
 /// Must be used only zero_state or key_block id
 pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<Arc<BlockHandle>> {
     let mut bad_peers = HashSet::new();
-    let (mut handle, zero_state, init_block_proof_link) = run_cold(engine.deref()).await?;
+    let (handle, zero_state, init_block_proof_link) = run_cold(engine.deref()).await?;
     let active_peers = Arc::new(lockfree::set::Set::new());
-    let mut key_blocks = Vec::new();
-    if !engine.flags().initial_sync_disabled {
-        key_blocks = get_key_blocks(
+    let mut key_blocks = if !engine.flags().initial_sync_disabled {
+        get_key_blocks(
             engine.deref(),
             handle,
             zero_state.as_ref(),
             init_block_proof_link,
             &active_peers,
             &mut bad_peers,
-        ).await?;
-    }
+        ).await?
+    } else {
+        vec![handle]
+    };
     
     let mut prev_err_opt = None;
     for _ in 0..5 {
         if let Some(err) = prev_err_opt {
             log::warn!(target: "boot", "{}", err);
         }
-        handle = choose_masterchain_state(engine.deref(), &mut key_blocks, PSS_PERIOD_BITS).await?;
+        let handle = choose_masterchain_state(engine.deref(), &mut key_blocks, PSS_PERIOD_BITS).await?;
         if handle.id().seq_no() == 0 {
             let Some(zero_state) = zero_state.as_ref() else {
                 fail!("Zero state is not set")
