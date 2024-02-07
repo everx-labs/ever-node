@@ -190,6 +190,30 @@ impl std::fmt::Display for ProcessedUptoStuff {
     }
 }
 
+// checking or removing foreign messages from queue
+// this operation should not be long because we don't allow
+// to merge shards with long queues
+fn clean_foreign_messages(out_queue: &mut OutMsgQueue, shard: ShardIdent, remove: bool) -> Result<bool> {
+    let mut removed = false;
+    out_queue.hashmap_filter(|_key, mut slice| {
+        let created_lt = u64::construct_from(&mut slice)?;
+        let enq = MsgEnqueueStuff::construct_from(&mut slice, created_lt)?;
+        if !shard.contains_full_prefix(enq.cur_prefix()) {
+            removed = true;
+            if remove {
+                Ok(HashmapFilterResult::Cancel)
+            } else {
+                Ok(HashmapFilterResult::Remove)
+            }
+        } else {
+            Ok(HashmapFilterResult::Accept)
+        }
+    })?;
+    out_queue.update_root_extra()?;
+    Ok(removed)
+}
+
+
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct OutMsgQueueInfoStuff {
     block_id: BlockIdExt,
@@ -328,22 +352,7 @@ impl OutMsgQueueInfoStuff {
     // to merge shards with long queues
     fn clean_foreign_messages(&mut self, remove: bool) -> Result<bool> {
         let shard = self.shard().clone();
-        let mut removed = false;
-        self.out_queue_mut()?.hashmap_filter(|_key, mut slice| {
-            let created_lt = u64::construct_from(&mut slice)?;
-            let enq = MsgEnqueueStuff::construct_from(&mut slice, created_lt)?;
-            if !shard.contains_full_prefix(enq.cur_prefix()) {
-                removed = true;
-                if remove {
-                    Ok(HashmapFilterResult::Cancel)
-                } else {
-                    Ok(HashmapFilterResult::Remove)
-                }
-            } else {
-                Ok(HashmapFilterResult::Accept)
-            }
-        })?;
-        Ok(removed)
+        clean_foreign_messages(self.out_queue_mut()?, shard, remove)
     }
 
     fn merge(&mut self, mut other: Self, split_queues: bool, is_validate: bool) -> Result<()> {
@@ -384,27 +393,8 @@ impl OutMsgQueueInfoStuff {
         self_shard: &ShardIdent
     ) -> Result<OutMsgQueue> {
         let mut sibling_queue = self_queue.clone();
-        self_queue.hashmap_filter(|_key, mut slice| {
-            let created_lt = u64::construct_from(&mut slice)?;
-            let enq = MsgEnqueueStuff::construct_from(&mut slice, created_lt)?;
-            if self_shard.contains_full_prefix(enq.cur_prefix()) {
-                Ok(HashmapFilterResult::Accept)
-            } else {
-                Ok(HashmapFilterResult::Remove)
-            }
-        })?;
-        self_queue.update_root_extra()?;
-
-        sibling_queue.hashmap_filter(|_key, mut slice| {
-            let created_lt = u64::construct_from(&mut slice)?;
-            let enq = MsgEnqueueStuff::construct_from(&mut slice, created_lt)?;
-            if self_shard.contains_full_prefix(enq.cur_prefix()) {
-                Ok(HashmapFilterResult::Remove)
-            } else {
-                Ok(HashmapFilterResult::Accept)
-            }
-        })?;
-        sibling_queue.update_root_extra()?;
+        clean_foreign_messages(self_queue, self_shard.clone(), true)?;
+        clean_foreign_messages(&mut sibling_queue, self_shard.sibling(), true)?;
         Ok(sibling_queue)
     }
 
