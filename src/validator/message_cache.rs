@@ -295,6 +295,10 @@ impl RempMessageWithOrigin {
     pub fn as_remp_catchain_record(&self, master_cc: u32) -> ton_api::ton::ton_node::RempCatchainRecordV2 {
         return self.message.as_remp_catchain_record(master_cc, &self.origin)
     }
+
+    pub fn as_rmq_record(&self) -> ton_api::ton::ton_node::RmqRecord {
+        return self.message.as_rmq_record()
+    }
 }
 
 impl Display for RempMessageWithOrigin {
@@ -656,7 +660,7 @@ impl MessageCache {
         }
     }
 
-    fn insert_message(&self, session: Arc<MessageCacheSession>, message: Arc<RmqMessage>, message_header: Arc<RempMessageHeader>, message_origin: Arc<RempMessageOrigin>, status: &RempMessageStatus) -> Result<()> {
+    fn insert_message(&self, session: Arc<MessageCacheSession>, message: Arc<RmqMessage>, message_header: Arc<RempMessageHeader>, message_origin: Option<Arc<RempMessageOrigin>>, status: &RempMessageStatus) -> Result<()> {
         if message.message_id != message_header.message_id {
             fail!("Inconsistent message: message {} and message_header {} have different message_id", message, message_header)
         }
@@ -668,7 +672,7 @@ impl MessageCache {
         }
 
         session.message_status.insert(message_id.clone(), status.clone());
-        session.insert_message(message, message_header, Some(message_origin))?;
+        session.insert_message(message, message_header, message_origin)?;
         Ok(())
     }
 
@@ -688,7 +692,7 @@ impl MessageCache {
     /// If we do not know anything -- TODO: if all reject, then 'Rejected'. Otherwise 'New'
     /// Actual -- get it as granted ("imprinting")
     /// Returns old status and new (added) status
-    pub async fn add_external_message_status<F>(&self,
+    pub fn add_external_message_status<F>(&self,
         message_id: &UInt256, message_uid: &UInt256, message: Option<Arc<RmqMessage>>, message_origin: Option<Arc<RempMessageOrigin>>,
         status_if_new: RempMessageStatus, status_updater: F,
         master_cc: u32
@@ -708,10 +712,11 @@ impl MessageCache {
                     message_uid
                 );
 
-                match (message, &message_origin) {
-                    (None,_) => self.insert_message_header( session, header, message_origin, &status_if_new)?,
-                    (Some(message), Some(origin)) => self.insert_message(session, message, header, origin.clone(), &status_if_new)?,
-                    (Some(message), None) => fail!("Incorrect options for add_external_message_status: message header {}, body {}, but no message origin", header, message)
+                match message {
+                    None =>
+                        self.insert_message_header( session, header, message_origin, &status_if_new)?,
+                    Some(message) =>
+                        self.insert_message(session, message, header, message_origin.clone(), &status_if_new)?
                 };
                 Ok((None, status_if_new))
             },
@@ -724,6 +729,18 @@ impl MessageCache {
                 Ok((Some(old_status), final_status))
             },
         }
+    }
+
+    pub fn update_message_body(&self, data: Arc<RmqMessage>) -> Result<()> {
+        self.add_external_message_status(
+            &data.message_id,
+            &data.message_uid,
+            Some(data.clone()),
+            None,
+            RempMessageStatus::TonNode_RempNew, |old,_new| old.clone(),
+            self.master_cc_seqno_curr.load(Ordering::Relaxed)
+        )?;
+        Ok(())
     }
 
     /// Checks whether message msg_id is accepted by collator;

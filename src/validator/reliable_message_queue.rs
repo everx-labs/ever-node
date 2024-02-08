@@ -257,8 +257,11 @@ impl MessageQueue {
         }
 
         let origin_with_idx = Arc::new(msg.origin.new_with_updated_source_idx(self.catchain_info.local_idx as u32));
-        log::trace!(target: "remp", "Point 3. Pushing to RMQ {}; message {}, {}", self, msg, origin_with_idx);
-        self.catchain_instance.pending_messages_queue_send(msg.as_remp_catchain_record(self.catchain_info.get_master_cc_seqno()))?;
+        log::trace!(target: "remp", "Point 3. Pushing to RMQ {}; message {}, {} + broadcast", self, msg, origin_with_idx);
+        self.catchain_instance.pending_messages_broadcast_send(
+            msg.as_remp_catchain_record(self.catchain_info.get_master_cc_seqno()),
+            msg.as_rmq_record()
+        )?;
 
         #[cfg(feature = "telemetry")]
         self.engine.remp_core_telemetry().in_channel_to_catchain(
@@ -415,7 +418,7 @@ impl MessageQueue {
                 old_status.clone()
             },
             message_master_seqno
-        ).await;
+        );
 
         match added {
             Err(e) => {
@@ -472,7 +475,7 @@ impl MessageQueue {
                     // validator.
                     |old,_new| { old.clone() },
                     reject_digest.masterchain_seqno as u32
-                ).await?;
+                )?;
             }
         }
         Ok(())
@@ -1024,7 +1027,11 @@ impl RmqQueueManager {
                     }
 
                     for new in next_queues.iter() {
-                        if let Err(x) = new.catchain_instance.pending_messages_queue_send(message.as_remp_catchain_record(message_cc, &origin)) {
+                        if let Err(x) = new.catchain_instance.pending_messages_broadcast_send(
+                            message.as_remp_catchain_record(message_cc, &origin),
+                            message.as_rmq_record()
+                        )
+                        {
                             log::error!(target: "remp",
                             "Point 5a. RMQ {}: message {:x} cannot be put to new queue {}: `{}`",
                             self, msgid, new, x

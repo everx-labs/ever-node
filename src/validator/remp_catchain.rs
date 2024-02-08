@@ -37,6 +37,7 @@ use catchain::{
 use ton_api::{
     IntoBoxed, ton::ton_node::RempCatchainRecordV2
 };
+use ton_api::ton::ton_node::{rmqrecord, RmqRecord};
 use ton_block::ValidatorDescr;
 use ton_types::{error, fail, KeyId, Result, UInt256};
 
@@ -58,7 +59,10 @@ pub struct RempCatchainInstanceImpl {
     pub pending_messages_queue_sender: crossbeam_channel::Sender<RempCatchainRecordV2>,
 
     pub rmq_catchain_receiver: crossbeam_channel::Receiver<RempCatchainRecordV2>,
-    rmq_catchain_sender: crossbeam_channel::Sender<RempCatchainRecordV2>
+    rmq_catchain_sender: crossbeam_channel::Sender<RempCatchainRecordV2>,
+
+    pub remp_messages_receiver: crossbeam_channel::Receiver<RmqRecord>,
+    pending_messages_broadcast_sender: crossbeam_channel::Sender<RmqRecord>
 }
 
 impl RempCatchainInstanceImpl {
@@ -67,10 +71,12 @@ impl RempCatchainInstanceImpl {
             crossbeam_channel::unbounded();
         let (rmq_catchain_sender, rmq_catchain_receiver) = 
             crossbeam_channel::unbounded();
+        let (remp_messages_sender, remp_messages_receiver) = crossbeam_channel::unbounded();
         Self {
             catchain_ptr,
             pending_messages_queue_sender, pending_messages_queue_receiver,
-            rmq_catchain_sender, rmq_catchain_receiver
+            rmq_catchain_sender, rmq_catchain_receiver,
+            pending_messages_broadcast_sender: remp_messages_sender, remp_messages_receiver
         }
     }
 }
@@ -111,6 +117,15 @@ impl RempCatchainInstance {
         match instance.pending_messages_queue_sender.send(msg) {
             Ok(()) => Ok(()),
             Err(e) => fail!("pending_messages_queue_sender: send error {}", e)
+        }
+    }
+
+    pub fn pending_messages_broadcast_send(&self, msg: RempCatchainRecordV2, msg_body: RmqRecord) -> Result<()> {
+        let instance = self.get_instance_impl()?;
+        match (instance.pending_messages_queue_sender.send(msg), instance.pending_messages_broadcast_sender.send(msg_body)) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(e), _) => fail!("pending_messages_queue_sender: send error {}", e),
+            (_, Err(e)) => fail!("pending_messages_broadcast_sender: send error {}", e)
         }
     }
 
@@ -420,6 +435,14 @@ impl RempCatchain {
             Err(e) => log::error!(target: "remp", "Cannot deserialize RMQ {} message: {}", self, e)
         }
     }
+
+    fn unpack_broadcast(&self, payload: &BlockPayloadPtr) -> Result<()> {
+        let message = RmqMessage::deserialize(payload.data())?;
+        let rmqrecord = RmqMessage::from_rmq_record(&message)?;
+        self.remp_manager.message_cache.update_message_body(Arc::new(rmqrecord))?;
+
+        Ok(())
+    }
 }
 
 impl fmt::Display for RempCatchain {
@@ -494,9 +517,10 @@ impl CatchainListener for RempCatchain {
     }
 
     fn process_broadcast(&self, source_id: PublicKeyHash, data: BlockPayloadPtr) {
-       log::trace!(target: "remp", "MessageQueue {} process broadcast from {}", self, source_id);
-
-       let message = RmqMessage::deserialize(data.data());
+        log::trace!(target: "remp", "MessageQueue {} process broadcast from {}", self, source_id);
+        if let Err(e) = self.unpack_broadcast(&data) {
+            log::error!(target: "remp", "Error processing broadcast from {}, message body will be ignored: `{}`", source_id, e);
+        }
     }
 
     fn process_query(&self, source_id: PublicKeyHash, data: BlockPayloadPtr, _callback: ExternalQueryResponseCallback) {
