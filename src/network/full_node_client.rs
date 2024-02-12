@@ -343,10 +343,16 @@ impl NodeClientOverlay {
                 }
             }
         };
-        if let Ok(Some(answer)) = self.send_adnl_query_to_peer::<R, D>(&peer, data, timeout).await {
-            Ok((answer, peer))
-        } else {
-            fail!("Cannot send query {:?} to peer {}", data.object, peer.id())
+        match self.send_adnl_query_to_peer::<R, D>(&peer, data, timeout).await {
+            Ok(Some(answer)) => Ok((answer, peer)),
+            Ok(None) => fail!(
+                "Cannot send query {:?} to peer {}: no reply", 
+                data.object, peer.id()
+            ),
+            Err(e) => fail!(
+                "Cannot send query {:?} to peer {}: {}", 
+                data.object, peer.id(), e
+            )
         }
     }
 
@@ -372,12 +378,16 @@ impl NodeClientOverlay {
         // first use active peers and add them to neighbour cache
         if let Some(active_peers) = active_peers {
             for peer in active_peers.iter() {
-                if let Ok((result, peer)) = self.send_adnl_query_to_peer_id::<R, D>(&peer, &data, timeout).await {
-                    if f(&result) {
-                        return Ok((result, peer));
-                    }
+                let peer = peer.as_ref();
+                match self.send_adnl_query_to_peer_id::<R, D>(peer, &data, timeout).await {
+                    Ok((result, peer)) => {
+                        if f(&result) {
+                            return Ok((result, peer));
+                        }
+                    },
+                    Err(e) => log::warn!("Bad active peer {} detected: {}", peer, e)
                 }
-                active_peers.remove(&*peer);
+                active_peers.remove(peer);
             }
         }
         // next try to send to all peers
@@ -385,22 +395,25 @@ impl NodeClientOverlay {
             .map(|peer| peer.clone())
             .collect::<Vec<_>>();
         all_peers.shuffle(&mut rand::thread_rng());
-        for peer in &all_peers {
+        for peer in all_peers.iter() {
             if let Some(active_peers) = active_peers {
-                if active_peers.contains(&*peer) {
+                if active_peers.contains(peer) {
                     continue;
                 }
             }
-            if bad_peers.contains(&*peer) {
+            if bad_peers.contains(peer) {
                 continue;
-            }
-            if let Ok((result, peer)) = self.send_adnl_query_to_peer_id::<R, D>(&peer, &data, timeout).await {
-                if f(&result) {
-                    if let Some(active_peers) = active_peers {
-                        active_peers.insert(peer.id().clone()).ok();
+            } 
+            match self.send_adnl_query_to_peer_id::<R, D>(peer, &data, timeout).await {
+                Ok((result, peer)) => {
+                    if f(&result) {
+                        if let Some(active_peers) = active_peers {
+                            active_peers.insert(peer.id().clone()).ok();
+                        }
+                        return Ok((result, peer));
                     }
-                    return Ok((result, peer));
-                }
+                },
+                Err(e) => log::warn!("New bad peer {} detected: {}", peer, e)
             }
             bad_peers.insert(peer.clone());
         }
