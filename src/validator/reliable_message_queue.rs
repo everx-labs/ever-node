@@ -17,7 +17,7 @@ use std::{
     fmt, fmt::Formatter,
     ops::RangeInclusive,
     sync::Arc,
-    time::{Duration, SystemTime}
+    time::Duration
 };
 use dashmap::DashMap;
 
@@ -52,6 +52,7 @@ use crate::engine_traits::RempDuplicateStatus;
 enum MessageQueueStatus { Created, Starting, Active, Stopping }
 const RMQ_STOP_POLLING_INTERVAL: Duration = Duration::from_millis(50);
 const RMQ_REQUEST_NEW_BLOCK_INTERVAL: Duration = Duration::from_millis(50);
+const RMQ_MAXIMAL_BROADCASTS_IN_PACK: u32 = 1000;
 
 struct MessageQueueImpl {
     status: MessageQueueStatus,
@@ -267,9 +268,9 @@ impl MessageQueue {
         self.engine.remp_core_telemetry().in_channel_to_catchain(
             &self.catchain_info.general_session_info.shard, self.catchain_instance.pending_messages_queue_len()?);
 
-        if let Some(session) = &self.remp_manager.catchain_store.get_catchain_session(&self.catchain_info.queue_id).await {
+        if self.catchain_instance.is_session_active() {
             log::trace!(target: "remp", "Point 3. Activating RMQ {} processing", self);
-            session.request_new_block(SystemTime::now() + RMQ_REQUEST_NEW_BLOCK_INTERVAL);
+            self.catchain_instance.activate_exchange(RMQ_REQUEST_NEW_BLOCK_INTERVAL, RMQ_MAXIMAL_BROADCASTS_IN_PACK)?;
 
             // Temporary status "New" --- message is not registered yet
             self.send_response_to_fullnode(msg.get_message_id(), origin_with_idx, RempMessageStatus::TonNode_RempNew);

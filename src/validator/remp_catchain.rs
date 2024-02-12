@@ -37,7 +37,7 @@ use catchain::{
 use ton_api::{
     IntoBoxed, ton::ton_node::RempCatchainRecordV2
 };
-use ton_api::ton::ton_node::{rmqrecord, RmqRecord};
+use ton_api::ton::ton_node::RmqRecord;
 use ton_block::ValidatorDescr;
 use ton_types::{error, fail, KeyId, Result, UInt256};
 
@@ -61,7 +61,7 @@ pub struct RempCatchainInstanceImpl {
     pub rmq_catchain_receiver: crossbeam_channel::Receiver<RempCatchainRecordV2>,
     rmq_catchain_sender: crossbeam_channel::Sender<RempCatchainRecordV2>,
 
-    pub remp_messages_receiver: crossbeam_channel::Receiver<RmqRecord>,
+    pub pending_messages_broadcast_receiver: crossbeam_channel::Receiver<RmqRecord>,
     pending_messages_broadcast_sender: crossbeam_channel::Sender<RmqRecord>
 }
 
@@ -76,7 +76,8 @@ impl RempCatchainInstanceImpl {
             catchain_ptr,
             pending_messages_queue_sender, pending_messages_queue_receiver,
             rmq_catchain_sender, rmq_catchain_receiver,
-            pending_messages_broadcast_sender: remp_messages_sender, remp_messages_receiver
+            pending_messages_broadcast_sender: remp_messages_sender,
+            pending_messages_broadcast_receiver: remp_messages_receiver
         }
     }
 }
@@ -144,6 +145,15 @@ impl RempCatchainInstance {
         }
     }
 
+    pub fn pending_messages_broadcast_try_recv(&self) -> Result<Option<RmqRecord>> {
+        let instance = self.get_instance_impl()?;
+        match instance.pending_messages_broadcast_receiver.try_recv() {
+            Ok(x) => Ok(Some(x)),
+            Err(crossbeam_channel::TryRecvError::Empty) => Ok(None),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => fail!("channel disconnected")
+        }
+    }
+
     pub fn rmq_catchain_receiver_len(&self) -> Result<usize> {
         let instance = self.get_instance_impl()?;
         Ok(instance.rmq_catchain_receiver.len())
@@ -168,6 +178,27 @@ impl RempCatchainInstance {
 
     pub fn get_id(&self) -> u128 {
         self.id.duration_since(UNIX_EPOCH).unwrap().as_micros()
+    }
+
+    fn poll_pending_broadcasts(&self, max_broadcasts: u32) -> Result<()> {
+        for _msg_count in 0..max_broadcasts {
+            match self.pending_messages_broadcast_try_recv()? {
+                None => break,
+                Some(msg) => {
+                    let block_payload = catchain::CatchainFactory::create_block_payload(
+                        serialize_tl_boxed_object!(&msg),
+                    );
+                    self.get_instance_impl()?.catchain_ptr.send_broadcast(block_payload)
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn activate_exchange(&self, delay: Duration, max_broadcasts: u32) -> Result<()> {
+        let session = &self.get_instance_impl()?.catchain_ptr;
+        session.request_new_block(SystemTime::now() + delay);
+        self.poll_pending_broadcasts(max_broadcasts)
     }
 }
 
