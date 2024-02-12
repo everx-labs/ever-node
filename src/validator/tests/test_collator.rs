@@ -21,7 +21,7 @@ use crate::{
         validator_utils::compute_validator_set_cc,
     },
 };
-use ton_types::{error, Result};
+use ton_types::Result;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 
@@ -72,10 +72,8 @@ async fn try_collate_by_engine(
     let min_mc_seq_no = if prev_blocks_ids[0].seq_no() == 0 {
         0
     } else {
-        let handle = engine.load_block_handle(&prev_blocks_ids[0])?.ok_or_else(
-            || error!("Cannot load handle for prev block {}", prev_blocks_ids[0])
-        )?;
-        engine.load_block(&handle).await?.block()?.read_info()?.min_ref_mc_seqno()
+        let state = engine.load_state(&prev_blocks_ids[0]).await?;
+        state.state()?.min_ref_mc_seqno()
     };
 
     let collator = collator::Collator::new(
