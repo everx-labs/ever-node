@@ -44,13 +44,15 @@ then
 fi
 
 cd ../../../
-if ! [ -d "ever-node-tools-private" ]
+if ! [ -d "ever-node-tools" ]
 then
     git clone "https://github.com/tonlabs/ever-node-tools"
-    cd ever-node-tools-private
+    cd ever-node-tools
     git checkout "$CURRENT_BRANCH" || echo "Use default branch"
+    git submodule init
+    git submodule update
 else
-    cd ever-node-tools-private
+    cd ever-node-tools
 fi
 TOOLS_ROOT=$(pwd)
 
