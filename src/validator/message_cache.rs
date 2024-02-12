@@ -389,12 +389,22 @@ impl MessageCacheSession {
                     fail!("Different message body: new body '{}', current cached body '{}'", m1, m2.val());
                 }
             }
+            else {
+                if let Some(m2) = self.messages.insert(message_id.clone(), m1.clone()) {
+                    fail!("Parallel updating of message body: new body '{}', another body '{}'", m1, m2.val())
+                }
+            }
         }
 
         if let Some(o1) = &origin {
             if let Some(o2) = self.message_origins.get(message_id) {
                 if o1 != o2.value() {
                     fail!("Different message origin: new origin '{}', current cached origin '{}'", o1, o2.value());
+                }
+            }
+            else {
+                if let Some(o2) = self.message_origins.insert(message_id.clone(), o1.clone()) {
+                    fail!("Parallel updating of message origin: new origin '{}', another origin '{}'", o1, o2)
                 }
             }
         }
@@ -646,10 +656,9 @@ impl MessageCache {
         );
 
         match (msg, origin, status) {
-            (None, _, Some(_)) => Ok(None), // Bare message info (retrieved from finalized block)
+            (None, _, Some(_)) | (_, None, Some(_)) => Ok(None), // Bare message info (retrieved from finalized block/not received from broadcast)
             (Some(m), Some(o), Some (h)) => Ok(Some((m.clone(), o.clone(), h.clone(), session.master_cc))), // Full message info
             (m, o, None) => fail!("Message {:x} has no status, body = {:?}, origin = {:?}", message_id, m, o),
-            (Some(m), None, Some(h)) => fail!("Message {:x} has no orgin, but has body {} and status {}", message_id, m, h)
         }
     }
 
@@ -740,6 +749,10 @@ impl MessageCache {
             RempMessageStatus::TonNode_RempNew, |old,_new| old.clone(),
             self.master_cc_seqno_curr.load(Ordering::Relaxed)
         )?;
+        match self.get_message_with_origin_status_cc(&data.message_id)? {
+            Some((msg, msg_origin, x, seqno)) => log::info!(target: "remp", "Message info added: {}, {}, {}, {}", msg, msg_origin, x, seqno),
+            None => log::info!(target: "remp", "Message {} was not found in cache", &data.message_id)
+        }
         Ok(())
     }
 
