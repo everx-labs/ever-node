@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.93
+
+- Deleted messages from outbound queue which were left after split are taken into estimation of block size
+
 ## Version 0.55.92
 
 - Added ability not to split out message queues during shard split

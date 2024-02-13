@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -3761,7 +3761,7 @@ impl ValidateQuery {
                     and underload history (block cannot be both overloaded and underloaded)"
                 )
             }
-            if base.split_queues && next_state.underload_history() & 1 != 0 {
+            if !base.split_queues && next_state.underload_history() & 1 != 0 {
                 Self::check_delivered_dequeued(&base, &manager)?;
             }
             if base.after_split || base.after_merge {
