@@ -25,7 +25,7 @@ appenders:
         limit: 5 gb
       roller:
         kind: fixed_window
-        pattern: '/shared/output_NODE_NUM_{}.log'
+        pattern: '/home/ruser/TON/ever-node/tests/test_high_load/logs/output_NODE_NUM_{}.log'
         base: 1
         count: 10
 

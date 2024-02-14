@@ -1,0 +1,126 @@
+{
+	"ABI version": 2,
+	"header": ["time"],
+	"functions": [
+		{
+			"name": "constructor",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setC",
+			"inputs": [
+				{"name":"counter","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "deployWorker",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "stopWorker",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "NeedMoney",
+			"inputs": [
+				{"name":"id","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "build",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "init",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setNumber",
+			"inputs": [
+				{"name":"number","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setCode2",
+			"inputs": [
+				{"name":"c","type":"cell"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setData2",
+			"inputs": [
+				{"name":"c","type":"cell"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setContract2",
+			"inputs": [
+				{"name":"c","type":"cell"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setKey",
+			"inputs": [
+				{"name":"key","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setdGrant",
+			"inputs": [
+				{"name":"dgrant","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "upgrade",
+			"inputs": [
+				{"name":"newcode","type":"cell"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "grant",
+			"inputs": [
+				{"name":"addr","type":"address"},
+				{"name":"value","type":"uint128"}
+			],
+			"outputs": [
+			]
+		}
+	],
+	"data": [
+	],
+	"events": [
+	]
+}
