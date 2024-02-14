@@ -16,6 +16,7 @@ use crate::{
     shard_state::ShardStateStuff, engine::Engine
 };
 
+use std::collections::HashSet;
 use std::{ops::Deref, sync::Arc, time::Duration};
 use std::path::Path;
 use storage::block_handle_db::BlockHandle;
@@ -26,6 +27,7 @@ use crate::validator::accept_block::create_new_proof_link;
 
 pub const PSS_PERIOD_BITS: u32 = 17;
 const RETRY_MASTER_STATE_DOWNLOAD: usize = 10;
+const RETRY_SHARD_STATE_DOWNLOAD: usize = 10;
 
 /// cold boot entry point
 /// download zero state or block proof link and check it
@@ -148,6 +150,8 @@ async fn get_key_blocks(
     mut handle: Arc<BlockHandle>,
     zero_state: Option<&Arc<ShardStateStuff>>,
     mut prev_block_proof: Option<BlockProofStuff>,
+    active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+    bad_peers: &mut HashSet<Arc<KeyId>>
 ) -> Result<Vec<Arc<BlockHandle>>> {
     let mut hardfork_iter = engine.hardforks().iter();
     let mut hardfork = hardfork_iter.next();
@@ -158,11 +162,10 @@ async fn get_key_blocks(
         }
         log::info!(target: "boot", "download_next_key_blocks_ids {}", handle.id());
         // this information is not trusted
-        let ids = match engine.download_next_key_blocks_ids(handle.id()).await {
+        let ids = match engine.download_next_key_blocks_ids(handle.id(), active_peers, bad_peers).await {
             Err(err) => {
                 log::warn!(target: "boot", "download_next_key_blocks_ids {}: {}", handle.id(), err);
-                futures_timer::Delay::new(Duration::from_secs(1)).await;
-                continue;
+                return Ok(key_blocks);
             }
             Ok(ids) => {
                 if let Some(block_id) = ids.last() {
@@ -237,7 +240,7 @@ async fn get_key_blocks(
 /// choose correct masterchain state
 async fn choose_masterchain_state(
     engine: &dyn EngineOperations,
-    mut key_blocks: Vec<Arc<BlockHandle>>,
+    key_blocks: &mut Vec<Arc<BlockHandle>>,
     pss_period_bits: u32,
 ) -> Result<Arc<BlockHandle>> {
     while let Some(handle) = key_blocks.pop() {
@@ -298,13 +301,14 @@ async fn download_wc_zerostates(
 /// Download persistent master block & state, enumerate shards and download block & state for each
 async fn download_start_blocks_and_states(
     engine: &dyn EngineOperations, 
-    master_handle: &Arc<BlockHandle>
+    master_handle: &Arc<BlockHandle>,
+    active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+    bad_peers: &mut HashSet<Arc<KeyId>>,
 ) -> Result<()> {
 
     engine.set_sync_status(Engine::SYNC_STATUS_LOAD_MASTER_STATE);
-    let active_peers = Arc::new(lockfree::set::Set::new());
     let init_mc_state = download_state(
-        engine, &master_handle, master_handle.id(), &active_peers, Some(RETRY_MASTER_STATE_DOWNLOAD)
+        engine, &master_handle, master_handle.id(), active_peers, bad_peers, Some(RETRY_MASTER_STATE_DOWNLOAD)
     ).await?;
     CHECK!(master_handle.has_state());
     CHECK!(master_handle.is_applied());
@@ -314,14 +318,16 @@ async fn download_start_blocks_and_states(
 
     engine.set_sync_status(Engine::SYNC_STATUS_LOAD_SHARD_STATES);
     for block_id in &top_blocks {
-        log::info!(target: "boot", "download shardchain state {}", block_id);
+        log::info!(target: "boot", "prepare shardchain state {}", block_id);
         let shard_handle = if block_id.seq_no() == 0 {
             download_zerostate(engine, block_id).await?
         } else {
             let handle = if let Some(handle) = engine.load_block_handle(block_id)? {
+                log::info!(target: "boot", "shardchain handle already present {}", block_id);
                 handle
             } else if engine.flags().starting_block_disabled {
                 let proof = engine.download_block_proof(block_id, true, false).await?;
+                log::info!(target: "boot", "shardchain block proof downloaded {}", block_id);
                 let handle = engine.store_block_proof(block_id, None, &proof).await?
                     .to_non_created()
                     .ok_or_else(
@@ -330,6 +336,7 @@ async fn download_start_blocks_and_states(
                 handle
             } else {
                 let (block, proof) = engine.download_block(block_id, None).await?;
+                log::info!(target: "boot", "shardchain block and proof downloaded {}", block_id);
                 let handle = engine.store_block(&block).await?
                     .to_non_created()
                     .ok_or_else(
@@ -344,7 +351,8 @@ async fn download_start_blocks_and_states(
                 }
                 handle
             };
-            download_state(engine, &handle, master_handle.id(), &active_peers, None).await?;
+            log::info!(target: "boot", "download shardchain state {}", block_id);
+            download_state(engine, &handle, master_handle.id(), active_peers, bad_peers, Some(RETRY_SHARD_STATE_DOWNLOAD)).await?;
             handle
         };
         CHECK!(shard_handle.has_state());
@@ -432,6 +440,7 @@ async fn download_state(
     handle: &Arc<BlockHandle>, 
     master_id: &BlockIdExt,
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+    bad_peers: &mut HashSet<Arc<KeyId>>,
     attempts: Option<usize>
 ) -> Result<Arc<ShardStateStuff>> {
     let state = if !handle.has_state() {
@@ -465,13 +474,13 @@ async fn download_state(
         } else if handle.has_proof_link() {
             engine.load_block_proof(handle, true).await?
         } else {
-            fail!("handle for has neither proof nor proof link {}", handle.id())
+            fail!("handle has neither proof nor proof link {}", handle.id())
         };
         // let state_update = block.block_or_queue_update()?.read_state_update()?;
         let (block, _) = proof.virtualize_block()?;
         let state_update = block.read_state_update()?;
         let state = engine.download_and_store_state(
-            &handle, &state_update.new_hash, master_id, active_peers, attempts
+            &handle, &state_update.new_hash, master_id, active_peers, bad_peers, attempts
         ).await?;
         engine.process_full_state_in_ext_db(&state).await?;
         state
@@ -485,24 +494,54 @@ async fn download_state(
 /// Cold load best key block and its state
 /// Must be used only zero_state or key_block id
 pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<Arc<BlockHandle>> {
-    let (mut handle, zero_state, init_block_proof_link) = run_cold(engine.deref()).await?;
-    if !engine.flags().initial_sync_disabled {
-        let key_blocks = get_key_blocks(
-            engine.deref(), handle, zero_state.as_ref(), init_block_proof_link
+
+    const MAX_RETRIES: usize = 5;
+
+    let mut bad_peers = HashSet::new();
+    let (handle, zero_state, init_block_proof_link) = run_cold(engine.deref()).await?;
+    let active_peers = Arc::new(lockfree::set::Set::new());
+    let mut key_blocks = if !engine.flags().initial_sync_disabled {
+        get_key_blocks(
+            engine.deref(),
+            handle,
+            zero_state.as_ref(),
+            init_block_proof_link,
+            &active_peers,
+            &mut bad_peers,
+        ).await?
+    } else {
+        vec![handle]
+    };
+    
+    let mut i = 0;
+    loop {
+        let handle = choose_masterchain_state(
+            engine.deref(), 
+            &mut key_blocks, 
+            PSS_PERIOD_BITS
         ).await?;
-        
-        handle = choose_masterchain_state(engine.deref(), key_blocks, PSS_PERIOD_BITS).await?;
+        if handle.id().seq_no() == 0 {
+            let Some(zero_state) = zero_state.as_ref() else {
+                fail!("Zero state is not set")
+            };
+            download_wc_zerostates(engine.deref(), zero_state).await?;
+            break Ok(handle);
+        } else if let Err(err) = download_start_blocks_and_states(
+            engine.deref(), 
+            &handle, 
+            &active_peers, 
+            &mut bad_peers
+        ).await {
+            i += 1;
+            if i >= MAX_RETRIES {
+                break Err(err)
+            }
+            log::warn!(target: "boot", "{}", err)
+        } else {
+            break Ok(handle);
+        }
     }
 
-    if handle.id().seq_no() == 0 {
-        let Some(zero_state) = zero_state.as_ref() else {
-            fail!("Zero state is not set")
-        };
-        download_wc_zerostates(engine.deref(), zero_state).await?;
-    } else {
-        download_start_blocks_and_states(engine.deref(), &handle).await?;
-    }
-    Ok(handle)
 }
 
 pub async fn warm_boot(
@@ -510,7 +549,7 @@ pub async fn warm_boot(
     block_id: Arc<BlockIdExt>,
     hardfork_path: impl AsRef<Path>,
 ) -> Result<BlockIdExt> {
-    log::info!("Warm boot");
+    log::info!(target: "boot", "Warm boot");
     if let Some(block_id) = check_hardforks(&engine, &block_id, hardfork_path).await? {
         return Ok(block_id)
     }
