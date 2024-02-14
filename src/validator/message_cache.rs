@@ -382,7 +382,7 @@ impl MessageCacheSession {
         }
     }
 
-    fn ensure_same_message(&self, message_id: &UInt256, message: Option<Arc<RmqMessage>>, origin: Option<Arc<RempMessageOrigin>>) -> Result<()> {
+    fn update_missing_fields(&self, message_id: &UInt256, message: Option<Arc<RmqMessage>>, origin: Option<Arc<RempMessageOrigin>>) -> Result<()> {
         if let Some(m1) = &message {
             if let Some(m2) = self.messages.get(message_id) {
                 if m1 != m2.val() {
@@ -730,7 +730,7 @@ impl MessageCache {
                 Ok((None, status_if_new))
             },
             Some(session) => {
-                if let Err(e) = session.ensure_same_message(&message_id, message, message_origin) {
+                if let Err(e) = session.update_missing_fields(&message_id, message, message_origin) {
                     log::error!(target: "remp", "Different cache contents for external message {}: {}", message_id, e);
                 }
                 let (old_status, final_status) =
