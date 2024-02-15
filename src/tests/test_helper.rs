@@ -819,20 +819,6 @@ impl EngineOperations for TestEngine {
         self.now.load(Ordering::Relaxed)
     }
 
-    async fn find_mc_block_by_seq_no(&self, seqno: u32) -> Result<Arc<BlockHandle>> {
-        let mc_state = self.load_last_applied_mc_state().await?;
-        let mc_state_id = if mc_state.block_id().seq_no() == seqno {
-            mc_state.block_id().clone()
-        } else {
-            let (_, mc_state_id, _) = mc_state.shard_state_extra()?.prev_blocks.get(&seqno)?
-                .ok_or_else(|| error!("cannot find masterchain state seqno: {} last applied: {}", seqno, mc_state.block_id().seq_no()))?
-                .master_block_id();
-            mc_state_id
-        };
-        self.load_block_handle(&mc_state_id)?
-            .ok_or_else(|| error!("cannot load block handle for {} for masterchain state seqno {}", mc_state_id, seqno))
-    }
-
     fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {
         self.db.load_block_handle(id)
     }

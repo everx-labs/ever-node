@@ -13,7 +13,7 @@
 
 use crate::network::full_node_client::FullNodeOverlayClient;
 
-use std::{sync::Arc, collections::HashSet};
+use std::sync::Arc;
 use ton_block::BlockIdExt;
 use ton_types::{error, fail, KeyId, Result};
 
@@ -23,14 +23,13 @@ pub async fn download_persistent_state(
     master_id: &BlockIdExt,
     overlay: &dyn FullNodeOverlayClient,
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-    bad_peers: &mut HashSet<Arc<KeyId>>,
     attempts: Option<usize>,
     check_stop: &(dyn Fn() -> Result<()> + Sync + Send),
 ) -> Result<Arc<Vec<u8>>> {
     let mut result = None;
     for _ in 0..10 {
         match download_persistent_state_iter(
-            id, msg_queue_for, master_id, overlay, active_peers, bad_peers, attempts, check_stop,
+            id, msg_queue_for, master_id, overlay, active_peers, attempts.clone(), check_stop,
         ).await {
             Err(e) => {
                 log::warn!("download_persistent_state_iter err: {}", e);
@@ -52,7 +51,6 @@ async fn download_persistent_state_iter(
     master_id: &BlockIdExt,
     overlay: &dyn FullNodeOverlayClient,
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-    bad_peers: &mut HashSet<Arc<KeyId>>,
     mut attempts: Option<usize>,
     check_stop: &(dyn Fn() -> Result<()> + Sync + Send),
 ) -> Result<Arc<Vec<u8>>> {
@@ -72,15 +70,15 @@ async fn download_persistent_state_iter(
         check_stop()?;
         if let Some(remained) = attempts.as_mut() {
             if *remained == 0 {
-                fail!("Can't find peer to load {} {}", descr, id)
+                fail!("Can't find peer to load {} {}", descr, id.shard())
             }
             *remained -= 1;
         }
-        match overlay.check_persistent_state(id, msg_queue_for, master_id, active_peers, bad_peers).await {
+        match overlay.check_persistent_state(id, msg_queue_for, master_id, active_peers).await {
             Err(e) => 
-                log::warn!("check_persistent_state descr {}: {}, {}: {}", descr, id.shard(), id.seq_no(), e),
+                log::trace!("check_persistent_state descr {} {}: {}", descr, id.shard(), e),
             Ok(None) => 
-                log::warn!("download_persistent_state {}: {}, {} not found!", descr, id.shard(), id.seq_no()),
+                log::trace!("download_persistent_state {}: {} not found!", descr, id.shard()),
             Ok(Some(p)) => 
                 break p
         }

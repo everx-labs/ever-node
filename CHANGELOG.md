@@ -2,13 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
-## Version 0.55.92
+## Version 0.55.93
 
-- Added ability not to split out message queues during shard split
-
-## Version 0.55.91
-
-- Try to use old persistent states in cold boot if newest one is not ready yet
+- Fix compiler warnings
+- Add REMP settings to default configs
 
 ## Version 0.55.90
 
