@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.92
+
+- Added ability not to split out message queues during shard split
+
+## Version 0.55.91
+
+- Try to use old persistent states in cold boot if newest one is not ready yet
+
 ## Version 0.55.90
 
 - Backport from public 

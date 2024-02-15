@@ -370,8 +370,8 @@ impl ShardStatesKeeper {
 
         let now = std::time::Instant::now();
         log::info!(
-            "check_and_store_state: deserialize (low_memory_mode: {}) {}...",
-            low_memory_mode, handle.id()
+            "check_and_store_state: deserialize (low_memory_mode: {}) length: {}, {}...",
+            low_memory_mode, data.len(), handle.id()
         );
 
         let state_root = {
@@ -391,8 +391,8 @@ impl ShardStatesKeeper {
         }
 
         log::info!(
-            "check_and_store_state: deserialized (low_memory_mode: {}) {} TIME {}",
-            handle.id(), low_memory_mode, now.elapsed().as_millis()
+            "check_and_store_state: deserialized (low_memory_mode: {}) {} TIME {} ms",
+            low_memory_mode, handle.id(), now.elapsed().as_millis()
         );
 
         let state = self.build_state_object(state_root, handle.id(), handle.is_queue_update_for())?;

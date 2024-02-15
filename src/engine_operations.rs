@@ -432,6 +432,7 @@ impl EngineOperations for Engine {
         root_hash: &UInt256,
         master_id: &BlockIdExt,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+        bad_peers: &mut HashSet<Arc<KeyId>>,
         attempts: Option<usize>
     ) -> Result<Arc<ShardStateStuff>> {
 
@@ -451,6 +452,7 @@ impl EngineOperations for Engine {
             master_id,
             overlay.deref(),
             active_peers,
+            bad_peers,
             attempts,
             &|| {
                 if self.check_stop() {
@@ -775,10 +777,12 @@ impl EngineOperations for Engine {
         &self, 
         mesh_nw_id: i32, // zero for own network
         block_id: &BlockIdExt, 
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+        bad_peers: &mut HashSet<Arc<KeyId>>,
     ) -> Result<Vec<BlockIdExt>> {
         let mc_overlay = self.get_full_node_overlay(
             mesh_nw_id, ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL).await?;
-        mc_overlay.download_next_key_blocks_ids(block_id, 5).await
+        mc_overlay.download_next_key_blocks_ids(block_id, 5, active_peers, bad_peers).await
     }
 
     async fn set_applied(

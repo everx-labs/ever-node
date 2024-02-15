@@ -392,9 +392,11 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
     async fn download_next_key_blocks_ids(
-        &self,
+        &self, 
         mesh_nw_id: i32, // zero for own network
-        block_id: &BlockIdExt,
+        block_id: &BlockIdExt, 
+        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+        bad_peers: &mut HashSet<Arc<KeyId>>,
     ) -> Result<Vec<BlockIdExt>> {
         unimplemented!()
     }
@@ -498,6 +500,7 @@ pub trait EngineOperations : Sync + Send {
         root_hash: &UInt256,
         master_id: &BlockIdExt,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
+        bad_peers: &mut HashSet<Arc<KeyId>>,
         attempts: Option<usize>
     ) -> Result<Arc<ShardStateStuff>> {
         unimplemented!()

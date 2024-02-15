@@ -1222,27 +1222,28 @@ impl ValidatorManagerImpl {
                 }
             }
         }
-
-        let mut precalc_split_queues_for: HashSet<BlockIdExt> = HashSet::new();
-        for (_, session) in &self.validator_sessions {
-            for id in &blocks_before_split {
-                if id.shard().is_parent_for(session.shard()) {
-                    log::trace!(target: "validator_manager", "precalc_split_queues_for {}", id);
-                    precalc_split_queues_for.insert(id.clone());
+        if !mc_state.config_params()?.has_capability(GlobalCapabilities::CapNoSplitOutQueue) {
+            let mut precalc_split_queues_for: HashSet<BlockIdExt> = HashSet::new();
+            for (_, session) in &self.validator_sessions {
+                for id in &blocks_before_split {
+                    if id.shard().is_parent_for(session.shard()) {
+                        log::trace!(target: "validator_manager", "precalc_split_queues_for {}", id);
+                        precalc_split_queues_for.insert(id.clone());
+                    }
                 }
             }
-        }
-
-        // start background tasks which will precalculate split out messages queues
-        for id in precalc_split_queues_for {
-            let engine = self.engine.clone();
-            tokio::spawn(async move {
-                log::trace!(target: "validator_manager", "Split queues precalculating for {}", id);
-                match OutMsgQueueInfoStuff::precalc_split_queues(&engine, &id).await {
-                    Ok(_) => log::trace!(target: "validator_manager", "Split queues precalculated for {}", id),
-                    Err(e) => log::error!(target: "validator_manager", "Can't precalculate split queues for {}: {}", id, e)
-                }
-            });
+            
+            // start background tasks which will precalculate split out messages queues
+            for id in precalc_split_queues_for {
+                let engine = self.engine.clone();
+                tokio::spawn(async move {
+                    log::trace!(target: "validator_manager", "Split queues precalculating for {}", id);
+                    match OutMsgQueueInfoStuff::precalc_split_queues(&engine, &id).await {
+                        Ok(_) => log::trace!(target: "validator_manager", "Split queues precalculated for {}", id),
+                        Err(e) => log::error!(target: "validator_manager", "Can't precalculate split queues for {}: {}", id, e)
+                    }
+                });
+            }
         }
 
         if rotate_all_shards(&mc_state_extra) {
