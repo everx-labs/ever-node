@@ -37,9 +37,9 @@ RUNNING NETWORK 48
 ./test_run_net.sh 48 10 no-cleanup
 
 echo "
-$(date +%H:%M:%S)  WAITING 10 min...
+$(date +%H:%M:%S)  WAITING 5 min...
 "
-sleep 600
+sleep 300
 
 # register mesh networks - 48 in 23
 echo "
@@ -60,13 +60,10 @@ cp tmp/global_config_48.json ../../target/release/
 cp tmp/global_config_23.json ../../target/release/
 
 
-exit 0
-
-
 echo "
-$(date +%H:%M:%S)  WAITING 10 min...
+$(date +%H:%M:%S)  WAITING 5 min...
 "
-sleep 600
+sleep 300
 
 # activate - 48 in 23
 echo "
@@ -81,7 +78,7 @@ echo "
 ACTIVATE 23 in 48
 "
 jq '.p58[0].is_active = true' tmp/config58_23_in_48.json > tmp/config58_23_in_48_.json
-mv tmp/config58_48_in_23_.json tmp/config58_23_in_48.json
+mv tmp/config58_23_in_48_.json tmp/config58_23_in_48.json
 ./update_config.sh tmp/console11.json 58 tmp/config58_23_in_48.json
 
 

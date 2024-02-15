@@ -43,8 +43,7 @@ use storage::{StorageAlloc, block_handle_db::BlockHandle};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
 use ton_api::ton::ton_node::{
-    RempMessage, RempMessageStatus, RempReceipt, 
-    broadcast::{BlockBroadcast, QueueUpdateBroadcast},
+    broadcast::{BlockBroadcast, MeshUpdateBroadcast, QueueUpdateBroadcast}, RempMessage, RempMessageStatus, RempReceipt
 };
 use ton_block::{
     AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, ShardAccount,
@@ -763,6 +762,10 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
+    async fn send_mesh_update_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()> {
+        unimplemented!()
+    }
+
     async fn send_top_shard_block_description(
         &self,
         tbd: Arc<TopBlockDescrStuff>,
@@ -945,6 +948,14 @@ pub trait EngineOperations : Sync + Send {
     }
 
     fn save_last_mesh_key_block_id(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn load_last_mesh_mc_block_id(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
+        unimplemented!()
+    }
+
+    fn save_last_mesh_mc_block_id(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
 

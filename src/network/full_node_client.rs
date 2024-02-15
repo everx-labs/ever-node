@@ -45,7 +45,7 @@ use ton_api::{
             DataFull, KeyBlocks, Prepared, PreparedProof, PreparedState, 
             broadcast::{
                 BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast,
-                QueueUpdateBroadcast,
+                QueueUpdateBroadcast, MeshUpdateBroadcast,
             }, 
             externalmessage::ExternalMessage, 
         }, Bool
@@ -61,6 +61,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
     async fn broadcast_external_message(&self, msg: &[u8]) -> Result<BroadcastSendInfo>;
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()>;
     async fn send_queue_update_broadcast(&self, broadcast: QueueUpdateBroadcast) -> Result<()>;
+    async fn send_mesh_update_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()>;
     async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()>;
     async fn download_block_proof(&self, block_id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff>;
     async fn download_block_full(&self, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
@@ -136,6 +137,8 @@ declare_counted!(
         #[cfg(feature = "telemetry")]
         tag_queue_update_broadcast: u32,
         #[cfg(feature = "telemetry")]
+        tag_mesh_update_broadcast: u32,
+        #[cfg(feature = "telemetry")]
         tag_download_block_full: u32,
         #[cfg(feature = "telemetry")]
         tag_download_queue_update: u32,
@@ -210,6 +213,8 @@ impl NodeClientOverlay {
             tag_block_broadcast: tag_from_bare_type::<BlockBroadcast>(),
             #[cfg(feature = "telemetry")]
             tag_queue_update_broadcast: tag_from_bare_type::<QueueUpdateBroadcast>(),
+            #[cfg(feature = "telemetry")]
+            tag_mesh_update_broadcast: tag_from_bare_type::<MeshUpdateBroadcast>(),
             #[cfg(feature = "telemetry")]
             tag_download_block_full: tag_from_boxed_type::<DownloadBlockFull>(),
             #[cfg(feature = "telemetry")]
@@ -551,6 +556,26 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         log::trace!(
             "send_queue_update_broadcast {} for wc {} (overlay {}) sent to {} nodes", 
             self.overlay_id, wc, id, info.send_to
+        );
+        Ok(())
+    }
+
+    async fn send_mesh_update_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()> {
+        let id = broadcast.id.clone();
+        let broadcast = TaggedByteSlice {
+            object: &serialize_boxed(&broadcast.into_boxed())?,
+            #[cfg(feature = "telemetry")]
+            tag: self.tag_mesh_update_broadcast
+        };
+        let info = self.network_context.overlay.broadcast(
+            &self.overlay_id,
+            &broadcast,
+            None,
+            false
+        ).await?;
+        log::trace!(
+            "send_mesh_update_broadcast {} (overlay {}) sent to {} nodes", 
+            id, self.overlay_id, info.send_to
         );
         Ok(())
     }

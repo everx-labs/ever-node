@@ -12,26 +12,28 @@
 */
 
 use crate::{
-    block::{construct_and_check_prev_stuff, BlockStuff, make_queue_update_from_block_raw},
-    shard_state::ShardStateStuff,
-    block_proof::BlockProofStuff,
-    engine_traits::EngineOperations,
-    full_node::apply_block::calc_shard_state,
-    types::top_block_descr::TopBlockDescrStuff,
-    validator::validator_utils::check_crypto_signatures,
-    validating_utils::{UNREGISTERED_CHAIN_MAX_LEN, fmt_block_id_short},
+    block::{
+        BlockStuff, construct_and_check_prev_stuff, make_mesh_update_raw, 
+        make_queue_update_from_block_raw,
+    }, 
+    block_proof::BlockProofStuff, engine_traits::EngineOperations, 
+    full_node::apply_block::calc_shard_state, shard_state::ShardStateStuff, 
+    types::top_block_descr::TopBlockDescrStuff, 
+    validating_utils::{fmt_block_id_short, UNREGISTERED_CHAIN_MAX_LEN}, 
+    validator::validator_utils::check_crypto_signatures
 };
 use storage::block_handle_db::BlockHandle;
-use std::{cmp::{max, min}, sync::Arc, ops::Deref, time::Duration, collections::HashSet};
+use std::{cmp::{max, min}, collections::HashSet, ops::Deref, sync::Arc, time::Duration, vec};
 use ton_block::{
     Block, TopBlockDescr, BlockIdExt, MerkleProof, McShardRecord, CryptoSignaturePair, 
     Deserializable, BlockSignatures, ValidatorSet, BlockProof, Serializable, BlockSignaturesPure, 
     ValidatorBaseInfo, OutQueueUpdate
 };
 use ton_types::{error, Result, fail, UInt256, UsageTree, HashmapType};
-use ton_api::ton::ton_node::{
-    blocksignature::BlockSignature, broadcast::{BlockBroadcast, QueueUpdateBroadcast}
-};
+use ton_api::ton::{ton_node::{
+    blocksignature::BlockSignature, 
+    broadcast::{BlockBroadcast, MeshUpdateBroadcast, QueueUpdateBroadcast}
+}};
 
 pub async fn accept_block(
     id: BlockIdExt,
@@ -148,9 +150,14 @@ pub async fn accept_block(
     if send_block_broadcast {
         let block_broadcast = build_block_broadcast(&block, &validator_set, &signatures, proof)?;
         let queue_update_broadcasts = build_queue_update_broadcasts(&block, &validator_set, &signatures)?;
-        // let mesh_update_broadcasts = build_mesh_update_broadcasts(&block, &validator_set, &signatures)?;
         let engine = engine.clone();
         let block_descr = block_descr.clone();
+        let mesh_update_broadcasts = if block.id().shard().is_masterchain() {
+            build_mesh_update_broadcasts(&block, &signatures, engine.deref()).await?
+        } else {
+            vec!()
+        };
+
         tokio::spawn(async move {
             log::trace!(target: "validator", "({}): accept_block: sending block broadcast", block_descr);
             if let Err(e) = engine.send_block_broadcast(block_broadcast).await {
@@ -178,6 +185,22 @@ pub async fn accept_block(
                         "({}): accept_block: sent queue update broadcast for {}",
                         block_descr,
                         wc
+                    );
+                }
+            }
+            for broadcast in mesh_update_broadcasts {
+                let nw = broadcast.target_nw;
+                if let Err(e) = engine.send_mesh_update_broadcast(broadcast).await {
+                    log::warn!(
+                        target: "validator", 
+                        "({}): accept_block: error while sending mesh update broadcast for nw {}: {}",
+                        block_descr, nw, e
+                    );
+                } else {
+                    log::trace!(
+                        target: "validator",
+                        "({}): accept_block: sent mesh update broadcast for {}",
+                        block_descr, nw
                     );
                 }
             }
@@ -778,18 +801,8 @@ fn validate_proof_link(
     Ok(prev_stuff.prev)
 }
 
-fn build_block_broadcast(
-    block: &BlockStuff,
-    validator_set: &ValidatorSet,
-    signatures: &BlockSignatures,
-    proof: BlockProofStuff,
-
-) -> Result<BlockBroadcast> {
-
-    log::trace!(target: "validator", "accept_block {}: build_block_broadcast", block.id());
-
+fn pack_signatures(signatures: &BlockSignatures) -> Result<Vec<BlockSignature>> {
     let mut packed_signatures = vec!();
-
     signatures.pure_signatures.signatures().iterate_slices(|ref mut _key, ref mut slice| {
         let sign = CryptoSignaturePair::construct_from(slice)?;
         packed_signatures.push(
@@ -800,7 +813,18 @@ fn build_block_broadcast(
         );
         Ok(true)
     })?;
+    Ok(packed_signatures)
+}
 
+fn build_block_broadcast(
+    block: &BlockStuff,
+    validator_set: &ValidatorSet,
+    signatures: &BlockSignatures,
+    proof: BlockProofStuff,
+
+) -> Result<BlockBroadcast> {
+    log::trace!(target: "validator", "accept_block {}: build_block_broadcast", block.id());
+    let packed_signatures = pack_signatures(&signatures)?;
     Ok(
         BlockBroadcast {
             id: block.id().clone(),
@@ -821,19 +845,8 @@ fn build_queue_update_broadcasts(
 
     log::trace!(target: "validator", "accept_block {}: build_queue_update_broadcasts", block.id());
 
-    let mut packed_signatures = vec!();
+    let packed_signatures = pack_signatures(&signatures)?;
     let mut broadcasts = vec!();
-
-    signatures.pure_signatures.signatures().iterate_slices(|ref mut _key, ref mut slice| {
-        let sign = CryptoSignaturePair::construct_from(slice)?;
-        packed_signatures.push(
-            BlockSignature {
-                who: UInt256::with_array(*sign.node_id_short.as_slice()),
-                signature: ton_api::ton::bytes(sign.sign.to_bytes().to_vec())
-            }
-        );
-        Ok(true)
-    })?;
 
     if let Some(updates) = block.block()?.out_msg_queue_updates.as_ref() {
         updates.iterate_with_keys(|wc_id: i32, update: OutQueueUpdate| {
@@ -855,13 +868,37 @@ fn build_queue_update_broadcasts(
     Ok(broadcasts)
 }
 
-fn build_mesh_update_broadcasts(
+async fn build_mesh_update_broadcasts(
     block: &BlockStuff,
-    validator_set: &ValidatorSet,
     signatures: &BlockSignatures,
-) -> Result<Vec<QueueUpdateBroadcast>> {
+    engine: &dyn EngineOperations,
+) -> Result<Vec<MeshUpdateBroadcast>> {
 
     log::trace!(target: "validator", "accept_block {}: build_mesh_update_broadcasts", block.id());
+    let last_mc_state = engine.load_state(block.id()).await?;
+    let mut broadcasts = vec!();
 
-    unimplemented!()
+    if let Some(mesh_config) = last_mc_state.config_params()?.mesh_config()? {
+        let mut active_nws = vec!();
+        mesh_config.iterate_with_keys(|nw_id: i32, nw_config| {
+            if nw_config.is_active {
+                active_nws.push((nw_id, nw_config));
+            }
+            Ok(true)
+        })?;
+        if !active_nws.is_empty() {
+            for (nw_id, nw_config) in active_nws {
+                if nw_config.is_active {
+                    let mu = make_mesh_update_raw(block, nw_id, signatures.clone(), engine).await?;
+                    broadcasts.push(MeshUpdateBroadcast {
+                        src_nw: last_mc_state.state()?.global_id(),
+                        id: block.id().clone(),
+                        target_nw: nw_id,
+                        data: ton_api::ton::bytes(mu),
+                    });
+                }
+            }
+        }
+    }
+    Ok(broadcasts)
 }

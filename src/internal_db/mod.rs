@@ -51,6 +51,7 @@ pub const ASSUME_OLD_FORMAT_CELLS: &str  = "AssumeOldFormatCells";
 pub const LAST_UNNEEDED_KEY_BLOCK: &str  = storage::db::rocksdb::LAST_UNNEEDED_KEY_BLOCK;
 
 pub const LAST_MESH_KEYBLOCK: &str       = "LastMeshKeyBlockId";
+pub const LAST_MESH_MC_BLOCK: &str       = "LastMeshMcBlockId";
 pub const LAST_MESH_HARDFORK_BLOCK: &str = "LastMeshHardforkBlockId";
 
 pub const DB_VERSION: &str  = "DbVersion";

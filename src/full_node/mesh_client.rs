@@ -1,12 +1,12 @@
-use std::{ops::Deref, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration, collections::HashMap};
+use std::{collections::HashMap, ops::Deref, sync::{atomic::{AtomicBool, AtomicU32, Ordering}, Arc}, time::{Duration, Instant}};
 
 use ton_block::{BlockIdExt, ConnectedNwConfig};
 use ton_types::{error, fail,  Result};
+use ton_api::ton::ton_node::broadcast::MeshUpdateBroadcast;
 
 use storage::block_handle_db::BlockHandle;
 use crate::{
-    block_proof::BlockProofStuff, engine_traits::EngineOperations, 
-    shard_state::ShardStateStuff, block::BlockStuff, boot::PSS_PERIOD_BITS,
+    block::BlockStuff, block_proof::BlockProofStuff, boot::PSS_PERIOD_BITS, engine_traits::EngineOperations, shard_state::ShardStateStuff
 };
 
 #[derive(Clone)]
@@ -15,6 +15,7 @@ enum BlockProofOrZerostate {
     Zerostate(Arc<ShardStateStuff>),
     None,
 }
+
 
 impl BlockProofOrZerostate {
     pub fn with_zerostate(zerostate: Arc<ShardStateStuff>) -> Self {
@@ -67,7 +68,21 @@ impl<'a> Boot<'a> {
 
         boot.engine.init_mesh_network(nw_id, &boot.nw_config.zerostate).await?;
 
-        let last_commited_block = boot.process_hardforks(last_commited_block.clone())?;
+        let mut last_known_block = boot.find_last_known_block(last_commited_block)?;
+
+        boot.process_hardforks(&mut last_known_block)?;
+
+        if let Some(last_known_block) = last_known_block {
+            match boot.warm_boot(last_known_block).await {
+                Ok((lbh, kb)) => {
+                    log::info!("{}: warm boot finished. Latest block: {}", boot.descr, lbh.id());
+                    return Ok((lbh, kb));
+                }
+                Err(e) => {
+                    log::warn!("{}: warm boot failed: {}. Start cold boot.", boot.descr, e);
+                }
+            }
+        }
 
         let (handle, init_block_proof_or_zs) = boot.get_init_point().await?;
 
@@ -77,13 +92,37 @@ impl<'a> Boot<'a> {
             || error!("INTERNAL ERROR: last key block is none")
         )?);
 
-        let latest_block_handle =
-            boot.get_latest_block(last_commited_block.as_ref(), &last_block_proof_or_zs).await?;
+        let latest_block_handle = boot.get_latest_block(None, &last_block_proof_or_zs).await?;
+        log::info!("{}: Cold boot finished. Latest block {}", boot.descr, latest_block_handle.id());
 
         Ok((latest_block_handle, last_block_proof_or_zs))
     }
 
-    pub fn check_nw_config(&self) -> Result<()> {
+    fn find_last_known_block(&self, last_commited_block: Option<BlockIdExt>) -> Result<Option<BlockIdExt>> {
+        let last_applied_block = self.engine.load_last_mesh_mc_block_id(self.nw_id)?;
+
+        log::trace!("{}: last commited block: {:?}", self.descr, last_commited_block);
+        log::trace!("{}: last applied block: {:?}", self.descr, last_applied_block);
+
+        let last_known_block = match (last_commited_block, last_applied_block) {
+            (Some(commited), Some(applied)) => {
+                if commited.seq_no() > applied.seq_no() {
+                    Some(commited)
+                } else {
+                    Some((*applied).clone())
+                }
+            }
+            (Some(commited), None) => Some(commited),
+            (None, Some(applied)) => Some((*applied).clone()),
+            (None, None) => None,
+        };
+
+        log::trace!("{}: last known block: {:?}", self.descr, last_known_block);
+
+        Ok(last_known_block)
+    }
+
+    fn check_nw_config(&self) -> Result<()> {
 
         if let Some(last_hf) = self.nw_config.hardforks.last() {
             if self.nw_config.init_block.seq_no() < last_hf.seq_no() {
@@ -100,7 +139,7 @@ impl<'a> Boot<'a> {
         Ok(())
     }
 
-    pub fn process_hardforks(&self, mut last_commited_block: Option<BlockIdExt>) -> Result<Option<BlockIdExt>> {
+    fn process_hardforks(&self, last_commited_block: &mut Option<BlockIdExt>) -> Result<()> {
 
         if let Some(last_hf) = self.nw_config.hardforks.last() {
             let last_processed_hf = self.engine.load_last_mesh_processed_hardfork(self.nw_id)?;
@@ -115,7 +154,7 @@ impl<'a> Boot<'a> {
                     }
                     log::info!("{}: hardforks are already processed up to {}", 
                         self.descr, last_processed_hf);
-                    return Ok(last_commited_block);
+                    return Ok(());
                 }
                 if last_processed_hf.seq_no() > last_hf.seq_no() {
                     fail!(
@@ -126,14 +165,14 @@ impl<'a> Boot<'a> {
                 }
             }
 
-            if let Some(last_commited_block) = last_commited_block {
+            if let Some(last_commited_block) = &last_commited_block {
                 if last_commited_block.seq_no() < last_hf.seq_no() {
                     log::info!(
                         "{}: last hardfork is {}, last commited block is {}. Continue with hardfork",
                         self.descr, last_hf, last_commited_block
                     );
                 } else if last_commited_block.seq_no() == last_hf.seq_no() {
-                    if last_commited_block != *last_hf {
+                    if last_commited_block != last_hf {
                         fail!(
                             "FATAL: last commited block {} is not equal to last hardfork {}",
                             last_commited_block, last_hf
@@ -152,10 +191,42 @@ impl<'a> Boot<'a> {
             }
 
             self.engine.save_last_mesh_processed_hardfork(self.nw_id, last_hf)?;
-
-            last_commited_block = None;
         }
-        Ok(last_commited_block)
+        Ok(())
+    }
+
+    async fn warm_boot(
+        &self,
+        last_known_block: BlockIdExt,
+    ) -> Result<(Arc<BlockHandle>, BlockProofOrZerostate)> {
+
+        let Ok(Some(handle)) = self.engine.load_block_handle(&last_known_block) else {
+            fail!("last known block {} is not in DB", self.descr);
+        };
+
+        if handle.gen_utime()? + 5 * 60 < self.engine.now() {
+            fail!("last known block {} is too old", last_known_block);
+        }
+
+        let last_key_block_id = self.engine.load_last_mesh_key_block_id(self.nw_id)?
+            .ok_or_else(|| error!("last key block {} is not in DB", last_known_block))?;
+
+        let last_key_block_proof = if last_key_block_id.seq_no() == 0 {
+            BlockProofOrZerostate::with_zerostate(
+                self.engine.load_state(&last_key_block_id).await?
+            )
+        } else {
+            let handle = self.engine.load_block_handle(&last_key_block_id)?
+                .ok_or_else(|| error!("last key block {} is not in DB", last_key_block_id))?;
+            BlockProofOrZerostate::with_key_block(
+                self.engine.load_block_proof(&handle, false).await?
+            )
+        };
+
+        let latest_block_handle = 
+            self.get_latest_block(Some(&last_known_block), &last_key_block_proof).await?;
+
+        Ok((latest_block_handle, last_key_block_proof))
     }
 
     async fn get_init_point(&self)
@@ -291,7 +362,7 @@ impl<'a> Boot<'a> {
             }
 
             // if we got last key block more then 30 sec ago
-            // and last key block + pss interval > now - finish
+            // and last key block time + pss interval > now  - finish
             if now - got_last_block_at > 30 {
                 let pss_interval = 1 << PSS_PERIOD_BITS;
                 let last_block_utime = prev_handle.gen_utime()?;
@@ -490,6 +561,8 @@ pub struct ConnectedNwClient {
     nw_id: i32,
     descr: String,
     stop: AtomicBool,
+    last_key_block_proof: parking_lot::RwLock<Arc<BlockProofOrZerostate>>,
+    last_applied_block_seqno: AtomicU32,
 }
 
 impl ConnectedNwClient {
@@ -500,13 +573,20 @@ impl ConnectedNwClient {
         nw_config: ConnectedNwConfig
     ) -> Arc<Self> {
         let descr = format!("mesh nw client {}", nw_id);
-        let client = Arc::new(Self { engine, nw_id, descr, stop: AtomicBool::new(false) });
+        let client = Arc::new(Self { 
+            engine, 
+            nw_id,
+            descr,
+            stop: AtomicBool::new(false),
+            last_key_block_proof: parking_lot::RwLock::new(Arc::new(BlockProofOrZerostate::None)),
+            last_applied_block_seqno: AtomicU32::new(0),
+        });
 
         tokio::spawn({
             let client = client.clone();
             async move {
 
-                // Boot
+                // Boot 
                 let (last_mc_block, last_key_block) = 'l: loop {
                     match Boot::boot(
                         client.engine.clone(), client.nw_id, &nw_config, last_block_id.clone()
@@ -523,8 +603,11 @@ impl ConnectedNwClient {
                     }
                 };
 
+                client.set_last_applied_block_seqno(last_mc_block.id().seq_no);
+                client.set_last_key_block_proof(Arc::new(last_key_block));
+
                 // Start worker
-                if let Err(e) = client.worker(last_mc_block, last_key_block).await {
+                if let Err(e) = client.worker(last_mc_block).await {
                     log::error!("{}: FATAL: worker failed: {}", client.descr, e);
                 }
             }
@@ -537,26 +620,39 @@ impl ConnectedNwClient {
         self.stop.store(true, Ordering::Relaxed);
     }
 
-    pub fn process_broadcast(&self) -> Result<()> {
+    pub async fn process_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()> {
+        log::debug!("{}: process_broadcast {}", self.descr, broadcast.id);
 
-        // process broadcast with mc block and queues updates - check proof and save block and updates
+        // Basic checks
+        let last_applied_seqno = self.last_applied_block_seqno();
+        if broadcast.id.seq_no <= last_applied_seqno {
+            log::debug!("{}: ignore broadcast {} because it is already applied (last applied: {})", 
+                self.descr, broadcast.id, last_applied_seqno);
+            return Ok(());
+        }
+        if broadcast.id.seq_no > last_applied_seqno + 1 {
+            log::warn!("{}: ignore broadcast {} because it is too new (last applied: {})", 
+                self.descr, broadcast.id, last_applied_seqno);
+            return Ok(());
+        }
 
-        unimplemented!()
-    }
+        let (mesh_update, proof) = BlockStuff::deserialize_mesh_update(
+            broadcast.src_nw,
+            broadcast.id,
+            broadcast.target_nw,
+            broadcast.data.0
+        )?;
 
-    pub fn process_commited(&self, block_id: BlockIdExt) -> Result<()> {
+        self.check_proof(&proof)?;
 
-        // new block of connected nw was commited into masterchain
+        self.save_and_apply_block(&mesh_update, proof, " process_broadcast:").await?;
 
-        // if we don't know about this block - download it
-
-        unimplemented!()
+        Ok(())
     }
 
     async fn worker(
         &self,
         mut last_mc_block: Arc<BlockHandle>,
-        mut last_key_block_proof: BlockProofOrZerostate,
     ) -> Result<()> {
 
         loop {
@@ -570,76 +666,123 @@ impl ConnectedNwClient {
                 continue;
             }
 
-            if last_mc_block.has_next1() {
-                let next = self.engine.load_block_next1(last_mc_block.id())?;
-                if let Some(next_mc_block) = self.engine.load_block_handle(&next)? {
-                    if next_mc_block.is_applied() {
-                        last_mc_block = next_mc_block;
-                        continue;
+            let (mesh_update, proof) = loop {
+                if last_mc_block.has_next1() {
+                    let next = self.engine.load_block_next1(last_mc_block.id())?;
+                    if let Some(next_mc_block) = self.engine.load_block_handle(&next)? {
+                        if next_mc_block.is_applied() {
+                            log::trace!("{}: {} already has next block {}", 
+                                self.descr, last_mc_block.id(), next_mc_block.id());
+                            last_mc_block = next_mc_block;
+                            continue;
+                        }
                     }
                 }
-            }
 
-            log::trace!("{}: downloading next block... prev: {}", self.descr, last_mc_block.id());
+                log::trace!("{}: downloading next block... prev: {}", self.descr, last_mc_block.id());
 
+                let (mesh_update, proof) =
+                    self.engine.download_next_block(self.nw_id, last_mc_block.id()).await?;
+                log::trace!("{}: downloading next block: got {}", self.descr, mesh_update.id());
 
-            let (mesh_update, proof) =
-                self.engine.download_next_block(self.nw_id, last_mc_block.id()).await?;
-            log::trace!("{}: downloading next block: got {}", self.descr, mesh_update.id());
-
-            if mesh_update.id().seq_no != last_mc_block.id().seq_no + 1 ||
-               mesh_update.id().shard_id != last_mc_block.id().shard_id 
-            {
-                log::warn!("{}: invalid next master block, got: {}, prev: {}",
-                    self.descr, mesh_update.id(), last_mc_block.id());
-            }
-
-            // Check proof
-            if let Some(zerostate) = last_key_block_proof.zerostate() {
-                log::trace!("{}: checking with zerostate, mesh update: {}", self.descr, mesh_update.id());
-                if let Err(e) = proof.check_with_master_state(zerostate) {
-                    log::warn!(
-                        "{}: mesh kit {} check with zerostate failed: {}",
-                        self.descr, mesh_update.id(), e
-                    );
-                    futures_timer::Delay::new(Duration::from_secs(1)).await;
-                    continue;
-                } 
-            } else if let Some(key_block_proof) = last_key_block_proof.block_proof() {
-                log::trace!(
-                    "{}: checking with prev key block proof {}, mesh update: {}",
-                    self.descr, key_block_proof.id(), mesh_update.id()
-                );
-                if let Err(e) = proof.check_with_prev_key_block_proof(key_block_proof) {
-                    log::warn!(
-                        "{}: mesh kit {} check with prev key block proof {} failed: {}",
-                        self.descr, mesh_update.id(), key_block_proof.id(), e
-                    );
-                    futures_timer::Delay::new(Duration::from_secs(1)).await;
+                if mesh_update.id().seq_no != last_mc_block.id().seq_no + 1 ||
+                   mesh_update.id().shard_id != last_mc_block.id().shard_id 
+                {
+                    log::warn!("{}: invalid next master block, got: {}, prev: {}",
+                        self.descr, mesh_update.id(), last_mc_block.id());
+                }
+                if last_mc_block.has_next1() {
+                    // block is almost applied
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 }
-            } else {
-                fail!("INTERNAL ERROR: there is no both zerostate and prev key block proof");
+                break (mesh_update, proof)
+            };
+
+            // Check proof
+            if let Err(e) = self.check_proof(&proof) {
+                log::warn!(
+                    "{}: mesh kit {} check failed: {}",
+                    self.descr, mesh_update.id(), e
+                );
+                futures_timer::Delay::new(Duration::from_secs(1)).await;
+                continue;
             }
 
-            // save
-            log::trace!("{}: saving mesh update {}...", self.descr, mesh_update.id());
-            let handle = self.engine.store_block(&mesh_update).await?.to_any();
+            last_mc_block = self.save_and_apply_block(&mesh_update, proof, "").await?;
+        }
+    }
 
-            // apply
-            log::trace!("{}: applying mesh update {}...", self.descr, mesh_update.id());
-            self.engine.clone().apply_block(&handle, &mesh_update, 0, false).await?;
+    async fn save_and_apply_block(
+        &self,
+        mesh_update: &BlockStuff,
+        proof: BlockProofStuff,
+        logged_prefix: &str,
+    ) -> Result<Arc<BlockHandle>> {
+        // save
+        log::trace!("{}:{} saving mesh update {}...", self.descr, logged_prefix, mesh_update.id());
+        let mut handle = self.engine.store_block(&mesh_update).await?.to_any();
 
-            if mesh_update.is_key_block()? {
-                log::trace!("{}: update last key block to: {}", self.descr, mesh_update.id());
-                last_key_block_proof = BlockProofOrZerostate::with_key_block(proof);
-                self.engine.save_last_mesh_key_block_id(self.nw_id, mesh_update.id())?;
-            }
+        // apply
+        log::trace!("{}:{} applying mesh update {}...", self.descr, logged_prefix, mesh_update.id());
+        self.engine.clone().apply_block(&handle, &mesh_update, 0, false).await?;
+        self.set_last_applied_block_seqno(mesh_update.id().seq_no);
 
-            last_mc_block = handle;
-            log::trace!("{}: applied {}", self.descr, mesh_update.id());
+        if mesh_update.is_key_block()? {
+            log::trace!("{}:{} update last key block to: {}", self.descr, logged_prefix, mesh_update.id());
+            handle = self.engine.store_block_proof(
+                self.nw_id, proof.id(), Some(handle), &proof).await?.to_any();
+            self.set_last_key_block_proof(Arc::new(BlockProofOrZerostate::KeyBlock(proof)));
+            self.engine.save_last_mesh_key_block_id(self.nw_id, mesh_update.id())?;
         }
 
+        log::trace!("{}:{} applied {}", self.descr, logged_prefix, mesh_update.id());
+        Ok(handle)
+    }
+
+    fn check_proof(&self, proof: &BlockProofStuff) -> Result<()> {
+        // Check proof
+        let last_key_block_proof = self.last_key_block_proof();
+        if let Some(zerostate) = last_key_block_proof.zerostate() {
+            log::trace!("{}: checking with zerostate, mesh update: {}", self.descr, proof.id());
+            proof.check_with_master_state(zerostate)?;
+        } else if let Some(key_block_proof) = last_key_block_proof.block_proof() {
+            log::trace!(
+                "{}: checking with prev key block proof {}, mesh update: {}",
+                self.descr, key_block_proof.id(), proof.id()
+            );
+            proof.check_with_prev_key_block_proof(key_block_proof)?;
+        } else {
+            fail!("INTERNAL ERROR: there is no both zerostate and prev key block proof");
+        }
+        Ok(())
+    }
+
+    fn last_key_block_proof(&self) -> Arc<BlockProofOrZerostate> {
+        let now = Instant::now();
+        let p = self.last_key_block_proof.read().clone();
+        if now.elapsed().as_millis() > 1 {
+            log::warn!("{}: last_key_block_proof long mutex read {} nanos", 
+                self.descr, now.elapsed().as_nanos());
+        }
+        p
+    }
+
+    fn set_last_key_block_proof(&self, proof: Arc<BlockProofOrZerostate>) {
+        let now = Instant::now();
+        *self.last_key_block_proof.write() = proof;
+        if now.elapsed().as_millis() > 1 {
+            log::warn!("{}: last_key_block_proof long mutex write {} nanos", 
+                self.descr, now.elapsed().as_nanos());
+        }
+    }
+
+    fn last_applied_block_seqno(&self) -> u32 {
+        self.last_applied_block_seqno.load(Ordering::Relaxed)
+    }
+
+    fn set_last_applied_block_seqno(&self, seqno: u32) {
+        self.last_applied_block_seqno.store(seqno, Ordering::Relaxed);
     }
 
 }
@@ -730,7 +873,11 @@ impl MeshClient {
 
             for (nw_id, block_id) in mc_block.mesh_top_blocks()? {
                 if let Some(_client) = self.clients.get(&nw_id) {
-                    // TODO client.val().process_commited(block_id)?;
+
+                    // TODO:
+                    // If commited block is much newer then last applied by worker -
+                    // then restart the worker with new commited block.
+
                 } else {
                     log::warn!("Found commit block {block_id} of unknown network {nw_id}");
                 }
@@ -745,6 +892,7 @@ impl MeshClient {
     }
 
     async fn update_clients(&self, mc_state: &ShardStateStuff) -> Result<()> {
+
         let Some(mesh_config) = mc_state.config_params()?.mesh_config()? else {
             log::debug!("MeshClient: there is no mesh config in mc block {}", mc_state.block_id());
             return Ok(());
@@ -789,10 +937,12 @@ impl MeshClient {
         Ok(())
     }
 
-    fn process_broadcast(&self) -> Result<()> {
+    pub async fn process_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()> {
     
-        // call process_broadcast in ConnectedNwClient
+        let client = self.clients.get(&broadcast.src_nw)
+            .ok_or_else(|| error!("MeshClient: unknown network {}", broadcast.src_nw))?;
+        client.val().process_broadcast(broadcast).await?;
 
-        unimplemented!()
+        Ok(())
     }
 }

@@ -23,10 +23,17 @@ impl MeshQueuesKeeper {
         let now = std::time::Instant::now();
         let mut total = 0;
         let mut cleaned = 0;
+
+
+        // TODO while mesh nw is not active it is not commited to our masterchain, so we don't know 
+        // what to delete. It is not a big deal, because queues are empty, but we should fix it somehow.
+
+
         for guard in &self.queues {
             total += 1;
-            let (nw_id, mc_id, _shard) = guard.key();
+            let (nw_id, mc_id, shard) = guard.key();
             if cache_resolver.allow_state_gc(*nw_id, mc_id, 0, 0)? {
+                log::trace!("MeshQueuesKeeper::gc: removing queue for {nw_id} {mc_id} {shard}");
                 self.queues.remove(guard.key());
                 cleaned +=1;
             }

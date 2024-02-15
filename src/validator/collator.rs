@@ -50,17 +50,17 @@ use std::{
     time::{Duration, Instant}
 };
 use ton_block::{
-    Account, AccountIdPrefixFull, AddSub, BlkPrevInfo, Block, BlockCreateStats, BlockExtra, 
-    BlockIdExt, BlockInfo, ChildCell, CommonMessage, CommonMsgInfo, ConfigParams, 
-    ConnectedNwDescrExt, ConnectedNwOutDescr, CopyleftRewards, CreatorStats, CurrencyCollection, 
-    Deserializable, ExtBlkRef, FutureSplitMerge, GetRepresentationHash, GlobalCapabilities, 
-    GlobalVersion, Grams, HashUpdate, HashmapAugType, InMsg, InMsgDescr, InRefValue, 
-    InternalMessageHeader, KeyExtBlkRef, KeyMaxLt, Libraries, McBlockExtra, McShardRecord, 
+    Account, AccountIdPrefixFull, AddSub, BlkPrevInfo, Block, BlockCreateStats, BlockExtra,
+    BlockIdExt, BlockInfo, ChildCell, CommonMessage, CommonMsgInfo, ConfigParams, ConnectedNwDescr,
+    ConnectedNwDescrExt, ConnectedNwOutDescr, CopyleftRewards, CreatorStats, CurrencyCollection,
+    Deserializable, ExtBlkRef, FutureSplitMerge, GetRepresentationHash, GlobalCapabilities,
+    GlobalVersion, Grams, HashUpdate, HashmapAugType, InMsg, InMsgDescr, InRefValue,
+    InternalMessageHeader, KeyExtBlkRef, KeyMaxLt, Libraries, McBlockExtra, McShardRecord,
     McStateExtra, MerkleUpdate, MeshHashes, MeshHashesExt, MeshMsgQueuesInfo, Message,
     MsgAddressInt, OutMsg, OutMsgDescr, OutMsgQueueInfo, OutMsgQueueKey, OutQueueUpdates,
-    ParamLimitIndex, Serializable, ShardAccount, ShardAccountBlocks, ShardAccounts, ShardDescr, 
+    ParamLimitIndex, Serializable, ShardAccount, ShardAccountBlocks, ShardAccounts, ShardDescr,
     ShardFees, ShardHashes, ShardIdent, ShardStateSplit, ShardStateUnsplit, TopBlockDescrSet,
-    Transaction, TransactionTickTock, UnixTime32, ValidatorSet, ValueFlow, VarUInteger32, 
+    Transaction, TransactionTickTock, UnixTime32, ValidatorSet, ValueFlow, VarUInteger32,
     WorkchainDescr, Workchains, MASTERCHAIN_ID, SERDE_OPTS_COMMON_MESSAGE, SERDE_OPTS_EMPTY
 };
 use ton_executor::{
@@ -604,6 +604,22 @@ impl CollatorData {
         Ok(())
     }
 
+    fn mesh(&self) -> Result<&MeshHashes> {
+        self.mesh.as_ref().ok_or_else(|| error!("`mesh` is not initialized yet"))
+    }
+
+    fn mesh_mut(&mut self) -> Result<&mut MeshHashes> {
+        self.mesh.as_mut().ok_or_else(|| error!("`mesh` is not initialized yet"))
+    }
+
+    fn set_mesh(&mut self, mesh: MeshHashes) -> Result<()> {
+        if self.mesh.is_some() {
+            fail!("`mesh` is already initialized")
+        }
+        self.mesh = Some(mesh);
+        Ok(())
+    }
+    
     //
     // fields with default values
     //
@@ -1342,7 +1358,7 @@ impl Collator {
                 &mc_data,
                 &mut collator_data
             )?;
-        } else {
+            self.import_new_mesh_blocks(&prev_data, &mc_data, &mut collator_data)?;
         }
 
         self.init_lt(&mc_data, &prev_data, &mut collator_data)?;
@@ -2130,20 +2146,57 @@ impl Collator {
     }
 
     fn import_new_mesh_blocks(
-        &self
-    
-    
+        &self,
+        prev_data: &PrevData,
+        mc_data: &McData,
+        collator_data: &mut CollatorData
     ) -> Result<()> {
+        if let Some(mesh_config) = mc_data.config().mesh_config()? {
 
+            log::trace!("{}: import_new_mesh_blocks", self.collated_block_descr);
 
+            let mut mesh_hashes = MeshHashes::new();
+            mesh_config.iterate_with_keys(|nw_id: i32, nw_config| {
 
+                if nw_config.is_active {
 
+                    let last_applied = self.engine.load_last_mesh_mc_block_id(nw_id)?
+                        .ok_or_else(|| error!("cannot get last mesh block id for network {}", nw_id))?;
 
+                    if let Some(descr) = mc_data.mc_state_extra().mesh.get(&nw_id)? {
+                        if descr.seq_no >= last_applied.seq_no {
+                            mesh_hashes.set(&nw_id, &descr)?;
+                            log::debug!("{}: skip mesh network {} block {} (already applied)",
+                                self.collated_block_descr, nw_id, last_applied);
+                            return Ok(true);
+                        }
+                    }
 
+                    log::trace!("{}: connected network {} is updated upto {}", 
+                        self.collated_block_descr, nw_id, last_applied);
 
+                    let handle = self.engine.load_block_handle(&last_applied)?
+                        .ok_or_else(|| error!("cannot get block handle for {} {}", nw_id, last_applied))?;
+                    let new_descr = ConnectedNwDescr {
+                        seq_no: last_applied.seq_no,
+                        root_hash: last_applied.root_hash().clone(),
+                        file_hash: last_applied.file_hash().clone(),
+                        imported: VarUInteger32::zero(),
+                        gen_utime: handle.gen_utime()?,
+                    };
+                    mesh_hashes.set(&nw_id, &new_descr)?;
+                } else {
+                    log::trace!("{}: connected network {} is not active", 
+                        self.collated_block_descr, nw_id);
+                }
+                Ok(true)
+            })?;
 
-
-        unimplemented!()
+            collator_data.set_mesh(mesh_hashes)?;
+        } else {
+            log::trace!("{}: import_new_mesh_blocks - there are no connected networks", self.collated_block_descr);
+        }
+        Ok(())
     }
 
     //
@@ -3052,9 +3105,10 @@ impl Collator {
                 let descr = if nw_config.is_active {
                     log::trace!("{}: create_block_mesh_descrs: {} is active",
                         self.collated_block_descr, nw_id);
-                    collator_data.mesh.as_ref()
-                        .ok_or_else(|| error!("INTERNAL ERROR: collator_data.mesh is None"))?
-                        .get(&nw_id)? 
+                    Some(collator_data.mesh()?
+                        .get(&nw_id)?
+                        .ok_or_else(|| error!("INTERNAL ERROR: can't get descr for {}", nw_id))?
+                    )
                 } else {
                     log::trace!("{}: create_block_mesh_descrs: {} is not active",
                         self.collated_block_descr, nw_id);
@@ -3232,6 +3286,13 @@ impl Collator {
         // 3. save new shard_hashes
         // just take collator_data.shards()
 
+        // 3.5 save new mesh descriptions
+        let mesh = if let Some(mesh_config) = old_config.mesh_config()? {
+            collator_data.mesh()?.clone()
+        } else {
+            MeshHashes::default()
+        };
+
         // 4. check extension flags
         // tate_extra.flags is checked in the McStateExtra::read_from 
 
@@ -3318,7 +3379,7 @@ impl Collator {
                 block_create_stats, 
                 global_balance,
                 state_copyleft_rewards: CopyleftRewards::default(),
-                mesh: MeshHashes::default(),
+                mesh
             }, 
             min_ref_mc_seqno
         ))

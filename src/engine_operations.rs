@@ -12,25 +12,27 @@
 */
 
 use crate::{
-    block::{BlockStuff, BlockKind}, block_proof::BlockProofStuff, 
-    config::{CollatorTestBundlesGeneralConfig, CollatorConfig}, engine::{Engine, EngineFlags},
+    block::{BlockKind, BlockStuff}, 
+    block_proof::BlockProofStuff, config::{CollatorConfig, CollatorTestBundlesGeneralConfig},
+    engine::{Engine, EngineFlags}, 
     engine_traits::{
-        ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, Server,
-        RempCoreInterface, RempDuplicateStatus
-    },
-    error::NodeError,
+        ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, RempCoreInterface, 
+        RempDuplicateStatus, Server
+    }, 
+    error::NodeError, 
+    ext_messages::{create_ext_message, EXT_MESSAGES_TRACE_TARGET}, 
     internal_db::{
-        INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, LAST_ROTATION_MC_BLOCK, SHARD_CLIENT_MC_BLOCK,
-        BlockResult, LAST_MESH_HARDFORK_BLOCK, LAST_MESH_KEYBLOCK,
-    },
-    shard_state::ShardStateStuff,
-    types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
-    ext_messages::{create_ext_message, EXT_MESSAGES_TRACE_TARGET},
+        BlockResult, INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, LAST_MESH_HARDFORK_BLOCK, 
+        LAST_MESH_KEYBLOCK, LAST_MESH_MC_BLOCK, LAST_ROTATION_MC_BLOCK, SHARD_CLIENT_MC_BLOCK
+    }, 
     jaeger,
+    shard_state::ShardStateStuff,
+    shard_states_keeper::PinnedShardStateGuard,
+    types::top_block_descr::{TopBlockDescrId, TopBlockDescrStuff},
     validator::{
         validator_manager::ValidationStatus,
         validator_utils::validatordescr_to_catchain_node,
-    }, shard_states_keeper::PinnedShardStateGuard
+    }
 };
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::ValidatedBlockStat;
@@ -52,8 +54,8 @@ use storage::block_handle_db::BlockHandle;
 use ton_api::{
     serialize_boxed, 
     ton::ton_node::{
-        RempMessage, RempMessageStatus, RempReceipt, 
-        broadcast::{BlockBroadcast, QueueUpdateBroadcast}
+        broadcast::{BlockBroadcast, MeshUpdateBroadcast, QueueUpdateBroadcast}, RempMessage,
+        RempMessageStatus, RempReceipt
     }, IntoBoxed
 };
 use ton_block::{
@@ -941,6 +943,20 @@ impl EngineOperations for Engine {
         Ok(())
     }
 
+    async fn send_mesh_update_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()> {
+        let overlay = self.get_full_node_overlay(
+            broadcast.target_nw,
+            MASTERCHAIN_ID,
+            SHARD_FULL,
+        ).await?;
+        
+        log::trace!("send_mesh_update_broadcast {} to {}", broadcast.id, broadcast.target_nw);
+        overlay.send_mesh_update_broadcast(broadcast).await?;
+        #[cfg(feature = "telemetry")]
+        self.full_node_telemetry().sent_block_broadcast(); // TODO
+        Ok(())
+    }
+
     async fn send_top_shard_block_description(
         &self,
         tbd: Arc<TopBlockDescrStuff>,
@@ -1310,6 +1326,14 @@ impl EngineOperations for Engine {
 
     fn save_last_mesh_key_block_id(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
         self.db().save_full_node_mesh_state(nw_id, LAST_MESH_KEYBLOCK, id)
+    }
+
+    fn load_last_mesh_mc_block_id(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
+        self.db().load_full_node_mesh_state(nw_id, LAST_MESH_MC_BLOCK)
+    }
+
+    fn save_last_mesh_mc_block_id(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
+        self.db().save_full_node_mesh_state(nw_id, LAST_MESH_MC_BLOCK, id)
     }
 
     fn load_last_mesh_processed_hardfork(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {

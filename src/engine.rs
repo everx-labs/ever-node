@@ -81,7 +81,8 @@ use storage::{StorageTelemetry, types::StorageCell};
 use ton_api::ton::ton_node::{
     Broadcast, 
     broadcast::{
-        BlockBroadcast, QueueUpdateBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast
+        BlockBroadcast, QueueUpdateBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast,
+        MeshUpdateBroadcast
     }
 };
 use ton_block::{
@@ -1519,8 +1520,13 @@ impl Engine {
         } else {
             if !pre_apply {
                 let first_time_applied = self.set_applied(handle, mc_seq_no).await?;
-                if first_time_applied && block.is_usual_block() {
-                    self.tps_counter.submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
+                if first_time_applied {
+                    if block.is_usual_block() {
+                        self.tps_counter.submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
+                    }
+                    if let BlockKind::MeshUpdate { network_id } = block.kind() {
+                        self.save_last_mesh_mc_block_id(network_id, id)?;
+                    }
                 }
             }
 
@@ -1673,6 +1679,9 @@ impl Engine {
                                 self.network.clone().process_connectivity_broadcast(broadcast);
                             }
                             Broadcast::TonNode_BlockCandidateBroadcast(_) => { }
+                            Broadcast::TonNode_MeshUpdateBroadcast(broadcast) => {
+                                self.clone().process_mesh_update_broadcast(broadcast, src);
+                            }
                         }
                     }
                 }
@@ -1818,6 +1827,26 @@ impl Engine {
         self.push_validated_block_stat(ValidatedBlockStat { nodes })?;
 
         Ok(())
+    }
+
+    fn process_mesh_update_broadcast(self: Arc<Self>, broadcast: MeshUpdateBroadcast, src: Arc<KeyId>) {
+        // because of ALL broadcasts are received in one task - spawn for each block
+        if let Some(mesh_client) = self.mesh_client.get().cloned() {
+            tokio::spawn(async move {
+                log::trace!("Processing mesh update broadcast from nw: {}, target nw {}, id {}, peer {}",
+                    broadcast.src_nw, broadcast.target_nw, broadcast.id, src);
+                let id = broadcast.id.clone();
+                match mesh_client.process_broadcast(broadcast).await {
+                    Err(e) => {
+                        log::error!("Error while processing mesh update broadcast {} (peer {}): {:?}",
+                            id, src, e);
+                    }
+                    Ok(_) => {
+                        log::trace!("Processed mesh update broadcast {}, peer {}", id, src);
+                    }
+                }
+            });
+        }
     }
 
     fn process_block_broadcast(self: Arc<Self>, broadcast: BlockBroadcast, src: Arc<KeyId>) {
