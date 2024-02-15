@@ -323,7 +323,7 @@ pub struct MessageCacheSession {
     ids_for_uid: LockfreeMapSet<UInt256, UInt256>,
     message_headers: DashMap<UInt256, Arc<RempMessageHeader>>,
     message_origins: DashMap<UInt256, Arc<RempMessageOrigin>>,
-    messages: Map<UInt256, Arc<RmqMessage>>,
+    messages: DashMap<UInt256, Arc<RmqMessage>>,
     message_events: LockfreeMapSet<UInt256, u32>, //Map<UInt256, Vec<UnixTime32>>,
     message_status: DashMap<UInt256, RempMessageStatus>,
 
@@ -375,9 +375,9 @@ impl MessageCacheSession {
         self.insert_message_header(&msg.message_id, msg_hdr, msg_origin)?;
         match self.messages.insert(msg.message_id.clone(), msg.clone()) {
             None => Ok(()),
-            Some(prev) if *prev.val() == msg => Ok(()),
+            Some(prev) if prev == msg => Ok(()),
             Some(p) => fail!("Different messages for same id {:x}, replacing {} with {}",
-                p.key(), p.val(), msg
+                msg.message_id, p, msg
             )
         }
     }
@@ -385,26 +385,31 @@ impl MessageCacheSession {
     fn update_missing_fields(&self, message_id: &UInt256, message: Option<Arc<RmqMessage>>, origin: Option<Arc<RempMessageOrigin>>) -> Result<()> {
         if let Some(m1) = &message {
             if let Some(m2) = self.messages.get(message_id) {
-                if m1 != m2.val() {
-                    fail!("Different message body: new body '{}', current cached body '{}'", m1, m2.val());
+                if m1 != m2.value() {
+                    fail!("Different message body: new body '{}', current cached body '{}'", m1, m2.value());
                 }
             }
             else {
                 if let Some(m2) = self.messages.insert(message_id.clone(), m1.clone()) {
-                    fail!("Parallel updating of message body: new body '{}', another body '{}'", m1, m2.val())
+                    if m1 != &m2 {
+                        fail!("Parallel updating of message body: new body '{}', another body '{}'", m1, m2)
+                    }
                 }
             }
         }
 
+        // If origin is different from the stored one, that's not a big deal.
         if let Some(o1) = &origin {
             if let Some(o2) = self.message_origins.get(message_id) {
                 if o1 != o2.value() {
-                    fail!("Different message origin: new origin '{}', current cached origin '{}'", o1, o2.value());
+                    log::trace!("Different message origin: new origin '{}', current cached origin '{}'", o1, o2.value());
                 }
             }
             else {
                 if let Some(o2) = self.message_origins.insert(message_id.clone(), o1.clone()) {
-                    fail!("Parallel updating of message origin: new origin '{}', another origin '{}'", o1, o2)
+                    if o1 != &o2 {
+                        fail!("Different message origin: new origin '{}', current cached origin '{}'", o1, o2);
+                    }
                 }
             }
         }
@@ -431,8 +436,8 @@ impl MessageCacheSession {
         self.messages.get(msg_id).is_some()
     }
 
-    fn all_messages_count(&self) -> usize {
-        self.message_headers.len()
+    fn all_messages_count(&self) -> (usize,usize,usize) {
+        (self.message_headers.len(), self.messages.len(), self.message_origins.len())
     }
 
     fn update_message_status(&self, message_id: &UInt256, new_status: RempMessageStatus) -> Result<RempMessageStatus> {
@@ -514,7 +519,7 @@ impl MessageCacheSession {
                 (m, h) => {
                     log::error!(target: "remp",
                         "Record for message {:?} is in incorrect state: msg = {:?}, status = {:?}",
-                        id, m.map(|x| x.val().clone()), h.map(|x| x.value().clone())
+                        id, m.map(|x| x.value().clone()), h.map(|x| x.value().clone())
                     );
                     stats.incorrect += 1
                 }
@@ -531,7 +536,7 @@ impl MessageCacheSession {
             message_headers: DashMap::new(),
             message_origins: DashMap::new(),
             message_events: LockfreeMapSet::default(),
-            messages: Map::default(),
+            messages: DashMap::default(),
             message_status: DashMap::default(),
             inf_shards: HashSet::from_iter(inf_shards.into_iter()),
             blocks_processed: DashSet::default(),
@@ -550,23 +555,31 @@ pub struct MessageCache {
     cache_size_metric: Arc<Metric>,
 }
 
-#[allow(dead_code)]
 impl MessageCache {
-    pub fn cc_expired(&self, old_cc_seqno: u32) -> bool {
-        old_cc_seqno < self.master_cc_seqno_lwb.load(Ordering::Relaxed)
-    }
-
-    pub fn all_messages_count(&self) -> usize {
+    /// Returns stats about available messages' info in cache, three counts:
+    /// (total, with_bodies, with_origins).
+    /// total --- total messages in cache count;
+    /// with_bodies --- messages that have bodies (that is, broadcasted/received from full node);
+    /// with_origins --- messages that have origins (that is, received through catchain/from full node).
+    ///
+    /// Some messages never have body/origin (those that were taken from accepted master blocks),
+    /// others may have either body or origin missing due to delays or losses in network.
+    pub fn all_messages_count(&self) -> (usize,usize,usize) {
         let range = self.get_master_cc_stored_range();
         let mut result: usize = 0;
+        let mut with_bodies: usize = 0;
+        let mut with_origins: usize = 0;
 
         for cc in range {
             if let Some(s) = self.sessions.get(&cc) {
-                result += s.val().all_messages_count();
+                let (r,b,o) = s.val().all_messages_count();
+                result += r;
+                with_bodies += b;
+                with_origins += o;
             }
         }
 
-        result
+        (result, with_bodies, with_origins)
     }
 
     /// Returns new message status, if it worths reporting (final statuses do not need to be reported)
@@ -617,7 +630,7 @@ impl MessageCache {
     pub fn get_message(&self, message_id: &UInt256) -> Result<Option<Arc<RmqMessage>>> {
         let msg = self.get_session_for_message(message_id).map(
             |session| session.messages.get(message_id).map(
-                |m| m.val().clone()
+                |m| m.value().clone()
             )
         );
         Ok(msg.flatten())
@@ -650,7 +663,7 @@ impl MessageCache {
         };
 
         let (msg, origin, status) = (
-            session.messages.get(message_id).map(|m| m.val().clone()),
+            session.messages.get(message_id).map(|m| m.value().clone()),
             session.message_origins.get(message_id).map(|m| m.value().clone()),
             session.message_status.get(message_id).map(|m| m.value().clone())
         );
@@ -868,7 +881,8 @@ impl MessageCache {
     }
 
     pub fn message_stats(&self) -> String {
-        format!("All REMP messages count = {}", self.all_messages_count())
+        let (count,with_origins,with_bodies) = self.all_messages_count();
+        format!("All REMP messages count = {}, of them: with origins (via catchain) = {}, with bodies (broadcasted) = {}", count, with_origins, with_bodies)
     }
 
     pub fn try_set_master_cc_start_time(&self, master_cc: u32, start_time: UnixTime32, inf_blocks: Vec<BlockIdExt>) -> Result<()> {
@@ -1063,7 +1077,7 @@ impl MessageCache {
                 stats.add(&session.val().gc_all());
 
                 #[cfg(feature = "telemetry")]
-                self.cache_size_metric.update(self.all_messages_count() as u64);
+                self.cache_size_metric.update(self.all_messages_count().0 as u64);
             }
             self.master_cc_seqno_stored.store(cc_to_remove+1, Relaxed);
         }

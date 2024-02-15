@@ -730,12 +730,6 @@ impl RempCatchainStore {
         Ok(())
     }
 
-    pub async fn get_catchain_session(&self, session_id: &UInt256) -> Option<CatchainPtr> {
-        self.catchains.execute_sync(|x| {
-            x.get(session_id).map(|rcw| rcw.info.instance.get_session()).flatten()
-        }).await
-    }
-
     pub async fn list_catchain_sessions(&self) -> Vec<(String, UInt256)> {
         let sessions_to_list = self.catchains.execute_sync(|x| {
             let mut sessions_to_list = Vec::new();
