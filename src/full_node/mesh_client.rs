@@ -789,6 +789,7 @@ impl ConnectedNwClient {
 
     fn set_last_applied_block_seqno(&self, seqno: u32) {
         self.last_applied_block_seqno.store(seqno, Ordering::Relaxed);
+        metrics::gauge!("connected_nw_client_block", seqno as f64, "network" => self.nw_id.to_string());
     }
 
 }
@@ -906,6 +907,8 @@ impl MeshClient {
                 let state = self.engine.load_state(mc_block.id()).await?;
                 self.update_clients(&state).await?;
             }
+
+            metrics::gauge!("mesh_client_block", mc_block.id().seq_no() as f64);
         }
     }
 
