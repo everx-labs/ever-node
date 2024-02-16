@@ -1,4 +1,9 @@
-use std::{collections::HashMap, ops::Deref, sync::{atomic::{AtomicBool, AtomicU32, Ordering}, Arc}, time::{Duration, Instant}};
+use std::{
+    collections::{HashMap, HashSet}, 
+    ops::Deref, 
+    sync::{atomic::{AtomicBool, AtomicU32, Ordering}, Arc}, 
+    time::{Duration, Instant}
+};
 
 use ton_block::{BlockIdExt, ConnectedNwConfig};
 use ton_types::{error, fail,  Result};
@@ -297,6 +302,8 @@ impl<'a> Boot<'a> {
         let mut got_last_block_at = self.engine.now();
         let mut key_blocks = vec!(handle.clone());
         let mut prev_handle = handle;
+        let mut bad_peers = HashSet::new();
+        let active_peers = Arc::new(lockfree::set::Set::new());
 
         'main_loop: loop {
             if self.engine.check_stop() {
@@ -306,7 +313,8 @@ impl<'a> Boot<'a> {
             // Get next block ids
             log::info!("{}: downloading next key blocks ids {}", self.descr, prev_handle.id());
             let (next_key_blocks_ids, got_at) = match 
-                self.engine.download_next_key_blocks_ids(self.nw_id, prev_handle.id()).await
+                self.engine.download_next_key_blocks_ids(self.nw_id, prev_handle.id(),
+                    &active_peers, &mut bad_peers).await
             {
                 Err(e) => {
                     log::warn!("{}: download_next_key_blocks_ids {}: {}", self.descr, prev_handle.id(), e);
@@ -370,6 +378,10 @@ impl<'a> Boot<'a> {
                     log::info!("{}: finish because of last block + pss interval", self.descr);
                     return Ok(prev_block_proof);
                 }
+            }
+
+            if next_key_blocks_ids.is_empty() {
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
     }

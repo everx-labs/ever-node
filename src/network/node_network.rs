@@ -641,7 +641,8 @@ impl NodeNetwork {
             &overlay_id_short, 
             || {
                 let ret = NodeClientOverlay::new(
-                    overlay_id_short.clone(),            
+                    overlay_id_short.clone(),
+                    network_id.is_none(),
                     peers.clone(),
                     &self.network_context
                 );

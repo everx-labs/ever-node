@@ -12,7 +12,7 @@ handle_error() {
 }
 trap 'handle_error $LINENO' ERR
 
-config_smc_boc="config_smc.boc"
+config_smc_boc="tmp/config_smc.boc"
 
 echo "Obtaining config contract's boc..."
 if ! output="$( $console -C $console_config \

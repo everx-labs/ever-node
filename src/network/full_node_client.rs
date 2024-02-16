@@ -138,6 +138,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
 declare_counted!(
     pub struct NodeClientOverlay {
         overlay_id: Arc<OverlayShortId>,
+        is_local: bool,
         peers: Arc<Neighbours>,
         network_context: Arc<NetworkContext>,
         #[cfg(feature = "telemetry")]
@@ -210,11 +211,13 @@ impl NodeClientOverlay {
 
     pub (crate) fn new(
         overlay_id: Arc<OverlayShortId>,
+        is_local: bool,
         peers: Arc<Neighbours>,
         network_context: &Arc<NetworkContext>
     ) -> Self { 
         let ret = Self {
             overlay_id,
+            is_local,
             peers,
             network_context: network_context.clone(),
             #[cfg(feature = "telemetry")]
@@ -1116,13 +1119,20 @@ Ok(if key_block {
             tag: self.tag_get_next_key_block_ids
         };
 
-        let (ids, _): (KeyBlocks, _) = self.send_adnl_query_to_all_peers(
-            request,
-            None,
-            Some(active_peers),
-            bad_peers,
-            |result: &KeyBlocks| !result.blocks().is_empty()
-        ).await?;
+        let (ids, _): (KeyBlocks, _) = if self.is_local {
+            self.send_adnl_query_to_all_peers(
+                request,
+                None,
+                Some(active_peers),
+                bad_peers,
+                |result: &KeyBlocks| !result.blocks().is_empty()
+            ).await?
+        } else {
+            // Foreign overlays are not maintain Neighbours on node level, so we can't request
+            // *all peers* here because it based on node level Neighbours
+            self.send_adnl_query(request, None, None, None).await?
+        };
+
         if !ids.blocks().is_empty() {
             return Ok(ids.only().blocks.into())
         }

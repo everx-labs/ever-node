@@ -808,7 +808,7 @@ fn pack_signatures(signatures: &BlockSignatures) -> Result<Vec<BlockSignature>> 
         packed_signatures.push(
             BlockSignature {
                 who: UInt256::with_array(*sign.node_id_short.as_slice()),
-                signature: ton_api::ton::bytes(sign.sign.to_bytes().to_vec())
+                signature: ton_api::ton::bytes(sign.sign.as_bytes().to_vec())
             }
         );
         Ok(true)
