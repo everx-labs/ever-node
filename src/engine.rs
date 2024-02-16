@@ -465,7 +465,7 @@ impl Downloader for NextMeshUpdateDownloader {
 
 pub struct Stopper {
     stop: Arc<AtomicU32>,
-    token: Arc<tokio_util::sync::CancellationToken>
+    token: tokio_util::sync::CancellationToken
 }
 
 impl Stopper {
@@ -473,7 +473,7 @@ impl Stopper {
     pub fn new() -> Self {
         Stopper {
             stop: Arc::new(AtomicU32::new(0)),
-            token: Arc::new(tokio_util::sync::CancellationToken::new())
+            token: tokio_util::sync::CancellationToken::new()
         }
     }
 
@@ -553,6 +553,10 @@ impl Stopper {
 
     pub fn release_stop(&self, mask: u32) {
         self.stop.fetch_and(!mask, Ordering::Relaxed);
+    }
+
+    pub fn token(&self) -> tokio_util::sync::CancellationToken {
+        self.token.clone()
     }
 
 }
@@ -2860,7 +2864,7 @@ pub async fn run(
         resend_top_shard_blocks_worker(engine.clone());
 
         #[cfg(not(feature="external_db"))] {
-            let mesh_client = MeshClient::start(engine.clone()).await?;
+            let mesh_client = MeshClient::start(engine.clone(), engine.stopper.token()).await?;
             engine.mesh_client.set(mesh_client).map_err(|_| error!("Attempt to set mesh_client twice"))?;
         }
 

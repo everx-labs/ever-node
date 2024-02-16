@@ -11,8 +11,6 @@
 * limitations under the License.
 */
 
-use crate::network::node_network::NodeNetwork;
-
 use adnl::{common::{Query, TaggedTlObject, Wait}, node::{AdnlNode, AddressCache}};
 use dht::DhtNode;
 use overlay::{OverlayShortId, OverlayNode};
@@ -26,6 +24,7 @@ use ton_api::ton::{TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilit
 #[cfg(feature = "telemetry")]
 use ton_api::tag_from_boxed_type;
 use ton_types::{error, fail, KeyId, KeyOption, Result};
+use crate::types::spawn_cancelable;
 
 #[derive(Debug)]
 pub struct Neighbour {
@@ -52,7 +51,7 @@ pub struct Neighbours {
     fail_attempts: AtomicU64,
     all_attempts: AtomicU64,
     start: Instant,
-    cancellation_token: Arc<tokio_util::sync::CancellationToken>,
+    cancellation_token: tokio_util::sync::CancellationToken,
     #[cfg(feature = "telemetry")]
     tag_get_capabilities: u32
 }
@@ -205,7 +204,7 @@ impl Neighbours {
         overlay: &Arc<OverlayNode>,
         overlay_id: Arc<OverlayShortId>,
         default_rldp_roundtrip: &Option<u32>,
-        cancellation_token: Arc<tokio_util::sync::CancellationToken>
+        cancellation_token: tokio_util::sync::CancellationToken
     ) -> Result<Self> {
         let default_rldp_roundtrip = default_rldp_roundtrip.unwrap_or(
             Self::DEFAULT_RLDP_ROUNDTRIP_MS
@@ -328,7 +327,7 @@ impl Neighbours {
     }
 
     pub fn start_reload(self: Arc<Self>) {
-        NodeNetwork::spawn_background_task(
+        spawn_cancelable(
             self.cancellation_token.clone(),
             async move {
                 loop {
@@ -346,7 +345,7 @@ impl Neighbours {
     }
 
     pub fn start_ping(self: Arc<Self>) {
-        NodeNetwork::spawn_background_task(
+        spawn_cancelable(
             self.cancellation_token.clone(),
             async move {
                 self.ping_neighbours().await;
@@ -364,7 +363,7 @@ impl Neighbours {
     }
 
     pub fn start_rnd_peers_process(self: Arc<Self>) {
-        NodeNetwork::spawn_background_task(
+        spawn_cancelable(
             self.cancellation_token.clone(),
             async move {
                 log::trace!("Wait random peers in overlay {}...", self.overlay_id);

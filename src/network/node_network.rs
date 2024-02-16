@@ -13,16 +13,15 @@
 
 use crate::{
     config::{ 
-        ConfigEvent, NodeConfigHandler, NodeConfigSubscriber, TonNodeConfig, 
-        ConnectivityCheckBroadcastConfig
+        ConfigEvent, ConnectivityCheckBroadcastConfig, NodeConfigHandler, NodeConfigSubscriber, TonNodeConfig
     },
     engine_traits::{EngineAlloc, OverlayOperations, PrivateOverlayOperations},
     network::{
         catchain_client::CatchainClient,
-        full_node_client::{NodeClientOverlay, FullNodeOverlayClient},
+        full_node_client::{FullNodeOverlayClient, NodeClientOverlay},
         neighbours::{self, Neighbours}, remp::RempNode,
     },
-    types::awaiters_pool::AwaitersPool,
+    types::{awaiters_pool::AwaitersPool, spawn_cancelable},
 };
 #[cfg(feature = "telemetry")]
 use crate::{
@@ -45,7 +44,7 @@ use overlay::{
 use rldp::RldpNode;
 use ton_block::BlockIdExt;
 use std::{
-    convert::TryInto, future::Future, hash::Hash, 
+    convert::TryInto, hash::Hash, 
     sync::{Arc, atomic::{AtomicI32, AtomicU64, AtomicBool, Ordering}}, 
     time::{Duration, SystemTime}
 };
@@ -81,7 +80,7 @@ pub struct NodeNetwork {
     config_handler: Arc<NodeConfigHandler>,
     connectivity_check_config: ConnectivityCheckBroadcastConfig,
     default_rldp_roundtrip: Option<u32>,
-    cancellation_token: Arc<tokio_util::sync::CancellationToken>,
+    cancellation_token: tokio_util::sync::CancellationToken,
     #[cfg(feature = "telemetry")]
     tag_connectivity_check_broadcast: u32,
     mesh_global_configs_dir: String,
@@ -137,7 +136,7 @@ impl NodeNetwork {
 
     pub async fn new(
         config: TonNodeConfig,
-        cancellation_token: Arc<tokio_util::sync::CancellationToken>,
+        cancellation_token: tokio_util::sync::CancellationToken,
         #[cfg(feature = "telemetry")]
         engine_telemetry: Arc<EngineTelemetry>,
         engine_allocated: Arc<EngineAlloc> 
@@ -304,29 +303,13 @@ impl NodeNetwork {
         }
     }
 
-    pub(in crate::network) fn spawn_background_task<F>(
-        cancellation_token: Arc<tokio_util::sync::CancellationToken>, 
-        task: F
-    ) where
-        F: Future<Output = ()> + Send + Sync + 'static
-    {
-        tokio::spawn(
-            async move {
-                tokio::select! {
-                    _ = task => {},
-                    _ = cancellation_token.cancelled() => {}
-                }
-            }
-        );                                                                         
-    }
-
     fn periodic_store_ip_addr(
         dht: Arc<DhtNode>,
         node_key: Arc<dyn KeyOption>,
         validator_keys: Option<Arc<lockfree::set::Set<Arc<KeyId>>>>,
-        cancellation_token: Arc<tokio_util::sync::CancellationToken>
+        cancellation_token: tokio_util::sync::CancellationToken
     ) {
-        Self::spawn_background_task(
+        spawn_cancelable(
             cancellation_token,
             async move {
                 loop {
@@ -349,9 +332,9 @@ impl NodeNetwork {
         dht: Arc<DhtNode>, 
         overlay_id: OverlayId,
         overlay_node: ton_api::ton::overlay::node::Node,
-        cancellation_token: Arc<tokio_util::sync::CancellationToken>
+        cancellation_token: tokio_util::sync::CancellationToken
     ) {
-        Self::spawn_background_task(
+        spawn_cancelable(
             cancellation_token,
             async move {
                 loop {
@@ -369,9 +352,9 @@ impl NodeNetwork {
         network_id: Option<i32>,
         overlay: Arc<OverlayNode>,
         overlay_id: Arc<OverlayShortId>,
-        cancellation_token: Arc<tokio_util::sync::CancellationToken>
+        cancellation_token: tokio_util::sync::CancellationToken
     ) {
-        Self::spawn_background_task(
+        spawn_cancelable(
             cancellation_token,
             async move {
                 loop {
@@ -532,9 +515,9 @@ impl NodeNetwork {
     fn find_dht_nodes(
         dht: Arc<DhtNode>, 
         network_id: Option<i32>,
-        cancellation_token: Arc<tokio_util::sync::CancellationToken>
+        cancellation_token: tokio_util::sync::CancellationToken
     ) {
-        Self::spawn_background_task(
+        spawn_cancelable(
             cancellation_token,
             async move {
                 loop {
@@ -571,7 +554,7 @@ impl NodeNetwork {
         network_id: Option<i32>,
     ) {
         let client_overlay = client_overlay.clone();
-        Self::spawn_background_task(
+        spawn_cancelable(
             self.cancellation_token.clone(),
             async move {
                 let mut iter = None;
@@ -691,7 +674,7 @@ impl NodeNetwork {
         let breaker_ = breaker.clone();
         let callback = callback.clone();
 
-        Self::spawn_background_task(
+        spawn_cancelable(
             self.cancellation_token.clone(),
             async move {
                 let mut current_validators = validators;
@@ -744,7 +727,7 @@ impl NodeNetwork {
         let adnl = self.network_context.adnl.clone();
         let overlay = self.network_context.overlay.clone();
 
-        Self::spawn_background_task(
+        spawn_cancelable(
             self.cancellation_token.clone(),
             async move {
                 let mut current_validators = validators;

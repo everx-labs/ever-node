@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet}, 
     ops::Deref, 
-    sync::{atomic::{AtomicBool, AtomicU32, Ordering}, Arc}, 
+    sync::{atomic::{AtomicU32, Ordering}, Arc}, 
     time::{Duration, Instant}
 };
 
@@ -11,7 +11,8 @@ use ton_api::ton::ton_node::broadcast::MeshUpdateBroadcast;
 
 use storage::block_handle_db::BlockHandle;
 use crate::{
-    block::BlockStuff, block_proof::BlockProofStuff, boot::PSS_PERIOD_BITS, engine_traits::EngineOperations, shard_state::ShardStateStuff
+    block::BlockStuff, block_proof::BlockProofStuff, boot::PSS_PERIOD_BITS, 
+    engine_traits::EngineOperations, shard_state::ShardStateStuff, types::spawn_cancelable
 };
 
 #[derive(Clone)]
@@ -256,9 +257,7 @@ impl<'a> Boot<'a> {
         };
 
         loop {
-            if self.engine.check_stop() {
-                fail!("{}: stopped", self.descr);
-            }
+
 
             if block_id.seq_no() == 0 {
                 log::info!("{}: downloading zerostate {}", self.descr, block_id);
@@ -306,9 +305,6 @@ impl<'a> Boot<'a> {
         let active_peers = Arc::new(lockfree::set::Set::new());
 
         'main_loop: loop {
-            if self.engine.check_stop() {
-                fail!("{}: stopped", self.descr);
-            }
 
             // Get next block ids
             log::info!("{}: downloading next key blocks ids {}", self.descr, prev_handle.id());
@@ -451,9 +447,6 @@ impl<'a> Boot<'a> {
         }
 
         'top: loop {
-            if self.engine.check_stop() {
-                fail!("{}: stopped", self.descr);
-            }
 
             // Download given mesh kit (mc block + queues) or latest one
             let (mesh_kit, mesh_kit_proof) = if let Some(id) = id {
@@ -572,9 +565,9 @@ pub struct ConnectedNwClient {
     engine: Arc<dyn EngineOperations>,
     nw_id: i32,
     descr: String,
-    stop: AtomicBool,
     last_key_block_proof: parking_lot::RwLock<Arc<BlockProofOrZerostate>>,
     last_applied_block_seqno: AtomicU32,
+    cancellation_token: tokio_util::sync::CancellationToken,
 }
 
 impl ConnectedNwClient {
@@ -582,19 +575,20 @@ impl ConnectedNwClient {
         engine: Arc<dyn EngineOperations>,
         last_block_id: Option<BlockIdExt>,
         nw_id: i32,
-        nw_config: ConnectedNwConfig
+        nw_config: ConnectedNwConfig,
+        cancellation_token: tokio_util::sync::CancellationToken,
     ) -> Arc<Self> {
         let descr = format!("mesh nw client {}", nw_id);
         let client = Arc::new(Self { 
             engine, 
             nw_id,
             descr,
-            stop: AtomicBool::new(false),
             last_key_block_proof: parking_lot::RwLock::new(Arc::new(BlockProofOrZerostate::None)),
             last_applied_block_seqno: AtomicU32::new(0),
+            cancellation_token: cancellation_token.clone(),
         });
 
-        tokio::spawn({
+        spawn_cancelable(cancellation_token, {
             let client = client.clone();
             async move {
 
@@ -629,7 +623,7 @@ impl ConnectedNwClient {
     }
 
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.cancellation_token.cancel();
     }
 
     pub async fn process_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()> {
@@ -637,6 +631,11 @@ impl ConnectedNwClient {
 
         // Basic checks
         let last_applied_seqno = self.last_applied_block_seqno();
+        if last_applied_seqno == 0 {
+            log::warn!("{}: ignore broadcast {} because last applied block is not set (boot is not finished)", 
+                self.descr, broadcast.id);
+            return Ok(());
+        }
         if broadcast.id.seq_no <= last_applied_seqno {
             log::debug!("{}: ignore broadcast {} because it is already applied (last applied: {})", 
                 self.descr, broadcast.id, last_applied_seqno);
@@ -668,11 +667,6 @@ impl ConnectedNwClient {
     ) -> Result<()> {
 
         loop {
-            if self.engine.check_stop() || self.stop.load(Ordering::Relaxed) {
-                log::info!("{}: stopped", self.descr);
-                return Ok(());
-            }
-
             if last_mc_block.gen_utime()? + 5 > self.engine.now() {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
@@ -803,10 +797,14 @@ impl ConnectedNwClient {
 pub struct MeshClient {
     engine: Arc<dyn EngineOperations>,
     clients: lockfree::map::Map<i32, Arc<ConnectedNwClient>>,
+    cancellation_token: tokio_util::sync::CancellationToken,
 }
 
 impl MeshClient {
-    pub async fn start(engine: Arc<dyn EngineOperations>) -> Result<Arc<Self>> {
+    pub async fn start(
+        engine: Arc<dyn EngineOperations>,
+        cancellation_token: tokio_util::sync::CancellationToken
+    ) -> Result<Arc<Self>> {
 
         // on the start
         // - get last master block
@@ -814,7 +812,11 @@ impl MeshClient {
 
         // Later - observe next master blocks
 
-        let mesh_client = Arc::new(Self { engine, clients: lockfree::map::Map::new() });
+        let mesh_client = Arc::new(Self { 
+            engine,
+            clients: lockfree::map::Map::new(),
+            cancellation_token,
+        });
 
         let last_mc_block_id = mesh_client.engine.load_last_applied_mc_block_id()?
             .ok_or_else(|| error!("No last mc block"))?;
@@ -827,7 +829,7 @@ impl MeshClient {
     }
 
     fn start_worker(self: Arc<Self>, mut last_mc_block_id: Arc<BlockIdExt>) {
-        tokio::spawn(async move {
+        spawn_cancelable(self.cancellation_token.clone(), async move {
             loop {
                 match self.worker(&last_mc_block_id).await {
                     Ok(_) => {
@@ -871,8 +873,6 @@ impl MeshClient {
             (mc_block_handle, mc_block) = loop {
                 if let Ok(r) = self.engine.wait_next_applied_mc_block(&mc_block_handle, Some(1000)).await {
                     break r;
-                } else if self.engine.check_stop() {
-                    return Ok(());
                 } else {
                     let diff = self.engine.now() - mc_block_handle.gen_utime()?;
                     if diff > 15 {
@@ -883,20 +883,26 @@ impl MeshClient {
 
             log::debug!("MeshClient: got mc block {}", mc_block.id());
 
+            let mut force_update = false;
             for (nw_id, block_id) in mc_block.mesh_top_blocks()? {
-                if let Some(_client) = self.clients.get(&nw_id) {
-
-                    // TODO:
-                    // If commited block is much newer then last applied by worker -
-                    // then restart the worker with new commited block.
-
+                if let Some(guard) = self.clients.get(&nw_id) {
+                    let client = guard.val();
+                    let last_applied = client.last_applied_block_seqno();
+                    if last_applied > 0 && last_applied < block_id.seq_no() {
+                        let lag = block_id.seq_no() - last_applied;
+                        if lag > 100 {
+                            client.stop();
+                            log::warn!("MeshClient: client for network {nw_id} has too big lag {lag}. Will be restarted.");
+                            self.clients.remove(&nw_id);
+                            force_update = true;
+                        }
+                    }
                 } else {
                     log::warn!("Found commit block {block_id} of unknown network {nw_id}");
                 }
             }
 
-            if mc_block.block()?.read_info()?.key_block() {
-                log::debug!("MeshClient: process key block {}", mc_block.id());
+            if force_update || mc_block.block()?.read_info()?.key_block() {
                 let state = self.engine.load_state(mc_block.id()).await?;
                 self.update_clients(&state).await?;
             }
@@ -904,6 +910,8 @@ impl MeshClient {
     }
 
     async fn update_clients(&self, mc_state: &ShardStateStuff) -> Result<()> {
+
+        log::debug!("MeshClient: update_clients {}", mc_state.block_id());
 
         let Some(mesh_config) = mc_state.config_params()?.mesh_config()? else {
             log::debug!("MeshClient: there is no mesh config in mc block {}", mc_state.block_id());
@@ -929,8 +937,9 @@ impl MeshClient {
         })?;
         for (nw_id, nw_config) in to_start {
             let last_commited_id = mesh_top_blocks.get(&nw_id).cloned();
+            let ct = self.cancellation_token.child_token();
             let client = ConnectedNwClient::start(
-                self.engine.clone(), last_commited_id, nw_id, nw_config).await;
+                self.engine.clone(), last_commited_id, nw_id, nw_config, ct).await;
             self.clients.insert(nw_id, client);
         }
 
