@@ -97,13 +97,17 @@ optional = true
 version = '0.26.0'
 
 [patch.'https://github.com/tonlabs/ever-block.git']
-ton_block = { path = '../ever-block' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git?branch=feature-mesh', branch = 'feature-mesh'}
+# ton_block = { path = '../ever-block' }
 
 [patch.'https://github.com/tonlabs/ever-block-json.git']
-ton_block_json = { path = '../ever-block-json' }
+ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git?branch=feature-mesh', branch = 'feature-mesh' }
+# ton_block_json = { path = '../ever-block-json' }
 
 [patch.'https://github.com/tonlabs/ever-tl.git']
-ton_api = { path = '../ever-tl/ton_api' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git?branch=feature-mesh', branch = 'feature-mesh' }
+# ton_api = { path = '../ever-tl/ton_api' }
 
 [patch.'https://github.com/tonlabs/ever-dht.git']
-dht = { path = '../ever-dht' }
+dht = { git = 'https://github.com/tonlabs/ever-dht.git?branch=feature-mesh', branch = 'feature-mesh' }
+# dht = { path = '../ever-dht' }
