@@ -2922,7 +2922,11 @@ impl Collator {
         new_state.set_underload_history(underload_history);
         new_state.set_min_ref_mc_seqno(collator_data.min_mc_seqno()?);
         new_state.write_accounts(&new_accounts)?;
-        new_state.write_out_msg_queues_info(out_msg_queue_local, out_msg_queue_mesh)?;
+        if mc_data.config().has_capability(GlobalCapabilities::CapCommonMessage) {
+            new_state.write_out_msg_queues_info(out_msg_queue_local, out_msg_queue_mesh)?;
+        } else {
+            new_state.write_out_msg_queue_info(&out_msg_queue_local)?;
+        }
         new_state.set_master_ref(master_ref);
         new_state.set_total_balance(new_accounts.root_extra().balance().clone());
         if let Some(mc_state_extra) = &mut mc_state_extra {
