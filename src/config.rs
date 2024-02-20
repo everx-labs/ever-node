@@ -655,7 +655,8 @@ impl TonNodeConfig {
             format!("{}:{}", LOCAL_HOST, port)
         } else {
             println!(
-                "Can`t generate console_config.json: default_config.json doesn`t contain control_server_port."
+                "Can`t generate console_config.json: \
+                default config doesn`t contain control_server_port."
             );
             return Ok(());
         };

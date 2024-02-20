@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.93
+
+- Fix compiler warnings
+- Add REMP settings to default configs
+
 ## Version 0.55.92
 
 - Added ability not to split out message queues during shard split
