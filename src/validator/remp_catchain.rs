@@ -467,12 +467,12 @@ impl RempCatchain {
         }
     }
 
-    fn unpack_broadcast(&self, payload: &BlockPayloadPtr) -> Result<()> {
+    fn unpack_broadcast(&self, payload: &BlockPayloadPtr) -> Result<UInt256> {
         let message = RmqMessage::deserialize(payload.data())?;
-        let rmqrecord = RmqMessage::from_rmq_record(&message)?;
-        self.remp_manager.message_cache.update_message_body(Arc::new(rmqrecord))?;
+        let rmqrecord = Arc::new(RmqMessage::from_rmq_record(&message)?);
+        self.remp_manager.message_cache.update_message_body(rmqrecord.clone())?;
 
-        Ok(())
+        Ok(rmqrecord.message_id.clone())
     }
 }
 
@@ -548,9 +548,11 @@ impl CatchainListener for RempCatchain {
     }
 
     fn process_broadcast(&self, source_id: PublicKeyHash, data: BlockPayloadPtr) {
-        log::trace!(target: "remp", "MessageQueue {} process broadcast from {}", self, source_id);
-        if let Err(e) = self.unpack_broadcast(&data) {
-            log::error!(target: "remp", "Error processing broadcast from {}, message body will be ignored: `{}`", source_id, e);
+        let len = data.data().len();
+        log::trace!(target: "remp", "MessageQueue {} process broadcast from {}, len {}", self, source_id, len);
+        match self.unpack_broadcast(&data) {
+            Err(e) => log::error!(target: "remp", "MessageQueue {}, error processing broadcast from {}, message body will be ignored: `{}`", self, source_id, e),
+            Ok(id) => log::trace!(target: "remp", "MessageQueue {} broadcast message: id {:x}, len {}", self, id, len)
         }
     }
 
