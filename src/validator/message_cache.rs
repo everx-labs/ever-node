@@ -432,10 +432,6 @@ impl MessageCacheSession {
         return true
     }
 
-    fn is_full_message(&self, msg_id: &UInt256) -> bool {
-        self.messages.get(msg_id).is_some()
-    }
-
     fn all_messages_count(&self) -> (usize,usize,usize) {
         (self.message_headers.len(), self.messages.len(), self.message_origins.len())
     }
@@ -465,14 +461,15 @@ impl MessageCacheSession {
     }
 
     fn message_events_to_string(&self, message_id: &UInt256) -> String {
-        if let Some(msg) = self.message_origins.get(message_id) {
+        let events = self.message_events.get_set(message_id);
+        let result = if let Some(msg) = self.message_origins.get(message_id) {
             let base = msg.value().timestamp;
-            let events = self.message_events.get_set(message_id);
             events.iter().map(|x| format!("{} ", (*x) as i64 - base as i64)).collect()
         }
         else {
             "*events: no message origin*".to_string()
-        }
+        };
+        format!("{} ({} events)", result, events.len())
     }
 
     fn message_info(&self, message_id: &UInt256) -> String {
@@ -485,14 +482,30 @@ impl MessageCacheSession {
             .map(|x| format!("{:?}", x.value()))
             .unwrap_or_else(|| "*error: no status in cache*".to_owned());
 
-        let collation_history = if self.is_full_message(message_id) {
-            self.message_events_to_string(message_id)
+        let has_additional_info = self.messages.contains_key(message_id)
+            || self.message_origins.contains_key(message_id)
+            || !self.message_events.get_set(message_id).is_empty();
+
+        let additional_info = if has_additional_info {
+            let body = self.messages
+                .get(message_id).map(|_| "has body".to_owned())
+                .unwrap_or_else(|| "*error: no body*".to_owned());
+
+            let origin = self.message_origins
+                .get(message_id).map(|x| x.value().to_string())
+                .unwrap_or_else(|| "*error: no origin*".to_owned());
+
+            let collation_history = self.message_events_to_string(message_id);
+
+            format!("{}, {}, {}", body, origin, collation_history)
         }
         else {
             "header only".to_owned()
         };
 
-        format!("id {:x}, cc {}, {}, status: {}, {}", message_id, self.master_cc, header, status, collation_history)
+        format!("id {:x}, cc {}, {}, status: {}, {}",
+                message_id, self.master_cc, header, status, additional_info
+        )
     }
 
     fn mark_collation_attempt(&self, msg_id: &UInt256) -> Result<()> {
@@ -682,6 +695,13 @@ impl MessageCache {
         }
     }
 
+    fn get_message_info(&self, message_id: &UInt256) -> Result<String> {
+        match self.get_session_for_message(message_id) {
+            None => Ok("absent".to_string()),
+            Some(s) => Ok(s.message_info(message_id))
+        }
+    }
+
     fn insert_message(&self, session: Arc<MessageCacheSession>, message: Arc<RmqMessage>, message_header: Arc<RempMessageHeader>, message_origin: Option<Arc<RempMessageOrigin>>, status: &RempMessageStatus) -> Result<()> {
         if message.message_id != message_header.message_id {
             fail!("Inconsistent message: message {} and message_header {} have different message_id", message, message_header)
@@ -754,7 +774,7 @@ impl MessageCache {
     }
 
     pub fn update_message_body(&self, data: Arc<RmqMessage>) -> Result<()> {
-        self.add_external_message_status(
+        let (old_status,new_status) = self.add_external_message_status(
             &data.message_id,
             &data.message_uid,
             Some(data.clone()),
@@ -762,10 +782,13 @@ impl MessageCache {
             RempMessageStatus::TonNode_RempNew, |old,_new| old.clone(),
             self.master_cc_seqno_curr.load(Ordering::Relaxed)
         )?;
-        match self.get_message_with_origin_status_cc(&data.message_id)? {
-            Some((msg, msg_origin, x, seqno)) => log::info!(target: "remp", "Message info added: {}, {}, {}, {}", msg, msg_origin, x, seqno),
-            None => log::info!(target: "remp", "Message {} was not found in cache", &data.message_id)
-        }
+        let info = self.get_message_info(&data.message_id)?;
+        log::trace!(target: "remp", "Message {}, tried to update message body: old status {}, new status {}, full message cache info {}",
+            &data,
+            match old_status { Some(m) => format!("{}",m), None => format!("None") },
+            new_status,
+            info
+        );
         Ok(())
     }
 
