@@ -18,7 +18,7 @@ Implementation of Everscal/Venom node and validator in safe Rust.
 
 ### Prerequisites
 
-Rust complier v1.65+.
+Rust complier v1.76+.
 
 ```
 apt-get update
