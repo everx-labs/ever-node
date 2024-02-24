@@ -383,7 +383,7 @@ where
     fn eq(&self, other: &Self) -> bool {
         //compare addresses only because each vector is unique in cache system
 
-        (self as *const dyn Vector<T>) == (other as *const dyn Vector<T>)
+        std::ptr::addr_eq(self, other)
     }
 }
 
@@ -918,8 +918,7 @@ where
     fn eq(&self, other: &Self) -> bool {
         //compare addresses only because each vector is unique in cache system
 
-        (self as *const dyn SortedVector<T, Compare>)
-            == (other as *const dyn SortedVector<T, Compare>)
+        std::ptr::addr_eq(self, other)
     }
 }
 
