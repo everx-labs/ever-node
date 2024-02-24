@@ -1049,12 +1049,11 @@ Ok(if key_block {
             tag: self.tag_get_next_key_block_ids
         };
 
-        let (ids, _): (KeyBlocks, _) = self.send_adnl_query_to_all_peers(
+        let (ids, _): (KeyBlocks, _) = self.send_adnl_query(
             request,
             None,
-            Some(active_peers),
-            bad_peers,
-            |result: &KeyBlocks| !result.blocks().is_empty()
+            None,
+            None,
         ).await?;
         if !ids.blocks().is_empty() {
             return Ok(ids.only().blocks.into())

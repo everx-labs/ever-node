@@ -1,67 +1,213 @@
 {
-    "log_config_name": "log_cfg.yml",
-    "ton_global_config_name": "ton-global.config.json",
-    "internal_db_path": "node_db",
-    "ip_address": "0.0.0.0:30303",
-    "control_server_port": 4925,
-    "shard_keeper": {
-        "get_peer_attempt_timeout_ms": 1000,
-        "download_next_block_full_timeout_ms": 1000,
-        "download_block_full_timeout_ms": 1000
+  "log_config_name": "log_cfg.yml",
+  "ton_global_config_name": "ton-global.config.json",
+  "internal_db_path": "node_db",
+  "ip_address": "0.0.0.0:30303",
+  "control_server_port": 3031,
+  "validation_countdown_mode": null,
+  "unsafe_catchain_patches_path": null,
+  "validator_keys": null,
+  "kafka_consumer_config": {
+    "group_id": "101",
+    "brokers": "kafka",
+    "topic": "requests",
+    "session_timeout_ms": 6000,
+    "run_attempt_timeout_ms": 1000
+  },
+  "external_db_config": {
+    "raw_block_producer": {
+      "enabled": false,
+      "brokers": "kafka",
+      "message_timeout_ms": 1000,
+      "topic": "raw_blocks",
+      "sharded_topics": null,
+      "sharding_depth": 0,
+      "attempt_timeout_ms": 100,
+      "message_max_size": 3000000,
+      "big_messages_storage": "/blob-storage",
+      "big_message_max_size": null,
+      "external_message_ref_address_prefix": "http:///ton-node:80/"
     },
-    "kafka_consumer_config": {
-        "group_id": "101",
-        "brokers": "kafka",
-        "topic": "requests",
-        "session_timeout_ms": 6000,
-        "run_attempt_timeout_ms": 1000
+      "block_producer": {
+      "enabled": false,
+      "brokers": "kafka",
+      "message_timeout_ms": 100,
+      "topic": "blocks",
+      "sharded_topics": null,
+      "sharding_depth": 0,
+      "attempt_timeout_ms": 100,
+      "message_max_size": 3000000,
+      "big_messages_storage": "big-blocks",
+      "big_message_max_size": null,
+      "external_message_ref_address_prefix": null
     },
-    "external_db_config": {
-        "block_producer": {
-            "enabled": true,
-            "brokers": "kafka",
-            "message_timeout_ms": 100,
-            "topic": "blocks",
-            "attempt_timeout_ms": 100,
-            "message_max_size": 3000000,
-            "big_messages_storage": "big-blocks"
-        },
-        "message_producer": {
-            "enabled": true,
-            "brokers": "kafka",
-            "message_timeout_ms": 1000,
-            "topic": "messages",
-            "attempt_timeout_ms": 100,
-            "message_max_size": 3000000,
-            "big_messages_storage": "big-messages"
-        },
-        "transaction_producer": {
-            "enabled": true,
-            "brokers": "kafka",
-            "message_timeout_ms": 1000,
-            "topic": "transactions",
-            "attempt_timeout_ms": 100,
-            "message_max_size": 3000000,
-            "big_messages_storage": "big-transactions"
-        },
-        "account_producer": {
-            "enabled": true,
-            "brokers": "kafka",
-            "message_timeout_ms": 1000,
-            "topic": "accounts",
-            "attempt_timeout_ms": 100,
-            "message_max_size": 3000000,
-            "big_messages_storage": "big-accounts"
-        },
-        "block_proof_producer": {
-            "enabled": true,
-            "brokers": "kafka",
-            "message_timeout_ms": 1000,
-            "topic": "blocks_signatures",
-            "attempt_timeout_ms": 100,
-            "message_max_size": 3000000,
-            "big_messages_storage": "big-block-proofs"
-        },
-        "bad_blocks_storage": "bad-blocks"
+    "message_producer": {
+      "enabled": false,
+      "brokers": "kafka",
+      "message_timeout_ms": 1000,
+      "topic": "messages",
+      "sharded_topics": null,
+      "sharding_depth": 0,
+      "attempt_timeout_ms": 100,
+      "message_max_size": 3000000,
+      "big_messages_storage": "big-messages",
+      "big_message_max_size": null,
+      "external_message_ref_address_prefix": null
+    },
+    "transaction_producer": {
+      "enabled": false,
+      "brokers": "kafka",
+      "message_timeout_ms": 1000,
+      "topic": "transactions",
+      "sharded_topics": null,
+      "sharding_depth": 0,
+      "attempt_timeout_ms": 100,
+      "message_max_size": 3000000,
+      "big_messages_storage": "big-transactions",
+      "big_message_max_size": null,
+      "external_message_ref_address_prefix": null
+    },
+    "account_producer": {
+      "enabled": false,
+      "brokers": "kafka",
+      "message_timeout_ms": 1000,
+      "topic": "accounts",
+      "sharded_topics": null,
+      "sharding_depth": 0,
+      "attempt_timeout_ms": 100,
+      "message_max_size": 3000000,
+      "big_messages_storage": "/blob-storage",
+      "big_message_max_size": 30000000,
+      "external_message_ref_address_prefix": "http:///ton-node:80/"
+    },
+    "block_proof_producer": {
+      "enabled": false,
+      "brokers": "kafka",
+      "message_timeout_ms": 1000,
+      "topic": "blocks_signatures",
+      "sharded_topics": null,
+      "sharding_depth": 0,
+      "attempt_timeout_ms": 100,
+      "message_max_size": 3000000,
+      "big_messages_storage": "big-block-proofs",
+      "big_message_max_size": null,
+      "external_message_ref_address_prefix": null
+    },
+    "raw_block_proof_producer": {
+      "enabled": false,
+      "brokers": "",
+      "message_timeout_ms": 0,
+      "topic": null,
+      "sharded_topics": null,
+      "sharding_depth": 0,
+      "attempt_timeout_ms": 0,
+      "message_max_size": 0,
+      "big_messages_storage": null,
+      "big_message_max_size": null,
+      "external_message_ref_address_prefix": null
+    },
+    "chain_range_producer": {
+      "enabled": false,
+      "brokers": "",
+      "message_timeout_ms": 0,
+      "topic": null,
+      "sharded_topics": null,
+      "sharding_depth": 0,
+      "attempt_timeout_ms": 0,
+      "message_max_size": 0,
+      "big_messages_storage": null,
+      "big_message_max_size": null,
+      "external_message_ref_address_prefix": null
+    },
+    "remp_statuses_producer": {
+      "enabled": false,
+      "brokers": "",
+      "message_timeout_ms": 0,
+      "topic": null,
+      "sharded_topics": null,
+      "sharding_depth": 0,
+      "attempt_timeout_ms": 0,
+      "message_max_size": 0,
+      "big_messages_storage": null,
+      "big_message_max_size": null,
+      "external_message_ref_address_prefix": null
+    },
+    "shard_hashes_producer": {
+      "enabled": false,
+      "brokers": "",
+      "message_timeout_ms": 0,
+      "topic": null,
+      "sharded_topics": null,
+      "sharding_depth": 0,
+      "attempt_timeout_ms": 0,
+      "message_max_size": 0,
+      "big_messages_storage": null,
+      "big_message_max_size": null,
+      "external_message_ref_address_prefix": null
+    },
+    "bad_blocks_storage": "bad-blocks"
+  },
+  "default_rldp_roundtrip_ms": null,
+  "test_bundles_config": {
+    "collator": {
+      "build_for_unknown_errors": false,
+      "known_errors": [],
+      "build_for_errors": false,
+      "errors": [],
+      "path": ""
+    },
+    "validator": {
+      "build_for_unknown_errors": false,
+      "known_errors": [],
+      "build_for_errors": false,
+      "errors": [],
+      "path": ""
     }
+  },
+  "connectivity_check_config": {
+    "enabled": true,
+    "long_len": 2048,
+    "short_period_ms": 1000,
+    "long_mult": 5
+  },
+  "gc": {
+    "enable_for_archives": true,
+    "archives_life_time_hours": 48,
+    "enable_for_shard_state_persistent": true,
+    "cells_gc_config": {
+      "gc_interval_sec": 900,
+      "cells_lifetime_sec": 1800
+    }
+  },
+  "validator_key_ring": null,
+  "remp": {
+    "client_enabled": true,
+    "remp_client_pool": null,
+    "service_enabled": true,
+    "message_queue_max_len": 10000,
+    "max_incoming_broadcast_delay_millis": 0
+  },
+  "restore_db": true,
+  "low_memory_mode": true,
+  "cells_db_config": {
+    "states_db_queue_len": 1000,
+    "max_pss_slowdown_mcs": 750,
+    "prefill_cells_counters": false,
+    "cache_cells_counters": true,
+    "cache_size_bytes": 4294967296
+  },
+  "collator_config": {
+    "cutoff_timeout_ms": 1000,
+    "stop_timeout_ms": 1500,
+    "clean_timeout_percentage_points": 150,
+    "optimistic_clean_percentage_points": 1000,
+    "max_secondary_clean_timeout_percentage_points": 350,
+    "max_collate_threads": 1,
+    "retry_if_empty": false,
+    "finalize_empty_after_ms": 800,
+    "empty_collation_sleep_ms": 100
+  },
+  "skip_saving_persistent_states": false,
+  "states_cache_mode": "Moderate",
+  "states_cache_cleanup_diff": 1000
 }

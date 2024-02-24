@@ -2,9 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
-## Version 0.55.93
+## Version 0.55.95
 
 - Deleted messages from outbound queue which were left after split are taken into estimation of block size
+
+## Version 0.55.94
+
+- Revert using all peers for requesting key block ids
+
+## Version 0.55.93
+
+- Fix compiler warnings
+- Add REMP settings to default configs
 
 ## Version 0.55.92
 
