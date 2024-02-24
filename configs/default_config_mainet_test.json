@@ -1,6 +1,6 @@
 {
     "log_config_name": "../common/config/log_cfg_debug.yml",
-    "ton_global_config_name": "../configs/ton-global.config-mainet-initblock.json",
+    "ton_global_config_name": "../configs/ton-global.config-mainet-test.json",
     "internal_db_path": "target/node_db",
     "ip_address": "0.0.0.0:30303",
     "control_server_port": 4925,
