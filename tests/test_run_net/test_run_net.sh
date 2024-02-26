@@ -1,24 +1,21 @@
 NODES=6
 WORKCHAINS=false
+REMP_TEST=false
 CURRENT_BRANCH="$(git branch --show-current)"
-
-if "$ROOT" == ""
-then
-    ROOT="./tmp"
-fi
+TEST_ROOT=$(pwd);
+NODE_TARGET=$TEST_ROOT/../../target/release/
 
 echo "Current branch: $CURRENT_BRANCH"
-echo "Current root: $ROOT"
+echo "Current root: $TEST_ROOT"
 
 # apt update
 # apt install jq
 
-if [ ! "$REMP_TEST" == "true" ]
+if [ "$REMP_TEST" == "true" ]
 then
-    echo "No Remp testing: '$REMP_TEST'"
-    REMP_TEST=false
-else
     echo "Remp testing in progress. Make sure you have enabled a REMP capability in a zerostate."
+else
+    echo "Remp testing is NOT enabled!"
 fi
 
 if [ "$WORKCHAINS" == "true" ]
@@ -30,10 +27,7 @@ fi
 
 echo "Preparations..."
 
-pkill -9 ton_node
-
-TEST_ROOT=$(pwd);
-NODE_TARGET=$TEST_ROOT/../../target/release/
+pkill -9 ton_node > /dev/null 2>&1 || echo "No ton_node processes"
 
 ./remove_junk.sh $NODE_TARGET $NODES > /dev/null 2>&1
 echo "Building $(pwd)"
@@ -44,13 +38,13 @@ then
 fi
 
 cd ../../../
-if ! [ -d "ever-node-tools-private" ]
+if ! [ -d "ever-node-tools" ]
 then
-    git clone "https://github.com/tonlabs/ever-node-tools"
-    cd ever-node-tools-private
+    git clone "git@github.com:tonlabs/ever-node-tools.git"
+    cd ever-node-tools
     git checkout "$CURRENT_BRANCH" || echo "Use default branch"
 else
-    cd ever-node-tools-private
+    cd ever-node-tools
 fi
 TOOLS_ROOT=$(pwd)
 
@@ -77,8 +71,6 @@ cat $TEST_ROOT/ton-global.config_2.json >> $NODE_TARGET/ton-global.config.json
 
 mkdir tmp > /dev/null 2>&1
 rm -rd tmp/* > /dev/null 2>&1
-mkdir tmp/blocks/ > /dev/null 2>&1
-
 
 # 0 is full node
 for (( N=0; N <= $NODES; N++ ))
@@ -88,12 +80,9 @@ do
     echo "Cleaning up #$N..."
     rm -r -d node_db_$N > /dev/null 2>&1
     rm -r -d configs_$N > /dev/null 2>&1
-    rm $ROOT/output_$N.log > /dev/null 2>&1
-
+    rm $TEST_ROOT/tmp/output_$N.log > /dev/null 2>&1
 
     echo "Validator's #$N config generating..."
-
-    pkill -9 ton_node
 
     $TOOLS_ROOT/target/release/keygen > $TEST_ROOT/tmp/genkey$N
     jq -c .public $TEST_ROOT/tmp/genkey$N > console_public_json
@@ -134,14 +123,13 @@ do
     cp $NODE_TARGET/default_config$N.json $TEST_ROOT/tmp/default_config$N.json
 
     rm tmp_output > /dev/null 2>&1
-    ./ton_node --configs . --ckey "$(cat console_public_json)" > tmp_output &
+    (./ton_node --configs . --ckey "$(cat console_public_json)" > tmp_output 2>&1 & wait 2>/dev/null) &
     echo "  waiting for 5 secs"
     sleep 5
     if [ ! -f "console_config.json" ]; then
         echo "ERROR: console_config.json does not exist"
         exit 1
     fi
-
 
     cp console_config.json $TEST_ROOT/tmp/console$N.json
     cd $TOOLS_ROOT/target/release/
@@ -165,7 +153,7 @@ do
 
     cp $NODE_TARGET/config.json $TEST_ROOT/tmp/config$N.json
 
-    pkill -9 ton_node
+    pkill -9 ton_node > /dev/null 2>&1 || echo "No ton_node processes"
 
 done
 
@@ -245,18 +233,16 @@ do
     cp $TEST_ROOT/tmp/config$N.json $NODE_TARGET/configs_$N/config.json
     cp $TEST_ROOT/tmp/default_config$N.json $NODE_TARGET/configs_$N/default_config.json
     cp $TEST_ROOT/tmp/console$N.json $NODE_TARGET/configs_$N/console.json
-    sed "s/NODE_NUM/$N/g" $TEST_ROOT/log_cfg.yml > $NODE_TARGET/configs_$N/log_cfg_$N.yml
+    sed "s/NODE_NUM/$N/g ; s#/shared/#$TEST_ROOT/tmp/#" "$TEST_ROOT/log_cfg.yml" > "$NODE_TARGET/configs_$N/log_cfg_$N.yml"
     cp $TEST_ROOT/tmp/ton-global.config.json $NODE_TARGET/configs_$N/ton-global.config.json
 
-    # rm $ROOT/output_$N.log
-    ./ton_node --configs configs_$N -z . > "$ROOT/node_$N.output" 2>&1 &
+    # rm $TEST_ROOT/tmp/output_$N.log
+    ./ton_node --configs configs_$N -z . > "$TEST_ROOT/tmp/output_$N.log" 2>&1 &
 
 done
 
 date
 echo "Started"
-
-exit 0
 
 # echo "Waiting 10mins for 200th master block"
 # sleep 600
@@ -264,7 +250,7 @@ exit 0
 # function find_block {
 #     for (( N=1; N <= $NODES; N++ ))
 #     do
-#         if cat "$ROOT/output_$N.log" | egrep -q "Applied(.*)$1"
+#         if cat "$TEST_ROOT/tmp/output_$N.log" | egrep -q "Applied(.*)$1"
 #         then
 #             echo "Applied block ($1) - FOUND on node #$N!"
 #         else
@@ -293,7 +279,4 @@ exit 0
 #     fi
 # fi
 
-# # pkill ton_node
-
-
-# echo "TEST PASSED"
+# pkill -9 ton_node

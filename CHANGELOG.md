@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.95
+
+- Fix script to run test network locally 
+
 ## Version 0.55.94
 
 - Revert using all peers for requesting key block ids
