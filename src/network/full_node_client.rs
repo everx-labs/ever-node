@@ -94,9 +94,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
     async fn download_next_key_blocks_ids(
         &self,
         block_id: &BlockIdExt,
-        max_size: i32,
-        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-        bad_peers: &mut HashSet<Arc<KeyId>>,
+        max_size: i32
     ) -> Result<Vec<BlockIdExt>>;
     async fn download_next_block_full(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
     async fn download_archive(
@@ -1037,8 +1035,6 @@ Ok(if key_block {
         &self, 
         block_id: &BlockIdExt,
         max_size: i32,
-        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-        bad_peers: &mut HashSet<Arc<KeyId>>
     ) -> Result<Vec<BlockIdExt>> {
         let request = TaggedObject {
             object: GetNextKeyBlockIds {

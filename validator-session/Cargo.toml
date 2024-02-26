@@ -16,10 +16,10 @@ metrics = '0.21.0'
 metrics-core = '0.5'
 rand = '0.8'
 catchain = { path = '../catchain' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.19' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.20' }
 storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.59' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.122' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.60' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.124' }
 ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.32' }
 
 [dev-dependencies]
