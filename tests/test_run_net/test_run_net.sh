@@ -40,7 +40,7 @@ fi
 cd ../../../
 if ! [ -d "ever-node-tools" ]
 then
-    git clone "git@github.com:tonlabs/ever-node-tools.git"
+    git clone --recurse-submodules "https://github.com/tonlabs/ever-node-tools.git"
     cd ever-node-tools
     git checkout "$CURRENT_BRANCH" || echo "Use default branch"
 else
