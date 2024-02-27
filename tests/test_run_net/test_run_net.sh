@@ -1,3 +1,5 @@
+#!/bin/bash
+
 NODES=6
 WORKCHAINS=false
 REMP_TEST=false
@@ -29,7 +31,7 @@ echo "Preparations..."
 
 pkill -9 ton_node > /dev/null 2>&1 || echo "No ton_node processes"
 
-./remove_junk.sh $NODE_TARGET $NODES > /dev/null 2>&1
+bash ./remove_junk.sh "$NODE_TARGET" "$NODES" > /dev/null 2>&1
 echo "Building $(pwd)"
 
 if ! cargo build --release
