@@ -39,16 +39,6 @@ if ! cargo build --release --features "telemetry" ; then
 fi
 
 rm -rf "$NODE_LOG" && mkdir "$NODE_LOG"
-cd "$NODE_ROOT/../node-tools"
-TOOLS_ROOT=$(pwd)
-TOOLS_TARGET="$TOOLS_ROOT/target/release"
-
-# cargo update
-echo "Building $(pwd)"
-if ! cargo build --release
-then
-    exit 1
-fi
 
 cd "$TEST_ROOT"
 NOWDATE=$(date +"%s")
@@ -79,7 +69,7 @@ for (( N=1; N <= NODES; N++ )) ; do
 
     pkill -9 ton_node > /dev/null 2>&1 || echo "No ton_node processes"
 
-    "$TOOLS_TARGET/keygen" > "$TEST_ROOT/tmp/genkey$N"
+    ./keygen > "$TEST_ROOT/tmp/genkey$N"
     jq -c .public "$TEST_ROOT/tmp/genkey$N" > console_public_json
     rm -f config.json > /dev/null 2>&1
     rm -f default_config.json > /dev/null 2>&1
@@ -125,7 +115,7 @@ for (( N=1; N <= NODES; N++ )) ; do
     fi
 
     cp console_config.json "$TEST_ROOT/tmp/console$N.json"
-    cd "$TOOLS_TARGET"
+    cd "$NODE_TARGET"
     jq ".client_key = $(jq .private "$TEST_ROOT/tmp/genkey$N")" "$TEST_ROOT/tmp/console$N.json" > "$TEST_ROOT/tmp/console$N.tmp.json"
     jq ".config = $(cat "$TEST_ROOT/tmp/console$N.tmp.json")" "$TEST_ROOT/console-template.json" > "$TEST_ROOT/tmp/console$N.json"
     rm -f "$TEST_ROOT/tmp/console$N.tmp.json"
@@ -177,16 +167,14 @@ done
 cat "$TEST_ROOT/zero_state_blanc_2.json" >> "$TEST_ROOT/tmp/zero_state.json"
 
 echo "  finish zerostate generating..."
+rm -f ./*.boc > /dev/null 2>&1
 ./zerostate -i "$TEST_ROOT/tmp/zero_state.json"
-rm -f "$NODE_TARGET/*.boc" > /dev/null 2>&1
-cp ./*.boc "$NODE_TARGET/"
-rm ./*.boc > /dev/null 2>&1
 
 echo "Global config generating..."
 
 cd "$TEST_ROOT"
 cat ton-global.config_1.json >> tmp/ton-global.config.json
-cd "$TOOLS_TARGET"
+cd "$NODE_TARGET"
 
 for (( N=1; N <= NODES; N++ ))
 do
@@ -206,7 +194,7 @@ do
 done
 
 cat "$TEST_ROOT/ton-global.config_2.json" >> "$TEST_ROOT/tmp/ton-global.config.json"
-jq ".validator.zero_state = $(jq .zero_state "$TOOLS_TARGET/config.json")" "$TEST_ROOT/tmp/ton-global.config.json" > "$TEST_ROOT/tmp/ton-global.config.json.tmp"
+jq ".validator.zero_state = $(jq .zero_state "$NODE_TARGET/config.json")" "$TEST_ROOT/tmp/ton-global.config.json" > "$TEST_ROOT/tmp/ton-global.config.json.tmp"
 # Looks like jq contains bug which converts big number wrong way, rolling back:
 sed "s/-9223372036854776000/-9223372036854775808/g" "$TEST_ROOT/tmp/ton-global.config.json.tmp" > "$TEST_ROOT/tmp/ton-global.config.json"
 cp "$TEST_ROOT/tmp/ton-global.config.json" "$NODE_TARGET/ton-global.config.json"
