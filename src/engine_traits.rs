@@ -363,9 +363,7 @@ pub trait EngineOperations : Sync + Send {
     }
     async fn download_next_key_blocks_ids(
         &self,
-        block_id: &BlockIdExt,
-        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-        bad_peers: &mut HashSet<Arc<KeyId>>,
+        block_id: &BlockIdExt
     ) -> Result<Vec<BlockIdExt>> {
         unimplemented!()
     }
