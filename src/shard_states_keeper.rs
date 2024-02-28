@@ -19,7 +19,7 @@ use storage::shardstate_db_async::Job as SsDbJob;
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{fail, error, Result, UInt256, BocReader, Cell};
 use adnl::common::add_unbound_object_to_map_with_update;
-use std::{ time::Duration, ops::Deref, sync::Arc };
+use std::{ ops::Deref, sync::Arc, time::{Duration, Instant} };
 
 pub struct PinnedShardStateGuard {
     state: Arc<ShardStateStuff>,
@@ -79,6 +79,7 @@ pub struct ShardStatesKeeper {
     skip_saving_pss: bool,
     states_cache_mode: ShardStatesCacheMode,
     states_cache_cleanup_diff: u32,
+    states_cache_cleanup_offset: u32,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<EngineTelemetry>,
     allocated: Arc<EngineAlloc>,
@@ -120,6 +121,7 @@ impl ShardStatesKeeper {
             skip_saving_pss,
             states_cache_mode,
             states_cache_cleanup_diff,
+            states_cache_cleanup_offset: rand::random::<u32>() % states_cache_cleanup_diff,
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated,
@@ -282,7 +284,7 @@ impl ShardStatesKeeper {
 
         let (cb1, cb2) = if persistent_state.is_some() || 
                             self.states_cache_mode.is_disabled() ||
-                           (handle.id().seq_no() % self.states_cache_cleanup_diff == 0 && 
+                           (handle.id().seq_no() % self.states_cache_cleanup_diff == self.states_cache_cleanup_offset && 
                             self.states_cache_mode.is_enabled())
         {
             let cb = SsNotificationCallback::new();
@@ -321,14 +323,17 @@ impl ShardStatesKeeper {
         ).await?.1;
 
         if let (true, Some(cb)) = (saving, cb2) {
-            let now = std::time::Instant::now();
-            log::trace!("store_state: waiting for callback...");
-            cb.wait().await;
+            let now = Instant::now();
+            log::debug!("store_state {}: waiting for callback...", handle.id());
+            while tokio::time::timeout(Duration::from_secs(1), cb.wait()).await.is_err() {
+                log::warn!("store_state {}: yet waiting for a callback: TIME {}ms", 
+                    handle.id(), now.elapsed().as_millis());
+            }
             let millis = now.elapsed().as_millis();
             if millis > 100 {
-                log::warn!("store_state: callback done TIME {}ms", millis);
+                log::warn!("store_state {}: callback done TIME {}ms", millis, handle.id());
             } else {
-                log::trace!("store_state: callback done TIME {}ms", millis);
+                log::debug!("store_state {}: callback done TIME {}ms", millis, handle.id());
             }
             // reload state after saving just to free fully loaded tree 
             // and use lazy loaded cells futher
