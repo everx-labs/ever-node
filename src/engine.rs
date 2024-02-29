@@ -603,7 +603,6 @@ impl Engine {
         let enable_shard_state_persistent_gc = general_config.enable_shard_state_persistent_gc();
         let skip_saving_persistent_states = general_config.skip_saving_persistent_states();
         let states_cache_mode = general_config.states_cache_mode();
-        let states_cache_cleanup_diff = general_config.states_cache_cleanup_diff();
         let restore_db = general_config.restore_db();
         let processed_workchain = general_config.workchain();
 
@@ -723,7 +722,6 @@ impl Engine {
             enable_shard_state_persistent_gc,
             skip_saving_persistent_states,
             states_cache_mode,
-            states_cache_cleanup_diff,
             cells_lifetime_sec,
             stopper.clone(),
             cells_db_config.states_db_queue_len + 10,
@@ -1605,6 +1603,7 @@ impl Engine {
                 handles: create_metric("Alloc NODE block handles"),
                 packages: create_metric("Alloc NODE packages"),
                 storage_cells: create_metric("Alloc NODE storage cells"),
+                storing_cells: create_metric("Alloc NODE storing cells"),
                 shardstates_queue: create_metric("Alloc NODE shardstates queue"),
                 cells_counters: create_metric("Alloc NODE cells counters"),
                 cell_counter_from_cache: create_metric_ex("NODE read cache cell_counters/sec"),
@@ -1635,6 +1634,7 @@ impl Engine {
             TelemetryItem::Metric(engine_telemetry.storage.handles.clone()),
             TelemetryItem::Metric(engine_telemetry.storage.packages.clone()),
             TelemetryItem::Metric(engine_telemetry.storage.storage_cells.clone()),
+            TelemetryItem::Metric(engine_telemetry.storage.storing_cells.clone()),
             TelemetryItem::Metric(engine_telemetry.storage.shardstates_queue.clone()),
             TelemetryItem::Metric(engine_telemetry.storage.cells_counters.clone()),
             TelemetryItem::MetricBuilder(engine_telemetry.storage.cell_counter_from_cache.clone()),

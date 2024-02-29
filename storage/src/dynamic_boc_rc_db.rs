@@ -19,14 +19,15 @@ use crate::{
 use crate::StorageTelemetry;
 use std::{
     borrow::Cow, fs::write, io::Cursor, mem::size_of, ops::{Deref, DerefMut}, path::Path,
-    sync::{Arc, atomic::{AtomicU32, Ordering}}, time::Duration
+    sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc}, time::Duration
 };
 //#[cfg(test)]
 //use std::path::Path;
 use ton_types::{
-    error, fail, ByteOrderRead, Cell, CellByHashStorage, CellData, DoneCellsStorage, 
-    MAX_LEVEL, OrderedCellsStorage, Result, UInt256, 
+    error, fail, BuilderData, ByteOrderRead, Cell, CellByHashStorage, CellData, DoneCellsStorage, 
+    OrderedCellsStorage, Result, UInt256, MAX_LEVEL 
 };
+use ton_block::merkle_update::CellsFactory;
 
 pub const BROKEN_CELL_BEACON_FILE: &str = "ton_node.broken_cell";
 
@@ -148,6 +149,10 @@ impl VisitedCell {
             VisitedCell::UpdatedOldFormat{cell, ..} => Some(cell),
         }
     }
+
+    fn is_new(&self) -> bool {
+        matches!(self, VisitedCell::New{..})
+    }
 }
 
 fn build_counter_key(cell_id: &[u8]) -> [u8; 33] {
@@ -162,6 +167,8 @@ pub struct DynamicBocDb {
     db_root_path: String,
     assume_old_cells: bool,
     raw_cells_cache: RawCellsCache,
+    storing_cells: Arc<lockfree::map::Map<UInt256, Cell>>,
+    storing_cells_count: AtomicU64,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<StorageTelemetry>,
     allocated: Arc<StorageAlloc>
@@ -184,6 +191,8 @@ impl DynamicBocDb {
             db_root_path: db_root_path.to_string(),
             assume_old_cells,
             raw_cells_cache,
+            storing_cells: Arc::new(lockfree::map::Map::new()),
+            storing_cells_count: AtomicU64::new(0),
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated
@@ -263,6 +272,20 @@ impl DynamicBocDb {
             "DynamicBocDb::save_boc  {:x}  transaction commit TIME {}", root_id,
             now.elapsed().as_millis()
         );
+
+        for (id, vc) in visited.iter() {
+            if vc.is_new() {
+                if self.storing_cells.remove(id).is_some() {
+                    log::trace!(
+                        target: TARGET,
+                        "DynamicBocDb::save_boc  {:x}  cell removed from storing_cells", id
+                    );
+                    #[cfg(feature = "telemetry")]
+                    let storing_cells_count = self.storing_cells_count.fetch_sub(1, Ordering::Relaxed);
+                    self.telemetry.storing_cells.update(storing_cells_count - 1);
+                }
+            }
+        }
 
         let saved_root = if let Some(c) = visited.get(&root_id).and_then(|vc| vc.cell()) {
             c.clone()
@@ -706,6 +729,55 @@ impl DynamicBocDb {
         }
 
         Ok((None, None))
+    }
+}
+
+impl CellsFactory for DynamicBocDb {
+    fn create_cell(self: Arc<Self>, builder: BuilderData) -> Result<Cell> {
+
+        let cell = Cell::with_cell_impl(
+            StorageCell::with_cell(builder.into_cell()?.deref(), &self, true, true)?
+        );
+        let repr_hash = cell.repr_hash();
+
+        let mut result_cell = None;
+
+        let result = self.storing_cells.insert_with(
+            repr_hash,
+            |_, inserted, found| {
+                if let Some((_, found)) = found {
+                    result_cell = Some(found.clone());
+                    lockfree::map::Preview::Discard
+                } else if let Some(inserted) = inserted {
+                    result_cell = Some(inserted.clone());
+                    return lockfree::map::Preview::Keep
+                } else {
+                    result_cell = Some(cell.clone());
+                    lockfree::map::Preview::New(cell.clone())
+                }
+            }
+        );
+
+        let result_cell = result_cell
+            .ok_or_else(|| error!("INTERNAL ERROR: result_cell {:x} is None", cell.repr_hash()))?;
+
+        match result {
+            lockfree::map::Insertion::Created => {
+                log::trace!(target: TARGET, "DynamicBocDb::create_cell {:x} - created new", cell.repr_hash());
+                #[cfg(feature = "telemetry")] {
+                    let storing_cells_count = self.storing_cells_count.fetch_add(1, Ordering::Relaxed);
+                    self.telemetry.storing_cells.update(storing_cells_count + 1);
+                }
+            }
+            lockfree::map::Insertion::Failed(_) => {
+                log::trace!(target: TARGET, "DynamicBocDb::create_cell {:x} - already exists", cell.repr_hash());
+            }
+            lockfree::map::Insertion::Updated(old) => {
+                fail!("INTERNAL ERROR: storing_cells.insert_with {:x} returned Updated({:?})", cell.repr_hash(), old)
+            }
+        }
+
+        Ok(result_cell)
     }
 }
 

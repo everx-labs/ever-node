@@ -119,7 +119,8 @@ pub async fn calc_shard_state(
     let ss = tokio::task::spawn_blocking(
         move || -> Result<Arc<ShardStateStuff>> {
             let now = std::time::Instant::now();
-            let (ss_root, _metrics) = merkle_update.apply_for_with_metrics(&prev_ss_root)?;
+            let cf = engine_cloned.db_cells_factory()?;
+            let (ss_root, _metrics) = merkle_update.apply_for_with_cells_factory(&prev_ss_root, &cf)?;
             let elapsed = now.elapsed();
             log::trace!("({}): TIME: calc_shard_state: applied Merkle update {}ms   {}",
                 block_descr_clone,
@@ -181,7 +182,8 @@ pub async fn calc_out_msg_queue(
     let ss = tokio::task::spawn_blocking(
         move || -> Result<Arc<ShardStateStuff>> {
             let now = std::time::Instant::now();
-            let (ss_root, _metrics) = merkle_update.apply_for_with_metrics(&prev_ss_root)?;
+            let cf = engine_cloned.db_cells_factory()?;
+            let (ss_root, _metrics) = merkle_update.apply_for_with_cells_factory(&prev_ss_root, &cf)?;
             let elapsed = now.elapsed();
             log::trace!("TIME: calc_out_msg_queue: applied Merkle update {}ms   {}",
                 elapsed.as_millis(), block_id);

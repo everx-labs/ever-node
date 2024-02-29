@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.96
+
+- Added a mechanism of storing cells.
+
 ## Version 0.55.95
 
 - Fix script to run test network locally 
