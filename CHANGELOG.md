@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.98
+
+- Fixed mint of extra currencies. A bug in the validator was caused while minting the second and next currencies. The result was a validation failure.
+
 ## Version 0.55.97
 
 - Improved alforithm for ping of bad peers
