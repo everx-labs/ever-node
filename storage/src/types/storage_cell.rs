@@ -143,7 +143,7 @@ impl StorageCell {
         let references_count = cell.references_count();
         let mut references = Vec::with_capacity(references_count);
         for i in 0..references_count {
-            let hash = cell.reference(i)?.repr_hash();
+            let hash = cell.reference_repr_hash(i)?;
             if !take_refs {
                 log::trace!(target: TARGET, "Cell {:x} - reference [{}] {:x} is not taken", 
                     cell.hash(MAX_LEVEL), i, hash);
@@ -164,7 +164,7 @@ impl StorageCell {
             references: parking_lot::RwLock::new(references),
             boc_db: Arc::downgrade(boc_db),
             tree_bits_count: cell.tree_bits_count(),
-            tree_cell_count: cell.tree_bits_count(),
+            tree_cell_count: cell.tree_cell_count(),
             use_cache
         })
     }
