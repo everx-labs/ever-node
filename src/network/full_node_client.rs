@@ -13,13 +13,19 @@
 
 use crate::{
     block::BlockStuff, block_proof::BlockProofStuff,
-    network::{neighbours::{Neighbours, Neighbour}, node_network::NetworkContext}, 
+    network::{
+        neighbours::{
+            Neighbours, Neighbour, 
+            UPDATE_FLAG_IS_REGISTER, UPDATE_FLAG_IS_REG_IN_COMMON_STAT, UPDATE_FLAG_IS_RDPL
+        },
+        node_network::NetworkContext
+    },
     shard_state::ShardStateStuff, types::top_block_descr::TopBlockDescrStuff
 };
 
 use adnl::{
     declare_counted,
-    common::{CountedObject, Counter,TaggedByteSlice, TaggedObject, TaggedTlObject}, 
+    common::{CountedObject, Counter,TaggedByteSlice, TaggedObject, TaggedTlObject},
     node::AdnlNode
 };
 use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
@@ -28,7 +34,7 @@ use std::{io::Cursor, time::Instant, sync::Arc, time::Duration, collections::Has
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
 use ton_api::{
-    serialize_boxed, serialize_boxed_append, 
+    serialize_boxed, serialize_boxed_append,
     BoxedSerialize, BoxedDeserialize, Deserializer, IntoBoxed,
     ton::{
         self, TLObject,
@@ -40,14 +46,14 @@ use ton_api::{
             PrepareBlockProof, PrepareKeyBlockProof, PrepareQueueUpdate, DownloadQueueUpdate,
             PreparePersistentMsgQueue, DownloadPersistentMsgQueueSlice,
         },
-        ton_node::{ 
-            ArchiveInfo, Broadcast, 
-            DataFull, KeyBlocks, Prepared, PreparedProof, PreparedState, 
+        ton_node::{
+            ArchiveInfo, Broadcast,
+            DataFull, KeyBlocks, Prepared, PreparedProof, PreparedState,
             broadcast::{
                 BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast,
                 QueueUpdateBroadcast,
-            }, 
-            externalmessage::ExternalMessage, 
+            },
+            externalmessage::ExternalMessage,
         }
     }
 };
@@ -88,7 +94,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
         attempt: u32,
     ) -> Result<Vec<u8>>;
     async fn download_zero_state(
-        &self, 
+        &self,
         id: &BlockIdExt
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)>;
     async fn download_next_key_blocks_ids(
@@ -98,7 +104,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
     ) -> Result<Vec<BlockIdExt>>;
     async fn download_next_block_full(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
     async fn download_archive(
-        &self, 
+        &self,
         mc_seq_no: u32,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<Option<Vec<u8>>>;
@@ -162,7 +168,7 @@ declare_counted!(
     }
 );
 
-impl NodeClientOverlay {   
+impl NodeClientOverlay {
 
     const ADNL_ATTEMPTS: u32 = 50;
     const TIMEOUT_PREPARE: u64 = 6000; // Milliseconds
@@ -173,7 +179,7 @@ impl NodeClientOverlay {
         overlay_id: Arc<OverlayShortId>,
         peers: Arc<Neighbours>,
         network_context: &Arc<NetworkContext>
-    ) -> Self { 
+    ) -> Self {
         let ret = Self {
             overlay_id,
             peers,
@@ -197,7 +203,7 @@ impl NodeClientOverlay {
             #[cfg(feature = "telemetry")]
             tag_download_next_block_full: tag_from_boxed_type::<DownloadNextBlockFull>(),
             #[cfg(feature = "telemetry")]
-            tag_download_persistent_state_slice: 
+            tag_download_persistent_state_slice:
                 tag_from_boxed_type::<DownloadPersistentStateSlice>(),
             #[cfg(feature = "telemetry")]
             tag_download_persistent_msg_queue_slice:
@@ -250,7 +256,7 @@ impl NodeClientOverlay {
     }
 
     async fn send_adnl_query_to_peer<R, D>(
-        &self, 
+        &self,
         peer: &Arc<Neighbour>,
         data: &TaggedTlObject,
         timeout: Option<u64>
@@ -270,9 +276,9 @@ impl NodeClientOverlay {
         let now = Instant::now();
         let timeout = timeout.or(Some(AdnlNode::calc_timeout(peer.roundtrip_adnl())));
         let answer = self.network_context.overlay.query(
-            peer.id(), 
-            &data, 
-            &self.overlay_id, 
+            peer.id(),
+            &data,
+            &self.overlay_id,
             timeout
         ).await?;
         let elapsed = now.elapsed();
@@ -286,9 +292,9 @@ impl NodeClientOverlay {
                     peer.query_success(roundtrip, false);
                     #[cfg(feature = "telemetry")]
                     self.network_context.telemetry.consumed_query(
-                        request_str, 
-                        true, 
-                        now.elapsed(), 
+                        request_str,
+                        true,
+                        now.elapsed(),
                         0
                     ); // TODO data size (need to patch overlay)
                     return Ok(Some(answer))
@@ -296,9 +302,9 @@ impl NodeClientOverlay {
                 Err(obj) => {
                     #[cfg(feature = "telemetry")]
                     self.network_context.telemetry.consumed_query(
-                        request_str, 
-                        false, 
-                        now.elapsed(), 
+                        request_str,
+                        false,
+                        now.elapsed(),
                         0
                     );
                     log::warn!("Wrong answer {:?} to {:?} from {}", obj, data.object, peer.id())
@@ -310,9 +316,12 @@ impl NodeClientOverlay {
             log::warn!("No reply to {:?} from {}", data.object, peer.id())
         }
 
-        self.peers.update_neighbour_stats(peer.id(), roundtrip, false, false, true)?;
+        self.peers.update_neighbour_stats(
+            peer, 
+            roundtrip, 
+            UPDATE_FLAG_IS_REGISTER | UPDATE_FLAG_IS_REG_IN_COMMON_STAT
+        );
         Ok(None)
-
     }
 
     // use this function if request size and answer size < 768 bytes (send query via ADNL)
@@ -420,8 +429,8 @@ impl NodeClientOverlay {
 
     // use this function if request size and answer size < 768 bytes (send query via ADNL)
     async fn send_adnl_query<R, D>(
-        &self, 
-        request: TaggedObject<R>, 
+        &self,
+        request: TaggedObject<R>,
         attempts: Option<u32>,
         timeout: Option<u64>,
         active_peers: Option<&Arc<lockfree::set::Set<Arc<KeyId>>>>
@@ -455,7 +464,7 @@ impl NodeClientOverlay {
                     if let Some(active_peers) = active_peers {
                         active_peers.remove(peer.id());
                     }
-                    return Err(e) 
+                    return Err(e)
                 },
                 Ok(Some(answer)) => return Ok((answer, peer)),
                 Ok(None) => if let Some(active_peers) = active_peers {
@@ -465,11 +474,11 @@ impl NodeClientOverlay {
         }
 
         fail!("Cannot send query {:?} in {} attempts", data.object, attempts)
- 
+
     }
 
     async fn send_rldp_query_raw<T>(
-        &self, 
+        &self,
         request: &TaggedObject<T>,
         peer: Arc<Neighbour>,
         attempt: u32,
@@ -499,20 +508,24 @@ impl NodeClientOverlay {
                 Ok((data, peer))
             },
             Err(e) => {
-                self.peers.update_neighbour_stats(peer.id(), roundtrip, false, true, true)?;
+                self.peers.update_neighbour_stats(
+                    &peer, 
+                    roundtrip, 
+                    UPDATE_FLAG_IS_RDPL | UPDATE_FLAG_IS_REGISTER | UPDATE_FLAG_IS_REG_IN_COMMON_STAT
+                );
                 fail!(e)
             }
         }
     }
 
     async fn send_rldp_query<T>(
-        &self, 
-        request: &TaggedObject<T>, 
+        &self,
+        request: &TaggedObject<T>,
         peer: Arc<Neighbour>,
         attempt: u32
-    ) -> Result<(Vec<u8>, Arc<Neighbour>, u64)> 
-    where 
-        T: BoxedSerialize + std::fmt::Debug 
+    ) -> Result<(Vec<u8>, Arc<Neighbour>, u64)>
+    where
+        T: BoxedSerialize + std::fmt::Debug
     {
 
         let mut query = self.network_context.overlay.get_query_prefix(&self.overlay_id)?;
@@ -542,16 +555,20 @@ impl NodeClientOverlay {
         if let Some(answer) = answer {
             #[cfg(feature = "telemetry")]
             self.network_context.telemetry.consumed_query(
-                request_str, 
-                true, 
-                now.elapsed(), 
+                request_str,
+                true,
+                now.elapsed(),
                 answer.len()
             );
             Ok((answer, peer, roundtrip))
         } else {
             #[cfg(feature = "telemetry")]
             self.network_context.telemetry.consumed_query(request_str, false, now.elapsed(), 0);
-            self.peers.update_neighbour_stats(peer.id(), roundtrip, false, true, true)?;
+            self.peers.update_neighbour_stats(
+                &peer, 
+                roundtrip, 
+                UPDATE_FLAG_IS_RDPL | UPDATE_FLAG_IS_REGISTER | UPDATE_FLAG_IS_REG_IN_COMMON_STAT
+            );
             fail!("No RLDP answer to {:?} from {}", request.object, peer.id())
         }
 
@@ -574,28 +591,28 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             tag: self.tag_external_message_broadcast
         };
         self.network_context.overlay.broadcast(
-            &self.overlay_id, 
-            &broadcast, 
+            &self.overlay_id,
+            &broadcast,
             None,
             false
         ).await
     }
-    
+
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()> {
         let id = broadcast.id.clone();
         let broadcast = TaggedByteSlice {
             object: &serialize_boxed(&broadcast.into_boxed())?,
             #[cfg(feature = "telemetry")]
             tag: self.tag_block_broadcast
-        };        
+        };
         let info = self.network_context.overlay.broadcast(
-            &self.overlay_id, 
-            &broadcast, 
+            &self.overlay_id,
+            &broadcast,
             None,
             false
         ).await?;
         log::trace!(
-            "send_block_broadcast {} (overlay {}) sent to {} nodes", 
+            "send_block_broadcast {} (overlay {}) sent to {} nodes",
             self.overlay_id, id, info.send_to
         );
         Ok(())
@@ -616,29 +633,29 @@ impl FullNodeOverlayClient for NodeClientOverlay {
             false
         ).await?;
         log::trace!(
-            "send_queue_update_broadcast {} for wc {} (overlay {}) sent to {} nodes", 
+            "send_queue_update_broadcast {} for wc {} (overlay {}) sent to {} nodes",
             self.overlay_id, wc, id, info.send_to
         );
         Ok(())
     }
-    
+
     async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()> {
-        let broadcast = NewShardBlockBroadcast { 
-            block: tbd.new_shard_block()? 
+        let broadcast = NewShardBlockBroadcast {
+            block: tbd.new_shard_block()?
         }.into_boxed();
         let broadcast = TaggedByteSlice {
             object: &serialize_boxed(&broadcast)?,
             #[cfg(feature = "telemetry")]
             tag: self.tag_new_shard_block_broadcast
-        };        
+        };
         let info = self.network_context.overlay.broadcast(
-            &self.overlay_id, 
-            &broadcast, 
+            &self.overlay_id,
+            &broadcast,
             None,
             true
         ).await?;
         log::trace!(
-            "send_top_shard_block_description {} (overlay {}) sent to {} nodes", 
+            "send_top_shard_block_description {} (overlay {}) sent to {} nodes",
             tbd.proof_for(), self.overlay_id, info.send_to
         );
         Ok(())
@@ -652,10 +669,10 @@ impl FullNodeOverlayClient for NodeClientOverlay {
     // tonNode.downloadBlockProof block:tonNode.blockIdExt = tonNode.Data;
     // tonNode.downloadBlockProofLink block:tonNode.blockIdExt = tonNode.Data;
     async fn download_block_proof(
-        &self, 
-        block_id: &BlockIdExt, 
-        is_link: bool, 
-        key_block: bool, 
+        &self,
+        block_id: &BlockIdExt,
+        is_link: bool,
+        key_block: bool,
     ) -> Result<BlockProofStuff> {
 
         // Prepare
@@ -669,8 +686,8 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     #[cfg(feature = "telemetry")]
                     tag: self.tag_prepare_key_block_proof
                 },
-                None, 
-                Some(Self::TIMEOUT_PREPARE), 
+                None,
+                Some(Self::TIMEOUT_PREPARE),
                 None
             ).await?
         } else {
@@ -683,8 +700,8 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     #[cfg(feature = "telemetry")]
                     tag: self.tag_prepare_block_proof
                 },
-                None, 
-                Some(Self::TIMEOUT_PREPARE), 
+                None,
+                Some(Self::TIMEOUT_PREPARE),
                 None
             ).await?
         };
@@ -698,8 +715,8 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                 let proof = if key_block {
                     self.send_rldp_query_raw(
                         &TaggedObject {
-                            object: DownloadKeyBlockProof { 
-                                block: block_id.clone() 
+                            object: DownloadKeyBlockProof {
+                                block: block_id.clone()
                             },
                             #[cfg(feature = "telemetry")]
                             tag: self.tag_download_key_block_proof
@@ -710,8 +727,8 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                 } else {
                     self.send_rldp_query_raw(
                         &TaggedObject {
-                            object: DownloadBlockProof { 
-                                block: block_id.clone() 
+                            object: DownloadBlockProof {
+                                block: block_id.clone()
                             },
                             #[cfg(feature = "telemetry")]
                             tag: self.tag_download_block_proof
@@ -721,12 +738,12 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     ).await?
                 };
                 (proof, false)
-            }, 
+            },
             PreparedProof::TonNode_PreparedProofLink => {
                 let proof = if key_block {
                     self.send_rldp_query_raw(
                         &TaggedObject {
-                            object: DownloadKeyBlockProofLink { 
+                            object: DownloadKeyBlockProofLink {
                                 block: block_id.clone()
                             },
                             #[cfg(feature = "telemetry")]
@@ -738,7 +755,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                 } else {
                     self.send_rldp_query_raw(
                         &TaggedObject {
-                            object: DownloadBlockProofLink { 
+                            object: DownloadBlockProofLink {
                                 block: block_id.clone()
                             },
                             #[cfg(feature = "telemetry")]
@@ -751,7 +768,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                 (proof, true)
             }
         };
-         
+
         BlockProofStuff::deserialize(block_id, proof, is_link)
 
 /*
@@ -793,8 +810,8 @@ Ok(if key_block {
     //
     // tonNode.downloadBlock block:tonNode.blockIdExt = tonNode.Data; DEPRECATED?
     async fn download_block_full(
-        &self, 
-        id: &BlockIdExt, 
+        &self,
+        id: &BlockIdExt,
     ) -> Result<(BlockStuff, BlockProofStuff)> {
 
         // Prepare
@@ -981,8 +998,8 @@ Ok(if key_block {
     // tonNode.prepareZeroState block:tonNode.blockIdExt = tonNode.PreparedState;
     // tonNode.downloadZeroState block:tonNode.blockIdExt = tonNode.Data;
     async fn download_zero_state(
-        &self, 
-        id: &BlockIdExt, 
+        &self,
+        id: &BlockIdExt,
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         // Prepare
         let (prepare, good_peer): (PreparedState, _) = self.send_adnl_query(
@@ -1018,7 +1035,7 @@ Ok(if key_block {
                     0
                 ).await?;
                 let state = ShardStateStuff::deserialize_zerostate(
-                    id.clone(), 
+                    id.clone(),
                     &state_bytes,
                     #[cfg(feature = "telemetry")]
                     &self.network_context.engine_telemetry,
@@ -1032,7 +1049,7 @@ Ok(if key_block {
     // tonNode.keyBlocks blocks:(vector tonNode.blockIdExt) incomplete:Bool error:Bool = tonNode.KeyBlocks;
     // tonNode.getNextKeyBlockIds block:tonNode.blockIdExt max_size:int = tonNode.KeyBlocks;
     async fn download_next_key_blocks_ids(
-        &self, 
+        &self,
         block_id: &BlockIdExt,
         max_size: i32,
     ) -> Result<Vec<BlockIdExt>> {
@@ -1059,11 +1076,11 @@ Ok(if key_block {
 
     // tonNode.downloadNextBlockFull prev_block:tonNode.blockIdExt = tonNode.DataFull;
     async fn download_next_block_full(
-        &self, 
-        prev_id: &BlockIdExt, 
+        &self,
+        prev_id: &BlockIdExt,
     ) -> Result<(BlockStuff, BlockProofStuff)> {
 
-        let request = TaggedObject { 
+        let request = TaggedObject {
             object: DownloadNextBlockFull {
                 prev_block: prev_id.clone()
             },
@@ -1079,7 +1096,7 @@ Ok(if key_block {
             fail!("neighbour is not found!")
         };
         log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request.object);
-        
+
         // Download
         let (data_full, peer): (DataFull, _) = self.send_rldp_query_typed(
             &request,
@@ -1094,12 +1111,12 @@ Ok(if key_block {
             },
             DataFull::TonNode_DataFull(data_full) => {
                 let block = BlockStuff::deserialize_block_checked(
-                    data_full.id.clone(), 
+                    data_full.id.clone(),
                     data_full.block.to_vec()
                 )?;
                 let proof = BlockProofStuff::deserialize(
-                    block.id(), 
-                    data_full.proof.to_vec(), 
+                    block.id(),
+                    data_full.proof.to_vec(),
                     data_full.is_link.clone().into()
                 )?;
                 Ok((block, proof))
@@ -1109,7 +1126,7 @@ Ok(if key_block {
     }
 
     async fn download_archive(
-        &self, 
+        &self,
         mc_seq_no: u32,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<Option<Vec<u8>>> {
@@ -1168,7 +1185,7 @@ Ok(if key_block {
                             if part_attempt > 10 {
                                 active_peers.remove(peer.id());
                                 fail!(
-                                    "Error download_archive after {} attempts : {}", 
+                                    "Error download_archive after {} attempts : {}",
                                     part_attempt, e
                                 )
                             }
