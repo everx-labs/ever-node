@@ -2554,7 +2554,7 @@ pub async fn run(
             }
         } else {
             // Legacy mode.
-            log::info!("Processed workchain was not specifed. LEGACY MODE");
+            log::info!("Processed workchain was not specifed");
             engine.add_full_node_overlay(BASE_WORKCHAIN_ID, SHARD_FULL, false).await?;
             network.add_consumer(
                 &network.calc_overlay_id(BASE_WORKCHAIN_ID, SHARD_FULL)?.0, 

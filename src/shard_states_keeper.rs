@@ -223,6 +223,10 @@ impl ShardStatesKeeper {
         force: bool,
     ) -> Result<(Arc<ShardStateStuff>, bool)> {
 
+        if handle.id() != state.block_id() {
+            fail!("BlockIdExt and ShardStateStuff block_id mismatch");
+        }
+
         let (cb1, cb2) = if persistent_state.is_some() || self.states_cache_mode.is_disabled() {
             let cb = SsNotificationCallback::new();
             (
@@ -430,7 +434,7 @@ impl ShardStatesKeeper {
                 Some(state.val().0.clone())
             } else if handle.has_saved_state() {
                 if let Ok(state) = self.db.load_shard_state_dynamic(handle.id()) {
-                    self.states.insert(id.clone(), (state.clone(), handle.clone()));
+                    self.states.insert(handle.id().clone(), (state.clone(), handle.clone()));
                     Some(state)
                 } else {
                     log::warn!("Can't load state for {} from DB, but handle.has_saved_state() == true", handle.id());
