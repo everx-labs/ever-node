@@ -120,7 +120,13 @@ pub async fn calc_shard_state(
         move || -> Result<Arc<ShardStateStuff>> {
             let now = std::time::Instant::now();
             let cf = engine_cloned.db_cells_factory()?;
-            let (ss_root, _metrics) = merkle_update.apply_for_with_cells_factory(&prev_ss_root, &cf)?;
+            let (ss_root, _metrics) = merkle_update.apply_for_with_cells_factory(&prev_ss_root, &cf)
+                .map_err(|e| error!(
+                    "Error applying Merkle update for block {}: {}\
+                    prev_ss_root: {:#.2}\
+                    merkle_update: {}",
+                    block_id, e, prev_ss_root, merkle_update
+                ))?;
             let elapsed = now.elapsed();
             log::trace!("({}): TIME: calc_shard_state: applied Merkle update {}ms   {}",
                 block_descr_clone,
