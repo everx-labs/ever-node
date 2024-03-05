@@ -280,9 +280,9 @@ impl DynamicBocDb {
                         target: TARGET,
                         "DynamicBocDb::save_boc  {:x}  cell removed from storing_cells", id
                     );
+                    let _storing_cells_count = self.storing_cells_count.fetch_sub(1, Ordering::Relaxed);
                     #[cfg(feature = "telemetry")]
-                    let storing_cells_count = self.storing_cells_count.fetch_sub(1, Ordering::Relaxed);
-                    self.telemetry.storing_cells.update(storing_cells_count - 1);
+                    self.telemetry.storing_cells.update(_storing_cells_count - 1);
                 }
             }
         }
