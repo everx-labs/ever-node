@@ -2,9 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
-## Version 0.55.97
+## Version 0.55.99
 
 - Added a mechanism of storing cells.
+
+## Version 0.55.98
+
+- Fixed mint of extra currencies. A bug in the validator was caused while minting the second and next currencies. The result was a validation failure.
+
+## Version 0.55.97
+
+- Improved alforithm for ping of bad peers
 
 ## Version 0.55.96
 
@@ -151,7 +159,7 @@ All notable changes to this project will be documented in this file.
 ## Version 0.55.61
 
 - Support hardforking in node
-  
+
 ## Version 0.55.60
 
 - Remove time limit for boot
@@ -256,7 +264,7 @@ All notable changes to this project will be documented in this file.
 ## Version 0.55.36
 
 - Different fixes
-  
+
 ## Version 0.55.33
 
 - Fix of SystemTime::elapsed() unwrap call
@@ -351,7 +359,7 @@ All notable changes to this project will be documented in this file.
 - Changed default config for test_run_net - no countdown for zerostate
 - Increase package version
 
-## Version 0.55.6                                      
+## Version 0.55.6
 
 - Disable timeout for catchain processing after restart
 - Increase package version
@@ -486,7 +494,7 @@ All notable changes to this project will be documented in this file.
   Description for flags see below.
 - Added in-memory cache for all cells counters. It speeds up cells DB but takes more memory.
   Enabled by `prefill_cells_cunters` flag. By-default it is disabled.
-- Abjusteble queue length for states DB. It is a throttling threshold - node slows down 
+- Abjusteble queue length for states DB. It is a throttling threshold - node slows down
   if the queue is full. Abjusted by `states_db_queue_len` flag in config.json. Default value is 1000.
 - Slow down of persistent state saving. It reduces load on cells DB when it is overloaded.
   Maksimum slowdown time (pause before next cell saving) is set by `max_pss_slowdown_mcs`
