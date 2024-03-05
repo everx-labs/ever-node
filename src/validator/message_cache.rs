@@ -71,16 +71,6 @@ impl RmqMessage {
         return Ok(RmqMessage { message, message_id, message_uid })
     }
 
-    pub fn as_remp_catchain_record(&self, master_cc: u32, origin: &RempMessageOrigin) -> ton_api::ton::ton_node::RempCatchainRecordV2 {
-        ton_api::ton::ton_node::rempcatchainrecordv2::RempCatchainMessageHeaderV2 {
-            message_id: self.message_id.clone().into(),
-            message_uid: self.message_uid.clone().into(),
-            source_key_id: UInt256::from(origin.source_key.data()),
-            source_idx: origin.source_idx as i32,
-            masterchain_seqno: master_cc as i32
-        }.into_boxed()
-    }
-
     pub fn as_rmq_record(&self) -> ton_api::ton::ton_node::RmqRecord {
         ton_api::ton::ton_node::rmqrecord::RmqMessage {
             message: self.message.write_to_bytes().unwrap().into(),
@@ -238,6 +228,16 @@ impl RempMessageOrigin {
         }
     }
 
+    pub fn as_remp_catchain_record(&self, message_id: &UInt256, message_uid: &UInt256, master_cc: u32) -> ton_api::ton::ton_node::RempCatchainRecordV2 {
+        ton_api::ton::ton_node::rempcatchainrecordv2::RempCatchainMessageHeaderV2 {
+            message_id: message_id.clone().into(),
+            message_uid: message_uid.clone().into(),
+            source_key_id: UInt256::from(self.source_key.data()),
+            source_idx: self.source_idx as i32,
+            masterchain_seqno: master_cc as i32
+        }.into_boxed()
+    }
+
     pub fn from_remp_catchain(record: &RempCatchainMessageHeaderV2) -> Result<Self> {
         Self::new(
             KeyId::from_data(record.source_key_id.as_slice().clone()),
@@ -293,7 +293,7 @@ impl RempMessageWithOrigin {
     }
 
     pub fn as_remp_catchain_record(&self, master_cc: u32) -> ton_api::ton::ton_node::RempCatchainRecordV2 {
-        return self.message.as_remp_catchain_record(master_cc, &self.origin)
+        return self.origin.as_remp_catchain_record(&self.message.message_id, &self.message.message_uid, master_cc)
     }
 
     pub fn as_rmq_record(&self) -> ton_api::ton::ton_node::RmqRecord {
@@ -669,22 +669,25 @@ impl MessageCache {
         }
     }
 
-    pub fn get_message_with_origin_status_cc(&self, message_id: &UInt256) -> Result<Option<(Arc<RmqMessage>, Arc<RempMessageOrigin>, RempMessageStatus, u32)>> {
+    pub fn get_message_with_origin_status_cc(&self, message_id: &UInt256) -> Result<Option<(Option<Arc<RmqMessage>>, Arc<RempMessageHeader>, Arc<RempMessageOrigin>, RempMessageStatus, u32)>> {
         let session = match self.get_session_for_message(message_id) {
             None => return Ok(None),
             Some(s) => s
         };
 
-        let (msg, origin, status) = (
+        let (header, msg, origin, status) = (
+            session.message_headers.get(message_id).ok_or_else(|| error!("Message {:x} has no header", message_id))?.value().clone(),
             session.messages.get(message_id).map(|m| m.value().clone()),
             session.message_origins.get(message_id).map(|m| m.value().clone()),
             session.message_status.get(message_id).map(|m| m.value().clone())
         );
 
         match (msg, origin, status) {
-            (None, _, Some(_)) | (_, None, Some(_)) => Ok(None), // Bare message info (retrieved from finalized block/not received from broadcast)
-            (Some(m), Some(o), Some (h)) => Ok(Some((m.clone(), o.clone(), h.clone(), session.master_cc))), // Full message info
-            (m, o, None) => fail!("Message {:x} has no status, body = {:?}, origin = {:?}", message_id, m, o),
+            (_, None, Some(_)) => Ok(None), // Bare message info (retrieved from finalized block/not received from broadcast)
+            (m, Some(o), Some (s)) =>
+                Ok(Some((m.clone(), header.clone(), o.clone(), s.clone(), session.master_cc))), // Full message info
+            (m, o, None) =>
+                fail!("Message {:x} has no status, body = {:?}, origin = {:?}", message_id, m, o),
         }
     }
 

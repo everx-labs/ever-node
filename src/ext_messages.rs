@@ -27,7 +27,7 @@ const MESSAGE_LIFETIME: u32 = 600; // seconds
 const MESSAGE_MAX_GENERATIONS: u8 = 3;
 
 const MAX_EXTERNAL_MESSAGE_DEPTH: u16 = 512;
-const MAX_EXTERNAL_MESSAGE_SIZE: usize = 65535;
+pub const MAX_EXTERNAL_MESSAGE_SIZE: usize = 65535;
 
 pub const EXT_MESSAGES_TRACE_TARGET: &str = "ext_messages";
 
