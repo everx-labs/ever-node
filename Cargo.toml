@@ -84,20 +84,20 @@ stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
 tokio-util = '0.7'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.23' }
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.24' }
 catchain = { path = 'catchain' }
-dht = { git = 'https://github.com/tonlabs/ever-dht.git', tag = '0.6.88' }
+dht = { git = 'https://github.com/tonlabs/ever-dht.git', tag = '0.6.91' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.20' }
-rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.8.16' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.22' }
+rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.8.18' }
 storage = { path = 'storage' }
-ton_abi = { git = 'https://github.com/tonlabs/ever-abi.git', optional = true, tag = '2.4.15' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.60' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.124' }
-ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git', tag = '0.7.213' }
-ton_executor = { git = 'https://github.com/tonlabs/ever-executor.git', tag = '1.16.111' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.32' }
-ton_vm = { git = 'https://github.com/tonlabs/ever-vm.git', tag = '1.9.8' }
+ton_abi = { git = 'https://github.com/tonlabs/ever-abi.git', optional = true, tag = '2.4.16' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.61' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.126' }
+ton_block_json = { git = 'https://github.com/tonlabs/ever-block-json.git', tag = '0.7.214' }
+ton_executor = { git = 'https://github.com/tonlabs/ever-executor.git', tag = '1.16.112' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.33' }
+ton_vm = { git = 'https://github.com/tonlabs/ever-vm.git', tag = '1.9.9' }
 validator_session = { path = 'validator-session' }
 
 [dev-dependencies]
