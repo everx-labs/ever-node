@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.99
+
+- Added a mechanism of storing cells.
+
 ## Version 0.55.98
 
 - Fixed mint of extra currencies. A bug in the validator was caused while minting the second and next currencies. The result was a validation failure.

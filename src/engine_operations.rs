@@ -57,8 +57,8 @@ use ton_api::{
     }, IntoBoxed
 };
 use ton_block::{
-    MASTERCHAIN_ID, SHARD_FULL, GlobalCapabilities, OutMsgQueue,
-    BlockIdExt, AccountIdPrefixFull, ShardIdent, Message
+    AccountIdPrefixFull, BlockIdExt, CellsFactory, GlobalCapabilities, Message, OutMsgQueue,
+    ShardIdent, MASTERCHAIN_ID, SHARD_FULL
 };
 #[cfg(feature="workchains")]
 use ton_block::{BASE_WORKCHAIN_ID, INVALID_WORKCHAIN_ID};
@@ -1255,6 +1255,10 @@ impl EngineOperations for Engine {
             }
         }
         None
+    }
+
+    fn db_cells_factory(&self) -> Result<Arc<dyn CellsFactory>> {
+        self.db().cells_factory()
     }
 }
 
