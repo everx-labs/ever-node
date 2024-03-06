@@ -171,7 +171,7 @@ impl std::cmp::PartialEq for dyn BoolVector {
     fn eq(&self, other: &Self) -> bool {
         //compare addresses only because each vector is unique in cache system
 
-        (self as *const dyn BoolVector) == (other as *const dyn BoolVector)
+        std::ptr::addr_eq(self, other)
     }
 }
 

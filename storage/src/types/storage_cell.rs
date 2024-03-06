@@ -11,17 +11,15 @@
 * limitations under the License.
 */
 
-use crate::dynamic_boc_rc_db::DynamicBocDb;
+use crate::{dynamic_boc_rc_db::DynamicBocDb, TARGET};
 use std::{io::{Cursor, Write}, sync::{Arc,Weak, atomic::{AtomicU64, Ordering}}};
 use ton_types::{
-    ByteOrderRead, Cell, CellData, CellImpl, CellType, LevelMask,
-    Result, UInt256, fail,
-    MAX_LEVEL, MAX_REFERENCES_COUNT, error
+    error, fail, ByteOrderRead, Cell, CellData, CellImpl, CellType, LevelMask, Result, UInt256, MAX_LEVEL, MAX_REFERENCES_COUNT
 };
 
 struct Reference {
     hash: UInt256,
-    cell: Option<Weak<StorageCell>>,
+    cell: Option<Weak<dyn CellImpl>>,
 }
 
 pub struct StorageCell {
@@ -139,13 +137,25 @@ impl StorageCell {
     pub fn with_cell(
         cell: &dyn CellImpl,
         boc_db: &Arc<DynamicBocDb>,
+        take_refs: bool,
         use_cache: bool,
     ) -> Result<Self> {
         let references_count = cell.references_count();
         let mut references = Vec::with_capacity(references_count);
         for i in 0..references_count {
-            let hash = cell.reference(i)?.repr_hash();
-            references.push(Reference {hash, cell: None} );
+            let hash = cell.reference_repr_hash(i)?;
+            if !take_refs {
+                log::trace!(target: TARGET, "Cell {:x} - reference [{}] {:x} is not taken", 
+                    cell.hash(MAX_LEVEL), i, hash);
+                references.push(Reference {hash, cell: None} );
+            } else {
+                log::trace!(target: TARGET, "Cell {:x} - reference [{}] {:x} is taken", 
+                    cell.hash(MAX_LEVEL), i, hash);
+                references.push(Reference {
+                    hash,
+                    cell: Some(Arc::downgrade(&cell.reference(i)?.cell_impl()))
+                });
+            }
         }
         CELL_COUNT.fetch_add(1, Ordering::Relaxed);
         boc_db.allocated().storage_cells.fetch_add(1, Ordering::Relaxed);
@@ -154,7 +164,7 @@ impl StorageCell {
             references: parking_lot::RwLock::new(references),
             boc_db: Arc::downgrade(boc_db),
             tree_bits_count: cell.tree_bits_count(),
-            tree_cell_count: cell.tree_bits_count(),
+            tree_cell_count: cell.tree_cell_count(),
             use_cache
         })
     }
@@ -169,14 +179,20 @@ impl StorageCell {
         self.hash(MAX_LEVEL as usize)
     }
 
-    pub(crate) fn reference(&self, index: usize) -> Result<Arc<StorageCell>> {
+    pub(crate) fn reference(&self, index: usize) -> Result<Arc<dyn CellImpl>> {
         let hash = {
             let references = self.references.read();
             let reference = references.get(index).ok_or_else(|| error!("Reference #{index} not found"))?;
             if let Some(weak) = &reference.cell {
                 if let Some(cell) = weak.upgrade() {
                     return Ok(cell);
+                } else {
+                    log::trace!(target: TARGET, "Cell {:x} - reference [{}] {:x} was freed", 
+                        self.repr_hash(), index, reference.hash);
                 }
+            } else {
+                log::trace!(target: TARGET, "Cell {:x} - reference [{}] {:x} is None", 
+                    self.repr_hash(), index, reference.hash);
             }
             reference.hash.clone()
         };
@@ -189,7 +205,7 @@ impl StorageCell {
 
         if self.use_cache {
             self.references.write()[index].cell = 
-                Some(Arc::downgrade(&storage_cell));
+                Some(Arc::downgrade(&storage_cell) as Weak<dyn CellImpl>);
         }
 
         Ok(storage_cell)

@@ -57,8 +57,8 @@ use ton_api::{
     }, IntoBoxed
 };
 use ton_block::{
-    MASTERCHAIN_ID, SHARD_FULL, GlobalCapabilities, OutMsgQueue,
-    BlockIdExt, AccountIdPrefixFull, ShardIdent, Message
+    AccountIdPrefixFull, BlockIdExt, CellsFactory, GlobalCapabilities, Message, OutMsgQueue,
+    ShardIdent, MASTERCHAIN_ID, SHARD_FULL
 };
 #[cfg(feature="workchains")]
 use ton_block::{BASE_WORKCHAIN_ID, INVALID_WORKCHAIN_ID};
@@ -735,12 +735,10 @@ impl EngineOperations for Engine {
 
     async fn download_next_key_blocks_ids(
         &self, 
-        block_id: &BlockIdExt,
-        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-        bad_peers: &mut HashSet<Arc<KeyId>>,
+        block_id: &BlockIdExt
     ) -> Result<Vec<BlockIdExt>> {
         let mc_overlay = self.get_masterchain_overlay().await?;
-        mc_overlay.download_next_key_blocks_ids(block_id, 5, active_peers, bad_peers).await
+        mc_overlay.download_next_key_blocks_ids(block_id, 5).await
     }
 
     async fn set_applied(
@@ -1257,6 +1255,10 @@ impl EngineOperations for Engine {
             }
         }
         None
+    }
+
+    fn db_cells_factory(&self) -> Result<Arc<dyn CellsFactory>> {
+        self.db().cells_factory()
     }
 }
 

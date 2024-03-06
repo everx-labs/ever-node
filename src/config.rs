@@ -112,8 +112,7 @@ impl Default for CollatorConfig {
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Copy)]
 pub enum ShardStatesCacheMode {
     Off, // States saved sinchronously and not cached.
-    Moderate, // States saved asiynchronously. Number of cached cells (in the state's BOCs) is minimal.
-    Full, // States saved asiynchronously. Number of cells in memory is continously growing.
+    Moderate, // States saved asiynchronously.
 }
 impl Default for ShardStatesCacheMode {
     fn default() -> Self {
@@ -121,18 +120,13 @@ impl Default for ShardStatesCacheMode {
     }
 }
 impl ShardStatesCacheMode {
-    pub fn is_enabled(&self) -> bool {
+    pub fn _is_enabled(&self) -> bool {
         matches!(self, ShardStatesCacheMode::Moderate)
-    }
-    pub fn _is_fully_enabled(&self) -> bool {
-        matches!(self, ShardStatesCacheMode::Full)
     }
     pub fn is_disabled(&self) -> bool {
         matches!(self, ShardStatesCacheMode::Off)
     }
 }
-
-fn default_states_cache_cleanup_diff() -> u32 { 1000 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct TonNodeConfig {
@@ -184,8 +178,6 @@ pub struct TonNodeConfig {
     skip_saving_persistent_states: bool,
     #[serde(default)]
     states_cache_mode: ShardStatesCacheMode,
-    #[serde(default = "default_states_cache_cleanup_diff")]
-    states_cache_cleanup_diff: u32,
 }
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
@@ -613,9 +605,6 @@ impl TonNodeConfig {
     pub fn states_cache_mode(&self) -> ShardStatesCacheMode {
         self.states_cache_mode
     }
-    pub fn states_cache_cleanup_diff(&self) -> u32 {
-        self.states_cache_cleanup_diff
-    }
     pub fn cells_db_config(&self) -> &CellsDbConfig {
         &self.cells_db_config
     }
@@ -655,7 +644,8 @@ impl TonNodeConfig {
             format!("{}:{}", LOCAL_HOST, port)
         } else {
             println!(
-                "Can`t generate console_config.json: default_config.json doesn`t contain control_server_port."
+                "Can`t generate console_config.json: \
+                default config doesn`t contain control_server_port."
             );
             return Ok(());
         };

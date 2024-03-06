@@ -1014,7 +1014,7 @@ impl std::cmp::PartialEq for dyn RoundState {
     fn eq(&self, other: &Self) -> bool {
         //compare addresses only because each vector is unique in cache system
 
-        (self as *const Self) == (other as *const Self)
+        std::ptr::addr_eq(self, other)
     }
 }
 

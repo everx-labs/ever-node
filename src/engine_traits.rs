@@ -47,8 +47,8 @@ use ton_api::ton::ton_node::{
     broadcast::{BlockBroadcast, QueueUpdateBroadcast},
 };
 use ton_block::{
-    AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, ShardAccount,
-    MASTERCHAIN_ID, Deserializable, ConfigParams, OutMsgQueue
+    AccountIdPrefixFull, BlockIdExt, CellsFactory, ConfigParams, Deserializable, Message,
+    OutMsgQueue, ShardAccount, ShardIdent, MASTERCHAIN_ID
 };
 use ton_types::{error, AccountId, KeyId, KeyOption, Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
@@ -363,9 +363,7 @@ pub trait EngineOperations : Sync + Send {
     }
     async fn download_next_key_blocks_ids(
         &self,
-        block_id: &BlockIdExt,
-        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-        bad_peers: &mut HashSet<Arc<KeyId>>,
+        block_id: &BlockIdExt
     ) -> Result<Vec<BlockIdExt>> {
         unimplemented!()
     }
@@ -903,6 +901,9 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!();
     }
 
+    fn db_cells_factory(&self) -> Result<Arc<dyn CellsFactory>> {
+        unimplemented!();
+    }
 }
 
 pub struct ChainRange {
