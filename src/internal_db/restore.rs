@@ -771,11 +771,12 @@ async fn restore_chain(
 
         // apply merkle update
         let merkle_update = block.block()?.read_state_update()?;
+        let cf = db.cells_factory()?;
         let block_id_ = block_id.clone();
         let state_root = tokio::task::spawn_blocking(
             move || -> Result<Cell> {
                 let now = std::time::Instant::now();
-                let root = merkle_update.apply_for(&prev_state_root)?;
+                let (root, _) = merkle_update.apply_for_with_cells_factory(&prev_state_root, &cf)?;
                 log::trace!("TIME: restore_chain: applied Merkle update {}ms   {}",
                     now.elapsed().as_millis(), block_id_);
                 metrics::histogram!("restore_chain_apply_merkle_update_time", now.elapsed());

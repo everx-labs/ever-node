@@ -7,6 +7,7 @@
 !remove_junk.sh
 !restart_nodes.sh
 !run_full_node.sh
+!stop_network.sh
 !test_run_net.sh
 !test_run_net_ci.sh
 !test_run_net_ci_public.sh

@@ -149,9 +149,7 @@ async fn get_key_blocks(
     engine: &dyn EngineOperations,
     mut handle: Arc<BlockHandle>,
     zero_state: Option<&Arc<ShardStateStuff>>,
-    mut prev_block_proof: Option<BlockProofStuff>,
-    active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-    bad_peers: &mut HashSet<Arc<KeyId>>
+    mut prev_block_proof: Option<BlockProofStuff>
 ) -> Result<Vec<Arc<BlockHandle>>> {
     let mut hardfork_iter = engine.hardforks().iter();
     let mut hardfork = hardfork_iter.next();
@@ -162,7 +160,7 @@ async fn get_key_blocks(
         }
         log::info!(target: "boot", "download_next_key_blocks_ids {}", handle.id());
         // this information is not trusted
-        let ids = match engine.download_next_key_blocks_ids(handle.id(), active_peers, bad_peers).await {
+        let ids = match engine.download_next_key_blocks_ids(handle.id()).await {
             Err(err) => {
                 log::warn!(target: "boot", "download_next_key_blocks_ids {}: {}", handle.id(), err);
                 return Ok(key_blocks);
@@ -497,22 +495,20 @@ pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<Arc<BlockHan
 
     const MAX_RETRIES: usize = 5;
 
-    let mut bad_peers = HashSet::new();
     let (handle, zero_state, init_block_proof_link) = run_cold(engine.deref()).await?;
-    let active_peers = Arc::new(lockfree::set::Set::new());
     let mut key_blocks = if !engine.flags().initial_sync_disabled {
         get_key_blocks(
             engine.deref(),
             handle,
             zero_state.as_ref(),
-            init_block_proof_link,
-            &active_peers,
-            &mut bad_peers,
+            init_block_proof_link
         ).await?
     } else {
         vec![handle]
     };
     
+    let active_peers = Arc::new(lockfree::set::Set::new());
+    let mut bad_peers = HashSet::new();
     let mut i = 0;
     loop {
         let handle = choose_masterchain_state(
