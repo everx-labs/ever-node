@@ -24,9 +24,7 @@ fn compute_hash_impl(
     let pk_hash = parse_hex_as_public_key_hash(source_public_key_hash);
 
     let pld_vec = parse_hex(payload);
-    let pld = ton_api::ton::bytes(pld_vec);
-
-    let block_id = get_block_id(&incarn, &pk_hash, height, &pld);
+    let block_id = get_block_id(&incarn, &pk_hash, height, &pld_vec);
     println!(
         "incarnation = {}, src = {:?}, height = {}, data = {}",
         incarn.to_hex_string(),
@@ -43,7 +41,7 @@ fn compute_hash(incarnation: &str, source_public_key_hash: &str, block: &str) ->
     let update: ton_api::ton::catchain::Update =
         ton_api::Deserializer::new(&mut blb).read_boxed().unwrap();
     let blk = update.only();
-    let pld = ton_api::ton::bytes(blb.to_vec());
+    let pld = blb.to_vec();
 
     compute_hash_impl(
         incarnation,
@@ -70,7 +68,7 @@ fn test_payload_hash() {
         ),
     ] {
         assert_eq!(
-            get_hash(&ton_api::ton::bytes(parse_hex(pl))),
+            get_hash(&parse_hex(pl)),
             parse_hex_as_int256(hc)
         );
     }

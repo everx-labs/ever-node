@@ -135,8 +135,8 @@ impl ControlQuerySubscriber {
         let config_info = ConfigInfo {
             mode: 0,
             id: block_id.clone(),
-            state_proof: ton::bytes(vec!()),
-            config_proof: ton::bytes(config_params.write_to_bytes()?)
+            state_proof: vec![],
+            config_proof: config_params.write_to_bytes()?
         };
         Ok(config_info)
     }
@@ -149,8 +149,8 @@ impl ControlQuerySubscriber {
         let config_info = ConfigInfo {
             mode: 0,
             id: mc_state.block_id().clone(),
-            state_proof: ton::bytes(vec!()),
-            config_proof: ton::bytes(config_param.into_bytes())
+            state_proof: vec![],
+            config_proof: config_param.into_bytes()
         };
         Ok(config_info)
     }
@@ -217,7 +217,7 @@ impl ControlQuerySubscriber {
         Ok(match shard_account {
             Some((account, _state_guard)) => ShardAccountStateBoxed::Raw_ShardAccountState(
                 ShardAccountState {
-                    shard_account: ton_api::ton::bytes(account.write_to_bytes()?)
+                    shard_account: account.write_to_bytes()?
                 }
             ),
             None => ShardAccountStateBoxed::Raw_ShardAccountNone
@@ -240,7 +240,7 @@ impl ControlQuerySubscriber {
                     |hash| Some(hash) != code.as_ref() && Some(hash) != data.as_ref() && Some(hash) != libs.as_ref()
                 ).unwrap();
                 ShardAccountMetaBoxed::Raw_ShardAccountMeta(ShardAccountMeta {
-                    shard_account_meta: ton_api::ton::bytes(proof.write_to_bytes()?)
+                    shard_account_meta: proof.write_to_bytes()?
                 })
             },
             None => ShardAccountMetaBoxed::Raw_ShardAccountMetaNone
@@ -497,7 +497,7 @@ impl ControlQuerySubscriber {
 
     fn process_sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Signature> {
         let sign = self.key_ring.sign_data(key_hash, data)?;
-        Ok(Signature {signature: ton::bytes(sign)})
+        Ok(Signature {signature: sign})
     }
 
     async fn add_validator_permanent_key(
@@ -717,7 +717,7 @@ impl ControlQuerySubscriber {
         };
         let query = match query.downcast::<ton::rpc::lite_server::SendMessage>() {
             Ok(query) => {
-                let message_data = query.body.0;
+                let message_data = query.body;
                 return QueryResult::consume_boxed(
                     self.redirect_external_message(&message_data).await?,
                     #[cfg(feature = "telemetry")]

@@ -478,8 +478,8 @@ impl BlockOrQueueUpdateBroadcast for BlockBroadcast {
     fn id(&self) -> &BlockIdExt { &self.id }
     fn catchain_seqno(&self) -> u32 { self.catchain_seqno as u32 }
     fn validator_set_hash(&self) -> u32 { self.validator_set_hash as u32 }
-    fn proof(&self) -> Option<Vec<u8>> { Some(self.proof.0.clone()) }
-    fn data(&self)-> Vec<u8> { self.data.0.clone() }
+    fn proof(&self) -> Option<Vec<u8>> { Some(self.proof.clone()) }
+    fn data(&self)-> Vec<u8> { self.data.clone() }
     fn is_queue_update_for(&self) -> Option<i32> { None }
     fn signatures(&self) -> &[ton_api::ton::ton_node::blocksignature::BlockSignature] {
         &self.signatures
@@ -491,7 +491,7 @@ impl BlockOrQueueUpdateBroadcast for QueueUpdateBroadcast {
     fn catchain_seqno(&self) -> u32 { self.catchain_seqno as u32 }
     fn validator_set_hash(&self) -> u32 { self.validator_set_hash as u32 }
     fn proof(&self) -> Option<Vec<u8>> { None }
-    fn data(&self)-> Vec<u8> { self.data.0.clone() }
+    fn data(&self)-> Vec<u8> { self.data.clone() }
     fn is_queue_update_for(&self) -> Option<i32> { Some(self.target_wc) }
     fn signatures(&self) -> &[ton_api::ton::ton_node::blocksignature::BlockSignature] {
         &self.signatures

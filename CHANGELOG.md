@@ -2,9 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.56.0
+
+- Get rid of ton::bytes type
+
 ## Version 0.55.99
 
-- Added a mechanism of storing cells.
+- Improved mechanism of storing cells.
 
 ## Version 0.55.98
 

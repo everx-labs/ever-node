@@ -568,11 +568,11 @@ impl LogPlayerImpl {
                 match message_type {
                     "block" => listener.on_message(
                         source_id.clone(),
-                        &CatchainFactory::create_block_payload(::ton_api::ton::bytes(bytes)),
+                        &CatchainFactory::create_block_payload(bytes),
                     ),
                     "broadcast" => listener.on_broadcast(
                         source_id.clone(),
-                        &CatchainFactory::create_block_payload(::ton_api::ton::bytes(bytes)),
+                        &CatchainFactory::create_block_payload(bytes),
                     ),
                     _ => log::warn!("...unknown message type {}", message_type),
                 }

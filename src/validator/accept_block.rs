@@ -794,7 +794,7 @@ fn build_block_broadcast(
         packed_signatures.push(
             BlockSignature {
                 who: UInt256::with_array(*sign.node_id_short.as_slice()),
-                signature: ton_api::ton::bytes(sign.sign.as_bytes().to_vec())
+                signature: sign.sign.as_bytes().to_vec()
             }
         );
         Ok(true)
@@ -806,8 +806,8 @@ fn build_block_broadcast(
             catchain_seqno: validator_set.catchain_seqno() as i32,
             validator_set_hash: signatures.validator_info.validator_list_hash_short as i32,
             signatures: packed_signatures.into(),
-            proof: ton_api::ton::bytes(proof.drain_data()),
-            data: ton_api::ton::bytes(block.data().to_vec()),
+            proof: proof.drain_data(),
+            data: block.data().to_vec()
         }
     )
 }
@@ -828,7 +828,7 @@ fn build_queue_update_broadcasts(
         packed_signatures.push(
             BlockSignature {
                 who: UInt256::with_array(*sign.node_id_short.as_slice()),
-                signature: ton_api::ton::bytes(sign.sign.as_bytes().to_vec())
+                signature: sign.sign.as_bytes().to_vec()
             }
         );
         Ok(true)
@@ -843,7 +843,7 @@ fn build_queue_update_broadcasts(
                     catchain_seqno: validator_set.catchain_seqno() as i32,
                     validator_set_hash: signatures.validator_info.validator_list_hash_short as i32,
                     signatures: packed_signatures.clone().into(),
-                    data: ton_api::ton::bytes(update),
+                    data: update,
                     target_wc: wc_id
                 });
             }

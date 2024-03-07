@@ -41,7 +41,7 @@ pub(crate) fn compute_hash_from_buffer_u32(data: &[u32]) -> HashType {
 }
 
 pub(crate) fn compute_hash_from_bytes(data: &::ton_api::ton::bytes) -> HashType {
-    compute_hash_from_buffer(&data.0)
+    compute_hash_from_buffer(&data)
 }
 
 pub(crate) fn compute_hash<T>(hashable: T) -> HashType

@@ -37,7 +37,7 @@ use ton_api::{
     serialize_boxed, serialize_boxed_append,
     BoxedSerialize, BoxedDeserialize, Deserializer, IntoBoxed,
     ton::{
-        self, TLObject,
+        TLObject,
         rpc::ton_node::{
             DownloadNextBlockFull, DownloadPersistentStateSlice, DownloadZeroState,
             PreparePersistentState, DownloadBlockProof, DownloadBlockProofLink,
@@ -582,7 +582,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
     async fn broadcast_external_message(&self, msg: &[u8]) -> Result<BroadcastSendInfo> {
         let broadcast = ExternalMessageBroadcast {
             message: ExternalMessage {
-                data: ton::bytes(msg.to_vec())
+                data: msg.to_vec()
             }
         }.into_boxed();
         let broadcast = TaggedByteSlice {
@@ -852,10 +852,10 @@ Ok(if key_block {
                         if id != &data_full.id {
                             fail!("Block with another id was received");
                         }
-                        let block = BlockStuff::deserialize_block_checked(id.clone(), data_full.block.0)?;
+                        let block = BlockStuff::deserialize_block_checked(id.clone(), data_full.block)?;
                         let proof = BlockProofStuff::deserialize(
                             block.id(),
-                            data_full.proof.0,
+                            data_full.proof,
                             data_full.is_link.into())?;
                         Ok((block, proof))
                     }
