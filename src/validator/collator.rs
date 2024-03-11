@@ -1534,7 +1534,6 @@ impl Collator {
                 collator_data.block_limit_status.register_remove_split_msg();
                 collator_data.remove_count += 1;
             }
-            collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, false)?;
             // normal limit reached, but we can add for soft and hard limit
             let stop = !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
             Ok(stop)
