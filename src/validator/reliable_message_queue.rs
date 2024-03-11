@@ -538,6 +538,7 @@ impl MessageQueue {
                 },
                 Ok(None) => {
                     log::trace!(target: "remp", "RMQ {}: no more query responses", self);
+                    break 'responses_loop;
                 },
                 Ok(Some(rmq_record)) => {
                     let rmq_message = Arc::new(RmqMessage::from_rmq_record(&rmq_record)?);
