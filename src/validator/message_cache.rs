@@ -421,6 +421,23 @@ impl MessageCacheSession {
         self.message_headers.contains_key(msg_id)
     }
 
+    fn is_message_fully_known(&self, msg_id: &UInt256) -> Result<bool> {
+        if self.message_headers.contains_key(msg_id) &&
+            self.message_origins.contains_key(msg_id) &&
+            self.messages.contains_key(msg_id)
+        {
+            if self.message_status.contains_key(msg_id) {
+                return Ok(true);
+            }
+            else {
+                fail!("Inconsistent message info in cache: {}", self.message_info(msg_id))
+            }
+        }
+        else {
+            return Ok(false);
+        }
+    }
+
     fn starts_before_block(&self, blk: &BlockIdExt) -> bool {
         for inf in &self.inf_shards {
             if inf.shard().intersect_with(blk.shard()) {
@@ -640,6 +657,7 @@ impl MessageCache {
         None
     }
 
+    #[allow(dead_code)]
     pub fn get_message(&self, message_id: &UInt256) -> Result<Option<Arc<RmqMessage>>> {
         let msg = self.get_session_for_message(message_id).map(
             |session| session.messages.get(message_id).map(
@@ -698,10 +716,17 @@ impl MessageCache {
         }
     }
 
-    fn get_message_info(&self, message_id: &UInt256) -> Result<String> {
+    pub fn get_message_info(&self, message_id: &UInt256) -> Result<String> {
         match self.get_session_for_message(message_id) {
             None => Ok("absent".to_string()),
             Some(s) => Ok(s.message_info(message_id))
+        }
+    }
+
+    pub fn is_message_fully_known(&self, message_id: &UInt256) -> Result<bool> {
+        match self.get_session_for_message(message_id) {
+            None => Ok(false),
+            Some(s) => s.is_message_fully_known(message_id)
         }
     }
 

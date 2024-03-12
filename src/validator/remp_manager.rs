@@ -647,14 +647,17 @@ impl RempCoreInterface for RempInterfaceQueues {
             0
         )?;
 
-        if self.message_cache.get_message(&message_id)?.is_some() {
+        if self.message_cache.is_message_fully_known(&message_id)? {
             log::trace!(target: "remp",
-                "Point 1. We already know about message {:x}, no forwarding to incoming queue is necessary",
+                "Point 1. Message {:x} is fully known, no forwarding to incoming queue is necessary",
                 message_id
             );
         }
         else {
-            log::trace!(target: "remp", "Point 1. Adding incoming message {} to incoming queue", remp_message);
+            log::trace!(target: "remp",
+                "Point 1. Adding incoming message {} to incoming queue, known message info {}",
+                remp_message, self.message_cache.get_message_info(&message_id)?
+            );
             self.incoming_sender.send(Arc::new(RempMessageWithOrigin { message: remp_message, origin: remp_message_origin }))?;
             #[cfg(feature = "telemetry")]
             self.engine.remp_core_telemetry().in_channel_from_fullnode(self.incoming_sender.len());
