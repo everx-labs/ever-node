@@ -1128,8 +1128,8 @@ impl SessionProcessor for SessionProcessorImpl {
                                     src: UInt256::with_array(*block_source_id.clone().data()),
                                     round: round as i32,
                                     root_hash: block_root_hash.clone().into(),
-                                    data: candidate.data.data().0.clone().into(),
-                                    collated_data: candidate.collated_data.data().0.clone().into(),
+                                    data: candidate.data.data().clone().into(),
+                                    collated_data: candidate.collated_data.data().clone().into(),
                                 }.into_boxed();
                                 let data = serialize_tl_boxed_object!(&broadcast);
                                 let data = catchain::CatchainFactory::create_block_payload(data);
@@ -1328,7 +1328,7 @@ impl SessionProcessor for SessionProcessorImpl {
 
         //read query data
 
-        let reader: &mut dyn std::io::Read = &mut data.data().as_ref();
+        let reader: &mut dyn std::io::Read = &mut data.data().as_slice();
         let mut deserializer = ton_api::Deserializer::new(reader);
         let message = match deserializer.read_boxed::<ton_api::ton::TLObject>() {
             Ok(message) => {
@@ -2418,18 +2418,18 @@ impl SessionProcessorImpl {
             log::info!(
                 "EVENTS LOG: New block candidate has been generated for \
                 round {}: root_hash={:?}, data_size={}, collated_data_size={}", 
-                round, root_hash, data.data().0.len(), collated_data.data().0.len()
+                round, root_hash, data.data().len(), collated_data.data().len()
             );
         }
 
-        if data.data().0.len() > self.description.opts().max_block_size as usize
-            || collated_data.data().0.len()
+        if data.data().len() > self.description.opts().max_block_size as usize
+            || collated_data.data().len()
                 > self.description.opts().max_collated_data_size as usize
         {
             log::error!(
                 "SessionProcessor::generated_block: \
                 generated candidate is too big. Dropping. size={}/{}", 
-                data.data().0.len(), collated_data.data().0.len()
+                data.data().len(), collated_data.data().len()
             );
             return;
         }
@@ -2451,8 +2451,8 @@ impl SessionProcessorImpl {
                 src: UInt256::with_array(self.get_local_id().data().clone()),
                 round: round as i32,
                 root_hash: root_hash.clone().into(),
-                data: data.data().clone().0.into(),
-                collated_data: collated_data.data().clone().0.into(),
+                data: data.data().clone().into(),
+                collated_data: collated_data.data().clone().into(),
             }
             .into_boxed(),
         );
@@ -2677,8 +2677,8 @@ impl SessionProcessorImpl {
                                 "EVENTS LOG: Validation failed for round {}: \
                                 root_hash={}, data_size={}, collated_data_size={}", 
                                 round, tl_block_clone.root_hash(),
-                                tl_block_clone.data().0.len(), 
-                                tl_block_clone.collated_data().0.len()
+                                tl_block_clone.data().len(), 
+                                tl_block_clone.collated_data().len()
                             );
                         }
 
@@ -2748,8 +2748,8 @@ impl SessionProcessorImpl {
                                 "EVENTS LOG: Validation succeed for round {}: \
                                 root_hash={}, data_size={}, collated_data_size={}", 
                                 round, tl_block_clone.root_hash(),
-                                tl_block_clone.data().0.len(), 
-                                tl_block_clone.collated_data().0.len()
+                                tl_block_clone.data().len(), 
+                                tl_block_clone.collated_data().len()
                             );
                         }
                     }
@@ -2784,7 +2784,7 @@ impl SessionProcessorImpl {
                     "EVENTS LOG: Validating block candidate for round {}: 
                     root_hash={}, data_size={}, collated_data_size={}", 
                     round, tl_block.root_hash(),
-                    tl_block.data().0.len(), tl_block.collated_data().0.len()
+                    tl_block.data().len(), tl_block.collated_data().len()
                 );
             }
 
@@ -2979,7 +2979,7 @@ impl SessionProcessorImpl {
         }
         .into_boxed());
 
-        match self.get_local_key().sign(&data.0) {
+        match self.get_local_key().sign(&data) {
             Err(err) => log::error!(
                 "SessionProcessor::candidate_decision_ok: failed to sign blockId {:?}: {:?}",
                 data, err
@@ -2988,7 +2988,7 @@ impl SessionProcessorImpl {
                 round,
                 hash,
                 validity_start_time,
-                ::ton_api::ton::bytes(signature.to_vec()),
+                signature.to_vec()
             ),
         }
     }
@@ -3443,9 +3443,7 @@ impl SessionProcessorImpl {
                     "Validator session {} node: weight={}, public_key={}, \
                     adnl_id={} (timestamp={})", 
                     session_id.to_hex_string(), node.weight,
-                    &hex::encode(
-                        &catchain::serialize_tl_boxed_object!(&key).as_ref()
-                    ),
+                    &hex::encode(&catchain::serialize_tl_boxed_object!(&key)),
                     &hex::encode(node.adnl_id.data()),
                     elapsed
                 );

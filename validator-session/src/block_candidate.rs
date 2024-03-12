@@ -70,7 +70,7 @@ impl Merge<PoolPtr<dyn BlockCandidateSignature>> for PoolPtr<dyn BlockCandidateS
 
         let left = self;
 
-        if left.get_signature().0 < right.get_signature().0 {
+        if left.get_signature() < right.get_signature() {
             left.clone()
         } else {
             right.clone()

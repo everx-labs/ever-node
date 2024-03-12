@@ -443,7 +443,7 @@ impl ReceivedBlock for ReceivedBlockImpl {
         .into_boxed();
         let mut serialized_message = serialize_tl_boxed_object!(&block_update_event);
 
-        serialized_message.0.extend(self.payload.data().iter());
+        serialized_message.extend(self.payload.data().iter());
 
         let serialized_block_with_payload =
             CatchainFactory::create_block_payload(serialized_message);
@@ -738,7 +738,7 @@ impl ReceivedBlockImpl {
 
         use ton_api::ton::catchain::block::inner::Data;
 
-        match ton_api::Deserializer::new(&mut self.payload.data().as_ref()).read_boxed::<Data>() {
+        match ton_api::Deserializer::new(&mut self.payload.data().as_slice()).read_boxed::<Data>() {
             Ok(message) => match message {
                 Data::Catchain_Block_Data_Fork(message) => {
                     let left = message.left.only();

@@ -148,7 +148,7 @@ impl CatchainClient {
                 log::warn!("Overlay {} was stopped!", &overlay_id);
                 return;
             }
-            let buf = &msg.data().0;
+            let buf = &msg.data();
             let tag = if buf.len() < 4 {
                 0 
             } else {
@@ -178,7 +178,7 @@ impl CatchainClient {
         message: &BlockPayloadPtr
     ) -> Result<BlockPayloadPtr> {
         let query: TLObject = Deserializer::new(
-            &mut Cursor::new(&message.data().0)
+            &mut Cursor::new(&message.data())
         ).read_boxed()?;
         #[cfg(feature = "telemetry")]
         let tag = tag_from_boxed_object(&query);
@@ -205,7 +205,7 @@ impl CatchainClient {
         metrics::histogram!("catchain_overlay_query_time", elapsed);
         let result = result.ok_or_else(|| error!("answer is None!"))?;
         let mut data: catchain::RawBuffer = catchain::RawBuffer::default();
-        let mut serializer = ton_api::Serializer::new(&mut data.0);
+        let mut serializer = ton_api::Serializer::new(&mut data);
         serializer.write_boxed(&result)?;
         let data = catchain::CatchainFactory::create_block_payload(data);
         Ok(data)
@@ -221,7 +221,7 @@ impl CatchainClient {
         max_answer_size: u64
     )-> Result<BlockPayloadPtr> {
         let query_body: TLObject = Deserializer::new(
-            &mut Cursor::new(&message.data().0)
+            &mut Cursor::new(&message.data())
         ).read_boxed()?;
         let mut query = overlay.get_query_prefix(overlay_id)?;
         //Serializer::new(&mut query).write_bare(&message.0)?;
@@ -242,9 +242,7 @@ impl CatchainClient {
         log::trace!(target: Self::TARGET, "result status: {}", &result.is_ok());
         let (data, _) = result?;
         let data = data.ok_or_else(|| error!("asnwer is None!"))?;
-        let data = catchain::CatchainFactory::create_block_payload(
-            ton_api::ton::bytes(data)
-        );
+        let data = catchain::CatchainFactory::create_block_payload(data);
         Ok(data)
     }
 
@@ -301,9 +299,7 @@ impl CatchainClient {
                     if let Some(listener) = catchain_listener.upgrade() {
                         listener.on_broadcast(
                             message.recv_from, 
-                            &catchain::CatchainFactory::create_block_payload(
-                                ::ton_api::ton::bytes(message.data)
-                            )
+                            &catchain::CatchainFactory::create_block_payload(message.data)
                         );    // Test id!
                     }
                 },
@@ -339,7 +335,7 @@ impl CatchainClient {
                     let block_update = catchain_block_update.into_boxed();
                     if let Some(listener) = catchain_listener.upgrade() {
                                 let mut data: catchain::RawBuffer = catchain::RawBuffer::default();
-                                let mut serializer = ton_api::Serializer::new(&mut data.0);
+                                let mut serializer = ton_api::Serializer::new(&mut data);
                                 serializer.write_boxed(&block_update)?;
                                 serializer.write_boxed(&vs_block_update)?;
                                 let data = catchain::CatchainFactory::create_block_payload(data);
@@ -471,7 +467,7 @@ impl CatchainOverlay for CatchainClient {
         self.runtime_handle.spawn(
             async move {
                 let msg = TaggedByteSlice {
-                    object: &msg.data().0,
+                    object: &msg.data(),
                     #[cfg(feature = "telemetry")]
                     tag: 0x80000002 // Catchain broadcast
                 };                                                         
@@ -541,15 +537,13 @@ impl QueriesConsumer for CatchainClientConsumer {
                     wait.request();
                     listener.on_query(
                         peers.other().clone(),
-                        &catchain::CatchainFactory::create_block_payload(
-                            ::ton_api::ton::bytes(data)
-                        ),
+                        &catchain::CatchainFactory::create_block_payload(data),
                         Box::new(
                             move |result: Result<BlockPayloadPtr> | {
                                 let result = match result {
                                     Ok(answer) => {
                                         let answer: Result<TLObject> = Deserializer::new(
-                                            &mut Cursor::new(&answer.data().0)
+                                            &mut Cursor::new(&answer.data())
                                         ).read_boxed();
                                         match answer {
                                             Ok(answer) => { 

@@ -51,8 +51,7 @@ use std::{
 };
 use ton_types::{error, fail, KeyId, KeyOption, Result, UInt256};
 use ton_api::{
-    IntoBoxed, serialize_boxed,
-    ton::{bytes, ton_node::broadcast::ConnectivityCheckBroadcast}
+    IntoBoxed, serialize_boxed, ton::ton_node::broadcast::ConnectivityCheckBroadcast
 };
 #[cfg(feature = "telemetry")]
 use ton_api::tag_from_bare_type;
@@ -942,7 +941,7 @@ impl NodeNetwork {
             padding.extend_from_slice(&now.to_le_bytes());
             let broadcast = ConnectivityCheckBroadcast {
                 pub_key: UInt256::with_array(key_id.clone()),
-                padding: bytes(padding),
+                padding
             };
             overlay.val().overlay().broadcast(
                 &self.masterchain_overlay_short_id, 
