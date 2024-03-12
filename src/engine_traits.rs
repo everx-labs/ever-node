@@ -46,7 +46,7 @@ use ton_api::ton::ton_node::{
     broadcast::{BlockBroadcast, MeshUpdateBroadcast, QueueUpdateBroadcast}, RempMessage, RempMessageStatus, RempReceipt
 };
 use ton_block::{
-    AccountIdPrefixFull, BlockIdExt, Message, ShardIdent, ShardAccount,
+    AccountIdPrefixFull, BlockIdExt, CellsFactory, Message, ShardIdent, ShardAccount,
     MASTERCHAIN_ID, Deserializable, ConfigParams, OutMsgQueue, OutMsgQueueInfo
 };
 use ton_types::{error, AccountId, KeyId, KeyOption, Result, UInt256};

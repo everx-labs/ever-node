@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet}, 
+    collections::HashMap,
     ops::Deref, 
     sync::{atomic::{AtomicU32, Ordering}, Arc}, 
     time::{Duration, Instant}
@@ -301,16 +301,13 @@ impl<'a> Boot<'a> {
         let mut got_last_block_at = self.engine.now();
         let mut key_blocks = vec!(handle.clone());
         let mut prev_handle = handle;
-        let mut bad_peers = HashSet::new();
-        let active_peers = Arc::new(lockfree::set::Set::new());
 
         'main_loop: loop {
 
             // Get next block ids
             log::info!("{}: downloading next key blocks ids {}", self.descr, prev_handle.id());
             let (next_key_blocks_ids, got_at) = match 
-                self.engine.download_next_key_blocks_ids(self.nw_id, prev_handle.id(),
-                    &active_peers, &mut bad_peers).await
+                self.engine.download_next_key_blocks_ids(self.nw_id, prev_handle.id()).await
             {
                 Err(e) => {
                     log::warn!("{}: download_next_key_blocks_ids {}: {}", self.descr, prev_handle.id(), e);

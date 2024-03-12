@@ -133,6 +133,10 @@ features = [ 'cmake_build' ]
 optional = true
 version = '0.26.0'
 
+[patch.'https://github.com/tonlabs/ever-types.git']
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git?branch=feature-mesh', branch = 'feature-mesh'}
+# ton_types = { path = '../ever-types' }
+
 [patch.'https://github.com/tonlabs/ever-block.git']
 ton_block = { git = 'https://github.com/tonlabs/ever-block.git?branch=feature-mesh', branch = 'feature-mesh'}
 # ton_block = { path = '../ever-block' }
