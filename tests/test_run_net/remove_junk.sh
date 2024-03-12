@@ -1,11 +1,11 @@
+#!/bin/bash
+
 NODE_PATH=$1
 NODES=$2
 if [ "$NODES" == "" ] ; then
     NODES=20
 fi
 
-echo $NODE_PATH $NODES
-   
 if ! [ "$NODE_PATH" == "" ] ; then 
     rm -f $NODE_PATH/*.boc
     rm -f $NODE_PATH/config.json
@@ -26,7 +26,7 @@ rm -f zero_state_tmp.json
 rm -f zero_state_tmp_2.json
 rm -rdf tmp
 
-for (( N=1; N <= $NODES; N++ ))
+for (( N=0; N <= $NODES; N++ ))
 do
     rm -f /shared/output_$N.log
     if ! [ "$NODE_PATH" == "" ] ; then 

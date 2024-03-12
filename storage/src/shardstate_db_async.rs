@@ -29,7 +29,7 @@ use std::{
     sync::{Arc, atomic::{AtomicU8, AtomicU32, Ordering}}, 
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use ton_block::BlockIdExt;
+use ton_block::{BlockIdExt, CellsFactory};
 use ton_types::{
     ByteOrderRead, Cell, Result, fail, error, DoneCellsStorage, OrderedCellsStorage, 
     CellByHashStorage, UInt256,
@@ -514,7 +514,11 @@ impl ShardStateDb {
             false
         )?)
     }
-    
+
+    pub fn cells_factory(&self) -> Result<Arc<dyn CellsFactory>> {
+        Ok(self.dynamic_boc_db.clone() as Arc<dyn CellsFactory>)
+    }
+
     pub fn enumerate_ids(&self, callback: &mut dyn FnMut(&BlockIdExt) -> Result<bool>) -> Result<()> {
         self.shardstate_db.for_each(&mut |_key, value| {
             let entry = DbEntry::from_slice(value)?;

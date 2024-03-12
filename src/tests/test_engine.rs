@@ -50,8 +50,8 @@ fn start_node(
 #[test]
 fn test_node_restart() {
 
-    const CONFIG_FROM_INITBLOCK: &str = "default_config_mainet_initblock.json";
-    const CONFIG_FROM_ZEROSTATE: &str = "default_config_mainet.json";
+    const CONFIG_FROM_INITBLOCK: &str = "default_config_mainet_initblock_test.json";
+    const CONFIG_FROM_ZEROSTATE: &str = "default_config_mainet_test.json";
     const DB_PATH: &str = "target/node_restart";
 
     for step in 1..=4 {

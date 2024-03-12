@@ -18,6 +18,7 @@ lru = '0.11.0'
 metrics = '0.21.1'
 parking_lot = '0.12.1'
 quick_cache = '0.4.0'
+rand = { features = [ 'small_rng' ], version = '0.8' }
 rocksdb = '0.21'
 serde = '1.0.114'
 serde_cbor = '0.11.1'
@@ -26,7 +27,6 @@ strum = '0.18.0'
 strum_macros = '0.18.0'
 adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = 'pre_feature-common-message' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-rand = { features = [ 'small_rng' ], version = '0.8' }
 tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
 ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = 'pre_feature-common-message' }
 ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = 'pre_feature-common-message' }

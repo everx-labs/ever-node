@@ -395,8 +395,6 @@ pub trait EngineOperations : Sync + Send {
         &self, 
         mesh_nw_id: i32, // zero for own network
         block_id: &BlockIdExt, 
-        active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
-        bad_peers: &mut HashSet<Arc<KeyId>>,
     ) -> Result<Vec<BlockIdExt>> {
         unimplemented!()
     }
@@ -940,6 +938,10 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!();
     }
 
+    fn db_cells_factory(&self) -> Result<Arc<dyn CellsFactory>> {
+        unimplemented!();
+    }
+
     // THE MESH
 
     fn network_global_id(&self) -> i32 {
@@ -1007,7 +1009,6 @@ pub trait EngineOperations : Sync + Send {
     async fn init_mesh_network(&self, nw_id: i32, zerostate: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
-
 }
 
 pub struct ChainRange {

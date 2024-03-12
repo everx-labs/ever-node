@@ -14,8 +14,6 @@ use storage::{
     block_handle_db::BlockHandle, shardstate_db_async::AllowStateGcResolver, 
     shardstate_db_async::SsNotificationCallback, error::StorageError,
 };
-use storage::shardstate_db_async::Callback as SsDbCallback;
-use storage::shardstate_db_async::Job as SsDbJob;
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{fail, error, Result, UInt256, BocReader, Cell};
 use adnl::common::add_unbound_object_to_map_with_update;
@@ -78,7 +76,6 @@ pub struct ShardStatesKeeper {
     max_catch_up_depth: u32,
     skip_saving_pss: bool,
     states_cache_mode: ShardStatesCacheMode,
-    states_cache_cleanup_diff: u32,
     mesh_queues_keeper: Arc<MeshQueuesKeeper>,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<EngineTelemetry>,
@@ -92,7 +89,6 @@ impl ShardStatesKeeper {
         enable_shard_state_persistent_gc: bool,
         skip_saving_pss: bool,
         states_cache_mode: ShardStatesCacheMode,
-        states_cache_cleanup_diff: u32,
         cells_lifetime_sec: u64,
         stopper: Arc<Stopper>,
         max_catch_up_depth: u32,
@@ -106,10 +102,6 @@ impl ShardStatesKeeper {
         let cache_resolver = Arc::new(AllowStateGcSmartResolver::new(0));
         db.start_states_gc(gc_resolver.clone());
 
-        if states_cache_cleanup_diff == 0 {
-            fail!("states_cache_cleanup_diff must be greater than 0");
-        }
-
         let mesh_queues_keeper = MeshQueuesKeeper::new();
 
         Ok(Arc::new(ShardStatesKeeper {
@@ -122,7 +114,6 @@ impl ShardStatesKeeper {
             max_catch_up_depth,
             skip_saving_pss,
             states_cache_mode,
-            states_cache_cleanup_diff,
             mesh_queues_keeper,
             #[cfg(feature = "telemetry")]
             telemetry,
@@ -241,77 +232,15 @@ impl ShardStatesKeeper {
         force: bool,
     ) -> Result<(Arc<ShardStateStuff>, bool)> {
 
-
-        struct SsCallback {
-            keeper: Arc<ShardStatesKeeper>,
-            handle: Arc<BlockHandle>,
-        }
-        #[async_trait::async_trait]
-        impl SsDbCallback for SsCallback {
-            async fn invoke(&self, job: SsDbJob, ok: bool) {
-                if ok {
-                    if let SsDbJob::PutState(cell, id) = job {
-                        if id == *self.handle.id() {
-                            match self.keeper.build_state_object(cell, &id, self.handle.is_queue_update_for()) {
-                                Ok(state) => {
-                                    // add new or replace existing
-                                    let _ = add_unbound_object_to_map_with_update(
-                                        &self.keeper.states, 
-                                        id.clone(),
-                                        |_found| Ok(Some((state.clone(), self.handle.clone())))
-                                    );
-                                }
-                                Err(e) => {
-                                    log::error!(
-                                        "INTERNAL ERROR: can't build state object for {id} : {e:?}"
-                                    );
-                                }
-                            }
-                        } else {
-                            log::error!("INTERNAL ERROR: unexpected id in SsCallback");
-                        }
-                    } else {
-                        log::error!("INTERNAL ERROR: unexpected job in SsCallback");
-                    }
-                } else {
-                    log::error!("INTERNAL ERROR: SsCallback: job failed");
-                }
-            }
-        }
-        impl SsCallback {
-            pub fn new(keeper: Arc<ShardStatesKeeper>, handle: Arc<BlockHandle>) -> Arc<Self> {
-                Arc::new(Self { keeper, handle })
-            }
+        if handle.id() != state.block_id() {
+            fail!("BlockIdExt and ShardStateStuff block_id mismatch");
         }
 
-        let (cb1, cb2) = if persistent_state.is_some() || 
-                            self.states_cache_mode.is_disabled() ||
-                           (handle.id().seq_no() % self.states_cache_cleanup_diff == 0 && 
-                            self.states_cache_mode.is_enabled())
-        {
+        let (cb1, cb2) = if persistent_state.is_some() || self.states_cache_mode.is_disabled() {
             let cb = SsNotificationCallback::new();
             (
-                Some(cb.clone() as Arc<dyn SsDbCallback>), 
+                Some(cb.clone() as Arc<dyn storage::shardstate_db_async::Callback>), 
                 Some(cb),
-            )
-        } else if self.states_cache_mode.is_enabled() {
-            // replace in-memory state in cache with loaded from DB. 
-            // It is need to use storage cells instead of in-memory cells, 
-            // because in-memory cells trees are growing infinitely.
-            //
-            // In depth:
-            // When a node applies a merkle update to a previous state to get the next one, 
-            // it takes the previous state from cache, creates new cells based
-            // on the merkle update (new tree skeleton), and connects branches from 
-            // the old state to it. Then the new cells are stored in the storage, 
-            // but all this happens asynchronously and in the general case can be quite behind in time.
-            // Thus, with each application of a merkle update, a skeleton of new cells
-            // grows in memory more and more. Only cells that are removed from the state are freed.
-            // Everything that has been added and has not yet been removed - hangs in memory.
-            // Replacing in-memory cells with storage cells frees hanged cells.
-            (
-                Some(SsCallback::new(self.clone(), handle.clone()) as Arc<dyn SsDbCallback>), 
-                None,
             )
         } else {
             (None, None)
@@ -514,7 +443,7 @@ impl ShardStatesKeeper {
                 Some(state.val().0.clone())
             } else if handle.has_saved_state() {
                 if let Ok(state) = self.db.load_shard_state_dynamic(handle.id()) {
-                    self.states.insert(id.clone(), (state.clone(), handle.clone()));
+                    self.states.insert(handle.id().clone(), (state.clone(), handle.clone()));
                     Some(state)
                 } else {
                     log::warn!("Can't load state for {} from DB, but handle.has_saved_state() == true", handle.id());
@@ -593,10 +522,11 @@ impl ShardStatesKeeper {
 
             let id = block.id().clone();
             let keeper = self.clone();
+            let cf = self.db.cells_factory()?;
             let state = tokio::task::spawn_blocking(
                 move || -> Result<Arc<ShardStateStuff>> {
                     let now = std::time::Instant::now();
-                    let root = merkle_update.apply_for(&prev_root)?;
+                    let (root, _) = merkle_update.apply_for_with_cells_factory(&prev_root, &cf)?;
                     log::trace!("TIME: restore_state_recursive: applied Merkle update {}ms   {}",
                         now.elapsed().as_millis(), id);
 

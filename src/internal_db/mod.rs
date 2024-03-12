@@ -35,9 +35,9 @@ use storage::{
 use storage::shardstate_db_async::{self, AllowStateGcResolver, ShardStateDb};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
-use ton_block::{Block, BlockIdExt, INVALID_WORKCHAIN_ID};
+use ton_block::{Block, BlockIdExt, INVALID_WORKCHAIN_ID, CellsFactory};
 use ton_types::{
-    error, fail, Result, UInt256, Cell, BocWriterStack, MAX_SAFE_DEPTH, DoneCellsStorage
+    error, fail, Result, UInt256, Cell, BocWriterStack, MAX_SAFE_DEPTH, DoneCellsStorage,
 };
 
 /// Full node state keys
@@ -1425,6 +1425,10 @@ impl InternalDb {
 
     pub fn find_full_block_id(&self, root_hash: &UInt256) -> Result<Option<BlockIdExt>> {
         self.block_handle_storage.load_full_block_id(root_hash)
+    }
+
+    pub fn cells_factory(&self) -> Result<Arc<dyn CellsFactory>> {
+        self.shard_state_dynamic_db.cells_factory()
     }
 }
 

@@ -684,7 +684,10 @@ fn validate_brodcast(
     let subset = if block_id.shard().is_masterchain() {
         calc_subset_for_masterchain(&val_set, config, cc_seqno)?
     } else {
-        calc_subset_for_workchain_standard(&val_set, config, block_id.shard(), cc_seqno)?
+        let subset = calc_subset_for_workchain_standard(
+            &val_set, config, block_id.shard(), cc_seqno
+        )?;
+        subset
     };
 
     if subset.short_hash != broadcast.validator_set_hash() {

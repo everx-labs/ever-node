@@ -1222,7 +1222,7 @@ impl Collator {
         let estimate_size = collator_data.block_limit_status.estimate_block_size(None);
 
         log::info!(
-            "{}: ASYNC COLLATED SIZE: {} ESTIMATEED SiZE: {} GAS: {} TIME: {}ms GAS_RATE: {} TRANS: {}ms ID: {}",
+            "{}: ASYNC COLLATED SIZE: {} ESTIMATEED SIZE: {} GAS: {} TIME: {}ms GAS_RATE: {} TRANS: {}ms ID: {}",
             self.collated_block_descr,
             candidate.data.len(),
             estimate_size,
