@@ -548,12 +548,26 @@ impl RempCatchain {
         }
     }
 
-    fn unpack_broadcast(&self, payload: &BlockPayloadPtr) -> Result<UInt256> {
+    fn unpack_broadcast(&self, payload: BlockPayloadPtr) -> Result<UInt256> {
         let message = RmqMessage::deserialize(payload.data())?;
         let rmqrecord = Arc::new(RmqMessage::from_rmq_record(&message)?);
         self.remp_manager.message_cache.update_message_body(rmqrecord.clone())?;
 
         Ok(rmqrecord.message_id.clone())
+    }
+
+    fn process_query(&self, query_payload: BlockPayloadPtr) -> Result<BlockPayloadPtr> {
+        let query = RempMessageHeader::deserialize(query_payload.data())?;
+        let message_id = query.message_id().ok_or_else(|| error!("No message id in query"))?;
+        if let Some(message_body) = self.remp_manager.message_cache.get_message(message_id)? {
+            let rmqrecord = message_body.as_rmq_record();
+            let response_payload = CatchainFactory::create_block_payload(serialize_tl_boxed_object!(&rmqrecord));
+
+            Ok(response_payload)
+        }
+        else {
+            fail!("Message body {:x} is not present in message cache", message_id)
+        }
     }
 }
 
@@ -631,15 +645,25 @@ impl CatchainListener for RempCatchain {
     fn process_broadcast(&self, source_id: PublicKeyHash, data: BlockPayloadPtr) {
         let len = data.data().len();
         log::trace!(target: "remp", "MessageQueue {} process broadcast from {}, len {}", self, source_id, len);
-        match self.unpack_broadcast(&data) {
+        match self.unpack_broadcast(data) {
             Err(e) => log::error!(target: "remp", "MessageQueue {}, error processing broadcast from {}, message body will be ignored: `{}`", self, source_id, e),
             Ok(id) => log::trace!(target: "remp", "MessageQueue {} broadcast message: id {:x}, len {}", self, id, len)
         }
     }
 
-    fn process_query(&self, source_id: PublicKeyHash, data: BlockPayloadPtr, _callback: ExternalQueryResponseCallback) {
-        let data = data.data();
-        log::trace!(target: "remp", "Processing RMQ {} Query {:?} from {}", self, data.0.as_slice(), source_id);
+    fn process_query(&self, source_id: PublicKeyHash, data: BlockPayloadPtr, callback: ExternalQueryResponseCallback) {
+        let raw_data = data.data();
+        log::trace!(target: "remp", "Processing RMQ {} Query {:?} from {}", self, raw_data.0.as_slice(), source_id);
+
+        match self.process_query(data) {
+            Err(e) => {
+                log::error!(target: "remp", "MessageQueue {}, error processing query from {}, message query will be ignored: `{}`", self, source_id, e);
+                callback(Err(error!("RMQ {}: error processing query from {}: {}", self, source_id, e)))
+            },
+            Ok(body) => {
+                callback(Ok(body))
+            }
+        }
     }
 
     fn set_time(&self, _timestamp: SystemTime) {

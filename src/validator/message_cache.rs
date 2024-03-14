@@ -657,7 +657,6 @@ impl MessageCache {
         None
     }
 
-    #[allow(dead_code)]
     pub fn get_message(&self, message_id: &UInt256) -> Result<Option<Arc<RmqMessage>>> {
         let msg = self.get_session_for_message(message_id).map(
             |session| session.messages.get(message_id).map(
