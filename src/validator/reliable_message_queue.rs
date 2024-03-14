@@ -29,7 +29,7 @@ use ton_api::ton::ton_node::{
     rempcatchainrecordv2::{RempCatchainMessageHeaderV2, RempCatchainMessageDigestV2}
 };
 use ton_block::{ShardIdent, Message, BlockIdExt, ValidatorDescr};
-use ton_types::{UInt256, Result, fail};
+use ton_types::{UInt256, Result, fail, gen_random_index, error};
 use catchain::{PrivateKey, PublicKey};
 use crate::{
     engine_traits::EngineOperations,
@@ -65,6 +65,9 @@ struct MessageQueueImpl {
 
     /// Messages, waiting for collator invocation
     pending_collation_order: BinaryHeap<(Reverse<u32>, UInt256)>,
+
+    /// Body sources for the message (actual if current node didn't receive body yet)
+    body_sources: HashMap<UInt256, Vec<u32>>
 }
 
 pub struct MessageQueue {
@@ -76,22 +79,38 @@ pub struct MessageQueue {
 }
 
 impl MessageQueueImpl {
-    pub fn add_to_collation_queue(&mut self, message_id: &UInt256, timestamp: u32, add_if_absent: bool) -> Result<(bool,usize)> {
-        match self.pending_collation_set.get_mut(message_id) {
-            Some(waiting_collation) if *waiting_collation => Ok((false, self.pending_collation_set.len())),
+    fn insert_body_source(&mut self, message_id: &UInt256, body_source: u32) {
+        match self.body_sources.remove(message_id) {
+            None => self.body_sources.insert(message_id.clone(), vec!(body_source)),
+            Some(mut vec) => {
+                if !vec.contains(&body_source) {
+                    vec.push(body_source);
+                }
+                self.body_sources.insert(message_id.clone(), vec)
+            }
+        };
+    }
+
+    pub fn add_to_collation_queue(&mut self, message_id: &UInt256, timestamp: u32, remp_node_sender: Option<u32>, add_if_absent: bool) -> Result<(bool,usize)> {
+        let added = match self.pending_collation_set.get_mut(message_id) {
+            Some(waiting_collation) if *waiting_collation => false,
             Some(waiting_collation) => {
                 self.pending_collation_order.push((Reverse(timestamp), message_id.clone()));
                 *waiting_collation = true;
-                Ok((true, self.pending_collation_set.len()))
+                true
             },
             None if add_if_absent => {
                 self.pending_collation_set.insert(message_id.clone(), true);
                 self.pending_collation_order.push((Reverse(timestamp), message_id.clone())); // Max heap --- need earliest message
-                Ok((true, self.pending_collation_set.len()))
+                true
             }
             None =>
                 fail!("Message {} is not present in collation set, cannot return it to collation queue", message_id)
+        };
+        if let Some(ns) = remp_node_sender {
+            self.insert_body_source(message_id, ns);
         }
+        Ok((added, self.pending_collation_set.len()))
     }
 
     pub fn take_first_for_collation(&mut self) -> Result<Option<(UInt256, u32)>> {
@@ -105,6 +124,10 @@ impl MessageQueueImpl {
         else {
             Ok(None)
         }
+    }
+
+    pub fn get_body_sources(&self, message_id: &UInt256) -> Option<&Vec<u32>> {
+        self.body_sources.get(message_id)
     }
 
     pub fn list_pending_for_forwarding(&mut self) -> Result<Vec<UInt256>> {
@@ -125,6 +148,7 @@ impl MessageQueue {
                 status: MessageQueueStatus::Created,
                 pending_collation_set: HashMap::new(),
                 pending_collation_order: BinaryHeap::new(),
+                body_sources: HashMap::new(),
             },
             format!("<<RMQ {}>>", remp_catchain_instance),
             #[cfg(feature = "telemetry")]
@@ -290,10 +314,10 @@ impl MessageQueue {
         }
     }
 
-    async fn add_pending_collation(&self, message_id: &UInt256, remp_message_origin: Arc<RempMessageOrigin>, status_to_send: Option<RempMessageStatus>) -> Result<()> {
+    async fn add_pending_collation(&self, message_id: &UInt256, remp_message_origin: Arc<RempMessageOrigin>, remp_node_sender: u32, status_to_send: Option<RempMessageStatus>) -> Result<()> {
         let (added_to_queue, _len) = self.queues.execute_sync(
             |catchain| catchain.add_to_collation_queue(
-                message_id, remp_message_origin.timestamp, true
+                message_id, remp_message_origin.timestamp, Some(remp_node_sender), true
             )
         ).await?;
 
@@ -365,15 +389,15 @@ impl MessageQueue {
         self.catchain_instance.is_session_active()
     }
 
-    async fn process_pending_remp_catchain_message(&self, catchain_record: &RempCatchainMessageHeaderV2) -> Result<()> {
+    async fn process_pending_remp_catchain_message(&self, catchain_record: &RempCatchainMessageHeaderV2, remp_node_sender: u32) -> Result<()> {
         let remp_message_header = Arc::new(RempMessageHeader::from_remp_catchain(catchain_record)?);
         let remp_message_origin = Arc::new(RempMessageOrigin::from_remp_catchain(catchain_record)?);
         let message_master_seqno = catchain_record.masterchain_seqno as u32;
         let forwarded = self.catchain_info.get_master_cc_seqno() > message_master_seqno;
 
         log::trace!(target: "remp",
-            "Point 4. RMQ {}: inserting pending message {}, {} from RMQ into message_cache, forwarded {}, message_master_cc {}",
-            self, remp_message_header, remp_message_origin, forwarded, message_master_seqno
+            "Point 4. RMQ {}: inserting pending message {}, {} from RMQ node {} into message_cache, forwarded {}, message_master_cc {}",
+            self, remp_message_header, remp_node_sender, remp_message_origin, forwarded, message_master_seqno
         );
 
         let status_if_new = if let Some((_msg, status)) = self.is_queue_overloaded().await {
@@ -453,7 +477,7 @@ impl MessageQueue {
                                 Some(x) => format!(" (old status {})", x)
                             }
                         );
-                self.add_pending_collation(&remp_message_header.message_id, remp_message_origin, Some(new_status)).await?;
+                self.add_pending_collation(&remp_message_header.message_id, remp_message_origin, remp_node_sender, Some(new_status)).await?;
                 #[cfg(feature = "telemetry")]
                 self.engine.remp_core_telemetry().add_to_cache_attempt(true);
             }
@@ -490,10 +514,10 @@ impl MessageQueue {
         Ok(())
     }
 
-    async fn process_pending_remp_catchain_record(&self, remp_catchain_record: &RempCatchainRecordV2) -> Result<()> {
+    async fn process_pending_remp_catchain_record(&self, remp_catchain_record: &RempCatchainRecordV2, relayer: u32) -> Result<()> {
         match remp_catchain_record {
             RempCatchainRecordV2::TonNode_RempCatchainMessageHeaderV2(msg) =>
-                self.process_pending_remp_catchain_message(msg).await,
+                self.process_pending_remp_catchain_message(msg,relayer).await,
             RempCatchainRecordV2::TonNode_RempCatchainMessageDigestV2(digest) =>
                 self.process_pending_remp_catchain_digest(digest).await
         }
@@ -525,7 +549,7 @@ impl MessageQueue {
                     log::trace!(target: "remp", "RMQ {}: No more messages in rmq_queue", self);
                     break 'queue_loop;
                 },
-                Ok(Some(record)) => self.process_pending_remp_catchain_record(&record).await?
+                Ok(Some((record,relayer))) => self.process_pending_remp_catchain_record(&record,relayer).await?
             }
         }
 
@@ -565,15 +589,35 @@ impl MessageQueue {
                     continue
                 }
                 Ok(Some((None, h, o, s, cc))) => {
-                    log::trace!(
-                        target: "remp",
-                        "Point 5. RMQ {}: message {:x} with status {:?} from {} found in pending_collation queue, but has no body yet; requesting body again",
-                        self, msgid, s, o
-                    );
-                    self.catchain_instance.pending_messages_queries_send(
-                        o.source_key.clone(),
-                        o.as_remp_catchain_record(&msgid, &h.message_uid, cc)
-                    )?;
+                    // -1 for absent index seems to be the easiest way to get around borrow/scope checker
+                    let dst_idx = self.queues.execute_sync(|x|
+                        match x.get_body_sources(&msgid) {
+                            None => -1,
+                            Some(v) if v.len() == 0 => -1,
+                            Some(v) => v.get(gen_random_index(v.len() as u16) as usize).map(|nn| *nn as i32).unwrap_or(-1)
+                        }
+                    ).await;
+
+                    if dst_idx >= 0 {
+                        log::trace!(
+                            target: "remp",
+                            "Point 5. RMQ {}: message {:x} with status {:?} from {} found in pending_collation queue, but has no body yet; requesting body again from node {}",
+                            self, msgid, s, o, dst_idx
+                        );
+
+                        let dst_adnl_id = self.catchain_instance.get_adnl_id(dst_idx as usize).ok_or_else(
+                            || error!("RMQ {}: cannot find adnl id for idx {}", self, dst_idx)
+                        )?;
+                        self.catchain_instance.pending_messages_queries_send(
+                            dst_adnl_id,
+                            o.as_remp_catchain_record(&msgid, &h.message_uid, cc)
+                        )?;
+                    }
+                    else {
+                        log::error!(target: "remp", "Point 5. RMQ {}: message {:x} with status {:?} from {} has no body and no body source; skipping",
+                            self, msgid, s, o
+                        )
+                    }
                     continue
                 },
                 Ok(None) => {
@@ -685,7 +729,7 @@ impl MessageQueue {
     pub async fn return_to_collation_queue(&self, message_id: &UInt256) -> Result<()> {
         if let Some(origin) = self.remp_manager.message_cache.get_message_origin(message_id)? {
             self.queues.execute_sync(
-                |catchain| catchain.add_to_collation_queue(message_id, origin.timestamp, false)
+                |catchain| catchain.add_to_collation_queue(message_id, origin.timestamp, None, false)
             ).await?;
             Ok(())
         }

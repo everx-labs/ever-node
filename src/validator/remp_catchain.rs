@@ -59,8 +59,8 @@ pub struct RempCatchainInstanceImpl {
     pending_messages_queue_receiver: crossbeam_channel::Receiver<RempCatchainRecordV2>,
     pub pending_messages_queue_sender: crossbeam_channel::Sender<RempCatchainRecordV2>,
 
-    pub rmq_catchain_receiver: crossbeam_channel::Receiver<RempCatchainRecordV2>,
-    rmq_catchain_sender: crossbeam_channel::Sender<RempCatchainRecordV2>,
+    pub rmq_catchain_receiver: crossbeam_channel::Receiver<(RempCatchainRecordV2,u32)>,
+    rmq_catchain_sender: crossbeam_channel::Sender<(RempCatchainRecordV2,u32)>,
 
     query_response_receiver: crossbeam_channel::Receiver<RmqRecord>,
     query_response_sender: Arc<crossbeam_channel::Sender<RmqRecord>>,
@@ -126,6 +126,10 @@ impl RempCatchainInstance {
 
     pub fn get_session(&self) -> Option<CatchainPtr> {
         self.instance_impl.load().map(|inst| inst.catchain_ptr.clone())
+    }
+
+    pub fn get_adnl_id(&self, node_idx: usize) -> Option<Arc<KeyId>> {
+        self.info.get_adnl_id(node_idx)
     }
 
     pub fn pending_messages_queue_send(&self, msg: RempCatchainRecordV2) -> Result<()> {
@@ -200,18 +204,18 @@ impl RempCatchainInstance {
         Ok(instance.rmq_catchain_receiver.len())
     }
 
-    pub fn rmq_catchain_try_recv(&self) -> Result<Option<RempCatchainRecordV2>> {
+    pub fn rmq_catchain_try_recv(&self) -> Result<Option<(RempCatchainRecordV2, u32)>> {
         let instance = self.get_instance_impl()?;
         match instance.rmq_catchain_receiver.try_recv() {
-            Ok(x) => Ok(Some(x)),
+            Ok((x,relayer)) => Ok(Some((x,relayer))),
             Err(crossbeam_channel::TryRecvError::Empty) => Ok(None),
             Err(crossbeam_channel::TryRecvError::Disconnected) => fail!("channel disconnected")
         }
     }
 
-    pub fn rmq_catchain_send(&self, msg: RempCatchainRecordV2) -> Result<()> {
+    pub fn rmq_catchain_send(&self, msg: RempCatchainRecordV2, msg_remp_source_idx: u32) -> Result<()> {
         let instance = self.get_instance_impl()?;
-        match instance.rmq_catchain_sender.send(msg) {
+        match instance.rmq_catchain_sender.send((msg, msg_remp_source_idx)) {
             Ok(()) => Ok(()),
             Err(e) => fail!("rmq_cathcain_sender: send error {}", e)
         }
@@ -408,6 +412,10 @@ impl RempCatchainInfo {
 
         general_eq
     }
+
+    pub fn get_adnl_id(&self, index: usize) -> Option<Arc<KeyId>> {
+        self.nodes.get(index).map(|n| n.adnl_id.clone())
+    }
 }
 
 impl fmt::Display for RempCatchainInfo {
@@ -521,7 +529,7 @@ impl RempCatchain {
                                         "Point 4. Message received from RMQ {}: {:?}, decoded {:?}, put to rmq_catchain queue",
                                         self, msg.signature.0, record //catchain.received_messages.len()
                                     );
-                                    if let Err(e) = self.instance.rmq_catchain_send(record.clone()) {
+                                    if let Err(e) = self.instance.rmq_catchain_send(record.clone(), source_idx) {
                                         log::error!(
                                             target: "remp", "Point 4. Cannot put message {:?} from RMQ {} to queue: {}",
                                             record, self, e
