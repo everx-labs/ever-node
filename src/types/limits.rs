@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2024 EverX. All Rights Reserved.
+* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -23,7 +23,6 @@ pub struct BlockLimitStatus {
     lt_start: u64,
     in_msgs: u32,
     out_msgs: u32,
-    removed_split_msgs: u32,
     out_msg_queue_ops: u32,
     stats: CellStorageStats,
     transactions: u32
@@ -41,7 +40,6 @@ impl BlockLimitStatus {
             lt_start: std::u64::MAX,
             in_msgs: 0,
             out_msgs: 0,
-            removed_split_msgs: 0,
             out_msg_queue_ops: 0,
             stats: CellStorageStats::default(),
             transactions: 0,
@@ -108,10 +106,6 @@ impl BlockLimitStatus {
         Ok(())
     }
 
-    pub fn register_remove_split_msg(&mut self) {
-        self.removed_split_msgs += 1;
-    }
-
     /// Update logical time
     pub fn update_lt(&mut self, lt: u64) {
         self.lt_current = max(self.lt_current, lt);
@@ -145,16 +139,14 @@ impl BlockLimitStatus {
             0
         };
         ret + (bits >> 3) + cels * 12 + ints * 3 + exts * 4 + 
-            self.removed_split_msgs * 128 +
             self.accounts * 200 + 
             self.transactions * 200
     }
 
     pub fn fits(&self, level: ParamLimitIndex) -> bool {
-        let bytes = self.estimate_block_size(None);
         self.limits.fits(
             level, 
-            bytes,
+            self.estimate_block_size(None),
             self.gas_used,
             self.lt_delta()
         )

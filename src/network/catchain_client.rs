@@ -21,12 +21,12 @@ use adnl::{
     },
     node::AdnlNode,
 };
+use adnl::{OverlayNode, PrivateOverlayShortId, QueriesConsumer};
+use adnl::RldpNode;
 use catchain::{
     BlockPayloadPtr, CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr,
     ExternalQueryResponseCallback, PublicKeyHash
 };
-use overlay::{OverlayNode, PrivateOverlayShortId, QueriesConsumer};
-use rldp::RldpNode;
 use std::{
     collections::HashMap, io::Cursor, sync::{Arc, atomic::{self, AtomicBool}}, time::Instant
 };
