@@ -219,7 +219,7 @@ impl Receiver for ReceiverImpl {
 
         let public_key = source.unwrap().borrow().get_public_key().clone();
 
-        match public_key.verify(&serialized_block_id.0, &dep.signature.0) {
+        match public_key.verify(&serialized_block_id, &dep.signature) {
             Err(err) => Err(err),
             Ok(_) => Ok(()),
         }
@@ -432,7 +432,7 @@ impl Receiver for ReceiverImpl {
                     reader.read_to_end(&mut payload)?;
 
                     let payload =
-                        CatchainFactory::create_block_payload(ton_api::ton::bytes(payload));
+                        CatchainFactory::create_block_payload(payload);
 
                     return self.receive_block(
                         adnl_id,
@@ -926,7 +926,7 @@ impl ReceiverImpl {
         assert!(block.in_db());
 
         let block_id_hash = block.get_hash();
-        let block_raw_data = ::ton_api::ton::bytes(block_id_hash.as_slice().to_vec());
+        let block_raw_data = block_id_hash.as_slice().to_vec();
 
         self.db
             .as_ref()
@@ -1029,7 +1029,7 @@ impl ReceiverImpl {
 
         let public_key = source.unwrap().borrow().get_public_key().clone();
 
-        match public_key.verify(&serialized_block_id.0, &block.signature.0) {
+        match public_key.verify(&serialized_block_id, &block.signature) {
             Err(err) => Err(err),
             Ok(_) => Ok(()),
         }
@@ -1153,7 +1153,7 @@ impl ReceiverImpl {
 
                     db.put_block(
                         &ZERO_HASH,
-                        ::ton_api::ton::bytes(block_id_hash.as_slice().to_vec()),
+                        block_id_hash.as_slice().to_vec()
                     );
 
                     //create new block and send
@@ -1219,7 +1219,6 @@ impl ReceiverImpl {
 
         if let Ok(root_block) = db.get_block(&ZERO_HASH) {
             let hash: [u8; 32] = root_block
-                .0
                 .try_into()
                 .map_err(|_| error!("Cannot convert root block hash"))?;
             let root_block_id_hash: BlockHash = hash.into();
@@ -1334,7 +1333,7 @@ impl ReceiverImpl {
 
         //parse header of a block
 
-        let reader: &mut dyn std::io::Read = &mut &raw_data.0[..];
+        let reader: &mut dyn std::io::Read = &mut raw_data.as_slice();
         let mut deserializer = ton_api::Deserializer::new(reader);
         let message = deserializer.read_boxed::<ton_api::ton::TLObject>();
 
@@ -1364,7 +1363,7 @@ impl ReceiverImpl {
 
         reader.read_to_end(&mut payload).unwrap();
 
-        let payload = CatchainFactory::create_block_payload(ton_api::ton::bytes(payload));
+        let payload = CatchainFactory::create_block_payload(payload);
 
         //check block ID
 
@@ -1695,7 +1694,7 @@ impl ReceiverImpl {
 
         log::trace!("Receiver: received query from {}: {:?}", adnl_id, data);
 
-        match ton_api::Deserializer::new(&mut &data.data().0[..])
+        match ton_api::Deserializer::new(&mut data.data().as_slice())
             .read_boxed::<ton_api::ton::TLObject>()
         {
             Ok(message) => {
@@ -1719,7 +1718,7 @@ impl ReceiverImpl {
                     Ok(message) => match self.process_get_block_query(adnl_id, &message) {
                         Ok(response) => {
                             let mut ret: RawBuffer = RawBuffer::default();
-                            let mut serializer = ton_api::Serializer::new(&mut ret.0);
+                            let mut serializer = ton_api::Serializer::new(&mut ret);
 
                             serializer.write_boxed(&response.0).unwrap();
                             serializer.write_bare(response.1.data()).unwrap();
@@ -2290,7 +2289,7 @@ impl ReceiverImpl {
                     receiver,
                 ),
                 Ok(payload) => {
-                    let data: &mut &[u8] = &mut payload.data().0.as_ref();
+                    let data: &mut &[u8] = &mut payload.data().as_slice();
                     let reader: &mut dyn std::io::Read = data;
                     let mut deserializer = ton_api::Deserializer::new(reader);
 
@@ -2301,10 +2300,7 @@ impl ReceiverImpl {
 
                                 match reader.read_to_end(&mut payload) {
                                     Ok(_) => {
-                                        let payload = CatchainFactory::create_block_payload(
-                                            ton_api::ton::bytes(payload),
-                                        );
-
+                                        let payload = CatchainFactory::create_block_payload(payload);
                                         boxed_response_callback(Ok(response), payload, receiver)
                                     }
                                     Err(err) => boxed_response_callback(

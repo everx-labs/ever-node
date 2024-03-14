@@ -60,7 +60,7 @@ impl LogParser {
 
     pub fn parse_slice (&self, name: &str) -> ::ton_api::ton::bytes {
         let data = self.get_field (name).unwrap();
-        return ::ton_api::ton::bytes (hex::decode (data).unwrap());
+        hex::decode (data).unwrap()
     }
 }
 

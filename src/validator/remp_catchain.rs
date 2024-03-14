@@ -188,7 +188,7 @@ impl RempCatchainInfo {
             members: members.into()
         }.into_boxed());
 
-        UInt256::calc_file_hash(&serialized.0)
+        UInt256::calc_file_hash(&serialized)
     }
 
     fn append_validator_list(nodes: &mut Vec<CatchainNode>, nodes_vdescr: &mut Vec<ValidatorDescr>, adnl_hash: &mut HashSet<Arc<KeyId>>, c: &Vec<ValidatorDescr>) {
@@ -373,7 +373,7 @@ impl RempCatchain {
     }
 
     fn unpack_payload(&self, payload: &BlockPayloadPtr, source_idx: u32) {
-        log::trace!(target: "remp", "RMQ {} unpacking message {:?} from {}", self, payload.data().0, source_idx);
+        log::trace!(target: "remp", "RMQ {} unpacking message {:?} from {}", self, payload.data(), source_idx);
 
         let pld: Result<::ton_api::ton::validator_session::BlockUpdate> =
             catchain::utils::deserialize_tl_boxed_object(payload.data());
@@ -392,7 +392,7 @@ impl RempCatchain {
                                     }
                                     log::trace!(target: "remp",
                                         "Point 4. Message received from RMQ {}: {:?}, decoded {:?}, put to rmq_catchain queue",
-                                        self, msg.signature.0, unpacked_message //catchain.received_messages.len()
+                                        self, msg.signature, unpacked_message //catchain.received_messages.len()
                                     );
                                     if let Err(e) = self.instance.rmq_catchain_send(unpacked_message.clone()) {
                                         log::error!(
@@ -402,7 +402,7 @@ impl RempCatchain {
                                     }
                                 },
                                 Err(e) => log::error!(target: "remp", "Cannot deserialize message from RMQ {} {:?}: {}",
-                                    self, msg.signature.0, e
+                                    self, msg.signature, e
                                 )
                             }
                         },
@@ -432,7 +432,7 @@ impl CatchainListener for RempCatchain {
     fn preprocess_block(&self, block: BlockPtr) {
         let data = block.get_payload();
         log::trace!(target: "remp", "Preprocessing RMQ {} Message {:?} from {}",
-            self, data.data().0, block.get_source_id()
+            self, data.data(), block.get_source_id()
         );
         self.unpack_payload(data, block.get_source_id());
     }
@@ -497,9 +497,18 @@ impl CatchainListener for RempCatchain {
         log::trace!(target: "remp", "MessageQueue {} process broadcast", self)
     }
 
-    fn process_query(&self, source_id: PublicKeyHash, data: BlockPayloadPtr, _callback: ExternalQueryResponseCallback) {
+    fn process_query(
+        &self, 
+        source_id: PublicKeyHash, 
+        data: BlockPayloadPtr, 
+        _callback: ExternalQueryResponseCallback
+    ) {
         let data = data.data();
-        log::trace!(target: "remp", "Processing RMQ {} Query {:?} from {}", self, data.0.as_slice(), source_id);
+        log::trace!(
+            target: "remp", 
+            "Processing RMQ {} Query {:?} from {}", 
+            self, data.as_slice(), source_id
+        );
     }
 
     fn set_time(&self, _timestamp: SystemTime) {

@@ -124,7 +124,7 @@ fn parse_data<Q: ToString>(param_opt: Option<Q>, name: &str) -> Result<ton::byte
     parse_any(
         param_opt,
         &format!("{} in hex format", name),
-        |value| Ok(ton::bytes(hex::decode(value)?))
+        |value| Ok(hex::decode(value)?)
     )
 }
 
@@ -278,7 +278,7 @@ impl SendReceive for Sign {
         mut _params: impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
         let answer = downcast::<ton_api::ton::engine::validator::Signature>(answer)?;
-        let signature = answer.signature().0.clone();
+        let signature = answer.signature().clone();
         let msg = format!(
             "got signature: {} {}", 
             hex::encode(&signature), base64_encode(&signature)
@@ -385,8 +385,8 @@ impl SendReceive for GetBlockchainConfig {
 
         // We use config_proof because we use standard struct ConfigInfo from ton-tl and
         // ConfigInfo doesn`t contain more suitable fields
-        let config_param = hex::encode(config_info.config_proof().0.clone());
-        Ok((format!("{}", config_param), config_info.config_proof().0.clone()))
+        let config_param = hex::encode(config_info.config_proof().clone());
+        Ok((format!("{}", config_param), config_info.config_proof().clone()))
     }
 }
 
@@ -406,8 +406,8 @@ impl SendReceive for GetConfig {
         mut _params: impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
         let config_info = downcast::<ton_api::ton::lite_server::ConfigInfo>(answer)?;
-        let config_param = String::from_utf8(config_info.config_proof().0.clone())?;
-        Ok((config_param.to_string(), config_info.config_proof().0.clone()))
+        let config_param = String::from_utf8(config_info.config_proof().clone())?;
+        Ok((config_param.to_string(), config_info.config_proof().clone()))
     }
 }
 
@@ -562,7 +562,7 @@ impl ControlClient {
     ) -> Result<(String, Vec<u8>)> {
         let query = command_send(name, params.clone())?;
         let boxed = ControlQuery {
-            data: ton::bytes(serialize_boxed(&query)?)
+            data: serialize_boxed(&query)?
         };
         #[cfg(feature = "telemetry")]
         let tag = tag_from_bare_object(&boxed);
@@ -1591,7 +1591,7 @@ mod test {
 
     #[test]
     fn test_parse_data() {
-        let ethalon = ton::bytes(vec![10, 77]);
+        let ethalon = vec![10, 77];
         assert_eq!(parse_test!(parse_data, "0A4D").unwrap(), ethalon);
         parse_test!(parse_data, "QQ").expect_err("must generate error");
         parse_test!(parse_data, "GfgI79Xf3q7r4q1SPz7wAqBt0W6CjavuADODoz/DQE8=")

@@ -1000,7 +1000,7 @@ impl EngineOperations for Engine {
     }
 
     async fn push_message_to_remp(&self, data: ton_api::ton::bytes) -> Result<()> {
-        let (id, _message) = create_ext_message(&data.0)?;
+        let (id, _message) = create_ext_message(&data)?;
         let remp_message = ton_api::ton::ton_node::rempmessage::RempMessage {
             message: data,
             id: id.clone(),
