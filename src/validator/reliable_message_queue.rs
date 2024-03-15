@@ -289,6 +289,7 @@ impl MessageQueue {
             msg.as_remp_catchain_record(self.catchain_info.get_master_cc_seqno()),
             msg.as_rmq_record()
         )?;
+        self.remp_manager.message_cache.update_message_body(Arc::new(msg.message.clone()))?;
 
         #[cfg(feature = "telemetry")]
         self.engine.remp_core_telemetry().in_channel_to_catchain(
