@@ -10,6 +10,10 @@ All notable changes to this project will be documented in this file.
 
 - Get rid of ton::bytes type
 
+## Version 0.55.100
+
+- Deleted messages from outbound queue which were left after split are taken into estimation of block size
+
 ## Version 0.55.99
 
 - Improved mechanism of storing cells.
