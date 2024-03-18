@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -261,6 +261,7 @@ struct CollatorData {
     execute_count: usize,
     out_msg_count: usize,
     in_msg_count: usize,
+    remove_count: usize,
 
     // timings and global capabilities
     split_queues: bool,
@@ -323,6 +324,7 @@ impl CollatorData {
             execute_count: 0,
             out_msg_count: 0,
             in_msg_count: 0,
+            remove_count: 0,
             before_split: false,
             split_queues,
         };
@@ -1524,10 +1526,14 @@ impl Collator {
             if let Some(deliver_lt) = deliver_lt {
                 log::trace!("{}: dequeue message: {:x}", self.collated_block_descr, enq.message_hash());
                 collator_data.dequeue_message(enq, deliver_lt, short)?;
+                collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, false)?;
             } else {
-                log::trace!("{}: remove split message: {:x}", self.collated_block_descr, enq.message_hash());
+                // let bytes = enq.enqueued().write_to_bytes()?;
+                // log::trace!("{}: remove split message: {:x} size: {}", self.collated_block_descr, enq.message_hash(), bytes.len());
+                log::trace!("{}: remove split message: {:x} ", self.collated_block_descr, enq.message_hash());
+                collator_data.block_limit_status.register_remove_split_msg();
+                collator_data.remove_count += 1;
             }
-            collator_data.block_limit_status.register_out_msg_queue_op(root, &collator_data.usage_tree, false)?;
             // normal limit reached, but we can add for soft and hard limit
             let stop = !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
             Ok(stop)
@@ -2910,18 +2916,18 @@ impl Collator {
         {
             log::debug!(
                 "{}: finalize_block finished: dequeue_count: {}, enqueue_count: {}, in_msg_count: {}, out_msg_count: {}, \
-                execute_count: {}, transit_count: {}",
+                execute_count: {}, transit_count: {}, remove_count: {}",
                 self.collated_block_descr, collator_data.dequeue_count, collator_data.enqueue_count,
                 collator_data.in_msg_count, collator_data.out_msg_count, collator_data.execute_count,
-                collator_data.transit_count,
+                collator_data.transit_count, collator_data.remove_count
             );
         }
         log::trace!(
             "{}: finalize_block finished: dequeue_count: {}, enqueue_count: {}, in_msg_count: {}, out_msg_count: {}, \
-            execute_count: {}, transit_count: {}, data len: {}",
+            execute_count: {}, transit_count: {}, remove_count: {}, data len: {}",
             self.collated_block_descr, collator_data.dequeue_count, collator_data.enqueue_count,
             collator_data.in_msg_count, collator_data.out_msg_count, collator_data.execute_count,
-            collator_data.transit_count, candidate.data.len(),
+            collator_data.transit_count, collator_data.remove_count, candidate.data.len()
         );
         Ok((candidate, new_state, exec_manager))
     }

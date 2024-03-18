@@ -480,11 +480,11 @@ impl CollatorTestBundle {
             None
         } else {
             let path = format!("{}/candidate/", path);
-            let data = ton_api::ton::bytes(read(format!("{}/data", path))?);
+            let data = read(format!("{}/data", path))?;
             Some(BlockCandidate {
                 block_id: index.id.clone(),
                 collated_file_hash: catchain::utils::get_hash(&data),
-                data: data.0,
+                data,
                 collated_data: read(format!("{}/collated_data", path))?,
                 created_by: index.created_by.clone(),
             })

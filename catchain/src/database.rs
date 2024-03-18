@@ -69,7 +69,7 @@ impl Database for DatabaseImpl {
         self.get_tx_counter.increment(1);
 
         match self.db.get(hash) {
-            Ok(ref data) => Ok(ton_api::ton::bytes(data.as_ref().to_vec())),
+            Ok(ref data) => Ok(data.as_ref().to_vec()),
             Err(err) => fail!("Block {} not found: {:?}", hash, err),
         }
     }

@@ -91,7 +91,7 @@ fn get_session_id(
         val_set,
         new_catchain_ids
     );
-    UInt256::calc_file_hash(&serialized.0)
+    UInt256::calc_file_hash(&serialized)
 }
 
 fn compute_session_unsafe_serialized(session_id: &UInt256, rotate_id: u32) -> Vec<u8> {
@@ -151,7 +151,7 @@ fn validator_session_options_serialize(
 
 fn get_validator_session_options_hash(opts: &validator_session::SessionOptions) -> (UInt256, catchain::RawBuffer) {
     let serialized = validator_session_options_serialize(opts);
-    (UInt256::calc_file_hash(&serialized.0), serialized)
+    (UInt256::calc_file_hash(&serialized), serialized)
 }
 
 fn get_session_options(opts: &ConsensusConfig) -> validator_session::SessionOptions {
@@ -533,7 +533,7 @@ impl ValidatorManagerImpl {
         log::debug!(
             target: "validator_manager",
             "SessionOptions from config.29 serialized: {} hash: {:x}",
-            hex::encode(session_options_serialized.0),
+            hex::encode(session_options_serialized),
             opts_hash
         );
         Ok((session_options, opts_hash))

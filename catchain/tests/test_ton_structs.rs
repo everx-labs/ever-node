@@ -21,7 +21,7 @@ fn test_block_update() {
             "{:?}", block_update), 
             "BlockUpdate { block: Block { incarnation: 0000000000000000000000000000000000000000000000000000000000000000, \
             src: 0, height: 0, data: Data { prev: Dep { src: 0, height: 0, \
-            data_hash: 0000000000000000000000000000000000000000000000000000000000000000, signature: <> }, \
-            deps: Vector([]) }, signature: <> } }"
+            data_hash: 0000000000000000000000000000000000000000000000000000000000000000, signature: [] }, \
+            deps: Vector([]) }, signature: [] } }"
     );
 }

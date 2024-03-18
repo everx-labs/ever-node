@@ -28,11 +28,11 @@ fn test_log_parser() {
 
     // Slice parsing
     let collated_file_hash = parser.parse_slice("candidate.collated_file_hash");
-    assert_eq!(collated_file_hash.0[31], 0x55);
-    assert_eq!(collated_file_hash.0, hex::decode("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855").unwrap());
+    assert_eq!(collated_file_hash[31], 0x55);
+    assert_eq!(collated_file_hash, hex::decode("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855").unwrap());
 
     // Empty slice parsing
-    assert_eq!(parser.parse_slice("candidate.collated_data_snd").0, Vec::<u8>::default());
+    assert_eq!(parser.parse_slice("candidate.collated_data_snd"), Vec::<u8>::default());
 
     // Indexed fields counting
     let validator_count = parser.get_field_count ("validator");
@@ -44,7 +44,7 @@ fn test_log_parser() {
         assert_eq!(parser.parse_field_fromstr::<u32>(&field_name), 32);
 
         let data_name = format!("validator.{}.data", validator);
-        assert_eq!(parser.parse_slice(&data_name).0.len(), 32);
+        assert_eq!(parser.parse_slice(&data_name).len(), 32);
     }
 
     // Last field

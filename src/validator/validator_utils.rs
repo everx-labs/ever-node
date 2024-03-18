@@ -39,7 +39,7 @@ pub fn sigpubkey_to_publickey(k: &SigPubKey) -> PublicKey {
 }
 
 pub fn make_cryptosig(s: BlockPayloadPtr) -> Result<CryptoSignature> {
-    return CryptoSignature::from_bytes(s.data().0.as_slice());
+    return CryptoSignature::from_bytes(s.data().as_slice());
 }
 
 pub fn make_cryptosig_pair(

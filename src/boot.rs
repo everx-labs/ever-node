@@ -151,9 +151,11 @@ async fn get_key_blocks(
     zero_state: Option<&Arc<ShardStateStuff>>,
     mut prev_block_proof: Option<BlockProofStuff>
 ) -> Result<Vec<Arc<BlockHandle>>> {
+    const MAX_RETRIES: usize = 100;
     let mut hardfork_iter = engine.hardforks().iter();
     let mut hardfork = hardfork_iter.next();
     let mut key_blocks = vec!(handle.clone());
+    let mut stuck_count = 0;
     'main_loop: loop {
         if engine.check_stop() {
             fail!("Boot was stopped");
@@ -167,10 +169,24 @@ async fn get_key_blocks(
             }
             Ok(ids) => {
                 if let Some(block_id) = ids.last() {
+                    stuck_count = 0;
                     log::info!(target: "boot", "last key block is {}", block_id);
                     ids
                 } else {
-                    return Ok(key_blocks);
+                    stuck_count += 1;
+                    if let Some(handle) = key_blocks.last() {
+                        let utime = handle.gen_utime()?;
+                        log::info!(
+                            target: "boot", 
+                            "Stuck {} times on last key block time diff: {}", 
+                            stuck_count, engine.now() - utime
+                        );
+                    }
+                    if stuck_count >= MAX_RETRIES {
+                        return Ok(key_blocks)
+                    } else {
+                        continue 'main_loop
+                    }
                 }
             }
         };

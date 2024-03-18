@@ -339,8 +339,8 @@ impl FullNodeOverlayService {
                         let proof = self.engine.load_block_proof_raw(&next_handle, has_proof_link).await?;
                         answer = DataFull {
                             id: next_id.into(),
-                            proof: ton::bytes(proof),
-                            block: ton::bytes(block),
+                            proof,
+                            block,
                             is_link: if has_proof_link { 
                                 ton::Bool::BoolTrue 
                             } else { 
@@ -375,9 +375,13 @@ impl FullNodeOverlayService {
                 let proof = self.engine.load_block_proof_raw(&handle, has_proof_link).await?;
                 answer = DataFull {
                     id: query.block,
-                    proof: ton_api::ton::bytes(proof),
-                    block: ton_api::ton::bytes(block),
-                    is_link: if has_proof_link { ton::Bool::BoolTrue } else { ton::Bool::BoolFalse }
+                    proof,
+                    block,
+                    is_link: if has_proof_link { 
+                        ton::Bool::BoolTrue 
+                    } else { 
+                        ton::Bool::BoolFalse 
+                    }
                 }.into_boxed();
             }
         }

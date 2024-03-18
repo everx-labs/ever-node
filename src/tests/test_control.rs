@@ -106,7 +106,7 @@ async fn query(client: &mut AdnlClient, query: &TLObject) -> Result<TLObject> {
     let control_query = TaggedTlObject {
         object: TLObject::new(
             ControlQuery {
-                data: ton::bytes(serialize_boxed(query)?)
+                data: serialize_boxed(query)?
             },
         ),
         #[cfg(feature = "telemetry")]

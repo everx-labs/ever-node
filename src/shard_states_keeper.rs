@@ -12,7 +12,7 @@ use storage::{
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{fail, error, Result, UInt256, BocReader, Cell};
 use adnl::common::add_unbound_object_to_map_with_update;
-use std::{ time::Duration, ops::Deref, sync::Arc };
+use std::{ ops::Deref, sync::Arc, time::{Duration, Instant} };
 
 pub struct PinnedShardStateGuard {
     state: Arc<ShardStateStuff>,
@@ -245,14 +245,17 @@ impl ShardStatesKeeper {
         ).await?.1;
 
         if let (true, Some(cb)) = (saving, cb2) {
-            let now = std::time::Instant::now();
-            log::trace!("store_state: waiting for callback...");
-            cb.wait().await;
+            let now = Instant::now();
+            log::debug!("store_state {}: waiting for callback...", handle.id());
+            while tokio::time::timeout(Duration::from_secs(1), cb.wait()).await.is_err() {
+                log::warn!("store_state {}: yet waiting for a callback: TIME {}ms", 
+                    handle.id(), now.elapsed().as_millis());
+            }
             let millis = now.elapsed().as_millis();
             if millis > 100 {
-                log::warn!("store_state: callback done TIME {}ms", millis);
+                log::warn!("store_state {}: callback done TIME {}ms", millis, handle.id());
             } else {
-                log::trace!("store_state: callback done TIME {}ms", millis);
+                log::debug!("store_state {}: callback done TIME {}ms", millis, handle.id());
             }
             // reload state after saving just to free fully loaded tree 
             // and use lazy loaded cells futher

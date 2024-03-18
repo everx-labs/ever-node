@@ -93,7 +93,7 @@ pub async fn calc_shard_state(
 ) -> Result<(Arc<ShardStateStuff>, (Arc<ShardStateStuff>, Option<Arc<ShardStateStuff>>))> {
     let block_descr = fmt_block_id_short(block.id());
 
-    log::trace!("({}): calc_shard_state: block: {}", block_descr, block.id());
+    log::debug!("({}): calc_shard_state: block: {}", block_descr, block.id());
 
     let (prev_ss_root, prev_ss) = match prev_ids {
         (prev1, Some(prev2)) => {
@@ -128,7 +128,7 @@ pub async fn calc_shard_state(
                     block_id, e, prev_ss_root, merkle_update
                 ))?;
             let elapsed = now.elapsed();
-            log::trace!("({}): TIME: calc_shard_state: applied Merkle update {}ms   {}",
+            log::debug!("({}): TIME: calc_shard_state: applied Merkle update {}ms   {}",
                 block_descr_clone,
                 elapsed.as_millis(), block_id);
             #[cfg(feature = "telemetry")]
@@ -149,7 +149,9 @@ pub async fn calc_shard_state(
         }
     ).await??;
 
+    log::debug!("({}): calc_shard_state: store_state: {}", block_descr, handle.id());
     let ss = engine.store_state(handle, ss).await?;
+    log::debug!("({}): calc_shard_state: store_state: {} done", block_descr, handle.id());
     Ok((ss, prev_ss))
 }
 

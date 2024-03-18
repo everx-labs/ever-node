@@ -302,7 +302,7 @@ impl CatchainOverlayListener for OverlayListenerImpl {
 
             log::warn!("{}", warning);
 
-            let response = match ton_api::Deserializer::new(&mut &data.data().0[..])
+            let response = match ton_api::Deserializer::new(&mut data.data().as_slice())
                 .read_boxed::<ton_api::ton::TLObject>()
             {
                 Ok(message) => {
@@ -1813,7 +1813,7 @@ impl CatchainProcessor {
     fn on_message(&mut self, adnl_id: PublicKeyHash, data: BlockPayloadPtr) {
         instrument!();
 
-        let bytes = &mut data.data().as_ref();
+        let bytes = &mut data.data().as_slice();
 
         if log::log_enabled!(log::Level::Debug) {
             let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_else(
@@ -1851,7 +1851,7 @@ impl CatchainProcessor {
                 "Receive broadcast from overlay for source: \
                 size={}, payload={}, source={}, session_id={:x}, timestamp={:?}",
                 data.data().len(),
-                &hex::encode(&data.data().as_ref()),
+                &hex::encode(data.data()),
                 &hex::encode(source_key_hash.data()),
                 self.session_id,
                 elapsed

@@ -1785,14 +1785,14 @@ impl Engine {
             log::trace!(
                 target: EXT_MESSAGES_TRACE_TARGET,
                 "Skipped ext message broadcast {}bytes from {}: NOT A VALIDATOR",
-                broadcast.message.data.0.len(), src
+                broadcast.message.data.len(), src
             );
         } else {
-            let bytes_len = broadcast.message.data.0.len();
+            let bytes_len = broadcast.message.data.len();
             let result = if remp {
                 self.push_message_to_remp(broadcast.message.data).await
             } else {
-                self.external_messages().new_message_raw(&broadcast.message.data.0, self.now())
+                self.external_messages().new_message_raw(&broadcast.message.data, self.now())
             };
             match result {
                 Err(e) => {
@@ -1843,7 +1843,7 @@ impl Engine {
     async fn process_new_shard_block(self: Arc<Self>, broadcast: NewShardBlockBroadcast) -> Result<BlockIdExt> {
         let id = broadcast.block.block;
         let cc_seqno = broadcast.block.cc_seqno as u32;
-        let data = broadcast.block.data.0;
+        let data = broadcast.block.data;
         let processed_wc = self.processed_workchain().unwrap_or(BASE_WORKCHAIN_ID);
 
         if processed_wc != MASTERCHAIN_ID && processed_wc != id.shard().workchain_id() {

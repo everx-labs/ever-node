@@ -633,7 +633,7 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
         //check approving with signature #1
 
         for i in 0..2 * total_nodes / 3 {
-            let signature = ::ton_api::ton::bytes(vec![127; 1]);
+            let signature = vec![127; 1];
             let action = ton::message::ApprovedBlock {
                 round: 0,
                 candidate: c2.clone().into(),
@@ -661,7 +661,7 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
         //check approving with signature #2
 
         for i in 2 * total_nodes / 3..total_nodes {
-            let signature = ::ton_api::ton::bytes(vec![127; 1]);
+            let signature = vec![127; 1];
             let action = ton::message::ApprovedBlock {
                 round: 0,
                 candidate: c2.clone().into(),
@@ -844,7 +844,7 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
         //check commits
 
         for i in 0..2 * total_nodes / 3 {
-            let signature = ::ton_api::ton::bytes(vec![126; 1]);
+            let signature = vec![126; 1];
             let action = ton::message::Commit {
                 round: 0,
                 candidate: c2.clone().into(),
@@ -867,7 +867,7 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
         assert!(state.get_hash() == 1464332123);
 
         for i in 2 * total_nodes / 3..total_nodes {
-            let signature = ::ton_api::ton::bytes(vec![126; 1]);
+            let signature = vec![126; 1];
             let action = ton::message::Commit {
                 round: 0,
                 candidate: c2.clone().into(),
@@ -1037,7 +1037,7 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
         //check approvals for another candidate
 
         for i in 0..total_nodes {
-            let signature = ::ton_api::ton::bytes(vec![127; 1]);
+            let signature = vec![127; 1];
             let action = ton::message::ApprovedBlock {
                 round: 0,
                 candidate: c1.clone().into(),
@@ -1373,7 +1373,7 @@ fn get_sign_string(signature: &BlockCandidateSignaturePtr) -> String {
         return "".to_string();
     }
 
-    match std::str::from_utf8(&signature.as_ref().unwrap().get_signature().0) {
+    match std::str::from_utf8(&signature.as_ref().unwrap().get_signature()) {
         Ok(s) => s.to_string(),
         _ => "Error".to_string(),
     }
@@ -1386,26 +1386,26 @@ fn test_state_hashes_part2(options: &SessionOptions, total_nodes: u32) {
 
     let sig1 = SessionFactory::create_block_candidate_signature(
         &mut description,
-        ::ton_api::ton::bytes(vec!['a' as u8; 1]),
+        vec!['a' as u8; 1]
     );
     let sig2 = SessionFactory::create_block_candidate_signature(
         &mut description,
-        ::ton_api::ton::bytes(vec!['b' as u8; 1]),
+        vec!['b' as u8; 1]
     );
     let sig3 = SessionFactory::create_block_candidate_signature(
         &mut description,
-        ::ton_api::ton::bytes(vec!['c' as u8; 1]),
+        vec!['c' as u8; 1]
     );
     let sig4 = SessionFactory::create_block_candidate_signature(
         &mut description,
-        ::ton_api::ton::bytes(vec!['d' as u8; 1]),
+        vec!['d' as u8; 1]
     );
 
     {
         let m1 = sig1.merge(&sig2, &mut description);
-        assert!(m1.as_ref().unwrap().get_signature().0[0] == 'a' as u8);
+        assert!(m1.as_ref().unwrap().get_signature()[0] == 'a' as u8);
         let m2 = sig2.merge(&sig1, &mut description);
-        assert!(m2.as_ref().unwrap().get_signature().0[0] == 'a' as u8);
+        assert!(m2.as_ref().unwrap().get_signature()[0] == 'a' as u8);
     }
 
     let sig_vec_null: Vec<BlockCandidateSignaturePtr> =
