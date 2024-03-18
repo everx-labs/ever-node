@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.56.1
+
+- Fix unstable sync (key blocks mismatch)
+
 ## Version 0.56.0
 
 - Get rid of ton::bytes type
