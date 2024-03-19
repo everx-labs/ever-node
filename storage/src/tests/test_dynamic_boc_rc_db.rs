@@ -117,7 +117,6 @@ async fn test_dynamic_boc_rc_db_2() -> Result<()> {
     let r2_id = r2.repr_hash();
     boc_db.save_boc(r2, true, &check_stop, &mut None, false).unwrap();
 
-
     boc_db.delete_boc(&r1_id, &check_stop, &mut None, false).unwrap();
     boc_db.delete_boc(&r2_id, &check_stop, &mut None, false).unwrap();
 
@@ -128,12 +127,7 @@ async fn test_dynamic_boc_rc_db_2() -> Result<()> {
     boc_db.delete_boc(&r3_id, &check_stop, &mut None, false).unwrap();
 
     let r4 = create_ss(vec!["r4", "c4", "A", "B"]);
-
     boc_db.save_boc(r4, true, &check_stop, &mut None, false).unwrap();
 
     Ok(())
 }
-
-#[cfg(feature = "ci_run")]
-#[path = "./private_test_dynamic_boc_rc_db.rs"]
-mod private_test_dynamic_boc_rc_db;
