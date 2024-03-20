@@ -269,7 +269,7 @@ impl DynamicBocDb {
             now.elapsed().as_millis()
         );
 
-        for (id, vc) in visited.iter() {
+        for (id, _) in visited.iter() {
             if self.storing_cells.remove(id).is_some() {
                 log::trace!(
                     target: TARGET,
