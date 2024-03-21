@@ -14,7 +14,6 @@
 use crate::{
     block::BlockStuff,
     block_proof::BlockProofStuff, config::TonNodeConfig, internal_db::BlockResult,
-    engine::EngineFlags,
     network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
     shard_state::ShardStateStuff,
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
@@ -31,12 +30,12 @@ use crate::{
 
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
+use adnl::{
+    BroadcastSendInfo, OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId
+};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, 
     CatchainOverlayLogReplayListenerPtr
-};
-use overlay::{
-    BroadcastSendInfo, OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId
 };
 use std::{collections::HashSet, sync::{Arc, atomic::AtomicU64}};
 use storage::{StorageAlloc, block_handle_db::BlockHandle};
@@ -666,7 +665,7 @@ pub trait EngineOperations : Sync + Send {
 
     fn hardforks(&self) -> &[BlockIdExt] { unimplemented!() }
 
-    fn flags(&self) -> &EngineFlags {
+    fn flags(&self) -> &u8 {
         unimplemented!()
     }
 

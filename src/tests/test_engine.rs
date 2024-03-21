@@ -12,7 +12,7 @@
 */
 
 use crate::{                                
-    config::TonNodeConfig, engine::{Engine, EngineFlags, run, Stopper}, 
+    config::TonNodeConfig, engine::{Engine, run, Stopper}, 
     test_helper::{configure_ip, get_config, init_test}
 };
 use std::{fs::remove_dir_all, sync::Arc, time::Duration};
@@ -29,18 +29,13 @@ fn start_node(
         .build()
         .expect("Can't create Validator tokio runtime")
         .handle().clone();
-    let flags = EngineFlags {
-        initial_sync_disabled: true,
-        starting_block_disabled: false,
-        force_check_db: false
-    };
     rt.block_on(
         run(
             config, 
             None, 
             vec![], 
             validator_rt, 
-            flags,
+            Engine::FLAG_INITIAL_SYNC_DISABLED,
             stopper
         )
     )

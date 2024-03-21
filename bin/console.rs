@@ -1350,6 +1350,7 @@ mod test {
         let allocated = create_engine_allocated();
         let network = NodeNetwork::new(
             node_config,
+            None, 
             Arc::new(tokio_util::sync::CancellationToken::new()),
             #[cfg(feature = "telemetry")]
             telemetry.clone(),

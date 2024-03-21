@@ -49,7 +49,7 @@ mod jaeger {
 }
 
 use crate::{
-    config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, Stopper, EngineFlags},
+    config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, Stopper},
     jaeger::init_jaeger, internal_db::restore::set_graceful_termination,
     validating_utils::supported_version
 };
@@ -285,9 +285,6 @@ fn get_build_info() -> String {
         Rust: {}\n\
         TON NODE git commit:         {}\n\
         ADNL git commit:             {}\n\
-        DHT git commit:              {}\n\
-        OVERLAY git commit:          {}\n\
-        RLDP git commit:             {}\n\
         TON_BLOCK git commit:        {}\n\
         TON_BLOCK_JSON git commit:   {}\n\
         TON_EXECUTOR git commit:     {}\n\
@@ -298,9 +295,6 @@ fn get_build_info() -> String {
         std::option_env!("BUILD_RUST_VERSION").unwrap_or(NOT_SET_LABEL),
         std::option_env!("BUILD_GIT_COMMIT").unwrap_or(NOT_SET_LABEL),
         adnl::build_commit().unwrap_or(NOT_SET_LABEL),
-        dht::build_commit().unwrap_or(NOT_SET_LABEL),
-        overlay::build_commit().unwrap_or(NOT_SET_LABEL),
-        rldp::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_block::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_block_json::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_executor::build_commit().unwrap_or(NOT_SET_LABEL),
@@ -338,7 +332,7 @@ async fn start_engine(
     config: TonNodeConfig, 
     zerostate_path: Option<&str>, 
     validator_runtime: tokio::runtime::Handle, 
-    flags: EngineFlags,
+    flags: u8,
     stopper: Arc<Stopper>
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
     let external_db = start_external_db(&config)?;
@@ -399,17 +393,28 @@ fn main() {
             .short("f")
             .long("force-check-db")
             .help("start check & restore db process forcedly with refilling cells database"))
+        .arg(clap::Arg::with_name("lightweight")
+            .long("lightweight")
+            .help("lightweight operation mode"))
         .arg(clap::Arg::with_name("process_conf_and_exit")
             .long("process-conf-and-exit")
             .help("finish node after config file processing (reading or generating)."));
 
     let matches = app.get_matches();
 
-    let flags = EngineFlags {
-        initial_sync_disabled: matches.is_present("initial_sync_disabled"),
-        starting_block_disabled: matches.is_present("starting_block_disabled"),
-        force_check_db: matches.is_present("force_check_db"),
-    };
+    let mut flags = 0;
+    if matches.is_present("force_check_db") {
+        flags |= Engine::FLAG_FORCE_CHECK_DB
+    }
+    if matches.is_present("initial_sync_disabled") {
+        flags |= Engine::FLAG_INITIAL_SYNC_DISABLED
+    } 
+    if matches.is_present("lightweight") {
+        flags |= Engine::FLAG_LIGHTWEIGHT_ADNL
+    } 
+    if matches.is_present("starting_block_disabled") {
+        flags |= Engine::FLAG_STARTING_BLOCK_DISABLED
+    }
     let process_conf_and_exit = matches.is_present("process_conf_and_exit");
 
     let config_dir_path = match matches.value_of("config") {

@@ -339,7 +339,7 @@ async fn download_start_blocks_and_states(
             let handle = if let Some(handle) = engine.load_block_handle(block_id)? {
                 log::info!(target: "boot", "shardchain handle already present {}", block_id);
                 handle
-            } else if engine.flags().starting_block_disabled {
+            } else if (engine.flags() & Engine::FLAG_STARTING_BLOCK_DISABLED) != 0 {
                 let proof = engine.download_block_proof(block_id, true, false).await?;
                 log::info!(target: "boot", "shardchain block proof downloaded {}", block_id);
                 let handle = engine.store_block_proof(block_id, None, &proof).await?
@@ -460,7 +460,9 @@ async fn download_state(
     let state = if !handle.has_state() {
         CHECK!(handle.has_proof() || handle.has_proof_link());
         // we can download last key block to get shards description to download shard states in parallel
-        let proof = if !engine.flags().starting_block_disabled && !handle.has_data() {
+        let proof = if 
+            ((engine.flags() & Engine::FLAG_STARTING_BLOCK_DISABLED) == 0) && !handle.has_data()
+        {
             log::info!(target: "boot", "downloading block {}", handle.id());
             let (block, proof) = engine.download_block(handle.id(), None).await?;
             engine.store_block(&block).await?.to_updated().ok_or_else(
@@ -512,7 +514,7 @@ pub async fn cold_boot(engine: Arc<dyn EngineOperations>) -> Result<Arc<BlockHan
     const MAX_RETRIES: usize = 5;
 
     let (handle, zero_state, init_block_proof_link) = run_cold(engine.deref()).await?;
-    let mut key_blocks = if !engine.flags().initial_sync_disabled {
+    let mut key_blocks = if (engine.flags() & Engine::FLAG_INITIAL_SYNC_DISABLED) == 0 {
         get_key_blocks(
             engine.deref(),
             handle,

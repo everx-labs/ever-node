@@ -13,7 +13,7 @@
 
 use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, 
-    config::{CollatorTestBundlesGeneralConfig, CollatorConfig}, engine::{Engine, EngineFlags},
+    config::{CollatorTestBundlesGeneralConfig, CollatorConfig}, engine::Engine,
     engine_traits::{
         ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, Server,
         RempCoreInterface, RempDuplicateStatus
@@ -43,10 +43,10 @@ use crate::{
 #[cfg(feature = "external_db")]
 use crate::internal_db::EXTERNAL_DB_BLOCK;
 
+use adnl::{BroadcastSendInfo, PrivateOverlayShortId};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
-use overlay::{BroadcastSendInfo, PrivateOverlayShortId};
 use std::{collections::HashSet, ops::Deref, sync::Arc};
 use storage::block_handle_db::BlockHandle;
 use ton_api::{
@@ -766,7 +766,7 @@ impl EngineOperations for Engine {
         self.hardforks()
     }
 
-    fn flags(&self) -> &EngineFlags {
+    fn flags(&self) -> &u8 {
         Engine::flags(self)
     }
 

@@ -67,8 +67,8 @@ use crate::{
 
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::{Metric, MetricBuilder, TelemetryItem, TelemetryPrinter};
+use adnl::{QueriesConsumer, node::AdnlNode};
 use catchain::SessionId;
-use overlay::QueriesConsumer;
 use std::{
     ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering, AtomicU64}},
     time::{Duration, SystemTime}, collections::{HashMap, HashSet}, path::Path
@@ -127,7 +127,7 @@ pub struct Engine {
     zero_state_id: BlockIdExt,
     init_mc_block_id: BlockIdExt,
     hardforks: Vec<BlockIdExt>,
-    flags: EngineFlags,
+    flags: u8,
     pub network: Arc<NodeNetwork>,
     archives_life_time: Option<u32>,
     // enable_shard_state_persistent_gc: bool,
@@ -494,6 +494,12 @@ impl Stopper {
 
 impl Engine {
 
+    // Flags
+    pub const FLAG_FORCE_CHECK_DB: u8          = 0x01;
+    pub const FLAG_INITIAL_SYNC_DISABLED: u8   = 0x02;
+    pub const FLAG_LIGHTWEIGHT_ADNL: u8        = 0x04;
+    pub const FLAG_STARTING_BLOCK_DISABLED: u8 = 0x08;
+
     // Masks for services
     #[cfg(feature = "external_db")]
     pub const MASK_SERVICE_KAFKA_CONSUMER: u32                 = 0x0001;
@@ -530,7 +536,7 @@ impl Engine {
     pub async fn new(
         general_config: TonNodeConfig, 
         ext_db: Vec<Arc<dyn ExternalDb>>, 
-        flags: EngineFlags,
+        flags: u8,
         stopper: Arc<Stopper>
     ) -> Result<Arc<Self>> {
 
@@ -620,8 +626,14 @@ impl Engine {
         let test_bundles_config = general_config.test_bundles_config().clone();
         let external_messages_maximum_queue_length = collator_config.external_messages_maximum_queue_length;
 
+        let adnl_options = if (flags & Engine::FLAG_LIGHTWEIGHT_ADNL) != 0 {
+            Some(AdnlNode::OPTION_LIGHTWEIGHT)
+        } else {
+            None
+        };
         let network = NodeNetwork::new(
             general_config,
+            adnl_options,
             stopper.token.clone(),
             #[cfg(feature = "telemetry")]
             engine_telemetry.clone(),
@@ -652,7 +664,7 @@ impl Engine {
         let db = open_db(
             db_config, 
             restore_db,
-            flags.force_check_db,
+            (flags & Engine::FLAG_FORCE_CHECK_DB) != 0,
             if let Some(status_reporter) = status_reporter.as_ref() {
                 Some(&status_reporter.is_broken)
             } else {
@@ -925,7 +937,7 @@ impl Engine {
 
     pub fn init_mc_block_id(&self) -> &BlockIdExt {&self.init_mc_block_id}
 
-    pub fn flags(&self) -> &EngineFlags { &self.flags }
+    pub fn flags(&self) -> &u8 { &self.flags }
 
     pub fn hardforks(&self) -> &[BlockIdExt] { &self.hardforks }
 
@@ -2477,19 +2489,20 @@ async fn boot(
     Ok((last_applied_mc_block, shard_client_mc_block, ss_keeper_mc_block, archives_gc_block, external_db_block))
 }
 
-#[derive(Default)]
+/*#[derive(Default)]
 pub struct EngineFlags {
     pub initial_sync_disabled: bool,
     pub starting_block_disabled: bool,
     pub force_check_db: bool,
 }
+*/
 
 pub async fn run(
     node_config: TonNodeConfig,
     zerostate_path: Option<&str>, 
     ext_db: Vec<Arc<dyn ExternalDb>>,
     validator_runtime: tokio::runtime::Handle, 
-    flags: EngineFlags,
+    flags: u8,
     stopper: Arc<Stopper>,
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
     log::info!("Engine::run");

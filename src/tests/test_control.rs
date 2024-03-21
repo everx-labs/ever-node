@@ -143,6 +143,7 @@ async fn start_control_with_options(
     };
     let network = NodeNetwork::new(
         config,
+        None,
         Arc::new(tokio_util::sync::CancellationToken::new()),
         #[cfg(feature = "telemetry")]
         create_engine_telemetry(),
