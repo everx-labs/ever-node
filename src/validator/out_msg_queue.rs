@@ -618,20 +618,19 @@ impl OutMsgQueueInfoStuff {
             .transpose()
     }
 
-    pub fn add_message(&mut self, enq: &MsgEnqueueStuff) -> Result<()> {
+    pub fn add_message(&mut self, enq: &MsgEnqueueStuff) -> Result<usize> {
         let labels = [("shard", self.shard().to_string())];
         metrics::counter!("out_msg_queue_add", 1, &labels);
         let key = enq.out_msg_key();
-        self.out_queue_mut()?.set(&key, enq.enqueued(), &enq.created_lt())
+        let (_, depth) = self.out_queue_mut()?.set_with_prev_and_depth(&key, enq.enqueued(), &enq.created_lt())?;
+        Ok(depth)
     }
 
-    pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<()> {
+    pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<SliceData> {
         let labels = [("shard", self.shard().to_string())];
         metrics::counter!("out_msg_queue_del", 1, &labels);
-        if self.out_queue_mut()?.remove(SliceData::load_bitstring(key.write_to_new_cell()?)?)?.is_none() {
-            fail!("error deleting from out_msg_queue dictionary: {:x}", key)
-        }
-        Ok(())
+        self.out_queue_mut()?.remove(key.write_to_bitstring()?)?
+            .ok_or_else(|| error!("error deleting from out_msg_queue dictionary: {:x}", key))
     }
 
     // remove all messages which are not from new_shard

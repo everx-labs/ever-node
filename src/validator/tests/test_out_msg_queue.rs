@@ -313,7 +313,10 @@ pub fn generate_test_queue(
         let body = SliceData::load_builder(builder).unwrap();
         let msg = Message::with_int_header_and_body(h.clone(), body);
         let env = MsgEnvelope::with_message_and_fee(&msg, 1_000_000_000.into()).unwrap();
-        queue.insert(0, prefix, &env, lt).unwrap();
+        let hash = env.message_hash();
+        let key = OutMsgQueueKey::with_workchain_id_and_prefix(0, prefix, hash);
+        let enq = EnqueuedMsg::with_param(lt, &env).unwrap();
+        queue.set(&key, &enq, &lt).unwrap();
 
         if lt < enqueue_lt {
             let new_msg = NewMessageTest::new(

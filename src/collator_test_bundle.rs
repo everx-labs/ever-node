@@ -29,8 +29,10 @@ use std::{
     ops::Deref, sync::{Arc, atomic::AtomicU64} 
 };
 use storage::{
-    StorageAlloc, block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage}, 
-    node_state_db::NodeStateDb, types::BlockMeta  
+    StorageAlloc, TimeChecker,
+    block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage}, 
+    node_state_db::NodeStateDb,
+    types::BlockMeta,
 };
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
@@ -567,6 +569,8 @@ impl CollatorTestBundle {
 impl CollatorTestBundle {
     // build bundle for a collating (just now) block. 
     // Uses real engine for top shard blocks and external messages.
+    // Blocks data loading is optional because we sometimes create bundles using a cut database (without blocks). 
+    // Such a bundle will work, but creating merkle updates could be long
     pub async fn build_for_collating_block(
         prev_blocks_ids: Vec<BlockIdExt>,
         engine: &Arc<dyn EngineOperations>,
@@ -632,21 +636,19 @@ impl CollatorTestBundle {
         // prev_blocks & states
         //
         let mut blocks = HashMap::new();
-        let prev1 = engine.load_block(
-            engine.load_block_handle(&prev_blocks_ids[0])?.ok_or_else(
-                || error!("Cannot load handle for prev1 block {}", prev_blocks_ids[0])
-            )?.deref()
-        ).await?;
+        let handle = engine.load_block_handle(&prev_blocks_ids[0])?
+            .ok_or_else(|| error!("Cannot load handle for prev1 block {}", prev_blocks_ids[0]))?;
+        if let Ok(prev1) = engine.load_block(&handle).await {
+            blocks.insert(prev_blocks_ids[0].clone(), prev1);
+        }
         states.insert(prev_blocks_ids[0].clone(), engine.load_state(&prev_blocks_ids[0]).await?);
-        blocks.insert(prev_blocks_ids[0].clone(), prev1);
         if prev_blocks_ids.len() > 1 {
-            let prev2 = engine.load_block(
-                engine.load_block_handle(&prev_blocks_ids[1])?.ok_or_else(
-                    || error!("Cannot load handle for prev2 block {}", prev_blocks_ids[1])
-                )?.deref()
-            ).await?;
+            let handle = engine.load_block_handle(&prev_blocks_ids[1])?
+                .ok_or_else(|| error!("Cannot load handle for prev2 block {}", prev_blocks_ids[1]))?;
+            if let Ok(prev2) = engine.load_block(&handle).await {
+                blocks.insert(prev_blocks_ids[1].clone(), prev2);
+            }
             states.insert(prev_blocks_ids[1].clone(), engine.load_state(&prev_blocks_ids[1]).await?);
-            blocks.insert(prev_blocks_ids[1].clone(), prev2);
         }
 
         // collect needed mc states
@@ -665,16 +667,25 @@ impl CollatorTestBundle {
         let oldest_mc_state = engine.load_state(
             engine.find_mc_block_by_seq_no(oldest_mc_seq_no).await?.id()
         ).await?;
+        let mut prev_mc_state = oldest_mc_state.clone();
         let mut mc_states = vec!(oldest_mc_state.block_id().clone());
         states.insert(oldest_mc_state.block_id().clone(), oldest_mc_state);
         let mut mc_merkle_updates = HashMap::new();
 
         for mc_seq_no in oldest_mc_seq_no + 1..=newest_mc_seq_no {
             let handle = engine.find_mc_block_by_seq_no(mc_seq_no).await?;
-            let block = engine.load_block(&handle).await?;
-            mc_merkle_updates.insert(block.id().clone(), block.block()?.read_state_update()?);
-            states.insert(block.id().clone(), engine.load_state(block.id()).await?);
-            mc_states.push(block.id().clone());
+            let mc_state = engine.load_state(handle.id()).await?;
+            let merkle_update = if let Ok(block) = engine.load_block(&handle).await {
+                block.block()?.read_state_update()?
+            } else {
+                let _tc = TimeChecker::new(format!("create merkle update for {}", handle.id()), 30);
+                // MerkleUpdate::default()
+                MerkleUpdate::create(prev_mc_state.root_cell(), mc_state.root_cell())?
+            };
+            mc_merkle_updates.insert(handle.id().clone(), merkle_update);
+            prev_mc_state = mc_state.clone();
+            states.insert(handle.id().clone(), mc_state);
+            mc_states.push(handle.id().clone());
         }
 
         let id = BlockIdExt {
@@ -721,6 +732,8 @@ impl CollatorTestBundle {
 
     // build bundle for a validating (just now) block. 
     // Uses real engine for top shard blocks and external messages.
+    // Blocks data loading is optional because we sometimes create bundles using a cut database (without blocks). 
+    // Such a bundle will work, but creating merkle updates could be long
     pub async fn build_for_validating_block(
         shard: ShardIdent,
         _min_masterchain_block_id: BlockIdExt,
@@ -784,21 +797,19 @@ impl CollatorTestBundle {
         // prev_blocks & states
         //
         let mut blocks = HashMap::new();
-        let prev1 = engine.load_block(
-            engine.load_block_handle(&prev_blocks_ids[0])?.ok_or_else(
-                || error!("Cannot load handle for prev1 block {}", prev_blocks_ids[0])
-            )?.deref()
-        ).await?;
+        let handle = engine.load_block_handle(&prev_blocks_ids[0])?
+            .ok_or_else(|| error!("Cannot load handle for prev1 block {}", prev_blocks_ids[0]))?;
+        if let Ok(prev1) = engine.load_block(&handle).await {
+            blocks.insert(prev_blocks_ids[0].clone(), prev1);
+        }
         states.insert(prev_blocks_ids[0].clone(), engine.load_state(&prev_blocks_ids[0]).await?);
-        blocks.insert(prev_blocks_ids[0].clone(), prev1);
         if prev_blocks_ids.len() > 1 {
-            let prev2 = engine.load_block(
-                engine.load_block_handle(&prev_blocks_ids[1])?.ok_or_else(
-                    || error!("Cannot load handle for prev2 block {}", prev_blocks_ids[1])
-                )?.deref()
-            ).await?;
+            let handle = engine.load_block_handle(&prev_blocks_ids[1])?
+                .ok_or_else(|| error!("Cannot load handle for prev2 block {}", prev_blocks_ids[1]))?;
+            if let Ok(prev2) = engine.load_block(&handle).await {
+                blocks.insert(prev_blocks_ids[1].clone(), prev2);
+            }
             states.insert(prev_blocks_ids[1].clone(), engine.load_state(&prev_blocks_ids[1]).await?);
-            blocks.insert(prev_blocks_ids[1].clone(), prev2);
         }
 
         // collect needed mc states
@@ -817,16 +828,25 @@ impl CollatorTestBundle {
         let oldest_mc_state = engine.load_state(
             engine.find_mc_block_by_seq_no(oldest_mc_seq_no).await?.id()
         ).await?;
+        let mut prev_mc_state = oldest_mc_state.clone();
         let mut mc_states = vec!(oldest_mc_state.block_id().clone());
         states.insert(oldest_mc_state.block_id().clone(), oldest_mc_state);
         let mut mc_merkle_updates = HashMap::new();
 
         for mc_seq_no in oldest_mc_seq_no + 1..=newest_mc_seq_no {
             let handle = engine.find_mc_block_by_seq_no(mc_seq_no).await?;
-            let block = engine.load_block(&handle).await?;
-            mc_merkle_updates.insert(block.id().clone(), block.block()?.read_state_update()?);
-            states.insert(block.id().clone(), engine.load_state(block.id()).await?);
-            mc_states.push(block.id().clone());
+            let mc_state = engine.load_state(handle.id()).await?;
+            let merkle_update = if let Ok(block) = engine.load_block(&handle).await {
+                block.block()?.read_state_update()?
+            } else {
+                // be careful - creating of new merkle update is very slow
+                // if some shards were frozen for a long time
+                MerkleUpdate::create(prev_mc_state.root_cell(), mc_state.root_cell())?
+            };
+            prev_mc_state = mc_state.clone();
+            mc_merkle_updates.insert(handle.id().clone(), merkle_update);
+            states.insert(handle.id().clone(), mc_state);
+            mc_states.push(handle.id().clone());
         }
 
         let b = BlockStuff::deserialize_block_checked(candidate.block_id.clone(), candidate.data.clone())?;
@@ -919,11 +939,9 @@ impl CollatorTestBundle {
         let mut top_shard_blocks_ids = vec![];
         let mc_state = engine.load_state(&last_mc_id).await?;
         for shard_block_id in shard_blocks_ids.iter().filter(|id| id.seq_no() != 0) {
-            let block = engine.load_block(
-                engine.load_block_handle(shard_block_id)?.ok_or_else(
-                    || error!("Cannot load handle for shard block {}", shard_block_id)               
-                )?.deref()
-            ).await?;
+            let handle = engine.load_block_handle(shard_block_id)?
+                .ok_or_else(|| error!("Cannot load handle for shard block {}", shard_block_id))?;
+            let block = engine.load_block(&handle).await?;
             let info = block.block()?.read_info()?;
             let prev_blocks_ids = info.read_prev_ids()?;
             let base_info = ValidatorBaseInfo::with_params(
@@ -995,11 +1013,9 @@ impl CollatorTestBundle {
             blocks.insert(prev1.id().clone(), block);
         }
         if let Some(prev2) = prev.1 {
-            let prev2 = engine.load_block(
-                engine.load_block_handle(&prev2)?.ok_or_else(
-                    || error!("Cannot load handle for prev2 block {}", prev2 )
-                )?.deref()
-            ).await?;
+            let handle = engine.load_block_handle(&prev2)?
+            .ok_or_else(|| error!("Cannot load handle for prev2 block {}", prev2 ))?;
+            let prev2 = engine.load_block(&handle).await?;
             prev_blocks_ids.push(prev2.id().clone());
             states.insert(prev2.id().clone(), engine.load_state(prev2.id()).await?);
             blocks.insert(prev2.id().clone(), prev2);
@@ -1018,7 +1034,7 @@ impl CollatorTestBundle {
         }
 
         // ethalon block and state
-        blocks.insert(block_id.clone(), block.clone());
+        blocks.insert(block_id.clone(), block);
         if block_id.shard().is_masterchain() {
             if block_id.seq_no() < oldest_mc_seq_no {
                 oldest_mc_seq_no = block_id.seq_no();

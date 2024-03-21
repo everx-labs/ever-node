@@ -18,7 +18,7 @@ use crate::{
 #[cfg(feature = "telemetry")]
 use crate::StorageTelemetry;
 use std::{
-    fs::read, path::Path, sync::{Arc, atomic::{AtomicU32}}, time::Duration
+    fs::read, path::Path, sync::{Arc, atomic::AtomicU32}, time::Duration
 };
 use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{Cell, Result, UInt256, read_single_root_boc};

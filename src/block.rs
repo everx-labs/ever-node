@@ -84,6 +84,21 @@ impl BlockStuff {
     }
 
     #[cfg(test)]
+    pub fn from_block(block: Block) -> Result<Self> {
+        let root = block.serialize()?;
+        let data = ton_types::write_boc(&root)?;
+        let file_hash = UInt256::calc_file_hash(&data);
+        let block_info = block.read_info()?;
+        let id = BlockIdExt {
+            shard_id: block_info.shard().clone(),
+            seq_no: block_info.seq_no(),
+            root_hash: root.repr_hash(),
+            file_hash,
+        };
+        Ok(Self { id, block: Some(block), root, data: Arc::new(data), ..Default::default() })
+    }
+
+    #[cfg(test)]
     pub fn read_block_from_file(filename: &str) -> Result<Self> {
         let data = Arc::new(std::fs::read(filename)?);
         let file_hash = UInt256::calc_file_hash(&data);
@@ -96,7 +111,7 @@ impl BlockStuff {
             root_hash: root.repr_hash(),
             file_hash,
         };
-        Ok(Self { id, block: Some(block), root, data: data, ..Default::default() })
+        Ok(Self { id, block: Some(block), root, data, ..Default::default() })
     }
 
     #[cfg(test)]
