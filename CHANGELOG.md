@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.56.3
+
+- Supported new multi-networks API of DHT
+- United crate for protocols
+
 ## Version 0.56.2
 
 - Fixed bug in storing cells mechanism.

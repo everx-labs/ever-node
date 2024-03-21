@@ -12,7 +12,7 @@
 */
 
 use adnl::node::{AdnlNode, AdnlNodeConfig};
-use dht::{DhtNode, DhtSearchPolicy};
+use adnl::{DhtNode, DhtSearchPolicy};
 use std::{convert::TryInto, env, fs::File, io::BufReader};
 use ton_node::config::TonNodeGlobalConfigJson;
 use ton_types::{error, fail, base64_decode, KeyId, Result};
@@ -35,13 +35,13 @@ async fn scan(adnlid: &str, cfgfile: &str) -> Result<()> {
         vec![KEY_TAG]
     )?;
     let adnl = AdnlNode::with_config(config).await?;
-    let dht = DhtNode::with_adnl_node(adnl.clone(), KEY_TAG)?;
+    let dht = DhtNode::with_params(adnl.clone(), KEY_TAG, None)?;
     AdnlNode::start(&adnl, vec![dht.clone()]).await?;
 
     let mut nodes = Vec::new();
     let mut bad_nodes = Vec::new();
     for dht_node in dht_nodes.iter() {
-        if let Some(key) = dht.add_peer(dht_node)? {
+        if let Some(key) = dht.add_peer_to_network(dht_node, None)? {
             nodes.push(key)
         } else {
             fail!("Invalid DHT peer {:?}", dht_node)
@@ -53,19 +53,20 @@ async fn scan(adnlid: &str, cfgfile: &str) -> Result<()> {
     let mut index = 0;
     println!("Searching DHT for {}...", keyid);
     loop {
-        if let Ok(Some((ip, key))) = DhtNode::find_address_with_context(
+        if let Ok(Some((ip, key))) = DhtNode::find_address_in_network_with_context(
             &dht, 
             &keyid,
             &mut context,
-            DhtSearchPolicy::FastSearch(5)
+            DhtSearchPolicy::FastSearch(5),
+            None
         ).await {
             println!("Found {} / {}", ip, key.id());
             return Ok(())
         }
         if index >= nodes.len() {
             nodes.clear();
-            for dht_node in dht.get_known_nodes(10000)?.iter() {
-                if let Some(key) = dht.add_peer(dht_node)? {
+            for dht_node in dht.get_known_nodes_of_network(10000, None)?.iter() {
+                if let Some(key) = dht.add_peer_to_network(dht_node, None)? {
                     if !bad_nodes.contains(&key) {
                         nodes.push(key)
                     }
@@ -82,14 +83,14 @@ async fn scan(adnlid: &str, cfgfile: &str) -> Result<()> {
             index, 
             nodes.len()
         );
-        if !dht.find_dht_nodes(&nodes[index]).await? {
+        if !dht.find_dht_nodes_in_network(&nodes[index], None).await? {
             println!("DHT node {} is non-responsive", nodes[index]); 
             bad_nodes.push(nodes.remove(index))
         } else {
             index += 1
         }
     }
-
+    
 }
 
 #[tokio::main]

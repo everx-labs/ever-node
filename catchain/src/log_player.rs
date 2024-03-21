@@ -18,7 +18,7 @@ use crate::{
     ExternalQueryResponseCallback, LogPlayer, LogPlayerPtr, LogReplayOptions, Options, 
     PublicKeyHash, PrivateKey, SessionId, ValidatorWeight, utils
 };
-use overlay::PrivateOverlayShortId;
+use adnl::PrivateOverlayShortId;
 use std::{
     cell::RefCell, collections::HashMap, fmt, fs::File, io::{BufRead, BufReader}, 
     rc::Rc, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::SystemTime
