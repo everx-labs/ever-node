@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ton_node'
-version = '0.56.2'
+version = '0.56.3'
 
 [workspace]
 members = [ 'storage' ]
@@ -121,6 +121,7 @@ statsd = [ 'metrics-exporter-statsd', 'log_metrics', 'dep:statsd' ]
 telemetry = [ 'adnl/telemetry', 'dht/telemetry', 'rldp/telemetry', 'overlay/telemetry', 'storage/telemetry' ]
 trace_alloc = [  ]
 trace_alloc_detail = [ 'trace_alloc' ]
+fast_finality_extra = [  ]
 
 [profile]
 
