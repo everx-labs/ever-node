@@ -22,7 +22,7 @@ use ton_block::{BlockIdExt, ShardIdent};
 use ton_types::{Result, SliceData, error, UInt256};
 use crate::engine_traits::RempDuplicateStatus;
 use crate::ext_messages::get_level_and_level_change;
-use crate::validator::message_cache::{MessageCache, RmqMessage};
+use crate::validator::message_cache::{MessageCache, RmqMessage, RempMessageOrigin};
 use crate::validator::reliable_message_queue::MessageQueue;
 
 //use crate::test_helper::init_test_log;
@@ -170,10 +170,11 @@ fn do_test_message_cache_add_remove(check_uids: bool) -> Result<()> {
             tb.cache.add_external_message_status(
                 &msg.message_id, &msg.message_uid,
                 Some(msg.clone()),
+                Some(Arc::new(RempMessageOrigin::create_empty()?)),
                 RempMessageStatus::TonNode_RempNew,
                 |_old,new| new.clone(),
                 master_seq as u32
-            ).await?;
+            )?;
 
             let mut should_be_duplicate = false;
             if check_uids {
@@ -216,7 +217,7 @@ fn do_test_message_cache_add_remove(check_uids: bool) -> Result<()> {
         let lwb = tb.cache.update_master_cc_ranges(ms3, Duration::from_secs(1))?;
         tb.cache.gc_old_messages(*lwb.start()).await;
         assert_eq!(tb.cache.gc_old_messages(*lwb.start()).await.total, 0);
-        assert_eq!(tb.cache.all_messages_count(), 0);
+        assert_eq!(tb.cache.all_messages_count(), (0,0,0));
 
         Ok(())
     })
@@ -243,18 +244,20 @@ fn do_test_message_cache_uids_same_block() -> Result<()> {
         tb.cache.add_external_message_status(
             &msg2.message_id, &msg2.message_uid,
             Some(msg2.clone()),
+            Some(Arc::new(RempMessageOrigin::create_empty()?)),
             RempMessageStatus::TonNode_RempNew,
             |_old,new| new.clone(),
             seq
-        ).await?;
+        )?;
 
         tb.cache.add_external_message_status(
             &msg1.message_id, &msg1.message_uid,
             Some(msg1.clone()),
+            Some(Arc::new(RempMessageOrigin::create_empty()?)),
             RempMessageStatus::TonNode_RempNew,
             |_old,new| new.clone(),
             seq
-        ).await?;
+        )?;
 
         let dup1 = tb.cache.check_message_duplicates(&msg1.message_id)?;
         let dup2 = tb.cache.check_message_duplicates(&msg2.message_id)?;
@@ -303,10 +306,12 @@ fn do_message_cache_simple_random_test() -> Result<()> {
             if !tb.simple_cache.uid_has_final_status(&msg.message_uid) {
                 tb.cache.add_external_message_status(
                     &msg.message_id, &msg.message_uid,
-                    Some(msg.clone()), status.clone(),
+                    Some(msg.clone()),
+                    Some(Arc::new(RempMessageOrigin::create_empty()?)),
+                    status.clone(),
                     |_old,new| new.clone(),
                     seq
-                ).await?;
+                )?;
                 tb.simple_cache.add_external_message_status(
                     &msg.message_id, &msg.message_uid,
                     seq as i32, &status
@@ -346,7 +351,7 @@ fn do_message_cache_simple_random_test() -> Result<()> {
         tb.cache.gc_old_messages(*lwb.start()).await;
 
         tb.simple_cache.remove_old_messages(max_seqs as i32 + 1);
-        assert_eq!(tb.cache.all_messages_count(), tb.simple_cache.all_messages_count());
+        assert_eq!(tb.cache.all_messages_count().0, tb.simple_cache.all_messages_count());
         Ok(())
     })
 }
@@ -381,23 +386,25 @@ pub fn test_message_cache_cc_ranges_and_gc() -> Result<()> {
 
         tb.cache.add_external_message_status(
             &msg.message_id, &msg.message_uid,
-            Some(msg.clone()), RempMessageStatus::TonNode_RempNew,
+            Some(msg.clone()),
+            Some(Arc::new(RempMessageOrigin::create_empty()?)),
+            RempMessageStatus::TonNode_RempNew,
             |_old,new| new.clone(),
             1
-        ).await?;
+        )?;
 
         tb.cache.try_set_master_cc_start_time(2 as u32,2.into(), vec!())?;
         let range = tb.cache.update_master_cc_ranges(2, Duration::from_secs(1))?;
 
-        assert!(tb.cache.get_message_with_status_cc(&msg.message_id)?.is_some());
+        assert!(tb.cache.get_message_with_origin_status_cc(&msg.message_id)?.is_some());
         tb.cache.gc_old_messages(*range.start()).await;
 
         tb.cache.try_set_master_cc_start_time(3 as u32,3.into(), vec!())?;
         let range = tb.cache.update_master_cc_ranges(3, Duration::from_secs(1))?;
-        assert!(tb.cache.get_message_with_status_cc(&msg.message_id)?.is_some());
+        assert!(tb.cache.get_message_with_origin_status_cc(&msg.message_id)?.is_some());
 
         tb.cache.gc_old_messages(*range.start()).await;
-        assert!(tb.cache.get_message_with_status_cc(&msg.message_id)?.is_none());
+        assert!(tb.cache.get_message_with_origin_status_cc(&msg.message_id)?.is_none());
 
         Ok(())
     })

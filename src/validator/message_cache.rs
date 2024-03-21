@@ -48,10 +48,7 @@ use ton_api::{
     }
 };
 
-use ton_block::{
-    Deserializable, Message, Serializable, MsgAddressInt, MsgAddrStd, 
-    ExternalInboundMessageHeader, BlockIdExt, UnixTime32
-};
+use ton_block::{Deserializable, Message, Serializable, MsgAddressInt, MsgAddrStd, ExternalInboundMessageHeader, BlockIdExt, UnixTime32, GetRepresentationHash};
 
 use ton_types::{error, fail, KeyId, SliceData, Result, UInt256};
 
@@ -70,7 +67,7 @@ impl RmqMessage {
     pub fn new(message: Arc<Message>, message_id: UInt256, message_uid: UInt256) -> Result<Self> {
         return Ok(RmqMessage { message, message_id, message_uid })
     }
-
+/*
     pub fn as_rmq_record(&self) -> ton_api::ton::ton_node::RmqRecord {
         ton_api::ton::ton_node::rmqrecord::RmqMessage {
             message: self.message.write_to_bytes().unwrap().into(),
@@ -80,12 +77,18 @@ impl RmqMessage {
             masterchain_seqno: 0
         }.into_boxed()
     }
-
-    pub fn deserialize(raw: &ton_api::ton::bytes) -> Result<ton_api::ton::ton_node::RmqRecord> {
-        let rmq_record: ton_api::ton::ton_node::RmqRecord = catchain::utils::deserialize_tl_boxed_object(&raw)?;
-        Ok(rmq_record)
+*/
+    pub fn as_remp_message_body(&self) -> ton_api::ton::ton_node::RempMessageBody {
+        ton_api::ton::ton_node::rempmessagebody::RempMessageBody {
+            message: self.message.write_to_bytes().unwrap().into()
+        }.into_boxed()
     }
 
+    pub fn deserialize_message_body(raw: &ton_api::ton::bytes) -> Result<ton_api::ton::ton_node::RempMessageBody> {
+        let message_body: ton_api::ton::ton_node::RempMessageBody = catchain::utils::deserialize_tl_boxed_object(&raw)?;
+        Ok(message_body)
+    }
+/*
     pub fn from_rmq_record(record: &ton_api::ton::ton_node::RmqRecord) -> Result<Self> {
         match record {
             ton_api::ton::ton_node::RmqRecord::TonNode_RmqMessage(rec) => {
@@ -99,11 +102,18 @@ impl RmqMessage {
             _ => fail!("message_cache::from_rmq_record: not an RmqMessage is given: {:?}", record)
         }
     }
+*/
+    pub fn from_message_body(body: &ton_api::ton::ton_node::RempMessageBody) -> Result<Self> {
+        let message = Arc::new(Message::construct_from_bytes(body.message())?);
+        let message_id = message.hash()?;
+        let message_uid = get_message_uid(&message);
+        Self::new (message, message_id, message_uid)
+    }
 
     #[allow(dead_code)]
     pub fn make_test_message(body: &SliceData) -> Result<Self> {
         let address = UInt256::rand();
-        let msg = ton_block::Message::with_ext_in_header_and_body(ExternalInboundMessageHeader {
+        let msg = Message::with_ext_in_header_and_body(ExternalInboundMessageHeader {
             src: Default::default(),
             dst: MsgAddressInt::AddrStd(MsgAddrStd {
                 anycast: None,
@@ -193,6 +203,22 @@ impl RempMessageHeader {
 
     pub fn from_remp_catchain(record: &RempCatchainMessageHeaderV2) -> Result<Self> {
         Ok(Self::new(&record.message_id, &record.message_uid))
+    }
+
+    pub fn serialize_query(query: &ton_api::ton::ton_node::RempMessageQuery) -> Result<ton_api::ton::bytes> {
+        let query_serialized = serialize_tl_boxed_object!(query);
+        return Ok(query_serialized)
+    }
+
+    pub fn deserialize_query(raw: &ton_api::ton::bytes) -> Result<ton_api::ton::ton_node::RempMessageQuery> {
+        let query = catchain::utils::deserialize_tl_boxed_object(raw)?;
+        Ok(query)
+    }
+
+    pub fn as_remp_message_query(&self) -> ton_api::ton::ton_node::RempMessageQuery {
+        ton_api::ton::ton_node::rempmessagequery::RempMessageQuery {
+            message_id: Default::default(),
+        }.into_boxed()
     }
 }
 
@@ -296,8 +322,8 @@ impl RempMessageWithOrigin {
         return self.origin.as_remp_catchain_record(&self.message.message_id, &self.message.message_uid, master_cc)
     }
 
-    pub fn as_rmq_record(&self) -> ton_api::ton::ton_node::RmqRecord {
-        return self.message.as_rmq_record()
+    pub fn as_remp_message_body(&self) -> ton_api::ton::ton_node::RempMessageBody {
+        return self.message.as_remp_message_body()
     }
 }
 

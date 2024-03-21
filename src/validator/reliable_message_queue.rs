@@ -287,7 +287,7 @@ impl MessageQueue {
         log::trace!(target: "remp", "Point 3. Pushing to RMQ {}; message {}, {} + broadcast", self, msg, origin_with_idx);
         self.catchain_instance.pending_messages_broadcast_send(
             msg.as_remp_catchain_record(self.catchain_info.get_master_cc_seqno()),
-            msg.as_rmq_record()
+            msg.as_remp_message_body()
         )?;
         self.remp_manager.message_cache.update_message_body(Arc::new(msg.message.clone()))?;
 
@@ -565,8 +565,8 @@ impl MessageQueue {
                     log::trace!(target: "remp", "RMQ {}: no more query responses", self);
                     break 'responses_loop;
                 },
-                Ok(Some(rmq_record)) => {
-                    let rmq_message = Arc::new(RmqMessage::from_rmq_record(&rmq_record)?);
+                Ok(Some(message_body)) => {
+                    let rmq_message = Arc::new(RmqMessage::from_message_body(&message_body)?);
                     self.remp_manager.message_cache.update_message_body(rmq_message.clone())?;
                 }
             }
@@ -589,7 +589,7 @@ impl MessageQueue {
                     );
                     continue
                 }
-                Ok(Some((None, h, o, s, cc))) => {
+                Ok(Some((None, h, o, s, _cc))) => {
                     // -1 for absent index seems to be the easiest way to get around borrow/scope checker
                     let dst_idx = self.queues.execute_sync(|x|
                         match x.get_body_sources(&msgid) {
@@ -611,7 +611,7 @@ impl MessageQueue {
                         )?;
                         self.catchain_instance.pending_messages_queries_send(
                             dst_adnl_id,
-                            o.as_remp_catchain_record(&msgid, &h.message_uid, cc)
+                            h.as_remp_message_query()
                         )?;
                     }
                     else {
@@ -1081,8 +1081,8 @@ impl RmqQueueManager {
                 };
 
                 // Forwarding:
-                // 1. Rejected messages -- as plain id (message id, message uid)
-                // 2. Non-final messages -- (full RmqRecord)
+                // 1. Rejected messages -- MessageDigestV2 (id, uid)
+                // 2. Non-final messages -- Message (id, uid, origin) + MessageBody as broadcast
                 // All other messages are not forwarded
 
                 if is_finally_rejected(&message_status) {
@@ -1122,7 +1122,7 @@ impl RmqQueueManager {
                     for new in next_queues.iter() {
                         if let Err(x) = new.catchain_instance.pending_messages_broadcast_send(
                             origin.as_remp_catchain_record(&message.message_id, &message.message_uid, message_cc),
-                            message.as_rmq_record()
+                            message.as_remp_message_body()
                         )
                         {
                             log::error!(target: "remp",

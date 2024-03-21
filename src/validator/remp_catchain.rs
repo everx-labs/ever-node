@@ -37,8 +37,7 @@ use catchain::{
 use ton_api::{
     IntoBoxed, ton::ton_node::RempCatchainRecordV2
 };
-use ton_api::ton::ton_node::RempCatchainRecordV2::{TonNode_RempCatchainMessageDigestV2, TonNode_RempCatchainMessageHeaderV2};
-use ton_api::ton::ton_node::RmqRecord;
+use ton_api::ton::ton_node::RempMessageQuery;
 use ton_block::ValidatorDescr;
 use ton_types::{error, fail, KeyId, Result, UInt256};
 
@@ -62,14 +61,14 @@ pub struct RempCatchainInstanceImpl {
     pub rmq_catchain_receiver: crossbeam_channel::Receiver<(RempCatchainRecordV2,u32)>,
     rmq_catchain_sender: crossbeam_channel::Sender<(RempCatchainRecordV2,u32)>,
 
-    query_response_receiver: crossbeam_channel::Receiver<RmqRecord>,
-    query_response_sender: Arc<crossbeam_channel::Sender<RmqRecord>>,
+    query_response_receiver: crossbeam_channel::Receiver<ton_api::ton::ton_node::RempMessageBody>,
+    query_response_sender: Arc<crossbeam_channel::Sender<ton_api::ton::ton_node::RempMessageBody>>,
 
-    pending_messages_queries_receiver: crossbeam_channel::Receiver<(Arc<KeyId>,RempCatchainRecordV2)>,
-    pending_messages_queries_sender: crossbeam_channel::Sender<(Arc<KeyId>,RempCatchainRecordV2)>,
+    pending_messages_queries_receiver: crossbeam_channel::Receiver<(Arc<KeyId>,RempMessageQuery)>,
+    pending_messages_queries_sender: crossbeam_channel::Sender<(Arc<KeyId>,RempMessageQuery)>,
 
-    pub pending_messages_broadcast_receiver: crossbeam_channel::Receiver<RmqRecord>,
-    pending_messages_broadcast_sender: crossbeam_channel::Sender<RmqRecord>,
+    pub pending_messages_broadcast_receiver: crossbeam_channel::Receiver<ton_api::ton::ton_node::RempMessageBody>,
+    pending_messages_broadcast_sender: crossbeam_channel::Sender<ton_api::ton::ton_node::RempMessageBody>,
 }
 
 impl RempCatchainInstanceImpl {
@@ -92,7 +91,7 @@ impl RempCatchainInstanceImpl {
         }
     }
 
-    fn get_query_response_sender(&self) -> Arc<crossbeam_channel::Sender<RmqRecord>> {
+    fn get_query_response_sender(&self) -> Arc<crossbeam_channel::Sender<ton_api::ton::ton_node::RempMessageBody>> {
         self.query_response_sender.clone()
     }
 }
@@ -140,7 +139,7 @@ impl RempCatchainInstance {
         }
     }
 
-    pub fn pending_messages_broadcast_send(&self, msg: RempCatchainRecordV2, msg_body: RmqRecord) -> Result<()> {
+    pub fn pending_messages_broadcast_send(&self, msg: RempCatchainRecordV2, msg_body: ton_api::ton::ton_node::RempMessageBody) -> Result<()> {
         let instance = self.get_instance_impl()?;
         match (instance.pending_messages_queue_sender.send(msg), instance.pending_messages_broadcast_sender.send(msg_body)) {
             (Ok(()), Ok(())) => Ok(()),
@@ -164,7 +163,7 @@ impl RempCatchainInstance {
         }
     }
 
-    pub fn pending_messages_broadcast_try_recv(&self) -> Result<Option<RmqRecord>> {
+    pub fn pending_messages_broadcast_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RempMessageBody>> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_broadcast_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
@@ -173,7 +172,7 @@ impl RempCatchainInstance {
         }
     }
 
-    pub fn pending_messages_queries_send(&self, dst: Arc<KeyId>, query: RempCatchainRecordV2) -> Result<()> {
+    pub fn pending_messages_queries_send(&self, dst: Arc<KeyId>, query: RempMessageQuery) -> Result<()> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queries_sender.send((dst, query)) {
             Ok(()) => Ok(()),
@@ -181,7 +180,7 @@ impl RempCatchainInstance {
         }
     }
 
-    pub fn pending_messages_queries_try_recv(&self) -> Result<Option<(Arc<KeyId>,RempCatchainRecordV2)>> {
+    pub fn pending_messages_queries_try_recv(&self) -> Result<Option<(Arc<KeyId>,RempMessageQuery)>> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queries_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
@@ -190,7 +189,7 @@ impl RempCatchainInstance {
         }
     }
 
-    pub fn query_response_receiver_try_recv(&self) -> Result<Option<RmqRecord>> {
+    pub fn query_response_receiver_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RempMessageBody>> {
         let instance = self.get_instance_impl()?;
         match instance.query_response_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
@@ -240,8 +239,8 @@ impl RempCatchainInstance {
         Ok(())
     }
 
-    fn deserialize_and_put_query_response_to_queue(r: Result<BlockPayloadPtr>, query_response_sender: Arc<crossbeam_channel::Sender<RmqRecord>>) -> Result<()> {
-        let response_record = RmqMessage::deserialize(r?.data())?;
+    fn deserialize_and_put_query_response_to_queue(r: Result<BlockPayloadPtr>, query_response_sender: Arc<crossbeam_channel::Sender<ton_api::ton::ton_node::RempMessageBody>>) -> Result<()> {
+        let response_record = RmqMessage::deserialize_message_body(r?.data())?;
         match query_response_sender.send(response_record) {
             Ok(()) => Ok(()),
             Err(e) => fail!("query_response_sender: send error {}", e)
@@ -252,10 +251,10 @@ impl RempCatchainInstance {
         for _msg_count in 0..max_queries {
             match self.pending_messages_queries_try_recv()? {
                 None => break,
-                Some((dst,TonNode_RempCatchainMessageHeaderV2(query))) => {
-                    let query_id = query.message_id.clone();
+                Some((dst,query)) => {
+                    let query_id = query.message_id().clone();
                     let query_payload = CatchainFactory::create_block_payload(
-                        serialize_tl_boxed_object!(&TonNode_RempCatchainMessageHeaderV2(query))
+                        RempMessageHeader::serialize_query(&query)?
                     );
                     let query_response_sender = self.get_instance_impl()?.get_query_response_sender();
                     self.get_instance_impl()?.catchain_ptr.send_query_via_rldp(
@@ -270,9 +269,6 @@ impl RempCatchainInstance {
                         query_payload,
                         max_answer_size
                     )
-                },
-                Some((_dst,TonNode_RempCatchainMessageDigestV2(d))) => {
-                    log::error!(target: "remp", "Unexpected pending query {:?}, only MessageHeader record may be sent", d)
                 }
             }
         }
@@ -557,19 +553,19 @@ impl RempCatchain {
     }
 
     fn unpack_broadcast(&self, payload: BlockPayloadPtr) -> Result<UInt256> {
-        let message = RmqMessage::deserialize(payload.data())?;
-        let rmqrecord = Arc::new(RmqMessage::from_rmq_record(&message)?);
+        let message = RmqMessage::deserialize_message_body(payload.data())?;
+        let rmqrecord = Arc::new(RmqMessage::from_message_body(&message)?);
         self.remp_manager.message_cache.update_message_body(rmqrecord.clone())?;
 
         Ok(rmqrecord.message_id.clone())
     }
 
     fn process_query(&self, query_payload: BlockPayloadPtr) -> Result<BlockPayloadPtr> {
-        let query = RempMessageHeader::deserialize(query_payload.data())?;
-        let message_id = query.message_id().ok_or_else(|| error!("No message id in query"))?;
+        let query = RempMessageHeader::deserialize_query(query_payload.data())?;
+        let message_id = query.message_id();
         if let Some(message_body) = self.remp_manager.message_cache.get_message(message_id)? {
-            let rmqrecord = message_body.as_rmq_record();
-            let response_payload = CatchainFactory::create_block_payload(serialize_tl_boxed_object!(&rmqrecord));
+            let remp_body_response = message_body.as_remp_message_body();
+            let response_payload = CatchainFactory::create_block_payload(serialize_tl_boxed_object!(&remp_body_response));
 
             Ok(response_payload)
         }
