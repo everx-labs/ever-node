@@ -207,6 +207,8 @@ impl Neighbour {
 }
 
 pub const MAX_NEIGHBOURS: usize = 16;
+const PULL_ROUNDTRIP: u64 = 100; // Roundtrip to pull data from the neighbour if not greater
+const KEEP_ROUNDTRIP: u64 = 50; // Roundtrip to forcedly keep the neighbour if not greater
 const PING_DELAY_MS: u64 = 1000; // Neighbour ping recommended minimum delay
 const RESERVE_PING_DELAY_MS: u64 = 30000; // Reserved neighbour ping recommended minimum delay
 
@@ -322,11 +324,12 @@ impl Neighbours {
                 // and random peer to replace
                 for current in self.peers.get_iter() {
                     let un = current.effective_unreliability();
-                    if un > u {
+                    let rt = current.roundtrip_adnl.load(Ordering::Relaxed);
+                    if (un > u) && (rt > KEEP_ROUNDTRIP) {
                         u = un;
                         cur_worst = Some(current.clone());
                     }
-                    if cnt == 0 || rng.gen_range(0, cnt) == 0 {
+                    if (cnt == 0 || rng.gen_range(0, cnt) == 0) && (rt > KEEP_ROUNDTRIP) {
                         cur_rand = Some(current.clone());
                     }
                     cnt += 1;
@@ -505,7 +508,7 @@ impl Neighbours {
                 peer_stat,
                 fines_points
             );
-            if unr <= FAIL_UNRELIABILITY {
+            if (unr <= FAIL_UNRELIABILITY) && (roundtrip_adnl < PULL_ROUNDTRIP)  {
                 if node_stat + (node_stat * 0.2 as f64) < peer_stat {
                     if fines_points > 0 {
                         let _ = neighbour.fines_points.fetch_update(
