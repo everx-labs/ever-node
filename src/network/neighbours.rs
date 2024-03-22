@@ -207,7 +207,7 @@ impl Neighbour {
 }
 
 pub const MAX_NEIGHBOURS: usize = 16;
-const PULL_ROUNDTRIP: u64 = 100; // Roundtrip to pull data from the neighbour if not greater
+pub const PULL_ROUNDTRIP: u64 = 100; // Roundtrip to pull data from the neighbour if not greater
 const KEEP_ROUNDTRIP: u64 = 50; // Roundtrip to forcedly keep the neighbour if not greater
 const PING_DELAY_MS: u64 = 1000; // Neighbour ping recommended minimum delay
 const RESERVE_PING_DELAY_MS: u64 = 30000; // Reserved neighbour ping recommended minimum delay
@@ -473,7 +473,7 @@ impl Neighbours {
         });
     }
 
-    pub fn choose_neighbour(&self) -> Result<Option<Arc<Neighbour>>> {
+    pub fn choose_neighbour(&self, rt_upto: u64) -> Result<Option<Arc<Neighbour>>> {
         let count = self.peers.count();
         if count == 0 {
             return Ok(None)
@@ -508,7 +508,7 @@ impl Neighbours {
                 peer_stat,
                 fines_points
             );
-            if (unr <= FAIL_UNRELIABILITY) && (roundtrip_adnl < PULL_ROUNDTRIP)  {
+            if (unr <= FAIL_UNRELIABILITY) && (roundtrip_adnl < rt_upto)  {
                 if node_stat + (node_stat * 0.2 as f64) < peer_stat {
                     if fines_points > 0 {
                         let _ = neighbour.fines_points.fetch_update(

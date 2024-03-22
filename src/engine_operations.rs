@@ -735,10 +735,11 @@ impl EngineOperations for Engine {
 
     async fn download_next_key_blocks_ids(
         &self, 
-        block_id: &BlockIdExt
+        block_id: &BlockIdExt,
+        rt_upto: u64
     ) -> Result<Vec<BlockIdExt>> {
         let mc_overlay = self.get_masterchain_overlay().await?;
-        mc_overlay.download_next_key_blocks_ids(block_id, 5).await
+        mc_overlay.download_next_key_blocks_ids(block_id, 5, rt_upto).await
     }
 
     async fn set_applied(
@@ -849,10 +850,11 @@ impl EngineOperations for Engine {
     async fn download_archive(
         &self, 
         masterchain_seqno: u32,
+        rt_upto: u64,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<Option<Vec<u8>>> {
         let client = self.get_masterchain_overlay().await?;
-        client.download_archive(masterchain_seqno, active_peers).await
+        client.download_archive(masterchain_seqno, rt_upto, active_peers).await
     }
 
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()> {

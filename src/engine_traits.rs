@@ -363,7 +363,8 @@ pub trait EngineOperations : Sync + Send {
     }
     async fn download_next_key_blocks_ids(
         &self,
-        block_id: &BlockIdExt
+        block_id: &BlockIdExt,
+        rt_upto: u64
     ) -> Result<Vec<BlockIdExt>> {
         unimplemented!()
     }
@@ -802,6 +803,7 @@ pub trait EngineOperations : Sync + Send {
     async fn download_archive(
         &self, 
         masterchain_seqno: u32,
+        rt_upto: u64,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<Option<Vec<u8>>> {
         unimplemented!()

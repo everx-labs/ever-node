@@ -13,7 +13,7 @@
 
 use crate::{
     CHECK, block_proof::BlockProofStuff, engine_traits::EngineOperations, 
-    shard_state::ShardStateStuff, engine::Engine
+    shard_state::ShardStateStuff, engine::Engine, network::neighbours::PULL_ROUNDTRIP
 };
 
 use std::collections::HashSet;
@@ -162,7 +162,7 @@ async fn get_key_blocks(
         }
         log::info!(target: "boot", "download_next_key_blocks_ids {}", handle.id());
         // this information is not trusted
-        let ids = match engine.download_next_key_blocks_ids(handle.id()).await {
+        let ids = match engine.download_next_key_blocks_ids(handle.id(), PULL_ROUNDTRIP).await {
             Err(err) => {
                 log::warn!(target: "boot", "download_next_key_blocks_ids {}: {}", handle.id(), err);
                 return Ok(key_blocks);

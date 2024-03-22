@@ -34,7 +34,7 @@ use crate::{
     network::{
         control::{ControlServer, DataSource, StatusReporter},
         full_node_client::FullNodeOverlayClient, full_node_service::FullNodeOverlayService,
-        node_network::NodeNetwork
+        neighbours::PULL_ROUNDTRIP, node_network::NodeNetwork
     },
     shard_blocks::{
         ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker, 
@@ -186,6 +186,7 @@ struct DownloadContext<'a, T> {
     limit: Option<u32>,
     log_error_limit: u32,
     name: &'a str,
+    rt_upto: u64,
     timeout: Option<(u64, u64, u64)>, // (current, multiplier*10, max)
 }
 
@@ -202,6 +203,7 @@ impl <T> DownloadContext<'_, T> {
                 Ok(ret) => break Ok(ret)
             }
             attempt += 1;
+            self.rt_upto *= 2;
             if let Some(limit) = &self.limit {
                 if &attempt > limit {
                     fail!("Downloader: out of attempts");
@@ -282,7 +284,7 @@ impl Downloader for BlockDownloader {
         }
         #[cfg(feature = "telemetry")]
         context.engine.full_node_telemetry.new_downloading_block_attempt(context.id);
-        let ret = context.client.download_block_full(context.id).await;
+        let ret = context.client.download_block_full(context.id, context.rt_upto).await;
         #[cfg(feature = "telemetry")]
         if ret.is_ok() { 
             context.engine.full_node_telemetry.new_downloaded_block(context.id);
@@ -313,7 +315,11 @@ impl Downloader for QueueUpdateDownloader {
         }
         #[cfg(feature = "telemetry")]
         context.engine.full_node_telemetry.new_downloading_block_attempt(context.id);
-        let ret = context.client.download_out_msg_queue_update(context.id, self.update_for_wc).await;
+        let ret = context.client.download_out_msg_queue_update(
+            context.id, 
+            self.update_for_wc,
+            context.rt_upto
+        ).await;
         #[cfg(feature = "telemetry")]
         if ret.is_ok() {
             context.engine.full_node_telemetry.new_downloaded_block(context.id);
@@ -345,7 +351,8 @@ impl Downloader for BlockProofDownloader {
         context.client.download_block_proof(
             context.id, 
             self.is_link, 
-            self.key_block, 
+            self.key_block,
+            context.rt_upto 
         ).await        
     }
 }              
@@ -373,7 +380,7 @@ impl Downloader for NextBlockDownloader {
                 }
             }
         }
-        context.client.download_next_block_full(context.id).await
+        context.client.download_next_block_full(context.id, context.rt_upto).await
     }    
 }  
 
@@ -394,7 +401,7 @@ impl Downloader for ZeroStateDownloader {
                 return Ok((zs, data));
             }
         }
-        context.client.download_zero_state(context.id).await
+        context.client.download_zero_state(context.id, context.rt_upto).await
     }
 }
 
@@ -1952,6 +1959,7 @@ impl Engine {
             limit,
             log_error_limit,
             name,
+            rt_upto: PULL_ROUNDTRIP,
             timeout,
         };
         Ok(ret)

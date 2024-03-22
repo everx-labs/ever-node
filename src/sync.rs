@@ -13,7 +13,7 @@
 
 use crate::{
     block::{BlockIdExtExtention, BlockStuff}, block_proof::BlockProofStuff, boot,
-    engine_traits::EngineOperations
+    engine_traits::EngineOperations, network::neighbours::PULL_ROUNDTRIP
 };
 
 use adnl::common::Wait;
@@ -65,6 +65,7 @@ pub(crate) async fn start_sync(
         engine: &Arc<dyn EngineOperations>, 
         wait: &Arc<Wait<(u32, Result<Option<Vec<u8>>>)>>, 
         seq_no: u32,
+        rt_upto: u64,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) {
         wait.request();
@@ -73,7 +74,7 @@ pub(crate) async fn start_sync(
         let active_peers = active_peers.clone();
         tokio::spawn(
             async move {
-                let res = download_archive(engine, seq_no, &active_peers).await;
+                let res = download_archive(engine, seq_no, rt_upto, &active_peers).await;
                 wait.respond(Some((seq_no, res)));
             }
         );
@@ -101,12 +102,13 @@ pub(crate) async fn start_sync(
         // Redownload previous not found ones 
         if let Some(latest) = latest {
             for (seq_no, status) in queue.iter_mut() {
-                if let ArchiveStatus::NotFound = status {
+                if let ArchiveStatus::NotFound(rt_upto) = status {
                     if latest <= *seq_no {
                         continue
                     }
-                    *status = ArchiveStatus::Downloading;
-                    download(engine, wait, *seq_no, active_peers)
+                    let rt_upto = *rt_upto;
+                    *status = ArchiveStatus::Downloading(rt_upto);
+                    download(engine, wait, *seq_no, rt_upto, active_peers)
                 }
             }
         }
@@ -114,7 +116,7 @@ pub(crate) async fn start_sync(
         if !engine.check_sync().await? {
             let mut earliest = None;
             for (seq_no, status) in queue.iter_mut() {
-                if let ArchiveStatus::NotFound = status {
+                if let ArchiveStatus::NotFound(_) = status {
                     if let Some(earliest) = earliest {
                         if earliest <= *seq_no {
                             continue
@@ -129,8 +131,12 @@ pub(crate) async fn start_sync(
             if let Some(earliest) = earliest {
                 for (seq_no, status) in queue.iter_mut() {
                     if earliest == *seq_no {
-                        *status = ArchiveStatus::Downloading;
-                        download(engine, wait, *seq_no, active_peers);
+                        let ArchiveStatus::NotFound(rt_upto) = status else {
+                            fail!("INTERNAL ERROR: archive {} redownload mismatch", seq_no)
+                        };
+                        let rt_upto = *rt_upto;
+                        *status = ArchiveStatus::Downloading(rt_upto);
+                        download(engine, wait, *seq_no, rt_upto, active_peers);
                         break
                     }
                 }
@@ -154,8 +160,9 @@ pub(crate) async fn start_sync(
                 break
             } 
             if queue.iter().position(|(seq_no, _)| seq_no == &sync_mc_seq_no).is_none() {
-                queue.push((sync_mc_seq_no, ArchiveStatus::Downloading));
-                download(engine, wait, sync_mc_seq_no, active_peers);
+                let rt_upto = PULL_ROUNDTRIP;
+                queue.push((sync_mc_seq_no, ArchiveStatus::Downloading(rt_upto)));
+                download(engine, wait, sync_mc_seq_no, rt_upto, active_peers);
             }
             sync_mc_seq_no += ARCHIVE_PACKAGE_SIZE;
         }
@@ -163,8 +170,8 @@ pub(crate) async fn start_sync(
     }
 
     enum ArchiveStatus {
-        Downloading,
-        NotFound,
+        Downloading(u64),
+        NotFound(u64),
         Downloaded(Vec<u8>)
     }
 
@@ -259,18 +266,34 @@ pub(crate) async fn start_sync(
             }
 */
             match wait.wait(&mut reader, false).await {
-                Some(Some((seq_no, Err(e)))) => {
+                Some(Some((seq_no_recv, Err(e)))) => {
                     log::error!(
                         target: TARGET,
                         "Error while downloading package seq_no {}: {}",
-                        seq_no, e
+                        seq_no_recv, e
                     );
-                    download(&engine, &wait, seq_no, &active_peers)
+                    if let Some(index) = queue.iter().position(
+                        |(seq_no_send, status)| match status {
+                            ArchiveStatus::Downloading(_) => seq_no_send == &seq_no_recv,
+                            _ => false
+                        }
+                    ) {
+                        let rt_upto = match &mut queue[index] {
+                            (_, ArchiveStatus::Downloading(rt_upto)) => {
+                                *rt_upto *= 2;
+                                *rt_upto
+                            },
+                            _ => fail!("INTERNAL ERROR: archive {} status mismatch", seq_no_recv)
+                        };
+                        download(&engine, &wait, seq_no_recv, rt_upto, &active_peers)
+                    } else {
+                        fail!("INTERNAL ERROR: sync queue broken")
+                    }
                 },
                 Some(Some((seq_no_recv, Ok(data)))) => {
                     if let Some(index) = queue.iter().position(
                         |(seq_no_send, status)| match status {
-                            ArchiveStatus::Downloading => seq_no_send == &seq_no_recv,
+                            ArchiveStatus::Downloading(_) => seq_no_send == &seq_no_recv,
                             _ => false
                         }
                     ) {
@@ -301,7 +324,14 @@ pub(crate) async fn start_sync(
                                             "Cannot apply downloaded package for MC seq_no = {}: {}",
                                             seq_no_recv, e
                                         );
-                                        download(&engine, &wait, seq_no_recv, &active_peers)
+                                        let rt_upto = match &mut queue[index] {
+                                            (_, ArchiveStatus::Downloading(rt_upto)) => {
+                                                *rt_upto *= 2;
+                                                *rt_upto
+                                            },
+                                            _ => fail!("INTERNAL ERROR: archive {} status mismatch", seq_no_recv)
+                                        };
+                                        download(&engine, &wait, seq_no_recv, rt_upto, &active_peers)
                                     }
                                 }
                             } else {
@@ -311,7 +341,11 @@ pub(crate) async fn start_sync(
                             }
                         } else {
                             let (_, status) = &mut queue[index];
-                            *status = ArchiveStatus::NotFound;
+                            match status {
+                                ArchiveStatus::Downloading(rt_upto) => 
+                                    *status = ArchiveStatus::NotFound(*rt_upto * 2),
+                                _ => fail!("INTERNAL ERROR: archive {} status mismatch", seq_no_recv)
+                            }
                             force_redownload(&engine, &wait, &mut queue, &active_peers).await?;
 /*                            if queue.iter().position(
                                 |(seq_no, status)| match status {
@@ -346,10 +380,11 @@ pub(crate) async fn start_sync(
 async fn download_archive(
     engine: Arc<dyn EngineOperations>, 
     mc_seq_no: u32,
+    rt_upto: u64,
     active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
 ) -> Result<Option<Vec<u8>>> {
     log::info!(target: "sync", "Requesting archive for MC seq_no = {}", mc_seq_no);
-    match engine.download_archive(mc_seq_no, active_peers).await {
+    match engine.download_archive(mc_seq_no, rt_upto, active_peers).await {
         Ok(Some(data)) => {
             log::info!(
                 target: "sync",

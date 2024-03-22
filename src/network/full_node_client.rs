@@ -15,7 +15,7 @@ use crate::{
     block::BlockStuff, block_proof::BlockProofStuff,
     network::{
         neighbours::{
-            Neighbours, Neighbour, 
+            Neighbours, Neighbour,
             UPDATE_FLAG_IS_REGISTER, UPDATE_FLAG_IS_REG_IN_COMMON_STAT, UPDATE_FLAG_IS_RDPL
         },
         node_network::NetworkContext
@@ -68,12 +68,23 @@ pub trait FullNodeOverlayClient : Sync + Send {
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()>;
     async fn send_queue_update_broadcast(&self, broadcast: QueueUpdateBroadcast) -> Result<()>;
     async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()>;
-    async fn download_block_proof(&self, block_id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff>;
-    async fn download_block_full(&self, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
+    async fn download_block_proof(
+        &self, 
+        block_id: &BlockIdExt, 
+        is_link: bool, 
+        key_block: bool,
+        rt_upto: u64
+    ) -> Result<BlockProofStuff>;
+    async fn download_block_full(
+        &self, 
+        id: &BlockIdExt, 
+        rt_upto: u64
+    ) -> Result<(BlockStuff, BlockProofStuff)>;
     async fn download_out_msg_queue_update(
         &self,
         id: &BlockIdExt,
         target_wc: i32,
+        rt_upto: u64
     ) -> Result<BlockStuff>;
     async fn check_persistent_state(
         &self,
@@ -95,17 +106,24 @@ pub trait FullNodeOverlayClient : Sync + Send {
     ) -> Result<Vec<u8>>;
     async fn download_zero_state(
         &self,
-        id: &BlockIdExt
+        id: &BlockIdExt,
+        rt_upto: u64
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)>;
     async fn download_next_key_blocks_ids(
         &self,
         block_id: &BlockIdExt,
-        max_size: i32
+        max_size: i32,
+        rt_upto: u64
     ) -> Result<Vec<BlockIdExt>>;
-    async fn download_next_block_full(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
+    async fn download_next_block_full(
+        &self, 
+        prev_id: &BlockIdExt, 
+        rt_upto: u64
+    ) -> Result<(BlockStuff, BlockProofStuff)>;
     async fn download_archive(
         &self,
         mc_seq_no: u32,
+        rt_upto: u64,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<Option<Vec<u8>>>;
     async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>>;
@@ -431,6 +449,7 @@ impl NodeClientOverlay {
     async fn send_adnl_query<R, D>(
         &self,
         request: TaggedObject<R>,
+        rt_upto: u64,
         attempts: Option<u32>,
         timeout: Option<u64>,
         active_peers: Option<&Arc<lockfree::set::Set<Arc<KeyId>>>>
@@ -448,7 +467,7 @@ impl NodeClientOverlay {
         let attempts = attempts.unwrap_or(Self::ADNL_ATTEMPTS);
 
         for _ in 0..attempts {
-            let peer = if let Some(p) = self.peers.choose_neighbour()? {
+            let peer = if let Some(p) = self.peers.choose_neighbour(rt_upto)? {
                 p
             } else {
                 tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_NO_NEIGHBOURS)).await;
@@ -673,6 +692,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         block_id: &BlockIdExt,
         is_link: bool,
         key_block: bool,
+        rt_upto: u64
     ) -> Result<BlockProofStuff> {
 
         // Prepare
@@ -686,6 +706,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     #[cfg(feature = "telemetry")]
                     tag: self.tag_prepare_key_block_proof
                 },
+                rt_upto,
                 None,
                 Some(Self::TIMEOUT_PREPARE),
                 None
@@ -700,6 +721,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
                     #[cfg(feature = "telemetry")]
                     tag: self.tag_prepare_block_proof
                 },
+                rt_upto,
                 None,
                 Some(Self::TIMEOUT_PREPARE),
                 None
@@ -812,6 +834,7 @@ Ok(if key_block {
     async fn download_block_full(
         &self,
         id: &BlockIdExt,
+        rt_upto: u64
     ) -> Result<(BlockStuff, BlockProofStuff)> {
 
         // Prepare
@@ -823,6 +846,7 @@ Ok(if key_block {
                 #[cfg(feature = "telemetry")]
                 tag: self.tag_prepare_block
             },
+            rt_upto,
             Some(1),
             None,
             None
@@ -869,6 +893,7 @@ Ok(if key_block {
         &self,
         id: &BlockIdExt,
         target_wc: i32,
+        rt_upto: u64
     ) -> Result<BlockStuff> {
 
         // Prepare
@@ -881,6 +906,7 @@ Ok(if key_block {
                 #[cfg(feature = "telemetry")]
                 tag: self.tag_prepare_queue_update
             },
+            rt_upto,
             Some(1),
             None,
             None
@@ -1000,6 +1026,7 @@ Ok(if key_block {
     async fn download_zero_state(
         &self,
         id: &BlockIdExt,
+        rt_upto: u64
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         // Prepare
         let (prepare, good_peer): (PreparedState, _) = self.send_adnl_query(
@@ -1012,6 +1039,7 @@ Ok(if key_block {
                 #[cfg(feature = "telemetry")]
                 tag: self.tag_prepare_zero_state
             },
+            rt_upto,
             None,
             Some(Self::TIMEOUT_PREPARE),
             None
@@ -1052,6 +1080,7 @@ Ok(if key_block {
         &self,
         block_id: &BlockIdExt,
         max_size: i32,
+        rt_upto: u64
     ) -> Result<Vec<BlockIdExt>> {
         let request = TaggedObject {
             object: GetNextKeyBlockIds {
@@ -1064,6 +1093,7 @@ Ok(if key_block {
 
         let (ids, _): (KeyBlocks, _) = self.send_adnl_query(
             request,
+            rt_upto,
             None,
             None,
             None,
@@ -1078,6 +1108,7 @@ Ok(if key_block {
     async fn download_next_block_full(
         &self,
         prev_id: &BlockIdExt,
+        rt_upto: u64
     ) -> Result<(BlockStuff, BlockProofStuff)> {
 
         let request = TaggedObject {
@@ -1089,7 +1120,7 @@ Ok(if key_block {
         };
 
         // Set neighbor
-        let peer = if let Some(p) = self.peers.choose_neighbour()? {
+        let peer = if let Some(p) = self.peers.choose_neighbour(rt_upto)? {
             p
         } else {
             tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_NO_NEIGHBOURS)).await;
@@ -1128,6 +1159,7 @@ Ok(if key_block {
     async fn download_archive(
         &self,
         mc_seq_no: u32,
+        rt_upto: u64,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<Option<Vec<u8>>> {
 
@@ -1141,6 +1173,7 @@ Ok(if key_block {
                 #[cfg(feature = "telemetry")]
                 tag: self.tag_get_archive_info
             },
+            rt_upto,
             None,
             Some(Self::TIMEOUT_PREPARE),
             Some(active_peers)
