@@ -118,6 +118,7 @@ statsd = [ 'metrics-exporter-statsd', 'log_metrics', 'dep:statsd' ]
 telemetry = [ 'adnl/telemetry', 'storage/telemetry' ]
 trace_alloc = [  ]
 trace_alloc_detail = [ 'trace_alloc' ]
+fast_finality_extra = [  ]
 
 [profile]
 
