@@ -43,10 +43,10 @@ use crate::{
 #[cfg(feature = "external_db")]
 use crate::internal_db::EXTERNAL_DB_BLOCK;
 
+use adnl::{BroadcastSendInfo, PrivateOverlayShortId};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
-use overlay::{BroadcastSendInfo, PrivateOverlayShortId};
 use std::{collections::HashSet, ops::Deref, sync::Arc};
 use storage::block_handle_db::BlockHandle;
 use ton_api::{

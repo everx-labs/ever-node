@@ -22,8 +22,8 @@ use crate::{
     ReceiverTaskQueuePtr, SessionId, ton, 
     profiling::Profiler, utils::{self, get_elapsed_time, MetricsDumper, MetricsHandle}
 };
+use adnl::{OverlayUtils, PrivateOverlayShortId};                    
 use metrics::Recorder;
-use overlay::{OverlayUtils, PrivateOverlayShortId};                    
 use rand::Rng;                                                              
 use std::{
     any::Any, cell::RefCell, collections::HashMap, collections::LinkedList, fmt, rc::Rc, 

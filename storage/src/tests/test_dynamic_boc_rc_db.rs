@@ -21,20 +21,23 @@ use std::sync::Arc;
 use ton_block::CellsFactory;
 use ton_types::{BuilderData, Cell, IBitstring, Result};
 
+include!("../db/tests/destroy_db.rs");
 include!("../../../common/src/log.rs");
 
-#[test]
-fn test_dynamic_boc_rc_db() -> Result<()> {
+const DB_PATH: &str = "../target/test";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_dynamic_boc_rc_db() -> Result<()> {
 
     //init_log("../common/config/log_cfg.yml");
 
-    let testname = "test_dynamic_boc_rc_db";
-    let _ = std::fs::remove_dir_all(testname);
+    const DB_NAME: &str = "test_dynamic_boc_rc_db";
 
-    let db = RocksDb::with_path(testname, testname)?;
+    destroy_rocks_db(DB_PATH, DB_NAME).await.unwrap();
 
+    let db = RocksDb::with_path(DB_PATH, DB_NAME)?;
     let boc_db = Arc::new(DynamicBocDb::with_db(
-        Arc::new(CellDb::with_db(db.clone(), testname, true)?), 
+        Arc::new(CellDb::with_db(db.clone(), DB_NAME, true)?), 
         "",
         false,
         1_000_000,
@@ -65,8 +68,11 @@ fn test_dynamic_boc_rc_db() -> Result<()> {
     boc_db.delete_boc(&root_cell_2.repr_hash().into(), &|| Ok(()), &mut cells_counters, false)?;
     assert_eq!(boc_db.len()?, 0);
 
-    let _ = std::fs::remove_dir_all(testname);
+    drop(boc_db);
+    drop(db);
+    destroy_rocks_db(DB_PATH, DB_NAME).await.unwrap();
     Ok(())
+
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -75,13 +81,13 @@ async fn test_dynamic_boc_rc_db_2() -> Result<()> {
     init_log("../common/config/log_cfg_debug.yml");
     println!();
 
-    let testname = "test_dynamic_boc_rc_db_2";
-    let _ = std::fs::remove_dir_all(testname);
+    const DB_NAME: &str = "test_dynamic_boc_rc_db_2";
 
-    let db = RocksDb::with_path(testname, testname)?;
+    destroy_rocks_db(DB_PATH, DB_NAME).await.unwrap();
 
+    let db = RocksDb::with_path(DB_PATH, DB_NAME)?;
     let boc_db = Arc::new(DynamicBocDb::with_db(
-        Arc::new(CellDb::with_db(db.clone(), testname, true)?), 
+        Arc::new(CellDb::with_db(db.clone(), DB_NAME, true)?), 
         "",
         false,
         1_000_000,
@@ -129,5 +135,11 @@ async fn test_dynamic_boc_rc_db_2() -> Result<()> {
     let r4 = create_ss(vec!["r4", "c4", "A", "B"]);
     boc_db.save_boc(r4, true, &check_stop, &mut None, false).unwrap();
 
+    drop(cells_factory);
+    drop(boc_db);
+    drop(db);
+    destroy_rocks_db(DB_PATH, DB_NAME).await.unwrap();
     Ok(())
+
 }
+

@@ -12,7 +12,7 @@
 */
 
 use adnl::{adnl_node_test_key, adnl_node_test_config, node::{AdnlNode, AdnlNodeConfig}};
-use dht::DhtNode;
+use adnl::DhtNode;
 use std::{env, ops::Deref, sync::Arc};
 use ton_types::{error, base64_encode, KeyOption, Result};
 
@@ -21,8 +21,8 @@ async fn gen(ip: &str, dht_key_enc: &str) -> Result<()> {
        adnl_node_test_config!(ip, adnl_node_test_key!(1 as usize, dht_key_enc))
     ).unwrap();
     let adnl = AdnlNode::with_config(config).await.unwrap();
-    let dht = DhtNode::with_adnl_node(adnl.clone(), 1 as usize).unwrap();
-    let node = dht.get_signed_node().unwrap();
+    let dht = DhtNode::with_params(adnl.clone(), 1 as usize, None).unwrap();
+    let node = dht.get_signed_node_of_network(None).unwrap();
     let key: Arc<dyn KeyOption> = (&node.id).try_into()?;
     let adr = AdnlNode::parse_address_list(&node.addr_list)?.ok_or_else(
         || error!("Cannot parse address list {:?}", node.addr_list)

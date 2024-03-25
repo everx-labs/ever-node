@@ -28,7 +28,7 @@ use adnl::{
     common::{CountedObject, Counter,TaggedByteSlice, TaggedObject, TaggedTlObject},
     node::AdnlNode
 };
-use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
+use adnl::{BroadcastSendInfo, OverlayShortId, OverlayNode};
 use rand::seq::SliceRandom;
 use std::{io::Cursor, time::Instant, sync::Arc, time::Duration, collections::HashSet};
 #[cfg(feature = "telemetry")]

@@ -17,7 +17,7 @@ use crate::{
 };
 
 use adnl::common::{AdnlPeers, Answer, QueryAnswer, QueryResult, TaggedByteVec, TaggedObject};
-use overlay::QueriesConsumer;
+use adnl::QueriesConsumer;
 use std::{cmp::min, fmt::Debug, sync::Arc};
 #[cfg(feature = "telemetry")]
 use ton_api::{tag_from_boxed_type, tag_from_boxed_object};

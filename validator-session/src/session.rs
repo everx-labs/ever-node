@@ -18,6 +18,7 @@ use crate::{
     SessionReplayListenerPtr, 
     task_queue::{CallbackTaskPtr, TaskPtr, TaskQueue, TaskQueuePtr}
 };
+use adnl::PrivateOverlayShortId;
 use catchain::{
     check_execution_time, instrument, 
     ActivityNodePtr, BlockPtr, CatchainListener, CatchainOverlay, CatchainOverlayListenerPtr,
@@ -26,7 +27,6 @@ use catchain::{
     profiling::Profiler, utils::{compute_instance_counter, get_elapsed_time, MetricsDumper}
 };
 use metrics::Recorder;
-use overlay::PrivateOverlayShortId;
 use std::{fmt, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, SystemTime}};
 use ton_types::Result;
 

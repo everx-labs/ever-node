@@ -1,5 +1,5 @@
 use crate::engine_traits::PrivateOverlayOperations;
-use overlay::PrivateOverlayShortId;
+use adnl::PrivateOverlayShortId;
 use std::sync::Arc;
 use ton_types::{Result, UInt256};
 use validator_session::{PublicKeyHash, CatchainOverlayPtr, CatchainNode};

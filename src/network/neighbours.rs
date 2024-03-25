@@ -14,8 +14,8 @@
 use crate::network::node_network::NodeNetwork;
 
 use adnl::{common::{Query, TaggedTlObject, Wait}, node::{AdnlNode, AddressCache}};
-use dht::DhtNode;
-use overlay::{OverlayShortId, OverlayNode};
+use adnl::DhtNode;
+use adnl::{OverlayShortId, OverlayNode};
 use rand::Rng;
 use std::{
     cmp::min,
@@ -456,7 +456,7 @@ impl Neighbours {
         tokio::spawn(async move {
             for peer in peers.iter() {
                 log::trace!("add_new_peers: searching IP for peer {}...", peer);
-                match DhtNode::find_address(&this.dht, peer).await {
+                match DhtNode::find_address_in_network(&this.dht, peer, None).await {
                     Ok(Some((ip, _))) => {
                         log::info!("add_new_peers: peer {}, IP {}", peer, ip);
                         if !this.add_overlay_peer(peer.clone()) {

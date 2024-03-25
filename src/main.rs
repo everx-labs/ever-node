@@ -285,9 +285,6 @@ fn get_build_info() -> String {
         Rust: {}\n\
         TON NODE git commit:         {}\n\
         ADNL git commit:             {}\n\
-        DHT git commit:              {}\n\
-        OVERLAY git commit:          {}\n\
-        RLDP git commit:             {}\n\
         TON_BLOCK git commit:        {}\n\
         TON_BLOCK_JSON git commit:   {}\n\
         TON_EXECUTOR git commit:     {}\n\
@@ -298,9 +295,6 @@ fn get_build_info() -> String {
         std::option_env!("BUILD_RUST_VERSION").unwrap_or(NOT_SET_LABEL),
         std::option_env!("BUILD_GIT_COMMIT").unwrap_or(NOT_SET_LABEL),
         adnl::build_commit().unwrap_or(NOT_SET_LABEL),
-        dht::build_commit().unwrap_or(NOT_SET_LABEL),
-        overlay::build_commit().unwrap_or(NOT_SET_LABEL),
-        rldp::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_block::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_block_json::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_executor::build_commit().unwrap_or(NOT_SET_LABEL),
