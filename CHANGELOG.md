@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.56.5
+
+- Estimate block size using pruned cells estimation
+
 ## Version 0.56.4
 
 - Supported new multi-networks API of DHT

@@ -64,14 +64,10 @@ impl BlockLimitStatus {
     }
 
     /// Classify the status
-    pub fn classify(&self) -> ParamLimitIndex {
-        max(
-            max(
-                self.limits.bytes().classify(self.estimate_block_size(None)),
-                self.limits.gas().classify(self.gas_used)
-            ),
-            self.limits.lt_delta().classify(self.lt_delta())
-        )
+    pub fn classify(&self, pruned_count: usize) -> ParamLimitIndex {
+        self.limits.bytes().classify(self.estimate_block_size(None, pruned_count))
+            .max(self.limits.gas().classify(self.gas_used))
+            .max(self.limits.lt_delta().classify(self.lt_delta()))
     }
 
     /// Register operation with output message queue in the block
@@ -124,7 +120,7 @@ impl BlockLimitStatus {
         self.lt_current
     }
 
-    pub fn estimate_block_size(&self, extra: Option<&CellStorageStats>) -> u32 {
+    pub fn estimate_block_size(&self, extra: Option<&CellStorageStats>, pruned_count: usize) -> u32 {
         let mut bits = 
             self.stats.cells_stats.bits + self.stats.proof_stats.bits;
         let mut cels = 
@@ -139,19 +135,23 @@ impl BlockLimitStatus {
             ints += extra.cells_stats.internal_refs;
             exts += extra.cells_stats.external_refs;
         }
-        let ret = 2000 + if extra.is_some() {
+        let mut ret = 2000 + if extra.is_some() {
             200
         } else {
             0
         };
-        ret + (bits >> 3) + cels * 12 + ints * 3 + exts * 4 + 
+        ret += (bits >> 3) + cels * 12 + ints * 3 + exts * 4 + 
+            pruned_count as u32 * 20 +
             self.removed_split_msgs * 128 +
             self.accounts * 200 + 
-            self.transactions * 200
+            self.transactions * 200;
+        // log::debug!("ESTIMATE: size: {}, cells: {:?}, proofs: {:?}, removed: {}, split msgs: {}",
+        //     ret, self.stats.cells_stats, self.stats.proof_stats, self.out_msg_queue_ops, self.removed_split_msgs);
+        ret
     }
 
-    pub fn fits(&self, level: ParamLimitIndex) -> bool {
-        let bytes = self.estimate_block_size(None);
+    pub fn fits(&self, level: ParamLimitIndex, pruned_count: usize) -> bool {
+        let bytes = self.estimate_block_size(None, pruned_count);
         self.limits.fits(
             level, 
             bytes,
@@ -160,9 +160,10 @@ impl BlockLimitStatus {
         )
     }
 
-    pub fn fits_normal(&self, percent: u32) -> bool {
+    pub fn fits_normal(&self, percent: u32, pruned_count: usize) -> bool {
+        let bytes = self.estimate_block_size(None, pruned_count);
         self.limits.fits_normal(
-            self.estimate_block_size(None),
+            bytes,
             self.gas_used,
             self.lt_delta(),
             percent
@@ -184,7 +185,7 @@ impl BlockLimitStatus {
 */
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Stats {
     bits: u32,
     cells: u32,
