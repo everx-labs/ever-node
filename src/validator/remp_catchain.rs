@@ -139,13 +139,19 @@ impl RempCatchainInstance {
         }
     }
 
-    pub fn pending_messages_broadcast_send(&self, msg: RempCatchainRecordV2, msg_body: ton_api::ton::ton_node::RempMessageBody) -> Result<()> {
+    pub fn pending_messages_broadcast_send(&self, msg: RempCatchainRecordV2, msg_body: Option<ton_api::ton::ton_node::RempMessageBody>) -> Result<()> {
         let instance = self.get_instance_impl()?;
-        match (instance.pending_messages_queue_sender.send(msg), instance.pending_messages_broadcast_sender.send(msg_body)) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(e), _) => fail!("pending_messages_queue_sender: send error {}", e),
-            (_, Err(e)) => fail!("pending_messages_broadcast_sender: send error {}", e)
+        if let Err(e) = instance.pending_messages_queue_sender.send(msg) {
+            fail!("pending_messages_queue_sender: send error {}", e)
         }
+
+        if let Some(body) = msg_body {
+            if let Err(e) = instance.pending_messages_broadcast_sender.send(body) {
+                fail!("pending_messages_broadcast_sender: send error {}", e)
+            }
+        }
+
+        Ok(())
     }
 
     #[cfg(feature = "telemetry")]

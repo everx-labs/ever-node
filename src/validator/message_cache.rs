@@ -393,22 +393,24 @@ impl MessageCacheSession {
         Ok(())
     }
 
-    fn insert_message(&self, msg: Arc<RmqMessage>, msg_hdr: Arc<RempMessageHeader>, msg_origin: Option<Arc<RempMessageOrigin>>) -> Result<()> {
+    fn insert_message(&self, msg: Arc<RmqMessage>, msg_hdr: Arc<RempMessageHeader>, msg_origin: Option<Arc<RempMessageOrigin>>) -> Result<bool> {
         if msg.message_uid != msg_hdr.message_uid || msg.message_id != msg_hdr.message_id {
             fail!("Message with id {:x} and uid {:x} and its header {} have different uids or ids", msg.message_id, msg.message_uid, msg_hdr);
         }
 
         self.insert_message_header(&msg.message_id, msg_hdr, msg_origin)?;
         match self.messages.insert(msg.message_id.clone(), msg.clone()) {
-            None => Ok(()),
-            Some(prev) if prev == msg => Ok(()),
+            None => Ok(true),
+            Some(prev) if prev == msg => Ok(false),
             Some(p) => fail!("Different messages for same id {:x}, replacing {} with {}",
                 msg.message_id, p, msg
             )
         }
     }
 
-    fn update_missing_fields(&self, message_id: &UInt256, message: Option<Arc<RmqMessage>>, origin: Option<Arc<RempMessageOrigin>>) -> Result<()> {
+    /// Returns body_updated flag
+    fn update_missing_fields(&self, message_id: &UInt256, message: Option<Arc<RmqMessage>>, origin: Option<Arc<RempMessageOrigin>>) -> Result<bool> {
+        let mut body_updated = false;
         if let Some(m1) = &message {
             if let Some(m2) = self.messages.get(message_id) {
                 if m1 != m2.value() {
@@ -420,9 +422,16 @@ impl MessageCacheSession {
                     if m1 != &m2 {
                         fail!("Parallel updating of message body: new body '{}', another body '{}'", m1, m2)
                     }
+                    log::warn!(target: "remp",
+                        "Update_missing_fields: body for message {:x} inserted as new, although it is present already in cache, considering non-updated",
+                        message_id
+                    )
+                }
+                else {
+                    body_updated = true
                 }
             }
-        }
+        };
 
         // If origin is different from the stored one, that's not a big deal.
         if let Some(o1) = &origin {
@@ -434,13 +443,13 @@ impl MessageCacheSession {
             else {
                 if let Some(o2) = self.message_origins.insert(message_id.clone(), o1.clone()) {
                     if o1 != &o2 {
-                        fail!("Different message origin: new origin '{}', current cached origin '{}'", o1, o2);
+                        log::trace!("Different message origin: new origin '{}', current cached origin '{}'", o1, o2);
                     }
                 }
             }
         }
 
-        Ok(())
+        Ok(body_updated)
     }
 
     fn is_message_present(&self, msg_id: &UInt256) -> bool {
@@ -755,7 +764,7 @@ impl MessageCache {
         }
     }
 
-    fn insert_message(&self, session: Arc<MessageCacheSession>, message: Arc<RmqMessage>, message_header: Arc<RempMessageHeader>, message_origin: Option<Arc<RempMessageOrigin>>, status: &RempMessageStatus) -> Result<()> {
+    fn insert_message(&self, session: Arc<MessageCacheSession>, message: Arc<RmqMessage>, message_header: Arc<RempMessageHeader>, message_origin: Option<Arc<RempMessageOrigin>>, status: &RempMessageStatus) -> Result<bool> {
         if message.message_id != message_header.message_id {
             fail!("Inconsistent message: message {} and message_header {} have different message_id", message, message_header)
         }
@@ -767,8 +776,7 @@ impl MessageCache {
         }
 
         session.message_status.insert(message_id.clone(), status.clone());
-        session.insert_message(message, message_header, message_origin)?;
-        Ok(())
+        session.insert_message(message, message_header, message_origin)
     }
 
     fn insert_message_header(&self, session: Arc<MessageCacheSession>, message_header: Arc<RempMessageHeader>, message_origin: Option<Arc<RempMessageOrigin>>, status: &RempMessageStatus) -> Result<()> {
@@ -786,12 +794,12 @@ impl MessageCache {
     /// If we know something about message -- that's more important than anything we discover from RMQ
     /// If we do not know anything -- TODO: if all reject, then 'Rejected'. Otherwise 'New'
     /// Actual -- get it as granted ("imprinting")
-    /// Returns old status and new (added) status
+    /// Returns old status, new (added) status, and body_updated flag
     pub fn add_external_message_status<F>(&self,
         message_id: &UInt256, message_uid: &UInt256, message: Option<Arc<RmqMessage>>, message_origin: Option<Arc<RempMessageOrigin>>,
         status_if_new: RempMessageStatus, status_updater: F,
         master_cc: u32
-    ) -> Result<(Option<RempMessageStatus>,RempMessageStatus)>
+    ) -> Result<(Option<RempMessageStatus>,RempMessageStatus,bool)>
         where F: FnOnce(&RempMessageStatus, &RempMessageStatus) -> RempMessageStatus
     {
         match self.get_session_for_message(message_id) {
@@ -807,27 +815,37 @@ impl MessageCache {
                     message_uid
                 );
 
-                match message {
-                    None =>
-                        self.insert_message_header( session, header, message_origin, &status_if_new)?,
+                let body_updated = match message {
+                    None => {
+                        self.insert_message_header( session, header, message_origin, &status_if_new)?;
+                        false
+                    },
                     Some(message) =>
                         self.insert_message(session, message, header, message_origin.clone(), &status_if_new)?
                 };
-                Ok((None, status_if_new))
+                Ok((None, status_if_new, body_updated))
             },
             Some(session) => {
-                if let Err(e) = session.update_missing_fields(&message_id, message, message_origin) {
-                    log::error!(target: "remp", "Different cache contents for external message {}: {}", message_id, e);
-                }
+                let body_updated = session
+                    .update_missing_fields(&message_id, message, message_origin)
+                    .unwrap_or_else(|e| {
+                        log::error!(target: "remp", "Different cache contents for external message {}: {}", message_id, e);
+                        false
+                    });
+
                 let (old_status, final_status) =
                     session.alter_message_status(&message_id, |old| status_updater(old,&status_if_new))?;
-                Ok((Some(old_status), final_status))
+
+                Ok((Some(old_status), final_status, body_updated))
             },
         }
     }
 
-    pub fn update_message_body(&self, data: Arc<RmqMessage>) -> Result<()> {
-        let (old_status,new_status) = self.add_external_message_status(
+    /// Updates message body for the message
+    /// `data` --- Message body with ids
+    /// `return` --- Whether the body added or not
+    pub fn update_message_body(&self, data: Arc<RmqMessage>) -> Result<bool> {
+        let (old_status, new_status, body_updated) = self.add_external_message_status(
             &data.message_id,
             &data.message_uid,
             Some(data.clone()),
@@ -842,7 +860,7 @@ impl MessageCache {
             new_status,
             info
         );
-        Ok(())
+        Ok(body_updated)
     }
 
     /// Checks whether message msg_id is accepted by collator;

@@ -284,12 +284,21 @@ impl MessageQueue {
         }
 
         let origin_with_idx = Arc::new(msg.origin.new_with_updated_source_idx(self.catchain_info.local_idx as u32));
-        log::trace!(target: "remp", "Point 3. Pushing to RMQ {}; message {}, {} + broadcast", self, msg, origin_with_idx);
+        let body_updated = self.remp_manager.message_cache.update_message_body(Arc::new(msg.message.clone()))?;
+        log::trace!(target: "remp", "Point 3. Pushing to RMQ {}; message {}, {}{}",
+            self, msg, origin_with_idx,
+            (if body_updated { " + broadcast" } else { "" }).to_string()
+        );
+
+        let msg_body = if body_updated {
+            Some(msg.as_remp_message_body())
+        }
+        else { None };
+
         self.catchain_instance.pending_messages_broadcast_send(
             msg.as_remp_catchain_record(self.catchain_info.get_master_cc_seqno()),
-            msg.as_remp_message_body()
+            msg_body
         )?;
-        self.remp_manager.message_cache.update_message_body(Arc::new(msg.message.clone()))?;
 
         #[cfg(feature = "telemetry")]
         self.engine.remp_core_telemetry().in_channel_to_catchain(
@@ -461,7 +470,7 @@ impl MessageQueue {
                             self, remp_message_header, e
                         );
             },
-            Ok((Some(_),new_status)) if Self::is_final_status(&new_status) => {
+            Ok((Some(_),new_status,_body_updated)) if Self::is_final_status(&new_status) => {
                 log::trace!(target: "remp",
                             "Point 4. RMQ {}. Message {:x} master_cc_seqno {} from validator {} has final status {}, skipping",
                             self, remp_message_header.message_id, message_master_seqno, remp_message_origin.source_idx, new_status
@@ -469,7 +478,7 @@ impl MessageQueue {
                 #[cfg(feature = "telemetry")]
                 self.engine.remp_core_telemetry().add_to_cache_attempt(false);
             }
-            Ok((old_status,new_status)) => {
+            Ok((old_status,new_status,_body_updated)) => {
                 log::trace!(target: "remp",
                             "Point 4. RMQ {}. Message {:x} master_cc_seqno {} from validator {} has non-final status {}{}, will be collated",
                             self, remp_message_header.message_id, message_master_seqno, remp_message_origin.source_idx, new_status,
@@ -1122,7 +1131,7 @@ impl RmqQueueManager {
                     for new in next_queues.iter() {
                         if let Err(x) = new.catchain_instance.pending_messages_broadcast_send(
                             origin.as_remp_catchain_record(&message.message_id, &message.message_uid, message_cc),
-                            message.as_remp_message_body()
+                            Some(message.as_remp_message_body())
                         )
                         {
                             log::error!(target: "remp",
