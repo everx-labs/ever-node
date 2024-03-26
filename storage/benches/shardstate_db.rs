@@ -14,7 +14,7 @@
 use std::{sync::Arc, collections::HashSet};
 use storage::{
     db::rocksdb::RocksDb,
-    shardstate_db_async::{AllowStateGcResolver, ShardStateDb, SsNotificationCallback},
+    shardstate_db_async::{AllowStateGcResolver, CellsDbConfig, ShardStateDb, SsNotificationCallback},
     StorageAlloc,
 };
 #[cfg(feature = "telemetry")]
@@ -153,9 +153,14 @@ async fn main() -> Result<()> {
             "shardstate_db",
             "cell_db",
             false,
-            1000,
-            1000,
             false,
+            CellsDbConfig {
+                states_db_queue_len: 1000,
+                max_pss_slowdown_mcs: 1000,
+                prefill_cells_counters: false,
+                cache_cells_counters: true,
+                cache_size_bytes: 10000000,
+            },
             #[cfg(feature = "telemetry")]
             Arc::new(StorageTelemetry::default()),
             Arc::new(StorageAlloc::default()),

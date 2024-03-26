@@ -729,9 +729,8 @@ impl DynamicBocDb {
 impl CellsFactory for DynamicBocDb {
     fn create_cell(self: Arc<Self>, builder: BuilderData) -> Result<Cell> {
 
-        let cell = Cell::with_cell_impl(
-            StorageCell::with_cell(builder.into_cell()?.deref(), &self, true, true)?
-        );
+        let cell = StorageCell::with_cell(&*builder.into_cell()?, &self, true, true)?;
+        let cell = Cell::with_cell_impl(cell);
         let repr_hash = cell.repr_hash();
 
         let mut result_cell = None;
@@ -744,7 +743,7 @@ impl CellsFactory for DynamicBocDb {
                     lockfree::map::Preview::Discard
                 } else if let Some(inserted) = inserted {
                     result_cell = Some(inserted.clone());
-                    return lockfree::map::Preview::Keep
+                    lockfree::map::Preview::Keep
                 } else {
                     result_cell = Some(cell.clone());
                     lockfree::map::Preview::New(cell.clone())

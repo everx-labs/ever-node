@@ -246,6 +246,7 @@ struct CollatorData {
     shards_max_end_lt: u64,
     before_split: bool,
     now_upper_limit: u32,
+    msg_queue_depth_sum: usize,
 
     // Split/merge
     want_merge: bool,
@@ -325,6 +326,7 @@ impl CollatorData {
             out_msg_count: 0,
             in_msg_count: 0,
             remove_count: 0,
+            msg_queue_depth_sum: 0,
             before_split: false,
             split_queues,
         };
@@ -378,7 +380,6 @@ impl CollatorData {
         if let Some(in_msg) = in_msg_opt {
             self.add_in_msg_to_block(in_msg)?;
         }
-        let shard = self.out_msg_queue_info.shard().clone();
         transaction.out_msgs.iterate_slices(|slice| {
             let msg_cell = slice.reference(0)?;
             let msg_hash = msg_cell.repr_hash();
@@ -388,9 +389,9 @@ impl CollatorData {
                     // Add out message to state for counting time and it may be removed if used
                     let use_hypercube = !self.config.has_capability(GlobalCapabilities::CapOffHypercube);
                     let fwd_fee = *info.fwd_fee();
-                    let enq = MsgEnqueueStuff::new(msg.clone(), &shard, fwd_fee, use_hypercube)?;
+                    let enq = MsgEnqueueStuff::new(msg.clone(), self.out_msg_queue_info.shard(), fwd_fee, use_hypercube)?;
                     self.enqueue_count += 1;
-                    self.out_msg_queue_info.add_message(&enq)?;
+                    self.msg_queue_depth_sum += self.out_msg_queue_info.add_message(&enq)?;
                     // Add to message block here for counting time later it may be replaced
                     let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
                     self.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
@@ -427,6 +428,11 @@ impl CollatorData {
 
     /// delete message from state queue
     fn del_out_msg_from_state(&mut self, key: &OutMsgQueueKey) -> Result<()> {
+        // let mut data = self.out_msg_queue_info.del_message(key)?;
+        // let created_lt = u64::construct_from(&mut data)?;
+        // let enq = MsgEnqueueStuff::construct_from(&mut data, created_lt)?;
+        // let data = ton_types::write_boc(&enq.message_cell())?;
+        // log::debug!("del_out_msg_from_state {:x} size {}", key, data.len());
         log::debug!("del_out_msg_from_state {:x}", key);
         self.dequeue_count += 1;
         self.out_msg_queue_info.del_message(key)?;
@@ -441,7 +447,7 @@ impl CollatorData {
     /// add message to state queue
     fn add_out_msg_to_state(&mut self, enq: &MsgEnqueueStuff, force: bool) -> Result<()> {
         self.enqueue_count += 1;
-        self.out_msg_queue_info.add_message(enq)?;
+        self.msg_queue_depth_sum += self.out_msg_queue_info.add_message(enq)?;
         self.block_limit_status.register_out_msg_queue_op(
             self.out_msg_queue_info.out_queue()?.data(),
             &self.usage_tree,
@@ -641,6 +647,20 @@ impl CollatorData {
         self.accepted_remp_messages = accepted;
         self.rejected_remp_messages = rejected;
         self.ignored_remp_messages = ignored;
+    }
+
+    fn estimate_pruned_count(&self) -> usize {
+        if self.enqueue_count != 0 {
+            let total_count = self.dequeue_count + self.enqueue_count + self.remove_count;
+            total_count * self.msg_queue_depth_sum / self.enqueue_count
+        } else {
+            0
+        }
+    }
+
+    fn limit_fits(&self, level: ParamLimitIndex) -> bool {
+        let pruned_count = self.estimate_pruned_count(); 
+        self.block_limit_status.fits(level, pruned_count)
     }
 }
 
@@ -961,8 +981,7 @@ impl ExecutionManager {
             AsyncMessage::Copyleft(_) => collator_data.copyleft_msgs.push(in_msg_opt.ok_or_else(|| error!("Can't unwrap `in_msg_opt`"))?),
             _ => ()
         }
-        collator_data.block_full |= !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
-
+        collator_data.block_full |= !collator_data.limit_fits(ParamLimitIndex::Normal);
         Ok(())
     }
 }
@@ -1150,7 +1169,8 @@ impl Collator {
             0 => collator_data.block_limit_status.gas_used(),
             duration => collator_data.block_limit_status.gas_used() / duration
         };
-        let estimate_size = collator_data.block_limit_status.estimate_block_size(None);
+        let pruned_count = collator_data.estimate_pruned_count();
+        let estimate_size = collator_data.block_limit_status.estimate_block_size(None, pruned_count) as usize;
 
         log::info!(
             "{}: ASYNC COLLATED SIZE: {} ESTIMATEED SIZE: {} GAS: {} TIME: {}ms GAS_RATE: {} TRANS: {}ms ID: {}",
@@ -1163,6 +1183,10 @@ impl Collator {
             exec_manager.total_trans_duration.load(Ordering::Relaxed) / 1000,
             candidate.block_id,
         );
+
+        if estimate_size > 400_000 && 100 * estimate_size.abs_diff(candidate.data.len()) / estimate_size > 5 {
+            log::warn!("{}: diff is too much", self.collated_block_descr)
+        }
 
         #[cfg(feature = "log_metrics")]
         report_collation_metrics(
@@ -1488,6 +1512,7 @@ impl Collator {
            collator_data.in_msg_count == 0 &&
            collator_data.out_msg_count == 0 &&
            collator_data.transit_count == 0 &&
+           collator_data.remove_count == 0 &&
            collator_data.execute_count == 0
         {
             return Ok(None);
@@ -1516,6 +1541,7 @@ impl Collator {
         optimistic_clean_percentage_points: u32,
     ) -> Result<(bool, i32, i32)> {
         log::debug!("{}: clean_out_msg_queue", self.collated_block_descr);
+        // log::debug!("{}: clean_out_msg_queue {}", self.collated_block_descr, output_queue_manager.next().out_queue()?.len()?);
         let short = collator_data.config.has_capability(GlobalCapabilities::CapShortDequeue);
         let result = output_queue_manager.clean_out_msg_queue(
             clean_timeout_nanos,
@@ -1535,7 +1561,7 @@ impl Collator {
                 collator_data.remove_count += 1;
             }
             // normal limit reached, but we can add for soft and hard limit
-            let stop = !collator_data.block_limit_status.fits(ParamLimitIndex::Normal);
+            let stop = !collator_data.limit_fits(ParamLimitIndex::Normal);
             Ok(stop)
         }).await?;
         let root = output_queue_manager.next().out_queue_or_part()?.data();
@@ -2392,7 +2418,7 @@ impl Collator {
             let header = msg.ext_in_header()
                 .ok_or_else(|| error!("message {:x} is not external inbound message", msg_id))?;
             if self.shard.contains_address(&header.dst)? {
-                if !collator_data.block_limit_status.fits(ParamLimitIndex::Soft) {
+                if !collator_data.limit_fits(ParamLimitIndex::Soft) {
                     log::debug!("{}: BLOCK FULL, stop processing external messages", self.collated_block_descr);
                     break
                 }
@@ -2443,7 +2469,8 @@ impl Collator {
             let header = msg.ext_in_header().ok_or_else(|| error!("remp message {:x} \
                 is not external inbound message", id))?;
             if self.shard.contains_address(&header.dst)? {
-                if !collator_data.block_limit_status.fits_normal(REMP_CUTOFF_LIMIT) {
+                let pruned_count = collator_data.estimate_pruned_count();
+                if !collator_data.block_limit_status.fits_normal(REMP_CUTOFF_LIMIT, pruned_count) {
                     log::trace!("{}: block is loaded enough, stop processing remp messages", self.collated_block_descr);
                     ignored.push(id);
                     ignore = true;
@@ -2558,7 +2585,8 @@ impl Collator {
 
     fn check_block_overload(&self, collator_data: &mut CollatorData, out_queue_cleaned_partial: bool) {
         log::trace!("{}: check_block_overload", self.collated_block_descr);
-        let class = collator_data.block_limit_status.classify();
+        let pruned_count = collator_data.estimate_pruned_count();
+        let class = collator_data.block_limit_status.classify(pruned_count);
         if class == ParamLimitIndex::Underload {
             // we don't want to merge if collation too long
             if !self.check_cutoff_timeout() && !out_queue_cleaned_partial && !collator_data.before_split {
@@ -2909,17 +2937,17 @@ impl Collator {
             created_by: self.created_by.clone(),
         };
         if workchain_id != -1
-            && (collator_data.dequeue_count > 0 || collator_data.enqueue_count > 0
-                || collator_data.in_msg_count > 0 || collator_data.out_msg_count > 0 || collator_data.execute_count > 0
-                || collator_data.transit_count > 0
+            && (collator_data.dequeue_count != 0 || collator_data.enqueue_count != 0
+                || collator_data.in_msg_count != 0 || collator_data.out_msg_count != 0 || collator_data.execute_count != 0
+                || collator_data.transit_count != 0 || collator_data.remove_count != 0
             )
         {
             log::debug!(
                 "{}: finalize_block finished: dequeue_count: {}, enqueue_count: {}, in_msg_count: {}, out_msg_count: {}, \
-                execute_count: {}, transit_count: {}, remove_count: {}",
+                execute_count: {}, transit_count: {}, remove_count: {} msg_queue_depth_sum: {}",
                 self.collated_block_descr, collator_data.dequeue_count, collator_data.enqueue_count,
                 collator_data.in_msg_count, collator_data.out_msg_count, collator_data.execute_count,
-                collator_data.transit_count, collator_data.remove_count
+                collator_data.transit_count, collator_data.remove_count, collator_data.msg_queue_depth_sum
             );
         }
         log::trace!(
