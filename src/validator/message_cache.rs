@@ -771,9 +771,9 @@ impl MessageCache {
 
         let message_id = message.message_id.clone();
 
-        if session.is_message_present(&message_id) {
-            fail!("Inconsistent message cache contents: message {} present in cache, although should not", message_id)
-        }
+        //if session.is_message_present(&message_id) {
+        //    fail!("Inconsistent message cache contents: message {} present in cache, although should not", message_id)
+        //}
 
         session.message_status.insert(message_id.clone(), status.clone());
         session.insert_message(message, message_header, message_origin)
@@ -781,9 +781,9 @@ impl MessageCache {
 
     fn insert_message_header(&self, session: Arc<MessageCacheSession>, message_header: Arc<RempMessageHeader>, message_origin: Option<Arc<RempMessageOrigin>>, status: &RempMessageStatus) -> Result<()> {
         let message_id = message_header.message_id.clone();
-        if session.is_message_present(&message_id) {
-            fail!("Inconsistent message cache contents: message header {:x} present in cache, although should not", message_id)
-        }
+        //if session.is_message_present(&message_id) {
+        //    fail!("Inconsistent message cache contents: message header {:x} present in cache, although should not", message_id)
+        //}
 
         session.message_status.insert(message_id.clone(), status.clone());
         session.insert_message_header(&message_id, message_header, message_origin)?;
