@@ -15,7 +15,7 @@ use adnl::{
     common::TaggedTlObject, 
     node::{AdnlNode, AdnlNodeConfig, AdnlNodeConfigJson, IpAddress}
 };
-use overlay::OverlayNode;
+use adnl::OverlayNode;
 use std::{convert::TryInto, env, fs::File, io::BufReader, sync::Arc};
 use ton_api::ton::{TLObject, rpc::ton_node::GetCapabilities};
 #[cfg(feature = "telemetry")]

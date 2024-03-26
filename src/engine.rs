@@ -67,8 +67,8 @@ use crate::{
 
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::{Metric, MetricBuilder, TelemetryItem, TelemetryPrinter};
+use adnl::QueriesConsumer;
 use catchain::SessionId;
-use overlay::QueriesConsumer;
 use std::{
     ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering, AtomicU64}},
     time::{Duration, SystemTime}, collections::{HashMap, HashSet}, path::Path

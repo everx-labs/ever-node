@@ -35,15 +35,15 @@ use adnl::{
     common::{add_counted_object_to_map, CountedObject, Counter, TaggedByteSlice}, 
     node::AdnlNode
 };
-use catchain::{
-    CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
-};
-use dht::{DhtIterator, DhtNode};
-use overlay::{
+use adnl::{DhtIterator, DhtNode};
+use adnl::{
     BroadcastSendInfo, OverlayId, OverlayShortId, OverlayNode, QueriesConsumer, 
     PrivateOverlayShortId
 };
-use rldp::RldpNode;
+use adnl::RldpNode;
+use catchain::{
+    CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
+};
 use std::{
     convert::TryInto, future::Future, hash::Hash, 
     sync::{Arc, atomic::{AtomicI32, AtomicU64, AtomicBool, Ordering}}, 
@@ -153,7 +153,7 @@ impl NodeNetwork {
         if !config.extensions().disable_compression {
             adnl.set_options(AdnlNode::OPTION_FORCE_COMPRESSION)
         }
-        let dht = DhtNode::with_adnl_node(adnl.clone(), Self::TAG_DHT_KEY)?;
+        let dht = DhtNode::with_params(adnl.clone(), Self::TAG_DHT_KEY, None)?;
         let overlay = OverlayNode::with_adnl_node_and_zero_state(
             adnl.clone(), 
             masterchain_zero_state_id.file_hash.as_slice(),
@@ -167,7 +167,7 @@ impl NodeNetwork {
 
         let nodes = global_config.dht_nodes()?;
         for peer in nodes.iter() {
-            dht.add_peer(peer)?;
+            dht.add_peer_to_network(peer, None)?;
         }
 
         let masterchain_overlay_short_id = overlay.calc_overlay_short_id(
@@ -396,7 +396,7 @@ impl NodeNetwork {
                     if neighbours.contains_overlay_peer(peer_key.id()) {
                         continue;
                     }
-                    if let Some((ip, _)) = DhtNode::find_address(dht, peer_key.id()).await? {
+                    if let Some((ip, _)) = DhtNode::find_address_in_network(dht, peer_key.id(), None).await? {
                         overlay.add_public_peer(&ip, peer, overlay_id)?;
                         if neighbours.add_overlay_peer(peer_key.id().clone()) {
                             log::trace!("add_overlay_peers: add overlay peer {:?}, address: {}", peer, ip);
@@ -449,10 +449,11 @@ impl NodeNetwork {
         let token = self.cancellation_token.clone();
         log::info!("Overlay {} node search in progress...", overlay_id);
         let nodes = tokio::select!{
-            nodes = DhtNode::find_overlay_nodes(
+            nodes = DhtNode::find_overlay_nodes_in_network(
                 &self.network_context.dht, 
                 overlay_id, 
-                iter
+                iter,
+                None
             ) => nodes,
             _ = token.cancelled() => fail!("Overlay {} node search cancelled", overlay_id)
         }?;
@@ -526,9 +527,18 @@ impl NodeNetwork {
             async move {
                 loop {
                     let mut iter = None;
-                    while let Some(id) = dht.get_known_peer(&mut iter) {
-                        if let Err(e) = dht.find_dht_nodes(&id).await {
-                            log::warn!("find_dht_nodes result: {:?}", e)
+                    loop {
+                        match dht.get_known_peer_of_network(&mut iter, None) {
+                            Err(e) => {
+                                log::warn!("get_known_peer_of_network result: {:?}", e);
+                                break;
+                            }
+                            Ok(None) => break,
+                            Ok(Some(id)) => {
+                                if let Err(e) = dht.find_dht_nodes_in_network(&id, None).await {
+                                    log::warn!("find_dht_nodes result: {:?}", e)
+                                }
+                            }
                         }
                     }
                     tokio::time::sleep(Self::TIMEOUT_FIND_DHT_NODES).await;
@@ -758,7 +768,7 @@ impl NodeNetwork {
     ) -> Result<Vec<CatchainNode>> {
         let mut lost_validators = Vec::new();
         for val in validators {
-            match DhtNode::find_address(dht, &val.adnl_id).await {
+            match DhtNode::find_address_in_network(dht, &val.adnl_id, None).await {
                 Ok(Some((addr, key))) => {
                     log::info!("addr found: {:?}, key: {:x?}", &addr, &key);
                     match full_node_callback {
@@ -1148,7 +1158,7 @@ impl PrivateOverlayOperations for NodeNetwork {
                     Ok(ret)
                 }
             )?;
-            match self.network_context.dht.fetch_address(&val.adnl_id).await {
+            match self.network_context.dht.fetch_address_of_network(&val.adnl_id, None).await {
                 Ok(Some((addr, key))) => {
                     log::info!("addr: {:?}, key: {:x?}", &addr, &key);
                     peers.push((addr, key));
