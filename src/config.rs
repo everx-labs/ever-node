@@ -178,6 +178,8 @@ pub struct TonNodeConfig {
     skip_saving_persistent_states: bool,
     #[serde(default)]
     states_cache_mode: ShardStatesCacheMode,
+    #[serde(default)]
+    sync_by_archives: bool,
 }
 
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
@@ -604,6 +606,9 @@ impl TonNodeConfig {
     }
     pub fn states_cache_mode(&self) -> ShardStatesCacheMode {
         self.states_cache_mode
+    }
+    pub fn sync_by_archives(&self) -> bool {
+        self.sync_by_archives
     }
     pub fn cells_db_config(&self) -> &CellsDbConfig {
         &self.cells_db_config
