@@ -56,7 +56,7 @@ impl AllowStateGcSmartResolver {
         );
 
         if new_min_ref_mc_seqno > old_min_ref_mc_seqno {
-            log::info!(
+            log::debug!(
                 "AllowStateGcSmartResolver::advance: updated min_ref_mc_block {} -> {}, mc_block_id: {}",
                 old_min_ref_mc_seqno, new_min_ref_mc_seqno, mc_block_id,
             );
@@ -73,14 +73,14 @@ impl AllowStateGcSmartResolver {
                         |found| if let Some(a) = found {
                             let old_val = a.fetch_max(id.seq_no(), Ordering::Relaxed);
                             if old_val != id.seq_no() {
-                                log::info!(
+                                log::debug!(
                                     "AllowStateGcSmartResolver::advance: updated min actual state for shard {}: {} -> {}",
                                     id.shard(), old_val, id.seq_no()
                                 );
                             }
                             Ok(None)
                         } else {
-                            log::info!(
+                            log::debug!(
                                 "AllowStateGcSmartResolver::advance: added min actual state for shard {}: {}",
                                 id.shard(), id.seq_no()
                             );
@@ -93,7 +93,7 @@ impl AllowStateGcSmartResolver {
                 for kv in self.min_actual_ss.iter() {
                     if !actual_shardes.contains(kv.key()) {
                         self.min_actual_ss.remove(kv.key());
-                        log::info!(
+                        log::debug!(
                             "AllowStateGcSmartResolver::advance: removed shard {}", kv.key()
                         );
                     }

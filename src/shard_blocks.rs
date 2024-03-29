@@ -262,7 +262,7 @@ impl ShardBlocksPool {
         }
 
         if last_mc_seq_no != mc_seqno {
-            log::error!("get_shard_blocks: Given last_mc_seq_no {} is not actual", last_mc_seq_no);
+            log::debug!("get_shard_blocks: Given last_mc_seq_no {} is not actual", last_mc_seq_no);
             fail!("Given last_mc_seq_no {} is not actual {}", last_mc_seq_no, mc_seqno);
         } else {
             let mut returned_list = string_builder::Builder::default();

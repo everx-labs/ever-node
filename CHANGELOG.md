@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.56.7
+
+- Logging was a bit refactored. Added neighbor's stat to telemetry.
+
 ## Version 0.56.6
 
 - Added new parameter to node config `sync_by_archives` which allows to synchronize node by archives 

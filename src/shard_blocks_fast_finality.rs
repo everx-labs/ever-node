@@ -220,7 +220,7 @@ impl ShardBlocksPool {
             }
 
             if last_mc_seq_no != mc_seqno {
-                log::error!(
+                log::debug!(
                     "get_shard_blocks: Given last_mc_seq_no {} is not actual {}", 
                     last_mc_seq_no, mc_seqno
                 );
