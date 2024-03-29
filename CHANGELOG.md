@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.56.6
+
+- Added new parameter to node config `sync_by_archives` which allows to synchronize node by archives 
+  instead of single blocks. It may be useful in some conditions, for example, long ping to other nodes.
+
 ## Version 0.56.5
 
 - Estimate block size using pruned cells estimation
