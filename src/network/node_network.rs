@@ -271,6 +271,12 @@ impl NodeNetwork {
         }
     }
 
+    pub fn log_neighbors_stat(&self) {
+        for guard in self.overlays.iter() {
+            guard.val().peers().log_neighbors_stat();
+        }
+    }
+
     pub async fn stop_adnl(&self) {
         log::info!("Stopping node network loops...");
         self.cancellation_token.cancel();

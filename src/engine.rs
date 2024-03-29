@@ -1969,7 +1969,7 @@ impl Engine {
             Arc::new(NextBlockDownloader),
             prev_id, 
             limit,
-            10,
+            30,
             "download_next_block_worker", 
             Some((50, 11, 1000))
         ).await?.download().await
@@ -2766,6 +2766,11 @@ fn telemetry_logger(engine: Arc<Engine>) {
                 "Full node client's telemetry:\n{}",
                 engine.network.telemetry().report(Engine::TIMEOUT_TELEMETRY_SEC)
             );
+            log::debug!(
+                target: "telemetry",
+                "Full node neighbours's telemetry:",
+            );
+            engine.network.log_neighbors_stat();
             if engine.remp_client.is_some() {
                 log::debug!(
                     target: "telemetry",
