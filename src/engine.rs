@@ -1969,7 +1969,7 @@ impl Engine {
             Arc::new(NextBlockDownloader),
             prev_id, 
             limit,
-            10,
+            30,
             "download_next_block_worker", 
             Some((50, 11, 1000))
         ).await?.download().await
@@ -2504,6 +2504,7 @@ pub async fn run(
     let wc_from_config = node_config.workchain();
     let remp_client_pool = node_config.remp_config().remp_client_pool();
     let configs_dir = node_config.build_config_path("");
+    let sync_by_archives = node_config.sync_by_archives();
 
     // Create engine
     let engine = Engine::new(node_config, ext_db, flags, stopper.clone()).await?;
@@ -2626,24 +2627,23 @@ pub async fn run(
         );
 
         // Sync by archives
-        if !engine.check_sync().await? {
-            // temporary remove sync with archives
-            struct FakeSync;
+        if sync_by_archives && !engine.check_sync().await? {
+            struct Checker;
             #[async_trait::async_trait]
-            impl crate::sync::StopSyncChecker for FakeSync {
-                async fn check(&self, _engine: &Arc<dyn EngineOperations>) -> bool { 
-                    true 
+            impl crate::sync::StopSyncChecker for Checker {
+                async fn check(&self, engine: &Arc<dyn EngineOperations>) -> bool { 
+                    engine.check_sync().await.unwrap_or(false)
                 }
             }
             crate::sync::start_sync(
                 Arc::clone(&engine) as Arc<dyn EngineOperations>, 
-                Some(&FakeSync)
+                Some(&Checker)
             ).await?;
             last_applied_mc_block = engine.load_last_applied_mc_block_id()?.ok_or_else(
-                || error!("INTERNAL ERROR: No last applied MC block after boot")
+                || error!("INTERNAL ERROR: No last applied MC block after sync")
             )?.deref().clone();
             shard_client_mc_block = engine.load_shard_client_mc_block_id()?.ok_or_else(
-                || error!("INTERNAL ERROR: No shard client MC block after boot")
+                || error!("INTERNAL ERROR: No shard client MC block after sync")
             )?.deref().clone();
         }
 
@@ -2766,6 +2766,11 @@ fn telemetry_logger(engine: Arc<Engine>) {
                 "Full node client's telemetry:\n{}",
                 engine.network.telemetry().report(Engine::TIMEOUT_TELEMETRY_SEC)
             );
+            log::debug!(
+                target: "telemetry",
+                "Full node neighbours's telemetry:",
+            );
+            engine.network.log_neighbors_stat();
             if engine.remp_client.is_some() {
                 log::debug!(
                     target: "telemetry",

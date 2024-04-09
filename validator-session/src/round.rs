@@ -706,9 +706,18 @@ impl RoundState for RoundStateImpl {
                     desc.get_cutoff_weight() as f64 / desc.get_total_weight() as f64;
 
                 if let Some(block) = block {
-                    result = format!("{}      - block {:?}: source={}, hash={:?}, root_hash={:?}, file_hash={:?}, approved={} ({:.2}%/{:.2}%) priority={}\n",
-            result, block.get_id(), block.get_source_index(), block.get_id(), block.get_root_hash(), block.get_file_hash(), approved_weight, normalized_approved_weight * 100.0,
-            normalized_cutoff_weight * 100.0, priority);
+                    result = format!(
+                        "{}      - block {:?}: source={}, hash={:?}, root_hash={:x}, file_hash={:?}, approved={} ({:.2}%/{:.2}%) priority={}\n",
+                        result,
+                        block.get_id(),
+                        block.get_source_index(),
+                        block.get_id(),
+                        block.get_root_hash(),
+                        block.get_file_hash(),
+                        approved_weight, normalized_approved_weight * 100.0,
+                        normalized_cutoff_weight * 100.0,
+                        priority
+                    );
                 } else {
                     result = format!(
                         "{}      - SKIP block: approved={} ({:.2}%/{:.2}%) priority={}\n",
