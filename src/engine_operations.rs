@@ -451,7 +451,7 @@ impl EngineOperations for Engine {
         ).await?;
 
         let state = self.shard_states_keeper().check_and_store_state(
-            handle, root_hash, data, self.low_memory_mode()).await?;
+            handle, root_hash, data).await?;
 
         Ok(state)
     }
