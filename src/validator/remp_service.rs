@@ -1,12 +1,10 @@
 use crate::{
-    engine_traits::{EngineOperations, RempCoreInterface}, ext_messages::create_ext_message,
-    network::remp::RempMessagesSubscriber,
+    engine_traits::{EngineOperations, RempCoreInterface, RempDuplicateStatus},
+    network::remp::RempMessagesSubscriber
 };
 
 use std::{sync::Arc, sync::Weak};
-use ton_api::ton::ton_node::RempMessage;
 use ton_types::{error, fail, KeyId, Result, UInt256};
-use crate::engine_traits::RempDuplicateStatus;
 
 #[derive(Default)]
 pub struct RempService {
@@ -37,7 +35,7 @@ impl RempService {
         self.get_core_interface()?.check_remp_duplicate(id)
     }
 
-    async fn new_remp_message(&self, message: RempMessage, source: &Arc<KeyId>) -> Result<()> {
+    async fn new_remp_message(&self, message: &ton_api::ton::ton_node::RempMessage, source: &Arc<KeyId>) -> Result<()> {
         // TODO send error receipt in case of any error
         let engine = self.engine
             .get().ok_or_else(|| error!("engine was not set"))?
@@ -52,34 +50,19 @@ impl RempService {
             fail!("Can't process REMP message because validator is out of sync");
         }
 
-        log::trace!(target: "remp", "Message: {:?}", message.message());
-
-        // deserialise message
-        let id = message.id().clone();
-        let (real_id, message) = create_ext_message(&message.message())?;
-        if real_id != id {
-            fail!("Given message id {:x} is not equal calculated one {:x}", id, real_id);
-        }
-
-        log::trace!(target: "remp", "Point 0. Incoming REMP message {:x} received from {}: {:?}",
-            id, source, message
-        );
-
         // push into remp catchain
-        remp_core.process_incoming_message(id, message, source.clone()).await?;
-
-        Ok(())
+        remp_core.process_incoming_message(message, source.clone()).await
     }
 }
 
 #[async_trait::async_trait]
 impl RempMessagesSubscriber for RempService {
-    async fn new_remp_message(&self, message: RempMessage, source: &Arc<KeyId>) -> Result<()> {
+    async fn new_remp_message(&self, message: ton_api::ton::ton_node::RempMessage, source: &Arc<KeyId>) -> Result<()> {
         // TODO send error receipt in case of any error
 
         let id = message.id().clone();
         log::trace!(target: "remp", "Point 0. Processing incoming REMP message {:x}", id);
-        match self.new_remp_message(message, source).await {
+        match self.new_remp_message(&message, source).await {
             Ok(_) => log::trace!(target: "remp", "Point 0. Processed incoming REMP message {:x}", id),
             Err(e) => log::error!(target: "remp", "Point 0. Error processing incoming REMP message {:x}: {}", id, e)
         }

@@ -65,20 +65,21 @@ pub struct RmqMessage {
 }
 
 impl RmqMessage {
-    pub fn new(message: Arc<Message>, message_id: UInt256, message_uid: UInt256) -> Result<Self> {
+    pub fn new(message: Arc<Message>) -> Result<Self> {
+        let message_id = message.hash()?;
+        Self::new_with_id (message, message_id)
+    }
+
+    fn new_with_id(message: Arc<Message>, message_id: UInt256) -> Result<Self> {
+        let message_uid = get_message_uid(&message);
         return Ok(RmqMessage { message, message_id, message_uid })
     }
-/*
-    pub fn as_rmq_record(&self) -> ton_api::ton::ton_node::RmqRecord {
-        ton_api::ton::ton_node::rmqrecord::RmqMessage {
-            message: self.message.write_to_bytes().unwrap().into(),
-            message_id: self.message_id.clone().into(),
-            source_key_id: UInt256::default(),
-            source_idx: 0,
-            masterchain_seqno: 0
-        }.into_boxed()
+
+    pub fn from_raw_message(raw_msg: &ton_api::ton::bytes) -> Result<Self> {
+        let (message_id, message) = create_ext_message(raw_msg)?;
+        Self::new_with_id (Arc::new(message), message_id)
     }
-*/
+
     pub fn as_remp_message_body(&self) -> ton_api::ton::ton_node::RempMessageBody {
         ton_api::ton::ton_node::rempmessagebody::RempMessageBody {
             message: self.message.write_to_bytes().unwrap().into()
@@ -94,16 +95,9 @@ impl RmqMessage {
         Ok(message_body)
     }
 
-    pub fn from_raw_message(raw_msg: &ton_api::ton::bytes) -> Result<Self> {
-        let (message_id, message) = create_ext_message(raw_msg)?;
-        let message_uid = get_message_uid(&message);
-        Self::new (Arc::new(message), message_id, message_uid)
-    }
-
     pub fn from_message_body(body: &ton_api::ton::ton_node::RempMessageBody) -> Result<Self> {
         let (message_id, message) = create_ext_message(body.message())?;
-        let message_uid = get_message_uid(&message);
-        Self::new (Arc::new(message), message_id, message_uid)
+        Self::new_with_id (Arc::new(message), message_id)
     }
 
     #[allow(dead_code)]
@@ -132,9 +126,8 @@ impl RmqMessage {
             msg, msg_cell.data(),
             msg_cell.repr_hash().to_hex_string()
         );
-        let (msg_id, msg_uid, msg) = (msg_cell.repr_hash(), get_message_uid(&msg), msg);
 
-        RmqMessage::new (Arc::new(msg), msg_id, msg_uid)
+        RmqMessage::new (Arc::new(msg))
     }
 }
 

@@ -1,13 +1,9 @@
 use std::{collections::HashSet, str::FromStr, sync::Arc, time::Duration};
 use std::ops::RangeInclusive;
 
-use ton_api::ton::ton_node::{RempMessageBody, RempMessageLevel, RempMessageLevel::TonNode_RempMasterchain, RempMessageStatus, rempmessagestatus::{RempAccepted, RempIgnored}};
+use ton_api::ton::ton_node::{RempMessageLevel, RempMessageLevel::TonNode_RempMasterchain, RempMessageStatus, rempmessagestatus::{RempAccepted, RempIgnored}};
 
-use ton_block::{
-    Message, Serializable, Deserializable, ExternalInboundMessageHeader,
-    MsgAddressInt, Grams, ShardIdent, ValidatorDescr, SigPubKey, BlockIdExt,
-    MsgAddressExt::AddrNone, UnixTime32
-};
+use ton_block::{Message, Serializable, Deserializable, ExternalInboundMessageHeader, MsgAddressInt, Grams, ShardIdent, ValidatorDescr, SigPubKey, BlockIdExt, MsgAddressExt::AddrNone, UnixTime32, GetRepresentationHash};
 use ton_types::{error, fail, Result, SliceData, UInt256};
 
 use crate::{
@@ -27,7 +23,6 @@ use crate::{
 use crate::validator::telemetry::RempCoreTelemetry;
 
 use catchain::PublicKey;
-use crate::ext_messages::create_ext_message;
 use crate::validator::message_cache::{RempMessageOrigin, RempMessageWithOrigin};
 use crate::validator::remp_catchain::RempCatchainInfo;
 
@@ -46,30 +41,22 @@ fn test_rmq_message_serialize() -> Result<()> {
         ).unwrap()
     );
     let message = Arc::new(pre_message);
-    let message_uid = get_message_uid(&message);
+    let rmq_message_test0: Arc<RmqMessage> = Arc::new(RmqMessage::new(message)?);
 
-    let rmq_message_test0: Arc<RmqMessage> = Arc::new(RmqMessage {
-        message,
-        message_id: UInt256::from_str("66e5dd1695ab795c04d474cf304b802413488d229639c2f4a980a28be3fbecb1").unwrap(),
-        message_uid,
-        //source_key: KeyId::from_data([249, 183, 41, 53, 7, 177, 255, 161, 106, 8, 18, 35, 65, 57, 50, 226, 122, 180, 239, 174, 198, 50, 125, 69, 218, 207, 153, 216, 215, 79, 253, 155]),
-        //source_idx: 0,
-        //timestamp: 0,
-    });
-
-    // Testing proper message field serialization
+    // Testing proper message serialization
     let data: ton_api::ton::bytes = rmq_message_test0.message.write_to_bytes().unwrap().into();
     let msg_buffer = Message::construct_from_bytes(&data).unwrap();
-
     assert_eq!(*rmq_message_test0.message, msg_buffer);
 
-    // Testing body serialization
+    // Testing RempMessageBody structure serialization/deserailization
     let test0_serialized = RmqMessage::serialize_message_body(&rmq_message_test0.as_remp_message_body());
     println!("Serialized message data: {:?}", data);
     println!("Serialized remp_message_body: {:?}", test0_serialized);
     let msg = RmqMessage::deserialize_message_body(&test0_serialized).unwrap();
     println!("Deserialzed message data: {:?}", msg.message());
-    let rmq_message = RmqMessage::from_message_body(&msg /*RmqMessage::deserialize_message_body(&msg)?*/)?;
+    let rmq_message = RmqMessage::from_message_body(&msg)?;
+
+    // Testing message construction from header and body
     let mut message_without_params = Message::default();
     message_without_params.set_header(rmq_message.message.header().clone());
     message_without_params.set_body(rmq_message.message.body().unwrap());
@@ -84,26 +71,25 @@ fn test_rmq_message_serialize() -> Result<()> {
 
 #[test]
 fn test_rmq_message_id() -> Result<()> {
-    //let message_data = SliceData::from_string(
-    //    "b5ee9c720101030100c300014589feeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0\
-    //           c0101ebbb6f5976b0533dc287fea336a34e909c9d7f18018af9afd3ad0fe36ee058000f2ab5d13c159aaffb04917f\
-    //           7be06ebbb58f45b14de97fe7df5edaf78847abf483554fe4d47282105f230ce104f0bf52cc3adfdb4d5a538f86e33\
-    //           acf55ca68d14800000063aa878d5b1983b83c1b079a4f000000006030020043d06435a826dde79131e36acc2ba1f8\
-    //           d92476518ecd71be9398816ee95b666cae4540_")?;
+    let message_id = UInt256::from_str("c80d5e0e0ada0f4c74ecb03c97947e09204c4d989ac720e1754aeec6f01a4acf")?;
+    let message_uid = UInt256::from_str("e4089ffa779a932656bd91a9e5b7323f714fb1782c052e8755fb56312be02c83")?;
+    let message_bytes = [
+        181, 238, 156, 114, 1, 1, 4, 1, 0, 209, 0, 1, 69, 137, 254, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238,
+        238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238,
+        12, 1, 1, 225, 138, 38, 33, 171, 175, 201, 185, 142, 85, 15, 44, 87, 151, 128, 86, 56, 56, 18, 59, 118, 138,
+        154, 35, 57, 76, 24, 106, 28, 34, 58, 59, 105, 58, 38, 145, 18, 99, 38, 183, 252, 21, 167, 111, 232, 24, 140,
+        227, 54, 240, 143, 185, 206, 53, 134, 220, 228, 17, 238, 112, 57, 5, 129, 96, 1, 242, 26, 212, 19, 110, 243, 200,
+        152, 241, 181, 102, 21, 208, 252, 108, 146, 59, 40, 199, 102, 184, 223, 73, 204, 64, 183, 116, 173, 179, 54,
+        87, 34, 128, 0, 0, 99, 176, 207, 135, 51, 25, 133, 83, 224, 68, 199, 96, 179, 96, 2, 1, 99, 128, 9, 75, 218,
+        166, 71, 170, 33, 189, 182, 153, 177, 109, 126, 100, 87, 19, 110, 125, 93, 129, 102, 179, 156, 141, 198, 170,
+        248, 140, 147, 62, 90, 201, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 239, 171, 102, 80, 210, 228, 3, 0, 0
+    ].to_vec();
 
-
-    let message_data = SliceData::from_string(format!("{}{}{}{}",
-        "b5ee9c720101030100c300014589feeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0",
-        "c0101ebbb6f5976b0533dc287fea336a34e909c9d7f18018af9afd3ad0fe36ee058000f2ab5d13c159aaffb04917f",
-        "7be06ebbb58f45b14de97fe7df5edaf78847abf483554fe4d47282105f230ce104f0bf52cc3adfdb4d5a538f86e33",
-        "acf55ca68d14800000063aa878d5b1983b83c1b079a4f000000006030_" //020043d06435a826dde79131e36acc2ba1f8","d92476518ecd71be9398816ee95b666cae4540"
-    ).as_str())?;
-
-    let message_id = UInt256::from_str("e8da5b5c46b97ec31330a874347beae2bcac9ab2b3dbc6c3cd4deec9994e3c33")?;
-
-    let message_bytes = message_data.write_to_bytes()?;
     let rmq_message = RmqMessage::from_raw_message(&message_bytes)?;
     assert_eq!(message_id, rmq_message.message_id);
+    assert_eq!(message_uid, rmq_message.message_uid);
+    assert_eq!(message_id, rmq_message.message.hash()?);
+    assert_eq!(message_uid, get_message_uid(&rmq_message.message));
     Ok(())
 }
 

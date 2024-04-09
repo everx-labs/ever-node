@@ -955,6 +955,6 @@ pub enum RempDuplicateStatus {
 
 #[async_trait::async_trait]
 pub trait RempCoreInterface: Sync + Send {
-    async fn process_incoming_message(&self, message_id: UInt256, message: Message, source: Arc<KeyId>) -> Result<()>;
+    async fn process_incoming_message(&self, message: &RempMessage, source: Arc<KeyId>) -> Result<()>;
     fn check_remp_duplicate(&self, message_id: &UInt256) -> Result<RempDuplicateStatus>;
 }

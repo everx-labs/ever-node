@@ -22,7 +22,7 @@ use std::cmp::{max, Reverse};
 use std::collections::BinaryHeap;
 
 use ton_block::{BlockIdExt, CatchainConfig, Message, ShardIdent, UnixTime32};
-use ton_api::ton::ton_node::RempMessageStatus;
+use ton_api::ton::ton_node::{RempMessageStatus};
 use ton_types::{error, fail, KeyId, Result, SliceData, UInt256};
 
 use crate::{
@@ -31,7 +31,7 @@ use crate::{
     validator::{
         message_cache::{RmqMessage, RempMessageOrigin, RempMessageWithOrigin, MessageCache}, mutex_wrapper::MutexWrapper,
         remp_catchain::RempCatchainStore,
-        validator_utils::{get_message_uid, get_shard_by_message}
+        validator_utils::get_shard_by_message
     }
 };
 
@@ -632,33 +632,34 @@ impl RempInterfaceQueues {
 
 #[async_trait::async_trait]
 impl RempCoreInterface for RempInterfaceQueues {
-    async fn process_incoming_message(&self, message_id: UInt256, message: Message, source: Arc<KeyId>) -> Result<()> {
-        let arc_message = Arc::new(message.clone());
-
+    async fn process_incoming_message(&self, message: &ton_api::ton::ton_node::RempMessage, source: Arc<KeyId>) -> Result<()> {
         // build message
-        let remp_message = RmqMessage::new (
-            arc_message,
-            message_id.clone(),
-            get_message_uid(&message),
-        )?;
-
-        let remp_message_origin = RempMessageOrigin::new (
-            source,
-            0
-        )?;
-
-        if self.message_cache.is_message_fully_known(&message_id)? {
+        let remp_message = RmqMessage::from_raw_message(message.message())?;
+        if message.id() != &remp_message.message_id {
+            fail!("Message {:x} has invalid message id {:x}, message will be ignored",
+                remp_message.message_id, message.id()
+            );
+        }
+        if self.message_cache.is_message_fully_known(&remp_message.message_id)? {
             log::trace!(target: "remp",
                 "Point 1. Message {:x} is fully known, no forwarding to incoming queue is necessary",
-                message_id
+                remp_message.message_id
             );
         }
         else {
+            let remp_message_origin = RempMessageOrigin::new (
+                source,
+                0
+            )?;
+
             log::trace!(target: "remp",
                 "Point 1. Adding incoming message {} to incoming queue, known message info {}",
-                remp_message, self.message_cache.get_message_info(&message_id)?
+                remp_message, self.message_cache.get_message_info(&remp_message.message_id)?
             );
-            self.incoming_sender.send(Arc::new(RempMessageWithOrigin { message: remp_message, origin: remp_message_origin }))?;
+            self.incoming_sender.send(Arc::new(RempMessageWithOrigin {
+                message: remp_message,
+                origin: remp_message_origin
+            }))?;
             #[cfg(feature = "telemetry")]
             self.engine.remp_core_telemetry().in_channel_from_fullnode(self.incoming_sender.len());
         }
