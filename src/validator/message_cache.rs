@@ -51,6 +51,7 @@ use ton_api::{
 use ton_block::{Deserializable, Message, Serializable, MsgAddressInt, MsgAddrStd, ExternalInboundMessageHeader, BlockIdExt, UnixTime32, GetRepresentationHash};
 
 use ton_types::{error, fail, KeyId, SliceData, Result, UInt256};
+use crate::ext_messages::create_ext_message;
 
 #[cfg(test)]
 #[path = "tests/test_message_cache.rs"]
@@ -84,30 +85,25 @@ impl RmqMessage {
         }.into_boxed()
     }
 
+    pub fn serialize_message_body(body: &ton_api::ton::ton_node::RempMessageBody) -> ton_api::ton::bytes {
+        serialize_tl_boxed_object!(body)
+    }
+
     pub fn deserialize_message_body(raw: &ton_api::ton::bytes) -> Result<ton_api::ton::ton_node::RempMessageBody> {
         let message_body: ton_api::ton::ton_node::RempMessageBody = catchain::utils::deserialize_tl_boxed_object(&raw)?;
         Ok(message_body)
     }
-/*
-    pub fn from_rmq_record(record: &ton_api::ton::ton_node::RmqRecord) -> Result<Self> {
-        match record {
-            ton_api::ton::ton_node::RmqRecord::TonNode_RmqMessage(rec) => {
-                let message_body = Arc::new(Message::construct_from_bytes(&rec.message)?);
-                Ok(Self {
-                    message: message_body.clone(),
-                    message_id: rec.message_id.clone().into(),
-                    message_uid: get_message_uid(&message_body)
-                })
-            },
-            _ => fail!("message_cache::from_rmq_record: not an RmqMessage is given: {:?}", record)
-        }
-    }
-*/
-    pub fn from_message_body(body: &ton_api::ton::ton_node::RempMessageBody) -> Result<Self> {
-        let message = Arc::new(Message::construct_from_bytes(body.message())?);
-        let message_id = message.hash()?;
+
+    pub fn from_raw_message(raw_msg: &ton_api::ton::bytes) -> Result<Self> {
+        let (message_id, message) = create_ext_message(raw_msg)?;
         let message_uid = get_message_uid(&message);
-        Self::new (message, message_id, message_uid)
+        Self::new (Arc::new(message), message_id, message_uid)
+    }
+
+    pub fn from_message_body(body: &ton_api::ton::ton_node::RempMessageBody) -> Result<Self> {
+        let (message_id, message) = create_ext_message(body.message())?;
+        let message_uid = get_message_uid(&message);
+        Self::new (Arc::new(message), message_id, message_uid)
     }
 
     #[allow(dead_code)]

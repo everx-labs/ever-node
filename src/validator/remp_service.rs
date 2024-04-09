@@ -3,14 +3,15 @@ use crate::{
     network::remp::RempMessagesSubscriber,
 };
 
-use std::{ops::Deref, sync::Arc};
+use std::{sync::Arc, sync::Weak};
 use ton_api::ton::ton_node::RempMessage;
-use ton_types::{error, fail, KeyId, Result};
+use ton_types::{error, fail, KeyId, Result, UInt256};
+use crate::engine_traits::RempDuplicateStatus;
 
 #[derive(Default)]
 pub struct RempService {
-    engine: tokio::sync::OnceCell<Arc<dyn EngineOperations>>,
-    remp_core: tokio::sync::OnceCell<Arc<dyn RempCoreInterface>>,
+    engine: tokio::sync::OnceCell<Weak<dyn EngineOperations>>,
+    remp_core: tokio::sync::OnceCell<Weak<dyn RempCoreInterface>>,
 }
 
 impl RempService {
@@ -19,21 +20,30 @@ impl RempService {
     }
 
     pub fn set_engine(&self, engine: Arc<dyn EngineOperations>) -> Result<()> {
-        self.engine.set(engine).map_err(|_| error!("Attempt to set engine twice"))
+        self.engine.set(Arc::downgrade(&engine)).map_err(|_| error!("Attempt to set engine twice"))
     }
 
     pub fn set_remp_core_interface(&self, remp_core: Arc<dyn RempCoreInterface>) -> Result<()> {
-        self.remp_core.set(remp_core).map_err(|_| error!("Attempt to set remp_core twice"))
+        self.remp_core.set(Arc::downgrade(&remp_core)).map_err(|_| error!("Attempt to set remp_core twice"))
     }
 
-    pub fn remp_core_interface(&self) -> Result<&dyn RempCoreInterface> {
-        self.remp_core.get().ok_or_else(|| error!("remp_core was not set")).map(|rci| rci.deref())
+    fn get_core_interface(&self) -> Result<Arc<dyn RempCoreInterface>> {
+        self.remp_core.get()
+            .ok_or_else(|| error!("remp_core was not set"))?
+            .upgrade().ok_or_else(|| error!("remp_core weak reference is null"))
+    }
+
+    pub fn check_remp_duplicate(&self, id: &UInt256) -> Result<RempDuplicateStatus> {
+        self.get_core_interface()?.check_remp_duplicate(id)
     }
 
     async fn new_remp_message(&self, message: RempMessage, source: &Arc<KeyId>) -> Result<()> {
         // TODO send error receipt in case of any error
-        let engine = self.engine.get().ok_or_else(|| error!("engine was not set"))?;
-        let remp_core = self.remp_core_interface()?;
+        let engine = self.engine
+            .get().ok_or_else(|| error!("engine was not set"))?
+            .upgrade().ok_or_else(|| error!("engine weak reference is null"))?;
+
+        let remp_core = self.get_core_interface()?;
 
         #[cfg(feature = "telemetry")]
         engine.remp_core_telemetry().message_from_fullnode();
@@ -41,6 +51,8 @@ impl RempService {
         if !engine.check_sync().await? {
             fail!("Can't process REMP message because validator is out of sync");
         }
+
+        log::trace!(target: "remp", "Message: {:?}", message.message());
 
         // deserialise message
         let id = message.id().clone();

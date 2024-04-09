@@ -995,7 +995,6 @@ impl EngineOperations for Engine {
     async fn check_remp_duplicate(&self, message_id: &UInt256) -> Result<RempDuplicateStatus> {
         self.remp_service()
             .ok_or_else(|| error!("Can't get message status because remp service was not set"))?
-            .remp_core_interface()?
             .check_remp_duplicate(message_id)
     }
 

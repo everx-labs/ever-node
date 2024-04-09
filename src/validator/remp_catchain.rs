@@ -35,9 +35,8 @@ use catchain::{
     PublicKey, PublicKeyHash
 };
 use ton_api::{
-    IntoBoxed, ton::ton_node::RempCatchainRecordV2
+    IntoBoxed, ton::ton_node::{RempCatchainRecordV2, RempMessageQuery}
 };
-use ton_api::ton::ton_node::RempMessageQuery;
 use ton_block::ValidatorDescr;
 use ton_types::{error, fail, KeyId, Result, UInt256};
 
@@ -571,7 +570,8 @@ impl RempCatchain {
         let message_id = query.message_id();
         if let Some(message_body) = self.remp_manager.message_cache.get_message(message_id)? {
             let remp_body_response = message_body.as_remp_message_body();
-            let response_payload = CatchainFactory::create_block_payload(serialize_tl_boxed_object!(&remp_body_response));
+            let remp_body_response_raw = RmqMessage::serialize_message_body(&remp_body_response);
+            let response_payload = CatchainFactory::create_block_payload(remp_body_response_raw);
 
             Ok(response_payload)
         }
