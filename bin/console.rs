@@ -14,13 +14,8 @@
 use adnl::{
     common::TaggedTlObject, client::{AdnlClient, AdnlClientConfig, AdnlClientConfigJson}
 };
-use std::{convert::TryInto, env, str::FromStr, time::Duration};
-use std::collections::HashMap;
-use num_bigint::BigUint;
-use ton_abi::TokenValue;
-use ton_abi::Token;
-use ton_abi::Contract;
-use ton_abi::Uint;
+use std::{collections::HashMap, convert::TryInto, env, str::FromStr, time::Duration};
+use ton_abi::{Contract, Token, TokenValue, Uint};
 use ton_api::{
     serialize_boxed,
     ton::{
@@ -642,7 +637,7 @@ impl ControlClient {
     fn convert_to_uint(value: &[u8], bytes_count: usize) -> TokenValue {
         assert!(value.len() == bytes_count);
         TokenValue::Uint(Uint {
-            number: BigUint::from_bytes_be(value),
+            number: num_bigint::BigUint::from_bytes_be(value),
             size: value.len() * 8,
         })
     }

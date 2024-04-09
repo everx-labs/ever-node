@@ -1290,7 +1290,6 @@ impl ValidatorManagerImpl {
                     max_vertical_seqno: 0
                 });
 
-
                 let session_id = get_session_id(
                     new_session_info.clone(),
                     &wc.validators,
@@ -1322,7 +1321,9 @@ impl ValidatorManagerImpl {
             for (_, session) in &self.validator_sessions {
                 for id in &blocks_before_split {
                     if id.shard().is_parent_for(session.shard()) {
-                        log::trace!(target: "validator_manager", "precalc_split_queues_for {}", id);
+                        log::trace!(
+                            target: "validator_manager", "precalc_split_queues_for {}", id
+                        );
                         precalc_split_queues_for.insert(id.clone());
                     }
                 }
@@ -1332,10 +1333,17 @@ impl ValidatorManagerImpl {
             for id in precalc_split_queues_for {
                 let engine = self.engine.clone();
                 tokio::spawn(async move {
-                    log::trace!(target: "validator_manager", "Split queues precalculating for {}", id);
+                    log::trace!(
+                        target: "validator_manager", "Split queues precalculating for {}", id
+                    );
                     match OutMsgQueueInfoStuff::precalc_split_queues(&engine, &id).await {
-                        Ok(_) => log::trace!(target: "validator_manager", "Split queues precalculated for {}", id),
-                        Err(e) => log::error!(target: "validator_manager", "Can't precalculate split queues for {}: {}", id, e)
+                        Ok(_) => log::trace!(
+                            target: "validator_manager", "Split queues precalculated for {}", id
+                        ),
+                        Err(e) => log::error!(
+                            target: "validator_manager", 
+                            "Can't precalculate split queues for {}: {}", id, e
+                        )
                     }
                 });
             }
@@ -1346,41 +1354,73 @@ impl ValidatorManagerImpl {
             if let Some(verification_listener) = self.verification_listener.lock().clone() {
                 let config = &mc_state_extra.config;
                 let mut are_workchains_updated = false;
-                match try_calc_vset_for_workchain(&full_validator_set, config, &catchain_config, workchain_id) {
+                match try_calc_vset_for_workchain(
+                    &full_validator_set, config, &catchain_config, workchain_id
+                ) {
                     Ok(workchain_validators) => {
                         let found_in_wc = self.find_us(&workchain_validators).is_some();
                         let found_in_mc = self.find_us(&mc_validators).is_some();
-                        let verification_listener: Arc<dyn VerificationListener> = verification_listener.clone();
+                        let verification_listener: Arc<dyn VerificationListener> = 
+                            verification_listener.clone();
                         let verification_listener = Arc::downgrade(&verification_listener);
                         if let Some(local_key) = self.validator_list_status.get_local_key() {
                             let local_key_id = local_key.id();
 
-                            if let Some(utime_since) = self.validator_list_status.get_curr_utime_since() {
+                            if let Some(utime_since) = 
+                                self.validator_list_status.get_curr_utime_since() 
+                            {
                                 log::trace!(target: "verificator", "Request BLS key");
-                                let mut local_bls_key = self.engine.get_validator_bls_key(local_key_id).await;
+                                let mut local_bls_key = 
+                                    self.engine.get_validator_bls_key(local_key_id).await;
                                 log::trace!(target: "verificator", "Request BLS key done");
                                 if local_bls_key.is_none() && GENERATE_MISSING_BLS_KEY {
                                     match VerificationFactory::generate_test_bls_key(&local_key) {
                                         Ok(bls_key) => local_bls_key = Some(bls_key),
-                                        Err(err) => log::error!(target: "verificator", "Can't generate test BLS key: {:?}", err),
+                                        Err(err) => log::error!(
+                                            target: "verificator", 
+                                            "Can't generate test BLS key: {:?}", err
+                                        ),
                                     }
                                 }
 
                                 match local_bls_key {
                                     Some(local_bls_key) => {
                                         if found_in_wc || found_in_mc {
-                                            log::debug!(target: "verificator", "Update workchains start");
-                                            verification_manager.update_workchains(local_key_id.clone(), local_bls_key, workchain_id, *utime_since, &workchain_validators, &mc_validators, &verification_listener).await;
+                                            log::debug!(
+                                                target: "verificator", "Update workchains start"
+                                            );
+                                            verification_manager.update_workchains(
+                                                local_key_id.clone(),
+                                                local_bls_key,
+                                                workchain_id,
+                                                *utime_since,
+                                                &workchain_validators,
+                                                &mc_validators,
+                                                &verification_listener
+                                            ).await;
                                             are_workchains_updated = true;
-                                            log::debug!(target: "verificator", "Update workchains finish");
+                                            log::debug!(
+                                                target: "verificator", "Update workchains finish"
+                                            );
                                         } else {
-                                            log::debug!(target: "verificator", "Skip workchains update because we are not present in WC/MC sets for workchain_id={}", workchain_id);
+                                            log::debug!(
+                                                target: "verificator", 
+                                                "Skip workchains update because we are not present \
+                                                in WC/MC sets for workchain_id={}", 
+                                                workchain_id
+                                            );
                                         }
                                     },
-                                    None => log::error!(target: "verificator", "Can't create verification workchains: no BLS private key attached"),
+                                    None => log::error!(
+                                        target: "verificator", 
+                                        "Can't create verification workchains: \
+                                         no BLS private key attached"
+                                    ),
                                 }
                             } else {
-                                log::warn!(target: "verificator", "Validator curr_utime_since is not set");
+                                log::warn!(
+                                    target: "verificator", "Validator curr_utime_since is not set"
+                                )
                             }
                         } else {
                             log::warn!(target: "verificator", "Validator local key is not found");

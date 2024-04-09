@@ -20,13 +20,11 @@ use catchain::{BlockPayloadPtr, CatchainNode, PublicKey, PublicKeyHash};
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
 use ton_block::{
-    BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, ConfigParams, CryptoSignature, 
-    CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, Serializable, 
-    ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet
+    BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, CatchainConfig, ConfigParams, 
+    CryptoSignature, CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, 
+    Serializable, ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, 
+    ValidatorSet, Workchains, WorkchainDescr
 };
-use ton_block::CatchainConfig;
-use ton_block::Workchains;
-use ton_block::WorkchainDescr;
 use ton_types::{
     error, fail, BuilderData, HashmapType, Ed25519KeyOption, KeyId,
     Result, Sha256, UInt256

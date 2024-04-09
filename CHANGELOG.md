@@ -35,7 +35,7 @@ All notable changes to this project will be documented in this file.
 
 ## Version 0.56.3
 
-- Fixed UNREGISTERED_CHAIN_MAX_LEN const for Venom blockchain.
+- Fixed UNREGISTERED_CHAIN_MAX_LEN const for Venom blockchain
 
 ## Version 0.56.2
 

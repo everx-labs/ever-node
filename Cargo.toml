@@ -47,7 +47,6 @@ path = 'bin/zerostate.rs'
 arc-swap = '0.3.11'
 async-recursion = '0.3.2'
 async-trait = '0.1.22'
-base64 = '0.13'
 bitflags = '1.2.1'
 chrono = '=0.4.19'
 clap = '2.33'
@@ -71,8 +70,6 @@ log4rs-rolling-file = '0.2.0'
 metrics = '0.21.0'
 metrics-exporter-prometheus = { optional = true, version = '0.12.1' }
 metrics-exporter-statsd = { optional = true, version = '0.5.0' }
-metrics-core = { version = '0.5.2' }
-metrics-runtime = { version = '0.13.0' }
 num-bigint = '0.4'
 num_cpus = '1.13'
 openssl = '0.10.35'

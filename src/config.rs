@@ -12,6 +12,8 @@
 */
 
 use crate::network::node_network::NodeNetwork;
+#[cfg(feature="workchains")]
+use crate::validator::validator_utils::mine_key_for_workchain;
 
 use adnl::{
     client::AdnlClientConfigJson,
@@ -19,12 +21,11 @@ use adnl::{
     node::{AdnlNodeConfig, AdnlNodeConfigJson}, server::{AdnlServerConfig, AdnlServerConfigJson}
 };
 use storage::shardstate_db_async::CellsDbConfig;
-use ton_types::BlsKeyOption;
 use std::{
     collections::{HashMap, HashSet}, convert::TryInto, fs::File, fmt::{Display, Formatter},
-    io::BufReader, path::Path, sync::{Arc, atomic::{self, AtomicI32}}, time::{Duration}
+    io::BufReader, path::{Path, PathBuf}, sync::{Arc, atomic::{self, AtomicI32}}, 
+    time::{Duration}
 };
-use std::path::PathBuf;
 use ton_api::{
     IntoBoxed, 
     ton::{
@@ -36,8 +37,8 @@ use ton_block::{BlockIdExt, ShardIdent};
 #[cfg(feature="external_db")]
 use ton_block::{BASE_WORKCHAIN_ID, MASTERCHAIN_ID};
 use ton_types::{
-    error, fail, base64_decode, base64_encode, Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson, 
-    Result, UInt256
+    error, fail, base64_decode, base64_encode, BlsKeyOption, Ed25519KeyOption, KeyId, KeyOption, 
+    KeyOptionJson, Result, UInt256
 };
 
 #[macro_export]
@@ -749,8 +750,8 @@ impl TonNodeConfig {
 
     fn generate_and_save_keys(&mut self, _key_type: i32) -> Result<([u8; 32], Arc<dyn KeyOption>)> {
         #[cfg(feature="workchains")]
-        let (private, public) = match key_type {
-            Ed25519KeyOption::KEY_TYPE => crate::validator::validator_utils::mine_key_for_workchain(self.workchain),
+        let (private, public) = match _key_type {
+            Ed25519KeyOption::KEY_TYPE => mine_key_for_workchain(self.workchain),
             BlsKeyOption::KEY_TYPE => BlsKeyOption::generate_with_json()?,
             _ => fail!("Unknown generate key type!"),
         };
@@ -815,8 +816,8 @@ impl TonNodeConfig {
         validator_key_id: &[u8; 32],
         bls_key: &[u8; 32]
     ) -> Result<ValidatorKeysJson> {
-        if let Some(mut key_info) = self.get_validator_key_info(&base64::encode(validator_key_id))? {
-            key_info.validator_bls_key = Some(base64::encode(bls_key));
+        if let Some(mut key_info) = self.get_validator_key_info(&base64_encode(validator_key_id))? {
+            key_info.validator_bls_key = Some(base64_encode(bls_key));
             self.update_validator_key_info(key_info)
         } else {
             fail!("Validator key have not been added!")
@@ -1065,7 +1066,7 @@ impl NodeConfigHandler {
     }
 
     pub async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>> {
-        match self.validator_keys.get(&base64::encode(key_id.data())) {
+        match self.validator_keys.get(&base64_encode(key_id.data())) {
             Some(_key) => self.get_bls_key_raw(*key_id.data()).await,
             None => None,
         }
@@ -1241,7 +1242,7 @@ impl NodeConfigHandler {
     }
 
     fn get_bls_key(config: &TonNodeConfig, key_id: [u8; 32]) -> Option<Arc<dyn KeyOption>> {
-        if let Ok(Some(key_info)) = config.get_validator_key_info(&base64::encode(key_id)) {
+        if let Ok(Some(key_info)) = config.get_validator_key_info(&base64_encode(key_id)) {
             if let Some(validator_key_ring) = &config.validator_key_ring {
                 if let Some(bls_key) = &key_info.validator_bls_key {
                     if let Some(key_data) = validator_key_ring.get(bls_key) {
