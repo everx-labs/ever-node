@@ -1,3 +1,11 @@
+Root section
+------------
+
+* `sync_by_archives`: possible values `true` and `false`. Default value `false`. If set `true` 
+  allows to synchronize node by archives instead of single blocks. It may be useful in some 
+  conditions, for example, long ping to other nodes.
+
+
 `remp` section
 ------------
 
