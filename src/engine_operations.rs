@@ -110,12 +110,20 @@ impl EngineOperations for Engine {
         self.network().activate_validator_list(validator_list_id)
     }
 
+    async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>> {
+        self.network().get_validator_bls_key(key_id).await
+    }
+
     fn set_sync_status(&self, status: u32) {
         self.set_sync_status(status);
     }
 
     fn get_sync_status(&self) -> u32 {
         self.get_sync_status()
+    }
+
+    fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<adnl::OverlayShortId>, adnl::OverlayId)> {
+        self.calc_overlay_id(workchain, shard)
     }
 
     fn validation_status(&self) -> ValidationStatus {
@@ -713,9 +721,13 @@ impl EngineOperations for Engine {
         }
 
         // Initialisation of remp_capability after cold boot by first processed master state
+        // same for SMFT
         if state.block_id().shard().is_masterchain() {
             self.set_remp_capability(
                 state.config_params()?.has_capability(GlobalCapabilities::CapRemp),
+            );
+            self.set_smft_capability(
+                state.config_params()?.has_capability(GlobalCapabilities::CapSmft),
             );
         }
         Ok(())
@@ -1015,6 +1027,10 @@ impl EngineOperations for Engine {
 
     fn remp_capability(&self) -> bool {
         Engine::remp_capability(self)
+    }
+
+    fn smft_capability(&self) -> bool {
+        Engine::smft_capability(self)
     }
 
     // Get current list of new shard blocks with respect to last mc block.

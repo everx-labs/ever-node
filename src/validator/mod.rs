@@ -36,6 +36,7 @@ pub mod remp_service;
 pub mod telemetry;
 #[cfg(feature = "slashing")]
 pub mod slashing;
+mod verification;
 
 use std::sync::Arc;
 use ton_types::{Result, UInt256, error};

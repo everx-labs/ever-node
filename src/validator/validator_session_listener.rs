@@ -218,12 +218,12 @@ impl CatchainReplayListener for ValidatorSessionListener {
     }
 }
 
-async fn process_validation_action (action: ValidationAction, g: Arc<ValidatorGroup>) {
+async fn process_validation_action (action: ValidationAction, g: Arc<ValidatorGroup>, rt: tokio::runtime::Handle) {
     let action_str = format!("{}", action);
     let next_block_descr = g.get_next_block_descr().await;
     log::info!(target: "validator", "({}): Processing action: {}, {}", next_block_descr, action_str, g.info().await);
     match action {
-        ValidationAction::OnGenerateSlot {round, callback} => g.on_generate_slot (round, callback).await,
+        ValidationAction::OnGenerateSlot {round, callback} => g.on_generate_slot (round, callback, rt).await,
 
         ValidationAction::OnCandidate {round, source, root_hash, data, collated_data, callback} =>
             g.on_candidate (round, source, root_hash, data, collated_data, callback).await,
@@ -316,8 +316,9 @@ pub async fn process_validation_queue(
                 }
 
                 let start_time = SystemTime::now();
+                let rt_clone = rt.clone();
                 let mut join_handle = rt.spawn(async move {
-                    process_validation_action (action, g_clone).await;
+                    process_validation_action (action, g_clone, rt_clone).await;
                 });
 
                 loop {

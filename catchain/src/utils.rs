@@ -13,7 +13,7 @@
 
 /// Imports
 use crate::{
-    serialize_tl_boxed_object, 
+    serialize_tl_boxed_object,
     BlockHash, BlockPayloadPtr, CatchainFactory, PrivateKey, PublicKey, PublicKeyHash, 
     RawBuffer, Receiver, SessionId, ton, utils
 };
@@ -504,6 +504,25 @@ impl MetricsDumper {
         //update state
 
         self.prev_metrics = metrics;
+    }
+
+    pub fn enumerate_as_f64<F>(&self, handler: F)
+    where
+        F: Fn(String, f64),
+    {
+        for (key, metric) in &self.prev_metrics {
+            use MetricUsage::*;
+
+            let value = match metric.usage {
+                Counter => metric.value as f64,
+                Derivative => metric.value as f64 / Self::METRIC_DERIVATIVE_MULTIPLIER,
+                Percents => (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER * 100.0,
+                Float => (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER,
+                Latency => (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER,
+            };
+
+            handler(key.clone(), value);
+        }
     }
 
     pub fn dump<F>(&self, handler: F)

@@ -31,6 +31,7 @@ pub fn supported_capabilities() -> u64 {
         GlobalCapabilities::CapReportVersion as u64 |
         GlobalCapabilities::CapShortDequeue as u64 |
         GlobalCapabilities::CapRemp as u64 |
+        GlobalCapabilities::CapSmft as u64 |
         GlobalCapabilities::CapInitCodeHash as u64 |
         GlobalCapabilities::CapOffHypercube as u64 |
         GlobalCapabilities::CapFixTupleIndexBug as u64 |
@@ -57,7 +58,7 @@ pub fn supported_capabilities() -> u64 {
 }
 
 pub fn supported_version() -> u32 {
-    49
+    50
 }
 
 pub fn check_this_shard_mc_info(

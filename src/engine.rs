@@ -138,6 +138,8 @@ pub struct Engine {
     sync_status: AtomicU32,
     remp_capability: AtomicBool,
 
+    smft_capability: AtomicBool,
+
     test_bundles_config: CollatorTestBundlesGeneralConfig,
     collator_config: CollatorConfig,
  
@@ -808,6 +810,7 @@ impl Engine {
             will_validate: AtomicBool::new(false),
             sync_status: AtomicU32::new(0),
             remp_capability: AtomicBool::new(false),
+            smft_capability: AtomicBool::new(false),
             test_bundles_config,
             collator_config,
             shard_states_keeper: shard_states_keeper.clone(),
@@ -956,6 +959,10 @@ impl Engine {
     ) -> Result<()> {
         let id = self.overlay_operations.calc_overlay_id(workchain, shard)?;
         self.overlay_operations.clone().add_overlay(id, !foreign).await
+    }
+
+    pub fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<adnl::OverlayShortId>, adnl::OverlayId)> {
+        self.overlay_operations.calc_overlay_id(workchain, shard)
     }
 
     pub fn shard_states_awaiters(&self) -> &AwaitersPool<BlockIdExt, Arc<ShardStateStuff>> {
@@ -1112,6 +1119,14 @@ impl Engine {
 
     pub fn destroy_candidate_table(&self, session_id: &SessionId) -> Result<bool> {
         self.candidate_db.destroy_db(session_id)
+    }
+
+    pub fn smft_capability(&self) -> bool {
+        self.smft_capability.load(Ordering::Relaxed)
+    }
+
+    pub fn set_smft_capability(&self, value: bool) {
+        self.smft_capability.store(value, Ordering::Relaxed);
     }
 
     pub fn split_queues_cache(&self) -> 
@@ -1428,6 +1443,10 @@ impl Engine {
                 block.get_config_params()?.has_capability(GlobalCapabilities::CapRemp),
                 Ordering::Relaxed
             );
+            self.smft_capability.store(
+                block.get_config_params()?.has_capability(GlobalCapabilities::CapSmft),
+                Ordering::Relaxed
+            );
             // While the node boots start key block is not processed by this function.
             // So see process_full_state_in_ext_db for the same code
         }
@@ -1553,7 +1572,9 @@ impl Engine {
                             Broadcast::TonNode_ConnectivityCheckBroadcast(broadcast) => {
                                 self.network.clone().process_connectivity_broadcast(broadcast);
                             }
-                            Broadcast::TonNode_BlockCandidateBroadcast(_) => { }
+                            Broadcast::TonNode_BlockCandidateBroadcast(broadcast) => {
+                                log::warn!("TonNode_BlockCandidateBroadcast from {}: {:?}", src, broadcast);
+                            }
                         }
                     }
                 }
@@ -2398,6 +2419,10 @@ async fn boot(
                 state.config_params()?.has_capability(GlobalCapabilities::CapRemp),
                 Ordering::Relaxed
             );
+            engine.smft_capability.store(
+                state.config_params()?.has_capability(GlobalCapabilities::CapSmft),
+                Ordering::Relaxed
+            );
             (block_id.clone(), false)
         }
         Err(err) => {
@@ -2492,7 +2517,8 @@ pub async fn run(
     let remp_config = node_config.remp_config().clone();
     let vm_config = ValidatorManagerConfig::read_configs(
         node_config.unsafe_catchain_patches_files(),
-        node_config.validation_countdown_mode()
+        node_config.validation_countdown_mode(),
+        node_config.is_smft_disabled(),
     );
     let wc_from_config = node_config.workchain();
     let remp_client_pool = node_config.remp_config().remp_client_pool();

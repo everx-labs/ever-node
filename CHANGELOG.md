@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.57.0
+
+- Shadow SMFT is prepared for first deployment
+
 ## Version 0.56.8
 
 - `./configs/ton-global.config.json` renamed to `./configs/ton-global-config-sample.json` because

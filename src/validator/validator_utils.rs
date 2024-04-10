@@ -20,12 +20,13 @@ use catchain::{BlockPayloadPtr, CatchainNode, PublicKey, PublicKeyHash};
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
 use ton_block::{
-    BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, ConfigParams, CryptoSignature, 
-    CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, Serializable, 
-    ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet
+    BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, CatchainConfig, ConfigParams, 
+    CryptoSignature, CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, 
+    Serializable, ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, 
+    ValidatorSet, Workchains, WorkchainDescr
 };
 use ton_types::{
-    error, fail, BuilderData, HashmapType, Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson, 
+    error, fail, BuilderData, HashmapType, Ed25519KeyOption, KeyId,
     Result, Sha256, UInt256
 };
 use validator_session::SessionNode;
@@ -324,6 +325,49 @@ pub fn try_calc_subset_for_workchain_standard(
     }
 }
 
+lazy_static::lazy_static! {
+    static ref SINGLE_WORKCHAIN: Workchains = {
+        let mut workchains = Workchains::default();
+        workchains.set(&0, &WorkchainDescr::default()).unwrap();
+        workchains
+    };
+}
+
+pub fn try_calc_vset_for_workchain(
+    vset: &ValidatorSet,
+    config: &ConfigParams,
+    cc_config: &CatchainConfig, 
+    workchain_id: i32, 
+) -> Result<Vec<ValidatorDescr>> {
+    let full_list = if cc_config.isolate_mc_validators {
+        if vset.total() <= vset.main() {
+            failure::bail!("Count of validators is too small to make sharde's subset while `isolate_mc_validators` flag is set");
+        }
+        let list = vset.list()[vset.main() as usize .. ].to_vec();
+        list
+    } else {
+        vset.list().to_vec().clone()
+    };
+    // in case on old block proof it doesn't contain workchains in config so 1 by default
+    let workchains = config.workchains().unwrap_or_else(|_| SINGLE_WORKCHAIN.clone());
+    match workchains.len()? as i32 {
+        0 => failure::bail!("workchain description is empty"),
+        1 => { Ok(full_list) },
+        count => {
+            let mut list = Vec::new();
+
+            for descr in vset.list() {
+                let id = calc_workchain_id(descr);
+                if (id == workchain_id) || (id >= count) {
+                    list.push(descr.clone());
+                }
+            }
+
+            Ok(list)
+        }
+    }
+}
+
 pub fn try_calc_subset_for_workchain(
     vset: &ValidatorSet,
     mc_state: &ShardStateStuff,
@@ -373,16 +417,6 @@ pub fn calc_subset_for_workchain_standard(
     }
 }
 
-pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (KeyOptionJson, Arc<dyn KeyOption>) {
-    loop {
-        if let Ok((private, public)) = Ed25519KeyOption::generate_with_json() {
-            if id_opt.is_none() || Some(calc_workchain_id_by_adnl_id(public.id().data())) == id_opt {
-                return (private, public)
-            }
-        }
-    }
-}
-
 pub async fn get_shard_by_message(engine: Arc<dyn EngineOperations>, message: Arc<Message>) -> Result<ShardIdent> {
     let dst_wc = message.dst_workchain_id()
         .ok_or_else(|| error!("Can't get workchain id from message"))?;
@@ -412,6 +446,10 @@ pub fn get_group_members_by_validator_descrs(iterator: &Vec<ValidatorDescr>, dst
 
 pub fn is_remp_enabled(_engine: Arc<dyn EngineOperations>, config_params: &ConfigParams) -> bool {
     return config_params.has_capability(GlobalCapabilities::CapRemp);
+}
+
+pub fn is_smft_enabled(_engine: Arc<dyn EngineOperations>, config_params: &ConfigParams) -> bool {
+    return config_params.has_capability(GlobalCapabilities::CapSmft);
 }
 
 pub fn get_message_uid(msg: &Message) -> UInt256 {

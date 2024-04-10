@@ -451,7 +451,7 @@ impl Neighbours {
         self.cancellation_token.cancel();
     }
 
-    fn add_new_peers(self: Arc<Self>, peers: Vec<Arc<KeyId>>) {
+    pub fn add_new_peers(self: Arc<Self>, peers: Vec<Arc<KeyId>>) {
         let this = self.clone();
         tokio::spawn(async move {
             for peer in peers.iter() {

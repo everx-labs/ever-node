@@ -257,6 +257,7 @@ impl CatchainClient {
         let overlay_id = private_overlay_id.clone();
         let self1 = self.clone();
         let self2 = self.clone();
+        let self3 = self.clone();
         let overlay = overlay_node.clone();
         let keys = validator_keys.clone();
         let listener = catchain_listener.clone();
@@ -271,6 +272,14 @@ impl CatchainClient {
         let listener = catchain_listener.clone();
         runtime_handle.spawn(async move { 
             if let Err(e) = CatchainClient::wait_catchain_broadcast(self2, &overlay_id, overlay, &keys, &listener).await {
+                log::warn!(target: Self::TARGET, "ERROR: {}", e)
+            }
+        });
+        let overlay_id = private_overlay_id.clone();
+        let overlay = overlay_node.clone();
+        let listener = catchain_listener.clone();
+        runtime_handle.spawn(async move { 
+            if let Err(e) = CatchainClient::wait_block_candidate_status_broadcast(self3, &overlay_id, overlay, &listener).await {
                 log::warn!(target: Self::TARGET, "ERROR: {}", e)
             }
         });
@@ -338,6 +347,44 @@ impl CatchainClient {
                                 let mut serializer = ton_api::Serializer::new(&mut data);
                                 serializer.write_boxed(&block_update)?;
                                 serializer.write_boxed(&vs_block_update)?;
+                                let data = catchain::CatchainFactory::create_block_payload(data);
+                        listener
+                            .on_message(
+                                source_id,
+                                &data);
+                    }
+                },
+                Ok(None) => { return Ok(())},
+                Err(e) => {
+                    log::error!(target: Self::TARGET, "private overlay broadcast err: {}", e);
+                },
+            };
+        }
+        let _result = result.ok_or_else(|| error!("Failed to receive a private overlay broadcast!"))?;
+        Ok(())
+    }
+
+    async fn wait_block_candidate_status_broadcast(
+        self: Arc<Self>,
+        overlay_id: &Arc<PrivateOverlayShortId>,
+        overlay: Arc<OverlayNode>, 
+        catchain_listener: &CatchainOverlayListenerPtr) -> Result<()> {
+        let receiver = overlay.clone();
+        let result: Option<Box<Broadcast>> = None;
+        let catchain_listener = catchain_listener.clone();
+
+        while let None = result {
+            if self.is_stop.load(atomic::Ordering::Relaxed) {
+                break;
+            };
+            let message = receiver.wait_for_block_candidate_status(overlay_id).await;
+            match message {
+                Ok(Some((block_status, source_id)))  => {
+                    log::trace!(target: Self::TARGET, "private overlay broadcast BlockCandidateStatus (successed)");
+                    if let Some(listener) = catchain_listener.upgrade() {
+                                let mut data: catchain::RawBuffer = catchain::RawBuffer::default();
+                                let mut serializer = ton_api::Serializer::new(&mut data);
+                                serializer.write_boxed(&block_status)?;
                                 let data = catchain::CatchainFactory::create_block_payload(data);
                         listener
                             .on_message(

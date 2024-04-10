@@ -20,6 +20,7 @@ use crate::{
         remp_block_parser::{RempMasterblockObserver, find_previous_sessions},
         remp_manager::{RempManager, RempInterfaceQueues},
         sessions_computing::{GeneralSessionInfo, SessionValidatorsInfo, SessionValidatorsList, SessionValidatorsCache},
+        fabric::run_validate_query_any_candidate,
         validator_group::{ValidatorGroup, ValidatorGroupStatus},
         validator_utils::{
             get_first_block_seqno_after_prevs,
@@ -27,7 +28,8 @@ use crate::{
             compute_validator_list_id, get_group_members_by_validator_descrs, 
             is_remp_enabled, try_calc_subset_for_workchain,
             validatordescr_to_catchain_node, validatorset_to_string,
-            ValidatorListHash, ValidatorSubsetInfo
+            ValidatorListHash, ValidatorSubsetInfo,
+            try_calc_vset_for_workchain,
         },
         out_msg_queue::OutMsgQueueInfoStuff,
     },
@@ -45,6 +47,10 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime}
 };
+use crate::validator::verification::{VerificationFactory, VerificationListener, VerificationManagerPtr};
+use crate::validator::verification::GENERATE_MISSING_BLS_KEY;
+use crate::validator::BlockCandidate;
+use spin::mutex::SpinMutex;
 use tokio::time::timeout;
 use ton_api::IntoBoxed;
 use ton_block::{
@@ -228,7 +234,9 @@ impl ValidationStatus {
 struct ValidatorListStatus {
     known_lists: HashMap<ValidatorListHash, PublicKey>,
     curr: Option<ValidatorListHash>,
-    next: Option<ValidatorListHash>
+    next: Option<ValidatorListHash>,
+    curr_utime_since: Option<u32>,
+    next_utime_since: Option<u32>,
 }
 
 impl ValidatorListStatus {
@@ -273,6 +281,10 @@ impl ValidatorListStatus {
     fn known_hashes (&self) -> HashSet<ValidatorListHash> {
         return self.known_lists.keys().cloned().collect();
     }
+
+    fn get_curr_utime_since(&self) -> &Option<u32> {
+        &self.curr_utime_since
+    }
 }
 
 impl Default for ValidatorListStatus {
@@ -280,13 +292,34 @@ impl Default for ValidatorListStatus {
         return ValidatorListStatus {
             known_lists: HashMap::default(),
             curr: None,
-            next: None
+            next: None,
+            curr_utime_since: None,
+            next_utime_since: None,
         }
     }
 }
 
 fn rotate_all_shards(mc_state_extra: &McStateExtra) -> bool {
     mc_state_extra.validator_info.nx_cc_updated
+}
+
+struct VerificationListenerImpl {
+    engine: Arc<dyn EngineOperations>,
+}
+
+#[async_trait::async_trait]
+impl VerificationListener for VerificationListenerImpl {
+    async fn verify(&self, block_candidate: &BlockCandidate) -> bool {
+        ValidatorManagerImpl::verify_block_candidate(block_candidate, self.engine.clone()).await
+    }
+}
+
+impl VerificationListenerImpl {
+    fn new(engine: Arc<dyn EngineOperations>) -> Self {
+        Self {
+            engine
+        }
+    }
 }
 
 struct ValidatorManagerImpl {
@@ -303,6 +336,8 @@ struct ValidatorManagerImpl {
 
     #[cfg(feature = "slashing")]
     slashing_manager: SlashingManagerPtr,
+    verification_manager: SpinMutex<Option<VerificationManagerPtr>>,
+    verification_listener: SpinMutex<Option<Arc<VerificationListenerImpl>>>,
 }
 
 impl ValidatorManagerImpl {
@@ -321,8 +356,8 @@ impl ValidatorManagerImpl {
 
         engine.set_validation_status(ValidationStatus::Disabled);
         (ValidatorManagerImpl {
-            engine,
-            rt,
+            engine: engine.clone(),
+            rt: rt.clone(),
             validator_sessions: HashMap::default(),
             validator_list_status: ValidatorListStatus::default(),
             session_info_cache: SessionValidatorsCache::new(),
@@ -332,7 +367,49 @@ impl ValidatorManagerImpl {
             block_observer: None,
             #[cfg(feature = "slashing")]
             slashing_manager: SlashingManager::create(),
+            verification_manager: SpinMutex::new(None),
+            verification_listener: SpinMutex::new(None),
         }, remp_interface_queues)
+    }
+
+    /// Create/destroy verification manager
+    fn update_verification_manager_usage(&self, mc_state_extra: &McStateExtra) {
+        let smft_enabled = !self.config.smft_disabled && crate::validator::validator_utils::is_smft_enabled(self.engine.clone(), mc_state_extra.config());
+        let verification_manager = self.verification_manager.lock().clone();
+        let has_verification_manager = verification_manager.is_some();
+
+        if smft_enabled && has_verification_manager {
+            return; //verification manager is enabled and created
+        }
+        if !smft_enabled && !has_verification_manager {
+            return; //verification manager is disabled and destroyed
+        }
+
+        if !smft_enabled && has_verification_manager {
+            //SMFT is disabled, but verification manager is created
+            log::info!(target: "verificator", "Destroy verification manager for validator manager");
+
+            *self.verification_manager.lock() = None;
+            *self.verification_listener.lock() = None;
+
+            return;
+        }
+
+        if smft_enabled && !has_verification_manager {
+            //SMFT is enabled, but verification manager has not been created
+
+            log::info!(target: "verificator", "Initialize verification manager for validator manager");
+
+            let verification_manager = VerificationFactory::create_manager(self.engine.clone(), self.rt.clone());
+            let verification_listener = Arc::new(VerificationListenerImpl::new(self.engine.clone()));
+
+            *self.verification_manager.lock() = Some(verification_manager);
+            *self.verification_listener.lock() = Some(verification_listener);
+
+            log::info!(target: "verificator", "Verification manager for validator manager has been initialized");
+
+            return;
+        }
     }
 
     /// find own key in validator subset
@@ -397,10 +474,12 @@ impl ValidatorManagerImpl {
         };
 
         self.validator_list_status.curr = self.update_single_validator_list(validator_set.list(), "current").await?;
+        self.validator_list_status.curr_utime_since = Some(validator_set.utime_since());
         if let Some(id) = self.validator_list_status.curr.as_ref() {
             self.engine.activate_validator_list(id.clone())?;
         }
         self.validator_list_status.next = self.update_single_validator_list(next_validator_set.list(), "next").await?;
+        self.validator_list_status.next_utime_since = Some(next_validator_set.utime_since());
 
         metrics::gauge!("in_current_vset_p34", if self.validator_list_status.curr.is_some() { 1 } else { 0 } as f64);
         metrics::gauge!("in_next_vset_p36", if self.validator_list_status.next.is_some() { 1 } else { 0 } as f64);
@@ -891,6 +970,7 @@ impl ValidatorManagerImpl {
                 #[cfg(feature = "slashing")]
                 let slashing_manager = self.slashing_manager.clone();
                 let remp_manager = self.remp_manager.clone();
+                let verification_manager = self.verification_manager.lock().clone();
                 let allow_unsafe_self_blocks_resync = self.config.unsafe_resync_catchains.contains(&cc_seqno);
                 let session = self.validator_sessions.entry(session_id.clone()).or_insert_with(||
                     Arc::new(ValidatorGroup::new(
@@ -905,6 +985,7 @@ impl ValidatorManagerImpl {
                         allow_unsafe_self_blocks_resync,
                         #[cfg(feature = "slashing")]
                         slashing_manager,
+                        verification_manager,
                     ))
                 );
 
@@ -969,6 +1050,9 @@ impl ValidatorManagerImpl {
                 self.remp_config.is_service_enabled()
             );
         }
+
+        // update verification manager (create / destroy depends on SMFT capabilities)
+        self.update_verification_manager_usage(&mc_state_extra);
 
         let master_cc_seqno = get_masterchain_seqno(self.engine.clone(), &mc_state).await?;
         if let Some(remp) = &self.remp_manager {
@@ -1095,6 +1179,9 @@ impl ValidatorManagerImpl {
         let next_validator_set = mc_state_extra.config.next_validator_set()?;
         let full_validator_set = mc_state_extra.config.validator_set()?;
         let possible_validator_change = next_validator_set.total() > 0;
+        let mut mc_validators = Vec::new();
+
+        mc_validators.reserve(full_validator_set.total() as usize);
 
         for ident in future_shards.iter() {
             log::trace!(target: "validator_manager", "Future shard {}", ident);
@@ -1190,6 +1277,10 @@ impl ValidatorManagerImpl {
 
         // Iterate over future shards and create all future sessions
         for (ident, (wc, next_cc_seqno, next_val_list_id)) in our_future_shards.iter() {
+            if ident.is_masterchain() {
+                mc_validators.append(&mut wc.validators.clone());
+            }
+
             if let Some(local_id) = self.find_us(&wc.validators) {
                 let new_session_info = Arc::new(GeneralSessionInfo {
                     shard: ident.clone(),
@@ -1198,6 +1289,7 @@ impl ValidatorManagerImpl {
                     key_seqno: keyblock_seqno,
                     max_vertical_seqno: 0
                 });
+
                 let session_id = get_session_id(
                     new_session_info.clone(),
                     &wc.validators,
@@ -1205,6 +1297,7 @@ impl ValidatorManagerImpl {
                 );
                 gc_validator_sessions.remove(&session_id);
                 if !self.validator_sessions.contains_key(&session_id) {
+                    let verification_manager = self.verification_manager.lock().clone();
                     let session = Arc::new(ValidatorGroup::new(
                         new_session_info,
                         local_id,
@@ -1216,7 +1309,8 @@ impl ValidatorManagerImpl {
                         self.engine.clone(),
                         self.config.unsafe_resync_catchains.contains(next_cc_seqno),
                         #[cfg(feature = "slashing")]
-                        self.slashing_manager.clone()
+                        self.slashing_manager.clone(),
+                        verification_manager,
                     ));
                     self.validator_sessions.insert(session_id, session);
                 }
@@ -1227,7 +1321,9 @@ impl ValidatorManagerImpl {
             for (_, session) in &self.validator_sessions {
                 for id in &blocks_before_split {
                     if id.shard().is_parent_for(session.shard()) {
-                        log::trace!(target: "validator_manager", "precalc_split_queues_for {}", id);
+                        log::trace!(
+                            target: "validator_manager", "precalc_split_queues_for {}", id
+                        );
                         precalc_split_queues_for.insert(id.clone());
                     }
                 }
@@ -1237,12 +1333,109 @@ impl ValidatorManagerImpl {
             for id in precalc_split_queues_for {
                 let engine = self.engine.clone();
                 tokio::spawn(async move {
-                    log::trace!(target: "validator_manager", "Split queues precalculating for {}", id);
+                    log::trace!(
+                        target: "validator_manager", "Split queues precalculating for {}", id
+                    );
                     match OutMsgQueueInfoStuff::precalc_split_queues(&engine, &id).await {
-                        Ok(_) => log::trace!(target: "validator_manager", "Split queues precalculated for {}", id),
-                        Err(e) => log::error!(target: "validator_manager", "Can't precalculate split queues for {}: {}", id, e)
+                        Ok(_) => log::trace!(
+                            target: "validator_manager", "Split queues precalculated for {}", id
+                        ),
+                        Err(e) => log::error!(
+                            target: "validator_manager", 
+                            "Can't precalculate split queues for {}: {}", id, e
+                        )
                     }
                 });
+            }
+        }
+
+        let verification_manager = self.verification_manager.lock().clone();
+        if let Some(verification_manager) = verification_manager {
+            if let Some(verification_listener) = self.verification_listener.lock().clone() {
+                let config = &mc_state_extra.config;
+                let mut are_workchains_updated = false;
+                match try_calc_vset_for_workchain(
+                    &full_validator_set, config, &catchain_config, workchain_id
+                ) {
+                    Ok(workchain_validators) => {
+                        let found_in_wc = self.find_us(&workchain_validators).is_some();
+                        let found_in_mc = self.find_us(&mc_validators).is_some();
+                        let verification_listener: Arc<dyn VerificationListener> = 
+                            verification_listener.clone();
+                        let verification_listener = Arc::downgrade(&verification_listener);
+                        if let Some(local_key) = self.validator_list_status.get_local_key() {
+                            let local_key_id = local_key.id();
+
+                            if let Some(utime_since) = 
+                                self.validator_list_status.get_curr_utime_since() 
+                            {
+                                log::trace!(target: "verificator", "Request BLS key");
+                                let mut local_bls_key = 
+                                    self.engine.get_validator_bls_key(local_key_id).await;
+                                log::trace!(target: "verificator", "Request BLS key done");
+                                if local_bls_key.is_none() && GENERATE_MISSING_BLS_KEY {
+                                    match VerificationFactory::generate_test_bls_key(&local_key) {
+                                        Ok(bls_key) => local_bls_key = Some(bls_key),
+                                        Err(err) => log::error!(
+                                            target: "verificator", 
+                                            "Can't generate test BLS key: {:?}", err
+                                        ),
+                                    }
+                                }
+
+                                match local_bls_key {
+                                    Some(local_bls_key) => {
+                                        if found_in_wc || found_in_mc {
+                                            log::debug!(
+                                                target: "verificator", "Update workchains start"
+                                            );
+                                            verification_manager.update_workchains(
+                                                local_key_id.clone(),
+                                                local_bls_key,
+                                                workchain_id,
+                                                *utime_since,
+                                                &workchain_validators,
+                                                &mc_validators,
+                                                &verification_listener
+                                            ).await;
+                                            are_workchains_updated = true;
+                                            log::debug!(
+                                                target: "verificator", "Update workchains finish"
+                                            );
+                                        } else {
+                                            log::debug!(
+                                                target: "verificator", 
+                                                "Skip workchains update because we are not present \
+                                                in WC/MC sets for workchain_id={}", 
+                                                workchain_id
+                                            );
+                                        }
+                                    },
+                                    None => log::error!(
+                                        target: "verificator", 
+                                        "Can't create verification workchains: \
+                                         no BLS private key attached"
+                                    ),
+                                }
+                            } else {
+                                log::warn!(
+                                    target: "verificator", "Validator curr_utime_since is not set"
+                                )
+                            }
+                        } else {
+                            log::warn!(target: "verificator", "Validator local key is not found");
+                        }
+                    }
+                    Err(err) => {
+                        log::error!(target: "validator", "Can't create verification workchains: {:?}", err);
+                    }
+                }
+
+                if !are_workchains_updated {
+                    log::debug!(target: "verificator", "Reset workchains start");
+                    verification_manager.reset_workchains().await;
+                    log::debug!(target: "verificator", "Reset workchains finish");
+                }
             }
         }
 
@@ -1477,6 +1670,20 @@ impl ValidatorManagerImpl {
 
         log::info!(target: "validator_manager", "Engine is stopped. Exiting from invocation loop (while applying state)");
         Ok(())
+    }
+
+    async fn verify_block_candidate(block_candidate: &BlockCandidate, engine: Arc<dyn EngineOperations>) -> bool {
+        let candidate_id = block_candidate.block_id.clone();
+
+        log::debug!(target: "verificator", "Verifying block candidate {:?}", candidate_id);
+
+        match run_validate_query_any_candidate(block_candidate.clone(), engine).await {
+            Ok(_time) => return true,
+            Err(err) => {
+                log::warn!(target: "verificator", "Block {:?} verification error: {:?}", candidate_id, err);
+                return false;
+            }
+        }
     }
 }
 
