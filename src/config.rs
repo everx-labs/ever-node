@@ -169,8 +169,6 @@ pub struct TonNodeConfig {
     #[serde(default)]
     restore_db: bool,
     #[serde(default)]
-    low_memory_mode: bool,
-    #[serde(default)]
     cells_db_config: CellsDbConfig,
     #[serde(default)]
     collator_config: CollatorConfig,
@@ -597,9 +595,6 @@ impl TonNodeConfig {
     }
     pub fn restore_db(&self) -> bool {
         self.restore_db
-    }
-    pub fn low_memory_mode(&self) -> bool {
-        self.low_memory_mode
     }
     pub fn skip_saving_persistent_states(&self) -> bool {
         self.skip_saving_persistent_states

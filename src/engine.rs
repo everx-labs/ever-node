@@ -136,7 +136,6 @@ pub struct Engine {
     last_known_keyblock_seqno: AtomicU32,
     will_validate: AtomicBool,
     sync_status: AtomicU32,
-    low_memory_mode: bool,
     remp_capability: AtomicBool,
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
@@ -614,7 +613,6 @@ impl Engine {
         };
         let control_config = general_config.control_server()?;
         let collator_config = general_config.collator_config().clone();
-        let low_memory_mode = general_config.low_memory_mode();
         let boot_from_zerostate = general_config.boot_from_zerostate();
         let global_config = general_config.load_global_config()?;
         let test_bundles_config = general_config.test_bundles_config().clone();
@@ -809,7 +807,6 @@ impl Engine {
             last_known_keyblock_seqno: AtomicU32::new(0),
             will_validate: AtomicBool::new(false),
             sync_status: AtomicU32::new(0),
-            low_memory_mode,
             remp_capability: AtomicBool::new(false),
             test_bundles_config,
             collator_config,
@@ -1086,10 +1083,6 @@ impl Engine {
 
     pub fn tps_counter(&self) -> &TpsCounter {
         &self.tps_counter
-    }
-
-    pub fn low_memory_mode(&self) -> bool {
-        self.low_memory_mode
     }
 
     pub fn remp_service(&self) -> Option<&RempService> {

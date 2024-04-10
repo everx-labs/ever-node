@@ -15,12 +15,12 @@ log = '0.4'
 metrics = '0.21.0'
 metrics-core = '0.5'
 rand = '0.8'
-adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.10.12' }
+adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.10.15' }
 catchain = { path = '../catchain' }
 storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.69' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.139' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.38' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.72' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.141' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.39' }
 
 [dev-dependencies]
 chrono = '0.4'

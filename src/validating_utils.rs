@@ -19,9 +19,9 @@ use ton_block::{
 use ton_types::{fail, error, Result, Sha256, UInt256};
 use std::{collections::HashSet, cmp::max, iter::Iterator};
 
-#[cfg(not(feature = "fast_finality_extra"))] 
+#[cfg(not(feature = "fast_finality_extra"))]
 pub const UNREGISTERED_CHAIN_MAX_LEN: u32 = 8;
-#[cfg(feature = "fast_finality_extra")] 
+#[cfg(feature = "fast_finality_extra")]
 pub const UNREGISTERED_CHAIN_MAX_LEN: u32 = 32;
 
 pub fn supported_capabilities() -> u64 {

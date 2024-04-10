@@ -286,24 +286,19 @@ impl ShardStatesKeeper {
         handle: &Arc<BlockHandle>,
         root_hash: &UInt256,
         data: Arc<Vec<u8>>,
-        low_memory_mode: bool,
     ) -> Result<Arc<ShardStateStuff>> {
 
         // deserialise cells (and save it by the way - in case of low memory mode)
 
         let now = std::time::Instant::now();
         log::info!(
-            "check_and_store_state: deserialize (low_memory_mode: {}) length: {}, {}...",
-            low_memory_mode, data.len(), handle.id()
+            "check_and_store_state: deserialize, length: {}, {}...",
+            data.len(), handle.id()
         );
 
         let state_root = {
-            let mut boc_reader = BocReader::new();
-            if low_memory_mode {
-                let done_cells_storage = self.db.create_done_cells_storage(root_hash)?;
-                boc_reader = boc_reader.set_done_cells_storage(done_cells_storage);
-            }
-            boc_reader
+            BocReader::new()
+                .set_done_cells_storage(self.db.create_done_cells_storage(root_hash)?)
                 .set_abort(&|| self.stopper.check_stop())
                 .read_inmem(data.clone())?
                 .withdraw_single_root()?
@@ -314,8 +309,8 @@ impl ShardStatesKeeper {
         }
 
         log::info!(
-            "check_and_store_state: deserialized (low_memory_mode: {}) {} TIME {} ms",
-            low_memory_mode, handle.id(), now.elapsed().as_millis()
+            "check_and_store_state: deserialized {} TIME {} ms",
+            handle.id(), now.elapsed().as_millis()
         );
 
         let state = self.build_state_object(state_root, handle.id(), handle.is_queue_update_for())?;
