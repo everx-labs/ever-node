@@ -196,11 +196,12 @@ impl RmqTestbench {
         })
     }
 
-    async fn send_pending_message(&self, msg: &RempMessageWithOrigin, masterchain_seqno: u32) -> Result<()> {
+    async fn send_pending_message(&self, msg: &RempMessageWithOrigin, masterchain_seqno: u32) -> Result<bool> {
         self.message_queue.process_pending_remp_catchain_record(
             &msg.as_remp_catchain_record(masterchain_seqno),
             0
-        ).await
+        ).await?;
+        self.remp_manager.message_cache.update_message_body(Arc::new(msg.message.clone()))
     }
 
     fn replace_message_queue(&mut self, masterchain_range: &RangeInclusive<u32>) -> Result<()> {
@@ -281,8 +282,8 @@ fn remp_simple_forwarding_test() -> Result<()> {
         //testbench.remp_manager.options
         println!("{:?}", testbench.remp_manager.message_cache.get_message_with_origin_status_cc(m1.get_message_id()));
 
-        testbench.send_pending_message(&m1, 1).await?;
-        testbench.send_pending_message(&m2, 1).await?;
+        assert_eq!(testbench.send_pending_message(&m1, 1).await?, false); // false: we've added m1, but not m2
+        assert_eq!(testbench.send_pending_message(&m2, 1).await?, true);
 
         let ign = RempIgnored { level: RempMessageLevel::TonNode_RempMasterchain, block_id: blk1 };
         assert_eq!(testbench.remp_manager.message_cache.get_message_status(m1.get_message_id())?.unwrap(), RempMessageStatus::TonNode_RempIgnored(ign));
@@ -327,7 +328,9 @@ fn remp_simple_collation_equal_uids_test() -> Result<()> {
             let pa = if m.get_message_id() == acc_id { "A" } else { "" }.to_string();
             let pr = if must_be_rejected.contains(&m) { "R" } else { "" }.to_string();
             println!("Pending msg: {:x} {}{}{}", m.get_message_id(), pc, pa, pr);
-            testbench.send_pending_message(m, testbench.message_queue.catchain_info.get_master_cc_seqno()).await?;
+
+            // All msg ids are different, therefore body must be added
+            assert!(testbench.send_pending_message(m, testbench.message_queue.catchain_info.get_master_cc_seqno()).await?);
         }
 
         let accepted = RempAccepted {
@@ -342,6 +345,7 @@ fn remp_simple_collation_equal_uids_test() -> Result<()> {
             2
         )?;
 
+        println!("Collecting messages for collation");
         testbench.message_queue.collect_messages_for_collation().await?;
 
         for (id, _msg) in testbench.engine.collator_queue.pop_iter() {

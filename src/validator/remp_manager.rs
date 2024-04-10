@@ -636,7 +636,7 @@ impl RempCoreInterface for RempInterfaceQueues {
         // build message
         let remp_message = RmqMessage::from_raw_message(message.message())?;
         if message.id() != &remp_message.message_id {
-            fail!("Message {:x} has invalid message id {:x}, message will be ignored",
+            fail!("Message with computed id {:x} has different id {:x} in RempMessage struct, message will be ignored",
                 remp_message.message_id, message.id()
             );
         }
