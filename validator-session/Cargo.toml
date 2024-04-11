@@ -5,7 +5,7 @@ name = 'validator_session'
 version = '0.0.2'
 
 [dependencies]
-adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.10.13' }
+adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.10.15' }
 backtrace = '0.3'
 catchain = { path = '../catchain' }
 crc = '3.0'
@@ -16,12 +16,11 @@ lazy_static = '1.4'
 log = '0.4'
 metrics = '0.21.0'
 metrics-core = '0.5'
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.27' }
 rand = '0.8'
 storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.70' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.139' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.38' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.72' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.141' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.39' }
 
 [dev-dependencies]
 chrono = '0.4'

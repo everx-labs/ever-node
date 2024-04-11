@@ -135,10 +135,10 @@ async fn start_control_with_options(
     config: Option<TonNodeConfig>,
     server_only: bool
 ) -> Result<(ControlServer, Option<AdnlClient>, Arc<KeyId>)> {
+    fs::copy("./configs/ton-global.config-sample.json", "./target/ton-global.config-sample.json")?;
     let config = if let Some(config) = config {
         config
     } else {
-        fs::copy("./configs/ton-global.config.json", "./target/ton-global.config.json")?;
         crate::test_helper::get_config(IP_NODE, Some("./target"), DEFAULT_CONFIG).await?
     };
     let network = NodeNetwork::new(

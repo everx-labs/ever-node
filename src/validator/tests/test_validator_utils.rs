@@ -34,6 +34,16 @@ fn block_config(block_stuff: &BlockStuff) -> Result<ConfigParams> {
     )
 }
 
+pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (ton_types::KeyOptionJson, Arc<dyn ton_types::KeyOption>) {
+    loop {
+        if let Ok((private, public)) = Ed25519KeyOption::generate_with_json() {
+            if id_opt.is_none() || Some(calc_workchain_id_by_adnl_id(public.id().data())) == id_opt {
+                return (private, public)
+            }
+        }
+    }
+}
+
 #[test]
 fn test_mine_key() {
     // let now = std::time::Instant::now();

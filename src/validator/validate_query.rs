@@ -27,6 +27,7 @@ use crate::{
         UNREGISTERED_CHAIN_MAX_LEN, fmt_next_block_descr,
     },
     validator::{out_msg_queue::MsgQueueManager, validator_utils::calc_subset_for_masterchain},
+    validator::verification::VerificationManagerPtr,
     CHECK,
 };
 
@@ -222,6 +223,7 @@ pub struct ValidateQuery {
     block_create_count: HashMap<UInt256, u64>,
 
     engine: Arc<dyn EngineOperations>,
+    verification_manager: Option<VerificationManagerPtr>,
 
     next_block_descr: Arc<String>,
 }
@@ -239,6 +241,7 @@ impl ValidateQuery {
         engine: Arc<dyn EngineOperations>,
         is_fake: bool,
         multithread: bool,
+        verification_manager: Option<VerificationManagerPtr>,
     ) -> Self {
         let next_block_descr = Arc::new(fmt_next_block_descr(&block_candidate.block_id));
         Self {
@@ -260,6 +263,7 @@ impl ValidateQuery {
             block_create_count: Default::default(),
 
             next_block_descr,
+            verification_manager,
         }
     }
 
@@ -849,6 +853,14 @@ impl ValidateQuery {
         if info.descr.next_validator_shard != shard.shard_prefix_with_tag() {
             reject_query!("new shard configuration for shard {} contains different next_validator_shard {}",
                 shard, info.descr.next_validator_shard)
+        }
+        if let Some(ref verification_manager) = &self.verification_manager {
+            const MAX_VERIFICATION_TIMEOUT : std::time::Duration = std::time::Duration::from_millis(20);
+            //TODO: rewrite check_one_shard for async
+            if !verification_manager.wait_for_block_verification(&info.block_id, &MAX_VERIFICATION_TIMEOUT) {
+                //reject_query!("can't verify block {}", info.block_id)
+                log::warn!(target:"verificator", "can't verify block {} in MC", info.block_id);
+            }
         }
         if info.descr.collators.is_some() {
             reject_query!("Configuration for shard {} could not contain collators", shard);

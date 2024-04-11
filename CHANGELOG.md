@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.57.0
+
+- Shadow SMFT is prepared for first deployment
+
+## Version 0.56.8
+
+- `./configs/ton-global.config.json` renamed to `./configs/ton-global-config-sample.json` because
+  it is not an actual mainnet config. You can get the actual mainnet config here: 
+  https://github.com/tonlabs/main.ton.dev/blob/master/configs/ton-global.config.json.
+- Removed `low_memory_mode` flag from node's config.json. It is always enabled now. 
+  The false value of this flag is not actual anymore because the size of the shard states 
+  has become too big to process it in memory.
+
 ## Version 0.56.7
 
 - Logging was a bit refactored. Added neighbor's stat to telemetry.
@@ -22,7 +35,7 @@ All notable changes to this project will be documented in this file.
 
 ## Version 0.56.3
 
-- Fixed UNREGISTERED_CHAIN_MAX_LEN const for Venom blockchain.
+- Fixed UNREGISTERED_CHAIN_MAX_LEN const for Venom blockchain
 
 ## Version 0.56.2
 

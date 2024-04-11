@@ -1,6 +1,6 @@
 {
   "log_config_name": "log_cfg.yml",
-  "ton_global_config_name": "ton-global.config.json",
+  "ton_global_config_name": "ton-global.config-sample.json",
   "internal_db_path": "node_db",
   "ip_address": "0.0.0.0:30303",
   "control_server_port": 3031,

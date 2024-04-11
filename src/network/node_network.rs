@@ -982,7 +982,26 @@ impl NodeNetwork {
             }
             match self.config_handler.get_validator_key(&validator_adnl_key_id).await {
                 Some((adnl_key, _)) => {
-                    let id = self.network_context.adnl.add_key(adnl_key, election_id as usize)?;
+                    let id = match self.network_context.adnl.add_key(adnl_key.clone(), election_id as usize) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            if let Ok(old_key) = self.network_context.adnl.key_by_tag(election_id as usize) {
+                                if *old_key.id() != validator_adnl_key_id {
+                                    log::warn!("load_and_store_adnl_key: remove old key {}, election_id: {}", 
+                                        old_key.id(), election_id);
+                                } else {
+                                    log::warn!("load_and_store_adnl_key: remove key {}, election_id: {}", 
+                                        old_key.id(), election_id);
+                                }
+
+                                let _ = self.network_context.adnl.delete_key(old_key.id(), election_id as usize);
+                                self.network_context.adnl.add_key(adnl_key, election_id as usize)?
+                            } else {
+                                fail!("failed initialization new validator key (id: {}, election_id: {}): {:?}",
+                                    validator_adnl_key_id, election_id, e);
+                            }
+                        }
+                    };
                     NodeNetwork::periodic_store_ip_addr(
                         self.network_context.dht.clone(),
                         self.network_context.adnl.key_by_id(&id)?,
@@ -1088,6 +1107,10 @@ impl OverlayOperations for NodeNetwork {
 
 #[async_trait::async_trait]
 impl PrivateOverlayOperations for NodeNetwork {
+    async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>> {
+        self.config_handler.get_validator_bls_key(key_id).await
+    }
+
     async fn set_validator_list(
         &self, 
         validator_list_id: UInt256,
@@ -1352,7 +1375,7 @@ impl NodeConfigSubscriber for NodeNetwork {
 // Unused         
 //            ConfigEvent::RemoveValidatorAdnlKey(validator_adnl_key_id, election_id) => {
 //                log::info!("config event (RemoveValidatorAdnlKey) id: {}.", &validator_adnl_key_id);
-//                self.adnl.delete_key(&validator_adnl_key_id, election_id as usize)?;
+//                self.network_context.adnl.delete_key(&validator_adnl_key_id, election_id as usize)?;
 //                let status = self.validator_context.actual_local_adnl_keys.remove(&validator_adnl_key_id).is_some();
 //                log::info!("config event (RemoveValidatorAdnlKey) id: {} finished({}).", &validator_adnl_key_id, &status);
 //                return Ok(status);

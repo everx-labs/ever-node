@@ -114,6 +114,8 @@ pub trait PrivateOverlayOperations: Sync + Send {
 
     async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool>;
 
+    async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>>;
+
     fn create_catchain_client(
         &self,
         validator_list_id: UInt256,
@@ -138,6 +140,10 @@ pub trait EngineOperations : Sync + Send {
     fn get_validator_status(&self) -> bool { unimplemented!() }
 
     fn validator_network(&self) -> Arc<dyn PrivateOverlayOperations> {
+        unimplemented!()
+    }
+
+    fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<OverlayShortId>, OverlayId)> {
         unimplemented!()
     }
 
@@ -191,6 +197,10 @@ pub trait EngineOperations : Sync + Send {
     }
 
     async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
+        unimplemented!()
+    }
+
+    async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>> {
         unimplemented!()
     }
 
@@ -766,6 +776,10 @@ pub trait EngineOperations : Sync + Send {
     }
 
     fn remp_capability(&self) -> bool { 
+        false 
+    }
+
+    fn smft_capability(&self) -> bool { 
         false 
     }
 

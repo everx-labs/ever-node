@@ -61,6 +61,8 @@ use crate::validator::validator_utils::get_first_block_seqno_after_prevs;
 // #[cfg(feature = "fast_finality")]
 // use crate::validator::workchains_fast_finality::compute_actual_finish;
 
+use crate::validator::verification::{VerificationManagerPtr};
+
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum ValidatorGroupStatus {
     Created, Countdown { start_at: tokio::time::Instant },
@@ -352,6 +354,7 @@ pub struct ValidatorGroup {
 
     #[cfg(feature = "slashing")]
     slashing_manager: SlashingManagerPtr,
+    verification_manager: Option<VerificationManagerPtr>,
     last_validation_time: AtomicU64,
     last_collation_time: AtomicU64,
 }
@@ -369,6 +372,7 @@ impl ValidatorGroup {
         allow_unsafe_self_blocks_resync: bool,
         #[cfg(feature = "slashing")]
         slashing_manager: SlashingManagerPtr,
+        verification_manager: Option<VerificationManagerPtr>,
     ) -> Self {
         let group_impl = ValidatorGroupImpl::new(
             general_session_info.shard.clone(),
@@ -393,6 +397,7 @@ impl ValidatorGroup {
             receiver: Arc::new(receiver),
             #[cfg(feature = "slashing")]
             slashing_manager,
+            verification_manager,
             last_validation_time: AtomicU64::new(0),
             last_collation_time: AtomicU64::new(0)
         }
@@ -630,9 +635,8 @@ impl ValidatorGroup {
         }
     }
 
-    pub async fn on_generate_slot(&self, round: u32, callback: ValidatorBlockCandidateCallback) {
+    pub async fn on_generate_slot(&self, round: u32, callback: ValidatorBlockCandidateCallback, rt: tokio::runtime::Handle) {
         let next_block_descr = self.get_next_block_descr().await;
-
         log::info!(
             target: "validator", 
             "({}): ValidatorGroup::on_generate_slot: collator request, {}",
@@ -687,6 +691,13 @@ impl ValidatorGroup {
             None => Err(error!("Min masterchain block id missing")),
         };
 
+        let candidate = match self.verification_manager.clone() {
+            Some(_) => match &result {
+                Ok(candidate) => Some(candidate.clone()),
+                _ => None
+            },
+            None => None,
+        };
         let result_message = match &result {
             Ok(_) => {
                 let now = std::time::SystemTime::now()
@@ -739,7 +750,36 @@ impl ValidatorGroup {
 
         self.group_impl.execute_sync(|group_impl| group_impl.on_generate_slot_invoked = true).await;
 
-        callback(result)
+        callback(result);
+
+        if let Some(verification_manager) = self.verification_manager.clone() {
+            if let Some(candidate) = candidate {
+                log::debug!(target:"verificator", "Received new candidate for round {} for shard {:?}", round, self.shard());
+                let verification_manager = verification_manager.clone();
+                let next_block_id = match self.group_impl.execute_sync(|group_impl|
+                    group_impl.create_next_block_id(
+                        candidate.id.root_hash.clone(),
+                        get_hash(&candidate.data.data()),
+                        self.shard().clone()
+                    )
+                ).await {
+                    Err(x) => { log::error!(target: "validator", "{}", x); return },
+                    Ok(x) => x
+                };
+
+                let candidate = super::BlockCandidate {
+                    block_id: next_block_id,
+                    data: candidate.data.data().to_vec(),
+                    collated_file_hash: candidate.collated_file_hash.clone(),
+                    collated_data: candidate.collated_data.data().to_vec(),
+                    created_by: self.local_key.pub_key().expect("source must contain pub_key").into(),
+                };
+
+                rt.clone().spawn(async move {
+                    verification_manager.send_new_block_candidate(&candidate).await;
+                });
+            }
+        }
     }
 
     // Validate_query
@@ -809,6 +849,7 @@ impl ValidatorGroup {
                         self.validator_set.clone(),
                         self.engine.clone(),
                         SystemTime::now() + Duration::new(10, 0),
+                        self.verification_manager.clone(),
                     ).await
                 }
                 None => Err(failure::err_msg("Min masterchain block id missing")),
