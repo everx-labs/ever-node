@@ -159,7 +159,7 @@ impl RempCatchainInstance {
         Ok(instance.pending_messages_queue_sender.len())
     }
 
-    pub fn pending_messages_queue_try_recv(&self) -> Result<Option<RempCatchainRecordV2>> {
+    fn pending_messages_queue_try_recv(&self) -> Result<Option<RempCatchainRecordV2>> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queue_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
@@ -168,7 +168,7 @@ impl RempCatchainInstance {
         }
     }
 
-    pub fn pending_messages_broadcast_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RempMessageBody>> {
+    fn pending_messages_broadcast_try_recv(&self) -> Result<Option<ton_api::ton::ton_node::RempMessageBody>> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_broadcast_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
@@ -185,7 +185,7 @@ impl RempCatchainInstance {
         }
     }
 
-    pub fn pending_messages_queries_try_recv(&self) -> Result<Option<(Arc<KeyId>,RempMessageQuery)>> {
+    fn pending_messages_queries_try_recv(&self) -> Result<Option<(Arc<KeyId>,RempMessageQuery)>> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queries_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
@@ -217,7 +217,7 @@ impl RempCatchainInstance {
         }
     }
 
-    pub fn rmq_catchain_send(&self, msg: RempCatchainRecordV2, msg_remp_source_idx: u32) -> Result<()> {
+    fn rmq_catchain_send(&self, msg: RempCatchainRecordV2, msg_remp_source_idx: u32) -> Result<()> {
         let instance = self.get_instance_impl()?;
         match instance.rmq_catchain_sender.send((msg, msg_remp_source_idx)) {
             Ok(()) => Ok(()),
@@ -280,11 +280,15 @@ impl RempCatchainInstance {
         Ok(())
     }
 
-    pub fn activate_exchange(&self, delay: Duration, max_broadcasts: u32, max_queries: u32, query_timeout: Duration, max_answer_size: u64) -> Result<()> {
-        let session = &self.get_instance_impl()?.catchain_ptr;
-        session.request_new_block(SystemTime::now() + delay);
+    pub fn poll_outbound_queues(&self, max_broadcasts: u32, max_queries: u32, query_timeout: Duration, max_answer_size: u64) -> Result<()> {
         self.poll_pending_broadcasts(max_broadcasts)?;
         self.poll_pending_queries(max_queries, SystemTime::now() + query_timeout, max_answer_size)
+    }
+
+    pub fn activate_exchange(&self, delay: Duration) -> Result<()> {
+        let session = &self.get_instance_impl()?.catchain_ptr;
+        session.request_new_block(SystemTime::now() + delay);
+        Ok(())
     }
 }
 

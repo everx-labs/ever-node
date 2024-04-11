@@ -305,14 +305,9 @@ impl MessageQueue {
             &self.catchain_info.general_session_info.shard, self.catchain_instance.pending_messages_queue_len()?);
 
         if self.catchain_instance.is_session_active() {
-            log::trace!(target: "remp", "Point 3. Activating RMQ {} processing", self);
-            self.catchain_instance.activate_exchange(
-                RMQ_REQUEST_NEW_BLOCK_INTERVAL,
-                RMQ_MAXIMAL_BROADCASTS_IN_PACK,
-                RMQ_MAXIMAL_QUERIES_IN_PACK,
-                RMQ_MESSAGE_QUERY_TIMEOUT,
-                MAX_EXTERNAL_MESSAGE_SIZE as u64 + 1000
-            )?;
+            log::trace!(target: "remp", "Activating RMQ {} processing", self);
+            self.activate_exchange()?;
+            self.poll_outbound_queues()?;
 
             // Temporary status "New" --- message is not registered yet
             self.send_response_to_fullnode(msg.get_message_id(), origin_with_idx, RempMessageStatus::TonNode_RempNew);
@@ -533,10 +528,24 @@ impl MessageQueue {
         }
     }
 
+    /// Check pending queues, activate catchain exchange
+    fn poll_outbound_queues(&self) -> Result<()> {
+        self.catchain_instance.poll_outbound_queues(
+            RMQ_MAXIMAL_BROADCASTS_IN_PACK,
+            RMQ_MAXIMAL_QUERIES_IN_PACK,
+            RMQ_MESSAGE_QUERY_TIMEOUT,
+            MAX_EXTERNAL_MESSAGE_SIZE as u64 + 1000
+        )
+    }
+
+    fn activate_exchange(&self) -> Result<()> {
+        self.catchain_instance.activate_exchange(RMQ_REQUEST_NEW_BLOCK_INTERVAL)
+    }
+
     /// Check received messages queue and put all received messages into
     /// hash map. Check status of all old messages in the hash map.
     pub async fn poll(&self) -> Result<()> {
-        log::debug!(target: "remp", "Point 4. RMQ {}: polling; total {} messages in cache, {} messages in rmq_queue",
+        log::debug!(target: "remp", "RMQ {}: polling; total {} messages in cache, {} messages in rmq_queue",
             self,
             self.received_messages_count().await,
             self.catchain_instance.rmq_catchain_receiver_len()?
@@ -581,7 +590,8 @@ impl MessageQueue {
             }
         }
 
-        Ok(())
+        self.poll_outbound_queues()?;
+        self.activate_exchange()
     }
 
     /// Prepare messages for collation - to be called just before collator invocation.
@@ -1095,23 +1105,6 @@ impl RmqQueueManager {
                 // All other messages are not forwarded
 
                 if is_finally_rejected(&message_status) {
-/*
-                    if let Some(digest) = rejected_message_digests.get_mut (&message_cc) {
-                        digest.messages.0.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
-                            id: message.message_id.clone(),
-                            uid: message.message_uid.clone()
-                        });
-                    }
-                    else {
-                        let mut digest = ton_api::ton::ton_node::rempcatchainrecord::RempCatchainMessageDigest::default();
-                        digest.masterchain_seqno = message_cc as i32;
-                        digest.messages.0.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
-                            id: message.message_id.clone(),
-                            uid: message.message_uid.clone()
-                        });
-                        rejected_message_digests.insert(message_cc, digest);
-                    }
-*/
                     let mut digest = RempCatchainMessageDigestV2::default();
                     digest.masterchain_seqno = message_cc as i32;
                     digest.messages.0.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
@@ -1146,21 +1139,6 @@ impl RmqQueueManager {
             }
 
             for digest in rejected_message_digests.into_iter() {
-/*
-                if !digest.messages.0.is_empty() {
-                    let digest_len = digest.messages.0.len();
-                    let msg = ton_api::ton::ton_node::RempCatchainRecord::TonNode_RempCatchainMessageDigest(digest);
-                    for new in next_queues.iter() {
-                        if let Err(x) = new.catchain_instance.pending_messages_queue_send(msg.clone()) {
-                            log::error!(target: "remp",
-                            "Point 5a. RMQ {}: message digest (len={}) cannot be put to new queue {}: `{}`",
-                            self, digest_len, new, x
-                        )
-                        } else {
-                            sent = sent + 1;
-                        }
-                    }
- */
                 let digest_len = digest.messages.0.len();
                 let msg = ton_api::ton::ton_node::RempCatchainRecordV2::TonNode_RempCatchainMessageDigestV2(digest);
                 for new in next_queues.iter() {
@@ -1174,11 +1152,6 @@ impl RmqQueueManager {
                         sent_rejects = sent_rejects + 1;
                     }
                 }
- /*
-                else {
-                    log::error!(target: "remp", "RMQ {}: rejected message digest for {} is empty, but present in cache!", self, master_cc)
-                }
- */
             }
 
             log::info!(target: "remp", "RMQ {}: forwarding messages to new RMQ, total {}, actually sent {} (with {} rejects of them)",
@@ -1284,7 +1257,7 @@ impl RmqQueueManager {
     }
 
     pub async fn poll(&self) {
-        log::trace!(target: "remp", "Point 2. RMQ {} manager: polling incoming messages", self);
+        log::trace!(target: "remp", "RMQ {} manager: polling incoming messages", self);
         if let Some(cur_queue) = &self.cur_queue {
             if !cur_queue.is_session_active() {
                 log::warn!(target: "remp", "RMQ {} is not active yet, waiting...", self);
