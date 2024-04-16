@@ -204,13 +204,16 @@ impl MessageQueue {
     }
 
     pub fn update_status_send_response(&self, msgid: &UInt256, origin: Arc<RempMessageOrigin>, new_status: RempMessageStatus) {
-        match self.remp_manager.message_cache.update_message_status(&msgid, new_status.clone()) {
-            Ok(Some(final_status)) => self.send_response_to_fullnode(msgid, origin, final_status),
-            Ok(None) => (), // Send nothing, no status update is requested
-            Err(e) => log::error!(target: "remp", 
+        if let Err(e) = self.remp_manager.message_cache.update_message_status(&msgid, new_status.clone()) {
+            log::error!(target: "remp",
                 "RMQ {}: Cannot update status for {:x}, new status {}, error {}",
                 self, msgid, new_status, e
             )
+        }
+        else {
+            if !is_finally_accepted(&new_status) {
+                self.send_response_to_fullnode(msgid, origin, new_status)
+            }
         }
     }
 

@@ -341,6 +341,7 @@ pub struct MessageCacheSession {
     messages: DashMap<UInt256, Arc<RmqMessage>>,
     message_events: LockfreeMapSet<UInt256, u32>, //Map<UInt256, Vec<UnixTime32>>,
     message_status: DashMap<UInt256, RempMessageStatus>,
+    message_finally_accepted: DashMap<UInt256, RempMessageStatus>,
 
     blocks_processed: DashSet<BlockIdExt>
 }
@@ -450,7 +451,7 @@ impl MessageCacheSession {
             self.message_origins.contains_key(msg_id) &&
             self.messages.contains_key(msg_id)
         {
-            if self.message_status.contains_key(msg_id) {
+            if self.get_message_status(msg_id)?.is_some() {
                 return Ok(true);
             }
             else {
@@ -477,6 +478,60 @@ impl MessageCacheSession {
         (self.message_headers.len(), self.messages.len(), self.message_origins.len())
     }
 
+    fn alter_message_status<F>(&self, message_id: &UInt256, status_updater: F)
+        -> Result<(RempMessageStatus,RempMessageStatus)>
+        where F: FnOnce(&RempMessageStatus) -> RempMessageStatus
+    {
+        match &mut self.message_status.get_mut(message_id) {
+            None => {
+                fail!("Changing status: no message {:x} in message cache session {}", message_id, self)
+            },
+            Some(status) => {
+                let old_status = status.value().clone();
+                let new_status = status_updater(&old_status);
+                if is_finally_accepted(&new_status) {
+                    if let Some(prev) = self.set_finally_accepted_status(message_id, new_status.clone())? {
+                        Ok((prev, new_status))
+                    }
+                    else {
+                        Ok((status.value().clone(), new_status))
+                    }
+                }
+                else {
+                    *status.value_mut() = new_status.clone();
+                    Ok((old_status, status.value().clone()))
+                }
+            }
+        }
+    }
+
+    fn update_message_status(&self, message_id: &UInt256, new_status: RempMessageStatus) -> Result<()> {
+        if is_finally_accepted (&new_status) {
+            log::trace!(target: "remp", "Setting finally accepting status for {:x}: {}", message_id, new_status);
+            self.set_finally_accepted_status(message_id, new_status)?;
+        }
+        else {
+            let old_status = self.message_status.insert(message_id.clone(), new_status.clone());
+            log::trace!(target: "remp", "Changing message status for {:x}: {:?} => {}", message_id, old_status, new_status);
+
+            if let Some(actual_status) = self.get_message_status(&message_id)? {
+                if is_finally_accepted(&actual_status) {
+                    log::error!(target: "remp", "Changing status for {:x} to {}, although it has final status {}", message_id, new_status, actual_status);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn set_finally_accepted_status(&self, message_id: &UInt256, new_status: RempMessageStatus) -> Result<Option<RempMessageStatus>> {
+        if !is_finally_accepted(&new_status) {
+            fail!("Set finally accepted status for {:x}: status {} is not final.", message_id, new_status)
+        }
+        let old = self.message_finally_accepted.insert(message_id.clone(), new_status);
+        Ok(old)
+    }
+
+/*
     fn update_message_status(&self, message_id: &UInt256, new_status: RempMessageStatus) -> Result<RempMessageStatus> {
         match self.message_status.insert(message_id.clone(), new_status.clone()) {
             None => fail!("Changing status to {}: no message {:x} in message cache session {}", new_status, message_id, self),
@@ -486,18 +541,22 @@ impl MessageCacheSession {
             }
         }
     }
-
-    fn alter_message_status<F>(&self, message_id: &UInt256, status_updater: F)
-        -> Result<(RempMessageStatus,RempMessageStatus)>
-        where F: FnOnce(&RempMessageStatus) -> RempMessageStatus
-    {
-        match &mut self.message_status.get_mut(message_id) {
-            None => fail!("Changing status: no message {:x} in message cache session {}", message_id, self),
-            Some(status) => {
-                let old_status = status.value().clone();
-                *status.value_mut() = status_updater(&old_status);
-                Ok((old_status, status.value().clone()))
+ */
+    fn get_message_status(&self, message_id: &UInt256) -> Result<Option<RempMessageStatus>> {
+        if let Some(status) = self.message_finally_accepted.get(message_id) {
+            if !is_finally_accepted(status.value()) {
+                fail!("Only finally accepted status may be stored in message_finally_accepted, for id {:x} found {}", message_id, status.value())
             }
+            Ok(Some(status.value().clone()))
+        }
+        else if let Some(status) = self.message_status.get(message_id) {
+            if is_finally_accepted(status.value()) {
+                fail!("No finally accepted status may be stored in message_status, for id {:x} found {}", message_id, status.value())
+            }
+            Ok(Some(status.value().clone()))
+        }
+        else {
+            Ok(None)
         }
     }
 
@@ -518,10 +577,14 @@ impl MessageCacheSession {
             .get(message_id).map(|x| format!("uid: {:x}", x.value().message_uid))
             .unwrap_or_else(|| "*error: no header in cache*".to_owned());
 
-        let status = self.message_status
-            .get(message_id)
-            .map(|x| format!("{:?}", x.value()))
-            .unwrap_or_else(|| "*error: no status in cache*".to_owned());
+        let status1 = self.message_status.get(message_id).map(|x| x.value().clone());
+        let status2 = self.message_finally_accepted.get(message_id).map(|x| x.value().clone());
+        let status = match (status1, status2) {
+            (Some(x), None) => format!("{:?}/**", x),
+            (None, Some(x)) => format!("**/{:?}", x),
+            (Some(x), Some(y)) => format!("{:?}/{:?}", x, y),
+            (None, None) => "*error: no status in cache*".to_owned()
+        };
 
         let has_additional_info = self.messages.contains_key(message_id)
             || self.message_origins.contains_key(message_id)
@@ -564,16 +627,25 @@ impl MessageCacheSession {
 
             log::debug!(target: "remp", "Removing old message: {}", self.message_info(&id));
 
-            match (self.messages.get(&id), self.message_status.get(&id)) {
+            let message_status = match self.get_message_status(&id) {
+                Err(e) => {
+                    log::error!(target: "remp", "Record for message {:?} is incorrect: err: {}", id, e);
+                    stats.incorrect += 1;
+                    continue;
+                }
+                Ok(s) => s
+            };
+
+            match (self.messages.get(&id), message_status) {
                 (Some(_m),Some(status)) => {
-                    if is_finally_accepted(status.value()) { stats.accepted_in_session += 1 }
-                    else if is_finally_rejected(status.value()) { stats.rejected_in_session += 1 }
+                    if is_finally_accepted(&status) { stats.accepted_in_session += 1 }
+                    else if is_finally_rejected(&status) { stats.rejected_in_session += 1 }
                 },
                 (None,Some(_status)) => stats.has_only_header += 1,
                 (m, h) => {
                     log::error!(target: "remp",
                         "Record for message {:?} is in incorrect state: msg = {:?}, status = {:?}",
-                        id, m.map(|x| x.value().clone()), h.map(|x| x.value().clone())
+                        id, m.map(|x| x.value().clone()), h.map(|x| x.clone())
                     );
                     stats.incorrect += 1
                 }
@@ -592,6 +664,7 @@ impl MessageCacheSession {
             message_events: LockfreeMapSet::default(),
             messages: DashMap::default(),
             message_status: DashMap::default(),
+            message_finally_accepted: DashMap::default(),
             inf_shards: HashSet::from_iter(inf_shards.into_iter()),
             blocks_processed: DashSet::default(),
         }
@@ -636,21 +709,13 @@ impl MessageCache {
         (result, with_bodies, with_origins)
     }
 
-    /// Returns new message status, if it worths reporting (final statuses do not need to be reported)
-    pub fn update_message_status(&self, message_id: &UInt256, new_status: RempMessageStatus) -> Result<Option<RempMessageStatus>> {
+    /// Updates message status: changes status to the given value
+    pub fn update_message_status(&self, message_id: &UInt256, new_status: RempMessageStatus) -> Result<()> {
         let session = self.get_session_for_message(message_id).ok_or_else(
             || error!("Cannot find message {:x} to change its status to {:?}", message_id, new_status)
         )?;
 
-        if let RempMessageStatus::TonNode_RempAccepted(acc_new) = &new_status {
-            if acc_new.level == RempMessageLevel::TonNode_RempMasterchain {
-                session.update_message_status(message_id, new_status.clone())?;
-                return Ok(None)
-            }
-        }
-
-        session.update_message_status(message_id, new_status.clone())?;
-        Ok(Some(new_status))
+        session.update_message_status(message_id, new_status)
     }
 
     fn get_session_for_message(&self, message_id: &UInt256) -> Option<Arc<MessageCacheSession>> {
@@ -693,10 +758,7 @@ impl MessageCache {
     pub fn get_message_status(&self, message_id: &UInt256) -> Result<Option<RempMessageStatus>> {
         match self.get_session_for_message(message_id) {
             None => Ok(None),
-            Some(s) =>
-                Ok(Some(s.message_status.get(message_id).ok_or_else(|| error!("No status for message {:x}, {}",
-                    message_id, s
-                ))?.value().clone()))
+            Some(s) => s.get_message_status(message_id)
         }
     }
 
@@ -720,7 +782,7 @@ impl MessageCache {
             session.message_headers.get(message_id).ok_or_else(|| error!("Message {:x} has no header", message_id))?.value().clone(),
             session.messages.get(message_id).map(|m| m.value().clone()),
             session.message_origins.get(message_id).map(|m| m.value().clone()),
-            session.message_status.get(message_id).map(|m| m.value().clone())
+            session.get_message_status(message_id)?
         );
 
         match (msg, origin, status) {
@@ -764,7 +826,12 @@ impl MessageCache {
         //    fail!("Inconsistent message cache contents: message {} present in cache, although should not", message_id)
         //}
 
-        session.message_status.insert(message_id.clone(), status.clone());
+        if is_finally_accepted(status) {
+            session.message_finally_accepted.insert(message_id.clone(), status.clone());
+        }
+        else {
+            session.message_status.insert(message_id.clone(), status.clone());
+        }
         session.insert_message(message, message_header, message_origin)
     }
 
@@ -774,7 +841,12 @@ impl MessageCache {
         //    fail!("Inconsistent message cache contents: message header {:x} present in cache, although should not", message_id)
         //}
 
-        session.message_status.insert(message_id.clone(), status.clone());
+        if is_finally_accepted(status) {
+            session.message_finally_accepted.insert(message_id.clone(), status.clone());
+        }
+        else {
+            session.message_status.insert(message_id.clone(), status.clone());
+        }
         session.insert_message_header(&message_id, message_header, message_origin)?;
         Ok(())
     }
