@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -19,23 +19,32 @@ use crate::{
     validator::{
         remp_block_parser::{RempMasterblockObserver, find_previous_sessions},
         remp_manager::{RempManager, RempInterfaceQueues},
-        sessions_computing::{GeneralSessionInfo, SessionValidatorsInfo, SessionValidatorsList, SessionValidatorsCache},
-        fabric::run_validate_query_any_candidate,
+        sessions_computing::{
+            GeneralSessionInfo, SessionValidatorsInfo, SessionValidatorsList, 
+            SessionValidatorsCache
+        },
         validator_group::{ValidatorGroup, ValidatorGroupStatus},
         validator_utils::{
             get_first_block_seqno_after_prevs,
             get_masterchain_seqno, get_block_info_by_id,
             compute_validator_list_id, get_group_members_by_validator_descrs, 
-            is_remp_enabled, try_calc_subset_for_workchain,
-            validatordescr_to_catchain_node, validatorset_to_string,
-            ValidatorListHash, ValidatorSubsetInfo,
-            try_calc_vset_for_workchain,
+            is_remp_enabled, try_calc_subset_for_workchain, validatordescr_to_catchain_node,
+            validatorset_to_string, ValidatorListHash, ValidatorSubsetInfo
         },
         out_msg_queue::OutMsgQueueInfoStuff,
     },
 };
-use crate::validator::validator_utils::try_calc_subset_for_workchain_standard;
-
+use crate::validator::{
+    BlockCandidate,
+    fabric::run_validate_query_any_candidate,
+    validator_utils::{
+        is_smft_enabled, try_calc_vset_for_workchain, try_calc_subset_for_workchain_standard
+    },
+    verification::{
+        GENERATE_MISSING_BLS_KEY, VerificationFactory, VerificationListener, 
+        VerificationManagerPtr
+    }
+};
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::{SlashingManager, SlashingManagerPtr};
 
@@ -47,18 +56,15 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime}
 };
-use crate::validator::verification::{VerificationFactory, VerificationListener, VerificationManagerPtr};
-use crate::validator::verification::GENERATE_MISSING_BLS_KEY;
-use crate::validator::BlockCandidate;
 use spin::mutex::SpinMutex;
 use tokio::time::timeout;
 use ton_api::IntoBoxed;
-use ton_block::{
+use ever_block::{
     BlockIdExt, ConfigParamEnum, ConsensusConfig, FutureSplitMerge, McStateExtra, ShardDescr, ShardIdent, 
     ValidatorDescr, ValidatorSet, BASE_WORKCHAIN_ID, MASTERCHAIN_ID, GlobalCapabilities, CatchainConfig, 
     UnixTime32
 };
-use ton_types::{error, fail, Result, UInt256};
+use ever_block::{error, fail, Result, UInt256};
 
 use crate::block::BlockIdExtExtention;
 
@@ -368,13 +374,14 @@ impl ValidatorManagerImpl {
             #[cfg(feature = "slashing")]
             slashing_manager: SlashingManager::create(),
             verification_manager: SpinMutex::new(None),
-            verification_listener: SpinMutex::new(None),
+            verification_listener: SpinMutex::new(None)
         }, remp_interface_queues)
     }
 
     /// Create/destroy verification manager
     fn update_verification_manager_usage(&self, mc_state_extra: &McStateExtra) {
-        let smft_enabled = !self.config.smft_disabled && crate::validator::validator_utils::is_smft_enabled(self.engine.clone(), mc_state_extra.config());
+        let smft_enabled = !self.config.smft_disabled && 
+            is_smft_enabled(self.engine.clone(), mc_state_extra.config());
         let verification_manager = self.verification_manager.lock().clone();
         let has_verification_manager = verification_manager.is_some();
 
@@ -1310,7 +1317,7 @@ impl ValidatorManagerImpl {
                         self.config.unsafe_resync_catchains.contains(next_cc_seqno),
                         #[cfg(feature = "slashing")]
                         self.slashing_manager.clone(),
-                        verification_manager,
+                        verification_manager
                     ));
                     self.validator_sessions.insert(session_id, session);
                 }

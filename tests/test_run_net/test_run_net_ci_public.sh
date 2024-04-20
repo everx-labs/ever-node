@@ -27,7 +27,7 @@ fi
 
 echo "Preparations..."
 
-pkill -9 ton_node > /dev/null 2>&1 || echo "No ton_node processes"
+pkill -9 ever-node > /dev/null 2>&1 || echo "No ever-node processes"
 cd "$TEST_ROOT"
 ./remove_junk.sh "$NODE_TARGET" "$NODES" > /dev/null 2>&1 || echo "Some unexpected error, but we don't give a shit about it"
 
@@ -67,7 +67,7 @@ for (( N=1; N <= NODES; N++ )) ; do
 
     echo "Validator's #$N config generating..."
 
-    pkill -9 ton_node > /dev/null 2>&1 || echo "No ton_node processes"
+    pkill -9 ever-node > /dev/null 2>&1 || echo "No ever-node processes"
 
     ./keygen > "$TEST_ROOT/tmp/genkey$N"
     jq -c .public "$TEST_ROOT/tmp/genkey$N" > console_public_json
@@ -106,7 +106,7 @@ for (( N=1; N <= NODES; N++ )) ; do
     cp "$NODE_TARGET/default_config$N.json" "$TEST_ROOT/tmp/default_config$N.json"
 
     rm -f tmp_output > /dev/null 2>&1
-    (./ton_node --configs . --ckey "$(cat console_public_json)" > tmp_output & wait 2>/dev/null) &
+    (./ever-node --configs . --ckey "$(cat console_public_json)" > tmp_output & wait 2>/dev/null) &
     echo "  waiting for 3 secs"
     sleep 3
     if [[ ! -f "console_config.json" ]] ; then
@@ -136,7 +136,7 @@ for (( N=1; N <= NODES; N++ )) ; do
 
     cp "$NODE_TARGET/config.json" "$TEST_ROOT/tmp/config$N.json"
 
-    pkill -9 ton_node > /dev/null 2>&1 || echo "No ton_node processes"
+    pkill -9 ever-node > /dev/null 2>&1 || echo "No ever-node processes"
 
 done
 
@@ -216,7 +216,7 @@ do
     cp "$TEST_ROOT/tmp/ton-global.config.json" "$NODE_TARGET/configs_$N/ton-global.config.json"
 
     # rm /shared/output_$N.log
-    (./ton_node --configs configs_$N -z . > "$NODE_LOG/output_$N.log" 2>&1 & wait 2>/dev/null) & 
+    (./ever-node --configs configs_$N -z . > "$NODE_LOG/output_$N.log" 2>&1 & wait 2>/dev/null) & 
 
 done
 
@@ -237,7 +237,7 @@ function find_block {
                 echo "ERROR: Can't find applied block ($1) on node #$N!"
                 PID="$(ps ax | grep configs_$N | grep -v grep | awk '{print $1}')"
                 gdb -p "$PID" -ex "thread apply all bt" -ex "detach" -ex "quit" > "$NODE_LOG/output_trace_$N.log"
-                pkill -9 ton_node > /dev/null 2>&1
+                pkill -9 ever-node > /dev/null 2>&1
                 exit 1
             fi
         fi
@@ -312,6 +312,6 @@ if [[ ! "$REMP_TEST" == "true" ]] ; then
     fi
 fi
 
-pkill -9 ton_node > /dev/null 2>&1
+pkill -9 ever-node > /dev/null 2>&1
 
 echo "TEST PASSED"

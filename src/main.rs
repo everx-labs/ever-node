@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -20,7 +20,6 @@ mod engine;
 mod engine_traits;
 mod engine_operations;
 mod error;
-mod ext_messages;
 #[cfg(feature = "external_db")]
 mod external_db;
 mod full_node;
@@ -34,6 +33,8 @@ mod types;
 mod validating_utils;
 mod validator;
 mod shard_states_keeper;
+
+mod ext_messages;
 
 mod shard_blocks;
 
@@ -66,9 +67,7 @@ use std::{
 use std::{
     fs::File, io::Write, mem::{self, MaybeUninit}, sync::atomic::{AtomicIsize, AtomicUsize}
 };
-#[cfg(feature = "external_db")]
-use ton_types::error;
-use ton_types::Result;
+use ever_block::Result;
 
 #[cfg(test)]
 #[path = "tests/test_helper.rs"]
@@ -281,31 +280,29 @@ fn get_version() -> String {
 fn get_build_info() -> String {
     let mut info = String::new();
     info += &format!(
-        "TON Node, version {}\n\
+        "EVER Node, version {}\n\
         Rust: {}\n\
         TON NODE git commit:         {}\n\
         ADNL git commit:             {}\n\
-        TON_BLOCK git commit:        {}\n\
-        TON_BLOCK_JSON git commit:   {}\n\
-        TON_EXECUTOR git commit:     {}\n\
+        EVER_BLOCK git commit:        {}\n\
+        EVER_BLOCK_JSON git commit:   {}\n\
+        EVER_EXECUTOR git commit:     {}\n\
         TON_TL git commit:           {}\n\
-        TON_TYPES git commit:        {}\n\
-        TON_VM git commit:           {}\n",
+        EVER_VM git commit:           {}\n",
         std::option_env!("CARGO_PKG_VERSION").unwrap_or(NOT_SET_LABEL),
         std::option_env!("BUILD_RUST_VERSION").unwrap_or(NOT_SET_LABEL),
         std::option_env!("BUILD_GIT_COMMIT").unwrap_or(NOT_SET_LABEL),
         adnl::build_commit().unwrap_or(NOT_SET_LABEL),
-        ton_block::build_commit().unwrap_or(NOT_SET_LABEL),
-        ton_block_json::build_commit().unwrap_or(NOT_SET_LABEL),
-        ton_executor::build_commit().unwrap_or(NOT_SET_LABEL),
+        ever_block::build_commit().unwrap_or(NOT_SET_LABEL),
+        ever_block_json::build_commit().unwrap_or(NOT_SET_LABEL),
+        ever_executor::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_api::build_commit().unwrap_or(NOT_SET_LABEL),
-        ton_types::build_commit().unwrap_or(NOT_SET_LABEL),
-        ton_vm::build_commit().unwrap_or(NOT_SET_LABEL),
+        ever_vm::build_commit().unwrap_or(NOT_SET_LABEL),
     );
     #[cfg(feature = "slashing")] {
         info += &format!(
-            "TON_ABI git commit:     {}\n",
-            ton_abi::build_commit().unwrap_or(NOT_SET_LABEL)
+            "EVER_ABI git commit:     {}\n",
+            ever_abi::build_commit().unwrap_or(NOT_SET_LABEL)
         );
     }
     info
@@ -316,7 +313,9 @@ fn start_external_db(config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>>
     let control_id = config.control_server()?.map(|config| *config.server_id());
     Ok(vec!(
         external_db::create_external_db(
-            config.external_db_config().ok_or_else(|| error!("Can't load external database config!"))?,
+            config.external_db_config().ok_or_else(
+                || ever_block::error!("Can't load external database config!")
+            )?,
             config.front_workchain_ids(),
             control_id,
         )?

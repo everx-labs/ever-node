@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -47,11 +47,10 @@ use ton_api::{
     }
 };
 
-use ton_block::{
-    Deserializable, Message, Serializable, MsgAddressInt, MsgAddrStd, 
-    ExternalInboundMessageHeader, BlockIdExt, UnixTime32
+use ever_block::{
+    error, fail, BlockIdExt, Deserializable, ExternalInboundMessageHeader, KeyId, Message,
+    MsgAddressInt, MsgAddrStd, Result, Serializable, SliceData, UInt256, UnixTime32
 };
-use ton_types::{error, fail, KeyId, SliceData, Result, UInt256};
 
 #[cfg(test)]
 #[path = "tests/test_message_cache.rs"]
@@ -126,7 +125,7 @@ impl RmqMessage {
     #[allow(dead_code)]
     pub fn make_test_message(body: &SliceData) -> Result<Self> {
         let address = UInt256::rand();
-        let msg = ton_block::Message::with_ext_in_header_and_body(ExternalInboundMessageHeader {
+        let msg = Message::with_ext_in_header_and_body(ExternalInboundMessageHeader {
             src: Default::default(),
             dst: MsgAddressInt::AddrStd(MsgAddrStd {
                 anycast: None,

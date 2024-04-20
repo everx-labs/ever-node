@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -18,8 +18,8 @@ use crate::collator_test_bundle::{create_block_handle_storage, create_engine_all
 use crate::collator_test_bundle::create_engine_telemetry;
 use std::{sync::{atomic::{AtomicU32, Ordering}, Arc}, collections::HashSet};
 use storage::{block_handle_db::{BlockHandle, BlockHandleStorage}, types::BlockMeta};
-use ton_block::{BlockIdExt, ShardIdent};
-use ton_types::UInt256;
+use ever_block::{BlockIdExt, ShardIdent};
+use ever_block::UInt256;
 
 struct TestEngine {
     pub last_applied_mc_block_seqno: AtomicU32,

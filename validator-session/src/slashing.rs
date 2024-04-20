@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -20,7 +20,7 @@ pub type PublicKeyHash = ::catchain::PublicKeyHash;
 pub type PublicKey = ::catchain::PublicKey;
 
 /// Slashing params
-pub type SlashingConfig = ::ton_block::SlashingConfig;
+pub type SlashingConfig = ::ever_block::SlashingConfig;
 
 /// Session statistics metric
 #[derive(Clone, Copy, Debug)]
@@ -367,8 +367,14 @@ impl AggregatedValidatorStat {
                     continue;
                 }
 
-                debug!("Add validator {} to slashed list because of score {:.4} with protection level {:.2} and min confidence level {:.4}",
-                    &hex::encode(entry.public_key.pub_key().expect("PublicKey is assigned")), score, min_slashing_protection_score, metric_norm.min_confidence_value);
+                log::debug!(
+                    "Add validator {} to slashed list because of score {:.4} \
+                    with protection level {:.2} and min confidence level {:.4}",
+                    &hex::encode(entry.public_key.pub_key().expect("PublicKey is assigned")), 
+                    score,
+                    min_slashing_protection_score,
+                    metric_norm.min_confidence_value
+                );
 
                 slashed_validators.push(SlashedNode {
                     public_key: entry.public_key.clone(),

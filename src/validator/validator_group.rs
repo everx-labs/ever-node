@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -16,8 +16,8 @@ use std::ops::RangeInclusive;
 use crossbeam_channel::Receiver;
 
 use catchain::utils::get_hash;
-use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, ValidatorDescr};
-use ton_types::{fail, error, Result, UInt256};
+use ever_block::{BlockIdExt, ShardIdent, ValidatorSet, ValidatorDescr};
+use ever_block::{fail, error, Result, UInt256};
 use validator_session::{
     BlockHash, BlockPayloadPtr, CatchainOverlayManagerPtr,
     SessionId, SessionPtr, SessionListenerPtr, SessionFactory,
@@ -61,7 +61,7 @@ use crate::validator::validator_utils::get_first_block_seqno_after_prevs;
 // #[cfg(feature = "fast_finality")]
 // use crate::validator::workchains_fast_finality::compute_actual_finish;
 
-use crate::validator::verification::{VerificationManagerPtr};
+use crate::validator::verification::VerificationManagerPtr;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum ValidatorGroupStatus {
@@ -635,7 +635,12 @@ impl ValidatorGroup {
         }
     }
 
-    pub async fn on_generate_slot(&self, round: u32, callback: ValidatorBlockCandidateCallback, rt: tokio::runtime::Handle) {
+    pub async fn on_generate_slot(
+        &self, 
+        round: u32, 
+        callback: ValidatorBlockCandidateCallback, 
+        rt: tokio::runtime::Handle
+    ) {
         let next_block_descr = self.get_next_block_descr().await;
         log::info!(
             target: "validator", 
@@ -659,12 +664,17 @@ impl ValidatorGroup {
         };
 
         if let Some(rmq) = self.get_reliable_message_queue().await {
-            log::info!(target: "validator", "ValidatorGroup::on_generate_slot: ({}) collecting REMP messages for {} for collation: {}",
+            log::info!(
+                target: "validator", 
+                "ValidatorGroup::on_generate_slot: ({}) collecting REMP messages \
+                for {} for collation: {}",
                 next_block_descr, self.info_round(round).await, include_external_messages
             );
             if include_external_messages {
                 if let Err(e) = rmq.collect_messages_for_collation().await {
-                    log::error!(target: "validator", "({}): Error collecting messages for {}: `{}`",
+                    log::error!(
+                        target: "validator", 
+                        "({}): Error collecting messages for {}: `{}`",
                         next_block_descr,
                         self.info_round(round).await,
                         e
@@ -698,6 +708,7 @@ impl ValidatorGroup {
             },
             None => None,
         };
+
         let result_message = match &result {
             Ok(_) => {
                 let now = std::time::SystemTime::now()
@@ -1046,7 +1057,7 @@ impl ValidatorGroup {
     }
 
     #[cfg(feature = "slashing")]
-    pub fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat) {
+    pub async fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat) {
         log::debug!(
             target: "validator", 
             "({}): ValidatorGroup::on_slashing_statistics round {}, stat {:?}",

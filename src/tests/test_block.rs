@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,13 +7,12 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use super::*;
-use ton_block::ShardIdent;
-use ton_types::read_single_root_boc;
+use ever_block::{Block, BlockIdExt, BlockProof, MerkleProof, read_single_root_boc, ShardIdent};
 
 #[test]
 fn test_block_stuff_deserialize() {
@@ -36,8 +35,8 @@ fn test_block_stuff_deserialize() {
 fn test_construct_and_check_prev_stuff_master() {
     let proof_data = std::fs::read("src/tests/static/test_master_block_proof_shuffle/proof__3236531").unwrap();
     let proof_root = read_single_root_boc(&proof_data).unwrap();
-    let proof = ton_block::BlockProof::construct_from_cell(proof_root.clone()).unwrap();
-    let merkle_proof = ton_block::MerkleProof::construct_from_cell(proof.root.clone()).unwrap();
+    let proof = BlockProof::construct_from_cell(proof_root.clone()).unwrap();
+    let merkle_proof = MerkleProof::construct_from_cell(proof.root.clone()).unwrap();
     let block_virt_root = merkle_proof.proof.clone().virtualize(1);
 
     let (id, stuff) = construct_and_check_prev_stuff(
@@ -46,7 +45,7 @@ fn test_construct_and_check_prev_stuff_master() {
         true
     ).unwrap();
 
-    let virt_block = ton_block::Block::construct_from_cell(block_virt_root.clone()).unwrap();
+    let virt_block = Block::construct_from_cell(block_virt_root.clone()).unwrap();
     let virt_block_info = virt_block.read_info().unwrap();
     let prev = virt_block_info.read_prev_ids().unwrap();
     let prev = &prev[0];
@@ -72,8 +71,8 @@ fn test_construct_and_check_prev_stuff_master() {
 fn test_construct_and_check_prev_stuff_shard() {
     let proof_data = std::fs::read("src/tests/static/test_shard_block_proof/proof_4377262").unwrap();
     let proof_root = read_single_root_boc(&proof_data).unwrap();
-    let proof = ton_block::BlockProof::construct_from_cell(proof_root.clone()).unwrap();
-    let merkle_proof = ton_block::MerkleProof::construct_from_cell(proof.root.clone()).unwrap();
+    let proof = BlockProof::construct_from_cell(proof_root.clone()).unwrap();
+    let merkle_proof = MerkleProof::construct_from_cell(proof.root.clone()).unwrap();
     let block_virt_root = merkle_proof.proof.clone().virtualize(1);
 
     let (id, stuff) = construct_and_check_prev_stuff(
@@ -82,12 +81,12 @@ fn test_construct_and_check_prev_stuff_shard() {
         true
     ).unwrap();
 
-    let virt_block = ton_block::Block::construct_from_cell(block_virt_root.clone()).unwrap();
+    let virt_block = Block::construct_from_cell(block_virt_root.clone()).unwrap();
     let virt_block_info = virt_block.read_info().unwrap();
 
     let prev = virt_block_info.read_prev_ids().unwrap();
     let prev = &prev[0];
-    let prev_block_id = ton_block::BlockIdExt {
+    let prev_block_id = BlockIdExt {
         shard_id: virt_block_info.shard().clone(),
         seq_no: prev.seq_no,
         root_hash: prev.root_hash.clone(),
@@ -96,7 +95,7 @@ fn test_construct_and_check_prev_stuff_shard() {
 
     let mc_block_id = virt_block_info.read_master_ref().unwrap().unwrap().master;
     let mc_block_id = BlockIdExt {
-        shard_id: ton_block::ShardIdent::masterchain(),
+        shard_id: ShardIdent::masterchain(),
         seq_no: mc_block_id.seq_no,
         root_hash: mc_block_id.root_hash.clone(),
         file_hash: mc_block_id.file_hash.clone()

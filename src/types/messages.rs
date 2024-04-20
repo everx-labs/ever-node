@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,18 +7,18 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use std::fmt::{self, Display, Formatter};
-use ton_block::{
+use ever_block::{
     GlobalCapabilities,
     Message, EnqueuedMsg, MsgEnvelope, AccountIdPrefixFull, IntermediateAddress, OutMsgQueueKey,
     Serializable, Deserializable, Grams, ShardIdent, AddSub,
 };
-use ton_executor::{BlockchainConfig, CalcMsgFwdFees};
-use ton_types::{error, fail, Result, AccountId, Cell, SliceData, UInt256};
+use ever_executor::{BlockchainConfig, CalcMsgFwdFees};
+use ever_block::{error, fail, Result, AccountId, Cell, SliceData, UInt256};
 
 #[cfg(test)]
 #[path = "tests/test_messages.rs"]

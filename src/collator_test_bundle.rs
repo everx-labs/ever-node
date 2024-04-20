@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -36,13 +36,13 @@ use storage::{
 };
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
-use ton_block::{
+use ever_block::{
     BlockIdExt, Message, ShardIdent, Serializable, MerkleUpdate, Deserializable, 
     ValidatorBaseInfo, BlockSignaturesPure, BlockSignatures, HashmapAugType, 
     TopBlockDescrSet, GlobalCapabilities, OutMsgQueue,
 };
-use ton_block::{ShardStateUnsplit, TopBlockDescr};
-use ton_types::{UInt256, fail, error, Result, CellType, read_boc, read_single_root_boc};
+use ever_block::{ShardStateUnsplit, TopBlockDescr};
+use ever_block::{UInt256, fail, error, Result, CellType, read_boc, read_single_root_boc};
 use crate::engine_traits::RempDuplicateStatus;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -57,7 +57,9 @@ struct CollatorTestBundleIndexJson {
     prev_blocks: Vec<String>,
     created_by: String,
     rand_seed: String,
+    #[serde(skip_serializing)]
     now: u32,
+    now_ms: u64,
     fake: bool,
     contains_ethalon: bool,
     #[serde(default)]
@@ -100,7 +102,7 @@ impl TryFrom<CollatorTestBundleIndexJson> for CollatorTestBundleIndex {
             prev_blocks,
             created_by: value.created_by.parse()?,
             rand_seed: Some(value.rand_seed.parse()?),
-            now: value.now,
+            now_ms: if value.now_ms == 0 { (value.now as u64) * 1000 } else { value.now_ms },
             fake: value.fake,
             contains_ethalon: value.contains_ethalon,
             contains_candidate: value.contains_candidate,
@@ -125,7 +127,8 @@ impl From<&CollatorTestBundleIndex> for CollatorTestBundleIndexJson {
                 Some(rand_seed) => rand_seed.to_hex_string(),
                 None => UInt256::default().to_hex_string(),
             },
-            now: value.now,
+            now: (value.now_ms / 1000) as u32,
+            now_ms: value.now_ms,
             fake: value.fake,
             contains_ethalon: value.contains_ethalon,
             contains_candidate: value.contains_candidate,
@@ -145,7 +148,7 @@ struct CollatorTestBundleIndex {
     prev_blocks: Vec<BlockIdExt>,
     created_by: UInt256,
     rand_seed: Option<UInt256>,
-    now: u32,
+    now_ms: u64,
     fake: bool,
     contains_ethalon: bool,
     contains_candidate: bool,
@@ -254,12 +257,12 @@ impl CollatorTestBundle {
             &allocated
         )?;
 
-        let mut now = mc_state.state()?.gen_time() + 1;
+        let mut now_ms = mc_state.state()?.gen_time_ms() + 1;
         let mut states = HashMap::new();
         states.insert(last_mc_state.clone(), mc_state);
         for wc_zero_state_name in wc_zero_state_names {
             let (wc_state, wc_fh, wc_rh) = construct_from_file::<ShardStateUnsplit>(wc_zero_state_name)?;
-            now = std::cmp::max(now, wc_state.gen_time() + 1);
+            now_ms = now_ms.max(wc_state.gen_time_ms() + 1);
             let block_id = BlockIdExt::with_params(wc_state.shard().clone(), 0, wc_rh, wc_fh);
             let wc_state = ShardStateStuff::from_state(
                 block_id.clone(), 
@@ -286,7 +289,7 @@ impl CollatorTestBundle {
             prev_blocks,
             created_by: UInt256::default(),
             rand_seed: None,
-            now,
+            now_ms,
             fake: true,
             contains_ethalon: false,
             contains_candidate: false,
@@ -337,10 +340,10 @@ impl CollatorTestBundle {
         // uncomment this block, and change dst address then run test
         // add id (new filename of message) to external messages in index.json
         // std::fs::create_dir_all(format!("{}/external_messages", path)).ok();
-        // let src = ton_block::MsgAddressExt::with_extern([0x77; 32].into())?;
+        // let src = ever_block::MsgAddressExt::with_extern([0x77; 32].into())?;
         // let dst = hex::decode("b1219502b825ef2345f49fc9065e485e7f478bddafa63039d00c63e494ab7090")?;
-        // let dst = ton_block::MsgAddressInt::with_standart(None, 0, dst.into())?;
-        // let h = ton_block::ExternalInboundMessageHeader::new(src, dst);
+        // let dst = ever_block::MsgAddressInt::with_standart(None, 0, dst.into())?;
+        // let h = ever_block::ExternalInboundMessageHeader::new(src, dst);
         // let msg = Message::with_ext_in_header(h);
         // let id = msg.serialize()?.repr_hash();
         // let filename = format!("{}/external_messages/{:x}", path, id);
@@ -606,7 +609,10 @@ impl CollatorTestBundle {
         //
         // external messages
         //
-        let external_messages = engine.get_external_messages_iterator(shard.clone(), 0).collect::<Vec<_>>();
+        let external_messages = engine.get_external_messages_iterator(
+            shard.clone(),
+            0
+        ).collect::<Vec<_>>();
 
         // 
         // neighbors
@@ -706,7 +712,7 @@ impl CollatorTestBundle {
             prev_blocks: prev_blocks_ids,
             created_by: UInt256::default(),
             rand_seed: None,
-            now: engine.now(),
+            now_ms: engine.now_ms(),
             fake: true,
             contains_ethalon: false,
             contains_candidate: false,
@@ -771,7 +777,10 @@ impl CollatorTestBundle {
         //
         // external messages
         //
-        let external_messages = engine.get_external_messages_iterator(shard.clone(), 0).collect::<Vec<_>>();
+        let external_messages = engine.get_external_messages_iterator(
+            shard.clone(),
+            0
+        ).collect::<Vec<_>>();
 
         // 
         // neighbors
@@ -862,7 +871,7 @@ impl CollatorTestBundle {
             prev_blocks: prev_blocks_ids,
             created_by: candidate.created_by.clone(),
             rand_seed: None,
-            now: b.block()?.read_info()?.gen_utime().as_u32(),
+            now_ms: b.block()?.read_info()?.gen_utime_ms(),
             fake: true,
             contains_ethalon: false,
             contains_candidate: true,
@@ -1071,7 +1080,7 @@ impl CollatorTestBundle {
             prev_blocks: prev_blocks_ids,
             created_by: extra.created_by().clone(),
             rand_seed: Some(extra.rand_seed().clone()),
-            now: info.gen_utime().as_u32(),
+            now_ms: info.gen_utime_ms(),
             fake: true,
             contains_ethalon: true,
             contains_candidate: false,
@@ -1219,7 +1228,11 @@ impl CollatorTestBundle {
 impl EngineOperations for CollatorTestBundle {
 
     fn now(&self) -> u32 {
-        self.index.now
+        (self.index.now_ms / 1000) as u32
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.index.now_ms
     }
 
     fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {

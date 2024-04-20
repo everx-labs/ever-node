@@ -21,7 +21,7 @@ use spin::mutex::SpinMutex;
 use ton_api::ton::ton_node::blockcandidatestatus::BlockCandidateStatus;
 use ton_api::ton::ton_node::broadcast::BlockCandidateBroadcast;
 use ton_api::IntoBoxed;
-use ton_types::Result;
+use ever_block::Result;
 use validator_session::ValidatorWeight;
 use catchain::serialize_tl_boxed_object;
 
@@ -250,8 +250,8 @@ impl Block {
             return serialized_block_status.clone();
         }
 
-        let ton_block = self.status().into_boxed();
-        let serialized_block_status = serialize_tl_boxed_object!(&ton_block);
+        let ever_block = self.status().into_boxed();
+        let serialized_block_status = serialize_tl_boxed_object!(&ever_block);
         let serialized_block_status =
             catchain::CatchainFactory::create_block_payload(serialized_block_status);
 

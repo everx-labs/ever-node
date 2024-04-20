@@ -24,7 +24,7 @@ use std::time::Duration;
 use std::time::UNIX_EPOCH;
 use spin::mutex::SpinMutex;
 use ton_api::ton::ton_node::broadcast::BlockCandidateBroadcast;
-use ton_types::Result;
+use ever_block::Result;
 use catchain::utils::MetricsDumper;
 use catchain::utils::MetricsHandle;
 use catchain::PublicKeyHash;

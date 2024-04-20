@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,15 +7,21 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use adnl::{
     common::TaggedTlObject, client::{AdnlClient, AdnlClientConfig, AdnlClientConfigJson}
 };
+use ever_abi::{Contract, Token, TokenValue, Uint};
+use ever_block::{
+    error, fail, AccountStatus, base64_decode, base64_encode, BlockIdExt, BuilderData, 
+    Deserializable, Ed25519KeyOption, Result, Serializable, ShardAccount, SliceData, 
+    UInt256, write_boc
+};
+use ever_block_json::parse_state;
 use std::{collections::HashMap, convert::TryInto, env, str::FromStr, time::Duration};
-use ton_abi::{Contract, Token, TokenValue, Uint};
 use ton_api::{
     serialize_boxed,
     ton::{
@@ -26,13 +32,6 @@ use ton_api::{
 };
 #[cfg(feature = "telemetry")]
 use ton_api::tag_from_bare_object;
-use ton_block::{
-    AccountStatus, Deserializable, BlockIdExt, Serializable, ShardAccount
-};
-use ton_types::{
-    error, fail, base64_decode, base64_encode, BuilderData, Ed25519KeyOption, Result, 
-    SliceData, UInt256, write_boc
-};
 
 include!("../common/src/test.rs");
 
@@ -626,7 +625,7 @@ impl ControlClient {
         let body = BuilderData::with_raw(data, len)?;
         let body = body.into_cell()?;
         log::trace!("message body {}", body);
-        let data = ton_types::write_boc(&body)?;
+        let data = write_boc(&body)?;
         let path = params.next().map(
             |path| path.to_string()).unwrap_or("recover-query.boc".to_string()
         );
@@ -780,7 +779,7 @@ impl ControlClient {
             body
         };
         log::trace!("message body {}", body);
-        let data = ton_types::write_boc(&body)?;
+        let data = write_boc(&body)?;
         let path = params.next().map(
             |path| path.to_string()).unwrap_or("validator-query.boc".to_string()
         );
@@ -808,7 +807,7 @@ impl ControlClient {
         let zerostate = 
             serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&zerostate)
                 .map_err(|err| error!("Can't parse read zerostate json file: {}", err))?;
-        let zerostate = ton_block_json::parse_state(&zerostate)
+        let zerostate = parse_state(&zerostate)
             .map_err(|err| error!("Can't parse read zerostate json file: {}", err))?;
 
         let key = SliceData::load_builder(index.write_to_new_cell()?)?;
@@ -941,12 +940,12 @@ mod test {
     use serde_json::json;
     use storage::block_handle_db::BlockHandle;
     use ton_api::deserialize_boxed;
-    use ton_block::{
+    use ever_block::{
         generate_test_account_by_init_code_hash,
         BlockLimits, ConfigParam0, ConfigParam34, ConfigParamEnum, McStateExtra, ParamLimits, 
         ShardIdent, ShardStateUnsplit, ValidatorDescr, ValidatorSet
     };
-    use ton_node::{
+    use ever_node::{
         collator_test_bundle::{create_engine_telemetry, create_engine_allocated},
         config::TonNodeConfig, engine_traits::{EngineAlloc, EngineOperations},
         internal_db::{InternalDbConfig, InternalDb, state_gc_resolver::AllowStateGcSmartResolver}, 
@@ -955,7 +954,7 @@ mod test {
         validator::validator_manager::ValidationStatus, shard_states_keeper::PinnedShardStateGuard,
     };
     #[cfg(feature = "telemetry")]
-    use ton_node::engine_traits::EngineTelemetry;
+    use ever_node::engine_traits::EngineTelemetry;
 
     const CFG_DIR: &str = "./target";
     const CFG_NODE_FILE: &str = "light_node.json";
@@ -987,7 +986,7 @@ mod test {
                 &ShardAccount::with_params(&account, UInt256::default(), 0).unwrap()
             ).unwrap();
             let cell = ss.serialize().unwrap();
-            let bytes = ton_types::write_boc(&cell).unwrap();
+            let bytes = write_boc(&cell).unwrap();
             let shard_state_id = BlockIdExt::with_params(
                 ShardIdent::full(0),
                 0,
@@ -1025,7 +1024,7 @@ mod test {
             ss.write_custom(Some(&ms)).unwrap();
 
             let cell = ss.serialize().unwrap();
-            let bytes = ton_types::write_boc(&cell).unwrap();
+            let bytes = write_boc(&cell).unwrap();
             let master_state_id = BlockIdExt::with_params(
                 ShardIdent::masterchain(),
                 0,

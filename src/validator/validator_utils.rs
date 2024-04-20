@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -17,18 +17,16 @@ use crate::{
 };
 
 use catchain::{BlockPayloadPtr, CatchainNode, PublicKey, PublicKeyHash};
+use ever_block::{
+    error, fail, BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, BuilderData,
+    ConfigParams, CryptoSignature, CryptoSignaturePair, Deserializable, Ed25519KeyOption,
+    GlobalCapabilities, HashmapType, KeyId, Message, Result, Serializable, Sha256, ShardIdent,
+    SigPubKey, UInt256, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet, Workchains,
+    WorkchainDescr
+};
+use ever_block::CatchainConfig;
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
-use ton_block::{
-    BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, CatchainConfig, ConfigParams, 
-    CryptoSignature, CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, 
-    Serializable, ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, 
-    ValidatorSet, Workchains, WorkchainDescr
-};
-use ton_types::{
-    error, fail, BuilderData, HashmapType, Ed25519KeyOption, KeyId,
-    Result, Sha256, UInt256
-};
 use validator_session::SessionNode;
 
 #[cfg(test)]
@@ -111,7 +109,7 @@ pub fn validatordescr_to_catchain_node(descr: &ValidatorDescr) -> CatchainNode {
     }
 }
 
-pub fn validatordescr_to_session_node(descr: &ValidatorDescr) -> ton_types::Result<SessionNode> {
+pub fn validatordescr_to_session_node(descr: &ValidatorDescr) -> Result<SessionNode> {
     Ok(validator_session::SessionNode {
         adnl_id: get_adnl_id(descr),
         public_key: sigpubkey_to_publickey(&descr.public_key),

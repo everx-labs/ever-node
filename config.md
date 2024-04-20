@@ -5,7 +5,6 @@ Root section
   allows to synchronize node by archives instead of single blocks. It may be useful in some 
   conditions, for example, long ping to other nodes.
 
-
 `remp` section
 ------------
 

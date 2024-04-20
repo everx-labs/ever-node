@@ -6,8 +6,8 @@ use crate::{
     },
     shard_state::ShardStateStuff,
 };
-use ton_block::{BlockIdExt, MASTERCHAIN_ID};
-use ton_types::{error, fail, Result, Cell};
+use ever_block::{BlockIdExt, MASTERCHAIN_ID};
+use ever_block::{error, fail, Result, Cell};
 use storage::{
     traits::Serializable, dynamic_boc_rc_db::BROKEN_CELL_BEACON_FILE,
     shardstate_db_async::SsNotificationCallback,

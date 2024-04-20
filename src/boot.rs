@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -20,8 +20,8 @@ use std::collections::HashSet;
 use std::{ops::Deref, sync::Arc, time::Duration};
 use std::path::Path;
 use storage::block_handle_db::BlockHandle;
-use ton_block::{BlockIdExt, ShardIdent, SHARD_FULL};
-use ton_types::{error, fail, KeyId, Result};
+use ever_block::{BlockIdExt, ShardIdent, SHARD_FULL};
+use ever_block::{error, fail, KeyId, Result};
 use crate::block::BlockStuff;
 use crate::validator::accept_block::create_new_proof_link;
 

@@ -7,15 +7,13 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use super::{BlockCandidate, McData};
 use crate::{
-    block::BlockStuff,
-    engine_traits::EngineOperations,
-    error::NodeError,
+    block::BlockStuff, engine_traits::EngineOperations, error::NodeError,
     shard_state::ShardStateStuff,
     types::{
         messages::{count_matching_bits, perform_hypercube_routing, MsgEnqueueStuff},
@@ -27,37 +25,35 @@ use crate::{
         UNREGISTERED_CHAIN_MAX_LEN, fmt_next_block_descr,
     },
     validator::{out_msg_queue::MsgQueueManager, validator_utils::calc_subset_for_masterchain},
-    validator::verification::VerificationManagerPtr,
     CHECK,
 };
+use crate::validator::verification::VerificationManagerPtr;
 
 use adnl::common::add_unbound_object_to_map_with_update;
+use ever_block::{
+    fail, Account, AccountBlock, AccountId, AccountIdPrefixFull, AccountStatus, AddSub,
+    base64_encode, BlockCreateStats, BlockError, BlockExtra, BlockIdExt, BlockInfo, BlockLimits,
+    Cell, CellType, config_params, ConfigParamEnum, ConfigParams, CopyleftRewards, Counters,
+    CreatorStats, CurrencyCollection, DepthBalanceInfo, Deserializable, EnqueuedMsg,
+    GlobalCapabilities, Grams, HashmapAugType, HashmapType, InMsg, InMsgDescr,
+    INVALID_WORKCHAIN_ID, KeyExtBlkRef, KeyMaxLt, LibDescr, Libraries, McBlockExtra,
+    MASTERCHAIN_ID, MAX_SPLIT_DEPTH, McShardRecord, McStateExtra, MerkleProof, MerkleUpdate,
+    Message, MsgAddressInt, MsgEnvelope, OutMsg, OutMsgDescr, OutMsgQueueInfo, OutMsgQueueKey,
+    OutQueueUpdate, read_boc, Result, Serializable, ShardAccount, ShardAccountBlocks,
+    ShardAccounts, ShardFeeCreated, ShardHashes, ShardIdent, SliceData, StateInitLib,
+    TopBlockDescrSet, TrComputePhase, Transaction, TransactionDescr, ValidatorSet, ValueFlow,
+    U15, UInt256, WorkchainDescr, write_boc
+};
+use ever_executor::{
+    BlockchainConfig, CalcMsgFwdFees, ExecuteParams, OrdinaryTransactionExecutor,
+    TickTockTransactionExecutor, TransactionExecutor,
+};
 use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
     },
-};
-use ton_block::{
-    config_params, Account, AccountBlock, AccountIdPrefixFull, AccountStatus, AddSub,
-    BlockCreateStats, BlockError, BlockExtra, BlockIdExt, BlockInfo, BlockLimits, ConfigParamEnum,
-    ConfigParams, CopyleftRewards, Counters, CreatorStats, CurrencyCollection, DepthBalanceInfo,
-    Deserializable, EnqueuedMsg, GlobalCapabilities, Grams, HashmapAugType, InMsg, InMsgDescr,
-    KeyExtBlkRef, KeyMaxLt, LibDescr, Libraries, McBlockExtra, McShardRecord, McStateExtra,
-    MerkleProof, MerkleUpdate, Message, MsgAddressInt, MsgEnvelope, OutMsg, OutMsgDescr,
-    OutMsgQueueKey, Serializable, ShardAccount, ShardAccountBlocks, ShardAccounts, ShardFeeCreated,
-    ShardHashes, ShardIdent, StateInitLib, TopBlockDescrSet, TrComputePhase, Transaction,
-    TransactionDescr, ValidatorSet, ValueFlow, WorkchainDescr, INVALID_WORKCHAIN_ID,
-    MASTERCHAIN_ID, U15, OutMsgQueueInfo, OutQueueUpdate, MAX_SPLIT_DEPTH
-};
-use ton_executor::{
-    BlockchainConfig, CalcMsgFwdFees, ExecuteParams, OrdinaryTransactionExecutor,
-    TickTockTransactionExecutor, TransactionExecutor,
-};
-use ton_types::{
-    read_boc, fail, AccountId, base64_encode, Cell, CellType, HashmapType, Result, 
-    SliceData, UInt256
 };
 
 use crate::engine_traits::RempDuplicateStatus;
@@ -261,9 +257,8 @@ impl ValidateQuery {
             create_stats_enabled: Default::default(),
             block_create_total: Default::default(),
             block_create_count: Default::default(),
-
             next_block_descr,
-            verification_manager,
+            verification_manager
         }
     }
 
@@ -4534,8 +4529,8 @@ impl ValidateQuery {
     ) -> Result<()> {
         log::trace!(target: "validate_reject",
             "acc_before: {}\nacc_after: {}\nconfig: {}\ntrans_origin: {}\ntrans_execute: {}",
-            base64_encode(ton_types::write_boc(&account_before)?),
-            base64_encode(ton_types::write_boc(&account_after)?),
+            base64_encode(write_boc(&account_before)?),
+            base64_encode(write_boc(&account_after)?),
             base64_encode(config.write_to_bytes()?),
             base64_encode(trans.write_to_bytes()?),
             base64_encode(trans_execute.write_to_bytes()?)
