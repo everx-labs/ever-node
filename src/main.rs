@@ -282,7 +282,7 @@ fn get_build_info() -> String {
     info += &format!(
         "EVER Node, version {}\n\
         Rust: {}\n\
-        TON NODE git commit:         {}\n\
+        EVER NODE git commit:         {}\n\
         ADNL git commit:             {}\n\
         EVER_BLOCK git commit:        {}\n\
         EVER_BLOCK_JSON git commit:   {}\n\
