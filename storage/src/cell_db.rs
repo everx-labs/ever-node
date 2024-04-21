@@ -17,10 +17,6 @@ use crate::{
     types::{StorageCell},
 };
 
-#[cfg(not(feature = "ref_count_gc"))]
-use crate::dynamic_boc_db::DynamicBocDb;
-
-#[cfg(feature = "ref_count_gc")]
 use crate::dynamic_boc_rc_db::DynamicBocDb;
 
 use std::{sync::Arc, io::{Cursor, Write}};
@@ -33,31 +29,31 @@ impl CellDb {
     pub fn get_cell(
         &self, 
         cell_id: &UInt256,
-        boc_db: Arc<DynamicBocDb>, 
-        #[cfg(feature = "ref_count_gc")]
-        use_cache: bool
-    ) -> Result<StorageCell> {
+        boc_db: &Arc<DynamicBocDb>, 
+        use_cache: bool,
+        with_parents_count: bool,
+    ) -> Result<(StorageCell, u32)> {
         StorageCell::deserialize(
             boc_db, 
             self.db.get(cell_id)?.as_ref(), 
-            #[cfg(feature = "ref_count_gc")]
-            use_cache
+            use_cache,
+            with_parents_count,
         )
     }
 
     pub fn try_get_cell(
         &self,
         cell_id: &UInt256,
-        boc_db: Arc<DynamicBocDb>,
-        #[cfg(feature = "ref_count_gc")]
-        use_cache: bool
-    ) -> Result<Option<StorageCell>> {
+        boc_db: &Arc<DynamicBocDb>,
+        use_cache: bool,
+        with_parents_count: bool,
+    ) -> Result<Option<(StorageCell, u32)>> {
         if let Some(data) = self.db.try_get(cell_id)? {
             Ok(Some(StorageCell::deserialize(
                 boc_db, 
                 data.as_ref(), 
-                #[cfg(feature = "ref_count_gc")]
-                use_cache
+                use_cache,
+                with_parents_count,
             )?))
         } else {
             Ok(None)

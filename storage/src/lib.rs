@@ -18,23 +18,19 @@ pub mod block_info_db;
 pub mod catchain_persistent_db;
 mod cell_db;
 pub mod db;
-#[cfg(not(feature = "ref_count_gc"))]
-mod dynamic_boc_db;
-#[cfg(feature = "ref_count_gc")]
-mod dynamic_boc_rc_db;
-mod error;
+pub mod dynamic_boc_rc_db;
+pub mod error;
 mod macros; 
 pub mod node_state_db;
-#[cfg(not(feature = "ref_count_gc"))]
-pub mod shardstate_db;
-#[cfg(feature = "ref_count_gc")]
 pub mod shardstate_db_async;
 pub mod traits;
 pub mod types;
 pub mod shard_top_blocks_db;
+#[cfg(test)]
+mod tests;
 
 #[cfg(feature = "telemetry")]
-use adnl::telemetry::Metric;
+use adnl::telemetry::{Metric, MetricBuilder};
 use std::{sync::{Arc, atomic::AtomicU64}, time::{Duration, Instant}};
 
 pub struct TimeChecker {
@@ -72,14 +68,44 @@ pub struct StorageTelemetry {
     pub file_entries: Arc<Metric>,
     pub handles: Arc<Metric>,
     pub packages: Arc<Metric>,
-    pub storage_cells: Arc<Metric>
+    pub storage_cells: Arc<Metric>,
+    pub storing_cells: Arc<Metric>,
+    pub shardstates_queue: Arc<Metric>,
+    pub cells_counters: Arc<Metric>,
+    pub cell_counter_from_cache: Arc<MetricBuilder>,
+    pub cell_counter_from_db: Arc<MetricBuilder>,
+    pub updated_old_cells: Arc<MetricBuilder>,
+    pub updated_cells: Arc<MetricBuilder>,
+    pub new_cells: Arc<MetricBuilder>,
+    pub deleted_cells: Arc<MetricBuilder>,
+}
+#[cfg(feature = "telemetry")]
+impl Default for StorageTelemetry {
+    fn default() -> Self {
+        Self {
+            file_entries: Metric::without_totals("", 1),
+            handles: Metric::without_totals("", 1),
+            packages: Metric::without_totals("", 1),
+            storage_cells: Metric::without_totals("", 1),
+            storing_cells: Metric::without_totals("", 1),
+            shardstates_queue: Metric::without_totals("", 1),
+            cells_counters: Metric::without_totals("", 1),
+            cell_counter_from_cache: MetricBuilder::with_metric_and_period(Metric::with_total_amount("", 1), 1000000000),
+            cell_counter_from_db: MetricBuilder::with_metric_and_period(Metric::with_total_amount("", 1), 1000000000),
+            updated_old_cells: MetricBuilder::with_metric_and_period(Metric::with_total_amount("", 1), 1000000000),
+            updated_cells: MetricBuilder::with_metric_and_period(Metric::with_total_amount("", 1), 1000000000),
+            new_cells: MetricBuilder::with_metric_and_period(Metric::with_total_amount("", 1), 1000000000),
+            deleted_cells: MetricBuilder::with_metric_and_period(Metric::with_total_amount("", 1), 1000000000),
+        }
+    }
 }
 
+#[derive(Default)]
 pub struct StorageAlloc {
     pub file_entries: Arc<AtomicU64>,
     pub handles: Arc<AtomicU64>,
     pub packages: Arc<AtomicU64>,
-    pub storage_cells: Arc<AtomicU64>
+    pub storage_cells: Arc<AtomicU64>,
 }
 
 pub(crate) const TARGET: &str = "storage";

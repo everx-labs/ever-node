@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -25,7 +25,7 @@ use rocksdb::{
 };
 use std::{
     fmt::{Debug, Formatter}, ops::Deref, path::Path, sync::{Arc, atomic::{AtomicI32, Ordering}},
-    io::Cursor,
+    io::Cursor, collections::HashSet,
 };
 use ton_types::{fail, error, Result};
 use ton_block::BlockIdExt;
@@ -36,61 +36,39 @@ pub const NODE_STATE_DB_NAME: &str = "node_state_db";
 #[derive(Debug)]
 pub struct RocksDb {
     db: Option<DBWithThreadMode<MultiThreaded>>,
-    locks: lockfree::map::Map<String, AtomicI32>
+    locks: lockfree::map::Map<String, AtomicI32>,
+    hi_perf_cfs: HashSet<String>
 }
 
 impl RocksDb {
 
     /// Creates new instance with given path
     pub fn with_path(path: &str, name: &str) -> Result<Arc<Self>> {
-        Self::with_options(path, name, |_| {}, false)
+        Self::with_options(path, name, HashSet::new(), false)
     }
 
     /// Creates new instance read only with given path
     pub fn read_only(path: &str, name: &str) -> Result<Arc<Self>> {
-        Self::with_options(path, name, |_| {}, true)
+        Self::with_options(path, name, HashSet::new(), true)
     }
 
     /// Creates new instance with given path and ability to additionally configure options
     pub fn with_options(
         path: &str, 
         name: &str,
-        configure_options: impl Fn(&mut Options), 
+        hi_perf_cfs: HashSet<String>,
         read_only: bool
     ) -> Result<Arc<Self>> {
 
         let path = Path::new(path);
         let path = path.join(name);
 
-        let cache = Cache::new_lru_cache(1 << 30).unwrap(); //1Gb block cache for one instance
-        let mut block_opts = BlockBasedOptions::default();
-        block_opts.set_block_cache(&cache);
-        // save in LRU block cache also indexes and bloom filters
-        block_opts.set_cache_index_and_filter_blocks(true); 
-        // keep indexes and filters in block cache until tablereader freed
-        block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true); 
-        block_opts.set_block_size(16 << 10);
-        // use latest available format version with new implementation of bloom filters
-        block_opts.set_format_version(5); 
-
-        let mut options = Options::default();
-        options.create_if_missing(true);
-        options.set_max_total_wal_size(512 << 20); // 512Mb for one instance
-        options.set_max_background_jobs(4);
-        // allow background async incrementall file sync to disk by 1Mb per sync
-        options.set_bytes_per_sync(1 << 20); 
-        options.set_block_based_table_factory(&block_opts);
-        options.create_missing_column_families(true);
-        options.enable_statistics();
-        options.set_dump_malloc_stats(true);
-
-        configure_options(&mut options);
+        let options = Self::build_db_options();
 
         let mut iteration = 1;
         loop {
 
-            let cfs = DBWithThreadMode::<MultiThreaded>::list_cf(&options, &path)
-                .unwrap_or(Vec::new());
+            let cfs = DBWithThreadMode::<MultiThreaded>::list_cf(&options, &path).unwrap_or_default();
 
             log::info!(
                 target: "storage",
@@ -99,10 +77,19 @@ impl RocksDb {
             );
             iteration += 1;
 
+            let cfs_opt = cfs.clone().into_iter()
+                .map(|cf| {
+                    let opt = if hi_perf_cfs.contains(&cf) {
+                        Self::build_hi_perf_cf_options()
+                    } else {
+                        Options::default()
+                    };
+                    rocksdb::ColumnFamilyDescriptor::new(cf, opt)
+                });
             let db = if read_only {
-                DBWithThreadMode::<MultiThreaded>::open_cf_for_read_only(&options, &path, cfs.clone(), false)?
+                DBWithThreadMode::<MultiThreaded>::open_cf_descriptors_read_only(&options, &path, cfs_opt, false)?
             } else {
-                DBWithThreadMode::<MultiThreaded>::open_cf(&options, &path, cfs.clone())?
+                DBWithThreadMode::<MultiThreaded>::open_cf_descriptors(&options, &path, cfs_opt)?
             };
 
 
@@ -120,10 +107,103 @@ impl RocksDb {
 
             let db = Self {
                 db: Some(db),
-                locks: lockfree::map::Map::new()
+                locks: lockfree::map::Map::new(),
+                hi_perf_cfs,
             };
             return Ok(Arc::new(db))
         }
+    }
+
+    fn build_hi_perf_cf_options() -> Options {
+
+        let mut options = Options::default();
+        let mut block_opts = BlockBasedOptions::default();
+
+        // specified cache for blocks.
+        let cache = Cache::new_lru_cache(1024 * 1024 * 1024);
+        block_opts.set_block_cache(&cache);
+
+        // save in LRU block cache also indexes and bloom filters
+        block_opts.set_cache_index_and_filter_blocks(true); 
+
+        // keep indexes and filters in block cache until tablereader freed
+        block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true); 
+
+        // Setup bloom filter with length of 10 bits per key. 
+        // This length provides less than 1% false positive rate.
+        block_opts.set_bloom_filter(10.0, false);
+
+        options.set_block_based_table_factory(&block_opts);
+
+        // Enable whole key bloom filter in memtable.
+        options.set_memtable_whole_key_filtering(true);
+
+        // Amount of data to build up in memory (backed by an unsorted log
+        // on disk) before converting to a sorted on-disk file.
+        //
+        // Larger values increase performance, especially during bulk loads.
+        // Up to max_write_buffer_number write buffers may be held in memory
+        // at the same time,
+        // so you may wish to adjust this parameter to control memory usage.
+        // Also, a larger write buffer will result in a longer recovery time
+        // the next time the database is opened.
+        options.set_write_buffer_size(1024 * 1024 * 1024);
+
+        // The maximum number of write buffers that are built up in memory.
+        // The default and the minimum number is 2, so that when 1 write buffer
+        // is being flushed to storage, new writes can continue to the other
+        // write buffer.
+        // If max_write_buffer_number > 3, writing will be slowed down to
+        // options.delayed_write_rate if we are writing to the last write buffer
+        // allowed.
+        options.set_max_write_buffer_number(4);
+
+        // if prefix_extractor is set and memtable_prefix_bloom_size_ratio is not 0,
+        // create prefix bloom for memtable with the size of
+        // write_buffer_size * memtable_prefix_bloom_size_ratio.
+        // If it is larger than 0.25, it is sanitized to 0.25.
+        let transform = rocksdb::SliceTransform::create_fixed_prefix(10);
+        options.set_prefix_extractor(transform);
+        options.set_memtable_prefix_bloom_ratio(0.1);
+
+        options
+    }
+
+    fn build_db_options() -> Options {
+
+        let mut options = Options::default();
+
+        // If true, the database will be created if it is missing.
+        options.create_if_missing(true);
+
+        // By default, RocksDB uses only one background thread for flush and
+        // compaction. Calling this function will set it up such that total of
+        // `total_threads` is used. Good value for `total_threads` is the number of
+        // cores.
+        let num_cpus = std::thread::available_parallelism().unwrap().get();
+        options.set_max_subcompactions(std::cmp::max(num_cpus as u32 / 2, 1));
+        options.set_max_background_jobs(std::cmp::max(num_cpus as i32 / 2, 2));
+        options.increase_parallelism(num_cpus as i32);
+
+        // If true, missing column families will be automatically created.
+        options.create_missing_column_families(true);
+        
+        options.set_max_total_wal_size(1024 * 1024 * 1024);
+
+        options.enable_statistics();
+        options.set_dump_malloc_stats(true);
+
+        // Specify the maximal size of the info log file. If the log file
+        // is larger than `max_log_file_size`, a new info log file will
+        // be created.
+        // If max_log_file_size == 0, all logs will be written to one log file.
+        options.set_max_log_file_size(1024 * 1024 * 100);
+
+        // Maximal info log files to be kept.
+        // Default: 1000
+        options.set_keep_log_file_num(3);
+
+        options
     }
 
     fn clean_up_old_cf(db: &DBWithThreadMode<MultiThreaded>, cfs: &[String]) -> Result<bool> {
@@ -169,8 +249,12 @@ impl RocksDb {
 
     // Error is occured if column family is already created
     fn create_cf(&self, name: &str) -> Result<()> {
-        let opts = Options::default();
-        self.db().create_cf(name, &opts)?;
+        let opt = if self.hi_perf_cfs.contains(name) {
+            Self::build_hi_perf_cf_options()
+        } else {
+            Options::default()
+        };
+        self.db().create_cf(name, &opt)?;
         Ok(())
     }
 
@@ -236,8 +320,8 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDb {
         self.db().path().to_str().unwrap()
     }
 
-    fn try_get(&self, key: &K) -> Result<Option<DbSlice>> {
-        let ret = self.db().get_pinned(key.key())?;
+    fn try_get_raw(&self, key: &[u8]) -> Result<Option<DbSlice>> {
+        let ret = self.db().get_pinned(key)?;
         Ok(ret.map(|value| value.into()))
     }
 
@@ -254,12 +338,12 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDb {
 }
 
 impl<K: DbKey + Send + Sync> KvcWriteable<K> for RocksDb {
-    fn put(&self, key: &K, value: &[u8]) -> Result<()> {
-        Ok(self.db().put(key.key(), value)?)
+    fn put_raw(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        Ok(self.db().put(key, value)?)
     }
 
-    fn delete(&self, key: &K) -> Result<()> {
-        Ok(self.db().delete(key.key())?)
+    fn delete_raw(&self, key: &[u8]) -> Result<()> {
+        Ok(self.db().delete(key)?)
     }
 }
 
@@ -360,11 +444,11 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbTable {
         self.family.as_str()
     }
 
-    fn try_get(&self, key: &K) -> Result<Option<DbSlice>> {
+    fn try_get_raw(&self, key: &[u8]) -> Result<Option<DbSlice>> {
         if let Some(lock) = self.db.locks.get(&self.family) {
             let lock = lock.val();
             if lock.fetch_add(1, Ordering::Relaxed) >= 0 {
-                let ret = self.db.get_pinned_cf(&self.cf()?, key.key());
+                let ret = self.db.get_pinned_cf(&self.cf()?, key);
                 lock.fetch_sub(1, Ordering::Relaxed);
                 return Ok(ret?.map(|value| value.into()))
             }
@@ -402,11 +486,11 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbTable {
 /// Implementation of writable key-value collection for RocksDB. Actual implementation is blocking.
 impl<K: DbKey + Send + Sync> KvcWriteable<K> for RocksDbTable {
 
-    fn put(&self, key: &K, value: &[u8]) -> Result<()> {
+    fn put_raw(&self, key: &[u8], value: &[u8]) -> Result<()> {
         if let Some(lock) = self.db.locks.get(&self.family) {
             let lock = lock.val();
             if lock.fetch_add(1, Ordering::Relaxed) >= 0 {
-                let ret = self.db.put_cf(&self.cf()?, key.key(), value);
+                let ret = self.db.put_cf(&self.cf()?, key, value);
                 lock.fetch_sub(1, Ordering::Relaxed);
                 return Ok(ret?)
             }
@@ -414,15 +498,15 @@ impl<K: DbKey + Send + Sync> KvcWriteable<K> for RocksDbTable {
         fail!("Attempt to write into dropped table {}", self.family)
     }
 
-    fn delete(&self, key: &K) -> Result<()> {
+    fn delete_raw(&self, key: &[u8]) -> Result<()> {
         if let Some(lock) = self.db.locks.get(&self.family) {
             let lock = lock.val();
             if lock.fetch_add(1, Ordering::Relaxed) >= 0 {
-                let ret = self.db.delete_cf(&self.cf()?, key.key());
+                let ret = self.db.delete_cf(&self.cf()?, key);
                 lock.fetch_sub(1, Ordering::Relaxed);
                 return Ok(ret?)
             }
-        }                   
+        }
         fail!("Attempt to delete from dropped table {}", self.family)
     }
 
@@ -475,8 +559,8 @@ impl Kvc for RocksDbSnapshot<'_> {
 }
 
 impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbSnapshot<'_> {
-    fn try_get(&self, key: &K) -> Result<Option<DbSlice>> {
-        Ok(self.snapshot.get_cf(&self.cf()?, key.key())?.map(|value| value.into()))
+    fn try_get_raw(&self, key: &[u8]) -> Result<Option<DbSlice>> {
+        Ok(self.snapshot.get_cf(&self.cf()?, key)?.map(|value| value.into()))
     }
     fn for_each(&self, predicate: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool>) -> Result<bool> {
         for iter in self.snapshot.iterator_cf(&self.cf()?, IteratorMode::Start) {
@@ -519,16 +603,16 @@ impl RocksDbTransaction {
 }
 
 impl<'db, K: DbKey + Send + Sync> KvcTransaction<K> for RocksDbTransaction {
-    fn put(&mut self, key: &K, value: &[u8]) -> Result<()> {
+    fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let mut batch = self.batch.take().unwrap();
-        batch.put_cf(&self.cf()?, key.key(), value);
+        batch.put_cf(&self.cf()?, key, value);
         self.batch = Some(batch);
         Ok(())
     }
 
-    fn delete(&mut self, key: &K) -> Result<()> {
+    fn delete_raw(&mut self, key: &[u8]) -> Result<()> {
         let mut batch = self.batch.take().unwrap();
-        batch.delete_cf(&self.cf()?, key.key());
+        batch.delete_cf(&self.cf()?, key);
         self.batch = Some(batch);
         Ok(())
     }

@@ -1,8 +1,8 @@
 [package]
 build = '../common/build/build.rs'
-edition = '2018'
+edition = '2021'
 name = 'validator_session'
-version = '0.0.1'
+version = '0.0.2'
 
 [dependencies]
 backtrace = '0.3'
@@ -12,14 +12,21 @@ failure = '0.1'
 hex = '0.4'
 lazy_static = '1.4'
 log = '0.4'
+metrics = '0.21.0'
 metrics-core = '0.5'
-metrics-runtime = '0.13'
 rand = '0.8'
-sha2 = '0.10'
+adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.10.15' }
 catchain = { path = '../catchain' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-crypto', tag = '0.1.80' }
 storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl', package = 'ton_api', tag = '0.2.167' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block', tag = '1.9.18' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types', tag = '1.12.6' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.72' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.141' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.39' }
+
+[dev-dependencies]
+chrono = '0.4'
+colored = '1.9'
+env_logger = '0.7'
+
+[features]
+slashing = [  ]
 

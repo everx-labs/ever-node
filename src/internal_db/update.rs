@@ -1,10 +1,7 @@
 use crate::internal_db::{
-    InternalDb, CURRENT_DB_VERSION, DB_VERSION_0, restore::check_db
+    InternalDb, CURRENT_DB_VERSION, DB_VERSION_3, DB_VERSION_4, DB_VERSION_5,
+    restore::check_db
 };
-#[cfg(feature = "async_ss_storage")]
-use crate::internal_db::DB_VERSION_2;
-#[cfg(not(feature = "async_ss_storage"))]
-use crate::internal_db::DB_VERSION_1;
 use std::sync::atomic::AtomicBool;
 use ton_types::{Result, fail};
 
@@ -12,42 +9,38 @@ pub async fn update(
     mut db: InternalDb, 
     mut version: u32,
     check_stop: &(dyn Fn() -> Result<()> + Sync),
-    is_broken: Option<&AtomicBool>
+    is_broken: Option<&AtomicBool>,
+    _force_check_db: bool,
+    _restore_db_enabled: bool,
 ) -> Result<InternalDb> {
     if version == CURRENT_DB_VERSION {
         return Ok(db)
     }
 
-    #[cfg(not(feature = "async_ss_storage"))]
-    if version == DB_VERSION_0 {
-        // 0 -> 1
+    if version < DB_VERSION_3 {
         log::info!(
-            "Detected old database version 0. This version possibly contains wrong cells and bits \
-             counters in cells DB. Need to restore database");
+            "Detected old database version {version}. Need to migrate to latest version"
+        );
         db = check_db(db, 0, true, true, check_stop, is_broken).await?;
-        version = DB_VERSION_1;
-        db.store_db_version(version)?;
+        db.store_db_version(DB_VERSION_4)?;
+        version = DB_VERSION_4;
+    } else if version == DB_VERSION_3 {
+        log::info!(
+            "Detected old database version 3. This version contains performance issue in cells DB. \
+            Database will be updated."
+        );
+        db.update_cells_db_upto_4().await?;
+        db.store_db_version(DB_VERSION_4)?;
+        version = DB_VERSION_4;
     }
 
-    #[cfg(feature = "async_ss_storage")]
-    if version < DB_VERSION_2 {
-        if version == DB_VERSION_0 {
-            log::info!(
-                "Detected old database version 0. This version possibly contains wrong cells and bits \
-                counters in cells DB. Need to restore database"
-            );
-        }
+    if version < DB_VERSION_5 {
         log::info!(
-            "Detected old database version {}. This version contains shard states DB \
-             in old format. Async shard states DB has another format. Need to refill \
-             DB using restore procedure.", version
+            "Detected old database version {version}. Need to migrate to version 5",
         );
-        if let Err(e) = db.clean_shard_state_dynamic_db() {
-            log::warn!("Clear shard state db: {}", e);
-        }
-        db = check_db(db, 0, true, true, check_stop, is_broken).await?;
-        version = DB_VERSION_2;
-        db.store_db_version(version)?;
+        db.migrate_handles_to_v5()?;
+        db.store_db_version(DB_VERSION_5)?;
+        version = DB_VERSION_5;
     }
 
     if version != CURRENT_DB_VERSION {

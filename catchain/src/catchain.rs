@@ -1,7 +1,7 @@
 /*
 * Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
 *
-* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use     
 * this file except in compliance with the License.
 *
 * Unless required by applicable law or agreed to in writing, software
@@ -11,20 +11,27 @@
 * limitations under the License.
 */
 
-pub use super::*;
-use crate::instrument;
-use crate::profiling::check_execution_time;
-use crate::ton_api::IntoBoxed;
-use crate::utils::*;
-use crate::CatchainFactory;
-use overlay::{OverlayUtils, PrivateOverlayShortId};
-use rand::Rng;
-use std::any::Any;
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use crate::{
+    check_execution_time, instrument, ActivityNodePtr, Block, BlockExtraId, BlockHash, 
+    BlockHeight, BlockPayloadPtr, BlockPtr, Catchain, CatchainFactory, CatchainListenerPtr,
+    CatchainNode, CatchainOverlay, CatchainOverlayListener, CatchainOverlayListenerPtr, 
+    CatchainOverlayManager, CatchainOverlayLogReplayListener, 
+    CatchainOverlayLogReplayListenerPtr, CatchainOverlayManagerPtr, CatchainOverlayPtr, 
+    CatchainPtr, ExternalQueryResponseCallback, Options, PrivateKey, PublicKeyHash, 
+    QueryResponseCallback, Receiver, ReceiverListener, ReceiverPtr, ReceiverTaskQueue, 
+    ReceiverTaskQueuePtr, SessionId, ton, 
+    profiling::Profiler, utils::{self, get_elapsed_time, MetricsDumper, MetricsHandle}
+};
+use adnl::{OverlayUtils, PrivateOverlayShortId};                    
+use metrics::Recorder;
+use rand::Rng;                                                              
+use std::{
+    any::Any, cell::RefCell, collections::HashMap, collections::LinkedList, fmt, rc::Rc, 
+    sync::{Arc, atomic::{AtomicBool, Ordering}}, 
+    time::{Duration, SystemTime, UNIX_EPOCH}
+};
+use ton_api::IntoBoxed;
+use ton_types::{error, Result, UInt256};
 
 /*
     Constants
@@ -65,7 +72,46 @@ impl Default for Options {
             max_deps: 4,
             debug_disable_db: false,
             skip_processed_blocks: false,
+            receiver_max_neighbours_count: 5,
+            receiver_neighbours_sync_min_period: Duration::from_millis(100),
+            receiver_neighbours_sync_max_period: Duration::from_millis(200),
+            receiver_max_sources_sync_attempts: 3,
+            receiver_neighbours_rotate_min_period: Duration::from_millis(60000),
+            receiver_neighbours_rotate_max_period: Duration::from_millis(120000),
         }
+    }
+}
+
+/*
+    Special blocks storage to control blocks destrocution order
+    (to avoid deep recursion on destruction of long chains of blocks)
+*/
+
+struct BlocksStorage {
+    storage: LinkedList<BlockPtr>,
+}
+
+impl BlocksStorage {
+    fn add(&mut self, block: BlockPtr) {
+        self.storage.push_back(block);
+    }
+
+    fn new() -> Self {
+        Self {
+            storage: LinkedList::new(),
+        }
+    }
+}
+
+impl Drop for BlocksStorage {
+    fn drop(&mut self) {
+        log::trace!("...removing blocks from catchain");
+
+        while !self.storage.is_empty() {
+            self.storage.pop_back();
+        }
+
+        log::trace!("...catchain blocks have been destroyed");
     }
 }
 
@@ -116,10 +162,17 @@ struct CatchainProcessor {
     current_extra_id: BlockExtraId, //current block extra identifier
     current_time: Option<std::time::SystemTime>, //current time for log replaying
     utility_queue_sender: crossbeam::channel::Sender<Box<TaskDesc<dyn FnOnce() + Send>>>, //queue from outer world to the Catchain utility thread
-    process_blocks_requests_counter: metrics_runtime::data::Counter, //counter for send_process
-    process_blocks_responses_counter: metrics_runtime::data::Counter, //counter for processed_block
-    process_blocks_skip_responses_counter: metrics_runtime::data::Counter, //counter for processed_block with may_be_skipped=true
-    process_blocks_batching_requests_counter: metrics_runtime::data::Counter, //counter for processed_block with batching request
+    process_blocks_requests_counter: metrics::Counter, //counter for send_process
+    process_blocks_responses_counter: metrics::Counter, //counter for processed_block
+    process_blocks_skip_responses_counter: metrics::Counter, //counter for processed_block with may_be_skipped=true
+    process_blocks_batching_requests_counter: metrics::Counter, //counter for processed_block with batching request
+    out_bytes: metrics::Counter, //outgoing traffic
+    out_queries_bytes: metrics::Counter, //outgoing queries traffic
+    out_broadcasts_bytes: metrics::Counter, //outgoing broadcasts traffic
+    processed_block_payload_size_histogram: metrics::Histogram, //histogram for processed blocks sizes
+    blocks_storage: BlocksStorage, //must be last field to force drop order; 
+                                   //storage for catchain blocks; 
+                                   //is needed only to avoid stack overflow on dropping very long chains of blocks during destruction
 }
 
 /*
@@ -143,10 +196,18 @@ pub(crate) struct CatchainImpl {
     destroy_db_flag: Arc<AtomicBool>,                 //indicates catchain has to destroy DB
     session_id: SessionId,                            //session ID
     _activity_node: ActivityNodePtr, //activity node for tracing lifetime of this catchain
-    main_thread_post_counter: metrics_runtime::data::Counter, //counter for main queue posts
-    main_thread_pull_counter: metrics_runtime::data::Counter, //counter for main queue pull
-    utility_thread_post_counter: metrics_runtime::data::Counter, //counter for utility queue posts
-    _utility_thread_pull_counter: metrics_runtime::data::Counter, //counter for utility queue pull
+    main_thread_post_counter: metrics::Counter, //counter for main queue posts
+    main_thread_pull_counter: metrics::Counter, //counter for main queue pull
+    utility_thread_post_counter: metrics::Counter, //counter for utility queue posts
+    _utility_thread_pull_counter: metrics::Counter, //counter for utility queue pull
+    in_queries_bytes: metrics::Counter, //incoming queries traffic
+    out_queries_bytes: metrics::Counter, //outgoing queries traffic
+    in_messages_bytes: metrics::Counter, //incoming messages traffic
+    out_messages_bytes: metrics::Counter, //outgoing messages traffic
+    in_broadcasts_bytes: metrics::Counter, //incoming broadcasts traffic
+    out_broadcasts_bytes: metrics::Counter, //outgoing broadcasts traffic
+    in_bytes: metrics::Counter, //incoming traffic
+    out_bytes: metrics::Counter, //outgoing traffic
 }
 
 /*
@@ -155,6 +216,12 @@ pub(crate) struct CatchainImpl {
 
 struct OverlayListenerImpl {
     catchain: CatchainImplWeakPtr, //back weak reference to a CatchainImpl
+    in_queries_bytes: metrics::Counter, //incoming queries traffic
+    out_queries_bytes: metrics::Counter, //outgoing queries traffic
+    in_messages_bytes: metrics::Counter, //incoming messages traffic
+    in_broadcasts_bytes: metrics::Counter, //incoming broadcasts traffic
+    in_bytes: metrics::Counter, //incoming traffic
+    out_bytes: metrics::Counter, //outgoing traffic
 }
 
 impl CatchainOverlayLogReplayListener for OverlayListenerImpl {
@@ -169,6 +236,9 @@ impl CatchainOverlayLogReplayListener for OverlayListenerImpl {
 
 impl CatchainOverlayListener for OverlayListenerImpl {
     fn on_message(&self, adnl_id: PublicKeyHash, data: &BlockPayloadPtr) {
+        self.in_messages_bytes.increment(data.data().len() as u64);
+        self.in_bytes.increment(data.data().len() as u64);
+
         if let Some(catchain) = self.catchain.upgrade() {
             let adnl_id = adnl_id.clone();
             let data = data.clone();
@@ -180,6 +250,9 @@ impl CatchainOverlayListener for OverlayListenerImpl {
     }
 
     fn on_broadcast(&self, source_key_hash: PublicKeyHash, data: &BlockPayloadPtr) {
+        self.in_broadcasts_bytes.increment(data.data().len() as u64);
+        self.in_bytes.increment(data.data().len() as u64);
+
         if let Some(catchain) = self.catchain.upgrade() {
             let source_key_hash_clone = source_key_hash.clone();
             let data_clone = data.clone();
@@ -194,8 +267,22 @@ impl CatchainOverlayListener for OverlayListenerImpl {
         &self,
         adnl_id: PublicKeyHash,
         data: &BlockPayloadPtr,
-        response_callback: ExternalQueryResponseCallback,
+        _response_callback: ExternalQueryResponseCallback,
     ) {
+        self.in_queries_bytes.increment(data.data().len() as u64);
+        self.in_bytes.increment(data.data().len() as u64);
+
+        let out_queries_bytes = self.out_queries_bytes.clone();
+        let out_bytes = self.out_bytes.clone();
+
+        let response_callback : Box<dyn FnOnce(Result<BlockPayloadPtr>) + Send> = Box::new(move |result: Result<BlockPayloadPtr>| {
+            if let Ok(payload) = &result {
+                out_queries_bytes.increment(payload.data().len() as u64);
+                out_bytes.increment(payload.data().len() as u64);
+            }
+            _response_callback(result);
+        });
+
         if let Some(catchain) = self.catchain.upgrade() {
             if !Self::catchain_main_thread_overloaded_flag(&catchain) {
                 let adnl_id = adnl_id.clone();
@@ -208,12 +295,14 @@ impl CatchainOverlayListener for OverlayListenerImpl {
                 return;
             }
 
-            let err_message = format!(
+            let warning = error!(
                 "Catchain {:x} is overloaded. Skip query from ADNL ID {}",
                 catchain.session_id, adnl_id
             );
 
-            let response = match ton_api::Deserializer::new(&mut &data.data().0[..])
+            log::warn!("{}", warning);
+
+            let response = match ton_api::Deserializer::new(&mut data.data().as_slice())
                 .read_boxed::<ton_api::ton::TLObject>()
             {
                 Ok(message) => {
@@ -235,22 +324,28 @@ impl CatchainOverlayListener for OverlayListenerImpl {
                             ::ton_api::ton::catchain::sent::Sent { cnt: 0 }.into_boxed(),
                         ))
                     } else {
-                        Err(err_msg(err_message.clone()))
+                        Err(warning)
                     }
                 }
                 Err(err) => Err(err),
             };
 
             response_callback(response);
-
-            warn!("{}", err_message);
         }
     }
 }
 
 impl OverlayListenerImpl {
-    fn create(catchain: CatchainImplWeakPtr) -> OverlayListenerRcPtr {
-        Arc::new(Self { catchain })
+    fn create(catchain: &CatchainImplPtr) -> OverlayListenerRcPtr {
+        Arc::new(Self {
+            catchain: Arc::downgrade(catchain),
+            in_bytes: catchain.in_bytes.clone(),
+            out_bytes: catchain.out_bytes.clone(),
+            in_messages_bytes: catchain.in_messages_bytes.clone(),
+            in_broadcasts_bytes: catchain.in_broadcasts_bytes.clone(),
+            in_queries_bytes: catchain.in_queries_bytes.clone(),
+            out_queries_bytes: catchain.out_queries_bytes.clone(),
+        })
     }
 
     fn catchain_main_thread_overloaded_flag(catchain: &CatchainImplPtr) -> bool {
@@ -343,6 +438,11 @@ struct ReceiverListenerImpl {
     overlay: CatchainOverlayPtr,   //network layer for outgoing catchain events
     next_completion_handler_available_index: CompletionHandlerId, //index of next available complete handler
     completion_handlers: HashMap<CompletionHandlerId, Box<dyn CompletionHandler>>, //complete handlers
+    in_queries_bytes: metrics::Counter, //incoming queries traffic
+    out_queries_bytes: metrics::Counter, //outgoing queries traffic
+    out_messages_bytes: metrics::Counter, //outgoing messages traffic
+    in_bytes: metrics::Counter, //incoming traffic
+    out_bytes: metrics::Counter, //outgoing traffic
 }
 
 impl ReceiverListener for ReceiverListenerImpl {
@@ -474,6 +574,9 @@ impl ReceiverListener for ReceiverListenerImpl {
         check_execution_time!(20000);
         instrument!();
 
+        self.out_messages_bytes.increment(message.data().len() as u64);
+        self.out_bytes.increment(message.data().len() as u64);
+
         //TODO: call processor directly instead of posting closure
         if can_be_postponed || CATCHAIN_POSTPONED_SEND_TO_OVERLAY {
             let overlay = Arc::downgrade(&self.overlay);
@@ -504,10 +607,13 @@ impl ReceiverListener for ReceiverListenerImpl {
         check_execution_time!(20000);
         instrument!();
 
+        self.out_messages_bytes.increment((message.data().len() * receiver_ids.len()) as u64);
+        self.out_bytes.increment((message.data().len() * receiver_ids.len()) as u64);
+
         //TODO: call processor directly instead of posting closure
         if CATCHAIN_POSTPONED_SEND_TO_OVERLAY {
             let overlay = Arc::downgrade(&self.overlay);
-            let receiver_ids: Vec<PublicKeyHash> = receiver_ids.clone().into();
+            let receiver_ids = receiver_ids.to_vec();
             let sender_id = sender_id.clone();
             let message = message.clone();
 
@@ -538,13 +644,25 @@ impl ReceiverListener for ReceiverListenerImpl {
         check_execution_time!(20000);
         instrument!();
 
-        let completion_handler = self.create_completion_handler(response_callback);
+        self.out_queries_bytes.increment(message.data().len() as u64);
+        self.out_bytes.increment(message.data().len() as u64);
+
+        let in_queries_bytes = self.in_queries_bytes.clone();
+        let in_bytes = self.in_bytes.clone();
+
+        let completion_handler = self.create_completion_handler(Box::new(move |result: Result<BlockPayloadPtr>, receiver: &mut dyn Receiver| {
+            if let Ok(payload) = &result {
+                in_queries_bytes.increment(payload.data().len() as u64);
+                in_bytes.increment(payload.data().len() as u64);
+            }
+            response_callback(result, receiver);
+        }));
 
         //TODO: call processor directly instead of posting closure
         if CATCHAIN_POSTPONED_SEND_TO_OVERLAY {
             let overlay = Arc::downgrade(&self.overlay);
             let receiver_id = receiver_id.clone();
-            let name: String = name.clone().into();
+            let name = name.to_string();
             let sender_id = sender_id.clone();
             let message = message.clone();
 
@@ -668,11 +786,16 @@ impl ReceiverListenerImpl {
             let handler = completion_handlers.remove(&handler_id);
 
             if let Some(mut handler) = handler {
-                let warning = format!("Remove Catchain completion handler #{} with latency {:.3}s (expected max latency is {:.3}s): created at {}", handler_id, latency.as_secs_f64(), COMPLETION_HANDLERS_MAX_WAIT_PERIOD.as_secs_f64(), utils::time_to_string(&handler.get_creation_time()));
+                let warning = error!(
+                    "Remove Catchain completion handler #{} with latency {:.3}s \
+                    (expected max latency is {:.3}s): created at {}", 
+                    handler_id, latency.as_secs_f64(), 
+                    COMPLETION_HANDLERS_MAX_WAIT_PERIOD.as_secs_f64(), 
+                    utils::time_to_string(&handler.get_creation_time())
+                );
 
-                warn!("{}", warning);
-
-                handler.reset_with_error(err_msg(warning), receiver);
+                log::warn!("{}", warning);
+                handler.reset_with_error(warning, receiver);
             }
         }
     }
@@ -681,13 +804,19 @@ impl ReceiverListenerImpl {
         Listener creation
     */
 
-    fn create(catchain: CatchainImplWeakPtr, overlay: CatchainOverlayPtr) -> ReceiverListenerRcPtr {
+    fn create(catchain: &CatchainImplPtr, overlay: CatchainOverlayPtr) -> ReceiverListenerRcPtr {
+        let catchain_weak = Arc::downgrade(catchain);
         let body = ReceiverListenerImpl {
-            task_queue: ReceiverTaskQueueImpl::create(catchain.clone()),
-            catchain: catchain,
+            task_queue: ReceiverTaskQueueImpl::create(catchain_weak.clone()),
+            catchain: catchain_weak,
             overlay: overlay,
             next_completion_handler_available_index: 1,
             completion_handlers: HashMap::new(),
+            in_bytes: catchain.in_bytes.clone(),
+            out_bytes: catchain.out_bytes.clone(),
+            in_queries_bytes: catchain.in_queries_bytes.clone(),
+            out_queries_bytes: catchain.out_queries_bytes.clone(),
+            out_messages_bytes: catchain.out_messages_bytes.clone(),
         };
 
         let receiver_listener: ReceiverListenerRcPtr = Rc::new(RefCell::new(body));
@@ -706,16 +835,16 @@ impl CatchainProcessor {
     */
 
     fn stop(&mut self) {
-        debug!("Stopping CatchainProcessor...");
+        log::debug!("Stopping CatchainProcessor...");
 
         self.overlay_manager
             .stop_overlay(&self.overlay_short_id, &self.overlay);
 
-        debug!("CatchainProcessor has been stopped");
+        log::debug!("CatchainProcessor has been stopped");
     }
 
     fn destroy_db(&mut self) {
-        debug!("Destroying Catchain DB...");
+        log::debug!("Destroying Catchain DB...");
 
         self.receiver.borrow_mut().destroy_db();
     }
@@ -765,7 +894,7 @@ impl CatchainProcessor {
         check_execution_time!(10000);
 
         if let Some(listener) = self.catchain_listener.upgrade() {
-            self.process_blocks_requests_counter.increment();
+            self.process_blocks_requests_counter.increment(1);
 
             listener.process_blocks(blocks);
         }
@@ -821,6 +950,7 @@ impl CatchainProcessor {
         >,
         should_stop_flag: Arc<AtomicBool>,
         is_stopped_flag: Arc<AtomicBool>,
+        utility_thread_is_stopped_flag: Arc<AtomicBool>,
         overloaded_flag: Arc<AtomicBool>,
         destroy_db_flag: Arc<AtomicBool>,
         options: Options,
@@ -834,9 +964,9 @@ impl CatchainProcessor {
         overlay_manager: CatchainOverlayManagerPtr,
         listener: CatchainListenerPtr,
         catchain_activity_node: ActivityNodePtr,
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: MetricsHandle,
     ) {
-        info!(
+        log::info!(
             "Catchain main loop is started (session_id is {:x})",
             session_id
         );
@@ -845,10 +975,10 @@ impl CatchainProcessor {
 
         let loop_counter = metrics_receiver
             .sink()
-            .counter("catchain_main_loop_iterations");
+            .register_counter(&"catchain_main_loop_iterations".into());
         let loop_overloads_counter = metrics_receiver
             .sink()
-            .counter("catchain_main_loop_overloads");
+            .register_counter(&"catchain_main_loop_overloads".into());
         let main_thread_pull_counter = catchain.main_thread_pull_counter.clone();
 
         //create catchain processor
@@ -871,7 +1001,10 @@ impl CatchainProcessor {
         let mut processor = match processor_opt {
             Ok(processor) => processor,
             Err(err) => {
-                error!("CatchainProcessor::main_loop: error during creation of CatchainProcessor: {:?}", err);
+                log::error!(
+                    "CatchainProcessor::main_loop: error during creation of CatchainProcessor: {:?}", 
+                    err
+                );
                 overloaded_flag.store(false, Ordering::SeqCst);
                 is_stopped_flag.store(true, Ordering::SeqCst);
                 return;
@@ -903,6 +1036,51 @@ impl CatchainProcessor {
         metrics_dumper.add_derivative_metric("process_blocks_responses".to_string());
         metrics_dumper.add_derivative_metric("process_blocks_skip_responses".to_string());
         metrics_dumper.add_derivative_metric("process_blocks_batching_requests".to_string());
+
+        metrics_dumper.add_derivative_metric("overlay_in_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_out_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_in_messages_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_out_messages_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_in_queries_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_out_queries_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_in_broadcasts_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_out_broadcasts_bytes".to_string());
+
+        utils::add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"overlay_in_messages.avg_size".to_string(),
+            &"overlay_in_messages_bytes".to_string(),
+            &"receiver_in_messages".to_string(),
+            0.0,
+        );
+        utils::add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"overlay_out_messages.avg_size".to_string(),
+            &"overlay_out_messages_bytes".to_string(),
+            &"receiver_out_messages".to_string(),
+            0.0,
+        );
+        utils::add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"overlay_in_queries.avg_size".to_string(),
+            &"overlay_in_queries_bytes".to_string(),
+            &"receiver_in_queries.total".to_string(),
+            0.0,
+        );
+        utils::add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"overlay_out_queries.avg_size".to_string(),
+            &"overlay_out_queries_bytes".to_string(),
+            &"receiver_out_queries.total".to_string(),
+            0.0,
+        );
+        utils::add_compute_relative_metric(
+            &mut metrics_dumper,
+            &"overlay_in_broadcasts.avg_size".to_string(),
+            &"overlay_in_broadcasts_bytes".to_string(),
+            &"receiver_in_broadcasts".to_string(),
+            0.0,
+        );
 
         utils::add_compute_percentage_metric(
             &mut metrics_dumper,
@@ -975,7 +1153,7 @@ impl CatchainProcessor {
                 instrument!();
 
                 catchain_activity_node.tick();
-                loop_counter.increment();
+                loop_counter.increment(1);
 
                 //check if the main loop should be stopped
 
@@ -993,7 +1171,7 @@ impl CatchainProcessor {
                 overloaded_flag.store(is_overloaded, Ordering::SeqCst);
 
                 if is_overloaded {
-                    loop_overloads_counter.increment();
+                    loop_overloads_counter.increment(1);
                 }
 
                 //handle catchain event with timeout
@@ -1028,16 +1206,21 @@ impl CatchainProcessor {
                 is_overloaded = false;
 
                 if let Ok(task_desc) = task_desc {
-                    main_thread_pull_counter.increment();
+                    main_thread_pull_counter.increment(1);
 
-                    let processing_latency = task_desc.creation_time.elapsed().unwrap();
+                    let processing_latency = get_elapsed_time(&task_desc.creation_time);
                     if processing_latency > CATCHAIN_WARN_PROCESSING_LATENCY {
                         is_overloaded = true;
 
-                        if last_latency_warn_dump_time.elapsed().unwrap()
+                        if get_elapsed_time(&last_latency_warn_dump_time)
                             > CATCHAIN_LATENCY_WARN_DUMP_PERIOD
                         {
-                            warn!("Catchain processing latency is {:.3}s (expected max latency is {:.3}s)", processing_latency.as_secs_f64(), CATCHAIN_WARN_PROCESSING_LATENCY.as_secs_f64());
+                            log::warn!(
+                                "Catchain processing latency is {:.3}s \
+                                (expected max latency is {:.3}s)", 
+                                processing_latency.as_secs_f64(), 
+                                CATCHAIN_WARN_PROCESSING_LATENCY.as_secs_f64()
+                            );
                             last_latency_warn_dump_time = SystemTime::now();
                         }
                     }
@@ -1069,7 +1252,7 @@ impl CatchainProcessor {
                             .next_block_generation_time
                             .duration_since(SystemTime::now())
                         {
-                            trace!(
+                            log::trace!(
                                 "Waiting for {:.3}s for a new block generation time slot",
                                 delay.as_secs_f64()
                             );
@@ -1105,22 +1288,22 @@ impl CatchainProcessor {
                 instrument!();
                 check_execution_time!(50_000);
 
-                if log_enabled!(log::Level::Debug) {
+                if log::log_enabled!(log::Level::Debug) {
                     let receiver = processor.receiver.borrow();
 
                     metrics_dumper.update(receiver.get_metrics_receiver());
 
                     let session_id_str = processor.session_id.to_hex_string();
 
-                    debug!("Catchain {:x} metrics:", processor.session_id);
+                    log::debug!("Catchain {:x} metrics:", processor.session_id);
 
-                    metrics_dumper.dump(|string| {
-                        debug!("{}{}", session_id_str, string);
-                    });
+                    metrics_dumper.dump(
+                        |string| log::debug!("{}{}", session_id_str, string)
+                    );
 
                     let sources_count = receiver.get_sources_count();
 
-                    debug!(
+                    log::debug!(
                         "Catchain {} debug dump (local_idx={}, sources_count={}):",
                         session_id_str, processor.local_idx, sources_count
                     );
@@ -1130,10 +1313,24 @@ impl CatchainProcessor {
                         let source = source.borrow();
                         let stat = source.get_statistics();
 
-                        debug!("{} {}v{:03}/{:03}: {} delivered={:4}{}, received={:4}{}, forks={}, queries={:4}/{:4}, msgs={:4}/{:4}, in_bcasts={:4}, adnl_id={}, pubkey_hash={}",
-                            session_id_str, if processor.local_idx == i { ">" } else { " " }, i, sources_count, if source.is_blamed() { "blamed" } else { "" }, source.get_delivered_height(), if source.has_undelivered() { "+" } else { " " },
-                            source.get_received_height(), if source.has_unreceived() { "+" } else { " " }, source.get_forks_count(), stat.in_queries_count, stat.out_queries_count,
-                            stat.in_messages_count, stat.out_messages_count, stat.in_broadcasts_count, source.get_adnl_id(), source.get_public_key_hash());
+                        log::debug!(
+                            "{} {}v{:03}/{:03}: {} delivered={:4}{}, received={:4}{}, forks={}, \
+                            queries={:4}/{:4}, msgs={:4}/{:4}, in_bcasts={:4}, adnl_id={}, \
+                            pubkey_hash={}",
+                            session_id_str, 
+                            if processor.local_idx == i { ">" } else { " " }, 
+                            i, sources_count, 
+                            if source.is_blamed() { "blamed" } else { "" }, 
+                            source.get_delivered_height(), 
+                            if source.has_undelivered() { "+" } else { " " },
+                            source.get_received_height(), 
+                            if source.has_unreceived() { "+" } else { " " }, 
+                            source.get_forks_count(), 
+                            stat.in_queries_count, stat.out_queries_count,
+                            stat.in_messages_count, stat.out_messages_count, 
+                            stat.in_broadcasts_count, 
+                            source.get_adnl_id(), source.get_public_key_hash()
+                        );
                     }
                 }
 
@@ -1147,11 +1344,11 @@ impl CatchainProcessor {
                 instrument!();
                 check_execution_time!(50_000);
 
-                if log_enabled!(log::Level::Debug) {
-                    let profiling_dump = profiling::Profiler::local_instance()
+                if log::log_enabled!(log::Level::Debug) {
+                    let profiling_dump = Profiler::local_instance()
                         .with(|profiler| profiler.borrow().dump());
 
-                    debug!(
+                    log::debug!(
                         "Catchain {:x} profiling: {}",
                         processor.session_id, profiling_dump
                     );
@@ -1162,10 +1359,26 @@ impl CatchainProcessor {
             }
         }
 
-        info!(
-            "Catchain main loop is finished (session_id is {:x})",
-            session_id
-        );
+          //waiting for utility loop (to control resources destruction in this thread)
+
+        loop {
+            if utility_thread_is_stopped_flag.load(Ordering::SeqCst) {
+                break;
+            }
+
+            log::info!(
+                "...waiting for Catchain utility thread (session_id is {:x})",
+                session_id,
+            );
+
+            const CHECKING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
+
+            std::thread::sleep(CHECKING_INTERVAL);
+        }
+
+        drop(queue_receiver);
+
+        log::info!("Catchain main loop is finished (session_id is {:x})", session_id);
 
         overloaded_flag.store(false, Ordering::SeqCst);
         is_stopped_flag.store(true, Ordering::SeqCst);
@@ -1181,25 +1394,25 @@ impl CatchainProcessor {
         overloaded_flag: Arc<AtomicBool>,
         queue_receiver: crossbeam::channel::Receiver<Box<TaskDesc<dyn FnOnce() + Send>>>,
         session_id: SessionId,
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
-        utility_thread_pull_counter: metrics_runtime::data::Counter,
+        metrics_receiver: MetricsHandle,
+        utility_thread_pull_counter: metrics::Counter,
     ) {
-        info!(
+        log::info!(
             "Catchain utility loop is started (session_id is {:x})",
             session_id
         );
 
         let name = format!("CatchainUtility_{:x}", session_id);
-        let activity_node = catchain::CatchainFactory::create_activity_node(name);
+        let activity_node = CatchainFactory::create_activity_node(name);
 
         //configure metrics
 
         let loop_counter = metrics_receiver
             .sink()
-            .counter("catchain_utility_loop_iterations");
+            .register_counter(&"catchain_utility_loop_iterations".into());
         let loop_overloads_counter = metrics_receiver
             .sink()
-            .counter("catchain_utility_loop_overloads");
+            .register_counter(&"catchain_utility_loop_overloads".into());
 
         //session callbacks processing loop
 
@@ -1208,7 +1421,7 @@ impl CatchainProcessor {
 
         loop {
             activity_node.tick();
-            loop_counter.increment();
+            loop_counter.increment(1);
 
             //check if the loop should be stopped
 
@@ -1221,7 +1434,7 @@ impl CatchainProcessor {
             overloaded_flag.store(is_overloaded, Ordering::SeqCst);
 
             if is_overloaded {
-                loop_overloads_counter.increment();
+                loop_overloads_counter.increment(1);
             }
 
             //handle session outgoing event with timeout
@@ -1237,16 +1450,21 @@ impl CatchainProcessor {
             is_overloaded = false;
 
             if let Ok(task_desc) = task_desc {
-                utility_thread_pull_counter.increment();
+                utility_thread_pull_counter.increment(1);
 
-                let processing_latency = task_desc.creation_time.elapsed().unwrap();
+                let processing_latency = get_elapsed_time(&task_desc.creation_time);
                 if processing_latency > CATCHAIN_WARN_PROCESSING_LATENCY {
                     is_overloaded = true;
 
-                    if last_latency_warn_dump_time.elapsed().unwrap()
+                    if get_elapsed_time(&last_latency_warn_dump_time)
                         > CATCHAIN_LATENCY_WARN_DUMP_PERIOD
                     {
-                        warn!("Catchain utility processing latency is {:.3}s (expected max latency is {:.3}s)", processing_latency.as_secs_f64(), CATCHAIN_WARN_PROCESSING_LATENCY.as_secs_f64());
+                        log::warn!(
+                            "Catchain utility processing latency is {:.3}s \
+                            (expected max latency is {:.3}s)", 
+                            processing_latency.as_secs_f64(), 
+                            CATCHAIN_WARN_PROCESSING_LATENCY.as_secs_f64()
+                        );
                         last_latency_warn_dump_time = SystemTime::now();
                     }
                 }
@@ -1262,10 +1480,12 @@ impl CatchainProcessor {
 
         //finishing routines
 
-        info!(
+        log::info!(
             "Catchain utility loop is finished (session_id is {:x})",
             session_id
         );
+
+        drop(queue_receiver);
 
         overloaded_flag.store(false, Ordering::SeqCst);
         is_stopped_flag.store(true, Ordering::SeqCst);
@@ -1350,11 +1570,11 @@ impl CatchainProcessor {
     fn send_preprocess(&mut self, block: BlockPtr, is_root: bool) {
         instrument!();
 
-        if log_enabled!(log::Level::Trace)
+        if log::log_enabled!(log::Level::Trace)
             && is_root
             && !self.get_block_desc(&*block).unwrap().borrow().preprocessed
         {
-            trace!("CatchainProcessor::send_preprocess for block {}", block);
+            log::trace!("CatchainProcessor::send_preprocess for block {}", block);
         }
 
         self.recursive_blocks_update(
@@ -1365,7 +1585,7 @@ impl CatchainProcessor {
 
                 //notify listeners
 
-                trace!(
+                log::trace!(
                     "...start preprocessing block {:?} from source {}",
                     block.get_hash(),
                     block.get_source_id()
@@ -1373,7 +1593,7 @@ impl CatchainProcessor {
 
                 processor.notify_preprocess_block(block.clone());
 
-                trace!(
+                log::trace!(
                     "...finish preprocessing block {:?} from source {}",
                     block.get_hash(),
                     block.get_source_id()
@@ -1416,12 +1636,12 @@ impl CatchainProcessor {
 
         assert!(self.receiver_started);
 
-        trace!("Send blocks processing...");
+        log::trace!("Send blocks processing...");
 
         let mut blocks: Vec<BlockPtr> = Vec::new();
         let mut block_hashes: Vec<BlockHash> = Vec::new();
 
-        trace!("...{} top blocks found", self.top_blocks.len());
+        log::trace!("...{} top blocks found", self.top_blocks.len());
 
         while self.top_blocks.len() > 0 && blocks.len() < self.options.max_deps as usize {
             let block = self.remove_random_top_block();
@@ -1431,7 +1651,7 @@ impl CatchainProcessor {
 
             if source_id as usize == self.sources.len() || !self.blamed_sources[source_id as usize]
             {
-                trace!(
+                log::trace!(
                     "...choose block {:?} from source #{} pubkeyhash={}",
                     block.get_hash(),
                     block.get_source_id(),
@@ -1447,11 +1667,11 @@ impl CatchainProcessor {
 
         self.process_deps = block_hashes;
 
-        trace!("...creating block for deps: {:?}", self.process_deps);
+        log::trace!("...creating block for deps: {:?}", self.process_deps);
 
         self.notify_process_blocks(blocks);
 
-        trace!("...finish creating block");
+        log::trace!("...finish creating block");
     }
 
     fn set_next_block_generation_time(&mut self, mut time: SystemTime) {
@@ -1494,7 +1714,7 @@ impl CatchainProcessor {
         }
 
         if !self.force_process {
-            trace!("Catchain forcing creation of a new block");
+            log::trace!("Catchain forcing creation of a new block");
         }
 
         self.force_process = true;
@@ -1512,7 +1732,8 @@ impl CatchainProcessor {
     ) {
         instrument!();
 
-        self.process_blocks_responses_counter.increment();
+        self.process_blocks_responses_counter.increment(1);
+        self.processed_block_payload_size_histogram.record(payload.data().len() as f64);
 
         assert!(self.receiver_started);
 
@@ -1523,7 +1744,7 @@ impl CatchainProcessor {
         }
 
         if !may_be_skipped {
-            trace!(
+            log::trace!(
                 "Catchain created block: deps={:?}, payload size is {}",
                 self.process_deps,
                 payload.data().len()
@@ -1535,7 +1756,7 @@ impl CatchainProcessor {
                     .add_block(payload, self.process_deps.drain(..).collect());
             }
         } else {
-            trace!("Catchain created skip-block: deps={:?}", self.process_deps);
+            log::trace!("Catchain created skip-block: deps={:?}", self.process_deps);
         }
 
         assert!(self.active_process);
@@ -1550,7 +1771,7 @@ impl CatchainProcessor {
             }
         };
 
-        debug!(
+        log::debug!(
             "Catchain top blocks: {}{}",
             self.top_blocks.len(),
             if enable_batching_mode {
@@ -1561,7 +1782,7 @@ impl CatchainProcessor {
         );
 
         if may_be_skipped {
-            self.process_blocks_skip_responses_counter.increment();
+            self.process_blocks_skip_responses_counter.increment(1);
         }
 
         if !batching_mode {
@@ -1571,9 +1792,9 @@ impl CatchainProcessor {
         } else {
             self.active_process = false;
 
-            self.process_blocks_batching_requests_counter.increment();
+            self.process_blocks_batching_requests_counter.increment(1);
 
-            info!("...catchain finish processing");
+            log::debug!("...catchain finish processing");
 
             if self.top_blocks.len() == 0 {
                 self.notify_finished_processing();
@@ -1592,16 +1813,20 @@ impl CatchainProcessor {
     fn on_message(&mut self, adnl_id: PublicKeyHash, data: BlockPayloadPtr) {
         instrument!();
 
-        let bytes = &mut data.data().as_ref();
+        let bytes = &mut data.data().as_slice();
 
-        if log_enabled!(log::Level::Debug) {
-            debug!(
-                "Receive message from overlay for source: size={}, payload={}, source={}, session_id={:x}, timestamp={:?}",
+        if log::log_enabled!(log::Level::Debug) {
+            let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_else(
+                |_| Duration::new(0, 0)
+            ).as_millis();
+            log::debug!(
+                "Receive message from overlay for source: \
+                size={}, payload={}, source={}, session_id={:x}, timestamp={:?}",
                 bytes.len(),
                 &hex::encode(&bytes),
                 &hex::encode(adnl_id.data()),
                 self.session_id,
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("Time went backwards").as_millis(),
+                elapsed
             );
         }
 
@@ -1611,21 +1836,25 @@ impl CatchainProcessor {
             .receive_message_from_overlay(&adnl_id, bytes)
         {
             Ok(_) => (),
-            Err(err) => warn!("CatchainImpl::on_message: {}", err),
+            Err(err) => log::warn!("CatchainImpl::on_message: {}", err),
         }
     }
 
     fn on_broadcast_from_overlay(&mut self, source_key_hash: PublicKeyHash, data: BlockPayloadPtr) {
         instrument!();
 
-        if log_enabled!(log::Level::Debug) {
-            debug!(
-                "Receive broadcast from overlay for source: size={}, payload={}, source={}, session_id={:x}, timestamp={:?}",
+        if log::log_enabled!(log::Level::Debug) {
+            let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_else(
+                |_| Duration::new(0, 0)
+            ).as_millis();
+            log::debug!(
+                "Receive broadcast from overlay for source: \
+                size={}, payload={}, source={}, session_id={:x}, timestamp={:?}",
                 data.data().len(),
-                &hex::encode(&data.data().as_ref()),
+                &hex::encode(data.data()),
                 &hex::encode(source_key_hash.data()),
                 self.session_id,
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("Time went backwards").as_millis(),
+                elapsed
             );
         }
 
@@ -1641,8 +1870,8 @@ impl CatchainProcessor {
     ) {
         instrument!();
 
-        if log_enabled!(log::Level::Trace) {
-            trace!(
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
                 "Receive broadcast from overlay for source {}: {:?}",
                 source_key_hash,
                 data
@@ -1676,7 +1905,7 @@ impl CatchainProcessor {
     */
 
     fn on_started(&mut self) {
-        debug!("Catchain has been successfully started");
+        log::debug!("Catchain has been successfully started");
 
         //notify about start of catchain
 
@@ -1720,7 +1949,7 @@ impl CatchainProcessor {
     ) {
         instrument!();
 
-        trace!(
+        log::trace!(
             "New catchain block {:x} (source_id={}, fork={}, height={})",
             hash,
             source_id,
@@ -1784,6 +2013,7 @@ impl CatchainProcessor {
         );
 
         self.blocks.insert(hash.clone(), block.clone());
+        self.blocks_storage.add(block.clone());
         self.block_descs.insert(
             hash.clone(),
             Rc::new(RefCell::new(BlockDesc {
@@ -1802,7 +2032,7 @@ impl CatchainProcessor {
             if source_id != self.local_idx {
                 self.top_blocks.insert(hash.clone(), block.clone());
 
-                trace!(
+                log::trace!(
                     "...block {:?} has been added to top blocks (top_blocks_count={})",
                     &hash,
                     self.top_blocks.len()
@@ -1881,8 +2111,8 @@ impl CatchainProcessor {
         data: BlockPayloadPtr,
         response_callback: ExternalQueryResponseCallback,
     ) {
-        if log_enabled!(log::Level::Trace) {
-            trace!(
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
                 "CatchainProcessor.on_custom_query: public_key_hash={} payload={:?}",
                 source_public_key_hash,
                 data
@@ -1906,7 +2136,7 @@ impl CatchainProcessor {
             creation_time: std::time::SystemTime::now(),
         });
         if let Err(send_error) = self.utility_queue_sender.send(task_desc) {
-            error!("Catchain utility method call error: {}", send_error);
+            log::error!("Catchain utility method call error: {}", send_error);
         }
     }
 
@@ -1916,6 +2146,9 @@ impl CatchainProcessor {
 
     fn send_broadcast(&mut self, payload: BlockPayloadPtr) {
         instrument!();
+
+        self.out_broadcasts_bytes.increment(payload.data().len() as u64);
+        self.out_bytes.increment(payload.data().len() as u64);
 
         let source = self.receiver.borrow().get_source(self.local_idx);
         let source = source.borrow();
@@ -1950,6 +2183,9 @@ impl CatchainProcessor {
         max_answer_size: u64,
     ) {
         instrument!();
+
+        self.out_queries_bytes.increment(query.data().len() as u64);
+        self.out_bytes.increment(query.data().len() as u64);
 
         if CATCHAIN_POSTPONED_SEND_TO_OVERLAY {
             let overlay = Arc::downgrade(&self.overlay);
@@ -1996,7 +2232,7 @@ impl CatchainProcessor {
         utility_queue_sender: crossbeam::channel::Sender<Box<TaskDesc<dyn FnOnce() + Send>>>,
         overlay_manager: CatchainOverlayManagerPtr,
         listener: CatchainListenerPtr,
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: MetricsHandle,
     ) -> Result<CatchainProcessor> {
         //sources preparation
 
@@ -2021,7 +2257,7 @@ impl CatchainProcessor {
         let sources_as_int256: Vec<UInt256> = sources
             .clone()
             .into_iter()
-            .map(|key| public_key_hash_to_int256(&key))
+            .map(|key| utils::public_key_hash_to_int256(&key))
             .collect();
         let first_block = ::ton_api::ton::catchain::firstblock::Firstblock {
             unique_hash: session_id.clone().into(),
@@ -2030,7 +2266,7 @@ impl CatchainProcessor {
         .into_boxed();
         let overlay_id = utils::get_overlay_id(&first_block)?;
         let overlay_short_id = OverlayUtils::calc_private_overlay_short_id(&first_block)?;
-        let overlay_listener = OverlayListenerImpl::create(Arc::downgrade(&catchain));
+        let overlay_listener = OverlayListenerImpl::create(&catchain);
         let overlay_data_listener: Arc<dyn CatchainOverlayListener + Send + Sync> =
             overlay_listener.clone();
         let overlay_replay_listener: Arc<dyn CatchainOverlayLogReplayListener + Send + Sync> =
@@ -2046,25 +2282,29 @@ impl CatchainProcessor {
         //configure metrics
 
         let process_blocks_requests_counter =
-            metrics_receiver.sink().counter("process_blocks_requests");
+            metrics_receiver.sink().register_counter(&"process_blocks_requests".into());
         let process_blocks_responses_counter =
-            metrics_receiver.sink().counter("process_blocks_responses");
+            metrics_receiver.sink().register_counter(&"process_blocks_responses".into());
         let process_blocks_skip_responses_counter = metrics_receiver
             .sink()
-            .counter("process_blocks_skip_responses");
+            .register_counter(&"process_blocks_skip_responses".into());
         let process_blocks_batching_requests_counter = metrics_receiver
             .sink()
-            .counter("process_blocks_batching_requests");
+            .register_counter(&"process_blocks_batching_requests".into());
+        let processed_block_payload_size_histogram = metrics_receiver
+            .sink()
+            .register_histogram(&"processed_block_payload_size".into());
 
-        debug!(
-            "CatchainProcessor: starting up overlay for session {:x} with ID {:x}, short_id {}",
+        log::debug!(
+            "CatchainProcessor: starting up overlay \
+            for session {:x} with ID {:x}, short_id {}",
             session_id, overlay_id, overlay_short_id
         );
 
         //receiver creation
 
         let receiver_listener =
-            ReceiverListenerImpl::create(Arc::downgrade(&catchain), overlay.clone());
+            ReceiverListenerImpl::create(&catchain, overlay.clone());
         let receiver = CatchainFactory::create_receiver(
             Rc::downgrade(&receiver_listener),
             &overlay_id,
@@ -2086,6 +2326,7 @@ impl CatchainProcessor {
             receiver_listener: receiver_listener,
             receiver: receiver,
             catchain_listener: listener,
+            blocks_storage: BlocksStorage::new(),
             blocks: HashMap::new(),
             block_descs: HashMap::new(),
             top_blocks: HashMap::new(),
@@ -2113,6 +2354,10 @@ impl CatchainProcessor {
             process_blocks_responses_counter,
             process_blocks_skip_responses_counter,
             process_blocks_batching_requests_counter,
+            out_queries_bytes: catchain.out_queries_bytes.clone(),
+            out_broadcasts_bytes: catchain.out_broadcasts_bytes.clone(),
+            out_bytes: catchain.out_bytes.clone(),
+            processed_block_payload_size_histogram,
         };
 
         Ok(body)
@@ -2121,9 +2366,10 @@ impl CatchainProcessor {
 
 impl Drop for CatchainProcessor {
     fn drop(&mut self) {
-        debug!("Dropping CatchainProcessor...");
-
+        log::debug!("Dropping CatchainProcessor...");
         self.stop();
+
+        log::trace!("...catchain has been stopped");
     }
 }
 
@@ -2144,7 +2390,7 @@ impl CatchainOverlay for DummyCatchainOverlay {
         sender_id: &PublicKeyHash,
         message: &BlockPayloadPtr,
     ) {
-        trace!(
+        log::trace!(
             "DummyCatchainOverlay: send message {:?} -> {:?}: {:?}",
             sender_id,
             receiver_id,
@@ -2158,7 +2404,7 @@ impl CatchainOverlay for DummyCatchainOverlay {
         sender_id: &PublicKeyHash,
         message: &BlockPayloadPtr,
     ) {
-        trace!(
+        log::trace!(
             "DummyCatchainOverlay: send message multicast {:?} -> {:?}: {:?}",
             sender_id,
             receiver_ids,
@@ -2175,7 +2421,7 @@ impl CatchainOverlay for DummyCatchainOverlay {
         message: &BlockPayloadPtr,
         _response_callback: ExternalQueryResponseCallback,
     ) {
-        trace!(
+        log::trace!(
             "DummyCatchainOverlay: send query {} {:?} -> {:?}: {:?}",
             name,
             sender_id,
@@ -2193,7 +2439,7 @@ impl CatchainOverlay for DummyCatchainOverlay {
         query: BlockPayloadPtr,
         _max_answer_size: u64,
     ) {
-        trace!(
+        log::trace!(
             "DummyCatchainOverlay: send query '{}' via RLDP -> {}: {:?}",
             name,
             dst_adnl_id,
@@ -2207,7 +2453,7 @@ impl CatchainOverlay for DummyCatchainOverlay {
         send_as: &PublicKeyHash,
         payload: BlockPayloadPtr,
     ) {
-        trace!(
+        log::trace!(
             "DummyCatchainOverlay: send broadcast_fec_ex {:?}/{:?}: {:?}",
             sender_id,
             send_as,
@@ -2263,9 +2509,11 @@ impl Catchain for CatchainImpl {
                 break;
             }
 
-            info!(
-                "...waiting for Catchain threads (session_id is {:x})",
-                self.session_id
+            log::info!(
+                "...waiting for Catchain threads (session_id is {:x}), main={}, util={}",
+                self.session_id,
+                self.main_thread_is_stopped_flag.load(Ordering::SeqCst),
+                self.utility_thread_is_stopped_flag.load(Ordering::SeqCst)
             );
 
             const CHECKING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
@@ -2273,7 +2521,7 @@ impl Catchain for CatchainImpl {
             std::thread::sleep(CHECKING_INTERVAL);
         }
 
-        info!(
+        log::info!(
             "Catchain has been stopped (session_id is {:x})",
             self.session_id
         );
@@ -2338,8 +2586,7 @@ impl Catchain for CatchainImpl {
 
 impl Drop for CatchainImpl {
     fn drop(&mut self) {
-        debug!("Dropping Catchain...");
-
+        log::debug!("Dropping Catchain...");
         self.stop(false);
     }
 }
@@ -2355,9 +2602,9 @@ impl CatchainImpl {
             creation_time: std::time::SystemTime::now(),
         });
         if let Err(send_error) = self.main_queue_sender.send(task_desc) {
-            error!("Catchain method call error: {}", send_error);
+            log::error!("Catchain method call error: {}", send_error);
         } else {
-            self.main_thread_post_counter.increment();
+            self.main_thread_post_counter.increment(1);
         }
     }
 
@@ -2371,9 +2618,9 @@ impl CatchainImpl {
             creation_time: std::time::SystemTime::now(),
         });
         if let Err(send_error) = self.utility_queue_sender.send(task_desc) {
-            error!("Catchain utility method call error: {}", send_error);
+            log::error!("Catchain utility method call error: {}", send_error);
         } else {
-            self.utility_thread_post_counter.increment();
+            self.utility_thread_post_counter.increment(1);
         }
     }
 
@@ -2396,7 +2643,7 @@ impl CatchainImpl {
         overlay_manager: CatchainOverlayManagerPtr,
         listener: CatchainListenerPtr,
     ) -> CatchainPtr {
-        debug!("Creating Catchain...");
+        log::debug!("Creating Catchain...");
 
         let (main_queue_sender, main_queue_receiver): (
             crossbeam::channel::Sender<Box<TaskDesc<dyn FnOnce(&mut CatchainProcessor) + Send>>>,
@@ -2416,16 +2663,22 @@ impl CatchainImpl {
         let name = format!("Catchain_{:x}", session_id);
         let catchain_activity_node = CatchainFactory::create_activity_node(name);
 
-        let metrics_receiver = Arc::new(
-            metrics_runtime::Receiver::builder()
-                .build()
-                .expect("failed to create metrics receiver"),
-        );
+        let metrics_receiver =
+            MetricsHandle::new(Some(Duration::from_secs(30)));
 
-        let main_thread_post_counter = metrics_receiver.sink().counter("main_queue.posts");
-        let main_thread_pull_counter = metrics_receiver.sink().counter("main_queue.pulls");
-        let utility_thread_post_counter = metrics_receiver.sink().counter("utility_queue.posts");
-        let utility_thread_pull_counter = metrics_receiver.sink().counter("utility_queue.pulls");
+        let main_thread_post_counter = metrics_receiver.sink().register_counter(&"main_queue.posts".into());
+        let main_thread_pull_counter = metrics_receiver.sink().register_counter(&"main_queue.pulls".into());
+        let utility_thread_post_counter = metrics_receiver.sink().register_counter(&"utility_queue.posts".into());
+        let utility_thread_pull_counter = metrics_receiver.sink().register_counter(&"utility_queue.pulls".into());
+
+        let in_messages_bytes = metrics_receiver.sink().register_counter(&"overlay_in_messages_bytes".into());
+        let out_messages_bytes = metrics_receiver.sink().register_counter(&"overlay_out_messages_bytes".into());
+        let in_queries_bytes = metrics_receiver.sink().register_counter(&"overlay_in_queries_bytes".into());
+        let out_queries_bytes = metrics_receiver.sink().register_counter(&"overlay_out_queries_bytes".into());
+        let in_broadcasts_bytes = metrics_receiver.sink().register_counter(&"overlay_in_broadcasts_bytes".into());
+        let out_broadcasts_bytes = metrics_receiver.sink().register_counter(&"overlay_out_broadcasts_bytes".into());
+        let in_bytes = metrics_receiver.sink().register_counter(&"overlay_in_bytes".into());
+        let out_bytes = metrics_receiver.sink().register_counter(&"overlay_out_bytes".into());
 
         let body: CatchainImpl = CatchainImpl {
             main_queue_sender,
@@ -2442,6 +2695,14 @@ impl CatchainImpl {
             main_thread_pull_counter,
             utility_thread_post_counter,
             _utility_thread_pull_counter: utility_thread_pull_counter.clone(),
+            in_queries_bytes,
+            out_queries_bytes,
+            in_messages_bytes,
+            out_messages_bytes,
+            in_broadcasts_bytes,
+            out_broadcasts_bytes,
+            in_bytes,
+            out_bytes,
         };
 
         let catchain = Arc::new(body);
@@ -2452,6 +2713,7 @@ impl CatchainImpl {
         let options = *options;
 
         let stop_flag_for_main_loop = should_stop_flag.clone();
+        let utility_thread_is_stopped_flag_for_main_loop = utility_thread_is_stopped_flag.clone();
         let session_id_clone = session_id.clone();
         let metrics_receiver_clone = metrics_receiver.clone();
         let _main_thread = std::thread::Builder::new()
@@ -2463,6 +2725,7 @@ impl CatchainImpl {
                     main_queue_receiver,
                     stop_flag_for_main_loop,
                     main_thread_is_stopped_flag,
+                    utility_thread_is_stopped_flag_for_main_loop,
                     main_thread_overloaded_flag,
                     destroy_db_flag,
                     options,

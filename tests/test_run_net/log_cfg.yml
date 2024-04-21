@@ -13,22 +13,16 @@ appenders:
     encoder:
       pattern: "{f}:{L} {l} [{h({t})}] {I}: {m}{n}"
 
-  logfile:
-    kind: file
-    path: "/ton-node/logs/output.log"
-    encoder:
-      pattern: "{d(%Y-%m-%d %H:%M:%S.%f)} {l} [{h({t})}] {I}: {m}{n}"
-
   rolling_logfile:
     kind: rolling_file
     encoder:
-      pattern: "{d(%Y-%m-%d %H:%M:%S.%f)} {l} [{h({t})}] {I}: {m}{n}"
+      pattern: "{d(%Y-%m-%d %H:%M:%S.%f)} {l} [{h({t})}@{file}(({line}))] {I}: {m}{n}"
     path: '/shared/output_NODE_NUM.log'
     policy:
       kind: compound
       trigger:
         kind: size
-        limit: 3 gb
+        limit: 5 gb
       roller:
         kind: fixed_window
         pattern: '/shared/output_NODE_NUM_{}.log'
@@ -80,16 +74,28 @@ loggers:
     level: error
 
   validator:
+    level: debug
+
+  validator_manager:
+    level: trace
+
+  remp:
+    level: trace
+
+  verificator:
     level: trace
 
   catchain:
-    level: debug
+    level: error
 
   validator_session:
     level: debug
 
   storage:
-    level: trace
+    level: info
 
   telemetry:
     level: debug
+
+  ext_messages:
+    level: trace

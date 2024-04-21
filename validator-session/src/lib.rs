@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -11,31 +11,9 @@
 * limitations under the License.
 */
 
-#[macro_use]
-extern crate lazy_static;
-
-extern crate catchain;
-extern crate metrics_runtime;
-extern crate rand;
-extern crate sha2;
-extern crate ton_api;
-extern crate ton_types;
-
-#[macro_use]
-extern crate log;
-
-#[macro_use]
-extern crate failure;
-
 //const TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG: bool = false; //compatibility with Telegram Node: bug in hashes computation for attempt and round
 const TELEGRAM_NODE_COMPATIBILITY_HASHES_BUG: bool = true; //compatibility with Telegram Node: bug in hashes computation for attempt and round
 
-use std::any::Any;
-use std::cell::RefCell;
-use std::fmt;
-use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::Weak;
 mod block_candidate;
 mod cache;
 mod old_round;
@@ -46,7 +24,8 @@ mod session;
 mod session_description;
 mod session_processor;
 mod session_state;
-pub mod slashing;
+#[cfg(feature="slashing")]
+mod slashing;
 mod task_queue;
 pub mod utils;
 mod vector;
@@ -54,21 +33,13 @@ mod vector_bool;
 mod vote_candidate;
 
 pub use cache::*;
-pub use catchain::ActivityNodePtr;
 use catchain::CatchainPtr;
-pub use catchain::CatchainReplayListener;
-use task_queue::CallbackTaskQueuePtr;
-use task_queue::CompletionHandlerProcessor;
-use task_queue::TaskQueuePtr;
-
-pub mod profiling {
-    pub use catchain::profiling::*;
-}
+use task_queue::{CallbackTaskQueuePtr, CompletionHandlerProcessor, TaskQueuePtr};
+use std::{any::Any, cell::RefCell, fmt, rc::Rc, sync::{Arc, Weak}};
 
 pub mod ton {
     pub use ton_api::ton::int;
     pub use ton_api::ton::rpc::validator_session::*;
-    pub use ton_api::ton::validator_session::round::validator_session::*;
     pub use ton_api::ton::validator_session::*;
 
     pub mod blockid {
@@ -125,7 +96,7 @@ pub type PublicKeyHash = ::catchain::PublicKeyHash;
 /// Block ID
 pub type BlockId = BlockHash;
 
-lazy_static! {
+lazy_static::lazy_static! {
   /// Block candidate identifier for skip round (optional case to identify candidate as empty)
   pub static ref SKIP_ROUND_CANDIDATE_BLOCKID : BlockId = ton_types::UInt256::default();
 
@@ -247,18 +218,34 @@ pub type SessionListenerPtr = Weak<dyn SessionListener + Send + Sync>;
 pub type ValidatorWeight = catchain::ValidatorWeight;
 
 /// Slashing validator statistics
+#[cfg(feature="slashing")]
 pub type SlashingValidatorStat = slashing::ValidatorStat;
 
 /// Slashing aggregated validator statistics
+#[cfg(feature="slashing")]
 pub type SlashingAggregatedValidatorStat = slashing::AggregatedValidatorStat;
 
 /// Slashed node
+#[cfg(feature="slashing")]
 pub type SlashedNode = slashing::SlashedNode;
+
+/// Slashing node
+#[cfg(feature="slashing")]
+pub type SlashingNode = slashing::Node;
+
+/// Slashing metric
+#[cfg(feature="slashing")]
+pub type SlashingMetric = slashing::Metric;
+
+/// Slashing aggregated metric
+#[cfg(feature="slashing")]
+pub type SlashingAggregatedMetric = slashing::AggregatedMetric;
 
 /// Validator session options
 #[derive(Clone, Copy, Debug)]
 pub struct SessionOptions {
     /// Catchain processing timeout
+    /// (will be ignored for single-node sessions)
     pub catchain_idle_timeout: std::time::Duration,
 
     /// Maximum number of dependencies to merge
@@ -266,6 +253,24 @@ pub struct SessionOptions {
 
     /// Use Catchain in receive only mode (for debugging and log replay)
     pub catchain_skip_processed_blocks: bool,
+
+    /// Receiver: max number of neighbours to synchronize
+    pub catchain_receiver_max_neighbours_count: usize,
+
+    /// Receiver: min time for catchain sync with neighbour nodes
+    pub catchain_receiver_neighbours_sync_min_period: std::time::Duration,
+
+    /// Receiver: max time for catchain sync with neighbour nodes
+    pub catchain_receiver_neighbours_sync_max_period: std::time::Duration,
+
+    /// Receiver: max number of attempts to find a source to synchronize
+    pub catchain_receiver_max_sources_sync_attempts: usize,
+
+    /// Receiver: min time for catchain neighbours rotation
+    pub catchain_receiver_neighbours_rotate_min_period: std::time::Duration,
+
+    /// Receiver: max time for catchain neighbours rotation
+    pub catchain_receiver_neighbours_rotate_max_period: std::time::Duration,
 
     /// Number of block candidates per round
     pub round_candidates: u32,
@@ -287,6 +292,9 @@ pub struct SessionOptions {
 
     /// Allow new catchain IDs
     pub new_catchain_ids: bool,
+
+    /// Skip validations for single node sessions
+    pub skip_single_node_session_validations: bool,
 }
 
 /// Merge wrapper
@@ -1120,7 +1128,7 @@ pub trait SessionDescription: fmt::Display + fmt::Debug + cache::SessionCache {
     fn is_in_past(&self, time: std::time::SystemTime) -> bool;
 
     /// Receiver for metrics
-    fn get_metrics_receiver(&self) -> &metrics_runtime::Receiver;
+    fn get_metrics_receiver(&self) -> &catchain::utils::MetricsHandle;
 
     /// Sent block instance counter
     fn get_sent_blocks_instance_counter(&self) -> &CachedInstanceCounter;
@@ -1250,6 +1258,7 @@ pub trait SessionListener {
     );
 
     /// Slashing statistics event
+    #[cfg(feature="slashing")]
     fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat);
 }
 
@@ -1297,7 +1306,7 @@ pub trait SessionProcessor: CompletionHandlerProcessor + fmt::Display {
     fn get_next_awake_time(&self) -> std::time::SystemTime;
 
     /// Stop all further session processing
-    fn stop(&mut self);
+    fn stop(&mut self, destroy_catchain_db: bool);
 
     /// Returns implementation specific details
     fn get_impl(&self) -> &dyn Any;
@@ -1462,7 +1471,7 @@ impl SessionFactory {
 
     /// Create session callbacks task queue
     pub fn create_callback_task_queue(
-        metrics_receiver: Arc<metrics_runtime::Receiver>,
+        metrics_receiver: catchain::utils::MetricsHandle,
     ) -> CallbackTaskQueuePtr {
         session::SessionImpl::create_callback_task_queue(metrics_receiver)
     }
@@ -1488,6 +1497,25 @@ impl SessionFactory {
             db_suffix,
             allow_unsafe_self_blocks_resync,
             overlay_manager,
+            listener,
+        )
+    }
+
+    /// Create session
+    pub fn create_single_node_session(
+        options: &SessionOptions,
+        session_id: &SessionId,
+        local_key: &PrivateKey,
+        db_path: String,
+        db_suffix: String,
+        listener: SessionListenerPtr,
+    ) -> SessionPtr {
+        session::SessionImpl::create_single(
+            options,
+            session_id,
+            local_key,
+            db_path,
+            db_suffix,
             listener,
         )
     }
@@ -1518,7 +1546,7 @@ impl SessionFactory {
         completion_task_queue: TaskQueuePtr,
         callbacks_task_queue: CallbackTaskQueuePtr,
         session_creation_time: std::time::SystemTime,
-        metrics: Option<Arc<metrics_runtime::Receiver>>,
+        metrics: Option<catchain::utils::MetricsHandle>,
     ) -> SessionProcessorPtr {
         session_processor::SessionProcessorImpl::create(
             options,

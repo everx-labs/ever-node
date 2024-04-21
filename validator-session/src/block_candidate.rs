@@ -11,7 +11,15 @@
 * limitations under the License.
 */
 
-pub use super::*;
+use crate::{
+    Any, BlockCandidate, BlockCandidatePtr, BlockCandidateSignature, 
+    BlockCandidateSignaturePtr, BlockCandidateSignatureVectorPtr, BlockCandidateWrapper, 
+    BlockId, BlockSignature, CacheObject, CachedInstanceCounter, DEFAULT_BLOCKID, 
+    HashableObject, HashType, Merge, MovablePoolObject, PoolObject, PoolPtr, SentBlockPtr, 
+    SessionCache, SessionDescription, SessionFactory, SessionPool, VectorMerge, ton
+};
+use std::fmt;
+use catchain::instrument;
 
 /*
 ===================================================================================================
@@ -21,7 +29,7 @@ pub use super::*;
 
 /*
     Implementation details for BlockCandidateSignature
-*/
+*/                                                           
 
 #[derive(Clone)]
 pub(crate) struct BlockCandidateSignatureImpl {
@@ -58,11 +66,11 @@ impl BlockCandidateSignature for BlockCandidateSignatureImpl {
 
 impl Merge<PoolPtr<dyn BlockCandidateSignature>> for PoolPtr<dyn BlockCandidateSignature> {
     fn merge(&self, right: &Self, _desc: &mut dyn SessionDescription) -> Self {
-        profiling::instrument!();
+        instrument!();
 
         let left = self;
 
-        if left.get_signature().0 < right.get_signature().0 {
+        if left.get_signature() < right.get_signature() {
             left.clone()
         } else {
             right.clone()
@@ -124,7 +132,7 @@ impl std::cmp::PartialEq for dyn BlockCandidateSignature {
     fn eq(&self, other: &Self) -> bool {
         //compare addresses only because each vector is unique in cache system
 
-        (self as *const Self) == (other as *const Self)
+        std::ptr::addr_eq(self, other)
     }
 }
 
@@ -187,7 +195,7 @@ impl BlockCandidateSignatureImpl {
         desc: &mut dyn SessionDescription,
         signature: BlockSignature,
     ) -> BlockCandidateSignaturePtr {
-        profiling::instrument!();
+        instrument!();
 
         let body = Self::new(
             signature,
@@ -283,7 +291,7 @@ impl BlockCandidate for BlockCandidateImpl {
     */
 
     fn clone_to_persistent(&self, cache: &mut dyn SessionCache) -> PoolPtr<dyn BlockCandidate> {
-        profiling::instrument!();
+        instrument!();
 
         let self_cloned = Self::new(
             self.block.move_to_persistent(cache),
@@ -301,7 +309,7 @@ impl BlockCandidate for BlockCandidateImpl {
 
 impl Merge<PoolPtr<dyn BlockCandidate>> for PoolPtr<dyn BlockCandidate> {
     fn merge(&self, right: &Self, desc: &mut dyn SessionDescription) -> Self {
-        profiling::instrument!();
+        instrument!();
 
         let left = self;
 
@@ -357,7 +365,7 @@ impl BlockCandidateWrapper for BlockCandidatePtr {
         src_idx: u32,
         signature: BlockCandidateSignaturePtr,
     ) -> BlockCandidatePtr {
-        profiling::instrument!();
+        instrument!();
 
         let &self_impl = &get_impl(&**self);
 
@@ -385,7 +393,7 @@ impl std::cmp::PartialEq for dyn BlockCandidate {
     fn eq(&self, other: &Self) -> bool {
         //compare addresses only because each vector is unique in cache system
 
-        (self as *const Self) == (other as *const Self)
+        std::ptr::addr_eq(self, other)
     }
 }
 
@@ -479,7 +487,7 @@ impl BlockCandidateImpl {
         block: SentBlockPtr,
         approved_by: BlockCandidateSignatureVectorPtr,
     ) -> BlockCandidatePtr {
-        profiling::instrument!();
+        instrument!();
 
         let body = Self::new(
             block,

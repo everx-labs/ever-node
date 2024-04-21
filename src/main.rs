@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -28,13 +28,14 @@ mod internal_db;
 mod macros;
 mod network;
 mod rng;
-mod shard_blocks;
 mod shard_state;
 mod sync;
 mod types;
 mod validating_utils;
 mod validator;
 mod shard_states_keeper;
+
+mod shard_blocks;
 
 #[cfg(feature = "tracing")]
 mod jaeger;
@@ -48,7 +49,7 @@ mod jaeger {
 }
 
 use crate::{
-    config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, STATSD, Stopper}, 
+    config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, Stopper, EngineFlags},
     jaeger::init_jaeger, internal_db::restore::set_graceful_termination,
     validating_utils::supported_version
 };
@@ -69,9 +70,12 @@ use std::{
 use ton_types::error;
 use ton_types::Result;
 
+#[cfg(test)]
+#[path = "tests/test_helper.rs"]
+pub mod test_helper;
 
 #[cfg(target_os = "linux")]
-#[link(name = "tcmalloc", kind = "dylib")]
+#[link(name = "tcmalloc_minimal", kind = "dylib")]
 extern "C" {
     pub fn tc_memalign(alignment: usize, size: usize) -> *mut c_void;
     pub fn tc_free(ptr: *mut c_void);
@@ -219,7 +223,7 @@ static GLOBAL: TracingAllocator = TracingAllocator {
     overhead: AtomicU64::new(0)
 };
 
-fn init_logger(log_config_path: Option<String>) {
+fn init_logger<T: AsRef<std::path::Path>>(log_config_path: Option<T>) {
 
     if let Some(path) = log_config_path {
         if let Err(err) = log4rs::init_file(path, Default::default()) {
@@ -281,9 +285,6 @@ fn get_build_info() -> String {
         Rust: {}\n\
         TON NODE git commit:         {}\n\
         ADNL git commit:             {}\n\
-        DHT git commit:              {}\n\
-        OVERLAY git commit:          {}\n\
-        RLDP git commit:             {}\n\
         TON_BLOCK git commit:        {}\n\
         TON_BLOCK_JSON git commit:   {}\n\
         TON_EXECUTOR git commit:     {}\n\
@@ -294,9 +295,6 @@ fn get_build_info() -> String {
         std::option_env!("BUILD_RUST_VERSION").unwrap_or(NOT_SET_LABEL),
         std::option_env!("BUILD_GIT_COMMIT").unwrap_or(NOT_SET_LABEL),
         adnl::build_commit().unwrap_or(NOT_SET_LABEL),
-        dht::build_commit().unwrap_or(NOT_SET_LABEL),
-        overlay::build_commit().unwrap_or(NOT_SET_LABEL),
-        rldp::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_block::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_block_json::build_commit().unwrap_or(NOT_SET_LABEL),
         ton_executor::build_commit().unwrap_or(NOT_SET_LABEL),
@@ -315,10 +313,12 @@ fn get_build_info() -> String {
 
 #[cfg(feature = "external_db")]
 fn start_external_db(config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>> {
+    let control_id = config.control_server()?.map(|config| *config.server_id());
     Ok(vec!(
         external_db::create_external_db(
             config.external_db_config().ok_or_else(|| error!("Can't load external database config!"))?,
-            config.front_workchain_ids()
+            config.front_workchain_ids(),
+            control_id,
         )?
     ))
 }
@@ -332,8 +332,7 @@ async fn start_engine(
     config: TonNodeConfig, 
     zerostate_path: Option<&str>, 
     validator_runtime: tokio::runtime::Handle, 
-    initial_sync_disabled: bool,
-    force_check_db: bool,
+    flags: EngineFlags,
     stopper: Arc<Stopper>
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
     let external_db = start_external_db(&config)?;
@@ -341,9 +340,8 @@ async fn start_engine(
         config, 
         zerostate_path, 
         external_db, 
-        validator_runtime, 
-        initial_sync_disabled,
-        force_check_db,
+        validator_runtime,
+        flags,
         stopper,
     ).await
 }
@@ -351,7 +349,15 @@ async fn start_engine(
 const CONFIG_NAME: &str = "config.json";
 const DEFAULT_CONFIG_NAME: &str = "default_config.json";
 
+fn check_debug_build() {
+    // check that node built with --release
+    if cfg!(debug_assertions) {
+        println!("!!! WARN: Node was built without --release\n");
+    }
+}
+
 fn main() {
+    check_debug_build();
 
     #[cfg(target_os = "linux")]
     check_tcmalloc();
@@ -378,18 +384,27 @@ fn main() {
         .arg(clap::Arg::with_name("initial_sync_disabled")
             .short("i")
             .long("initial-sync-disabled")
-            .value_name("initial sync disable flag")
             .help("use this flag to sync from zero_state"))
+        .arg(clap::Arg::with_name("starting_block_disabled")
+            .short("b")
+            .long("starting-block-disabled")
+            .help("use this flag to disable downloading starting block for sync. proof will be used instead"))
         .arg(clap::Arg::with_name("force_check_db")
             .short("f")
             .long("force-check-db")
-            .value_name("force check db flag")
-            .help("start check & restore db process forcely"));
+            .help("start check & restore db process forcedly with refilling cells database"))
+        .arg(clap::Arg::with_name("process_conf_and_exit")
+            .long("process-conf-and-exit")
+            .help("finish node after config file processing (reading or generating)."));
 
     let matches = app.get_matches();
 
-    let initial_sync_disabled = matches.is_present("initial_sync_disabled");
-    let force_check_db = matches.is_present("force_check_db");
+    let flags = EngineFlags {
+        initial_sync_disabled: matches.is_present("initial_sync_disabled"),
+        starting_block_disabled: matches.is_present("starting_block_disabled"),
+        force_check_db: matches.is_present("force_check_db"),
+    };
+    let process_conf_and_exit = matches.is_present("process_conf_and_exit");
 
     let config_dir_path = match matches.value_of("config") {
         Some(config) => {
@@ -418,11 +433,19 @@ fn main() {
         Ok(c) => c
     };
 
+    if process_conf_and_exit {
+        println!("Finish node because of --process-conf-and-exit flag is set");
+        return;
+    }
+
     init_logger(config.log_config_path());
     log::info!("{}", version);
-    
-    lazy_static::initialize(&STATSD);
-    
+
+    #[cfg(feature = "statsd")]
+    engine::init_statsd_exporter();
+    #[cfg(feature = "prometheus")]
+    engine::init_prometheus_exporter();
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(8 * 1024 * 1024)
@@ -485,10 +508,10 @@ fn main() {
     );
 
     let stopper = Arc::new(Stopper::new());
-    let stopper1 = stopper.clone();
+    let stopper_ctrl_c = stopper.clone();
     ctrlc::set_handler(move || {
         log::warn!("Got SIGINT, starting node's safe stopping...");
-        stopper1.set_stop();
+        stopper_ctrl_c.set_stop();
     }).expect("Error setting termination signals handler");
 
     let validator_rt_handle = validator_runtime.handle().clone();
@@ -498,8 +521,7 @@ fn main() {
             config, 
             zerostate_path, 
             validator_rt_handle,
-            initial_sync_disabled,
-            force_check_db,
+            flags,
             stopper.clone(),
         ).await {
             Err(e) => {

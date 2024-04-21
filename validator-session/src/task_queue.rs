@@ -11,7 +11,9 @@
 * limitations under the License.
 */
 
-pub use super::*;
+use crate::SessionProcessor;
+use std::sync::Arc;
+use ton_types::Result;
 
 /// Task of task queue
 pub type TaskPtr = Box<dyn FnOnce(&mut dyn SessionProcessor) + Send>;
@@ -48,6 +50,9 @@ pub trait TaskQueue<FuncPtr: Send + 'static>: Send + Sync {
         timeout: std::time::Duration,
         last_warn_dump_time: &mut std::time::SystemTime,
     ) -> Option<FuncPtr>;
+
+    /// Flush queue
+    fn flush(&self);
 }
 
 /// Post closure to be run in a main processing thread

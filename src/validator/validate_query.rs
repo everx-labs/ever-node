@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -11,7 +11,7 @@
 * limitations under the License.
 */
 
-use super::{validator_utils::calc_subset_for_workchain, BlockCandidate, McData};
+use super::{BlockCandidate, McData};
 use crate::{
     block::BlockStuff,
     engine_traits::EngineOperations,
@@ -23,15 +23,17 @@ use crate::{
     },
     validating_utils::{
         check_cur_validator_set, check_this_shard_mc_info, may_update_shard_block_info,
-        supported_capabilities, supported_version,
+        supported_version, supported_capabilities, calc_remp_msg_ordering_hash,
+        UNREGISTERED_CHAIN_MAX_LEN, fmt_next_block_descr,
     },
-    validator::out_msg_queue::MsgQueueManager,
+    validator::{out_msg_queue::MsgQueueManager, validator_utils::calc_subset_for_masterchain},
+    validator::verification::VerificationManagerPtr,
     CHECK,
 };
+
 use adnl::common::add_unbound_object_to_map_with_update;
 use std::{
     collections::HashMap,
-    io::Cursor,
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
@@ -47,20 +49,23 @@ use ton_block::{
     OutMsgQueueKey, Serializable, ShardAccount, ShardAccountBlocks, ShardAccounts, ShardFeeCreated,
     ShardHashes, ShardIdent, StateInitLib, TopBlockDescrSet, TrComputePhase, Transaction,
     TransactionDescr, ValidatorSet, ValueFlow, WorkchainDescr, INVALID_WORKCHAIN_ID,
-    MASTERCHAIN_ID, MAX_SPLIT_DEPTH, U15,
+    MASTERCHAIN_ID, U15, OutMsgQueueInfo, OutQueueUpdate, MAX_SPLIT_DEPTH
 };
 use ton_executor::{
     BlockchainConfig, CalcMsgFwdFees, ExecuteParams, OrdinaryTransactionExecutor,
     TickTockTransactionExecutor, TransactionExecutor,
 };
 use ton_types::{
-    deserialize_cells_tree, fail, AccountId, Cell, CellType, HashmapType, Result, SliceData,
-    UInt256,
+    read_boc, fail, AccountId, base64_encode, Cell, CellType, HashmapType, Result, 
+    SliceData, UInt256
 };
 
-#[cfg(feature = "metrics")]
-use crate::engine::STATSD;
+use crate::engine_traits::RempDuplicateStatus;
+use crate::validator::validator_utils::is_remp_enabled;
 
+#[cfg(test)]
+#[path = "tests/test_validate_query.rs"]
+mod tests;
 
 // pub const SPLIT_MERGE_DELAY: u32 = 100;        // prepare (delay) split/merge for 100 seconds
 // pub const SPLIT_MERGE_INTERVAL: u32 = 100;     // split/merge is enabled during 60 second interval
@@ -128,6 +133,7 @@ struct ValidateBase {
     // TODO: maybe make some fileds Option
     // data from block_candidate
     capabilities: u64,
+    split_queues: bool,
     block: BlockStuff,
     info: BlockInfo,
     value_flow: ValueFlow,
@@ -162,6 +168,8 @@ struct ValidateBase {
     copyleft_rewards: Arc<lockfree::queue::Queue<(AccountId, Grams)>>,
 
     result: ValidateResult,
+
+    next_block_descr: Arc<String>,
 }
 
 impl ValidateBase {
@@ -215,6 +223,9 @@ pub struct ValidateQuery {
     block_create_count: HashMap<UInt256, u64>,
 
     engine: Arc<dyn EngineOperations>,
+    verification_manager: Option<VerificationManagerPtr>,
+
+    next_block_descr: Arc<String>,
 }
 
 impl ValidateQuery {
@@ -230,7 +241,9 @@ impl ValidateQuery {
         engine: Arc<dyn EngineOperations>,
         is_fake: bool,
         multithread: bool,
+        verification_manager: Option<VerificationManagerPtr>,
     ) -> Self {
+        let next_block_descr = Arc::new(fmt_next_block_descr(&block_candidate.block_id));
         Self {
             engine,
             shard,
@@ -248,6 +261,9 @@ impl ValidateQuery {
             create_stats_enabled: Default::default(),
             block_create_total: Default::default(),
             block_create_count: Default::default(),
+
+            next_block_descr,
+            verification_manager,
         }
     }
 
@@ -260,11 +276,12 @@ impl ValidateQuery {
 
     fn init_base(&mut self) -> Result<ValidateBase> {
         let mut base = ValidateBase::default();
+        base.next_block_descr = self.next_block_descr.clone();
         base.is_fake = self.is_fake;
         base.created_by = self.block_candidate.created_by.clone();
         base.prev_blocks_ids = std::mem::take(&mut self.prev_blocks_ids);
         let block_id = &self.block_candidate.block_id;
-        log::info!(target: "validate_query", "validate query for {:#} started", block_id);
+        log::info!(target: "validate_query", "({}): validate query for {:#} started", self.next_block_descr, block_id);
         if block_id.shard() != self.shard() {
             soft_reject_query!("block candidate belongs to shard {} different from current shard {}",
                 block_id.shard(), self.shard())
@@ -322,9 +339,9 @@ impl ValidateQuery {
 
         // 3. load state(s) corresponding to previous block(s)
         for i in 0..base.prev_blocks_ids.len() {
-            log::debug!(target: "validate_query", "load state for prev block {} of {} {}", i + 1, base.prev_blocks_ids.len(), base.prev_blocks_ids[i]);
+            log::debug!(target: "validate_query", "({}): load state for prev block {} of {} {}", self.next_block_descr, i + 1, base.prev_blocks_ids.len(), base.prev_blocks_ids[i]);
             let prev_state = (self.engine.clone()).wait_state(&base.prev_blocks_ids[i], Some(1_000), true).await?;
-            if &self.shard == prev_state.shard() && prev_state.state().before_split() {
+            if &self.shard == prev_state.shard() && prev_state.state()?.before_split() {
                 reject_query!("cannot accept new unsplit shardchain block for {} \
                     after previous block {} with before_split set", self.shard, prev_state.block_id())
             }
@@ -356,7 +373,7 @@ impl ValidateQuery {
         CHECK!(!block_candidate.data.is_empty());
         // 1. deserialize block itself
         let data = std::mem::take(&mut block_candidate.data);
-        base.block = BlockStuff::new(block_candidate.block_id.clone(), data)?;
+        base.block = BlockStuff::deserialize_block_checked(block_candidate.block_id.clone(), data)?;
         // 3. initial block parse
         Self::init_parse(&mut base)?;
         // ...
@@ -366,8 +383,12 @@ impl ValidateQuery {
 
     // init_parse
     fn init_parse(base: &mut ValidateBase) -> Result<()> {
-        base.global_id = base.block.block().global_id();
-        base.info = base.block.block().read_info()?;
+        base.global_id = base.block.block()?.global_id();
+        let allow_v2 = false;
+        base.info.read_from_ex(
+            &mut SliceData::load_cell(base.block.block()?.info_cell())?,
+            allow_v2
+        )?;
         let block_id = BlockIdExt::from_ext_blk(base.info.read_master_id()?);
         CHECK!(block_id.shard_id.is_masterchain());
         let prev_blocks_ids = base.info.read_prev_ids()?;
@@ -389,11 +410,11 @@ impl ValidateQuery {
         if base.info.shard() != base.shard() {
             reject_query!("shard mismatch in the block header")
         }
-        base.state_update = base.block.block().read_state_update()?;
-        base.value_flow = base.block.block().read_value_flow()?;
+        base.state_update = base.block.block()?.read_state_update()?;
+        base.value_flow = base.block.block()?.read_value_flow()?;
 
         if base.info.key_block() {
-            log::info!(target: "validate_query", "validating key block {}", base.block_id());
+            log::info!(target: "validate_query", "({}): validating key block {}", base.next_block_descr, base.block_id());
         }
         if base.info.start_lt() >= base.info.end_lt() {
             reject_query!("block has start_lt greater than or equal to end_lt")
@@ -420,7 +441,11 @@ impl ValidateQuery {
         if base.info.after_merge() != base.after_merge {
             reject_query!("after_merge value mismatch in block header")
         }
-        base.extra = base.block.block().read_extra()?;
+        base.extra = base.block.block()?.read_extra()?;
+        if !base.extra.ref_shard_blocks().is_empty() {
+            reject_query!("block extra could not contain ref_shard_blocks")
+        }
+
         if &base.created_by != base.extra.created_by() {
             reject_query!("block candidate {} has creator {:x} but the block header contains different value {:x}",
                 base.block_id(), base.created_by, base.extra.created_by())
@@ -449,7 +474,7 @@ impl ValidateQuery {
         match croot.cell_type() {
             CellType::Ordinary => match TopBlockDescrSet::construct_from_cell(croot) {
                 Ok(descr) => if base.top_shard_descr_dict.is_empty() {
-                    log::debug!(target: "validate_query", "collated datum #{} is a TopBlockDescrSet", idx);
+                    log::debug!(target: "validate_query", "({}): collated datum #{} is a TopBlockDescrSet", base.next_block_descr, idx);
                     base.top_shard_descr_dict = descr;
                     base.top_shard_descr_dict.count(10000)
                         .map_err(|err| error!("invalid TopBlockDescrSet : {}", err))?;
@@ -457,7 +482,7 @@ impl ValidateQuery {
                     reject_query!("duplicate TopBlockDescrSet in collated data")
                 }
                 Err(err) => if let Some(BlockError::InvalidConstructorTag{ t, s: _ }) = err.downcast_ref() {
-                    log::warn!(target: "validate_query", "collated datum # {} has unknown type (magic {:X}), ignoring", idx, t);
+                    log::warn!(target: "validate_query", "({}): collated datum # {} has unknown type (magic {:X}), ignoring", base.next_block_descr, idx, t);
                 } else {
                     return Err(err)
                 }
@@ -469,7 +494,8 @@ impl ValidateQuery {
                 };
                 let virt_root = merkle_proof.proof.virtualize(1);
                 let virt_root_hash = merkle_proof.hash;
-                log::debug!(target: "validate_query", "collated datum # {} is a Merkle proof with root hash {:x}",
+                log::debug!(target: "validate_query", "({}): collated datum # {} is a Merkle proof with root hash {:x}",
+                    base.next_block_descr,
                     idx, virt_root_hash);
                 if base.virt_roots.insert(virt_root_hash.clone(), virt_root).is_some() {
                     reject_query!("Merkle proof with duplicate virtual root hash {:x}", virt_root_hash);
@@ -484,8 +510,8 @@ impl ValidateQuery {
     fn extract_collated_data(base: &mut ValidateBase, block_candidate: &BlockCandidate) -> Result<()> {
         if !block_candidate.collated_data.is_empty() {
             // 8. deserialize collated data
-            let collated_roots = match deserialize_cells_tree(&mut Cursor::new(&block_candidate.collated_data)) {
-                Ok(cells) => cells,
+            let collated_roots = match read_boc(&block_candidate.collated_data) {
+                Ok(result) => result.roots,
                 Err(err) => reject_query!("cannot deserialize collated data: {}", err)
             };
             // 9. extract/classify collated data
@@ -502,10 +528,10 @@ impl ValidateQuery {
             Some(master_ref) => (self.engine.clone()).wait_state(&master_ref.master.master_block_id().1, Some(1_000), true).await?,
             None => (self.engine.clone()).wait_state(&base.prev_blocks_ids[0], Some(1_000), true).await?
         };
-        log::debug!(target: "validate_query", "in ValidateQuery::get_ref_mc_state() {}", mc_state.block_id());
-        if mc_state.state().seq_no() < self.min_mc_seq_no {
+        log::debug!(target: "validate_query", "({}): in ValidateQuery::get_ref_mc_state() {}", self.next_block_descr, mc_state.block_id());
+        if mc_state.state()?.seq_no() < self.min_mc_seq_no {
             reject_query!("requested to validate a block referring to an unknown future masterchain block {} < {}",
-                mc_state.state().seq_no(), self.min_mc_seq_no)
+                mc_state.state()?.seq_no(), self.min_mc_seq_no)
         }
         self.try_unpack_mc_state(&base, mc_state)
     }
@@ -527,7 +553,7 @@ impl ValidateQuery {
         base: &ValidateBase, 
         mc_state: Arc<ShardStateStuff>
     ) -> Result<McData> {
-        log::debug!(target: "validate_query", "unpacking reference masterchain state {}", mc_state.block_id());
+        log::debug!(target: "validate_query", "({}): unpacking reference masterchain state {}", self.next_block_descr, mc_state.block_id());
         let mc_state_extra = mc_state.shard_state_extra()?.clone();
         let config_params = mc_state_extra.config();
         CHECK!(config_params, inited);
@@ -540,29 +566,33 @@ impl ValidateQuery {
         // ihr_enabled_ = config_params->ihr_enabled();
         self.create_stats_enabled = config_params.has_capability(GlobalCapabilities::CapCreateStatsEnabled);
         if config_params.has_capabilities() && (config_params.capabilities() & !supported_capabilities()) != 0 {
-            log::error!(target: "validate_query", "block generation capabilities {} have been enabled in global configuration, \
+            log::error!(target: "validate_query", "({}): block generation capabilities {} have been enabled in global configuration, \
                 but we support only {} (upgrade validator software?)",
+                    self.next_block_descr,
                     config_params.capabilities(), supported_capabilities());
         }
         if config_params.global_version() > supported_version() {
-            log::error!(target: "validate_query", "block version {} have been enabled in global configuration, \
+            log::error!(target: "validate_query", "({}): block version {} have been enabled in global configuration, \
                 but we support only {} (upgrade validator software?)",
+                    self.next_block_descr,
                     config_params.global_version(), supported_version());
         }
         self.old_mc_shards = mc_state_extra.shards().clone();
         self.new_mc_shards = if base.shard().is_masterchain() {
             base.mc_extra.shards().clone()
         } else {
-            self.old_mc_shards.clone()
+             {
+                self.old_mc_shards.clone()
+            }
         };
-        if base.global_id != mc_state.state().global_id() {
+        if base.global_id != mc_state.state()?.global_id() {
             reject_query!("blockchain global id mismatch: new block has {} while the masterchain configuration expects {}",
-                base.global_id, mc_state.state().global_id())
+                base.global_id, mc_state.state()?.global_id())
         }
         CHECK!(&base.info, inited);
-        if base.info.vert_seq_no() != mc_state.state().vert_seq_no() {
+        if base.info.vert_seq_no() != mc_state.state()?.vert_seq_no() {
             reject_query!("vertical seqno mismatch: new block has {} while the masterchain configuration expects {}",
-                base.info.vert_seq_no(), mc_state.state().vert_seq_no())
+                base.info.vert_seq_no(), mc_state.state()?.vert_seq_no())
         }
         let (prev_key_block_seqno, prev_key_block);
         if mc_state_extra.after_key_block {
@@ -623,11 +653,11 @@ impl ValidateQuery {
             self.check_one_prev_state(base, &base.prev_states[0])?;
             base.prev_states[0].root_cell().clone()
         };
-        log::debug!(target: "validate_query", "computing next state");
+        log::debug!(target: "validate_query", "({}): computing next state", self.next_block_descr);
         let next_state_root = base.state_update.apply_for(&prev_state_root)
             .map_err(|err| error!("cannot apply Merkle update from block to compute new state : {}", err))?;
-        log::debug!(target: "validate_query", "next state computed");
-        let next_state = ShardStateStuff::from_root_cell(
+        log::debug!(target: "validate_query", "({}): next state computed", self.next_block_descr);
+        let next_state = ShardStateStuff::from_state_root_cell(
             base.block_id().clone(), 
             next_state_root.clone(),
             #[cfg(feature = "telemetry")]
@@ -635,23 +665,29 @@ impl ValidateQuery {
             self.engine.engine_allocated()
         )?;
         base.next_state = Some(next_state.clone());
-        if base.info.end_lt() != next_state.state().gen_lt() {
+        if base.info.end_lt() != next_state.state()?.gen_lt() {
             reject_query!("new state contains generation lt {} distinct from end_lt {} in block header",
-                next_state.state().gen_lt(), base.info.end_lt())
+                next_state.state()?.gen_lt(), base.info.end_lt())
         }
-        if base.now() != next_state.state().gen_time() {
+        if base.now() != next_state.state()?.gen_time() {
             reject_query!("new state contains generation time {} distinct from the value {} in block header",
-                next_state.state().gen_time(), base.now())
+                next_state.state()?.gen_time(), base.now())
         }
-        if base.info.before_split() != next_state.state().before_split() {
+        if base.info.before_split() != next_state.state()?.before_split() {
             reject_query!("before_split value mismatch in new state and in block header")
         }
-        if (base.block_id().seq_no != next_state.state().seq_no()) || (base.shard() != next_state.state().shard()) {
+        if (base.block_id().seq_no != next_state.state()?.seq_no()) || (base.shard() != next_state.state()?.shard()) {
             reject_query!("header of new state claims it belongs to block {} instead of {}",
-                next_state.state().shard(), base.block_id().shard())
+                next_state.state()?.shard(), base.block_id().shard())
         }
-        if next_state.state().custom_cell().is_some() != base.shard().is_masterchain() {
+        if next_state.state()?.custom_cell().is_some() != base.shard().is_masterchain() {
             reject_query!("McStateExtra in the new state of a non-masterchain block, or conversely")
+        }
+        if next_state.state()?.ref_shard_blocks().is_some() {
+            reject_query!("new state could not contain ref_shard_blocks")
+        }
+        if next_state.state()?.gen_time_ms_part() != 0 {
+            reject_query!("new state could not contain gen_time_ms_part")
         }
         if base.shard().is_masterchain() {
             base.prev_state_extra = prev_state.shard_state_extra()?.clone();
@@ -677,22 +713,22 @@ impl ValidateQuery {
 
     // similar to Collator::unpack_one_last_state()
     fn check_one_prev_state(&self, base: &ValidateBase, ss: &ShardStateStuff) -> Result<()> {
-        if ss.state().vert_seq_no() > base.info.vert_seq_no() {
+        if ss.state()?.vert_seq_no() > base.info.vert_seq_no() {
             reject_query!("one of previous states {} has vertical seqno {} larger than that of the new block {}",
-                ss.state().id(), ss.state().vert_seq_no(), base.info.vert_seq_no())
+                ss.state()?.id(), ss.state()?.vert_seq_no(), base.info.vert_seq_no())
         }
         Ok(())
     }
 
     fn unpack_prev_state(&mut self, base: &mut ValidateBase) -> Result<()> {
-        base.prev_state_accounts = base.prev_states[0].state().read_accounts()?;
-        base.prev_validator_fees = base.prev_states[0].state().total_validator_fees().clone();
+        base.prev_state_accounts = base.prev_states[0].state()?.read_accounts()?;
+        base.prev_validator_fees = base.prev_states[0].state()?.total_validator_fees().clone();
         if let Some(state) = base.prev_states.get(1) {
             CHECK!(base.after_merge);
             let key = state.shard().merge()?.shard_key(false);
-            base.prev_state_accounts.hashmap_merge(&state.state().read_accounts()?, &key)?;
+            base.prev_state_accounts.hashmap_merge(&state.state()?.read_accounts()?, &key)?;
             base.prev_state_accounts.update_root_extra()?;
-            base.prev_validator_fees.add(state.state().total_validator_fees())?;
+            base.prev_validator_fees.add(state.state()?.total_validator_fees())?;
         } else if base.after_split {
             base.prev_state_accounts.split_for(&base.shard().shard_key(false))?;
             base.prev_state_accounts.update_root_extra()?;
@@ -705,10 +741,10 @@ impl ValidateQuery {
     }
 
     fn unpack_next_state(&self, base: &mut ValidateBase, mc_data: &McData) -> Result<()> {
-        log::debug!(target: "validate_query", "unpacking new state");
+        log::debug!(target: "validate_query", "({}): unpacking new state", self.next_block_descr);
         let next_state = base.next_state.as_ref().ok_or_else(
             || error!("Next state is not initialized in validator query")
-        )?.state();
+        )?.state()?;
         if next_state.gen_time() != base.now() {
             reject_query!(
                 "new state of {} claims to have been generated at unixtime {}, \
@@ -752,13 +788,55 @@ impl ValidateQuery {
             &self.engine,
             &mc_data.state,
             self.shard().clone(),
+            self.block_candidate.block_id.seq_no,
             &self.new_mc_shards,
             &base.prev_states,
             base.next_state.as_ref(),
             base.after_merge,
             base.after_split,
+            base.split_queues,
+            None,
+            None,
+            None,
             None,
         ).await
+    }
+
+    fn check_tsbd(
+        &self,
+        base: &ValidateBase,
+        mc_data: &McData,
+        id: &BlockIdExt,
+    ) -> Result<(TopBlockDescrStuff, usize)> {
+        let tsbd = match base.top_shard_descr_dict.get_top_block_descr(id.shard())? {
+            Some(tbd) => TopBlockDescrStuff::new(tbd, &id, base.is_fake, false)?,
+            None => reject_query!("no ShardTopBlockDescr for shard {} is present in collated data",
+                id)
+        };
+        if tsbd.proof_for() != id {
+            reject_query!(
+                "ShardTopBlockDescr is for block {} instead of {} declared in new shardchain configuration",
+                tsbd.proof_for(), id
+            )
+        }
+        // following checks are similar to those of Collator::import_new_shard_top_blocks()
+        let do_flags = TopBlockDescrMode::FAIL_NEW | TopBlockDescrMode::FAIL_TOO_NEW;
+        let mut res_flags = 0;
+        let chain_len = tsbd.prevalidate(
+            mc_data.state.block_id(), &mc_data.state, do_flags, &mut res_flags)
+            .map_err(|err| error!("ShardTopBlockDescr for {} is invalid: res_flags={}, err: {}",
+                tsbd.proof_for(), res_flags, err))?;
+        if chain_len <= 0 || chain_len > UNREGISTERED_CHAIN_MAX_LEN as i32 {
+            reject_query!("ShardTopBlockDescr for {} is invalid: its chain length is {} (not in range 1..{})",
+                tsbd.proof_for(), chain_len, UNREGISTERED_CHAIN_MAX_LEN)
+        }
+        let chain_len = chain_len as usize;
+        if tsbd.gen_utime() > base.now() {
+            reject_query!("ShardTopBlockDescr for {} is invalid: it claims to be generated at {} while it is still {}",
+                tsbd.proof_for(), tsbd.gen_utime(), base.now())
+        }
+
+        Ok((tsbd, chain_len))
     }
 
     // similar to Collator::update_one_shard()
@@ -771,14 +849,26 @@ impl ValidateQuery {
         wc_info: Option<&WorkchainDescr>
     ) -> Result<()> {
         let shard = info.shard();
-        log::debug!(target: "validate_query", "checking shard {} in new shard configuration", shard);
+        log::debug!(target: "validate_query", "({}): checking shard {} in new shard configuration", self.next_block_descr, shard);
         if info.descr.next_validator_shard != shard.shard_prefix_with_tag() {
             reject_query!("new shard configuration for shard {} contains different next_validator_shard {}",
                 shard, info.descr.next_validator_shard)
         }
+        if let Some(ref verification_manager) = &self.verification_manager {
+            const MAX_VERIFICATION_TIMEOUT : std::time::Duration = std::time::Duration::from_millis(20);
+            //TODO: rewrite check_one_shard for async
+            if !verification_manager.wait_for_block_verification(&info.block_id, &MAX_VERIFICATION_TIMEOUT) {
+                //reject_query!("can't verify block {}", info.block_id)
+                log::warn!(target:"verificator", "can't verify block {} in MC", info.block_id);
+            }
+        }
+        if info.descr.collators.is_some() {
+            reject_query!("Configuration for shard {} could not contain collators", shard);
+        }
         let old = self.old_mc_shards.find_shard(&shard.left_ancestor_mask()?)?;
         let mut prev: Option<McShardRecord> = None;
         let mut cc_seqno = !0;
+        //#[cfg(not(feature = "fast_finality"))]
         let mut old_before_merge = false;
         let workchain_created = false;
         if old.is_none() {
@@ -823,7 +913,7 @@ impl ValidateQuery {
         } else if let Some(old) = old {
             if old.block_id == info.block_id {
                 // shard unchanged ?
-                log::debug!(target: "validate_query", "shard {} unchanged", shard);
+                log::debug!(target: "validate_query", "({}): shard {} unchanged", self.next_block_descr, shard);
                 if !old.basic_info_equal(&info, true, true) {
                     reject_query!("shard information for block {}  listed in new shard configuration \
                         differs from that present in the old shard configuration for the same block",
@@ -834,37 +924,12 @@ impl ValidateQuery {
                 // ...
             } else {
                 // shard changed, extract and check TopShardBlockDescr from collated data
-                log::debug!(target: "validate_query", "shard {} changed from {} to {}", shard, old.block_id.seq_no, info.block_id.seq_no);
+                log::debug!(target: "validate_query", "({}): shard {} changed from {} to {}", self.next_block_descr, shard, old.block_id.seq_no, info.block_id.seq_no);
                 if info.descr.reg_mc_seqno != base.block_id().seq_no {
                     reject_query!("shard information for block {} has been updated in the new shard configuration, but it has reg_mc_seqno={} different from that of the current block {}",
                         info.block_id, info.descr.reg_mc_seqno, base.block_id().seq_no)
                 }
-                let sh_bd = match base.top_shard_descr_dict.get_top_block_descr(info.block_id.shard())? {
-                    Some(tbd) => TopBlockDescrStuff::new(tbd, &info.block_id, base.is_fake)?,
-                    None => reject_query!("no ShardTopBlockDescr for newly-registered shard {} is present in collated data",
-                        info.block_id)
-                };
-                if sh_bd.proof_for() != &info.block_id {
-                    reject_query!("ShardTopBlockDescr for shard {} is for new block {} \
-                        instead of {} declared in new shardchain configuration",
-                            shard, sh_bd.proof_for(), info.block_id)
-                }
-                // following checks are similar to those of Collator::import_new_shard_top_blocks()
-                let do_flags = TopBlockDescrMode::FAIL_NEW | TopBlockDescrMode::FAIL_TOO_NEW;
-                let mut res_flags = 0;
-                let chain_len = sh_bd.prevalidate(mc_data.state.block_id(), &mc_data.mc_state_extra,
-                    mc_data.state.state().vert_seq_no(), do_flags, &mut res_flags)
-                    .map_err(|err| error!("ShardTopBlockDescr for {} is invalid: res_flags={}, err: {}",
-                        sh_bd.proof_for(), res_flags, err))?;
-                if chain_len <= 0 || chain_len > 8 {
-                    reject_query!("ShardTopBlockDescr for {} is invalid: its chain length is {} (not in range 1..8)",
-                        sh_bd.proof_for(), chain_len)
-                }
-                let chain_len = chain_len as usize;
-                if sh_bd.gen_utime() > base.now() {
-                    reject_query!("ShardTopBlockDescr for {} is invalid: it claims to be generated at {} while it is still {}",
-                        sh_bd.proof_for(), sh_bd.gen_utime(), base.now())
-                }
+                let (sh_bd, chain_len) = self.check_tsbd(base, mc_data, &info.block_id)?; 
                 let descr = sh_bd.get_top_descr(chain_len)
                     .map_err(|err| error!("No top descr for {:?}: {}", sh_bd, err))?;
                 CHECK!(&descr, inited);
@@ -901,7 +966,7 @@ impl ValidateQuery {
                 // ...
                 if old.shard().is_parent_for(shard) {
                     // shard has been split
-                    log::debug!(target: "validate_query", "detected shard split {} -> {}", old.shard(), shard);
+                    log::debug!(target: "validate_query", "({}): detected shard split {} -> {}", self.next_block_descr, old.shard(), shard);
                     // ...
                 } else if shard.is_parent_for(old.shard()) {
                     // shard has been merged
@@ -910,7 +975,8 @@ impl ValidateQuery {
                             reject_query!("shard {} has been impossibly merged from more than two shards \
                                 {}, {} and others", shard, old.shard(), old2.shard())
                         }
-                        log::debug!(target: "validate_query", "detected shard merge {} + {} -> {}",
+                        log::debug!(target: "validate_query", "({}): detected shard merge {} + {} -> {}",
+                            self.next_block_descr,
                             old.shard(), old2.shard(), shard);
                     } else {
                         // CHECK!(old2.is_some());
@@ -929,39 +995,63 @@ impl ValidateQuery {
             }
         }
         let mut fsm_inherited = false;
-        if let Some(prev) = prev {
+        if let Some(prev) = &prev {
             // shard was not created, split or merged; it is a successor of `prev`
-            old_before_merge = prev.descr.before_merge;
-            if !prev.descr().is_fsm_none() && !prev.descr().fsm_equal(info.descr())
-                && base.now() < prev.descr().fsm_utime_end() && !info.descr.before_split {
-                reject_query!("future split/merge information for shard {} has been arbitrarily \
-                    changed without a good reason", shard)
-            }
             fsm_inherited = !prev.descr().is_fsm_none() && prev.descr().fsm_equal(info.descr());
-            if fsm_inherited && (base.now() > prev.descr().fsm_utime_end() || info.descr.before_split) {
-                reject_query!("future split/merge information for shard {}\
-                    has been carried on to the new shard configuration, but it is either expired (expire time {}, now {}), 
-                    or before_split bit has been set ({})",
-                        shard, prev.descr().fsm_utime_end(), base.now(), info.descr.before_split);
+            old_before_merge = prev.descr.before_merge;
+             {
+                if  !prev.descr().is_fsm_none() &&               // fsm was not none
+                    !prev.descr().fsm_equal(info.descr()) &&     // fsm was changed
+                    base.now() < prev.descr().fsm_utime_end() && // split/merge time is not come
+                    !info.descr.before_split 
+                {
+                    reject_query!("future split/merge information for shard {} has been arbitrarily \
+                        changed without a good reason", shard)
+                }
+                if fsm_inherited && (base.now() > prev.descr().fsm_utime_end() || info.descr.before_split) {
+                    reject_query!("future split/merge information for shard {}\
+                        has been carried on to the new shard configuration, but it is either expired (expire time {}, now {}), 
+                        or before_split bit has been set ({})",
+                            shard, prev.descr().fsm_utime_end(), base.now(), info.descr.before_split);
+                }
             }
+            // ⬆️ for fast finality there is equal check in check_one_shard_fast_finality()
         } else {
             // shard was created, split or merged
             if info.descr.before_split {
-                reject_query!("a newly-created, split or merged shard {} cannot have before_split set immediately after", shard)
+                reject_query!(
+                    "a newly-created, split or merged shard {} cannot have \
+                    before_split set immediately after", 
+                    shard
+                )
             }
         }
         let wc_info = wc_info.expect("in ton node it is a bug");
         let depth = shard.prefix_len();
-        let split_cond = (info.descr.want_split || depth < wc_info.min_split()) && depth < wc_info.max_split() && depth < MAX_SPLIT_DEPTH;
-        let merge_cond = depth > wc_info.min_split() && (info.descr.want_merge || depth > wc_info.max_split())
-            && (sibling.map(|s| s.descr.want_merge).unwrap_or_default() || depth > wc_info.max_split());
+        
+        let split_cond = (info.descr.want_split || depth < wc_info.min_split()) &&
+                         depth < wc_info.max_split() &&
+                         depth < MAX_SPLIT_DEPTH;
+        
+        let merge_cond = depth > wc_info.min_split() &&
+                         (info.descr.want_merge || depth > wc_info.max_split()) && 
+                         (sibling.map(|s| s.descr.want_merge).unwrap_or_default() || depth > wc_info.max_split());
+
         if !fsm_inherited && !info.descr().is_fsm_none() {
-            if info.descr().fsm_utime() < base.now() || info.descr().fsm_utime_end() <= info.descr().fsm_utime()
-                || info.descr().fsm_utime_end() < info.descr().fsm_utime() + MIN_SPLIT_MERGE_INTERVAL
-                || info.descr().fsm_utime_end() > base.now() + MAX_SPLIT_MERGE_DELAY {
-                reject_query!("incorrect future split/merge interval {} .. {} \
-                    set for shard {} in new shard configuration (it is {} now)",
-                        info.descr().fsm_utime(), info.descr().fsm_utime_end(), shard, base.now());
+             {
+                let fsm_begin = info.descr().fsm_utime();
+                let fsm_end = info.descr().fsm_utime_end();
+                if  fsm_begin < base.now() || 
+                    fsm_end <= fsm_begin || 
+                    fsm_end < fsm_begin + MIN_SPLIT_MERGE_INTERVAL || 
+                    fsm_end > base.now() + MAX_SPLIT_MERGE_DELAY 
+                {
+                    reject_query!(
+                        "incorrect future split/merge interval {} .. {} \
+                        set for shard {} in new shard configuration (it is {} now)",
+                        fsm_begin, fsm_end, shard, base.now()
+                    );
+                }
             }
             if info.descr().is_fsm_split() && !split_cond {
                 reject_query!("announcing future split for shard {} in new shard configuration, \
@@ -974,37 +1064,60 @@ impl ValidateQuery {
         }
         if info.descr.before_merge {
             if !sibling.map(|s| s.descr.before_merge).unwrap_or_default() {
-                reject_query!("before_merge set for shard {} in shard configuration, \
-                    but not for its sibling", shard)
+                reject_query!(
+                    "before_merge set for shard {} in shard configuration, \
+                    but not for its sibling", 
+                    shard
+                )
             }
             if !info.descr().is_fsm_merge() {
-                reject_query!("before_merge set for shard {} in shard configuration, \
-                    but it has not been announced in future split/merge for this shard", shard)
+                reject_query!(
+                    "before_merge set for shard {} in shard configuration, \
+                    but it has not been announced in future split/merge \
+                    for this shard", 
+                    shard
+                )
             }
             if !merge_cond {
-                reject_query!("before_merge set for shard {} in shard configuration, \
-                    but merge conditions are not met", shard)
+                reject_query!(
+                    "before_merge set for shard {} in shard configuration, \
+                    but merge conditions are not met", 
+                    shard
+                )
             }
         }
         CHECK!(cc_seqno != !0);
         let cc_updated = info.descr.next_catchain_seqno != cc_seqno;
         if info.descr.next_catchain_seqno != cc_seqno + cc_updated as u32 {
-            reject_query!("new shard configuration for shard {} changed catchain seqno \
-                from {} to {} (only updates by at most one are allowed)", shard, cc_seqno, info.descr.next_catchain_seqno)
+            reject_query!(
+                "new shard configuration for shard {} changed catchain seqno \
+                from {} to {} (only updates by at most one are allowed)", 
+                shard, cc_seqno, info.descr.next_catchain_seqno
+            )
         }
         if !cc_updated && self.update_shard_cc {
-            reject_query!("new shard configuration for shard {} has unchanged catchain seqno {}, \
-                but it must have been updated for all shards", shard, cc_seqno)
+            reject_query!(
+                "new shard configuration for shard {} has unchanged catchain seqno {}, \
+                but it must have been updated for all shards", 
+                shard, cc_seqno
+            )
         }
         let bm_cleared = !info.descr.before_merge && old_before_merge;
         if !cc_updated && bm_cleared && !workchain_created {
-            reject_query!("new shard configuration for shard {} has unchanged catchain seqno {} \
-                while the before_merge bit has been cleared", shard, cc_seqno)
+            reject_query!(
+                "new shard configuration for shard {} has unchanged catchain seqno {} \
+                while the before_merge bit has been cleared", 
+                shard, cc_seqno
+            )
         }
         if cc_updated && !(self.update_shard_cc || bm_cleared) {
-            reject_query!("new shard configuration for shard {} has increased catchain seqno {} \
-                without a good reason", shard, cc_seqno);
+            reject_query!(
+                "new shard configuration for shard {} has increased catchain seqno {} \
+                without a good reason", 
+                shard, cc_seqno
+            )
         }
+
         base.result.min_shard_ref_mc_seqno.fetch_min(info.descr.min_ref_mc_seqno, Ordering::Relaxed);
         base.result.max_shard_utime.fetch_max(info.descr.gen_utime, Ordering::Relaxed);
         base.result.max_shard_lt.fetch_max(info.descr.end_lt, Ordering::Relaxed);
@@ -1020,16 +1133,19 @@ impl ValidateQuery {
         }
         let prev_now = base.prev_state.as_ref().ok_or_else(
             || error!("Prev state is not initialized in validator query")
-        )?.state().gen_time();
+        )?.state()?.gen_time();
         if prev_now > base.now() {
             reject_query!("creation time is not monotonic: {} after {}", base.now(), prev_now)
         }
         let ccvc = base.next_state_extra.config.catchain_config()?;
         let wc_set = base.next_state_extra.config.workchains()?;
-        self.update_shard_cc = base.info.key_block()
-            || (base.now() / ccvc.shard_catchain_lifetime > prev_now / ccvc.shard_catchain_lifetime);
+        self.update_shard_cc = base.info.key_block();
+         {
+            self.update_shard_cc |= 
+                base.now() / ccvc.shard_catchain_lifetime > prev_now / ccvc.shard_catchain_lifetime;
+        }
         if self.update_shard_cc {
-            log::debug!(target: "validate_query", "catchain_seqno of all shards must be updated");
+            log::debug!(target: "validate_query", "({}): catchain_seqno of all shards must be updated", self.next_block_descr);
         }
 
         let mut wc_id = INVALID_WORKCHAIN_ID;
@@ -1072,7 +1188,7 @@ impl ValidateQuery {
     // similar to Collator::register_shard_block_creators
     fn register_shard_block_creators(&mut self, _base: &ValidateBase, creator_list: &[UInt256]) -> Result<()> {
         for x in creator_list {
-            log::debug!(target: "validate_query", "registering block creator {}", x.to_hex_string());
+            log::debug!(target: "validate_query", "({}): registering block creator {}", self.next_block_descr, x.to_hex_string());
             if !x.is_zero() {
                 *self.block_create_count.entry(x.clone()).or_default() += 1;
             }
@@ -1102,10 +1218,10 @@ impl ValidateQuery {
         }
         let now = base.next_state.as_ref().ok_or_else(
             || error!("Next state is not initialized in validator query")
-        )?.state().gen_time();
+        )?.state()?.gen_time();
         let prev_now = base.prev_state.as_ref().ok_or_else(
             || error!("Prev state is not initialized in validator query")
-        )?.state().gen_time();
+        )?.state()?.gen_time();
         let ccvc = base.next_state_extra.config.catchain_config()?;
         let cur_validators = base.next_state_extra.config.validator_set()?;
         let lifetime = ccvc.mc_catchain_lifetime;
@@ -1114,70 +1230,71 @@ impl ValidateQuery {
         let catchain_seqno = new_info.catchain_seqno;
         if is_key_block || (now / lifetime > prev_now / lifetime) {
             cc_updated = true;
-            log::debug!(target: "validate_query", "increased masterchain catchain seqno to {}", catchain_seqno);
+            log::debug!(target: "validate_query", "({}): increased masterchain catchain seqno to {}", self.next_block_descr, catchain_seqno);
         }
-        let (nodes, _hash_short) = calc_subset_for_workchain(
-            &cur_validators,
-            &base.next_state_extra.config,
-            &ccvc, 
-            self.shard.shard_prefix_with_tag(), 
-            self.shard.workchain_id(), 
-            catchain_seqno,
-            now.into()
-        )?;
+        let subset = calc_subset_for_masterchain(
+            &cur_validators, &base.next_state_extra.config, catchain_seqno)?;
 
-        if nodes.is_empty() {
+        if subset.validators.is_empty() {
             reject_query!("cannot compute next masterchain validator set from new masterchain state")
         }
 
-        let vlist_hash = ValidatorSet::calc_subset_hash_short(&nodes, /* new_info.catchain_seqno */ 0)?;
+        let vlist_hash = ValidatorSet::calc_subset_hash_short(&subset.validators, /* new_info.catchain_seqno */ 0)?;
         if new_info.validator_list_hash_short != vlist_hash {
             reject_query!("new masterchain validator list hash incorrect hash: expected {}, found {}",
                 new_info.validator_list_hash_short, vlist_hash);
         }
-        log::debug!(target: "validate_query", "masterchain validator set hash changed from {} to {}",
+        log::debug!(target: "validate_query", "({}): masterchain validator set hash changed from {} to {}",
+            self.next_block_descr,
             old_info.validator_list_hash_short, vlist_hash);
         if new_info.nx_cc_updated != cc_updated & self.update_shard_cc {
             reject_query!("new_info.nx_cc_updated has incorrect value {}", new_info.nx_cc_updated)
         }
+
         Ok(())
     }
 
     fn check_utime_lt(&self, base: &ValidateBase, mc_data: &McData) -> Result<()> {
         CHECK!(&base.config_params, inited);
         let mut gen_lt = std::u64::MIN;
+
         for state in &base.prev_states {
-            if base.info.start_lt() <= state.state().gen_lt() {
+            if base.info.start_lt() <= state.state()?.gen_lt() {
                 reject_query!("block has start_lt {} less than or equal to lt {} of the previous state",
-                    base.info.start_lt(), state.state().gen_lt())
+                    base.info.start_lt(), state.state()?.gen_lt())
             }
-            if base.now() <= state.state().gen_time() {
+            if base.now() <= state.state()?.gen_time() {
                 reject_query!("block has creation time {} less than or equal to that of the previous state ({})",
-                    base.now(), state.state().gen_time())
+                    base.now(), state.state()?.gen_time())
             }
-            gen_lt = std::cmp::max(gen_lt, state.state().gen_lt());
+            gen_lt = std::cmp::max(gen_lt, state.state()?.gen_lt());
         }
-        if base.now() <= mc_data.state.state().gen_time() {
+        if base.now() <= mc_data.state.state()?.gen_time() {
             reject_query!("block has creation time {} less than or equal to that of the reference masterchain state ({})",
-                base.now(), mc_data.state.state().gen_time())
+                base.now(), mc_data.state.state()?.gen_time())
         }
-        /*
-        if base.now() > (unsigned)std::time(nullptr) + 15 {
-            reject_query!("block has creation time " << base.now() too much in the future (it is only " << (unsigned)std::time(nullptr) now)");
+
+        let now = self.engine.now();
+        if base.now() > now + 15 {
+            reject_query!("block has creation time {} too much in the future (it is only {} now)",
+                base.now(), now)
         }
-        */
-        if base.info.start_lt() <= mc_data.state.state().gen_lt() {
+        if base.info.start_lt() <= mc_data.state.state()?.gen_lt() {
             reject_query!("block has start_lt {} less than or equal to lt {} of the reference masterchain state",
-                base.info.start_lt(), mc_data.state.state().gen_lt())
+                base.info.start_lt(), mc_data.state.state()?.gen_lt())
         }
-        let lt_bound = std::cmp::max(gen_lt, std::cmp::max(mc_data.state.state().gen_lt(), base.max_shard_lt()));
+
+        let lt_bound = std::cmp::max(gen_lt, std::cmp::max(mc_data.state.state()?.gen_lt(), base.max_shard_lt()));
+
         if base.info.start_lt() > lt_bound + base.config_params.get_lt_align() * 4 {
             reject_query!("block has start_lt {} which is too large without a good reason (lower bound is {})",
                 base.info.start_lt(), lt_bound + 1)
         }
-        if base.shard().is_masterchain() && base.info.start_lt() - gen_lt > base.config_params.get_max_lt_growth() {
+
+        let max_lt_growth = mc_data.config().get_max_lt_growth();
+        if base.shard().is_masterchain() && base.info.start_lt() - gen_lt > max_lt_growth {
             reject_query!("block increases logical time from previous state by {} which exceeds the limit ({})",
-                base.info.start_lt() - gen_lt, base.config_params.get_max_lt_growth())
+                base.info.start_lt() - gen_lt, max_lt_growth)
         }
         let delta_hard = base.config_params.block_limits(base.shard().is_masterchain())?.lt_delta().hard_limit() as u64;
         if base.info.end_lt() - base.info.start_lt() > delta_hard {
@@ -1194,24 +1311,24 @@ impl ValidateQuery {
  */
 
     fn load_block_data(base: &mut ValidateBase) -> Result<()> {
-        log::debug!(target: "validate_query", "unpacking block structures");
+        log::debug!(target: "validate_query", "({}): unpacking block structures", base.next_block_descr);
         base.in_msg_descr = base.extra.read_in_msg_descr()?;
         base.out_msg_descr = base.extra.read_out_msg_descr()?;
         base.account_blocks = base.extra.read_account_blocks()?;
         // run some hand-written checks from block::tlb::
         // (letmatic tests from block::gen:: have been already run for the entire block)
         // count and validate
-        log::debug!(target: "validate_query", "validating InMsgDescr");
+        log::debug!(target: "validate_query", "({}): validating InMsgDescr", base.next_block_descr);
         // base.in_msg_descr.count(1000000)?;
-        log::debug!(target: "validate_query", "validating OutMsgDescr");
+        log::debug!(target: "validate_query", "({}): validating OutMsgDescr", base.next_block_descr);
         // base.out_msg_descr.count(1000000)?;
-        log::debug!(target: "validate_query", "validating ShardAccountBlocks");
+        log::debug!(target: "validate_query", "({}): validating ShardAccountBlocks", base.next_block_descr);
         // base.account_blocks.count(1000000)?;
         Ok(())
     }
 
     fn precheck_value_flow(base: Arc<ValidateBase>) -> Result<()> {
-        log::debug!(target: "validate_query", "value flow: {}", base.value_flow);
+        log::debug!(target: "validate_query", "({}): value flow: {}", base.next_block_descr, base.value_flow);
         // if !base.value_flow.validate() {
         //     reject_query!("ValueFlow of block {} is invalid (in-balance is not equal to out-balance)", base.block_id())
         // }
@@ -1307,17 +1424,20 @@ impl ValidateQuery {
         };
         to_mint_config.iterate_with_keys(|curr_id: u32, amount| {
             let amount2 = base.prev_state_extra.global_balance.get_other(curr_id)?.unwrap_or_default();
-            if amount >= amount2 {
+            if amount > amount2 {
                 let mut delta = amount.clone();
                 delta.sub(&amount2)?;
-                log::debug!(target: "validate_query", "currency #{}: existing {}, required {}, to be minted {}",
+                log::debug!(target: "validate_query", "({}): currency #{}: existing {}, required {}, to be minted {}",
+                    base.next_block_descr,
                     curr_id, amount2, amount, delta);
-                to_mint.set_other_ex(curr_id, &delta)?;
+                if curr_id != 0 {
+                    to_mint.set_other_ex(curr_id, &delta)?;
+                }
             }
             Ok(true)
         }).map_err(|err| error!("error scanning extra currencies to be minted : {}", err))?;
         if !to_mint.is_zero()? {
-            log::debug!(target: "validate_query", "new currencies to be minted: {}", to_mint);
+            log::debug!(target: "validate_query", "({}): new currencies to be minted: {}", base.next_block_descr, to_mint);
         }
         Ok(to_mint)
     }
@@ -1326,7 +1446,7 @@ impl ValidateQuery {
         old_val_extra: Option<(ShardAccount, DepthBalanceInfo)>,
         new_val_extra: Option<(ShardAccount, DepthBalanceInfo)>
     ) -> Result<bool> {
-        log::debug!(target: "validate_query", "checking update of account {}", acc_id.to_hex_string());
+        log::debug!(target: "validate_query", "({}): checking update of account {}", base.next_block_descr, acc_id.to_hex_string());
         let acc_blk = base.account_blocks.get(&acc_id)?.ok_or_else(|| error!("the state of account {} \
             changed in the new state with respect to the old state, but the block contains no \
             AccountBlock for this account", acc_id.to_hex_string()))?;
@@ -1386,7 +1506,7 @@ impl ValidateQuery {
     }
 
     fn precheck_account_updates(base: Arc<ValidateBase>) -> Result<()> {
-        log::debug!(target: "validate_query", "pre-checking all Account updates between the old and the new state");
+        log::debug!(target: "validate_query", "({}): pre-checking all Account updates between the old and the new state", base.next_block_descr);
         // let prev_accounts = base.prev_state_accounts.clone();
         // let next_accounts = base.next_state_accounts.clone();
         base.prev_state_accounts.scan_diff_with_aug(
@@ -1397,11 +1517,16 @@ impl ValidateQuery {
     }
 
     fn precheck_one_transaction(
-        base: &ValidateBase, acc_id: &AccountId, trans_lt: u64, trans_root: Cell,
-        prev_trans_lt: &mut u64, prev_trans_hash: &mut UInt256, prev_trans_lt_len: &mut u64,
+        base: &ValidateBase, 
+        acc_id: &AccountId, 
+        trans_lt: u64, 
+        trans_root: Cell,
+        prev_trans_lt: &mut u64, 
+        prev_trans_hash: &mut UInt256, 
+        prev_trans_lt_len: &mut u64,
         acc_state_hash: &mut UInt256
-    ) -> Result<bool> {
-        log::debug!(target: "validate_query", "pre-checking Transaction {}", trans_lt);
+    ) -> Result<Option<(UInt256, bool)>> {
+        log::debug!(target: "validate_query", "({}): pre-checking Transaction {}", base.next_block_descr, trans_lt);
         let trans = Transaction::construct_from_cell(trans_root.clone())?;
         if &trans.account_id() != &acc_id || trans.logical_time() != trans_lt {
             reject_query!("transaction {} of {} claims to be transaction {} of {}",
@@ -1436,6 +1561,10 @@ impl ValidateQuery {
                 while the actual value is {}", trans_lt, acc_id.to_hex_string(),
                 hash_upd.old_hash.to_hex_string(), acc_state_hash.to_hex_string())
         }
+        let msg_info = match (trans.in_msg_cell(), trans.read_in_msg()?) {
+            (Some(root), Some(msg)) => Some((root.repr_hash(), msg.is_internal())),
+            _ => None 
+        };
         *prev_trans_lt_len = lt_len;
         *prev_trans_lt = trans_lt;
         *prev_trans_hash = trans_root.repr_hash();
@@ -1451,13 +1580,13 @@ impl ValidateQuery {
                 Ok(true)
             }
         })?;
-        return Ok(true)
+        Ok(msg_info)
     }
 
     // NB: could be run in parallel for different accounts
-    fn precheck_one_account_block(base: &ValidateBase, acc_id: &UInt256, acc_blk: AccountBlock) -> Result<()> {
+    fn precheck_one_account_block(base: &ValidateBase, acc_id: &UInt256, acc_blk: AccountBlock, engine: &Arc<dyn EngineOperations>) -> Result<()> {
         let acc_id = AccountId::from(acc_id.clone());
-        log::debug!(target: "validate_query", "pre-checking AccountBlock for {}", acc_id.to_hex_string());
+        log::debug!(target: "validate_query", "({}): pre-checking AccountBlock for {}", base.next_block_descr, acc_id.to_hex_string());
         
         if !base.shard().contains_account(acc_id.clone())? {
             reject_query!("new block {} contains AccountBlock for account {} not belonging to the block's shard {}",
@@ -1499,12 +1628,40 @@ impl ValidateQuery {
         let mut last_trans_lt = old_state.last_trans_lt();
         let mut last_trans_hash = old_state.last_trans_hash().clone();
         let mut acc_state_hash = hash_upd.old_hash;
-        acc_blk.transactions().iterate_slices(|key, trans_slice|
-            key.clone().get_next_u64().and_then(|key| Self::precheck_one_transaction(base,
-                &acc_id, key, trans_slice.reference(0)?, &mut last_trans_lt, &mut last_trans_hash,
-                &mut last_trans_lt_len, &mut acc_state_hash
-            )).map_err(|err| error!("transaction {:x} of account {:x} is invalid : {}", key, acc_id, err))
-        )?;
+        let mut prev_msg_hash = None;
+        //let mut there_were_remp_message = false;
+        acc_blk.transactions().iterate_slices(|key, trans_slice| {
+            let trans_lt = key.clone().get_next_u64()?;
+            let msg_info = Self::precheck_one_transaction(
+                base,
+                &acc_id,
+                trans_lt,
+                trans_slice.reference(0)?,
+                &mut last_trans_lt,
+                &mut last_trans_hash,
+                &mut last_trans_lt_len,
+                &mut acc_state_hash
+            ).map_err(|err| error!("transaction {:x} of account {:x} is invalid : {}", trans_lt, acc_id, err))?;
+
+            if is_remp_enabled(engine.clone(), &base.config_params) {
+                if let Some((id, is_internal)) = msg_info {
+                    if !is_internal {
+                        Self::check_message_ordering(
+                            base,
+                            &id,
+                            //is_internal,
+                            //&mut there_were_remp_message,
+                            &mut prev_msg_hash,
+                            engine,
+                        ).map_err(|err| error!(
+                            "transaction {:x} of account {:x} has invalid ordering : {}",
+                            trans_lt, acc_id, err)
+                        )?;
+                    }
+                }
+            }
+            Ok(true)
+        })?;
         if let Some(new_state) = new_state {
             if last_trans_lt != new_state.last_trans_lt() || &last_trans_hash != new_state.last_trans_hash() {
                 reject_query!("last transaction mismatch for account {} : block lists {}:{} but \
@@ -1519,12 +1676,52 @@ impl ValidateQuery {
         Ok(())
     }
 
-    fn precheck_account_transactions(base: Arc<ValidateBase>, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validate_query", "pre-checking all AccountBlocks, and all transactions of all accounts");
+    fn check_message_ordering(
+        base: &ValidateBase,
+        id: &UInt256,
+        //is_internal: bool,
+        //there_were_remp_message: &mut bool,
+        prev_hash: &mut Option<UInt256>,
+        engine: &Arc<dyn EngineOperations>,
+    ) -> Result<()> {
+        // if is_internal && *there_were_remp_message {
+        //     reject_query!("this transaction processed internal message, but has LT greater than \
+        //         at least one transaction with external (remp) message.");
+        // } else if !is_internal {
+        //     *there_were_remp_message = true;
+            tokio::runtime::Handle::try_current()?.block_on(async {
+                match engine.check_remp_duplicate(id).await? {
+                    RempDuplicateStatus::Absent => reject_query!("message {:x} is not found in remp queue", id),
+                    RempDuplicateStatus::Duplicate(blk, uid, orig_msg_id) =>
+                        reject_query!("message {:x} (message uid {:x}) is already included into valid block {} as message {:x}", id, uid, blk, orig_msg_id),
+                    RempDuplicateStatus::Fresh(uid) => {
+                        log::trace!(target: "validate_query", "({}): message {:x} (message uid {:x}) is waiting for validation in remp queue", base.next_block_descr, id, uid);
+                        Ok(())
+                    }
+                }
+            })?;
+            let hash = calc_remp_msg_ordering_hash(&id, base.prev_blocks_ids.iter());
+            if let Some(prev_hash) = prev_hash {
+                if *prev_hash > hash {
+                    reject_query!("external message's hash is less than previous transaction's one");
+                }
+            }
+            *prev_hash = Some(hash);
+        //}
+        Ok(())
+    }
+
+    fn precheck_account_transactions(
+        base: Arc<ValidateBase>,
+        tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>,
+        engine: &Arc<dyn EngineOperations>,
+    ) -> Result<()> {
+        log::debug!(target: "validate_query", "({}): pre-checking all AccountBlocks, and all transactions of all accounts", base.next_block_descr);
         base.account_blocks.iterate_with_keys(|key, acc_blk| {
             let base = base.clone();
+            let engine = engine.clone();
             Self::add_task(tasks, move ||
-                Self::precheck_one_account_block(&base, &key, acc_blk).map_err(|err|
+                Self::precheck_one_account_block(&base, &key, acc_blk, &engine).map_err(|err|
                     error!("invalid AccountBlock for account {} in the new block {} : {}",
                         key.to_hex_string(), base.block_id(), err))
             );
@@ -1554,20 +1751,28 @@ impl ValidateQuery {
 
     // checks that any change in OutMsgQueue in the state is accompanied by an OutMsgDescr record in the block
     // also checks that the keys are correct
+    // Message can be removed from queue if it was not from this shard - split case
     fn precheck_one_message_queue_update(
         base: &ValidateBase,
         out_msg_id: &OutMsgQueueKey,
         old_value: Option<(EnqueuedMsg, u64)>,
         new_value: Option<(EnqueuedMsg, u64)>
     ) -> Result<()> {
-        log::debug!(target: "validate_query", "checking update of enqueued outbound message {:x}", out_msg_id);
+        log::debug!(target: "validate_query", "({}): checking update of enqueued outbound message {:x}", base.next_block_descr, out_msg_id);
         CHECK!(old_value.is_some() || new_value.is_some());
         let m_str = if new_value.is_some() && old_value.is_some() {
             reject_query!("EnqueuedMsg with key {:x} has been changed in the OutMsgQueue, \
                 but the key did not change", out_msg_id)
         } else if new_value.is_some() {
             "en"
-        } else if old_value.is_some() {
+        } else if let Some((enq, created_lt)) = &old_value {
+            if !base.split_queues {
+                let enq = MsgEnqueueStuff::from_enqueue_and_lt(enq.clone(), *created_lt)?;
+                if !base.shard().contains_full_prefix(enq.cur_prefix()) {
+                    // allow foreign messages to remove from queue without OutMsg
+                    return Ok(())
+                }
+            }
             "de"
         } else {
             ""
@@ -1631,7 +1836,7 @@ impl ValidateQuery {
                     contains a MsgEnvelope distinct from that stored in the new queue", out_msg_id)
             }
         } else {
-            log::error!(target: "validate_query", "EnqueuedMsg with key {:x} has been not changed in the OutMsgQueue", out_msg_id);
+            log::error!(target: "validate_query", "({}): EnqueuedMsg with key {:x} has been not changed in the OutMsgQueue", base.next_block_descr, out_msg_id);
             return Ok(())
         };
         // let msg_env = enq.env;
@@ -1651,10 +1856,10 @@ impl ValidateQuery {
     }
 
     fn precheck_message_queue_update(base: Arc<ValidateBase>, manager: &MsgQueueManager, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validate_query", "pre-checking the difference between the \
-            old and the new outbound message queues");
-        manager.prev().out_queue().scan_diff_with_aug(
-            manager.next().out_queue(),
+        log::debug!(target: "validate_query", "({}): pre-checking the difference between the \
+            old and the new outbound message queues", base.next_block_descr);
+        manager.prev().out_queue()?.scan_diff_with_aug(
+            manager.next().out_queue()?,
             |key, val1, val2| {
                 let base = base.clone();
                 Self::add_task(tasks, move || Self::precheck_one_message_queue_update(&base, &key, val1, val2));
@@ -1726,7 +1931,7 @@ impl ValidateQuery {
     }
 
     fn check_in_msg(base: &ValidateBase, manager: &MsgQueueManager, key: &UInt256, in_msg: &InMsg) -> Result<()> {
-        log::debug!(target: "validate_query", "checking InMsg with key {}", key.to_hex_string());
+        log::debug!(target: "validate_query", "({}): checking InMsg with key {}", base.next_block_descr, key.to_hex_string());
         CHECK!(in_msg, inited);
         // initial checks and unpack
         let msg_hash = in_msg.message_cell()?.repr_hash();
@@ -1755,28 +1960,40 @@ impl ValidateQuery {
             let (_workchain_id, addr) = msg.dst_ref().ok_or_else(|| error!("No dest address"))
                 .and_then(|addr| addr.extract_std_address(true))?;
             if &addr != transaction.account_id() {
-                reject_query!("InMsg corresponding to inbound message with hash {} and destination address {} \
-                   claims that the message is processed by transaction {} of another account {}",
-                        key.to_hex_string(), addr.to_hex_string(), transaction.logical_time(), transaction.account_id().to_hex_string())
+                reject_query!(
+                    "InMsg corresponding to inbound message with hash {} and destination address {} \
+                    claims that the message is processed by transaction {} of another account {}",
+                    key.to_hex_string(), addr.to_hex_string(), 
+                    transaction.logical_time(), transaction.account_id().to_hex_string()
+                )
             }
         }
         let fwd_fee = match in_msg {
             // msg_import_ext$000 msg:^(Message Any) transaction:^Transaction
             // importing an inbound external message
             InMsg::External(_) => {
-                let dst = msg.dst_ref().ok_or_else(|| error!("destination of inbound external message with hash {:x} \
-                    is an invalid blockchain address", key))?;
-                let dest_prefix = AccountIdPrefixFull::prefix(dst)?;
+                let header = msg.ext_in_header().ok_or_else(
+                    || error!("non-external message in `msg_import_ext` with hash {key:x}")
+                )?;
+                let dest_prefix = AccountIdPrefixFull::prefix(&header.dst)?;
                 if !dest_prefix.is_valid() {
-                    reject_query!("destination of inbound external message with hash {:x} \
-                        is an invalid blockchain address", key)
+                    reject_query!(
+                        "destination of inbound external message with hash {key:x} \
+                        is an invalid blockchain address"
+                    )
                 }
                 if !base.shard().contains_full_prefix(&dest_prefix) {
-                    reject_query!("inbound external message with hash {} has destination address \
-                        {}... not in this shard", key.to_hex_string(), dest_prefix)
+                    reject_query!(
+                        "inbound external message with hash {} has destination address \
+                        {}... not in this shard", 
+                        key.to_hex_string(), dest_prefix
+                    )
                 }
-                if dst.extract_std_address(true).is_err()  {
-                    reject_query!("cannot unpack destination address of inbound external message with hash {}", key.to_hex_string())
+                if header.dst.extract_std_address(true).is_err()  {
+                    reject_query!(
+                        "cannot unpack destination address of inbound external message with hash {}", 
+                        key.to_hex_string()
+                    )
                 }
                 return Ok(()) // nothing to check more for external messages
             }
@@ -2055,7 +2272,7 @@ impl ValidateQuery {
     }
 
     fn check_in_msg_descr(base: Arc<ValidateBase>, manager: Arc<MsgQueueManager>, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validate_query", "checking inbound messages listed in InMsgDescr");
+        log::debug!(target: "validate_query", "({}): checking inbound messages listed in InMsgDescr", base.next_block_descr);
         base.in_msg_descr.iterate_with_keys(|key, in_msg| {
             let base = base.clone();
             let manager = manager.clone();
@@ -2093,7 +2310,7 @@ impl ValidateQuery {
 
     // key of Message
     fn check_out_msg(base: &ValidateBase, manager: &MsgQueueManager, key: &UInt256, out_msg: &OutMsg) -> Result<()> {
-        log::debug!(target: "validate_query", "checking OutMsg with key {}", key.to_hex_string());
+        log::debug!(target: "validate_query", "({}): checking OutMsg with key {}", key.to_hex_string(), base.next_block_descr);
         CHECK!(out_msg, inited);
         // initial checks and unpack
         let msg_cell_opt = out_msg.message_cell()?;
@@ -2287,7 +2504,7 @@ impl ValidateQuery {
             }
             // msg_export_new
             OutMsg::New(_) => {
-                log::debug!(target: "validate_query", "src: {}, dst: {}, shard: {}", src_prefix, dest_prefix, base.shard());
+                log::debug!(target: "validate_query", "({}): src: {}, dst: {}, shard: {}", base.next_block_descr, src_prefix, dest_prefix, base.shard());
                 // perform hypercube routing for this new message
                 let use_hypercube = !base.config_params.has_capability(GlobalCapabilities::CapOffHypercube);
                 let route_info = perform_hypercube_routing(&src_prefix, &dest_prefix, &base.shard(), use_hypercube)
@@ -2359,9 +2576,9 @@ impl ValidateQuery {
                         that has not been yet processed by the corresponding neighbor", key.to_hex_string(), next_prefix)
                 }
                 if deliver_lt != info.import_block_lt() {
-                    log::warn!(target: "validate_query", "msg_export_deq OutMsg entry with key {} claims the dequeued message with next hop {} \
+                    log::warn!(target: "validate_query", "({}): msg_export_deq OutMsg entry with key {} claims the dequeued message with next hop {} \
                         has been delivered in block with end_lt={} while the correct value is {}",
-                            key.to_hex_string(), next_prefix, info.import_block_lt(), deliver_lt);
+                        base.next_block_descr, key.to_hex_string(), next_prefix, info.import_block_lt(), deliver_lt);
                 }
             }
             // msg_export_tr_req
@@ -2435,7 +2652,7 @@ impl ValidateQuery {
     }
 
     fn check_out_msg_descr(base: Arc<ValidateBase>, manager: Arc<MsgQueueManager>, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validate_query", "checking outbound messages listed in OutMsgDescr");
+        log::debug!(target: "validate_query", "({}): checking outbound messages listed in OutMsgDescr", base.next_block_descr);
         base.out_msg_descr.iterate_with_keys(|key, out_msg| {
             let base = base.clone();
             let manager = manager.clone();
@@ -2450,7 +2667,11 @@ impl ValidateQuery {
     }
 
     // compare to Collator::update_processed_upto()
-    fn check_processed_upto(base: &ValidateBase, manager: &MsgQueueManager, mc_data: &McData) -> Result<()> {
+    fn check_processed_upto(
+        base: &ValidateBase,
+        manager: &MsgQueueManager,
+        mc_data: &McData
+    ) -> Result<()> {
         log::debug!(target: "validate_query", "checking ProcessedInfo");
         if !manager.next().is_reduced() {
             reject_query!("new ProcessedInfo is not reduced (some entries completely cover other entries)");
@@ -2464,21 +2685,29 @@ impl ValidateQuery {
                 reject_query!("newly-added ProcessedInfo entry refers to shard {} distinct from the current shard {}",
                     ShardIdent::with_tagged_prefix(base.shard().workchain_id(), upd.shard)?, base.shard())
             }
-            let ref_mc_seqno = match base.shard().is_masterchain() {
-                true => base.block_id().seq_no,
-                false => mc_data.state.state().seq_no()
-            };
-            if upd.mc_seqno != ref_mc_seqno {
-                reject_query!("newly-added ProcessedInfo entry refers to masterchain block {} but \
-                    the processed inbound message queue belongs to masterchain block {}",
-                        upd.mc_seqno, ref_mc_seqno)
+             {
+                let ref_mc_seqno = match base.shard().is_masterchain() {
+                    true => base.block_id().seq_no,
+                    false => mc_data.state.state()?.seq_no()
+                };
+                if upd.mc_seqno() != ref_mc_seqno {
+                    reject_query!(
+                        "newly-added ProcessedInfo entry refers to masterchain block {} but \
+                        the processed inbound message queue belongs to masterchain block {}",
+                        upd.mc_seqno(), ref_mc_seqno
+                    )
+                }
             }
             if upd.last_msg_lt >= base.info.end_lt() {
-                reject_query!("newly-added ProcessedInfo entry claims that the last processed message has lt {} \
-                    larger than this block's end lt {}", upd.last_msg_lt, base.info.end_lt())
+                reject_query!(
+                    "newly-added ProcessedInfo entry claims that the last processed message has lt {} \
+                    larger than this block's end lt {}", upd.last_msg_lt, base.info.end_lt()
+                )
             }
             if upd.last_msg_lt == 0 {
-                reject_query!("newly-added ProcessedInfo entry claims that the last processed message has zero lt")
+                reject_query!(
+                    "newly-added ProcessedInfo entry claims that the last processed message has zero lt"
+                )
             }
             claimed_proc_lt = upd.last_msg_lt;
             claimed_proc_hash = upd.last_msg_hash;
@@ -2486,24 +2715,32 @@ impl ValidateQuery {
             claimed_proc_lt = 0;
             claimed_proc_hash = UInt256::default();
         }
-        log::debug!(target: "validate_query", "ProcessedInfo claims to have processed all inbound messages up to ({},{:x})",
-            claimed_proc_lt, claimed_proc_hash);
+        log::debug!(
+            target: "validate_query", 
+            "({}): ProcessedInfo claims to have processed all inbound messages up to ({},{:x})",
+            base.next_block_descr,
+            claimed_proc_lt, claimed_proc_hash
+        );
         if let Some(key_val) = base.result.lt_hash.get(&0) {
             let (proc_lt, proc_hash) = key_val.val();
             if &claimed_proc_lt < proc_lt
                 || (&claimed_proc_lt == proc_lt && proc_lt != &0 && &claimed_proc_hash < proc_hash) {
-                reject_query!("the ProcessedInfo claims to have processed messages only upto ({},{:x}), \
+                reject_query!(
+                    "the ProcessedInfo claims to have processed messages only upto ({},{:x}), \
                     but there is a InMsg processing record for later message ({},{:x})",
-                        claimed_proc_lt, claimed_proc_hash, proc_lt, proc_hash)
+                    claimed_proc_lt, claimed_proc_hash, proc_lt, proc_hash
+                )
             }
         }
         if let Some(key_val) = base.result.lt_hash.get(&1) {
             let (min_enq_lt, min_enq_hash) = key_val.val();
             if min_enq_lt < &claimed_proc_lt
                 || (min_enq_lt == &claimed_proc_lt && !(&claimed_proc_hash < min_enq_hash)) {
-                reject_query!("the ProcessedInfo claims to have processed all messages only upto ({},{:x}), \
+                reject_query!(
+                    "the ProcessedInfo claims to have processed all messages only upto ({},{:x}), \
                     but there is a OutMsg enqueuing record for earlier message ({},{:x})",
-                        claimed_proc_lt, claimed_proc_hash, min_enq_lt, min_enq_hash)
+                    claimed_proc_lt, claimed_proc_hash, min_enq_lt, min_enq_hash
+                )
             }
         }
         base.result.lt_hash.insert(2, (claimed_proc_lt, claimed_proc_hash));
@@ -2610,9 +2847,10 @@ impl ValidateQuery {
                 let (claimed_proc_lt, claimed_proc_hash) = key_val.val();
                 if claimed_proc_lt != &0
                     && !(claimed_proc_lt < &created_lt || (claimed_proc_lt == &created_lt && claimed_proc_hash < &key.hash)) {
-                    log::error!(target: "validate_query", "internal inconsistency: new ProcessedInfo claims \
+                    log::error!(target: "validate_query", "({}): internal inconsistency: new ProcessedInfo claims \
                         to have processed all messages up to ({},{:x}), but we somehow have not processed a message ({},{:x}) \
                         from OutMsgQueue of neighbor {} key {:x}",
+                            base.next_block_descr,
                             claimed_proc_lt, claimed_proc_hash,
                             created_lt, key.hash,
                             nb_block_id, key);
@@ -2624,12 +2862,16 @@ impl ValidateQuery {
 
     // return true if all queues are processed
     fn check_in_queue(base: &ValidateBase, manager: &MsgQueueManager) -> Result<bool> {
-        log::debug!(target: "validate_query", "check_in_queue len: {}", manager.neighbors().len());
+        log::debug!(target: "validate_query", "({}): check_in_queue len: {}", base.next_block_descr, manager.neighbors().len());
         let mut iter = manager.merge_out_queue_iter(base.shard())?;
         while let Some(k_v) = iter.next() {
             let (msg_key, enq, lt, nb_block_id) = k_v?;
-            log::debug!(target: "validate_query", "processing inbound message with \
-                (lt,hash)=({},{:x}) from neighbor - {}", lt, msg_key.hash, nb_block_id);
+            if !base.split_queues && !nb_block_id.shard().contains_full_prefix(enq.cur_prefix()) {
+                // this case from shard split result without splitting queues 
+                continue;
+            }
+            log::debug!(target: "validate_query", "({}): processing inbound message with \
+                (lt,hash)=({},{:x}) from neighbor - {}", base.next_block_descr, lt, msg_key.hash, nb_block_id);
             // if (verbosity > 3) {
             //     std::cerr << "inbound message: lt=" << kv->lt from=" << kv->source key=" << kv->key.to_hex_string() msg=";
             //     block::gen::t_EnqueuedMsg.print(std::cerr, *(kv->msg));
@@ -2654,38 +2896,44 @@ impl ValidateQuery {
     // checks that all messages imported from our outbound queue into neighbor shards have been dequeued
     // similar to Collator::out_msg_queue_cleanup()
     // (but scans new outbound queue instead of the old)
+    // this operation could be long and must be called if outbound queue is short only
     fn check_delivered_dequeued(base: &ValidateBase, manager: &MsgQueueManager) -> Result<bool> {
-        log::debug!(target: "validate_query", "scanning new outbound queue and checking delivery status of all messages");
+        log::debug!(target: "validate_query", "({}): scanning new outbound queue and checking delivery status of all messages", base.next_block_descr);
         for nb in manager.neighbors() {
             if !nb.is_disabled() && !nb.can_check_processed() {
                 reject_query!("internal error: no info for checking processed messages from neighbor {}", nb.block_id())
             }
         }
         // TODO: warning may be too much messages
-        manager.next().out_queue().iterate_with_keys_and_aug(|msg_key, enq, created_lt| {
+        manager.next().out_queue()?.iterate_with_keys_and_aug(|msg_key, enq, created_lt| {
+            if created_lt >= base.info.start_lt() {
+                log::debug!(target: "validate_query", "({}): stop scanning new outbound queue", base.next_block_descr);
+                return Ok(false)
+            }
             // log::debug!(target: "validate_query", "key is " << key.to_hex_string(n));
             let enq = MsgEnqueueStuff::from_enqueue_and_lt(enq, created_lt)?;
             if msg_key.hash != enq.message_hash() {
                 reject_query!("cannot unpack EnqueuedMsg with key {:x} in the new OutMsgQueue", msg_key)
             }
-            log::debug!(target: "validate_query", "scanning outbound message with (lt,hash)=({},{}) enqueued_lt={}",
-                created_lt, msg_key.hash.to_hex_string(), enq.enqueued_lt());
+            // log::debug!(target: "validate_query", "scanning outbound message with (lt,hash)=({},{}) enqueued_lt={}",
+                // created_lt, msg_key.hash.to_hex_string(), enq.enqueued_lt());
             for nb in manager.neighbors() {
                 // could look up neighbor with shard containing enq_msg_descr.next_prefix more efficiently
                 // (instead of checking all neighbors)
                 if !nb.is_disabled() && nb.already_processed(&enq)? {
                     // the message has been delivered but not removed from queue!
-                    log::warn!(target: "validate_query", "outbound queue not cleaned up completely (overfull block?): \
-                        outbound message with (lt,hash)=({},{}) enqueued_lt={} has been already delivered and \
+                    reject_query!("({}): outbound queue not cleaned up completely (overfull block?): \
+                        outbound message with (lt,hash)=({},{:x}) enqueued_lt={} has been already delivered and \
                         processed by neighbor {} but it has not been dequeued in this block and it is still \
-                        present in the new outbound queue", created_lt, msg_key.hash.to_hex_string(),
+                        present in the new outbound queue", base.next_block_descr, created_lt, msg_key.hash,
                             enq.enqueued_lt(), nb.block_id());
-                    return Ok(false)
                 }
             }
-            if created_lt >= base.info.start_lt() {
-                log::debug!(target: "validate_query", "stop scanning new outbound queue");
-                return Ok(false)
+            if !base.shard().contains_full_prefix(enq.cur_prefix()) {
+                reject_query!("({}): outbound queue not cleaned up completely (overfull block?): \
+                    outbound message with (lt,hash)=({},{:x}) enqueued_lt={} has been left from split \
+                    and should be removed in underload block", base.next_block_descr, created_lt,
+                    msg_key.hash, enq.enqueued_lt())
             }
             Ok(true)
         })?;
@@ -2739,7 +2987,8 @@ impl ValidateQuery {
         is_first: bool,
         is_last: bool
     ) -> Result<bool> {
-        log::debug!(target: "validate_query", "checking {} transaction {} of account {}",
+        log::debug!(target: "validate_query", "({}): checking {} transaction {} of account {}",
+            base.next_block_descr,
             lt, trans_root.repr_hash().to_hex_string(), account_addr.to_hex_string());
         let trans = Transaction::construct_from_cell(trans_root.clone())?;
         let account_create = account.is_none();
@@ -3026,6 +3275,8 @@ impl ValidateQuery {
             seed_block: base.extra.rand_seed().clone(),
             debug: false,
             block_version: base.info.gen_software().unwrap_or(&config_params::GlobalVersion::new()).version,
+            #[cfg(feature = "signature_with_id")]
+            signature_id: base.global_id,  // Use network global ID as signature ID
             ..ExecuteParams::default()
         };
         let _old_account_root = account_root.clone();
@@ -3034,13 +3285,33 @@ impl ValidateQuery {
         *account = Account::construct_from_cell(account_root.clone())?;
         let new_hash = account_root.repr_hash();
         if state_update.new_hash != new_hash {
-            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
+            let _ = Self::prepare_transaction_for_log(
+                &_old_account_root, 
+                account_root, 
+                executor.config().raw_config(), 
+                &trans, 
+                &trans_execute
+            );
+            #[cfg(test)]
+            Self::prepare_transaction_for_test(
+                base, _old_account_root, &trans, "account hash wrong".to_string()
+            )?;
             reject_query!("transaction {} of {:x} is invalid: it claims that the new \
                 account state hash is {:x} but the re-computed value is {:x}",
                     lt, account_addr, state_update.new_hash, new_hash)
         }
         if trans.out_msgs != trans_execute.out_msgs {
-            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
+            let _ = Self::prepare_transaction_for_log(
+                &_old_account_root, 
+                account_root, 
+                executor.config().raw_config(), 
+                &trans, 
+                &trans_execute
+            );
+            #[cfg(test)]
+            Self::prepare_transaction_for_test(
+                base, _old_account_root, &trans, "account hash wrong".to_string()
+            )?;
             reject_query!("transaction {} of {:x} is invalid: it has produced a set of \
                 outbound messages different from that listed in the transaction",
                     lt, account_addr)
@@ -3059,7 +3330,21 @@ impl ValidateQuery {
         trans_execute.set_prev_trans_lt(trans.prev_trans_lt());
         let trans_execute_root = trans_execute.serialize()?;
         if trans_root != trans_execute_root {
-            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
+            let _ = Self::prepare_transaction_for_log(
+                &_old_account_root, 
+                account_root, 
+                executor.config().raw_config(), 
+                &trans, 
+                &trans_execute
+            );
+            #[cfg(test)]
+            if let Err(err) = crate::test_helper::compare_transactions(
+                &trans, &trans_execute, true
+            ) {
+                Self::prepare_transaction_for_test(
+                    base, _old_account_root, &trans, err.to_string()
+                )?;
+            }
             reject_query!("re created transaction {} doesn't correspond", lt)
         }
         // check new balance and value flow
@@ -3077,7 +3362,17 @@ impl ValidateQuery {
         right_balance.add(&money_exported)?;
         right_balance.add(&trans.total_fees())?;
         if left_balance != right_balance {
-            let _ = Self::prepare_transaction_for_log(&_old_account_root, account_root, executor.config().raw_config(), &trans, &trans_execute);
+            let _ = Self::prepare_transaction_for_log(
+                &_old_account_root, 
+                account_root, 
+                executor.config().raw_config(), 
+                &trans, 
+                &trans_execute
+            );
+            #[cfg(test)]
+            Self::prepare_transaction_for_test(
+                base, _old_account_root, &trans, "balance incorrect".to_string()
+            )?;
             reject_query!("transaction {} of {} violates the currency flow condition: \
                 old balance={} + imported={} does not equal new balance={} + exported=\
                 {} + total_fees={}", lt, account_addr.to_hex_string(),
@@ -3124,7 +3419,7 @@ impl ValidateQuery {
     }
 
     fn check_transactions(base: Arc<ValidateBase>, libraries: Libraries, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validate_query", "checking all transactions");
+        log::debug!(target: "validate_query", "({}): checking all transactions", base.next_block_descr);
         let config = BlockchainConfig::with_config(base.config_params.clone())?;
         base.account_blocks.iterate_with_keys_and_aug(|account_addr, acc_block, fee| {
             let base = base.clone();
@@ -3165,11 +3460,11 @@ impl ValidateQuery {
         if !base.shard().is_masterchain() {
             return Ok(())
         }
-        log::debug!(target: "validate_query", "getting the list of special tick-tock smart contracts");
+        log::debug!(target: "validate_query", "({}): getting the list of special tick-tock smart contracts", base.next_block_descr);
         let ticktock_smcs = base.config_params.special_ticktock_smartcontracts(3, &base.prev_state_accounts)?;
-        log::debug!(target: "validate_query", "have {} tick-tock smart contracts", ticktock_smcs.len());
+        log::debug!(target: "validate_query", "({}): have {} tick-tock smart contracts", base.next_block_descr, ticktock_smcs.len());
         for addr in ticktock_smcs {
-            log::debug!(target: "validate_query", "special smart contract {} with ticktock={}", addr.0.to_hex_string(), addr.1);
+            log::debug!(target: "validate_query", "({}): special smart contract {} with ticktock={}", base.next_block_descr, addr.0.to_hex_string(), addr.1);
             if base.account_blocks.get(&addr.0)?.is_none() {
                 reject_query!("there are no transactions (and in particular, no tick-tock transactions) \
                     for special smart contract {} with ticktock={}",
@@ -3213,7 +3508,8 @@ impl ValidateQuery {
             _ => reject_query!("wrong type of message")
         };
         let msg_hash = env.message_cell().repr_hash();
-        log::debug!(target: "validate_query", "checking special message with hash {} and expected amount {}",
+        log::debug!(target: "validate_query", "({}): checking special message with hash {} and expected amount {}",
+            base.next_block_descr,
             msg_hash.to_hex_string(), amount);
         match base.in_msg_descr.get(&msg_hash)? {
             Some(msg) => if &msg != in_msg {
@@ -3305,6 +3601,85 @@ impl ValidateQuery {
         Ok(())
     }
 
+    fn check_queue_updates(base: &ValidateBase) -> Result<()> {
+
+        if !base.config_params.has_capability(GlobalCapabilities::CapWorkchains) {
+            if base.block.block()?.out_msg_queue_updates.is_some() {
+                fail!("CapWorkchains is not set but block contains out msg queue updates");
+            }
+        } else if base.block.id().shard().is_masterchain() {
+            if base.block.block()?.out_msg_queue_updates.is_some() {
+                fail!("Master block could not contain out msg queue updates");
+            }
+        } else {
+
+            let check_update_for_wc = |wc_id: i32, update: &OutQueueUpdate| -> Result<()> {
+                // prepare old proof
+                let prev_state_root = if base.after_merge && base.prev_states.len() == 2 {
+                    let left  = base.prev_states[0].root_cell().clone();
+                    let right = base.prev_states[1].root_cell().clone();
+                    ShardStateStuff::construct_split_root(left, right)?
+                } else {
+                    CHECK!(base.prev_states.len(), 1);
+                    base.prev_states[0].root_cell().clone()
+                };
+                let mut old_sub_queue_root_hash = UInt256::default();
+                let old_proof = if base.block.id().seq_no() != 1 {
+                    let old_proof_stuff = OutMsgQueueInfo::prepare_proof_for_wc_ex(&prev_state_root, wc_id)?;
+                    if old_proof_stuff.sub_queue_root_hash_2.is_some() != base.after_merge {
+                        fail!("Update of queue for wc {} has hash_2 which doesn't match after_merge flag");
+                    } else {
+                        old_sub_queue_root_hash = old_proof_stuff.sub_queue_root_hash;
+                    }
+                    old_proof_stuff.proof.serialize()?
+                } else {
+                    // first update is built from zerostate 
+                    // (see OutMsgQueueInfo::prepare_first_update_for_wc)
+                    prev_state_root
+                };
+
+                // apply update for old proof
+                let updated_proof = update.update.apply_for(&old_proof)?;
+
+                // prepare new proof
+                let next_state = base.next_state.as_ref().ok_or_else(|| error!(" base.next_state is None"))?;
+                let new_proof_stuff = OutMsgQueueInfo::prepare_proof_for_wc_ex(next_state.root_cell(), wc_id)?;
+                let new_proof = new_proof_stuff.proof.serialize()?;
+
+                // compare updated old proof with new one
+                if new_proof != updated_proof {
+                    fail!("Update of queue for wc {} is wrong", wc_id);
+                }
+
+                let is_empty = if base.after_merge || base.block.id().seq_no() == 1 {
+                    false
+                } else {
+                    old_sub_queue_root_hash == new_proof_stuff.sub_queue_root_hash
+                };
+                if is_empty != update.is_empty {
+                    fail!("Update of queue for wc {} has incorrect 'is_empty' field", wc_id);
+                }
+                Ok(())
+            };
+
+            let updates = base.block.block()?.out_msg_queue_updates.as_ref()
+                .ok_or_else(|| error!("CapWorkchains is set but block doesn't contain out msg queue updates"))?;
+
+            base.mc_extra.shards().iterate_with_keys(|wc_id: i32, _| {
+                if base.block.id().shard().workchain_id() != wc_id {
+                    let update = updates.get(&wc_id)?
+                        .ok_or_else(|| error!("There is no queue update for wc {}", wc_id))?;
+                    check_update_for_wc(wc_id, &update)?;
+                }
+                Ok(true)
+            })?;
+            let update = updates.get(&MASTERCHAIN_ID)?
+                .ok_or_else(|| error!("There is no queue update for masterchain"))?;
+            check_update_for_wc(MASTERCHAIN_ID, &update)?;
+        }
+        Ok(())
+    }
+
     fn check_one_library_update(key: UInt256, old: Option<LibDescr>, new: Option<LibDescr>, lib_publishers2: &mut Vec<LibPublisher>) -> Result<bool> {
         let new = match new {
             Some(new) => {
@@ -3333,10 +3708,10 @@ impl ValidateQuery {
         let mut lib_publishers2 = vec![];
         let old = base.prev_state.as_ref().ok_or_else(
             || error!("Prev state is not initialized in validator query")
-        )?.state().libraries().clone();
+        )?.state()?.libraries().clone();
         let new = base.next_state.as_ref().ok_or_else(
             || error!("Next state is not initialized in validator query")
-        )?.state().libraries().clone();
+        )?.state()?.libraries().clone();
         old.scan_diff(
             &new, 
             |key: UInt256, old, new| Self::check_one_library_update(key, old, new, &mut lib_publishers2)
@@ -3357,12 +3732,12 @@ impl ValidateQuery {
     }
 
     fn check_new_state(base: &mut ValidateBase, mc_data: &McData, manager: &MsgQueueManager) -> Result<()> {
-        log::debug!(target: "validate_query", "checking header of the new shardchain state");
+        log::debug!(target: "validate_query", "({}): checking header of the new shardchain state", base.next_block_descr);
         let prev_state = base.prev_state.as_ref().ok_or_else(
             || error!("Prev state is not initialized in validator query")
-        )?.state();
+        )?.state()?;
         if let Some(next_state) = &base.next_state {
-            let next_state = next_state.state();
+            let next_state = next_state.state()?;
             let my_mc_seqno = if base.shard().is_masterchain() {
                 base.block_id().seq_no()
             } else {
@@ -3400,6 +3775,9 @@ impl ValidateQuery {
                     and underload history (block cannot be both overloaded and underloaded)"
                 )
             }
+            if !base.split_queues && next_state.underload_history() & 1 != 0 {
+                Self::check_delivered_dequeued(&base, &manager)?;
+            }
             if base.after_split || base.after_merge {
                 if (next_state.overload_history() | next_state.underload_history()) & !1 != 0 {
                     reject_query!(
@@ -3430,7 +3808,8 @@ impl ValidateQuery {
             }
             log::debug!(
                 target: "validate_query", 
-                "checking total validator fees: new={}+recovered={} == old={}+collected={}",
+                "({}): checking total validator fees: new={}+recovered={} == old={}+collected={}",
+                base.next_block_descr,
                 next_state.total_validator_fees(), base.value_flow.recovered,
                 base.prev_validator_fees, base.value_flow.fees_collected
             );
@@ -3471,12 +3850,20 @@ impl ValidateQuery {
         } 
         let next_state = base.next_state.as_ref().ok_or_else(
             || error!("Next state is not initialized in validator query")
-        )?.state();
+        )?.state()?;
         if !base.shard().is_masterchain() && !next_state.libraries().is_empty() {
             reject_query!(
                 "new state contains a non-empty public library collection, \
                 which is not allowed for non-masterchain blocks"
             )
+        }
+         {
+            if next_state.ref_shard_blocks().is_some() {
+                reject_query!("new state could not contain ref_shard_blocks");
+            }
+            if next_state.gen_time_ms_part() != 0 {
+                reject_query!("new state could not contain nonzero gen_time_ms_part");
+            }
         }
         // TODO: it seems was tested in unpack_next_state
         if base.shard().is_masterchain() && next_state.master_ref().is_some() {
@@ -3503,7 +3890,7 @@ impl ValidateQuery {
         }
         let new_accounts = base.next_state.as_ref().ok_or_else(
             || error!("Next state is not initialized in validator query")
-        )?.state().read_accounts()?;
+        )?.state()?.read_accounts()?;
         let old_config_root = match new_accounts.get(&base.prev_state_extra.config.config_addr)? {
             Some(account) => account.read_account()?.get_data(),
             None => reject_query!("cannot extract configuration from the new state of the (old) configuration smart contract {}",
@@ -3528,13 +3915,18 @@ impl ValidateQuery {
         }
         if new_config.important_config_parameters_changed(&old_config, false)? {
             // same as the check in Collator::create_mc_state_extra()
-            log::warn!(target: "validate_query", "the global configuration changes in block {}", base.block_id());
+            log::warn!(target: "validate_query", "({}): the global configuration changes in block {}", base.next_block_descr, base.block_id());
             if !base.info.key_block() {
                 reject_query!("important parameters in the global configuration have changed, but the block is not marked as a key block")
             }
         } else if base.info.key_block()
             && !(cfg_acc_changed || new_config.important_config_parameters_changed(&old_config, true)?) {
             reject_query!("no important parameters have been changed, but the block is marked as a key block")
+        }
+        if old_config.has_capability(GlobalCapabilities::CapWorkchains) &&
+           !new_config.has_capability(GlobalCapabilities::CapWorkchains) 
+        {
+            reject_query!("GlobalCapabilities::CapWorkchains can't be disabled");
         }
         let want_cfg_addr = match old_config.config(0)? {
             Some(ConfigParamEnum::ConfigParam0(param)) => param.config_addr,
@@ -3569,8 +3961,9 @@ impl ValidateQuery {
         let want_config_root = match new_accounts.get(&want_cfg_addr) {
             Ok(Some(account)) => account.read_account()?.get_data(),
             _ => {
-                log::warn!(target: "validate_query", "switching of configuration smart contract did not happen \
+                log::warn!(target: "validate_query", "({}): switching of configuration smart contract did not happen \
                     because the suggested new configuration smart contract {} does not contain a valid configuration",
+                        base.next_block_descr,
                         want_cfg_addr.to_hex_string());
                 return Ok(())
             }
@@ -3578,9 +3971,10 @@ impl ValidateQuery {
         // if !base.config_params.valid_config_data(&base.prev_state_extra.config, true, false)? {
         let want_config = ConfigParams::with_address_and_params(want_cfg_addr.clone(), want_config_root);
         if !want_config.valid_config_data(false, None)? {
-            log::warn!(target: "validate_query", "switching of configuration smart contract did not happen \
+            log::warn!(target: "validate_query", "({}): switching of configuration smart contract did not happen \
                 because the configuration extracted from suggested new configuration smart contract {} \
                 failed to pass per-parameter validity checks, or one of mandatory configuration parameters is missing",
+                    base.next_block_descr,
                     want_cfg_addr.to_hex_string());
             return Ok(())
         }
@@ -3605,13 +3999,13 @@ impl ValidateQuery {
                 reject_query!("entry with seqno {} disappeared in the new previous blocks dictionary as compared to \
                     the old previous blocks dictionary", seq_no)
             }
-        } else if seq_no != mc_data.state.state().seq_no() {
+        } else if seq_no != mc_data.state.state()?.seq_no() {
             reject_query!("new previous blocks dictionary contains a new entry with seqno {} \
-                while the only new entry must be for the previous block with seqno {}", seq_no, mc_data.state.state().seq_no())
+                while the only new entry must be for the previous block with seqno {}", seq_no, mc_data.state.state()?.seq_no())
         } else {
             new.expect("check scan_diff for Hashmap").0
         };
-        log::debug!(target: "validate_query", "prev block id for {} is present", seq_no);
+        log::debug!(target: "validate_query", "({}): prev block id for {} is present", base.next_block_descr, seq_no);
         let (end_lt, block_id, key) = new_val.master_block_id();
         if block_id.seq_no != seq_no {
             reject_query!("new previous blocks dictionary entry with seqno {} in fact describes a block {} with different seqno",
@@ -3621,10 +4015,10 @@ impl ValidateQuery {
             reject_query!("new previous blocks dictionary has a new entry for previous block {} while the correct previous block is {}",
                 block_id, base.prev_blocks_ids[0])
         }
-        if end_lt != mc_data.state.state().gen_lt() {
+        if end_lt != mc_data.state.state()?.gen_lt() {
             reject_query!("previous blocks dictionary has new entry for previous block {} \
                 indicating end_lt={} but the correct value is {}",
-                    block_id, end_lt, mc_data.state.state().gen_lt())
+                    block_id, end_lt, mc_data.state.state()?.gen_lt())
         }
         if key != mc_data.mc_state_extra.after_key_block {
             reject_query!("previous blocks dictionary has new entry for previous block {} indicating is_key_block={} but the correct value is {}",
@@ -3637,10 +4031,10 @@ impl ValidateQuery {
     fn check_mc_state_extra(&self, base: &ValidateBase, mc_data: &McData) -> Result<HashMap<AccountId, Grams>> {
         let prev_state = base.prev_state.as_ref().ok_or_else(
             || error!("Prev state is not initialized in validator query")
-        )?.state();
+        )?.state()?;
         let next_state = base.next_state.as_ref().ok_or_else(
             || error!("Next state is not initialized in validator query")
-        )?.state();
+        )?.state()?;
         if !base.shard().is_masterchain() {
             if next_state.custom_cell().is_some() {
                 reject_query!(
@@ -3653,7 +4047,8 @@ impl ValidateQuery {
         let import_created = base.mc_extra.fees().root_extra().create.clone();
         log::debug!(
             target: "validate_query", 
-            "checking header of McStateExtra in the new masterchain state"
+            "({}): checking header of McStateExtra in the new masterchain state",
+            base.next_block_descr
         );
         if prev_state.custom_cell().is_none() {
             reject_query!("previous masterchain state did not contain a McStateExtra")
@@ -3682,11 +4077,11 @@ impl ValidateQuery {
             |seq_no: u32, old, new| Self::check_one_prev_dict_update(base, mc_data, seq_no, old, new)
         ).map_err(|err| error!("invalid previous block dictionary in the new state : {}", err))?;
         if let Some((seq_no, _)) = base.prev_state_extra.prev_blocks.get_max(false)? {
-            if seq_no >= mc_data.state.state().seq_no() {
+            if seq_no >= mc_data.state.state()?.seq_no() {
                 reject_query!(
                     "previous block dictionary for the previous state with seqno {} \
                     contains information about 'previous' masterchain block with seqno {}",
-                    mc_data.state.state().seq_no(), seq_no
+                    mc_data.state.state()?.seq_no(), seq_no
                 )
             }
         }
@@ -3697,18 +4092,18 @@ impl ValidateQuery {
             )
         )?;
         CHECK!(base.block_id().seq_no == mc_data.state.block_id().seq_no() + 1);
-        if seq_no > mc_data.state.state().seq_no() {
+        if seq_no > mc_data.state.state()?.seq_no() {
             reject_query!(
                 "previous block dictionary for the new state with seqno {} \
                 contains information about a future masterchain block with seqno {}",
                 base.block_id().seq_no, seq_no
             )
         }
-        if seq_no != mc_data.state.state().seq_no() {
+        if seq_no != mc_data.state.state()?.seq_no() {
             reject_query!(
                 "previous block dictionary for the new state of masterchain block {} \
                 does not contain information about immediately previous block with seqno {}",
-                base.block_id(), mc_data.state.state().seq_no()
+                base.block_id(), mc_data.state.state()?.seq_no()
             )
         }
         // after_key_block:Bool
@@ -3737,12 +4132,12 @@ impl ValidateQuery {
             )
         } else if let Some(ref last_key_block) = base.next_state_extra.last_key_block {
             let block_id = BlockIdExt::from_ext_blk(last_key_block.clone());
-            if block_id != base.prev_blocks_ids[0] || last_key_block.end_lt != mc_data.state.state().gen_lt() {
+            if block_id != base.prev_blocks_ids[0] || last_key_block.end_lt != mc_data.state.state()?.gen_lt() {
                 reject_query!(
                     "last_key_block has been set in the new masterchain state to {} with lt {}, \
                     but the only possible value for this update is the previous block {} \
                     with lt {}", block_id, last_key_block.end_lt, base.prev_blocks_ids[0], 
-                    mc_data.state.state().gen_lt()
+                    mc_data.state.state()?.gen_lt()
                 )
             }
             if !mc_data.mc_state_extra.after_key_block {
@@ -3801,7 +4196,8 @@ impl ValidateQuery {
             Default::default()
         };
         if !base.value_flow.copyleft_rewards.is_empty() {
-            log::warn!("copyleft rewards in masterchain must be empty, real rewards count: {}",
+            log::warn!("({}): copyleft rewards in masterchain must be empty, real rewards count: {}",
+                base.next_block_descr,
                 base.value_flow.copyleft_rewards.len()?
             )
         }
@@ -3855,7 +4251,7 @@ impl ValidateQuery {
     }
 
     fn check_one_block_creator_update(&self, base: &ValidateBase, key: &UInt256, old: Option<CreatorStats>, new: Option<CreatorStats>) -> Result<bool> {
-        log::debug!(target: "validate_query", "checking update of CreatorStats for {}", key.to_hex_string());
+        log::debug!(target: "validate_query", "({}): checking update of CreatorStats for {}", self.next_block_descr, key.to_hex_string());
         let (new, new_exists) = match new {
             Some(new) => (new, true),
             None => (CreatorStats::default(), false)
@@ -3881,7 +4277,7 @@ impl ValidateQuery {
 
     // similar to Collator::update_block_creator_stats()
     fn check_block_create_stats(&self, base: &ValidateBase, old: BlockCreateStats, new: BlockCreateStats) -> Result<bool> {
-        log::debug!(target: "validate_query", "checking all CreatorStats updates between the old and the new state");
+        log::debug!(target: "validate_query", "({}): checking all CreatorStats updates between the old and the new state", self.next_block_descr);
         old.counters.scan_diff(
             &new.counters,
             |key: UInt256, old, new| self.check_one_block_creator_update(base, &key, old, new)
@@ -3926,7 +4322,7 @@ impl ValidateQuery {
     }
 
     fn check_mc_block_extra(base: &ValidateBase, _mc_data: &McData) -> Result<()> {
-        log::debug!(target: "validate_query", "checking all CreatorStats updates between the old and the new state");
+        log::debug!(target: "validate_query", "({}): checking all CreatorStats updates between the old and the new state", base.next_block_descr);
         if !base.shard().is_masterchain() {
             return Ok(())
         }
@@ -3980,6 +4376,7 @@ impl ValidateQuery {
         self.unpack_prev_state(&mut base)?;
         self.unpack_next_state(&mut base, &mc_data)?;
         base.config_params = mc_data.state().config_params()?.clone();
+        base.split_queues = !base.config_params.has_capability(GlobalCapabilities::CapNoSplitOutQueue);
         base.capabilities = base.config_params.capabilities();
         Self::load_block_data(&mut base)?;
         Ok((base, mc_data))
@@ -4012,14 +4409,14 @@ impl ValidateQuery {
 
         let manager = self.init_output_queue_manager(&mc_data, &base).await?;
         self.check_shard_layout(&base, &mc_data)?;
+
         check_cur_validator_set(
             &self.validator_set,
             base.block_id(),
             base.shard(),
             mc_data.mc_state_extra(),
             &self.old_mc_shards,
-            &base.config_params,
-            base.now(),
+            &mc_data.state(),
             base.is_fake
         )?;
         self.check_utime_lt(&base, &mc_data)?;
@@ -4036,12 +4433,12 @@ impl ValidateQuery {
         Self::add_task(&mut tasks, move || Self::precheck_value_flow(b));
         let b = base.clone();
         Self::add_task(&mut tasks, move || Self::precheck_account_updates(b));
-        Self::precheck_account_transactions(base.clone(), &mut tasks)?;
+        Self::precheck_account_transactions(base.clone(), &mut tasks, &self.engine)?;
         Self::precheck_message_queue_update(base.clone(), &manager, &mut tasks)?;
 
         Self::check_in_msg_descr(base.clone(), manager.clone(), &mut tasks)?;
         Self::check_out_msg_descr(base.clone(), manager.clone(), &mut tasks)?;
-        Self::check_transactions(base.clone(), mc_data.libraries().clone(), &mut tasks)?;
+        Self::check_transactions(base.clone(), mc_data.libraries()?.clone(), &mut tasks)?;
 
         self.run_tasks(tasks).await?;
 
@@ -4051,36 +4448,39 @@ impl ValidateQuery {
 
         Self::check_processed_upto(&base, &manager, &mc_data)?;
         Self::check_in_queue(&base, &manager)?;
-        Self::check_delivered_dequeued(&base, &manager)?;
+        // Excessive check: validity of message in queue is checked elsewhere
+        // Self::check_delivered_dequeued(&base, &manager)?;
         Self::check_all_ticktock_processed(&base)?;
         Self::check_message_processing_order(&mut base)?;
         Self::check_new_state(&mut base, &mc_data, &manager)?;
         Self::check_mc_block_extra(&base, &mc_data)?;
         let sent_rewards = self.check_mc_state_extra(&base, &mc_data)?;
         Self::check_special_messages(&base, &sent_rewards)?;
+        Self::check_queue_updates(&base)?;
 
         Ok(base)
     }
 
     pub async fn try_validate(mut self) -> Result<()> {
         let block_id = self.block_candidate.block_id.clone();
-        log::trace!("VALIDATE {}", block_id);
+        log::trace!("({}): VALIDATE {}", self.next_block_descr, block_id);
         let now = std::time::Instant::now();
 
         let result = self.validate().await;
         let duration = now.elapsed().as_millis() as u64;
         let base = result.map_err(|e| {
-            log::warn!("VALIDATION FAILED {} TIME {}ms ERR {}", block_id, duration, e);
+            log::warn!("({}): VALIDATION FAILED {} TIME {}ms ERR {}", self.next_block_descr, block_id, duration, e);
             e
         })?;
 
         let gas_used = base.gas_used.load(Ordering::Relaxed);
         let ratio = gas_used.checked_div(duration).unwrap_or(gas_used);
-        log::info!("ASYNC VALIDATED {} TIME {}ms GAS_RATE: {}", base.block_id(), duration, ratio);
+        log::info!("({}): ASYNC VALIDATED {} TIME {}ms GAS_RATE: {}", self.next_block_descr, base.block_id(), duration, ratio);
 
-        #[cfg(feature = "metrics")]
-        STATSD.gauge(&format!("gas_rate_validator_{}", base.block_id().shard()), ratio as f64);
+        let labels = [("shard", base.block_id().shard().to_string())];
+        metrics::gauge!("gas_rate_validator", ratio as f64, &labels);
 
+        #[cfg(not(test))]
         #[cfg(feature = "telemetry")]
         self.engine.validator_telemetry().succeeded_attempt(
             &self.shard,
@@ -4093,6 +4493,36 @@ impl ValidateQuery {
     }
 }
 
+#[cfg(test)]
+impl ValidateQuery {
+    fn prepare_transaction_for_test(
+        base: &ValidateBase,
+        account_root: Cell,
+        trans: &Transaction,
+        err: String
+    ) -> Result<()> {
+        let path = format!("./target/check/validator/{},{},{}",
+            base.shard().workchain_id(),
+            base.shard().shard_prefix_as_str_with_tag(),
+            base.block_id().seq_no()
+        );
+        std::fs::create_dir_all(&path).ok();
+        let account_addr = trans.account_id();
+        // sometimes it can be usable if it is the last transaction for this account
+        // comment next two lines if it is not last transaction in account block
+        let new_shard_acc = base.next_state_accounts.get_serialized(account_addr.clone())?.unwrap_or_default();
+        // let new_shard_acc = ShardAccount::construct_from(&mut new_shard_acc)?;
+        let new_account_root = new_shard_acc.account_cell();
+        let config_cell = base.config_params.serialize()?;
+        let trans_root = trans.serialize()?;
+        let msg_cell = trans.in_msg_cell().map(|cell| cell.clone()).unwrap_or_default();
+        std::fs::write(format!("{}/{}.txt", path, trans_root.repr_hash().to_hex_string()), err.as_bytes())?;
+        crate::test_helper::prepare_data_for_executor_test(
+            &path, &account_root, &new_account_root, &msg_cell, &trans_root, &config_cell
+        )?;
+        Ok(())
+    }
+}
 
 impl ValidateQuery {
     fn prepare_transaction_for_log(
@@ -4104,11 +4534,11 @@ impl ValidateQuery {
     ) -> Result<()> {
         log::trace!(target: "validate_reject",
             "acc_before: {}\nacc_after: {}\nconfig: {}\ntrans_origin: {}\ntrans_execute: {}",
-            base64::encode(ton_types::serialize_toc(&account_before)?),
-            base64::encode(ton_types::serialize_toc(&account_after)?),
-            base64::encode(config.write_to_bytes()?),
-            base64::encode(trans.write_to_bytes()?),
-            base64::encode(trans_execute.write_to_bytes()?)
+            base64_encode(ton_types::write_boc(&account_before)?),
+            base64_encode(ton_types::write_boc(&account_after)?),
+            base64_encode(config.write_to_bytes()?),
+            base64_encode(trans.write_to_bytes()?),
+            base64_encode(trans_execute.write_to_bytes()?)
         );
         Ok(())
     }

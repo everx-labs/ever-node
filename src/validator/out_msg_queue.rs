@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -17,51 +17,81 @@ use crate::{
     shard_state::{ShardHashesStuff, ShardStateStuff},
     types::messages::MsgEnqueueStuff,
 };
+use super::out_msg_queue_cleaner;
 use std::{
     cmp::max, iter::Iterator, sync::{Arc, atomic::{AtomicBool, Ordering}},
-    collections::HashMap,
+    collections::{btree_map::{self, BTreeMap}, HashMap, HashSet},
 };
 use ton_block::{
     BlockIdExt, ShardIdent, Serializable, Deserializable,
     OutMsgQueueInfo, OutMsgQueue, OutMsgQueueKey, IhrPendingInfo,
     ProcessedInfo, ProcessedUpto, ProcessedInfoKey,
     ShardHashes, AccountIdPrefixFull,
-    HashmapAugType,
+    HashmapAugType, ShardStateUnsplit,
 };
 use ton_types::{
-    error, fail,
-    BuilderData, Cell, SliceData, IBitstring, Result, UInt256,
-    HashmapSubtree, HashmapType, HashmapFilterResult, HashmapRemover,
+    error, fail, BuilderData, Cell, LabelReader, SliceData, IBitstring, Result, UInt256, 
+    HashmapType, HashmapFilterResult, HashmapRemover, UsageTree, HashmapSubtree,
 };
 
+#[cfg(test)]
+#[path = "tests/test_out_msg_queue.rs"]
+mod tests;
 
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ProcessedUptoStuff {
+    /// An abstract at-least-an-ancestor shard which can refer to
+    /// a newly created shard during split.
     pub shard: u64,
-    pub mc_seqno: u32,
+
+    /// Block seqno with a different meaning depending on a context:
+    /// - Masterchain block seqno if used without a direct intershard communication.
+    /// - A block seqno, corresponding to [`exact_shard`] otherwise.
+    ///
+    /// [`exact_shard`]: ProcessedUptoStuff::exact_shard
+    pub seqno: u32,
+
     pub last_msg_lt: u64,
     pub last_msg_hash: UInt256,
+
+    /// An original shard in case of altering [`ProcessedUptoStuff::shard`].
+    /// A computed masterchain block seqno.
+
     mc_end_lt: u64,
     ref_shards: Option<ShardHashes>,
 }
 
 impl ProcessedUptoStuff {
-    pub fn with_params(shard: u64, mc_seqno: u32, last_msg_lt: u64, last_msg_hash: UInt256) -> Self {
+    pub fn with_params(
+        shard: u64,
+        seqno: u32,
+        last_msg_lt: u64,
+        last_msg_hash: UInt256,
+    ) -> Self {
         Self {
             shard,
-            mc_seqno,
+            seqno,
             last_msg_lt,
             last_msg_hash,
             mc_end_lt: 0,
             ref_shards: None,
         }
     }
-    pub fn new(key: ProcessedInfoKey, value: ProcessedUpto) -> Self {
-        Self::with_params(key.shard, key.mc_seqno, value.last_msg_lt, value.last_msg_hash)
+
+    pub fn mc_seqno(&self) -> u32 {
+        self.seqno
     }
+
     pub fn contains(&self, other: &Self) -> bool {
+        // NOTE: an abstract shards are checked here.
+        // In case of direct intershard communication `mc_seqno` does not change
+        // its order properties:
+        //   - `shard` field behaves the same (we use an additional field `original_shard`
+        //     if we need to know an exact shard)
+        //   - `mc_seqno` as shard seqno grows the same way as masterchain seqno
+
         ShardIdent::is_ancestor(self.shard, other.shard)
-            && self.mc_seqno >= other.mc_seqno
+            && self.seqno >= other.seqno
             && ((self.last_msg_lt > other.last_msg_lt)
             || ((self.last_msg_lt == other.last_msg_lt) && (self.last_msg_hash >= other.last_msg_hash))
         )
@@ -69,36 +99,82 @@ impl ProcessedUptoStuff {
     pub fn can_check_processed(&self) -> bool {
         self.ref_shards.is_some()
     }
+
     fn already_processed(&self, enq: &MsgEnqueueStuff) -> Result<bool> {
+        log::trace!(
+            "already_processed: shard={:016x}, last_msg_lt={}, last_msg_hash={}, \
+            cur_prefix={:016x}, dst_prefix={:016x}, enq_hash={}", 
+            self.shard,
+            self.last_msg_lt,
+            self.last_msg_hash.to_hex_string(),
+            enq.cur_prefix().prefix,
+            enq.dst_prefix().prefix,
+            enq.message_hash().to_hex_string(),
+        );
         if enq.created_lt() > self.last_msg_lt {
+            log::trace!(
+                "already_processed: enq_hash={} `enq.created_lt() > self.last_msg_lt`",
+                enq.message_hash().to_hex_string()
+            );
             return Ok(false)
         }
         if !ShardIdent::contains(self.shard, enq.next_prefix().prefix) {
+            log::trace!(
+                "already_processed: enq_hash={} `!ShardIdent::contains(next_prefix)`", 
+                enq.message_hash().to_hex_string()
+            );
             return Ok(false)
         }
         if enq.created_lt() == self.last_msg_lt && self.last_msg_hash < enq.message_hash() {
+            log::trace!(
+                "already_processed: enq_hash={} `enq.created_lt() == self.last_msg_lt`", 
+                enq.message_hash().to_hex_string()
+            );
             return Ok(false)
         }
         if enq.same_workchain() && ShardIdent::contains(self.shard, enq.cur_prefix().prefix) {
+            log::trace!(
+                "already_processed: enq_hash={} `ShardIdent::contains(cur_prefix)`", 
+                enq.message_hash().to_hex_string()
+            );
             // this branch is needed only for messages generated in the same shard
             // (such messages could have been processed without a reference from the masterchain)
             // enable this branch only if an extra boolean parameter is set
             return Ok(true)
         }
         let shard_end_lt = self.compute_shard_end_lt(&enq.cur_prefix())?;
+        log::trace!(
+            "already_processed: enq_hash={} shard_end_lt={shard_end_lt}, processed={}", 
+            enq.message_hash().to_hex_string(), enq.enqueued_lt() < shard_end_lt
+        );
         Ok(enq.enqueued_lt() < shard_end_lt)
     }
+    
     pub fn compute_shard_end_lt(&self, prefix: &AccountIdPrefixFull) -> Result<u64> {
         let shard_end_lt = if prefix.is_masterchain() {
             self.mc_end_lt
         } else  {
-            self.ref_shards.as_ref()
-                .ok_or_else(|| error!("PrcessedUpTo record for {} ({}:{:x}) have not got info about shards",
-                    self.mc_seqno, self.last_msg_lt, self.last_msg_hash))?
+            let shard = self.ref_shards.as_ref()
+                .ok_or_else(
+                    || error!(
+                        "ProcessedUpTo record for {} ({}:{:x}) has no info about shards",
+                        self.seqno, self.last_msg_lt, self.last_msg_hash
+                    )
+                )?
                 .find_shard_by_prefix(&prefix)?
-                .ok_or_else(|| error!("PrcessedUpTo record for {} ({}:{:x}) have not got info about shard prefix {}",
-                    self.mc_seqno, self.last_msg_lt, self.last_msg_hash, prefix))?
-                .descr().end_lt
+                .ok_or_else(
+                    || error!(
+                        "ProcessedUpTo record for {} ({}:{:x}) has no info about shard prefix {}",
+                        self.seqno, self.last_msg_lt, self.last_msg_hash, prefix
+                    )
+                )?;
+                
+            log::trace!(
+                "compute_shard_end_lt: prefix={:016x}, seqno={:016x}, end_lt={}, full_id={}",
+                prefix.prefix, self.seqno, shard.descr().end_lt, shard.block_id()
+            );
+
+            shard.descr().end_lt
         };
         Ok(shard_end_lt)
     }
@@ -106,16 +182,44 @@ impl ProcessedUptoStuff {
 
 impl std::fmt::Display for ProcessedUptoStuff {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "shard: {:016X}, mc_seqno: {}, mc_end_lt: {}, last_msg_lt: {}, last_msg_hash: {:x}",
-            self.shard, self.mc_seqno, self.mc_end_lt, self.last_msg_lt, self.last_msg_hash)
+        write!(
+            f, 
+            "shard: {:016X}, mc_seqno: {}, mc_end_lt: {}, last_msg_lt: {}, last_msg_hash: {:x}",
+            self.shard, self.seqno, self.mc_end_lt, self.last_msg_lt, self.last_msg_hash
+        )
     }
 }
+
+// checking or removing foreign messages from queue
+// this operation should not be long because we don't allow
+// to merge shards with long queues
+fn clean_foreign_messages(out_queue: &mut OutMsgQueue, shard: ShardIdent, remove: bool) -> Result<bool> {
+    let mut removed = false;
+    out_queue.hashmap_filter(|_key, mut slice| {
+        let created_lt = u64::construct_from(&mut slice)?;
+        let enq = MsgEnqueueStuff::construct_from(&mut slice, created_lt)?;
+        if !shard.contains_full_prefix(enq.cur_prefix()) {
+            removed = true;
+            if remove {
+                Ok(HashmapFilterResult::Cancel)
+            } else {
+                Ok(HashmapFilterResult::Remove)
+            }
+        } else {
+            Ok(HashmapFilterResult::Accept)
+        }
+    })?;
+    out_queue.update_root_extra()?;
+    Ok(removed)
+}
+
 
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct OutMsgQueueInfoStuff {
     block_id: BlockIdExt,
-    out_queue: OutMsgQueue,
-    ihr_pending: IhrPendingInfo,
+    out_queue: Option<OutMsgQueue>,
+    out_queue_part: Option<OutMsgQueue>,
+    ihr_pending: Option<IhrPendingInfo>,
     entries: Vec<ProcessedUptoStuff>,
     min_seqno: u32,
     end_lt: u64,
@@ -123,16 +227,29 @@ pub struct OutMsgQueueInfoStuff {
 }
 
 impl OutMsgQueueInfoStuff {
-    pub fn from_shard_state(state: &ShardStateStuff) -> Result<Self> {
-        let out_queue_info = state.state().read_out_msg_queue_info()?;
-        Self::from_out_queue_info(state.block_id().clone(), out_queue_info, state.state().gen_lt())
+    pub async fn from_shard_state(
+        state: &ShardStateStuff,
+        cached_states: &mut CachedStates,
+    ) -> Result<Self> {
+        let out_queue_info = state.state()?.read_out_msg_queue_info()?;
+        Self::from_out_queue_info(
+            state.block_id().clone(),
+            out_queue_info,
+            state.state()?.gen_lt(),
+            cached_states,
+        ).await
     }
-    fn from_out_queue_info(block_id: BlockIdExt, out_queue_info: OutMsgQueueInfo, end_lt: u64) -> Result<Self> {
+
+    async fn from_out_queue_info(
+        block_id: BlockIdExt, 
+        out_queue_info: OutMsgQueueInfo, 
+        end_lt: u64,
+        cached_states: &mut CachedStates,
+    ) -> Result<Self> {
         // TODO: comment the next line in the future when the output queues become huge
         // (do this carefully)
         // out_queue_info.out_queue().count_cells(1000000)?;
         let mut out_queue = out_queue_info.out_queue().clone();
-
 
         // Due to the lack of necessary checks shardstate already has an internal message with anycast info.
         // Due to anycast info the message was added into wrong shardstate's subtree.
@@ -144,28 +261,84 @@ impl OutMsgQueueInfoStuff {
                 0x5777784F96FB1CFFu64,
                 "05aa297e3a2e003e1449e1297742d64f188985dc029c620edc84264f9786c0c3".parse().unwrap()
             );
-            let key = SliceData::load_builder(key.write_to_new_cell()?)?;
+            let key = SliceData::load_bitstring(key.write_to_new_cell()?)?;
             out_queue.remove(key)?;
         }
 
-
         let ihr_pending = out_queue_info.ihr_pending().clone();
+
+        Self::with_params(
+            block_id, 
+            Some(out_queue), 
+            None, 
+            out_queue_info.proc_info(), 
+            Some(ihr_pending), 
+            end_lt,
+            cached_states,
+        ).await
+    }
+
+    pub async fn from_queue_part(
+        block_id: BlockIdExt, 
+        out_queue_part: OutMsgQueue,
+        proc_info: ProcessedInfo,
+        end_lt: u64,
+        cached_states: &mut CachedStates,
+    ) -> Result<Self> {
+        Self::with_params(
+            block_id,
+            None,
+            Some(out_queue_part),
+            &proc_info,
+            None,
+            end_lt,
+            cached_states,
+        ).await
+    }
+
+    async fn with_params(
+        block_id: BlockIdExt, 
+        out_queue: Option<OutMsgQueue>,
+        out_queue_part: Option<OutMsgQueue>,
+        proc_info: &ProcessedInfo,
+        ihr_pending: Option<IhrPendingInfo>,
+        end_lt: u64,
+        cached_states: &mut CachedStates,
+    ) -> Result<Self> {
+        // NOTE: no new states are loaded for an old implementation
+        let _ = cached_states;
+
         // unpack ProcessedUptoStuff
         let mut entries = vec![];
         let mut min_seqno = std::u32::MAX;
-        out_queue_info.proc_info().iterate_slices_with_keys(|ref mut key, ref mut value| {
-            let key = ProcessedInfoKey::construct_from(key)?;
-            let value = ProcessedUpto::construct_from(value)?;
-            let entry = ProcessedUptoStuff::new(key, value);
-            if entry.mc_seqno < min_seqno {
-                min_seqno = entry.mc_seqno;
+
+        for item in proc_info.clone().inner().iter() {
+            let (key, mut value) = item?;
+            let key = ProcessedInfoKey::construct_from(&mut SliceData::load_builder(key)?)?;
+            let value = ProcessedUpto::construct_from(&mut value)?;
+            if value.original_shard.is_some() {
+                fail!("ProcessedUpto could not contain original_shard");
             }
+
+            let entry = {
+                if key.mc_seqno < min_seqno {
+                    min_seqno = key.mc_seqno;
+                }
+                ProcessedUptoStuff::with_params(
+                    key.shard,
+                    key.mc_seqno,
+                    value.last_msg_lt,
+                    value.last_msg_hash,
+                )
+            };
+
             entries.push(entry);
-            Ok(true)
-        })?;
+        }
+
         Ok(Self {
             block_id,
             out_queue,
+            out_queue_part,
             ihr_pending,
             entries,
             min_seqno,
@@ -174,15 +347,34 @@ impl OutMsgQueueInfoStuff {
         })
     }
 
-    fn merge(&mut self, other: &Self) -> Result<()> {
+    // checking or removing foreign messages from queue
+    // this operation should not be long because we don't allow
+    // to merge shards with long queues
+    fn clean_foreign_messages(&mut self, remove: bool) -> Result<bool> {
+        let shard = self.shard().clone();
+        clean_foreign_messages(self.out_queue_mut()?, shard, remove)
+    }
+
+    fn merge(&mut self, mut other: Self, split_queues: bool, is_validate: bool) -> Result<()> {
+        if !split_queues {
+            if !is_validate {
+                // first we want to clean queues from foreign split messages
+                self.clean_foreign_messages(false)?;
+                other.clean_foreign_messages(false)?;
+            } else if self.clean_foreign_messages(true)? {
+                fail!("outbound queue for shard {} has messages from split", self.shard())
+            } else if other.clean_foreign_messages(true)? {
+                fail!("outbound queue for shard {} has messages from split", other.shard())
+            }
+        }
         let shard = self.shard().merge()?;
 
-        self.out_queue.combine_with(&other.out_queue)?;
-        self.out_queue.update_root_extra()?;
-        self.ihr_pending.merge(&other.ihr_pending, &shard.shard_key(false))?;
+        self.out_queue_mut()?.combine_with(other.out_queue()?)?;
+        self.out_queue_mut()?.update_root_extra()?;
+        self.ihr_pending_mut()?.merge(other.ihr_pending()?, &shard.shard_key(false))?;
         for entry in &other.entries {
-            if self.min_seqno > entry.mc_seqno {
-                self.min_seqno = entry.mc_seqno;
+            if self.min_seqno > entry.mc_seqno() {
+                self.min_seqno = entry.mc_seqno();
             }
             self.entries.push(entry.clone());
         }
@@ -196,24 +388,94 @@ impl OutMsgQueueInfoStuff {
         Ok(())
     }
 
-    fn split(&mut self, subshard: ShardIdent) -> Result<Self> {
-        let sibling = subshard.sibling();
-        let mut out_queue = OutMsgQueue::default();
-        self.out_queue.hashmap_filter(|key, value| {
-            let mut slice = value.clone();
-            let lt = u64::construct_from(&mut slice)?;
-            let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
-            if !subshard.contains_full_prefix(enq.cur_prefix()) {
-                let key = SliceData::load_builder(key.clone())?;
-                out_queue.set_builder_serialized(key, &BuilderData::from_slice(&value), &lt)?;
-                Ok(HashmapFilterResult::Remove)
+    fn calc_split_queues(
+        self_queue: &mut OutMsgQueue,
+        self_shard: &ShardIdent
+    ) -> Result<OutMsgQueue> {
+        let mut sibling_queue = self_queue.clone();
+        clean_foreign_messages(self_queue, self_shard.clone(), true)?;
+        clean_foreign_messages(&mut sibling_queue, self_shard.sibling(), true)?;
+        Ok(sibling_queue)
+    }
+
+    pub async fn precalc_split_queues(
+        engine: &Arc<dyn EngineOperations>,
+        block_id: &BlockIdExt
+    ) -> Result<()> {
+        if engine.set_split_queues_calculating(block_id) {
+            let ss = engine.clone().wait_state(block_id, Some(10_000), false).await?;
+            let usage_tree = UsageTree::with_params(ss.root_cell().clone(), true);
+            let root_cell = usage_tree.root_cell();
+            let ss = ShardStateStuff::from_state(
+                block_id.clone(), 
+                ShardStateUnsplit::construct_from_cell(root_cell)?,
+                #[cfg(feature = "telemetry")]
+                engine.engine_telemetry(),
+                engine.engine_allocated()
+            )?;
+            let mut queue0 = ss.state()?.read_out_msg_queue_info()?;
+            let queue0 = queue0.out_queue_mut();
+            let (s0, _s1) = block_id.shard().split()?;
+            let now = std::time::Instant::now();
+            let queue1 = Self::calc_split_queues(queue0, &s0)?;
+            log::info!("precalc_split_queues after block {}, TIME {}ms", 
+                block_id, now.elapsed().as_millis());
+            engine.set_split_queues(block_id, queue0.clone(), queue1, usage_tree.build_visited_set());
+        } else {
+            log::trace!("precalc_split_queues {} already calculating or calculated", block_id);
+        }
+        Ok(())
+    }
+
+    fn split(
+        &mut self,
+        subshard: ShardIdent,
+        engine: &Arc<dyn EngineOperations>,
+        usage_tree: Option<&UsageTree>,
+        imported_visited: Option<&mut HashSet<UInt256>>,
+        split_queues: bool,
+    ) -> Result<Self> {
+        let sibling_queue = if !split_queues {
+            // we don't split out message queue and clean it slow on each block. need to check it in collator and validator
+            self.out_queue_or_part()?.clone()
+        } else {
+            let (s0, _s1) = self.block_id().shard().split()?;
+            if let Some((q0, q1, visited)) = engine.get_split_queues(self.block_id()) {
+                if let Some(imported_visited) = imported_visited {
+                    for cell_id in visited {
+                        imported_visited.insert(cell_id);
+                    }
+                }
+                log::info!("Use split queues from cache (prev block {})", self.block_id());
+                if s0 == subshard {
+                    self.out_queue = Some(q0);
+                    q1
+                } else {
+                    self.out_queue = Some(q1);
+                    q0
+                }
             } else {
-                Ok(HashmapFilterResult::Accept)
+                let now = std::time::Instant::now();
+                let sibling_queue = Self::calc_split_queues(self.out_queue_mut()?, &subshard)?;
+                let (q0, q1) = if s0 == subshard {
+                    (self.out_queue()?.clone(), sibling_queue.clone())
+                } else {
+                    (sibling_queue.clone(), self.out_queue()?.clone())
+                };
+                if let Some(usage_tree) = usage_tree {
+                    let visited = usage_tree.build_visited_set();
+                    engine.set_split_queues(self.block_id(), q0, q1, visited);
+                    log::warn!(
+                        "There is no precalculated split queues (prev block {}), calculated TIME {}ms", 
+                        self.block_id(), now.elapsed().as_millis());
+                }
+                sibling_queue
             }
-        })?;
-        self.out_queue.update_root_extra()?;
-        let mut ihr_pending = self.ihr_pending.clone();
-        self.ihr_pending.split_inplace(&subshard.shard_key(false))?;
+        };
+
+        let sibling = subshard.sibling();
+        let mut ihr_pending = self.ihr_pending()?.clone();
+        self.ihr_pending_mut()?.split_inplace(&subshard.shard_key(false))?;
         ihr_pending.split_inplace(&sibling.shard_key(false))?;
 
         let mut entries = vec![];
@@ -224,16 +486,16 @@ impl OutMsgQueueInfoStuff {
                 let mut entry = entry.clone();
                 entry.shard = ShardIdent::shard_intersection(entry.shard, sibling.shard_prefix_with_tag());
                 log::debug!("to sibling {}", entry);
-                if min_seqno > entry.mc_seqno {
-                    min_seqno = entry.mc_seqno;
+                if min_seqno > entry.mc_seqno() {
+                    min_seqno = entry.mc_seqno();
                 }
                 entries.push(entry);
             }
             if ShardIdent::shard_intersects(entry.shard, subshard.shard_prefix_with_tag()) {
                 entry.shard = ShardIdent::shard_intersection(entry.shard, subshard.shard_prefix_with_tag());
                 log::debug!("to us {}", entry);
-                if self.min_seqno > entry.mc_seqno {
-                    self.min_seqno = entry.mc_seqno;
+                if self.min_seqno > entry.mc_seqno() {
+                    self.min_seqno = entry.mc_seqno();
                 }
                 self.entries.push(entry);
             }
@@ -249,8 +511,9 @@ impl OutMsgQueueInfoStuff {
         );
         let mut sibling = OutMsgQueueInfoStuff {
             block_id,
-            out_queue,
-            ihr_pending,
+            out_queue: Some(sibling_queue),
+            out_queue_part: None,
+            ihr_pending: Some(ihr_pending),
             entries,
             min_seqno,
             end_lt: self.end_lt,
@@ -264,35 +527,41 @@ impl OutMsgQueueInfoStuff {
         let mut min_seqno = std::u32::MAX;
         let mut proc_info = ProcessedInfo::default();
         for entry in &self.entries {
-            min_seqno = std::cmp::min(min_seqno, entry.mc_seqno);
-            let key = ProcessedInfoKey::with_params(entry.shard, entry.mc_seqno);
-            let value = ProcessedUpto::with_params(entry.last_msg_lt, entry.last_msg_hash.clone());
+            min_seqno = std::cmp::min(min_seqno, entry.mc_seqno());
+            let key = ProcessedInfoKey::with_params(entry.shard, entry.seqno);
+            let value = ProcessedUpto::with_params(
+                entry.last_msg_lt, 
+                entry.last_msg_hash.clone(), 
+                 None,
+            );
             proc_info.set(&key, &value)?
         }
-        Ok((OutMsgQueueInfo::with_params(self.out_queue.clone(), proc_info, self.ihr_pending.clone()), min_seqno))
+        Ok((OutMsgQueueInfo::with_params(self.out_queue()?.clone(), proc_info, self.ihr_pending()?.clone()), min_seqno))
     }
 
-    pub fn fix_processed_upto(
+    fn fix_processed_upto(
         &mut self,
-        cur_mc_seqno: u32,
+        seqno: u32,
         next_mc_end_lt: u64,
         next_shards: Option<&ShardHashes>,
-        mc_shard_states: &HashMap<u32, Arc<ShardStateStuff>>,
+        cached_states: &CachedStates,
         stop_flag: &Option<&AtomicBool>,
     ) -> Result<()> {
-        let masterchain = self.shard().is_masterchain();
-        for mut entry in &mut self.entries {
+        let workchain = self.shard().workchain_id();
+        let masterchain = workchain == ton_block::MASTERCHAIN_ID;
+        for entry in &mut self.entries {
             if entry.ref_shards.is_none() {
                 check_stop_flag(stop_flag)?;
-                let mc_seqno = std::cmp::min(entry.mc_seqno, cur_mc_seqno);
-                if next_shards.is_some() && masterchain && entry.mc_seqno == cur_mc_seqno + 1 {
+                if next_shards.is_some() && masterchain && entry.seqno == seqno + 1 {
                     entry.mc_end_lt = next_mc_end_lt;
                     entry.ref_shards = next_shards.cloned();
                 } else {
-                    let state = mc_shard_states.get(&mc_seqno)
-                        .ok_or_else(|| error!("mastechain state for block {} was not previously cached", mc_seqno))?;
-                    entry.mc_end_lt = state.state().gen_lt();
-                    entry.ref_shards = Some(state.shards()?.clone());
+                    let (shard, seqno) = (ShardIdent::masterchain(), std::cmp::min(entry.seqno, seqno));
+
+                    let (mc_end_lt, ref_shards) = cached_states.get_entry_data(&shard, seqno)?;
+
+                    entry.mc_end_lt = mc_end_lt;
+                    entry.ref_shards = Some(ref_shards);
                 };
             }
         }
@@ -308,36 +577,66 @@ impl OutMsgQueueInfoStuff {
 
     pub fn is_disabled(&self) -> bool { self.disabled }
 
-    pub fn out_queue(&self) -> &OutMsgQueue { &self.out_queue }
+    pub fn out_queue(&self) -> Result<&OutMsgQueue> {
+        self.out_queue.as_ref().ok_or_else(|| error!("out_queue is None"))
+    }
+
+    pub fn out_queue_mut(&mut self) -> Result<&mut OutMsgQueue> {
+        self.out_queue.as_mut().ok_or_else(|| error!("out_queue is None"))
+    }
+
+    pub fn out_queue_part(&self) -> Result<&OutMsgQueue> {
+        self.out_queue_part.as_ref().ok_or_else(|| error!("out_queue_part is None"))
+    }
+
+    pub fn out_queue_or_part(&self) -> Result<&OutMsgQueue> {
+        self.out_queue.as_ref()
+            .or_else(|| self.out_queue_part.as_ref())
+            .ok_or_else(|| error!("INTERNAL ERROR: both `out_queue` and `out_queue_part` are None"))
+    }
+
+    pub fn ihr_pending(&self) -> Result<&IhrPendingInfo> {
+        self.ihr_pending.as_ref().ok_or_else(|| error!("ihr_pending is None"))
+    }
+
+    pub fn ihr_pending_mut(&mut self) -> Result<&mut IhrPendingInfo> {
+        self.ihr_pending.as_mut().ok_or_else(|| error!("ihr_pending is None"))
+    }
 
     pub fn forced_fix_out_queue(&mut self) -> Result<()> {
-        if self.out_queue.is_empty() && self.out_queue.root_extra() != &0 {
-            self.out_queue.after_remove()?;
+        let queue = self.out_queue_mut()?;
+        if queue.is_empty() && queue.root_extra() != &0 {
+            queue.after_remove()?;
         }
         Ok(())
     }
 
     pub fn message(&self, key: &OutMsgQueueKey) -> Result<Option<MsgEnqueueStuff>> {
-        self.out_queue.get_with_aug(&key)?.map(|(enq, lt)| MsgEnqueueStuff::from_enqueue_and_lt(enq, lt)).transpose()
+        self.out_queue_or_part()?
+            .get_with_aug(&key)?
+            .map(|(enq, lt)| MsgEnqueueStuff::from_enqueue_and_lt(enq, lt))
+            .transpose()
     }
 
-    pub fn add_message(&mut self, enq: &MsgEnqueueStuff) -> Result<()> {
+    pub fn add_message(&mut self, enq: &MsgEnqueueStuff) -> Result<usize> {
+        let labels = [("shard", self.shard().to_string())];
+        metrics::counter!("out_msg_queue_add", 1, &labels);
         let key = enq.out_msg_key();
-        self.out_queue.set(&key, enq.enqueued(), &enq.created_lt())
+        let (_, depth) = self.out_queue_mut()?.set_with_prev_and_depth(&key, enq.enqueued(), &enq.created_lt())?;
+        Ok(depth)
     }
 
-    pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<()> {
-        if self.out_queue.remove(SliceData::load_builder(key.write_to_new_cell()?)?)?.is_none() {
-            fail!("error deleting from out_msg_queue dictionary: {:x}", key)
-        }
-        Ok(())
+    pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<SliceData> {
+        let labels = [("shard", self.shard().to_string())];
+        metrics::counter!("out_msg_queue_del", 1, &labels);
+        self.out_queue_mut()?.remove(key.write_to_bitstring()?)?
+            .ok_or_else(|| error!("error deleting from out_msg_queue dictionary: {:x}", key))
     }
 
     // remove all messages which are not from new_shard
-    fn filter_messages(&mut self, new_shard: &ShardIdent, shard_prefix: &SliceData) -> Result<()> {
+    fn filter_messages(&mut self, new_shard: &ShardIdent) -> Result<()> {
         let old_shard = self.shard().clone();
-        self.out_queue.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
-        self.out_queue.hashmap_filter(|_key, mut slice| {
+        self.out_queue_mut()?.hashmap_filter(|_key, mut slice| {
             // log::debug!("scanning OutMsgQueue entry with key {:x}", key);
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
@@ -349,7 +648,8 @@ impl OutMsgQueueInfoStuff {
                 true => Ok(HashmapFilterResult::Accept),
                 false => Ok(HashmapFilterResult::Remove)
             }
-        })
+        })?;
+        Ok(())
     }
 
     pub fn end_lt(&self) -> u64 { self.end_lt }
@@ -361,10 +661,15 @@ impl OutMsgQueueInfoStuff {
         }
         true
     }
-    pub fn add_processed_upto(&mut self, mc_seqno: u32, last_msg_lt: u64, last_msg_hash: UInt256) -> Result<()> {
+    pub fn add_processed_upto(
+        &mut self,
+        seqno: u32,
+        last_msg_lt: u64,
+        last_msg_hash: UInt256,
+    ) -> Result<()> {
         let entry = ProcessedUptoStuff {
             shard: self.shard().shard_prefix_with_tag(),
-            mc_seqno,
+            seqno,
             last_msg_lt,
             last_msg_hash,
             mc_end_lt: 0,
@@ -412,6 +717,7 @@ impl OutMsgQueueInfoStuff {
         }
         Ok(found)
     }
+
     pub fn is_reduced(&self) -> bool {
         Self::is_reduced_entries(&self.entries)
     }
@@ -468,11 +774,11 @@ impl OutMsgQueueInfoStuff {
 }
 
 pub struct MsgQueueManager {
-// Unused
-//    shard: ShardIdent,
+    shard: ShardIdent,
     prev_out_queue_info: OutMsgQueueInfoStuff,
     next_out_queue_info: OutMsgQueueInfoStuff,
     neighbors: Vec<OutMsgQueueInfoStuff>,
+    block_descr: Arc<String>,
 }
 
 impl MsgQueueManager {
@@ -481,105 +787,151 @@ impl MsgQueueManager {
         engine: &Arc<dyn EngineOperations>,
         last_mc_state: &Arc<ShardStateStuff>,
         shard: ShardIdent,
+        new_seq_no: u32,
         shards: &ShardHashes,
         prev_states: &Vec<Arc<ShardStateStuff>>,
         next_state_opt: Option<&Arc<ShardStateStuff>>,
         after_merge: bool,
         after_split: bool,
+        split_queues: bool,
         stop_flag: Option<&AtomicBool>,
+        usage_tree: Option<&UsageTree>,
+        imported_visited: Option<&mut HashSet<UInt256>>,
+        block_descr: Option<Arc<String>>,
     ) -> Result<Self> {
-        let mut mc_shard_states = HashMap::new();
-        mc_shard_states.insert(last_mc_state.block_id().seq_no, last_mc_state.clone());
+        let block_descr = block_descr.unwrap_or_else(|| Arc::new(String::default()));
+
+        let mut cached_states = CachedStates::new(engine);
+        cached_states.insert(last_mc_state.clone());
+
+        // NOTE: cached previous states (for shard) are not needed for the
+        // original queue manager implementation.
+
+        // Cache the next state if exists and precompute the next `mc_end_lt`
+        // to reduce the compute of state queries in `fix_processed_upto`
         let next_mc_end_lt = match next_state_opt {
             Some(state) => {
-                if state.shard().is_masterchain() {
-                    mc_shard_states.insert(state.block_id().seq_no(), state.clone());
-                }
-                state.state().gen_lt()
+                cached_states.insert(state.clone());
+                state.shard().is_masterchain().then(|| state.gen_lt()).transpose()?.unwrap_or_default()
             }
-            None => 0
+            None => 0,
         };
-        log::debug!("request a preliminary list of neighbors for {}", shard);
+
+        log::debug!("{}: request a preliminary list of neighbors for {}", block_descr, shard);
         let shards = ShardHashesStuff::from(shards.clone());
-        let (_master, workchain_id) = engine.processed_workchain().await?;
-        let neighbor_list = shards.neighbours_for(&shard, workchain_id)?;
+        let neighbor_list = shards.neighbours_for(&shard)?;
         let mut neighbors = vec![];
-        log::debug!("got a preliminary list of {} neighbors for {}", neighbor_list.len(), shard);
-        for (i, shard) in neighbor_list.iter().enumerate() {
-            log::debug!("neighbors #{} ---> {:#}", i + 1, shard.shard());
-            
-            // TODO add loop and stop_flag checking
-            let shard_state = engine.clone().wait_state(shard.block_id(), Some(1_000), true).await?;
-            
-            let nb = Self::load_out_queue_info(engine, &shard_state, &last_mc_state, &mut mc_shard_states).await?;
+        log::debug!("{}: got a preliminary list of {} neighbors for {}", block_descr, neighbor_list.len(), shard);
+        for (i, nb_shard_record) in neighbor_list.iter().enumerate() {
+            let nb_block_id = nb_shard_record.block_id();
+
+            log::debug!("{}: neighbors #{} ---> {:#}", block_descr, i + 1, nb_block_id.shard());
+
+            let nb = if nb_block_id.shard().is_masterchain() ||
+                nb_block_id.shard().workchain_id() == shard.workchain_id()
+            {
+                let shard_state = engine.clone().wait_state(nb_block_id, Some(1_000), true).await?;
+                cached_states.insert(shard_state.clone());
+
+                Self::load_out_queue_info(&shard_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?
+            } else {
+                log::debug!("{}: loading OutMsgQueueInfo of neighbor {:#}", block_descr, nb_shard_record.block_id());
+                let queue_part = 
+                    engine.clone().wait_state(nb_shard_record.block_id(), Some(1_000), true).await?;
+
+                // Non-masterchain shard states are only required for the new implementation
+
+                let nb = OutMsgQueueInfoStuff::from_queue_part(
+                    nb_block_id.clone(),
+                    queue_part.queue_for_wc(shard.workchain_id())?,
+                    queue_part.proc_info()?,
+                    queue_part.gen_lt()?,
+                    &mut cached_states,
+                ).await?;
+
+                // Request masterchain states of neighbours for the old implementation
+                for entry in nb.entries() {
+                    cached_states.request_mc_state(last_mc_state, entry.mc_seqno(), Some(10_000)).await?;
+                }
+
+                // Request exact shard states of neighbours for the new implementation
+
+                nb
+            };
             neighbors.push(nb);
             check_stop_flag(&stop_flag)?;
         }
-        let mc_seqno = last_mc_state.block_id().seq_no();
-        if shards.is_empty() || mc_seqno != 0 {
-            let nb = Self::load_out_queue_info(engine, &last_mc_state, &last_mc_state, &mut mc_shard_states).await?;
+
+        // TODO: `shards.is_empty()` might not be needed
+        if shards.is_empty() || last_mc_state.block_id().seq_no() != 0 {
+            let nb = Self::load_out_queue_info(&last_mc_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?;
             neighbors.push(nb);
         }
-        let mut next_out_queue_info;
-        let mut prev_out_queue_info = Self::load_out_queue_info(engine, &prev_states[0], &last_mc_state, &mut mc_shard_states).await?;
-        if prev_out_queue_info.block_id().seq_no != 0 {
-            if let Some(state) = prev_states.get(1) {
-                CHECK!(after_merge);
-                let merge_out_queue_info = Self::load_out_queue_info(engine, state, &last_mc_state, &mut mc_shard_states).await?;
-                log::debug!("prepare merge for states {} and {}", prev_out_queue_info.block_id(), merge_out_queue_info.block_id());
-                prev_out_queue_info.merge(&merge_out_queue_info)?;
-                Self::add_trivial_neighbor_after_merge(&mut neighbors, &shard, &prev_out_queue_info, prev_states, &stop_flag)?;
-                next_out_queue_info = match next_state_opt {
-                    Some(next_state) => Self::load_out_queue_info(engine, next_state, &last_mc_state, &mut mc_shard_states).await?,
-                    None => prev_out_queue_info.clone()
-                };
-            } else if after_split {
-                log::debug!("prepare split for state {}", prev_out_queue_info.block_id());
-                let sibling_out_queue_info = prev_out_queue_info.split(shard.clone())?;
-                Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, 
-                    Some(sibling_out_queue_info), prev_states[0].shard(), &stop_flag)?;
-                next_out_queue_info = match next_state_opt {
-                    Some(next_state) => Self::load_out_queue_info(engine, next_state, &last_mc_state, &mut mc_shard_states).await?,
-                    None => prev_out_queue_info.clone()
-                };
-            } else {
-                Self::add_trivial_neighbor(&mut neighbors, &shard, &prev_out_queue_info, None, 
-                    prev_out_queue_info.shard(), &stop_flag)?;
-                next_out_queue_info = match next_state_opt {
-                    Some(next_state) => Self::load_out_queue_info(engine, next_state, &last_mc_state, &mut mc_shard_states).await?,
-                    None => prev_out_queue_info.clone()
-                };
-            }
-        } else {
-            next_out_queue_info = match next_state_opt {
-                Some(next_state) => Self::load_out_queue_info(engine, next_state, &last_mc_state, &mut mc_shard_states).await?,
-                None => prev_out_queue_info.clone()
-            };
-        }
 
-        prev_out_queue_info.fix_processed_upto(mc_seqno, 0, None, &mc_shard_states, &stop_flag)?;
-        next_out_queue_info.fix_processed_upto(mc_seqno, next_mc_end_lt, Some(shards.as_ref()), &mc_shard_states, &stop_flag)?;
+        let mut prev_out_queue_info = Self::load_out_queue_info(&prev_states[0], &last_mc_state, &mut cached_states, block_descr.clone()).await?;
+        if prev_states[0].block_id().seq_no != 0 {
+            if let Some(merge_state) = prev_states.get(1) {
+                CHECK!(after_merge);
+                log::debug!("{}: prepare merge for states {} and {}", block_descr, prev_states[0].block_id(), merge_state.block_id());
+                let merge_out_queue_info = Self::load_out_queue_info(merge_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?;
+                prev_out_queue_info.merge(merge_out_queue_info, split_queues, next_state_opt.is_some())?;
+                Self::add_trivial_neighbor_after_merge(&mut neighbors, &shard, &prev_out_queue_info, prev_states, &stop_flag, block_descr.clone())?;
+            } else {
+                let sibling_out_queue_info = if after_split {
+                    log::debug!("{}: prepare split for state {}", block_descr, prev_states[0].block_id());
+                    Some(prev_out_queue_info.split(shard.clone(), engine, usage_tree, imported_visited, split_queues)?)
+                } else {
+                    None
+                };
+                Self::add_trivial_neighbor(
+                    &mut neighbors,
+                    &shard,
+                    &prev_out_queue_info, 
+                    sibling_out_queue_info,
+                    split_queues,
+                    prev_states[0].shard(),
+                    &stop_flag,
+                    block_descr.clone()
+                )?;
+            }
+        }
+        let mut next_out_queue_info = match next_state_opt {
+            Some(next_state) => Self::load_out_queue_info(next_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?,
+            None => prev_out_queue_info.clone()
+        };
+
+        // `ProcessedUptoStuff` seqno is a masterchain seqno for the old implementation
+        let seqno = {
+            _ = new_seq_no; // unused
+            last_mc_state.block_id().seq_no()
+        };
+
+        // `ProcessedUptoStuff` seqno is an exact shard seqno for the new implementation
+
+        prev_out_queue_info.fix_processed_upto(seqno, 0, None, &cached_states, &stop_flag)?;
+        next_out_queue_info.fix_processed_upto(seqno, next_mc_end_lt, Some(shards.as_ref()), &cached_states, &stop_flag)?;
 
         for neighbor in &mut neighbors {
-            neighbor.fix_processed_upto(mc_seqno, 0, None, &mc_shard_states, &stop_flag)?;
+            neighbor.fix_processed_upto(seqno, 0, None, &cached_states, &stop_flag)?;
         }
+
         Ok(MsgQueueManager {
-        //Unused
-          // shard,
+            shard,
             prev_out_queue_info,
             next_out_queue_info,
             neighbors,
+            block_descr,
         })
     }
 
     pub async fn load_out_queue_info(
-        engine: &Arc<dyn EngineOperations>,
         state: &Arc<ShardStateStuff>,
         last_mc_state: &Arc<ShardStateStuff>,
-        mc_shard_states: &mut HashMap<u32, Arc<ShardStateStuff>>
+        cached_states: &mut CachedStates,
+        block_descr: Arc<String>,
     ) -> Result<OutMsgQueueInfoStuff> {
-        log::debug!("unpacking OutMsgQueueInfo of neighbor {:#}", state.block_id());
-        let nb = OutMsgQueueInfoStuff::from_shard_state(&state)?;
+        log::debug!("{}: unpacking OutMsgQueueInfo of neighbor {:#}", block_descr, state.block_id());
+        let nb = OutMsgQueueInfoStuff::from_shard_state(&state, cached_states).await?;
         // if (verbosity >= 2) {
         //     block::gen::t_ProcessedInfo.print(std::cerr, qinfo.proc_info);
         //     qinfo.proc_info->print_rec(std::cerr);
@@ -589,10 +941,12 @@ impl MsgQueueManager {
         // .. (have to check the above condition and perform a `break` here) ..
         // ..
         for entry in nb.entries() {
-
             // TODO add loop and stop_flag checking
-            Self::request_mc_state(engine, last_mc_state, entry.mc_seqno,
-                Some(10_000), mc_shard_states).await?;
+
+             {
+                cached_states.request_mc_state(last_mc_state, entry.seqno, Some(10_000)).await?;
+            }
+
         }
         Ok(nb)
     }
@@ -606,14 +960,38 @@ impl MsgQueueManager {
         Ok((false, 0))
     }
 
+    fn get_max_processed_lt_from_queue_info(&self) -> u64 {
+        let current_shard = self.prev_out_queue_info.shard();
+        let mut max_lt = 0;
+        for neighbor in &self.neighbors {
+            if neighbor.shard().workchain_id() != -1 || neighbor.shard() == current_shard {
+                for entry in &neighbor.entries {
+                    if entry.last_msg_lt > max_lt {
+                        max_lt = entry.last_msg_lt;
+                    }
+                }
+            }
+            log::trace!(
+                "{}: get_max_processed_lt: (current shard {} != neighbor shard {}) = {}, max_lt {}",
+                self.block_descr,
+                current_shard,
+                neighbor.shard(),
+                neighbor.shard() != current_shard,
+                max_lt,
+            );
+        }
+        max_lt
+    }
+
     fn add_trivial_neighbor_after_merge(
         neighbors: &mut Vec<OutMsgQueueInfoStuff>,
         shard: &ShardIdent,
         real_out_queue_info: &OutMsgQueueInfoStuff,
         prev_states: &Vec<Arc<ShardStateStuff>>,
         stop_flag: &Option<&AtomicBool>,
+        block_descr: Arc<String>,
     ) -> Result<()> {
-        log::debug!("in add_trivial_neighbor_after_merge()");
+        log::debug!("{}: in add_trivial_neighbor_after_merge()", block_descr);
         CHECK!(prev_states.len(), 2);
         let mut found = 0;
         let n = neighbors.len();
@@ -621,7 +999,7 @@ impl MsgQueueManager {
             if shard.intersect_with(neighbors[i].shard()) {
                 let nb = &neighbors[i];
                 found += 1;
-                log::debug!("neighbor #{} : {} intersects our shard {}", i, nb.block_id(), shard);
+                log::debug!("{}: neighbor #{} : {} intersects our shard {}", block_descr, i, nb.block_id(), shard);
                 if !shard.is_parent_for(nb.shard()) || found > 2 {
                     fail!("impossible shard configuration in add_trivial_neighbor_after_merge()")
                 }
@@ -632,12 +1010,12 @@ impl MsgQueueManager {
                 }
                 if found == 1 {
                     neighbors[i] = real_out_queue_info.clone();
-                    log::debug!("adjusted neighbor #{} : {} with shard expansion \
-                        (immediate after-merge adjustment)", i, neighbors[i].block_id());
+                    log::debug!("{}: adjusted neighbor #{} : {} with shard expansion \
+                        (immediate after-merge adjustment)", block_descr, i, neighbors[i].block_id());
                 } else {
                     neighbors[i].disable();
-                    log::debug!("disabling neighbor #{} : {} \
-                        (immediate after-merge adjustment)", i, neighbors[i].block_id());
+                    log::debug!("{}: disabling neighbor #{} : {} \
+                        (immediate after-merge adjustment)", block_descr, i, neighbors[i].block_id());
                 }
 
                 check_stop_flag(stop_flag)?;
@@ -651,11 +1029,13 @@ impl MsgQueueManager {
         neighbors: &mut Vec<OutMsgQueueInfoStuff>,
         shard: &ShardIdent,
         real_out_queue_info: &OutMsgQueueInfoStuff,
-        sibling_out_queue_info: Option<OutMsgQueueInfoStuff>,
+        mut sibling_out_queue_info: Option<OutMsgQueueInfoStuff>,
+        split_queues: bool,
         prev_shard: &ShardIdent,
         stop_flag: &Option<&AtomicBool>,
+        block_descr: Arc<String>,
     ) -> Result<()> {
-        log::debug!("in add_trivial_neighbor()");
+        log::debug!("{}: in add_trivial_neighbor()", block_descr);
         // Possible cases are:
         // 1. prev_shard = shard = one of neighbors
         //    => replace neighbor by (more recent) prev_shard info
@@ -674,78 +1054,79 @@ impl MsgQueueManager {
         let mut cs = 0;
         let n = neighbors.len();
         for i in 0..n {
-            if shard.intersect_with(neighbors[i].shard()) {
-                let nb = &neighbors[i];
-                found += 1;
-                log::debug!("neighbor #{} : {} intersects our shard {}", i, nb.block_id(), shard);
-                if nb.shard() == prev_shard {
-                    if prev_shard == shard {
-                        // case 1. Normal.
-                        CHECK!(found == 1);
-                        neighbors[i] = real_out_queue_info.clone();
-                        log::debug!("adjusted neighbor #{} : {} (simple replacement)", i, neighbors[i].block_id());
-                        cs = 1;
-                    } else if nb.shard().is_parent_for(&shard) {
-                        // case 2. Immediate after-split.
-                        CHECK!(found == 1);
-                        CHECK!(sibling_out_queue_info.is_some());
-                        if let Some(ref sibling) = sibling_out_queue_info {
-                            neighbors[i] = sibling.clone();
-                            neighbors[i].set_shard(shard.clone());
-                        }
-                        log::debug!("adjusted neighbor #{} : {} with shard \
-                            shrinking to our sibling (immediate after-split adjustment)", i, neighbors[i].block_id());
-
-                        let nb = real_out_queue_info.clone();
-                        log::debug!("created neighbor #{} : {} with shard \
-                            shrinking to our (immediate after-split adjustment)", n, nb.block_id());
-                        neighbors.push(nb);
-                        cs = 2;
-                    } else {
-                        fail!("impossible shard configuration in add_trivial_neighbor()")
-                    }
-                } else if nb.shard().is_parent_for(shard) && shard == prev_shard {
-                    // case 3. Continued after-split
+            let nb = &mut neighbors[i];
+            if !shard.intersect_with(nb.shard()) { continue; }
+            found += 1;
+            log::debug!("{}: neighbor #{} : {} intersects our shard {}", block_descr, i, nb.block_id(), shard);
+            if nb.shard() == prev_shard {
+                if prev_shard == shard {
+                    // case 1. Normal.
                     CHECK!(found == 1);
-                    CHECK!(sibling_out_queue_info.is_none());
-
-                    // compute the part of virtual sibling's OutMsgQueue with destinations in our shard
-                    let sib_shard = shard.sibling();
-                    let shard_prefix = shard.shard_key(true);
-                    neighbors[i].filter_messages(&sib_shard, &shard_prefix)
-                        .map_err(|err| error!("cannot filter virtual sibling's OutMsgQueue from that of \
-                            the last common ancestor: {}", err))?;
-                    neighbors[i].set_shard(sib_shard);
-                    log::debug!("adjusted neighbor #{} : {} with shard shrinking \
-                        to our sibling (continued after-split adjustment)", i, neighbors[i].block_id());
+                    *nb = real_out_queue_info.clone();
+                    log::debug!("{}: adjusted neighbor #{} : {} (simple replacement)", block_descr, i, nb.block_id());
+                    cs = 1;
+                } else if nb.shard().is_parent_for(&shard) {
+                    // case 2. Immediate after-split.
+                    CHECK!(found == 1);
+                    CHECK!(sibling_out_queue_info.is_some());
+                    if let Some(sibling) = sibling_out_queue_info.take() {
+                        *nb = sibling;
+                    }
+                    log::debug!("{}: adjusted neighbor #{} : {} with shard \
+                        shrinking to our sibling (immediate after-split adjustment)", block_descr, i, nb.block_id());
 
                     let nb = real_out_queue_info.clone();
-                    log::debug!("created neighbor #{} : {} from our preceding state \
-                        (continued after-split adjustment)", n, nb.block_id());
+                    log::debug!("{}: created neighbor #{} : {} with shard \
+                        shrinking to our (immediate after-split adjustment)",
+                        block_descr, n, nb.block_id());
                     neighbors.push(nb);
-                    cs = 3;
-                } else if shard.is_parent_for(nb.shard()) && shard == prev_shard {
-                    // case 4. Continued after-merge.
-                    if found == 1 {
-                        cs = 4;
-                    }
-                    CHECK!(cs == 4);
-                    CHECK!(found <= 2);
-                    if found == 1 {
-                        neighbors[i] = real_out_queue_info.clone();
-                        log::debug!("adjusted neighbor #{} : {} with shard expansion \
-                            (continued after-merge adjustment)", i, neighbors[i].block_id());
-                    } else {
-                        neighbors[i].disable();
-                        log::debug!("disabling neighbor #{} : {} (continued after-merge adjustment)",
-                            i, neighbors[i].block_id());
-                    }
+                    cs = 2;
                 } else {
                     fail!("impossible shard configuration in add_trivial_neighbor()")
                 }
+            } else if nb.shard().is_parent_for(shard) && shard == prev_shard {
+                // case 3. Continued after-split
+                CHECK!(found == 1);
+                CHECK!(sibling_out_queue_info.is_none());
 
-                check_stop_flag(stop_flag)?;
+                // compute the part of virtual sibling's OutMsgQueue with destinations in our shard
+                let sib_shard = shard.sibling();
+                let shard_prefix = shard.shard_key(true);
+                nb.out_queue_mut()?.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
+                if split_queues {
+                    nb.filter_messages(&sib_shard)
+                        .map_err(|err| error!("cannot filter virtual sibling's OutMsgQueue \
+                            from that of the last common ancestor: {}", err))?;
+                }
+                nb.set_shard(sib_shard);
+                log::debug!("{}: adjusted neighbor #{} : {} with shard shrinking \
+                    to our sibling (continued after-split adjustment)", block_descr, i, nb.block_id());
+
+                let nb = real_out_queue_info.clone();
+                log::debug!("{}: created neighbor #{} : {} from our preceding state \
+                    (continued after-split adjustment)", block_descr, n, nb.block_id());
+                neighbors.push(nb);
+                cs = 3;
+            } else if shard.is_parent_for(nb.shard()) && shard == prev_shard {
+                // case 4. Continued after-merge.
+                if found == 1 {
+                    cs = 4;
+                }
+                CHECK!(cs == 4);
+                CHECK!(found <= 2);
+                if found == 1 {
+                    *nb = real_out_queue_info.clone();
+                    log::debug!("{}: adjusted neighbor #{} : {} with shard expansion \
+                        (continued after-merge adjustment)", block_descr, i, nb.block_id());
+                } else {
+                    nb.disable();
+                    log::debug!("{}: disabling neighbor #{} : {} (continued after-merge adjustment)",
+                    block_descr, i, nb.block_id());
+                }
+            } else {
+                fail!("impossible shard configuration in add_trivial_neighbor()")
             }
+            check_stop_flag(stop_flag)?;
         }
         // dbg!(found, cs);
         CHECK!(found != 0 && cs != 0);
@@ -753,20 +1134,20 @@ impl MsgQueueManager {
         Ok(())
     }
 
-    pub fn clean_out_msg_queue(
-        &mut self, 
-        mut on_message: impl FnMut(Option<(MsgEnqueueStuff, u64)>, Option<&Cell>) -> Result<bool>
-    ) -> Result<bool> {
-        log::debug!("in clean_out_msg_queue: cleaning output messages imported by neighbors");
-        if self.next_out_queue_info.out_queue.is_empty() {
-            return Ok(false)
+    pub async fn clean_out_msg_queue(
+        &mut self,
+        clean_timeout_nanos: i128,
+        optimistic_clean_percentage_points: u32,
+        split_queues: bool,
+        mut on_message: impl FnMut(MsgEnqueueStuff, Option<u64>, Option<&Cell>) -> Result<bool>
+    ) -> Result<(bool, i32, i32)> {
+        let timer = std::time::Instant::now();
+
+        log::debug!("{}: in clean_out_msg_queue: cleaning output messages imported by neighbors", self.block_descr);
+        if self.next_out_queue_info.out_queue()?.is_empty() {
+            return Ok((false, 0, 0))
         }
-        // if (verbosity >= 2) {
-        //     auto rt = out_msg_queue_->get_root();
-        //     std::cerr << "old out_msg_queue is ";
-        //     block::gen::t_OutMsgQueue.print(std::cerr, *rt);
-        //     rt->print_rec(std::cerr);
-        // }
+
         for neighbor in self.neighbors.iter() {
             if !neighbor.is_disabled() && !neighbor.can_check_processed() {
                 fail!(
@@ -777,69 +1158,256 @@ impl MsgQueueManager {
         }
         let mut block_full = false;
         let mut partial = false;
-        let mut queue = self.next_out_queue_info.out_queue.clone();
-        let mut skipped = 0;
+        let mut queue = self.next_out_queue_info.out_queue()?.clone();
         let mut deleted = 0;
-        queue.hashmap_filter(|_key, mut slice| {
-            if block_full {
-                log::warn!("BLOCK FULL when cleaning output queue, cleanup is partial");
-                partial = true;
-                return Ok(HashmapFilterResult::Stop)
-            }
-            let lt = u64::construct_from(&mut slice)?;
-            let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
-            log::debug!("Scanning outbound {}", enq);
-            let (processed, end_lt) = self.already_processed(&enq)?;
-            if processed {
-                log::debug!("Outbound {} has beed already delivered, dequeueing", enq);
-                block_full = on_message(Some((enq, end_lt)), self.next_out_queue_info.out_queue.data())?;
-                deleted += 1;
-                return Ok(HashmapFilterResult::Remove)
-            }
-            skipped += 1;
-            Ok(HashmapFilterResult::Accept)
-        })?;
-        log::debug!("Deleted {} messages from out_msg_queue, skipped {}", deleted, skipped);
-        self.next_out_queue_info.out_queue = queue;
-        // if (verbosity >= 2) {
-        //     std::cerr << "new out_msg_queue is ";
-        //     block::gen::t_OutMsgQueue.print(std::cerr, *rt);
-        //     rt->print_rec(std::cerr);
-        // }
-        // CHECK(block::gen::t_OutMsgQueue.validate_upto(100000, *rt));  // DEBUG, comment later if SLOW
-        on_message(None, self.next_out_queue_info.out_queue.data())?;
-        Ok(partial)
+        let mut skipped = 0;
+        let root = self.next_out_queue_info.out_queue()?.data();
+
+        let ordered_cleaning_timeout_nanos = clean_timeout_nanos * (optimistic_clean_percentage_points as i128) / 1000;
+        let random_cleaning_timeout_nanos = clean_timeout_nanos - ordered_cleaning_timeout_nanos;
+
+        log::debug!(
+            "{}: clean_out_msg_queue: clean_timeout = {} nanos, ordered_cleaning_timeout = {} nanos, random_cleaning_timeout = {} nanos",
+            self.block_descr,
+            clean_timeout_nanos,
+            ordered_cleaning_timeout_nanos,
+            random_cleaning_timeout_nanos,
+        );
+
+        if ordered_cleaning_timeout_nanos > 0 {
+            let max_processed_lt = self.get_max_processed_lt_from_queue_info();
+
+            let mut clean_timeout_check = 50_000_000;
+            let max_clean_timeout_check = 550_000_000;
+
+            partial = out_msg_queue_cleaner::hashmap_filter_ordered_by_lt_hash(
+                &mut queue,
+                max_processed_lt,
+                ordered_cleaning_timeout_nanos,
+                |node_obj| {
+                    if block_full {
+                        log::debug!("{}: BLOCK FULL when ordered cleaning output queue, cleanup is partial", self.block_descr);
+                        partial = true;
+                        return Ok(HashmapFilterResult::Stop);
+                    }
+
+                    let elapsed_nanos = timer.elapsed().as_nanos() as i128;
+                    if clean_timeout_check <= max_clean_timeout_check && elapsed_nanos >= clean_timeout_check {
+                        log::debug!(
+                            "{}: clean_out_msg_queue: ordered cleaning time elapsed {} nanos: processed = {}, deleted = {}, skipped = {}",
+                            self.block_descr, elapsed_nanos, deleted + skipped, deleted, skipped,
+                        );
+                        clean_timeout_check += 50_000_000;
+                    }
+
+                    let lt = node_obj.lt();
+                    let mut data_and_refs = node_obj.data_and_refs()?;
+                    let enq = MsgEnqueueStuff::construct_from(&mut data_and_refs, lt)?;
+
+                    if !split_queues && !self.shard.contains_full_prefix(enq.cur_prefix()) {
+                        block_full = on_message(enq, None, root)?;
+                        deleted += 1;
+                        return Ok(HashmapFilterResult::Remove);
+                    }
+
+                    let (processed, end_lt) = self.already_processed(&enq)?;
+                    if processed {
+                        block_full = on_message(enq, Some(end_lt), root)?;
+                        deleted += 1;
+                        return Ok(HashmapFilterResult::Remove);
+                    }
+                    skipped += 1;
+                    Ok(HashmapFilterResult::Accept)
+                },
+                Some(format!("{}: ", self.block_descr)),
+            ).map_err(|e| {
+                log::error!(
+                    "{}: clean_out_msg_queue: error while ordered cleaning output queue, last state was:{} processed = {}, deleted = {}, skipped = {}: e = {}",
+                    self.block_descr,
+                    if partial { " partial," } else { "" },
+                    deleted + skipped, deleted, skipped,
+                    e,
+                );
+                e
+            })?;
+
+            let ordered_clean_elapsed = timer.elapsed().as_nanos() as i128;
+
+            log::debug!(
+                "{}: clean_out_msg_queue: cleaning finished (ordered) in {} nanos:{} processed = {}, deleted = {}, skipped = {}",
+                self.block_descr,
+                ordered_clean_elapsed,
+                if partial { " partial," } else { "" },
+                deleted + skipped, deleted, skipped,
+            );
+        } else {
+            // not time limit on the ordered clean = queue not cleaned = partial
+            partial = true;
+        }
+
+        if random_cleaning_timeout_nanos > 0 && partial {
+            partial = false;
+
+            let mut random_deleted = 0;
+            let mut random_skipped = 0;
+
+            let random_clean_timer = std::time::Instant::now();
+
+            let mut clean_timeout_check = 50_000_000;
+            let max_clean_timeout_check = 550_000_000;
+
+            queue.hashmap_filter(|_key, mut slice| {
+                if block_full {
+                    log::debug!("{}: BLOCK FULL when random cleaning output queue, cleanup is partial", self.block_descr);
+                    partial = true;
+                    return Ok(HashmapFilterResult::Stop)
+                }
+
+                let elapsed_nanos = random_clean_timer.elapsed().as_nanos() as i128;
+
+                if clean_timeout_check <= max_clean_timeout_check && elapsed_nanos >= clean_timeout_check {
+                    log::debug!(
+                        "{}: clean_out_msg_queue: random cleaning time elapsed {} nanos: processed = {}, deleted = {}, skipped = {}",
+                        self.block_descr, elapsed_nanos,
+                        random_deleted + random_skipped, random_deleted, random_skipped,
+                    );
+                    clean_timeout_check += 50_000_000;
+                }
+
+                // stop when reached the time limit
+                if elapsed_nanos >= random_cleaning_timeout_nanos {
+                    log::debug!(
+                        "{}: clean_out_msg_queue: stopped random cleaning output queue because of time elapsed {} nanos >= {} nanos limit",
+                        self.block_descr, elapsed_nanos, random_cleaning_timeout_nanos,
+                    );
+                    partial = true;
+                    return Ok(HashmapFilterResult::Stop)
+                }
+
+                let lt = u64::construct_from(&mut slice)?;
+                let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
+                if !split_queues && !self.shard.contains_full_prefix(enq.cur_prefix()) {
+                    block_full = on_message(enq, None, root)?;
+                    deleted += 1;
+                    return Ok(HashmapFilterResult::Remove);
+                }
+                let (processed, end_lt) = self.already_processed(&enq)?;
+                if processed {
+                    block_full = on_message(enq, Some(end_lt), root)?;
+                    random_deleted += 1;
+                    return Ok(HashmapFilterResult::Remove)
+                }
+                random_skipped += 1;
+                Ok(HashmapFilterResult::Accept)
+            }).map_err(|e| {
+                log::error!(
+                    "{}: clean_out_msg_queue: error while random cleaning output queue, last state was:{} processed = {}, deleted = {}, skipped = {}: e = {}",
+                    self.block_descr,
+                    if partial { " partial," } else { "" },
+                    random_deleted + random_skipped, random_deleted, random_skipped,
+                    e,
+                );
+                e
+            })?;
+
+            let random_clean_elapsed = random_clean_timer.elapsed().as_nanos() as i128;
+
+            log::debug!(
+                "{}: clean_out_msg_queue: cleaning finished (random) in {} nanos:{} processed = {}, deleted = {}, skipped = {}",
+                self.block_descr,
+                random_clean_elapsed,
+                if partial { " partial," } else { "" },
+                random_deleted + random_skipped, random_deleted, random_skipped,
+            );
+
+            deleted += random_deleted;
+            skipped += random_skipped;
+        }
+
+        let total_clean_elapsed_nanos = timer.elapsed().as_nanos();
+
+        log::debug!(
+            "{}: clean_out_msg_queue: cleaning finished (total) in {} nanos:{} processed = {}, deleted = {}, skipped = {}",
+            self.block_descr,
+            total_clean_elapsed_nanos,
+            if partial { " partial," } else { "" },
+            deleted + skipped, deleted, skipped,
+        );
+
+        self.next_out_queue_info.out_queue = Some(queue);
+
+        Ok((partial, deleted + skipped, deleted))
+    }
+}
+
+pub struct CachedStates {
+    engine: Arc<dyn EngineOperations>,
+    states: HashMap<ShardIdent, BTreeMap<u32, Arc<ShardStateStuff>>>,
+}
+
+impl CachedStates {
+    pub fn new(engine: &Arc<dyn EngineOperations>) -> Self {
+        Self {
+            engine: engine.clone(),
+            states: Default::default(),
+        }
     }
 
-    async fn request_mc_state(
-        engine: &Arc<dyn EngineOperations>,
+    pub fn get_entry_data(&self, shard: &ShardIdent, seq_no: u32) -> Result<(u64, ShardHashes)> {
+        if let Some(states) = self.states.get(shard) {
+            if let Some(state_stuff) = states.get(&seq_no) {
+                let state = state_stuff.state()?;
+
+                let mc_end_lt = match state.master_ref() {
+                    None => state.gen_lt(),
+                    Some(master_ref) => master_ref.master.end_lt,
+                };
+
+                let shard_hashes = state_stuff.shards()?.clone();
+
+                return Ok((mc_end_lt, shard_hashes));
+            }
+        }
+        fail!("state for block {}:{} was not previously cached", shard, seq_no)
+    }
+
+    pub fn insert(&mut self, state: Arc<ShardStateStuff>) {
+        self.states
+            .entry(state.shard().clone())
+            .or_default()
+            .insert(state.seq_no(), state);
+    }
+
+    pub async fn request_mc_state(
+        &mut self,
         last_mc_state: &Arc<ShardStateStuff>,
         seq_no: u32,
         timeout_ms: Option<u64>,
-        mc_shard_states: &mut HashMap<u32, Arc<ShardStateStuff>>,
     ) -> Result<()> {
-        if !mc_shard_states.contains_key(&seq_no) {
-            let last_mc_seqno = last_mc_state.state().seq_no();
+        let states = self.states.entry(ShardIdent::masterchain()).or_default();
+        if let btree_map::Entry::Vacant(entry) = states.entry(seq_no) {
+            let last_mc_seqno = last_mc_state.state()?.seq_no();
             if seq_no >= last_mc_seqno {
                 fail!("Requested too new master chain state {}, last is {}", seq_no, last_mc_seqno);
             }
+
             let block_id = match last_mc_state.shard_state_extra()?.prev_blocks.get(&seq_no) {
                 Ok(Some(result)) => result.master_block_id().1,
                 _ => fail!("cannot find previous masterchain block with seqno {} \
                     to load corresponding state as required", seq_no)
             };
-            mc_shard_states.insert(
-                seq_no,
-                engine.clone().wait_state(&block_id, timeout_ms, true).await?
-            );
+
+            let state = self.engine.clone().wait_state(&block_id, timeout_ms, true).await?;
+            entry.insert(state);
         }
         Ok(())
     }
+
 }
 
 impl MsgQueueManager {
     /// create iterator for merging all output messages from all neighbors to our shard
-    pub fn merge_out_queue_iter(&self, shard: &ShardIdent) -> Result<MsgQueueMergerIterator> {
+    pub fn merge_out_queue_iter(&self, shard: &ShardIdent) -> Result<MsgQueueMergerIterator<BlockIdExt>> {
         MsgQueueMergerIterator::from_manager(self, shard)
     }
     /// find enquque message and return it with neighbor id 
@@ -853,6 +1421,7 @@ impl MsgQueueManager {
     }
     pub fn prev(&self) -> &OutMsgQueueInfoStuff { &self.prev_out_queue_info }
     pub fn next(&self) -> &OutMsgQueueInfoStuff { &self.next_out_queue_info }
+    pub fn next_mut(&mut self) -> &mut OutMsgQueueInfoStuff { &mut self.next_out_queue_info }
     pub fn take_next(&mut self) -> OutMsgQueueInfoStuff { std::mem::take(&mut self.next_out_queue_info) }
 // Unused
 //    pub fn shard(&self) -> &ShardIdent { &self.shard }
@@ -869,33 +1438,45 @@ impl MsgQueueManager {
 }
 
 #[derive(Eq, PartialEq)]
-struct RootRecord {
+struct RootRecord<T> {
     lt: u64,
     cursor: SliceData,
     bit_len: usize,
     key: BuilderData,
-    block_id: BlockIdExt
+    id: T
 }
 
-impl RootRecord {
+impl<T: Eq> RootRecord<T> {
     fn new(
         lt: u64,
         cursor: SliceData,
         bit_len: usize,
         key: BuilderData,
-        block_id: BlockIdExt
+        id: T
     ) -> Self {
         Self {
             lt,
             cursor,
             bit_len,
             key,
-            block_id
+            id
         }
+    }
+    fn from_cell(cell: &Cell, mut bit_len: usize, id: T) -> Result<Self> {
+        let mut cursor = SliceData::load_cell_ref(cell)?;
+        let key = cursor.get_label_raw(&mut bit_len, BuilderData::default())?;
+        let lt = cursor.get_next_u64()?;
+        Ok(Self {
+            lt,
+            cursor,
+            bit_len,
+            key,
+            id
+        })
     }
 }
 
-impl Ord for RootRecord {
+impl<T: Eq> Ord for RootRecord<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // first compare lt descending, because Vec is a stack
         let mut cmp = self.lt.cmp(&other.lt);
@@ -910,29 +1491,33 @@ impl Ord for RootRecord {
         cmp.reverse()
     }
 }
-impl PartialOrd for RootRecord {
+impl<T: Eq> PartialOrd for RootRecord<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
 }
 
 /// it iterates messages ascending create_lt and hash
-pub struct MsgQueueMergerIterator {
+pub struct MsgQueueMergerIterator<T> {
     // store branches descending by lt and hash because Vec works like Stack
-    roots: Vec<RootRecord>,
+    roots: Vec<RootRecord<T>>,
 }
 
-impl MsgQueueMergerIterator {
+impl MsgQueueMergerIterator<BlockIdExt> {
     pub fn from_manager(manager: &MsgQueueManager, shard: &ShardIdent) -> Result<Self> {
         let shard_prefix = shard.shard_key(true);
         let mut roots = vec![];
         for nb in manager.neighbors.iter().filter(|nb| !nb.is_disabled()) {
-            let mut out_queue_short = nb.out_queue.clone();
-            out_queue_short.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
-            if let Some(root) = out_queue_short.data() {
-                let mut cursor = SliceData::load_cell_ref(root)?;
-                let mut bit_len = out_queue_short.bit_len();
-                let key = cursor.get_label_raw(&mut bit_len, BuilderData::default())?;
-                let lt = cursor.get_next_u64()?;
-                roots.push(RootRecord::new(lt, cursor, bit_len, key, nb.block_id().clone()));
+            let out_queue_short = if let Ok(full_queue) = nb.out_queue() {
+                let mut q = full_queue.clone();
+                q.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
+                q
+            } else {
+                let mut q = nb.out_queue_part()?.clone();
+                q.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
+                q
+            };
+            if let Some(cell) = out_queue_short.data() {
+                roots.push(RootRecord::from_cell(cell, out_queue_short.bit_len(), nb.block_id().clone())?);
+                // roots.push(RootRecord::new(lt, cursor, bit_len, key, nb.block_id().clone()));
             }
         }
         if !roots.is_empty() {
@@ -941,34 +1526,48 @@ impl MsgQueueMergerIterator {
         }
         Ok(Self { roots })
     }
-    fn insert(&mut self, root: RootRecord) {
+}
+
+impl MsgQueueMergerIterator<u8> {
+    #[cfg(test)]
+    pub fn from_queue(out_queue: &OutMsgQueue) -> Result<Self> {
+        let mut roots = Vec::new();
+        if let Some(cell) = out_queue.data() {
+            roots.push(RootRecord::from_cell(cell, out_queue.bit_len(), 0)?);
+        }
+        Ok(Self { roots })
+    }
+}
+
+impl<T: Clone + Eq> MsgQueueMergerIterator<T> {
+    fn insert(&mut self, root: RootRecord<T>) {
         let idx = self.roots.binary_search(&root).unwrap_or_else(|x| x);
         self.roots.insert(idx, root);
         debug_assert!(self.roots.first().unwrap().lt >= self.roots.last().unwrap().lt);
     }
-    fn next_item(&mut self) -> Result<Option<(OutMsgQueueKey, MsgEnqueueStuff, u64, BlockIdExt)>> {
+    fn next_item(&mut self) -> Result<Option<(OutMsgQueueKey, MsgEnqueueStuff, u64, T)>> {
         while let Some(mut root) = self.roots.pop() {
             if root.bit_len == 0 {
                 let key = OutMsgQueueKey::construct_from_cell(root.key.into_cell()?)?;
                 let enq = MsgEnqueueStuff::construct_from(&mut root.cursor, root.lt)?;
-                return Ok(Some((key, enq, root.lt, root.block_id)))
+                return Ok(Some((key, enq, root.lt, root.id)))
             }
             for idx in 0..2 {
                 let mut bit_len = root.bit_len - 1;
                 let mut cursor = SliceData::load_cell(root.cursor.reference(idx)?)?;
                 let mut key = root.key.clone();
                 key.append_bit_bool(idx == 1)?;
-                key = cursor.get_label_raw(&mut bit_len, key)?;
+                key = LabelReader::read_label_raw(&mut cursor, &mut bit_len, key)?;
                 let lt = cursor.get_next_u64()?;
-                self.insert(RootRecord::new(lt, cursor, bit_len, key, root.block_id.clone()));
+                self.insert(RootRecord::new(lt, cursor, bit_len, key, root.id.clone()));
             }
         }
         Ok(None)
     }
 }
 
-impl Iterator for MsgQueueMergerIterator {
-    type Item = Result<(OutMsgQueueKey, MsgEnqueueStuff, u64, BlockIdExt)>;
+impl<T: Clone + Eq> Iterator for MsgQueueMergerIterator<T> {
+    type Item = Result<(OutMsgQueueKey, MsgEnqueueStuff, u64, T)>;
     fn next(&mut self) -> Option<Self::Item> {
         self.next_item().transpose()
     }

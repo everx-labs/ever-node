@@ -11,10 +11,9 @@
 * limitations under the License.
 */
 
-pub use super::*;
-use crate::profiling::ResultStatusCounter;
-pub use catchain::InstanceCounter;
-use std::collections::HashMap;
+use crate::{HashableObject, HashType, PoolObject, PoolPtr, SessionPool};
+use catchain::profiling::{InstanceCounter, ResultStatusCounter};
+use std::{collections::HashMap, rc::Rc};
 
 /// Entry entry to be used by cache objects
 pub type CacheEntry = Rc<dyn std::any::Any>;
@@ -122,7 +121,7 @@ pub struct CachedInstanceCounter {
 }
 
 impl CachedInstanceCounter {
-    pub fn new(receiver: &metrics_runtime::Receiver, key: &String) -> Self {
+    pub fn new(receiver: &catchain::utils::MetricsHandle, key: &String) -> Self {
         let body = Self {
             pool: SessionPool::Temp,
             total_instance_counter: InstanceCounter::new(receiver, &format!("{}.total", key)),
@@ -205,7 +204,7 @@ impl<Key, Value> FifoCache<Key, Value>
 where
     Key: std::cmp::Eq + std::hash::Hash + Clone,
 {
-    pub fn new(name: String, metrics_receiver: &metrics_runtime::Receiver) -> Self {
+    pub fn new(name: String, metrics_receiver: &catchain::utils::MetricsHandle) -> Self {
         const DEFAULT_FIFO_CACHE_MIN_FLUSH_SIZE: usize = 1000;
         const DEFAULT_FIFO_CACHE_EXPIRATION_TIME: std::time::Duration =
             std::time::Duration::from_secs(60);
@@ -220,7 +219,7 @@ where
 
     pub fn new_with_params(
         name: String,
-        metrics_receiver: &metrics_runtime::Receiver,
+        metrics_receiver: &catchain::utils::MetricsHandle,
         min_flush_size: usize,
         expiration_time: std::time::Duration,
     ) -> Self {

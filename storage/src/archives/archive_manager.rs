@@ -30,6 +30,9 @@ use ton_block::{
 };
 use ton_types::{error, fail, Result, UInt256};
 
+#[cfg(test)]
+#[path = "tests/test_archive_manager.rs"]
+mod tests;
 
 pub struct ArchiveManager {
     db: Arc<RocksDb>,
@@ -43,7 +46,7 @@ pub struct ArchiveManager {
 
 impl ArchiveManager {
 
-    pub const ARCHIVE_DIR: &str = "archive";
+    pub const ARCHIVE_DIR: &'static str = "archive";
 
     pub async fn with_data(
         db: Arc<RocksDb>,
@@ -182,7 +185,7 @@ impl ArchiveManager {
         let prooflink_inited = handle.has_proof_link();
         let data_inited = handle.has_data();
 
-        if data_inited && !(proof_inited || prooflink_inited) {
+        if data_inited && !handle.is_queue_update() && !(proof_inited || prooflink_inited) {
             fail!(
                 "Can't move block {} to archive: proof are not stored (proof = {}, prooflink = {})",
                 handle.id(),
@@ -512,7 +515,6 @@ impl ArchiveManager {
             Ok(PackageId::for_key_block(mc_seq_no / KEY_ARCHIVE_PACKAGE_SIZE))
         } else {
             let package_id = self.file_maps.files().get_closest_id(mc_seq_no).await.ok_or_else(|| {
-                log::error!(target: "storage", "Package not found for seq_no: {}", mc_seq_no);
                 error!("Package not found for seq_no: {}", mc_seq_no)
             })?;
             Ok(PackageId::for_block(package_id))

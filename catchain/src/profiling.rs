@@ -11,25 +11,25 @@
 * limitations under the License.
 */
 
-pub use super::*;
-
-use metrics_runtime;
+use crate::utils::MetricsHandle;
+use metrics::Recorder;
+use std::cell::RefCell;
 
 /*
     Instances counter
 */
 
 pub struct InstanceCounter {
-    create_counter: metrics_runtime::data::Counter,
-    drop_counter: metrics_runtime::data::Counter,
+    create_counter: metrics::Counter,
+    drop_counter: metrics::Counter,
     need_drop: bool,
 }
 
 impl InstanceCounter {
-    pub fn new(receiver: &metrics_runtime::Receiver, key: &String) -> Self {
+    pub fn new(receiver: &MetricsHandle, key: &String) -> Self {
         let body = Self {
-            create_counter: receiver.sink().counter(format!("{}.create", &key)),
-            drop_counter: receiver.sink().counter(format!("{}.drop", &key)),
+            create_counter: receiver.sink().register_counter(&format!("{}.create", &key).into()),
+            drop_counter: receiver.sink().register_counter(&format!("{}.drop", &key).into()),
             need_drop: false,
         };
 
@@ -48,7 +48,7 @@ impl InstanceCounter {
 
     pub fn force_drop(&mut self) {
         if self.need_drop {
-            self.drop_counter.increment();
+            self.drop_counter.increment(1);
             self.need_drop = false;
         }
     }
@@ -59,7 +59,7 @@ impl Clone for InstanceCounter {
         let mut body = self.clone_refs_only();
 
         body.need_drop = true;
-        body.create_counter.increment();
+        body.create_counter.increment(1);
 
         body
     }
@@ -77,32 +77,32 @@ impl Drop for InstanceCounter {
 
 #[derive(Clone)]
 pub struct ResultStatusCounter {
-    total_counter: metrics_runtime::data::Counter,
-    success_counter: metrics_runtime::data::Counter,
-    failure_counter: metrics_runtime::data::Counter,
+    total_counter: metrics::Counter,
+    success_counter: metrics::Counter,
+    failure_counter: metrics::Counter,
 }
 
 impl ResultStatusCounter {
-    pub fn new(receiver: &metrics_runtime::Receiver, key: &String) -> Self {
+    pub fn new(receiver: &MetricsHandle, key: &String) -> Self {
         let body = Self {
-            total_counter: receiver.sink().counter(format!("{}.total", &key)),
-            success_counter: receiver.sink().counter(format!("{}.success", &key)),
-            failure_counter: receiver.sink().counter(format!("{}.failure", &key)),
+            total_counter: receiver.sink().register_counter(&format!("{}.total", &key).into()),
+            success_counter: receiver.sink().register_counter(&format!("{}.success", &key).into()),
+            failure_counter: receiver.sink().register_counter(&format!("{}.failure", &key).into()),
         };
 
         body
     }
 
     pub fn total_increment(&self) {
-        self.total_counter.increment();
+        self.total_counter.increment(1);
     }
 
     pub fn success(&self) {
-        self.success_counter.increment();
+        self.success_counter.increment(1);
     }
 
     pub fn failure(&self) {
-        self.failure_counter.increment();
+        self.failure_counter.increment(1);
     }
 }
 
@@ -142,7 +142,7 @@ impl Profiler {
 
     /// Get global instance of the profiler (for merging from local instance to global)
     pub fn global_instance() -> std::sync::Arc<std::sync::Mutex<Profiler>> {
-        lazy_static! {
+        lazy_static::lazy_static! {
             pub static ref INSTANCE: std::sync::Arc<std::sync::Mutex<Profiler>> =
                 std::sync::Arc::new(std::sync::Mutex::<Profiler>::new(Profiler::new()));
         }
@@ -151,7 +151,7 @@ impl Profiler {
 
     /// New profiler creation
     fn new() -> Self {
-        lazy_static! {
+        lazy_static::lazy_static! {
             pub static ref ROOT_CODE_LINE: ProfileCodeLine = ProfileCodeLine {
                 file_name: "",
                 function_name: "<root>",
@@ -496,7 +496,7 @@ impl Drop for ExecutionTimeGuard {
             return;
         }
 
-        warn!(
+        log::warn!(
             "Execution time {:.3}ms is greater than expected time {:.3}ms for {} at {}({})",
             duration.as_secs_f64() * 1000.0,
             self.max_duration.as_secs_f64() * 1000.0,
@@ -524,17 +524,17 @@ macro_rules! function {
 #[macro_export]
 macro_rules! instrument {
     () => {
-        lazy_static! {
-            static ref INSTRUMENT_CODE_LINE: super::catchain::profiling::ProfileCodeLine =
-                super::catchain::profiling::ProfileCodeLine {
+        lazy_static::lazy_static! {
+            static ref INSTRUMENT_CODE_LINE: $crate::profiling::ProfileCodeLine =
+                $crate::profiling::ProfileCodeLine {
                     file_name: file!(),
-                    function_name: super::catchain::profiling::function!(85),
+                    function_name: $crate::function!(85),
                     line: line!(),
                 };
         }
 
         let _instrument_guard =
-            super::catchain::profiling::ProfileGuard::new(&INSTRUMENT_CODE_LINE);
+            $crate::profiling::ProfileGuard::new(&INSTRUMENT_CODE_LINE);
     };
 }
 
@@ -542,20 +542,21 @@ macro_rules! instrument {
 #[macro_export]
 macro_rules! check_execution_time {
     ($max_duration_microseconds:expr) => {
-        lazy_static! {
-            static ref CHECK_EXECUTION_TIME_CODE_LINE: super::catchain::profiling::ProfileCodeLine =
-                super::catchain::profiling::ProfileCodeLine {
+        lazy_static::lazy_static! {
+            static ref CHECK_EXECUTION_TIME_CODE_LINE: $crate::profiling::ProfileCodeLine =
+                $crate::profiling::ProfileCodeLine {
                     file_name: file!(),
-                    function_name: super::catchain::profiling::function!(95),
+                    function_name: $crate::function!(95),
                     line: line!(),
                 };
             static ref CHECK_EXECUTION_TIME_MAX_DURATION: std::time::Duration =
                 std::time::Duration::from_micros($max_duration_microseconds);
         }
 
-        let _check_execution_time_guard = super::catchain::profiling::ExecutionTimeGuard::new(
+        let _check_execution_time_guard = $crate::profiling::ExecutionTimeGuard::new(
             &CHECK_EXECUTION_TIME_CODE_LINE,
             &CHECK_EXECUTION_TIME_MAX_DURATION,
         );
     };
 }
+                                                

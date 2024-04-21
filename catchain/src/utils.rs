@@ -11,23 +11,24 @@
 * limitations under the License.
 */
 
-extern crate hex;
-
 /// Imports
-pub use super::*;
-use ever_crypto::{Ed25519KeyOption, KeyId};
-use crate::ton_api::IntoBoxed;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::convert::TryInto;
+use crate::{
+    serialize_tl_boxed_object,
+    BlockHash, BlockPayloadPtr, CatchainFactory, PrivateKey, PublicKey, PublicKeyHash, 
+    RawBuffer, Receiver, SessionId, ton, utils
+};
+use std::{collections::{BTreeMap, HashMap, HashSet}, convert::TryInto};
+use ton_api::{deserialize_typed, IntoBoxed};
+use ton_types::{Ed25519KeyOption, KeyId, Result, UInt256};
 
+mod metrics;
+pub use self::metrics::MetricsHandle;
 /*
     to string conversions
 */
 
 pub fn bytes_to_string(v: &::ton_api::ton::bytes) -> String {
-    hex::encode(&v.0)
+    hex::encode(&v)
 }
 
 pub fn public_key_hashes_to_string(v: &[PublicKeyHash]) -> String {
@@ -99,7 +100,7 @@ pub fn parse_hex_as_int256(hex_asm: &str) -> UInt256 {
 }
 
 pub fn parse_hex_as_bytes(hex_asm: &str) -> ::ton_api::ton::bytes {
-    ::ton_api::ton::bytes(parse_hex(&hex_asm))
+    parse_hex(&hex_asm)
 }
 
 pub fn parse_hex_as_block_payload(hex_asm: &str) -> BlockPayloadPtr {
@@ -111,7 +112,8 @@ pub fn parse_hex_as_public_key(hex_asm: &str) -> PublicKey {
     let mut key_slice = vec![0; hex_asm.len() / 2];
     parse_hex_to_array(hex_asm, &mut key_slice[..]);
     //TODO: errors processing for key creation
-    Ed25519KeyOption::from_public_key_tl_serialized(&key_slice).unwrap()
+    let key = deserialize_typed::<ton_api::ton::PublicKey>(key_slice).unwrap();
+    (&key).try_into().unwrap()
 }
 
 pub fn parse_hex_as_public_key_raw(hex_asm: &str) -> PublicKey {
@@ -151,11 +153,11 @@ pub fn parse_hex_as_expanded_private_key(hex_asm: &str) -> PrivateKey {
 }
 
 pub fn get_hash(data: &::ton_api::ton::bytes) -> BlockHash {
-    UInt256::calc_file_hash(&data.0)
+    UInt256::calc_file_hash(&data)
 }
 
 pub fn get_hash_from_block_payload(data: &BlockPayloadPtr) -> BlockHash {
-    UInt256::calc_file_hash(&data.data().0)
+    UInt256::calc_file_hash(&data.data())
 }
 
 pub fn int256_to_public_key_hash(public_key: &UInt256) -> PublicKeyHash {
@@ -176,7 +178,7 @@ pub fn get_overlay_id(first_block: &ton_api::ton::catchain::FirstBlock) -> Resul
         name: serialized_first_block.into(),
     };
     let serialized_overlay_id = serialize_tl_boxed_object!(&overlay_id.into_boxed());
-    Ok(UInt256::calc_file_hash(&serialized_overlay_id.0))
+    Ok(UInt256::calc_file_hash(&serialized_overlay_id))
 }
 
 pub fn get_block_id(
@@ -218,7 +220,7 @@ pub fn get_block_id_hash(id: &ton::BlockId) -> BlockHash {
     let mut serial = Vec::<u8>::new();
     let mut serializer = ton_api::Serializer::new(&mut serial);
     serializer.write_boxed(id).unwrap();
-    get_hash(&ton_api::ton::bytes(serial))
+    get_hash(&serial)
 }
 
 pub fn get_block_dependency_hash(block: &ton::BlockDep, receiver: &dyn Receiver) -> BlockHash {
@@ -247,7 +249,7 @@ macro_rules! serialize_tl_boxed_object
 {
   ($($args:expr),*) => {{
     let mut ret : ton_api::ton::bytes = ton_api::ton::bytes::default();
-    let mut serializer = ton_api::Serializer::new(&mut ret.0);
+    let mut serializer = ton_api::Serializer::new(&mut ret);
 
     $(serializer.write_boxed($args).unwrap();)*
 
@@ -260,10 +262,10 @@ pub fn serialize_block_with_payload(
     payload: &BlockPayloadPtr,
 ) -> Result<RawBuffer> {
     let mut raw_data: RawBuffer = RawBuffer::default();
-    let mut serializer = ton_api::Serializer::new(&mut raw_data.0);
+    let mut serializer = ton_api::Serializer::new(&mut raw_data);
 
     serializer.write_boxed(&block.clone().into_boxed())?;
-    raw_data.0.extend(payload.data().iter());
+    raw_data.extend(payload.data().iter());
 
     Ok(raw_data)
 }
@@ -275,7 +277,7 @@ where
     match response {
         Ok(response) => {
             let mut ret: RawBuffer = RawBuffer::default();
-            let mut serializer = ton_api::Serializer::new(&mut ret.0);
+            let mut serializer = ton_api::Serializer::new(&mut ret);
 
             serializer.write_boxed(&response).unwrap();
 
@@ -287,13 +289,13 @@ where
 
 pub fn deserialize_tl_bare_object<T: ::ton_api::BareDeserialize>(bytes: &RawBuffer) -> Result<T> {
     let cloned_bytes = bytes.clone();
-    let data: &mut &[u8] = &mut cloned_bytes.0.as_ref();
+    let data: &mut &[u8] = &mut cloned_bytes.as_slice();
     ton_api::Deserializer::new(data).read_bare()
 }
 
 pub fn deserialize_tl_boxed_object<T: ::ton_api::BoxedDeserialize>(bytes: &RawBuffer) -> Result<T> {
     let cloned_bytes = bytes.clone();
-    let data: &mut &[u8] = &mut cloned_bytes.0.as_ref();
+    let data: &mut &[u8] = &mut cloned_bytes.as_slice();
     ton_api::Deserializer::new(data).read_boxed()
 }
 
@@ -417,62 +419,56 @@ impl MetricsDumper {
         );
     }
 
-    pub fn update(&mut self, metrics_receiver: &metrics_runtime::Receiver) {
+    pub fn update(&mut self, metrics_receiver: &metrics::MetricsHandle) {
         //convert metrics
 
         let mut metrics: BTreeMap<String, Metric> = BTreeMap::new();
 
-        for (key, value) in &metrics_receiver.controller().snapshot().into_measurements() {
-            let key = key.name().to_string();
+        let snapshot = metrics_receiver.snapshot();
 
-            match value {
-                metrics_runtime::Measurement::Counter(value) => {
-                    metrics.insert(
-                        key,
-                        Metric {
-                            value: *value,
-                            usage: MetricUsage::Counter,
-                        },
-                    );
-                }
-                metrics_runtime::Measurement::Histogram(value) => {
-                    self.update_histogram(&mut metrics, key, value.decompress());
-                }
-                metrics_runtime::Measurement::Gauge(value) => {
-                    let mut usage = MetricUsage::Counter;
-                    let mut key = key.to_string();
+        for (k, v) in snapshot.counters {
+            metrics.insert(k.to_string(), Metric {
+                value: v,
+                usage: MetricUsage::Counter,
+            });
+        }
 
-                    if let Some(stripped_basic_key) = key.strip_prefix("percents:") {
-                        usage = MetricUsage::Percents;
-                        key = stripped_basic_key.to_string();
-                    } else {
-                        if let Some(stripped_basic_key) = key.strip_prefix("float:") {
-                            key = stripped_basic_key.to_string();
-                            usage = MetricUsage::Float;
-                        }
-                    }
+        for (mut key, v) in snapshot.gauges {
+            let mut usage = MetricUsage::Counter;
 
-                    metrics.insert(
-                        key,
-                        Metric {
-                            value: *value as u64,
-                            usage: usage,
-                        },
-                    );
+            if let Some(stripped_basic_key) = key.strip_prefix("percents:") {
+                usage = MetricUsage::Percents;
+                key = stripped_basic_key.to_string();
+            } else {
+                if let Some(stripped_basic_key) = key.strip_prefix("float:") {
+                    key = stripped_basic_key.to_string();
+                    usage = MetricUsage::Float;
                 }
             }
+            metrics.insert(key, Metric {
+                value: v as u64,
+                usage,
+            });
+        }
+
+        for (k, v) in snapshot.histograms {
+            self.update_histogram(&mut metrics, k.to_string(), v);
         }
 
         //snapshot time
 
-        let duration = self.last_dump_time.elapsed().unwrap().as_secs_f64();
+        let duration = get_elapsed_time(&self.last_dump_time).as_secs_f64();
         self.last_dump_time = std::time::SystemTime::now();
 
         //compute metrics
 
+        let mut unprocessed_handlers = HashSet::new();
+
         for (key, handler) in &self.compute_handlers {
             if let Some(value) = handler(key, &metrics) {
                 metrics.insert(key.to_string(), value);
+            } else {
+                unprocessed_handlers.insert(key.to_string());
             }
         }
 
@@ -495,9 +491,38 @@ impl MetricsDumper {
             }
         }
 
+        //second pass for recursive compute handlers
+
+        for key in unprocessed_handlers {
+            if let Some(handler) = self.compute_handlers.get(&key) {
+                if let Some(value) = handler(&key, &metrics) {
+                    metrics.insert(key.to_string(), value);
+                }   
+            }
+        }
+
         //update state
 
         self.prev_metrics = metrics;
+    }
+
+    pub fn enumerate_as_f64<F>(&self, handler: F)
+    where
+        F: Fn(String, f64),
+    {
+        for (key, metric) in &self.prev_metrics {
+            use MetricUsage::*;
+
+            let value = match metric.usage {
+                Counter => metric.value as f64,
+                Derivative => metric.value as f64 / Self::METRIC_DERIVATIVE_MULTIPLIER,
+                Percents => (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER * 100.0,
+                Float => (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER,
+                Latency => (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER,
+            };
+
+            handler(key.clone(), value);
+        }
     }
 
     pub fn dump<F>(&self, handler: F)
@@ -768,4 +793,12 @@ pub fn compute_result_ignore_metric(
         value: (percentage * MetricsDumper::METRIC_FLOAT_MULTIPLIER) as u64,
         usage: MetricUsage::Percents,
     })
+}
+
+pub fn get_elapsed_time(from_time: &std::time::SystemTime) -> std::time::Duration {
+  if let Ok(latency) = from_time.elapsed() {
+    latency
+  } else {
+    std::time::Duration::ZERO
+  }
 }

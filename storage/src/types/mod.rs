@@ -11,19 +11,18 @@
 * limitations under the License.
 */
 
+#[cfg(test)]
+mod tests;
 
 mod block_id;
 mod block_meta;
 mod db_slice;
-mod reference;
 mod shard_ident_key;
 mod status_key;
 mod storage_cell;
 
-pub use block_id::*;
 pub use block_meta::*;
 pub use db_slice::*;
-pub use reference::*;
 pub use shard_ident_key::*;
 pub use status_key::*;
 pub use storage_cell::*;

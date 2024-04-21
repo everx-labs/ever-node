@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -16,27 +16,29 @@ use crate::network::node_network::NetworkContext;
 use adnl::{
     declare_counted, 
     common::{
-        AdnlPeers, Answer, CountedObject, Counter, QueryResult, 
+        AdnlPeers, Answer, CountedObject, Counter, QueryAnswer, QueryResult, 
         TaggedByteSlice, TaggedTlObject, Wait
     },
     node::AdnlNode,
 };
-use ever_crypto::{KeyId, KeyOption};
-use overlay::{OverlayNode, PrivateOverlayShortId, QueriesConsumer};
+use adnl::{OverlayNode, PrivateOverlayShortId, QueriesConsumer};
+use adnl::RldpNode;
 use catchain::{
     BlockPayloadPtr, CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr,
     ExternalQueryResponseCallback, PublicKeyHash
 };
-use rldp::RldpNode;
 use std::{
     collections::HashMap, io::Cursor, sync::{Arc, atomic::{self, AtomicBool}}, time::Instant
 };
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
-use ton_api::{serialize_boxed, serialize_boxed_append, tag_from_boxed_object,
+use ton_api::{
+    serialize_boxed, serialize_boxed_append,
     Deserializer, IntoBoxed, ton::{ ton_node::Broadcast, TLObject }
 };
-use ton_types::{error, fail, Result};
+#[cfg(feature = "telemetry")]
+use ton_api::tag_from_boxed_object;
+use ton_types::{error, fail, KeyId, KeyOption, Result};
 
 declare_counted!(
     pub struct CatchainClient {
@@ -84,7 +86,8 @@ impl CatchainClient {
             Some(runtime_handle.clone()), 
             overlay_id, 
             &local_adnl_key, 
-            &peers
+            &peers,
+            network_context.broadcast_hops
         )?;
         let consumer = Arc::new(
             CatchainClientConsumer::new(overlay_id.clone(), catchain_listener)
@@ -145,7 +148,7 @@ impl CatchainClient {
                 log::warn!("Overlay {} was stopped!", &overlay_id);
                 return;
             }
-            let buf = &msg.data().0;
+            let buf = &msg.data();
             let tag = if buf.len() < 4 {
                 0 
             } else {
@@ -175,10 +178,12 @@ impl CatchainClient {
         message: &BlockPayloadPtr
     ) -> Result<BlockPayloadPtr> {
         let query: TLObject = Deserializer::new(
-            &mut Cursor::new(&message.data().0)
+            &mut Cursor::new(&message.data())
         ).read_boxed()?;
         #[cfg(feature = "telemetry")]
         let tag = tag_from_boxed_object(&query);
+        #[cfg(not(feature = "telemetry"))]
+        let tag = 0;
         let query = TaggedTlObject {
             object: query,
             #[cfg(feature = "telemetry")]
@@ -197,9 +202,10 @@ impl CatchainClient {
             "<send_query> result (overlay: {}, data: {:08x}, key_id: {}): {:?}({}ms)",
             &overlay_id, tag, &receiver_id, result, elapsed.as_millis()
         );
+        metrics::histogram!("catchain_overlay_query_time", elapsed);
         let result = result.ok_or_else(|| error!("answer is None!"))?;
         let mut data: catchain::RawBuffer = catchain::RawBuffer::default();
-        let mut serializer = ton_api::Serializer::new(&mut data.0);
+        let mut serializer = ton_api::Serializer::new(&mut data);
         serializer.write_boxed(&result)?;
         let data = catchain::CatchainFactory::create_block_payload(data);
         Ok(data)
@@ -215,7 +221,7 @@ impl CatchainClient {
         max_answer_size: u64
     )-> Result<BlockPayloadPtr> {
         let query_body: TLObject = Deserializer::new(
-            &mut Cursor::new(&message.data().0)
+            &mut Cursor::new(&message.data())
         ).read_boxed()?;
         let mut query = overlay.get_query_prefix(overlay_id)?;
         //Serializer::new(&mut query).write_bare(&message.0)?;
@@ -236,9 +242,7 @@ impl CatchainClient {
         log::trace!(target: Self::TARGET, "result status: {}", &result.is_ok());
         let (data, _) = result?;
         let data = data.ok_or_else(|| error!("asnwer is None!"))?;
-        let data = catchain::CatchainFactory::create_block_payload(
-            ton_api::ton::bytes(data)
-        );
+        let data = catchain::CatchainFactory::create_block_payload(data);
         Ok(data)
     }
 
@@ -253,6 +257,7 @@ impl CatchainClient {
         let overlay_id = private_overlay_id.clone();
         let self1 = self.clone();
         let self2 = self.clone();
+        let self3 = self.clone();
         let overlay = overlay_node.clone();
         let keys = validator_keys.clone();
         let listener = catchain_listener.clone();
@@ -267,6 +272,14 @@ impl CatchainClient {
         let listener = catchain_listener.clone();
         runtime_handle.spawn(async move { 
             if let Err(e) = CatchainClient::wait_catchain_broadcast(self2, &overlay_id, overlay, &keys, &listener).await {
+                log::warn!(target: Self::TARGET, "ERROR: {}", e)
+            }
+        });
+        let overlay_id = private_overlay_id.clone();
+        let overlay = overlay_node.clone();
+        let listener = catchain_listener.clone();
+        runtime_handle.spawn(async move { 
+            if let Err(e) = CatchainClient::wait_block_candidate_status_broadcast(self3, &overlay_id, overlay, &listener).await {
                 log::warn!(target: Self::TARGET, "ERROR: {}", e)
             }
         });
@@ -295,9 +308,7 @@ impl CatchainClient {
                     if let Some(listener) = catchain_listener.upgrade() {
                         listener.on_broadcast(
                             message.recv_from, 
-                            &catchain::CatchainFactory::create_block_payload(
-                                ::ton_api::ton::bytes(message.data)
-                            )
+                            &catchain::CatchainFactory::create_block_payload(message.data)
                         );    // Test id!
                     }
                 },
@@ -333,9 +344,47 @@ impl CatchainClient {
                     let block_update = catchain_block_update.into_boxed();
                     if let Some(listener) = catchain_listener.upgrade() {
                                 let mut data: catchain::RawBuffer = catchain::RawBuffer::default();
-                                let mut serializer = ton_api::Serializer::new(&mut data.0);
+                                let mut serializer = ton_api::Serializer::new(&mut data);
                                 serializer.write_boxed(&block_update)?;
                                 serializer.write_boxed(&vs_block_update)?;
+                                let data = catchain::CatchainFactory::create_block_payload(data);
+                        listener
+                            .on_message(
+                                source_id,
+                                &data);
+                    }
+                },
+                Ok(None) => { return Ok(())},
+                Err(e) => {
+                    log::error!(target: Self::TARGET, "private overlay broadcast err: {}", e);
+                },
+            };
+        }
+        let _result = result.ok_or_else(|| error!("Failed to receive a private overlay broadcast!"))?;
+        Ok(())
+    }
+
+    async fn wait_block_candidate_status_broadcast(
+        self: Arc<Self>,
+        overlay_id: &Arc<PrivateOverlayShortId>,
+        overlay: Arc<OverlayNode>, 
+        catchain_listener: &CatchainOverlayListenerPtr) -> Result<()> {
+        let receiver = overlay.clone();
+        let result: Option<Box<Broadcast>> = None;
+        let catchain_listener = catchain_listener.clone();
+
+        while let None = result {
+            if self.is_stop.load(atomic::Ordering::Relaxed) {
+                break;
+            };
+            let message = receiver.wait_for_block_candidate_status(overlay_id).await;
+            match message {
+                Ok(Some((block_status, source_id)))  => {
+                    log::trace!(target: Self::TARGET, "private overlay broadcast BlockCandidateStatus (successed)");
+                    if let Some(listener) = catchain_listener.upgrade() {
+                                let mut data: catchain::RawBuffer = catchain::RawBuffer::default();
+                                let mut serializer = ton_api::Serializer::new(&mut data);
+                                serializer.write_boxed(&block_status)?;
                                 let data = catchain::CatchainFactory::create_block_payload(data);
                         listener
                             .on_message(
@@ -375,6 +424,7 @@ impl CatchainOverlay for CatchainClient {
         if elapsed.as_micros() > 500 {
             log::trace!(target: Self::TARGET, "message elapsed: {}", elapsed.as_millis());
         };
+        metrics::histogram!("catchain_send_message_time", elapsed);
     }
 
     /// Send message to multiple sources
@@ -460,20 +510,19 @@ impl CatchainOverlay for CatchainClient {
         let msg = payload.clone();
         let overlay_id = self.overlay_id.clone();
         let overlay = self.network_context.overlay.clone();
-        let broadcast_hops = self.network_context.broadcast_hops;
         let local_validator_key = self.local_validator_key.clone();
         self.runtime_handle.spawn(
             async move {
                 let msg = TaggedByteSlice {
-                    object: &msg.data().0,
+                    object: &msg.data(),
                     #[cfg(feature = "telemetry")]
                     tag: 0x80000002 // Catchain broadcast
-                }; 
+                };                                                         
                 let result = overlay.broadcast(
                     &overlay_id, 
                     &msg, 
                     Some(&local_validator_key),
-                    broadcast_hops
+                    false
                 ).await;
                 log::trace!(target: Self::TARGET, "send_broadcast_fec_ex status: {:?}", result);
             }
@@ -485,7 +534,7 @@ struct CatchainClientConsumer {
     catchain_listener: CatchainOverlayListenerPtr,
     is_stop: AtomicBool,
     overlay_id: Arc<PrivateOverlayShortId>,
-    worker_waiters: lockfree::map::Map<u128, Arc<Wait<Result<QueryResult>>>>
+    worker_waiters: Arc<lockfree::map::Map<u128, Arc<Wait<Result<Option<Answer>>>>>>
 }
 
 impl CatchainClientConsumer {
@@ -497,7 +546,7 @@ impl CatchainClientConsumer {
             catchain_listener: catchain_listener,
             is_stop: AtomicBool::new(false),
             overlay_id: overlay_id, 
-            worker_waiters: lockfree::map::Map::new()
+            worker_waiters: Arc::new(lockfree::map::Map::new())
         }
     }
 }
@@ -521,55 +570,77 @@ impl QueriesConsumer for CatchainClientConsumer {
                 fail!(e)
             }
         };
-        let (wait, mut queue_reader) = Wait::new();
-        self.worker_waiters.insert(id.as_nanos(), wait.clone());
-        
-        if let Some(listener) = self.catchain_listener.upgrade() {
-            let wait = wait.clone();
-            wait.request();
-            listener
-                .on_query(
-                    peers.other().clone(),
-                    &catchain::CatchainFactory::create_block_payload(::ton_api::ton::bytes(data)),
-                    Box::new(move |result: Result<BlockPayloadPtr> | {
-                        let result = match result {
-                            Ok(answer) => {
-                                let answer: Result<TLObject> = Deserializer::new(
-                                    &mut Cursor::new(&answer.data().0)
-                                ).read_boxed();
-                                match answer {
-                                    Ok(answer) => { 
-                                        #[cfg(feature = "telemetry")]
-                                        let tag = tag_from_boxed_object(&answer);
-                                        let answer = TaggedTlObject {
-                                            object: answer,
-                                            #[cfg(feature = "telemetry")]
-                                            tag
-                                        };
-                                        Ok(QueryResult::Consumed(Some(Answer::Object(answer)))) 
+
+        // Spawn the task to let catchain query processed asynchronously
+        let catchain_listener = self.catchain_listener.clone();
+        let peers = peers.clone();
+        let worker_waiters = self.worker_waiters.clone();
+        let handle = tokio::spawn(
+            async move {
+                let (wait, mut queue_reader) = Wait::new();
+                worker_waiters.insert(id.as_nanos(), wait.clone());        
+                if let Some(listener) = catchain_listener.upgrade() {
+                    let wait = wait.clone();
+                    wait.request();
+                    listener.on_query(
+                        peers.other().clone(),
+                        &catchain::CatchainFactory::create_block_payload(data),
+                        Box::new(
+                            move |result: Result<BlockPayloadPtr> | {
+                                let result = match result {
+                                    Ok(answer) => {
+                                        let answer: Result<TLObject> = Deserializer::new(
+                                            &mut Cursor::new(&answer.data())
+                                        ).read_boxed();
+                                        match answer {
+                                            Ok(answer) => { 
+                                                #[cfg(feature = "telemetry")]
+                                                let tag = tag_from_boxed_object(&answer);
+                                                let answer = TaggedTlObject {
+                                                    object: answer,
+                                                    #[cfg(feature = "telemetry")]
+                                                    tag
+                                                };
+                                                let ret = Answer::Object(answer);
+                                                Ok(Some(ret))
+                                            },
+                                            Err(e) => Err(e)
+                                        }
                                     },
                                     Err(e) => Err(e)
-                                }
-                            },
-                            Err(e) => Err(e)
-                        };
-                        wait.respond(Some(result));
-                    })
-                );
-        }
-        let res = match wait.wait(&mut queue_reader, true).await {
-            Some(None) => fail!("Answer was not set!"),
-            Some(Some(answer)) => answer,
-            None => {
-                log::warn!(target: CatchainClient::TARGET, "Waiting returned an internal error (query: {:?})", query);
-                fail!("Waiting returned an internal error!");
+                                };
+                                wait.respond(Some(result));
+                            }
+                        )
+                    );
+                }
+                let res = match wait.wait(&mut queue_reader, true).await {
+                    Some(None) => fail!("Answer was not set!"),
+                    Some(Some(answer)) => answer,
+                    None => {
+                        log::warn!(
+                            target: CatchainClient::TARGET, 
+                            "Waiting returned an internal error (query: {:?})", 
+                            query
+                        );
+                        fail!("Waiting returned an internal error!");
+                    }
+                };
+                if log::log_enabled!(log::Level::Trace) {
+                    let elapsed = now.elapsed();
+                    log::trace!(
+                        target: CatchainClient::TARGET, 
+                        "query elapsed: {}", 
+                        elapsed.as_millis()
+                    );
+                };
+                metrics::histogram!("catchain_client_query_time", now.elapsed());
+                worker_waiters.remove(&id.as_nanos());
+                res
             }
-        };
-        if log::log_enabled!(log::Level::Trace) {
-            let elapsed = now.elapsed();
-            log::trace!(target: CatchainClient::TARGET, "query elapsed: {}", elapsed.as_millis());
-        };
-        self.worker_waiters.remove(&id.as_nanos());
-        res
+        );
+
+        Ok(QueryResult::Consumed(QueryAnswer::Pending(handle)))
+
     }
 }

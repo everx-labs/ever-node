@@ -11,26 +11,6 @@
 * limitations under the License.
 */
 
-#[macro_use]
-extern crate lazy_static;
-
-extern crate base64;
-extern crate chrono;
-extern crate crossbeam;
-extern crate metrics_core;
-extern crate metrics_runtime;
-extern crate rand;
-extern crate regex;
-extern crate sha2;
-extern crate tokio;
-extern crate ton_api;
-extern crate ton_types;
-
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate failure;
-
 /// Modules
 mod activity_node;
 mod block;
@@ -44,21 +24,13 @@ mod receiver;
 mod receiver_source;
 pub mod utils;
 
-use adnl::node::AdnlNode;
-use ever_crypto::{KeyId, KeyOption};
-use failure::err_msg;
-pub use overlay::PrivateOverlayShortId;
-pub use profiling::{InstanceCounter, ResultStatusCounter};
+use crate::{profiling::InstanceCounter, utils::MetricsHandle};
+use adnl::{PrivateOverlayShortId, node::AdnlNode};
 use std::{
-    any::Any,
-    cell::RefCell,
-    fmt,
-    path::Path,
-    rc::{Rc, Weak},
-    sync::Arc,
+    any::Any, cell::RefCell, fmt, path::Path, rc::{Rc, Weak}, sync::Arc,
     time::SystemTime,
 };
-use ton_types::types::UInt256;
+use ton_types::{KeyId, KeyOption, UInt256};
 
 /// Public key
 pub type PublicKey = Arc<dyn KeyOption>;
@@ -223,6 +195,24 @@ pub struct Options {
 
     /// Check blocks processed by ValidatorSession but don't use them in Catchain DAG (for debugging and log replay)
     pub skip_processed_blocks: bool,
+
+    /// Receiver: max number of neighbours to synchronize
+    pub receiver_max_neighbours_count: usize,
+
+    /// Receiver: min time for catchain sync with neighbour nodes
+    pub receiver_neighbours_sync_min_period: std::time::Duration,
+
+    /// Receiver: max time for catchain sync with neighbour nodes
+    pub receiver_neighbours_sync_max_period: std::time::Duration,
+
+    /// Receiver: max number of attempts to find a source to synchronize
+    pub receiver_max_sources_sync_attempts: usize,
+
+    /// Receiver: min time for catchain neighbours rotation
+    pub receiver_neighbours_rotate_min_period: std::time::Duration,
+
+    /// Receiver: max time for catchain neighbours rotation
+    pub receiver_neighbours_rotate_max_period: std::time::Duration,
 }
 
 /// Catchain log replay options
@@ -571,7 +561,7 @@ pub trait Receiver {
     fn process(&mut self);
 
     /// Receiver for metrics
-    fn get_metrics_receiver(&self) -> &metrics_runtime::Receiver;
+    fn get_metrics_receiver(&self) -> &MetricsHandle;
 
     /// Received blocks instance counter
     fn get_received_blocks_instance_counter(&self) -> &InstanceCounter;
@@ -1044,7 +1034,7 @@ impl CatchainFactory {
         path: String,
         db_suffix: String,
         allow_unsafe_self_blocks_resync: bool,
-        metrics: Option<Arc<metrics_runtime::Receiver>>,
+        metrics: Option<MetricsHandle>,
     ) -> Result<ReceiverPtr> {
         receiver::ReceiverImpl::create(
             listener,
@@ -1067,7 +1057,7 @@ impl CatchainFactory {
     pub fn create_database(
         path: String,
         name: String,
-        metrics: &metrics_runtime::Receiver,
+        metrics: &MetricsHandle,
     ) -> Result<DatabasePtr> {
         database::DatabaseImpl::create(&path, &name, metrics)
     }

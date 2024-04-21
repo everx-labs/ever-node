@@ -1,14 +1,25 @@
 {
-    "log_config_name": "log_cfg_fullnode.yml",
+    "log_config_name": "log_cfg_nodenumber.yml",
     "ton_global_config_name": "ton-global.config.json",
-    "internal_db_path": "full_node_db",
-    "ip_address": "0.0.0.0:30006",
+    "internal_db_path": "node_db_nodenumber",
+    "ip_address": "0.0.0.0:main_port",
+    "control_server_port": control_port,
+    workchain_id
+    "shard_keeper": {
+        "get_peer_attempt_timeout_ms": 1000,
+        "download_next_block_full_timeout_ms": 1000,
+        "download_block_full_timeout_ms": 1000
+    },
     "kafka_consumer_config": {
         "group_id": "101",
         "brokers": "kafka",
         "topic": "requests",
         "session_timeout_ms": 6000,
         "run_attempt_timeout_ms": 1000
+    },
+    "remp": {
+        "client_enabled": true,
+        "service_enabled": true
     },
     "external_db_config": {
         "block_producer": {
