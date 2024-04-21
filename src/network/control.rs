@@ -364,7 +364,6 @@ impl ControlQuerySubscriber {
         Self::add_stats(&mut stats, "masterchainblocknumber", mc_block_handle.id().seq_no());
 
         Self::add_stats(&mut stats, "node_version", format!("\"{}\"", env!("CARGO_PKG_VERSION")));
-
         let public_overlay_adnl_id = self.public_overlay_adnl_id.as_ref().ok_or_else(||
             error!("Public overlay key id didn`t set!")
         )?;
