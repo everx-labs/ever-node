@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,18 +7,20 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
-use std::{cmp::min, time::SystemTime};
+use std::cmp::min;
+use std::time::SystemTime;
 
+use crate::engine::now_duration;
 use super::*;
-use ton_block::{
+use ever_block::{
     InternalMessageHeader, ExternalInboundMessageHeader, Serializable,
     GetRepresentationHash, MsgAddressInt, MsgAddressExt,
 };
-use ton_types::{
+use ever_block::{
     BuilderData, IBitstring, CellType, SliceData, write_boc, BocWriter
 };
 
@@ -199,15 +201,15 @@ fn test_messages_pool() {
     // create 3 messages, 2 of them are with the prefix 0x01 and one with 0x22
     let m = create_external_message(1, vec!(1));
     let id1 = m.hash().unwrap();
-    mp.new_message(id1.clone(), m, 0).unwrap();
+    mp.new_message(&id1, m, 0).unwrap();
 
     let m = create_external_message(1, vec!(2));
     let id2 = m.hash().unwrap();
-    mp.new_message(id2.clone(), m, 0).unwrap();
+    mp.new_message(&id2, m, 0).unwrap();
 
     let m = create_external_message(0x22, vec!(2));
     let id3 = m.hash().unwrap();
-    mp.new_message(id3.clone(), m.clone(), 0).unwrap();
+    mp.new_message(&id3, m.clone(), 0).unwrap();
 
     // get messages for shard 0x8000_0000_0000_0000 - total 3 messages
     let m1 = mp.get_messages(&ShardIdent::with_tagged_prefix(0, 0x8000_0000_0000_0000).unwrap(), 1).unwrap(); 
@@ -265,11 +267,16 @@ fn test_messages_pool() {
 
 
 async fn check_messages(mp: Arc<MessagesPool>, shard: ShardIdent, now: u32, expected_count: usize) -> Result<()> {
-    for _ in 0..20 {
+    let iterations = 20;
+    for i in 1..=iterations {
         // let count = mp.clone().get_messages(&shard, now).unwrap().len();
-        let count = mp.clone().iter(shard.clone(), now, u64::MAX).count();
+        let count = mp.clone().iter(
+            shard.clone(), 
+            now,
+            u64::MAX
+        ).count();
         if count != expected_count {
-            fail!("Wrong messages count for shard {} expected {}, got {}", shard, expected_count, count)
+            fail!("Wrong messages count for shard {} expected {}, got {} on {} iteration", shard, expected_count, count, i)
         }
     }
     Ok(())
@@ -280,15 +287,16 @@ async fn test_ext_messages_multi_threads() {
     const M: usize = 50;
     let mp = Arc::new(MessagesPool::new(0, None));
 
-    // for dst_shard in [0, 0x40, 0x80, 0xC0] {
-    for dst_shard in [0, 0x20, 0x40, 0x60, 0x80, 0xA0, 0xC0, 0xE0] {
+    // total 8 prefixes by 50 messages in each
+    for prefix in [0, 0x20, 0x40, 0x60, 0x80, 0xA0, 0xC0, 0xE0] {
         for i in 0..M {
-            let m = create_external_message(dst_shard, vec!(i as u8));
+            let m = create_external_message(prefix, vec!(i as u8));
             let id = m.hash().unwrap();
-            mp.new_message(id.clone(), m, 0).unwrap();
+            mp.new_message(&id, m, 0).unwrap();
         }
     }
 
+    // get messages to destination shards
     let tests = [
         [(0x20, M*2), (0x60, M*2), (0xA0, M*2), (0xE0, M*2)],
         [(0x40, M*4), (0xA0, M*2), (0xD0, M), (0xF0, M)],
@@ -315,11 +323,11 @@ fn test_external_messages_maximum_queue_length() {
     for i in 0..maximum_queue_length {
         let m = create_external_message(0, vec!(i as u8));
         let id = m.hash().unwrap();
-        mp.new_message(id.clone(), m, 0).unwrap();
+        mp.new_message(&id, m, 0).unwrap();
     }
     let m = create_external_message(0, vec!(maximum_queue_length as u8));
     let id = m.hash().unwrap();
-    mp.new_message(id.clone(), m, 0).unwrap_err();
+    mp.new_message(&id, m, 0).unwrap_err();
 }
 
 #[test]
@@ -333,17 +341,20 @@ fn test_external_messages_big_load() {
         for j in 0..rate_per_second {
             let m = create_external_message(0, (i * rate_per_second + j).to_be_bytes().to_vec());
             let id = m.hash().unwrap();
-            mp.new_message(id.clone(), m, now + i).unwrap();
+            mp.new_message(&id, m, now + i).unwrap();
         }
     }
-    let n = SystemTime::now();
-    let now = now_duration().as_millis() as u64;
-    let count = mp.clone().iter(
-        ShardIdent::full(0), 
-        (now / 1000) as u32, 
-        now + limit
-    ).take(100).count();
-    let n = n.elapsed().unwrap().as_millis();
+    let (count, n) = {
+        let n = SystemTime::now();
+        let now = now_duration().as_millis() as u64;
+        let count = mp.clone().iter(
+            ShardIdent::full(0), 
+            (now / 1000) as u32, 
+            now + limit
+        ).take(100).count();
+        let n = n.elapsed().unwrap().as_millis();
+        (count, n)
+    };
     println!("count = {}, time = {:?}", count, n);
     assert_eq!(0, count);
     assert!((n as u64) < limit * 3);

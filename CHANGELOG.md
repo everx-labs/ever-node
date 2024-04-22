@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.58.2
+
+- Repo ever_types merged into repo ever_block
+
+## Version 0.58.0
+
+- The crate was renamed from `ton_node` to `ever-node`
+- Supported renaming of other crates
+
 ## Version 0.57.0
 
 - Shadow SMFT is prepared for first deployment

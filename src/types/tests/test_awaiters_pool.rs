@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -20,7 +20,7 @@ use std::{
     time::Duration,
     sync::{Arc, atomic::{AtomicU32, Ordering}}
 };
-use ton_types::fail;
+use ever_block::fail;
 
 async fn op(number: Arc<AtomicU32>) -> Result<u32> {
     futures_timer::Delay::new(Duration::from_millis(1000)).await;

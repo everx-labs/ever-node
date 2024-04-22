@@ -18,8 +18,8 @@ use std::time::Duration;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use log::warn;
-use ton_api::IntoBoxed;
-use ton_types::KeyOption;
+use ever_block::{KeyId, KeyOption, Result};
+use ton_api::IntoBoxed;          
 
 /*
     Constants
@@ -81,12 +81,12 @@ impl Drop for HangCheck {
     Utils
 */
 
-pub(crate) fn get_adnl_id(validator: &ValidatorDescr) -> Arc<ton_types::KeyId> {
+pub(crate) fn get_adnl_id(validator: &ValidatorDescr) -> Arc<KeyId> {
     super::super::validator_utils::get_adnl_id(validator)
     //ever_crypto::KeyId::from_data(validator.compute_node_id_short().inner())
 }
 
-pub(crate) fn into_public_key_tl(opt: &Arc<dyn ton_types::KeyOption>) -> ton_types::Result<ton_api::ton::PublicKey> {
+pub(crate) fn into_public_key_tl(opt: &Arc<dyn KeyOption>) -> Result<ton_api::ton::PublicKey> {
     let pub_key = opt.pub_key()?;
     use ton_api::ton::pub_::publickey::Bls;
     Ok(Bls {
@@ -95,8 +95,7 @@ pub(crate) fn into_public_key_tl(opt: &Arc<dyn ton_types::KeyOption>) -> ton_typ
 }
 
 pub(crate) fn generate_test_bls_key(public_key: &Arc<dyn KeyOption>) -> Result<Arc<dyn KeyOption>> {
-    use ton_types::BlsKeyOption;
-    use ton_types::BLS_KEY_MATERIAL_LEN;    
+    use ever_block::{BlsKeyOption, BLS_KEY_MATERIAL_LEN};    
 
     log::debug!(target: "verificator", "Generate BLS key from public validator's key {}", public_key.id());
 

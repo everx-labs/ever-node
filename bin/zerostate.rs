@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,21 +7,22 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use clap::{Arg, App};
 use serde_json::{Map, Value};
-use ton_block::{
-    ConfigParamEnum, ConfigParam12,
-    Deserializable, Serializable, ShardIdent, ShardStateUnsplit, StateInit,
+use ever_block::{
+    base64_encode, ConfigParamEnum, ConfigParam12, Deserializable, HashmapType, MASTERCHAIN_ID,
+    Result, Serializable, SHARD_FULL, ShardIdent, ShardStateUnsplit, StateInit, UInt256, 
+    write_boc
 };
-use ton_types::{base64_encode, HashmapType, Result, UInt256, write_boc};
+use ever_block_json::parse_state;
 
 fn import_zerostate(json: &str) -> Result<ShardStateUnsplit> {
     let map = serde_json::from_str::<Map<String, Value>>(&json)?;
-    let mut mc_zero_state = ton_block_json::parse_state(&map)?;
+    let mut mc_zero_state = parse_state(&map)?;
     let now = mc_zero_state.gen_time();
     // let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as u32;
     // mc_zero_state.set_gen_time(now);
@@ -29,7 +30,7 @@ fn import_zerostate(json: &str) -> Result<ShardStateUnsplit> {
     let mut workchains = extra.config.workchains()?;
     let mut wc_zero_state = vec![];
     workchains.clone().iterate_with_keys(|workchain_id, mut descr| {
-        let shard = ShardIdent::with_tagged_prefix(workchain_id, ton_block::SHARD_FULL)?;
+        let shard = ShardIdent::with_tagged_prefix(workchain_id, SHARD_FULL)?;
         // generate empty shard state and set desired fields
         let mut state = ShardStateUnsplit::with_ident(shard);
         state.set_gen_time(now);
@@ -38,7 +39,7 @@ fn import_zerostate(json: &str) -> Result<ShardStateUnsplit> {
 
         let cell = state.serialize()?;
         descr.zerostate_root_hash = cell.repr_hash();
-        let bytes = ton_types::write_boc(&cell)?;
+        let bytes = write_boc(&cell)?;
         descr.zerostate_file_hash = UInt256::calc_file_hash(&bytes);
         workchains.set(&workchain_id, &descr)?;
         let name = format!("{:x}.boc", descr.zerostate_file_hash);
@@ -51,8 +52,8 @@ fn import_zerostate(json: &str) -> Result<ShardStateUnsplit> {
     let cur_validators = extra.config.validator_set()?;
     let (_validators, hash_short) = cur_validators.calc_subset(
         &ccvc, 
-        ton_block::SHARD_FULL, 
-        ton_block::MASTERCHAIN_ID, 
+        SHARD_FULL, 
+        MASTERCHAIN_ID, 
         0,
         now.into()
     )?;
@@ -98,7 +99,7 @@ fn write_zero_state(mc_zero_state: ShardStateUnsplit) -> Result<()> {
     println!("{}", json);
 
     // check correctness
-    // std::fs::write("new.json", ton_block_json::debug_state(mc_zero_state)?)?;
+    // std::fs::write("new.json", debug_state(mc_zero_state)?)?;
 
     Ok(())
 }

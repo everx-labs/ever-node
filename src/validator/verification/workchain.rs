@@ -32,16 +32,15 @@ use tokio::time::sleep;
 use std::time::SystemTime;
 use std::time::Duration;
 use spin::mutex::SpinMutex;
+use ever_block::{crc32_digest, Result, bls::BLS_PUBLIC_KEY_LEN};
 use ton_api::ton::ton_node::blockcandidatestatus::BlockCandidateStatus;
 use ton_api::ton::ton_node::broadcast::BlockCandidateBroadcast;
-use ton_types::Result;
 use validator_session::ValidatorWeight;
 use catchain::utils::MetricsDumper;
 use catchain::utils::MetricsHandle;
 use metrics::Recorder;
 use catchain::utils::add_compute_relative_metric;
 use catchain::utils::add_compute_result_metric;
-use ton_types::bls::BLS_PUBLIC_KEY_LEN;
 
 //TODO: cutoff weight configuration
 //TODO: neighbours mode configuration
@@ -1068,7 +1067,7 @@ impl Workchain {
             payload.append(&mut local_key_payload);
 
             let payload_ptr = unsafe { std::slice::from_raw_parts(payload.as_ptr() as *const u8, payload.len()) };
-            let hash = ton_types::crc32_digest(payload_ptr);
+            let hash = crc32_digest(payload_ptr);
 
             if self.wc_validators.len () < 1 {
                 return false; //no verification in empty workchain

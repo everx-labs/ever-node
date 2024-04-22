@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -47,12 +47,12 @@ use ton_api::{
         }
     }
 };
-use ton_block::{
-    BlockIdExt, MsgAddressInt, Serializable, ShardIdent, MASTERCHAIN_ID, MerkleProof, 
-    ShardAccount
+use ever_block::{
+    error, fail, AccountId, BlockIdExt, BlsKeyOption, Ed25519KeyOption, KeyId, MASTERCHAIN_ID,
+    MerkleProof, MsgAddressInt, read_single_root_boc, Result, Serializable, ShardIdent, 
+    ShardAccount, UInt256
 };
-use ton_block_json::serialize_config_param;
-use ton_types::{error, fail, KeyId, read_single_root_boc, Result, UInt256, AccountId};
+use ever_block_json::serialize_config_param;
 
 pub struct ControlServer {
     adnl: AdnlServer
@@ -638,7 +638,7 @@ impl ControlQuerySubscriber {
         };
         let query = match query.downcast::<GenerateKeyPair>() {
             Ok(_params) => return QueryResult::consume(
-                self.process_generate_keypair(ton_types::Ed25519KeyOption::KEY_TYPE).await?,
+                self.process_generate_keypair(Ed25519KeyOption::KEY_TYPE).await?,
                 #[cfg(feature = "telemetry")]
                 None
             ),
@@ -646,7 +646,7 @@ impl ControlQuerySubscriber {
         };
         let query = match query.downcast::<GenerateBlsKeyPair>() {
             Ok(_params) => return QueryResult::consume(
-                self.process_generate_keypair(ton_types::BlsKeyOption::KEY_TYPE).await?,
+                self.process_generate_keypair(BlsKeyOption::KEY_TYPE).await?,
                 #[cfg(feature = "telemetry")]
                 None
             ),

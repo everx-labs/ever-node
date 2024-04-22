@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,23 +7,22 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use crate::{engine_traits::EngineOperations, shard_state::ShardStateStuff, validator::UInt256};
-use ever_crypto::Ed25519KeyOption;
-use num_bigint::BigUint;
+
+use ever_abi::{Contract, Function, Token, TokenValue, Uint};
+use ever_block::{
+    error, ConfigParamEnum, ExternalInboundMessageHeader, HashmapAugType, Message, MsgAddressExt,
+    MsgAddressInt, Result, Serializable, SigPubKey, SlashingConfig, SliceData, write_boc
+};
+#[cfg(feature = "slashing")]
+use ever_block::{base64_encode, Ed25519KeyOption};
 use rand::Rng;
-use spin::mutex::SpinMutex;
 use std::{fmt, sync::Arc};
 use storage::block_handle_db::BlockHandle;
-use ton_abi::{Contract, Function, Token, TokenValue, Uint};
-use ton_block::{
-    ConfigParamEnum, ExternalInboundMessageHeader, HashmapAugType, Message, MsgAddressExt,
-    MsgAddressInt, Serializable, SigPubKey, SlashingConfig,
-};
-use ton_types::{error, Result, write_boc, SliceData};
 use validator_session::{
     PrivateKey, PublicKey, SlashingAggregatedMetric, SlashingMetric, SlashingNode,
     SlashingValidatorStat,
@@ -41,7 +40,8 @@ lazy_static::lazy_static! {
         .expect("Elector contract must have 'report' function for slashing")
         .clone();
     // it should be got from config params
-    static ref ELECTOR_ADDRESS: MsgAddressInt = "-1:3333333333333333333333333333333333333333333333333333333333333333".parse().unwrap();
+    static ref ELECTOR_ADDRESS: MsgAddressInt = 
+        "-1:3333333333333333333333333333333333333333333333333333333333333333".parse().unwrap();
 }
 
 /// Slashing manager pointer
@@ -49,7 +49,7 @@ pub type SlashingManagerPtr = Arc<SlashingManager>;
 
 /// Slashing manager
 pub struct SlashingManager {
-    manager: SpinMutex<SlashingManagerImpl>,
+    manager: spin::mutex::SpinMutex<SlashingManagerImpl>,
     send_messages_block_offset: u32,
 }
 
@@ -71,7 +71,7 @@ impl SlashingManager {
 
         Arc::new(SlashingManager {
             send_messages_block_offset: rng.gen(),
-            manager: SpinMutex::new(SlashingManagerImpl::default()),
+            manager: spin::mutex::SpinMutex::new(SlashingManagerImpl::default())
         })
     }
 
@@ -242,7 +242,7 @@ impl SlashingManager {
     fn convert_to_u256(value: &[u8]) -> TokenValue {
         assert!(value.len() == 32);
         TokenValue::Uint(Uint {
-            number: BigUint::from_bytes_be(value),
+            number: num_bigint::BigUint::from_bytes_be(value),
             size: 256,
         })
     }
@@ -347,7 +347,7 @@ impl SlashingManager {
     fn serialize_message(message: &Arc<Message>) -> Result<(UInt256, Vec<u8>)> {
         let cell = message.serialize()?;
         let id = cell.repr_hash();
-        let bytes = ton_types::write_boc(&cell)?;
+        let bytes = write_boc(&cell)?;
 
         Ok((id, bytes))
     }

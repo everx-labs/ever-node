@@ -12,19 +12,18 @@
 */
 
 use super::*;
-use ton_types::Result;
+use ever_block::{
+    crc32_digest, Result,
+    bls::{
+        aggregate_two_bls_signatures, aggregate_public_keys_based_on_nodes_info, 
+        BLS_PUBLIC_KEY_LEN, BLS_SECRET_KEY_LEN, get_nodes_info_from_sig, NodesInfo, 
+        sign_and_add_node_info, truncate_nodes_info_and_verify
+    }
+};
 use std::time::SystemTime;
 use std::time::Duration;
 use validator_session::ValidatorWeight;
 use catchain::check_execution_time;
-use ton_types::bls::get_nodes_info_from_sig;
-use ton_types::bls::sign_and_add_node_info;
-use ton_types::bls::aggregate_two_bls_signatures;
-use ton_types::bls::aggregate_public_keys_based_on_nodes_info;
-use ton_types::bls::NodesInfo;
-use ton_types::bls::BLS_PUBLIC_KEY_LEN;
-use ton_types::bls::BLS_SECRET_KEY_LEN;
-use ton_types::bls::truncate_nodes_info_and_verify;
 
 /*
     Constants
@@ -155,7 +154,7 @@ impl MultiSignature {
             }
         }
 
-        let hash = ton_types::crc32_digest(Self::raw_byte_access(&new_nodes));
+        let hash = crc32_digest(Self::raw_byte_access(&new_nodes));
 
         (new_nodes, hash)
     }

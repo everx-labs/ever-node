@@ -1,5 +1,5 @@
 
-pub async fn destroy_rocks_db(path: &str, name: &str) -> ton_types::Result<()> {
+pub async fn destroy_rocks_db(path: &str, name: &str) -> ever_block::Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     let mut path = std::path::Path::new(path);
     let db_path = path.join(name);
@@ -21,7 +21,7 @@ pub async fn destroy_rocks_db(path: &str, name: &str) -> ton_types::Result<()> {
     // Clean up DB folder
     if db_path.exists() {
         std::fs::remove_dir_all(db_path).map_err(
-            |e| ton_types::error!("Can't clean DB folder: {}", e)
+            |e| ever_block::error!("Can't clean DB folder: {}", e)
         )?
     }
     // Clean up upper folder if empty
@@ -30,7 +30,7 @@ pub async fn destroy_rocks_db(path: &str, name: &str) -> ton_types::Result<()> {
             break
         }
         std::fs::remove_dir_all(path).map_err(
-            |e| ton_types::error!("Can't clean DB enclosing folder: {}", e)
+            |e| ever_block::error!("Can't clean DB enclosing folder: {}", e)
         )?;
         path = if let Some(path) = path.parent() {
             path

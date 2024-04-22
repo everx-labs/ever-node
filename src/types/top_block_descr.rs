@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -19,24 +19,20 @@ use crate::{
 };
 use crate::validator::validator_utils::calc_subset_for_workchain_standard;
 
-use bitflags::bitflags;
+use ever_block::{
+    error, fail, AddSub, Block, BlockInfo, BlockIdExt, BlockSignatures, BocReader, BocWriter,
+    Cell, CopyleftRewards, CurrencyCollection, Deserializable, HashmapAugType, McShardRecord,
+    MerkleProof, Result, Serializable, ShardIdent, TopBlockDescr, UInt256
+};
 use std::{
     cmp::{max, Ordering, PartialOrd, Ord}, convert::TryInto, fmt, io::{Write, Read, Cursor},
     sync::{Arc, atomic::{AtomicI8, self}}
-};
-use ton_block::{
-    Block, TopBlockDescr, BlockInfo, BlockIdExt, MerkleProof, McShardRecord,
-    Deserializable, HashmapAugType, BlockSignatures, CurrencyCollection,
-    AddSub, ShardIdent, Serializable, CopyleftRewards
-};
-use ton_types::{
-    error, Result, fail, Cell, UInt256,
 };
 use ton_api::ton::ton_node::newshardblock::NewShardBlock;
 
 pub use self::id::TopBlockDescrId;
 
-bitflags! {
+bitflags::bitflags! {
     pub struct Mode: u8 {
         const DEFAULT = 0;
         const FAIL_NEW = 1;
@@ -166,7 +162,7 @@ impl TopBlockDescrStuff {
         let mut bytes = Cursor::new(bytes);
 
         // Read BOC first
-        let root = ton_types::BocReader::new().read(&mut bytes)?.withdraw_single_root()?;
+        let root = BocReader::new().read(&mut bytes)?.withdraw_single_root()?;
 
         // Try to read meta from the remaining data. Defaults to 0 for compatibility
         let mut meta = 0u8;
@@ -184,7 +180,7 @@ impl TopBlockDescrStuff {
         let root_cell = self.tbd.serialize()?;
 
         let mut result = Vec::new();
-        ton_types::BocWriter::with_root(&root_cell)?.write(&mut result)?;
+        BocWriter::with_root(&root_cell)?.write(&mut result)?;
         result.push(meta);
         Ok(result)
     }

@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -16,7 +16,7 @@ use colored::Colorize;
 use rand::Rng;
 use std::{fmt, io::Write, time::{Duration, SystemTime}};
 use ton_api::IntoBoxed;
-use ton_types::{fail, KeyId};
+use ever_block::{fail, KeyId};
 use validator_session::*;
 
 /*
@@ -579,7 +579,7 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
 
     assert!(c1 != c2);
 
-    let zero_hash: ton_types::UInt256 = zero_hash.into();
+    let zero_hash: ever_block::UInt256 = zero_hash.into();
     let mut state = SessionFactory::create_state(&mut description);
     let mut attempt_id = 1000000000;
 

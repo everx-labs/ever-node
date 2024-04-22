@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -22,16 +22,12 @@ use std::{
     cmp::max, iter::Iterator, sync::{Arc, atomic::{AtomicBool, Ordering}},
     collections::{btree_map::{self, BTreeMap}, HashMap, HashSet},
 };
-use ton_block::{
-    BlockIdExt, ShardIdent, Serializable, Deserializable,
-    OutMsgQueueInfo, OutMsgQueue, OutMsgQueueKey, IhrPendingInfo,
-    ProcessedInfo, ProcessedUpto, ProcessedInfoKey,
-    ShardHashes, AccountIdPrefixFull,
-    HashmapAugType, ShardStateUnsplit,
-};
-use ton_types::{
-    error, fail, BuilderData, Cell, LabelReader, SliceData, IBitstring, Result, UInt256, 
-    HashmapType, HashmapFilterResult, HashmapRemover, UsageTree, HashmapSubtree,
+use ever_block::{
+    error, fail, AccountIdPrefixFull, BlockIdExt, BuilderData, Cell, Deserializable,
+    HashmapAugType, HashmapFilterResult, HashmapRemover, HashmapSubtree, HashmapType,
+    IBitstring, IhrPendingInfo, LabelReader, MASTERCHAIN_ID, OutMsgQueue, OutMsgQueueInfo,
+    OutMsgQueueKey, ProcessedInfo, ProcessedInfoKey, ProcessedUpto, Result, Serializable,
+    ShardIdent, ShardHashes, ShardStateUnsplit, SliceData, UInt256, UsageTree
 };
 
 #[cfg(test)]
@@ -548,7 +544,7 @@ impl OutMsgQueueInfoStuff {
         stop_flag: &Option<&AtomicBool>,
     ) -> Result<()> {
         let workchain = self.shard().workchain_id();
-        let masterchain = workchain == ton_block::MASTERCHAIN_ID;
+        let masterchain = workchain == MASTERCHAIN_ID;
         for entry in &mut self.entries {
             if entry.ref_shards.is_none() {
                 check_stop_flag(stop_flag)?;

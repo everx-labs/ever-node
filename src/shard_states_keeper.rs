@@ -9,8 +9,8 @@ use storage::{
     block_handle_db::BlockHandle, shardstate_db_async::AllowStateGcResolver, 
     shardstate_db_async::SsNotificationCallback, error::StorageError,
 };
-use ton_block::{BlockIdExt, ShardIdent};
-use ton_types::{fail, error, Result, UInt256, BocReader, Cell};
+use ever_block::{BlockIdExt, ShardIdent};
+use ever_block::{fail, error, Result, UInt256, BocReader, Cell};
 use adnl::common::add_unbound_object_to_map_with_update;
 use std::{ ops::Deref, sync::Arc, time::{Duration, Instant} };
 
