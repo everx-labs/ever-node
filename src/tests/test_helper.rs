@@ -38,7 +38,7 @@ use ever_block::{
     ConfigParam34, ConfigParamEnum, ConfigParams, Deserializable, HashmapAugType, InMsgDescr,
     InRefValue, McStateExtra, Message, OutMsgDescr, Serializable, ShardAccount, 
     ShardAccountBlocks, ShardIdent, ShardStateUnsplit, Transaction, U15, UInt256, 
-    ValidatorBaseInfo, ValidatorDescr, ValidatorSet, write_boc
+    ValidatorBaseInfo, ValidatorDescr, ValidatorSet, write_boc, CommonMessage,
 };
 use ever_block_json::*;
 use std::{path::Path, sync::{{Arc, RwLock}, atomic::{AtomicU32, Ordering}}, time::Duration};

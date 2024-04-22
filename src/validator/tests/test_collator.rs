@@ -21,7 +21,7 @@ use crate::{
         validator_utils::compute_validator_set_cc,
     },
 };
-use ever_block::Result;
+use ever_block::{Result, AccountIdPrefixFull};
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 

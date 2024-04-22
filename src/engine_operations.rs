@@ -791,7 +791,7 @@ impl EngineOperations for Engine {
         block_id: &BlockIdExt, 
     ) -> Result<Vec<BlockIdExt>> {
         let mc_overlay = self.get_full_node_overlay(
-            mesh_nw_id, ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL).await?;
+            mesh_nw_id, MASTERCHAIN_ID, SHARD_FULL).await?;
         mc_overlay.download_next_key_blocks_ids(block_id, 5).await
     }
 

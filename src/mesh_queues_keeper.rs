@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use storage::shardstate_db_async::AllowStateGcResolver;
-use ton_block::{BlockIdExt, ShardIdent, OutMsgQueueInfo};
-use ton_types::{Result, fail};
+use ever_block::{BlockIdExt, ShardIdent, OutMsgQueueInfo, Result, fail};
 
 pub struct MeshQueuesKeeper {
     queues: lockfree::map::Map<(i32, BlockIdExt, ShardIdent), Arc<OutMsgQueueInfo>>,

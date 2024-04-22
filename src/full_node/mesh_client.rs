@@ -5,8 +5,7 @@ use std::{
     time::{Duration, Instant}
 };
 
-use ton_block::{BlockIdExt, ConnectedNwConfig};
-use ton_types::{error, fail,  Result};
+use ever_block::{BlockIdExt, ConnectedNwConfig, error, fail, Result};
 use ton_api::ton::ton_node::broadcast::MeshUpdateBroadcast;
 
 use storage::block_handle_db::BlockHandle;
@@ -648,7 +647,7 @@ impl ConnectedNwClient {
             broadcast.src_nw,
             broadcast.id,
             broadcast.target_nw,
-            broadcast.data.0
+            broadcast.data
         )?;
 
         self.check_proof(&proof)?;

@@ -1315,7 +1315,7 @@ Ok(if key_block {
                     fail!("Answer for DownloadNextMeshUpdate should have is_link = false");
                 }
                 let (block, proof) = BlockStuff::deserialize_mesh_update(
-                    nw_id, data_full.id, target_nw_id, data_full.block.0)?;
+                    nw_id, data_full.id, target_nw_id, data_full.block)?;
 
                 Ok((block, proof))
             }
@@ -1403,7 +1403,7 @@ Ok(if key_block {
                     fail!("Answer for DownloadLatestMeshKit should have is_link = false");
                 }
                 let (block, proof) = BlockStuff::deserialize_mesh_kit(
-                    nw_id, data_full.id, target_nw_id, data_full.block.0)?;
+                    nw_id, data_full.id, target_nw_id, data_full.block)?;
 
                 Ok((block, proof))
             }

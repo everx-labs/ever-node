@@ -30,6 +30,7 @@ use ton_api::{
         raw::ShardAccountState, rpc::engine::validator::ControlQuery
     }
 };
+use ever_node::block::BlockKind;
 #[cfg(feature = "telemetry")]
 use ton_api::tag_from_bare_object;
 
@@ -1058,7 +1059,7 @@ mod test {
             db.create_or_load_block_handle(
                 &master_state_id,
                 None,
-                None,
+                BlockKind::Block,
                 Some(1),
                 None
             ).unwrap()._to_created().unwrap();
@@ -1438,7 +1439,7 @@ mod test {
         let allocated = create_engine_allocated();
         let network = NodeNetwork::new(
             node_config,
-            Arc::new(tokio_util::sync::CancellationToken::new()),
+            tokio_util::sync::CancellationToken::new(),
             #[cfg(feature = "telemetry")]
             telemetry.clone(),
             allocated.clone()
