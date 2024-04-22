@@ -12,9 +12,8 @@
 */
 
 use super::*;
-use ton_types::Result;
+use ever_block::{crc32_digest, Result, bls::BLS_PUBLIC_KEY_LEN};
 use validator_session::ValidatorWeight;
-use ton_types::bls::BLS_PUBLIC_KEY_LEN;
 
 /*
 ===============================================================================
@@ -142,7 +141,7 @@ impl MultiSignature {
 
     /// Update hash
     fn update_hash(&mut self) {
-        self.hash = ton_types::crc32_digest(Self::raw_byte_access(&self.nodes))
+        self.hash = crc32_digest(Self::raw_byte_access(&self.nodes))
     }
 
     /// Serialize signature

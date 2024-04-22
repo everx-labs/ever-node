@@ -11,6 +11,8 @@
 * limitations under the License.
 */
 
+#![cfg(not(feature = "fast_finality"))]
+
 extern crate catchain;
 
 use crate::engine_traits::EngineOperations;
@@ -19,11 +21,7 @@ use std::collections::HashMap;
 /// API dependencies
 use std::sync::Arc;
 use std::sync::Weak;
-use ton_block::BlockIdExt;
-use ton_block::ValidatorDescr;
-use ton_types::UInt256;
-use ton_types::KeyOption;
-use ton_types::Result;
+use ever_block::{BlockIdExt, KeyOption, Result, UInt256, ValidatorDescr};
 use validator_session::PrivateKey;
 use validator_session::PublicKeyHash;
 use catchain::profiling::InstanceCounter;

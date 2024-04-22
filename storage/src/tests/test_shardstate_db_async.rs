@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -20,8 +20,8 @@ use crate::StorageTelemetry;
 use std::{
     fs::read, path::Path, sync::{Arc, atomic::AtomicU32}, time::Duration
 };
-use ton_block::{BlockIdExt, ShardIdent};
-use ton_types::{Cell, Result, UInt256, read_single_root_boc};
+use ever_block::{BlockIdExt, ShardIdent};
+use ever_block::{Cell, Result, UInt256, read_single_root_boc};
 
 include!("../db/tests/destroy_db.rs");
 include!("../../../common/src/log.rs");

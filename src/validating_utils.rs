@@ -7,16 +7,16 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use crate::{validator::validator_utils::compute_validator_set_cc, shard_state::ShardStateStuff};
-use ton_block::{
+use ever_block::{
     ShardIdent, BlockIdExt, ConfigParams, McStateExtra, ShardHashes, ValidatorSet, McShardRecord,
     INVALID_WORKCHAIN_ID, MASTERCHAIN_ID, GlobalCapabilities,
 };
-use ton_types::{fail, error, Result, Sha256, UInt256};
+use ever_block::{fail, error, Result, Sha256, UInt256};
 use std::{collections::HashSet, cmp::max, iter::Iterator};
 
 #[cfg(not(feature = "fast_finality_extra"))]

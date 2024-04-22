@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -56,13 +56,13 @@ use ton_api::{
         broadcast::{BlockBroadcast, QueueUpdateBroadcast}
     }, IntoBoxed
 };
-use ton_block::{
+use ever_block::{
     AccountIdPrefixFull, BlockIdExt, CellsFactory, GlobalCapabilities, Message, OutMsgQueue,
     ShardIdent, MASTERCHAIN_ID, SHARD_FULL
 };
 #[cfg(feature="workchains")]
-use ton_block::{BASE_WORKCHAIN_ID, INVALID_WORKCHAIN_ID};
-use ton_types::{error, fail, KeyId, KeyOption, Result, UInt256};
+use ever_block::{BASE_WORKCHAIN_ID, INVALID_WORKCHAIN_ID};
+use ever_block::{error, fail, KeyId, KeyOption, Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
 
 #[async_trait::async_trait]
@@ -957,7 +957,7 @@ impl EngineOperations for Engine {
         self.will_validate()
     }
 
-    fn new_external_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
+    fn new_external_message(&self, id: &UInt256, message: Arc<Message>) -> Result<()> {
         if !self.is_validator() {
             return Ok(());
         }
@@ -969,7 +969,13 @@ impl EngineOperations for Engine {
         shard: ShardIdent,
         finish_time_ms: u64
     ) -> Box<dyn Iterator<Item = (Arc<Message>, UInt256)> + Send + Sync> {
-        Box::new(self.external_messages().clone().iter(shard, self.now(), finish_time_ms))
+        Box::new(
+            self.external_messages().clone().iter(
+                shard, 
+                self.now(),
+                finish_time_ms
+            )
+        )
     }
 
     fn get_external_messages_len(&self) -> u32 {
@@ -1284,7 +1290,7 @@ async fn redirect_external_message(
     message_data: &[u8]
 ) -> Result<BroadcastSendInfo> {
     let message = Arc::new(message);
-    engine.new_external_message(id.clone(), message.clone())?;
+    engine.new_external_message(&id, message.clone())?;
     if let Some(header) = message.ext_in_header() {
         let res = engine.broadcast_to_public_overlay(
             &AccountIdPrefixFull::checked_prefix(&header.dst)?,

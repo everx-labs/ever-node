@@ -1,10 +1,23 @@
+/*
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific EVERX DEV software governing permissions and
+* limitations under the License.
+*/
+
 use crate::{
     engine_traits::{EngineOperations, RempCoreInterface, RempDuplicateStatus},
     network::remp::RempMessagesSubscriber
 };
 
-use std::{sync::Arc, sync::Weak};
-use ton_types::{error, fail, KeyId, Result, UInt256};
+use std::sync::{Arc, Weak};
+use ever_block::{error, fail, KeyId, Result, UInt256};
 
 #[derive(Default)]
 pub struct RempService {

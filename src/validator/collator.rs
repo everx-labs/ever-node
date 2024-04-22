@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -49,7 +49,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use ton_block::{
+use ever_block::{
     AddSub, BlkPrevInfo, Block, BlockCreateStats, BlockExtra, BlockIdExt, BlockInfo, CommonMsgInfo,
     ConfigParams, CopyleftRewards, CreatorStats, CurrencyCollection, Deserializable, ExtBlkRef,
     FutureSplitMerge, GlobalCapabilities, GlobalVersion, Grams, HashmapAugType, InMsg, InMsgDescr,
@@ -60,11 +60,11 @@ use ton_block::{
     Transaction, TransactionTickTock, UnixTime32, ValidatorSet, ValueFlow, WorkchainDescr,
     Workchains, Account, AccountIdPrefixFull, OutQueueUpdates, OutMsgQueueInfo, MASTERCHAIN_ID
 };
-use ton_executor::{
+use ever_executor::{
     BlockchainConfig, ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor,
     TransactionExecutor,
 };
-use ton_types::{error, fail, AccountId, Cell, HashmapType, Result, UInt256, UsageTree, SliceData};
+use ever_block::{error, fail, AccountId, Cell, HashmapType, Result, UInt256, UsageTree, SliceData};
 
 use crate::validator::validator_utils::is_remp_enabled;
 
@@ -371,7 +371,7 @@ impl CollatorData {
         // log::trace!(
         //     "new transaction, message {:x}\n{}",
         //     in_msg_opt.map(|m| m.message_cell().unwrap().repr_hash()).unwrap_or_default(),
-        //     ton_block_json::debug_transaction(transaction.clone()).unwrap_or_default(),
+        //     ever_block_json::debug_transaction(transaction.clone()).unwrap_or_default(),
         // );       
         self.execute_count += 1;
         let gas_used = transaction.gas_used().unwrap_or(0);
@@ -431,7 +431,7 @@ impl CollatorData {
         // let mut data = self.out_msg_queue_info.del_message(key)?;
         // let created_lt = u64::construct_from(&mut data)?;
         // let enq = MsgEnqueueStuff::construct_from(&mut data, created_lt)?;
-        // let data = ton_types::write_boc(&enq.message_cell())?;
+        // let data = ever_block::write_boc(&enq.message_cell())?;
         // log::debug!("del_out_msg_from_state {:x} size {}", key, data.len());
         log::debug!("del_out_msg_from_state {:x}", key);
         self.dequeue_count += 1;
@@ -1607,8 +1607,8 @@ impl Collator {
                     );
                 }
                 prev_state.proc_info()?.iterate_slices_with_keys(|ref mut key, ref mut value| {
-                    let key = ton_block::ProcessedInfoKey::construct_from(key)?;
-                    let value = ton_block::ProcessedUpto::construct_from(value)?;
+                    let key = ever_block::ProcessedInfoKey::construct_from(key)?;
+                    let value = ever_block::ProcessedUpto::construct_from(value)?;
                     log::trace!(
                         "{}: prev processed upto {} {:x} - {} {:x}",
                         self.collated_block_descr,
@@ -2409,22 +2409,34 @@ impl Collator {
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
         if collator_data.skip_extmsg() {
-            log::debug!("{}: skipping processing of inbound external messages", self.collated_block_descr);
+            log::debug!(
+                "{}: skipping processing of inbound external messages", 
+                self.collated_block_descr
+            );
             return Ok(())
         }
-        let finish_time_ms = self.get_external_messages_finish_time_micros();
         log::debug!("{}: process_inbound_external_messages", self.collated_block_descr);
-        for (msg, msg_id) in self.engine.get_external_messages_iterator(self.shard.clone(), finish_time_ms) {
+        let finish_time_ms = self.get_external_messages_finish_time_micros();
+        let mut iter = self.engine.get_external_messages_iterator(self.shard.clone(), finish_time_ms);
+        loop {
+            let Some((msg, msg_id)) = iter.next() else {
+                break;
+            };
             let header = msg.ext_in_header()
                 .ok_or_else(|| error!("message {:x} is not external inbound message", msg_id))?;
             if self.shard.contains_address(&header.dst)? {
                 if !collator_data.limit_fits(ParamLimitIndex::Soft) {
-                    log::debug!("{}: BLOCK FULL, stop processing external messages", self.collated_block_descr);
+                    log::debug!(
+                        "{}: BLOCK FULL, stop processing external messages", 
+                        self.collated_block_descr
+                    );
                     break
                 }
                 if self.check_cutoff_timeout() {
-                    log::warn!("{}: TIMEOUT is elapsed, stop processing external messages",
-                        self.collated_block_descr);
+                    log::warn!(
+                        "{}: TIMEOUT is elapsed, stop processing external messages",
+                        self.collated_block_descr
+                    );
                     break
                 }
                 log::debug!("{}: message {:x} sent to execution", self.collated_block_descr, msg_id);
@@ -2830,8 +2842,8 @@ impl Collator {
                 .read_out_msg_queue_info()?
                 .proc_info()
                 .iterate_slices_with_keys(|ref mut key, ref mut value| {
-                    let key = ton_block::ProcessedInfoKey::construct_from(key)?;
-                    let value = ton_block::ProcessedUpto::construct_from(value)?;
+                    let key = ever_block::ProcessedInfoKey::construct_from(key)?;
+                    let value = ever_block::ProcessedUpto::construct_from(value)?;
                     log::trace!(
                         "{}: new processed upto {} {:x} - {} {:x}",
                         self.collated_block_descr,
@@ -2901,11 +2913,11 @@ impl Collator {
         log::trace!("{}: finalize_block: fill block candidate", self.collated_block_descr);
         let cell = new_block.serialize()?;
         block_id.root_hash = cell.repr_hash();
-        let data = ton_types::write_boc(&cell)?;
+        let data = ever_block::write_boc(&cell)?;
         block_id.file_hash = UInt256::calc_file_hash(&data);
 
         // !!!! DEBUG !!!!
-        // if let Ok(block_str) = ton_block_json::debug_block(new_block.clone()) {
+        // if let Ok(block_str) = ever_block_json::debug_block(new_block.clone()) {
         //     let _ = std::fs::write(
         //         format!("tmp/{}.json", block_id), block_str
         //     );

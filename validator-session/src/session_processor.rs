@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -23,9 +23,11 @@ use crate::{
     task_queue::{
         CompletionHandler, CompletionHandlerId, CompletionHandlerPtr, create_completion_handler,
         post_callback_closure, post_closure
-    }, 
+    },
     ton
 };
+#[cfg(feature = "slashing")]
+use crate::{SlashingValidatorStat, slashing::Node};
 use catchain::{
     check_execution_time, instrument, serialize_tl_boxed_object,
     BlockPtr, CatchainPtr, ExternalQueryResponseCallback, profiling::ResultStatusCounter,
@@ -37,7 +39,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH}
 };
 use ton_api::IntoBoxed;
-use ton_types::{error, KeyId, Result, UInt256};
+use ever_block::{error, KeyId, Result, UInt256};
 
 /*
     Constants
@@ -2080,7 +2082,7 @@ impl SessionProcessorImpl {
                         .get_mut(public_key_hash)
                         .unwrap();
 
-                    use slashing::Metric::*;
+                    use crate::slashing::Metric::*;
 
                     slashing_node.increment(TotalRoundsCount, 1);
                     if self.description.get_node_priority(i, self.current_round) >= 0 {
@@ -3193,21 +3195,21 @@ impl SessionProcessorImpl {
         check_execution_time!(20000);
         instrument!();
 
-        trace!(
-            "SessionProcessor::notify_slashing_statistics: post on_slashing_statistics event for further processing"
+        log::trace!(
+            "SessionProcessor::notify_slashing_statistics: \
+            post on_slashing_statistics event for further processing"
         );
 
         let listener = self.session_listener.clone();
 
         post_callback_closure(&self.callbacks_task_queue, move || {
             check_execution_time!(20000);
-
             if let Some(listener) = listener.upgrade() {
-                trace!("SessionProcessor::notify_session_statistics: on_slashing_statistics start");
-
+                log::trace!(
+                    "SessionProcessor::notify_session_statistics: on_slashing_statistics start"
+                );
                 listener.on_slashing_statistics(round, stat);
-
-                trace!(
+                log::trace!(
                     "SessionProcessor::notify_session_statistics: on_slashing_statistics finish"
                 );
             }
@@ -3458,7 +3460,7 @@ impl SessionProcessorImpl {
         for node in &ids {
             slashing_stat.validators_stat.insert(
                 node.public_key.id().clone(),
-                slashing::Node::new(node.public_key.clone()),
+                Node::new(node.public_key.clone()),
             );
         }
 

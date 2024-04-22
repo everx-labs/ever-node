@@ -3,8 +3,8 @@ use crate::{
     block::BlockStuff,
     shard_state::ShardHashesStuff,
 };
-use ton_types::{Result, error};
-use ton_block::{BlockIdExt, SHARD_FULL, ShardIdent, BASE_WORKCHAIN_ID, MASTERCHAIN_ID};
+use ever_block::{Result, error};
+use ever_block::{BlockIdExt, SHARD_FULL, ShardIdent, BASE_WORKCHAIN_ID, MASTERCHAIN_ID};
 use std::{collections::HashSet, sync::Arc};
 use storage::block_handle_db::BlockHandle;
 

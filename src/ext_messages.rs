@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -16,8 +16,8 @@ use adnl::common::{add_unbound_object_to_map, add_unbound_object_to_map_with_upd
 use lockfree::map::Map;
 use std::sync::{Arc, atomic::{AtomicU64, Ordering, AtomicU32}};
 use ton_api::ton::ton_node::{RempMessageStatus, RempMessageLevel};
-use ton_block::{Deserializable, ShardIdent, Message, AccountIdPrefixFull, BlockIdExt};
-use ton_types::{Result, types::UInt256, fail, read_boc};
+use ever_block::{Deserializable, ShardIdent, Message, AccountIdPrefixFull, BlockIdExt};
+use ever_block::{Result, types::UInt256, fail, read_boc};
 
 #[cfg(test)]
 #[path = "tests/test_ext_messages.rs"]
@@ -179,17 +179,16 @@ impl MessagesPool {
     pub fn new_message_raw(&self, data: &[u8], now: u32) -> Result<()> {
         let (id, message) = create_ext_message(data)?;
         let message = Arc::new(message);
-
-        self.new_message(id.clone(), message, now)?;
+        self.new_message(&id, message, now)?;
         Ok(())
     }
 
-    pub fn new_message(&self, id: UInt256, message: Arc<Message>, now: u32) -> Result<()> {
+    pub fn new_message(&self, id: &UInt256, message: Arc<Message>, now: u32) -> Result<()> {
         let timestamp = self.min_timestamp.load(Ordering::Relaxed);
         if now < timestamp {
             fail!("now {} is less than minimum {} for {:x}", now, timestamp, id)
         }
-        if self.messages.get(&id).is_some() {
+        if self.messages.get(id).is_some() {
             return Ok(());
         }
         for timestamp in self.min_timestamp.load(Ordering::Relaxed)..now.saturating_sub(MESSAGE_LIFETIME) {

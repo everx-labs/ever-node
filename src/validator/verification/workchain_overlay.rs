@@ -38,7 +38,7 @@ use std::time::SystemTime;
 use tokio::time::sleep;
 use ton_api::ton::ton_node::blockcandidatestatus::BlockCandidateStatus;
 use ton_api::ton::ton_node::Broadcast;
-use ton_types::Result;
+use ever_block::Result;
 
 //TODO: traffic metrics & derivatives
 //TODO: remove dependency from CatchainClient? (use private overlay directly)

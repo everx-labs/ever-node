@@ -3,7 +3,7 @@ use crate::internal_db::{
     restore::check_db
 };
 use std::sync::atomic::AtomicBool;
-use ton_types::{Result, fail};
+use ever_block::{Result, fail};
 
 pub async fn update(
     mut db: InternalDb, 

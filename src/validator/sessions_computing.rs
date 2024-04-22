@@ -1,11 +1,24 @@
+/*
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
+*
+* Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
+* this file except in compliance with the License.
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific EVERX DEV software governing permissions and
+* limitations under the License.
+*/
+
 use std::{
     collections::HashMap,
     fmt::{Display, Formatter},
     sync::Arc
 };
 use dashmap::DashMap;
-use ton_types::{error, fail, Result, UInt256};
-use ton_block::{ValidatorSet, ShardIdent, ValidatorDescr};
+use ever_block::{error, fail, Result, UInt256};
+use ever_block::{ValidatorSet, ShardIdent, ValidatorDescr};
 use crate::validator::validator_utils::validatorset_to_string;
 
 /// 1) shard, cc_seqno -> session_id

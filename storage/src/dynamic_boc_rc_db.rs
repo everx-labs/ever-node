@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -23,11 +23,11 @@ use std::{
 };
 //#[cfg(test)]
 //use std::path::Path;
-use ton_types::{
+use ever_block::{
     error, fail, BuilderData, ByteOrderRead, Cell, CellByHashStorage, CellData, DoneCellsStorage, 
     OrderedCellsStorage, Result, UInt256, MAX_LEVEL 
 };
-use ton_block::merkle_update::CellsFactory;
+use ever_block::merkle_update::CellsFactory;
 
 pub const BROKEN_CELL_BEACON_FILE: &str = "ton_node.broken_cell";
 

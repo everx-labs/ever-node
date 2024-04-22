@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -16,28 +16,28 @@ use crate::{
     error::NodeError, external_db::WriteData, shard_state::ShardStateStuff
 };
 
+use ever_block::{
+    fail, Account, AccountBlock, AccountId, Block, BlockIdExt, BlockProcessingStatus, BlockProof,
+    BuilderData, Cell, DepthBalanceInfo, Deserializable, HashmapAugType, HashmapIterator,
+    HashmapType, Message, MessageProcessingStatus, MsgAddressInt, MsgAddrStd, Result,
+    Serializable, ShardAccount, SliceData, Transaction, TransactionProcessingStatus, UInt256, 
+    write_boc
+};
+use ever_block_json::{
+    AccountSerializationSet, block_order, BlockSerializationSetFH, db_serialize_account, 
+    db_serialize_block, db_serialize_block_proof, db_serialize_deleted_account, 
+    db_serialize_message, db_serialize_remp_status, db_serialize_transaction, 
+    DeletedAccountSerializationSet, MessageSerializationSet, TransactionSerializationSet, 
+    u64_to_string
+};
 use std::{
     collections::{hash_set::HashSet, BTreeMap, HashMap},
     convert::TryInto,
     time::{SystemTime, UNIX_EPOCH},
     sync::{Arc, atomic::{AtomicU64, Ordering}},
 };
-use ton_block::{
-    Account, AccountBlock, Block, BlockIdExt,
-    BlockProcessingStatus, BlockProof, Deserializable,
-    HashmapAugType, Message, MessageProcessingStatus,
-    Serializable, ShardAccount, Transaction, TransactionProcessingStatus,
-    MsgAddressInt, MsgAddrStd, DepthBalanceInfo,
-};
-use ton_types::{
-    write_boc,
-    types::UInt256, HashmapIterator,
-    AccountId, Cell, Result, SliceData, HashmapType,
-    fail, BuilderData,
-};
 use ton_api::ton::ton_node::RempReceipt;
 use serde::Serialize;
-use serde_json::{Map, Value};
 
 lazy_static::lazy_static!(
     static ref ACCOUNT_NONE_HASH: UInt256 = Account::default().serialize().unwrap().repr_hash();
@@ -179,7 +179,7 @@ impl<T: 'static + WriteData> Processor<T> {
         block_id: UInt256,
         tr_chain_order: &str,
         block_root_for_proof: Option<&Cell>,
-        messages: &mut HashMap<UInt256, Map<String, Value>>,
+        messages: &mut HashMap<UInt256, serde_json::Map<String, serde_json::Value>>
     ) -> Result<()> {
         if let Some(message_cell) = transaction.in_msg_cell() {
             let message = Message::construct_from_cell(message_cell.clone())?;
@@ -196,7 +196,7 @@ impl<T: 'static + WriteData> Processor<T> {
                 } else {
                     messages.remove(&message_id)
                         .unwrap_or_else(|| {
-                            let mut doc = Map::with_capacity(2);
+                            let mut doc = serde_json::Map::with_capacity(2);
                             doc.insert("id".into(), message_id.as_hex_string().into());
                             doc
                         })
@@ -204,7 +204,7 @@ impl<T: 'static + WriteData> Processor<T> {
 
             doc.insert(
                 "dst_chain_order".into(),
-                format!("{}{}", tr_chain_order, ton_block_json::u64_to_string(0)).into());
+                format!("{}{}", tr_chain_order, u64_to_string(0)).into());
 
             messages.insert(message_id, doc);
         };
@@ -225,7 +225,7 @@ impl<T: 'static + WriteData> Processor<T> {
             // messages are ordered by created_lt
             doc.insert(
                 "src_chain_order".into(),
-                format!("{}{}", tr_chain_order, ton_block_json::u64_to_string(index)).into());
+                format!("{}{}", tr_chain_order, u64_to_string(index)).into());
 
             index += 1;
             messages.insert(message_id, doc);
@@ -241,13 +241,13 @@ impl<T: 'static + WriteData> Processor<T> {
         block_root_for_proof: Option<&Cell>,
         block_id: UInt256,
         transaction_now: Option<u32>,
-    ) -> Result<Map<String, Value>> {
+    ) -> Result<serde_json::Map<String, serde_json::Value>> {
         let boc = write_boc(&message_cell)?;
         let proof = block_root_for_proof
             .map(|cell| write_boc(&message.prepare_proof(true, cell)?))
             .transpose()?;
 
-        let set = ton_block_json::MessageSerializationSet {
+        let set = MessageSerializationSet {
             message,
             id: message_cell.repr_hash(),
             block_id: Some(block_id.clone()),
@@ -257,7 +257,7 @@ impl<T: 'static + WriteData> Processor<T> {
             proof,
             transaction_now, // affects ExtIn messages only
         };
-        let doc = ton_block_json::db_serialize_message("id", &set)?;
+        let doc = db_serialize_message("id", &set)?;
         Ok(doc)
     }
 
@@ -268,14 +268,14 @@ impl<T: 'static + WriteData> Processor<T> {
         block_id: UInt256,
         workchain_id: i32,
         add_proof: bool,
-    ) -> Result<Map<String, Value>> {
+    ) -> Result<serde_json::Map<String, serde_json::Value>> {
         let boc = write_boc(&tr_cell).unwrap();
         let proof = if add_proof {
             Some(write_boc(&transaction.prepare_proof(&block_root)?)?)
         } else {
             None
         };
-        let set = ton_block_json::TransactionSerializationSet {
+        let set = TransactionSerializationSet {
             transaction,
             id: tr_cell.repr_hash(),
             status: TransactionProcessingStatus::Finalized,
@@ -285,7 +285,7 @@ impl<T: 'static + WriteData> Processor<T> {
             proof,
             ..Default::default()
         };
-        let doc = ton_block_json::db_serialize_transaction("id", &set)?;
+        let doc = db_serialize_transaction("id", &set)?;
         Ok(doc)
     }
 
@@ -326,7 +326,7 @@ impl<T: 'static + WriteData> Processor<T> {
             Some(id) => id,
             None => fail!("Account without id in external db processor")
         };
-        let set = ton_block_json::AccountSerializationSet {
+        let set = AccountSerializationSet {
             account,
             prev_code_hash,
             proof: None,
@@ -336,7 +336,7 @@ impl<T: 'static + WriteData> Processor<T> {
         };
 
         let partition_key = Self::calc_account_partition_key(sharding_depth, account_id.clone())?;
-        let mut doc = ton_block_json::db_serialize_account("id", &set)?;
+        let mut doc = db_serialize_account("id", &set)?;
         if let Some(last_trans_chain_order) = last_trans_chain_order {
             doc.insert("last_trans_chain_order".to_owned(), last_trans_chain_order.into());
         }
@@ -356,19 +356,19 @@ impl<T: 'static + WriteData> Processor<T> {
         last_trans_lt: Option<u64>,
     ) -> Result<DbRecord> {
         let partition_key = Self::calc_account_partition_key(sharding_depth, account_id.clone())?;
-        let set = ton_block_json::DeletedAccountSerializationSet {
+        let set = DeletedAccountSerializationSet {
             account_id,
             workchain_id,
             prev_code_hash,
             ..Default::default()
         };
 
-        let mut doc = ton_block_json::db_serialize_deleted_account("id", &set)?;
+        let mut doc = db_serialize_deleted_account("id", &set)?;
         if let Some(last_trans_chain_order) = last_trans_chain_order {
             doc.insert("last_trans_chain_order".to_owned(), last_trans_chain_order.into());
         }
         if let Some(lt) = last_trans_lt {
-            doc.insert("last_trans_lt".to_owned(), ton_block_json::u64_to_string(lt).into());
+            doc.insert("last_trans_lt".to_owned(), u64_to_string(lt).into());
         }
         Ok(DbRecord::Account(
             doc["id"].to_string(),
@@ -384,14 +384,14 @@ impl<T: 'static + WriteData> Processor<T> {
         file_hash: &UInt256,
         block_order: String,
     ) -> Result<DbRecord> {
-        let set = ton_block_json::BlockSerializationSetFH {
+        let set = BlockSerializationSetFH {
             block,
             id: &block_root.repr_hash(),
             status: BlockProcessingStatus::Finalized,
             boc,
             file_hash: Some(file_hash),
         };
-        let mut doc = ton_block_json::db_serialize_block("id", set)?;
+        let mut doc = db_serialize_block("id", set)?;
         doc.insert("chain_order".to_owned(), block_order.into());
         Ok(DbRecord::Block(
             doc["id"].to_string(),
@@ -431,7 +431,7 @@ impl<T: 'static + WriteData> Processor<T> {
         partition_key: Option<u32>,
         block_order: String,
     ) -> Result<DbRecord> {
-        let mut doc = ton_block_json::db_serialize_block_proof("id", proof)?;
+        let mut doc = db_serialize_block_proof("id", proof)?;
         doc.insert("chain_order".to_owned(), block_order.into());
         Ok(DbRecord::BlockProof(
             doc["id"].to_string(),
@@ -457,7 +457,7 @@ impl<T: 'static + WriteData> Processor<T> {
             block.id(), e);
         let root = std::path::Path::new(&self.bad_blocks_storage);
         let name = block.id().to_string();
-        let _ = std::fs::create_dir_all(root.clone());
+        let _ = std::fs::create_dir_all(root);
         match std::fs::write(root.join(std::path::Path::new(&name)), block.data()) {
             Ok(_) => log::error!(
                 "Bad block {}, saved into {}",
@@ -499,7 +499,7 @@ impl<T: 'static + WriteData> Processor<T> {
         let block_root = block_stuff.root_cell().clone();
         let block_extra = block.read_extra()?;
         let block_boc = if process_block || process_raw_block { Some(block_stuff.data().to_vec()) } else { None };
-        let block_order = ton_block_json::block_order(&block, mc_seq_no)?;
+        let block_order = block_order(&block, mc_seq_no)?;
         let workchain_id = block.read_info()?.shard().workchain_id();
         let shard_accounts = state.map(|s| s.state()?.read_accounts()).transpose()?;
         let accounts_sharding_depth = self.writers.write_account.sharding_depth();
@@ -525,7 +525,7 @@ impl<T: 'static + WriteData> Processor<T> {
             // Accounts, transactions and messages
             if process_account || process_transaction || process_message {
 
-                // Prepare sorted ton_block transactions and addresses of changed accounts
+                // Prepare sorted ever_block transactions and addresses of changed accounts
                 let mut changed_acc = HashSet::new();
                 let mut deleted_acc = HashSet::new();
                 let mut acc_last_trans_chain_order = HashMap::new();
@@ -559,14 +559,14 @@ impl<T: 'static + WriteData> Processor<T> {
                 log::trace!("TIME: preliminary prepare {} transactions {}ms;   {}", tr_count, now.elapsed().as_millis(), block_id);
 
 
-                // Iterate ton_block transactions to:
+                // Iterate ever_block transactions to:
                 // - prepare messages and transactions for external db
                 // - prepare last_trans_chain_order for accounts
                 let now = std::time::Instant::now();
                 let mut index = 0;
                 let mut messages = Default::default();
                 for (_, (cell, transaction)) in transactions.into_iter() {
-                    let tr_chain_order = format!("{}{}", block_order, ton_block_json::u64_to_string(index as u64));
+                    let tr_chain_order = format!("{}{}", block_order, u64_to_string(index as u64));
 
                     if process_message {
                         Self::prepare_messages_from_transaction(
@@ -913,7 +913,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
         status: &RempReceipt,
         signature: &[u8]
     ) -> Result<()> {
-        //let value = ton_block_json::db_serialize_remp_status(status, signature)?;
+        //let value = db_serialize_remp_status(status, signature)?;
         // self.remp_statuses_sender.send((
         //     format!("{:x}", id),
         //     format!("{:#}", serde_json::json!(value))
@@ -924,7 +924,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
 
         let key = format!("{:x}", id);
         let val = format!("{:#}",
-            serde_json::json!(ton_block_json::db_serialize_remp_status(status, signature)?));
+            serde_json::json!(db_serialize_remp_status(status, signature)?));
         self.writers.write_remp_statuses.write_data(key, val, None, None).await?;
         Ok(())
     }

@@ -46,7 +46,7 @@ cargo test --release -- --nocapture --test-threads=1
 
 To get help about command line arguments, run
 ```
-ton_node --help
+ever-node --help
 ```
 
 ## Everscale/Venom Console Usage

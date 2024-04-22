@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -33,10 +33,10 @@ use ton_api::{
         dht::node::Node as DhtNodeConfig, pub_::publickey::Ed25519
     }
 };
-use ton_block::{BlockIdExt, ShardIdent};
+use ever_block::{BlockIdExt, ShardIdent};
 #[cfg(feature="external_db")]
-use ton_block::{BASE_WORKCHAIN_ID, MASTERCHAIN_ID};
-use ton_types::{
+use ever_block::{BASE_WORKCHAIN_ID, MASTERCHAIN_ID};
+use ever_block::{
     error, fail, base64_decode, base64_encode, BlsKeyOption, Ed25519KeyOption, KeyId, KeyOption, 
     KeyOptionJson, Result, UInt256
 };
@@ -106,7 +106,7 @@ impl Default for CollatorConfig {
             finalize_empty_after_ms: 800,
             empty_collation_sleep_ms: 100,
             external_messages_timeout_percentage_points: 100, // 0.1 = 10% = 100ms
-            external_messages_maximum_queue_length: None,
+            external_messages_maximum_queue_length: Some(25600),
         }
     }
 }

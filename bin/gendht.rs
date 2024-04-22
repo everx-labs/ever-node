@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,14 +7,14 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use adnl::{adnl_node_test_key, adnl_node_test_config, node::{AdnlNode, AdnlNodeConfig}};
 use adnl::DhtNode;
 use std::{env, ops::Deref, sync::Arc};
-use ton_types::{error, base64_encode, KeyOption, Result};
+use ever_block::{error, base64_encode, KeyOption, Result};
 
 async fn gen(ip: &str, dht_key_enc: &str) -> Result<()> {
     let config = AdnlNodeConfig::from_json(

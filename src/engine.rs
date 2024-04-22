@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,12 +7,16 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use crate::{
     block::{BlockStuff, BlockIdExtExtention}, block_proof::BlockProofStuff, boot,
+    config::{
+        CollatorConfig, CollatorTestBundlesGeneralConfig, KafkaConsumerConfig,
+        TonNodeConfig, ValidatorManagerConfig
+    },
     engine_traits::{
         ExternalDb, EngineAlloc, EngineOperations,
         OverlayOperations, PrivateOverlayOperations, Server,
@@ -56,7 +60,7 @@ use crate::internal_db::EXTERNAL_DB_BLOCK;
 #[cfg(feature = "slashing")]
 use crate::validator::{
     slashing::{ValidatedBlockStat, ValidatedBlockStatNode},
-    validator_utils::calc_subset_for_workchain,
+    validator_utils::calc_subset_for_workchain_standard,
 };
 #[cfg(feature = "telemetry")]
 use crate::{
@@ -65,10 +69,18 @@ use crate::{
     validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
 };
 
+use adnl::QueriesConsumer;
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::{Metric, MetricBuilder, TelemetryItem, TelemetryPrinter};
-use adnl::QueriesConsumer;
 use catchain::SessionId;
+use ever_block::{
+    error, fail, BASE_WORKCHAIN_ID, BlockIdExt, GlobalCapabilities, KeyId, MASTERCHAIN_ID, 
+    OutMsgQueue, Result, SHARD_FULL, ShardIdent, UInt256
+};
+#[cfg(feature = "slashing")]
+use ever_block::{CryptoSignaturePair, Deserializable, HashmapType};
+#[cfg(feature = "telemetry")]
+use ever_block::Cell;
 use std::{
     ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering, AtomicU64}},
     time::{Duration, SystemTime}, collections::{HashMap, HashSet}, path::Path
@@ -83,19 +95,6 @@ use ton_api::ton::ton_node::{
     broadcast::{
         BlockBroadcast, QueueUpdateBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast
     }
-};
-use ton_block::{
-    self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL, BASE_WORKCHAIN_ID, GlobalCapabilities,
-    OutMsgQueue
-};
-use ton_types::{error, fail, KeyId, Result, UInt256};
-#[cfg(feature = "slashing")]
-use ton_types::HashmapType;
-#[cfg(feature = "telemetry")]
-use ton_types::Cell;
-use crate::config::{
-    CollatorConfig, CollatorTestBundlesGeneralConfig, KafkaConsumerConfig,
-    TonNodeConfig, ValidatorManagerConfig
 };
 
 #[cfg(feature = "slashing")]
@@ -176,7 +175,7 @@ pub struct Engine {
 
     tps_counter: TpsCounter,
 
-    pub out_queues_cache: std::sync::Mutex<std::collections::HashMap<ShardIdent, ton_block::OutMsgQueue>>,
+    pub out_queues_cache: std::sync::Mutex<std::collections::HashMap<ShardIdent, OutMsgQueue>>,
 }
 
 struct DownloadContext<'a, T> {
@@ -792,7 +791,9 @@ impl Engine {
                 engine_telemetry.clone(),
                 engine_allocated.clone()
             ),
-            external_messages: Arc::new(MessagesPool::new(now, external_messages_maximum_queue_length)),
+            external_messages: Arc::new(
+                MessagesPool::new(now, external_messages_maximum_queue_length)
+            ),
             servers: lockfree::queue::Queue::new(),
             remp_client,
             remp_service,
@@ -932,7 +933,7 @@ impl Engine {
     pub fn shard_states_keeper(&self) -> Arc<ShardStatesKeeper> { self.shard_states_keeper.clone() }
 
     pub async fn get_masterchain_overlay(&self) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        self.get_full_node_overlay(ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL).await
+        self.get_full_node_overlay(MASTERCHAIN_ID, SHARD_FULL).await
     }
 
     pub async fn get_full_node_overlay(&self, workchain: i32, shard: u64) -> Result<Arc<dyn FullNodeOverlayClient>> {
@@ -1687,27 +1688,31 @@ impl Engine {
     }
 
     #[cfg(feature = "slashing")]
-    async fn process_validated_block_stats(&self, block_id: &BlockIdExt, signing_nodes: HashSet<UInt256>, created_by: &UInt256) -> Result<()> {
+    async fn process_validated_block_stats(
+        &self, 
+        block_id: &BlockIdExt, 
+        signing_nodes: HashSet<UInt256>, 
+        created_by: &UInt256
+    ) -> Result<()> {
         let last_mc_state = self.load_last_applied_mc_state().await?;
-        let (cur_validator_set, cc_config) = last_mc_state.read_cur_validator_set_and_cc_conf()?;
+        let (cur_validator_set, _) =
+            last_mc_state.state()?.read_cur_validator_set_and_cc_conf()?;
         let shard = block_id.shard();
         let cc_seqno = if shard.is_masterchain() {
             last_mc_state.shard_state_extra()?.validator_info.catchain_seqno
         } else {
             last_mc_state.shards()?.calc_shard_cc_seqno(shard)?
         };
-        let (validators, _hash_short) = calc_subset_for_workchain(
+        let validators = calc_subset_for_workchain_standard(
             &cur_validator_set,
             last_mc_state.config_params()?,
-            &cc_config,
-            shard.shard_prefix_with_tag(),
-            shard.workchain_id(),
-            cc_seqno,
-            Default::default())?;
+            &shard,
+            cc_seqno
+        )?;
 
         let mut nodes = Vec::new();
 
-        for validator in &validators {
+        for validator in &validators.validators {
             let signed = signing_nodes.contains(&validator.compute_node_id_short());
             let collated = &validator.public_key == created_by;
             let validated_block_stat_node = ValidatedBlockStatNode {
@@ -1806,7 +1811,10 @@ impl Engine {
             let result = if remp {
                 self.push_message_to_remp(broadcast.message.data).await
             } else {
-                self.external_messages().new_message_raw(&broadcast.message.data, self.now())
+                self.external_messages().new_message_raw(
+                    &broadcast.message.data, 
+                    self.now()
+                ).map(|_| ())
             };
             match result {
                 Err(e) => {
@@ -1819,8 +1827,13 @@ impl Engine {
                 Ok(_) => {
                     log::debug!(
                         target: EXT_MESSAGES_TRACE_TARGET,
-                        "Processed ext message broadcast {}bytes from {} (added into remp's queue)",
-                        bytes_len, src
+                        "Processed ext message broadcast {}bytes from {}{}",
+                        bytes_len, src,
+                        if remp {
+                            " (added into remp's queue)"
+                        } else {
+                            ""
+                        }
                     );
                 }
             }
@@ -1887,8 +1900,7 @@ impl Engine {
                 let mut signing_nodes = HashSet::new();
                 if let Some(commit_signatures) = tbd.top_block_descr().signatures() {
                     commit_signatures.pure_signatures.signatures().iterate_slices(|ref mut _key, ref mut slice| {
-                        use ton_block::Deserializable;
-                        let sign = ton_block::CryptoSignaturePair::construct_from(slice)?;
+                        let sign = CryptoSignaturePair::construct_from(slice)?;
                         signing_nodes.insert(sign.node_id_short.clone());
                         Ok(true)
                     })?;
@@ -2882,7 +2894,7 @@ pub fn init_prometheus_exporter() {
         .install().expect("Could not create PrometheusRecorder");
 }
 
-// TODO: move to ton_types crate
+// TODO: move to ever_block crate
 pub fn now_duration() -> Duration {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default()
 }

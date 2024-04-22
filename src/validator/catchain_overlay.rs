@@ -1,7 +1,7 @@
 use crate::engine_traits::PrivateOverlayOperations;
 use adnl::PrivateOverlayShortId;
 use std::sync::Arc;
-use ton_types::{Result, UInt256};
+use ever_block::{Result, UInt256};
 use validator_session::{PublicKeyHash, CatchainOverlayPtr, CatchainNode};
 
 pub(crate) struct CatchainOverlayManagerImpl {

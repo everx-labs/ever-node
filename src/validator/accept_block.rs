@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,28 +7,25 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use crate::{
     block::{construct_and_check_prev_stuff, BlockStuff, make_queue_update_from_block_raw},
-    shard_state::ShardStateStuff,
-    block_proof::BlockProofStuff,
-    engine_traits::EngineOperations,
-    full_node::apply_block::calc_shard_state,
+    block_proof::BlockProofStuff, engine_traits::EngineOperations,
+    full_node::apply_block::calc_shard_state, shard_state::ShardStateStuff,
     types::top_block_descr::TopBlockDescrStuff,
     validator::validator_utils::check_crypto_signatures,
     validating_utils::{UNREGISTERED_CHAIN_MAX_LEN, fmt_block_id_short},
 };
 use storage::block_handle_db::BlockHandle;
 use std::{cmp::{max, min}, sync::Arc, ops::Deref, time::Duration, collections::HashSet};
-use ton_block::{
-    Block, TopBlockDescr, BlockIdExt, MerkleProof, McShardRecord, CryptoSignaturePair, 
-    Deserializable, BlockSignatures, ValidatorSet, BlockProof, Serializable, BlockSignaturesPure, 
-    ValidatorBaseInfo, OutQueueUpdate
-};
-use ton_types::{error, Result, fail, UInt256, UsageTree, HashmapType};
+use ever_block::{
+    error, fail, Block, BlockIdExt, BlockProof, BlockSignatures, BlockSignaturesPure,
+    CryptoSignaturePair, Deserializable, HashmapType, McShardRecord, MerkleProof, OutQueueUpdate,
+    Result, Serializable, TopBlockDescr, ValidatorBaseInfo, ValidatorSet, UInt256, UsageTree 
+}; 
 use ton_api::ton::ton_node::{
     blocksignature::BlockSignature, broadcast::{BlockBroadcast, QueueUpdateBroadcast}
 };
@@ -483,7 +480,7 @@ fn create_new_proof_internal(
     // check signatures 
     // TODO make function somewhere, BlockProofStuff contains same code
 
-    let checked_data = ton_block::Block::build_data_for_sign(
+    let checked_data = Block::build_data_for_sign(
         &id.root_hash,
         &id.file_hash
     );

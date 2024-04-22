@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2022 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,26 +7,23 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
-use std::{cmp::max, sync::Arc};
-use std::io::Write;
-use ton_block::{
-    Block, BlockIdExt, BlkPrevInfo, Deserializable, ExtBlkRef, ShardDescr, ShardIdent, 
-    ShardHashes, HashmapAugType, MerkleProof, Serializable, ConfigParams, OutQueueUpdate,
-};
-use ton_types::{
-    Cell, Result, types::UInt256, BocReader, error, fail, HashmapType, UsageTree,
-};
-
-#[cfg(test)]
-use ton_block::{BlockInfo, BlkMasterInfo};
 use crate::{
     shard_state::ShardHashesStuff,
     validator::accept_block::visit_block_for_proof,
 };
+
+use ever_block::{
+    error, fail, Block, BlockIdExt, BlkPrevInfo, BocReader, Cell, ConfigParams, Deserializable, 
+    ExtBlkRef, HashmapAugType, HashmapType, MerkleProof, OutQueueUpdate, Result, Serializable, 
+    ShardDescr, ShardIdent, ShardHashes, UInt256, UsageTree
+};
+#[cfg(test)]
+use ever_block::{BlockInfo, BlkMasterInfo, write_boc};
+use std::{cmp::max, io::Write, sync::Arc};
 
 #[cfg(test)]
 #[path = "tests/test_block.rs"]
@@ -86,7 +83,7 @@ impl BlockStuff {
     #[cfg(test)]
     pub fn from_block(block: Block) -> Result<Self> {
         let root = block.serialize()?;
-        let data = ton_types::write_boc(&root)?;
+        let data = write_boc(&root)?;
         let file_hash = UInt256::calc_file_hash(&data);
         let block_info = block.read_info()?;
         let id = BlockIdExt {
@@ -360,20 +357,20 @@ impl BlockStuff {
                 Ok(true)
             })?;
         Ok(shards)
-   }
+    }
 
-   pub fn get_config_params(&self) -> Result<ConfigParams> {
-       self.block()?
-           .read_extra()?
-           .read_custom()?
-           .ok_or_else(|| error!("Block {} doesn't contain `custom` field", self.id))?
-           .config_mut().take()
-           .ok_or_else(|| error!("Block {} doesn't contain `config` field", self.id))
-   }
+    pub fn get_config_params(&self) -> Result<ConfigParams> {
+        self.block()?
+            .read_extra()?
+            .read_custom()?
+            .ok_or_else(|| error!("Block {} doesn't contain `custom` field", self.id))?
+            .config_mut().take()
+            .ok_or_else(|| error!("Block {} doesn't contain `config` field", self.id))
+    }
 
 // Unused
 //    pub fn read_cur_validator_set_and_cc_conf(&self) -> Result<(ValidatorSet, CatchainConfig)> {
-//        self.block()?.read_cur_validator_set_and_cc_conf()
+//       self.block()?.read_cur_validator_set_and_cc_conf()
 //    }
 
     pub fn calculate_tr_count(&self) -> Result<usize> {

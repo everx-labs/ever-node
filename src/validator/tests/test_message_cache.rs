@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -18,8 +18,8 @@ use openssl::rand::rand_bytes;
 use rand::{Rng, thread_rng};
 use adnl::telemetry::Metric;
 use ton_api::ton::ton_node::{RempMessageLevel, RempMessageStatus, rempmessagestatus::RempAccepted};
-use ton_block::{BlockIdExt, ShardIdent};
-use ton_types::{Result, SliceData, error, UInt256};
+use ever_block::{BlockIdExt, ShardIdent};
+use ever_block::{Result, SliceData, error, UInt256};
 use crate::engine_traits::RempDuplicateStatus;
 use crate::ext_messages::get_level_and_level_change;
 use crate::validator::message_cache::{MessageCache, RmqMessage, RempMessageOrigin};

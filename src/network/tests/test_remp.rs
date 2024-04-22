@@ -12,7 +12,7 @@ use ton_api::{
     IntoBoxed,
     ton::ton_node::{RempReceipt, RempCombinedReceipt, RempMessageStatus},
 };
-use ton_types::{fail, KeyId, Result, UInt256};
+use ever_block::{fail, KeyId, Result, UInt256};
 
 const KEY_TAG: usize = 0;
 
@@ -96,7 +96,7 @@ async fn test_remp_client_compact_protocol() -> Result<()> {
                 status: RempMessageStatus::TonNode_RempRejected(
                     ton_api::ton::ton_node::rempmessagestatus::RempRejected {
                         level: 2.try_into()?,
-                        block_id: ton_block::BlockIdExt::default(),
+                        block_id: ever_block::BlockIdExt::default(),
                         error: "Error test".to_owned(),
                     }
                 ),
