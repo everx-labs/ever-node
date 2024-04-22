@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.58.3
+
+- Minor fixes related to renaming
+
 ## Version 0.58.2
 
 - Repo ever_types merged into repo ever_block
