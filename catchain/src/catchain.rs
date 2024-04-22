@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use     
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -22,8 +22,8 @@ use crate::{
     ReceiverTaskQueuePtr, SessionId, ton, 
     profiling::Profiler, utils::{self, get_elapsed_time, MetricsDumper, MetricsHandle}
 };
+use adnl::{OverlayUtils, PrivateOverlayShortId};                    
 use metrics::Recorder;
-use overlay::{OverlayUtils, PrivateOverlayShortId};                    
 use rand::Rng;                                                              
 use std::{
     any::Any, cell::RefCell, collections::HashMap, collections::LinkedList, fmt, rc::Rc, 
@@ -31,7 +31,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH}
 };
 use ton_api::IntoBoxed;
-use ton_types::{error, Result, UInt256};
+use ever_block::{error, Result, UInt256};
 
 /*
     Constants
@@ -302,7 +302,7 @@ impl CatchainOverlayListener for OverlayListenerImpl {
 
             log::warn!("{}", warning);
 
-            let response = match ton_api::Deserializer::new(&mut &data.data().0[..])
+            let response = match ton_api::Deserializer::new(&mut data.data().as_slice())
                 .read_boxed::<ton_api::ton::TLObject>()
             {
                 Ok(message) => {
@@ -1813,7 +1813,7 @@ impl CatchainProcessor {
     fn on_message(&mut self, adnl_id: PublicKeyHash, data: BlockPayloadPtr) {
         instrument!();
 
-        let bytes = &mut data.data().as_ref();
+        let bytes = &mut data.data().as_slice();
 
         if log::log_enabled!(log::Level::Debug) {
             let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_else(
@@ -1851,7 +1851,7 @@ impl CatchainProcessor {
                 "Receive broadcast from overlay for source: \
                 size={}, payload={}, source={}, session_id={:x}, timestamp={:?}",
                 data.data().len(),
-                &hex::encode(&data.data().as_ref()),
+                &hex::encode(data.data()),
                 &hex::encode(source_key_hash.data()),
                 self.session_id,
                 elapsed

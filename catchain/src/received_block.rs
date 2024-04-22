@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -21,7 +21,7 @@ use std::{
     cell::RefCell, cmp, collections::HashMap, fmt, rc::{Rc, Weak}, str::FromStr
 };
 use ton_api::IntoBoxed;
-use ton_types::{error, fail, Result, UInt256};
+use ever_block::{error, fail, Result, UInt256};
 
 /*
     Constants
@@ -443,7 +443,7 @@ impl ReceivedBlock for ReceivedBlockImpl {
         .into_boxed();
         let mut serialized_message = serialize_tl_boxed_object!(&block_update_event);
 
-        serialized_message.0.extend(self.payload.data().iter());
+        serialized_message.extend(self.payload.data().iter());
 
         let serialized_block_with_payload =
             CatchainFactory::create_block_payload(serialized_message);
@@ -738,7 +738,7 @@ impl ReceivedBlockImpl {
 
         use ton_api::ton::catchain::block::inner::Data;
 
-        match ton_api::Deserializer::new(&mut self.payload.data().as_ref()).read_boxed::<Data>() {
+        match ton_api::Deserializer::new(&mut self.payload.data().as_slice()).read_boxed::<Data>() {
             Ok(message) => match message {
                 Data::Catchain_Block_Data_Fork(message) => {
                     let left = message.left.only();

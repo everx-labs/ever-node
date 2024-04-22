@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,14 +7,21 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use adnl::{
     common::TaggedTlObject, client::{AdnlClient, AdnlClientConfig, AdnlClientConfigJson}
 };
-use std::{convert::TryInto, env, str::FromStr, time::Duration};
+use ever_abi::{Contract, Token, TokenValue, Uint};
+use ever_block::{
+    error, fail, AccountStatus, base64_decode, base64_encode, BlockIdExt, BuilderData, 
+    Deserializable, Ed25519KeyOption, Result, Serializable, ShardAccount, SliceData, 
+    UInt256, write_boc
+};
+use ever_block_json::parse_state;
+use std::{collections::HashMap, convert::TryInto, env, str::FromStr, time::Duration};
 use ton_api::{
     serialize_boxed,
     ton::{
@@ -25,15 +32,12 @@ use ton_api::{
 };
 #[cfg(feature = "telemetry")]
 use ton_api::tag_from_bare_object;
-use ton_block::{
-    AccountStatus, Deserializable, BlockIdExt, Serializable, ShardAccount
-};
-use ton_types::{
-    error, fail, base64_decode, base64_encode, BuilderData, Ed25519KeyOption, Result, 
-    SliceData, UInt256, write_boc
-};
 
 include!("../common/src/test.rs");
+
+const ELECTOR_ABI: &[u8] = include_bytes!("Elector.abi.json"); //elector's ABI
+const ELECTOR_PROCESS_NEW_STAKE_FUNC_NAME: &str = "process_new_stake"; //elector process_new_stake function name
+const USE_FIFTH_ELECTOR: bool = true;
 
 trait SendReceive {
     fn send<Q: ToString>(params: impl Iterator<Item = Q>) -> Result<TLObject>;
@@ -90,6 +94,7 @@ commands! {
     AddValidatorAdnlAddr, "addvalidatoraddr", "addvalidatoraddr <permkeyhash> <keyhash> <expireat>\tadd validator ADNL addr"
     AddValidatorPermKey, "addpermkey", "addpermkey <keyhash> <election-date> <expire-at>\tadd validator permanent key"
     AddValidatorTempKey, "addtempkey", "addtempkey <permkeyhash> <keyhash> <expire-at>\tadd validator temp key"
+    AddValidatorBlsKey, "addblskey", "addblskey <permkeyhash> <keyhash> <expire-at>\t add validator bls key"
     Bundle, "bundle", "bundle <block_id>\tprepare bundle"
     ExportPub, "exportpub", "exportpub <keyhash>\texports public key by key hash"
     FutureBundle, "future_bundle", "future_bundle <block_id>\tprepare future bundle"
@@ -124,7 +129,7 @@ fn parse_data<Q: ToString>(param_opt: Option<Q>, name: &str) -> Result<ton::byte
     parse_any(
         param_opt,
         &format!("{} in hex format", name),
-        |value| Ok(ton::bytes(hex::decode(value)?))
+        |value| Ok(hex::decode(value)?)
     )
 }
 
@@ -225,8 +230,18 @@ impl SendReceive for GetSessionStats {
 }
 
 impl SendReceive for NewKeypair {
-    fn send<Q: ToString>(_params: impl Iterator<Item = Q>) -> Result<TLObject> {
-        Ok(TLObject::new(ton::rpc::engine::validator::GenerateKeyPair))
+    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+        match params.next() {
+            None => Ok(TLObject::new(ton::rpc::engine::validator::GenerateKeyPair)),
+            Some(param) => {
+                let mut param = param.to_string();
+                param.make_ascii_lowercase();
+                match param.as_ref() {
+                    "bls" => Ok(TLObject::new(ton::rpc::engine::validator::GenerateBlsKeyPair)),
+                    _ => fail!("invalid parameters!")
+                }
+            },
+        }
     }
     fn receive<Q: ToString>(
         answer: TLObject, 
@@ -254,11 +269,14 @@ impl SendReceive for ExportPub {
         mut _params: impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
         let answer = downcast::<ton_api::ton::PublicKey>(answer)?;
-        let pub_key = answer
-            .key()
-            .ok_or_else(|| error!("Public key not found in answer!"))?
-            .as_slice()
-            .to_vec();
+        let pub_key = match answer.key() {
+            Some(key) => key.clone().into_vec(),
+            None => {
+                answer.bls_key()
+                    .ok_or_else(|| error!("Public key not found in answer!"))?
+                    .clone()
+            }
+        };
         let msg = format!("imported key: {} {}", hex::encode(&pub_key), base64_encode(&pub_key));
         Ok((msg, pub_key))
     }
@@ -278,7 +296,7 @@ impl SendReceive for Sign {
         mut _params: impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
         let answer = downcast::<ton_api::ton::engine::validator::Signature>(answer)?;
-        let signature = answer.signature().0.clone();
+        let signature = answer.signature().clone();
         let msg = format!(
             "got signature: {} {}", 
             hex::encode(&signature), base64_encode(&signature)
@@ -295,6 +313,19 @@ impl SendReceive for AddValidatorPermKey {
         Ok(TLObject::new(ton::rpc::engine::validator::AddValidatorPermanentKey {
             key_hash,
             election_date,
+            ttl
+        }))
+    }
+}
+
+impl SendReceive for AddValidatorBlsKey {
+    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+        let permanent_key_hash = parse_int256(params.next(), "permanent_key_hash")?;
+        let key_hash =  parse_int256(params.next(), "key_hash")?;
+        let ttl = parse_int(params.next(), "expire_at")? - now();
+        Ok(TLObject::new(ton::rpc::engine::validator::AddValidatorBlsKey {
+            permanent_key_hash,
+            key_hash,
             ttl
         }))
     }
@@ -385,8 +416,8 @@ impl SendReceive for GetBlockchainConfig {
 
         // We use config_proof because we use standard struct ConfigInfo from ton-tl and
         // ConfigInfo doesn`t contain more suitable fields
-        let config_param = hex::encode(config_info.config_proof().0.clone());
-        Ok((format!("{}", config_param), config_info.config_proof().0.clone()))
+        let config_param = hex::encode(config_info.config_proof().clone());
+        Ok((format!("{}", config_param), config_info.config_proof().clone()))
     }
 }
 
@@ -406,8 +437,8 @@ impl SendReceive for GetConfig {
         mut _params: impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
         let config_info = downcast::<ton_api::ton::lite_server::ConfigInfo>(answer)?;
-        let config_param = String::from_utf8(config_info.config_proof().0.clone())?;
-        Ok((config_param.to_string(), config_info.config_proof().0.clone()))
+        let config_param = String::from_utf8(config_info.config_proof().clone())?;
+        Ok((config_param.to_string(), config_info.config_proof().clone()))
     }
 }
 
@@ -562,7 +593,7 @@ impl ControlClient {
     ) -> Result<(String, Vec<u8>)> {
         let query = command_send(name, params.clone())?;
         let boxed = ControlQuery {
-            data: ton::bytes(serialize_boxed(&query)?)
+            data: serialize_boxed(&query)?
         };
         #[cfg(feature = "telemetry")]
         let tag = tag_from_bare_object(&boxed);
@@ -594,12 +625,20 @@ impl ControlClient {
         let body = BuilderData::with_raw(data, len)?;
         let body = body.into_cell()?;
         log::trace!("message body {}", body);
-        let data = ton_types::write_boc(&body)?;
+        let data = write_boc(&body)?;
         let path = params.next().map(
             |path| path.to_string()).unwrap_or("recover-query.boc".to_string()
         );
         std::fs::write(&path, &data)?;
         Ok((format!("Message body is {} saved to path {}", base64_encode(&data), path), data))
+    }
+
+    fn convert_to_uint(value: &[u8], bytes_count: usize) -> TokenValue {
+        assert!(value.len() == bytes_count);
+        TokenValue::Uint(Uint {
+            number: num_bigint::BigUint::from_bytes_be(value),
+            size: value.len() * 8,
+        })
     }
 
     // @input elect_time expire_time <validator-query.boc>
@@ -677,21 +716,70 @@ impl ControlClient {
         Ed25519KeyOption::from_public_key(&pub_key[..].try_into()?)
             .verify(&data, &signature)?;
 
-        let query_id = now() as u64;
-        // validator-elect-signed.fif
-        let mut data = 0x4E73744Bu32.to_be_bytes().to_vec();
-        data.extend_from_slice(&query_id.to_be_bytes());
-        data.extend_from_slice(&pub_key);
-        data.extend_from_slice(&elect_time.to_be_bytes());
-        data.extend_from_slice(&max_factor.to_be_bytes());
-        data.extend_from_slice(&adnl);
-        let len = data.len() * 8;
-        let mut body = BuilderData::with_raw(data, len)?;
-        let len = signature.len() * 8;
-        body.checked_append_reference(BuilderData::with_raw(signature, len)?.into_cell()?)?;
-        let body = body.into_cell()?;
+        let body = if USE_FIFTH_ELECTOR {
+            let query_id = now() as u64;
+            // validator-elect-signed.fif
+            let mut data = 0x4E73744Bu32.to_be_bytes().to_vec();
+            data.extend_from_slice(&query_id.to_be_bytes());
+            data.extend_from_slice(&pub_key);
+            data.extend_from_slice(&elect_time.to_be_bytes());
+            data.extend_from_slice(&max_factor.to_be_bytes());
+            data.extend_from_slice(&adnl);
+            let len = data.len() * 8;
+            let mut body = BuilderData::with_raw(data, len)?;
+            let len = signature.len() * 8;
+            body.checked_append_reference(BuilderData::with_raw(signature, len)?.into_cell()?)?;
+            let body = body.into_cell()?;
+            body
+        } else {
+            let (s, bls) = self.process_command("newkey", vec!["bls"].iter()).await?;
+            log::trace!("{}", s);
+            let bls_str = &hex::encode_upper(&bls)[..];
+
+            let (s, bls_pub_key) = self.process_command("exportpub", vec![bls_str].iter()).await?;
+            log::trace!("{}", s);
+
+            let (s, _) = self.process_command("addblskey", vec![perm_str.clone(), bls_str.to_string(), elect_time_str].iter()).await?;
+            log::trace!("{}", s);
+
+            let contract = Contract::load(ELECTOR_ABI).expect("Elector's ABI must be valid");
+            let process_new_stake_fn = contract
+                .function(ELECTOR_PROCESS_NEW_STAKE_FUNC_NAME)
+                .expect("Elector contract must have 'process_new_stake' function for elections")
+                .clone();
+            log::trace!("Use process new stake function '{}' with id={:08X}",
+                ELECTOR_PROCESS_NEW_STAKE_FUNC_NAME, process_new_stake_fn.get_function_id());
+
+            let time_now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            let header: HashMap<_, _> = vec![("time".to_owned(), TokenValue::Time(time_now_ms))]
+                .into_iter()
+                .collect();
+
+            let query_id = now() as u64;
+
+            let parameters = [
+                Token::new("query_id", Self::convert_to_uint(&query_id.to_be_bytes(), 8)),
+                Token::new("validator_pubkey", Self::convert_to_uint(&pub_key, 32)),
+                Token::new("stake_at", Self::convert_to_uint(&elect_time.to_be_bytes(), 4)),
+                Token::new("max_factor", Self::convert_to_uint(&max_factor.to_be_bytes(), 4)),
+                Token::new("adnl_addr", Self::convert_to_uint(&adnl, 32)),
+                Token::new("bls_key1", Self::convert_to_uint(&bls_pub_key[0..32], 32)), //256 bits
+                Token::new("bls_key2", Self::convert_to_uint(&bls_pub_key[32..], 16)), //128 bits
+                Token::new("signature", TokenValue::Bytes(signature.to_vec())),
+            ];
+
+            const INTERNAL_CALL: bool = true; //internal message
+
+            let body = process_new_stake_fn
+                .encode_input(&header, &parameters, INTERNAL_CALL, None, None)
+                .and_then(|builder| builder.into_cell())?;
+            body
+        };
         log::trace!("message body {}", body);
-        let data = ton_types::write_boc(&body)?;
+        let data = write_boc(&body)?;
         let path = params.next().map(
             |path| path.to_string()).unwrap_or("validator-query.boc".to_string()
         );
@@ -719,7 +807,7 @@ impl ControlClient {
         let zerostate = 
             serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&zerostate)
                 .map_err(|err| error!("Can't parse read zerostate json file: {}", err))?;
-        let zerostate = ton_block_json::parse_state(&zerostate)
+        let zerostate = parse_state(&zerostate)
             .map_err(|err| error!("Can't parse read zerostate json file: {}", err))?;
 
         let key = SliceData::load_builder(index.write_to_new_cell()?)?;
@@ -852,12 +940,12 @@ mod test {
     use serde_json::json;
     use storage::block_handle_db::BlockHandle;
     use ton_api::deserialize_boxed;
-    use ton_block::{
+    use ever_block::{
         generate_test_account_by_init_code_hash,
         BlockLimits, ConfigParam0, ConfigParam34, ConfigParamEnum, McStateExtra, ParamLimits, 
         ShardIdent, ShardStateUnsplit, ValidatorDescr, ValidatorSet
     };
-    use ton_node::{
+    use ever_node::{
         collator_test_bundle::{create_engine_telemetry, create_engine_allocated},
         config::TonNodeConfig, engine_traits::{EngineAlloc, EngineOperations},
         internal_db::{InternalDbConfig, InternalDb, state_gc_resolver::AllowStateGcSmartResolver}, 
@@ -866,7 +954,7 @@ mod test {
         validator::validator_manager::ValidationStatus, shard_states_keeper::PinnedShardStateGuard,
     };
     #[cfg(feature = "telemetry")]
-    use ton_node::engine_traits::EngineTelemetry;
+    use ever_node::engine_traits::EngineTelemetry;
 
     const CFG_DIR: &str = "./target";
     const CFG_NODE_FILE: &str = "light_node.json";
@@ -898,7 +986,7 @@ mod test {
                 &ShardAccount::with_params(&account, UInt256::default(), 0).unwrap()
             ).unwrap();
             let cell = ss.serialize().unwrap();
-            let bytes = ton_types::write_boc(&cell).unwrap();
+            let bytes = write_boc(&cell).unwrap();
             let shard_state_id = BlockIdExt::with_params(
                 ShardIdent::full(0),
                 0,
@@ -936,7 +1024,7 @@ mod test {
             ss.write_custom(Some(&ms)).unwrap();
 
             let cell = ss.serialize().unwrap();
-            let bytes = ton_types::write_boc(&cell).unwrap();
+            let bytes = write_boc(&cell).unwrap();
             let master_state_id = BlockIdExt::with_params(
                 ShardIdent::masterchain(),
                 0,
@@ -1591,7 +1679,7 @@ mod test {
 
     #[test]
     fn test_parse_data() {
-        let ethalon = ton::bytes(vec![10, 77]);
+        let ethalon = vec![10, 77];
         assert_eq!(parse_test!(parse_data, "0A4D").unwrap(), ethalon);
         parse_test!(parse_data, "QQ").expect_err("must generate error");
         parse_test!(parse_data, "GfgI79Xf3q7r4q1SPz7wAqBt0W6CjavuADODoz/DQE8=")

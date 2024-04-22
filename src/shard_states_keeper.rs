@@ -14,10 +14,10 @@ use storage::{
     block_handle_db::BlockHandle, shardstate_db_async::AllowStateGcResolver, 
     shardstate_db_async::SsNotificationCallback, error::StorageError,
 };
-use ton_block::{BlockIdExt, ShardIdent};
-use ton_types::{fail, error, Result, UInt256, BocReader, Cell};
+use ever_block::{BlockIdExt, ShardIdent};
+use ever_block::{fail, error, Result, UInt256, BocReader, Cell};
 use adnl::common::add_unbound_object_to_map_with_update;
-use std::{ time::Duration, ops::Deref, sync::Arc };
+use std::{ ops::Deref, sync::Arc, time::{Duration, Instant} };
 
 pub struct PinnedShardStateGuard {
     state: Arc<ShardStateStuff>,
@@ -254,14 +254,17 @@ impl ShardStatesKeeper {
         ).await?.1;
 
         if let (true, Some(cb)) = (saving, cb2) {
-            let now = std::time::Instant::now();
-            log::trace!("store_state: waiting for callback...");
-            cb.wait().await;
+            let now = Instant::now();
+            log::debug!("store_state {}: waiting for callback...", handle.id());
+            while tokio::time::timeout(Duration::from_secs(1), cb.wait()).await.is_err() {
+                log::warn!("store_state {}: yet waiting for a callback: TIME {}ms", 
+                    handle.id(), now.elapsed().as_millis());
+            }
             let millis = now.elapsed().as_millis();
             if millis > 100 {
-                log::warn!("store_state: callback done TIME {}ms", millis);
+                log::warn!("store_state {}: callback done TIME {}ms", millis, handle.id());
             } else {
-                log::trace!("store_state: callback done TIME {}ms", millis);
+                log::debug!("store_state {}: callback done TIME {}ms", millis, handle.id());
             }
             // reload state after saving just to free fully loaded tree 
             // and use lazy loaded cells futher
@@ -292,24 +295,19 @@ impl ShardStatesKeeper {
         handle: &Arc<BlockHandle>,
         root_hash: &UInt256,
         data: Arc<Vec<u8>>,
-        low_memory_mode: bool,
     ) -> Result<Arc<ShardStateStuff>> {
 
         // deserialise cells (and save it by the way - in case of low memory mode)
 
         let now = std::time::Instant::now();
         log::info!(
-            "check_and_store_state: deserialize (low_memory_mode: {}) length: {}, {}...",
-            low_memory_mode, data.len(), handle.id()
+            "check_and_store_state: deserialize, length: {}, {}...",
+            data.len(), handle.id()
         );
 
         let state_root = {
-            let mut boc_reader = BocReader::new();
-            if low_memory_mode {
-                let done_cells_storage = self.db.create_done_cells_storage(root_hash)?;
-                boc_reader = boc_reader.set_done_cells_storage(done_cells_storage);
-            }
-            boc_reader
+            BocReader::new()
+                .set_done_cells_storage(self.db.create_done_cells_storage(root_hash)?)
                 .set_abort(&|| self.stopper.check_stop())
                 .read_inmem(data.clone())?
                 .withdraw_single_root()?
@@ -320,8 +318,8 @@ impl ShardStatesKeeper {
         }
 
         log::info!(
-            "check_and_store_state: deserialized (low_memory_mode: {}) {} TIME {} ms",
-            low_memory_mode, handle.id(), now.elapsed().as_millis()
+            "check_and_store_state: deserialized {} TIME {} ms",
+            handle.id(), now.elapsed().as_millis()
         );
 
         let state = self.build_state_object(state_root, handle.id(), handle.is_queue_update_for())?;

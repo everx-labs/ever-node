@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -34,24 +34,22 @@ use adnl::{
     common::{add_counted_object_to_map, CountedObject, Counter, TaggedByteSlice}, 
     node::AdnlNode
 };
+use adnl::{DhtIterator, DhtNode};
+use adnl::{
+    BroadcastSendInfo, OverlayId, OverlayShortId, OverlayNode, QueriesConsumer, 
+    PrivateOverlayShortId, OverlayUtils, RldpNode
+};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
-use dht::{DhtIterator, DhtNode};
-use overlay::{
-    BroadcastSendInfo, OverlayId, OverlayNode, OverlayShortId, OverlayUtils, PrivateOverlayShortId, QueriesConsumer
-};
-use rldp::RldpNode;
-use ton_block::BlockIdExt;
 use std::{
     convert::TryInto, hash::Hash, 
     sync::{Arc, atomic::{AtomicI32, AtomicU64, AtomicBool, Ordering}}, 
     time::{Duration, SystemTime}
 };
-use ton_types::{error, fail, KeyId, KeyOption, Result, UInt256};
+use ever_block::{error, fail, KeyId, KeyOption, Result, UInt256, BlockIdExt};
 use ton_api::{
-    IntoBoxed, serialize_boxed,
-    ton::{bytes, ton_node::broadcast::ConnectivityCheckBroadcast}
+    IntoBoxed, serialize_boxed, ton::ton_node::broadcast::ConnectivityCheckBroadcast,
 };
 #[cfg(feature = "telemetry")]
 use ton_api::tag_from_bare_type;
@@ -274,6 +272,12 @@ impl NodeNetwork {
                 Ok(result) => log::info!("Deleted overlay {} ({})", guard.key(), result),
                 Err(e) => log::warn!("Deleting overlay {}: {}", guard.key(), e)
             }
+        }
+    }
+
+    pub fn log_neighbors_stat(&self) {
+        for guard in self.overlays.iter() {
+            guard.val().peers().log_neighbors_stat();
         }
     }
 
@@ -960,7 +964,7 @@ impl NodeNetwork {
             padding.extend_from_slice(&now.to_le_bytes());
             let broadcast = ConnectivityCheckBroadcast {
                 pub_key: UInt256::with_array(key_id.clone()),
-                padding: bytes(padding),
+                padding
             };
             overlay.val().overlay().broadcast(
                 &self.masterchain_overlay_short_id, 
@@ -985,7 +989,26 @@ impl NodeNetwork {
             }
             match self.config_handler.get_validator_key(&validator_adnl_key_id).await {
                 Some((adnl_key, _)) => {
-                    let id = self.network_context.adnl.add_key(adnl_key, election_id as usize)?;
+                    let id = match self.network_context.adnl.add_key(adnl_key.clone(), election_id as usize) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            if let Ok(old_key) = self.network_context.adnl.key_by_tag(election_id as usize) {
+                                if *old_key.id() != validator_adnl_key_id {
+                                    log::warn!("load_and_store_adnl_key: remove old key {}, election_id: {}", 
+                                        old_key.id(), election_id);
+                                } else {
+                                    log::warn!("load_and_store_adnl_key: remove key {}, election_id: {}", 
+                                        old_key.id(), election_id);
+                                }
+
+                                let _ = self.network_context.adnl.delete_key(old_key.id(), election_id as usize);
+                                self.network_context.adnl.add_key(adnl_key, election_id as usize)?
+                            } else {
+                                fail!("failed initialization new validator key (id: {}, election_id: {}): {:?}",
+                                    validator_adnl_key_id, election_id, e);
+                            }
+                        }
+                    };
                     NodeNetwork::periodic_store_ip_addr(
                         self.network_context.dht.clone(),
                         self.network_context.adnl.key_by_id(&id)?,
@@ -1130,6 +1153,10 @@ impl OverlayOperations for NodeNetwork {
 
 #[async_trait::async_trait]
 impl PrivateOverlayOperations for NodeNetwork {
+    async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>> {
+        self.config_handler.get_validator_bls_key(key_id).await
+    }
+
     async fn set_validator_list(
         &self, 
         validator_list_id: UInt256,
@@ -1394,7 +1421,7 @@ impl NodeConfigSubscriber for NodeNetwork {
 // Unused         
 //            ConfigEvent::RemoveValidatorAdnlKey(validator_adnl_key_id, election_id) => {
 //                log::info!("config event (RemoveValidatorAdnlKey) id: {}.", &validator_adnl_key_id);
-//                self.adnl.delete_key(&validator_adnl_key_id, election_id as usize)?;
+//                self.network_context.adnl.delete_key(&validator_adnl_key_id, election_id as usize)?;
 //                let status = self.validator_context.actual_local_adnl_keys.remove(&validator_adnl_key_id).is_some();
 //                log::info!("config event (RemoveValidatorAdnlKey) id: {} finished({}).", &validator_adnl_key_id, &status);
 //                return Ok(status);

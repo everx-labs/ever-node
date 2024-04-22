@@ -16,14 +16,14 @@ use storage::{types::BlockMeta, block_handle_db::{BlockHandle, BlockHandleStorag
 use ton_api::ton::ton_node::{
     RempMessage, RempMessageLevel, RempMessageStatus, RempReceipt
 };
-use ton_block::{
+use ever_block::{
     ConfigParams, FutureSplitMerge, ShardHashes, ShardIdent, ShardStateUnsplit, ValidatorDescr,
     ValidatorSet, SigPubKey, ShardDescr, CatchainConfig, ConfigParamEnum, ConfigParam34, 
     ConfigParam36, BinTree, InRefValue, McStateExtra, Block, BlockExtra, InMsg, McBlockExtra,
     BlockIdExt, Message, Transaction, ExternalInboundMessageHeader, MsgAddressExt, MsgAddressInt,
     InMsgDescr, GetRepresentationHash, Serializable, ShardAccount, ChildCell, CommonMessage,
 };
-use ton_types::{
+use ever_block::{
     error, fail, AccountId, Ed25519KeyOption, KeyId, Result, SliceData, UInt256
 };
 

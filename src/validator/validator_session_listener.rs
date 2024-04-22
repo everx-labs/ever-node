@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -218,28 +218,49 @@ impl CatchainReplayListener for ValidatorSessionListener {
     }
 }
 
-async fn process_validation_action (action: ValidationAction, g: Arc<ValidatorGroup>) {
+async fn process_validation_action(
+    action: ValidationAction, 
+    g: Arc<ValidatorGroup>, 
+    rt: tokio::runtime::Handle
+) {
     let action_str = format!("{}", action);
     let next_block_descr = g.get_next_block_descr().await;
-    log::info!(target: "validator", "({}): Processing action: {}, {}", next_block_descr, action_str, g.info().await);
+    log::info!(
+        target: "validator", 
+        "({}): Processing action: {}, {}", next_block_descr, action_str, g.info().await
+    );
     match action {
-        ValidationAction::OnGenerateSlot {round, callback} => g.on_generate_slot (round, callback).await,
+        ValidationAction::OnGenerateSlot {round, callback} => g.on_generate_slot(
+            round, 
+            callback, 
+            rt
+        ).await,
 
         ValidationAction::OnCandidate {round, source, root_hash, data, collated_data, callback} =>
             g.on_candidate (round, source, root_hash, data, collated_data, callback).await,
 
-        ValidationAction::OnBlockCommitted(OnBlockCommitted{ round, source, root_hash, file_hash, data, signatures, approve_signatures }) =>
+        ValidationAction::OnBlockCommitted(
+            OnBlockCommitted {
+                round, source, root_hash, file_hash, data, signatures, approve_signatures 
+            }
+        ) =>
             //panic!("ValidatorAction::OnBlockCommitted must be processed in a separate thread!");
-            g.on_block_committed (round, source, root_hash, file_hash, data, signatures, approve_signatures).await,
+            g.on_block_committed (
+                round, source, root_hash, file_hash, data, signatures, approve_signatures
+            ).await,
 
         ValidationAction::OnBlockSkipped { round } => g.on_block_skipped(round).await,
 
-        ValidationAction::OnGetApprovedCandidate { source, root_hash, file_hash, collated_data_hash, callback} =>
-            g.on_get_approved_candidate(source, root_hash, file_hash, collated_data_hash, callback).await,
+        ValidationAction::OnGetApprovedCandidate { 
+            source, root_hash, file_hash, collated_data_hash, callback
+        } =>
+            g.on_get_approved_candidate(
+                source, root_hash, file_hash, collated_data_hash, callback
+            ).await,
 
         #[cfg(feature = "slashing")]
         ValidationAction::OnSlashingStatistics { round, stat } =>
-            g.on_slashing_statistics(round, stat)
+            g.on_slashing_statistics(round, stat).await
     }
 }
 
@@ -316,8 +337,13 @@ pub async fn process_validation_queue(
                 }
 
                 let start_time = SystemTime::now();
+                let rt_clone = rt.clone();
                 let mut join_handle = rt.spawn(async move {
-                    process_validation_action (action, g_clone).await;
+                    process_validation_action(
+                        action, 
+                        g_clone, 
+                        rt_clone
+                    ).await;
                 });
 
                 loop {

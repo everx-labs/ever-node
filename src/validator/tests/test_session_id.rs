@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -16,7 +16,7 @@ use std::{
     io::{self, BufRead},
     time::Duration,
 };
-use ton_block::{signature::SigPubKey, validators::ValidatorDescr};
+use ever_block::{signature::SigPubKey, validators::ValidatorDescr};
 
 use super::*;
 use crate::validator::{log_parser::LogParser, sessions_computing::GeneralSessionInfo};
@@ -45,7 +45,7 @@ fn parse_validator_descr(parser: &LogParser, name: &str) -> ValidatorDescr {
         SigPubKey::from_bytes(&parser.parse_slice(&format!("{}.key", name))).unwrap(),
         parser.parse_field_fromstr::<u64>(&format!("{}.weight", name)),
         Some(UInt256::from_slice(
-            parser.parse_slice(&format!("{}.addr", name)).0.as_slice(),
+            parser.parse_slice(&format!("{}.addr", name)).as_slice(),
         )),
         None
     )
@@ -67,7 +67,7 @@ impl ValidatorParams {
         ValidatorParams {
             general_session_info: Arc::new(GeneralSessionInfo {
                 catchain_seqno,
-                opts_hash: UInt256::from_slice(parser.parse_slice("opts_hash").0.as_slice()),
+                opts_hash: UInt256::from_slice(parser.parse_slice("opts_hash").as_slice()),
                 shard: parse_shard_ident(parser, "shard"),
                 key_seqno: parser.parse_field_fromstr::<u32>("key_seqno"),
                 max_vertical_seqno: 0
@@ -97,9 +97,9 @@ fn do_test_get_validator_set_id(contents: &str) {
 
     let serialized = get_session_id_serialize(p.general_session_info.clone(), &p.val_set.list().to_vec(), true);
     let computed_id = get_session_id(p.general_session_info.clone(), &p.val_set.list().to_vec(), true);
-    let actual_id = UInt256::from_slice(&parser.parse_slice("group_id").0);
+    let actual_id = UInt256::from_slice(&parser.parse_slice("group_id"));
 
-    println!("Serialized: {}", hex::encode(&serialized.0));
+    println!("Serialized: {}", hex::encode(&serialized));
     println!("Actual group-id: {}", actual_id);
     println!("Computed group-id: {}", computed_id);
 
@@ -128,7 +128,7 @@ fn do_test_catchain_unsafe_rotate(s: &str) {
     //let session_id = get_session_id(&p.shard, &p.val_set, &p.opts_hash, p.key_seqno, true, 0);
     let session_id = get_session_id(p.general_session_info.clone(), &p.val_set.list().to_vec(), true);
     let unsafe_serialized = compute_session_unsafe_serialized(&session_id, rotation_id);
-    let actual_serialized = parser.parse_slice("unsafe_serialized").0;
+    let actual_serialized = parser.parse_slice("unsafe_serialized");
 
     let unsafe_id = get_session_unsafe_id(
         p.general_session_info.clone(),
@@ -137,7 +137,7 @@ fn do_test_catchain_unsafe_rotate(s: &str) {
         Some(prev_block),
         &config
     );
-    let real_unsafe_id = UInt256::from_slice(&parser.parse_slice("unsafe_id").0);
+    let real_unsafe_id = UInt256::from_slice(&parser.parse_slice("unsafe_id"));
 
     println!("Actual unsafe-id: {:x}", real_unsafe_id);
     println!("Computed unsafe-id: {:x}", unsafe_id);

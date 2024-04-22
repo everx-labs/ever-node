@@ -2,9 +2,69 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.58.2
+
+- Repo ever_types merged into repo ever_block
+
+## Version 0.58.0
+
+- The crate was renamed from `ton_node` to `ever-node`
+- Supported renaming of other crates
+
+## Version 0.57.0
+
+- Shadow SMFT is prepared for first deployment
+
+## Version 0.56.8
+
+- `./configs/ton-global.config.json` renamed to `./configs/ton-global-config-sample.json` because
+  it is not an actual mainnet config. You can get the actual mainnet config here: 
+  https://github.com/tonlabs/main.ton.dev/blob/master/configs/ton-global.config.json.
+- Removed `low_memory_mode` flag from node's config.json. It is always enabled now. 
+  The false value of this flag is not actual anymore because the size of the shard states 
+  has become too big to process it in memory.
+
+## Version 0.56.7
+
+- Logging was a bit refactored. Added neighbor's stat to telemetry.
+
+## Version 0.56.6
+
+- Added new parameter to node config `sync_by_archives` which allows to synchronize node by archives 
+  instead of single blocks. It may be useful in some conditions, for example, long ping to other nodes.
+
+## Version 0.56.5
+
+- Estimate block size using pruned cells estimation
+
+## Version 0.56.4
+
+- Supported new multi-networks API of DHT
+- United crate for protocols
+
+## Version 0.56.3
+
+- Fixed UNREGISTERED_CHAIN_MAX_LEN const for Venom blockchain
+
+## Version 0.56.2
+
+- Fixed bug in storing cells mechanism.
+
+## Version 0.56.1
+
+- Fix unstable sync (key blocks mismatch)
+
+## Version 0.56.0
+
+- Get rid of ton::bytes type
+
+## Version 0.55.100
+
+- Deleted messages from outbound queue which were left after split are taken into estimation of block size
+
 ## Version 0.55.99
 
-- Added a mechanism of storing cells.
+- Improved mechanism of storing cells.
 
 ## Version 0.55.98
 

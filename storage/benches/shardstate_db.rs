@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,20 +7,20 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use std::{sync::Arc, collections::HashSet};
 use storage::{
     db::rocksdb::RocksDb,
-    shardstate_db_async::{AllowStateGcResolver, ShardStateDb, SsNotificationCallback},
+    shardstate_db_async::{AllowStateGcResolver, CellsDbConfig, ShardStateDb, SsNotificationCallback},
     StorageAlloc,
 };
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
-use ton_block::{BlockIdExt, ShardIdent};
-use ton_types::{Cell, Result, BuilderData};
+use ever_block::{BlockIdExt, ShardIdent};
+use ever_block::{Cell, Result, BuilderData};
 use rand::{Rng, SeedableRng};
 
 include!("../src/db/tests/destroy_db.rs");
@@ -153,9 +153,14 @@ async fn main() -> Result<()> {
             "shardstate_db",
             "cell_db",
             false,
-            1000,
-            1000,
             false,
+            CellsDbConfig {
+                states_db_queue_len: 1000,
+                max_pss_slowdown_mcs: 1000,
+                prefill_cells_counters: false,
+                cache_cells_counters: true,
+                cache_size_bytes: 10000000,
+            },
             #[cfg(feature = "telemetry")]
             Arc::new(StorageTelemetry::default()),
             Arc::new(StorageAlloc::default()),

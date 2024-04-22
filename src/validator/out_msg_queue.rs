@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -22,16 +22,12 @@ use std::{
     cmp::max, iter::Iterator, sync::{Arc, atomic::{AtomicBool, Ordering}},
     collections::{btree_map::{self, BTreeMap}, HashMap, HashSet},
 };
-use ton_block::{
-    BlockIdExt, ShardIdent, Serializable, Deserializable, 
-    OutMsgQueueInfo, OutMsgQueue, OutMsgQueueKey, IhrPendingInfo,
-    ProcessedInfo, ProcessedUpto, ProcessedInfoKey, 
-    ShardHashes, AccountIdPrefixFull,
-    HashmapAugType, ShardStateUnsplit,
-};
-use ton_types::{
-    error, fail, BuilderData, Cell, LabelReader, SliceData, IBitstring, Result, UInt256, 
-    HashmapType, HashmapFilterResult, HashmapRemover, UsageTree, HashmapSubtree,
+use ever_block::{
+    error, fail, AccountIdPrefixFull, BlockIdExt, BuilderData, Cell, Deserializable,
+    HashmapAugType, HashmapFilterResult, HashmapRemover, HashmapSubtree, HashmapType,
+    IBitstring, IhrPendingInfo, LabelReader, MASTERCHAIN_ID, OutMsgQueue, OutMsgQueueInfo,
+    OutMsgQueueKey, ProcessedInfo, ProcessedInfoKey, ProcessedUpto, Result, Serializable,
+    ShardIdent, ShardHashes, ShardStateUnsplit, SliceData, UInt256, UsageTree
 };
 
 #[cfg(test)]
@@ -548,7 +544,7 @@ impl OutMsgQueueInfoStuff {
         stop_flag: &Option<&AtomicBool>,
     ) -> Result<()> {
         let workchain = self.shard().workchain_id();
-        let masterchain = workchain == ton_block::MASTERCHAIN_ID;
+        let masterchain = workchain == MASTERCHAIN_ID;
         for entry in &mut self.entries {
             if entry.ref_shards.is_none() {
                 check_stop_flag(stop_flag)?;
@@ -618,20 +614,19 @@ impl OutMsgQueueInfoStuff {
             .transpose()
     }
 
-    pub fn add_message(&mut self, enq: &MsgEnqueueStuff) -> Result<()> {
+    pub fn add_message(&mut self, enq: &MsgEnqueueStuff) -> Result<usize> {
         let labels = [("shard", self.shard().to_string())];
         metrics::counter!("out_msg_queue_add", 1, &labels);
         let key = enq.out_msg_key();
-        self.out_queue_mut()?.set(&key, enq.enqueued(), &enq.created_lt())
+        let (_, depth) = self.out_queue_mut()?.set_with_prev_and_depth(&key, enq.enqueued(), &enq.created_lt())?;
+        Ok(depth)
     }
 
-    pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<()> {
+    pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<SliceData> {
         let labels = [("shard", self.shard().to_string())];
         metrics::counter!("out_msg_queue_del", 1, &labels);
-        if self.out_queue_mut()?.remove(SliceData::load_bitstring(key.write_to_new_cell()?)?)?.is_none() {
-            fail!("error deleting from out_msg_queue dictionary: {:x}", key)
-        }
-        Ok(())
+        self.out_queue_mut()?.remove(key.write_to_bitstring()?)?
+            .ok_or_else(|| error!("error deleting from out_msg_queue dictionary: {:x}", key))
     }
 
     // remove all messages which are not from new_shard

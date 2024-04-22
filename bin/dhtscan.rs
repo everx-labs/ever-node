@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,16 +7,16 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use adnl::node::{AdnlNode, AdnlNodeConfig};
-use dht::DhtNode;
-use overlay::OverlayNode;
+use adnl::DhtNode;
+use adnl::OverlayNode;
 use std::{collections::HashMap, env, fs::File, io::BufReader, ops::Deref, sync::Arc};
-use ton_node::config::TonNodeGlobalConfigJson;
-use ton_types::{error, fail, base64_encode, KeyOption, Result};
+use ever_node::config::TonNodeGlobalConfigJson;
+use ever_block::{error, fail, base64_encode, KeyOption, Result};
 
 include!("../common/src/test.rs");
 
@@ -40,7 +40,7 @@ fn scan(cfgfile: &str, jsonl: bool, search_overlay: bool, use_workchain0: bool) 
         vec![KEY_TAG]
     )?;
     let adnl = rt.block_on(AdnlNode::with_config(config))?;
-    let dht = DhtNode::with_adnl_node(adnl.clone(), KEY_TAG)?;
+    let dht = DhtNode::with_params(adnl.clone(), KEY_TAG, None)?;
     let overlay = OverlayNode::with_adnl_node_and_zero_state(
         adnl.clone(), 
         zero_state.as_slice(), 
@@ -51,7 +51,7 @@ fn scan(cfgfile: &str, jsonl: bool, search_overlay: bool, use_workchain0: bool) 
 
     let mut preset_nodes = Vec::new();
     for dht_node in dht_nodes.iter() {
-        if let Some(key) = dht.add_peer(dht_node)? {
+        if let Some(key) = dht.add_peer_to_network(dht_node, None)? {
             preset_nodes.push(key)
         } else {
             fail!("Invalid DHT peer {:?}", dht_node)
@@ -60,7 +60,7 @@ fn scan(cfgfile: &str, jsonl: bool, search_overlay: bool, use_workchain0: bool) 
 
     println!("Scanning DHT...");
     for node in preset_nodes.iter() {
-        rt.block_on(dht.find_dht_nodes(node))?;
+        rt.block_on(dht.find_dht_nodes_in_network(node, None))?;
     }
 
     scan_overlay(&mut rt, &dht, preset_nodes.len(), &overlay, search_overlay, -1)?;
@@ -72,7 +72,7 @@ fn scan(cfgfile: &str, jsonl: bool, search_overlay: bool, use_workchain0: bool) 
     }
 
     let mut count = 0;
-    let nodes = dht.get_known_nodes(5000)?;
+    let nodes = dht.get_known_nodes_of_network(5000, None)?;
     if nodes.len() > dht_nodes.len() {
         println!("---- Found DHT nodes:");
         for node in nodes {
@@ -87,7 +87,7 @@ fn scan(cfgfile: &str, jsonl: bool, search_overlay: bool, use_workchain0: bool) 
                 continue;
             }
             let key: Arc<dyn KeyOption> = (&node.id).try_into()?;
-            match rt.block_on(dht.ping(key.id())) {
+            match rt.block_on(dht.ping_in_network(key.id(), None)) {
                 Ok(true) => (),
                 _ => continue
             }
@@ -151,7 +151,9 @@ fn scan_overlay(
     let mut iter = None;
     let mut overlays = HashMap::new();
     loop {
-        let res = rt.block_on(DhtNode::find_overlay_nodes(&dht, &overlay_id, &mut iter))?;
+        let res = rt.block_on(
+            DhtNode::find_overlay_nodes_in_network(&dht, &overlay_id, &mut iter, None)
+        )?;
         let count = overlays.len();
         for (ip, node) in res {
             let key: Arc<dyn KeyOption> = (&node.id).try_into()?;
@@ -165,7 +167,7 @@ fn scan_overlay(
         } else {
             println!(
                 "Found {} new DHT nodes, searching more...", 
-                dht.get_known_nodes(5000)?.len() - dht_presets
+                dht.get_known_nodes_of_network(5000, None)?.len() - dht_presets
             )
         }
         if iter.is_none() {

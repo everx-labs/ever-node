@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,12 +7,17 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use crate::{
-    block::{BlockStuff, BlockIdExtExtention, BlockKind}, block_proof::BlockProofStuff, boot,
+    block::{BlockStuff, BlockIdExtExtention, BlockKind},
+    block_proof::BlockProofStuff, boot,
+    config::{
+        CollatorConfig, CollatorTestBundlesGeneralConfig, KafkaConsumerConfig,
+        TonNodeConfig, ValidatorManagerConfig
+    },
     engine_traits::{
         ExternalDb, EngineAlloc, EngineOperations,
         OverlayOperations, PrivateOverlayOperations, Server,
@@ -56,7 +61,7 @@ use crate::internal_db::EXTERNAL_DB_BLOCK;
 #[cfg(feature = "slashing")]
 use crate::validator::{
     slashing::{ValidatedBlockStat, ValidatedBlockStatNode},
-    validator_utils::calc_subset_for_workchain,
+    validator_utils::calc_subset_for_workchain_standard,
 };
 #[cfg(feature = "telemetry")]
 use crate::{
@@ -65,10 +70,18 @@ use crate::{
     validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
 };
 
+use adnl::QueriesConsumer;
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::{Metric, MetricBuilder, TelemetryItem, TelemetryPrinter};
 use catchain::SessionId;
-use overlay::QueriesConsumer;
+use ever_block::{
+    error, fail, BASE_WORKCHAIN_ID, BlockIdExt, GlobalCapabilities, KeyId, MASTERCHAIN_ID, 
+    OutMsgQueue, Result, SHARD_FULL, ShardIdent, UInt256
+};
+#[cfg(feature = "slashing")]
+use ever_block::{CryptoSignaturePair, Deserializable, HashmapType};
+#[cfg(feature = "telemetry")]
+use ever_block::Cell;
 use std::{
     ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering, AtomicU64, AtomicI32}},
     time::{Duration, SystemTime}, collections::{HashMap, HashSet}, path::Path
@@ -84,19 +97,6 @@ use ton_api::ton::ton_node::{
         BlockBroadcast, QueueUpdateBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast,
         MeshUpdateBroadcast
     }
-};
-use ton_block::{
-    self, ShardIdent, BlockIdExt, MASTERCHAIN_ID, SHARD_FULL, BASE_WORKCHAIN_ID, GlobalCapabilities,
-    OutMsgQueue
-};
-use ton_types::{error, fail, KeyId, Result, UInt256};
-#[cfg(feature = "slashing")]
-use ton_types::HashmapType;
-#[cfg(feature = "telemetry")]
-use ton_types::Cell;
-use crate::config::{
-    CollatorConfig, CollatorTestBundlesGeneralConfig, KafkaConsumerConfig,
-    TonNodeConfig, ValidatorManagerConfig
 };
 
 #[cfg(feature = "slashing")]
@@ -139,9 +139,10 @@ pub struct Engine {
     last_known_keyblock_seqno: AtomicU32,
     will_validate: AtomicBool,
     sync_status: AtomicU32,
-    low_memory_mode: bool,
     remp_capability: AtomicBool,
     network_global_id: AtomicI32,
+
+    smft_capability: AtomicBool,
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
     collator_config: CollatorConfig,
@@ -179,7 +180,7 @@ pub struct Engine {
 
     tps_counter: TpsCounter,
 
-    pub out_queues_cache: std::sync::Mutex<std::collections::HashMap<ShardIdent, ton_block::OutMsgQueue>>,
+    pub out_queues_cache: std::sync::Mutex<std::collections::HashMap<ShardIdent, OutMsgQueue>>,
 
     mesh_client: tokio::sync::OnceCell<Arc<MeshClient>>,
 }
@@ -683,7 +684,6 @@ impl Engine {
         };
         let control_config = general_config.control_server()?;
         let collator_config = general_config.collator_config().clone();
-        let low_memory_mode = general_config.low_memory_mode();
         let boot_from_zerostate = general_config.boot_from_zerostate();
         let global_config = general_config.load_global_config()?;
         let test_bundles_config = general_config.test_bundles_config().clone();
@@ -873,7 +873,9 @@ impl Engine {
                 engine_telemetry.clone(),
                 engine_allocated.clone()
             ),
-            external_messages: Arc::new(MessagesPool::new(now, external_messages_maximum_queue_length)),
+            external_messages: Arc::new(
+                MessagesPool::new(now, external_messages_maximum_queue_length)
+            ),
             servers: lockfree::queue::Queue::new(),
             remp_client,
             remp_service,
@@ -890,9 +892,9 @@ impl Engine {
             last_known_keyblock_seqno: AtomicU32::new(0),
             will_validate: AtomicBool::new(false),
             sync_status: AtomicU32::new(0),
-            low_memory_mode,
             remp_capability: AtomicBool::new(false),
             network_global_id: AtomicI32::new(0),
+            smft_capability: AtomicBool::new(false),
             test_bundles_config,
             collator_config,
             shard_states_keeper: shard_states_keeper.clone(),
@@ -1018,7 +1020,7 @@ impl Engine {
     pub fn shard_states_keeper(&self) -> Arc<ShardStatesKeeper> { self.shard_states_keeper.clone() }
 
     pub async fn get_masterchain_overlay(&self) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        self.get_full_node_overlay(0, ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL).await
+        self.get_full_node_overlay(0, MASTERCHAIN_ID, SHARD_FULL).await
     }
 
     pub async fn get_full_node_overlay(
@@ -1058,6 +1060,10 @@ impl Engine {
     ) -> Result<()> {
         let id = self.overlay_operations.calc_overlay_id(None, workchain, shard)?;
         self.overlay_operations.clone().add_overlay(None, id, !foreign).await
+    }
+
+    pub fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<adnl::OverlayShortId>, adnl::OverlayId)> {
+        self.overlay_operations.calc_overlay_id(None, workchain, shard)
     }
 
     pub fn shard_states_awaiters(&self) -> &AwaitersPool<BlockIdExt, Arc<ShardStateStuff>> {
@@ -1195,10 +1201,6 @@ impl Engine {
         &self.tps_counter
     }
 
-    pub fn low_memory_mode(&self) -> bool {
-        self.low_memory_mode
-    }
-
     pub fn remp_service(&self) -> Option<&RempService> {
         self.remp_service.as_ref().map(|arc| arc.deref())
     }
@@ -1230,6 +1232,14 @@ impl Engine {
 
     pub fn destroy_candidate_table(&self, session_id: &SessionId) -> Result<bool> {
         self.candidate_db.destroy_db(session_id)
+    }
+
+    pub fn smft_capability(&self) -> bool {
+        self.smft_capability.load(Ordering::Relaxed)
+    }
+
+    pub fn set_smft_capability(&self, value: bool) {
+        self.smft_capability.store(value, Ordering::Relaxed);
     }
 
     pub fn split_queues_cache(&self) -> 
@@ -1554,6 +1564,10 @@ impl Engine {
                 block.get_config_params()?.has_capability(GlobalCapabilities::CapRemp),
                 Ordering::Relaxed
             );
+            self.smft_capability.store(
+                block.get_config_params()?.has_capability(GlobalCapabilities::CapSmft),
+                Ordering::Relaxed
+            );
             // While the node boots start key block is not processed by this function.
             // So see process_full_state_in_ext_db for the same code
         }
@@ -1680,9 +1694,11 @@ impl Engine {
                             Broadcast::TonNode_ConnectivityCheckBroadcast(broadcast) => {
                                 self.network.clone().process_connectivity_broadcast(broadcast);
                             }
-                            Broadcast::TonNode_BlockCandidateBroadcast(_) => { }
                             Broadcast::TonNode_MeshUpdateBroadcast(broadcast) => {
                                 self.clone().process_mesh_update_broadcast(broadcast, src);
+                            }
+                            Broadcast::TonNode_BlockCandidateBroadcast(broadcast) => {
+                                log::warn!("TonNode_BlockCandidateBroadcast from {}: {:?}", src, broadcast);
                             }
                         }
                     }
@@ -1796,27 +1812,31 @@ impl Engine {
     }
 
     #[cfg(feature = "slashing")]
-    async fn process_validated_block_stats(&self, block_id: &BlockIdExt, signing_nodes: HashSet<UInt256>, created_by: &UInt256) -> Result<()> {
+    async fn process_validated_block_stats(
+        &self, 
+        block_id: &BlockIdExt, 
+        signing_nodes: HashSet<UInt256>, 
+        created_by: &UInt256
+    ) -> Result<()> {
         let last_mc_state = self.load_last_applied_mc_state().await?;
-        let (cur_validator_set, cc_config) = last_mc_state.read_cur_validator_set_and_cc_conf()?;
+        let (cur_validator_set, _) =
+            last_mc_state.state()?.read_cur_validator_set_and_cc_conf()?;
         let shard = block_id.shard();
         let cc_seqno = if shard.is_masterchain() {
             last_mc_state.shard_state_extra()?.validator_info.catchain_seqno
         } else {
             last_mc_state.shards()?.calc_shard_cc_seqno(shard)?
         };
-        let (validators, _hash_short) = calc_subset_for_workchain(
+        let validators = calc_subset_for_workchain_standard(
             &cur_validator_set,
             last_mc_state.config_params()?,
-            &cc_config,
-            shard.shard_prefix_with_tag(),
-            shard.workchain_id(),
-            cc_seqno,
-            Default::default())?;
+            &shard,
+            cc_seqno
+        )?;
 
         let mut nodes = Vec::new();
 
-        for validator in &validators {
+        for validator in &validators.validators {
             let signed = signing_nodes.contains(&validator.compute_node_id_short());
             let collated = &validator.public_key == created_by;
             let validated_block_stat_node = ValidatedBlockStatNode {
@@ -1928,14 +1948,17 @@ impl Engine {
             log::trace!(
                 target: EXT_MESSAGES_TRACE_TARGET,
                 "Skipped ext message broadcast {}bytes from {}: NOT A VALIDATOR",
-                broadcast.message.data.0.len(), src
+                broadcast.message.data.len(), src
             );
         } else {
-            let bytes_len = broadcast.message.data.0.len();
+            let bytes_len = broadcast.message.data.len();
             let result = if remp {
                 self.push_message_to_remp(broadcast.message.data).await
             } else {
-                self.external_messages().new_message_raw(&broadcast.message.data.0, self.now())
+                self.external_messages().new_message_raw(
+                    &broadcast.message.data, 
+                    self.now()
+                ).map(|_| ())
             };
             match result {
                 Err(e) => {
@@ -1948,8 +1971,13 @@ impl Engine {
                 Ok(_) => {
                     log::debug!(
                         target: EXT_MESSAGES_TRACE_TARGET,
-                        "Processed ext message broadcast {}bytes from {} (added into remp's queue)",
-                        bytes_len, src
+                        "Processed ext message broadcast {}bytes from {}{}",
+                        bytes_len, src,
+                        if remp {
+                            " (added into remp's queue)"
+                        } else {
+                            ""
+                        }
                     );
                 }
             }
@@ -1986,7 +2014,7 @@ impl Engine {
     async fn process_new_shard_block(self: Arc<Self>, broadcast: NewShardBlockBroadcast) -> Result<BlockIdExt> {
         let id = broadcast.block.block;
         let cc_seqno = broadcast.block.cc_seqno as u32;
-        let data = broadcast.block.data.0;
+        let data = broadcast.block.data;
         let processed_wc = self.processed_workchain().unwrap_or(BASE_WORKCHAIN_ID);
 
         if processed_wc != MASTERCHAIN_ID && processed_wc != id.shard().workchain_id() {
@@ -2016,8 +2044,7 @@ impl Engine {
                 let mut signing_nodes = HashSet::new();
                 if let Some(commit_signatures) = tbd.top_block_descr().signatures() {
                     commit_signatures.pure_signatures.signatures().iterate_slices(|ref mut _key, ref mut slice| {
-                        use ton_block::Deserializable;
-                        let sign = ton_block::CryptoSignaturePair::construct_from(slice)?;
+                        let sign = CryptoSignaturePair::construct_from(slice)?;
                         signing_nodes.insert(sign.node_id_short.clone());
                         Ok(true)
                     })?;
@@ -2115,7 +2142,7 @@ impl Engine {
             0,
             prev_id, 
             limit,
-            10,
+            30,
             "download_next_block_worker", 
             Some((50, 11, 1000))
         ).await?.download().await
@@ -2611,6 +2638,10 @@ async fn boot(
                 Ordering::Relaxed
             );
             engine.network_global_id.store(state.state()?.global_id(), Ordering::Relaxed);
+            engine.smft_capability.store(
+                state.config_params()?.has_capability(GlobalCapabilities::CapSmft),
+                Ordering::Relaxed
+            );
             (block_id.clone(), false)
         }
         Err(err) => {
@@ -2712,11 +2743,13 @@ pub async fn run(
     let remp_config = node_config.remp_config().clone();
     let vm_config = ValidatorManagerConfig::read_configs(
         node_config.unsafe_catchain_patches_files(),
-        node_config.validation_countdown_mode()
+        node_config.validation_countdown_mode(),
+        node_config.is_smft_disabled(),
     );
     let wc_from_config = node_config.workchain();
     let remp_client_pool = node_config.remp_config().remp_client_pool();
     let configs_dir = node_config.build_config_path("");
+    let sync_by_archives = node_config.sync_by_archives();
 
     // Create engine
     let engine = Engine::new(node_config, ext_db, flags, stopper.clone()).await?;
@@ -2839,24 +2872,23 @@ pub async fn run(
         );
 
         // Sync by archives
-        if !engine.check_sync().await? {
-            // temporary remove sync with archives
-            struct FakeSync;
+        if sync_by_archives && !engine.check_sync().await? {
+            struct Checker;
             #[async_trait::async_trait]
-            impl crate::sync::StopSyncChecker for FakeSync {
-                async fn check(&self, _engine: &Arc<dyn EngineOperations>) -> bool { 
-                    true 
+            impl crate::sync::StopSyncChecker for Checker {
+                async fn check(&self, engine: &Arc<dyn EngineOperations>) -> bool { 
+                    engine.check_sync().await.unwrap_or(false)
                 }
             }
             crate::sync::start_sync(
                 Arc::clone(&engine) as Arc<dyn EngineOperations>, 
-                Some(&FakeSync)
+                Some(&Checker)
             ).await?;
             last_applied_mc_block = engine.load_last_applied_mc_block_id()?.ok_or_else(
-                || error!("INTERNAL ERROR: No last applied MC block after boot")
+                || error!("INTERNAL ERROR: No last applied MC block after sync")
             )?.deref().clone();
             shard_client_mc_block = engine.load_shard_client_mc_block_id()?.ok_or_else(
-                || error!("INTERNAL ERROR: No shard client MC block after boot")
+                || error!("INTERNAL ERROR: No shard client MC block after sync")
             )?.deref().clone();
         }
 
@@ -2984,6 +3016,11 @@ fn telemetry_logger(engine: Arc<Engine>) {
                 "Full node client's telemetry:\n{}",
                 engine.network.telemetry().report(Engine::TIMEOUT_TELEMETRY_SEC)
             );
+            log::debug!(
+                target: "telemetry",
+                "Full node neighbours's telemetry:",
+            );
+            engine.network.log_neighbors_stat();
             if engine.remp_client.is_some() {
                 log::debug!(
                     target: "telemetry",
@@ -3076,7 +3113,7 @@ pub fn init_prometheus_exporter() {
         .install().expect("Could not create PrometheusRecorder");
 }
 
-// TODO: move to ton_types crate
+// TODO: move to ever_block crate
 pub fn now_duration() -> Duration {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default()
 }

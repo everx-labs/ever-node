@@ -29,7 +29,7 @@ fi
 
 echo "Preparations..."
 
-pkill -9 ton_node > /dev/null 2>&1 || echo "No ton_node processes"
+pkill -9 ever-node > /dev/null 2>&1 || echo "No ever-node processes"
 
 bash ./remove_junk.sh "$NODE_TARGET" "$NODES" > /dev/null 2>&1
 echo "Building $(pwd)"
@@ -106,7 +106,7 @@ do
     cp $NODE_TARGET/default_config$N.json $TEST_ROOT/tmp/default_config$N.json
 
     rm tmp_output > /dev/null 2>&1
-    (./ton_node --configs . --ckey "$(cat console_public_json)" > tmp_output 2>&1 & wait 2>/dev/null) &
+    (./ever-node --configs . --ckey "$(cat console_public_json)" > tmp_output 2>&1 & wait 2>/dev/null) &
     echo "  waiting for 5 secs"
     sleep 5
     if [ ! -f "console_config.json" ]; then
@@ -136,7 +136,7 @@ do
 
     cp $NODE_TARGET/config.json $TEST_ROOT/tmp/config$N.json
 
-    pkill -9 ton_node > /dev/null 2>&1 || echo "No ton_node processes"
+    pkill -9 ever-node > /dev/null 2>&1 || echo "No ever-node processes"
 
 done
 
@@ -218,7 +218,7 @@ do
     cp $TEST_ROOT/tmp/ton-global.config.json $NODE_TARGET/configs_$N/ton-global.config.json
 
     # rm $TEST_ROOT/tmp/output_$N.log
-    ./ton_node --configs configs_$N -z . > "$TEST_ROOT/tmp/output_$N.log" 2>&1 &
+    ./ever-node --configs configs_$N -z . > "$TEST_ROOT/tmp/output_$N.log" 2>&1 &
 
 done
 
@@ -260,4 +260,4 @@ echo "Started"
 #     fi
 # fi
 
-# pkill -9 ton_node
+# pkill -9 ever-node

@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -28,7 +28,7 @@ use adnl::{
     common::{CountedObject, Counter,TaggedByteSlice, TaggedObject, TaggedTlObject},
     node::AdnlNode
 };
-use overlay::{BroadcastSendInfo, OverlayShortId, OverlayNode};
+use adnl::{BroadcastSendInfo, OverlayShortId, OverlayNode};
 use rand::seq::SliceRandom;
 use std::{io::Cursor, time::Instant, sync::Arc, time::Duration, collections::HashSet};
 #[cfg(feature = "telemetry")]
@@ -37,7 +37,7 @@ use ton_api::{
     serialize_boxed, serialize_boxed_append,
     BoxedSerialize, BoxedDeserialize, Deserializer, IntoBoxed,
     ton::{
-        self, TLObject,
+        TLObject,
         rpc::ton_node::{
             DownloadNextBlockFull, DownloadPersistentStateSlice, DownloadZeroState,
             PreparePersistentState, DownloadBlockProof, DownloadBlockProofLink,
@@ -60,8 +60,8 @@ use ton_api::{
 };
 #[cfg(feature = "telemetry")]
 use ton_api::{tag_from_boxed_type, tag_from_bare_type};
-use ton_block::BlockIdExt;
-use ton_types::{error, fail, KeyId, Result};
+use ever_block::BlockIdExt;
+use ever_block::{error, fail, KeyId, Result};
 
 #[async_trait::async_trait]
 pub trait FullNodeOverlayClient : Sync + Send {
@@ -632,7 +632,7 @@ impl FullNodeOverlayClient for NodeClientOverlay {
     async fn broadcast_external_message(&self, msg: &[u8]) -> Result<BroadcastSendInfo> {
         let broadcast = ExternalMessageBroadcast {
             message: ExternalMessage {
-                data: ton::bytes(msg.to_vec())
+                data: msg.to_vec()
             }
         }.into_boxed();
         let broadcast = TaggedByteSlice {
@@ -922,10 +922,10 @@ Ok(if key_block {
                         if id != &data_full.id {
                             fail!("Block with another id was received");
                         }
-                        let block = BlockStuff::deserialize_block_checked(id.clone(), data_full.block.0)?;
+                        let block = BlockStuff::deserialize_block_checked(id.clone(), data_full.block)?;
                         let proof = BlockProofStuff::deserialize(
                             block.id(),
-                            data_full.proof.0,
+                            data_full.proof,
                             data_full.is_link.into())?;
                         Ok((block, proof))
                     }

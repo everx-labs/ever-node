@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2022 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,17 +7,9 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
-
-use std::sync::Arc;
-
-use ton_block::{
-    Block, BlockIdExt, BlockInfo, BlockProof, BlockSignatures, ConfigParams, Deserializable, 
-    MerkleProof, Serializable
-};
-use ton_types::{Cell, Result, fail, error, HashmapType, BocReader, write_boc};
 
 use crate::{
     block::{BlockIdExtExtention, BlockStuff},
@@ -28,6 +20,12 @@ use crate::{
         check_crypto_signatures, calc_subset_for_masterchain, ValidatorSubsetInfo
     },
 };
+
+use ever_block::{
+    error, fail, Block, BlockIdExt, BlockInfo, BlockProof, BocReader, Cell, ConfigParams, 
+    Deserializable, HashmapType, MerkleProof, Result, Serializable, write_boc, BlockSignatures,
+};
+use std::sync::Arc;
 
 #[cfg(test)]
 #[path = "tests/test_block_proof.rs"]
@@ -145,9 +143,9 @@ impl BlockProofStuff {
         &self.id
     }
 
-    pub fn proof(&self) -> &BlockProof {
-        &self.proof
-    }
+    // pub fn proof(&self) -> &BlockProof {
+    //     &self.proof
+    // }
 
     pub fn data(&self) -> &[u8] {
         &self.data
@@ -572,7 +570,7 @@ impl BlockProofStuff {
         }
 
         // Check signatures
-        let checked_data = ton_block::Block::build_data_for_sign(
+        let checked_data = Block::build_data_for_sign(
             &self.id.root_hash,
             &self.id.file_hash
         );
@@ -604,7 +602,7 @@ impl BlockProofStuff {
         Ok(())
     }
 
-    fn process_given_state(&self, state: &ShardStateStuff, block_info: &ton_block::BlockInfo)
+    fn process_given_state(&self, state: &ShardStateStuff, block_info: &BlockInfo)
     -> Result<ValidatorSubsetInfo> {
 
         // Checks

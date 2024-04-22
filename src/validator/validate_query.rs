@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,15 +7,13 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use super::{BlockCandidate, McData};
 use crate::{
-    block::BlockStuff,
-    engine_traits::EngineOperations,
-    error::NodeError,
+    block::BlockStuff, engine_traits::EngineOperations, error::NodeError,
     shard_state::ShardStateStuff,
     types::{
         messages::{count_matching_bits, perform_hypercube_routing, MsgEnqueueStuff},
@@ -29,34 +27,33 @@ use crate::{
     validator::{out_msg_queue::MsgQueueManager, validator_utils::calc_subset_for_masterchain},
     CHECK,
 };
+use crate::validator::verification::VerificationManagerPtr;
 
 use adnl::common::add_unbound_object_to_map_with_update;
+use ever_block::{
+    fail, Account, AccountBlock, AccountId, AccountIdPrefixFull, AccountStatus, AddSub,
+    base64_encode, BlockCreateStats, BlockError, BlockExtra, BlockIdExt, BlockInfo, BlockLimits,
+    Cell, CellType, config_params, ConfigParamEnum, ConfigParams, CopyleftRewards, Counters,
+    CreatorStats, CurrencyCollection, DepthBalanceInfo, Deserializable, EnqueuedMsg,
+    GlobalCapabilities, Grams, HashmapAugType, HashmapType, InMsg, InMsgDescr,
+    INVALID_WORKCHAIN_ID, KeyExtBlkRef, KeyMaxLt, LibDescr, Libraries, McBlockExtra,
+    MASTERCHAIN_ID, MAX_SPLIT_DEPTH, McShardRecord, McStateExtra, MerkleProof, MerkleUpdate,
+    MsgAddressInt, MsgEnvelope, OutMsg, OutMsgDescr, OutMsgQueueInfo, OutMsgQueueKey,
+    OutQueueUpdate, read_boc, Result, Serializable, ShardAccount, ShardAccountBlocks,
+    ShardAccounts, ShardFeeCreated, ShardHashes, ShardIdent, SliceData, StateInitLib,
+    TopBlockDescrSet, TrComputePhase, Transaction, TransactionDescr, ValidatorSet, ValueFlow,
+    U15, UInt256, WorkchainDescr, CommonMessage, SERDE_OPTS_COMMON_MESSAGE
+};
+use ever_executor::{
+    BlockchainConfig, CalcMsgFwdFees, ExecuteParams, OrdinaryTransactionExecutor,
+    TickTockTransactionExecutor, TransactionExecutor,
+};
 use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
     },
-};
-use ton_block::{
-    config_params, Account, AccountBlock, AccountIdPrefixFull, AccountStatus, AddSub,
-    BlockCreateStats, BlockError, BlockExtra, BlockIdExt, BlockInfo, BlockLimits, ConfigParamEnum,
-    ConfigParams, CopyleftRewards, Counters, CreatorStats, CurrencyCollection, DepthBalanceInfo,
-    Deserializable, EnqueuedMsg, GlobalCapabilities, Grams, HashmapAugType, InMsg, InMsgDescr,
-    KeyExtBlkRef, KeyMaxLt, LibDescr, Libraries, McBlockExtra, McShardRecord, McStateExtra,
-    MerkleProof, MerkleUpdate, MsgAddressInt, MsgEnvelope, OutMsg, OutMsgDescr,
-    OutMsgQueueKey, Serializable, ShardAccount, ShardAccountBlocks, ShardAccounts, ShardFeeCreated,
-    ShardHashes, ShardIdent, StateInitLib, TopBlockDescrSet, TrComputePhase, Transaction,
-    TransactionDescr, ValidatorSet, ValueFlow, WorkchainDescr, INVALID_WORKCHAIN_ID,
-    MASTERCHAIN_ID, U15, OutMsgQueueInfo, OutQueueUpdate, MAX_SPLIT_DEPTH, CommonMessage, SERDE_OPTS_COMMON_MESSAGE
-};
-use ton_executor::{
-    BlockchainConfig, CalcMsgFwdFees, ExecuteParams, OrdinaryTransactionExecutor,
-    TickTockTransactionExecutor, TransactionExecutor,
-};
-use ton_types::{
-    read_boc, fail, AccountId, base64_encode, Cell, CellType, HashmapType, Result, 
-    SliceData, UInt256
 };
 
 use crate::engine_traits::RempDuplicateStatus;
@@ -222,6 +219,7 @@ pub struct ValidateQuery {
     block_create_count: HashMap<UInt256, u64>,
 
     engine: Arc<dyn EngineOperations>,
+    verification_manager: Option<VerificationManagerPtr>,
 
     next_block_descr: Arc<String>,
 }
@@ -239,6 +237,7 @@ impl ValidateQuery {
         engine: Arc<dyn EngineOperations>,
         is_fake: bool,
         multithread: bool,
+        verification_manager: Option<VerificationManagerPtr>,
     ) -> Self {
         let next_block_descr = Arc::new(fmt_next_block_descr(&block_candidate.block_id));
         Self {
@@ -258,8 +257,8 @@ impl ValidateQuery {
             create_stats_enabled: Default::default(),
             block_create_total: Default::default(),
             block_create_count: Default::default(),
-
             next_block_descr,
+            verification_manager
         }
     }
 
@@ -849,6 +848,14 @@ impl ValidateQuery {
         if info.descr.next_validator_shard != shard.shard_prefix_with_tag() {
             reject_query!("new shard configuration for shard {} contains different next_validator_shard {}",
                 shard, info.descr.next_validator_shard)
+        }
+        if let Some(ref verification_manager) = &self.verification_manager {
+            const MAX_VERIFICATION_TIMEOUT : std::time::Duration = std::time::Duration::from_millis(20);
+            //TODO: rewrite check_one_shard for async
+            if !verification_manager.wait_for_block_verification(&info.block_id, &MAX_VERIFICATION_TIMEOUT) {
+                //reject_query!("can't verify block {}", info.block_id)
+                log::warn!(target:"verificator", "can't verify block {} in MC", info.block_id);
+            }
         }
         if info.descr.collators.is_some() {
             reject_query!("Configuration for shard {} could not contain collators", shard);
@@ -3801,7 +3808,7 @@ impl ValidateQuery {
                     and underload history (block cannot be both overloaded and underloaded)"
                 )
             }
-            if base.split_queues && next_state.underload_history() & 1 != 0 {
+            if !base.split_queues && next_state.underload_history() & 1 != 0 {
                 Self::check_delivered_dequeued(&base, &manager)?;
             }
             if base.after_split || base.after_merge {
@@ -4558,11 +4565,11 @@ impl ValidateQuery {
         trans: &Transaction,
         trans_execute: &Transaction
     ) -> Result<()> {
-        use ton_types::write_boc;
+        use ever_block::write_boc;
         log::trace!(target: "validate_reject",
             "acc_before: {}\nacc_after: {}\nconfig: {}\ntrans_origin: {}\ntrans_execute: {}",
-            base64_encode(ton_types::write_boc(&account_before)?),
-            base64_encode(ton_types::write_boc(&account_after)?),
+            base64_encode(write_boc(&account_before)?),
+            base64_encode(write_boc(&account_after)?),
             base64_encode(config.write_to_bytes()?),
             base64_encode(write_boc(&trans.serialize_with_opts(trans.in_msg.serde_opts())?)?),
             base64_encode(write_boc(&trans_execute.serialize_with_opts(trans_execute.in_msg.serde_opts())?)?),

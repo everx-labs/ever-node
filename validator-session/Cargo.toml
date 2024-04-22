@@ -15,12 +15,11 @@ log = '0.4'
 metrics = '0.21.0'
 metrics-core = '0.5'
 rand = '0.8'
+adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', branch = 'feature-mesh' }
 catchain = { path = '../catchain' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = 'pre_feature-common-message' }
+ever_block = { git = 'https://github.com/everx-labs/ever-block.git', branch = 'feature-mesh' }
 storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = 'pre_feature-common-message' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = 'pre_feature-common-message' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = 'pre_feature-common-message' }
+ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', branch = 'feature-mesh' }
 
 [dev-dependencies]
 chrono = '0.4'

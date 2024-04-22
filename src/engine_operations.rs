@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -45,10 +45,10 @@ use crate::{
 #[cfg(feature = "external_db")]
 use crate::internal_db::EXTERNAL_DB_BLOCK;
 
+use adnl::{BroadcastSendInfo, PrivateOverlayShortId};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
-use overlay::{BroadcastSendInfo, PrivateOverlayShortId};
 use std::{collections::HashSet, ops::Deref, sync::Arc};
 use storage::block_handle_db::BlockHandle;
 use ton_api::{
@@ -58,13 +58,13 @@ use ton_api::{
         RempMessageStatus, RempReceipt
     }, IntoBoxed
 };
-use ton_block::{
+use ever_block::{
     AccountIdPrefixFull, BlockIdExt, CellsFactory, GlobalCapabilities, Message, OutMsgQueue,
     OutMsgQueueInfo, ShardIdent, MASTERCHAIN_ID, SHARD_FULL
 };
 #[cfg(feature="workchains")]
-use ton_block::{BASE_WORKCHAIN_ID, INVALID_WORKCHAIN_ID};
-use ton_types::{error, fail, KeyId, KeyOption, Result, UInt256};
+use ever_block::{BASE_WORKCHAIN_ID, INVALID_WORKCHAIN_ID};
+use ever_block::{error, fail, KeyId, KeyOption, Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
 
 #[async_trait::async_trait]
@@ -112,12 +112,20 @@ impl EngineOperations for Engine {
         self.network().activate_validator_list(validator_list_id)
     }
 
+    async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>> {
+        self.network().get_validator_bls_key(key_id).await
+    }
+
     fn set_sync_status(&self, status: u32) {
         self.set_sync_status(status);
     }
 
     fn get_sync_status(&self) -> u32 {
         self.get_sync_status()
+    }
+
+    fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<adnl::OverlayShortId>, adnl::OverlayId)> {
+        self.calc_overlay_id(workchain, shard)
     }
 
     fn validation_status(&self) -> ValidationStatus {
@@ -463,7 +471,7 @@ impl EngineOperations for Engine {
         ).await?;
 
         let state = self.shard_states_keeper().check_and_store_state(
-            handle, root_hash, data, self.low_memory_mode()).await?;
+            handle, root_hash, data).await?;
 
         Ok(state)
     }
@@ -753,9 +761,13 @@ impl EngineOperations for Engine {
         }
 
         // Initialisation of remp_capability after cold boot by first processed master state
+        // same for SMFT
         if state.block_id().shard().is_masterchain() {
             self.set_remp_capability(
                 state.config_params()?.has_capability(GlobalCapabilities::CapRemp),
+            );
+            self.set_smft_capability(
+                state.config_params()?.has_capability(GlobalCapabilities::CapSmft),
             );
         }
         Ok(())
@@ -1004,7 +1016,7 @@ impl EngineOperations for Engine {
         self.will_validate()
     }
 
-    fn new_external_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
+    fn new_external_message(&self, id: &UInt256, message: Arc<Message>) -> Result<()> {
         if !self.is_validator() {
             return Ok(());
         }
@@ -1016,7 +1028,13 @@ impl EngineOperations for Engine {
         shard: ShardIdent,
         finish_time_ms: u64
     ) -> Box<dyn Iterator<Item = (Arc<Message>, UInt256)> + Send + Sync> {
-        Box::new(self.external_messages().clone().iter(shard, self.now(), finish_time_ms))
+        Box::new(
+            self.external_messages().clone().iter(
+                shard, 
+                self.now(),
+                finish_time_ms
+            )
+        )
     }
 
     fn get_external_messages_len(&self) -> u32 {
@@ -1059,7 +1077,7 @@ impl EngineOperations for Engine {
     }
 
     async fn push_message_to_remp(&self, data: ton_api::ton::bytes) -> Result<()> {
-        let (id, _message) = create_ext_message(&data.0)?;
+        let (id, _message) = create_ext_message(&data)?;
         let remp_message = ton_api::ton::ton_node::rempmessage::RempMessage {
             message: data,
             id: id.clone(),
@@ -1074,6 +1092,10 @@ impl EngineOperations for Engine {
 
     fn remp_capability(&self) -> bool {
         Engine::remp_capability(self)
+    }
+
+    fn smft_capability(&self) -> bool {
+        Engine::smft_capability(self)
     }
 
     // Get current list of new shard blocks with respect to last mc block.
@@ -1402,7 +1424,7 @@ async fn redirect_external_message(
     message_data: &[u8]
 ) -> Result<BroadcastSendInfo> {
     let message = Arc::new(message);
-    engine.new_external_message(id.clone(), message.clone())?;
+    engine.new_external_message(&id, message.clone())?;
     if let Some(header) = message.ext_in_header() {
         let res = engine.broadcast_to_public_overlay(
             &AccountIdPrefixFull::checked_prefix(&header.dst)?,

@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -42,16 +42,17 @@ use ton_api::{
         },
         rpc::engine::validator::{
             AddAdnlId, AddValidatorAdnlAddress, AddValidatorPermanentKey, AddValidatorTempKey,
+            AddValidatorBlsKey, GenerateBlsKeyPair,
             ControlQuery, ExportPublicKey, GenerateKeyPair, Sign, GetBundle, GetFutureBundle
         }
     }
 };
-use ton_block::{
-    BlockIdExt, MsgAddressInt, Serializable, ShardIdent, MASTERCHAIN_ID, MerkleProof, 
-    ShardAccount
+use ever_block::{
+    error, fail, AccountId, BlockIdExt, BlsKeyOption, Ed25519KeyOption, KeyId, MASTERCHAIN_ID,
+    MerkleProof, MsgAddressInt, read_single_root_boc, Result, Serializable, ShardIdent, 
+    ShardAccount, UInt256
 };
-use ton_block_json::serialize_config_param;
-use ton_types::{error, fail, KeyId, read_single_root_boc, Result, UInt256, AccountId};
+use ever_block_json::serialize_config_param;
 
 pub struct ControlServer {
     adnl: AdnlServer
@@ -135,8 +136,8 @@ impl ControlQuerySubscriber {
         let config_info = ConfigInfo {
             mode: 0,
             id: block_id.clone(),
-            state_proof: ton::bytes(vec!()),
-            config_proof: ton::bytes(config_params.write_to_bytes()?)
+            state_proof: vec![],
+            config_proof: config_params.write_to_bytes()?
         };
         Ok(config_info)
     }
@@ -149,8 +150,8 @@ impl ControlQuerySubscriber {
         let config_info = ConfigInfo {
             mode: 0,
             id: mc_state.block_id().clone(),
-            state_proof: ton::bytes(vec!()),
-            config_proof: ton::bytes(config_param.into_bytes())
+            state_proof: vec![],
+            config_proof: config_param.into_bytes()
         };
         Ok(config_info)
     }
@@ -217,7 +218,7 @@ impl ControlQuerySubscriber {
         Ok(match shard_account {
             Some((account, _state_guard)) => ShardAccountStateBoxed::Raw_ShardAccountState(
                 ShardAccountState {
-                    shard_account: ton_api::ton::bytes(account.write_to_bytes()?)
+                    shard_account: account.write_to_bytes()?
                 }
             ),
             None => ShardAccountStateBoxed::Raw_ShardAccountNone
@@ -240,7 +241,7 @@ impl ControlQuerySubscriber {
                     |hash| Some(hash) != code.as_ref() && Some(hash) != data.as_ref() && Some(hash) != libs.as_ref()
                 ).unwrap();
                 ShardAccountMetaBoxed::Raw_ShardAccountMeta(ShardAccountMeta {
-                    shard_account_meta: ton_api::ton::bytes(proof.write_to_bytes()?)
+                    shard_account_meta: proof.write_to_bytes()?
                 })
             },
             None => ShardAccountMetaBoxed::Raw_ShardAccountMetaNone
@@ -483,9 +484,9 @@ impl ControlQuerySubscriber {
 
     }
 
-    async fn process_generate_keypair(&self) -> Result<KeyHash> {
+    async fn process_generate_keypair(&self, key_type: i32) -> Result<KeyHash> {
         let ret = KeyHash {
-            key_hash: UInt256::with_array(self.key_ring.generate().await?)
+            key_hash: UInt256::with_array(self.key_ring.generate(key_type).await?)
         };
         Ok(ret)
     }
@@ -497,7 +498,7 @@ impl ControlQuerySubscriber {
 
     fn process_sign_data(&self, key_hash: &[u8; 32], data: &[u8]) -> Result<Signature> {
         let sign = self.key_ring.sign_data(key_hash, data)?;
-        Ok(Signature {signature: ton::bytes(sign)})
+        Ok(Signature {signature: sign})
     }
 
     async fn add_validator_permanent_key(
@@ -526,6 +527,11 @@ impl ControlQuerySubscriber {
         _ttl: ton::int
     ) -> Result<Success> {
         self.config.add_validator_adnl_key(perm_key_hash, key_hash).await?;
+        Ok(Success::Engine_Validator_Success)
+    }
+
+    async fn add_validator_bls_key(&self, perm_key_hash: &[u8; 32], key_hash: &[u8; 32], _ttl: ton::int) -> Result<Success> {
+        self.config.add_validator_bls_key(perm_key_hash, key_hash).await?;
         Ok(Success::Engine_Validator_Success)
     }
 
@@ -631,8 +637,16 @@ impl ControlQuerySubscriber {
             Err(query) => query
         };
         let query = match query.downcast::<GenerateKeyPair>() {
-            Ok(_) => return QueryResult::consume(
-                self.process_generate_keypair().await?,
+            Ok(_params) => return QueryResult::consume(
+                self.process_generate_keypair(Ed25519KeyOption::KEY_TYPE).await?,
+                #[cfg(feature = "telemetry")]
+                None
+            ),
+            Err(query) => query
+        };
+        let query = match query.downcast::<GenerateBlsKeyPair>() {
+            Ok(_params) => return QueryResult::consume(
+                self.process_generate_keypair(BlsKeyOption::KEY_TYPE).await?,
                 #[cfg(feature = "telemetry")]
                 None
             ),
@@ -684,6 +698,15 @@ impl ControlQuerySubscriber {
             ),
             Err(query) => query
         };
+        let query = match query.downcast::<AddValidatorBlsKey>() {
+            Ok(query) => return QueryResult::consume_boxed(
+                self.add_validator_bls_key(
+                    query.permanent_key_hash.as_slice(), query.key_hash.as_slice(), query.ttl
+                ).await?,
+                None
+            ),
+            Err(query) => query
+        };
         let query = match query.downcast::<AddAdnlId>() {
             Ok(query) => return QueryResult::consume_boxed(
                 self.add_adnl_address(query.key_hash.as_slice(), query.category)?,
@@ -717,7 +740,7 @@ impl ControlQuerySubscriber {
         };
         let query = match query.downcast::<ton::rpc::lite_server::SendMessage>() {
             Ok(query) => {
-                let message_data = query.body.0;
+                let message_data = query.body;
                 return QueryResult::consume_boxed(
                     self.redirect_external_message(&message_data).await?,
                     #[cfg(feature = "telemetry")]

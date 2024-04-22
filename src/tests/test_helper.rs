@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -33,12 +33,17 @@ use crate::validator::{
 #[cfg(feature = "telemetry")]
 use crate::{collator_test_bundle::create_engine_telemetry, engine_traits::EngineTelemetry};
 
+use ever_block::{
+    error, Account, BlkMasterInfo, Block, BlockIdExt, BlockSignatures, Cell, ConfigParam0,
+    ConfigParam34, ConfigParamEnum, ConfigParams, Deserializable, HashmapAugType, InMsgDescr,
+    InRefValue, McStateExtra, Message, OutMsgDescr, Serializable, ShardAccount, 
+    ShardAccountBlocks, ShardIdent, ShardStateUnsplit, Transaction, U15, UInt256, 
+    ValidatorBaseInfo, ValidatorDescr, ValidatorSet, write_boc
+};
+use ever_block_json::*;
 use std::{path::Path, sync::{{Arc, RwLock}, atomic::{AtomicU32, Ordering}}, time::Duration};
 use storage::block_handle_db::{BlockHandle, Callback, StoreJob};
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
-use ton_block::*;
-use ton_block_json::*;
-use ton_types::{error, write_boc, Cell, UInt256};
 
 include!("../../common/src/config.rs");
 include!("../../common/src/test.rs");
@@ -317,7 +322,7 @@ pub fn gen_master_state(
     }
     ss.write_custom(Some(&ms)).unwrap();
     let cell = ss.serialize().unwrap();
-    let bytes = ton_types::write_boc(&cell).unwrap();
+    let bytes = write_boc(&cell).unwrap();
     #[cfg(feature = "telemetry")]
     let telemetry = telemetry.unwrap_or_else(|| create_engine_telemetry());
     let allocated = allocated.unwrap_or_else(|| create_engine_allocated());
@@ -366,7 +371,7 @@ pub fn gen_shard_state(
         ).unwrap();
     }
     let cell = ss.serialize().unwrap();
-    let bytes = ton_types::write_boc(&cell).unwrap();
+    let bytes = write_boc(&cell).unwrap();
     #[cfg(feature = "telemetry")]
     let telemetry = telemetry.unwrap_or_else(|| create_engine_telemetry());
     let allocated = allocated.unwrap_or_else(|| create_engine_allocated());
@@ -575,7 +580,7 @@ impl TestEngine {
         in_msgs.iterate_with_keys(|key, in_msg| {
             let msg = in_msg.read_message()?;
             if msg.is_inbound_external() {
-                self.ext_messages.new_message(key, Arc::new(msg), self.now())?;
+                self.ext_messages.new_message(&key, Arc::new(msg), self.now())?;
             }
             Ok(true)
         })?;
@@ -746,23 +751,23 @@ impl TestEngine {
             let state_stuff = self.load_state(block_stuff.id()).await?;
             std::fs::write(
                 &format!("{}/state_real.txt", res_path), 
-                ton_block_json::debug_state(state_stuff.state()?.clone())?
+                debug_state(state_stuff.state()?.clone())?
             )?;
             std::fs::write(
                 &format!("{}/state_candidate.txt", res_path), 
-                ton_block_json::debug_state(new_state.clone())?
+                debug_state(new_state.clone())?
             )?;
 
             // std::fs::write(
             //     &format!("{}/{}-state_real.txt", res_path, shard), 
-            //     ton_block_json::debug_state(state_stuff.state()?.clone())?
+            //     debug_state(state_stuff.state()?.clone())?
             //)?;
             // std::fs::write(
             //     &format!("{}/{}-state_candidate.txt", res_path, shard), 
-            //     ton_block_json::debug_state(new_state.clone())?
+            //     debug_state(new_state.clone())?
             //)?;
     
-            // let cell = ton_types::deserialize_tree_of_cells(
+            // let cell = ever_block::deserialize_tree_of_cells(
             //     &mut std::io::Cursor::new(&block_candidate.data)
             // )?;
             // std::fs::write(
@@ -795,6 +800,7 @@ impl TestEngine {
             self.clone(),
             true,
             true,
+            None,
         );
         validator_query.try_validate().await?;
     
@@ -1064,7 +1070,7 @@ impl EngineOperations for TestEngine {
             Some(self.db.load_block_proof(&handle, !id.shard().is_masterchain()).await?)
         ))
     }
-    fn new_external_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
+    fn new_external_message(&self, id: &UInt256, message: Arc<Message>) -> Result<()> {
         self.ext_messages.new_message(id, message, self.now())
     }
     fn get_external_messages_iterator(
@@ -1072,7 +1078,13 @@ impl EngineOperations for TestEngine {
         shard: ShardIdent,
         finish_time_ms: u64
     ) -> Box<dyn Iterator<Item = (Arc<Message>, UInt256)> + Send + Sync> {
-        Box::new(self.ext_messages.clone().iter(shard, self.now(), finish_time_ms))
+        Box::new(
+            self.ext_messages.clone().iter(
+                shard, 
+                self.now(),
+                finish_time_ms
+            )
+        )
     }
     fn complete_external_messages(
         &self, 

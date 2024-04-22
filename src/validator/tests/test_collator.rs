@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -21,7 +21,7 @@ use crate::{
         validator_utils::compute_validator_set_cc,
     },
 };
-use ton_types::Result;
+use ever_block::Result;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 
@@ -90,8 +90,8 @@ async fn try_collate_by_engine(
 
     let new_block = Block::construct_from_bytes(&block_candidate.data)?;
 
-    // std::fs::write(&format!("{}/state_candidate.json", RES_PATH), ton_block_json::debug_state(new_state.clone())?)?;
-    // std::fs::write(&format!("{}/block_candidate.json", RES_PATH), ton_block_json::debug_block_full(&new_block)?)?;
+    // std::fs::write(&format!("{}/state_candidate.json", RES_PATH), ever_block_json::debug_state(new_state.clone())?)?;
+    // std::fs::write(&format!("{}/block_candidate.json", RES_PATH), ever_block_json::debug_block_full(&new_block)?)?;
 
     let validator_query = ValidateQuery::new(
         shard.clone(),
@@ -102,6 +102,7 @@ async fn try_collate_by_engine(
         engine.clone(),
         true,
         true,
+        None,
     );
     validator_query.try_validate().await?;
     Ok((new_block, new_state))

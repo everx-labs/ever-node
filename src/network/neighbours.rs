@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,13 +7,15 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
-use adnl::{common::{Query, TaggedTlObject, Wait}, node::{AdnlNode, AddressCache}};
-use dht::DhtNode;
-use overlay::{OverlayShortId, OverlayNode};
+use crate::types::spawn_cancelable;
+
+use adnl::{common::{Query, TaggedTlObject, Wait}, node::{AddressCache, AdnlNode}};
+use adnl::DhtNode;
+use adnl::{OverlayShortId, OverlayNode};
 use rand::Rng;
 use std::{
     cmp::min,
@@ -23,8 +25,7 @@ use std::{
 use ton_api::ton::{TLObject, rpc::ton_node::GetCapabilities, ton_node::Capabilities};
 #[cfg(feature = "telemetry")]
 use ton_api::tag_from_boxed_type;
-use ton_types::{error, fail, KeyId, KeyOption, Result};
-use crate::types::spawn_cancelable;
+use ever_block::{error, fail, KeyId, KeyOption, Result};
 
 #[derive(Debug)]
 pub struct Neighbour {
@@ -453,23 +454,52 @@ impl Neighbours {
         self.cancellation_token.cancel();
     }
 
-    fn add_new_peers(self: Arc<Self>, peers: Vec<Arc<KeyId>>) {
+    pub fn add_new_peers(self: Arc<Self>, peers: Vec<Arc<KeyId>>) {
         let this = self.clone();
         tokio::spawn(async move {
             for peer in peers.iter() {
                 log::trace!("add_new_peers: searching IP for peer {}...", peer);
                 match DhtNode::find_address_in_network(&this.dht, peer, self.network_id).await {
                     Ok(Some((ip, _))) => {
-                        log::info!("add_new_peers: peer {}, IP {}", peer, ip);
-                        if !this.add_overlay_peer(peer.clone()) {
-                            log::debug!("add_new_peers already present");
-                        }
+                        if this.add_overlay_peer(peer.clone()) {
+                            log::info!("add_new_peers: peer {}, IP {}", peer, ip);
+                        } else {
+                            log::trace!("add_new_peers: peer {}, IP {} is already present", peer, ip);
+                        } 
                     }
-                    Ok(None) => log::warn!("add_new_peers: peer {}, IP not found", peer),
+                    Ok(None) => log::debug!("add_new_peers: peer {}, IP not found", peer),
                     Err(e) => log::warn!("add_new_peers: peer {}, IP search error {}", peer, e)
                 }
             }
         });
+    }
+
+    pub fn log_neighbors_stat(&self) {
+        log::debug!(
+            target: "telemetry", 
+            "Neighbours: overlay {} count {}",
+            self.overlay_id, self.peers.count()
+        );
+        let node_stat = self.fail_attempts.load(Ordering::Relaxed) as f64 /
+            self.all_attempts.load(Ordering::Relaxed) as f64;
+        for neighbour in self.peers.get_iter() {
+            let unr = neighbour.effective_unreliability();
+            let roundtrip_rldp = neighbour.roundtrip_rldp.load(Ordering::Relaxed);
+            let roundtrip_adnl = neighbour.roundtrip_adnl.load(Ordering::Relaxed);
+            let peer_stat = neighbour.fail_attempts.load(Ordering::Relaxed) as f64 /
+                neighbour.all_attempts.load(Ordering::Relaxed) as f64;
+            let fines_points = neighbour.fines_points.load(Ordering::Relaxed);
+            log::debug!(
+                target: "telemetry", 
+                "Neighbour {}, unr {:.6}, rt ADNL {:.6}, rt RLDP {:.6} (all stat: {:.4}, peer stat: {:.4}/{}))",
+                neighbour.id(), unr,
+                roundtrip_adnl,
+                roundtrip_rldp,
+                node_stat,
+                peer_stat,
+                fines_points
+            );
+        }
     }
 
     pub fn choose_neighbour(&self) -> Result<Option<Arc<Neighbour>>> {
@@ -629,7 +659,7 @@ impl Neighbours {
             tokio::spawn(
                 async move {
                     if let Err(e) = self_cloned.update_capabilities(peer, ping_reserve).await {
-                        log::warn!("{}; ping_idx #{}", e, ping_idx)
+                        log::debug!("{}; ping_idx #{}", e, ping_idx)
                     }
                     wait_cloned.respond(Some(()));
                 }
@@ -913,21 +943,21 @@ impl NeighboursCacheCore {
         bad_peer: bool
     ) -> Result<bool> {
         let new_unr = existing_in_reserve.as_ref().map_or(0, |v| v.effective_unreliability());
-        log::info!("started replace (old: {}, new: {}) {}, new_unr: {}",
+        log::debug!("started replace (old: {}, new: {}) {}, new_unr: {}",
             &old, &new, if bad_peer { "as a bad peer" } else { "for rotation" }, new_unr);
         let index = if let Some(index) = self.get_index(old) {
             index
         } else {
             fail!("replaced neighbour not found!")
         };
-        log::info!("replace func use index: {} (old: {}, new: {})", &index, &old, &new);
+        log::debug!("replace func use index: {} (old: {}, new: {})", &index, &old, &new);
         let status_insert = self.insert_ex(new.clone(), true, existing_in_reserve)?;
 
         if status_insert {
             self.indices.insert(index, new);
             self.values.remove(old);
         }
-        log::info!("finish replace (old: {})", &old);
+        log::debug!("finish replace (old: {})", &old);
         Ok(status_insert)
     }
 

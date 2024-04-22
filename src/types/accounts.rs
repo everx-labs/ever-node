@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,17 +7,17 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use std::sync::{atomic::AtomicU64, Arc};
-use ton_block::{
+use ever_block::{
     Account, AccountBlock, Augmentation, CopyleftRewards, Deserializable, HashUpdate,
     HashmapAugType, LibDescr, Libraries, Serializable, ShardAccount, ShardAccounts, StateInitLib,
     Transaction, Transactions,
 };
-use ton_types::{fail, AccountId, Cell, HashmapRemover, Result, UInt256};
+use ever_block::{fail, AccountId, Cell, HashmapRemover, Result, UInt256};
 
 pub struct ShardAccountStuff {
     account_addr: AccountId,

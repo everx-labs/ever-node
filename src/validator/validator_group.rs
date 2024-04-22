@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -16,8 +16,8 @@ use std::ops::RangeInclusive;
 use crossbeam_channel::Receiver;
 
 use catchain::utils::get_hash;
-use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, ValidatorDescr};
-use ton_types::{fail, error, Result, UInt256};
+use ever_block::{BlockIdExt, ShardIdent, ValidatorSet, ValidatorDescr};
+use ever_block::{fail, error, Result, UInt256};
 use validator_session::{
     BlockHash, BlockPayloadPtr, CatchainOverlayManagerPtr,
     SessionId, SessionPtr, SessionListenerPtr, SessionFactory,
@@ -60,6 +60,8 @@ use crate::validator::slashing::SlashingManagerPtr;
 use crate::validator::validator_utils::get_first_block_seqno_after_prevs;
 // #[cfg(feature = "fast_finality")]
 // use crate::validator::workchains_fast_finality::compute_actual_finish;
+
+use crate::validator::verification::VerificationManagerPtr;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum ValidatorGroupStatus {
@@ -352,6 +354,7 @@ pub struct ValidatorGroup {
 
     #[cfg(feature = "slashing")]
     slashing_manager: SlashingManagerPtr,
+    verification_manager: Option<VerificationManagerPtr>,
     last_validation_time: AtomicU64,
     last_collation_time: AtomicU64,
 }
@@ -369,6 +372,7 @@ impl ValidatorGroup {
         allow_unsafe_self_blocks_resync: bool,
         #[cfg(feature = "slashing")]
         slashing_manager: SlashingManagerPtr,
+        verification_manager: Option<VerificationManagerPtr>,
     ) -> Self {
         let group_impl = ValidatorGroupImpl::new(
             general_session_info.shard.clone(),
@@ -393,6 +397,7 @@ impl ValidatorGroup {
             receiver: Arc::new(receiver),
             #[cfg(feature = "slashing")]
             slashing_manager,
+            verification_manager,
             last_validation_time: AtomicU64::new(0),
             last_collation_time: AtomicU64::new(0)
         }
@@ -630,9 +635,13 @@ impl ValidatorGroup {
         }
     }
 
-    pub async fn on_generate_slot(&self, round: u32, callback: ValidatorBlockCandidateCallback) {
+    pub async fn on_generate_slot(
+        &self, 
+        round: u32, 
+        callback: ValidatorBlockCandidateCallback, 
+        rt: tokio::runtime::Handle
+    ) {
         let next_block_descr = self.get_next_block_descr().await;
-
         log::info!(
             target: "validator", 
             "({}): ValidatorGroup::on_generate_slot: collator request, {}",
@@ -655,12 +664,17 @@ impl ValidatorGroup {
         };
 
         if let Some(rmq) = self.get_reliable_message_queue().await {
-            log::info!(target: "validator", "ValidatorGroup::on_generate_slot: ({}) collecting REMP messages for {} for collation: {}",
+            log::info!(
+                target: "validator", 
+                "ValidatorGroup::on_generate_slot: ({}) collecting REMP messages \
+                for {} for collation: {}",
                 next_block_descr, self.info_round(round).await, include_external_messages
             );
             if include_external_messages {
                 if let Err(e) = rmq.collect_messages_for_collation().await {
-                    log::error!(target: "validator", "({}): Error collecting messages for {}: `{}`",
+                    log::error!(
+                        target: "validator", 
+                        "({}): Error collecting messages for {}: `{}`",
                         next_block_descr,
                         self.info_round(round).await,
                         e
@@ -685,6 +699,14 @@ impl ValidatorGroup {
                 }
             }
             None => Err(error!("Min masterchain block id missing")),
+        };
+
+        let candidate = match self.verification_manager.clone() {
+            Some(_) => match &result {
+                Ok(candidate) => Some(candidate.clone()),
+                _ => None
+            },
+            None => None,
         };
 
         let result_message = match &result {
@@ -739,7 +761,36 @@ impl ValidatorGroup {
 
         self.group_impl.execute_sync(|group_impl| group_impl.on_generate_slot_invoked = true).await;
 
-        callback(result)
+        callback(result);
+
+        if let Some(verification_manager) = self.verification_manager.clone() {
+            if let Some(candidate) = candidate {
+                log::debug!(target:"verificator", "Received new candidate for round {} for shard {:?}", round, self.shard());
+                let verification_manager = verification_manager.clone();
+                let next_block_id = match self.group_impl.execute_sync(|group_impl|
+                    group_impl.create_next_block_id(
+                        candidate.id.root_hash.clone(),
+                        get_hash(&candidate.data.data()),
+                        self.shard().clone()
+                    )
+                ).await {
+                    Err(x) => { log::error!(target: "validator", "{}", x); return },
+                    Ok(x) => x
+                };
+
+                let candidate = super::BlockCandidate {
+                    block_id: next_block_id,
+                    data: candidate.data.data().to_vec(),
+                    collated_file_hash: candidate.collated_file_hash.clone(),
+                    collated_data: candidate.collated_data.data().to_vec(),
+                    created_by: self.local_key.pub_key().expect("source must contain pub_key").into(),
+                };
+
+                rt.clone().spawn(async move {
+                    verification_manager.send_new_block_candidate(&candidate).await;
+                });
+            }
+        }
     }
 
     // Validate_query
@@ -809,6 +860,7 @@ impl ValidatorGroup {
                         self.validator_set.clone(),
                         self.engine.clone(),
                         SystemTime::now() + Duration::new(10, 0),
+                        self.verification_manager.clone(),
                     ).await
                 }
                 None => Err(failure::err_msg("Min masterchain block id missing")),
@@ -1005,7 +1057,7 @@ impl ValidatorGroup {
     }
 
     #[cfg(feature = "slashing")]
-    pub fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat) {
+    pub async fn on_slashing_statistics(&self, round: u32, stat: SlashingValidatorStat) {
         log::debug!(
             target: "validator", 
             "({}): ValidatorGroup::on_slashing_statistics round {}, stat {:?}",

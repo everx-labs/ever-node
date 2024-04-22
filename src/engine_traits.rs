@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,18 +7,18 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use crate::{
-    block::BlockStuff,
-    block_proof::BlockProofStuff, config::TonNodeConfig, internal_db::BlockResult,
-    engine::EngineFlags,
+    block::BlockStuff, block_proof::BlockProofStuff, 
+    config::{CollatorConfig, CollatorTestBundlesGeneralConfig, TonNodeConfig},
+    engine::{EngineFlags, now_duration}, internal_db::BlockResult,
     network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
-    shard_state::ShardStateStuff,
+    shard_state::ShardStateStuff, shard_states_keeper::PinnedShardStateGuard,
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
-    validator::validator_manager::ValidationStatus, engine::now_duration, shard_states_keeper::PinnedShardStateGuard,
+    validator::validator_manager::ValidationStatus
 };
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::ValidatedBlockStat;
@@ -31,12 +31,17 @@ use crate::{
 
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
+use adnl::{
+    BroadcastSendInfo, OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId
+};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, 
     CatchainOverlayLogReplayListenerPtr
 };
-use overlay::{
-    BroadcastSendInfo, OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId
+use ever_block::{
+    error, AccountId, AccountIdPrefixFull, BlockIdExt, CellsFactory, ConfigParams, 
+    Deserializable, KeyId, KeyOption, MASTERCHAIN_ID, Message, OutMsgQueue, Result, 
+    SHARD_FULL, ShardAccount, ShardIdent, UInt256, OutMsgQueueInfo
 };
 use std::{collections::HashSet, sync::{Arc, atomic::AtomicU64}};
 use storage::{StorageAlloc, block_handle_db::BlockHandle};
@@ -45,13 +50,7 @@ use storage::StorageTelemetry;
 use ton_api::ton::ton_node::{
     broadcast::{BlockBroadcast, MeshUpdateBroadcast, QueueUpdateBroadcast}, RempMessage, RempMessageStatus, RempReceipt
 };
-use ton_block::{
-    AccountIdPrefixFull, BlockIdExt, CellsFactory, Message, ShardIdent, ShardAccount,
-    MASTERCHAIN_ID, Deserializable, ConfigParams, OutMsgQueue, OutMsgQueueInfo
-};
-use ton_types::{error, AccountId, KeyId, KeyOption, Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
-use crate::config::{CollatorConfig, CollatorTestBundlesGeneralConfig};
 
 #[cfg(feature = "telemetry")]
 pub struct EngineTelemetry {
@@ -97,7 +96,7 @@ pub trait OverlayOperations : Sync + Send {
     ) -> Result<()>;
 
     async fn get_masterchain_overlay(self: Arc<Self>) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        let overlay_id = self.calc_overlay_id(None, ton_block::MASTERCHAIN_ID, ton_block::SHARD_FULL)?;
+        let overlay_id = self.calc_overlay_id(None, MASTERCHAIN_ID, SHARD_FULL)?;
         self.get_overlay(&overlay_id.0).await
             .ok_or_else(|| error!("INTERNAL ERROR: masterchain overlay was not found"))
     }
@@ -130,6 +129,8 @@ pub trait PrivateOverlayOperations: Sync + Send {
 
     async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool>;
 
+    async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>>;
+
     fn create_catchain_client(
         &self,
         validator_list_id: UInt256,
@@ -154,6 +155,10 @@ pub trait EngineOperations : Sync + Send {
     fn get_validator_status(&self) -> bool { unimplemented!() }
 
     fn validator_network(&self) -> Arc<dyn PrivateOverlayOperations> {
+        unimplemented!()
+    }
+
+    fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<OverlayShortId>, OverlayId)> {
         unimplemented!()
     }
 
@@ -207,6 +212,10 @@ pub trait EngineOperations : Sync + Send {
     }
 
     async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
+        unimplemented!()
+    }
+
+    async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>> {
         unimplemented!()
     }
 
@@ -626,7 +635,7 @@ pub trait EngineOperations : Sync + Send {
     }
 
     // External messages
-    fn new_external_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
+    fn new_external_message(&self, id: &UInt256, message: Arc<Message>) -> Result<()> {
         unimplemented!()
     }
     fn get_external_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
@@ -803,6 +812,10 @@ pub trait EngineOperations : Sync + Send {
     }
 
     fn remp_capability(&self) -> bool { 
+        false 
+    }
+
+    fn smft_capability(&self) -> bool { 
         false 
     }
 
@@ -1055,7 +1068,7 @@ pub enum RempDuplicateStatus {
     /// Message found in queue and already included into valid block
     /// Parameters: block id; message uid; included message id (may be different from original id,
     /// since messages with different ids may share the same uid)
-    Duplicate(ton_block::BlockIdExt, UInt256, UInt256)
+    Duplicate(BlockIdExt, UInt256, UInt256)
 }
 
 #[async_trait::async_trait]

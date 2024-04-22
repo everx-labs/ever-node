@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,19 +7,19 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 /// Imports
 use crate::{
-    serialize_tl_boxed_object, 
+    serialize_tl_boxed_object,
     BlockHash, BlockPayloadPtr, CatchainFactory, PrivateKey, PublicKey, PublicKeyHash, 
     RawBuffer, Receiver, SessionId, ton, utils
 };
 use std::{collections::{BTreeMap, HashMap, HashSet}, convert::TryInto};
 use ton_api::{deserialize_typed, IntoBoxed};
-use ton_types::{Ed25519KeyOption, KeyId, Result, UInt256};
+use ever_block::{Ed25519KeyOption, KeyId, Result, UInt256};
 
 mod metrics;
 pub use self::metrics::MetricsHandle;
@@ -28,7 +28,7 @@ pub use self::metrics::MetricsHandle;
 */
 
 pub fn bytes_to_string(v: &::ton_api::ton::bytes) -> String {
-    hex::encode(&v.0)
+    hex::encode(&v)
 }
 
 pub fn public_key_hashes_to_string(v: &[PublicKeyHash]) -> String {
@@ -100,7 +100,7 @@ pub fn parse_hex_as_int256(hex_asm: &str) -> UInt256 {
 }
 
 pub fn parse_hex_as_bytes(hex_asm: &str) -> ::ton_api::ton::bytes {
-    ::ton_api::ton::bytes(parse_hex(&hex_asm))
+    parse_hex(&hex_asm)
 }
 
 pub fn parse_hex_as_block_payload(hex_asm: &str) -> BlockPayloadPtr {
@@ -153,11 +153,11 @@ pub fn parse_hex_as_expanded_private_key(hex_asm: &str) -> PrivateKey {
 }
 
 pub fn get_hash(data: &::ton_api::ton::bytes) -> BlockHash {
-    UInt256::calc_file_hash(&data.0)
+    UInt256::calc_file_hash(&data)
 }
 
 pub fn get_hash_from_block_payload(data: &BlockPayloadPtr) -> BlockHash {
-    UInt256::calc_file_hash(&data.data().0)
+    UInt256::calc_file_hash(&data.data())
 }
 
 pub fn int256_to_public_key_hash(public_key: &UInt256) -> PublicKeyHash {
@@ -178,7 +178,7 @@ pub fn get_overlay_id(first_block: &ton_api::ton::catchain::FirstBlock) -> Resul
         name: serialized_first_block.into(),
     };
     let serialized_overlay_id = serialize_tl_boxed_object!(&overlay_id.into_boxed());
-    Ok(UInt256::calc_file_hash(&serialized_overlay_id.0))
+    Ok(UInt256::calc_file_hash(&serialized_overlay_id))
 }
 
 pub fn get_block_id(
@@ -220,7 +220,7 @@ pub fn get_block_id_hash(id: &ton::BlockId) -> BlockHash {
     let mut serial = Vec::<u8>::new();
     let mut serializer = ton_api::Serializer::new(&mut serial);
     serializer.write_boxed(id).unwrap();
-    get_hash(&ton_api::ton::bytes(serial))
+    get_hash(&serial)
 }
 
 pub fn get_block_dependency_hash(block: &ton::BlockDep, receiver: &dyn Receiver) -> BlockHash {
@@ -249,7 +249,7 @@ macro_rules! serialize_tl_boxed_object
 {
   ($($args:expr),*) => {{
     let mut ret : ton_api::ton::bytes = ton_api::ton::bytes::default();
-    let mut serializer = ton_api::Serializer::new(&mut ret.0);
+    let mut serializer = ton_api::Serializer::new(&mut ret);
 
     $(serializer.write_boxed($args).unwrap();)*
 
@@ -262,10 +262,10 @@ pub fn serialize_block_with_payload(
     payload: &BlockPayloadPtr,
 ) -> Result<RawBuffer> {
     let mut raw_data: RawBuffer = RawBuffer::default();
-    let mut serializer = ton_api::Serializer::new(&mut raw_data.0);
+    let mut serializer = ton_api::Serializer::new(&mut raw_data);
 
     serializer.write_boxed(&block.clone().into_boxed())?;
-    raw_data.0.extend(payload.data().iter());
+    raw_data.extend(payload.data().iter());
 
     Ok(raw_data)
 }
@@ -277,7 +277,7 @@ where
     match response {
         Ok(response) => {
             let mut ret: RawBuffer = RawBuffer::default();
-            let mut serializer = ton_api::Serializer::new(&mut ret.0);
+            let mut serializer = ton_api::Serializer::new(&mut ret);
 
             serializer.write_boxed(&response).unwrap();
 
@@ -289,13 +289,13 @@ where
 
 pub fn deserialize_tl_bare_object<T: ::ton_api::BareDeserialize>(bytes: &RawBuffer) -> Result<T> {
     let cloned_bytes = bytes.clone();
-    let data: &mut &[u8] = &mut cloned_bytes.0.as_ref();
+    let data: &mut &[u8] = &mut cloned_bytes.as_slice();
     ton_api::Deserializer::new(data).read_bare()
 }
 
 pub fn deserialize_tl_boxed_object<T: ::ton_api::BoxedDeserialize>(bytes: &RawBuffer) -> Result<T> {
     let cloned_bytes = bytes.clone();
-    let data: &mut &[u8] = &mut cloned_bytes.0.as_ref();
+    let data: &mut &[u8] = &mut cloned_bytes.as_slice();
     ton_api::Deserializer::new(data).read_boxed()
 }
 
@@ -504,6 +504,25 @@ impl MetricsDumper {
         //update state
 
         self.prev_metrics = metrics;
+    }
+
+    pub fn enumerate_as_f64<F>(&self, handler: F)
+    where
+        F: Fn(String, f64),
+    {
+        for (key, metric) in &self.prev_metrics {
+            use MetricUsage::*;
+
+            let value = match metric.usage {
+                Counter => metric.value as f64,
+                Derivative => metric.value as f64 / Self::METRIC_DERIVATIVE_MULTIPLIER,
+                Percents => (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER * 100.0,
+                Float => (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER,
+                Latency => (metric.value as f64) / Self::METRIC_FLOAT_MULTIPLIER,
+            };
+
+            handler(key.clone(), value);
+        }
     }
 
     pub fn dump<F>(&self, handler: F)

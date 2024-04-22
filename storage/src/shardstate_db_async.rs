@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -29,8 +29,8 @@ use std::{
     sync::{Arc, atomic::{AtomicU8, AtomicU32, Ordering}}, 
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use ton_block::{BlockIdExt, CellsFactory};
-use ton_types::{
+use ever_block::{BlockIdExt, CellsFactory};
+use ever_block::{
     ByteOrderRead, Cell, Result, fail, error, DoneCellsStorage, OrderedCellsStorage, 
     CellByHashStorage, UInt256,
 };
@@ -412,6 +412,16 @@ impl ShardStateDb {
 
     pub fn shardstate_db(&self) -> Arc<dyn KvcWriteable<BlockIdExt>> {
         Arc::clone(&self.shardstate_db)
+    }
+
+    #[cfg(test)]
+    pub fn enum_shardstate_db(&self) -> Result<()> {
+        self.shardstate_db.for_each(&mut |_key, val| {
+            let db_entry = DbEntry::from_slice(val)?;
+            println!("{}", db_entry.block_id);
+            Ok(true)
+        })?;
+        Ok(())
     }
 
     pub async fn put(

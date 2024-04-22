@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -706,9 +706,18 @@ impl RoundState for RoundStateImpl {
                     desc.get_cutoff_weight() as f64 / desc.get_total_weight() as f64;
 
                 if let Some(block) = block {
-                    result = format!("{}      - block {:?}: source={}, hash={:?}, root_hash={:?}, file_hash={:?}, approved={} ({:.2}%/{:.2}%) priority={}\n",
-            result, block.get_id(), block.get_source_index(), block.get_id(), block.get_root_hash(), block.get_file_hash(), approved_weight, normalized_approved_weight * 100.0,
-            normalized_cutoff_weight * 100.0, priority);
+                    result = format!(
+                        "{}      - block {:?}: source={}, hash={:?}, root_hash={:x}, file_hash={:?}, approved={} ({:.2}%/{:.2}%) priority={}\n",
+                        result,
+                        block.get_id(),
+                        block.get_source_index(),
+                        block.get_id(),
+                        block.get_root_hash(),
+                        block.get_file_hash(),
+                        approved_weight, normalized_approved_weight * 100.0,
+                        normalized_cutoff_weight * 100.0,
+                        priority
+                    );
                 } else {
                     result = format!(
                         "{}      - SKIP block: approved={} ({:.2}%/{:.2}%) priority={}\n",

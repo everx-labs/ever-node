@@ -36,7 +36,7 @@ root:
 
 loggers:
   # node messages
-  ton_node:
+  ever_node:
     level: trace
   boot:
     level: trace
@@ -59,7 +59,7 @@ loggers:
     level: warn
 
   # block messages
-  ton_block:
+  ever_block:
     level: off
 
   # block messages
@@ -80,6 +80,9 @@ loggers:
     level: trace
 
   remp:
+    level: trace
+
+  verificator:
     level: trace
 
   catchain:

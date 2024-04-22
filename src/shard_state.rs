@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -19,13 +19,13 @@ use adnl::{declare_counted, common::{CountedObject, Counter}};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
 use std::{io::Write, sync::Arc, collections::HashMap};
-use ton_block::{
-    BlockIdExt, ShardAccount, ShardIdent, ShardStateUnsplit, ShardStateSplit, ValidatorSet, 
-    CatchainConfig, Serializable, Deserializable, ConfigParams, McShardRecord, 
+use ever_block::{
+    BlockIdExt, ShardAccount, ShardIdent, ShardStateUnsplit, ShardStateSplit, 
+    Serializable, Deserializable, ConfigParams, McShardRecord, 
     McStateExtra, ShardDescr, ShardHashes, HashmapAugType, InRefValue, BinTree, 
     BinTreeType, WorkchainDescr, OutMsgQueue, ProcessedInfo, MerkleProof, ConnectedNwDescr,
 };
-use ton_types::{
+use ever_block::{
     AccountId, Cell, SliceData, error, fail, Result, UInt256, BocWriter, BocReader, read_single_root_boc,
 };
 
@@ -431,10 +431,6 @@ impl ShardStateStuff {
             Ok(true)
         })?;
         Ok(vec)
-    }
-
-    pub fn read_cur_validator_set_and_cc_conf(&self) -> Result<(ValidatorSet, CatchainConfig)> {
-        self.config_params()?.read_cur_validator_set_and_cc_conf()
     }
 
 // Unused

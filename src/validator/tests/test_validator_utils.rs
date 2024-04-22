@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -18,12 +18,11 @@ use crate::{
     validator::accept_block::create_new_proof
 };
 
-use ton_block::{
-    MASTERCHAIN_ID,
+use ever_block::{
     Block, BlockIdExt, ConfigParamEnum, CryptoSignature, CryptoSignaturePair, Deserializable,
-    SigPubKey, 
+    KeyOption, KeyOptionJson, MASTERCHAIN_ID, SigPubKey, 
 };
-use ton_types::{error, HashmapType};
+use ever_block::{error, HashmapType};
 use crate::validator::accept_block::create_new_proof_link;
 
 fn block_config(block_stuff: &BlockStuff) -> Result<ConfigParams> {
@@ -32,6 +31,16 @@ fn block_config(block_stuff: &BlockStuff) -> Result<ConfigParams> {
     ).ok_or_else(
         || error!(NodeError::InvalidArg("State doesn't contain `custom` field".to_string()))
     )
+}
+
+pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (KeyOptionJson, Arc<dyn KeyOption>) {
+    loop {
+        if let Ok((private, public)) = Ed25519KeyOption::generate_with_json() {
+            if id_opt.is_none() || Some(calc_workchain_id_by_adnl_id(public.id().data())) == id_opt {
+                return (private, public)
+            }
+        }
+    }
 }
 
 #[test]
@@ -186,7 +195,7 @@ fn check_any_keyblock_validator_set(file_name: &str) {
 fn test_create_new_proof_with_workchains() {
     let block_stuff = BlockStuff::read_block_from_file("src/tests/static/key_block.boc").unwrap();
     let validator_set = block_config(&block_stuff).unwrap().validator_set().unwrap();
-    let data = ton_block::Block::build_data_for_sign(
+    let data = Block::build_data_for_sign(
         block_stuff.id().root_hash(), 
         block_stuff.id().file_hash()
     );

@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -17,17 +17,16 @@ use crate::{
 };
 
 use catchain::{BlockPayloadPtr, CatchainNode, PublicKey, PublicKeyHash};
+use ever_block::{
+    error, fail, BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, BuilderData,
+    ConfigParams, CryptoSignature, CryptoSignaturePair, Deserializable, Ed25519KeyOption,
+    GlobalCapabilities, HashmapType, KeyId, Message, Result, Serializable, Sha256, ShardIdent,
+    SigPubKey, UInt256, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet, Workchains,
+    WorkchainDescr
+};
+use ever_block::CatchainConfig;
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
-use ton_block::{
-    BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, ConfigParams, CryptoSignature, 
-    CryptoSignaturePair, Deserializable, GlobalCapabilities, Message, Serializable, 
-    ShardIdent, SigPubKey, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet
-};
-use ton_types::{
-    error, fail, BuilderData, HashmapType, Ed25519KeyOption, KeyId, KeyOption, KeyOptionJson, 
-    Result, Sha256, UInt256
-};
 use validator_session::SessionNode;
 
 #[cfg(test)]
@@ -39,7 +38,7 @@ pub fn sigpubkey_to_publickey(k: &SigPubKey) -> PublicKey {
 }
 
 pub fn make_cryptosig(s: BlockPayloadPtr) -> Result<CryptoSignature> {
-    return CryptoSignature::from_bytes(s.data().0.as_slice());
+    return CryptoSignature::from_bytes(s.data().as_slice());
 }
 
 pub fn make_cryptosig_pair(
@@ -110,7 +109,7 @@ pub fn validatordescr_to_catchain_node(descr: &ValidatorDescr) -> CatchainNode {
     }
 }
 
-pub fn validatordescr_to_session_node(descr: &ValidatorDescr) -> ton_types::Result<SessionNode> {
+pub fn validatordescr_to_session_node(descr: &ValidatorDescr) -> Result<SessionNode> {
     Ok(validator_session::SessionNode {
         adnl_id: get_adnl_id(descr),
         public_key: sigpubkey_to_publickey(&descr.public_key),
@@ -324,6 +323,49 @@ pub fn try_calc_subset_for_workchain_standard(
     }
 }
 
+lazy_static::lazy_static! {
+    static ref SINGLE_WORKCHAIN: Workchains = {
+        let mut workchains = Workchains::default();
+        workchains.set(&0, &WorkchainDescr::default()).unwrap();
+        workchains
+    };
+}
+
+pub fn try_calc_vset_for_workchain(
+    vset: &ValidatorSet,
+    config: &ConfigParams,
+    cc_config: &CatchainConfig, 
+    workchain_id: i32, 
+) -> Result<Vec<ValidatorDescr>> {
+    let full_list = if cc_config.isolate_mc_validators {
+        if vset.total() <= vset.main() {
+            failure::bail!("Count of validators is too small to make sharde's subset while `isolate_mc_validators` flag is set");
+        }
+        let list = vset.list()[vset.main() as usize .. ].to_vec();
+        list
+    } else {
+        vset.list().to_vec().clone()
+    };
+    // in case on old block proof it doesn't contain workchains in config so 1 by default
+    let workchains = config.workchains().unwrap_or_else(|_| SINGLE_WORKCHAIN.clone());
+    match workchains.len()? as i32 {
+        0 => failure::bail!("workchain description is empty"),
+        1 => { Ok(full_list) },
+        count => {
+            let mut list = Vec::new();
+
+            for descr in vset.list() {
+                let id = calc_workchain_id(descr);
+                if (id == workchain_id) || (id >= count) {
+                    list.push(descr.clone());
+                }
+            }
+
+            Ok(list)
+        }
+    }
+}
+
 pub fn try_calc_subset_for_workchain(
     vset: &ValidatorSet,
     mc_state: &ShardStateStuff,
@@ -373,16 +415,6 @@ pub fn calc_subset_for_workchain_standard(
     }
 }
 
-pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (KeyOptionJson, Arc<dyn KeyOption>) {
-    loop {
-        if let Ok((private, public)) = Ed25519KeyOption::generate_with_json() {
-            if id_opt.is_none() || Some(calc_workchain_id_by_adnl_id(public.id().data())) == id_opt {
-                return (private, public)
-            }
-        }
-    }
-}
-
 pub async fn get_shard_by_message(engine: Arc<dyn EngineOperations>, message: Arc<Message>) -> Result<ShardIdent> {
     let dst_wc = message.dst_workchain_id()
         .ok_or_else(|| error!("Can't get workchain id from message"))?;
@@ -412,6 +444,10 @@ pub fn get_group_members_by_validator_descrs(iterator: &Vec<ValidatorDescr>, dst
 
 pub fn is_remp_enabled(_engine: Arc<dyn EngineOperations>, config_params: &ConfigParams) -> bool {
     return config_params.has_capability(GlobalCapabilities::CapRemp);
+}
+
+pub fn is_smft_enabled(_engine: Arc<dyn EngineOperations>, config_params: &ConfigParams) -> bool {
+    return config_params.has_capability(GlobalCapabilities::CapSmft);
 }
 
 pub fn get_message_uid(msg: &Message) -> UInt256 {

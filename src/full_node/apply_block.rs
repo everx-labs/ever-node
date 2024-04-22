@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -17,8 +17,11 @@ use crate::{
 };
 use std::{ops::Deref, sync::Arc, time::Instant};
 use storage::block_handle_db::BlockHandle;
-use ton_types::{error, fail, Result};
-use ton_block::{BlockIdExt, MerkleProof, Deserializable, Serializable, ShardIdent, ConnectedNwOutDescr, OutMsgQueueInfo};
+use ever_block::{error, fail, Result};
+use ever_block::{
+    BlockIdExt, MerkleProof, Deserializable, Serializable, ShardIdent,
+    OutMsgQueueInfo, ConnectedNwOutDescr,
+};
 
 pub const MAX_RECURSION_DEPTH: u32 = UNREGISTERED_CHAIN_MAX_LEN * 2;
 
@@ -97,7 +100,7 @@ pub async fn calc_shard_state(
 ) -> Result<(Arc<ShardStateStuff>, (Arc<ShardStateStuff>, Option<Arc<ShardStateStuff>>))> {
     let block_descr = fmt_block_id_short(block.id());
 
-    log::trace!("({}): calc_shard_state: block: {}", block_descr, block.id());
+    log::debug!("({}): calc_shard_state: block: {}", block_descr, block.id());
 
     let (prev_ss_root, prev_ss) = match prev_ids {
         (prev1, Some(prev2)) => {
@@ -132,7 +135,7 @@ pub async fn calc_shard_state(
                     block_id, e, prev_ss_root, merkle_update
                 ))?;
             let elapsed = now.elapsed();
-            log::trace!("({}): TIME: calc_shard_state: applied Merkle update {}ms   {}",
+            log::debug!("({}): TIME: calc_shard_state: applied Merkle update {}ms   {}",
                 block_descr_clone,
                 elapsed.as_millis(), block_id);
             #[cfg(feature = "telemetry")]
@@ -153,7 +156,9 @@ pub async fn calc_shard_state(
         }
     ).await??;
 
+    log::debug!("({}): calc_shard_state: store_state: {}", block_descr, handle.id());
     let ss = engine.store_state(handle, ss).await?;
+    log::debug!("({}): calc_shard_state: store_state: {} done", block_descr, handle.id());
     Ok((ss, prev_ss))
 }
 

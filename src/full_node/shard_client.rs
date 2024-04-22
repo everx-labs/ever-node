@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -22,12 +22,12 @@ use crate::{
 use crate::validator::validator_utils::calc_subset_for_workchain_standard;
 
 use std::{sync::Arc, mem::drop, time::Duration};
-use ton_block::{
+use ever_block::{
     BlockIdExt, BlockSignaturesPure, CryptoSignaturePair, CryptoSignature, 
     GlobalCapabilities, ProofChain, MerkleProof, Deserializable, Block, Serializable,
     BASE_WORKCHAIN_ID,
 };
-use ton_types::{Result, fail, error};
+use ever_block::{Result, fail, error};
 use ton_api::ton::ton_node::broadcast::{BlockBroadcast, QueueUpdateBroadcast};
 
 pub fn start_masterchain_client(
@@ -478,8 +478,8 @@ impl BlockOrQueueUpdateBroadcast for BlockBroadcast {
     fn id(&self) -> &BlockIdExt { &self.id }
     fn catchain_seqno(&self) -> u32 { self.catchain_seqno as u32 }
     fn validator_set_hash(&self) -> u32 { self.validator_set_hash as u32 }
-    fn proof(&self) -> Option<Vec<u8>> { Some(self.proof.0.clone()) }
-    fn data(&self)-> Vec<u8> { self.data.0.clone() }
+    fn proof(&self) -> Option<Vec<u8>> { Some(self.proof.clone()) }
+    fn data(&self)-> Vec<u8> { self.data.clone() }
     fn is_queue_update_for(&self) -> Option<i32> { None }
     fn signatures(&self) -> &[ton_api::ton::ton_node::blocksignature::BlockSignature] {
         &self.signatures
@@ -491,7 +491,7 @@ impl BlockOrQueueUpdateBroadcast for QueueUpdateBroadcast {
     fn catchain_seqno(&self) -> u32 { self.catchain_seqno as u32 }
     fn validator_set_hash(&self) -> u32 { self.validator_set_hash as u32 }
     fn proof(&self) -> Option<Vec<u8>> { None }
-    fn data(&self)-> Vec<u8> { self.data.0.clone() }
+    fn data(&self)-> Vec<u8> { self.data.clone() }
     fn is_queue_update_for(&self) -> Option<i32> { Some(self.target_wc) }
     fn signatures(&self) -> &[ton_api::ton::ton_node::blocksignature::BlockSignature] {
         &self.signatures
@@ -699,11 +699,11 @@ fn validate_brodcast(
         )));
     }
 
-    // extract signatures - build ton_block::BlockSignaturesPure
+    // extract signatures - build ever_block::BlockSignaturesPure
     let blk_pure_signatures = broadcast.extract_signatures()?;
 
     // Check signatures
-    let checked_data = ton_block::Block::build_data_for_sign(
+    let checked_data = ever_block::Block::build_data_for_sign(
         &block_id.root_hash,
         &block_id.file_hash
     );

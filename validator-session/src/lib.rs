@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -33,13 +33,9 @@ mod vector_bool;
 mod vote_candidate;
 
 pub use cache::*;
-use catchain::{function, CatchainPtr};
+use catchain::CatchainPtr;
 use task_queue::{CallbackTaskQueuePtr, CompletionHandlerProcessor, TaskQueuePtr};
 use std::{any::Any, cell::RefCell, fmt, rc::Rc, sync::{Arc, Weak}};
-
-mod profiling {
-    pub use catchain::profiling::*;
-}
 
 pub mod ton {
     pub use ton_api::ton::int;
@@ -102,10 +98,10 @@ pub type BlockId = BlockHash;
 
 lazy_static::lazy_static! {
   /// Block candidate identifier for skip round (optional case to identify candidate as empty)
-  pub static ref SKIP_ROUND_CANDIDATE_BLOCKID : BlockId = ton_types::UInt256::default();
+  pub static ref SKIP_ROUND_CANDIDATE_BLOCKID : BlockId = ever_block::UInt256::default();
 
   /// Default block ID for internal use
-  pub static ref DEFAULT_BLOCKID : BlockId = ton_types::UInt256::default();
+  pub static ref DEFAULT_BLOCKID : BlockId = ever_block::UInt256::default();
 }
 
 /// Overlay manager

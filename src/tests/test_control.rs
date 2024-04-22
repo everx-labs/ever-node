@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -50,11 +50,11 @@ use ton_api::{
 };
 use ton_api::ton::raw::ShardAccountMeta;
 use ton_api::ton::rpc::raw::{GetAccountMetaByBlock, GetShardAccountMeta};
-use ton_block::{
+use ever_block::{
     Account, BlockIdExt, ConfigParamEnum, ConfigParams, Deserializable,
     generate_test_account_by_init_code_hash, Message, Serializable, ShardIdent
 };
-use ton_types::{
+use ever_block::{
     error, fail, base64_encode, Ed25519KeyOption, KeyId, KeyOption, Result, UInt256
 };
 
@@ -106,7 +106,7 @@ async fn query(client: &mut AdnlClient, query: &TLObject) -> Result<TLObject> {
     let control_query = TaggedTlObject {
         object: TLObject::new(
             ControlQuery {
-                data: ton::bytes(serialize_boxed(query)?)
+                data: serialize_boxed(query)?
             },
         ),
         #[cfg(feature = "telemetry")]
@@ -135,10 +135,10 @@ async fn start_control_with_options(
     config: Option<TonNodeConfig>,
     server_only: bool
 ) -> Result<(ControlServer, Option<AdnlClient>, Arc<KeyId>)> {
+    fs::copy("./configs/ton-global.config-sample.json", "./target/ton-global.config-sample.json")?;
     let config = if let Some(config) = config {
         config
     } else {
-        fs::copy("./configs/ton-global.config.json", "./target/ton-global.config.json")?;
         crate::test_helper::get_config(IP_NODE, Some("./target"), DEFAULT_CONFIG).await?
     };
     let network = NodeNetwork::new(

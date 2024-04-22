@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -15,13 +15,17 @@ use std::{
     sync::Arc,
     time::SystemTime,
 };
-use super::validator_utils::{validator_query_candidate_to_validator_block_candidate, pairvec_to_cryptopair_vec, get_first_block_seqno_after_prevs};
+use super::validator_utils::{
+    validator_query_candidate_to_validator_block_candidate, pairvec_to_cryptopair_vec,
+    get_first_block_seqno_after_prevs
+};
 use crate::{
     collator_test_bundle::CollatorTestBundle, engine_traits::EngineOperations, 
-    validator::{CollatorSettings, validate_query::ValidateQuery, collator}, validating_utils::{fmt_next_block_descr_from_next_seqno, fmt_next_block_descr}
+    validator::{CollatorSettings, validate_query::ValidateQuery, collator}, 
+    validating_utils::{fmt_next_block_descr_from_next_seqno, fmt_next_block_descr}
 };
-use ton_block::{BlockIdExt, ShardIdent, ValidatorSet, Deserializable};
-use ton_types::{Result, UInt256};
+use crate::validator::verification::VerificationManagerPtr;
+use ever_block::{Block, BlockIdExt, Deserializable, Result, ShardIdent, UInt256, ValidatorSet};
 use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
 
 #[allow(dead_code)]
@@ -29,23 +33,46 @@ pub async fn run_validate_query_any_candidate(
     block: super::BlockCandidate,
     engine: Arc<dyn EngineOperations>,
 ) -> Result<SystemTime> {
-    let real_block = ton_block::Block::construct_from_bytes(&block.data)?;
+    let real_block = Block::construct_from_bytes(&block.data)?;
     let shard = block.block_id.shard().clone();
     let info = real_block.read_info()?;
     let prev = info.read_prev_ids()?;
     let mc_state = engine.load_last_applied_mc_state().await?;
     let min_masterchain_block_id = mc_state.find_block_id(info.min_ref_mc_seqno())?;
-    let (set, _) = mc_state.read_cur_validator_set_and_cc_conf()?;
-    run_validate_query(
-        shard,
-        SystemTime::now(),
-        min_masterchain_block_id,
-        prev,
-        block,
-        set,
-        engine,
-        SystemTime::now()
-    ).await
+    let mut cc_seqno_with_delta = 0;
+    if let Some(mc_state_extra) = mc_state.state()?.read_custom()? {
+        let cc_seqno_from_state = if shard.is_masterchain() {
+            mc_state_extra.validator_info.catchain_seqno
+        } else {
+            mc_state_extra.shards.calc_shard_cc_seqno(&shard)?
+        };
+        let nodes = crate::validator::validator_utils::compute_validator_set_cc(
+            &*engine.load_last_applied_mc_state().await?,
+            &shard,
+            engine.now(),
+            cc_seqno_from_state,
+            &mut cc_seqno_with_delta
+        )?;
+        let validator_set = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno_with_delta, nodes)?;
+
+        log::debug!(
+            target: "verificator", 
+            "ValidatorSetForVerification cc_seqno: {:?}", validator_set.cc_seqno()
+        );
+        run_validate_query(
+            shard,
+            SystemTime::now(),
+            min_masterchain_block_id,
+            prev,
+            block,
+            validator_set,
+            engine,
+            SystemTime::now(),
+            None, //no verification manager for validations within verification
+        ).await
+    } else {
+        Err(failure::format_err!("MC state is None"))
+    }
 }
 
 pub async fn run_validate_query(
@@ -57,6 +84,7 @@ pub async fn run_validate_query(
     set: ValidatorSet,
     engine: Arc<dyn EngineOperations>,
     _timeout: SystemTime,
+    verification_manager: Option<VerificationManagerPtr>,
 ) -> Result<SystemTime> {
 
     let next_block_descr = fmt_next_block_descr(&block.block_id);
@@ -86,6 +114,7 @@ pub async fn run_validate_query(
             engine.clone(),
             false,
             true,
+            verification_manager,
         ).try_validate().await
     } else {
         let query = ValidateQuery::new(
@@ -97,6 +126,7 @@ pub async fn run_validate_query(
             engine.clone(),
             false,
             true,
+            verification_manager,
         );
         let validator_result = query.try_validate().await;
         if let Err(err) = &validator_result {
@@ -160,7 +190,7 @@ pub async fn run_accept_block_query(
     approve_signatures: Vec<(PublicKeyHash, BlockPayloadPtr)>,
     send_broadcast: bool,
     engine: Arc<dyn EngineOperations>,
-) -> ton_types::Result<()> {
+) -> Result<()> {
     let sigs = pairvec_to_cryptopair_vec(signatures)?;
     let approve_sigs = pairvec_to_cryptopair_vec(approve_signatures)?;
     super::accept_block::accept_block(

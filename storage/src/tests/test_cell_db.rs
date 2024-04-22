@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -15,7 +15,7 @@ use crate::{
     cell_db::CellDb, tests::utils::*, types::{StorageCell}
 };
 use std::{io::Cursor, sync::Arc};
-use ton_types::{Cell, Result, cells_serialization::deserialize_tree_of_cells, UInt256};
+use ever_block::{Cell, Result, cells_serialization::deserialize_tree_of_cells, UInt256};
 use std::ops::Deref;
 
 use crate::dynamic_boc_db::DynamicBocDb;

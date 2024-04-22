@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -24,9 +24,7 @@ fn compute_hash_impl(
     let pk_hash = parse_hex_as_public_key_hash(source_public_key_hash);
 
     let pld_vec = parse_hex(payload);
-    let pld = ton_api::ton::bytes(pld_vec);
-
-    let block_id = get_block_id(&incarn, &pk_hash, height, &pld);
+    let block_id = get_block_id(&incarn, &pk_hash, height, &pld_vec);
     println!(
         "incarnation = {}, src = {:?}, height = {}, data = {}",
         incarn.to_hex_string(),
@@ -43,7 +41,7 @@ fn compute_hash(incarnation: &str, source_public_key_hash: &str, block: &str) ->
     let update: ton_api::ton::catchain::Update =
         ton_api::Deserializer::new(&mut blb).read_boxed().unwrap();
     let blk = update.only();
-    let pld = ton_api::ton::bytes(blb.to_vec());
+    let pld = blb.to_vec();
 
     compute_hash_impl(
         incarnation,
@@ -70,7 +68,7 @@ fn test_payload_hash() {
         ),
     ] {
         assert_eq!(
-            get_hash(&ton_api::ton::bytes(parse_hex(pl))),
+            get_hash(&parse_hex(pl)),
             parse_hex_as_int256(hc)
         );
     }

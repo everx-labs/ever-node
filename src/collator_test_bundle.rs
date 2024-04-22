@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -29,18 +29,20 @@ use std::{
     ops::Deref, sync::{Arc, atomic::AtomicU64} 
 };
 use storage::{
-    StorageAlloc, block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage}, 
-    block_handle_db::NodeStateDb, types::BlockMeta  
+    StorageAlloc, TimeChecker,
+    block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage}, 
+    block_handle_db::NodeStateDb,
+    types::BlockMeta,
 };
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
-use ton_block::{
+use ever_block::{
     BlockIdExt, Message, ShardIdent, Serializable, MerkleUpdate, Deserializable, 
     ValidatorBaseInfo, BlockSignaturesPure, BlockSignatures, HashmapAugType, 
     TopBlockDescrSet, GlobalCapabilities, OutMsgQueue,
 };
-use ton_block::{ShardStateUnsplit, TopBlockDescr};
-use ton_types::{UInt256, fail, error, Result, CellType, read_boc, read_single_root_boc};
+use ever_block::{ShardStateUnsplit, TopBlockDescr};
+use ever_block::{UInt256, fail, error, Result, CellType, read_boc, read_single_root_boc};
 use crate::engine_traits::RempDuplicateStatus;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -55,7 +57,9 @@ struct CollatorTestBundleIndexJson {
     prev_blocks: Vec<String>,
     created_by: String,
     rand_seed: String,
+    #[serde(skip_serializing)]
     now: u32,
+    now_ms: u64,
     fake: bool,
     contains_ethalon: bool,
     #[serde(default)]
@@ -98,7 +102,7 @@ impl TryFrom<CollatorTestBundleIndexJson> for CollatorTestBundleIndex {
             prev_blocks,
             created_by: value.created_by.parse()?,
             rand_seed: Some(value.rand_seed.parse()?),
-            now: value.now,
+            now_ms: if value.now_ms == 0 { (value.now as u64) * 1000 } else { value.now_ms },
             fake: value.fake,
             contains_ethalon: value.contains_ethalon,
             contains_candidate: value.contains_candidate,
@@ -123,7 +127,8 @@ impl From<&CollatorTestBundleIndex> for CollatorTestBundleIndexJson {
                 Some(rand_seed) => rand_seed.to_hex_string(),
                 None => UInt256::default().to_hex_string(),
             },
-            now: value.now,
+            now: (value.now_ms / 1000) as u32,
+            now_ms: value.now_ms,
             fake: value.fake,
             contains_ethalon: value.contains_ethalon,
             contains_candidate: value.contains_candidate,
@@ -143,7 +148,7 @@ struct CollatorTestBundleIndex {
     prev_blocks: Vec<BlockIdExt>,
     created_by: UInt256,
     rand_seed: Option<UInt256>,
-    now: u32,
+    now_ms: u64,
     fake: bool,
     contains_ethalon: bool,
     contains_candidate: bool,
@@ -252,12 +257,12 @@ impl CollatorTestBundle {
             &allocated
         )?;
 
-        let mut now = mc_state.state()?.gen_time() + 1;
+        let mut now_ms = mc_state.state()?.gen_time_ms() + 1;
         let mut states = HashMap::new();
         states.insert(last_mc_state.clone(), mc_state);
         for wc_zero_state_name in wc_zero_state_names {
             let (wc_state, wc_fh, wc_rh) = construct_from_file::<ShardStateUnsplit>(wc_zero_state_name)?;
-            now = std::cmp::max(now, wc_state.gen_time() + 1);
+            now_ms = now_ms.max(wc_state.gen_time_ms() + 1);
             let block_id = BlockIdExt::with_params(wc_state.shard().clone(), 0, wc_rh, wc_fh);
             let wc_state = ShardStateStuff::from_state(
                 block_id.clone(), 
@@ -284,7 +289,7 @@ impl CollatorTestBundle {
             prev_blocks,
             created_by: UInt256::default(),
             rand_seed: None,
-            now,
+            now_ms,
             fake: true,
             contains_ethalon: false,
             contains_candidate: false,
@@ -335,10 +340,10 @@ impl CollatorTestBundle {
         // uncomment this block, and change dst address then run test
         // add id (new filename of message) to external messages in index.json
         // std::fs::create_dir_all(format!("{}/external_messages", path)).ok();
-        // let src = ton_block::MsgAddressExt::with_extern([0x77; 32].into())?;
+        // let src = ever_block::MsgAddressExt::with_extern([0x77; 32].into())?;
         // let dst = hex::decode("b1219502b825ef2345f49fc9065e485e7f478bddafa63039d00c63e494ab7090")?;
-        // let dst = ton_block::MsgAddressInt::with_standart(None, 0, dst.into())?;
-        // let h = ton_block::ExternalInboundMessageHeader::new(src, dst);
+        // let dst = ever_block::MsgAddressInt::with_standart(None, 0, dst.into())?;
+        // let h = ever_block::ExternalInboundMessageHeader::new(src, dst);
         // let msg = Message::with_ext_in_header(h);
         // let id = msg.serialize()?.repr_hash();
         // let filename = format!("{}/external_messages/{:x}", path, id);
@@ -480,11 +485,11 @@ impl CollatorTestBundle {
             None
         } else {
             let path = format!("{}/candidate/", path);
-            let data = ton_api::ton::bytes(read(format!("{}/data", path))?);
+            let data = read(format!("{}/data", path))?;
             Some(BlockCandidate {
                 block_id: index.id.clone(),
                 collated_file_hash: catchain::utils::get_hash(&data),
-                data: data.0,
+                data,
                 collated_data: read(format!("{}/collated_data", path))?,
                 created_by: index.created_by.clone(),
             })
@@ -567,6 +572,8 @@ impl CollatorTestBundle {
 impl CollatorTestBundle {
     // build bundle for a collating (just now) block. 
     // Uses real engine for top shard blocks and external messages.
+    // Blocks data loading is optional because we sometimes create bundles using a cut database (without blocks). 
+    // Such a bundle will work, but creating merkle updates could be long
     pub async fn build_for_collating_block(
         prev_blocks_ids: Vec<BlockIdExt>,
         engine: &Arc<dyn EngineOperations>,
@@ -602,7 +609,10 @@ impl CollatorTestBundle {
         //
         // external messages
         //
-        let external_messages = engine.get_external_messages_iterator(shard.clone(), 0).collect::<Vec<_>>();
+        let external_messages = engine.get_external_messages_iterator(
+            shard.clone(),
+            0
+        ).collect::<Vec<_>>();
 
         // 
         // neighbors
@@ -632,21 +642,19 @@ impl CollatorTestBundle {
         // prev_blocks & states
         //
         let mut blocks = HashMap::new();
-        let prev1 = engine.load_block(
-            engine.load_block_handle(&prev_blocks_ids[0])?.ok_or_else(
-                || error!("Cannot load handle for prev1 block {}", prev_blocks_ids[0])
-            )?.deref()
-        ).await?;
+        let handle = engine.load_block_handle(&prev_blocks_ids[0])?
+            .ok_or_else(|| error!("Cannot load handle for prev1 block {}", prev_blocks_ids[0]))?;
+        if let Ok(prev1) = engine.load_block(&handle).await {
+            blocks.insert(prev_blocks_ids[0].clone(), prev1);
+        }
         states.insert(prev_blocks_ids[0].clone(), engine.load_state(&prev_blocks_ids[0]).await?);
-        blocks.insert(prev_blocks_ids[0].clone(), prev1);
         if prev_blocks_ids.len() > 1 {
-            let prev2 = engine.load_block(
-                engine.load_block_handle(&prev_blocks_ids[1])?.ok_or_else(
-                    || error!("Cannot load handle for prev2 block {}", prev_blocks_ids[1])
-                )?.deref()
-            ).await?;
+            let handle = engine.load_block_handle(&prev_blocks_ids[1])?
+                .ok_or_else(|| error!("Cannot load handle for prev2 block {}", prev_blocks_ids[1]))?;
+            if let Ok(prev2) = engine.load_block(&handle).await {
+                blocks.insert(prev_blocks_ids[1].clone(), prev2);
+            }
             states.insert(prev_blocks_ids[1].clone(), engine.load_state(&prev_blocks_ids[1]).await?);
-            blocks.insert(prev_blocks_ids[1].clone(), prev2);
         }
 
         // collect needed mc states
@@ -665,16 +673,25 @@ impl CollatorTestBundle {
         let oldest_mc_state = engine.load_state(
             engine.find_mc_block_by_seq_no(oldest_mc_seq_no).await?.id()
         ).await?;
+        let mut prev_mc_state = oldest_mc_state.clone();
         let mut mc_states = vec!(oldest_mc_state.block_id().clone());
         states.insert(oldest_mc_state.block_id().clone(), oldest_mc_state);
         let mut mc_merkle_updates = HashMap::new();
 
         for mc_seq_no in oldest_mc_seq_no + 1..=newest_mc_seq_no {
             let handle = engine.find_mc_block_by_seq_no(mc_seq_no).await?;
-            let block = engine.load_block(&handle).await?;
-            mc_merkle_updates.insert(block.id().clone(), block.block()?.read_state_update()?);
-            states.insert(block.id().clone(), engine.load_state(block.id()).await?);
-            mc_states.push(block.id().clone());
+            let mc_state = engine.load_state(handle.id()).await?;
+            let merkle_update = if let Ok(block) = engine.load_block(&handle).await {
+                block.block()?.read_state_update()?
+            } else {
+                let _tc = TimeChecker::new(format!("create merkle update for {}", handle.id()), 30);
+                // MerkleUpdate::default()
+                MerkleUpdate::create(prev_mc_state.root_cell(), mc_state.root_cell())?
+            };
+            mc_merkle_updates.insert(handle.id().clone(), merkle_update);
+            prev_mc_state = mc_state.clone();
+            states.insert(handle.id().clone(), mc_state);
+            mc_states.push(handle.id().clone());
         }
 
         let id = BlockIdExt {
@@ -695,7 +712,7 @@ impl CollatorTestBundle {
             prev_blocks: prev_blocks_ids,
             created_by: UInt256::default(),
             rand_seed: None,
-            now: engine.now(),
+            now_ms: engine.now_ms(),
             fake: true,
             contains_ethalon: false,
             contains_candidate: false,
@@ -721,6 +738,8 @@ impl CollatorTestBundle {
 
     // build bundle for a validating (just now) block. 
     // Uses real engine for top shard blocks and external messages.
+    // Blocks data loading is optional because we sometimes create bundles using a cut database (without blocks). 
+    // Such a bundle will work, but creating merkle updates could be long
     pub async fn build_for_validating_block(
         shard: ShardIdent,
         _min_masterchain_block_id: BlockIdExt,
@@ -758,7 +777,10 @@ impl CollatorTestBundle {
         //
         // external messages
         //
-        let external_messages = engine.get_external_messages_iterator(shard.clone(), 0).collect::<Vec<_>>();
+        let external_messages = engine.get_external_messages_iterator(
+            shard.clone(),
+            0
+        ).collect::<Vec<_>>();
 
         // 
         // neighbors
@@ -784,21 +806,19 @@ impl CollatorTestBundle {
         // prev_blocks & states
         //
         let mut blocks = HashMap::new();
-        let prev1 = engine.load_block(
-            engine.load_block_handle(&prev_blocks_ids[0])?.ok_or_else(
-                || error!("Cannot load handle for prev1 block {}", prev_blocks_ids[0])
-            )?.deref()
-        ).await?;
+        let handle = engine.load_block_handle(&prev_blocks_ids[0])?
+            .ok_or_else(|| error!("Cannot load handle for prev1 block {}", prev_blocks_ids[0]))?;
+        if let Ok(prev1) = engine.load_block(&handle).await {
+            blocks.insert(prev_blocks_ids[0].clone(), prev1);
+        }
         states.insert(prev_blocks_ids[0].clone(), engine.load_state(&prev_blocks_ids[0]).await?);
-        blocks.insert(prev_blocks_ids[0].clone(), prev1);
         if prev_blocks_ids.len() > 1 {
-            let prev2 = engine.load_block(
-                engine.load_block_handle(&prev_blocks_ids[1])?.ok_or_else(
-                    || error!("Cannot load handle for prev2 block {}", prev_blocks_ids[1])
-                )?.deref()
-            ).await?;
+            let handle = engine.load_block_handle(&prev_blocks_ids[1])?
+                .ok_or_else(|| error!("Cannot load handle for prev2 block {}", prev_blocks_ids[1]))?;
+            if let Ok(prev2) = engine.load_block(&handle).await {
+                blocks.insert(prev_blocks_ids[1].clone(), prev2);
+            }
             states.insert(prev_blocks_ids[1].clone(), engine.load_state(&prev_blocks_ids[1]).await?);
-            blocks.insert(prev_blocks_ids[1].clone(), prev2);
         }
 
         // collect needed mc states
@@ -817,16 +837,25 @@ impl CollatorTestBundle {
         let oldest_mc_state = engine.load_state(
             engine.find_mc_block_by_seq_no(oldest_mc_seq_no).await?.id()
         ).await?;
+        let mut prev_mc_state = oldest_mc_state.clone();
         let mut mc_states = vec!(oldest_mc_state.block_id().clone());
         states.insert(oldest_mc_state.block_id().clone(), oldest_mc_state);
         let mut mc_merkle_updates = HashMap::new();
 
         for mc_seq_no in oldest_mc_seq_no + 1..=newest_mc_seq_no {
             let handle = engine.find_mc_block_by_seq_no(mc_seq_no).await?;
-            let block = engine.load_block(&handle).await?;
-            mc_merkle_updates.insert(block.id().clone(), block.block()?.read_state_update()?);
-            states.insert(block.id().clone(), engine.load_state(block.id()).await?);
-            mc_states.push(block.id().clone());
+            let mc_state = engine.load_state(handle.id()).await?;
+            let merkle_update = if let Ok(block) = engine.load_block(&handle).await {
+                block.block()?.read_state_update()?
+            } else {
+                // be careful - creating of new merkle update is very slow
+                // if some shards were frozen for a long time
+                MerkleUpdate::create(prev_mc_state.root_cell(), mc_state.root_cell())?
+            };
+            prev_mc_state = mc_state.clone();
+            mc_merkle_updates.insert(handle.id().clone(), merkle_update);
+            states.insert(handle.id().clone(), mc_state);
+            mc_states.push(handle.id().clone());
         }
 
         let b = BlockStuff::deserialize_block_checked(candidate.block_id.clone(), candidate.data.clone())?;
@@ -842,7 +871,7 @@ impl CollatorTestBundle {
             prev_blocks: prev_blocks_ids,
             created_by: candidate.created_by.clone(),
             rand_seed: None,
-            now: b.block()?.read_info()?.gen_utime().as_u32(),
+            now_ms: b.block()?.read_info()?.gen_utime_ms(),
             fake: true,
             contains_ethalon: false,
             contains_candidate: true,
@@ -919,11 +948,9 @@ impl CollatorTestBundle {
         let mut top_shard_blocks_ids = vec![];
         let mc_state = engine.load_state(&last_mc_id).await?;
         for shard_block_id in shard_blocks_ids.iter().filter(|id| id.seq_no() != 0) {
-            let block = engine.load_block(
-                engine.load_block_handle(shard_block_id)?.ok_or_else(
-                    || error!("Cannot load handle for shard block {}", shard_block_id)               
-                )?.deref()
-            ).await?;
+            let handle = engine.load_block_handle(shard_block_id)?
+                .ok_or_else(|| error!("Cannot load handle for shard block {}", shard_block_id))?;
+            let block = engine.load_block(&handle).await?;
             let info = block.block()?.read_info()?;
             let prev_blocks_ids = info.read_prev_ids()?;
             let base_info = ValidatorBaseInfo::with_params(
@@ -995,11 +1022,9 @@ impl CollatorTestBundle {
             blocks.insert(prev1.id().clone(), block);
         }
         if let Some(prev2) = prev.1 {
-            let prev2 = engine.load_block(
-                engine.load_block_handle(&prev2)?.ok_or_else(
-                    || error!("Cannot load handle for prev2 block {}", prev2 )
-                )?.deref()
-            ).await?;
+            let handle = engine.load_block_handle(&prev2)?
+            .ok_or_else(|| error!("Cannot load handle for prev2 block {}", prev2 ))?;
+            let prev2 = engine.load_block(&handle).await?;
             prev_blocks_ids.push(prev2.id().clone());
             states.insert(prev2.id().clone(), engine.load_state(prev2.id()).await?);
             blocks.insert(prev2.id().clone(), prev2);
@@ -1018,7 +1043,7 @@ impl CollatorTestBundle {
         }
 
         // ethalon block and state
-        blocks.insert(block_id.clone(), block.clone());
+        blocks.insert(block_id.clone(), block);
         if block_id.shard().is_masterchain() {
             if block_id.seq_no() < oldest_mc_seq_no {
                 oldest_mc_seq_no = block_id.seq_no();
@@ -1055,7 +1080,7 @@ impl CollatorTestBundle {
             prev_blocks: prev_blocks_ids,
             created_by: extra.created_by().clone(),
             rand_seed: Some(extra.rand_seed().clone()),
-            now: info.gen_utime().as_u32(),
+            now_ms: info.gen_utime_ms(),
             fake: true,
             contains_ethalon: true,
             contains_candidate: false,
@@ -1203,7 +1228,11 @@ impl CollatorTestBundle {
 impl EngineOperations for CollatorTestBundle {
 
     fn now(&self) -> u32 {
-        self.index.now
+        (self.index.now_ms / 1000) as u32
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.index.now_ms
     }
 
     fn load_block_handle(&self, id: &BlockIdExt) -> Result<Option<Arc<BlockHandle>>> {

@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -23,11 +23,11 @@ use std::{
 };
 //#[cfg(test)]
 //use std::path::Path;
-use ton_types::{
+use ever_block::{
     error, fail, BuilderData, ByteOrderRead, Cell, CellByHashStorage, CellData, DoneCellsStorage, 
     OrderedCellsStorage, Result, UInt256, MAX_LEVEL 
 };
-use ton_block::merkle_update::CellsFactory;
+use ever_block::merkle_update::CellsFactory;
 
 pub const BROKEN_CELL_BEACON_FILE: &str = "ton_node.broken_cell";
 
@@ -149,10 +149,6 @@ impl VisitedCell {
             VisitedCell::UpdatedOldFormat{cell, ..} => Some(cell),
         }
     }
-
-    fn is_new(&self) -> bool {
-        matches!(self, VisitedCell::New{..})
-    }
 }
 
 fn build_counter_key(cell_id: &[u8]) -> [u8; 33] {
@@ -273,17 +269,15 @@ impl DynamicBocDb {
             now.elapsed().as_millis()
         );
 
-        for (id, vc) in visited.iter() {
-            if vc.is_new() {
-                if self.storing_cells.remove(id).is_some() {
-                    log::trace!(
-                        target: TARGET,
-                        "DynamicBocDb::save_boc  {:x}  cell removed from storing_cells", id
-                    );
-                    let _storing_cells_count = self.storing_cells_count.fetch_sub(1, Ordering::Relaxed);
-                    #[cfg(feature = "telemetry")]
-                    self.telemetry.storing_cells.update(_storing_cells_count - 1);
-                }
+        for (id, _) in visited.iter() {
+            if self.storing_cells.remove(id).is_some() {
+                log::trace!(
+                    target: TARGET,
+                    "DynamicBocDb::save_boc  {:x}  cell removed from storing_cells", id
+                );
+                let _storing_cells_count = self.storing_cells_count.fetch_sub(1, Ordering::Relaxed);
+                #[cfg(feature = "telemetry")]
+                self.telemetry.storing_cells.update(_storing_cells_count - 1);
             }
         }
 
@@ -735,9 +729,8 @@ impl DynamicBocDb {
 impl CellsFactory for DynamicBocDb {
     fn create_cell(self: Arc<Self>, builder: BuilderData) -> Result<Cell> {
 
-        let cell = Cell::with_cell_impl(
-            StorageCell::with_cell(builder.into_cell()?.deref(), &self, true, true)?
-        );
+        let cell = StorageCell::with_cell(&*builder.into_cell()?, &self, true, true)?;
+        let cell = Cell::with_cell_impl(cell);
         let repr_hash = cell.repr_hash();
 
         let mut result_cell = None;
@@ -750,7 +743,7 @@ impl CellsFactory for DynamicBocDb {
                     lockfree::map::Preview::Discard
                 } else if let Some(inserted) = inserted {
                     result_cell = Some(inserted.clone());
-                    return lockfree::map::Preview::Keep
+                    lockfree::map::Preview::Keep
                 } else {
                     result_cell = Some(cell.clone());
                     lockfree::map::Preview::New(cell.clone())

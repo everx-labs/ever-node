@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -24,8 +24,8 @@ use adnl::{
         Counter
     }
 };
-use ton_block::{BlockIdExt, TopBlockDescr, Deserializable, BlockSignatures};
-use ton_types::{fail, Result};
+use ever_block::{BlockIdExt, TopBlockDescr, Deserializable, BlockSignatures};
+use ever_block::{fail, Result};
 use std::{
     sync::{Arc, atomic::{AtomicU32, Ordering}},
     time::Duration,
@@ -262,7 +262,7 @@ impl ShardBlocksPool {
         }
 
         if last_mc_seq_no != mc_seqno {
-            log::error!("get_shard_blocks: Given last_mc_seq_no {} is not actual", last_mc_seq_no);
+            log::debug!("get_shard_blocks: Given last_mc_seq_no {} is not actual", last_mc_seq_no);
             fail!("Given last_mc_seq_no {} is not actual {}", last_mc_seq_no, mc_seqno);
         } else {
             let mut returned_list = string_builder::Builder::default();

@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -15,7 +15,7 @@ use std::{collections::BinaryHeap, str::FromStr, time::Instant};
 
 use super::*;
 use crate::types::messages::MsgEnqueueStuff;
-use ton_block::*;
+use ever_block::*;
 // TODO: need tests to illustrate adding, routing, fetching message
 // create internal message in one shard
 // put it to its queue
@@ -273,8 +273,7 @@ pub fn generate_test_queue(
     enqueue_lt: u64,
     mut test_addresses: Vec<&str>,
 ) -> (OutMsgQueue, BinaryHeap<NewMessageTest>) {
-    use ton_block::*;
-    use ton_types::*;
+    use ever_block::*;
 
     let use_test_addresses = test_addresses.len() as u64 == size;
     test_addresses.reverse();
@@ -314,7 +313,10 @@ pub fn generate_test_queue(
         let body = SliceData::load_builder(builder).unwrap();
         let msg = Message::with_int_header_and_body(h.clone(), body);
         let env = MsgEnvelope::with_message_and_fee(&msg, 1_000_000_000.into()).unwrap();
-        queue.insert(0, prefix, &env, lt).unwrap();
+        let hash = env.message_hash();
+        let key = OutMsgQueueKey::with_workchain_id_and_prefix(0, prefix, hash);
+        let enq = EnqueuedMsg::with_param(lt, &env).unwrap();
+        queue.set(&key, &enq, &lt).unwrap();
 
         if lt < enqueue_lt {
             let new_msg = NewMessageTest::new(
@@ -333,8 +335,7 @@ pub fn generate_test_queue(
 
 #[test]
 fn test_clean_queue() {
-    use ton_block::*;
-    use ton_types::*;
+    use ever_block::*;
 
     // init log
     let level = log::LevelFilter::Debug;

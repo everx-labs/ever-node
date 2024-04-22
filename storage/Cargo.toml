@@ -25,12 +25,11 @@ serde_cbor = '0.11.1'
 serde_derive = '1.0.114'
 strum = '0.18.0'
 strum_macros = '0.18.0'
-adnl = { git = 'https://github.com/tonlabs/ever-adnl.git', tag = 'pre_feature-common-message' }
-lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = 'pre_feature-common-message' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = 'pre_feature-common-message' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = 'pre_feature-common-message' }
+adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', branch = 'feature-mesh' }
+ever_block = { git = 'https://github.com/everx-labs/ever-block.git', branch = 'feature-mesh' }
+lockfree = { git = 'https://github.com/everx-labs/lockfree.git' }
+ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', branch = 'feature-mesh' }
 
 [build-dependencies]
 cc = { features = [ 'parallel' ], version = '1.0.61' }

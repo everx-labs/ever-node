@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,33 +7,33 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
 use crate::{
     block::{
-        BlockStuff, construct_and_check_prev_stuff, make_mesh_update_raw, 
-        make_queue_update_from_block_raw,
-    }, 
-    block_proof::BlockProofStuff, engine_traits::EngineOperations, 
-    full_node::apply_block::calc_shard_state, shard_state::ShardStateStuff, 
-    types::top_block_descr::TopBlockDescrStuff, 
-    validating_utils::{fmt_block_id_short, UNREGISTERED_CHAIN_MAX_LEN}, 
-    validator::validator_utils::check_crypto_signatures
+        construct_and_check_prev_stuff, BlockStuff, make_queue_update_from_block_raw, 
+        make_mesh_update_raw
+    },
+    block_proof::BlockProofStuff, engine_traits::EngineOperations,
+    full_node::apply_block::calc_shard_state, shard_state::ShardStateStuff,
+    types::top_block_descr::TopBlockDescrStuff,
+    validator::validator_utils::check_crypto_signatures,
+    validating_utils::{UNREGISTERED_CHAIN_MAX_LEN, fmt_block_id_short},
 };
 use storage::block_handle_db::BlockHandle;
-use std::{cmp::{max, min}, collections::HashSet, ops::Deref, sync::Arc, time::Duration, vec};
-use ton_block::{
-    Block, TopBlockDescr, BlockIdExt, MerkleProof, McShardRecord, CryptoSignaturePair, 
-    Deserializable, BlockSignatures, ValidatorSet, BlockProof, Serializable, BlockSignaturesPure, 
-    ValidatorBaseInfo, OutQueueUpdate
-};
-use ton_types::{error, Result, fail, UInt256, UsageTree, HashmapType};
-use ton_api::ton::{ton_node::{
+use std::{cmp::{max, min}, sync::Arc, ops::Deref, time::Duration, collections::HashSet};
+use ever_block::{
+    error, fail, Block, BlockIdExt, BlockProof, BlockSignatures, BlockSignaturesPure,
+    CryptoSignaturePair, Deserializable, HashmapType, McShardRecord, MerkleProof, OutQueueUpdate,
+    Result, Serializable, TopBlockDescr, ValidatorBaseInfo, ValidatorSet, UInt256, UsageTree,
+
+}; 
+use ton_api::ton::ton_node::{
     blocksignature::BlockSignature, 
-    broadcast::{BlockBroadcast, MeshUpdateBroadcast, QueueUpdateBroadcast}
-}};
+    broadcast::{BlockBroadcast, QueueUpdateBroadcast, MeshUpdateBroadcast}
+};
 
 pub async fn accept_block(
     id: BlockIdExt,
@@ -46,7 +46,7 @@ pub async fn accept_block(
     engine: Arc<dyn EngineOperations>,
 ) -> Result<()> {
     let block_descr = fmt_block_id_short(&id);
-    log::trace!(target: "validator", "({}): accept_block: {}", block_descr, id);
+    log::debug!(target: "validator", "({}): accept_block: {}", block_descr, id);
 
     let is_fake = false;
     let is_fork = false;
@@ -79,7 +79,7 @@ pub async fn accept_block(
             Ok(None) => {
                 log::debug!(
                     target: "validator",
-                    "({}): accept block: skipping - block has already pre-applied",
+                    "({}): accept_block: skipping - block has already pre-applied",
                     block_descr,
                 );
                 return Ok(())
@@ -87,9 +87,9 @@ pub async fn accept_block(
             Err(e) => {
                 attempt += 1;
                 log::warn!(target: "validator", 
-                    "({}): accept block routine (attempt {attempt} of {MAX_ATTEMPTS}): {e}", block_descr);
+                    "({}): accept_block routine (attempt {attempt} of {MAX_ATTEMPTS}): {e}", block_descr);
                 if attempt > MAX_ATTEMPTS {
-                    log::error!("({}): accept block routine: OUT OF {MAX_ATTEMPTS} ATTEMPTS", block_descr);
+                    log::error!("({}): accept_block routine: OUT OF {MAX_ATTEMPTS} ATTEMPTS", block_descr);
                     fail!("accept block routine {id}: OUT OF {MAX_ATTEMPTS} ATTEMPTS", );
                 } else {
                     tokio::time::sleep(Duration::from_millis(timeout)).await;
@@ -100,9 +100,9 @@ pub async fn accept_block(
     };
 
     if id.shard().is_masterchain() {
-        log::debug!(target: "validator", "({}): Applying block", block_descr);
+        log::debug!(target: "validator", "({}): acccept_block: Applying block", block_descr);
         engine.clone().apply_block(&handle, &block, id.seq_no(), false).await?;
-        log::trace!(target: "validator", "acccept_block {}: applied block", id);
+        log::debug!(target: "validator", "({}): acccept_block: Applied block", block_descr);
     } else {
         let last_mc_state = choose_mc_state(&block, &engine).await?;
 
@@ -148,6 +148,7 @@ pub async fn accept_block(
     }
 
     if send_block_broadcast {
+        log::debug!(target: "validator", "({}): accept_block: build block broadcasts", block_descr);
         let block_broadcast = build_block_broadcast(&block, &validator_set, &signatures, proof)?;
         let queue_update_broadcasts = build_queue_update_broadcasts(&block, &validator_set, &signatures)?;
         let engine = engine.clone();
@@ -207,7 +208,7 @@ pub async fn accept_block(
         });
     }
 
-    log::trace!(target: "validator", "({}): accept_block: done", block_descr);
+    log::debug!(target: "validator", "({}): accept_block: done", block_descr);
     Ok(())
 }
 
@@ -237,12 +238,19 @@ pub async fn accept_block_routine(
     #[cfg(feature = "telemetry")]
     let mut block_broadcast = block_opt.is_some();
 
+    let block_descr = fmt_block_id_short(&id);
+
     let block = match block_opt {
         Some(b) => b,
         None => {
             let block = match &handle_opt {
-                Some(h) if h.has_data() => engine.load_block(h).await?,
+                Some(h) if h.has_data() => {
+                    log::debug!(target: "validator", "({}): accept_block: loading block from db", block_descr);
+                    let block = engine.load_block(h).await?;
+                    block
+                }
                 _ => {
+                    log::debug!(target: "validator", "({}): accept_block: downloading block", block_descr);
                     let (block, _proof) = engine.download_block(&id, Some(10)).await?;
                     block
                 }
@@ -255,6 +263,7 @@ pub async fn accept_block_routine(
     let mut handle = if let Some(handle) = handle_opt {
         handle
     } else {
+        log::debug!(target: "validator", "({}): accept_block: storing block", block_descr);
         let result = engine.store_block(&block).await?;
         #[cfg(feature = "telemetry")]
         if block_broadcast {
@@ -270,6 +279,7 @@ pub async fn accept_block_routine(
         handle
     };
 
+    log::debug!(target: "validator", "({}): accept_block: storing block prev", block_descr);
     engine.store_block_prev1(&handle, &prev[0])?;
     if prev.len() == 2 {
         engine.store_block_prev2(&handle, &prev[1])?;
@@ -279,6 +289,7 @@ pub async fn accept_block_routine(
         return Ok(None)
     }
 
+    log::debug!(target: "validator", "({}): accept_block: calculating shard state", block_descr);
     let _ss = calc_shard_state(
         &handle,
         &block,
@@ -286,11 +297,13 @@ pub async fn accept_block_routine(
         &engine
     ).await?;
 
+
     let (proof, signatures) = create_new_proof(
         &block,
         &validator_set,
         signatures)?;
 
+    log::debug!(target: "validator", "({}): accept_block: storing block proof", block_descr);
     handle = engine.store_block_proof(0, &id, Some(handle), &proof).await?
         .to_non_created()
         .ok_or_else(
@@ -426,7 +439,7 @@ fn create_new_proof_internal(
 ) -> Result<(BlockProofStuff, BlockSignatures)> {
     let id = block_stuff.id();
     let block_descr = fmt_block_id_short(id);
-    log::trace!(target: "validator", "({}): create_new_proof", block_descr);
+    log::debug!(target: "validator", "({}): accept_block: create_new_proof", block_descr);
 
     // visit block while building a Merkle proof
     let usage_tree = UsageTree::with_root(block_stuff.root_cell().clone());
@@ -494,7 +507,7 @@ fn create_new_proof_internal(
     // check signatures 
     // TODO make function somewhere, BlockProofStuff contains same code
 
-    let checked_data = ton_block::Block::build_data_for_sign(
+    let checked_data = Block::build_data_for_sign(
         &id.root_hash,
         &id.file_hash
     );
@@ -808,7 +821,7 @@ fn pack_signatures(signatures: &BlockSignatures) -> Result<Vec<BlockSignature>> 
         packed_signatures.push(
             BlockSignature {
                 who: UInt256::with_array(*sign.node_id_short.as_slice()),
-                signature: ton_api::ton::bytes(sign.sign.as_bytes().to_vec())
+                signature: sign.sign.as_bytes().to_vec()
             }
         );
         Ok(true)
@@ -831,8 +844,8 @@ fn build_block_broadcast(
             catchain_seqno: validator_set.catchain_seqno() as i32,
             validator_set_hash: signatures.validator_info.validator_list_hash_short as i32,
             signatures: packed_signatures.into(),
-            proof: ton_api::ton::bytes(proof.drain_data()),
-            data: ton_api::ton::bytes(block.data().to_vec()),
+            proof: proof.drain_data(),
+            data: block.data().to_vec()
         }
     )
 }
@@ -857,7 +870,7 @@ fn build_queue_update_broadcasts(
                     catchain_seqno: validator_set.catchain_seqno() as i32,
                     validator_set_hash: signatures.validator_info.validator_list_hash_short as i32,
                     signatures: packed_signatures.clone().into(),
-                    data: ton_api::ton::bytes(update),
+                    data: update,
                     target_wc: wc_id
                 });
             }
@@ -894,7 +907,7 @@ async fn build_mesh_update_broadcasts(
                         src_nw: last_mc_state.state()?.global_id(),
                         id: block.id().clone(),
                         target_nw: nw_id,
-                        data: ton_api::ton::bytes(mu),
+                        data: mu,
                     });
                 }
             }

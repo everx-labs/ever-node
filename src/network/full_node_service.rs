@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2023 EverX. All Rights Reserved.
+* Copyright (C) 2019-2024 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -7,7 +7,7 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
 
@@ -18,8 +18,8 @@ use crate::{
 };
 
 use adnl::common::{AdnlPeers, Answer, QueryAnswer, QueryResult, TaggedByteVec, TaggedObject};
-use overlay::QueriesConsumer;
-use std::{cmp::min, fmt::Debug, ops::Deref, sync::Arc};
+use adnl::QueriesConsumer;
+use std::{cmp::min, fmt::Debug, sync::Arc, ops::Deref};
 #[cfg(feature = "telemetry")]
 use ton_api::{tag_from_boxed_type, tag_from_boxed_object};
 use ton_api::{
@@ -38,8 +38,8 @@ use ton_api::{
         }
     }
 };
-use ton_block::BlockIdExt;
-use ton_types::{error, fail, Result};
+use ever_block::BlockIdExt;
+use ever_block::{fail, error, Result};
 
 // max part size for partially transmitted data like archives and states
 const PART_MAX_SIZE: usize = 1 << 21; 
@@ -333,8 +333,8 @@ impl FullNodeOverlayService {
                         let proof = self.engine.load_block_proof_raw(&next_handle, has_proof_link).await?;
                         answer = DataFull {
                             id: next_id.into(),
-                            proof: ton::bytes(proof),
-                            block: ton::bytes(block),
+                            proof,
+                            block,
                             is_link: if has_proof_link { 
                                 ton::Bool::BoolTrue 
                             } else { 
@@ -369,9 +369,13 @@ impl FullNodeOverlayService {
                 let proof = self.engine.load_block_proof_raw(&handle, has_proof_link).await?;
                 answer = DataFull {
                     id: query.block,
-                    proof: ton_api::ton::bytes(proof),
-                    block: ton_api::ton::bytes(block),
-                    is_link: if has_proof_link { ton::Bool::BoolTrue } else { ton::Bool::BoolFalse }
+                    proof,
+                    block,
+                    is_link: if has_proof_link { 
+                        ton::Bool::BoolTrue 
+                    } else { 
+                        ton::Bool::BoolFalse 
+                    }
                 }.into_boxed();
             }
         }
@@ -431,7 +435,7 @@ impl FullNodeOverlayService {
                     &block,
                     query.target_nw,
                     proof.drain_signatures()?,
-                    self.engine.deref()
+                    self.engine.deref(),
                 ).await?;
                 let answer = TaggedByteVec {
                     object: data,
@@ -466,8 +470,8 @@ impl FullNodeOverlayService {
 
                 answer = DataFull {
                     id: (*id).clone(),
-                    proof: ton_api::ton::bytes(vec!()),
-                    block: ton_api::ton::bytes(data),
+                    proof: vec!(),
+                    block: data,
                     is_link: ton::Bool::BoolFalse
                 }.into_boxed();
             }
@@ -535,8 +539,8 @@ impl FullNodeOverlayService {
 
                     answer = DataFull {
                         id: next_id,
-                        proof: ton_api::ton::bytes(vec!()),
-                        block: ton_api::ton::bytes(data),
+                        proof: vec!(),
+                        block: data,
                         is_link: ton::Bool::BoolFalse
                     }.into_boxed();
                 }
