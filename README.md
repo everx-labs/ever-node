@@ -28,7 +28,7 @@ apt-get install pkg-config make clang libssl-dev libzstd-dev libgoogle-perftools
 ### Installing
 
 ```
-git clone --recurse-submodules https://github.com/tonlabs/ever-node.git
+git clone --recurse-submodules https://github.com/everx-labs/ever-node.git
 cd ever-node
 cargo build --release
 ```
@@ -51,7 +51,7 @@ ever-node --help
 
 ## Everscale/Venom Console Usage
 
-This tool serves the purpose of generating election requests for the Rust Node. The tool is compatible with [TONOS-CLI](https://github.com/tonlabs/tonos-cli) and allows to perform all actions necessary to obtain a signed election request.
+This tool serves the purpose of generating election requests for the Rust Node. The tool is compatible with [TONOS-CLI](https://github.com/everx-labs/tonos-cli) and allows to perform all actions necessary to obtain a signed election request.
 
 ### How to use
 
