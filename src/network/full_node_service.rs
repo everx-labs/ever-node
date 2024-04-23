@@ -28,7 +28,14 @@ use ton_api::{
     ton::{
         self, TLObject, Vector,
         rpc::ton_node::{
-            DownloadBlock, DownloadBlockFull, DownloadBlockProof, DownloadBlockProofLink, DownloadKeyBlockProof, DownloadKeyBlockProofLink, DownloadLatestMeshKit, DownloadMeshKit, DownloadMeshUpdate, DownloadNextBlockFull, DownloadNextMeshUpdate, DownloadPersistentMsgQueueSlice, DownloadPersistentState, DownloadPersistentStateSlice, DownloadQueueUpdate, DownloadZeroState, GetArchiveInfo, GetArchiveSlice, GetCapabilities, GetNextBlockDescription, GetNextKeyBlockIds, PrepareBlock, PrepareBlockProof, PrepareKeyBlockProof, PreparePersistentMsgQueue, PreparePersistentState, PrepareQueueUpdate, PrepareZeroState
+            DownloadBlock, DownloadBlockFull, DownloadBlockProof, DownloadBlockProofLink, 
+            DownloadKeyBlockProof, DownloadKeyBlockProofLink, DownloadLatestMeshKit, DownloadMeshKit,
+            DownloadMeshUpdate, DownloadNextBlockFull, DownloadNextMeshUpdate, 
+            DownloadPersistentMsgQueueSlice, DownloadPersistentState, DownloadPersistentStateSlice, 
+            DownloadQueueUpdate, DownloadZeroState, GetArchiveInfo, GetArchiveSlice, 
+            GetCapabilities, GetNextBlockDescription, GetNextKeyBlockIds, PrepareBlock, 
+            PrepareBlockProof, PrepareKeyBlockProof, PreparePersistentMsgQueue, 
+            PreparePersistentState, PrepareQueueUpdate, PrepareZeroState
         },
         ton_node::{
             self,

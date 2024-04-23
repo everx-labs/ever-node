@@ -51,7 +51,7 @@ echo "Preparations..."
 
 if [ ! "$NO_CLEANUP" == "no-cleanup" ]
 then
-    pkill -9 ton_node || true
+    pkill -9 ever-node || true
 fi
 
 TEST_ROOT=$(pwd);
@@ -64,11 +64,11 @@ cargo build --release
 cd ../../../
 if ! [ -d "ever-node-tools" ]
 then
-    git clone "https://github.com/tonlabs/ever-node-tools"
+    git clone "https://github.com/everx-labs/ever-node-tools"
     cd ever-node-tools
     git submodule init
-    git submodule up
-date
+    git submodule update --recursive
+    cd ../
 fi
 cd ever-node-tools
 TOOLS_ROOT=$(pwd)
@@ -163,7 +163,7 @@ do
     cp $NODE_TARGET/default_config$N.json $TEST_ROOT/tmp/default_config$N.json
 
     rm tmp_output > /dev/null 2>&1 || true
-    ./ton_node --configs . --ckey "$(cat console_public_json)" 2>&1 > tmp_output &
+    ./ever-node --configs . --ckey "$(cat console_public_json)" 2>&1 > tmp_output &
     NODE_PID=$!
     sleep 5
     if [ ! -f "console_config.json" ]; then
@@ -193,7 +193,7 @@ do
 
     cp $NODE_TARGET/config.json $TEST_ROOT/tmp/config$N.json
 
-    # "-n" means kill only last run ton_node process
+    # "-n" means kill only last run ever-node process
     kill -s 9 $NODE_PID
 
 done
@@ -289,7 +289,7 @@ do
     sed "s,LOGS_ROOT,$TMP_DIR,g" $NODE_TARGET/configs_$N/log_cfg_$N.tmp.yml > $NODE_TARGET/configs_$N/log_cfg_$N.yml
     cp $TEST_ROOT/tmp/global_config_$GLOBAL_ID.json $NODE_TARGET/configs_$N/global_config.json
 
-    ./ton_node --configs configs_$N -z . > "$TMP_DIR/node_$N.output" 2>&1 &
+    ./ever-node --configs configs_$N -z . > "$TMP_DIR/node_$N.output" 2>&1 &
 
 done
 
