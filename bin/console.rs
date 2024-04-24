@@ -875,7 +875,7 @@ async fn main() {
 
     if !args.is_present("JSON") {
         println!(
-            "tonlabs console {}\nCOMMIT_ID: {}\nBUILD_DATE: {}\nCOMMIT_DATE: {}\nGIT_BRANCH: {}",
+            "everx-labs console {}\nCOMMIT_ID: {}\nBUILD_DATE: {}\nCOMMIT_DATE: {}\nGIT_BRANCH: {}",
             env!("CARGO_PKG_VERSION"),
             env!("BUILD_GIT_COMMIT"),
             env!("BUILD_TIME") ,
