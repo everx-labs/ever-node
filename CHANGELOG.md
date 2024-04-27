@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.58.4
+
+- Added support for due payment fix
+- Bump block version
+
 ## Version 0.58.3
 
 - Minor fixes related to renaming

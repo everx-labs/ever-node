@@ -26,10 +26,10 @@ serde_derive = '1.0.114'
 strum = '0.18.0'
 strum_macros = '0.18.0'
 tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
-adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.22' }
-ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.10.0' }
+adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.24' }
+ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.10.2' }
 lockfree = { git = 'https://github.com/everx-labs/lockfree.git' }
-ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.3.77' }
+ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.3.79' }
 
 [build-dependencies]
 cc = { features = [ 'parallel' ], version = '1.0.61' }
