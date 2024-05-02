@@ -65,6 +65,7 @@ use ever_executor::{
     TransactionExecutor,
 };
 use ever_block::{error, fail, AccountId, Cell, HashmapType, Result, UInt256, UsageTree, SliceData};
+use crate::engine_traits::RempQueueCollatorInterface;
 
 use crate::validator::validator_utils::is_remp_enabled;
 
@@ -1017,6 +1018,7 @@ impl Collator {
         created_by: UInt256,
         engine: Arc<dyn EngineOperations>,
         rand_seed: Option<UInt256>,
+        remp_collator_interface: Option<Arc<dyn RempQueueCollatorInterface>>,
         collator_settings: CollatorSettings
     ) -> Result<Self> {
 

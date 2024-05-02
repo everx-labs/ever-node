@@ -48,7 +48,7 @@ impl RempService {
         self.get_core_interface()?.check_remp_duplicate(id)
     }
 
-    async fn new_remp_message(&self, message: &ton_api::ton::ton_node::RempMessage, source: &Arc<KeyId>) -> Result<()> {
+    async fn process_incoming_message(&self, message: &ton_api::ton::ton_node::RempMessage, source: &Arc<KeyId>) -> Result<()> {
         // TODO send error receipt in case of any error
         let engine = self.engine
             .get().ok_or_else(|| error!("engine was not set"))?
@@ -75,7 +75,7 @@ impl RempMessagesSubscriber for RempService {
 
         let id = message.id().clone();
         log::trace!(target: "remp", "Point 0. Processing incoming REMP message {:x}", id);
-        match self.new_remp_message(&message, source).await {
+        match self.process_incoming_message(&message, source).await {
             Ok(_) => log::trace!(target: "remp", "Point 0. Processed incoming REMP message {:x}", id),
             Err(e) => log::error!(target: "remp", "Point 0. Error processing incoming REMP message {:x}: {}", id, e)
         }

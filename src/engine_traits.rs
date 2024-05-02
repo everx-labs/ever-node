@@ -43,7 +43,7 @@ use ever_block::{
     Deserializable, KeyId, KeyOption, MASTERCHAIN_ID, Message, OutMsgQueue, Result, 
     SHARD_FULL, ShardAccount, ShardIdent, UInt256
 };
-use std::{collections::HashSet, sync::{Arc, atomic::AtomicU64}};
+use std::{collections::HashSet, sync::{Arc, atomic::AtomicU64}, time::SystemTime};
 use storage::{StorageAlloc, block_handle_db::BlockHandle};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
@@ -970,4 +970,9 @@ pub enum RempDuplicateStatus {
 pub trait RempCoreInterface: Sync + Send {
     async fn process_incoming_message(&self, message: &RempMessage, source: Arc<KeyId>) -> Result<()>;
     fn check_remp_duplicate(&self, message_id: &UInt256) -> Result<RempDuplicateStatus>;
+}
+
+#[async_trait::async_trait]
+pub trait RempQueueCollatorInterface : Send + Sync {
+    async fn get_next_message_for_collation(&self, master_block_id: &BlockIdExt, generation_deadline: SystemTime) -> Result<Option<Arc<Message>>>;
 }
