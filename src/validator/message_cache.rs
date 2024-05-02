@@ -55,6 +55,7 @@ use ever_block::{
     KeyId, Message,
     MsgAddressInt, MsgAddrStd, Result, Serializable, SliceData, UInt256, UnixTime32
 };
+use ever_block_json::unix_time_to_system_time;
 
 #[cfg(test)]
 #[path = "tests/test_message_cache.rs"]
@@ -268,7 +269,11 @@ impl RempMessageOrigin {
     }
 
     fn timestamp_now() -> Result<u32> {
-        Ok(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs() as u32)
+        Ok(UnixTime32::now().as_u32())
+    }
+
+    pub fn system_time(&self) -> Result<SystemTime> {
+        unix_time_to_system_time(UnixTime32::new(self.timestamp).as_u32() as u64)
     }
 
     pub fn create_empty() -> Result<Self> {

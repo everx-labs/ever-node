@@ -28,7 +28,7 @@ use ton_api::ton::ton_node::{
     RempCatchainRecordV2,
     rempcatchainrecordv2::{RempCatchainMessageHeaderV2, RempCatchainMessageDigestV2}
 };
-use ever_block::{ShardIdent, Message, BlockIdExt, ValidatorDescr, UnixTime32};
+use ever_block::{ShardIdent, Message, BlockIdExt, ValidatorDescr};
 use ever_block::{UInt256, Result, fail, gen_random_index, error};
 
 use catchain::{PrivateKey, PublicKey};
@@ -64,7 +64,7 @@ struct MessageQueueImpl {
     pending_collation_set: HashMap<UInt256, bool>,
 
     /// Messages, waiting for collator invocation
-    pending_collation_order: BinaryHeap<(Reverse<u32>, UInt256)>,
+    pending_collation_order: BinaryHeap<(Reverse<SystemTime>, UInt256)>,
 
     /// Body sources for the message (actual if current node didn't receive body yet)
     body_sources: HashMap<UInt256, Vec<u32>>
@@ -91,7 +91,7 @@ impl MessageQueueImpl {
         };
     }
 
-    pub fn add_to_collation_queue(&mut self, message_id: &UInt256, timestamp: u32, remp_node_sender: Option<u32>, add_if_absent: bool) -> Result<(bool,usize)> {
+    pub fn add_to_collation_queue(&mut self, message_id: &UInt256, timestamp: SystemTime, remp_node_sender: Option<u32>, add_if_absent: bool) -> Result<(bool,usize)> {
         let added = match self.pending_collation_set.get_mut(message_id) {
             Some(waiting_collation) if *waiting_collation => false,
             Some(waiting_collation) => {
@@ -113,12 +113,12 @@ impl MessageQueueImpl {
         Ok((added, self.pending_collation_set.len()))
     }
 
-    pub fn take_first_for_collation(&mut self) -> Result<Option<(UInt256, u32)>> {
-        if let Some((timestamp, id)) = self.pending_collation_order.pop() {
+    pub fn take_first_for_collation(&mut self) -> Result<Option<(UInt256, SystemTime)>> {
+        if let Some((Reverse(timestamp), id)) = self.pending_collation_order.pop() {
             match self.pending_collation_set.insert(id.clone(), false) {
                 None => fail!("Message {:?}: taken from collation queue, but not found in collation set", id),
                 Some(false) => fail!("Message {:?}: already removed from collation queue and given to collator", id),
-                Some(true) => Ok(Some((id, timestamp.0)))
+                Some(true) => Ok(Some((id, timestamp)))
             }
         }
         else {
@@ -324,9 +324,9 @@ impl MessageQueue {
     }
 
     async fn add_pending_collation(&self, message_id: &UInt256, remp_message_origin: Arc<RempMessageOrigin>, remp_node_sender: u32, status_to_send: Option<RempMessageStatus>) -> Result<()> {
-        let (added_to_queue, _len) = self.queues.execute_sync(
-            |catchain| catchain.add_to_collation_queue(
-                message_id, remp_message_origin.timestamp, Some(remp_node_sender), true
+        let (added_to_queue, _len) = self.queues.execute_sync(|catchain|
+            catchain.add_to_collation_queue(
+                message_id, remp_message_origin.system_time()?, Some(remp_node_sender), true
             )
         ).await?;
 
@@ -686,26 +686,29 @@ impl MessageQueue {
         Ok((false, Some((message.message.clone(), origin))))
     }
 
-    async fn put_back_to_collation_queue(&self, msgid: &UInt256, timestamp: u32) -> Result<()> {
+    async fn put_back_to_collation_queue(&self, msgid: &UInt256, timestamp: SystemTime) -> Result<()> {
         let (added, _) = self.queues.execute_sync(|x|
             x.add_to_collation_queue(&msgid, timestamp, None, false)
         ).await?;
 
-        if added {
+        if !added {
             fail!("Message {:x} is already waiting for collation while postponing it", msgid);
         }
 
         Ok(())
     }
 
-    pub async fn get_one_message_for_collation(&self, message_deadline: UnixTime32, generation_deadline: SystemTime) -> Result<Option<(UInt256, Arc<Message>, Arc<RempMessageOrigin>)>> {
+    pub async fn get_one_message_for_collation(&self, message_deadline: SystemTime, generation_deadline: SystemTime) -> Result<Option<(UInt256, Arc<Message>, Arc<RempMessageOrigin>)>> {
         while let Some((msgid, timestamp)) = self.queues.execute_sync(|x| x.take_first_for_collation()).await? {
-            if let Ok(x) = generation_deadline.elapsed() {
-                log::trace!(target: "remp", "RMQ {}: Message collation deadline expired {} ms ago", self, x.as_millis());
+            if generation_deadline < SystemTime::now() {
+                log::trace!(target: "remp",
+                    "RMQ {}: Message collation deadline expired at {:?}, stopping external messages collation",
+                    self, generation_deadline
+                );
                 return Ok(None)
             }
 
-            if message_deadline.as_u32() <= timestamp {
+            if message_deadline <= timestamp {
                 self.put_back_to_collation_queue(&msgid, timestamp).await?;
                 return Ok(None)
             }
@@ -721,7 +724,7 @@ impl MessageQueue {
                 },
                 Ok((leave_in_queue, None)) => {
                     if leave_in_queue {
-                        self.put_back_to_collation_queue(&msgid, UnixTime32::now().as_u32()).await?;
+                        self.put_back_to_collation_queue(&msgid, SystemTime::now()).await?;
                     }
                     continue
                 },
@@ -744,7 +747,7 @@ impl MessageQueue {
     pub async fn collect_messages_for_collation (&self) -> Result<()> {
         log::trace!(target: "remp", "RMQ {}: collecting messages for collation", self);
         let mut cnt = 0;
-        let message_deadline = UnixTime32::now();
+        let message_deadline = SystemTime::now();
         let deadline = SystemTime::now().add(Duration::from_millis(1000));
 
         while let Some((msg_id,message,_origin)) = self.get_one_message_for_collation(message_deadline, deadline).await? {
@@ -912,7 +915,7 @@ impl MessageQueue {
     pub async fn return_to_collation_queue(&self, message_id: &UInt256) -> Result<()> {
         if let Some(origin) = self.remp_manager.message_cache.get_message_origin(message_id)? {
             self.queues.execute_sync(
-                |catchain| catchain.add_to_collation_queue(message_id, origin.timestamp, None, false)
+                |catchain| catchain.add_to_collation_queue(message_id, origin.system_time()?, None, false)
             ).await?;
             Ok(())
         }
@@ -1532,12 +1535,12 @@ impl fmt::Display for RmqQueueManager {
 
 pub struct RempQueueCollatorInterfaceImpl {
     queue: Arc<RmqQueueManager>,
-    message_deadline: UnixTime32
+    message_deadline: SystemTime
 }
 
 impl RempQueueCollatorInterfaceImpl {
     pub fn new(remp_manager: Arc<RmqQueueManager>) -> Self {
-        Self { queue: remp_manager, message_deadline: UnixTime32::now() }
+        Self { queue: remp_manager, message_deadline: SystemTime::now() }
     }
 }
 

@@ -697,11 +697,12 @@ impl TestEngine {
             extra.created_by().clone(),
             self.clone(),
             Some(extra.rand_seed().clone()),
+            None,
             CollatorSettings::default(),
         )?;
 
-        let (block_candidate, new_state) = collator.collate().await?;   
-            
+        let (block_candidate, new_state) = collator.collate().await?;
+
         if let Some(res_path) = &self.res_path {
 
             let new_block = Block::construct_from_bytes(&block_candidate.data)?;

@@ -13,6 +13,7 @@
 
 use std::{collections::HashSet, str::FromStr, sync::Arc, time::Duration};
 use std::ops::RangeInclusive;
+use std::thread::sleep;
 
 use ton_api::ton::ton_node::{RempMessageLevel, RempMessageLevel::TonNode_RempMasterchain, RempMessageStatus, rempmessagestatus::{RempAccepted, RempIgnored}};
 
@@ -363,6 +364,7 @@ fn remp_simple_collation_equal_uids_test() -> Result<()> {
         )?;
 
         println!("Collecting messages for collation");
+        sleep(Duration::from_millis(10)); // To overcome SystemTime inconsistency and make tests reproducible.
         testbench.message_queue.collect_messages_for_collation().await?;
 
         for (id, _msg) in testbench.engine.collator_queue.pop_iter() {

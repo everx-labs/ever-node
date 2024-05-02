@@ -16,8 +16,9 @@ use std::ops::RangeInclusive;
 use crossbeam_channel::Receiver;
 
 use catchain::utils::get_hash;
-use ever_block::{BlockIdExt, ShardIdent, ValidatorSet, ValidatorDescr};
+use ever_block::{BlockIdExt, ShardIdent, ValidatorSet, ValidatorDescr, UnixTime32};
 use ever_block::{fail, error, Result, UInt256};
+use ever_block_json::unix_time_to_system_time;
 use validator_session::{
     BlockHash, BlockPayloadPtr, CatchainOverlayManagerPtr,
     SessionId, SessionPtr, SessionListenerPtr, SessionFactory,
@@ -723,8 +724,7 @@ impl ValidatorGroup {
 
         let result_message = match &result {
             Ok(_) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+                let now = UnixTime32::now().as_u32() as u64;
                 self.last_collation_time.fetch_max(now, Ordering::Relaxed);
 
                 format!("Collation successful")
