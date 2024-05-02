@@ -5,12 +5,12 @@ name = 'validator_session'
 version = '0.0.2'
 
 [dependencies]
-adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.22' }
+adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.24' }
 backtrace = '0.3'
 catchain = { path = '../catchain' }
 crc = '3.0'
 crossbeam = '0.7'
-ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.10.0' }
+ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.10.2' }
 failure = '0.1'
 hex = '0.4'
 lazy_static = '1.4'
@@ -19,7 +19,7 @@ metrics = '0.21.0'
 metrics-core = '0.5'
 rand = '0.8'
 storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.3.77' }
+ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.3.79' }
 
 [dev-dependencies]
 chrono = '0.4'
