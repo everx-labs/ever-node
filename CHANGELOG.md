@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.58.4
+
+Load cells from storing cells cache by id
+
 ## Version 0.58.3
 
 - Minor fixes related to renaming
