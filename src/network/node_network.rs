@@ -271,6 +271,7 @@ impl NodeNetwork {
         }
     }
 
+    #[cfg(feature = "telemetry")]
     pub fn log_neighbors_stat(&self) {
         for guard in self.overlays.iter() {
             guard.val().peers().log_neighbors_stat();

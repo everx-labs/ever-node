@@ -474,6 +474,7 @@ impl Neighbours {
         });
     }
 
+    #[cfg(feature = "telemetry")]
     pub fn log_neighbors_stat(&self) {
         log::debug!(
             target: "telemetry", 

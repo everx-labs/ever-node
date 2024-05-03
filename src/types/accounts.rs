@@ -63,6 +63,7 @@ impl ShardAccountStuff {
         } else {
             let shard_acc = ShardAccount::with_account_root(self.account_root(), self.last_trans_hash.clone(), self.last_trans_lt);
             let value = shard_acc.write_to_new_cell()?;
+            log::trace!("Updating account {:x} in shard state", self.account_addr());
             new_accounts.set_builder_serialized(self.account_addr().clone(), &value, &account.aug()?)?;
         }
         AccountBlock::with_params(&self.account_addr, &self.transactions, &self.state_update)
@@ -114,7 +115,7 @@ impl ShardAccountStuff {
         let account = self.read_account()?;
         let new_libs = account.libraries();
         if new_libs.root() != self.orig_libs.root() {
-            new_libs.scan_diff(&self.orig_libs, |key: UInt256, old, new| {
+            self.orig_libs.scan_diff(&new_libs, |key: UInt256, old, new| {
                 let old = old.unwrap_or_default();
                 let new = new.unwrap_or_default();
                 if old.is_public_library() && !new.is_public_library() {

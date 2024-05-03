@@ -784,7 +784,7 @@ impl TonNodeConfig {
         let (private, public) = Ed25519KeyOption::generate_with_json()?;
         let key_id = public.id().data();
         log::info!("generate_and_save_keys: generate new key (id: {:?})", key_id);
-        let key_ring = self.validator_key_ring.get_or_insert_with(|| HashMap::new());
+        let key_ring = self.validator_key_ring.get_or_insert_with(HashMap::new);
         key_ring.insert(base64_encode(key_id), private);
         Ok((key_id.clone(), public))
     }

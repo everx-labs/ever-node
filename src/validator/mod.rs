@@ -39,8 +39,8 @@ pub mod slashing;
 mod verification;
 
 use std::sync::Arc;
-use ever_block::{Result, UInt256, error};
 use ever_block::{
+    error, Result, UInt256,
     BlkMasterInfo, BlockIdExt, ConfigParams, CurrencyCollection,
     ExtBlkRef, McStateExtra, Libraries,
 };
@@ -60,6 +60,10 @@ pub struct CollatorSettings {
     pub want_split: Option<bool>,
     pub want_merge: Option<bool>,
     pub is_fake: bool,
+    // for collator test bundles we don't need to calculate state update
+    // because of state is merkle proofed
+    #[cfg(test)]
+    pub is_bundle: bool,
 }
 
 impl CollatorSettings {

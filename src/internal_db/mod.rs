@@ -15,14 +15,14 @@ use crate::{
     block::{BlockStuff, BlockKind}, block_proof::BlockProofStuff, engine_traits::EngineAlloc, error::NodeError,
     shard_state::ShardStateStuff, types::top_block_descr::{TopBlockDescrId, TopBlockDescrStuff},
     internal_db::restore::check_db,
-
 };
 #[cfg(feature = "telemetry")]
 use crate::engine_traits::EngineTelemetry;
 
 use std::{
-    cmp::min, collections::{HashMap, HashSet}, io::Cursor, mem::size_of, path::{Path, PathBuf},
-    sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}}, time::{UNIX_EPOCH, Duration}, ops::Deref
+    collections::{HashMap, HashSet}, io::Cursor, mem::size_of, ops::Deref,
+    path::{Path, PathBuf}, sync::{atomic::{AtomicBool, AtomicU32, Ordering}, Arc},
+    time::{Duration, UNIX_EPOCH}
 };
 use storage::{
     StorageAlloc, TimeChecker,
@@ -35,9 +35,9 @@ use storage::{
 use storage::shardstate_db_async::{self, AllowStateGcResolver, ShardStateDb};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
-use ever_block::{Block, BlockIdExt, INVALID_WORKCHAIN_ID, CellsFactory};
 use ever_block::{
-    error, fail, Result, UInt256, Cell, BocWriterStack, MAX_SAFE_DEPTH, DoneCellsStorage,
+    error, fail, Block, BlockIdExt, BocWriterStack, Cell, CellsFactory, DoneCellsStorage,
+    Result, UInt256, INVALID_WORKCHAIN_ID, MAX_SAFE_DEPTH
 };
 
 /// Full node state keys
@@ -206,6 +206,23 @@ pub struct InternalDb {
 #[allow(dead_code)]
 impl InternalDb {
 
+    #[cfg(test)]
+    pub async fn only_cells_db(
+        config: InternalDbConfig,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<EngineTelemetry>,
+        allocated: Arc<EngineAlloc>,
+    ) -> Result<Self> {
+        Self::construct(
+            config,
+            false,
+            true,
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated
+        ).await
+    }
+
     pub async fn with_update(
         config: InternalDbConfig,
         restore_db_enabled: bool,
@@ -217,43 +234,43 @@ impl InternalDb {
         telemetry: Arc<EngineTelemetry>,
         allocated: Arc<EngineAlloc>,
     ) -> Result<Self> {
-        let mut db = Self::construct(
+        let db = Self::construct(
             config,
             allow_update,
+            false,
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated,
         ).await?;
         let version = db.resolve_db_version()?;
-        if version != CURRENT_DB_VERSION {
-            if allow_update {
-                db = update::update(db, version, check_stop, is_broken, force_check_db, 
-                    restore_db_enabled).await?
-            } else {
-                fail!(
-                    "DB version {} does not correspond to current supported one {}.", 
-                    version, 
-                    CURRENT_DB_VERSION
-                )
-            }
-        } else {
+        let db = if version == CURRENT_DB_VERSION {
             log::info!("DB VERSION {}", version);
             // TODO correct workchain id needed here, but it will be known later
-            db = check_db(db, 0, restore_db_enabled, force_check_db, check_stop, is_broken).await?;
-        }
+            check_db(db, 0, restore_db_enabled, force_check_db, check_stop, is_broken).await?
+        } else if allow_update {
+            update::update(db, version, check_stop, is_broken, force_check_db, 
+                restore_db_enabled).await?
+        } else {
+            fail!(
+                "DB version {} does not correspond to current supported one {}.", 
+                version, 
+                CURRENT_DB_VERSION
+            )
+        };
         Ok(db)
     }
 
     async fn construct(
         config: InternalDbConfig,
         allow_update: bool,
+        read_only: bool,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<EngineTelemetry>,
         allocated: Arc<EngineAlloc>,
     ) -> Result<Self> {
         let mut hi_perf_cfs = HashSet::new();
         hi_perf_cfs.insert(CELLS_CF_NAME.to_string());
-        let db = RocksDb::with_options(config.db_directory.as_str(), "db", hi_perf_cfs, false)?;
+        let db = RocksDb::with_options(config.db_directory.as_str(), "db", hi_perf_cfs, read_only)?;
         let db_catchain = RocksDb::with_path(config.db_directory.as_str(), "catchains")?;
         let block_handle_db = Arc::new(
             BlockHandleDb::with_db(db.clone(), "block_handle_db", true)?
@@ -320,7 +337,7 @@ impl InternalDb {
             ).await?
         );
 
-        let db = Self {
+        Ok(Self {
             db: db.clone(),
             block_handle_storage,
             prev1_block_db: BlockInfoDb::with_db(db.clone(), "prev1_block_db", true)?,
@@ -341,9 +358,7 @@ impl InternalDb {
             #[cfg(feature = "telemetry")]
             telemetry, 
             allocated
-        };
-
-        Ok(db)
+        })
     }
 
     fn resolve_db_version(&self) -> Result<u32> {
@@ -621,6 +636,30 @@ impl InternalDb {
             )
         } else {
             fail!("Can't find mc block with seqno {}", seqno)
+        }
+    }
+
+    #[cfg(test)]
+    /// seacrhes for a block in the previous blocks db
+    /// be careful it can be slow
+    pub fn find_block_by_seq_no(&self, shard: &ever_block::ShardIdent, seqno: u32) -> Result<Arc<BlockHandle>> {
+        let _tc = TimeChecker::new(format!("find_block_by_seq_no {}", seqno), 300);
+        let mut found = None;
+        self.prev1_block_db.for_each(&mut |_key, val| {
+            let id = BlockIdExt::deserialize(&mut Cursor::new(&val))?;
+            if id.shard() == shard && id.seq_no() == seqno {
+                found = Some(id);
+                Ok(false)
+            } else {
+                Ok(true)
+            }
+        })?;
+        if let Some(id) = found {
+            self.load_block_handle(&id)?.ok_or_else(
+                || error!("Cannot load handle for master block {}", id)
+            )
+        } else {
+            fail!("Can't find block with seqno {} in shard {}", seqno, shard)
         }
     }
 
@@ -953,7 +992,7 @@ impl InternalDb {
         if offset == full_lenth {
             Ok(vec![])
         } else {
-            let length = min(length, full_lenth - offset);
+            let length = length.min(full_lenth - offset);
             let data = self.shard_state_persistent_db.read_file_part(id, offset, length).await?;
             Ok(data)
         }

@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.12
+
+- Enhanced bundler engine for creating short and quick bundles
+  using state proofs instead of full state for debugging and testing purposes
+
 ## Version 0.59.11
 
 - Fix for broken shard merge

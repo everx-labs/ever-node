@@ -13,13 +13,10 @@
 
 use super::*;
 use crate::{
-    collator_test_bundle::CollatorTestBundle, engine_traits::EngineOperations, 
+    collator_test_bundle::{try_collate, CollatorTestBundle},
+    engine_traits::EngineOperations,
+    test_helper::compare_blocks,
     test_helper::test_async, types::messages::{count_matching_bits, MsgEnvelopeStuff},
-    validator::{
-        CollatorSettings, collator,
-        validate_query::ValidateQuery,
-        validator_utils::compute_validator_set_cc,
-    },
 };
 use ever_block::{Result, AccountIdPrefixFull};
 use pretty_assertions::assert_eq;
@@ -27,8 +24,8 @@ use std::{fs::{create_dir_all, remove_dir_all}, sync::Arc};
 
 const RES_PATH: &'static str = "target/cmp";
 
-async fn try_collate_by_bundle(bundle: Arc<CollatorTestBundle>) -> Result<(Block, ShardStateUnsplit)> {
-    try_collate_by_engine(
+async fn try_collate_by_bundle(bundle: Arc<CollatorTestBundle>) -> Result<CollateResult> {
+    let collate_result = try_collate_by_engine(
         bundle.clone(),
         bundle.block_id().shard().clone(),
         bundle.prev_blocks_ids().clone(),
@@ -36,8 +33,21 @@ async fn try_collate_by_bundle(bundle: Arc<CollatorTestBundle>) -> Result<(Block
         match bundle.ethalon_block()? {
             Some(block) => Some(block.block()?.read_extra().unwrap().rand_seed().clone()),
             None => bundle.rand_seed().cloned()
+        },
+        true,
+    ).await?;
+    if let Some(ethalon_block) = bundle.ethalon_block()? {
+        let mut block = match &collate_result.candidate {
+            Some(candidate) => {
+                Block::construct_from_bytes(&candidate.data)?
+            }
+            None => return Err(collate_result.error.unwrap())
+        };
+        if let Err(result) = compare_blocks(ethalon_block.block()?, &mut block) {
+            panic!("Blocks are not equal: {}", result);
         }
-    ).await
+    }
+    Ok(collate_result)
 }
 
 async fn try_collate_by_engine(
@@ -46,68 +56,10 @@ async fn try_collate_by_engine(
     prev_blocks_ids: Vec<BlockIdExt>,
     created_by_opt: Option<UInt256>,
     rand_seed_opt: Option<UInt256>,
-) -> Result<(Block, ShardStateUnsplit)> {
+    skip_state_update: bool,
+) -> Result<CollateResult> {
     std::fs::create_dir_all(RES_PATH).ok();
-    let prev_blocks_history = PrevBlockHistory::new_prevs(&shard, &prev_blocks_ids);
-    let mc_state = engine.load_last_applied_mc_state().await?;
-    let mc_state_extra = mc_state.shard_state_extra()?;
-    let mut cc_seqno_with_delta = 0;
-    let cc_seqno_from_state = if shard.is_masterchain() {
-        mc_state_extra.validator_info.catchain_seqno
-    } else {
-        mc_state_extra.shards.calc_shard_cc_seqno(&shard)?
-    };
-    let nodes = compute_validator_set_cc(
-        &mc_state,
-        &shard,
-        prev_blocks_history.get_next_seqno().ok_or_else(|| error!("Empty prev blocks"))?,
-        cc_seqno_from_state,
-        &mut cc_seqno_with_delta
-    )?;
-    let validator_set = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno_with_delta, nodes)?;
-
-    // log::debug!("{}", block_stuff.id());
-
-    log::info!("TRY COLLATE block {}", shard);
-
-    let min_mc_seq_no = if prev_blocks_ids[0].seq_no() == 0 {
-        0
-    } else {
-        let state = engine.load_state(&prev_blocks_ids[0]).await?;
-        state.state()?.min_ref_mc_seqno()
-    };
-
-    let collator = collator::Collator::new(
-        shard.clone(),
-        min_mc_seq_no,
-        &prev_blocks_history,
-        validator_set.clone(),
-        created_by_opt.unwrap_or_default(),
-        engine.clone(),
-        rand_seed_opt,
-        None,
-        CollatorSettings::default(),
-    )?;
-    let (block_candidate, new_state) = collator.collate().await?;
-
-    let new_block = Block::construct_from_bytes(&block_candidate.data)?;
-
-    // std::fs::write(&format!("{}/state_candidate.json", RES_PATH), ever_block_json::debug_state(new_state.clone())?)?;
-    // std::fs::write(&format!("{}/block_candidate.json", RES_PATH), ever_block_json::debug_block_full(&new_block)?)?;
-
-    let validator_query = ValidateQuery::new(
-        shard.clone(),
-        min_mc_seq_no,
-        prev_blocks_ids.clone(),
-        block_candidate.clone(),
-        validator_set.clone(),
-        engine.clone(),
-        true,
-        true,
-        None,
-    );
-    validator_query.try_validate().await?;
-    Ok((new_block, new_state))
+    try_collate(&engine, shard, prev_blocks_ids, created_by_opt, rand_seed_opt, skip_state_update, false).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -116,8 +68,8 @@ async fn test_collate_first_block() {
         create_dir_all(RES_PATH).ok();
         //init_test_log();
         match CollatorTestBundle::build_with_zero_state(
-            "src/tests/static/zerostate.boc",
-            &["src/tests/static/basestate0.boc", "src/tests/static/basestate0.boc"]
+        "src/tests/static/zerostate.boc",
+        &["src/tests/static/basestate0.boc", "src/tests/static/basestate0.boc"]
         ).await {
             Ok(bundle) => try_collate_by_bundle(Arc::new(bundle)).await.map(|_| ()),
             Err(e) => Err(e)

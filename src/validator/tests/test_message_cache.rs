@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use openssl::rand::rand_bytes;
 use rand::{Rng, thread_rng};
+#[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
 use ton_api::ton::ton_node::{RempMessageLevel, RempMessageStatus, rempmessagestatus::RempAccepted};
 use ever_block::{BlockIdExt, ShardIdent};

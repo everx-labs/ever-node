@@ -153,7 +153,7 @@ impl Package {
             .read(true)
             .write(!read_only || create)
             .create(create)
-            .open(&path).await?)
+            .open(path).await?)
     }
 
     pub async fn open_file(&self) -> Result<tokio::fs::File> {

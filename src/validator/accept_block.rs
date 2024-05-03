@@ -611,24 +611,23 @@ pub async fn create_top_shard_block_description(
 
 fn find_known_ancestors(
     block: &BlockStuff,
-    mc_state: &ShardStateStuff)
-    -> Result<Option<(u32, Vec<McShardRecord>)>> {
+    mc_state: &ShardStateStuff
+) -> Result<Option<(u32, Vec<McShardRecord>)>> {
     let block_descr = fmt_block_id_short(block.id());
 
     let master_ref = block.block()?.read_info()?.read_master_ref()?
         .ok_or_else(|| error!("Block {} doesn't have `master_ref`", block.id()))?.master;
     let shard = block.id().shard();
-    let mc_state_extra = mc_state.state()?.read_custom()?
-        .ok_or_else(|| error!("State for {} doesn't have McStateExtra", mc_state.block_id()))?;
+    let shards = mc_state.shards()?;
 
     let mut ancestors = vec!();
     let oldest_ancestor_seqno;
 
-    match mc_state_extra.shards().find_shard(shard) {
+    match shards.find_shard(shard) {
         Ok(None) => {
             let (a1, a2) = shard.split()?;
-            let ancestor1 = mc_state_extra.shards().get_shard(&a1)?;
-            let ancestor2 = mc_state_extra.shards().find_shard(&a2)?;
+            let ancestor1 = shards.get_shard(&a1)?;
+            let ancestor2 = shards.find_shard(&a2)?;
 
             if let (Some(ancestor1), Some(ancestor2)) = (ancestor1, ancestor2) {
                 log::trace!(target: "validator", "({}): found two ancestors: {} and {}", block_descr, ancestor1.shard(), ancestor2.shard());

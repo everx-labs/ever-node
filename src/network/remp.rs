@@ -182,6 +182,11 @@ impl RempNode {
         self.telemetry.set(telemetry).map_err(|_| error!("Can't set telemetry"))?;
         Ok(())
     }
+
+    #[cfg(all(test,feature = "telemetry"))]
+    pub fn telemetry(&self) -> Arc<RempCoreTelemetry> {
+        self.telemetry.get().unwrap().clone()
+    }
 }
 
 #[async_trait::async_trait]

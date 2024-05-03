@@ -16,7 +16,6 @@ use crate::{
     block::BlockStuff, error::NodeError, shard_state::ShardHashesStuff,
     validator::accept_block::{create_new_proof, create_new_proof_link}
 };
-
 use ever_block::{
     error, Block, BlockIdExt, ConfigParamEnum, CryptoSignature, CryptoSignaturePair, 
     Deserializable, HashmapType, MASTERCHAIN_ID, SigPubKey, 

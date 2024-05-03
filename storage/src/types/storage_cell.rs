@@ -198,17 +198,14 @@ impl StorageCell {
         };
 
         let boc_db = self.boc_db.upgrade().ok_or_else(|| error!("BocDb is dropped"))?;
-        let cell = boc_db.load_cell(
-            &hash,
-            self.use_cache
-        )?;
+        let storage_cell = boc_db.load_storage_cell(&hash, self.use_cache)?;
 
         if self.use_cache {
             self.references.write()[index].cell = 
-                Some(Arc::downgrade(cell.cell_impl()) as Weak<dyn CellImpl>);
+                Some(Arc::downgrade(storage_cell.cell_impl()) as Weak<dyn CellImpl>);
         }
 
-        Ok(cell.cell_impl().clone())
+        Ok(storage_cell.cell_impl().clone())
     }
 
 }

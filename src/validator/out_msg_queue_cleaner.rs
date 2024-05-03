@@ -1123,8 +1123,11 @@ impl HashmapOrderedFilterCursor {
             let mut label = child_node_key.clone();
             label.move_by(branch_key_len)?;
 
-            let mut builder = OutMsgQueue::make_cell_with_label(label, top_bit_len)?;
-            builder.checked_append_references_and_data(child_node_reminder)?;
+            let builder = OutMsgQueue::make_cell_with_remainder(
+                label,
+                top_bit_len,
+                child_node_reminder
+            )?;
 
             let new_node_cell = builder.into_cell()?;
 

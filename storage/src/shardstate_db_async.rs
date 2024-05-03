@@ -414,16 +414,6 @@ impl ShardStateDb {
         Arc::clone(&self.shardstate_db)
     }
 
-    #[cfg(test)]
-    pub fn enum_shardstate_db(&self) -> Result<()> {
-        self.shardstate_db.for_each(&mut |_key, val| {
-            let db_entry = DbEntry::from_slice(val)?;
-            println!("{}", db_entry.block_id);
-            Ok(true)
-        })?;
-        Ok(())
-    }
-
     pub async fn put(
         &self, 
         id: &BlockIdExt, 
@@ -517,8 +507,7 @@ impl ShardStateDb {
         )?)
     }
 
-    pub fn create_hashed_cell_storage(
-        &self,) -> Result<impl CellByHashStorage> {
+    pub fn create_hashed_cell_storage(&self) -> Result<impl CellByHashStorage> {
         Ok(CellByHashStorageAdapter::new(
             self.dynamic_boc_db.clone(),
             false

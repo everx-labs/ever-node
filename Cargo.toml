@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ever-node'
-version = '0.59.11'
+version = '0.59.12'
 
 [workspace]
 members = [ 'storage' ]
@@ -107,7 +107,7 @@ tokio = { features = [ 'macros' ], version = '1.5' }
 
 [features]
 default = [ 'telemetry', 'ever_block/export_key', 'validator_session/export_key' ]
-export_key = [ 'catchain/export_key', 'ever_block/export_key' ]
+export_key = [ 'catchain/export_key', 'ever_block/export_key', 'validator_session/export_key' ]
 external_db = [ 'rdkafka' ]
 fast_finality_extra = [  ]
 gosh = [ 'ever_block/gosh', 'ever_vm/gosh' ]

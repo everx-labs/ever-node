@@ -197,7 +197,7 @@ impl ValidateBase {
 pub struct ValidateQuery {
     // current state of blockchain
     shard: ShardIdent,
-    min_mc_seq_no: u32,
+    min_mc_seqno: u32,
     // block_id: BlockIdExt,
     block_candidate: BlockCandidate,
     // other
@@ -232,7 +232,7 @@ impl ValidateQuery {
     }
     pub fn new(
         shard: ShardIdent,
-        min_mc_seq_no: u32,
+        min_mc_seqno: u32,
         prev_blocks_ids: Vec<BlockIdExt>,
         block_candidate: BlockCandidate,
         validator_set: ValidatorSet,
@@ -245,7 +245,7 @@ impl ValidateQuery {
         Self {
             engine,
             shard,
-            min_mc_seq_no,
+            min_mc_seqno,
             block_candidate,
             validator_set,
             is_fake,
@@ -287,7 +287,7 @@ impl ValidateQuery {
             soft_reject_query!("can validate block candidates only for masterchain (-1) and base workchain (0) and standard workchain (1-255)")
         }
         if block_id.shard().is_masterchain() && base.prev_blocks_ids.is_empty() {
-            self.min_mc_seq_no = 0
+            self.min_mc_seqno = 0
         }
         match base.prev_blocks_ids.len() {
             2 => {
@@ -316,10 +316,10 @@ impl ValidateQuery {
                         soft_reject_query!("cannot split shards in masterchain")
                     }
                 }
-                if block_id.shard().is_masterchain() && self.min_mc_seq_no > base.prev_blocks_ids[0].seq_no {
+                if block_id.shard().is_masterchain() && self.min_mc_seqno > base.prev_blocks_ids[0].seq_no {
                     soft_reject_query!("cannot refer to specified masterchain block {} \
                         because it is later than {} the immediately preceding masterchain block",
-                            self.min_mc_seq_no, base.prev_blocks_ids[0].seq_no)
+                            self.min_mc_seqno, base.prev_blocks_ids[0].seq_no)
                 }
             }
             0 => soft_reject_query!("must have one or two previous blocks to generate a next block"),
@@ -524,9 +524,9 @@ impl ValidateQuery {
         let (_, mc_id) = base.info.read_master_id()?.master_block_id();
         let mc_state = self.engine.clone().wait_state(&mc_id, Some(1_000), true).await?;
         log::debug!(target: "validate_query", "({}): in ValidateQuery::get_ref_mc_state() {}", self.next_block_descr, mc_state.block_id());
-        if mc_state.state()?.seq_no() < self.min_mc_seq_no {
+        if mc_state.state()?.seq_no() < self.min_mc_seqno {
             reject_query!("requested to validate a block referring to an unknown future masterchain block {} < {}",
-                mc_state.state()?.seq_no(), self.min_mc_seq_no)
+                mc_state.state()?.seq_no(), self.min_mc_seqno)
         }
         self.try_unpack_mc_state(&base, mc_state)
     }
@@ -2766,12 +2766,12 @@ impl ValidateQuery {
         enq: MsgEnqueueStuff,
         created_lt: u64,
         key: &OutMsgQueueKey,
-        nb_block_id: &BlockIdExt,
+        block_id: &BlockIdExt,
     ) -> Result<bool> {
         if created_lt != enq.created_lt() {
             reject_query!("EnqueuedMsg with key {:x} in outbound queue of our neighbor {} \
                 pretends to have been created at lt {} but its actual creation lt is {}",
-                    key, nb_block_id, created_lt, enq.created_lt())
+                    key, block_id, created_lt, enq.created_lt())
         }
         CHECK!(base.shard().contains_full_prefix(&enq.next_prefix()));
 
@@ -2787,7 +2787,7 @@ impl ValidateQuery {
             // just check that we have not imported it once again
             if in_msg.is_some() {
                 reject_query!("have an InMsg entry for processing again already processed EnqueuedMsg with key {:x} \
-                    of neighbor {}", key, nb_block_id)
+                    of neighbor {}", key, block_id)
             }
             if base.shard().contains_full_prefix(&enq.cur_prefix()) {
                 // if this message comes from our own outbound queue, we must have dequeued it
@@ -2815,7 +2815,7 @@ impl ValidateQuery {
             //     log::error!(target: "validate_query", "internal inconsistency: new ProcessedInfo claims \
             //         to have processed all messages up to ({},{}) but we had somehow already processed a message ({},{}) \
             //         from OutMsgQueue of neighbor {} key {}", self.claimed_proc_lt, self.claimed_proc_hash.to_hex_string(),
-            //             created_lt, key.hash.to_hex_string(), nb_block_id, key.to_hex_string());
+            //             created_lt, key.hash.to_hex_string(), block_id, key.to_hex_string());
             //     return Ok(false)
             // }
             // Ok(true)
@@ -2830,7 +2830,7 @@ impl ValidateQuery {
                         to have processed all messages up to ({},{:x}), but we had somehow processed in this block \
                         a message ({},{:x}) from OutMsgQueue of neighbor {} key {:x}",
                             claimed_proc_lt, claimed_proc_hash,
-                            created_lt, key, nb_block_id, key)
+                            created_lt, key, block_id, key)
                 }
             }
             // must have a msg_import_fin or msg_import_tr InMsg record
@@ -2839,15 +2839,15 @@ impl ValidateQuery {
                 Some(InMsg::Transit(info)) => info.in_envelope_message_hash(),
                 None => reject_query!("there is no InMsg entry for processing EnqueuedMsg with key {:x} \
                     of neighbor {} which is claimed to be processed by new ProcessedInfo of this block", 
-                        key, nb_block_id),
+                        key, block_id),
                 _ => reject_query!("expected either a msg_import_fin or a msg_import_tr InMsg record \
                     for processing EnqueuedMsg with key {:x} of neighbor {} which is claimed to be processed \
-                    by new ProcessedInfo of this block", key, nb_block_id)
+                    by new ProcessedInfo of this block", key, block_id)
             };
             if hash != enq.envelope_hash() {
                 reject_query!("InMsg record for processing EnqueuedMsg with key {:x} of neighbor {} \
                     which is claimed to be processed by new ProcessedInfo of this block contains a reference \
-                    to a different MsgEnvelope", key, nb_block_id);
+                    to a different MsgEnvelope", key, block_id);
             }
             // all other checks have been done while checking InMsgDescr
             Ok(true)
@@ -2864,7 +2864,7 @@ impl ValidateQuery {
                             base.next_block_descr,
                             claimed_proc_lt, claimed_proc_hash,
                             created_lt, key.hash,
-                            nb_block_id, key);
+                            block_id, key);
                 }
             }
             Ok(false)
@@ -2876,18 +2876,18 @@ impl ValidateQuery {
         log::debug!(target: "validate_query", "({}): check_in_queue len: {}", base.next_block_descr, manager.neighbors().len());
         let mut iter = manager.merge_out_queue_iter(base.shard())?;
         while let Some(k_v) = iter.next() {
-            let (msg_key, enq, lt, nb_block_id) = k_v?;
-            if !base.split_queues && !nb_block_id.shard().contains_full_prefix(enq.cur_prefix()) {
+            let (msg_key, enq, lt, block_id) = k_v?;
+            if !base.split_queues && !block_id.shard().contains_full_prefix(enq.cur_prefix()) {
                 // this case from shard split result without splitting queues 
                 continue;
             }
             log::debug!(target: "validate_query", "({}): processing inbound message with \
-                (lt,hash)=({},{:x}) from neighbor - {}", base.next_block_descr, lt, msg_key.hash, nb_block_id);
+                (lt,hash)=({},{:x}) from neighbor - {}", base.next_block_descr, lt, msg_key.hash, block_id);
             // if (verbosity > 3) {
             //     std::cerr << "inbound message: lt=" << kv->lt from=" << kv->source key=" << kv->key.to_hex_string() msg=";
             //     block::gen::t_EnqueuedMsg.print(std::cerr, *(kv->msg));
             // }
-            match Self::check_neighbor_outbound_message_processed(base, manager, enq, lt, &msg_key, &nb_block_id) {
+            match Self::check_neighbor_outbound_message_processed(base, manager, enq, lt, &msg_key, &block_id) {
                 Err(err) => {
                     // if (verbosity > 1) {
                     //     std::cerr << "invalid neighbor outbound message: lt=" << kv->lt from=" << kv->source
@@ -2895,7 +2895,7 @@ impl ValidateQuery {
                     //     block::gen::t_EnqueuedMsg.print(std::cerr, *(kv->msg));
                     // }
                     reject_query!("error processing outbound internal message {:x} of neighbor {} : {}",
-                        msg_key.hash, nb_block_id, err)
+                        msg_key.hash, block_id, err)
                 }
                 Ok(false) => return Ok(false),
                 _ => ()
