@@ -1552,8 +1552,17 @@ impl fmt::Display for RempQueueCollatorInterfaceImpl {
 
 #[async_trait::async_trait]
 impl RempQueueCollatorInterface for RempQueueCollatorInterfaceImpl {
-    async fn get_next_message_for_collation(&self, master_block_id: &BlockIdExt, generation_deadline: SystemTime) -> Result<Option<Arc<Message>>> {
-        let reason = if self.queue.remp_manager.message_cache.is_block_processed(master_block_id)? {
+    async fn init_queue(
+        &self,
+        master_block_id: &BlockIdExt,
+        prev_blocks_ids: &[&BlockIdExt]
+    ) -> Result<()> {
+        unimplemented!("RempQueueCollatorInterfaceImpl::init_queue")
+    }
+
+    async fn get_next_message_for_collation(&self) -> Result<Option<(Arc<Message>, UInt256)>> {
+        unimplemented!("RempQueueCollatorInterfaceImpl::get_next_message_for_collation")
+        /*let reason = if self.queue.remp_manager.message_cache.is_block_processed(master_block_id)? {
             if let Some(q) = &self.queue.cur_queue {
                 return Ok(q.get_one_message_for_collation(self.message_deadline, generation_deadline)
                     .await?
@@ -1573,7 +1582,7 @@ impl RempQueueCollatorInterface for RempQueueCollatorInterfaceImpl {
             self, master_block_id, reason
         );
 
-        return Ok(None)
+        return Ok(None)*/
     }
 }
 

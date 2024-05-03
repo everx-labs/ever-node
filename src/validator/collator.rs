@@ -25,7 +25,7 @@ use crate::{
         top_block_descr::{cmp_shard_block_descr, Mode as TbdMode, TopBlockDescrStuff},
     },
     validating_utils::{
-        calc_remp_msg_ordering_hash, check_cur_validator_set, check_this_shard_mc_info, 
+        check_cur_validator_set, check_this_shard_mc_info, 
         may_update_shard_block_info, supported_capabilities, supported_version,
         UNREGISTERED_CHAIN_MAX_LEN, fmt_next_block_descr_from_next_seqno,
     },
@@ -216,9 +216,6 @@ struct CollatorData {
     new_messages: BinaryHeap<NewMessage>, // using for priority queue
     accepted_ext_messages: Vec<(UInt256, i32)>, // message id and wokchain id
     rejected_ext_messages: Vec<(UInt256, String)>, // message id and reject reason
-    accepted_remp_messages: Vec<UInt256>,
-    rejected_remp_messages: Vec<(UInt256, String)>,
-    ignored_remp_messages: Vec<UInt256>,
     usage_tree: UsageTree,
     imported_visited: HashSet<UInt256>,
 
@@ -291,9 +288,6 @@ impl CollatorData {
             new_messages: Default::default(),
             accepted_ext_messages: Default::default(),
             rejected_ext_messages: Default::default(),
-            accepted_remp_messages: Default::default(),
-            rejected_remp_messages: Default::default(),
-            ignored_remp_messages: Default::default(),
             usage_tree,
             imported_visited: HashSet::new(),
             gen_utime,
@@ -638,18 +632,6 @@ impl CollatorData {
          std::mem::take(&mut self.rejected_ext_messages))
     }
 
-    fn withdraw_remp_msg_statuses(&mut self) -> (Vec<UInt256>, Vec<(UInt256, String)>, Vec<UInt256>) {
-        (std::mem::take(&mut self.accepted_remp_messages),
-         std::mem::take(&mut self.rejected_remp_messages),
-         std::mem::take(&mut self.ignored_remp_messages))
-    }
-
-    fn set_remp_msg_statuses(&mut self, accepted: Vec<UInt256>, rejected: Vec<(UInt256, String)>, ignored: Vec<UInt256>) {
-        self.accepted_remp_messages = accepted;
-        self.rejected_remp_messages = rejected;
-        self.ignored_remp_messages = ignored;
-    }
-
     fn estimate_pruned_count(&self) -> usize {
         if self.enqueue_count != 0 {
             let total_count = self.dequeue_count + self.enqueue_count + self.remove_count;
@@ -989,6 +971,7 @@ impl ExecutionManager {
 
 pub struct Collator {
     engine: Arc<dyn EngineOperations>,
+    remp_collator_interface: Option<Arc<dyn RempQueueCollatorInterface>>,
     shard: ShardIdent,
     min_mc_seqno: u32,
     prev_blocks_ids: Vec<BlockIdExt>,
@@ -1091,6 +1074,7 @@ impl Collator {
                 file_hash: UInt256::default(),
             },
             engine,
+            remp_collator_interface,
             shard,
             min_mc_seqno,
             prev_blocks_ids,
@@ -1340,11 +1324,6 @@ impl Collator {
     ) -> Result<Option<(BlockCandidate, ShardStateUnsplit, ExecutionManager)>> {
         log::debug!("{}: do_collate", self.collated_block_descr);
 
-        let remp_messages = if is_remp_enabled(self.engine.clone(), mc_data.config()) {
-            Some(self.engine.get_remp_messages(&self.shard)?)
-        } else {
-            None
-        };
         self.check_stop_flag()?;
 
         // loads out queues from neighbors and out queue of current shard
@@ -1419,15 +1398,13 @@ impl Collator {
             log::debug!("{}: TIME: process_inbound_internal_messages {}ms;", 
                 self.collated_block_descr, now.elapsed().as_millis());
 
-            if let Some(remp_messages) = remp_messages {
+            if is_remp_enabled(self.engine.clone(), mc_data.config()) {
                 // import remp messages (if space&gas left)
                 let now = std::time::Instant::now();
-                let total = remp_messages.len();
-                let processed = self.process_remp_messages(
-                    prev_data, collator_data, &mut exec_manager, remp_messages
-                ).await?;
-                log::debug!("{}: TIME: process_remp_messages {}ms, processed {}, ignored {}", 
-                    self.collated_block_descr, now.elapsed().as_millis(), processed, total - processed);
+                let (accepted, rejected) = self.process_remp_messages(
+                    prev_data, mc_data, collator_data, &mut exec_manager).await?;
+                log::debug!("{}: TIME: process_remp_messages {}ms, accepted {}, rejected {}", 
+                    self.collated_block_descr, now.elapsed().as_millis(), accepted, rejected);
             }
 
             // import inbound external messages (if space&gas left)
@@ -2462,58 +2439,51 @@ impl Collator {
     async fn process_remp_messages(
         &self,
         prev_data: &PrevData,
+        mc_data: &McData,
         collator_data: &mut CollatorData,
         exec_manager: &mut ExecutionManager,
-        mut remp_messages: Vec<(Arc<Message>, UInt256)>,
-    ) -> Result<usize> {
-        log::trace!("{}: process_remp_messages ({}pcs)", self.collated_block_descr, remp_messages.len());
+    ) -> Result<(usize, usize)> {
+        log::trace!("{}: process_remp_messages", self.collated_block_descr);
 
-        remp_messages.sort_by_cached_key(|(_, id)| {
-            calc_remp_msg_ordering_hash(&id, prev_data.pure_states.iter().map(|s| s.block_id()))
-        });
-        log::trace!("{}: process_remp_messages: sorted {} messages", self.collated_block_descr, remp_messages.len());
+        let remp_collator_interface = self.remp_collator_interface.as_ref()
+            .ok_or_else(|| error!("remp_collator_interface is not set"))?;
 
-        let mut ignored = vec!();
-        let mut ignore = false;
-        for (msg, id) in remp_messages.drain(..) {
-            if ignore {
-                ignored.push(id);
-                continue;
-            }
+        remp_collator_interface.init_queue(
+            mc_data.state().block_id(),
+            &prev_data.pure_states.iter().map(|s| s.block_id()).collect::<Vec<_>>()
+        ).await?;
+        log::trace!("{}: process_remp_messages: inited queue", self.collated_block_descr);
+
+        while let Some((msg, id)) = remp_collator_interface.get_next_message_for_collation().await? {
+            log::trace!("{}: process_remp_messages: got next message {:x}", self.collated_block_descr, id);
             let header = msg.ext_in_header().ok_or_else(|| error!("remp message {:x} \
                 is not external inbound message", id))?;
             if self.shard.contains_address(&header.dst)? {
                 let pruned_count = collator_data.estimate_pruned_count();
                 if !collator_data.block_limit_status.fits_normal(REMP_CUTOFF_LIMIT, pruned_count) {
                     log::trace!("{}: block is loaded enough, stop processing remp messages", self.collated_block_descr);
-                    ignored.push(id);
-                    ignore = true;
+                    break;
                 } else if self.check_cutoff_timeout() {
                     log::warn!("{}: TIMEOUT is elapsed, stop processing remp messages",
                         self.collated_block_descr);
-                    ignored.push(id);
-                    ignore = true;
+                    break;
                 } else {
                     let (_, account_id) = header.dst.extract_std_address(true)?;
-                    log::trace!("{}: remp message {:x} sent to execution", self.collated_block_descr, id);
-                    let msg = AsyncMessage::Ext(msg.deref().clone(), id);
+                    let msg = AsyncMessage::Ext(msg.deref().clone(), id.clone());
                     exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
+                    log::trace!("{}: remp message {:x} sent to execution", self.collated_block_descr, id);
                 }
             } else {
                 log::warn!(
                     "{}: process_remp_messages: ignored message {:x} for another shard {}",
                     self.collated_block_descr, id, header.dst
                 );
-                ignored.push(id);
             }
             self.check_stop_flag()?;
         }
         exec_manager.wait_transactions(collator_data).await?;
         let (accepted, rejected) = collator_data.withdraw_ext_msg_statuses();
-        let processed = accepted.len() + rejected.len();
-        let accepted = accepted.into_iter().map(|(id, _)| id).collect();
-        collator_data.set_remp_msg_statuses(accepted, rejected, ignored);
-        Ok(processed)
+        Ok((accepted.len(), rejected.len()))
     }
 
     async fn process_new_messages(
@@ -2925,11 +2895,6 @@ impl Collator {
         //     );
         // }
         // !!!! DEBUG !!!!
-
-        if is_remp_enabled(self.engine.clone(), mc_data.config()) {
-            let (accepted, rejected, ignored) = collator_data.withdraw_remp_msg_statuses();
-            self.engine.finalize_remp_messages(block_id.clone(), accepted, rejected, ignored)?;
-        }
 
         self.check_stop_flag()?;
 

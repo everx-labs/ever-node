@@ -18,7 +18,6 @@ use crossbeam_channel::Receiver;
 use catchain::utils::get_hash;
 use ever_block::{BlockIdExt, ShardIdent, ValidatorSet, ValidatorDescr, UnixTime32};
 use ever_block::{fail, error, Result, UInt256};
-use ever_block_json::unix_time_to_system_time;
 use validator_session::{
     BlockHash, BlockPayloadPtr, CatchainOverlayManagerPtr,
     SessionId, SessionPtr, SessionListenerPtr, SessionFactory,

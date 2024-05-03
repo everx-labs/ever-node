@@ -460,6 +460,7 @@ pub fn is_finally_accepted(status: &RempMessageStatus) -> bool {
     }
 }
 
+// To be deleted
 pub struct RempMessagesPool {
     messages: Map<UInt256, Arc<Message>>,
     statuses_queue: lockfree::queue::Queue<(UInt256, Arc<Message>, RempMessageStatus)>,
@@ -483,7 +484,7 @@ impl RempMessagesPool {
 
     // Important! If call get_messages with same shard two times in row (without finalize_messages between)
     // the messages returned first call will return second time too.
-    pub fn get_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
+    /*pub fn get_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
         let mut result = vec!();
         let mut ids = String::new();
         for guard in self.messages.iter() {
@@ -506,7 +507,7 @@ impl RempMessagesPool {
         );
 
         Ok(result)
-    }
+    }*/
 
     pub fn finalize_messages(
         &self,
