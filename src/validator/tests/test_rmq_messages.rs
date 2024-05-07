@@ -365,7 +365,10 @@ fn remp_simple_collation_equal_uids_test() -> Result<()> {
 
         println!("Collecting messages for collation");
         sleep(Duration::from_millis(10)); // To overcome SystemTime inconsistency and make tests reproducible.
-        testbench.message_queue.collect_messages_for_collation().await?;
+        let messages = testbench.message_queue.prepare_messages_for_collation().await?;
+        for (msg_id, msg, _order) in messages.into_iter() {
+            testbench.engine.new_remp_message(msg_id.clone(), msg)?;
+        }
 
         for (id, _msg) in testbench.engine.collator_queue.pop_iter() {
             println!("collated: {:x}", id);
