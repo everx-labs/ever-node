@@ -1609,7 +1609,7 @@ impl RempQueueCollatorInterface for RempQueueCollatorInterfaceImpl {
         let mut ordered_messages: Vec<(UInt256, UInt256, Arc<Message>, Arc<RempMessageOrigin>)> = prepared_messages.into_iter().map(
             |(id,msg,origin)| (Self::compute_ordering_hash(&id, prev_blocks_ids), id, msg, origin)
         ).collect();
-        ordered_messages.sort_by(|(ordering_id1,_,_,_), (ordering_id2,_,_,_)| ordering_id1.cmp(ordering_id2));
+        ordered_messages.sort_by(|(ordering_id1,_,_,_), (ordering_id2,_,_,_)| ordering_id2.cmp(ordering_id1));
         let cnt = ordered_messages.len();
 
         for (_order, id, msg, origin) in ordered_messages.into_iter() {
