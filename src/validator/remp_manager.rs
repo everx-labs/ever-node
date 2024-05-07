@@ -363,10 +363,6 @@ impl CollatorInterfaceWrapper {
 //          message_dispatcher: Mutex::new(HashMap::new())
         }
     }
-
-    pub async fn send_message_to_collator(&self, msg_id: UInt256, msg: Arc<Message>) -> Result<()> {
-        self.engine.new_remp_message(msg_id.clone(), msg)
-    }
 }
 
 pub struct CollatorResult {

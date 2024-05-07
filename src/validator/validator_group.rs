@@ -39,7 +39,7 @@ use validator_session_listener::{
 use super::*;
 use super::fabric::*;
 use crate::{
-    engine_traits::{EngineOperations, RempQueueCollatorInterface},
+    engine_traits::EngineOperations,
     validator::{
         catchain_overlay::CatchainOverlayManagerImpl,
         mutex_wrapper::MutexWrapper,
@@ -583,11 +583,10 @@ impl ValidatorGroup {
         self.group_impl.execute_sync(|group_impl| group_impl.reliable_queue.clone()).await
     }
 
-    pub async fn get_remp_queue_collator_interface(&self) -> Option<Arc<dyn RempQueueCollatorInterface>> {
+    pub async fn get_remp_queue_collator_interface(&self) -> Option<Arc<RempQueueCollatorInterfaceImpl>> {
         let queue_manager = self.get_reliable_message_queue().await;
         queue_manager.map(|x| {
-            let interface: Arc<dyn RempQueueCollatorInterface> = Arc::new(RempQueueCollatorInterfaceImpl::new(x));
-            interface
+            Arc::new(RempQueueCollatorInterfaceImpl::new(x))
         })
     }
 
@@ -661,7 +660,7 @@ impl ValidatorGroup {
         let (_lk_round, prev_block_ids, mm_block_id, min_ts) =
             self.group_impl.execute_sync(|group_impl| group_impl.update_round (round)).await;
 
-        let remp_queue_collator_interface = match self.check_in_sync(&prev_block_ids).await {
+        let remp_queue_collator_interface_impl = match self.check_in_sync(&prev_block_ids).await {
             Err(e) => {
                 log::warn!(target: "validator", "({}): Error checking sync for {}: `{}`",
                     next_block_descr, self.info_round(round).await, e
@@ -673,15 +672,17 @@ impl ValidatorGroup {
             Ok(true) => self.get_remp_queue_collator_interface().await
         };
 
+        /*
         // To be removed after moving message queue processing into collator
         if let Some(rmq) = self.get_reliable_message_queue().await {
             log::info!(
                 target: "validator", 
                 "ValidatorGroup::on_generate_slot: ({}) collecting REMP messages \
                 for {} for collation: {}",
-                next_block_descr, self.info_round(round).await, remp_queue_collator_interface.is_some()
+                next_block_descr, self.info_round(round).await, remp_queue_collator_interface_impl.is_some()
             );
-            if remp_queue_collator_interface.is_some() {
+            if let Some(interface_impl) = remp_queue_collator_interface_impl {
+                let interface
                 if let Err(e) = rmq.collect_messages_for_collation().await {
                     log::error!(
                         target: "validator", 
@@ -693,6 +694,7 @@ impl ValidatorGroup {
                 }
             }
         }
+         */
 
         let result = match mm_block_id {
             Some(mc) => {
@@ -701,7 +703,7 @@ impl ValidatorGroup {
                     min_ts,
                     mc.seq_no,
                     prev_block_ids,
-                    remp_queue_collator_interface,
+                    remp_queue_collator_interface_impl.clone().map(|x| x.into_interface()),
                     self.local_key.clone(),
                     self.validator_set.clone(),
                     self.engine.clone(),
@@ -711,6 +713,18 @@ impl ValidatorGroup {
                 }
             }
             None => Err(error!("Min masterchain block id missing")),
+        };
+
+        let return_result_message = if let Some(x) = remp_queue_collator_interface_impl {
+            match x.return_prepared_messages_to_queue().await {
+                Ok((total, returned)) => format!("total external messages {}, processed {}, returned to queue {}",
+                    total, total as i64 - returned as i64, returned
+                ),
+                Err(e) => format!("error returning non-processed external messages to queue `{}`", e)
+            }
+        }
+        else {
+            format!("no external messages processed")
         };
 
         let candidate = match self.verification_manager.clone() {
@@ -754,6 +768,8 @@ impl ValidatorGroup {
                 format!("Collation failed: `{}`", x)
             }
         };
+
+        let result_message = format!("{}{}", result_message, return_result_message);
 
         if let Some(rmq) = self.get_reliable_message_queue().await {
             if let Err(e) = rmq.process_collation_result().await {

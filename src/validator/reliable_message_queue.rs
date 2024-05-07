@@ -15,10 +15,11 @@ use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashMap},
     fmt, fmt::Formatter,
-    ops::{Add, RangeInclusive},
+    ops::RangeInclusive,
     sync::Arc,
     time::{Duration, SystemTime}
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 use dashmap::DashMap;
 
 use ton_api::ton::ton_node::{
@@ -28,7 +29,7 @@ use ton_api::ton::ton_node::{
     RempCatchainRecordV2,
     rempcatchainrecordv2::{RempCatchainMessageHeaderV2, RempCatchainMessageDigestV2}
 };
-use ever_block::{ShardIdent, Message, BlockIdExt, ValidatorDescr};
+use ever_block::{ShardIdent, Message, BlockIdExt, ValidatorDescr, Sha256};
 use ever_block::{UInt256, Result, fail, gen_random_index, error};
 
 use catchain::{PrivateKey, PublicKey};
@@ -698,16 +699,8 @@ impl MessageQueue {
         Ok(())
     }
 
-    pub async fn get_one_message_for_collation(&self, message_deadline: SystemTime, generation_deadline: SystemTime) -> Result<Option<(UInt256, Arc<Message>, Arc<RempMessageOrigin>)>> {
+    pub async fn get_one_message_for_collation(&self, message_deadline: SystemTime) -> Result<Option<(UInt256, Arc<Message>, Arc<RempMessageOrigin>)>> {
         while let Some((msgid, timestamp)) = self.queues.execute_sync(|x| x.take_first_for_collation()).await? {
-            if generation_deadline < SystemTime::now() {
-                log::trace!(target: "remp",
-                    "RMQ {}: Message collation deadline expired at {:?}, stopping external messages collation",
-                    self, generation_deadline
-                );
-                return Ok(None)
-            }
-
             if message_deadline <= timestamp {
                 self.put_back_to_collation_queue(&msgid, timestamp).await?;
                 return Ok(None)
@@ -743,16 +736,26 @@ impl MessageQueue {
         return Ok(None)
     }
 
+    pub async fn prepare_messages_for_collation (&self) -> Result<Vec<(UInt256, Arc<Message>, Arc<RempMessageOrigin>)>> {
+        let message_deadline = SystemTime::now();
+        let mut prepared_for_collation = Vec::new();
+
+        while let Some(msg_info) = self.get_one_message_for_collation(message_deadline).await? {
+            prepared_for_collation.push(msg_info);
+        }
+
+        Ok(prepared_for_collation)
+    }
+/*
     /// Prepare messages for collation - to be called just before collator invocation.
     pub async fn collect_messages_for_collation (&self) -> Result<()> {
         log::trace!(target: "remp", "RMQ {}: collecting messages for collation", self);
         let mut cnt = 0;
         let message_deadline = SystemTime::now();
-        let deadline = SystemTime::now().add(Duration::from_millis(1000));
 
-        while let Some((msg_id,message,_origin)) = self.get_one_message_for_collation(message_deadline, deadline).await? {
+        while let Some((msg_id,message,_origin)) = self.get_one_message_for_collation(message_deadline).await? {
             //self.queues.execute_sync(|x| x.take_first_for_collation()).await? {
-/*
+
             let (message, origin) = match self.check_one_message_for_collation(&msgid).await {
                 Err(e) => {
                     log::error!(
@@ -864,7 +867,7 @@ impl MessageQueue {
                     continue
                 }
             }
-*/
+
             match self.send_message_to_collator(msg_id.clone(), message.clone()).await {
                 Err(e) => {
                     let error = format!("{}", e);
@@ -879,7 +882,7 @@ impl MessageQueue {
         log::trace!(target: "remp", "Point 5. RMQ {}: total {} messages for collation", self, cnt);
         Ok(())
     }
-
+*/
     pub async fn all_accepted_by_collator_to_ignored(&self) -> Result<Vec<UInt256>> {
         let mut downgrading = Vec::new();
 
@@ -1032,12 +1035,6 @@ impl MessageQueue {
 
     pub async fn received_messages_count (&self) -> usize {
         self.queues.execute_sync(|mq| mq.pending_collation_set.len()).await
-    }
-
-    async fn send_message_to_collator(&self, message_id: UInt256, message: Arc<Message>) -> Result<()> {
-        self.remp_manager.collator_receipt_dispatcher.queue.send_message_to_collator(
-            message_id, message
-        ).await
     }
 
     //pub fn pack_payload
@@ -1361,7 +1358,7 @@ impl RmqQueueManager {
             fail!("Cannot put message to RMQ {}: queue is not started yet", self)
         }
     }
-
+/*
     pub async fn collect_messages_for_collation (&self) -> Result<()> {
         if let Some(queue) = &self.cur_queue {
             queue.collect_messages_for_collation().await?;
@@ -1369,6 +1366,16 @@ impl RmqQueueManager {
         }
         else {
             fail!("Collecting messages for collation: RMQ {} is not started", self)
+        }
+    }
+*/
+    pub async fn prepare_messages_for_collation (&self) -> Result<Vec<(UInt256, Arc<Message>, Arc<RempMessageOrigin>)>> {
+        if let Some(queue) = &self.cur_queue {
+            let messages = queue.prepare_messages_for_collation().await?;
+            Ok(messages)
+        }
+        else {
+            fail!("Preparing messages for collation: RMQ {} is not started", self)
         }
     }
 
@@ -1535,12 +1542,46 @@ impl fmt::Display for RmqQueueManager {
 
 pub struct RempQueueCollatorInterfaceImpl {
     queue: Arc<RmqQueueManager>,
-    message_deadline: SystemTime
+    messages_to_process: lockfree::queue::Queue<(UInt256, Arc<Message>, Arc<RempMessageOrigin>)>,
+    messages_count: AtomicUsize
 }
 
 impl RempQueueCollatorInterfaceImpl {
     pub fn new(remp_manager: Arc<RmqQueueManager>) -> Self {
-        Self { queue: remp_manager, message_deadline: SystemTime::now() }
+        Self {
+            queue: remp_manager,
+            messages_to_process: lockfree::queue::Queue::new(),
+            messages_count: AtomicUsize::new(0)
+        }
+    }
+
+    fn compute_ordering_hash(msg_id: &UInt256, prev_blocks_ids: &[&BlockIdExt]) -> UInt256 {
+        let mut hasher = Sha256::new();
+        for prev_id in prev_blocks_ids {
+            hasher.update(prev_id.root_hash().as_slice());
+        }
+        hasher.update(msg_id.as_slice());
+        UInt256::from(hasher.finalize().as_slice())
+    }
+
+    /// All messages that were not requested by collator, are returned back to queue by this function.
+    /// The function returns (total messages, messages returned back)
+    pub async fn return_prepared_messages_to_queue(&self) -> Result<(usize, usize)> {
+        let mut cnt = 0;
+        let cur_queue = match &self.queue.cur_queue {
+            Some(q) => q,
+            None => fail!("No current queue {}: cannot return prepared messages to non-initalized/removed queue", self)
+        };
+        for (msg_id,_,_) in self.messages_to_process.pop_iter() {
+            cur_queue.return_to_collation_queue(&msg_id).await?;
+            cnt += 1;
+        }
+        Ok((self.messages_count.load(Ordering::Relaxed), cnt))
+    }
+
+    pub fn into_interface(self: Arc<Self>) -> Arc<dyn RempQueueCollatorInterface> {
+        let interface: Arc<dyn RempQueueCollatorInterface> = self.clone();
+        interface
     }
 }
 
@@ -1552,16 +1593,50 @@ impl fmt::Display for RempQueueCollatorInterfaceImpl {
 
 #[async_trait::async_trait]
 impl RempQueueCollatorInterface for RempQueueCollatorInterfaceImpl {
+    /// Returns true if the messages were prepared,
+    /// false if the messages could not be prepared (master block is not processed yet).
     async fn init_queue(
         &self,
         master_block_id: &BlockIdExt,
         prev_blocks_ids: &[&BlockIdExt]
     ) -> Result<()> {
-        unimplemented!("RempQueueCollatorInterfaceImpl::init_queue")
+        if !self.queue.remp_manager.message_cache.is_block_processed(master_block_id)? {
+            log::warn!(target: "remp", "Block {} is not ready yet, cannot collect messages relative to it", master_block_id);
+            return Ok(());
+        }
+
+        let prepared_messages = self.queue.prepare_messages_for_collation().await?;
+        let mut ordered_messages: Vec<(UInt256, UInt256, Arc<Message>, Arc<RempMessageOrigin>)> = prepared_messages.into_iter().map(
+            |(id,msg,origin)| (Self::compute_ordering_hash(&id, prev_blocks_ids), id, msg, origin)
+        ).collect();
+        ordered_messages.sort_by(|(ordering_id1,_,_,_), (ordering_id2,_,_,_)| ordering_id1.cmp(ordering_id2));
+        let cnt = ordered_messages.len();
+
+        for (_order, id, msg, origin) in ordered_messages.into_iter() {
+            self.messages_to_process.push((id, msg, origin));
+        }
+
+        log::trace!(target: "remp", "Point 5. RMQ {}: total {} messages for collation", self, cnt);
+        self.messages_count.store(cnt, Ordering::Relaxed);
+
+        Ok(())
     }
 
     async fn get_next_message_for_collation(&self) -> Result<Option<(Arc<Message>, UInt256)>> {
-        unimplemented!("RempQueueCollatorInterfaceImpl::get_next_message_for_collation")
+        let cur_queue = match &self.queue.cur_queue {
+            Some(q) => q,
+            None => fail!("No current queue {}: cannot get next message for collation", self)
+        };
+
+        Ok(self.messages_to_process.pop().map(|(id,msg,origin)| {
+            let new_status = RempMessageStatus::TonNode_RempAccepted (RempAccepted {
+                level: RempMessageLevel::TonNode_RempQueue,
+                block_id: BlockIdExt::default(),
+                master_id: BlockIdExt::default()
+            });
+            cur_queue.update_status_send_response(&id, origin.clone(), new_status);
+            (msg,id)
+        }))
         /*let reason = if self.queue.remp_manager.message_cache.is_block_processed(master_block_id)? {
             if let Some(q) = &self.queue.cur_queue {
                 return Ok(q.get_one_message_for_collation(self.message_deadline, generation_deadline)
