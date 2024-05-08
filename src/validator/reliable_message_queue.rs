@@ -1612,7 +1612,9 @@ impl RempQueueCollatorInterface for RempQueueCollatorInterfaceImpl {
         ordered_messages.sort_by(|(ordering_id1,_,_,_), (ordering_id2,_,_,_)| ordering_id2.cmp(ordering_id1));
         let cnt = ordered_messages.len();
 
-        log::trace!(target: "remp", "DebugMessageCollationStart");
+        log::trace!(target: "remp", "DebugMessageCollationStart: {}",
+            prev_blocks_ids.iter().map(|x| format!(" {} ", x)).collect::<String>()
+        );
         for (order, id, msg, origin) in ordered_messages.into_iter() {
             let msg_serialized: ton_api::ton::bytes = msg.write_to_bytes().unwrap().into();
             log::trace!(target: "remp", "DebugMessageCollation: {:x} {:x} {:?}", order, id, msg_serialized);
