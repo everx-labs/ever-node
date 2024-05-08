@@ -29,7 +29,7 @@ use ton_api::ton::ton_node::{
     RempCatchainRecordV2,
     rempcatchainrecordv2::{RempCatchainMessageHeaderV2, RempCatchainMessageDigestV2}
 };
-use ever_block::{ShardIdent, Message, BlockIdExt, ValidatorDescr, Sha256};
+use ever_block::{ShardIdent, Message, BlockIdExt, ValidatorDescr, Sha256, Serializable};
 use ever_block::{UInt256, Result, fail, gen_random_index, error};
 
 use catchain::{PrivateKey, PublicKey};
@@ -1612,9 +1612,13 @@ impl RempQueueCollatorInterface for RempQueueCollatorInterfaceImpl {
         ordered_messages.sort_by(|(ordering_id1,_,_,_), (ordering_id2,_,_,_)| ordering_id2.cmp(ordering_id1));
         let cnt = ordered_messages.len();
 
-        for (_order, id, msg, origin) in ordered_messages.into_iter() {
+        log::trace!(target: "remp", "DebugMessageCollationStart");
+        for (order, id, msg, origin) in ordered_messages.into_iter() {
+            let msg_serialized: ton_api::ton::bytes = msg.write_to_bytes().unwrap().into();
+            log::trace!(target: "remp", "DebugMessageCollation: {:x} {:x} {:?}", order, id, msg_serialized);
             self.messages_to_process.push((id, msg, origin));
         }
+        log::trace!(target: "remp", "DebugMessageCollationFinish");
 
         log::trace!(target: "remp", "Point 5. RMQ {}: total {} messages for collation", self, cnt);
         self.messages_count.store(cnt, Ordering::Relaxed);
