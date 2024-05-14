@@ -534,12 +534,15 @@ impl RempCatchain {
                                         "Point 4. Message received from RMQ {}: {:?}, decoded {:?}, put to rmq_catchain queue",
                                         self, msg.signature, record //catchain.received_messages.len()
                                     );
+                                    /*
                                     if let Err(e) = self.instance.rmq_catchain_send(record.clone(), source_idx) {
                                         log::error!(
                                             target: "remp", "Point 4. Cannot put message {:?} from RMQ {} to queue: {}",
                                             record, self, e
                                         )
                                     }
+                                    
+                                     */
                                 },
                                 Err(e) => log::error!(target: "remp", "Cannot deserialize message from RMQ {} {:?}: {}",
                                     self, msg.signature, e

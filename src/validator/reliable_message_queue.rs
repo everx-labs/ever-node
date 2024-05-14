@@ -47,12 +47,13 @@ use crate::{
     }
 };
 use failure::err_msg;
+use storage::db::traits::DbKey;
 use crate::block::BlockIdExtExtention;
 
 #[derive(Debug,PartialEq,Eq,PartialOrd,Ord,Clone)]
 enum MessageQueueStatus { Created, Starting, Active, Stopping }
 const RMQ_STOP_POLLING_INTERVAL: Duration = Duration::from_millis(50);
-const RMQ_REQUEST_NEW_BLOCK_INTERVAL: Duration = Duration::from_millis(50);
+const RMQ_REQUEST_NEW_BLOCK_INTERVAL: Duration = Duration::from_millis(10);
 const RMQ_MAXIMAL_BROADCASTS_IN_PACK: u32 = 1000;
 const RMQ_MAXIMAL_QUERIES_IN_PACK: u32 = 1000;
 const RMQ_MESSAGE_QUERY_TIMEOUT: Duration = Duration::from_millis(2000);
@@ -1611,7 +1612,7 @@ impl RempQueueCollatorInterface for RempQueueCollatorInterfaceImpl {
         ).collect();
         ordered_messages.sort_by(|(ordering_id1,_,_,_), (ordering_id2,_,_,_)| ordering_id2.cmp(ordering_id1));
         let cnt = ordered_messages.len();
-
+/*
         log::trace!(target: "remp", "DebugMessageCollationStart: {}",
             prev_blocks_ids.iter().map(|x| format!(" {} ", x)).collect::<String>()
         );
@@ -1621,8 +1622,19 @@ impl RempQueueCollatorInterface for RempQueueCollatorInterfaceImpl {
             self.messages_to_process.push((id, msg, origin));
         }
         log::trace!(target: "remp", "DebugMessageCollationFinish");
+*/
+        for (_order, id, _msg, origin) in ordered_messages.into_iter() {
+            if let Some(x) = &self.queue.cur_queue {
+                let reject = RempRejected {
+                    level: RempMessageLevel::TonNode_RempCollator,
+                    block_id: BlockIdExt::default(),
+                    error: "Test message rejected".as_string()
+                };
+                x.update_status_send_response(&id, origin, RempMessageStatus::TonNode_RempRejected(reject))
+            }
+        }
 
-        log::trace!(target: "remp", "Point 5. RMQ {}: total {} messages for collation", self, cnt);
+        log::info!(target: "remp", "Point 5. RMQ {}: total {} messages for collation", self, cnt);
         self.messages_count.store(cnt, Ordering::Relaxed);
 
         Ok(())

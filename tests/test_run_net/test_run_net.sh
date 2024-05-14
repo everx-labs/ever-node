@@ -1,6 +1,6 @@
 #!/bin/bash
 
-NODES=6
+NODES=3
 WORKCHAINS=false
 REMP_TEST=false
 CURRENT_BRANCH="$(git branch --show-current)"
