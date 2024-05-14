@@ -1726,10 +1726,18 @@ pub fn start_validator_manager(
                 log::error!(target: "validator_manager", "set_remp_core_interface: {}", e);
             }
 
+            let iface = remp_iface.clone();
             runtime.clone().spawn(async move { 
                 log::info!(target: "remp", "Starting REMP responses polling loop");
-                remp_iface.poll_responses_loop().await; 
+                iface.poll_responses_loop().await;
                 log::info!(target: "remp", "Finishing REMP responses polling loop");
+            });
+
+            let iface = remp_iface.clone();
+            runtime.clone().spawn(async move {
+                log::info!(target: "remp", "Starting REMP testing loop");
+                iface.test_remp_messages_loop(Duration::from_millis(300), 100).await;
+                log::info!(target: "remp", "Finishing REMP testing loop");
             });
         }
 

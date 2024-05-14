@@ -534,15 +534,14 @@ impl RempCatchain {
                                         "Point 4. Message received from RMQ {}: {:?}, decoded {:?}, put to rmq_catchain queue",
                                         self, msg.signature, record //catchain.received_messages.len()
                                     );
-                                    /*
+
                                     if let Err(e) = self.instance.rmq_catchain_send(record.clone(), source_idx) {
                                         log::error!(
                                             target: "remp", "Point 4. Cannot put message {:?} from RMQ {} to queue: {}",
                                             record, self, e
                                         )
                                     }
-                                    
-                                     */
+
                                 },
                                 Err(e) => log::error!(target: "remp", "Cannot deserialize message from RMQ {} {:?}: {}",
                                     self, msg.signature, e
@@ -608,8 +607,9 @@ impl CatchainListener for RempCatchain {
 
         let mut msg_vect: Vec<::ton_api::ton::validator_session::round::Message> = Vec::new();
         let mut msg_ids: Vec<String> = Vec::new();
+        let MAX_VECT_COUNT = 8;
 
-        if let Ok(Some(msg)) = self.instance.pending_messages_queue_try_recv() {
+        while let Ok(Some(msg)) = self.instance.pending_messages_queue_try_recv() {
             let msg_body = ::ton_api::ton::validator_session::round::validator_session::message::message::Commit {
                 round: 0,
                 candidate: Default::default(),
@@ -621,6 +621,8 @@ impl CatchainListener for RempCatchain {
 
             msg_vect.push(msg_body);
             msg_ids.push(get_remp_catchain_record_info(&msg));
+
+            if msg_vect.len() >= MAX_VECT_COUNT { break; }
         }
 
         let payload = ::ton_api::ton::validator_session::blockupdate::BlockUpdate {

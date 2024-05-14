@@ -42,7 +42,8 @@ use std::time::SystemTime;
 use adnl::telemetry::Metric;
 use chrono::{DateTime, Utc};
 use crossbeam_channel::TryRecvError;
-use rand::Rng;
+use rand::{Rng, RngCore};
+use rand::prelude::ThreadRng;
 
 pub struct RempInterfaceQueues {
     message_cache: Arc<MessageCache>,
@@ -550,9 +551,12 @@ impl RempManager {
 
 #[allow(dead_code)] 
 impl RempInterfaceQueues {
-    pub fn make_test_message(&self) -> Result<RempMessageWithOrigin> {
+    pub fn make_test_message(&self, thread_rng: &mut ThreadRng) -> Result<RempMessageWithOrigin> {
+        let mut data_array  = [0 as u8; 128];
+        thread_rng.fill_bytes(&mut data_array);
+        let data = SliceData::new(data_array.to_vec());
         Ok(RempMessageWithOrigin {
-            message: RmqMessage::make_test_message(&SliceData::new_empty())?,
+            message: RmqMessage::make_test_message(&data)?,
             origin: RempMessageOrigin::create_empty()?
         })
     }
@@ -563,25 +567,26 @@ impl RempInterfaceQueues {
      * 1. random messages are generated each second, and sent to the REMP input queue
      * 2. responses after REMP processing are taken from REMP response queue and printed
      */
-    pub async fn test_remp_messages_loop(&self) {
+    pub async fn test_remp_messages_loop(&self, pause: Duration, batch_size: usize) {
         log::info!(target: "remp", "Test REMP messages loop is started");
         loop {
-            match self.make_test_message() {
-                Err(e) => log::error!(target: "remp", "Cannot make test REMP message: `{}`", e),
-                Ok(msg) => {
-                    if let Err(x) = self.incoming_sender.send(Arc::new(msg)) {
-                        log::error!(target: "remp", "Cannot send test REMP message to RMQ: {}",
-                            x
-                        );
-                    }
+            for _i in 0..batch_size {
+                let mut thread_rng = ThreadRng::default();
+                match self.make_test_message(&mut thread_rng) {
+                    Err(e) => log::error!(target: "remp", "Cannot make test REMP message: `{}`", e),
+                    Ok(msg) => {
+                        if let Err(x) = self.incoming_sender.send(Arc::new(msg)) {
+                            log::error!(target: "remp", "Cannot send test REMP message to RMQ: {}", x);
+                        }
 
-                    while let Ok(msg) = self.response_receiver.try_recv() {
-                        log::trace!(target: "remp", "Received test REMP response: {:?}", msg);
+                        while let Ok(msg) = self.response_receiver.try_recv() {
+                            log::trace!(target: "remp", "Received test REMP response: {:?}", msg);
+                        }
                     }
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(pause).await;
         }
     }
 
