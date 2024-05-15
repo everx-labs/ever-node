@@ -38,11 +38,11 @@ use ever_block::{
     GlobalCapabilities, Grams, HashmapAugType, HashmapType, InMsg, InMsgDescr,
     INVALID_WORKCHAIN_ID, KeyExtBlkRef, KeyMaxLt, LibDescr, Libraries, McBlockExtra,
     MASTERCHAIN_ID, MAX_SPLIT_DEPTH, McShardRecord, McStateExtra, MerkleProof, MerkleUpdate,
-    Message, MsgAddressInt, MsgEnvelope, OutMsg, OutMsgDescr, OutMsgQueueInfo, OutMsgQueueKey,
+    MsgAddressInt, MsgEnvelope, OutMsg, OutMsgDescr, OutMsgQueueInfo, OutMsgQueueKey,
     OutQueueUpdate, read_boc, Result, Serializable, ShardAccount, ShardAccountBlocks,
     ShardAccounts, ShardFeeCreated, ShardHashes, ShardIdent, SliceData, StateInitLib,
     TopBlockDescrSet, TrComputePhase, Transaction, TransactionDescr, ValidatorSet, ValueFlow,
-    U15, UInt256, WorkchainDescr, write_boc
+    U15, UInt256, WorkchainDescr, CommonMessage, SERDE_OPTS_COMMON_MESSAGE
 };
 use ever_executor::{
     BlockchainConfig, CalcMsgFwdFees, ExecuteParams, OrdinaryTransactionExecutor,
@@ -1557,7 +1557,10 @@ impl ValidateQuery {
                 hash_upd.old_hash.to_hex_string(), acc_state_hash.to_hex_string())
         }
         let msg_info = match (trans.in_msg_cell(), trans.read_in_msg()?) {
-            (Some(root), Some(msg)) => Some((root.repr_hash(), msg.is_internal())),
+            (Some(root), Some(msg)) => Some((
+                root.repr_hash(),
+                msg.get_std().ok().map(|m| m.is_internal()).unwrap_or(false)
+            )),
             _ => None 
         };
         *prev_trans_lt_len = lt_len;
@@ -1948,9 +1951,18 @@ impl ValidateQuery {
                 .map_err(|err| error!("InMsg corresponding to inbound message with key {} contains an invalid \
                     Transaction reference (transaction not in the block's transaction list) : {}",
                         key.to_hex_string(), err))?;
-            if !transaction.in_msg_cell().map(|cell| cell.repr_hash() == msg_hash).unwrap_or_default() {
-                reject_query!("InMsg corresponding to inbound message with key {} \
-                    refers to transaction that does not process this inbound message", key.to_hex_string())
+            if let Some(tr_msg_cell) = transaction.in_msg_cell() {
+                if tr_msg_cell.repr_hash() != msg_hash {
+                    // if enveloped msg is not equal to trans in msg hash, try to repack enveloped msg with CommonMessge format.
+                    // This can happen after CapCommonMessage Cap is enabled 
+                    // if shard's OutMsgQueue still contains undelivered messages in old format.
+                    log::warn!(target: "validate_query", "Hash of transaction in_msg != enveloped message hash, repack msg in old format and compare again");
+                    let cmn_msg_hash = CommonMessage::Std(msg.clone()).serialize_with_opts(SERDE_OPTS_COMMON_MESSAGE)?.repr_hash();
+                    if tr_msg_cell.repr_hash() != cmn_msg_hash {
+                        reject_query!("InMsg corresponding to inbound message with key {} \
+                            refers to transaction that does not process this inbound message", key.to_hex_string())
+                    }
+                }
             }
             let (_workchain_id, addr) = msg.dst_ref().ok_or_else(|| error!("No dest address"))
                 .and_then(|addr| addr.extract_std_address(true))?;
@@ -2273,8 +2285,8 @@ impl ValidateQuery {
             let manager = manager.clone();
             Self::add_task(tasks, move || {
                 Self::check_in_msg(&base, &manager, &key, &in_msg)
-                    .map_err(|err| error!("invalid InMsg with key (message hash) {} in the new block {} : {}",
-                        key.to_hex_string(), base.block_id(), err))
+                    .map_err(|err| error!("invalid InMsg with key (message hash) {} in the new block {} : {} {:?}",
+                        key.to_hex_string(), base.block_id(), err, in_msg))
             });
             Ok(true)
         }).map_err(|err| error!("invalid InMsgDescr dictionary in the new block {} : {}", base.block_id(), err))?;
@@ -2315,7 +2327,9 @@ impl ValidateQuery {
                     reject_query!("OutMsg with key {} refers to a message with different hash {}",
                         key.to_hex_string(), msg_cell.repr_hash().to_hex_string())
                 }
-                Message::construct_from_cell(msg_cell.clone())?
+                // TODO MESH support CommonMessage
+                out_msg.read_message()?
+                    .ok_or_else(|| error!("OutMsg with key {} has no Message", key.to_hex_string()))?
             }
             None => Default::default()
         };
@@ -2653,8 +2667,8 @@ impl ValidateQuery {
             let manager = manager.clone();
             Self::add_task(tasks, move ||
                 Self::check_out_msg(&base, &manager, &key, &out_msg)
-                    .map_err(|err| error!("invalid OutMsg with key {} in the new block {} : {}",
-                        key.to_hex_string(), base.block_id(), err))
+                    .map_err(|err| error!("invalid OutMsg with key {} in the new block {} : {} {:?}",
+                        key.to_hex_string(), base.block_id(), err, out_msg))
             );
             Ok(true)
         }).map_err(|err| error!("invalid OutMsgDescr dictionary in the new block {} : {}", base.block_id(), err))?;
@@ -2991,12 +3005,32 @@ impl ValidateQuery {
         // check input message
         let mut money_imported = CurrencyCollection::default();
         let mut money_exported = CurrencyCollection::default();
-        let in_msg = trans.read_in_msg()?;
-        if let Some(in_msg_root) = trans.in_msg_cell() {
-            let in_msg = base.in_msg_descr.get(&in_msg_root.repr_hash())?.ok_or_else(|| error!("inbound message with hash {} of \
-                transaction {} of account {} does not have a corresponding InMsg record",
-                    in_msg_root.repr_hash().to_hex_string(), lt, account_addr.to_hex_string()))?;
-            let msg = Message::construct_from_cell(in_msg_root.clone())?;
+        let common_in_msg_opt = trans.read_in_msg()?;
+        if let Some(common_in_msg) = &common_in_msg_opt {
+            let in_msg_root = trans.in_msg.cell();
+            let in_msg = match base.in_msg_descr.get(&in_msg_root.repr_hash())? {
+                Some(inmsg) => inmsg,
+                // if msg not found, try to repack msg in old format and query again.
+                // This can happen after CapCommonMessage Cap is enabled 
+                // if shard's OutMsgQueue still contains undelivered messages in old format.
+                None => {
+                    log::warn!(target: "validate_query", 
+                        "InMsgDescr does't contain msg {}, repack msg in legacy format and query again", 
+                        in_msg_root.repr_hash().to_hex_string()
+                    );
+                    match base.in_msg_descr.get(&common_in_msg.serialize()?.repr_hash())? {
+                        Some(inmsg) => inmsg,
+                        None => fail!(
+                            "inbound message with hash {} of transaction {} of account {} does not have a corresponding InMsg record",
+                            in_msg_root.repr_hash().to_hex_string(), 
+                            lt,
+                            account_addr.to_hex_string(),
+                        ),
+                    }
+                },
+            };
+            // TODO MESH support mesh messages
+            let msg = common_in_msg.get_std()?;
             // once we know there is a InMsg with correct hash, we already know that it contains a message with this hash (by the verification of InMsg), so it is our message
             // have still to check its destination address and imported value
             // and that it refers to this transaction
@@ -3039,6 +3073,7 @@ impl ValidateQuery {
                 }
             }
         }
+        let serde_opts = trans.out_msgs.serde_opts();
         // check output messages
         trans.out_msgs.iterate_slices_with_keys(|ref mut key, ref out_msg| {
             let out_msg_root = out_msg.reference(0)?;
@@ -3049,7 +3084,8 @@ impl ValidateQuery {
             // once we know there is an OutMsg with correct hash, we already know that it contains a message with this hash (by the verification of OutMsg), so it is our message
             // have still to check its source address, lt and imported value
             // and that it refers to this transaction as its origin
-            let msg = Message::construct_from_cell(out_msg_root.clone())?;
+            let common_msg = CommonMessage::construct_from_cell_with_opts(out_msg_root.clone(), serde_opts)?;
+            let msg = common_msg.get_std()?;
             match out_msg {
                 OutMsg::External(_) => (),
                 OutMsg::Immediate(_) | OutMsg::New(_) => {
@@ -3275,7 +3311,7 @@ impl ValidateQuery {
             ..ExecuteParams::default()
         };
         let _old_account_root = account_root.clone();
-        let mut trans_execute = executor.execute_with_libs_and_params(in_msg.as_ref(), account_root, params)?;
+        let mut trans_execute = executor.execute_with_libs_and_params(common_in_msg_opt.as_ref(), account_root, params)?;
         let copyleft_reward = trans_execute.copyleft_reward().clone();
         *account = Account::construct_from_cell(account_root.clone())?;
         let new_hash = account_root.repr_hash();
@@ -3323,7 +3359,7 @@ impl ValidateQuery {
         // we cannot know prev transaction in executor
         trans_execute.set_prev_trans_hash(trans.prev_trans_hash().clone());
         trans_execute.set_prev_trans_lt(trans.prev_trans_lt());
-        let trans_execute_root = trans_execute.serialize()?;
+        let trans_execute_root = trans_execute.serialize_with_opts(trans_execute.in_msg.serde_opts())?;
         if trans_root != trans_execute_root {
             let _ = Self::prepare_transaction_for_log(
                 &_old_account_root, 
@@ -3345,9 +3381,11 @@ impl ValidateQuery {
         // check new balance and value flow
         let mut left_balance = old_balance.clone();
         left_balance.add(&money_imported)?;
-        if let Some(in_msg) = in_msg {
-            if let Some(header) = in_msg.int_header() {
-                left_balance.grams.add(&header.ihr_fee)?;
+        if let Some(in_msg) = &common_in_msg_opt {
+            if let Ok(std_msg) = in_msg.get_std() {
+                if let Some(header) = std_msg.int_header() {
+                    left_balance.grams.add(&header.ihr_fee)?;
+                }
             }
         }
         let new_balance = account.balance().cloned().unwrap_or_default();
@@ -4527,13 +4565,14 @@ impl ValidateQuery {
         trans: &Transaction,
         trans_execute: &Transaction
     ) -> Result<()> {
+        use ever_block::write_boc;
         log::trace!(target: "validate_reject",
             "acc_before: {}\nacc_after: {}\nconfig: {}\ntrans_origin: {}\ntrans_execute: {}",
             base64_encode(write_boc(&account_before)?),
             base64_encode(write_boc(&account_after)?),
             base64_encode(config.write_to_bytes()?),
-            base64_encode(trans.write_to_bytes()?),
-            base64_encode(trans_execute.write_to_bytes()?)
+            base64_encode(write_boc(&trans.serialize_with_opts(trans.in_msg.serde_opts())?)?),
+            base64_encode(write_boc(&trans_execute.serialize_with_opts(trans_execute.in_msg.serde_opts())?)?),
         );
         Ok(())
     }

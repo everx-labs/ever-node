@@ -31,7 +31,7 @@ use std::{
 use storage::{
     StorageAlloc, TimeChecker,
     block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage}, 
-    node_state_db::NodeStateDb,
+    block_handle_db::NodeStateDb,
     types::BlockMeta,
 };
 #[cfg(feature = "telemetry")]

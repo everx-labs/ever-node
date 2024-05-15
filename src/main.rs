@@ -33,6 +33,7 @@ mod types;
 mod validating_utils;
 mod validator;
 mod shard_states_keeper;
+mod mesh_queues_keeper;
 
 mod ext_messages;
 
