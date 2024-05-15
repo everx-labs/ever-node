@@ -603,7 +603,7 @@ impl CatchainListener for RempCatchain {
     }
 
     fn process_blocks(&self, blocks: Vec<BlockPtr>) {
-        log::trace!(target: "remp", "Processing RMQ {}: new external messages, len = {}", self, blocks.len());
+        log::trace!(target: "remp", "Processing RMQ {}: new external messages, len {}", self, blocks.len());
 
         let mut msg_vect: Vec<::ton_api::ton::validator_session::round::Message> = Vec::new();
         let mut msg_ids: Vec<String> = Vec::new();
@@ -638,8 +638,8 @@ impl CatchainListener for RempCatchain {
                     catchain::CatchainFactory::create_block_payload(
                         serialized_payload.clone(),
                     ), false, false);
-                log::trace!(target: "remp", "Point 3. RMQ {} sent messages: '{:?}'",
-                    self, msg_ids
+                log::trace!(target: "remp", "Point 3. RMQ {} sent messages, cnt {}, len {}: '{:?}'",
+                    self, msg_ids.len(), serialized_payload.len(), msg_ids
                 );
                 #[cfg(feature = "telemetry")]
                 self.engine.remp_core_telemetry().sent_to_catchain(
