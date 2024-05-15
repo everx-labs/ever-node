@@ -128,7 +128,7 @@
       "p16": {
         "max_validators": 1000,
         "max_main_validators": 100,
-        "min_validators": 5
+        "min_validators": 3
       },
       "p17": {
         "min_stake": "10000000000000",
@@ -248,6 +248,6 @@
         "utime_since": nowdate,
         "utime_until": 2000242087,
         "total": p34_total,
-        "main": 5,
+        "main": 3,
         "total_weight": p34_total_weight,
         "list": [

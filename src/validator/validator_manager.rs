@@ -1486,7 +1486,7 @@ impl ValidatorManagerImpl {
         }
  
         if let Some(rm) = &self.remp_manager {
-            metrics::gauge!("remp_message_cache_size", rm.message_cache.all_messages_count() as f64);
+            metrics::gauge!("remp_message_cache_size", rm.message_cache.all_messages_count().0 as f64);
             log::info!(target: "validator_manager", "Remp message cache stats: {}", rm.message_cache.message_stats());
 
             for (s, shard_ident) in rm.catchain_store.list_catchain_sessions().await.iter() {
@@ -1726,10 +1726,18 @@ pub fn start_validator_manager(
                 log::error!(target: "validator_manager", "set_remp_core_interface: {}", e);
             }
 
+            let iface = remp_iface.clone();
             runtime.clone().spawn(async move { 
                 log::info!(target: "remp", "Starting REMP responses polling loop");
-                remp_iface.poll_responses_loop().await; 
+                iface.poll_responses_loop().await;
                 log::info!(target: "remp", "Finishing REMP responses polling loop");
+            });
+
+            let iface = remp_iface.clone();
+            runtime.clone().spawn(async move {
+                log::info!(target: "remp", "Starting REMP testing loop");
+                iface.test_remp_messages_loop(Duration::from_millis(300), 100).await;
+                log::info!(target: "remp", "Finishing REMP testing loop");
             });
         }
 

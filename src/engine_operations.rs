@@ -990,18 +990,6 @@ impl EngineOperations for Engine {
     fn new_remp_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
         self.remp_messages()?.new_message(id, message)
     }
-    fn get_remp_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
-        self.remp_messages()?.get_messages(shard)
-    }
-    fn finalize_remp_messages(
-        &self,
-        block: BlockIdExt,
-        accepted: Vec<UInt256>,
-        rejected: Vec<(UInt256, String)>,
-        ignored: Vec<UInt256>,
-    ) -> Result<()> {
-        self.remp_messages()?.finalize_messages(block, accepted, rejected, ignored)
-    }
     fn finalize_remp_messages_as_ignored(&self, block_id: &BlockIdExt)
     -> Result<()> {
         self.remp_messages()?.finalize_remp_messages_as_ignored(block_id)
@@ -1013,7 +1001,6 @@ impl EngineOperations for Engine {
     async fn check_remp_duplicate(&self, message_id: &UInt256) -> Result<RempDuplicateStatus> {
         self.remp_service()
             .ok_or_else(|| error!("Can't get message status because remp service was not set"))?
-            .remp_core_interface()?
             .check_remp_duplicate(message_id)
     }
 

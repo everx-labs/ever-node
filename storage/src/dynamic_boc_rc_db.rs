@@ -301,9 +301,7 @@ impl DynamicBocDb {
 
     // Is thread-safe
     pub fn load_boc(self: &Arc<Self>, root_cell_id: &UInt256, use_cache: bool) -> Result<Cell> {
-        let storage_cell = self.load_cell(root_cell_id, use_cache)?;
-
-        Ok(Cell::with_cell_impl_arc(storage_cell))
+        self.load_cell(root_cell_id, use_cache)
     }
 
     pub fn check_and_update_cells(&mut self) -> Result<()> {
@@ -454,7 +452,7 @@ impl DynamicBocDb {
         self: &Arc<Self>,
         cell_id: &UInt256,
         use_cache: bool,
-    ) -> Result<Arc<StorageCell>> {
+    ) -> Result<Cell> {
 
         let deserialize = |value: &[u8]| {
             StorageCell::deserialize(self, value, use_cache, false).or_else(
@@ -469,7 +467,7 @@ impl DynamicBocDb {
                         target: TARGET, 
                         "DynamicBocDb::load_cell from cache id {cell_id:x}"
                     );
-                    return Ok(Arc::new(cell))
+                    return Ok(Cell::with_cell_impl(cell))
                 },
                 Err(e) => log::trace!(
                     target: TARGET, 
@@ -481,6 +479,15 @@ impl DynamicBocDb {
         let storage_cell_data = match self.db.get(cell_id) {
             Ok(data) => data,
             Err(e) => {
+
+                if let Some(guard) = self.storing_cells.get(cell_id) {
+                    log::error!(
+                        target: TARGET,
+                        "DynamicBocDb::load_cell from storing_cells by id {cell_id:x}",
+                    );
+                    return Ok(guard.val().clone());
+                }
+
                 log::error!("FATAL!");
                 log::error!("FATAL! Can't load cell {:x} from db, error: {:?}", cell_id, e);
                 log::error!("FATAL!");
@@ -519,7 +526,7 @@ impl DynamicBocDb {
             "DynamicBocDb::load_cell from DB id {cell_id:x} use_cache {use_cache}"
         );
 
-        Ok(storage_cell)
+        Ok(Cell::with_cell_impl_arc(storage_cell))
     }
 
     pub(crate) fn allocated(&self) -> &StorageAlloc {
@@ -819,7 +826,7 @@ impl DoneCellsStorage for DoneCellsStorageAdapter {
 
     fn get(&self, index: u32) -> Result<Cell> {
         let id = UInt256::from_slice(self.index.get(&index.into())?.as_ref()).into();
-        Ok(Cell::with_cell_impl_arc(self.boc_db.clone().load_cell(&id, false)?))
+        Ok(self.boc_db.clone().load_cell(&id, false)?)
     }
 
     fn cleanup(&mut self) -> Result<()> {
@@ -849,8 +856,7 @@ impl CellByHashStorageAdapter {
 
 impl CellByHashStorage for CellByHashStorageAdapter {
     fn get_cell_by_hash(&self, hash: &UInt256) -> Result<Cell> {
-        let cell = Cell::with_cell_impl_arc(self.boc_db.clone().load_cell(&hash, self.use_cache)?);
-        Ok(cell)
+        self.boc_db.clone().load_cell(&hash, self.use_cache)
     }
 }
 
@@ -920,7 +926,7 @@ impl OrderedCellsStorage for OrderedCellsStorageAdapter {
 
     fn get_cell_by_index(&self, index: u32) -> Result<Cell> {
         let id = UInt256::from_slice(self.index1.get(&index.into())?.as_ref()).into();
-        let cell = Cell::with_cell_impl_arc(self.boc_db.clone().load_cell(&id, false)?);
+        let cell = self.boc_db.clone().load_cell(&id, false)?;
 
         let slowdown = self.slowdown();
         if index % 1000 == 0 {

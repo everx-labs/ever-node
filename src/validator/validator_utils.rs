@@ -17,13 +17,7 @@ use crate::{
 };
 
 use catchain::{BlockPayloadPtr, CatchainNode, PublicKey, PublicKeyHash};
-use ever_block::{
-    error, fail, BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, BuilderData,
-    ConfigParams, CryptoSignature, CryptoSignaturePair, Deserializable, Ed25519KeyOption,
-    GlobalCapabilities, HashmapType, KeyId, Message, Result, Serializable, Sha256, ShardIdent,
-    SigPubKey, UInt256, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet, Workchains,
-    WorkchainDescr
-};
+use ever_block::{error, fail, BlockIdExt, BlockInfo, BlockSignatures, BlockSignaturesPure, BuilderData, ConfigParams, CryptoSignature, CryptoSignaturePair, Deserializable, Ed25519KeyOption, GlobalCapabilities, HashmapType, KeyId, Message, Result, Serializable, Sha256, ShardIdent, SigPubKey, UInt256, UnixTime32, ValidatorBaseInfo, ValidatorDescr, ValidatorSet, Workchains, WorkchainDescr, AccountIdPrefixFull};
 use ever_block::CatchainConfig;
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
@@ -418,12 +412,29 @@ pub fn calc_subset_for_workchain_standard(
 pub async fn get_shard_by_message(engine: Arc<dyn EngineOperations>, message: Arc<Message>) -> Result<ShardIdent> {
     let dst_wc = message.dst_workchain_id()
         .ok_or_else(|| error!("Can't get workchain id from message"))?;
-    let dst_address = message.int_dst_account_id()
+    let mut dst_address = message.int_dst_account_id()
         .ok_or_else(|| error!("Can't get standart destination address from message"))?;
 
+    let last_mc_state = engine.load_last_applied_mc_state().await?;
+    let mut shards_vec = Vec::new();
+    last_mc_state.shards()?.iterate_shards_for_workchain(
+        dst_wc, |s, _| { shards_vec.push(s); Ok(true) }
+    )?;
+
+    if shards_vec.len() == 0 {
+        return Ok(ShardIdent::masterchain())
+    }
+
+    let shard_id = shards_vec
+        .get(dst_address.hash(0).first_u64() as usize % shards_vec.len())
+        .ok_or_else(|| error!("No shards"))?;
+
     // find account and related shard
-    let (_account, shard) = engine.load_account(dst_wc, dst_address.clone()).await?;
-    Ok(shard)
+    //let (_account, shard) = engine.load_account(dst_wc, dst_address.clone()).await?;
+
+    log::trace!(target: "remp", "get_shard_by_message: message {:x}: shard {}", dst_address, shard_id);
+
+    Ok(shard_id.clone())
 }
 
 pub fn get_first_block_seqno_after_prevs(prevs: &Vec<BlockIdExt>) -> Option<u32> {

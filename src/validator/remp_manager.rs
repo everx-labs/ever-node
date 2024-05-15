@@ -29,9 +29,9 @@ use crate::{
     config::RempConfig,
     engine_traits::{EngineOperations, RempCoreInterface, RempDuplicateStatus},
     validator::{
-        message_cache::{RmqMessage, MessageCache}, mutex_wrapper::MutexWrapper,
+        message_cache::{RmqMessage, RempMessageOrigin, RempMessageWithOrigin, MessageCache}, mutex_wrapper::MutexWrapper,
         remp_catchain::RempCatchainStore,
-        validator_utils::{get_message_uid, get_shard_by_message}
+        validator_utils::get_shard_by_message
     }
 };
 
@@ -42,31 +42,32 @@ use std::time::SystemTime;
 use adnl::telemetry::Metric;
 use chrono::{DateTime, Utc};
 use crossbeam_channel::TryRecvError;
-use rand::Rng;
+use rand::{Rng, RngCore};
+use rand::prelude::ThreadRng;
 
 pub struct RempInterfaceQueues {
     message_cache: Arc<MessageCache>,
     runtime: Arc<tokio::runtime::Handle>,
     pub engine: Arc<dyn EngineOperations>,
     pub incoming_sender: 
-        crossbeam_channel::Sender<Arc<RmqMessage>>,
+        crossbeam_channel::Sender<Arc<RempMessageWithOrigin>>,
     pub response_receiver: 
-        crossbeam_channel::Receiver<(UInt256, Arc<RmqMessage>, RempMessageStatus)>
+        crossbeam_channel::Receiver<(UInt256, UInt256, Arc<RempMessageOrigin>, RempMessageStatus)>
 }
 
 pub struct RempDelayer {
     max_incoming_broadcast_delay_millis: u32,
     random_seed: u64,
 
-    pub incoming_receiver: crossbeam_channel::Receiver<Arc<RmqMessage>>,
-    pub delayed_incoming_sender: crossbeam_channel::Sender<Arc<RmqMessage>>,
-    delay_heap: MutexWrapper<(BinaryHeap<(Reverse<SystemTime>, UInt256)>, HashMap<UInt256, Arc<RmqMessage>>)>,
+    pub incoming_receiver: crossbeam_channel::Receiver<Arc<RempMessageWithOrigin>>,
+    pub delayed_incoming_sender: crossbeam_channel::Sender<Arc<RempMessageWithOrigin>>,
+    delay_heap: MutexWrapper<(BinaryHeap<(Reverse<SystemTime>, UInt256)>, HashMap<UInt256, Arc<RempMessageWithOrigin>>)>,
 }
 
 impl RempDelayer {
     pub fn new (random_seed: u64, options: &RempConfig,
-                incoming_receiver: crossbeam_channel::Receiver<Arc<RmqMessage>>,
-                delayed_incoming_sender: crossbeam_channel::Sender<Arc<RmqMessage>>) -> Self {
+                incoming_receiver: crossbeam_channel::Receiver<Arc<RempMessageWithOrigin>>,
+                delayed_incoming_sender: crossbeam_channel::Sender<Arc<RempMessageWithOrigin>>) -> Self {
         Self {
             max_incoming_broadcast_delay_millis: options.get_max_incoming_broadcast_delay_millis(),
             random_seed,
@@ -76,21 +77,22 @@ impl RempDelayer {
         }
     }
 
-    async fn push_delayer(&self, activation_time: SystemTime, msg: Arc<RmqMessage>) {
+    async fn push_delayer(&self, activation_time: SystemTime, msg: Arc<RempMessageWithOrigin>) {
         let tm: DateTime<Utc> = activation_time.into();
         self.delay_heap.execute_sync(|(h,m)| {
-            if !m.contains_key(&msg.message_id) {
+            let message_id = msg.get_message_id();
+            if !m.contains_key(message_id) {
                 log::trace!(target: "remp", "Delaying REMP message {} till {}", msg, tm.format("%T"));
-                h.push((Reverse(activation_time), msg.message_id.clone()));
-                m.insert(msg.message_id.clone(), msg);
+                h.push((Reverse(activation_time), message_id.clone()));
+                m.insert(message_id.clone(), msg);
             }
             else {
-                log::trace!(target: "remp", "REMP message {} is already waiting", msg);
+                log::trace!(target: "remp", "Delayer: REMP message {} is already waiting", msg);
             }
         }).await
     }
 
-    async fn pop_delayer(&self) -> Option<Arc<RmqMessage>> {
+    async fn pop_delayer(&self) -> Option<Arc<RempMessageWithOrigin>> {
         let now = SystemTime::now();
         let res = self.delay_heap.execute_sync(|(h,m)| {
             match h.peek() {
@@ -107,7 +109,7 @@ impl RempDelayer {
 
         if let Some((tm,msg)) = res {
             let tm: DateTime<Utc> = tm.0.into();
-            log::trace!(target: "remp", "Sending further REMP message {}, delayed till {}", msg, tm.format("%T"));
+            log::trace!(target: "remp", "Resuming REMP message {}, delayed till {}", msg, tm.format("%T"));
             Some(msg)
         }
         else {
@@ -123,7 +125,7 @@ impl RempDelayer {
         max (h,m)
     }
 
-    async fn poll_incoming_once(&self) -> Result<Option<Arc<RmqMessage>>> {
+    async fn poll_incoming_once(&self) -> Result<Option<Arc<RempMessageWithOrigin>>> {
         if let Some(msg) = self.pop_delayer().await {
             return Ok(Some(msg))
         }
@@ -132,7 +134,7 @@ impl RempDelayer {
             match self.incoming_receiver.try_recv() {
                 Ok(msg) => {
                     if msg.has_no_source_key() && self.max_incoming_broadcast_delay_millis > 0 {
-                        let delay = (msg.message_id.first_u64() + self.random_seed) % (self.max_incoming_broadcast_delay_millis as u64);
+                        let delay = (msg.get_message_id().first_u64() + self.random_seed) % (self.max_incoming_broadcast_delay_millis as u64);
                         self.push_delayer(SystemTime::now() + Duration::from_millis(delay), msg).await;
                     }
                     else {
@@ -321,21 +323,21 @@ impl<T: fmt::Display, Q: RempQueue<T>> RempQueueDispatcher<T,Q> {
 
 pub struct RempIncomingQueue {
     engine: Arc<dyn EngineOperations>,
-    pub incoming_receiver: crossbeam_channel::Receiver<Arc<RmqMessage>>
+    pub incoming_receiver: crossbeam_channel::Receiver<Arc<RempMessageWithOrigin>>
 }
 
 impl RempIncomingQueue {
     pub fn new(
         engine: Arc<dyn EngineOperations>, 
-        incoming_receiver: crossbeam_channel::Receiver<Arc<RmqMessage>>
+        incoming_receiver: crossbeam_channel::Receiver<Arc<RempMessageWithOrigin>>
     ) -> Self {
         RempIncomingQueue { engine, incoming_receiver }
     }
 }
 
 #[async_trait::async_trait]
-impl RempQueue<RmqMessage> for RempIncomingQueue {
-    fn receive_message(&self) -> Result<Option<Arc<RmqMessage>>> {
+impl RempQueue<RempMessageWithOrigin> for RempIncomingQueue {
+    fn receive_message(&self) -> Result<Option<Arc<RempMessageWithOrigin>>> {
         match self.incoming_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
             Err(crossbeam_channel::TryRecvError::Empty) => 
@@ -345,8 +347,8 @@ impl RempQueue<RmqMessage> for RempIncomingQueue {
         }
     }
 
-    async fn compute_shard(&self, msg: Arc<RmqMessage>) -> Result<ShardIdent> {
-        get_shard_by_message(self.engine.clone(), msg.message.clone()).await
+    async fn compute_shard(&self, msg: Arc<RempMessageWithOrigin>) -> Result<ShardIdent> {
+        get_shard_by_message(self.engine.clone(), msg.message.message.clone()).await
     }
 }
 
@@ -361,10 +363,6 @@ impl CollatorInterfaceWrapper {
             engine,
 //          message_dispatcher: Mutex::new(HashMap::new())
         }
-    }
-
-    pub async fn send_message_to_collator(&self, msg_id: UInt256, msg: Arc<Message>) -> Result<()> {
-        self.engine.new_remp_message(msg_id.clone(), msg)
     }
 }
 
@@ -439,9 +437,9 @@ pub struct RempManager {
     pub catchain_store: Arc<RempCatchainStore>,
     pub message_cache: Arc<MessageCache>,
     incoming_delayer: RempDelayer,
-    incoming_dispatcher: RempQueueDispatcher<RmqMessage, RempIncomingQueue>,
+    incoming_dispatcher: RempQueueDispatcher<RempMessageWithOrigin, RempIncomingQueue>,
     pub collator_receipt_dispatcher: RempQueueDispatcher<CollatorResult, CollatorInterfaceWrapper>,
-    pub response_sender: crossbeam_channel::Sender<(UInt256, Arc<RmqMessage>, RempMessageStatus)>
+    pub response_sender: crossbeam_channel::Sender<(UInt256 /* local_id */, UInt256 /* message_id */, Arc<RempMessageOrigin>, RempMessageStatus)>
 }
 
 impl RempManager {
@@ -503,7 +501,7 @@ impl RempManager {
         self.collator_receipt_dispatcher.remove_actual_shard(shard).await;
     }
 
-    pub async fn poll_incoming(&self, shard: &ShardIdent) -> (Option<Arc<RmqMessage>>, usize) {
+    pub async fn poll_incoming(&self, shard: &ShardIdent) -> (Option<Arc<RempMessageWithOrigin>>, usize) {
         match self.incoming_delayer.poll_incoming().await {
             Ok(n) => {
                 log::trace!(target: "remp", "Polling REMP incoming delayer queue: {} messages processed", n);
@@ -515,12 +513,12 @@ impl RempManager {
         return self.incoming_dispatcher.poll(shard).await;
     }
 
-    pub async fn return_to_incoming(&self, message: Arc<RmqMessage>, shard: &ShardIdent) {
+    pub async fn return_to_incoming(&self, message: Arc<RempMessageWithOrigin>, shard: &ShardIdent) {
         self.incoming_dispatcher.return_back(message, shard).await;
     }
 
-    pub fn queue_response_to_fullnode(&self, local_key_id: UInt256, rmq_message: Arc<RmqMessage>, status: RempMessageStatus) -> Result<()> {
-        self.response_sender.send((local_key_id, rmq_message, status))?;
+    pub fn queue_response_to_fullnode(&self, local_key_id: UInt256, message_id: UInt256, origin: Arc<RempMessageOrigin>, status: RempMessageStatus) -> Result<()> {
+        self.response_sender.send((local_key_id, message_id, origin, status))?;
         Ok(())
     }
 
@@ -553,8 +551,14 @@ impl RempManager {
 
 #[allow(dead_code)] 
 impl RempInterfaceQueues {
-    pub fn make_test_message(&self) -> Result<RmqMessage> {
-        RmqMessage::make_test_message(&SliceData::new_empty())
+    pub fn make_test_message(&self, thread_rng: &mut ThreadRng) -> Result<RempMessageWithOrigin> {
+        let mut data_array  = [0 as u8; 128];
+        thread_rng.fill_bytes(&mut data_array);
+        let data = SliceData::new(data_array.to_vec());
+        Ok(RempMessageWithOrigin {
+            message: RmqMessage::make_test_message(&data)?,
+            origin: RempMessageOrigin::create_empty()?
+        })
     }
 
     /**
@@ -563,34 +567,35 @@ impl RempInterfaceQueues {
      * 1. random messages are generated each second, and sent to the REMP input queue
      * 2. responses after REMP processing are taken from REMP response queue and printed
      */
-    pub async fn test_remp_messages_loop(&self) {
+    pub async fn test_remp_messages_loop(&self, pause: Duration, batch_size: usize) {
         log::info!(target: "remp", "Test REMP messages loop is started");
         loop {
-            match self.make_test_message() {
-                Err(e) => log::error!(target: "remp", "Cannot make test REMP message: `{}`", e),
-                Ok(test_message) => {
-                    if let Err(x) = self.incoming_sender.send(Arc::new(test_message)) {
-                        log::error!(target: "remp", "Cannot send test REMP message to RMQ: {}",
-                            x
-                        );
-                    }
+            for _i in 0..batch_size {
+                let mut thread_rng = ThreadRng::default();
+                match self.make_test_message(&mut thread_rng) {
+                    Err(e) => log::error!(target: "remp", "Cannot make test REMP message: `{}`", e),
+                    Ok(msg) => {
+                        if let Err(x) = self.incoming_sender.send(Arc::new(msg)) {
+                            log::error!(target: "remp", "Cannot send test REMP message to RMQ: {}", x);
+                        }
 
-                    while let Ok(msg) = self.response_receiver.try_recv() {
-                        log::trace!(target: "remp", "Received test REMP response: {:?}", msg);
+                        while let Ok(msg) = self.response_receiver.try_recv() {
+                            log::trace!(target: "remp", "Received test REMP response: {:?}", msg);
+                        }
                     }
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(pause).await;
         }
     }
 
     pub async fn send_response_to_fullnode(
-        &self, local_key_id: UInt256, rmq_message: Arc<RmqMessage>, status: RempMessageStatus
+        &self, local_key_id: UInt256, message_id: UInt256, origin: Arc<RempMessageOrigin>, status: RempMessageStatus
     ) {
         let receipt = ton_api::ton::ton_node::RempReceipt::TonNode_RempReceipt (
             ton_api::ton::ton_node::rempreceipt::RempReceipt {
-                message_id: rmq_message.message_id.clone().into(),
+                message_id: message_id.clone().into(),
                 status: status.clone(),
                 timestamp: 0,
                 source_id: local_key_id.into()
@@ -599,15 +604,15 @@ impl RempInterfaceQueues {
 
         let (engine,runtime) = (self.engine.clone(), self.runtime.clone());
         runtime.clone().spawn(async move {
-            if let Err(e) = engine.send_remp_receipt(rmq_message.source_key.clone(), receipt).await {
+            if let Err(e) = engine.send_remp_receipt(origin.source_key.clone(), receipt).await {
                 log::error!(target: "remp",
                     "Cannot send {} response message {:x} to {}: {}",
-                    status, rmq_message.message_id, rmq_message.source_key, e
+                    status, message_id, origin.source_key, e
                 )
             }
             else {
                 log::trace!(target: "remp", "Sending {} response for message {:x} to {}",
-                    status, rmq_message.message_id, rmq_message.source_idx
+                    status, message_id, origin.source_idx
                 )
             }
         });
@@ -616,8 +621,8 @@ impl RempInterfaceQueues {
     pub async fn poll_responses_loop(&self) {
         loop {
             match self.response_receiver.try_recv() {
-                Ok((local_key_id, msg,status)) => 
-                    self.send_response_to_fullnode(local_key_id, msg, status).await,
+                Ok((local_key_id, hdr, origin, status)) => 
+                    self.send_response_to_fullnode(local_key_id, hdr, origin, status).await,
                 Err(crossbeam_channel::TryRecvError::Empty) => 
                     tokio::time::sleep(Duration::from_millis(1)).await,
                 Err(crossbeam_channel::TryRecvError::Disconnected) => return
@@ -628,27 +633,34 @@ impl RempInterfaceQueues {
 
 #[async_trait::async_trait]
 impl RempCoreInterface for RempInterfaceQueues {
-    async fn process_incoming_message(&self, message_id: UInt256, message: Message, source: Arc<KeyId>) -> Result<()> {
-        let arc_message = Arc::new(message.clone());
-
+    async fn process_incoming_message(&self, message: &ton_api::ton::ton_node::RempMessage, source: Arc<KeyId>) -> Result<()> {
         // build message
-        let remp_message = Arc::new(RmqMessage::new (
-            arc_message,
-            message_id.clone(),
-            get_message_uid(&message),
-            source,
-            0
-        )?);
-
-        if self.message_cache.get_message(&message_id)?.is_some() {
+        let remp_message = RmqMessage::from_raw_message(message.message())?;
+        if message.id() != &remp_message.message_id {
+            fail!("Message with computed id {:x} has different id {:x} in RempMessage struct, message will be ignored",
+                remp_message.message_id, message.id()
+            );
+        }
+        if self.message_cache.is_message_fully_known(&remp_message.message_id)? {
             log::trace!(target: "remp",
-                "Point 1. We already know about message {:x}, no forwarding to incoming queue is necessary",
-                message_id
+                "Point 1. Message {:x} is fully known, no forwarding to incoming queue is necessary",
+                remp_message.message_id
             );
         }
         else {
-            log::trace!(target: "remp", "Point 1. Adding incoming message {} to incoming queue", remp_message);
-            self.incoming_sender.send(remp_message)?;
+            let remp_message_origin = RempMessageOrigin::new (
+                source,
+                0
+            )?;
+
+            log::trace!(target: "remp",
+                "Point 1. Adding incoming message {} to incoming queue, known message info {}",
+                remp_message, self.message_cache.get_message_info(&remp_message.message_id)?
+            );
+            self.incoming_sender.send(Arc::new(RempMessageWithOrigin {
+                message: remp_message,
+                origin: remp_message_origin
+            }))?;
             #[cfg(feature = "telemetry")]
             self.engine.remp_core_telemetry().in_channel_from_fullnode(self.incoming_sender.len());
         }

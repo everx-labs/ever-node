@@ -628,18 +628,6 @@ pub trait EngineOperations : Sync + Send {
     fn new_remp_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
         unimplemented!()
     }
-    fn get_remp_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
-        unimplemented!()
-    }
-    fn finalize_remp_messages(
-        &self,
-        block: BlockIdExt,
-        accepted: Vec<UInt256>,
-        rejected: Vec<(UInt256, String)>,
-        ignored: Vec<UInt256>,
-    ) -> Result<()> {
-        unimplemented!()
-    }
     fn finalize_remp_messages_as_ignored(&self, block_id: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
@@ -968,6 +956,16 @@ pub enum RempDuplicateStatus {
 
 #[async_trait::async_trait]
 pub trait RempCoreInterface: Sync + Send {
-    async fn process_incoming_message(&self, message_id: UInt256, message: Message, source: Arc<KeyId>) -> Result<()>;
+    async fn process_incoming_message(&self, message: &RempMessage, source: Arc<KeyId>) -> Result<()>;
     fn check_remp_duplicate(&self, message_id: &UInt256) -> Result<RempDuplicateStatus>;
+}
+
+#[async_trait::async_trait]
+pub trait RempQueueCollatorInterface : Send + Sync {
+    async fn init_queue(
+        &self,
+        master_block_id: &BlockIdExt,
+        prev_blocks_ids: &[&BlockIdExt]
+    ) -> Result<()>;
+    async fn get_next_message_for_collation(&self) -> Result<Option<(Arc<Message>, UInt256)>>;
 }

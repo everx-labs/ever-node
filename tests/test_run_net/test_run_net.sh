@@ -1,6 +1,6 @@
 #!/bin/bash
 
-NODES=6
+NODES=3
 WORKCHAINS=false
 REMP_TEST=false
 CURRENT_BRANCH="$(git branch --show-current)"
@@ -38,6 +38,27 @@ if ! cargo build --release
 then
     exit 1
 fi
+
+cd ../../../
+if ! [ -d "ever-node-tools" ]
+then
+    git clone "https://github.com/tonlabs/ever-node-tools"
+    cd ever-node-tools
+    git checkout "$CURRENT_BRANCH" || echo "Use default branch"
+    git submodule init
+    git submodule update
+else
+    cd ever-node-tools
+fi
+TOOLS_ROOT=$(pwd)
+
+# cargo update
+echo "Building $(pwd)"
+if ! cargo build --release
+then
+    exit 1
+fi
+cd target/release/
 
 cd $TEST_ROOT
 NOWDATE=$(date +"%s")

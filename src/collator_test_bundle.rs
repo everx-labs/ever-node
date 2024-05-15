@@ -39,7 +39,7 @@ use storage::StorageTelemetry;
 use ever_block::{
     BlockIdExt, Message, ShardIdent, Serializable, MerkleUpdate, Deserializable, 
     ValidatorBaseInfo, BlockSignaturesPure, BlockSignatures, HashmapAugType, 
-    TopBlockDescrSet, GlobalCapabilities, OutMsgQueue,
+    TopBlockDescrSet, OutMsgQueue,
 };
 use ever_block::{ShardStateUnsplit, TopBlockDescr};
 use ever_block::{UInt256, fail, error, Result, CellType, read_boc, read_single_root_boc};
@@ -1208,19 +1208,6 @@ impl CollatorTestBundle {
 
     pub fn candidate(&self) -> Option<&BlockCandidate> { self.candidate.as_ref() }
     pub fn set_notes(&mut self, notes: String) { self.index.notes = notes }
-
-    fn get_messages(&self, remp: bool) -> Result<Vec<(Arc<Message>, UInt256)>> {
-        let remp_enabled = self.states
-            .get(&self.index.last_mc_state)
-            .ok_or_else(|| error!("Can't load last ms block to read config"))?
-            .config_params()?.has_capability(GlobalCapabilities::CapRemp);
-
-        if remp_enabled == remp {
-            Ok(self.external_messages.clone())
-        } else {
-            Ok(vec!())
-        }
-    }
 }
 
 // Is used instead full node's engine for run tests
@@ -1344,20 +1331,6 @@ impl EngineOperations for CollatorTestBundle {
 
     fn engine_allocated(&self) -> &Arc<EngineAlloc> {
         &self.allocated
-    }
-
-    fn get_remp_messages(&self, _shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
-        self.get_messages(true)
-    }
-
-    fn finalize_remp_messages(
-        &self,
-        _block: BlockIdExt,
-        _accepted: Vec<UInt256>,
-        _rejected: Vec<(UInt256, String)>,
-        _ignored: Vec<UInt256>,
-    ) -> Result<()> {
-        Ok(())
     }
 
     async fn check_remp_duplicate(&self, _message_id: &UInt256) -> Result<RempDuplicateStatus> {
