@@ -143,9 +143,10 @@ impl BlockProofStuff {
         &self.id
     }
 
-    // pub fn proof(&self) -> &BlockProof {
-    //     &self.proof
-    // }
+    #[cfg(feature = "external_db")]
+    pub fn proof(&self) -> &BlockProof {
+        &self.proof
+    }
 
     pub fn data(&self) -> &[u8] {
         &self.data
