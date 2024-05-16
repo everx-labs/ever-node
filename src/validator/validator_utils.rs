@@ -25,6 +25,8 @@ use ever_block::{
     WorkchainDescr
 };
 use ever_block::CatchainConfig;
+#[cfg(feature = "workchains")]
+use ever_block::{KeyOption, KeyOptionJson};
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
 use validator_session::SessionNode;
@@ -46,6 +48,17 @@ pub fn make_cryptosig_pair(
 ) -> Result<CryptoSignaturePair> {
     let csig = make_cryptosig(pair.1)?;
     return Ok(CryptoSignaturePair::with_params(pair.0.data().into(), csig));
+}
+
+#[cfg(feature = "workchains")]
+pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (KeyOptionJson, Arc<dyn KeyOption>) {
+    loop {
+        if let Ok((private, public)) = Ed25519KeyOption::generate_with_json() {
+            if id_opt.is_none() || Some(calc_workchain_id_by_adnl_id(public.id().data())) == id_opt {
+                return (private, public)
+            }
+        }
+    }
 }
 
 pub fn pairvec_to_cryptopair_vec(

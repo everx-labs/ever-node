@@ -31,6 +31,7 @@ pub mod types;
 pub mod validating_utils;
 pub mod validator;
 pub mod shard_states_keeper;
+mod mesh_queues_keeper;
 
 pub mod ext_messages;
 

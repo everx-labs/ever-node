@@ -12,7 +12,8 @@
 */
 
 use crate::{
-    block::{BlockStuff, BlockIdExtExtention}, block_proof::BlockProofStuff, boot,
+    block::{BlockStuff, BlockIdExtExtention, BlockKind},
+    block_proof::BlockProofStuff, boot,
     config::{
         CollatorConfig, CollatorTestBundlesGeneralConfig, KafkaConsumerConfig,
         TonNodeConfig, ValidatorManagerConfig
@@ -29,7 +30,7 @@ use crate::{
             SHARD_BROADCAST_WINDOW, apply_proof_chain,
         },
         counters::TpsCounter,
-        remp_client::RempClient,
+        remp_client::RempClient, mesh_client::MeshClient,
     },
     internal_db::{
         InternalDb, InternalDbConfig, 
@@ -82,7 +83,7 @@ use ever_block::{CryptoSignaturePair, Deserializable, HashmapType};
 #[cfg(feature = "telemetry")]
 use ever_block::Cell;
 use std::{
-    ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering, AtomicU64}},
+    ops::Deref, sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering, AtomicU64, AtomicI32}},
     time::{Duration, SystemTime}, collections::{HashMap, HashSet}, path::Path
 };
 #[cfg(feature = "telemetry")]
@@ -93,7 +94,8 @@ use storage::{StorageTelemetry, types::StorageCell};
 use ton_api::ton::ton_node::{
     Broadcast, 
     broadcast::{
-        BlockBroadcast, QueueUpdateBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast
+        BlockBroadcast, QueueUpdateBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast,
+        MeshUpdateBroadcast
     }
 };
 
@@ -115,6 +117,8 @@ pub struct Engine {
     next_block_applying_awaiters: AwaitersPool<BlockIdExt, BlockIdExt>,
     download_block_awaiters: AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)>,
     download_queue_update_awaiters: AwaitersPool<BlockIdExt, BlockStuff>,
+    download_mesh_kit_awaiters: AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)>,
+    download_latest_mesh_kit_awaiters: AwaitersPool<i32, (BlockStuff, BlockProofStuff)>,
     external_messages: Arc<MessagesPool>,
     servers: lockfree::queue::Queue<Server>,
     stopper: Arc<Stopper>,
@@ -136,6 +140,7 @@ pub struct Engine {
     will_validate: AtomicBool,
     sync_status: AtomicU32,
     remp_capability: AtomicBool,
+    network_global_id: AtomicI32,
 
     smft_capability: AtomicBool,
 
@@ -176,6 +181,8 @@ pub struct Engine {
     tps_counter: TpsCounter,
 
     pub out_queues_cache: std::sync::Mutex<std::collections::HashMap<ShardIdent, OutMsgQueue>>,
+
+    mesh_client: tokio::sync::OnceCell<Arc<MeshClient>>,
 }
 
 struct DownloadContext<'a, T> {
@@ -398,9 +405,68 @@ impl Downloader for ZeroStateDownloader {
     }
 }
 
+struct MeshKitDownloader {
+    network_id: i32
+}
+ 
+#[async_trait::async_trait]
+impl Downloader for MeshKitDownloader {
+    type Item = (BlockStuff, BlockProofStuff);
+    async fn try_download(
+        &self, 
+        context: &DownloadContext<'_, Self::Item>,
+    ) -> Result<Self::Item> {
+        context.client.download_mesh_kit(
+            self.network_id,
+            context.id,
+            context.engine.network_global_id()
+        ).await
+    }
+}
+
+struct LatestMeshKitDownloader {
+    network_id: i32
+}
+ 
+#[async_trait::async_trait]
+impl Downloader for LatestMeshKitDownloader {
+    type Item = (BlockStuff, BlockProofStuff);
+    async fn try_download(
+        &self, 
+        context: &DownloadContext<'_, Self::Item>,
+    ) -> Result<Self::Item> {
+        context.client.download_latest_mesh_kit(
+            self.network_id,
+            context.engine.network_global_id()
+        ).await
+    }
+}
+
+struct NextMeshUpdateDownloader {
+    network_id: i32
+}
+ 
+#[async_trait::async_trait]
+impl Downloader for NextMeshUpdateDownloader {
+    type Item = (BlockStuff, BlockProofStuff);
+    async fn try_download(
+        &self, 
+        context: &DownloadContext<'_, Self::Item>,
+    ) -> Result<Self::Item> {
+        // if let Some(handle) = context.engine.db.load_block_handle(context.id)? {
+        //     TODO
+        // }
+        context.client.download_next_mesh_update(
+            self.network_id,
+            context.id,
+            context.engine.network_global_id()
+        ).await
+    }
+}
+
 pub struct Stopper {
     stop: Arc<AtomicU32>,
-    token: Arc<tokio_util::sync::CancellationToken>
+    token: tokio_util::sync::CancellationToken
 }
 
 impl Stopper {
@@ -408,7 +474,7 @@ impl Stopper {
     pub fn new() -> Self {
         Stopper {
             stop: Arc::new(AtomicU32::new(0)),
-            token: Arc::new(tokio_util::sync::CancellationToken::new())
+            token: tokio_util::sync::CancellationToken::new()
         }
     }
 
@@ -488,6 +554,10 @@ impl Stopper {
 
     pub fn release_stop(&self, mask: u32) {
         self.stop.fetch_and(!mask, Ordering::Relaxed);
+    }
+
+    pub fn token(&self) -> tokio_util::sync::CancellationToken {
+        self.token.clone()
     }
 
 }
@@ -794,6 +864,18 @@ impl Engine {
             external_messages: Arc::new(
                 MessagesPool::new(now, external_messages_maximum_queue_length)
             ),
+            download_mesh_kit_awaiters: AwaitersPool::new(
+                "download_mesh_kit_awaiters",
+                #[cfg(feature = "telemetry")]
+                engine_telemetry.clone(),
+                engine_allocated.clone()
+            ),
+            download_latest_mesh_kit_awaiters: AwaitersPool::new(
+                "download_latest_mesh_kit_awaiters",
+                #[cfg(feature = "telemetry")]
+                engine_telemetry.clone(),
+                engine_allocated.clone()
+            ),
             servers: lockfree::queue::Queue::new(),
             remp_client,
             remp_service,
@@ -811,6 +893,7 @@ impl Engine {
             will_validate: AtomicBool::new(false),
             sync_status: AtomicU32::new(0),
             remp_capability: AtomicBool::new(false),
+            network_global_id: AtomicI32::new(0),
             smft_capability: AtomicBool::new(false),
             test_bundles_config,
             collator_config,
@@ -848,6 +931,8 @@ impl Engine {
             tps_counter: TpsCounter::new(),
 
             out_queues_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+
+            mesh_client: tokio::sync::OnceCell::new()
         });
 
         if let Some(rs) = engine.remp_service() {
@@ -916,6 +1001,8 @@ impl Engine {
 
     pub fn db(&self) -> &Arc<InternalDb> { &self.db }
 
+    pub fn overlay_operations(&self) -> &Arc<dyn OverlayOperations> { &self.overlay_operations }
+
     pub fn validator_network(&self) -> Arc<dyn PrivateOverlayOperations> { self.network.clone() }
 
     pub fn network(&self) -> &NodeNetwork { &self.network }
@@ -933,21 +1020,34 @@ impl Engine {
     pub fn shard_states_keeper(&self) -> Arc<ShardStatesKeeper> { self.shard_states_keeper.clone() }
 
     pub async fn get_masterchain_overlay(&self) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        self.get_full_node_overlay(MASTERCHAIN_ID, SHARD_FULL).await
+        self.get_full_node_overlay(0, MASTERCHAIN_ID, SHARD_FULL).await
     }
 
-    pub async fn get_full_node_overlay(&self, workchain: i32, shard: u64) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        let id = self.overlay_operations.calc_overlay_id(workchain, shard)?;
+    pub async fn get_full_node_overlay(
+        &self,
+        mesh_nw_id: i32,
+        workchain: i32,
+        shard: u64
+    ) -> Result<Arc<dyn FullNodeOverlayClient>> {
+
+        let nw_id = if mesh_nw_id != 0 && mesh_nw_id != self.network_global_id() {
+            Some(mesh_nw_id)
+        } else {
+            None
+        };
+
+        let id = self.overlay_operations.calc_overlay_id(nw_id, workchain, shard)?;
         if let Some(overlay) = self.overlay_operations.get_overlay(&id.0).await {
             Ok(overlay)
         } else {
             log::debug!(
-                "Overlay for workchain {workchain} was not found. Attempt to add foreign overlay."
+                "Overlay for network {mesh_nw_id} wc {workchain} was not found. Attempt to add foreign overlay."
             );
-            self.overlay_operations.clone().add_overlay(id.clone(), false).await?;
+            self.overlay_operations.clone().add_overlay(nw_id, id.clone(), false).await?;
             self.overlay_operations.get_overlay(&id.0).await
                 .ok_or_else(|| error!(
-                    "INTERNAL ERROR: overlay for workchain {workchain} was not found after calling add_overlay"
+                    "INTERNAL ERROR: overlay for network {mesh_nw_id} wc {workchain} \
+                    was not found after calling add_overlay"
                 ))
         }
     }
@@ -958,12 +1058,12 @@ impl Engine {
         shard: u64,
         foreign: bool
     ) -> Result<()> {
-        let id = self.overlay_operations.calc_overlay_id(workchain, shard)?;
-        self.overlay_operations.clone().add_overlay(id, !foreign).await
+        let id = self.overlay_operations.calc_overlay_id(None, workchain, shard)?;
+        self.overlay_operations.clone().add_overlay(None, id, !foreign).await
     }
 
     pub fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<adnl::OverlayShortId>, adnl::OverlayId)> {
-        self.overlay_operations.calc_overlay_id(workchain, shard)
+        self.overlay_operations.calc_overlay_id(None, workchain, shard)
     }
 
     pub fn shard_states_awaiters(&self) -> &AwaitersPool<BlockIdExt, Arc<ShardStateStuff>> {
@@ -984,6 +1084,14 @@ impl Engine {
 
     pub fn download_queue_update_awaiters(&self) -> &AwaitersPool<BlockIdExt, BlockStuff> {
         &self.download_queue_update_awaiters
+    }
+
+    pub fn download_mesh_kit_awaiters(&self) -> &AwaitersPool<BlockIdExt, (BlockStuff, BlockProofStuff)> {
+        &self.download_mesh_kit_awaiters
+    }
+
+    pub fn download_latest_mesh_kit_awaiters(&self) -> &AwaitersPool<i32, (BlockStuff, BlockProofStuff)> {
+        &self.download_latest_mesh_kit_awaiters
     }
 
     pub fn external_messages(&self) -> &Arc<MessagesPool> {
@@ -1108,6 +1216,10 @@ impl Engine {
 
     pub fn remp_capability(&self) -> bool {
         self.remp_capability.load(Ordering::Relaxed)
+    }
+
+    pub fn network_global_id(&self) -> i32 {
+        self.network_global_id.load(Ordering::Relaxed)
     }
 
     pub fn set_remp_capability(&self, value: bool) {
@@ -1252,7 +1364,7 @@ impl Engine {
                     } else {
                         continue
                     };
-                    let handle = self.store_block_proof(id, Some(handle), &proof).await?;
+                    let handle = self.store_block_proof(0, id, Some(handle), &proof).await?;
                     let handle = handle.to_non_created().ok_or_else(
                         || error!("INTERNAL ERROR: bad result for store block {} proof", id)
                         )?;
@@ -1359,31 +1471,33 @@ impl Engine {
                 handle.id(), recursion_depth, apply_block::MAX_RECURSION_DEPTH);
         }
 
-        let is_empty_queue_update = handle.is_empty_queue_update();
         let op_name = if pre_apply { "pre-applying" } else { "applying" };
-        let block_name = if let Some(wc) = handle.is_queue_update_for() {
-            if is_empty_queue_update {
-                format!("empty queue update for {}", wc)
-            } else {
-                format!("queue update for {}", wc)
-            }
-        } else {
-            "block".to_owned()
+        let block_name = match block.kind() {
+            BlockKind::Block => "block".to_owned(),
+            BlockKind::QueueUpdate { queue_update_for, empty } if !empty => 
+                format!("queue update for {}", queue_update_for),
+            BlockKind::QueueUpdate { queue_update_for, empty } if empty => 
+                format!("empty queue update for {}", queue_update_for),
+            BlockKind::MeshUpdate { network_id: u32 } => format!("mesh update from {}", u32),
+            kind => fail!("INTERNAL ERROR: unexpected block kind: {:?}", kind)
         };
+
         let id = block.id();
         log::debug!("Start {op_name} {block_name} {id}");
 
         let mut is_link = false;
-        let has_proof = handle.has_proof_or_link(&mut is_link);
-        let has_data = handle.has_data();
-        let is_queue_update = handle.is_queue_update();
-
-        if !((has_proof || is_queue_update) && (has_data || is_empty_queue_update)) {
-            fail!(
-                "Block must have proof ({}) or be queue update ({}) and data ({}) \
-                or be empty queue update ({}) saved before applying",
-                has_proof, is_queue_update, has_data, is_empty_queue_update
-            );
+        match block.kind() {
+            BlockKind::Block => {
+                if !handle.has_data() || !handle.has_proof_or_link(&mut is_link) {
+                    fail!("Block must have proof and data saved before applying");
+                }
+            },
+            BlockKind::QueueUpdate { empty, .. } => {
+                if !handle.has_data() && !empty {
+                    fail!("Queue update must have data saved before applying");
+                }
+            },
+            _ => ()
         }
 
         apply_block(handle, block, mc_seq_no, &(self.clone() as Arc<dyn EngineOperations>),
@@ -1392,7 +1506,7 @@ impl Engine {
         let gen_utime = block.gen_utime()?;
         let ago = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i32 - gen_utime as i32;
-        if block.id().shard().is_masterchain() {
+        if !block.is_mesh() && block.id().shard().is_masterchain() {
             if !pre_apply {
                 self.shard_blocks()
                     .update_shard_blocks(&self.load_state(block.id()).await?)
@@ -1417,8 +1531,14 @@ impl Engine {
             log::info!("{op_name} {block_name} {id}, {ago} seconds old");
         } else {
             if !pre_apply {
-                if self.set_applied(handle, mc_seq_no).await? && !block.is_queue_update(){
-                    self.tps_counter.submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
+                let first_time_applied = self.set_applied(handle, mc_seq_no).await?;
+                if first_time_applied {
+                    if block.is_usual_block() {
+                        self.tps_counter.submit_transactions(gen_utime as u64, block.calculate_tr_count()?);
+                    }
+                    if let BlockKind::MeshUpdate { network_id } = block.kind() {
+                        self.save_last_mesh_mc_block_id(network_id, id)?;
+                    }
                 }
             }
 
@@ -1538,6 +1658,7 @@ impl Engine {
     async fn listen_broadcasts(self: Arc<Self>, shard_ident: ShardIdent, mask: u32) -> Result<()> {
         log::debug!("Started listening overlay for shard {}", shard_ident);
         let client = self.get_full_node_overlay(
+            0,
             shard_ident.workchain_id(),
             shard_ident.shard_prefix_with_tag()
         ).await?;
@@ -1572,6 +1693,9 @@ impl Engine {
                             }
                             Broadcast::TonNode_ConnectivityCheckBroadcast(broadcast) => {
                                 self.network.clone().process_connectivity_broadcast(broadcast);
+                            }
+                            Broadcast::TonNode_MeshUpdateBroadcast(broadcast) => {
+                                self.clone().process_mesh_update_broadcast(broadcast, src);
                             }
                             Broadcast::TonNode_BlockCandidateBroadcast(broadcast) => {
                                 log::warn!("TonNode_BlockCandidateBroadcast from {}: {:?}", src, broadcast);
@@ -1727,6 +1851,26 @@ impl Engine {
         self.push_validated_block_stat(ValidatedBlockStat { nodes })?;
 
         Ok(())
+    }
+
+    fn process_mesh_update_broadcast(self: Arc<Self>, broadcast: MeshUpdateBroadcast, src: Arc<KeyId>) {
+        // because of ALL broadcasts are received in one task - spawn for each block
+        if let Some(mesh_client) = self.mesh_client.get().cloned() {
+            tokio::spawn(async move {
+                log::trace!("Processing mesh update broadcast from nw: {}, target nw {}, id {}, peer {}",
+                    broadcast.src_nw, broadcast.target_nw, broadcast.id, src);
+                let id = broadcast.id.clone();
+                match mesh_client.process_broadcast(broadcast).await {
+                    Err(e) => {
+                        log::error!("Error while processing mesh update broadcast {} (peer {}): {:?}",
+                            id, src, e);
+                    }
+                    Ok(_) => {
+                        log::trace!("Processed mesh update broadcast {}, peer {}", id, src);
+                    }
+                }
+            });
+        }
     }
 
     fn process_block_broadcast(self: Arc<Self>, broadcast: BlockBroadcast, src: Arc<KeyId>) {
@@ -1961,6 +2105,7 @@ impl Engine {
     async fn create_download_context<'a, T>(
         &'a self,
         downloader: Arc<dyn Downloader<Item = T>>,
+        mesh_nw_id: i32, // zero for own network
         id: &'a BlockIdExt, 
         limit: Option<u32>,
         log_error_limit: u32,
@@ -1969,6 +2114,7 @@ impl Engine {
     ) -> Result<DownloadContext<'a, T>> {
         let ret = DownloadContext {
             client: self.get_full_node_overlay(
+                mesh_nw_id,
                 id.shard().workchain_id(),
                 id.shard().shard_prefix_with_tag()
             ).await?,
@@ -1993,6 +2139,7 @@ impl Engine {
         }
         self.create_download_context(
             Arc::new(NextBlockDownloader),
+            0,
             prev_id, 
             limit,
             30,
@@ -2009,6 +2156,7 @@ impl Engine {
     ) -> Result<(BlockStuff, BlockProofStuff)> {
         self.create_download_context(
             Arc::new(BlockDownloader),
+            0,
             id, 
             limit,
             0,
@@ -2026,6 +2174,7 @@ impl Engine {
     ) -> Result<BlockStuff> {
         self.create_download_context(
             Arc::new(QueueUpdateDownloader{ update_for_wc }),
+            0,
             id, 
             limit,
             0,
@@ -2036,6 +2185,7 @@ impl Engine {
 
     pub async fn download_block_proof_worker(
         &self,
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt,
         is_link: bool,
         key_block: bool,
@@ -2051,6 +2201,7 @@ impl Engine {
                     key_block
                 }
             ),
+            mesh_nw_id,
             id, 
             limit,
             0,
@@ -2061,16 +2212,71 @@ impl Engine {
 
     pub async fn download_zerostate_worker(
         &self,
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt,
         limit: Option<u32>
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         self.create_download_context(
             Arc::new(ZeroStateDownloader),
+            mesh_nw_id,
             id, 
             limit,
             0,
             "download_zerostate_worker", 
             Some((10, 12, 3000))
+        ).await?.download().await
+    }
+
+    pub async fn download_mesh_kit_worker(
+        &self,
+        network_id: i32,
+        id: &BlockIdExt,
+        limit: Option<u32>,
+        timeout: Option<(u64, u64, u64)>
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
+        self.create_download_context(
+            Arc::new(MeshKitDownloader{network_id}),
+            network_id,
+            id,
+            limit,
+            0,
+            "download_mesh_kit_worker", 
+            timeout
+        ).await?.download().await
+    }
+
+    pub async fn download_latest_mesh_kit_worker(
+        &self,
+        network_id: i32,
+        limit: Option<u32>,
+        timeout: Option<(u64, u64, u64)>
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
+        self.create_download_context(
+            Arc::new(LatestMeshKitDownloader{network_id}),
+            network_id,
+            &BlockIdExt::default(),
+            limit,
+            0,
+            "download_latest_mesh_kit_worker", 
+            timeout
+        ).await?.download().await
+    }
+
+    pub async fn download_next_mesh_update_worker(
+        &self,
+        network_id: i32,
+        id: &BlockIdExt,
+        limit: Option<u32>,
+        timeout: Option<(u64, u64, u64)>
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
+        self.create_download_context(
+            Arc::new(NextMeshUpdateDownloader{network_id}),
+            network_id,
+            id, 
+            limit,
+            0,
+            "download_mesh_kit_worker", 
+            timeout
         ).await?.download().await
     }
 
@@ -2431,6 +2637,7 @@ async fn boot(
                 state.config_params()?.has_capability(GlobalCapabilities::CapRemp),
                 Ordering::Relaxed
             );
+            engine.network_global_id.store(state.state()?.global_id(), Ordering::Relaxed);
             engine.smft_capability.store(
                 state.config_params()?.has_capability(GlobalCapabilities::CapSmft),
                 Ordering::Relaxed
@@ -2444,6 +2651,13 @@ async fn boot(
             engine.release_stop(Engine::MASK_SERVICE_BOOT);
             let id = result?.id().clone();
             engine.save_last_applied_mc_block_id(&id)?;
+
+            let state = match engine.load_mc_zero_state().await {
+                Err(_) => engine.load_last_applied_mc_state().await?,
+                Ok(s) => s
+            };
+            engine.network_global_id.store(state.state()?.global_id(), Ordering::Relaxed);
+
             (id, true)
         }
     };
@@ -2574,13 +2788,13 @@ pub async fn run(
             log::info!("Processed workchain from config: {wc}");
             engine.add_full_node_overlay(*wc, SHARD_FULL, false).await?;
             network.add_consumer(
-                &network.calc_overlay_id(*wc, SHARD_FULL)?.0, 
+                &network.calc_overlay_id(None, *wc, SHARD_FULL)?.0, 
                 full_node_service.clone()
             )?;
             if *wc != MASTERCHAIN_ID {
                 engine.add_full_node_overlay(MASTERCHAIN_ID, SHARD_FULL, true).await?;
                 network.add_consumer(
-                    &network.calc_overlay_id(MASTERCHAIN_ID, SHARD_FULL)?.0, 
+                    &network.calc_overlay_id(None, MASTERCHAIN_ID, SHARD_FULL)?.0, 
                     full_node_service.clone()
                 )?;
             }
@@ -2589,12 +2803,12 @@ pub async fn run(
             log::info!("Processed workchain was not specifed");
             engine.add_full_node_overlay(BASE_WORKCHAIN_ID, SHARD_FULL, false).await?;
             network.add_consumer(
-                &network.calc_overlay_id(BASE_WORKCHAIN_ID, SHARD_FULL)?.0, 
+                &network.calc_overlay_id(None, BASE_WORKCHAIN_ID, SHARD_FULL)?.0, 
                 full_node_service.clone()
             )?;
             engine.add_full_node_overlay(MASTERCHAIN_ID, SHARD_FULL, false).await?;
             network.add_consumer(
-                &network.calc_overlay_id(MASTERCHAIN_ID, SHARD_FULL)?.0, 
+                &network.calc_overlay_id(None, MASTERCHAIN_ID, SHARD_FULL)?.0, 
                 full_node_service.clone()
             )?;
         }
@@ -2680,6 +2894,11 @@ pub async fn run(
 
         // top shard blocks
         resend_top_shard_blocks_worker(engine.clone());
+
+        #[cfg(not(feature="external_db"))] {
+            let mesh_client = MeshClient::start(engine.clone(), engine.stopper.token()).await?;
+            engine.mesh_client.set(mesh_client).map_err(|_| error!("Attempt to set mesh_client twice"))?;
+        }
 
         // blocks download clients
         engine.set_sync_status(Engine::SYNC_STATUS_SYNC_BLOCKS);

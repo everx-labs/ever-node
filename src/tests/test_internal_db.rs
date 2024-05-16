@@ -589,7 +589,7 @@ async fn test_archives_multithread() {
         let handle = db.store_block_data(
             &BlockStuff::fake_block(id.clone(), mc.map(|mc| mc.clone()), false)?,
             None
-        ).await?._to_any();
+        ).await?.to_any();
         let handle = db.store_block_proof(
             id, Some(handle), &BlockProofStuff::fake(id)?, None
         ).await?.to_non_created().ok_or_else(
@@ -699,7 +699,7 @@ async fn test_archives_singlethread() {
         let h = db.store_block_data(
             &BlockStuff::fake_block(id.clone(), mc.map(|mc| mc.clone()), false)?,
             None
-        ).await?._to_any();
+        ).await?.to_any();
         Ok(h)
     }
 

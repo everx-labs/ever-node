@@ -14,16 +14,16 @@
 use super::*;
 use crate::{
     collator_test_bundle::CollatorTestBundle, engine_traits::EngineOperations, 
-    types::messages::{count_matching_bits, MsgEnvelopeStuff},
+    test_helper::test_async, types::messages::{count_matching_bits, MsgEnvelopeStuff},
     validator::{
         CollatorSettings, collator,
         validate_query::ValidateQuery,
         validator_utils::compute_validator_set_cc,
     },
 };
-use ever_block::Result;
+use ever_block::{Result, AccountIdPrefixFull};
 use pretty_assertions::assert_eq;
-use std::sync::Arc;
+use std::{fs::{create_dir_all, remove_dir_all}, sync::Arc};
 
 const RES_PATH: &'static str = "target/cmp";
 
@@ -110,13 +110,21 @@ async fn try_collate_by_engine(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_collate_first_block() {
-    std::fs::create_dir_all(RES_PATH).ok();
-    // init_test_log();
-    let bundle = Arc::new(CollatorTestBundle::build_with_zero_state(
-        "src/tests/static/zerostate.boc",
-        &["src/tests/static/basestate0.boc", "src/tests/static/basestate0.boc"]
-    ).await.unwrap());
-    try_collate_by_bundle(bundle).await.unwrap();
+    async fn test() -> Result<()> {
+        create_dir_all(RES_PATH).ok();
+        //init_test_log();
+        match CollatorTestBundle::build_with_zero_state(
+            "src/tests/static/zerostate.boc",
+            &["src/tests/static/basestate0.boc", "src/tests/static/basestate0.boc"]
+        ).await {
+            Ok(bundle) => try_collate_by_bundle(Arc::new(bundle)).await.map(|_| ()),
+            Err(e) => Err(e)
+        }
+    }
+    test_async(
+        || Box::pin(test()),
+        || { remove_dir_all(RES_PATH).ok(); }
+    ).await;
 }
 
 // prepare for testing purposes
@@ -144,7 +152,7 @@ fn prepare_test_env_message(
     let hdr = InternalMessageHeader::with_addresses(src, dst, CurrencyCollection::with_grams(1_000_000_000));
     let mut msg = Message::with_int_header(hdr);
     msg.set_at_and_lt(at, lt);
-    MsgEnvelopeStuff::new(msg, &shard, Grams::from(1_000_000), use_hypercube)
+    MsgEnvelopeStuff::new(CommonMessage::Std(msg), &shard, Grams::from(1_000_000), use_hypercube, SERDE_OPTS_EMPTY)
 }
 
 #[test]
