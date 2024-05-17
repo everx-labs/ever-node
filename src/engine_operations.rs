@@ -12,25 +12,27 @@
 */
 
 use crate::{
-    block::BlockStuff, block_proof::BlockProofStuff, 
-    config::{CollatorTestBundlesGeneralConfig, CollatorConfig}, engine::{Engine, EngineFlags},
+    block::{BlockKind, BlockStuff}, 
+    block_proof::BlockProofStuff, config::{CollatorConfig, CollatorTestBundlesGeneralConfig},
+    engine::{Engine, EngineFlags}, 
     engine_traits::{
-        ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, Server,
-        RempCoreInterface, RempDuplicateStatus
-    },
-    error::NodeError,
+        ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, RempCoreInterface, 
+        RempDuplicateStatus, Server
+    }, 
+    error::NodeError, 
+    ext_messages::{create_ext_message, EXT_MESSAGES_TRACE_TARGET}, 
     internal_db::{
-        INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, LAST_ROTATION_MC_BLOCK, SHARD_CLIENT_MC_BLOCK,
-        BlockResult,
-    },
-    shard_state::ShardStateStuff,
-    types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
-    ext_messages::{create_ext_message, EXT_MESSAGES_TRACE_TARGET},
+        BlockResult, INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, LAST_MESH_HARDFORK_BLOCK, 
+        LAST_MESH_KEYBLOCK, LAST_MESH_MC_BLOCK, LAST_ROTATION_MC_BLOCK, SHARD_CLIENT_MC_BLOCK
+    }, 
     jaeger,
+    shard_state::ShardStateStuff,
+    shard_states_keeper::PinnedShardStateGuard,
+    types::top_block_descr::{TopBlockDescrId, TopBlockDescrStuff},
     validator::{
         validator_manager::ValidationStatus,
         validator_utils::validatordescr_to_catchain_node,
-    }, shard_states_keeper::PinnedShardStateGuard
+    }
 };
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::ValidatedBlockStat;
@@ -52,13 +54,13 @@ use storage::block_handle_db::BlockHandle;
 use ton_api::{
     serialize_boxed, 
     ton::ton_node::{
-        RempMessage, RempMessageStatus, RempReceipt, 
-        broadcast::{BlockBroadcast, QueueUpdateBroadcast}
+        broadcast::{BlockBroadcast, MeshUpdateBroadcast, QueueUpdateBroadcast}, RempMessage,
+        RempMessageStatus, RempReceipt
     }, IntoBoxed
 };
 use ever_block::{
     AccountIdPrefixFull, BlockIdExt, CellsFactory, GlobalCapabilities, Message, OutMsgQueue,
-    ShardIdent, MASTERCHAIN_ID, SHARD_FULL
+    OutMsgQueueInfo, ShardIdent, MASTERCHAIN_ID, SHARD_FULL
 };
 #[cfg(feature="workchains")]
 use ever_block::{BASE_WORKCHAIN_ID, INVALID_WORKCHAIN_ID};
@@ -236,7 +238,7 @@ impl EngineOperations for Engine {
         }
         let handle = loop {
             if prev_handle.has_next1() {
-                let id = self.load_block_next1(prev_handle.id()).await?;
+                let id = self.load_block_next1(prev_handle.id())?;
                 break self.wait_applied_block(&id, timeout_ms).await?;
             } else {
                 if let Some(id) = self.next_block_applying_awaiters()
@@ -414,12 +416,22 @@ impl EngineOperations for Engine {
         }
     }
 
-    async fn download_block_proof(&self, id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff> {
-        self.download_block_proof_worker(id, is_link, key_block, Some(1)).await
+    async fn download_block_proof(
+        &self,
+        mesh_nw_id: i32, // zero for own network
+        id: &BlockIdExt,
+        is_link: bool,
+        key_block: bool
+    ) -> Result<BlockProofStuff> {
+        self.download_block_proof_worker(mesh_nw_id, id, is_link, key_block, Some(1)).await
     }
 
-    async fn download_next_block(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
-        self.download_next_block_worker(prev_id, None).await
+    async fn download_next_block(&self, mesh_nw_id: i32, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
+        if mesh_nw_id == 0 || mesh_nw_id == self.network_global_id() {
+            self.download_next_block_worker(prev_id, None).await
+        } else {
+            self.download_next_mesh_update_worker(mesh_nw_id, prev_id, None, None).await
+        }
     }
 
     async fn download_and_store_state(
@@ -440,7 +452,7 @@ impl EngineOperations for Engine {
             (None, handle.id().shard().workchain_id())
         };
 
-        let overlay = self.get_full_node_overlay(overlay_wc, SHARD_FULL).await?;
+        let overlay = self.get_full_node_overlay(0, overlay_wc, SHARD_FULL).await?;
 
         let data = crate::full_node::state_helper::download_persistent_state(
             handle.id(),
@@ -466,9 +478,10 @@ impl EngineOperations for Engine {
 
     async fn download_zerostate(
         &self, 
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
-        self.download_zerostate_worker(id, None).await
+        self.download_zerostate_worker(mesh_nw_id, id, None).await
     }
 
     async fn store_block(&self, block: &BlockStuff) -> Result<BlockResult> {
@@ -488,11 +501,17 @@ impl EngineOperations for Engine {
 
     async fn store_block_proof(
         &self, 
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt,
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff,
     ) -> Result<BlockResult> {
-        self.db().store_block_proof(id, handle, proof, None).await
+
+        if mesh_nw_id == 0 || mesh_nw_id == self.network_global_id() {
+            self.db().store_block_proof(id, handle, proof, None).await
+        } else {
+            self.db().store_mesh_block_proof(id, mesh_nw_id, handle, proof, None).await
+        }
     }
 
     fn create_handle_for_empty_queue_update(
@@ -500,15 +519,36 @@ impl EngineOperations for Engine {
         block: &BlockStuff // virt block constructed from proof of update 
                            // (block's BOC contains only queue update, other cells are pruned)
     ) -> Result<BlockResult> {
-        let target_wc = block.is_queue_update_for()
-            .ok_or_else(|| error!("Block {} is not a queue update", block.id()))?;
+        if !block.is_queue_update() {
+            fail!("{} is not a queue update", block.id());
+        }
         self.db().create_or_load_block_handle(
             block.id(),
-            Some(block.block_or_queue_update()?),
-            Some((target_wc, true)),
+            Some(block.virt_block()?),
+            block.kind(),
             None,
             None
         )
+    }
+
+    fn create_handle_for_mesh(
+        &self,
+        block: &BlockStuff // mesh kit or update
+    ) -> Result<BlockResult> {
+        if !block.is_mesh() {
+            fail!("{} is not a mesh kit or update", block.id());
+        }
+        self.db().create_or_load_block_handle(
+            block.id(),
+            Some(block.virt_block()?),
+            block.kind(),
+            None,
+            None
+        )
+    }
+
+    async fn init_mesh_network(&self, nw_id: i32, zerostate: &BlockIdExt) -> Result<()> {
+        self.overlay_operations().init_mesh_network(nw_id, zerostate).await
     }
 
     async fn load_block_proof(
@@ -607,7 +647,7 @@ impl EngineOperations for Engine {
         let handle = self.db().create_or_load_block_handle(
             state.block_id(), 
             None,
-            None,
+            BlockKind::Block,
             Some(state.state()?.gen_time()),
             None
         )?.to_non_updated().ok_or_else(
@@ -643,7 +683,7 @@ impl EngineOperations for Engine {
         self.db().store_block_next1(handle, next, None)
     }
 
-    async fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         self.db().load_block_next1(id)
     }
 
@@ -651,7 +691,7 @@ impl EngineOperations for Engine {
         self.db().store_block_next2(handle, next2, None)
     }
 
-    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
+    fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         self.db().load_block_next2(id)
     }
 
@@ -747,9 +787,11 @@ impl EngineOperations for Engine {
 
     async fn download_next_key_blocks_ids(
         &self, 
-        block_id: &BlockIdExt
+        mesh_nw_id: i32, // zero for own network
+        block_id: &BlockIdExt, 
     ) -> Result<Vec<BlockIdExt>> {
-        let mc_overlay = self.get_masterchain_overlay().await?;
+        let mc_overlay = self.get_full_node_overlay(
+            mesh_nw_id, MASTERCHAIN_ID, SHARD_FULL).await?;
         mc_overlay.download_next_key_blocks_ids(block_id, 5).await
     }
 
@@ -761,9 +803,11 @@ impl EngineOperations for Engine {
         if handle.is_applied() {
             return Ok(false);
         }
-        self.db().assign_mc_ref_seq_no(handle, mc_seq_no, None)?;
-        if handle.id().seq_no() != 0 {
-            self.db().archive_block(handle.id(), None).await?;
+        if !handle.is_mesh() {
+            self.db().assign_mc_ref_seq_no(handle, mc_seq_no, None)?;
+            if handle.id().seq_no() != 0 {
+                self.db().archive_block(handle.id(), None).await?;
+            }
         }
         if self.db().store_block_applied(handle, None)? {
             #[cfg(feature = "telemetry")]
@@ -795,7 +839,7 @@ impl EngineOperations for Engine {
         to: &AccountIdPrefixFull, 
         data: &[u8]
     ) -> Result<BroadcastSendInfo> {
-        let overlay = self.get_full_node_overlay(to.workchain_id, to.prefix).await?;
+        let overlay = self.get_full_node_overlay(0, to.workchain_id, to.prefix).await?;
         overlay.broadcast_external_message(data).await
     }
 
@@ -888,7 +932,7 @@ impl EngineOperations for Engine {
 
         for wc in target_wcs {
             log::trace!("send_block_broadcast {} to {}", broadcast.id, wc);
-            let overlay = self.get_full_node_overlay(wc, SHARD_FULL).await?;
+            let overlay = self.get_full_node_overlay(0, wc, SHARD_FULL).await?;
             overlay.send_block_broadcast(broadcast.clone()).await?;
         }
 
@@ -901,12 +945,27 @@ impl EngineOperations for Engine {
     async fn send_queue_update_broadcast(&self, broadcast: QueueUpdateBroadcast) -> Result<()> {
         // TODO select right overlay
         let overlay = self.get_full_node_overlay(
+            0,
             broadcast.target_wc,
             SHARD_FULL, //broadcast.id.shard as u64
         ).await?;
         
         log::trace!("send_queue_update_broadcast {} to {}", broadcast.id, broadcast.target_wc);
         overlay.send_queue_update_broadcast(broadcast).await?;
+        #[cfg(feature = "telemetry")]
+        self.full_node_telemetry().sent_block_broadcast(); // TODO
+        Ok(())
+    }
+
+    async fn send_mesh_update_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()> {
+        let overlay = self.get_full_node_overlay(
+            broadcast.target_nw,
+            MASTERCHAIN_ID,
+            SHARD_FULL,
+        ).await?;
+        
+        log::trace!("send_mesh_update_broadcast {} to {}", broadcast.id, broadcast.target_nw);
+        overlay.send_mesh_update_broadcast(broadcast).await?;
         #[cfg(feature = "telemetry")]
         self.full_node_telemetry().sent_block_broadcast(); // TODO
         Ok(())
@@ -936,7 +995,7 @@ impl EngineOperations for Engine {
         }
 
         for wc in target_wcs {
-            let overlay = self.get_full_node_overlay(wc, SHARD_FULL).await?;
+            let overlay = self.get_full_node_overlay(0, wc, SHARD_FULL).await?;
             overlay.send_top_shard_block_description(&tbd).await?;
         }
 
@@ -1268,6 +1327,80 @@ impl EngineOperations for Engine {
 
     fn db_cells_factory(&self) -> Result<Arc<dyn CellsFactory>> {
         self.db().cells_factory()
+    }
+
+    // THE MESH
+
+    fn network_global_id(&self) -> i32 {
+        Engine::network_global_id(self)
+    }
+
+    fn load_last_mesh_key_block_id(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
+        self.db().load_full_node_mesh_state(nw_id, LAST_MESH_KEYBLOCK)
+    }
+
+    fn save_last_mesh_key_block_id(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
+        self.db().save_full_node_mesh_state(nw_id, LAST_MESH_KEYBLOCK, id)
+    }
+
+    fn load_last_mesh_mc_block_id(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
+        self.db().load_full_node_mesh_state(nw_id, LAST_MESH_MC_BLOCK)
+    }
+
+    fn save_last_mesh_mc_block_id(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
+        self.db().save_full_node_mesh_state(nw_id, LAST_MESH_MC_BLOCK, id)
+    }
+
+    fn load_last_mesh_processed_hardfork(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
+        self.db().load_full_node_mesh_state(nw_id, LAST_MESH_HARDFORK_BLOCK)
+    }
+
+    fn save_last_mesh_processed_hardfork(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
+        self.db().save_full_node_mesh_state(nw_id, LAST_MESH_HARDFORK_BLOCK, id)
+    }
+
+    async fn download_mesh_kit(&self, nw_id: i32, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
+        loop {
+            if let Some((block, proof)) = self.download_mesh_kit_awaiters().do_or_wait(
+                &id,
+                None,
+                self.download_mesh_kit_worker(nw_id, id, Some(10), None)
+            ).await? {
+                return Ok((block, proof))
+            }
+        }
+    }
+
+    async fn download_latest_mesh_kit(&self, nw_id: i32) -> Result<(BlockStuff, BlockProofStuff)> {
+        loop {
+            if let Some((block, proof)) = self.download_latest_mesh_kit_awaiters().do_or_wait(
+                &nw_id,
+                None,
+                self.download_latest_mesh_kit_worker(nw_id, Some(10), None)
+            ).await? {
+                return Ok((block, proof))
+            }
+        }
+    }
+
+    fn store_mesh_queue(
+        &self,
+        nw_id: i32,
+        mc_block_id: &BlockIdExt,
+        shard: &ShardIdent,
+        queue: Arc<OutMsgQueueInfo>
+    ) -> Result<()> {
+        self.shard_states_keeper()
+            .mesh_queues_keeper().store_mesh_queue(nw_id, mc_block_id, shard, queue)
+    }
+
+    fn load_mesh_queue(
+        &self,
+        nw_id: i32,
+        mc_block_id: &BlockIdExt,
+        shard: &ShardIdent
+    ) -> Result<Arc<OutMsgQueueInfo>> {
+        self.shard_states_keeper().mesh_queues_keeper().load_mesh_queue(nw_id, mc_block_id, shard)
     }
 }
 

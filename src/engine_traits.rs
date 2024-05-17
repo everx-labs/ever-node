@@ -41,15 +41,14 @@ use catchain::{
 use ever_block::{
     error, AccountId, AccountIdPrefixFull, BlockIdExt, CellsFactory, ConfigParams, 
     Deserializable, KeyId, KeyOption, MASTERCHAIN_ID, Message, OutMsgQueue, Result, 
-    SHARD_FULL, ShardAccount, ShardIdent, UInt256
+    SHARD_FULL, ShardAccount, ShardIdent, UInt256, OutMsgQueueInfo
 };
 use std::{collections::HashSet, sync::{Arc, atomic::AtomicU64}};
 use storage::{StorageAlloc, block_handle_db::BlockHandle};
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
 use ton_api::ton::ton_node::{
-    RempMessage, RempMessageStatus, RempReceipt, 
-    broadcast::{BlockBroadcast, QueueUpdateBroadcast},
+    broadcast::{BlockBroadcast, MeshUpdateBroadcast, QueueUpdateBroadcast}, RempMessage, RempMessageStatus, RempReceipt
 };
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
 
@@ -83,22 +82,39 @@ pub struct EngineAlloc {
 #[async_trait::async_trait]
 pub trait OverlayOperations : Sync + Send {
     async fn start(&self) -> Result<()>;
+
     async fn get_overlay(
         &self, 
         overlay_id: &OverlayShortId
     ) -> Option<Arc<dyn FullNodeOverlayClient>>;
+
     async fn add_overlay(
         self: Arc<Self>,
+        network_id: Option<i32>,
         overlay_id: (Arc<OverlayShortId>, OverlayId),
         local: bool,
     ) -> Result<()>;
+
     async fn get_masterchain_overlay(self: Arc<Self>) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        let overlay_id = self.calc_overlay_id(MASTERCHAIN_ID, SHARD_FULL)?;
+        let overlay_id = self.calc_overlay_id(None, MASTERCHAIN_ID, SHARD_FULL)?;
         self.get_overlay(&overlay_id.0).await
             .ok_or_else(|| error!("INTERNAL ERROR: masterchain overlay was not found"))
     }
-    fn add_consumer(&self, overlay_id: &Arc<OverlayShortId>, consumer: Arc<dyn QueriesConsumer>) -> Result<()>;
-    fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<OverlayShortId>, OverlayId)> ;
+
+    fn add_consumer(
+        &self, 
+        overlay_id: &Arc<OverlayShortId>, 
+        consumer: Arc<dyn QueriesConsumer>
+    ) -> Result<()>;
+
+    fn calc_overlay_id(
+        &self,
+        network_id: Option<i32>,
+        workchain: i32,
+        shard: u64
+    ) -> Result<(Arc<OverlayShortId>, OverlayId)>;
+
+    async fn init_mesh_network(&self, network_id: i32, zerostate: &BlockIdExt) -> Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -361,18 +377,33 @@ pub trait EngineOperations : Sync + Send {
     ) -> Result<()> {
         unimplemented!()
     }
-    async fn download_block(&self, id: &BlockIdExt, limit: Option<u32>) -> Result<(BlockStuff, Option<BlockProofStuff>)> {
+    async fn download_block(
+        &self,
+        id: &BlockIdExt,
+        limit: Option<u32>
+    ) -> Result<(BlockStuff, Option<BlockProofStuff>)> {
         unimplemented!()
     }
-    async fn download_block_proof(&self, id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff> {
+    async fn download_block_proof(
+        &self,
+        mesh_nw_id: i32, // zero for own network
+        id: &BlockIdExt,
+        is_link: bool,
+        key_block: bool
+    ) -> Result<BlockProofStuff> {
         unimplemented!()
     }
-    async fn download_next_block(&self, prev_id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
+    async fn download_next_block(
+        &self,
+        mesh_nw_id: i32, // zero for own network
+        prev_id: &BlockIdExt
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
         unimplemented!()
     }
     async fn download_next_key_blocks_ids(
-        &self,
-        block_id: &BlockIdExt
+        &self, 
+        mesh_nw_id: i32, // zero for own network
+        block_id: &BlockIdExt, 
     ) -> Result<Vec<BlockIdExt>> {
         unimplemented!()
     }
@@ -383,7 +414,8 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
     async fn store_block_proof(
-        &self, 
+        &self,
+        mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt, 
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff
@@ -481,8 +513,9 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
     async fn download_zerostate(
-        &self, 
-        id: &BlockIdExt
+        &self,
+        mesh_nw_id: i32, // zero for own network
+        id: &BlockIdExt,
     ) -> Result<(Arc<ShardStateStuff>, Vec<u8>)> {
         unimplemented!()
     }
@@ -551,13 +584,13 @@ pub trait EngineOperations : Sync + Send {
     fn store_block_next1(&self, handle: &Arc<BlockHandle>, next: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
-    async fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         unimplemented!()
     }
     fn store_block_next2(&self, handle: &Arc<BlockHandle>, next2: &BlockIdExt) -> Result<()> {
         unimplemented!()
     }
-    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
+    fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         unimplemented!()
     }
 
@@ -724,6 +757,10 @@ pub trait EngineOperations : Sync + Send {
     }
 
     async fn send_queue_update_broadcast(&self, broadcast: QueueUpdateBroadcast) -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn send_mesh_update_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()> {
         unimplemented!()
     }
 
@@ -904,6 +941,74 @@ pub trait EngineOperations : Sync + Send {
 
     fn db_cells_factory(&self) -> Result<Arc<dyn CellsFactory>> {
         unimplemented!();
+    }
+
+    // THE MESH
+
+    fn network_global_id(&self) -> i32 {
+        unimplemented!()
+    }
+
+    fn load_last_mesh_key_block_id(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
+        unimplemented!()
+    }
+
+    fn save_last_mesh_key_block_id(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn load_last_mesh_mc_block_id(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
+        unimplemented!()
+    }
+
+    fn save_last_mesh_mc_block_id(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn load_last_mesh_processed_hardfork(&self, nw_id: i32) -> Result<Option<Arc<BlockIdExt>>> {
+        unimplemented!()
+    }
+
+    fn save_last_mesh_processed_hardfork(&self, nw_id: i32, id: &BlockIdExt) -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn download_mesh_kit(&self, nw_id: i32, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
+        unimplemented!()
+    }
+
+    async fn download_latest_mesh_kit(&self, nw_id: i32) -> Result<(BlockStuff, BlockProofStuff)> {
+        unimplemented!()
+    }
+
+    fn store_mesh_queue(
+        &self,
+        nw_id: i32,
+        mc_block_id: &BlockIdExt,
+        shard: &ShardIdent,
+        queue: Arc<OutMsgQueueInfo>
+    ) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn load_mesh_queue(
+        &self,
+        nw_id: i32,
+        mc_block_id: &BlockIdExt,
+        shard: &ShardIdent
+    ) -> Result<Arc<OutMsgQueueInfo>> {
+        unimplemented!()
+    }
+
+    fn create_handle_for_mesh(
+        &self,
+        block: &BlockStuff // mesh kit or update
+    ) -> Result<BlockResult> {
+        unimplemented!()
+    }
+
+    async fn init_mesh_network(&self, nw_id: i32, zerostate: &BlockIdExt) -> Result<()> {
+        unimplemented!()
     }
 }
 
