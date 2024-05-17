@@ -14,11 +14,11 @@
 use std::fmt::{self, Display, Formatter};
 use ever_block::{
     GlobalCapabilities,
-    Message, EnqueuedMsg, MsgEnvelope, AccountIdPrefixFull, IntermediateAddress, OutMsgQueueKey,
-    Serializable, Deserializable, Grams, ShardIdent, AddSub,
+    EnqueuedMsg, MsgEnvelope, AccountIdPrefixFull, IntermediateAddress, OutMsgQueueKey,
+    Serializable, Deserializable, Grams, ShardIdent, AddSub, CommonMessage, ChildCell
 };
 use ever_executor::{BlockchainConfig, CalcMsgFwdFees};
-use ever_block::{error, fail, Result, AccountId, Cell, SliceData, UInt256};
+use ever_block::{error, fail, Result, AccountId, SliceData, UInt256};
 
 #[cfg(test)]
 #[path = "tests/test_messages.rs"]
@@ -27,7 +27,7 @@ mod tests;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MsgEnvelopeStuff {
     env: MsgEnvelope,
-    msg: Message,
+    msg: CommonMessage,
     src_prefix: AccountIdPrefixFull,
     dst_prefix: AccountIdPrefixFull,
     cur_prefix: AccountIdPrefixFull,
@@ -36,10 +36,11 @@ pub struct MsgEnvelopeStuff {
 
 impl MsgEnvelopeStuff {
     pub fn from_envelope(env: MsgEnvelope) -> Result<Self> {
-        let msg = env.read_message()?;
-        let src = msg.src_ref().ok_or_else(|| error!("source address of message {:x} is invalid", env.message_hash()))?;
+        let msg = env.read_common_message()?;
+        let std_msg = msg.get_std()?;
+        let src = std_msg.src_ref().ok_or_else(|| error!("source address of message {:x} is invalid", env.message_hash()))?;
         let src_prefix = AccountIdPrefixFull::prefix(src)?;
-        let dst = msg.dst_ref().ok_or_else(|| error!("destination address of message {:x} is invalid", env.message_hash()))?;
+        let dst = std_msg.dst_ref().ok_or_else(|| error!("destination address of message {:x} is invalid", env.message_hash()))?;
         let dst_prefix = AccountIdPrefixFull::prefix(dst)?;
 
         let cur_prefix  = src_prefix.interpolate_addr_intermediate(&dst_prefix, env.cur_addr())?;
@@ -53,18 +54,19 @@ impl MsgEnvelopeStuff {
             next_prefix,
         })
     }
-    pub fn new(msg: Message, shard: &ShardIdent, fwd_fee: Grams, use_hypercube: bool) -> Result<Self> {
-        let msg_cell = msg.serialize()?;
-        let src = msg.src_ref().ok_or_else(|| error!("source address of message {:x} is invalid", msg_cell.repr_hash()))?;
+    pub fn new(msg: CommonMessage, shard: &ShardIdent, fwd_fee: Grams, use_hypercube: bool, serde_opts: u8) -> Result<Self> {
+        let std_msg = msg.get_std()?;
+        let msg_cell = msg.serialize_with_opts(serde_opts)?;
+        let src = std_msg.src_ref().ok_or_else(|| error!("source address of message {:x} is invalid", msg_cell.repr_hash()))?;
         let src_prefix = AccountIdPrefixFull::prefix(src)?;
-        let dst = msg.dst_ref().ok_or_else(|| error!("destination address of message {:x} is invalid", msg_cell.repr_hash()))?;
+        let dst = std_msg.dst_ref().ok_or_else(|| error!("destination address of message {:x} is invalid", msg_cell.repr_hash()))?;
         let dst_prefix = AccountIdPrefixFull::prefix(dst)?;
         let (cur_addr, next_addr) = perform_hypercube_routing(&src_prefix, &dst_prefix, shard, use_hypercube)?;
         let env = MsgEnvelope::with_routing(
-            msg_cell,
+            ChildCell::with_cell_and_opts(msg_cell, serde_opts),
             fwd_fee,
             cur_addr,
-            next_addr
+            next_addr,
         );
         let cur_prefix  = src_prefix.interpolate_addr_intermediate(&dst_prefix, env.cur_addr())?;
         let next_prefix = src_prefix.interpolate_addr_intermediate(&dst_prefix, env.next_addr())?;
@@ -78,9 +80,9 @@ impl MsgEnvelopeStuff {
         })
     }
     pub fn inner(&self) -> &MsgEnvelope { &self.env }
-    pub fn message(&self) -> &Message { &self.msg }
+    pub fn message(&self) -> &CommonMessage { &self.msg }
     pub fn message_hash(&self) -> UInt256 { self.env.message_hash() }
-    pub fn message_cell(&self) -> Cell { self.env.message_cell() }
+    pub fn message_cell(&self) -> ChildCell<CommonMessage> { self.env.msg_cell() }
     #[cfg(test)]
     pub fn src_prefix(&self) -> &AccountIdPrefixFull { &self.src_prefix }
     pub fn dst_prefix(&self) -> &AccountIdPrefixFull { &self.dst_prefix }
@@ -112,7 +114,10 @@ impl MsgEnqueueStuff {
     pub fn from_enqueue(enq: EnqueuedMsg) -> Result<Self> {
         let env = MsgEnvelopeStuff::from_envelope(enq.read_out_msg()?)?;
         let enqueued_lt = enq.enqueued_lt;
-        let created_lt = env.message().lt().ok_or_else(|| error!("wrong message type {:x}", env.message_hash()))?;
+        let created_lt = env.message()
+            .get_std()?
+            .lt()
+            .ok_or_else(|| error!("wrong message type {:x}", env.message_hash()))?;
 
         Ok(Self{
             enq,
@@ -133,7 +138,7 @@ impl MsgEnqueueStuff {
         })
     }
     pub fn next_hop(&self, shard: &ShardIdent, enqueued_lt: u64, config: &BlockchainConfig) -> Result<(MsgEnqueueStuff, Grams)> {
-        let fwd_prices = config.get_fwd_prices(self.message().is_masterchain());
+        let fwd_prices = config.get_fwd_prices(self.message().get_std()?.is_masterchain());
         let mut fwd_fee_remaining = *self.fwd_fee_remaining();
         let transit_fee = fwd_prices.next_fee_checked(&fwd_fee_remaining)?;
         fwd_fee_remaining.sub(&transit_fee)?;
@@ -143,7 +148,12 @@ impl MsgEnqueueStuff {
         let cur_prefix  = self.env.next_prefix.interpolate_addr_intermediate(&self.env.dst_prefix, &cur_addr)?;
         let next_prefix = self.env.next_prefix.interpolate_addr_intermediate(&self.env.dst_prefix, &next_addr)?;
         let msg = self.message().clone();
-        let env = MsgEnvelope::with_routing(self.message_cell().clone(), fwd_fee_remaining, cur_addr, next_addr);
+        let env = MsgEnvelope::with_routing(
+            self.message_cell(),
+            fwd_fee_remaining,
+            cur_addr,
+            next_addr
+        );
         let env = MsgEnvelopeStuff {
             env,
             msg,
@@ -163,10 +173,11 @@ impl MsgEnqueueStuff {
     /// create enqeue for message
     /// create envelope message
     /// all fee from message
-    pub fn new(msg: Message, shard: &ShardIdent, fwd_fee: Grams, use_hypercube: bool) -> Result<Self> {
-        let created_lt = msg.lt().unwrap_or_default();
+    pub fn new(msg: CommonMessage, shard: &ShardIdent, fwd_fee: Grams, use_hypercube: bool, serde_opts: u8) -> Result<Self> {
+        let std_msg = msg.get_std()?;
+        let created_lt = std_msg.lt().unwrap_or_default();
         let enqueued_lt = created_lt;
-        let env = MsgEnvelopeStuff::new(msg, shard, fwd_fee, use_hypercube)?;
+        let env = MsgEnvelopeStuff::new(msg, shard, fwd_fee, use_hypercube, serde_opts)?;
         let enq = EnqueuedMsg::with_param(enqueued_lt, env.inner())?;
         Ok(Self{
             env,
@@ -177,8 +188,10 @@ impl MsgEnqueueStuff {
     }
 
     pub fn same_workchain(&self) -> bool {
-        if let (Some(src), Some(dst)) = (self.message().src_workchain_id(), self.message().dst_workchain_id()) {
-            return src == dst
+        if let Ok(msg) = self.message().get_std() {
+            if let (Some(src), Some(dst)) = (msg.src_workchain_id(), msg.dst_workchain_id()) {
+                return src == dst
+            }
         }
         false
     }
@@ -188,27 +201,27 @@ impl MsgEnqueueStuff {
     pub fn envelope_hash(&self) -> UInt256 {
         self.enq.out_msg_cell().repr_hash()
     }
-    // pub fn envelope(&self) -> &MsgEnvelope {
-    //     self.env.inner()
-    // }
-    pub fn envelope_cell(&self) -> Cell {
-        self.enq.out_msg_cell()
+    pub fn envelope_cell(&self) -> ChildCell<MsgEnvelope> {
+        self.enq.out_msg.clone()
     }
     pub fn message_hash(&self) -> UInt256 {
         self.env.message_hash()
     }
-    pub fn message_cell(&self) -> Cell {
+    pub fn message_cell(&self) -> ChildCell<CommonMessage> {
         self.env.message_cell()
     }
-    pub fn message(&self) -> &Message {
+    pub fn message(&self) -> &CommonMessage {
         &self.env.msg
     }
     pub fn out_msg_key(&self) -> OutMsgQueueKey {
         OutMsgQueueKey::with_account_prefix(&self.next_prefix(), self.message_hash())
     }
     pub fn dst_account_id(&self) -> Result<AccountId> {
-        self.message().int_dst_account_id().ok_or_else(|| error!("internal message with hash {:x} \
-            has wrong destination address", self.message_hash()))
+        self.message()
+            .get_std()?
+            .int_dst_account_id()
+            .ok_or_else(|| error!("internal message with hash {:x} \
+                has wrong destination address", self.message_hash()))
     }
     pub fn created_lt(&self) -> u64 { self.created_lt }
     pub fn enqueued_lt(&self) -> u64 { self.enqueued_lt }

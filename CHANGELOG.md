@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.58.6
+
+- Send SMFT messages to random workchain nodes to improve delivery across workchain
+
+## Version 0.58.5
+
+- Support Mesh networks
+
 ## Version 0.58.4
 
 - Added support for due payment fix

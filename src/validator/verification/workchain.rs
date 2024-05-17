@@ -52,11 +52,13 @@ use catchain::utils::add_compute_result_metric;
 ===============================================================================
 */
 
-const BLOCK_SYNC_MIN_PERIOD_MS: u64 = 300; //min time for block sync
-const BLOCK_SYNC_MAX_PERIOD_MS: u64 = 400; //max time for block sync
-const NEIGHBOURS_SYNC_MIN_PERIOD_MS: u64 = 10000; //min time for sync with neighbour nodes
-const NEIGHBOURS_SYNC_MAX_PERIOD_MS: u64 = 20000; //max time for sync with neighbour nodes
-const BLOCK_LIFETIME_PERIOD: Duration = Duration::from_secs(60); //block's lifetime
+//TODO: move to network config
+const BLOCK_SYNC_MIN_PERIOD_MS: u64 = 100; //min time for block sync
+const BLOCK_SYNC_MAX_PERIOD_MS: u64 = 200; //max time for block sync
+const FAR_NEIGHBOURS_COUNT: usize = 3; //far neighbours count
+const FAR_NEIGHBOURS_SYNC_MIN_PERIOD_MS: u64 = 300; //min time for sync with neighbour nodes
+const FAR_NEIGHBOURS_SYNC_MAX_PERIOD_MS: u64 = 400; //max time for sync with neighbour nodes
+const BLOCK_LIFETIME_PERIOD: Duration = Duration::from_secs(10); //block's lifetime
 const VERIFICATION_OBLIGATION_CUTOFF: f64 = 0.2; //cutoff for validator obligation to verify [0..1]
 
 /*
@@ -448,18 +450,17 @@ impl Workchain {
             0.0,
         );
 
-        if workchain_id != -1 {
-            add_compute_result_metric(metrics_dumper, &format!("smft_wc{}_overlay_out_queries", workchain_id));
+        add_compute_result_metric(metrics_dumper, &format!("smft_wc{}_overlay_out_queries", workchain_id));
 
-            metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_in_broadcasts", workchain_id));
-            metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_out_broadcasts", workchain_id));
-            metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_in_queries", workchain_id));
-            metrics_dumper.add_derivative_metric(format!("smft_wc{}_in_block_candidates", workchain_id));
-            metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_out_queries.total", workchain_id));
-            metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_send_message_to_neighbours_calls", workchain_id));
-            metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_in_messages", workchain_id));
-            metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_out_messages", workchain_id));
-        }
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_in_broadcasts", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_out_broadcasts", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_in_queries", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_in_block_candidates", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_out_queries.total", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_send_message_to_neighbours_calls", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_send_message_to_far_neighbours_calls", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_in_messages", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_out_messages", workchain_id));
     }
 
 
@@ -586,7 +587,7 @@ impl Workchain {
     }
 
     /// Block update function
-    fn synchronize_block(workchain_weak: Weak<Workchain>, block_weak: Weak<SpinMutex<Block>>, neighbours_sync_time: Option<SystemTime>) {
+    fn synchronize_block(workchain_weak: Weak<Workchain>, block_weak: Weak<SpinMutex<Block>>, far_neighbours_sync_time: Option<SystemTime>) {
         let workchain = {
             if let Some(workchain) = workchain_weak.upgrade() {
                 workchain
@@ -622,17 +623,44 @@ impl Workchain {
             BLOCK_SYNC_MAX_PERIOD_MS + 1,
         ));
         let next_sync_time = SystemTime::now() + delay;
-        let neighbours_force_sync = neighbours_sync_time.is_some() && neighbours_sync_time.unwrap().elapsed().is_ok();
-        let neighbours_sync_time = {
-            if neighbours_sync_time.is_none() || neighbours_force_sync {
-                Some(SystemTime::now() + Duration::from_millis(rng.gen_range(NEIGHBOURS_SYNC_MIN_PERIOD_MS, NEIGHBOURS_SYNC_MAX_PERIOD_MS + 1)))
+        let far_neighbours_force_sync = far_neighbours_sync_time.is_some() && far_neighbours_sync_time.unwrap().elapsed().is_ok();
+        let far_neighbours_sync_time = {
+            if far_neighbours_sync_time.is_none() || far_neighbours_force_sync {
+                Some(SystemTime::now() + Duration::from_millis(rng.gen_range(FAR_NEIGHBOURS_SYNC_MIN_PERIOD_MS, FAR_NEIGHBOURS_SYNC_MAX_PERIOD_MS + 1)))
             } else {
-                neighbours_sync_time
+                far_neighbours_sync_time
             }
         };
 
+        //periodically force push block status to neighbours
+
         let workchain_id = workchain.workchain_id;
         let node_debug_id = workchain.node_debug_id.clone();
+
+        if far_neighbours_force_sync {
+            let (is_delivered, _is_rejected) = workchain.get_block_status(&block);
+
+            if !is_delivered {
+                trace!(
+                    target: "verificator",
+                    "Force block {:?} synchronization for workchain's #{} private overlay between far neighbours (overlay={})",
+                    candidate_id,
+                    workchain_id,
+                    node_debug_id);
+
+                workchain.send_block_status_to_far_neighbours(&block, FAR_NEIGHBOURS_COUNT);
+            }
+        }
+
+        //check if block updates has to be sent to network (updates buffering)
+
+        let ready_to_send = block.lock().toggle_send_ready(false);
+
+        if ready_to_send {
+            workchain.send_block_status_to_private_neighbours(&block);
+        }
+
+        //schedule next synchronization
 
         workchain.runtime.spawn(async move {
             if let Ok(timeout) = next_sync_time.duration_since(SystemTime::now()) {
@@ -650,35 +678,8 @@ impl Workchain {
 
             //synchronize block
 
-            Self::synchronize_block(workchain_weak, block_weak, neighbours_sync_time);
+            Self::synchronize_block(workchain_weak, block_weak, far_neighbours_sync_time);
         });
-
-        //periodically force push block status to neighbours
-
-        if neighbours_force_sync {
-            let (is_delivered, _is_rejected) = workchain.get_block_status(&block);
-
-            if !is_delivered {
-                trace!(
-                    target: "verificator",
-                    "Force block {:?} synchronization for workchain's #{} private overlay (overlay={})",
-                    candidate_id,
-                    workchain_id,
-                    node_debug_id);
-
-                block.lock().toggle_send_ready(true);
-            }
-        }
-
-        //TODO: force sync in case of overlay neighbours change
-
-        //check if block updates has to be sent to network (updates buffering)
-
-        let ready_to_send = block.lock().toggle_send_ready(false);
-
-        if ready_to_send {
-            workchain.send_block_status_impl(&block);
-        }
     }
 
     /// Start block synchronization
@@ -1034,25 +1035,44 @@ impl Workchain {
         block.lock().toggle_send_ready(true);
     }
 
-    /// Send block for delivery implementation
-    fn send_block_status_impl(&self, block: &BlockPtr) {
+    /// Send block to private neighbours
+    fn send_block_status_to_private_neighbours(&self, block: &BlockPtr) {
         self.send_block_status_counter.increment(1);
 
         //serialize block status
 
-        let serialized_block_status = {
+        let (serialized_block_status, candidate_id) = {
             //this block is needeed to minimize lock of block
             let mut block = block.lock();
-            let candidate_id = block.get_id();
 
-            trace!(target: "verificator", "Send block {:?} to neighbours after update (node={})", candidate_id, self.node_debug_id);
-
-            block.serialize()
+            (block.serialize(), block.get_id().clone())
         };
 
         //send block status to neighbours
 
+        trace!(target: "verificator", "Send block {:?} to private neighbours after update (node={})", candidate_id, self.node_debug_id);
+
         self.send_message_to_private_neighbours(serialized_block_status);
+    }
+
+    /// Send block to far neighbours
+    fn send_block_status_to_far_neighbours(&self, block: &BlockPtr, nodes_count: usize) {
+        self.send_block_status_counter.increment(1);
+
+        //serialize block status
+
+        let (serialized_block_status, candidate_id) = {
+            //this block is needeed to minimize lock of block
+            let mut block = block.lock();
+
+            (block.serialize(), block.get_id().clone())
+        };
+
+        //send block status to neighbours
+
+        trace!(target: "verificator", "Send block {:?} to {} far neighbours after update (node={})", candidate_id, nodes_count, self.node_debug_id);
+
+        self.send_message_to_far_neighbours(serialized_block_status, nodes_count);
     }
 
     /*
@@ -1150,10 +1170,17 @@ impl Workchain {
         self.workchain_overlay.lock().clone()
     }
 
-    /// Send message to neighbours in a private workchain overlay
+    /// Send message to private neighbours in a private workchain overlay
     fn send_message_to_private_neighbours(&self, data: BlockPayloadPtr) {
         if let Some(workchain_overlay) = self.get_workchain_overlay() {
             workchain_overlay.send_message_to_private_neighbours(data);
+        }
+    }
+
+    /// Send message to far neighbours in a private workchain overlay
+    fn send_message_to_far_neighbours(&self, data: BlockPayloadPtr, nodes_count: usize) {
+        if let Some(workchain_overlay) = self.get_workchain_overlay() {
+            workchain_overlay.send_message_to_far_neighbours(data, nodes_count);
         }
     }
 

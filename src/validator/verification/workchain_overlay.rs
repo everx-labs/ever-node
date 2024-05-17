@@ -49,7 +49,7 @@ use ever_block::Result;
 ===============================================================================
 */
 
-const MIN_NEIGHBOURS_COUNT: usize = 16; //min number of neighbours to synchronize
+const MIN_NEIGHBOURS_COUNT: usize = 5; //min number of neighbours to synchronize
 const MAX_NEIGHBOURS_COUNT: usize = 32; //max number of neighbours to synchronize
 const NEIGHBOURS_ROTATE_MIN_PERIOD_MS: u64 = 60000; //min time for neighbours rotation
 const NEIGHBOURS_ROTATE_MAX_PERIOD_MS: u64 = 120000; //max time for neighbours rotation
@@ -96,7 +96,8 @@ pub struct WorkchainOverlay {
     listener: Arc<WorkchainListener>,       //linked listener
     node_debug_id: Arc<String>,             //debug ID of node
     _instance_counter: InstanceCounter,     //instance counter
-    send_message_to_neighbours_counter: metrics::Counter, //number of send message to neighbours calls
+    send_message_to_neighbours_counter: metrics::Counter, //number of send message to private neighbours calls
+    send_message_to_far_neighbours_counter: metrics::Counter, //number of send message to far neighbours calls
     out_message_counter: metrics::Counter,                //number of outgoing messages
     _in_message_counter: metrics::Counter,                //number of incoming messages
     send_all_counter: metrics::Counter,                   //number of send to all active nodes calls
@@ -197,6 +198,7 @@ impl WorkchainOverlay {
             listener,
             _instance_counter: (*overlays_instance_counter).clone(),
             send_message_to_neighbours_counter: metrics_receiver.sink().register_counter(&format!("{}_send_message_to_neighbours_calls", metrics_prefix).into()),
+            send_message_to_far_neighbours_counter: metrics_receiver.sink().register_counter(&format!("{}_send_message_to_far_neighbours_calls", metrics_prefix).into()),
             send_all_counter: metrics_receiver.sink().register_counter(&format!("{}_send_all_calls", metrics_prefix).into()),
             out_broadcast_counter: metrics_receiver.sink().register_counter(&format!("{}_out_broadcasts", metrics_prefix).into()),
             out_query_counter,
@@ -227,6 +229,29 @@ impl WorkchainOverlay {
         self.send_message_to_neighbours_counter.increment(1);
 
         self.send_message_multicast(&neighbours_adnl_ids, data);
+    }
+
+    /// Send message to far neighbours
+    pub fn send_message_to_far_neighbours(&self, data: BlockPayloadPtr, nodes_count: usize) {
+        let mut far_neighbours_adnl_ids = Vec::with_capacity(nodes_count);
+        let mut rng = rand::thread_rng();
+
+        for _i in 0..nodes_count {
+            let random_value = rng.gen_range(0, self.active_validators_adnl_ids.len());
+            let adnl_id = self.active_validators_adnl_ids[random_value].clone();
+
+            if adnl_id == self.local_adnl_id {
+                continue;
+            }
+
+            far_neighbours_adnl_ids.push(adnl_id.clone());
+        }
+
+        log::trace!(target: "verificator", "Sending multicast to {} far neighbours (overlay={})", far_neighbours_adnl_ids.len(), self.node_debug_id);
+
+        self.send_message_to_far_neighbours_counter.increment(1);
+
+        self.send_message_multicast(&far_neighbours_adnl_ids, data);
     }
 
     /// Send message to all nodes

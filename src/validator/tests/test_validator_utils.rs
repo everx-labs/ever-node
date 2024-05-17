@@ -12,18 +12,17 @@
 */
 
 use super::*;
-use crate::shard_state::ShardHashesStuff;
 use crate::{
-    block::BlockStuff, error::NodeError,
-    validator::accept_block::create_new_proof
+    block::BlockStuff, error::NodeError, shard_state::ShardHashesStuff,
+    validator::accept_block::{create_new_proof, create_new_proof_link}
 };
+#[cfg(feature = "workchains")]
+use crate::validator::validator_utils::mine_key_for_workchain;
 
 use ever_block::{
-    Block, BlockIdExt, ConfigParamEnum, CryptoSignature, CryptoSignaturePair, Deserializable,
-    KeyOption, KeyOptionJson, MASTERCHAIN_ID, SigPubKey, 
+    error, Block, BlockIdExt, ConfigParamEnum, CryptoSignature, CryptoSignaturePair, 
+    Deserializable, HashmapType, MASTERCHAIN_ID, SigPubKey, 
 };
-use ever_block::{error, HashmapType};
-use crate::validator::accept_block::create_new_proof_link;
 
 fn block_config(block_stuff: &BlockStuff) -> Result<ConfigParams> {
     block_stuff.block()?.read_extra()?.read_custom()?.and_then(
@@ -33,16 +32,7 @@ fn block_config(block_stuff: &BlockStuff) -> Result<ConfigParams> {
     )
 }
 
-pub fn mine_key_for_workchain(id_opt: Option<i32>) -> (KeyOptionJson, Arc<dyn KeyOption>) {
-    loop {
-        if let Ok((private, public)) = Ed25519KeyOption::generate_with_json() {
-            if id_opt.is_none() || Some(calc_workchain_id_by_adnl_id(public.id().data())) == id_opt {
-                return (private, public)
-            }
-        }
-    }
-}
-
+#[cfg(feature = "workchains")]
 #[test]
 fn test_mine_key() {
     // let now = std::time::Instant::now();

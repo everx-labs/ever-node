@@ -19,9 +19,10 @@ use crate::{
         control::{ControlQuerySubscriber, ControlServer, DataSource, StatusReporter},
         node_network::NodeNetwork
     },
-    shard_state::ShardStateStuff, test_helper::{gen_master_state, gen_shard_state},
+    shard_state::ShardStateStuff, 
+    test_helper::{gen_master_state, gen_shard_state, init_test_log, test_async},
     validating_utils::{supported_capabilities, supported_version},
-    validator::validator_manager::ValidationStatus, shard_states_keeper::PinnedShardStateGuard,
+    validator::validator_manager::ValidationStatus, shard_states_keeper::PinnedShardStateGuard, block::BlockKind,
 };
 #[cfg(feature = "telemetry")]
 use crate::collator_test_bundle::create_engine_telemetry;
@@ -31,8 +32,8 @@ use adnl::{
     server::AdnlServerConfig
 };
 use std::{
-    collections::HashMap, fs, ops::Deref, sync::{Arc, atomic::{AtomicBool, Ordering}},
-    time::SystemTime
+    collections::HashMap, fs::{copy, remove_dir_all}, ops::Deref, 
+    sync::{Arc, atomic::{AtomicBool, Ordering}}, time::SystemTime
 };
 use storage::block_handle_db::BlockHandle;
 use ton_api::{ 
@@ -135,7 +136,7 @@ async fn start_control_with_options(
     config: Option<TonNodeConfig>,
     server_only: bool
 ) -> Result<(ControlServer, Option<AdnlClient>, Arc<KeyId>)> {
-    fs::copy("./configs/ton-global.config-sample.json", "./target/ton-global.config-sample.json")?;
+    copy("./configs/ton-global.config-sample.json", "./target/ton-global.config-sample.json")?;
     let config = if let Some(config) = config {
         config
     } else {
@@ -143,7 +144,7 @@ async fn start_control_with_options(
     };
     let network = NodeNetwork::new(
         config,
-        Arc::new(tokio_util::sync::CancellationToken::new()),
+        tokio_util::sync::CancellationToken::new(),
         #[cfg(feature = "telemetry")]
         create_engine_telemetry(),
         create_engine_allocated()
@@ -681,7 +682,7 @@ async fn test_stats() {
                 Some(telemetry.clone()),
                 Some(allocated.clone())
             );
-            std::fs::remove_dir_all(DB_PATH).ok();
+            remove_dir_all(DB_PATH).ok();
             let db_config = InternalDbConfig {
                 db_directory: String::from(DB_PATH),
                 ..Default::default()
@@ -700,7 +701,7 @@ async fn test_stats() {
             db.create_or_load_block_handle(
                 &master_state_id,
                 None,
-                None,
+                BlockKind::Block,
                 Some(1),
                 None
             ).unwrap()._to_created().unwrap();
@@ -858,28 +859,35 @@ async fn test_stats() {
 
     }
 
-    crate::test_helper::init_test_log();
-    let engine = Arc::new(TestEngine::new().await);
-    let (control, mut client, key_id) = start_control(
-        DataSource::Engine(engine.clone())
-    ).await.unwrap();
+    async fn test() -> Result<()> {
 
-    let answer: Stats = request(
-        &mut client,
-        GetStats
-    ).await.unwrap();
-    check_stats(&answer, &engine, &key_id, false);
+        init_test_log();
+        let engine = Arc::new(TestEngine::new().await);
+        let (control, mut client, key_id) = start_control(
+            DataSource::Engine(engine.clone())
+        ).await?;
 
-    let answer: Stats = request(
-        &mut client,
-        GetSelectedStats {
-            filter: "*".to_string()
-        }
-    ).await.unwrap();
-    check_stats(&answer, &engine, &key_id, true);
+        let answer: Stats = request(&mut client, GetStats).await?;
+        check_stats(&answer, &engine, &key_id, false);
 
-    client.shutdown().await.unwrap();
-    control.shutdown().await;
+        let answer: Stats = request(
+            &mut client,
+            GetSelectedStats {
+                filter: "*".to_string()
+            }
+        ).await?;
+        check_stats(&answer, &engine, &key_id, true);
+
+        client.shutdown().await?;
+        control.shutdown().await;
+        Ok(())
+
+    }
+
+    test_async(
+        || Box::pin(test()),
+        || { remove_dir_all(DB_PATH).ok(); }
+    ).await;
 
 }
 

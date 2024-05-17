@@ -1,7 +1,12 @@
 use crate::{
-    boot, config::ShardStatesCacheMode, engine::{Engine, Stopper}, engine_traits::{EngineAlloc, EngineOperations}, 
-    internal_db::{state_gc_resolver::AllowStateGcSmartResolver, InternalDb, LAST_APPLIED_MC_BLOCK}, 
-    shard_state::ShardStateStuff
+    internal_db::{
+        InternalDb, state_gc_resolver::AllowStateGcSmartResolver, LAST_APPLIED_MC_BLOCK,
+    },
+    shard_state::ShardStateStuff,
+    engine_traits::{EngineOperations, EngineAlloc},
+    engine::{Engine, Stopper},
+    boot,
+    config::ShardStatesCacheMode, mesh_queues_keeper::MeshQueuesKeeper,
 };
 #[cfg(feature = "telemetry")]
 use crate::engine_traits::EngineTelemetry;
@@ -71,6 +76,7 @@ pub struct ShardStatesKeeper {
     max_catch_up_depth: u32,
     skip_saving_pss: bool,
     states_cache_mode: ShardStatesCacheMode,
+    mesh_queues_keeper: Arc<MeshQueuesKeeper>,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<EngineTelemetry>,
     allocated: Arc<EngineAlloc>,
@@ -96,6 +102,8 @@ impl ShardStatesKeeper {
         let cache_resolver = Arc::new(AllowStateGcSmartResolver::new(0));
         db.start_states_gc(gc_resolver.clone());
 
+        let mesh_queues_keeper = MeshQueuesKeeper::new();
+
         Ok(Arc::new(ShardStatesKeeper {
             db,
             gc_resolver,
@@ -106,6 +114,7 @@ impl ShardStatesKeeper {
             max_catch_up_depth,
             skip_saving_pss,
             states_cache_mode,
+            mesh_queues_keeper,
             #[cfg(feature = "telemetry")]
             telemetry,
             allocated,
@@ -175,7 +184,7 @@ impl ShardStatesKeeper {
     }
 
     pub fn allow_state_gc(&self, block_id: &BlockIdExt) -> Result<bool> {
-        self.gc_resolver.allow_state_gc(block_id, 0, u64::MAX)
+        self.gc_resolver.allow_state_gc(0, block_id, 0, u64::MAX)
     }
 
     #[async_recursion::async_recursion]
@@ -613,16 +622,22 @@ impl ShardStatesKeeper {
                     // clear cache
                     let mut total = 0;
                     let mut cleaned = 0;
+                    let now = std::time::Instant::now();
                     for guard in &self.states {
                         total += 1;
-                        if self.cache_resolver.allow_state_gc(&guard.0, 0, 0)? {
+                        if self.cache_resolver.allow_state_gc(0, &guard.0, 0, 0)? {
                             if guard.val().1.has_saved_state() {
                                 self.states.remove(&guard.0);
                                 cleaned +=1;
                             }
                         }
                     }
-                    log::debug!("clean_cache_worker: cleaned: {}, total: {}", cleaned, total);
+                    log::debug!(
+                        "clean_cache_worker: TIME {time}ms, cleaned: {cleaned}, total: {total}",
+                        time = now.elapsed().as_millis(),
+                    );
+
+                    self.mesh_queues_keeper.gc(self.cache_resolver.deref())?;
                 }
             }
 
@@ -773,6 +788,10 @@ impl ShardStatesKeeper {
                 }
             }
         }
+    }
+
+    pub fn mesh_queues_keeper(&self) -> &MeshQueuesKeeper {
+        self.mesh_queues_keeper.deref()
     }
 
     async fn wait_and_store_persistent_state_attempt(

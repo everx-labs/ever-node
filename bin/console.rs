@@ -946,12 +946,12 @@ mod test {
         ShardIdent, ShardStateUnsplit, ValidatorDescr, ValidatorSet
     };
     use ever_node::{
-        collator_test_bundle::{create_engine_telemetry, create_engine_allocated},
+        block::BlockKind, collator_test_bundle::{create_engine_telemetry, create_engine_allocated},
         config::TonNodeConfig, engine_traits::{EngineAlloc, EngineOperations},
         internal_db::{InternalDbConfig, InternalDb, state_gc_resolver::AllowStateGcSmartResolver}, 
         network::{control::{ControlServer, DataSource}, node_network::NodeNetwork},
-        shard_state::ShardStateStuff,
-        validator::validator_manager::ValidationStatus, shard_states_keeper::PinnedShardStateGuard,
+        shard_state::ShardStateStuff, shard_states_keeper::PinnedShardStateGuard,
+        validator::validator_manager::ValidationStatus
     };
     #[cfg(feature = "telemetry")]
     use ever_node::engine_traits::EngineTelemetry;
@@ -1058,7 +1058,7 @@ mod test {
             db.create_or_load_block_handle(
                 &master_state_id,
                 None,
-                None,
+                BlockKind::Block,
                 Some(1),
                 None
             ).unwrap()._to_created().unwrap();
@@ -1438,7 +1438,7 @@ mod test {
         let allocated = create_engine_allocated();
         let network = NodeNetwork::new(
             node_config,
-            Arc::new(tokio_util::sync::CancellationToken::new()),
+            tokio_util::sync::CancellationToken::new(),
             #[cfg(feature = "telemetry")]
             telemetry.clone(),
             allocated.clone()
