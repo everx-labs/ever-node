@@ -1593,8 +1593,6 @@ impl fmt::Display for RempQueueCollatorInterfaceImpl {
 
 #[async_trait::async_trait]
 impl RempQueueCollatorInterface for RempQueueCollatorInterfaceImpl {
-    /// Returns true if the messages were prepared,
-    /// false if the messages could not be prepared (master block is not processed yet).
     async fn init_queue(
         &self,
         master_block_id: &BlockIdExt,
@@ -1637,27 +1635,10 @@ impl RempQueueCollatorInterface for RempQueueCollatorInterfaceImpl {
             cur_queue.update_status_send_response(&id, origin.clone(), new_status);
             (msg,id)
         }))
-        /*let reason = if self.queue.remp_manager.message_cache.is_block_processed(master_block_id)? {
-            if let Some(q) = &self.queue.cur_queue {
-                return Ok(q.get_one_message_for_collation(self.message_deadline, generation_deadline)
-                    .await?
-                    .map(|(_id,m,_o)| m)
-                );
-            }
-            else {
-                "no current queue is active"
-            }
-        }
-        else {
-            "block is not processed yet"
-        };
+    }
 
-        log::warn!(target: "remp",
-            "RMQ {}: collator request relative to master block {} cannot be processed: {}",
-            self, master_block_id, reason
-        );
-
-        return Ok(None)*/
+    async fn update_message_collation_result(&self, id: &UInt256, result: RempMessageStatus) -> Result<()> {
+        unimplemented!("Processing result");
     }
 }
 

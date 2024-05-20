@@ -1073,4 +1073,5 @@ pub trait RempQueueCollatorInterface : Send + Sync {
         prev_blocks_ids: &[&BlockIdExt]
     ) -> Result<()>;
     async fn get_next_message_for_collation(&self) -> Result<Option<(Arc<Message>, UInt256)>>;
+    async fn update_message_collation_result(&self, id: &UInt256, result: RempMessageStatus) -> Result<()>;
 }
