@@ -39,6 +39,10 @@ use crate::{
 use adnl::common::Wait;
 use futures::try_join;
 use rand::Rng;
+use ton_api::ton::ton_node::{
+    rempmessagestatus::{RempAccepted, RempIgnored, RempRejected}, 
+    RempMessageLevel, RempMessageStatus
+};
 use std::{
     cmp::{max, min},
     collections::{BinaryHeap, HashMap, HashSet},
@@ -2599,6 +2603,11 @@ impl Collator {
         ).await?;
         log::trace!("{}: process_remp_messages: inited queue", self.collated_block_descr);
 
+        let remp_ignored = RempMessageStatus::TonNode_RempIgnored(RempIgnored {
+            level: RempMessageLevel::TonNode_RempCollator,
+            ..Default::default()
+        });
+
         while let Some((msg, id)) = remp_collator_interface.get_next_message_for_collation().await? {
             log::trace!("{}: process_remp_messages: got next message {:x}", self.collated_block_descr, id);
             let header = msg.ext_in_header().ok_or_else(|| error!("remp message {:x} \
@@ -2606,9 +2615,13 @@ impl Collator {
             if self.shard.contains_address(&header.dst)? {
                 let pruned_count = collator_data.estimate_pruned_count();
                 if !collator_data.block_limit_status.fits_normal(REMP_CUTOFF_LIMIT, pruned_count) {
+                    remp_collator_interface.update_message_collation_result(
+                        &id, remp_ignored.clone()).await?;
                     log::trace!("{}: block is loaded enough, stop processing remp messages", self.collated_block_descr);
                     break;
                 } else if self.check_cutoff_timeout() {
+                    remp_collator_interface.update_message_collation_result(
+                        &id, remp_ignored.clone()).await?;
                     log::warn!("{}: TIMEOUT is elapsed, stop processing remp messages",
                         self.collated_block_descr);
                     break;
@@ -2620,6 +2633,8 @@ impl Collator {
                     exec_manager.execute(account_id, msg, prev_data, collator_data).await?;
                 }
             } else {
+                remp_collator_interface.update_message_collation_result(
+                    &id, remp_ignored.clone()).await?;
                 log::warn!(
                     "{}: process_remp_messages: ignored message {:x} for another shard {}",
                     self.collated_block_descr, id, header.dst
@@ -2629,7 +2644,26 @@ impl Collator {
         }
         exec_manager.wait_transactions(collator_data).await?;
         let (accepted, rejected) = collator_data.withdraw_ext_msg_statuses();
-        Ok((accepted.len(), rejected.len()))
+        let accepted_count = accepted.len();
+        let rejected_count = rejected.len();
+        for (id, error) in rejected {
+            let remp_rejected = RempMessageStatus::TonNode_RempRejected(RempRejected {
+                level: RempMessageLevel::TonNode_RempCollator,
+                error,
+                ..Default::default()
+            });
+            remp_collator_interface.update_message_collation_result(
+                &id, remp_rejected).await?;
+        }
+        let remp_accepted = RempMessageStatus::TonNode_RempAccepted(RempAccepted {
+            level: RempMessageLevel::TonNode_RempCollator,
+            ..Default::default()
+        });
+        for (id, _) in accepted {
+            remp_collator_interface.update_message_collation_result(
+                &id, remp_accepted.clone()).await?;
+        }
+        Ok((accepted_count, rejected_count))
     }
 
     async fn process_new_messages(
