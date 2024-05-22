@@ -930,6 +930,36 @@ impl MessageQueue {
         }
     }
 
+    pub async fn process_one_collation_result(&self, id: &UInt256, status: &RempMessageStatus, blk: &BlockIdExt) -> Result<()> {
+        match status {
+            RempMessageStatus::TonNode_RempRejected(r) if r.level == RempMessageLevel::TonNode_RempCollator => {
+                let status_blk = RempMessageStatus::TonNode_RempRejected (RempRejected { block_id : blk.clone(), .. r.clone() });
+                log::trace!(target: "remp", "Point 6. RMQ {} message {:x}, processing result {:?}", self, id, status_blk);
+                self.update_status_send_response_by_id(id, status_blk).await?;
+            },
+            RempMessageStatus::TonNode_RempAccepted(a) if a.level == RempMessageLevel::TonNode_RempCollator => {
+                let status_blk = RempMessageStatus::TonNode_RempAccepted (RempAccepted { block_id : blk.clone(), .. a.clone() });
+                log::trace!(target: "remp", "Point 6. RMQ {} message {:x}, processing result {:?}", self, id, status_blk);
+                self.update_status_send_response_by_id(id, status_blk).await?;
+            },
+            RempMessageStatus::TonNode_RempIgnored(i) if i.level == RempMessageLevel::TonNode_RempCollator => {
+                // Part 2. All messages, ignored by collator itself are also a subject for re-collation
+                let status_blk = RempMessageStatus::TonNode_RempIgnored (RempIgnored { block_id: blk.clone(), .. i.clone() });
+                log::trace!(target: "remp",
+                    "Point 6. RMQ {} message {:x} ignored by collator, processing result {:?}, returning to collation queue",
+                    self, id, status_blk
+                );
+                self.update_status_send_response_by_id(id, status_blk).await?;
+                self.return_to_collation_queue(id).await?;
+            },
+            _ => fail!(
+                "Point 6. RMQ {} unexpected collator result {} for RMQ message {:x}",
+                self, status, id
+            )
+        };
+        Ok(())
+    }
+
     /// Processes one collator response from engine.deque_remp_message_status().
     /// Returns Ok(status) if the response was sucessfully processed, Ok(None) if no responses remain
     pub async fn process_one_deque_remp_message_status(&self) -> Result<Option<RempMessageStatus>> {
@@ -1358,17 +1388,7 @@ impl RmqQueueManager {
             fail!("Cannot put message to RMQ {}: queue is not started yet", self)
         }
     }
-/*
-    pub async fn collect_messages_for_collation (&self) -> Result<()> {
-        if let Some(queue) = &self.cur_queue {
-            queue.collect_messages_for_collation().await?;
-            Ok(())
-        }
-        else {
-            fail!("Collecting messages for collation: RMQ {} is not started", self)
-        }
-    }
-*/
+
     pub async fn prepare_messages_for_collation (&self) -> Result<Vec<(UInt256, Arc<Message>, Arc<RempMessageOrigin>)>> {
         if let Some(queue) = &self.cur_queue {
             let messages = queue.prepare_messages_for_collation().await?;
@@ -1543,6 +1563,7 @@ impl fmt::Display for RmqQueueManager {
 pub struct RempQueueCollatorInterfaceImpl {
     queue: Arc<RmqQueueManager>,
     messages_to_process: lockfree::queue::Queue<(UInt256, Arc<Message>, Arc<RempMessageOrigin>)>,
+    messages_processed: lockfree::queue::Queue<(UInt256, RempMessageStatus)>,
     messages_count: AtomicUsize
 }
 
@@ -1551,6 +1572,7 @@ impl RempQueueCollatorInterfaceImpl {
         Self {
             queue: remp_manager,
             messages_to_process: lockfree::queue::Queue::new(),
+            messages_processed: lockfree::queue::Queue::new(),
             messages_count: AtomicUsize::new(0)
         }
     }
@@ -1582,6 +1604,59 @@ impl RempQueueCollatorInterfaceImpl {
     pub fn into_interface(self: Arc<Self>) -> Arc<dyn RempQueueCollatorInterface> {
         let interface: Arc<dyn RempQueueCollatorInterface> = self.clone();
         interface
+    }
+
+    pub async fn process_collation_result(&self, blk: &BlockIdExt, mark_as_ignored: bool) -> Result<()> {
+        let cur_queue = match &self.queue.cur_queue {
+            Some(q) => q,
+            None => fail!("No current queue {}: cannot return prepared messages to non-initalized/removed queue", self)
+        };
+
+        log::trace!(target: "remp", "Point 6. RMQ {}: processing collation results for block {}", self, blk);
+
+        let mut accepted = 0;
+        let mut rejected = 0;
+        let mut ignored = 0;
+        let mut errors = 0;
+
+        while let Some((id, status)) = self.messages_processed.pop() {
+            let status = if mark_as_ignored {
+                let ignored = RempIgnored { level: RempMessageLevel::TonNode_RempCollator, block_id: Default::default() };
+                RempMessageStatus::TonNode_RempIgnored(ignored)
+            }
+            else { status };
+
+            if let Err(e) = cur_queue.process_one_collation_result(&id, &status, blk).await {
+                log::error!(target: "remp", "RMQ {}. Error processing collation result, block {}, msg {:x}, result {:?}: {}", self, blk, id, status, e);
+                errors += 1;
+            }
+            else {
+                match &status {
+                    RempMessageStatus::TonNode_RempRejected(_) => rejected += 1,
+                    RempMessageStatus::TonNode_RempAccepted(_) => accepted += 1,
+                    RempMessageStatus::TonNode_RempIgnored(_) => ignored += 1,
+
+                    s => {
+                        log::error!(target: "remp", "RMQ {}. Error processing collation result, block {}, msg {:x}, unexpected outcome {:?}", self, blk, id, s)
+                    }
+                }
+            }
+        }
+
+        log::debug!(target: "remp", "Point 6. RMQ {}: processed collation results for block {}, accepted {}, rejected {}, ignored {}, errors {}",
+            self, blk, accepted, rejected, ignored, errors
+        );
+
+        Ok(())
+    }
+
+    /// Updates cache contents according to results from the collator.
+    /// `blk` - block id of the newly collated block
+    /// `was_collation_successful` - false if collation failed and returned Error. In this case
+    /// the messages are remarked as 'ignored'.
+    pub async fn update_queues_after_collation(&self, blk: &BlockIdExt, was_collation_successful: bool) -> Result<(usize, usize)> {
+        self.process_collation_result(blk, !was_collation_successful).await?;
+        self.return_prepared_messages_to_queue().await
     }
 }
 
@@ -1638,7 +1713,8 @@ impl RempQueueCollatorInterface for RempQueueCollatorInterfaceImpl {
     }
 
     async fn update_message_collation_result(&self, id: &UInt256, result: RempMessageStatus) -> Result<()> {
-        unimplemented!("Processing result");
+        self.messages_processed.push ((id.clone(), result));
+        Ok(())
     }
 }
 

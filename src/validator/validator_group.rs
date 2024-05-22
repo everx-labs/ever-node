@@ -672,30 +672,6 @@ impl ValidatorGroup {
             Ok(true) => self.get_remp_queue_collator_interface().await
         };
 
-        /*
-        // To be removed after moving message queue processing into collator
-        if let Some(rmq) = self.get_reliable_message_queue().await {
-            log::info!(
-                target: "validator", 
-                "ValidatorGroup::on_generate_slot: ({}) collecting REMP messages \
-                for {} for collation: {}",
-                next_block_descr, self.info_round(round).await, remp_queue_collator_interface_impl.is_some()
-            );
-            if let Some(interface_impl) = remp_queue_collator_interface_impl {
-                let interface
-                if let Err(e) = rmq.collect_messages_for_collation().await {
-                    log::error!(
-                        target: "validator", 
-                        "({}): Error collecting messages for {}: `{}`",
-                        next_block_descr,
-                        self.info_round(round).await,
-                        e
-                    )
-                }
-            }
-        }
-         */
-
         let result = match mm_block_id {
             Some(mc) => {
                 match run_collate_query (
@@ -715,24 +691,56 @@ impl ValidatorGroup {
             None => Err(error!("Min masterchain block id missing")),
         };
 
-        let return_result_message = if let Some(x) = remp_queue_collator_interface_impl {
-            match x.return_prepared_messages_to_queue().await {
-                Ok((total, returned)) => format!("total external messages {}, processed {}, returned to queue {}",
-                    total, total as i64 - returned as i64, returned
-                ),
-                Err(e) => format!("error returning non-processed external messages to queue `{}`", e)
-            }
-        }
-        else {
-            format!("no external messages processed")
-        };
-
         let candidate = match self.verification_manager.clone() {
             Some(_) => match &result {
                 Ok(candidate) => Some(candidate.clone()),
                 _ => None
             },
             None => None,
+        };
+
+        let next_block_id = match &result {
+            Err(_) =>
+                match self.group_impl.execute_sync(|group_impl| group_impl.create_next_block_id(
+                    UInt256::default(), UInt256::default(),
+                    self.shard().clone()
+                )).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::error!(target: "validator", "({}): Validator group {}: cannot generate next block id: `{}`",
+                                next_block_descr,
+                                self.info_round(round).await, e
+                            );
+                        BlockIdExt::default()
+                    }
+                },
+            Ok(candidate) =>
+                match self.group_impl.execute_sync(|group_impl|
+                   group_impl.create_next_block_id(
+                       candidate.id.root_hash.clone(),
+                       get_hash(&candidate.data.data()),
+                       self.shard().clone()
+                   )
+                ).await {
+                    Err(x) => {
+                        log::error!(target: "validator", "({}): validator group {}: cannot generate next block id: {}",
+                            next_block_descr, self.info_round(round).await, x
+                        );
+                        BlockIdExt::default()
+                    },
+                    Ok(x) => x
+                }
+        };
+
+        let return_result_message = if let Some(x) = remp_queue_collator_interface_impl {
+            match x.update_queues_after_collation(&next_block_id, result.is_ok()).await {
+                Ok((total, returned)) =>
+                    format!("total external messages {}, processed {}, returned to queue {}", total, total as i64 - returned as i64, returned),
+                Err(e) => format!("error returning non-processed external messages to queue `{}`", e)
+            }
+        }
+        else {
+            format!("no external messages processed")
         };
 
         let result_message = match &result {
@@ -743,28 +751,6 @@ impl ValidatorGroup {
                 format!("Collation successful")
             }
             Err(x) => {
-                if let Some(rmq) = self.get_reliable_message_queue().await {
-                    let block_id = match self.group_impl.execute_sync(|group_impl| group_impl.create_next_block_id(
-                        UInt256::default(), UInt256::default(),
-                        self.shard().clone()
-                    )).await {
-                        Ok(b) => b,
-                        Err(e) => {
-                            log::error!(target: "validator", "({}): Validator group {}: cannot generate next block id: `{}`",
-                                next_block_descr,
-                                self.info_round(round).await, e
-                            );
-                            BlockIdExt::default()
-                        }
-                    };
-                    if let Err(e) = self.engine.finalize_remp_messages_as_ignored(&block_id) {
-                        log::error!(target: "remp", 
-                            "({}): RMQ {}: cannot finalize remp messages as ignored by block {}: `{}`",
-                            next_block_descr,
-                            rmq, block_id, e
-                        );
-                    }
-                }
                 format!("Collation failed: `{}`", x)
             }
         };
@@ -794,6 +780,7 @@ impl ValidatorGroup {
             if let Some(candidate) = candidate {
                 log::debug!(target:"verificator", "Received new candidate for round {} for shard {:?}", round, self.shard());
                 let verification_manager = verification_manager.clone();
+                /*
                 let next_block_id = match self.group_impl.execute_sync(|group_impl|
                     group_impl.create_next_block_id(
                         candidate.id.root_hash.clone(),
@@ -804,6 +791,7 @@ impl ValidatorGroup {
                     Err(x) => { log::error!(target: "validator", "{}", x); return },
                     Ok(x) => x
                 };
+                 */
 
                 let candidate = super::BlockCandidate {
                     block_id: next_block_id,

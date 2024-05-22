@@ -21,7 +21,7 @@ use ever_block::{
     Message, Serializable, Deserializable, ExternalInboundMessageHeader, 
     MsgAddressInt, Grams, ShardIdent, ValidatorDescr, SigPubKey, BlockIdExt, 
     MsgAddressExt::AddrNone, UnixTime32, GetRepresentationHash,
-    error, fail, Result, SliceData, UInt256
+    fail, Result, SliceData, UInt256
 };
 
 use crate::{
