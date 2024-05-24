@@ -14,15 +14,13 @@
 use crate::network::node_network::NetworkContext;
 
 use adnl::{
-    declare_counted, 
+    declare_counted, OverlayNode, PrivateOverlayShortId, RldpNode,
     common::{
         AdnlPeers, Answer, CountedObject, Counter, QueryAnswer, QueryResult, 
-        TaggedByteSlice, TaggedTlObject, Wait
+        Subscriber, TaggedByteSlice, TaggedTlObject, Wait
     },
     node::AdnlNode,
 };
-use adnl::{OverlayNode, PrivateOverlayShortId, QueriesConsumer};
-use adnl::RldpNode;
 use catchain::{
     BlockPayloadPtr, CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr,
     ExternalQueryResponseCallback, PublicKeyHash
@@ -552,7 +550,7 @@ impl CatchainClientConsumer {
 }
 
 #[async_trait::async_trait]
-impl QueriesConsumer for CatchainClientConsumer {
+impl Subscriber for CatchainClientConsumer {
     async fn try_consume_query(&self, query: TLObject, peers: &AdnlPeers) -> Result<QueryResult> {
         
         let is_stop = self.is_stop.load(atomic::Ordering::Relaxed);

@@ -58,6 +58,7 @@ pub trait VerificationManager: Sync + Send {
     /// New block broadcast has been generated
     async fn send_new_block_candidate(&self, candidate: &BlockCandidate);
 
+    #[allow(dead_code)]
     /// Get block status (delivered, rejected)
     fn get_block_status(
         &self,

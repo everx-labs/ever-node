@@ -51,10 +51,12 @@ mod jaeger {
 }
 
 use crate::{
-    config::TonNodeConfig, engine_traits::ExternalDb, engine::{Engine, Stopper, EngineFlags},
+    config::TonNodeConfig, engine::{Engine, Stopper, EngineFlags},
     jaeger::init_jaeger, internal_db::restore::set_graceful_termination,
     validating_utils::supported_version
 };
+#[cfg(feature = "external_db")]
+use crate::engine_traits::ExternalDb;
 
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
@@ -323,11 +325,6 @@ fn start_external_db(config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>>
     ))
 }
 
-#[cfg(not(feature = "external_db"))]
-fn start_external_db(_config: &TonNodeConfig) -> Result<Vec<Arc<dyn ExternalDb>>> {
-    Ok(vec!())
-}
-
 async fn start_engine(
     config: TonNodeConfig, 
     zerostate_path: Option<&str>, 
@@ -335,10 +332,12 @@ async fn start_engine(
     flags: EngineFlags,
     stopper: Arc<Stopper>
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
+    #[cfg(feature = "external_db")]
     let external_db = start_external_db(&config)?;
     crate::engine::run(
         config, 
         zerostate_path, 
+        #[cfg(feature = "external_db")]
         external_db, 
         validator_runtime,
         flags,

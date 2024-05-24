@@ -107,37 +107,14 @@ impl BlockHandle {
     fn deserialize<R: Read>(id: &BlockIdExt, read: &mut R) -> Result<BlockMeta> {
         let meta = BlockMeta::deserialize(read)?;
         if (meta.flags() & FLAG_HAS_FULL_ID) == FLAG_HAS_FULL_ID {
-            let workchain_id = read.read_le_u32()? as i32;
-            if workchain_id != id.shard().workchain_id() {
-                fail!(
-                    "BlockHandle::deserialize: workchain_id mismatch: {} != {}",
-                    workchain_id,
-                    id.shard().workchain_id()
-                )
-            }
-            let shard_prefix = read.read_le_u64()?;
-            if shard_prefix != id.shard().shard_prefix_with_tag() {
-                fail!(
-                    "BlockHandle::deserialize: shard_prefix mismatch: {} != {}",
-                    shard_prefix,
-                    id.shard().shard_prefix_with_tag()
-                )
-            }
-            let seq_no = read.read_le_u32()?;
-            if seq_no != id.seq_no() {
-                fail!(
-                    "BlockHandle::deserialize: seq_no mismatch: {} != {}",
-                    seq_no,
-                    id.seq_no()
-                )
-            }
-            let file_hash = UInt256::with_array(read.read_u256()?);
-            if file_hash != *id.file_hash() {
-                fail!(
-                    "BlockHandle::deserialize: file_hash mismatch: {} != {}",
-                    file_hash,
-                    id.file_hash()
-                )
+            let id2 = BlockIdExt {
+                shard_id: ShardIdent::with_tagged_prefix(read.read_le_u32()? as i32, read.read_le_u64()?)?,
+                seq_no: read.read_le_u32()?,
+                file_hash: UInt256::with_array(read.read_u256()?),
+                root_hash: id.root_hash().clone()
+            };
+            if id != &id2 {
+                log::warn!("BlockHandle::deserialize: id mismatch: written {} != given {}", id2, id);
             }
         }
         Ok(meta)

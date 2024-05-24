@@ -1,3 +1,5 @@
+#![cfg(not(feature = "external_db"))]
+
 use std::{
     collections::HashMap,
     ops::Deref, 
@@ -20,7 +22,6 @@ enum BlockProofOrZerostate {
     Zerostate(Arc<ShardStateStuff>),
     None,
 }
-
 
 impl BlockProofOrZerostate {
     pub fn with_zerostate(zerostate: Arc<ShardStateStuff>) -> Self {

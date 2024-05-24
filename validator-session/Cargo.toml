@@ -14,7 +14,7 @@ lazy_static = '1.4'
 log = '0.4'
 metrics = '0.21.0'
 rand = '0.8'
-adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.26' }
+adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.27' }
 catchain = { path = '../catchain' }
 ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.10.4' }
 storage = { path = '../storage' }
@@ -26,5 +26,6 @@ colored = '1.9'
 env_logger = '0.7'
 
 [features]
+export_key = [  ]
 slashing = [  ]
 

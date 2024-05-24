@@ -22,8 +22,10 @@ use ever_block::{
     ExtBlkRef, HashmapAugType, HashmapType, MerkleProof, OutQueueUpdate, Result, Serializable, 
     ShardDescr, ShardIdent, ShardHashes, UInt256, UsageTree, MeshMsgQueueUpdates, MeshMsgQueuesKit,
     MeshUpdate, BlockProof, MeshKit, ConnectedNwOutDescr, ConnectedNwDescrExt,
-    MerkleUpdate, OutMsgQueueInfo, BlockSignatures, GetRepresentationHash
+    MerkleUpdate, BlockSignatures, GetRepresentationHash
 };
+#[cfg(not(feature = "external_db"))]
+use ever_block::OutMsgQueueInfo;
 #[cfg(test)]
 use ever_block::{BlockInfo, BlkMasterInfo, write_boc};
 use std::{cmp::max, io::Write, sync::Arc,collections::{HashMap, HashSet}};
@@ -35,7 +37,7 @@ mod tests;
 pub struct BlockPrevStuff {
     pub mc_block_id: BlockIdExt,
     pub prev: Vec<BlockIdExt>,
-    pub after_split: bool
+    pub _after_split: bool
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -576,6 +578,7 @@ impl BlockStuff {
         Ok(shards)
     }
 
+    #[cfg(not(feature = "external_db"))]
     // Commited master block for each connected network
     pub fn mesh_top_blocks(&self) -> Result<HashMap<i32, BlockIdExt>> {
         let mut tbs = HashMap::new();
@@ -658,6 +661,7 @@ impl BlockStuff {
         }
     }
 
+    #[cfg(not(feature = "external_db"))]
     pub fn mesh_queue(&self, src_shard: &ShardIdent) -> Result<Arc<OutMsgQueueInfo>> {
         match &self.block {
             BlockOrigin::MeshKit{queues, ..} => {
@@ -790,7 +794,7 @@ pub fn construct_and_check_prev_stuff(
         BlockPrevStuff {
             mc_block_id: out_mc_block_id,
             prev: out_prev,
-            after_split: out_after_split
+            _after_split: out_after_split
         }
     ))
 

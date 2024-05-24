@@ -410,6 +410,7 @@ impl RempClientTelemetry {
         self.set_message_status(id, REMP_MESSAGE_EXPIRED);
     }
 
+    #[cfg(feature = "external_db")]
     pub fn add_receipt(
         &self,
         message_id: &UInt256,

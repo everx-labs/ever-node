@@ -397,7 +397,7 @@ pub(crate) async fn download_zerostate(
                 let (state, handle) = engine.store_zerostate(state, &state_bytes).await?;
                 engine.set_applied(&handle, 0).await?;
                 engine.save_last_applied_mc_block_id(handle.id())?;
-                engine.process_full_state_in_ext_db(&state).await?;
+                engine.process_initial_state(&state).await?;
                 return Ok(handle)
             }
             Err(err) => log::warn!(target: "boot", "download_zerostate error: {}", err)
@@ -496,7 +496,7 @@ async fn download_state(
         let state = engine.download_and_store_state(
             &handle, &state_update.new_hash, master_id, active_peers, bad_peers, attempts
         ).await?;
-        engine.process_full_state_in_ext_db(&state).await?;
+        engine.process_initial_state(&state).await?;
         state
     } else {
         engine.load_state(handle.id()).await?
