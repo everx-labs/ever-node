@@ -756,7 +756,7 @@ impl ValidatorGroup {
         };
 
         let result_message = format!("{}{}", result_message, return_result_message);
-
+/*
         if let Some(rmq) = self.get_reliable_message_queue().await {
             if let Err(e) = rmq.process_collation_result().await {
                 log::error!(target: "validator", "({}): Error processing collation results for {}: `{}`",
@@ -766,7 +766,7 @@ impl ValidatorGroup {
                 )
             }
         }
-
+*/
         log::info!(target: "validator", "({}): ValidatorGroup::on_generate_slot: {}, {}",
             next_block_descr,
             self.info_round(round).await, result_message

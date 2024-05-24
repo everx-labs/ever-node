@@ -46,7 +46,6 @@ use crate::{
         validator_utils::ValidatorListHash
     }
 };
-use failure::err_msg;
 use crate::block::BlockIdExtExtention;
 
 #[derive(Debug,PartialEq,Eq,PartialOrd,Ord,Clone)]
@@ -959,7 +958,7 @@ impl MessageQueue {
         };
         Ok(())
     }
-
+/*
     /// Processes one collator response from engine.deque_remp_message_status().
     /// Returns Ok(status) if the response was sucessfully processed, Ok(None) if no responses remain
     pub async fn process_one_deque_remp_message_status(&self) -> Result<Option<RempMessageStatus>> {
@@ -1032,7 +1031,7 @@ impl MessageQueue {
             self, accepted + rejected + ignored, accepted, rejected, ignored
         );
     }
-
+*/
     async fn get_queue_len(&self) -> usize {
         self.queues.execute_sync(|q| q.pending_collation_set.len()).await
     }
@@ -1398,7 +1397,7 @@ impl RmqQueueManager {
             fail!("Preparing messages for collation: RMQ {} is not started", self)
         }
     }
-
+/*
     pub async fn process_collation_result (&self) -> Result<()> {
         if let Some(queue) = &self.cur_queue {
             queue.process_collation_result().await;
@@ -1408,7 +1407,7 @@ impl RmqQueueManager {
             Err(err_msg(format!("Processing collation result: RMQ {} is not started", self)))
         }
     }
-
+*/
     pub async fn process_messages_from_committed_block(&self, id: BlockIdExt) -> Result<()> {
         if let Some(queue) = &self.cur_queue {
             let proc = Arc::new(StatusUpdater {

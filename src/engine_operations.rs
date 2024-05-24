@@ -55,7 +55,7 @@ use ton_api::{
     serialize_boxed, 
     ton::ton_node::{
         broadcast::{BlockBroadcast, MeshUpdateBroadcast, QueueUpdateBroadcast}, RempMessage,
-        RempMessageStatus, RempReceipt
+        RempReceipt
     }, IntoBoxed
 };
 use ever_block::{
@@ -1046,17 +1046,6 @@ impl EngineOperations for Engine {
     }
 
     // Remp messages
-    fn new_remp_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
-        self.remp_messages()?.new_message(id, message)
-    }
-    fn finalize_remp_messages_as_ignored(&self, block_id: &BlockIdExt)
-    -> Result<()> {
-        self.remp_messages()?.finalize_remp_messages_as_ignored(block_id)
-    }
-    fn dequeue_remp_message_status(&self) -> Result<Option<(UInt256, Arc<Message>, RempMessageStatus)>> {
-        self.remp_messages()?.dequeue_message_status()
-    }
-
     async fn check_remp_duplicate(&self, message_id: &UInt256) -> Result<RempDuplicateStatus> {
         self.remp_service()
             .ok_or_else(|| error!("Can't get message status because remp service was not set"))?

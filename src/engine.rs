@@ -22,7 +22,7 @@ use crate::{
         ExternalDb, EngineAlloc, EngineOperations,
         OverlayOperations, PrivateOverlayOperations, Server,
     },
-    ext_messages::{MessagesPool, EXT_MESSAGES_TRACE_TARGET, RempMessagesPool},
+    ext_messages::{MessagesPool, EXT_MESSAGES_TRACE_TARGET},
     full_node::{
         apply_block::{self, apply_block},
         shard_client::{
@@ -125,7 +125,6 @@ pub struct Engine {
 
     remp_client: Option<Arc<RempClient>>,
     remp_service: Option<Arc<RempService>>,
-    remp_messages: Option<Arc<RempMessagesPool>>,
 
     zero_state_id: BlockIdExt,
     init_mc_block_id: BlockIdExt,
@@ -808,15 +807,15 @@ impl Engine {
         };
         #[cfg(feature = "telemetry")]
         let remp_core_telemetry = Arc::new(RempCoreTelemetry::new(Self::TIMEOUT_TELEMETRY_SEC));
-        let (remp_service, remp_messages) = if remp_config.is_service_enabled() {
+        let remp_service = if remp_config.is_service_enabled() {
             let remp_service = Arc::new(RempService::new());
             network.remp().set_messages_subscriber(remp_service.clone())?;
             #[cfg(feature = "telemetry")]
             network.remp().set_telemetry(remp_core_telemetry.clone())?;
             network.remp().start()?;
-            (Some(remp_service), Some(Arc::new(RempMessagesPool::new())))
+            Some(remp_service)
         } else {
-            (None, None)
+            None
         };
 
         log::info!("Engine is created.");
@@ -879,7 +878,6 @@ impl Engine {
             servers: lockfree::queue::Queue::new(),
             remp_client,
             remp_service,
-            remp_messages,
             stopper,
             zero_state_id,
             init_mc_block_id,
@@ -1207,11 +1205,6 @@ impl Engine {
 
     pub fn remp_client(&self) -> Option<&Arc<RempClient>> {
         self.remp_client.as_ref()
-    }
-
-    pub fn remp_messages(&self) -> Result<&RempMessagesPool> {
-        let rm = self.remp_messages.as_ref().ok_or_else(|| error!("Remp messages pool was not inited."))?.deref();
-        Ok(rm)
     }
 
     pub fn remp_capability(&self) -> bool {

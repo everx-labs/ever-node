@@ -657,17 +657,6 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    // Remp messages
-    fn new_remp_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
-        unimplemented!()
-    }
-    fn finalize_remp_messages_as_ignored(&self, block_id: &BlockIdExt) -> Result<()> {
-        unimplemented!()
-    }
-    fn dequeue_remp_message_status(&self) -> Result<Option<(UInt256, Arc<Message>, RempMessageStatus)>> {
-        unimplemented!()
-    }
-
     // Utils
 
     fn now(&self) -> u32 {

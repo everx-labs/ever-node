@@ -21,7 +21,7 @@ use std::{
 use std::cmp::{max, Reverse};
 use std::collections::BinaryHeap;
 
-use ever_block::{BlockIdExt, CatchainConfig, Message, ShardIdent, UnixTime32};
+use ever_block::{BlockIdExt, CatchainConfig, ShardIdent, UnixTime32};
 use ton_api::ton::ton_node::RempMessageStatus;
 use ever_block::{error, fail, KeyId, Result, SliceData, UInt256};
 
@@ -351,26 +351,12 @@ impl RempQueue<RempMessageWithOrigin> for RempIncomingQueue {
     }
 }
 
-pub struct CollatorInterfaceWrapper {
-    engine: Arc<dyn EngineOperations>,
-//  message_dispatcher: Mutex<HashMap<UInt256, ShardIdent>>
-}
-
-impl CollatorInterfaceWrapper {
-    pub fn new(engine: Arc<dyn EngineOperations>) -> Self {
-        CollatorInterfaceWrapper {
-            engine,
-//          message_dispatcher: Mutex::new(HashMap::new())
-        }
-    }
-}
-
-pub struct CollatorResult {
-    pub message_id: UInt256,
-    pub message: Arc<Message>,
-    pub status: RempMessageStatus
-}
-
+//pub struct CollatorResult {
+//    pub message_id: UInt256,
+//    pub message: Arc<Message>,
+//    pub status: RempMessageStatus
+//}
+/*
 #[async_trait::async_trait]
 impl RempQueue<CollatorResult> for CollatorInterfaceWrapper {
     fn receive_message(&self) -> Result<Option<Arc<CollatorResult>>> {
@@ -383,12 +369,12 @@ impl RempQueue<CollatorResult> for CollatorInterfaceWrapper {
         get_shard_by_message(self.engine.clone(), msg.message.clone()).await
     }
 }
-
-impl fmt::Display for CollatorResult {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "message_id: {:x}, status: {}", self.message_id, self.status)
-    }
-}
+*/
+//impl fmt::Display for CollatorResult {
+//    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+//        write!(f, "message_id: {:x}, status: {}", self.message_id, self.status)
+//    }
+//}
 
 // REMP Message flow: 
 // Point 0. incoming message                                     @ RempService
@@ -437,7 +423,7 @@ pub struct RempManager {
     pub message_cache: Arc<MessageCache>,
     incoming_delayer: RempDelayer,
     incoming_dispatcher: RempQueueDispatcher<RempMessageWithOrigin, RempIncomingQueue>,
-    pub collator_receipt_dispatcher: RempQueueDispatcher<CollatorResult, CollatorInterfaceWrapper>,
+    //pub collator_receipt_dispatcher: RempQueueDispatcher<CollatorResult, CollatorInterfaceWrapper>,
     pub response_sender: crossbeam_channel::Sender<(UInt256 /* local_id */, UInt256 /* message_id */, Arc<RempMessageOrigin>, RempMessageStatus)>
 }
 
@@ -455,7 +441,6 @@ impl RempManager {
 
         let mut delay_random_rng = rand::thread_rng();
         let delay_random_seed: u64 = delay_random_rng.gen();
-        let collator_interface_wrapper = CollatorInterfaceWrapper::new(engine.clone());
         return (RempManager {
             options: opt.clone(),
             catchain_store: Arc::new(RempCatchainStore::new()),
@@ -469,14 +454,6 @@ impl RempManager {
                 #[cfg(feature = "telemetry")]
                 engine.remp_core_telemetry().incoming_mutex_metric()
             ),
-            collator_receipt_dispatcher: RempQueueDispatcher::with_metric(
-                "collator receipt dispatcher".to_string(),
-                collator_interface_wrapper,
-                #[cfg(feature = "telemetry")]
-                engine.remp_core_telemetry().collator_receipt_queue_size_metric(),
-                #[cfg(feature = "telemetry")]
-                engine.remp_core_telemetry().collator_receipt_mutex_metric()
-            ),
             response_sender: response_sender
         }, RempInterfaceQueues { 
             engine,
@@ -489,7 +466,7 @@ impl RempManager {
 
     pub async fn add_active_shard(&self, shard: &ShardIdent) {
         self.incoming_dispatcher.add_actual_shard(shard).await;
-        self.collator_receipt_dispatcher.add_actual_shard(shard).await;
+        //self.collator_receipt_dispatcher.add_actual_shard(shard).await;
     }
 
     pub async fn remove_active_shard(&self, shard: &ShardIdent) {
@@ -497,7 +474,7 @@ impl RempManager {
         if let Some(remaining) = remaining_incoming_msgs {
             self.incoming_dispatcher.reroute_messages(&remaining, shard).await;
         }
-        self.collator_receipt_dispatcher.remove_actual_shard(shard).await;
+        //self.collator_receipt_dispatcher.remove_actual_shard(shard).await;
     }
 
     pub async fn poll_incoming(&self, shard: &ShardIdent) -> (Option<Arc<RempMessageWithOrigin>>, usize) {

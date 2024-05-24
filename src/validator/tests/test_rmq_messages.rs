@@ -15,7 +15,7 @@ use std::{collections::HashSet, str::FromStr, sync::Arc, time::Duration};
 use std::ops::RangeInclusive;
 use std::thread::sleep;
 
-use ton_api::ton::ton_node::{RempMessageLevel, RempMessageLevel::TonNode_RempMasterchain, RempMessageStatus, rempmessagestatus::{RempAccepted, RempIgnored}};
+use ton_api::ton::ton_node::{RempMessageLevel, RempMessageStatus, rempmessagestatus::{RempAccepted, RempIgnored}};
 
 use ever_block::{
     Message, Serializable, Deserializable, ExternalInboundMessageHeader, 
@@ -114,16 +114,9 @@ fn test_rmq_message_id() -> Result<()> {
 struct RmqTestEngine {
     #[cfg(feature = "telemetry")]
     remp_core_telemetry: RempCoreTelemetry,
-    collator_queue: lockfree::queue::Queue<(UInt256, Arc<Message>)>
 }
 
 impl EngineOperations for RmqTestEngine {
-    fn new_remp_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
-        println!("New message received for collation: {:x}", id);
-        self.collator_queue.push((id, message));
-        Ok(())
-    }
-
     #[cfg(feature = "telemetry")]
     fn remp_core_telemetry(&self) -> &RempCoreTelemetry {
         &self.remp_core_telemetry
@@ -135,7 +128,6 @@ impl RmqTestEngine {
         Self {
             #[cfg(feature = "telemetry")]
             remp_core_telemetry : RempCoreTelemetry::new(10),
-            collator_queue: lockfree::queue::Queue::new()
         }
     }
 }
@@ -366,11 +358,11 @@ fn remp_simple_collation_equal_uids_test() -> Result<()> {
         println!("Collecting messages for collation");
         sleep(Duration::from_millis(10)); // To overcome SystemTime inconsistency and make tests reproducible.
         let messages = testbench.message_queue.prepare_messages_for_collation().await?;
-        for (msg_id, msg, _order) in messages.into_iter() {
-            testbench.engine.new_remp_message(msg_id.clone(), msg)?;
-        }
+//        for (msg_id, msg, _order) in messages.into_iter() {
+//            testbench.engine.new_remp_message(msg_id.clone(), msg)?;
+//        }
 
-        for (id, _msg) in testbench.engine.collator_queue.pop_iter() {
+        for (id, _msg, _origin) in messages.iter() {
             println!("collated: {:x}", id);
             assert!(must_be_collated.remove(&id));
         }
@@ -433,7 +425,7 @@ fn remp_simple_expiration_test() -> Result<()> {
                 Some(Arc::new(m.message.clone())),
                 Some(Arc::new(m.origin.clone())),
                 RempMessageStatus::TonNode_RempAccepted(RempAccepted {
-                    level: TonNode_RempMasterchain,
+                    level: RempMessageLevel::TonNode_RempMasterchain,
                     block_id: Default::default(),
                     master_id: Default::default()
                 }),
