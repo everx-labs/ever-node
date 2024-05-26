@@ -17,8 +17,9 @@ use crate::{
     network::neighbours::{PROTOCOL_CAPABILITIES, PROTOCOL_VERSION}
 };
 
-use adnl::common::{AdnlPeers, Answer, QueryAnswer, QueryResult, TaggedByteVec, TaggedObject};
-use adnl::QueriesConsumer;
+use adnl::common::{
+    AdnlPeers, Answer, QueryAnswer, QueryResult, Subscriber, TaggedByteVec, TaggedObject
+};
 use std::{cmp::min, fmt::Debug, sync::Arc, ops::Deref};
 #[cfg(feature = "telemetry")]
 use ton_api::{tag_from_boxed_type, tag_from_boxed_object};
@@ -901,7 +902,7 @@ impl FullNodeOverlayService {
 }
 
 #[async_trait::async_trait]
-impl QueriesConsumer for FullNodeOverlayService {
+impl Subscriber for FullNodeOverlayService {
     #[allow(dead_code)]
     async fn try_consume_query(
         &self, 

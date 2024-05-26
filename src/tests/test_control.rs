@@ -227,7 +227,7 @@ async fn test_get_all_config_params() {
         }
     }
 
-    crate::test_helper::init_test_log();
+    init_test_log();
     let engine = Arc::new(TestEngine::new());
     let (control, mut client, _) = start_control(
         DataSource::Engine(engine.clone())
@@ -346,7 +346,7 @@ async fn test_getaccount() {
 
     }
 
-    crate::test_helper::init_test_log();
+    init_test_log();
     let engine = Arc::new(TestEngine::new());
     let control = start_control_with_options(
         DataSource::Engine(engine.clone()),
@@ -465,7 +465,7 @@ async fn test_get_applied_shards_info() {
         }
     }
 
-    crate::test_helper::init_test_log();
+    init_test_log();
     let engine = Arc::new(TestEngine::new());
     let control = start_control_with_options(
         DataSource::Engine(engine.clone()),
@@ -497,7 +497,7 @@ async fn test_connect_to_control() {
         }
     }
 
-    crate::test_helper::init_test_log();
+    init_test_log();
     let (control, mut client, _) = start_control(
         DataSource::Status(Arc::new(TestSource))
     ).await.unwrap();
@@ -524,23 +524,7 @@ impl EngineOperations for TestSendMsgEngine {
 #[tokio::test]
 async fn test_control_send_message() {
 
-    struct TestSendMsgEngine {
-        expected_data: Vec<u8>
-    }
-
-    #[async_trait::async_trait]
-    impl EngineOperations for TestSendMsgEngine {
-        async fn redirect_external_message(
-            &self,
-            message_data: &[u8],
-            _id: UInt256
-        ) -> Result<()> {
-            assert_eq!(message_data, &self.expected_data);
-            Ok(())
-        }
-    }
-
-    crate::test_helper::init_test_log();
+    init_test_log();
 
     let body = Message::default().write_to_bytes().unwrap();
     let engine = TestSendMsgEngine{expected_data: body.clone()};
@@ -582,7 +566,7 @@ async fn test_control_db_restore() {
         }
     }
 
-    crate::test_helper::init_test_log();
+    init_test_log();
     let status = Arc::new(
         TestSource {
             broken: AtomicBool::new(false)

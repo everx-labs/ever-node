@@ -38,7 +38,7 @@ use std::time::SystemTime;
 use tokio::time::sleep;
 use ton_api::ton::ton_node::blockcandidatestatus::BlockCandidateStatus;
 use ton_api::ton::ton_node::Broadcast;
-use ever_block::Result;
+use ever_block::{error, Result};
 
 //TODO: traffic metrics & derivatives
 //TODO: remove dependency from CatchainClient? (use private overlay directly)
@@ -587,12 +587,12 @@ impl CatchainOverlayListener for WorkchainListener {
                     Err(err) => {
                         let message = format!("WorkchainListener::on_query error (overlay={}): {:?}", node_debug_id, err);
                         warn!(target: "verificator", "{}", message);
-                        response_callback(Err(failure::format_err!("{}", message)));
+                        response_callback(Err(error!("{}", message)));
                     }
                 }
             } else {
                 warn!(target: "verificator", "Query listener is not bound");
-                response_callback(Err(failure::format_err!("Query listener is not bound")));
+                response_callback(Err(error!("Query listener is not bound")));
             }
         });
     }

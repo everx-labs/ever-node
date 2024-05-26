@@ -12,9 +12,6 @@
 */
 
 use crate::network::node_network::NodeNetwork;
-#[cfg(feature = "workchains")]
-use crate::validator::validator_utils::mine_key_for_workchain;
-
 use adnl::{
     client::AdnlClientConfigJson,
     common::{add_unbound_object_to_map_with_update, Wait},
@@ -559,6 +556,7 @@ impl TonNodeConfig {
         }
     }
 
+    #[cfg(feature = "external_db")]
     pub fn kafka_consumer_config(&self) -> Option<KafkaConsumerConfig> {
         self.kafka_consumer_config.clone()
     }
@@ -781,13 +779,6 @@ impl TonNodeConfig {
     }
 
     fn generate_and_save_keys(&mut self, _key_type: i32) -> Result<([u8; 32], Arc<dyn KeyOption>)> {
-        #[cfg(feature="workchains")]
-        let (private, public) = match _key_type {
-            Ed25519KeyOption::KEY_TYPE => mine_key_for_workchain(self.workchain),
-            BlsKeyOption::KEY_TYPE => BlsKeyOption::generate_with_json()?,
-            _ => fail!("Unknown generate key type!"),
-        };
-        #[cfg(not(feature="workchains"))]
         let (private, public) = Ed25519KeyOption::generate_with_json()?;
         let key_id = public.id().data();
         log::info!("generate_and_save_keys: generate new key (id: {:?})", key_id);
@@ -930,8 +921,6 @@ pub struct NodeConfigHandler {
     sender: tokio::sync::mpsc::UnboundedSender<Arc<(Arc<Wait<Answer>>, Task)>>,
     key_ring: Arc<lockfree::map::Map<String, Arc<dyn KeyOption>>>,
     validator_keys: Arc<ValidatorKeys>,
-    #[cfg(feature="workchains,external_db")]
-    workchain_id: Option<i32>,
 }
 
 impl NodeConfigHandler {
@@ -945,8 +934,6 @@ impl NodeConfigHandler {
             sender,
             key_ring: Arc::new(lockfree::map::Map::new()),
             validator_keys: Arc::new(ValidatorKeys::new()),
-            #[cfg(feature="workchains,external_db")]
-            workchain_id: config.workchain,
         });
 
         Ok((config_handler, NodeConfigHandlerContext{reader, config}))
@@ -1395,12 +1382,6 @@ impl NodeConfigHandler {
                     Task::GetBlsKey(key_data) => {
                         let result = NodeConfigHandler::get_bls_key(&actual_config, key_data);
                         Answer::GetKey(result)
-                    },
-                    #[cfg(feature="workchains")]
-                    Task::StoreWorkchainId(workchain_id) => {
-                        actual_config.workchain = Some(workchain_id);
-                        let result = actual_config.save_to_file(&name);
-                        Answer::Result(result)
                     },
                     Task::StoreStatesGcInterval(interval) => {
                         if let Some(c) = &mut actual_config.gc {

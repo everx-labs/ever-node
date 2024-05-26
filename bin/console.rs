@@ -51,7 +51,7 @@ trait SendReceive {
 }
 
 trait ConsoleCommand: SendReceive {
-    fn name() -> &'static str;
+    fn _name() -> &'static str;
     fn help() -> &'static str;
 }
 
@@ -60,11 +60,12 @@ macro_rules! commands {
         $(
             struct $command;
             impl ConsoleCommand for $command {
-                fn name() -> &'static str {$name}
+                fn _name() -> &'static str {$name}
                 fn help() -> &'static str {$help}
             }
         )*
-        fn _command_help(name: &str) -> Result<&str> {
+        #[allow(dead_code)]
+        fn command_help(name: &str) -> Result<&str> {
             match name {
                 $($name => Ok($command::help()), )*
                 _ => fail!("command {} not supported", name)

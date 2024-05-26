@@ -30,14 +30,10 @@ use crate::{
 };
 
 use adnl::{
-    declare_counted, 
-    common::{add_counted_object_to_map, CountedObject, Counter, TaggedByteSlice}, 
+    declare_counted, BroadcastSendInfo, DhtIterator, DhtNode, OverlayId, OverlayShortId, 
+    OverlayNode, OverlayUtils, PrivateOverlayShortId, RldpNode,
+    common::{add_counted_object_to_map, CountedObject, Counter, Subscriber, TaggedByteSlice},
     node::AdnlNode
-};
-use adnl::{DhtIterator, DhtNode};
-use adnl::{
-    BroadcastSendInfo, OverlayId, OverlayShortId, OverlayNode, QueriesConsumer, 
-    PrivateOverlayShortId, OverlayUtils, RldpNode
 };
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
@@ -1110,7 +1106,7 @@ impl OverlayOperations for NodeNetwork {
     fn add_consumer(
         &self, 
         overlay_id: &Arc<OverlayShortId>, 
-        consumer: Arc<dyn QueriesConsumer>
+        consumer: Arc<dyn Subscriber>
     ) -> Result<()> {
         self.network_context.overlay.add_consumer(overlay_id, consumer)?;
         Ok(())

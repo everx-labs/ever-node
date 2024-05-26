@@ -16,7 +16,7 @@ use crate::{
     block_proof::BlockProofStuff, config::{CollatorConfig, CollatorTestBundlesGeneralConfig},
     engine::{Engine, EngineFlags}, 
     engine_traits::{
-        ChainRange, EngineAlloc, EngineOperations, PrivateOverlayOperations, RempCoreInterface, 
+        EngineAlloc, EngineOperations, PrivateOverlayOperations, RempCoreInterface, 
         RempDuplicateStatus, Server
     }, 
     error::NodeError, 
@@ -34,6 +34,8 @@ use crate::{
         validator_utils::validatordescr_to_catchain_node,
     }
 };
+#[cfg(feature = "external_db")]
+use crate::engine_traits::ChainRange;
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::ValidatedBlockStat;
 #[cfg(feature = "telemetry")]
@@ -62,8 +64,6 @@ use ever_block::{
     AccountIdPrefixFull, BlockIdExt, CellsFactory, GlobalCapabilities, Message, OutMsgQueue,
     OutMsgQueueInfo, ShardIdent, MASTERCHAIN_ID, SHARD_FULL
 };
-#[cfg(feature="workchains")]
-use ever_block::{BASE_WORKCHAIN_ID, INVALID_WORKCHAIN_ID};
 use ever_block::{error, fail, KeyId, KeyOption, Result, UInt256};
 use validator_session::{BlockHash, SessionId, ValidatorBlockCandidate};
 
@@ -695,6 +695,7 @@ impl EngineOperations for Engine {
         self.db().load_block_next2(id)
     }
 
+    #[cfg(feature = "external_db")]
     async fn process_block_in_ext_db(
         &self,
         handle: &Arc<BlockHandle>,
@@ -736,14 +737,15 @@ impl EngineOperations for Engine {
         Ok(())
     }
 
+    #[cfg(feature = "external_db")]
     async fn process_chain_range_in_ext_db(&self, chain_range: &ChainRange) -> Result<()> {
         for db in self.ext_db() {
             db.process_chain_range(chain_range).await?;
         }
-
         Ok(())
     }
 
+    #[cfg(feature = "external_db")]
     async fn process_shard_hashes_in_ext_db(
         &self,
         shard_hashes: &Vec<BlockIdExt>)
@@ -751,15 +753,14 @@ impl EngineOperations for Engine {
         for db in self.ext_db() {
             db.process_shard_hashes(shard_hashes).await?;
         }
-
         Ok(())
     }
 
-    async fn process_full_state_in_ext_db(&self, state: &Arc<ShardStateStuff>)-> Result<()> {
+    async fn process_initial_state(&self, state: &Arc<ShardStateStuff>)-> Result<()> {
+        #[cfg(feature = "external_db")]
         for db in self.ext_db() {
             db.process_full_state(state).await?;
         }
-
         // Initialisation of remp_capability after cold boot by first processed master state
         // same for SMFT
         if state.block_id().shard().is_masterchain() {
@@ -773,6 +774,7 @@ impl EngineOperations for Engine {
         Ok(())
     }
 
+    #[cfg(feature = "external_db")]
     async fn process_remp_msg_status_in_ext_db(
         &self,
         id: &UInt256,
@@ -1136,10 +1138,12 @@ impl EngineOperations for Engine {
         self.db().db_root_dir()
     }
 
+    #[cfg(feature = "external_db")]
     fn produce_chain_ranges_enabled(&self) -> bool {
         self.ext_db().iter().any(|ext_db| ext_db.process_chain_range_enabled())
     }
 
+    #[cfg(feature = "external_db")]
     fn produce_shard_hashes_enabled(&self) -> bool {
         self.ext_db().iter().any(|ext_db| ext_db.process_shard_hashes_enabled())
     }
