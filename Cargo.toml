@@ -100,7 +100,7 @@ validator_session = { path = 'validator-session' }
 
 [dev-dependencies]
 difference = '2.0'
-external-ip = '4.1.0'
+external-ip = '5'
 pretty_assertions = '1.3'
 tokio = { features = [ 'macros' ], version = '1.5' }
 
