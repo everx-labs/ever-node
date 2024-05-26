@@ -86,7 +86,7 @@ stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
 tokio-util = '0.7'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.27' }
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.27-fixed' }
 catchain = { path = 'catchain' }
 ever_abi = { git = 'https://github.com/everx-labs/ever-abi.git', tag = '2.5.6' }
 ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.10.4' }
