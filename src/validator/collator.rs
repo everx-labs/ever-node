@@ -2594,8 +2594,13 @@ impl Collator {
     ) -> Result<(usize, usize)> {
         log::trace!("{}: process_remp_messages", self.collated_block_descr);
 
-        let remp_collator_interface = self.remp_collator_interface.as_ref()
-            .ok_or_else(|| error!("remp_collator_interface is not set"))?;
+        let remp_collator_interface = match &self.remp_collator_interface {
+            Some(iface) => iface,
+            None => {
+                log::trace!("{}: no remp_collator_interace is set, exiting process_remp_messages", self.collated_block_descr);
+                return Ok((0,0))
+            }
+        };
 
         remp_collator_interface.init_queue(
             mc_data.state().block_id(),

@@ -5,7 +5,7 @@ name = 'validator_session'
 version = '0.0.2'
 
 [dependencies]
-adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.26' }
+adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.27-fixed' }
 backtrace = '0.3'
 catchain = { path = '../catchain' }
 crc = '3.0'
@@ -26,5 +26,6 @@ colored = '1.9'
 env_logger = '0.7'
 
 [features]
+export_key = [  ]
 slashing = [  ]
 

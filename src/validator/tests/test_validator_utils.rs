@@ -16,8 +16,6 @@ use crate::{
     block::BlockStuff, error::NodeError, shard_state::ShardHashesStuff,
     validator::accept_block::{create_new_proof, create_new_proof_link}
 };
-#[cfg(feature = "workchains")]
-use crate::validator::validator_utils::mine_key_for_workchain;
 
 use ever_block::{
     error, Block, BlockIdExt, ConfigParamEnum, CryptoSignature, CryptoSignaturePair, 
@@ -30,27 +28,6 @@ fn block_config(block_stuff: &BlockStuff) -> Result<ConfigParams> {
     ).ok_or_else(
         || error!(NodeError::InvalidArg("State doesn't contain `custom` field".to_string()))
     )
-}
-
-#[cfg(feature = "workchains")]
-#[test]
-fn test_mine_key() {
-    // let now = std::time::Instant::now();
-    let (_, pub_key) = mine_key_for_workchain(None);
-    assert_ne!(pub_key.id().data(), &[0; 32]);
-    let (_, pub_key) = mine_key_for_workchain(Some(-1));
-    assert_ne!(pub_key.id().data(), &[0; 32]);
-    assert_eq!(pub_key.id().data()[0] % 32, 0);
-    let (_, pub_key) = mine_key_for_workchain(Some(0));
-    assert_ne!(pub_key.id().data(), &[0; 32]);
-    assert_eq!(pub_key.id().data()[0] % 32, 1);
-    let (_, pub_key) = mine_key_for_workchain(Some(1));
-    assert_ne!(pub_key.id().data(), &[0; 32]);
-    assert_eq!(pub_key.id().data()[0] % 32, 2);
-    let (_, pub_key) = mine_key_for_workchain(Some(2));
-    assert_ne!(pub_key.id().data(), &[0; 32]);
-    assert_eq!(pub_key.id().data()[0] % 32, 3);
-    // assert!(now.elapsed().as_micros() < 1000);
 }
 
 #[test]

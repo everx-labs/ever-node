@@ -15,12 +15,10 @@ use crate::{
     block::{BlockStuff, BlockIdExtExtention, BlockKind},
     block_proof::BlockProofStuff, boot,
     config::{
-        CollatorConfig, CollatorTestBundlesGeneralConfig, KafkaConsumerConfig,
-        TonNodeConfig, ValidatorManagerConfig
+        CollatorConfig, CollatorTestBundlesGeneralConfig, TonNodeConfig, ValidatorManagerConfig
     },
     engine_traits::{
-        ExternalDb, EngineAlloc, EngineOperations,
-        OverlayOperations, PrivateOverlayOperations, Server,
+        EngineAlloc, EngineOperations, OverlayOperations, PrivateOverlayOperations, Server
     },
     ext_messages::{MessagesPool, EXT_MESSAGES_TRACE_TARGET},
     full_node::{
@@ -29,8 +27,7 @@ use crate::{
             process_block_broadcast, start_masterchain_client, start_shards_client,
             SHARD_BROADCAST_WINDOW, apply_proof_chain,
         },
-        counters::TpsCounter,
-        remp_client::RempClient, mesh_client::MeshClient,
+        counters::TpsCounter, remp_client::RempClient
     },
     internal_db::{
         InternalDb, InternalDbConfig, 
@@ -55,9 +52,12 @@ use crate::{
     }
 };
 #[cfg(feature = "external_db")]
-use crate::external_db::{kafka_consumer::KafkaConsumer, start_external_db_worker};
+use crate::{
+    config::KafkaConsumerConfig, engine_traits::ExternalDb, 
+    external_db::{kafka_consumer::KafkaConsumer, start_external_db_worker}
+};
 #[cfg(not(feature = "external_db"))]
-use crate::internal_db::EXTERNAL_DB_BLOCK;
+use crate::{full_node::mesh_client::MeshClient, internal_db::EXTERNAL_DB_BLOCK};
 #[cfg(feature = "slashing")]
 use crate::validator::{
     slashing::{ValidatedBlockStat, ValidatedBlockStatNode},
@@ -70,7 +70,7 @@ use crate::{
     validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
 };
 
-use adnl::QueriesConsumer;
+use adnl::common::Subscriber;
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::{Metric, MetricBuilder, TelemetryItem, TelemetryPrinter};
 use catchain::SessionId;
@@ -94,10 +94,11 @@ use storage::{StorageTelemetry, types::StorageCell};
 use ton_api::ton::ton_node::{
     Broadcast, 
     broadcast::{
-        BlockBroadcast, QueueUpdateBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast,
-        MeshUpdateBroadcast
+        BlockBroadcast, QueueUpdateBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast
     }
 };
+#[cfg(not(feature = "external_db"))]
+use ton_api::ton::ton_node::broadcast::MeshUpdateBroadcast;
 
 #[cfg(feature = "slashing")]
 //maximum number of validated block stats entries in engine's queue
@@ -109,6 +110,7 @@ mod tests;
 
 pub struct Engine {
     db: Arc<InternalDb>,
+    #[cfg(feature = "external_db")]
     ext_db: Vec<Arc<dyn ExternalDb>>,
     candidate_db: CandidateDbPool,
     overlay_operations: Arc<dyn OverlayOperations>,
@@ -179,8 +181,7 @@ pub struct Engine {
 
     tps_counter: TpsCounter,
 
-    pub out_queues_cache: std::sync::Mutex<std::collections::HashMap<ShardIdent, OutMsgQueue>>,
-
+    #[cfg(not(feature = "external_db"))]
     mesh_client: tokio::sync::OnceCell<Arc<MeshClient>>,
 }
 
@@ -555,6 +556,7 @@ impl Stopper {
         self.stop.fetch_and(!mask, Ordering::Relaxed);
     }
 
+    #[cfg(not(feature = "external_db"))]
     pub fn token(&self) -> tokio_util::sync::CancellationToken {
         self.token.clone()
     }
@@ -598,6 +600,7 @@ impl Engine {
 
     pub async fn new(
         general_config: TonNodeConfig, 
+        #[cfg(feature = "external_db")]
         ext_db: Vec<Arc<dyn ExternalDb>>, 
         flags: EngineFlags,
         stopper: Arc<Stopper>
@@ -827,6 +830,7 @@ impl Engine {
         let candidate_db = CandidateDbPool::with_path(db.db_root_dir()?);
         let engine = Arc::new(Engine {
             db,
+            #[cfg(feature = "external_db")]
             ext_db,
             candidate_db,
             overlay_operations: network.clone() as Arc<dyn OverlayOperations>,
@@ -928,8 +932,7 @@ impl Engine {
             ),
             tps_counter: TpsCounter::new(),
 
-            out_queues_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-
+            #[cfg(not(feature = "external_db"))]
             mesh_client: tokio::sync::OnceCell::new()
         });
 
@@ -1005,6 +1008,7 @@ impl Engine {
 
     pub fn network(&self) -> &NodeNetwork { &self.network }
 
+    #[cfg(feature = "external_db")]
     pub fn ext_db(&self) -> &Vec<Arc<dyn ExternalDb>> { &self.ext_db }
 
     pub fn zero_state_id(&self) -> &BlockIdExt { &self.zero_state_id }
@@ -1562,7 +1566,7 @@ impl Engine {
                 Ordering::Relaxed
             );
             // While the node boots start key block is not processed by this function.
-            // So see process_full_state_in_ext_db for the same code
+            // So see process_initial_state for the same code
         }
 
         let (prev_id, prev2_id_opt) = block.construct_prev_id()?;
@@ -1687,8 +1691,9 @@ impl Engine {
                             Broadcast::TonNode_ConnectivityCheckBroadcast(broadcast) => {
                                 self.network.clone().process_connectivity_broadcast(broadcast);
                             }
-                            Broadcast::TonNode_MeshUpdateBroadcast(broadcast) => {
-                                self.clone().process_mesh_update_broadcast(broadcast, src);
+                            Broadcast::TonNode_MeshUpdateBroadcast(_broadcast) => {
+                                #[cfg(not(feature = "external_db"))]
+                                self.clone().process_mesh_update_broadcast(_broadcast, src);
                             }
                             Broadcast::TonNode_BlockCandidateBroadcast(broadcast) => {
                                 log::warn!("TonNode_BlockCandidateBroadcast from {}: {:?}", src, broadcast);
@@ -1846,6 +1851,7 @@ impl Engine {
         Ok(())
     }
 
+    #[cfg(not(feature = "external_db"))]
     fn process_mesh_update_broadcast(self: Arc<Self>, broadcast: MeshUpdateBroadcast, src: Arc<KeyId>) {
         // because of ALL broadcasts are received in one task - spawn for each block
         if let Some(mesh_client) = self.mesh_client.get().cloned() {
@@ -2593,23 +2599,33 @@ pub(crate) async fn load_zero_state(engine: &Arc<Engine>, path: &str) -> Result<
         )?;
         let (zs, handle) = engine.store_zerostate(zs, &bytes).await?;
         engine.set_applied(&handle, id.seq_no()).await?;
-        engine.process_full_state_in_ext_db(&zs).await?;
+        engine.process_initial_state(&zs).await?;
     }
 
     let (mc_zero_state, handle) = engine.store_zerostate(mc_zero_state, &mc_zs_bytes).await?;
     engine.set_applied(&handle, zero_id.seq_no()).await?;
-    engine.process_full_state_in_ext_db(&mc_zero_state).await?;
+    engine.process_initial_state(&mc_zero_state).await?;
 
     log::trace!("All static zero states had been load");
     return Ok(true)
 
 }
 
+struct BootInfo {
+    archives_gc_block: BlockIdExt,
+    #[cfg(feature = "external_db")]
+    external_db_block: BlockIdExt,
+    last_applied_mc_block: BlockIdExt,
+    shard_client_mc_block: BlockIdExt,
+    ss_keeper_mc_block: BlockIdExt
+}
+
 async fn boot(
     engine: &Arc<Engine>, 
     zerostate_path: Option<&str>, 
     hardfork_path: impl AsRef<Path>
-) -> Result<(BlockIdExt, BlockIdExt, BlockIdExt, BlockIdExt, BlockIdExt)> {
+) -> Result<BootInfo> {
+
     log::info!("Booting...");
     engine.set_sync_status(Engine::SYNC_STATUS_START_BOOT);
 
@@ -2700,8 +2716,6 @@ async fn boot(
         }
     };
     #[cfg(not(feature = "external_db"))]
-    let external_db_block = BlockIdExt::default();
-    #[cfg(not(feature = "external_db"))]
     engine.db().drop_full_node_state(EXTERNAL_DB_BLOCK)?;
 
     engine.set_sync_status(Engine::SYNC_STATUS_FINISH_BOOT);
@@ -2710,8 +2724,18 @@ async fn boot(
     log::info!("shard_client_mc_block: {}", shard_client_mc_block);
     log::info!("ss_keeper_mc_block: {}", ss_keeper_mc_block);
     log::info!("archives_gc_block: {}", archives_gc_block);
+    #[cfg(feature = "external_db")]
     log::info!("external_db_block: {}", external_db_block);
-    Ok((last_applied_mc_block, shard_client_mc_block, ss_keeper_mc_block, archives_gc_block, external_db_block))
+    let ret = BootInfo {
+        archives_gc_block,
+        #[cfg(feature = "external_db")]
+        external_db_block,
+        last_applied_mc_block,
+        shard_client_mc_block,
+        ss_keeper_mc_block
+    };
+    Ok(ret)
+
 }
 
 #[derive(Default)]
@@ -2724,6 +2748,7 @@ pub struct EngineFlags {
 pub async fn run(
     node_config: TonNodeConfig,
     zerostate_path: Option<&str>, 
+    #[cfg(feature = "external_db")]
     ext_db: Vec<Arc<dyn ExternalDb>>,
     validator_runtime: tokio::runtime::Handle, 
     flags: EngineFlags,
@@ -2731,6 +2756,7 @@ pub async fn run(
 ) -> Result<(Arc<Engine>, tokio::task::JoinHandle<()>)> {
     log::info!("Engine::run");
 
+    #[cfg(feature = "external_db")]
     let consumer_config = node_config.kafka_consumer_config();
     let control_server_config = node_config.control_server()?;
     let remp_config = node_config.remp_config().clone();
@@ -2745,7 +2771,13 @@ pub async fn run(
     let sync_by_archives = node_config.sync_by_archives();
 
     // Create engine
-    let engine = Engine::new(node_config, ext_db, flags, stopper.clone()).await?;
+    let engine = Engine::new(
+        node_config, 
+        #[cfg(feature = "external_db")]
+        ext_db, 
+        flags, 
+        stopper.clone()
+    ).await?;
     let engine_ret = engine.clone();
     let result = async move {
 
@@ -2767,13 +2799,14 @@ pub async fn run(
             engine.register_server(server)
         };
 
+        #[cfg(feature = "external_db")]
         // Messages from external DB (usually kafka)
         start_external_broadcast_process(engine.clone(), &consumer_config)?;
 
         let full_node_service = FullNodeOverlayService::new(
             Arc::clone(&engine) as Arc<dyn EngineOperations>
         );
-        let full_node_service: Arc<dyn QueriesConsumer> = Arc::new(full_node_service);
+        let full_node_service: Arc<dyn Subscriber> = Arc::new(full_node_service);
 
         // Overlays, depends on 'workchain' option is set or not
         let network = engine.network();
@@ -2807,13 +2840,7 @@ pub async fn run(
         }
 
         // Boot
-        let (
-            mut last_applied_mc_block,
-            mut shard_client_mc_block,
-            ss_keeper_block,
-            archives_gc_block,
-            external_db_block,
-        ) = boot(&engine, zerostate_path, configs_dir).await?;
+        let mut boot_info = boot(&engine, zerostate_path, configs_dir).await?;
 
         // Broadcasts (blocks, external messages etc.)
         if let Some(wc) = &wc_from_config {
@@ -2836,17 +2863,16 @@ pub async fn run(
             ).await?;
         }
 
-        let _ = Engine::start_archives_gc(engine.clone(), archives_gc_block)?;
+        let _ = Engine::start_archives_gc(engine.clone(), boot_info.archives_gc_block)?;
 
-        #[cfg(not(feature = "external_db"))] let _ = external_db_block;
         #[cfg(feature = "external_db")]
-        let _ = start_external_db_worker(engine.clone(), external_db_block)?;
+        let _ = start_external_db_worker(engine.clone(), boot_info.external_db_block)?;
 
         engine.shard_states_keeper.clone().start(
             engine.clone(),
-            last_applied_mc_block.clone(),
-            shard_client_mc_block.clone(),
-            ss_keeper_block
+            boot_info.last_applied_mc_block.clone(),
+            boot_info.shard_client_mc_block.clone(),
+            boot_info.ss_keeper_mc_block
         ).await?;
 
         if remp_config.is_client_enabled() {
@@ -2877,10 +2903,10 @@ pub async fn run(
                 Arc::clone(&engine) as Arc<dyn EngineOperations>, 
                 Some(&Checker)
             ).await?;
-            last_applied_mc_block = engine.load_last_applied_mc_block_id()?.ok_or_else(
+            boot_info.last_applied_mc_block = engine.load_last_applied_mc_block_id()?.ok_or_else(
                 || error!("INTERNAL ERROR: No last applied MC block after sync")
             )?.deref().clone();
-            shard_client_mc_block = engine.load_shard_client_mc_block_id()?.ok_or_else(
+            boot_info.shard_client_mc_block = engine.load_shard_client_mc_block_id()?.ok_or_else(
                 || error!("INTERNAL ERROR: No shard client MC block after sync")
             )?.deref().clone();
         }
@@ -2890,14 +2916,22 @@ pub async fn run(
 
         #[cfg(not(feature="external_db"))] {
             let mesh_client = MeshClient::start(engine.clone(), engine.stopper.token()).await?;
-            engine.mesh_client.set(mesh_client).map_err(|_| error!("Attempt to set mesh_client twice"))?;
+            engine.mesh_client.set(mesh_client).map_err(
+                |_| error!("Attempt to set mesh_client twice")
+            )?;
         }
 
         // blocks download clients
         engine.set_sync_status(Engine::SYNC_STATUS_SYNC_BLOCKS);
         Engine::check_finish_sync(Arc::clone(&engine));
-        let join_shards = start_shards_client(engine.clone(), shard_client_mc_block)?;
-        let join_master = start_masterchain_client(engine.clone(), last_applied_mc_block)?;
+        let join_shards = start_shards_client(
+            engine.clone(),
+            boot_info.shard_client_mc_block
+        )?;
+        let join_master = start_masterchain_client(
+            engine.clone(),
+            boot_info.last_applied_mc_block
+        )?;
         Ok((join_shards, join_master))
 
     }.await;
@@ -3033,14 +3067,6 @@ fn telemetry_logger(engine: Arc<Engine>) {
             }
         }
     });
-}
-
-#[cfg(not(feature = "external_db"))]
-pub fn start_external_broadcast_process(
-    _engine: Arc<dyn EngineOperations>, 
-    _consumer_config: &Option<KafkaConsumerConfig>
-) -> Result<()> { 
-    Ok(())
 }
 
 #[cfg(feature = "external_db")]

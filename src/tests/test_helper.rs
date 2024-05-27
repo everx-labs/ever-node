@@ -1002,6 +1002,7 @@ impl EngineOperations for TestEngine {
         self.db.load_block_next2(id)
     }
 
+    #[cfg(feature = "external_db")]
     async fn process_block_in_ext_db(
         &self,
         _handle: &Arc<BlockHandle>,

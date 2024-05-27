@@ -364,20 +364,6 @@ impl RempCatchainInfo {
         Self::append_validator_list(&mut nodes, &mut nodes_vdescr, &mut adnl_hash, next);
 
         Self::check_unique(&nodes)?;
-/*
-        for nn in nodes.iter() {
-            adnl_hash.insert(nn.adnl_id.clone());
-        }
-
-        for next_nn in next.iter() {
-            let next_cn = validatordescr_to_catchain_node(next_nn);
-            if !adnl_hash.contains(&next_cn.adnl_id) {
-                adnl_hash.insert(next_cn.adnl_id.clone());
-                nodes.push(next_cn);
-                nodes_vdescr.push(next_nn.clone());
-            }
-        }
-*/
 
         let local_key_id = local.id().data().into();
         let local_idx = get_validator_key_idx(local, &nodes)?;

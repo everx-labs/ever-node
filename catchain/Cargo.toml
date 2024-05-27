@@ -5,7 +5,7 @@ name = 'catchain'
 version = '0.1.0'
 
 [dependencies]
-adnl = { features = [ 'node' ], git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.26' }
+adnl = { features = [ 'node' ], git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.27-fixed' }
 chrono = '0.4.10'
 crossbeam = '0.7.3'
 ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.10.4' }

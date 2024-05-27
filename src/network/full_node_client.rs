@@ -118,6 +118,7 @@ pub trait FullNodeOverlayClient : Sync + Send {
         prev_id: &BlockIdExt,
         target_nw_id: i32,
     ) -> Result<(BlockStuff, BlockProofStuff)>;
+    #[allow(dead_code)]
     async fn download_mesh_update(
         &self,
         nw_id: i32,

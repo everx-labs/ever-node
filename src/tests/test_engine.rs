@@ -38,6 +38,7 @@ fn start_node(
         run(
             config, 
             None, 
+            #[cfg(feature = "external_db")]
             vec![], 
             validator_rt, 
             flags,

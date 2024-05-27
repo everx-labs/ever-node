@@ -32,7 +32,7 @@ use crate::{
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
 use adnl::{
-    BroadcastSendInfo, OverlayId, OverlayShortId, QueriesConsumer, PrivateOverlayShortId
+    BroadcastSendInfo, OverlayId, OverlayShortId, PrivateOverlayShortId, common::Subscriber
 };
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, 
@@ -41,7 +41,7 @@ use catchain::{
 use ever_block::{
     error, AccountId, AccountIdPrefixFull, BlockIdExt, CellsFactory, ConfigParams, 
     Deserializable, KeyId, KeyOption, MASTERCHAIN_ID, Message, OutMsgQueue, Result, 
-    SHARD_FULL, ShardAccount, ShardIdent, UInt256, OutMsgQueueInfo
+    ShardAccount, ShardIdent, UInt256, OutMsgQueueInfo
 };
 use std::{collections::HashSet, sync::{Arc, atomic::AtomicU64}};
 use storage::{StorageAlloc, block_handle_db::BlockHandle};
@@ -95,8 +95,9 @@ pub trait OverlayOperations : Sync + Send {
         local: bool,
     ) -> Result<()>;
 
-    async fn get_masterchain_overlay(self: Arc<Self>) -> Result<Arc<dyn FullNodeOverlayClient>> {
-        let overlay_id = self.calc_overlay_id(None, MASTERCHAIN_ID, SHARD_FULL)?;
+    #[allow(dead_code)]
+    async fn get_masterchain_overlay(&self) -> Result<Arc<dyn FullNodeOverlayClient>> {
+        let overlay_id = self.calc_overlay_id(None, MASTERCHAIN_ID, ever_block::SHARD_FULL)?;
         self.get_overlay(&overlay_id.0).await
             .ok_or_else(|| error!("INTERNAL ERROR: masterchain overlay was not found"))
     }
@@ -104,7 +105,7 @@ pub trait OverlayOperations : Sync + Send {
     fn add_consumer(
         &self, 
         overlay_id: &Arc<OverlayShortId>, 
-        consumer: Arc<dyn QueriesConsumer>
+        consumer: Arc<dyn Subscriber>
     ) -> Result<()>;
 
     fn calc_overlay_id(
@@ -435,6 +436,8 @@ pub trait EngineOperations : Sync + Send {
     async fn load_block_proof_raw(&self, handle: &BlockHandle, is_link: bool) -> Result<Vec<u8>> {
         unimplemented!()
     }
+
+    #[cfg(feature = "external_db")]
     async fn process_block_in_ext_db(
         &self,
         handle: &Arc<BlockHandle>,
@@ -448,6 +451,7 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
+    #[cfg(feature = "external_db")]
     async fn process_remp_msg_status_in_ext_db(
         &self,
         id: &UInt256,
@@ -457,6 +461,7 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
+    #[cfg(feature = "external_db")]
     async fn process_chain_range_in_ext_db(
         &self,
         chain_range: &ChainRange)
@@ -464,6 +469,7 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
+    #[cfg(feature = "external_db")]
     async fn process_shard_hashes_in_ext_db(
         &self,
         shard_hashes: &Vec<BlockIdExt>)
@@ -563,7 +569,7 @@ pub trait EngineOperations : Sync + Send {
     ) -> Result<(Arc<ShardStateStuff>, Arc<BlockHandle>)> {
         unimplemented!()
     }
-    async fn process_full_state_in_ext_db(&self, state: &Arc<ShardStateStuff>)-> Result<()> {
+    async fn process_initial_state(&self, state: &Arc<ShardStateStuff>)-> Result<()> {
         unimplemented!()
     }
 
@@ -1001,12 +1007,14 @@ pub trait EngineOperations : Sync + Send {
     }
 }
 
+#[cfg(feature = "external_db")]
 pub struct ChainRange {
     pub master_block: BlockIdExt,
     pub shard_blocks: Vec<BlockIdExt>
 }
 
 /// External DB should implement this trait and put itself into engine's new function
+#[cfg(feature = "external_db")]
 #[async_trait::async_trait]
 pub trait ExternalDb : Sync + Send {
     async fn process_block(

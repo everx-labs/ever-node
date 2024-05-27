@@ -4,7 +4,7 @@ name = 'storage'
 version = '0.5.0'
 
 [dependencies]
-adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.26' }
+adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.27-fixed' }
 ahash = '0.8'
 async-trait = '0.1.31'
 bytes = '1.1.0'

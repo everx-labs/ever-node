@@ -709,6 +709,7 @@ impl EngineOperations for TestRempClientEngine {
         false
     }
 
+    #[cfg(feature = "external_db")]
     async fn process_remp_msg_status_in_ext_db(
         &self,
         _id: &UInt256,

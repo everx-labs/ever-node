@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.58.11
+
+- Adjust build with external DB
+
+## Version 0.58.10
+
+- Reduced strictness of block id fields checking. In case of a mismatch, logging is performed instead of returning an error 
+
+## Version 0.58.9
+
+- Attempt to load lost cell from storing cells cache by id
+
+## Version 0.58.8
+
+- Fix build warnings
+
+## Version 0.58.7
+
+- Refactor overlay consumer interface
+
 ## Version 0.58.6
 
 - Send SMFT messages to random workchain nodes to improve delivery across workchain
