@@ -57,13 +57,13 @@ const MIN_FORWARDING_NEIGHBOURS_COUNT: usize = 5; //min number of neighbours to 
 const MAX_FORWARDING_NEIGHBOURS_COUNT: usize = 32; //max number of neighbours to synchronize
 const MIN_CANDIDATE_NEIGHBOURS_COUNT: usize = 3; //min number of neighbours to synchronize
 const MAX_CANDIDATE_NEIGHBOURS_COUNT: usize = 10; //max number of neighbours to synchronize
-const BLOCK_SYNC_MIN_PERIOD_MS: u64 = 100; //min time for block sync
-const BLOCK_SYNC_MAX_PERIOD_MS: u64 = 200; //max time for block sync
+const BLOCK_SYNC_MIN_PERIOD_MS: u64 = 300; //min time for block sync
+const BLOCK_SYNC_MAX_PERIOD_MS: u64 = 600; //max time for block sync
 const MIN_FAR_NEIGHBOURS_COUNT: usize = 2; //min far neighbours count
 const MAX_FAR_NEIGHBOURS_COUNT: usize = 5; //min far neighbours count
-const FAR_NEIGHBOURS_SYNC_MIN_PERIOD_MS: u64 = 300; //min time for sync with neighbour nodes
-const FAR_NEIGHBOURS_SYNC_MAX_PERIOD_MS: u64 = 400; //max time for sync with neighbour nodes
-const FAR_NEIGHBOURS_RESYNC_PERIOD: Duration = Duration::from_millis(500); //period for far neighbours resync
+const FAR_NEIGHBOURS_SYNC_MIN_PERIOD_MS: u64 = 1000; //min time for sync with neighbour nodes
+const FAR_NEIGHBOURS_SYNC_MAX_PERIOD_MS: u64 = 2000; //max time for sync with neighbour nodes
+const FAR_NEIGHBOURS_RESYNC_PERIOD: Duration = Duration::from_millis(1000); //period for far neighbours resync
 const BLOCK_LIFETIME_PERIOD: Duration = Duration::from_secs(10); //block's lifetime
 const VERIFICATION_OBLIGATION_CUTOFF: f64 = 0.2; //cutoff for validator obligation to verify [0..1]
 const DYNAMIC_CONFIG_UPDATE_PERIOD: Duration = Duration::from_secs(30); //period for dynamic config update
@@ -713,12 +713,13 @@ impl Workchain {
             }
         };
 
-        let (candidate_id, block_end_of_life_time) = {
+        let (candidate_id, block_end_of_life_time, delivery_weight) = {
             let block = block.lock();
+            let delivered_weight = block.get_deliveries_signature().get_total_weight(&workchain.wc_validators);
 
             block.get_delivery_stats().syncs_count.fetch_add(1, Ordering::SeqCst);
 
-            (block.get_id().clone(), *block.get_first_appearance_time() + BLOCK_LIFETIME_PERIOD)
+            (block.get_id().clone(), *block.get_first_appearance_time() + BLOCK_LIFETIME_PERIOD, delivered_weight)
         };
 
         //remove old blocks
@@ -756,14 +757,16 @@ impl Workchain {
         let node_debug_id = workchain.node_debug_id.clone();
 
         if far_neighbours_force_sync {
-            trace!(
-                target: "verificator",
-                "Force block {:?} synchronization for workchain's #{} private overlay between far neighbours (overlay={})",
-                candidate_id,
-                workchain_id,
-                node_debug_id);
+            if delivery_weight > 0 && delivery_weight < workchain.wc_total_weight {
+                trace!(
+                    target: "verificator",
+                    "Force block {:?} synchronization for workchain's #{} private overlay between far neighbours (overlay={})",
+                    candidate_id,
+                    workchain_id,
+                    node_debug_id);
 
-            workchain.send_block_status_to_far_neighbours(&block, delivery_params.block_status_far_neighbours_count);
+                workchain.send_block_status_to_far_neighbours(&block, delivery_params.block_status_far_neighbours_count);
+            }
         }
 
         //check if block updates has to be sent to network (updates buffering)
@@ -873,6 +876,16 @@ impl Workchain {
             }
             Err(err) => {
                 error!(target: "verificator", "Can't merge block status for block {:?} in workchain {}: {:?}", candidate_id, self.node_debug_id, err);
+            }
+        }
+
+        {
+            let block = block.lock();
+
+            if received_from_workchain {
+                block.get_delivery_stats().in_wc_real_merges_count.fetch_add(1, Ordering::SeqCst);
+            } else {
+                block.get_delivery_stats().in_mc_real_merges_count.fetch_add(1, Ordering::SeqCst);
             }
         }
 

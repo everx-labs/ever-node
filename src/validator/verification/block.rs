@@ -79,6 +79,8 @@ pub struct BlockDeliveryStats {
     pub in_candidates_count: AtomicUsize,         //incoming candidates count
     pub in_wc_merges_count: AtomicUsize,          //incoming WC updates
     pub in_mc_merges_count: AtomicUsize,          //incoming MC updates
+    pub in_wc_real_merges_count: AtomicUsize,     //incoming WC updates
+    pub in_mc_real_merges_count: AtomicUsize,     //incoming MC updates
     pub out_wc_sends_count: AtomicUsize,          //outgoing WC updates
     pub out_mc_syncs_count: AtomicUsize,          //outgoing MC syncs
     pub out_mc_sends_count: AtomicUsize,          //outgoing MC sends
@@ -119,12 +121,14 @@ impl std::fmt::Debug for Block {
 
 impl std::fmt::Debug for BlockDeliveryStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[in_candidates={}, in_wc_merges={}, out_wc_sends={}, out_mc_syncs={}, out_mc_sends={}, in_mc_merges={}, neighbours_sends={}/{}, syncs={}]",
+        write!(f, "[in_candidates={}, in_wc_merges={}/{}, out_wc_sends={}, out_mc_syncs={}, out_mc_sends={}, in_mc_merges={}/{}, neighbours_sends={}/{}, syncs={}]",
             self.in_candidates_count.load(std::sync::atomic::Ordering::Relaxed),
+            self.in_wc_real_merges_count.load(std::sync::atomic::Ordering::Relaxed),
             self.in_wc_merges_count.load(std::sync::atomic::Ordering::Relaxed),
             self.out_wc_sends_count.load(std::sync::atomic::Ordering::Relaxed),
             self.out_mc_syncs_count.load(std::sync::atomic::Ordering::Relaxed),
             self.out_mc_sends_count.load(std::sync::atomic::Ordering::Relaxed),
+            self.in_mc_real_merges_count.load(std::sync::atomic::Ordering::Relaxed),
             self.in_mc_merges_count.load(std::sync::atomic::Ordering::Relaxed),
             self.forwarding_neighbours_sends.load(std::sync::atomic::Ordering::Relaxed),
             self.far_neighbours_sends.load(std::sync::atomic::Ordering::Relaxed),
