@@ -162,10 +162,11 @@ fn test_contains_processed_up_to() {
     let mut msg = Message::with_int_header(hdr);
     msg.set_at_and_lt(1600000000, 10_000_002);
     let enq = MsgEnqueueStuff::new(
-        msg,
+        CommonMessage::Std(msg),
         &ShardIdent::with_workchain_id(0).unwrap(),
         Grams::zero(),
         true,
+        SERDE_OPTS_EMPTY,
     )
     .unwrap();
 
@@ -208,7 +209,7 @@ fn test_contains_processed_up_to() {
     let mut msg = Message::with_int_header(hdr);
     msg.set_at_and_lt(1600000000, 5_000_007);
     let enq =
-        MsgEnqueueStuff::new(msg, &ShardIdent::masterchain(), Grams::default(), true).unwrap();
+        MsgEnqueueStuff::new(CommonMessage::Std(msg), &ShardIdent::masterchain(), Grams::default(), true, SERDE_OPTS_EMPTY).unwrap();
 
     let mut put_old = ProcessedUptoStuff::with_params(
         SHARD_FULL,
@@ -234,7 +235,7 @@ fn test_contains_processed_up_to() {
 #[derive(Clone, Eq, PartialEq)]
 pub struct NewMessageTest {
     lt_hash: (u64, UInt256),
-    msg: Message,
+    msg: CommonMessage,
     tr_cell: Cell,
     prefix: AccountIdPrefixFull,
 }
@@ -242,7 +243,7 @@ pub struct NewMessageTest {
 impl NewMessageTest {
     pub fn new(
         lt_hash: (u64, UInt256),
-        msg: Message,
+        msg: CommonMessage,
         tr_cell: Cell,
         prefix: AccountIdPrefixFull,
     ) -> Self {
@@ -320,7 +321,7 @@ pub fn generate_test_queue(
         if lt < enqueue_lt {
             let new_msg = NewMessageTest::new(
                 (lt, env.message_hash()),
-                msg,
+                CommonMessage::Std(msg),
                 Default::default(),
                 account_id_prefix.clone(),
             );
@@ -381,7 +382,7 @@ fn test_clean_queue() {
 
             if log_msgs_order {
                 log_num += 1;
-                println!("{log_num}: lt {lt}, {}", enq.message().dst().unwrap());
+                println!("{log_num}: lt {lt}, {}", enq.message().get_std().unwrap().dst().unwrap());
             }
 
             if enq.created_lt() <= clean_lt {
@@ -403,7 +404,7 @@ fn test_clean_queue() {
 
             if log_msgs_order {
                 log_num += 1;
-                println!("{log_num}: lt {lt}, {}", enq.message().dst().unwrap());
+                println!("{log_num}: lt {lt}, {}", enq.message().get_std().unwrap().dst().unwrap());
             }
 
             if lt > clean_lt {
@@ -434,7 +435,7 @@ fn test_clean_queue() {
 
             if log_msgs_order {
                 log_num += 1;
-                println!("{log_num}: lt {lt}, {}", enq.message().dst().unwrap());
+                println!("{log_num}: lt {lt}, {}", enq.message().get_std().unwrap().dst().unwrap());
             }
 
             if enq.created_lt() <= clean_lt {
@@ -495,7 +496,7 @@ fn test_clean_queue() {
 
             if log_msgs_order {
                 log_num += 1;
-                println!("{log_num}: lt {lt}, {}", enq.message().dst().unwrap());
+                println!("{log_num}: lt {lt}, {}", enq.message().get_std().unwrap().dst().unwrap());
             }
 
             if enq.created_lt() <= clean_lt {
@@ -535,7 +536,7 @@ fn test_clean_queue() {
 
                     if log_msgs_order {
                         log_num += 1;
-                        println!("{log_num}: lt {lt}, {}", enq.message().dst().unwrap());
+                        println!("{log_num}: lt {lt}, {}", enq.message().get_std().unwrap().dst().unwrap());
                     }
 
                     if enq.created_lt() <= clean_lt {
@@ -572,14 +573,14 @@ fn test_clean_queue() {
             prefix: _,
         } in new_messages.drain()
         {
-            let info = msg
+            let info = msg.get_std().unwrap()
                 .int_header()
                 .ok_or_else(|| error!("message is not internal"))
                 .unwrap();
             let fwd_fee = *info.fwd_fee();
-            let enq = MsgEnqueueStuff::new(msg, shard, fwd_fee, false).unwrap();
+            let enq = MsgEnqueueStuff::new(msg, shard, fwd_fee, false, SERDE_OPTS_EMPTY).unwrap();
             // collator_data.add_out_msg_to_state(&enq, true)?;
-            let _out_msg = OutMsg::new(enq.envelope_cell(), tr_cell);
+            let _out_msg = OutMsg::new(enq.envelope_cell(), ChildCell::with_cell(tr_cell));
             // collator_data.add_out_msg_to_block(hash, &out_msg)?;
         }
         Ok(())
@@ -595,14 +596,14 @@ fn test_clean_queue() {
             prefix: _,
         }) = new_messages.pop()
         {
-            let info = msg
+            let info = msg.get_std().unwrap()
                 .int_header()
                 .ok_or_else(|| error!("message is not internal"))
                 .unwrap();
             let fwd_fee = *info.fwd_fee();
-            let enq = MsgEnqueueStuff::new(msg, shard, fwd_fee, false).unwrap();
+            let enq = MsgEnqueueStuff::new(msg, shard, fwd_fee, false, SERDE_OPTS_EMPTY).unwrap();
             // collator_data.add_out_msg_to_state(&enq, true)?;
-            let _out_msg = OutMsg::new(enq.envelope_cell(), tr_cell);
+            let _out_msg = OutMsg::new(enq.envelope_cell(), ChildCell::with_cell(tr_cell));
             // collator_data.add_out_msg_to_block(hash, &out_msg)?;
         }
 

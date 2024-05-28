@@ -517,7 +517,7 @@ async fn save_block(
     let handle = engine.store_block(&block).await?.to_non_created().ok_or_else(
         || error!("INTERNAL ERROR: mismatch in block {} store result during sync", block_id)
     )?;
-    let handle = engine.store_block_proof(block_id, Some(handle), &proof).await?
+    let handle = engine.store_block_proof(0, block_id, Some(handle), &proof).await?
         .to_non_created()
         .ok_or_else(
             || error!(

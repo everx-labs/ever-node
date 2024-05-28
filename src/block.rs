@@ -14,16 +14,21 @@
 use crate::{
     shard_state::ShardHashesStuff,
     validator::accept_block::visit_block_for_proof,
+    block_proof::BlockProofStuff, engine_traits::EngineOperations,
 };
 
 use ever_block::{
     error, fail, Block, BlockIdExt, BlkPrevInfo, BocReader, Cell, ConfigParams, Deserializable, 
     ExtBlkRef, HashmapAugType, HashmapType, MerkleProof, OutQueueUpdate, Result, Serializable, 
-    ShardDescr, ShardIdent, ShardHashes, UInt256, UsageTree
+    ShardDescr, ShardIdent, ShardHashes, UInt256, UsageTree, MeshMsgQueueUpdates, MeshMsgQueuesKit,
+    MeshUpdate, BlockProof, MeshKit, ConnectedNwOutDescr, ConnectedNwDescrExt,
+    MerkleUpdate, BlockSignatures, GetRepresentationHash
 };
+#[cfg(not(feature = "external_db"))]
+use ever_block::OutMsgQueueInfo;
 #[cfg(test)]
 use ever_block::{BlockInfo, BlkMasterInfo, write_boc};
-use std::{cmp::max, io::Write, sync::Arc};
+use std::{cmp::max, io::Write, sync::Arc,collections::{HashMap, HashSet}};
 
 #[cfg(test)]
 #[path = "tests/test_block.rs"]
@@ -32,7 +37,40 @@ mod tests;
 pub struct BlockPrevStuff {
     pub mc_block_id: BlockIdExt,
     pub prev: Vec<BlockIdExt>,
-    pub after_split: bool
+    pub _after_split: bool
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum BlockKind {
+    Block,
+    QueueUpdate { queue_update_for: i32, empty: bool },
+    MeshKit { network_id: i32 },
+    MeshUpdate { network_id: i32 },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum BlockOrigin {
+    Block(Block),
+    QueueUpdate {
+        block_part: Block,
+        queue_update_for: i32,
+        empty: bool,
+    },
+    MeshUpdate {
+        block_part: Block,
+        queue_updates: MeshMsgQueueUpdates,
+        network_id: i32,
+    },
+    MeshKit {
+        block_part: Block,
+        queues: MeshMsgQueuesKit,
+        network_id: i32,
+    }
+}
+impl Default for BlockOrigin {
+    fn default() -> Self {
+        Self::Block(Block::default())
+    }
 }
 
 /// It is a wrapper around various block's representations and properties.
@@ -42,9 +80,7 @@ pub struct BlockPrevStuff {
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct BlockStuff {
     id: BlockIdExt,
-    block: Option<Block>,
-    queue_update: Option<Block>, // virtual block with queue update, info, ...
-    queue_update_for: i32,
+    block: BlockOrigin,
     root: Cell,
     data: Arc<Vec<u8>>, // Arc is used to make cloning more lightweight
 }
@@ -65,19 +101,189 @@ impl BlockStuff {
         if id.root_hash != root.repr_hash() {
             fail!("wrong root hash for {}", id)
         }
-        let block = Some(Block::construct_from_cell(root.clone())?);
+        let block = BlockOrigin::Block(Block::construct_from_cell(root.clone())?);
         Ok(Self { id, block, root, data, ..Default::default() })
     }
 
-    pub fn deserialize_queue_update(id: BlockIdExt, queue_update_for: i32, data: Vec<u8>) -> Result<Self> {
+    pub fn deserialize_queue_update(
+        id: BlockIdExt,
+        queue_update_for: i32,
+        empty: bool,
+        data: Vec<u8>
+    ) -> Result<Self> {
         let data = Arc::new(data);
         let root = BocReader::new().read_inmem(data.clone())?.withdraw_single_root()?;
         let merkle_proof = MerkleProof::construct_from_cell(root.clone())?;
         if id.root_hash != merkle_proof.hash {
             fail!("wrong merkle proof hash for {}", id)
         }
-        let queue_update = Some(merkle_proof.virtualize()?);
-        Ok(Self { id, queue_update, queue_update_for, root, data, ..Default::default() })
+        let block = BlockOrigin::QueueUpdate{
+            block_part: merkle_proof.virtualize()?, 
+            queue_update_for,
+            empty
+        };
+        Ok(Self { id, block, root, data, ..Default::default() })
+    }
+
+    pub fn deserialize_mesh_update(
+        nw_id: i32,
+        id: BlockIdExt,
+        target_nw_id: i32,
+        data: Vec<u8>
+    ) -> Result<(Self, BlockProofStuff)> {
+
+        fn check_update(
+            nw_descr: &ConnectedNwOutDescr,
+            nw_id: i32,
+            mesh_update: &MeshUpdate,
+            id: &BlockIdExt,
+            shard: &ShardIdent,
+        ) -> Result<bool> {
+            if nw_descr.out_queue_update.new_hash != nw_descr.out_queue_update.old_hash {
+                let update = mesh_update.queue_updates.get_queue_update(&shard)?
+                    .ok_or_else(|| error!("Can't load update from shard {} block {} {}",
+                        shard, nw_id, id))?;
+                if update.old_hash != nw_descr.out_queue_update.old_hash {
+                    fail!("Old update hash mismatch. Shard {} block {} {}", shard, nw_id, id);
+                }
+                if update.new_hash != nw_descr.out_queue_update.new_hash {
+                    fail!("New update hash mismatch. Shard {} block {} {}", shard, nw_id, id);
+                }
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+
+        let data = Arc::new(data);
+        let root = BocReader::new().read_inmem(data.clone())?.withdraw_single_root()?;
+        let mesh_update = MeshUpdate::construct_from_cell(root.clone())?;
+        if id.root_hash != mesh_update.mc_block_part.hash {
+            fail!("wrong merkle proof hash for {}", id)
+        }
+        let block_part: Block = mesh_update.mc_block_part.virtualize()?;
+        let mc_extra = block_part
+            .read_extra()?
+            .read_custom()?
+            .ok_or_else(|| error!("Given block is not a master block."))?;
+
+        // Check update for masterchain
+        let nw_descr = mc_extra.mesh_descr().get(&target_nw_id)?
+            .ok_or_else(|| error!("Can't load descr for {} from masterchain, mesh kit {} {}", 
+                target_nw_id, nw_id, id)
+        )?;
+        let mut total_updates = 0;
+        if check_update(&nw_descr.queue_descr, nw_id, &mesh_update, &id, &ShardIdent::masterchain())? {
+            total_updates += 1;
+        }
+
+        // Check updates for shards
+        mc_extra.shards().iterate_shards(|ident: ShardIdent, descr: ShardDescr| {
+            let nw_descr = descr.mesh_msg_queues.get(&target_nw_id)?
+                .ok_or_else(|| error!("Can't load descr for {} from shard {} block {} {}",
+                    target_nw_id, ident, nw_id, id)
+            )?;
+            if check_update(&nw_descr, nw_id, &mesh_update, &id, &ident)? {
+                total_updates += 1;
+            }
+            Ok(true)
+        })?;
+
+        let real_len = mesh_update.queue_updates.len()?;
+        if real_len != total_updates {
+            fail!("Mesh updates count mismatch {} != {}. Block {} {}", 
+                real_len, total_updates, nw_id, id);
+        }
+
+        let block = BlockOrigin::MeshUpdate {
+            block_part,
+            queue_updates: mesh_update.queue_updates,
+            network_id: nw_id,
+        };
+        let block_stuff = Self { id, block, root, data, ..Default::default() };
+
+        let proof = BlockProof {
+            proof_for: block_stuff.id.clone(),
+            root: mesh_update.mc_block_part.write_to_new_cell()?.into_cell()?,
+            signatures: Some(mesh_update.signatures),
+        };
+        let proof_stuff = BlockProofStuff::new(proof, false)?;
+
+        Ok((block_stuff, proof_stuff))
+    }
+
+    pub fn deserialize_mesh_kit(
+        nw_id: i32,
+        id: BlockIdExt,
+        target_nw_id: i32,
+        data: Vec<u8>
+    ) -> Result<(Self, BlockProofStuff)> {
+        let data = Arc::new(data);
+        let root = BocReader::new().read_inmem(data.clone())?.withdraw_single_root()?;
+        
+        let mesh_kit = MeshKit::construct_from_cell(root.clone())?;
+        if id.root_hash != mesh_kit.mc_block_part.hash {
+            fail!("wrong merkle proof hash for {}", id)
+        }
+
+        let block_part: Block = mesh_kit.mc_block_part.virtualize()?;
+        let custom = block_part
+            .read_extra()?
+            .read_custom()?.ok_or_else(|| error!("Given block is not a master block."))?;
+        
+        let nw_descr = custom.mesh_descr().get(&target_nw_id)?
+            .ok_or_else(|| error!("Can't load descr for {} from masterchain, mesh kit {} {}", 
+                target_nw_id, nw_id, id))?;
+
+        let queue = mesh_kit.queues.get_queue(&ShardIdent::masterchain())?
+            .ok_or_else(|| error!("Can't load queue for {} from masterchain, mesh kit {} {}", 
+                target_nw_id, nw_id, id))?;
+
+        if queue.hash()? != nw_descr.queue_descr.out_queue_update.new_hash {
+            fail!("Old update hash mismatch. Masterchain, mesh kit {} {}", nw_id, id);
+        }
+
+        let mut total_queues = 1;
+        custom.shards().iterate_shards(|ident: ShardIdent, descr: ShardDescr| {
+
+            let nw_descr = descr.mesh_msg_queues.get(&target_nw_id)?
+                .ok_or_else(|| error!("Can't load descr for {} from shard {} mesh kit {} {}",
+                    target_nw_id, ident, nw_id, id))?;
+
+                    total_queues += 1;
+
+            let queue = mesh_kit.queues.get_queue(&ident)?
+                .ok_or_else(|| error!("Can't load queue from shard {} mesh kit {} {}",
+                    ident, nw_id, id))?;
+
+            if queue.hash()? != nw_descr.out_queue_update.new_hash {
+                fail!("Old update hash mismatch. Shard {} mesh kit {} {}", ident, nw_id, id);
+            }
+            
+            Ok(true)
+        })?;
+
+        let real_len = mesh_kit.queues.len()?;
+        if real_len != total_queues {
+            fail!("Mesh out queues count mismatch {} != {}. Block {} {}", 
+                real_len, total_queues, nw_id, id);
+        }
+
+        let block = BlockOrigin::MeshKit {
+            block_part,
+            queues: mesh_kit.queues,
+            network_id: nw_id,
+        };
+        let block_stuff = Self { id, block, root, data, ..Default::default() };
+
+        let proof = BlockProof {
+            proof_for: block_stuff.id.clone(),
+            root: mesh_kit.mc_block_part.write_to_new_cell()?.into_cell()?,
+            signatures: Some(mesh_kit.signatures),
+        };
+        let proof_stuff = BlockProofStuff::new(proof, false)?;
+
+        Ok((block_stuff, proof_stuff))
     }
 
     #[cfg(test)]
@@ -92,7 +298,7 @@ impl BlockStuff {
             root_hash: root.repr_hash(),
             file_hash,
         };
-        Ok(Self { id, block: Some(block), root, data: Arc::new(data), ..Default::default() })
+        Ok(Self { id, block: BlockOrigin::Block(block), root, data: Arc::new(data), ..Default::default() })
     }
 
     #[cfg(test)]
@@ -108,7 +314,7 @@ impl BlockStuff {
             root_hash: root.repr_hash(),
             file_hash,
         };
-        Ok(Self { id, block: Some(block), root, data, ..Default::default() })
+        Ok(Self { id, block: BlockOrigin::Block(block), root, data, ..Default::default() })
     }
 
     #[cfg(test)]
@@ -129,36 +335,48 @@ impl BlockStuff {
         }
         Ok(BlockStuff {
             id,
-            block: Some(block),
+            block: BlockOrigin::Block(block),
             root: Cell::default(),
             data: Arc::new(vec!(0xfe; 10_000)),
             ..Default::default()
         })
     }
 
-    pub fn block(&self) -> Result<&Block> {
-        self.block.as_ref().ok_or_else(|| {
-            error!("the block {} is not full, it contains only queue update for WC {}", 
-                self.id, self.queue_update_for)
-        })
+    pub fn kind(&self) -> BlockKind {
+        match &self.block {
+            BlockOrigin::Block(_) => BlockKind::Block,
+            BlockOrigin::QueueUpdate{queue_update_for, empty, ..} =>
+                BlockKind::QueueUpdate{queue_update_for: *queue_update_for, empty: *empty },
+            BlockOrigin::MeshUpdate{network_id, ..} => BlockKind::MeshUpdate{network_id: *network_id},
+            BlockOrigin::MeshKit{network_id, ..} => BlockKind::MeshKit{network_id: *network_id},
+        }
     }
 
-    pub fn block_or_queue_update(&self) -> Result<&Block> {
-        if let Some(block) = self.block.as_ref() {
+    pub fn block(&self) -> Result<&Block> {
+        if let BlockOrigin::Block(block) = &self.block {
             Ok(block)
-        } else if let Some(virt_block) = self.queue_update.as_ref() {
-            Ok(virt_block)
         } else {
-            fail!("INTERNAL ERROR: both block and queue_update fields are None in {}", self.id)
+            fail!("Block {} is not a BlockKind::Block", self.id)
+        }
+    }
+
+    pub fn virt_block(&self) -> Result<&Block> {
+        match &self.block {
+            BlockOrigin::Block(block) => Ok(block),
+            BlockOrigin::QueueUpdate{block_part, ..} => Ok(block_part),
+            BlockOrigin::MeshUpdate{block_part, ..} => Ok(block_part),
+            BlockOrigin::MeshKit{block_part, ..} => Ok(block_part),
         }
     }
 
     pub fn get_queue_update_for(&self, workchain_id: i32) -> Result<OutQueueUpdate> {
-        if self.is_queue_update() && self.queue_update_for != workchain_id {
-            fail!("This queue update is for wc {}, not {}", self.queue_update_for, workchain_id)
+        if let Some(wc) = self.is_queue_update_for() {
+            if wc != workchain_id {
+                fail!("{} is not queue update for wc {}", self.id(), workchain_id)
+            }
         }
         self
-            .block_or_queue_update()?
+            .virt_block()?
             .out_msg_queue_updates.as_ref().ok_or_else(|| {
                 error!("Block {} doesn't contain queue updates at all", self.id())
             })?
@@ -171,25 +389,48 @@ impl BlockStuff {
     pub fn fake_with_block(id: BlockIdExt, block: Block) -> Self {
         BlockStuff {
             id,
-            block: Some(block),
+            block: BlockOrigin::Block(block),
             root: Cell::default(),
             data: Arc::new(vec!(0xfe; 10_000)),
-            queue_update: None,
-            queue_update_for: 0,
         }
     }
 
-    pub fn is_queue_update(&self) -> bool { self.queue_update.is_some() }
+    pub fn is_queue_update(&self) -> bool {
+        matches!(self.block, BlockOrigin::QueueUpdate{..})
+    }
 
     pub fn is_queue_update_for(&self) -> Option<i32> {
-        if self.is_queue_update() {
-            Some(self.queue_update_for)
-        } else {
-            None
+        match &self.block {
+            BlockOrigin::QueueUpdate{queue_update_for, ..} => Some(*queue_update_for),
+            _ => None
         }
     }
-    
+
+    pub fn is_mesh(&self) -> bool {
+        matches!(self.block, BlockOrigin::MeshUpdate{..} | BlockOrigin::MeshKit{..})
+    }
+
+    // pub fn is_mesh_kit(&self) -> bool {
+    //     matches!(self.block, BlockOrigin::MeshKit{..})
+    // }
+
+    // pub fn is_mesh_update(&self) -> bool {
+    //     matches!(self.block, BlockOrigin::MeshUpdate{..})
+    // }
+
+    pub fn is_usual_block(&self) -> bool {
+        matches!(self.block, BlockOrigin::Block(_))
+    }
+
     pub fn id(&self) -> &BlockIdExt { &self.id }
+
+    pub fn network_global_id(&self) -> i32 {
+        match &self.block {
+            BlockOrigin::MeshUpdate{network_id, ..} => *network_id,
+            BlockOrigin::MeshKit{network_id, ..} => *network_id,
+            _ => 0
+        }
+    }
 
 // Unused
 //    pub fn shard(&self) -> &ShardIdent { 
@@ -206,15 +447,15 @@ impl BlockStuff {
 //    }
 
     pub fn gen_utime(&self) -> Result<u32> {
-        Ok(self.block_or_queue_update()?.read_info()?.gen_utime().as_u32())
+        Ok(self.virt_block()?.read_info()?.gen_utime().as_u32())
     }
 
    pub fn is_key_block(&self) -> Result<bool> {
-       Ok(self.block_or_queue_update()?.read_info()?.key_block())
+       Ok(self.virt_block()?.read_info()?.key_block())
    }
 
     pub fn construct_prev_id(&self) -> Result<(BlockIdExt, Option<BlockIdExt>)> {
-        let header = self.block_or_queue_update()?.read_info()?;
+        let header = self.virt_block()?.read_info()?;
         match header.read_prev_ref()? {
             BlkPrevInfo::Block{prev} => {
                 let shard_id = if header.after_split() {
@@ -259,7 +500,7 @@ impl BlockStuff {
 
     pub fn get_master_id(&self) -> Result<ExtBlkRef> {
         Ok(self
-            .block_or_queue_update()?
+            .virt_block()?
             .read_info()?
             .read_master_ref()?
             .ok_or_else(|| error!("Can't get master ref: given block is a master block"))?
@@ -273,7 +514,7 @@ impl BlockStuff {
 
     pub fn shards(&self) -> Result<ShardHashes> {
         Ok(self
-            .block()?
+            .virt_block()?
             .read_extra()?
             .read_custom()?
             .ok_or_else(|| error!("Given block is not a master block."))?
@@ -337,11 +578,35 @@ impl BlockStuff {
         Ok(shards)
     }
 
-    #[cfg(feature = "external_db")]
+    #[cfg(not(feature = "external_db"))]
+    // Commited master block for each connected network
+    pub fn mesh_top_blocks(&self) -> Result<HashMap<i32, BlockIdExt>> {
+        let mut tbs = HashMap::new();
+        self
+            .block()?
+            .read_extra()?
+            .read_custom()?
+            .ok_or_else(|| error!("Given block is not a master block."))?
+            .mesh_descr()
+            .iterate_with_keys(|id: i32, descr: ConnectedNwDescrExt| {
+                if let Some(descr) = descr.descr {
+                    let block = BlockIdExt {
+                        shard_id: ShardIdent::masterchain(),
+                        seq_no: descr.seq_no,
+                        root_hash: descr.root_hash,
+                        file_hash: descr.file_hash
+                    };
+                    tbs.insert(id, block);
+                }
+                Ok(true)
+            })?;
+        Ok(tbs)
+    }
+
     pub fn top_blocks_all(&self) -> Result<Vec<BlockIdExt>> {
         let mut shards = Vec::new();
         self
-            .block()?
+            .virt_block()?
             .read_extra()?
             .read_custom()?
             .ok_or_else(|| error!("Given block is not a master block."))?
@@ -384,6 +649,30 @@ impl BlockStuff {
         log::trace!("calculate_tr_count: transactions {}, TIME: {}ms, block: {}", tr_count, now.elapsed().as_millis(), self.id());
         Ok(tr_count)
     }
+
+    pub fn mesh_update(&self, src_shard: &ShardIdent) -> Result<MerkleUpdate> {
+        match &self.block {
+            BlockOrigin::MeshUpdate{queue_updates, ..} => {
+                let update = queue_updates.get_queue_update(src_shard)?
+                    .ok_or_else(|| error!("Block {} doesn't contain queue update for shard {}", self.id(), src_shard))?;
+                Ok(update)
+            },
+            _ => fail!("Block {} is not a mesh update", self.id())
+        }
+    }
+
+    #[cfg(not(feature = "external_db"))]
+    pub fn mesh_queue(&self, src_shard: &ShardIdent) -> Result<Arc<OutMsgQueueInfo>> {
+        match &self.block {
+            BlockOrigin::MeshKit{queues, ..} => {
+                let q = queues.get_queue(src_shard)?
+                    .ok_or_else(|| error!("Block {} doesn't contain queue from shard {}", self.id(), src_shard))?;
+                Ok(Arc::new(q))
+            },
+            _ => fail!("Block {} is not a mesh kit", self.id())
+        }
+    }
+
 }
 
 pub trait BlockIdExtExtention {
@@ -505,7 +794,7 @@ pub fn construct_and_check_prev_stuff(
         BlockPrevStuff {
             mc_block_id: out_mc_block_id,
             prev: out_prev,
-            after_split: out_after_split
+            _after_split: out_after_split
         }
     ))
 
@@ -514,7 +803,7 @@ pub fn construct_and_check_prev_stuff(
 #[allow(dead_code)]
 pub fn make_queue_update_from_block(block_stuff: &BlockStuff, update_for_wc: i32) -> Result<BlockStuff> {
     let queue_update_bytes = make_queue_update_from_block_raw(block_stuff, update_for_wc)?;
-    BlockStuff::deserialize_queue_update(block_stuff.id().clone(), update_for_wc, queue_update_bytes)
+    BlockStuff::deserialize_queue_update(block_stuff.id().clone(), update_for_wc, false, queue_update_bytes)
 }
 
 pub fn make_queue_update_from_block_raw(block_stuff: &BlockStuff, update_for_wc: i32) -> Result<Vec<u8>> {
@@ -538,4 +827,150 @@ pub fn make_queue_update_from_block_raw(block_stuff: &BlockStuff, update_for_wc:
         |h| h == &update_root_hash
     )?;
     queue_update.write_to_bytes()
+}
+
+fn make_mesh_proof(
+    block_stuff: &BlockStuff,
+    target_nw: i32,
+) -> Result<(MerkleProof, HashMap<BlockIdExt, ConnectedNwOutDescr>)> {
+    if !block_stuff.id().shard().is_masterchain() {
+        fail!("Can't make mesh proof for non-masterchain block {}", block_stuff.id())
+    }
+
+    let usage_tree = UsageTree::with_root(block_stuff.root_cell().clone());
+    let block = Block::construct_from_cell(usage_tree.root_cell())?;
+
+    visit_block_for_proof(&block, block_stuff.id())?;
+
+    let mut descr_root_hashes = HashSet::new();
+    let mut descrs = HashMap::new();
+
+    // Traget network description (last commited block of the network info)
+    // Queue info from this mc to the target network
+    let mut mc_descr_root = block
+        .read_extra()?
+        .read_custom()?
+        .ok_or_else(|| error!("Block {} doesn't contain `custom` field", block_stuff.id()))?
+        .mesh_descr()
+        .get_as_slice(&target_nw)?
+        .ok_or_else(|| error!("Block {} doesn't contain description for network {}",
+                        block_stuff.id(), target_nw))?;
+    descr_root_hashes.insert(mc_descr_root.repr_hash());
+    descrs.insert(
+        block_stuff.id().clone(),
+        ConnectedNwDescrExt::construct_from(&mut mc_descr_root)?.queue_descr
+    );
+
+    // Queue info from shardes to the target network
+    block
+        .read_extra()?
+        .read_custom()?
+        .ok_or_else(|| error!("Given block is not a master block."))?
+        .shards()
+        .iterate_shards(|ident: ShardIdent, descr: ShardDescr| {
+            let mut descr_root = descr.mesh_msg_queues.get_as_slice(&target_nw)?
+                .ok_or_else(|| error!("Can't load description for nw {} from shard {} mc_block {}",
+                    target_nw, ident, block_stuff.id()))?;
+                descr_root_hashes.insert(descr_root.repr_hash());
+                let id = BlockIdExt {
+                    shard_id: ident.clone(),
+                    seq_no: descr.seq_no,
+                    root_hash: descr.root_hash,
+                    file_hash: descr.file_hash
+                };
+                descrs.insert(
+                    id,
+                    ConnectedNwOutDescr::construct_from(&mut descr_root)?
+                );
+            Ok(true)
+        })?;
+
+    let proof = MerkleProof::create_with_subtrees(
+        block_stuff.root_cell(),
+        |h| usage_tree.contains(h),
+        |h| descr_root_hashes.contains(h)
+    )?;
+
+    Ok((proof, descrs))
+}
+
+pub async fn make_mesh_kit_raw(
+    block_stuff: &BlockStuff,
+    target_nw: i32,
+    signatures: BlockSignatures,
+    engine: &dyn EngineOperations // for loading needed states
+) -> Result<Vec<u8>> {
+
+    let (proof, descrs) = make_mesh_proof(block_stuff, target_nw)?;
+
+    let mut queues = MeshMsgQueuesKit::new();
+
+    for (id, out_descr) in descrs {
+        let state = engine.load_state(&id).await?;
+
+        let queue = state.state()?.read_out_msg_queues_info()?.1
+            .get(&target_nw)?
+            .ok_or_else(|| error!("Can't load out queue for {} from {}", target_nw, id))?
+            .inner();
+
+        if queue.hash()? != out_descr.out_queue_update.new_hash {
+            fail!("INTERNAL ERROR: new queue hash for {} from {} mismatch", target_nw, id);
+        }
+
+        queues.add_queue(id.shard(), queue)?;
+    }
+
+    let mesh_kit = MeshKit {
+        mc_block_part: proof,
+        queues,
+        signatures,
+    };
+
+    mesh_kit.write_to_bytes()
+}
+
+pub async fn make_mesh_update_raw(
+    block_stuff: &BlockStuff,
+    target_nw: i32,
+    signatures: BlockSignatures,
+    engine: &dyn EngineOperations // for loading needed states
+) -> Result<Vec<u8>> {
+
+    let (proof, descrs) = make_mesh_proof(block_stuff, target_nw)?;
+
+    let mut queue_updates = MeshMsgQueueUpdates::new();
+    for (id, out_descr) in descrs {
+        if out_descr.out_queue_update.new_hash != out_descr.out_queue_update.old_hash {
+            
+            let new_state = engine.load_state(&id).await?;
+            let old_state = engine.load_state(&block_stuff.construct_prev_id()?.0).await?;
+
+            let new_queue_root = new_state.state()?.read_out_msg_queues_info()?.1
+                .get_as_slice(&target_nw)?
+                .ok_or_else(|| error!("Can't load out queue for {} from {}", target_nw, id))?;
+                
+            let old_queue_root = old_state.state()?.read_out_msg_queues_info()?.1
+                .get_as_slice(&target_nw)?
+                .ok_or_else(|| error!("Can't load out queue for {} from {}", target_nw, id))?;
+
+            let now = std::time::Instant::now();
+            let update = MerkleUpdate::create(&old_queue_root.cell(), &new_queue_root.cell())?;
+            let elapsed = now.elapsed().as_millis();
+            if elapsed > 50 {
+                log::warn!(
+                    "make_mesh_update_raw(target nw: {}): MerkleUpdate::create from state {} took {}ms", 
+                    target_nw, id, elapsed
+                );
+            }
+            queue_updates.add_queue_update(id.shard(), update)?;
+        }
+    }
+
+    let mesh_update = MeshUpdate {
+        mc_block_part: proof,
+        queue_updates,
+        signatures,
+    };
+
+    mesh_update.write_to_bytes()
 }

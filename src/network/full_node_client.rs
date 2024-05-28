@@ -45,28 +45,30 @@ use ton_api::{
             PrepareZeroState, GetNextKeyBlockIds, GetArchiveInfo, GetArchiveSlice,
             PrepareBlockProof, PrepareKeyBlockProof, PrepareQueueUpdate, DownloadQueueUpdate,
             PreparePersistentMsgQueue, DownloadPersistentMsgQueueSlice,
+            DownloadMeshUpdate, DownloadLatestMeshKit, DownloadNextMeshUpdate, DownloadMeshKit
         },
-        ton_node::{
+        ton_node::{ 
             ArchiveInfo, Broadcast,
-            DataFull, KeyBlocks, Prepared, PreparedProof, PreparedState,
+            DataFull, KeyBlocks, Prepared, PreparedProof, PreparedState, 
             broadcast::{
                 BlockBroadcast, ExternalMessageBroadcast, NewShardBlockBroadcast,
-                QueueUpdateBroadcast,
-            },
-            externalmessage::ExternalMessage,
-        }
+                QueueUpdateBroadcast, MeshUpdateBroadcast,
+            }, 
+            externalmessage::ExternalMessage, 
+        }, Bool
     }
 };
 #[cfg(feature = "telemetry")]
 use ton_api::{tag_from_boxed_type, tag_from_bare_type};
 use ever_block::BlockIdExt;
-use ever_block::{error, fail, KeyId, Result};
+use ever_block::{fail, KeyId, Result};
 
 #[async_trait::async_trait]
 pub trait FullNodeOverlayClient : Sync + Send {
     async fn broadcast_external_message(&self, msg: &[u8]) -> Result<BroadcastSendInfo>;
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()>;
     async fn send_queue_update_broadcast(&self, broadcast: QueueUpdateBroadcast) -> Result<()>;
+    async fn send_mesh_update_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()>;
     async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()>;
     async fn download_block_proof(&self, block_id: &BlockIdExt, is_link: bool, key_block: bool) -> Result<BlockProofStuff>;
     async fn download_block_full(&self, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)>;
@@ -109,18 +111,47 @@ pub trait FullNodeOverlayClient : Sync + Send {
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<Option<Vec<u8>>>;
     async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>>;
+
+    async fn download_next_mesh_update(
+        &self,
+        nw_id: i32,
+        prev_id: &BlockIdExt,
+        target_nw_id: i32,
+    ) -> Result<(BlockStuff, BlockProofStuff)>;
+    #[allow(dead_code)]
+    async fn download_mesh_update(
+        &self,
+        nw_id: i32,
+        id: &BlockIdExt,
+        target_nw_id: i32,
+    ) -> Result<(BlockStuff, BlockProofStuff)>;
+    async fn download_latest_mesh_kit(
+        &self,
+        nw_id: i32,
+        target_nw_id: i32,
+    ) -> Result<(BlockStuff, BlockProofStuff)>;
+    async fn download_mesh_kit(
+        &self,
+        nw_id: i32,
+        id: &BlockIdExt,
+        target_nw_id: i32,
+    ) -> Result<(BlockStuff, BlockProofStuff)>;
+
 }
 
 //    #[derive(Clone)]
 declare_counted!(
     pub struct NodeClientOverlay {
         overlay_id: Arc<OverlayShortId>,
+        is_local: bool,
         peers: Arc<Neighbours>,
         network_context: Arc<NetworkContext>,
         #[cfg(feature = "telemetry")]
         tag_block_broadcast: u32,
         #[cfg(feature = "telemetry")]
         tag_queue_update_broadcast: u32,
+        #[cfg(feature = "telemetry")]
+        tag_mesh_update_broadcast: u32,
         #[cfg(feature = "telemetry")]
         tag_download_block_full: u32,
         #[cfg(feature = "telemetry")]
@@ -164,7 +195,15 @@ declare_counted!(
         #[cfg(feature = "telemetry")]
         tag_prepare_persistent_msg_queue: u32,
         #[cfg(feature = "telemetry")]
-        tag_prepare_zero_state: u32
+        tag_prepare_zero_state: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_mesh_update: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_latest_mesh_kit: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_mesh_kit: u32,
+        #[cfg(feature = "telemetry")]
+        tag_download_next_mesh_update: u32
     }
 );
 
@@ -177,17 +216,21 @@ impl NodeClientOverlay {
 
     pub (crate) fn new(
         overlay_id: Arc<OverlayShortId>,
+        is_local: bool,
         peers: Arc<Neighbours>,
         network_context: &Arc<NetworkContext>
     ) -> Self {
         let ret = Self {
             overlay_id,
+            is_local,
             peers,
             network_context: network_context.clone(),
             #[cfg(feature = "telemetry")]
             tag_block_broadcast: tag_from_bare_type::<BlockBroadcast>(),
             #[cfg(feature = "telemetry")]
             tag_queue_update_broadcast: tag_from_bare_type::<QueueUpdateBroadcast>(),
+            #[cfg(feature = "telemetry")]
+            tag_mesh_update_broadcast: tag_from_bare_type::<MeshUpdateBroadcast>(),
             #[cfg(feature = "telemetry")]
             tag_download_block_full: tag_from_boxed_type::<DownloadBlockFull>(),
             #[cfg(feature = "telemetry")]
@@ -234,6 +277,14 @@ impl NodeClientOverlay {
             tag_prepare_persistent_msg_queue: tag_from_boxed_type::<PreparePersistentMsgQueue>(),
             #[cfg(feature = "telemetry")]
             tag_prepare_zero_state: tag_from_boxed_type::<PrepareZeroState>(),
+            #[cfg(feature = "telemetry")]
+            tag_download_mesh_update: tag_from_boxed_type::<DownloadMeshUpdate>(),
+            #[cfg(feature = "telemetry")]
+            tag_download_next_mesh_update: tag_from_boxed_type::<DownloadNextMeshUpdate>(),
+            #[cfg(feature = "telemetry")]
+            tag_download_latest_mesh_kit: tag_from_boxed_type::<DownloadLatestMeshKit>(),
+            #[cfg(feature = "telemetry")]
+            tag_download_mesh_kit: tag_from_boxed_type::<DownloadMeshKit>(),
             counter: network_context.engine_allocated.overlay_clients.clone().into()
         };
         #[cfg(feature = "telemetry")]
@@ -639,6 +690,26 @@ impl FullNodeOverlayClient for NodeClientOverlay {
         Ok(())
     }
 
+    async fn send_mesh_update_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()> {
+        let id = broadcast.id.clone();
+        let broadcast = TaggedByteSlice {
+            object: &serialize_boxed(&broadcast.into_boxed())?,
+            #[cfg(feature = "telemetry")]
+            tag: self.tag_mesh_update_broadcast
+        };
+        let info = self.network_context.overlay.broadcast(
+            &self.overlay_id,
+            &broadcast,
+            None,
+            false
+        ).await?;
+        log::trace!(
+            "send_mesh_update_broadcast {} (overlay {}) sent to {} nodes", 
+            id, self.overlay_id, info.send_to
+        );
+        Ok(())
+    }
+    
     async fn send_top_shard_block_description(&self, tbd: &TopBlockDescrStuff) -> Result<()> {
         let broadcast = NewShardBlockBroadcast {
             block: tbd.new_shard_block()?
@@ -903,7 +974,7 @@ Ok(if key_block {
                     good_peer,
                     0
                 ).await?;
-                BlockStuff::deserialize_queue_update(id.clone(), target_wc, update_bytes)
+                BlockStuff::deserialize_queue_update(id.clone(), target_wc, false, update_bytes)
             }
         }
     }
@@ -1194,6 +1265,188 @@ Ok(if key_block {
                 }
             }
         }
+    }
+
+    async fn download_next_mesh_update(
+        &self,
+        nw_id: i32,
+        prev_id: &BlockIdExt,
+        target_nw_id: i32,
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
+
+        let request = TaggedObject { 
+            object: DownloadNextMeshUpdate {
+                target_nw: target_nw_id,
+                prev_block: prev_id.clone(),
+            },
+            #[cfg(feature = "telemetry")]
+            tag: self.tag_download_next_mesh_update
+        };
+
+        // Set neighbor
+        let peer = if let Some(p) = self.peers.choose_neighbour()? {
+            p
+        } else {
+            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_NO_NEIGHBOURS)).await;
+            fail!("neighbour is not found!")
+        };
+        log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request.object);
+
+        // Download
+        let (data_full, peer): (DataFull, _) = self.send_rldp_query_typed(
+            &request,
+            peer,
+            0
+        ).await?;
+
+        // Parse
+        match data_full {
+            DataFull::TonNode_DataFullEmpty =>  {
+                fail!("DownloadNextMeshUpdate {} {}: got `TonNode_DataFullEmpty` from {}",
+                    nw_id, prev_id, peer.id())
+            },
+            DataFull::TonNode_DataFull(data_full) => {
+                if prev_id.seq_no() + 1 != data_full.id.seq_no() {
+                    fail!("Answer for DownloadNextMeshUpdate has wrong id");
+                }
+                if data_full.proof.len() > 0 {
+                    fail!("Answer for DownloadNextMeshUpdate should have empty proof");
+                }
+                if data_full.is_link == Bool::BoolTrue {
+                    fail!("Answer for DownloadNextMeshUpdate should have is_link = false");
+                }
+                let (block, proof) = BlockStuff::deserialize_mesh_update(
+                    nw_id, data_full.id, target_nw_id, data_full.block)?;
+
+                Ok((block, proof))
+            }
+        }
+    }
+
+    async fn download_mesh_update(
+        &self,
+        nw_id: i32,
+        id: &BlockIdExt,
+        target_nw_id: i32,
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
+
+        let request = TaggedObject { 
+            object: DownloadMeshUpdate {
+                target_nw: target_nw_id,
+                block: id.clone(),
+            },
+            #[cfg(feature = "telemetry")]
+            tag: self.tag_download_mesh_update
+        };
+
+        // Set neighbor
+        let peer = if let Some(p) = self.peers.choose_neighbour()? {
+            p
+        } else {
+            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_NO_NEIGHBOURS)).await;
+            fail!("neighbour is not found!")
+        };
+        log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request.object);
+
+        // Download
+        let data = self.send_rldp_query_raw(
+            &request,
+            peer,
+            0
+        ).await?;
+
+        // Parse
+        let (block, proof) = BlockStuff::deserialize_mesh_update(
+            nw_id, id.clone(), target_nw_id, data)?;
+        Ok((block, proof))
+    }
+
+    async fn download_latest_mesh_kit(
+        &self,
+        nw_id: i32,
+        target_nw_id: i32,
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
+        let request = TaggedObject { 
+            object: DownloadLatestMeshKit {
+                target_nw: target_nw_id,
+            },
+            #[cfg(feature = "telemetry")]
+            tag: self.tag_download_latest_mesh_kit
+        };
+
+        // Set neighbor
+        let peer = if let Some(p) = self.peers.choose_neighbour()? {
+            p
+        } else {
+            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_NO_NEIGHBOURS)).await;
+            fail!("neighbour is not found!")
+        };
+        log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request.object);
+
+        // Download
+        let (data_full, peer): (DataFull, _) = self.send_rldp_query_typed(
+            &request,
+            peer,
+            0
+        ).await?;
+
+        // Parse
+        match data_full {
+            DataFull::TonNode_DataFullEmpty =>  {
+                fail!("DownloadLatestMeshKit {}: got `TonNode_DataFullEmpty` from {}",
+                    nw_id, peer.id())
+            },
+            DataFull::TonNode_DataFull(data_full) => {
+                if data_full.proof.len() > 0 {
+                    fail!("Answer for DownloadLatestMeshKit should have empty proof");
+                }
+                if data_full.is_link == Bool::BoolTrue {
+                    fail!("Answer for DownloadLatestMeshKit should have is_link = false");
+                }
+                let (block, proof) = BlockStuff::deserialize_mesh_kit(
+                    nw_id, data_full.id, target_nw_id, data_full.block)?;
+
+                Ok((block, proof))
+            }
+        }
+    }
+
+    async fn download_mesh_kit(
+        &self,
+        nw_id: i32,
+        id: &BlockIdExt,
+        target_nw_id: i32,
+    ) -> Result<(BlockStuff, BlockProofStuff)> {
+        let request = TaggedObject { 
+            object: DownloadMeshKit {
+                target_nw: target_nw_id,
+                block: id.clone()
+            },
+            #[cfg(feature = "telemetry")]
+            tag: self.tag_download_mesh_kit
+        };
+
+        // Set neighbor
+        let peer = if let Some(p) = self.peers.choose_neighbour()? {
+            p
+        } else {
+            tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_NO_NEIGHBOURS)).await;
+            fail!("neighbour is not found!")
+        };
+        log::trace!("USE PEER {}, REQUEST {:?}", peer.id(), request.object);
+
+        // Download
+        let data = self.send_rldp_query_raw(
+            &request,
+            peer,
+            0
+        ).await?;
+
+        // Parse
+        let (block, proof) = BlockStuff::deserialize_mesh_kit(
+            nw_id, id.clone(), target_nw_id, data)?;
+
+        Ok((block, proof))
     }
 
     async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>> {

@@ -24,7 +24,7 @@ use crate::{
         mpmc_channel::MpmcChannel,
     },
 };
-#[cfg(feature = "telemetry")]
+#[cfg(all(feature = "telemetry", feature = "external_db"))]
 use crate::full_node::telemetry::ReceiptTelemetry;
 
 use adnl::common::add_unbound_object_to_map_with_update;
@@ -39,7 +39,7 @@ use ton_api::{
 };
 use ever_block::{
     Message, ShardIdent, FutureSplitMerge, ShardAccount, BlockIdExt, ValidatorDescr, MASTERCHAIN_ID,
-    HashmapAugType
+    HashmapAugType, CommonMessage
 };
 use ever_executor::{
     BlockchainConfig, OrdinaryTransactionExecutor, TransactionExecutor, ExecuteParams,
@@ -426,7 +426,7 @@ impl RempClient {
         let engine = self.engine.get().ok_or_else(|| error!("engine was not set"))?;
         #[cfg(feature = "telemetry")]
         engine.remp_client_telemetry().register_got_receipt();
-        #[cfg(feature = "telemetry")]
+        #[cfg(all(feature = "telemetry", feature = "external_db"))]
         let got_at = Instant::now();
 
         //let receipt = ton_api::deserialize_boxed(&signed_receipt.receipt().0)?
@@ -464,13 +464,13 @@ impl RempClient {
             engine.remp_client_telemetry().set_message_rejected(&message_id);
         }
 
-        #[cfg(feature = "telemetry")]
+        #[cfg(all(feature = "telemetry", feature = "external_db"))]
         let status_short_name = remp_status_short_name(&receipt);
 
         //let signature = signed_receipt.only().signature.0.try_into()
         //    .map_err(|_| error!("signed_receipt.signature has invalid length"))?;
 
-        #[cfg(feature = "telemetry")]
+        #[cfg(all(feature = "telemetry", feature = "external_db"))]
         let rt = ReceiptTelemetry {
             status: status_short_name,
             got_at,
@@ -482,7 +482,7 @@ impl RempClient {
             receipt, 
             vec!(), //signature, 
             die_soon, 
-            #[cfg(feature = "telemetry")]
+            #[cfg(all(feature = "telemetry", feature = "external_db"))]
             Some(rt)
         )?;
 
@@ -537,7 +537,7 @@ impl RempClient {
             receipt,
             signature,
             die_soon,
-            #[cfg(feature = "telemetry")]
+            #[cfg(all(feature = "telemetry", feature = "external_db"))]
             None
         )
     }
@@ -548,7 +548,7 @@ impl RempClient {
         status: RempReceipt,
         signature: Vec<u8>,
         die_soon: bool,
-        #[cfg(feature = "telemetry")]
+        #[cfg(all(feature = "telemetry", feature = "external_db"))]
         receipt_telemetry: Option<ReceiptTelemetry>
     ) -> Result<()> {
         
@@ -578,22 +578,29 @@ impl RempClient {
         }
 
         // Send to kafka (async)
-        let engine = self.engine.get().ok_or_else(|| error!("engine was not set"))?.clone();
-        let message_id = message_id.clone();
-        tokio::spawn(async move {
-            #[cfg(feature = "telemetry")]
-            let sending = Instant::now();
-            if let Err(e) = engine.process_remp_msg_status_in_ext_db(&message_id, &status, &signature).await {
-                log::error!("Can't send status of {} to ext db: {}", message_id, e)
-            } else {
-                #[cfg(feature = "telemetry")] {
-                    if let Some(mut rt) = receipt_telemetry {
-                        rt.sending_ns = sending.elapsed().as_nanos() as u64;
-                        engine.remp_client_telemetry().add_receipt(&message_id, rt);
+        #[cfg(feature = "external_db")]
+        {
+            let engine = self.engine.get().ok_or_else(|| error!("engine was not set"))?.clone();
+            let message_id = message_id.clone();
+            tokio::spawn(async move {
+                #[cfg(feature = "telemetry")]
+                let sending = Instant::now();
+                if let Err(e) = engine.process_remp_msg_status_in_ext_db(
+                    &message_id, 
+                    &status, 
+                    &signature
+                ).await {
+                    log::error!("Can't send status of {} to ext db: {}", message_id, e)
+                } else {
+                    #[cfg(feature = "telemetry")] {
+                        if let Some(mut rt) = receipt_telemetry {
+                            rt.sending_ns = sending.elapsed().as_nanos() as u64;
+                            engine.remp_client_telemetry().add_receipt(&message_id, rt);
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
         Ok(())
     }
 
@@ -869,9 +876,10 @@ impl RempClient {
         };
         let now = Instant::now();
         let mut account_root = account.account_cell();
+        let common_msg = CommonMessage::Std(message);
         let execution_result = tokio::task::block_in_place(|| {
             let executor = OrdinaryTransactionExecutor::new(config);
-            executor.execute_with_libs_and_params(Some(&message), &mut account_root, params)
+            executor.execute_with_libs_and_params(Some(&common_msg), &mut account_root, params)
         });
 
         let duration = now.elapsed().as_micros() as u64;
@@ -1053,7 +1061,7 @@ impl RempClient {
     }*/
 }
 
-#[cfg(feature = "telemetry")]
+#[cfg(all(feature = "telemetry", feature = "external_db"))]
 pub fn remp_status_short_name(status: &RempReceipt) -> String {
     match status.status() {
         RempMessageStatus::TonNode_RempAccepted(acc) => {

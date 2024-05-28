@@ -1011,7 +1011,7 @@ impl RmqQueueManager {
 */
                     let mut digest = RempCatchainMessageDigest::default();
                     digest.masterchain_seqno = message_cc as i32;
-                    digest.messages.0.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
+                    digest.messages.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
                         id: message.message_id.clone(),
                         uid: message.message_uid.clone()
                     });
@@ -1054,7 +1054,7 @@ impl RmqQueueManager {
                         }
                     }
  */
-                let digest_len = digest.messages.0.len();
+                let digest_len = digest.messages.len();
                 let msg = ton_api::ton::ton_node::RempCatchainRecord::TonNode_RempCatchainMessageDigest(digest);
                 for new in next_queues.iter() {
                     if let Err(x) = new.catchain_instance.pending_messages_queue_send(msg.clone()) {

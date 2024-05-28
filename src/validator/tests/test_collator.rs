@@ -21,7 +21,7 @@ use crate::{
         validator_utils::compute_validator_set_cc,
     },
 };
-use ever_block::Result;
+use ever_block::{Result, AccountIdPrefixFull};
 use pretty_assertions::assert_eq;
 use std::{fs::{create_dir_all, remove_dir_all}, sync::Arc};
 
@@ -152,7 +152,7 @@ fn prepare_test_env_message(
     let hdr = InternalMessageHeader::with_addresses(src, dst, CurrencyCollection::with_grams(1_000_000_000));
     let mut msg = Message::with_int_header(hdr);
     msg.set_at_and_lt(at, lt);
-    MsgEnvelopeStuff::new(msg, &shard, Grams::from(1_000_000), use_hypercube)
+    MsgEnvelopeStuff::new(CommonMessage::Std(msg), &shard, Grams::from(1_000_000), use_hypercube, SERDE_OPTS_EMPTY)
 }
 
 #[test]

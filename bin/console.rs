@@ -51,7 +51,7 @@ trait SendReceive {
 }
 
 trait ConsoleCommand: SendReceive {
-    fn name() -> &'static str;
+    fn _name() -> &'static str;
     fn help() -> &'static str;
 }
 
@@ -60,11 +60,12 @@ macro_rules! commands {
         $(
             struct $command;
             impl ConsoleCommand for $command {
-                fn name() -> &'static str {$name}
+                fn _name() -> &'static str {$name}
                 fn help() -> &'static str {$help}
             }
         )*
-        fn _command_help(name: &str) -> Result<&str> {
+        #[allow(dead_code)]
+        fn command_help(name: &str) -> Result<&str> {
             match name {
                 $($name => Ok($command::help()), )*
                 _ => fail!("command {} not supported", name)
@@ -424,8 +425,8 @@ impl SendReceive for GetBlockchainConfig {
 impl SendReceive for GetConfig {
     fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
         let param_number = parse_int(params.next(), "paramnumber")?;
-        let mut params: ton::vector<ton::Bare, ton::int> = ton::vector::default();
-        params.0.push(param_number);
+        let mut params = Vec::new();
+        params.push(param_number);
         Ok(TLObject::new(ton::rpc::lite_server::GetConfigParams {
             mode: 0,
             id: BlockIdExt::default(),
@@ -946,12 +947,12 @@ mod test {
         ShardIdent, ShardStateUnsplit, ValidatorDescr, ValidatorSet
     };
     use ever_node::{
-        collator_test_bundle::{create_engine_telemetry, create_engine_allocated},
+        block::BlockKind, collator_test_bundle::{create_engine_telemetry, create_engine_allocated},
         config::TonNodeConfig, engine_traits::{EngineAlloc, EngineOperations},
         internal_db::{InternalDbConfig, InternalDb, state_gc_resolver::AllowStateGcSmartResolver}, 
         network::{control::{ControlServer, DataSource}, node_network::NodeNetwork},
-        shard_state::ShardStateStuff,
-        validator::validator_manager::ValidationStatus, shard_states_keeper::PinnedShardStateGuard,
+        shard_state::ShardStateStuff, shard_states_keeper::PinnedShardStateGuard,
+        validator::validator_manager::ValidationStatus
     };
     #[cfg(feature = "telemetry")]
     use ever_node::engine_traits::EngineTelemetry;
@@ -1058,7 +1059,7 @@ mod test {
             db.create_or_load_block_handle(
                 &master_state_id,
                 None,
-                None,
+                BlockKind::Block,
                 Some(1),
                 None
             ).unwrap()._to_created().unwrap();
@@ -1438,7 +1439,7 @@ mod test {
         let allocated = create_engine_allocated();
         let network = NodeNetwork::new(
             node_config,
-            Arc::new(tokio_util::sync::CancellationToken::new()),
+            tokio_util::sync::CancellationToken::new(),
             #[cfg(feature = "telemetry")]
             telemetry.clone(),
             allocated.clone()

@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ever-node'
-version = '0.58.4'
+version = '0.58.13'
 
 [workspace]
 members = [ 'storage' ]
@@ -100,18 +100,18 @@ validator_session = { path = 'validator-session' }
 
 [dev-dependencies]
 difference = '2.0'
-ed25519-dalek = '1.0.1'
-external-ip = '4.1.0'
+external-ip = '5'
 pretty_assertions = '1.3'
 tokio = { features = [ 'macros' ], version = '1.5' }
 
 [features]
-default = [ 'telemetry', 'ever_block/export_key' ]
+default = [ 'telemetry', 'ever_block/export_key', 'validator_session/export_key' ]
 export_key = [ 'catchain/export_key', 'ever_block/export_key' ]
 external_db = [ 'rdkafka' ]
 fast_finality_extra = [  ]
 gosh = [ 'ever_block/gosh', 'ever_vm/gosh' ]
 log_metrics = [  ]
+only_sorted_clean = [  ]
 prometheus = [ 'metrics-exporter-prometheus', 'log_metrics' ]
 signature_with_id = [ 'ever_block/signature_with_id', 'ever_vm/signature_with_id', 'ever_executor/signature_with_id' ]
 slashing = [ 'validator_session/slashing' ]

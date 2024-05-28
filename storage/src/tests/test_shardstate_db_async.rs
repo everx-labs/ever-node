@@ -40,7 +40,13 @@ fn ss_from_file(index: u32) -> Cell {
 struct MockedResolver;
 
 impl AllowStateGcResolver for MockedResolver {
-    fn allow_state_gc(&self, block_id: &BlockIdExt, _saved_at: u64, _gc_utime: u64) -> Result<bool> {
+    fn allow_state_gc(
+        &self, 
+        _nw_id: i32, 
+        block_id: &BlockIdExt, 
+        _saved_at: u64, 
+        _gc_utime: u64
+    ) -> Result<bool> {
         Ok(block_id.seq_no() > 2_467_100)
     }
 }

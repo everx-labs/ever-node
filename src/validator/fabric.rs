@@ -40,39 +40,36 @@ pub async fn run_validate_query_any_candidate(
     let mc_state = engine.load_last_applied_mc_state().await?;
     let min_masterchain_block_id = mc_state.find_block_id(info.min_ref_mc_seqno())?;
     let mut cc_seqno_with_delta = 0;
-    if let Some(mc_state_extra) = mc_state.state()?.read_custom()? {
-        let cc_seqno_from_state = if shard.is_masterchain() {
-            mc_state_extra.validator_info.catchain_seqno
-        } else {
-            mc_state_extra.shards.calc_shard_cc_seqno(&shard)?
-        };
-        let nodes = crate::validator::validator_utils::compute_validator_set_cc(
-            &*engine.load_last_applied_mc_state().await?,
-            &shard,
-            engine.now(),
-            cc_seqno_from_state,
-            &mut cc_seqno_with_delta
-        )?;
-        let validator_set = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno_with_delta, nodes)?;
-
-        log::debug!(
-            target: "verificator", 
-            "ValidatorSetForVerification cc_seqno: {:?}", validator_set.cc_seqno()
-        );
-        run_validate_query(
-            shard,
-            SystemTime::now(),
-            min_masterchain_block_id,
-            prev,
-            block,
-            validator_set,
-            engine,
-            SystemTime::now(),
-            None, //no verification manager for validations within verification
-        ).await
+    let mc_state_extra = mc_state.shard_state_extra()?;
+    let cc_seqno_from_state = if shard.is_masterchain() {
+        mc_state_extra.validator_info.catchain_seqno
     } else {
-        Err(failure::format_err!("MC state is None"))
-    }
+        mc_state_extra.shards.calc_shard_cc_seqno(&shard)?
+    };
+    let nodes = crate::validator::validator_utils::compute_validator_set_cc(
+        &*engine.load_last_applied_mc_state().await?,
+        &shard,
+        engine.now(),
+        cc_seqno_from_state,
+        &mut cc_seqno_with_delta
+    )?;
+    let validator_set = ValidatorSet::with_cc_seqno(0, 0, 0, cc_seqno_with_delta, nodes)?;
+
+    log::debug!(
+        target: "verificator", 
+        "ValidatorSetForVerification cc_seqno: {:?}", validator_set.cc_seqno()
+    );
+    run_validate_query(
+        shard,
+        SystemTime::now(),
+        min_masterchain_block_id,
+        prev,
+        block,
+        validator_set,
+        engine,
+        SystemTime::now(),
+        None, //no verification manager for validations within verification
+    ).await
 }
 
 pub async fn run_validate_query(

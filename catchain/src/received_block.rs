@@ -267,7 +267,7 @@ impl ReceivedBlock for ReceivedBlockImpl {
         let prev = receiver.create_block(&block.data.prev);
         self.prev = Some(prev.clone());
 
-        for dep in &block.data.deps.0 {
+        for dep in &block.data.deps {
             let dep_block = receiver.create_block(dep).clone();
             self.block_deps.push(dep_block);
         }
@@ -928,7 +928,7 @@ impl ReceivedBlockImpl {
 
         used.insert(block.src);
 
-        for dep in &block.data.deps.0 {
+        for dep in &block.data.deps {
             if used.contains(&dep.src) {
                 fail!("Two deps from the same source");
             }
@@ -938,7 +938,7 @@ impl ReceivedBlockImpl {
 
         (receiver.validate_block_dependency(&block.data.prev))?;
 
-        for dep in &block.data.deps.0 {
+        for dep in &block.data.deps {
             (receiver.validate_block_dependency(dep))?;
         }
 

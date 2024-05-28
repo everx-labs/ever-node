@@ -36,7 +36,13 @@ use ever_block::{
 };
 
 pub trait AllowStateGcResolver: Send + Sync {
-    fn allow_state_gc(&self, block_id: &BlockIdExt, save_utime: u64, gc_utime: u64) -> Result<bool>;
+    fn allow_state_gc(
+        &self,
+        nw_id: i32, // connected network id; zero for own.
+        block_id: &BlockIdExt,
+        save_utime: u64,
+        gc_utime: u64
+    ) -> Result<bool>;
 }
 
 pub(crate) struct DbEntry {
@@ -347,7 +353,7 @@ impl ShardStateDb {
                     let entry = DbEntry::from_slice(value)?;
                     let time = 
                         SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-                    match gc_resolver.allow_state_gc(&entry.block_id, entry.save_utime, time) {
+                    match gc_resolver.allow_state_gc(0, &entry.block_id, entry.save_utime, time) {
                         Ok(true) => {
                             log::debug!(
                                 target: TARGET, "ShardStateDb GC: delete  id {}", entry.block_id);
@@ -462,7 +468,7 @@ impl ShardStateDb {
             Ok(data) => data,
             Err(e) => {
                 if let Some(gc_resolver) = self.gc_resolver.get() {
-                    if gc_resolver.allow_state_gc(id, 0, 0)? {
+                    if gc_resolver.allow_state_gc(0, id, 0, 0)? {
                         fail!(StorageError::StateIsAllowedToGc(id.clone()))
                     }
                 }
@@ -479,7 +485,7 @@ impl ShardStateDb {
 
         if let Some(gc_resolver) = self.gc_resolver.get() {
             let utime_now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-            if gc_resolver.allow_state_gc(&db_entry.block_id, db_entry.save_utime, utime_now)? {
+            if gc_resolver.allow_state_gc(0, &db_entry.block_id, db_entry.save_utime, utime_now)? {
                 fail!(StorageError::StateIsAllowedToGc(db_entry.block_id))
             }
         }

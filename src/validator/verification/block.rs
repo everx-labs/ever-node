@@ -74,6 +74,8 @@ struct NodeDeliveryDesc {
     last_status_sent_time: Option<std::time::SystemTime>,     //last status time
     last_status_received_time: Option<std::time::SystemTime>, //last received time
 }
+
+//TODO: add max number of entries in delivery signature
 #[derive(Default)]
 pub struct BlockDeliveryStats {
     pub in_candidates_count: AtomicUsize,         //incoming candidates count

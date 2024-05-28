@@ -29,6 +29,7 @@ pub struct ShardAccountStuff {
     state_update: HashUpdate,
     orig_libs: StateInitLib,
     copyleft_rewards: CopyleftRewards,
+    serde_opts: u8,
 }
 
 impl ShardAccountStuff {
@@ -36,6 +37,7 @@ impl ShardAccountStuff {
         account_addr: AccountId,
         shard_acc: ShardAccount,
         lt: Arc<AtomicU64>,
+        serde_opts: u8,
     ) -> Result<Self> {
         let account_hash = shard_acc.account_cell().repr_hash();
         let account_root = shard_acc.account_cell();
@@ -48,9 +50,10 @@ impl ShardAccountStuff {
             last_trans_hash,
             last_trans_lt,
             lt,
-            transactions: Transactions::default(),
+            transactions: Transactions::with_serde_opts(serde_opts),
             state_update: HashUpdate::with_hashes(account_hash.clone(), account_hash),
             copyleft_rewards: CopyleftRewards::default(),
+            serde_opts,
         })
     }
     pub fn update_shard_state(&mut self, new_accounts: &mut ShardAccounts) -> Result<AccountBlock> {
@@ -89,8 +92,8 @@ impl ShardAccountStuff {
 
         self.account_root = account_root;
         self.state_update.new_hash = self.account_root.repr_hash();
-
-        let tr_root = transaction.serialize()?;
+        
+        let tr_root = transaction.serialize_with_opts(self.serde_opts)?;
         self.last_trans_hash = tr_root.repr_hash();
         self.last_trans_lt = transaction.logical_time();
 

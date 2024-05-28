@@ -20,8 +20,7 @@ pub mod utils {
 
     use crate::{
         db::rocksdb::RocksDb,
-        StorageAlloc, block_handle_db::{BlockHandleDb, BlockHandleStorage}, 
-        node_state_db::NodeStateDb
+        StorageAlloc, block_handle_db::{BlockHandleDb, BlockHandleStorage, NodeStateDb}, 
     };
     #[cfg(feature = "telemetry")]
     use crate::StorageTelemetry;
