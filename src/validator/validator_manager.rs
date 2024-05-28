@@ -860,7 +860,8 @@ impl ValidatorManagerImpl {
             if do_unsafe_catchain_rotate {"(unsafe rotate)"} else {""}
         );
 
-        let remp_enabled = is_remp_enabled(self.engine.clone(), mc_state_extra.config());
+        let remp_enabled = !do_unsafe_catchain_rotate
+            && is_remp_enabled(self.engine.clone(), mc_state_extra.config());
 
         for (ident, prev_blocks) in new_shards.iter() {
             let cc_seqno_from_state = if ident.is_masterchain() {
