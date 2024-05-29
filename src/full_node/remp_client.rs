@@ -99,7 +99,14 @@ impl RempReceiptsSubscriber for RempClient {
 impl RempClient {
 
     pub fn new(local_key_id: UInt256) -> Self {
-        Self::with_params(HANGED_MESSAGE_TIMEOUT_MS, TIME_BEFORE_DIE_MS, false, local_key_id)
+        Self::with_params(
+            HANGED_MESSAGE_TIMEOUT_MS,
+            TIME_BEFORE_DIE_MS,
+
+            true, // !!! temporary disabled local run
+
+            local_key_id
+        )
     }
 
     pub fn with_params(
