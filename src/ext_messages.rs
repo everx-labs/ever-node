@@ -290,7 +290,9 @@ impl MessagesPool {
             }
             if let Some(guard) = order.map.remove(&seqno) {
                 if let Some(guard) = self.messages.remove(&guard.val().id) {
+                    #[cfg(not(feature = "statsd"))]
                     metrics::increment_gauge!("ext_messages_expired", 1f64);
+                    #[cfg(not(feature = "statsd"))]
                     metrics::decrement_gauge!("ext_messages_len", 1f64);
                     log::debug!(
                         target: EXT_MESSAGES_TRACE_TARGET,
