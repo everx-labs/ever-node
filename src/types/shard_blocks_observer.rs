@@ -56,7 +56,7 @@ impl ShardBlocksObserver {
                 let handle = self.engine.load_block_handle(id)?
                     .ok_or_else(|| error!("Can't load top processed block's handle with id {}", id))?;
                 if handle.has_next1() {
-                    let next_id = self.engine.load_block_next1(handle.id())?;
+                    let next_id = self.engine.load_block_next1(handle.id()).await?;
                     let next_handle = self.engine.load_block_handle(&next_id)?
                         .ok_or_else(|| error!("Can't load next #1 block's handle with id {}", next_id))?;
                     let block = self.engine.load_block(&next_handle).await?;
@@ -71,7 +71,7 @@ impl ShardBlocksObserver {
                     new_top_processed_blocks.insert(handle.id().clone());
                 }
                 if handle.has_next2() {
-                    let next_id = self.engine.load_block_next2(handle.id())?
+                    let next_id = self.engine.load_block_next2(handle.id()).await?
                         .ok_or_else(|| error!(
                             "INTERNAL ERROR! Block {}: 'handle.has_next2' is true but 'engine.load_block_next2' is None", 
                             handle.id()

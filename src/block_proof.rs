@@ -23,7 +23,7 @@ use crate::{
 
 use ever_block::{
     error, fail, Block, BlockIdExt, BlockInfo, BlockProof, BocReader, Cell, ConfigParams, 
-    Deserializable, HashmapType, MerkleProof, Result, Serializable, write_boc, BlockSignatures,
+    Deserializable, HashmapType, MerkleProof, Result, Serializable, write_boc
 };
 use std::sync::Arc;
 
@@ -143,7 +143,7 @@ impl BlockProofStuff {
         &self.id
     }
 
-    #[cfg(feature = "external_db")]
+    #[cfg(feature="external_db")]
     pub fn proof(&self) -> &BlockProof {
         &self.proof
     }
@@ -157,10 +157,6 @@ impl BlockProofStuff {
         drop(self.root);
         debug_assert_eq!(Arc::strong_count(&self.data), 1);
         Arc::try_unwrap(self.data).unwrap_or_else(|s| (*s).clone())
-    }
-
-    pub fn drain_signatures(self) -> Result<BlockSignatures> {
-        self.proof.signatures.ok_or_else(|| error!("Proof doesn't contain signatures"))
     }
 
     pub fn check_with_prev_key_block_proof(&self, prev_key_block_proof: &BlockProofStuff) -> Result<()> {
@@ -265,13 +261,13 @@ impl BlockProofStuff {
 
         Self::pre_check_virtual_block(
             id,
-            queue_update.virt_block()?,
+            queue_update.block_or_queue_update()?,
             &merkle_proof.proof.virtualize(1)
         )?;
 
         // get root cell of queue update and check it has zero level
         let merkle_update_root = queue_update
-            .virt_block()?
+            .block_or_queue_update()?
             .out_msg_queue_updates.as_ref()
             .ok_or_else(|| error!("Queue update {} doesn't contain out_msg_queue_updates", id))?
             .get_as_slice(&wc)?
@@ -335,14 +331,7 @@ impl BlockProofStuff {
                 "Can't verify block {} using key block {} with larger or equal seqno", self.id(), prev_key_block_proof.id()
             )))
         }
-
-        let (subset, virt_prev_key_block) = self.process_prev_key_block_proof(prev_key_block_proof)?;
-
-        if virt_prev_key_block.read_info()?.gen_utime().as_u32() >= virt_block_info.gen_utime().as_u32() {
-            fail!(NodeError::InvalidData(format!(
-                "Can't verify block {} using key block {} with larger or equal gen_utime", self.id(), prev_key_block_proof.id()
-            )))
-        }
+        let subset = self.process_prev_key_block_proof(prev_key_block_proof)?;
 
         if virt_block_info.key_block() {
             self.pre_check_key_block_proof(virt_block)?;
@@ -460,13 +449,6 @@ impl BlockProofStuff {
             )))
         }
 
-        if info.gen_utime().as_u32() == 0 {
-            fail!(NodeError::InvalidData(format!(
-                "proof for block {} contains a Merkle proof with zero gen_utime",
-                id,
-            )))
-        }
-
         Ok(info)
     }
 
@@ -506,7 +488,7 @@ impl BlockProofStuff {
     fn process_prev_key_block_proof(
         &self,
         prev_key_block_proof: &BlockProofStuff,
-    ) -> Result<(ValidatorSubsetInfo, Block)> {
+    ) -> Result<ValidatorSubsetInfo> {
         let (virt_key_block, prev_key_block_info) = prev_key_block_proof.pre_check_block_proof()?;
 
         if !prev_key_block_info.key_block() {
@@ -532,13 +514,11 @@ impl BlockProofStuff {
                 "State doesn't contain `custom` field".to_string()
             )))?;
 
-        let subset = calc_subset_for_masterchain(
+        calc_subset_for_masterchain(
             &validator_set,
             &config,
             self.proof.signatures.as_ref().map(|s| s.validator_info.catchain_seqno).unwrap_or(0),
-        )?;
-
-        Ok((subset, virt_key_block))
+        )
     }
 
     fn check_signatures(&self, subset: &ValidatorSubsetInfo) -> Result<()> {

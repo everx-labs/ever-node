@@ -31,11 +31,7 @@ use catchain::profiling::InstanceCounter;
 use catchain::check_execution_time;
 use log::*;
 use adnl::{OverlayShortId, PrivateOverlayShortId};
-use rand::Rng;
-use spin::mutex::SpinMutex;
 use std::time::Duration;
-use std::time::SystemTime;
-use tokio::time::sleep;
 use ton_api::ton::ton_node::blockcandidatestatus::BlockCandidateStatus;
 use ton_api::ton::ton_node::Broadcast;
 use ever_block::Result;
@@ -49,10 +45,6 @@ use ever_block::Result;
 ===============================================================================
 */
 
-const MIN_NEIGHBOURS_COUNT: usize = 5; //min number of neighbours to synchronize
-const MAX_NEIGHBOURS_COUNT: usize = 32; //max number of neighbours to synchronize
-const NEIGHBOURS_ROTATE_MIN_PERIOD_MS: u64 = 60000; //min time for neighbours rotation
-const NEIGHBOURS_ROTATE_MAX_PERIOD_MS: u64 = 120000; //max time for neighbours rotation
 const USE_QUERIES_FOR_BLOCK_STATUS: bool = false; //use queries for block status delivery, otherwise use messages
 
 /*
@@ -65,6 +57,7 @@ pub trait WorkchainOverlayListener: Send + Sync {
     /// Block status has been updated
     fn on_workchain_block_status_updated(
         &self,
+        adnl_id: &PublicKeyHash,
         block_status: BlockCandidateStatus,
         received_from_workchain: bool,
     ) -> Result<BlockPtr>;
@@ -85,13 +78,12 @@ type OverlayPtr = catchain::CatchainOverlayPtr;
 pub struct WorkchainOverlay {
     engine: EnginePtr,                      //pointer to engine
     workchain_id: i32,                      //workchain identifier
-    runtime_handle: tokio::runtime::Handle, //runtime handle for further interaction between threads
+    _runtime_handle: tokio::runtime::Handle, //runtime handle for further interaction between threads
     local_adnl_id: PublicKeyHash,           //ADNL ID for this node
     network: PrivateOverlayNetworkPtr,      //private overlay network
     overlay: OverlayPtr,                    //private overlay
     overlay_short_id: Arc<OverlayShortId>,  //private overlay short ID
     overlay_id: UInt256,             //ID of validator list
-    neighbours_adnl_ids: SpinMutex<Vec<PublicKeyHash>>, //ADNL IDs of neighbours
     active_validators_adnl_ids: Vec<PublicKeyHash>, //ADNL IDs of active validators
     listener: Arc<WorkchainListener>,       //linked listener
     node_debug_id: Arc<String>,             //debug ID of node
@@ -189,11 +181,10 @@ impl WorkchainOverlay {
             overlay,
             overlay_short_id,
             network: Arc::downgrade(&network.clone()),
-            neighbours_adnl_ids: SpinMutex::new(Vec::new()),
             active_validators_adnl_ids,
             overlay_id,
             local_adnl_id,
-            runtime_handle: runtime.clone(),
+            _runtime_handle: runtime.clone(),
             engine: engine.clone(),
             listener,
             _instance_counter: (*overlays_instance_counter).clone(),
@@ -211,8 +202,6 @@ impl WorkchainOverlay {
 
         log::debug!(target: "verificator", "Verification workchain's #{} overlay {} has been started", workchain_id, overlay.node_debug_id);
 
-        Self::rotate_neighbours(Arc::downgrade(&overlay));
-
         Ok(overlay)
     }
 
@@ -221,37 +210,42 @@ impl WorkchainOverlay {
     */
 
     /// Send message to neighbours
-    pub fn send_message_to_private_neighbours(&self, data: BlockPayloadPtr) {
-        let neighbours_adnl_ids = self.neighbours_adnl_ids.lock().clone();
-        
-        log::trace!(target: "verificator", "Sending multicast to {} neighbours (overlay={})", neighbours_adnl_ids.len(), self.node_debug_id);
+    pub fn send_message_to_forwarding_neighbours(&self, data: BlockPayloadPtr, neighbours: &Vec<usize>) {
+        log::trace!(target: "verificator", "Sending multicast to {} forwarding neighbours (overlay={})", neighbours.len(), self.node_debug_id);
 
         self.send_message_to_neighbours_counter.increment(1);
 
-        self.send_message_multicast(&neighbours_adnl_ids, data);
+        self.send_message_to_neighbours(data, neighbours);
     }
 
-    /// Send message to far neighbours
-    pub fn send_message_to_far_neighbours(&self, data: BlockPayloadPtr, nodes_count: usize) {
-        let mut far_neighbours_adnl_ids = Vec::with_capacity(nodes_count);
-        let mut rng = rand::thread_rng();
+    /// Send message to custom neighbours
+    pub fn send_message_to_far_neighbours(&self, data: BlockPayloadPtr, neighbours: &Vec<usize>) {
+        log::trace!(target: "verificator", "Sending multicast to {} far neighbours (overlay={})", neighbours.len(), self.node_debug_id);
 
-        for _i in 0..nodes_count {
-            let random_value = rng.gen_range(0, self.active_validators_adnl_ids.len());
-            let adnl_id = self.active_validators_adnl_ids[random_value].clone();
+        self.send_message_to_far_neighbours_counter.increment(1);
+
+        self.send_message_to_neighbours(data, neighbours);
+    }
+
+    /// Send message to neighbours
+    fn send_message_to_neighbours(&self, data: BlockPayloadPtr, neighbours: &Vec<usize>) {
+        let mut neighbours_adnl_ids = Vec::with_capacity(neighbours.len());
+
+        for idx in neighbours {
+            if *idx >= self.active_validators_adnl_ids.len() {
+                continue;
+            }
+
+            let adnl_id = self.active_validators_adnl_ids[*idx].clone();
 
             if adnl_id == self.local_adnl_id {
                 continue;
             }
 
-            far_neighbours_adnl_ids.push(adnl_id.clone());
+            neighbours_adnl_ids.push(adnl_id.clone());
         }
 
-        log::trace!(target: "verificator", "Sending multicast to {} far neighbours (overlay={})", far_neighbours_adnl_ids.len(), self.node_debug_id);
-
-        self.send_message_to_far_neighbours_counter.increment(1);
-
-        self.send_message_multicast(&far_neighbours_adnl_ids, data);
+        self.send_message_multicast(&neighbours_adnl_ids, data);
     }
 
     /// Send message to all nodes
@@ -336,101 +330,6 @@ impl WorkchainOverlay {
             .send_broadcast_fec_ex(sender_id, send_as, payload);
 
         self.out_broadcast_counter.increment(1);
-    }
-
-    /*
-        Neighbours management
-    */
-
-    /// Rotate neighbours
-    fn rotate_neighbours(overlay_weak: Weak<WorkchainOverlay>) {
-        let overlay = {
-            if let Some(overlay) = overlay_weak.upgrade() {
-                overlay
-            } else {
-                return;
-            }
-        };
-
-        trace!(target: "verificator", "Rotate neighbours (overlay={})", overlay.node_debug_id);
-
-        let mut rng = rand::thread_rng();
-
-        //initiate next neighbours rotation
-
-        let delay = Duration::from_millis(rng.gen_range(
-            NEIGHBOURS_ROTATE_MIN_PERIOD_MS,
-            NEIGHBOURS_ROTATE_MAX_PERIOD_MS + 1,
-        ));
-        let next_neighbours_rotate_time = SystemTime::now() + delay;
-        let workchain_id = overlay.workchain_id;
-        let node_debug_id = overlay.node_debug_id.clone();
-
-        overlay.runtime_handle.spawn(async move {
-            if let Ok(timeout) = next_neighbours_rotate_time.duration_since(SystemTime::now()) {
-                trace!(
-                    target: "verificator",
-                    "Next neighbours rotation for workchain's #{} private overlay is scheduled at {} (in {:.3}s from now; overlay={})",
-                    workchain_id,
-                    catchain::utils::time_to_string(&next_neighbours_rotate_time),
-                    timeout.as_secs_f64(),
-                    node_debug_id);
-
-                sleep(timeout).await;
-            }
-
-            //rotate neighbours
-
-            Self::rotate_neighbours(overlay_weak);
-        });
-
-        //randomly choose max neighbours from sources
-
-        let sources_count = overlay.active_validators_adnl_ids.len();
-        //let mut items_count = MAX_NEIGHBOURS_COUNT;
-        let mut items_count = ((sources_count as f64).sqrt() as usize).clamp(MIN_NEIGHBOURS_COUNT, MAX_NEIGHBOURS_COUNT);
-        let mut new_neighbours = Vec::with_capacity(items_count);
-
-        trace!(
-            target: "verificator",
-            "...choose {} neighbours from {} sources (overlay={})",
-            items_count,
-            sources_count,
-            overlay.node_debug_id,
-        );
-
-        if items_count > sources_count {
-            items_count = sources_count;
-        }
-
-        let mut neighbours_string = "".to_string();
-        let local_adnl_id = overlay.local_adnl_id.clone();
-
-        for i in 0..sources_count {
-            let random_value = rng.gen_range(0, sources_count - i);
-            if random_value >= items_count {
-                continue;
-            }
-
-            let adnl_id = overlay.active_validators_adnl_ids[i].clone();
-
-            if adnl_id == local_adnl_id {
-                continue;
-            }
-
-            new_neighbours.push(adnl_id.clone());
-            items_count -= 1;
-
-            if neighbours_string.len() > 0 {
-                neighbours_string = format!("{}, ", neighbours_string);
-            }
-
-            neighbours_string = format!("{}{}", neighbours_string, adnl_id);
-        }
-
-        trace!(target: "verificator", "...new workchain's #{} private overlay {} neighbours are: [{:?}]", overlay.workchain_id, overlay.node_debug_id, neighbours_string);
-
-        *overlay.neighbours_adnl_ids.lock() = new_neighbours;
     }
 }
 
@@ -619,7 +518,7 @@ impl WorkchainListener {
 
                         block_status_update_counter.increment(1);
 
-                        match listener.on_workchain_block_status_updated(block_status, received_from_workchain) {
+                        match listener.on_workchain_block_status_updated(adnl_id, block_status, received_from_workchain) {
                             Ok(block) => {
                                 return Ok(block);
                             }

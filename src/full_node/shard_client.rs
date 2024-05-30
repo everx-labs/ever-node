@@ -118,7 +118,7 @@ async fn load_next_master_block(
     log::trace!("load_next_master_block: prev block: {}", prev_id);
     if let Some(prev_handle) = engine.load_block_handle(prev_id)? {
         if prev_handle.has_next1() {
-            let next_id = engine.load_block_next1(prev_id)?;
+            let next_id = engine.load_block_next1(prev_id).await?;
             engine.clone().download_and_apply_block(&next_id, next_id.seq_no(), false).await?; 
             return Ok(next_id)
         }
@@ -127,7 +127,7 @@ async fn load_next_master_block(
     };
 
     log::trace!("load_next_master_block: downloading next block... prev: {}", prev_id);
-    let (block, proof) = engine.download_next_block(0, prev_id).await?;
+    let (block, proof) = engine.download_next_block(prev_id).await?;
     log::trace!("load_next_master_block: got next block: {}", prev_id);
     if block.id().seq_no != prev_id.seq_no + 1 {
         fail!("Invalid next master block got: {}, prev: {}", block.id(), prev_id);
@@ -151,7 +151,7 @@ async fn load_next_master_block(
         }
     };
     if !next_handle.has_proof() {
-        next_handle = engine.store_block_proof(0, block.id(), Some(next_handle), &proof).await?
+        next_handle = engine.store_block_proof(block.id(), Some(next_handle), &proof).await?
             .to_non_created()
             .ok_or_else(
                 || error!(
@@ -419,7 +419,7 @@ pub async fn apply_proof_chain(
         log::trace!("apply_proof_chain: next proof {}", id);
 
         let data = merkle_proof.write_to_bytes()?;
-        let block_stuff = BlockStuff::deserialize_queue_update(id.clone(), own_wc, true, data)?;
+        let block_stuff = BlockStuff::deserialize_queue_update(id.clone(), own_wc, data)?;
         let queue_update = block_stuff.get_queue_update_for(own_wc)?;
 
         log::trace!("apply_proof_chain: apply {}, is_empty {}", id, queue_update.is_empty);
@@ -542,8 +542,7 @@ pub async fn process_block_broadcast(
         block = BlockStuff::deserialize_queue_update(
             broadcast.id().clone(),
             target_wc,
-            false,
-            broadcast.data(),
+            broadcast.data()
         )?;
         BlockProofStuff::check_queue_update(&block)?;
 
@@ -615,7 +614,7 @@ pub async fn process_block_broadcast(
 
     if let Some(proof) = proof_opt.as_ref() {
         if !handle.has_proof() {
-            let result = engine.store_block_proof(0, block.id(), Some(handle), proof).await?;
+            let result = engine.store_block_proof(block.id(), Some(handle), proof).await?;
             handle = if let Some(handle) = result.to_updated() {
                 handle
             } else {
@@ -648,7 +647,7 @@ pub async fn process_block_broadcast(
         }
     } else {
         let master_ref = block
-            .virt_block()?
+            .block_or_queue_update()?
             .read_info()?
             .read_master_ref()?
             .ok_or_else(|| NodeError::InvalidData(format!(

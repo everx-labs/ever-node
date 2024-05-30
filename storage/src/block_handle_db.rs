@@ -13,7 +13,7 @@
 
 use crate::{
     TARGET, StorageAlloc, db_impl_serializable, db::traits::KvcWriteable, 
-    traits::Serializable, types::BlockMeta, db_impl_base
+    node_state_db::NodeStateDb, traits::Serializable, types::BlockMeta
 };
 #[cfg(feature = "telemetry")]
 use crate::StorageTelemetry;
@@ -52,13 +52,9 @@ pub(crate) const FLAG_IS_QUEUE_UPDATE: u32       = 0x00004000;
 pub(crate) const FLAG_IS_EMPTY_QUEUE_UPDATE: u32 = 0x00008000;
 const FLAG_STATE_SAVED: u32                      = 0x00010000;
 const FLAG_HAS_FULL_ID: u32                      = 0x00020000;
-pub(crate) const FLAG_IS_MESH: u32               = 0x00040000;
-
 
 // not serializing flags (possible flags - 1, 2, 4, 8)
 const FLAG_ARCHIVING: u32 = 0x80000000;
-
-db_impl_base!(NodeStateDb, KvcWriteable, &'static str);
 
 /// Meta information related to block
 #[derive(Debug)]
@@ -406,25 +402,13 @@ impl BlockHandle {
         self.is_flag_set(FLAG_IS_QUEUE_UPDATE)
     }
 
-    pub fn is_mesh(&self) -> bool {
-        self.is_flag_set(FLAG_IS_MESH)
-    }
-
     pub fn is_empty_queue_update(&self) -> bool {
         self.is_flag_set(FLAG_IS_EMPTY_QUEUE_UPDATE)
     }
 
     pub fn is_queue_update_for(&self) -> Option<i32> {
         if self.is_queue_update() {
-            Some(self.meta.params as i32)
-        } else {
-            None
-        }
-    }
-
-    pub fn mesh_nw_id(&self) -> Option<i32> {
-        if self.is_mesh() {
-            Some(self.meta.params as i32)
+            Some(self.meta.queue_update_for)
         } else {
             None
         }
@@ -514,10 +498,10 @@ type BlockHandleCache = lockfree::map::Map<UInt256, HandleObject>;
 pub enum StoreJob {
     SaveHandle(Arc<BlockHandle>),
     DropHandle(BlockIdExt),
-    SaveFullNodeState((String, Arc<BlockIdExt>)),
-    SaveValidatorState((String, Arc<BlockIdExt>)),
-    DropValidatorState(String),
-    DropFullNodeState(String)
+    SaveFullNodeState((&'static str, Arc<BlockIdExt>)),
+    SaveValidatorState((&'static str, Arc<BlockIdExt>)),
+    DropValidatorState(&'static str),
+    DropFullNodeState(&'static str)
 }
 
 #[async_trait::async_trait]
@@ -530,7 +514,7 @@ pub struct BlockHandleStorage {
     handle_cache: Arc<BlockHandleCache>,
     full_node_state_db: Arc<NodeStateDb>,
     validator_state_db: Arc<NodeStateDb>,
-    state_cache: lockfree::map::Map<String, Arc<BlockIdExt>>,
+    state_cache: lockfree::map::Map<&'static str, Arc<BlockIdExt>>,
     storer: tokio::sync::mpsc::UnboundedSender<(StoreJob, Option<Arc<dyn Callback>>)>,
     #[cfg(feature = "telemetry")]
     telemetry: Arc<StorageTelemetry>,
@@ -563,12 +547,12 @@ impl BlockHandleStorage {
             async move {
 
                 fn save_state(
-                    key: &str, 
+                    key: &'static str, 
                     id: &Arc<BlockIdExt>, 
                     db: &Arc<NodeStateDb>
                 ) -> bool {
                     let mut buf = Vec::new();
-                    let result = id.serialize(&mut buf).and_then(|_| db.put_raw(key.as_bytes(), &buf[..]));
+                    let result = id.serialize(&mut buf).and_then(|_| db.put(&key, &buf[..]));
                     if let Err(e) = result {
                         log::error!(target: TARGET, "ERROR: {} while saving state {}", e, id);
                         false
@@ -614,7 +598,7 @@ impl BlockHandleStorage {
                         StoreJob::SaveValidatorState((key, id)) => 
                             save_state(key, id, &validator_state_db),
                         StoreJob::DropValidatorState(key) => {
-                            let result = validator_state_db.delete_raw(key.as_bytes());
+                            let result = validator_state_db.delete(key);
                             if let Err(e) = result {
                                 log::error!(
                                     target: TARGET, 
@@ -627,7 +611,7 @@ impl BlockHandleStorage {
                             }
                         }
                         StoreJob::DropFullNodeState(key) => {
-                            let result = full_node_state_db.delete_raw(key.as_bytes());
+                            let result = full_node_state_db.delete(key);
                             if let Err(e) = result {
                                 log::error!(
                                     target: TARGET, 
@@ -667,21 +651,21 @@ impl BlockHandleStorage {
 
     pub fn drop_validator_state(
         &self,
-        key: String,
+        key: &'static str,
     ) -> Result<()> {
-        self.delete_state(&key)?;
+        self.delete_state(key)?;
         self.storer.send((StoreJob::DropValidatorState(key), None)).map_err(
-            |_| error!("Cannot drop validator state: storer thread dropped")
+            |_| error!("Cannot drop validator state {}: storer thread dropped", key)
         )
     }
 
     pub fn drop_full_node_state(
         &self,
-        key: String,
+        key: &'static str,
     ) -> Result<()> {
-        self.delete_state(&key)?;
+        self.delete_state(key)?;
         self.storer.send((StoreJob::DropFullNodeState(key), None)).map_err(
-            |_| error!("Cannot drop fullnode state: storer thread dropped")
+            |_| error!("Cannot drop fullnode state {}: storer thread dropped", key)
         )
     }
 
@@ -718,11 +702,11 @@ impl BlockHandleStorage {
         self.handle_db.is_empty()
     }
 
-    pub fn load_full_node_state(&self, key: &str) -> Result<Option<Arc<BlockIdExt>>> {
+    pub fn load_full_node_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>> {
         self.load_state(key, &self.full_node_state_db)
     }
 
-    pub fn load_validator_state(&self, key: &str) -> Result<Option<Arc<BlockIdExt>>> {
+    pub fn load_validator_state(&self, key: &'static str) -> Result<Option<Arc<BlockIdExt>>> {
         self.load_state(key, &self.validator_state_db)
     }
 
@@ -738,10 +722,10 @@ impl BlockHandleStorage {
 
     pub fn save_full_node_state(
         &self,
-        key: String,
+        key: &'static str,  
         id: &BlockIdExt
     ) -> Result<()> {
-        let refid = self.create_state(key.clone(), id)?;
+        let refid = self.create_state(key, id)?;
         self.storer.send((StoreJob::SaveFullNodeState((key, refid)), None)).map_err(
             |_| error!("Cannot store full node state {}: storer thread dropped", id)
         )
@@ -749,10 +733,10 @@ impl BlockHandleStorage {
 
     pub fn save_validator_state(
         &self,
-        key: String,
+        key: &'static str,  
         id: &BlockIdExt
     ) -> Result<()> {
-        let refid = self.create_state(key.clone(), id)?;
+        let refid = self.create_state(key, id)?;
         self.storer.send((StoreJob::SaveValidatorState((key, refid)), None)).map_err(
             |_| error!("Cannot store validator state {}: storer thread dropped", id)
         )
@@ -818,7 +802,7 @@ impl BlockHandleStorage {
 
     fn create_state(
         &self,
-        key: String,
+        key: &'static str,
         id: &BlockIdExt
     ) -> Result<Arc<BlockIdExt>> {
         let id = Arc::new(id.clone());
@@ -834,7 +818,7 @@ impl BlockHandleStorage {
 
     fn delete_state(
         &self,
-        key: &str,
+        key: &'static str,
     ) -> Result<()> {
         self.state_cache.remove(key);
         Ok(())
@@ -877,16 +861,16 @@ impl BlockHandleStorage {
 
     fn load_state(
         &self, 
-        key: &str, 
+        key: &'static str, 
         db: &Arc<NodeStateDb>
     ) -> Result<Option<Arc<BlockIdExt>>> {
         log::trace!(target: TARGET, "load state {}", key);
         if let Some(id) = self.state_cache.get(key) {
             Ok(Some(id.val().clone()))
-        } else if let Some(db_slice) = db.try_get_raw(key.as_bytes())? {
+        } else if let Some(db_slice) = db.try_get(&key)? {
             let mut cursor = Cursor::new(db_slice.as_ref());
             let id = BlockIdExt::deserialize(&mut cursor)?;
-            Ok(Some(self.create_state(key.to_string(), &id)?))
+            Ok(Some(self.create_state(key, &id)?))
         } else {
             Ok(None)
         }

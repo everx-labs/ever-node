@@ -14,7 +14,7 @@
 use super::*;
 use std::str::FromStr;
 use ever_block::{
-    CurrencyCollection, InternalMessageHeader, MsgAddressInt, Message, SERDE_OPTS_EMPTY
+    CurrencyCollection, InternalMessageHeader, MsgAddressInt
 };
 
 #[test]
@@ -24,12 +24,12 @@ fn test_msg_envelope() {
     let src_shard = ShardIdent::with_tagged_prefix(0, 0xa400000000000000).unwrap();
     let dst_shard = ShardIdent::with_tagged_prefix(0, 0x7c00000000000000).unwrap();
     let hdr = InternalMessageHeader::with_addresses(src, dst, CurrencyCollection::default());
-    let msg = CommonMessage::Std(Message::with_int_header(hdr));
-    let env = MsgEnvelopeStuff::new(msg.clone(), &src_shard, Grams::default(), false, SERDE_OPTS_EMPTY).unwrap();
+    let msg = Message::with_int_header(hdr);
+    let env = MsgEnvelopeStuff::new(msg.clone(), &src_shard, Grams::default(), false).unwrap();
     assert!(src_shard.contains_full_prefix(env.cur_prefix()));
     assert!(dst_shard.contains_full_prefix(env.next_prefix()));
 
-    let env = MsgEnvelopeStuff::new(msg, &src_shard, Grams::default(), true, SERDE_OPTS_EMPTY).unwrap();
+    let env = MsgEnvelopeStuff::new(msg, &src_shard, Grams::default(), true).unwrap();
     assert!(src_shard.contains_full_prefix(env.cur_prefix()));
     assert!(!dst_shard.contains_full_prefix(env.next_prefix()));
     let shard = ShardIdent::with_tagged_prefix(0, 0x7400000000000000).unwrap();

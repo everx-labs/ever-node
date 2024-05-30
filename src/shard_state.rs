@@ -18,12 +18,12 @@ use crate::engine_traits::EngineTelemetry;
 use adnl::{declare_counted, common::{CountedObject, Counter}};
 #[cfg(feature = "telemetry")]
 use std::sync::atomic::Ordering;
-use std::{io::Write, sync::Arc, collections::HashMap};
+use std::{io::Write, sync::Arc};
 use ever_block::{
     BlockIdExt, ShardAccount, ShardIdent, ShardStateUnsplit, ShardStateSplit, 
     Serializable, Deserializable, ConfigParams, McShardRecord, 
     McStateExtra, ShardDescr, ShardHashes, HashmapAugType, InRefValue, BinTree, 
-    BinTreeType, WorkchainDescr, OutMsgQueue, ProcessedInfo, MerkleProof, ConnectedNwDescr,
+    BinTreeType, WorkchainDescr, OutMsgQueue, ProcessedInfo, MerkleProof,
 };
 use ever_block::{
     AccountId, Cell, SliceData, error, fail, Result, UInt256, BocWriter, BocReader, read_single_root_boc,
@@ -320,23 +320,6 @@ impl ShardStateStuff {
 
     pub fn top_blocks_all(&self) -> Result<Vec<BlockIdExt>> {
         self.shard_hashes()?.top_blocks_all()
-    }
-
-    pub fn mesh_top_blocks(&self) -> Result<HashMap<i32, BlockIdExt>> {
-        let mut tbs = HashMap::new();
-        self.shard_state_extra()?
-            .mesh
-            .iterate_with_keys(|id: i32, descr: ConnectedNwDescr| {
-                let block = BlockIdExt {
-                    shard_id: ShardIdent::masterchain(),
-                    seq_no: descr.seq_no,
-                    root_hash: descr.root_hash,
-                    file_hash: descr.file_hash
-                };
-                tbs.insert(id, block);
-                Ok(true)
-            })?;
-        Ok(tbs)
     }
 
 // Unused

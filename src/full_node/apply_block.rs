@@ -15,13 +15,10 @@ use crate::{
     block::BlockStuff, engine_traits::EngineOperations, shard_state::ShardStateStuff,
     validating_utils::{UNREGISTERED_CHAIN_MAX_LEN, fmt_block_id_short}
 };
-use std::{ops::Deref, sync::Arc, time::Instant};
+use std::{ops::Deref, sync::Arc};
 use storage::block_handle_db::BlockHandle;
 use ever_block::{error, fail, Result};
-use ever_block::{
-    BlockIdExt, MerkleProof, Deserializable, Serializable, ShardIdent,
-    OutMsgQueueInfo, ConnectedNwOutDescr,
-};
+use ever_block::{BlockIdExt, MerkleProof, Deserializable, Serializable};
 
 pub const MAX_RECURSION_DEPTH: u32 = UNREGISTERED_CHAIN_MAX_LEN * 2;
 
@@ -43,10 +40,6 @@ pub async fn apply_block(
 
     if handle.is_queue_update() {
         calc_out_msg_queue(handle, block, &prev_ids, engine).await?;
-        set_prev_ids(&handle, &prev_ids, engine.deref())?;
-        set_next_ids(&handle, &prev_ids, engine.deref())?;
-    } else if handle.is_mesh() {
-        calc_mesh_queues(handle, block, &prev_ids, engine).await?;
         set_prev_ids(&handle, &prev_ids, engine.deref())?;
         set_next_ids(&handle, &prev_ids, engine.deref())?;
     } else {
@@ -226,89 +219,6 @@ pub async fn calc_out_msg_queue(
     log::trace!("TIME: calc_out_msg_queue: store_state {}ms   {}",
             now.elapsed().as_millis(), handle.id());
     metrics::histogram!("calc_out_msg_queue_store_state_time", now.elapsed());
-    Ok(())
-}
-
-pub async fn calc_mesh_queues(
-    _handle: &Arc<BlockHandle>,
-    mesh_update: &BlockStuff,
-    prev_ids: &(BlockIdExt, Option<BlockIdExt>),
-    engine: &Arc<dyn EngineOperations>
-) -> Result<()> {
-
-    fn process_one_shard(
-        mesh_update: &BlockStuff,
-        cn_descr: &ConnectedNwOutDescr,
-        src_shard: &ShardIdent,
-        prev_ids: &(BlockIdExt, Option<BlockIdExt>),
-        engine: &Arc<dyn EngineOperations>
-    ) -> Result<()> {
-        let old_queue = engine.load_mesh_queue(
-            mesh_update.network_global_id(),
-            &prev_ids.0,
-            &src_shard
-        )?;
-        let old_queue_root = old_queue.write_to_new_cell()?.into_cell()?;
-
-        let old_hash = old_queue_root.repr_hash();
-        if old_hash != cn_descr.out_queue_update.old_hash {
-            fail!(
-                "INTERNAL ERROR: mesh update {}: old queue hash mismatch for {} ({} != {})", 
-                mesh_update.id(), src_shard, old_hash, cn_descr.out_queue_update.old_hash
-            );
-        }
-
-        let new_queue = if cn_descr.out_queue_update.old_hash != cn_descr.out_queue_update.new_hash {
-            let new_queue_root = mesh_update.mesh_update(&src_shard)?.apply_for(&old_queue_root)?;
-            let new_hash = new_queue_root.repr_hash();
-            if new_queue_root.repr_hash() != cn_descr.out_queue_update.new_hash {
-                fail!(
-                    "INTERNAL ERROR: mesh update {}: new queue hash mismatch for {} ({} != {})", 
-                    mesh_update.id(), src_shard, new_hash, cn_descr.out_queue_update.new_hash
-                );
-            }
-            Arc::new(OutMsgQueueInfo::construct_from_cell(new_queue_root)?)
-        } else {
-            old_queue
-        };
-
-        engine.store_mesh_queue(
-            mesh_update.network_global_id(),
-            &mesh_update.id(),
-            &src_shard,
-            new_queue
-        )?;
-
-        Ok(())
-    }
-
-    log::trace!("calc_mesh_queues: network: {}, mesh update: {}",
-        mesh_update.network_global_id(), mesh_update.id());
-    let now = Instant::now();
-
-    let host_network_id = engine.network_global_id();
-
-    let cn_descr = mesh_update
-        .virt_block()?
-        .read_extra()?
-        .read_custom()?
-        .ok_or_else(|| error!("Mesh update {} doesn't contain extra->custom field", mesh_update.id()))?
-        .mesh_descr()
-        .get(&host_network_id)?
-        .ok_or_else(|| error!("Mesh update {} doesn't contain queue from masterchain to us", mesh_update.id()))?;
-    process_one_shard(mesh_update, &cn_descr.queue_descr, &ShardIdent::masterchain(), prev_ids, engine)?;
-
-    mesh_update.shards()?.iterate_shards(|ident, descr| {
-        let cn_descr = descr.mesh_msg_queues.get(&host_network_id)?
-            .ok_or_else(|| error!("Mesh update {} doesn't contain queue for us", mesh_update.id()))?;
-        process_one_shard(mesh_update, &cn_descr, &ident, prev_ids, engine)?;
-        Ok(true)
-    })?;
-
-    log::trace!("calc_mesh_queues: network: {}, mesh update: {}, DONE TIME: {}ms",
-        mesh_update.network_global_id(), mesh_update.id(), now.elapsed().as_millis());
-    metrics::histogram!("calc_mesh_queues_time", now.elapsed());
-
     Ok(())
 }
 

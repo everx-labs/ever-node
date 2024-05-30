@@ -67,7 +67,7 @@ impl std::fmt::Debug for MultiSignature {
             }
         }
 
-        write!(f, "[???]")
+        write!(f, "[]")
     }
 }
 

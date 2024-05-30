@@ -12,14 +12,13 @@
 */
 
 use crate::{
-    engine_traits::EngineOperations, 
-    block::{make_queue_update_from_block_raw, make_mesh_kit_raw, make_mesh_update_raw},
+    engine_traits::EngineOperations, block::make_queue_update_from_block_raw,
     network::neighbours::{PROTOCOL_CAPABILITIES, PROTOCOL_VERSION}
 };
 
 use adnl::common::{AdnlPeers, Answer, QueryAnswer, QueryResult, TaggedByteVec, TaggedObject};
 use adnl::QueriesConsumer;
-use std::{cmp::min, fmt::Debug, sync::Arc, ops::Deref};
+use std::{cmp::min, fmt::Debug, sync::Arc};
 #[cfg(feature = "telemetry")]
 use ton_api::{tag_from_boxed_type, tag_from_boxed_object};
 use ton_api::{
@@ -28,14 +27,14 @@ use ton_api::{
     ton::{
         self, TLObject, Vector,
         rpc::ton_node::{
-            DownloadBlock, DownloadBlockFull, DownloadBlockProof, DownloadBlockProofLink, 
-            DownloadKeyBlockProof, DownloadKeyBlockProofLink, DownloadLatestMeshKit, DownloadMeshKit,
-            DownloadMeshUpdate, DownloadNextBlockFull, DownloadNextMeshUpdate, 
-            DownloadPersistentMsgQueueSlice, DownloadPersistentState, DownloadPersistentStateSlice, 
-            DownloadQueueUpdate, DownloadZeroState, GetArchiveInfo, GetArchiveSlice, 
-            GetCapabilities, GetNextBlockDescription, GetNextKeyBlockIds, PrepareBlock, 
-            PrepareBlockProof, PrepareKeyBlockProof, PreparePersistentMsgQueue, 
-            PreparePersistentState, PrepareQueueUpdate, PrepareZeroState
+            DownloadNextBlockFull, DownloadPersistentStateSlice, DownloadZeroState,
+            PreparePersistentState, GetNextBlockDescription,
+            DownloadBlockProof, DownloadBlockProofLink, DownloadKeyBlockProof, DownloadKeyBlockProofLink,
+            PrepareBlock, DownloadBlock, DownloadBlockFull, GetArchiveInfo,
+            PrepareZeroState, GetNextKeyBlockIds, GetArchiveSlice, 
+            PrepareBlockProof, PrepareKeyBlockProof, DownloadPersistentState, GetCapabilities,
+            PrepareQueueUpdate, PreparePersistentMsgQueue, DownloadQueueUpdate,
+            DownloadPersistentMsgQueueSlice,
         },
         ton_node::{
             self,
@@ -46,7 +45,7 @@ use ton_api::{
     }
 };
 use ever_block::BlockIdExt;
-use ever_block::{fail, error, Result};
+use ever_block::{fail, Result};
 
 // max part size for partially transmitted data like archives and states
 const PART_MAX_SIZE: usize = 1 << 21; 
@@ -76,7 +75,7 @@ impl FullNodeOverlayService {
         &self, 
         query: GetNextBlockDescription
     ) -> Result<TaggedObject<BlockDescription>> {
-        let answer = match self.engine.load_block_next1(&query.prev_block) {
+        let answer = match self.engine.load_block_next1(&query.prev_block).await {
             Ok(id) => {
                 ton_node::blockdescription::BlockDescription{
                     id: id.into()
@@ -331,7 +330,7 @@ impl FullNodeOverlayService {
         let mut answer = DataFullBoxed::TonNode_DataFullEmpty;
         if let Some(prev_handle) = self.engine.load_block_handle(&query.prev_block)? {
             if prev_handle.has_next1() {
-                let next_id = self.engine.load_block_next1(&query.prev_block)?;
+                let next_id = self.engine.load_block_next1(&query.prev_block).await?;
                 if let Some(next_handle) = self.engine.load_block_handle(&next_id)? {
                     let has_proof_link = next_handle.has_proof_link();
                     let has_proof = next_handle.has_proof();
@@ -425,142 +424,6 @@ impl FullNodeOverlayService {
             }
         }
         fail!("Block's data isn't initialized");
-    }
-
-    async fn download_mesh_kit(
-        &self, 
-        query: DownloadMeshKit
-    ) -> Result<TaggedByteVec> {
-        if !query.block.shard().is_masterchain() {
-            fail!("Mesh kit can be built only from masterchain blocks");
-        }
-        if let Some(handle) = self.engine.load_block_handle(&query.block)? {
-            if handle.has_data() && handle.has_proof() {
-                let block = self.engine.load_block(&handle).await?;
-                let proof = self.engine.load_block_proof(&handle, false).await?;
-                let data = make_mesh_kit_raw(
-                    &block,
-                    query.target_nw,
-                    proof.drain_signatures()?,
-                    self.engine.deref(),
-                ).await?;
-                let answer = TaggedByteVec {
-                    object: data,
-                    #[cfg(feature = "telemetry")]
-                    tag: 0x8000000A // Raw reply do download block
-                };
-                return Ok(answer);
-            }
-        }
-        fail!("Can't load block or proof for {}", query.block);
-    }
-
-    async fn download_latest_mesh_kit(
-        &self, 
-        query: DownloadLatestMeshKit
-    ) -> Result<TaggedObject<DataFullBoxed>> {
-        let id = self.engine.load_last_applied_mc_block_id()?
-            .ok_or_else(|| error!("Can't load last mc block id"))?;
-        let mut answer = DataFullBoxed::TonNode_DataFullEmpty;
-        if let Some(handle) = self.engine.load_block_handle(&id)? {
-            if handle.has_data() && handle.has_proof() {
-
-                let block = self.engine.load_block(&handle).await?;
-                let proof = self.engine.load_block_proof(&handle, false).await?;
-
-                let data = make_mesh_kit_raw(
-                    &block,
-                    query.target_nw,
-                    proof.drain_signatures()?,
-                    self.engine.deref()
-                ).await?;
-
-                answer = DataFull {
-                    id: (*id).clone(),
-                    proof: vec!(),
-                    block: data,
-                    is_link: ton::Bool::BoolFalse
-                }.into_boxed();
-            }
-        }
-        #[cfg(feature = "telemetry")]
-        let tag = tag_from_boxed_object(&answer);
-        let answer = TaggedObject {
-            object: answer,
-            #[cfg(feature = "telemetry")]
-            tag
-        };
-        Ok(answer)
-    }
-
-
-    async fn download_mesh_update(
-        &self, 
-        query: DownloadMeshUpdate
-    ) -> Result<TaggedByteVec> {
-        if !query.block.shard().is_masterchain() {
-            fail!("Mesh kit can be built only from masterchain blocks");
-        }
-        if let Some(handle) = self.engine.load_block_handle(&query.block)? {
-            if handle.has_data() && handle.has_proof() {
-                let block = self.engine.load_block(&handle).await?;
-                let proof = self.engine.load_block_proof(&handle, false).await?;
-                let data = make_mesh_update_raw(
-                    &block,
-                    query.target_nw,
-                    proof.drain_signatures()?,
-                    self.engine.deref()
-                ).await?;
-                let answer = TaggedByteVec {
-                    object: data,
-                    #[cfg(feature = "telemetry")]
-                    tag: 0x8000000A // Raw reply do download block
-                };
-                return Ok(answer);
-            }
-        }
-        fail!("Can't load block or proof for {}", query.block);
-    }
-
-    async fn download_next_mesh_update(
-        &self, 
-        query: DownloadNextMeshUpdate
-    ) -> Result<TaggedObject<DataFullBoxed>> {
-        if !query.prev_block.shard().is_masterchain() {
-            fail!("Mesh kit can be built only from masterchain blocks");
-        }
-        let mut answer = DataFullBoxed::TonNode_DataFullEmpty;
-        if let Ok(next_id) = self.engine.load_block_next1(&query.prev_block) {
-            if let Some(handle) = self.engine.load_block_handle(&next_id)? {
-                if handle.has_data() && handle.has_proof() {
-
-                    let block = self.engine.load_block(&handle).await?;
-                    let proof = self.engine.load_block_proof(&handle, false).await?;
-
-                    let data = make_mesh_update_raw(
-                        &block,
-                        query.target_nw,
-                        proof.drain_signatures()?,
-                        self.engine.deref()
-                    ).await?;
-
-                    answer = DataFull {
-                        id: next_id,
-                        proof: vec!(),
-                        block: data,
-                        is_link: ton::Bool::BoolFalse
-                    }.into_boxed();
-                }
-            }
-        }
-        #[cfg(feature = "telemetry")]
-        let tag = tag_from_boxed_object(&answer);
-        let answer = TaggedObject {
-            object: answer,
-            #[cfg(feature = "telemetry")]
-            tag
-        };
-        Ok(answer)
     }
 
     // tonNode.downloadBlock block:tonNode.blockIdExt = tonNode.Data;
@@ -836,7 +699,7 @@ impl FullNodeOverlayService {
                             answer
                         }
                         Err(e) => {
-                            log::warn!("consume_query: consumed {}, error {:?}", query_str, e);
+                            log::trace!("consume_query: consumed {}, error {:?}", query_str, e);
                             #[cfg(feature = "telemetry")]
                             self.engine.full_node_service_telemetry().consumed_query(
                                 query_str, false, now.elapsed(), 0
@@ -1010,38 +873,6 @@ impl QueriesConsumer for FullNodeOverlayService {
         let query = match self.consume_query_raw::<DownloadQueueUpdate, _>(
             query,
             &Self::download_queue_update
-        ).await? {
-            Ok(answer) => return Ok(answer),
-            Err(query) => query
-        };
-
-        let query = match self.consume_query_raw::<DownloadMeshKit, _>(
-            query,
-            &Self::download_mesh_kit
-        ).await? {
-            Ok(answer) => return Ok(answer),
-            Err(query) => query
-        };
-
-        let query = match self.consume_query::<DownloadLatestMeshKit, _, _>(
-            query,
-            &Self::download_latest_mesh_kit
-        ).await? {
-            Ok(answer) => return Ok(answer),
-            Err(query) => query
-        };
-
-        let query = match self.consume_query_raw::<DownloadMeshUpdate, _>(
-            query,
-            &Self::download_mesh_update
-        ).await? {
-            Ok(answer) => return Ok(answer),
-            Err(query) => query
-        };
-
-        let query = match self.consume_query::<DownloadNextMeshUpdate, _, _>(
-            query,
-            &Self::download_next_mesh_update
         ).await? {
             Ok(answer) => return Ok(answer),
             Err(query) => query

@@ -13,9 +13,9 @@
 
 #![allow(dead_code)]
 use crate::{
-    block::{BlockStuff, BlockKind}, block_proof::BlockProofStuff, 
-    config::{CollatorConfig, TonNodeConfig}, 
+    block::BlockStuff, block_proof::BlockProofStuff,
     collator_test_bundle::create_engine_allocated,
+    config::{CollatorConfig, TonNodeConfig}, 
     full_node::apply_block::apply_block,
     internal_db::{
         LAST_APPLIED_MC_BLOCK, SHARD_CLIENT_MC_BLOCK,
@@ -38,7 +38,7 @@ use ever_block::{
     ConfigParam34, ConfigParamEnum, ConfigParams, Deserializable, HashmapAugType, InMsgDescr,
     InRefValue, McStateExtra, Message, OutMsgDescr, Serializable, ShardAccount, 
     ShardAccountBlocks, ShardIdent, ShardStateUnsplit, Transaction, U15, UInt256, 
-    ValidatorBaseInfo, ValidatorDescr, ValidatorSet, write_boc, CommonMessage,
+    ValidatorBaseInfo, ValidatorDescr, ValidatorSet, write_boc
 };
 use ever_block_json::*;
 use std::{
@@ -176,15 +176,12 @@ fn compare_in_msgs(msgs1: &InMsgDescr, msgs2: &InMsgDescr) -> Result<()> {
         // let _tr = msg_aug_1.as_ref().unwrap().0.read_transaction()?.unwrap();
         // dbg!(debug_transaction(_tr)?);
         if let (Some((msg1, aug1)), Some((msg2, aug2))) = (&msg_aug_1, &msg_aug_2) {
-            let check_trans;
             if let (Some(tr1), Some(tr2)) = (msg1.read_transaction()?, msg2.read_transaction()?) {
                 compare_transactions(&tr1, &tr2, false)?;
-                check_trans = false;
+                compare_messages(&msg1.read_message()?, &msg2.read_message()?, false)?;
             } else {
-                check_trans = true;
+                compare_messages(&msg1.read_message()?, &msg2.read_message()?, true)?;
             }
-            let (std_msg1, std_msg2) = (msg1.read_message()?, msg2.read_message()?);
-            compare_messages(&CommonMessage::Std(std_msg1), &CommonMessage::Std(std_msg2), check_trans)?;
             assert_eq!(aug1, aug2);
         } else if let Some(msg_aug_2) = msg_aug_2 {
             println!("{}", debug_message(msg_aug_2.0.read_message()?.clone())?);
@@ -206,7 +203,7 @@ fn compare_in_msgs(msgs1: &InMsgDescr, msgs2: &InMsgDescr) -> Result<()> {
     Ok(())
 }
 
-fn compare_messages(msg1: &CommonMessage, msg2: &CommonMessage, _check_transaction: bool) -> Result<()> {
+fn compare_messages(msg1: &Message, msg2: &Message, _check_transaction: bool) -> Result<()> {
     assert_eq!(msg1, msg2);
     Ok(())
 }
@@ -227,11 +224,10 @@ pub fn compare_transactions(tr1: &Transaction, tr2: &Transaction, check_messages
     dbg!(tr1.logical_time());
     assert_eq!(tr1.read_description()?, tr2.read_description()?);
     if check_messages {
-        let (msg1, msg2) = (&tr1.in_msg, &tr2.in_msg);
-        if !msg1.empty() && !msg2.empty() {
+        if let (Some(msg1), Some(msg2)) = (&tr1.in_msg, &tr2.in_msg) {
             compare_messages(&msg1.read_struct()?, &msg2.read_struct()?, false)?;
         } else {
-            assert_eq!(msg1, msg2);
+            assert_eq!(tr1.in_msg, tr2.in_msg);
         }
     }
     tr1.out_msgs.scan_diff(&tr2.out_msgs, |key: U15, msg1, msg2| {
@@ -915,7 +911,6 @@ impl EngineOperations for TestEngine {
 
     async fn store_block_proof(
         &self, 
-        _mesh_nw_id: i32, // zero for own network
         id: &BlockIdExt, 
         handle: Option<Arc<BlockHandle>>, 
         proof: &BlockProofStuff
@@ -952,7 +947,7 @@ impl EngineOperations for TestEngine {
         let handle = self.db.create_or_load_block_handle(
             state.block_id(), 
             None,
-            BlockKind::Block,
+            None,
             Some(state.state()?.gen_time()),
             None
         )?.to_non_updated().ok_or_else(
@@ -989,7 +984,7 @@ impl EngineOperations for TestEngine {
         self.db.store_block_next1(handle, next, None)
     }
 
-    fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
+    async fn load_block_next1(&self, id: &BlockIdExt) -> Result<BlockIdExt> {
         self.db.load_block_next1(id)
     }
 
@@ -997,7 +992,7 @@ impl EngineOperations for TestEngine {
         self.db.store_block_next2(handle, next2, None)
     }
 
-    fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
+    async fn load_block_next2(&self, id: &BlockIdExt) -> Result<Option<BlockIdExt>> {
         self.db.load_block_next2(id)
     }
 

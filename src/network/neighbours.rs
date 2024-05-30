@@ -11,7 +11,7 @@
 * limitations under the License.
 */
 
-use crate::types::spawn_cancelable;
+use crate::network::node_network::NodeNetwork;
 
 use adnl::{common::{Query, TaggedTlObject, Wait}, node::{AddressCache, AdnlNode}};
 use adnl::DhtNode;
@@ -47,13 +47,12 @@ pub struct Neighbours {
     reserve: ReserveNeighbours, ///< Replaced peers saved stats
     all_peers: lockfree::set::Set<Arc<KeyId>>,
     overlay_id: Arc<OverlayShortId>,
-    network_id: Option<i32>,
     overlay: Arc<OverlayNode>,
     dht: Arc<DhtNode>,
     fail_attempts: AtomicU64,
     all_attempts: AtomicU64,
     start: Instant,
-    cancellation_token: tokio_util::sync::CancellationToken,
+    cancellation_token: Arc<tokio_util::sync::CancellationToken>,
     #[cfg(feature = "telemetry")]
     tag_get_capabilities: u32
 }
@@ -226,11 +225,10 @@ impl Neighbours {
     pub fn new(
         start_peers: &Vec<Arc<KeyId>>,
         dht: &Arc<DhtNode>,
-        network_id: Option<i32>,
         overlay: &Arc<OverlayNode>,
         overlay_id: Arc<OverlayShortId>,
         default_rldp_roundtrip: &Option<u32>,
-        cancellation_token: tokio_util::sync::CancellationToken
+        cancellation_token: Arc<tokio_util::sync::CancellationToken>
     ) -> Result<Self> {
         let default_rldp_roundtrip = default_rldp_roundtrip.unwrap_or(
             Self::DEFAULT_RLDP_ROUNDTRIP_MS
@@ -242,7 +240,6 @@ impl Neighbours {
             overlay: overlay.clone(),
             dht: dht.clone(),
             overlay_id,
-            network_id,
             fail_attempts: AtomicU64::new(0),
             all_attempts: AtomicU64::new(0),
             start: Instant::now(),
@@ -375,7 +372,7 @@ impl Neighbours {
     }
 
     pub fn start_reload(self: Arc<Self>) {
-        spawn_cancelable(
+        NodeNetwork::spawn_background_task(
             self.cancellation_token.clone(),
             async move {
                 loop {
@@ -393,7 +390,7 @@ impl Neighbours {
     }
 
     pub fn start_ping(self: Arc<Self>) {
-        spawn_cancelable(
+        NodeNetwork::spawn_background_task(
             self.cancellation_token.clone(),
             async move {
                 self.ping_neighbours().await;
@@ -411,7 +408,7 @@ impl Neighbours {
     }
 
     pub fn start_rnd_peers_process(self: Arc<Self>) {
-        spawn_cancelable(
+        NodeNetwork::spawn_background_task(
             self.cancellation_token.clone(),
             async move {
                 log::trace!("Wait random peers in overlay {}...", self.overlay_id);
@@ -459,7 +456,7 @@ impl Neighbours {
         tokio::spawn(async move {
             for peer in peers.iter() {
                 log::trace!("add_new_peers: searching IP for peer {}...", peer);
-                match DhtNode::find_address_in_network(&this.dht, peer, self.network_id).await {
+                match DhtNode::find_address_in_network(&this.dht, peer, None).await {
                     Ok(Some((ip, _))) => {
                         if this.add_overlay_peer(peer.clone()) {
                             log::info!("add_new_peers: peer {}, IP {}", peer, ip);

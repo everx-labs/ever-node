@@ -22,7 +22,7 @@ use crate::{
     shard_state::ShardStateStuff, 
     test_helper::{gen_master_state, gen_shard_state, init_test_log, test_async},
     validating_utils::{supported_capabilities, supported_version},
-    validator::validator_manager::ValidationStatus, shard_states_keeper::PinnedShardStateGuard, block::BlockKind,
+    validator::validator_manager::ValidationStatus, shard_states_keeper::PinnedShardStateGuard,
 };
 #[cfg(feature = "telemetry")]
 use crate::collator_test_bundle::create_engine_telemetry;
@@ -144,7 +144,7 @@ async fn start_control_with_options(
     };
     let network = NodeNetwork::new(
         config,
-        tokio_util::sync::CancellationToken::new(),
+        Arc::new(tokio_util::sync::CancellationToken::new()),
         #[cfg(feature = "telemetry")]
         create_engine_telemetry(),
         create_engine_allocated()
@@ -701,7 +701,7 @@ async fn test_stats() {
             db.create_or_load_block_handle(
                 &master_state_id,
                 None,
-                BlockKind::Block,
+                None,
                 Some(1),
                 None
             ).unwrap()._to_created().unwrap();

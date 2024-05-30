@@ -1460,7 +1460,7 @@ impl<T: Eq> RootRecord<T> {
     }
     fn from_cell(cell: &Cell, mut bit_len: usize, id: T) -> Result<Self> {
         let mut cursor = SliceData::load_cell_ref(cell)?;
-        let key = LabelReader::read_label_raw(&mut cursor, &mut bit_len, BuilderData::default())?;
+        let key = cursor.get_label_raw(&mut bit_len, BuilderData::default())?;
         let lt = cursor.get_next_u64()?;
         Ok(Self {
             lt,

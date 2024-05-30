@@ -39,7 +39,7 @@ use ton_api::{
 };
 use ever_block::{
     Message, ShardIdent, FutureSplitMerge, ShardAccount, BlockIdExt, ValidatorDescr, MASTERCHAIN_ID,
-    HashmapAugType, CommonMessage
+    HashmapAugType
 };
 use ever_executor::{
     BlockchainConfig, OrdinaryTransactionExecutor, TransactionExecutor, ExecuteParams,
@@ -869,10 +869,9 @@ impl RempClient {
         };
         let now = Instant::now();
         let mut account_root = account.account_cell();
-        let common_msg = CommonMessage::Std(message);
         let execution_result = tokio::task::block_in_place(|| {
             let executor = OrdinaryTransactionExecutor::new(config);
-            executor.execute_with_libs_and_params(Some(&common_msg), &mut account_root, params)
+            executor.execute_with_libs_and_params(Some(&message), &mut account_root, params)
         });
 
         let duration = now.elapsed().as_micros() as u64;

@@ -18,4 +18,3 @@ pub mod shard_client;
 pub mod telemetry;
 pub mod counters;
 pub mod remp_client;
-pub mod mesh_client;

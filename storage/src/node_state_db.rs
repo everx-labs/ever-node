@@ -11,11 +11,6 @@
 * limitations under the License.
 */
 
-pub mod accounts;
-pub mod awaiters_pool;
-pub mod top_block_descr;
-pub mod limits;
-pub mod messages;
-pub mod lockfree_cache;
-pub mod shard_blocks_observer;
-pub mod mpmc_channel;
+use crate::{db_impl_base, db::traits::KvcWriteable};
+
+db_impl_base!(NodeStateDb, KvcWriteable, &'static str);
