@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.58.12
+
+- REMP performance and stability improvements
+- Load cells from storing cells cache by id
+
 ## Version 0.58.11
 
 - Adjust build with external DB
@@ -32,7 +37,6 @@ All notable changes to this project will be documented in this file.
 
 ## Version 0.58.4
 
-- Load cells from storing cells cache by id
 - Added support for due payment fix
 - Bump block version
 
