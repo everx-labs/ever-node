@@ -48,7 +48,6 @@ arc-swap = '0.3.11'
 async-recursion = '0.3.2'
 async-trait = '0.1.22'
 bitflags = '1.2.1'
-catchain = { path = 'catchain' }
 chrono = '=0.4.19'
 clap = '2.33'
 colored = '1.9.3'
@@ -83,18 +82,19 @@ serde_json = '1.0.64'
 shell-words = '1.0'
 spin = '0.7.1'
 statsd = { optional = true, version = '0.15' }
-storage = { path = 'storage' }
 stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
 tokio-util = '0.7'
 adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.27-fixed' }
+catchain = { path = 'catchain' }
 ever_abi = { git = 'https://github.com/everx-labs/ever-abi.git', tag = '2.5.6' }
 ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.10.4' }
 ever_block_json = { git = 'https://github.com/everx-labs/ever-block-json.git', tag = '0.8.9' }
 ever_executor = { git = 'https://github.com/everx-labs/ever-executor.git', tag = '1.17.10' }
 ever_vm = { git = 'https://github.com/everx-labs/ever-vm.git', tag = '2.1.8' }
 lockfree = { git = 'https://github.com/everx-labs/lockfree.git' }
+storage = { path = 'storage' }
 ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.3.82' }
 validator_session = { path = 'validator-session' }
 
