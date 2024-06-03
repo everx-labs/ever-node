@@ -850,7 +850,7 @@ impl EngineOperations for Engine {
             fail!("Can't process external message because node is out of sync");
         }
 
-        let remp_way = self.remp_capability();
+        let remp_way = self.remp_capability() && self.remp_client().is_some();
         if remp_way {
             self.remp_client()
                 .ok_or_else(|| error!("redirect_external_message: remp client is not set"))?
