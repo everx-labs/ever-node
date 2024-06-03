@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.58.12
+
+- Send external messages as an overlay broadcast when REMP capability is set, but REMP-client is disabled
+
 ## Version 0.58.11
 
 - Adjust build with external DB
