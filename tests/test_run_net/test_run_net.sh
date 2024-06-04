@@ -40,14 +40,6 @@ then
     exit 1
 fi
 
-# cargo update
-echo "Building $(pwd)"
-if ! cargo build --release
-then
-    exit 1
-fi
-cd target/release/
-
 cd $TEST_ROOT
 NOWDATE=$(date +"%s")
 # NOWIP=$(curl ifconfig.me)
