@@ -1,9 +1,8 @@
-TOOLS=../../../ton-labs-node-tools/target/release/
+TOOLS=../../target/release/
 RUN_TEST_ROOT=../test_run_net/
 TEST_ROOT=$(pwd)
 DELAY=20
 
-run net
 cd $RUN_TEST_ROOT
 if ! $RUN_TEST_ROOT/test_run_net.sh
 then
