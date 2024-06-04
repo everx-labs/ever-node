@@ -6,7 +6,6 @@ REMP_TEST=false
 CURRENT_BRANCH="$(git branch --show-current)"
 TEST_ROOT=$(pwd);
 NODE_TARGET=$TEST_ROOT/../../target/release/
-TOOLS_ROOT=$NODE_TARGET
 
 echo "Current branch: $CURRENT_BRANCH"
 echo "Current root: $TEST_ROOT"
