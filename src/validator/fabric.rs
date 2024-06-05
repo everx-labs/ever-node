@@ -16,15 +16,16 @@ use std::{
     time::SystemTime,
 };
 use super::validator_utils::{
-    validator_query_candidate_to_validator_block_candidate, pairvec_to_cryptopair_vec,
-    get_first_block_seqno_after_prevs
+    get_first_block_seqno_after_prevs,
+    pairvec_to_cryptopair_vec,
+    validator_query_candidate_to_validator_block_candidate,
 };
 use crate::{
-    collator_test_bundle::CollatorTestBundle, engine_traits::EngineOperations, 
-    validator::{CollatorSettings, validate_query::ValidateQuery, collator}, 
-    validating_utils::{fmt_next_block_descr_from_next_seqno, fmt_next_block_descr}
+    collator_test_bundle::CollatorTestBundle,
+    engine_traits::{EngineOperations, RempQueueCollatorInterface},
+    validating_utils::{fmt_next_block_descr_from_next_seqno, fmt_next_block_descr},
+    validator::{CollatorSettings, validate_query::ValidateQuery, collator, verification::VerificationManagerPtr}
 };
-use crate::validator::verification::VerificationManagerPtr;
 use ever_block::{Block, BlockIdExt, Deserializable, Result, ShardIdent, UInt256, ValidatorSet};
 use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
 
@@ -208,6 +209,7 @@ pub async fn run_collate_query (
     _min_ts: SystemTime,
     min_mc_seqno: u32,
     prev: Vec<BlockIdExt>,
+    remp_collator_interface: Option<Arc<dyn RempQueueCollatorInterface>>,
     collator_id: PublicKey,
     set: ValidatorSet,
     engine: Arc<dyn EngineOperations>,
@@ -228,6 +230,7 @@ pub async fn run_collate_query (
         UInt256::from(collator_id.pub_key()?),
         engine.clone(),
         None,
+        remp_collator_interface,
         CollatorSettings::default()
     )?;
     let collator_result = collator.collate().await;

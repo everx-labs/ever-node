@@ -165,8 +165,7 @@ pub struct TonNodeConfig {
     port: Option<u16>,
     #[serde(skip)]
     file_name: String,
-    #[serde(default = "RempConfig::default")]
-    remp: RempConfig,
+    remp: Option<RempConfig>,
     #[serde(default)]
     restore_db: bool,
     #[serde(default)]
@@ -599,8 +598,11 @@ impl TonNodeConfig {
     pub fn extensions(&self) -> &NodeExtensions {
         &self.extensions
     }
-    pub fn remp_config(&self) -> &RempConfig {
-        &self.remp
+    pub fn remp_config(&self) -> RempConfig {
+        match &self.remp {
+            Some(x) => x.clone(),
+            None => RempConfig::default()
+        }
     }
     pub fn restore_db(&self) -> bool {
         self.restore_db

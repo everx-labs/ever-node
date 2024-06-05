@@ -1,0 +1,6 @@
+*.log
+*__address
+*.boc
+*.tvc
+*.json
+*.code
