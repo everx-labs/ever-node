@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.58.14
+
+- Some issues logged as errors in remp client are now warnings
+- Fixed top shard blocks resend - now it retries sending when master block was updated. It logged a error before
+
 ## Version 0.58.13
 
 - REMP performance and stability improvements

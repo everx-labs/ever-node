@@ -1087,9 +1087,10 @@ impl EngineOperations for Engine {
     }
     async fn get_own_shard_blocks(
         &self, 
-        mc_state: &Arc<ShardStateStuff>
+        mc_state: &Arc<ShardStateStuff>,
+        actual_last_mc_seqno: Option<&mut u32>,
     ) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
-        self.shard_blocks().get_shard_blocks(mc_state, self, true, None).await
+        self.shard_blocks().get_shard_blocks(mc_state, self, true, actual_last_mc_seqno).await
     }
 
     // Save tsb into persistent storage
