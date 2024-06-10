@@ -14,6 +14,7 @@
 use std::{collections::{HashMap, HashSet}, fmt, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
 use std::fmt::{Display, Formatter};
 use std::ops::RangeInclusive;
+use std::sync::atomic::AtomicU64;
 
 use crate::{
     engine_traits::EngineOperations,
@@ -592,12 +593,15 @@ impl CatchainListener for RempCatchain {
         let mut msg_vect: Vec<::ton_api::ton::validator_session::round::Message> = Vec::new();
         let mut msg_ids: Vec<String> = Vec::new();
 
-        if let Ok(Some(msg)) = self.instance.pending_messages_queue_try_recv() {
+        while let Ok(Some(msg)) = self.instance.pending_messages_queue_try_recv() {
+            if msg_vect.len() >= 4 { break }
+
             let msg_body = ::ton_api::ton::validator_session::round::validator_session::message::message::Commit {
                 round: 0,
                 candidate: Default::default(),
                 signature: RempMessageHeader::serialize(&msg).unwrap()
             }.into_boxed();
+
             log::trace!(target: "remp", "Point 3. RMQ {} sending message: {:?}, decoded {:?}",
                 self, msg_body, msg
             );
@@ -612,6 +616,12 @@ impl CatchainListener for RempCatchain {
             state: 0 //real_state_hash as i32,
         }.into_boxed();
         let serialized_payload = serialize_tl_boxed_object!(&payload);
+
+        if serialized_payload.len() > 960 {
+            log::warn!(target: "remp", "Point 3. RMQ {} created block with payload of {} bytes ({} headers), which is too big.",
+                self, serialized_payload.len(), msg_ids.len()
+            )
+        }
 
         match &self.instance.get_session() {
             Some(ctchn) => {
