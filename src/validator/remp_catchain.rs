@@ -159,6 +159,11 @@ impl RempCatchainInstance {
         Ok(instance.pending_messages_queue_sender.len())
     }
 
+    pub fn pending_messages_present(&self) -> Result<bool> {
+        let instance = self.get_instance_impl()?;
+        Ok(instance.pending_messages_queue_receiver.is_empty())
+    }
+
     fn pending_messages_queue_try_recv(&self) -> Result<Option<RempCatchainRecordV2>> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queue_receiver.try_recv() {
