@@ -548,7 +548,7 @@ impl MessageQueue {
         else {
             RMQ_REQUEST_NEW_BLOCK_START_DELAY
         };
-        log::trace!(target: "remp", "RMQ {}: activating exchange after {:?}, inbound_pending_messages {}", self, delay, no_messages);
+        log::trace!(target: "remp", "RMQ {}: activating exchange after {:?}, no messages {}", self, delay, no_messages);
         self.catchain_instance.activate_exchange(delay)
     }
 
