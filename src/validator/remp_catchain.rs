@@ -159,7 +159,7 @@ impl RempCatchainInstance {
         Ok(instance.pending_messages_queue_sender.len())
     }
 
-    pub fn pending_messages_present(&self) -> Result<bool> {
+    pub fn pending_messages_queue_empty(&self) -> Result<bool> {
         let instance = self.get_instance_impl()?;
         Ok(instance.pending_messages_queue_receiver.is_empty())
     }

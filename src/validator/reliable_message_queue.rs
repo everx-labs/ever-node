@@ -51,8 +51,8 @@ use crate::block::BlockIdExtExtention;
 #[derive(Debug,PartialEq,Eq,PartialOrd,Ord,Clone)]
 enum MessageQueueStatus { Created, Starting, Active, Stopping }
 const RMQ_STOP_POLLING_INTERVAL: Duration = Duration::from_millis(50);
-const RMQ_REQUEST_NEW_BLOCK_DELAY: Duration = Duration::from_millis(50);
-const RMQ_REQUEST_NEW_BLOCK_INTERVAL: Duration = Duration::from_millis(500);
+const RMQ_REQUEST_NEW_BLOCK_START_DELAY: Duration = Duration::from_millis(50);
+const RMQ_REQUEST_NEW_BLOCK_POLLING_INTERVAL: Duration = Duration::from_millis(500);
 const RMQ_MAXIMAL_BROADCASTS_IN_PACK: u32 = 1000;
 const RMQ_MAXIMAL_QUERIES_IN_PACK: u32 = 1000;
 const RMQ_MESSAGE_QUERY_TIMEOUT: Duration = Duration::from_millis(2000);
@@ -541,14 +541,14 @@ impl MessageQueue {
     }
 
     fn activate_exchange(&self) -> Result<()> {
-        let inbound_pending_messages = self.catchain_instance.pending_messages_present()?;
-        let delay = if inbound_pending_messages {
-            RMQ_REQUEST_NEW_BLOCK_DELAY
+        let no_messages = self.catchain_instance.pending_messages_queue_empty()?;
+        let delay = if no_messages {
+            RMQ_REQUEST_NEW_BLOCK_POLLING_INTERVAL
         }
         else {
-            RMQ_REQUEST_NEW_BLOCK_INTERVAL
+            RMQ_REQUEST_NEW_BLOCK_START_DELAY
         };
-        log::trace!(target: "remp", "RMQ {}: activating exchange after {:?}, inbound_pending_messages {}", self, delay, inbound_pending_messages);
+        log::trace!(target: "remp", "RMQ {}: activating exchange after {:?}, inbound_pending_messages {}", self, delay, no_messages);
         self.catchain_instance.activate_exchange(delay)
     }
 
