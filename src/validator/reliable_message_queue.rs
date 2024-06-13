@@ -633,7 +633,7 @@ impl MessageQueue {
                     )?;
                     self.catchain_instance.pending_messages_queries_send(
                         dst_adnl_id,
-                        h.as_remp_message_query()
+                        Arc::new(h.as_remp_message_query())
                     )?;
                 }
                 else {

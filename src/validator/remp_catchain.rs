@@ -65,8 +65,8 @@ pub struct RempCatchainInstanceImpl {
     query_response_receiver: crossbeam_channel::Receiver<ton_api::ton::ton_node::RempMessageBody>,
     query_response_sender: Arc<crossbeam_channel::Sender<ton_api::ton::ton_node::RempMessageBody>>,
 
-    pending_messages_queries_receiver: crossbeam_channel::Receiver<(Arc<KeyId>,RempMessageQuery)>,
-    pending_messages_queries_sender: crossbeam_channel::Sender<(Arc<KeyId>,RempMessageQuery)>,
+    pending_messages_queries_receiver: crossbeam_channel::Receiver<(Arc<KeyId>, Arc<RempMessageQuery>)>,
+    pending_messages_queries_sender: crossbeam_channel::Sender<(Arc<KeyId>, Arc<RempMessageQuery>)>,
 
     pub pending_messages_broadcast_receiver: crossbeam_channel::Receiver<ton_api::ton::ton_node::RempMessageBody>,
     pending_messages_broadcast_sender: crossbeam_channel::Sender<ton_api::ton::ton_node::RempMessageBody>,
@@ -184,7 +184,7 @@ impl RempCatchainInstance {
         }
     }
 
-    pub fn pending_messages_queries_send(&self, dst: Arc<KeyId>, query: RempMessageQuery) -> Result<()> {
+    pub fn pending_messages_queries_send(&self, dst: Arc<KeyId>, query: Arc<RempMessageQuery>) -> Result<()> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queries_sender.send((dst, query)) {
             Ok(()) => Ok(()),
@@ -192,7 +192,7 @@ impl RempCatchainInstance {
         }
     }
 
-    fn pending_messages_queries_try_recv(&self) -> Result<Option<(Arc<KeyId>,RempMessageQuery)>> {
+    fn pending_messages_queries_try_recv(&self) -> Result<Option<(Arc<KeyId>, Arc<RempMessageQuery>)>> {
         let instance = self.get_instance_impl()?;
         match instance.pending_messages_queries_receiver.try_recv() {
             Ok(x) => Ok(Some(x)),
@@ -264,17 +264,23 @@ impl RempCatchainInstance {
             match self.pending_messages_queries_try_recv()? {
                 None => break,
                 Some((dst,query)) => {
+                    if query.message_id().is_zero() {
+                        log::error!(target: "remp", "RempCatchain {}: cannot make query for zero message id: {:?}", self, query);
+                        continue
+                    }
+
                     let query_id = query.message_id().clone();
                     let query_payload = CatchainFactory::create_block_payload(
                         RempMessageHeader::serialize_query(&query)?
                     );
                     let query_response_sender = self.get_instance_impl()?.get_query_response_sender();
+                    let catchain_name = format!("{}", self);
                     self.get_instance_impl()?.catchain_ptr.send_query_via_rldp(
                         dst.clone(),
                         "message body request".to_string(),
                         Box::new (move |r: Result<BlockPayloadPtr>| {
                             if let Err(e) = Self::deserialize_and_put_query_response_to_queue(r, query_response_sender) {
-                                log::error!(target: "remp", "Cannot deserelialize response to query for message {:x}, error: {}", query_id, e)
+                                log::error!(target: "remp", "RempCatchain {}: cannot deserelialize response to query for message {:x}, error: {}", catchain_name, query_id, e)
                             }
                         }),
                         query_timeout,
