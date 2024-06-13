@@ -1205,6 +1205,10 @@ impl RmqQueueManager {
 
             for digest in rejected_message_digests.into_iter() {
                 let digest_len = digest.messages.0.len();
+                if digest_len > 1 {
+                    log::warn!(target: "remp", "Point 5a. RMQ {}: message digest (len={}) is too long!", self, digest_len)
+                }
+
                 let msg = ton_api::ton::ton_node::RempCatchainRecordV2::TonNode_RempCatchainMessageDigestV2(digest);
                 for new in next_queues.iter() {
                     if let Err(x) = new.catchain_instance.pending_messages_queue_send(msg.clone()) {

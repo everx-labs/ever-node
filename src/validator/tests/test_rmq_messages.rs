@@ -17,6 +17,8 @@ use std::thread::sleep;
 
 use ton_api::ton::ton_node::{RempMessageLevel, RempMessageStatus, rempmessagestatus::{RempAccepted, RempIgnored}};
 
+use catchain::PublicKey;
+
 use ever_block::{
     Message, Serializable, Deserializable, ExternalInboundMessageHeader, 
     MsgAddressInt, Grams, ShardIdent, ValidatorDescr, SigPubKey, BlockIdExt, 
@@ -28,8 +30,10 @@ use crate::{
     config::RempConfig,
     engine_traits::{EngineOperations, RempCoreInterface, RempDuplicateStatus},
     validator::{
+        message_cache::{RempMessageOrigin, RempMessageWithOrigin},
         reliable_message_queue::{MessageQueue, RmqMessage},
         remp_block_parser::{BlockProcessor, RempMasterBlockIndexingProcessor},
+        remp_catchain::{REMP_CATCHAIN_RECORDS_PER_BLOCK, REMP_MAX_BLOCK_PAYLOAD_LEN, RempCatchain, RempCatchainInfo},
         remp_manager::{RempInterfaceQueues, RempManager, RempSessionStats},
         sessions_computing::GeneralSessionInfo,
         validator_utils::{
@@ -37,12 +41,9 @@ use crate::{
         }
     }
 };
+
 #[cfg(feature = "telemetry")]
 use crate::validator::telemetry::RempCoreTelemetry;
-
-use catchain::PublicKey;
-use crate::validator::message_cache::{RempMessageOrigin, RempMessageWithOrigin};
-use crate::validator::remp_catchain::RempCatchainInfo;
 
 #[test]
 fn test_rmq_message_serialize() -> Result<()> {
@@ -108,6 +109,49 @@ fn test_rmq_message_id() -> Result<()> {
     assert_eq!(message_uid, rmq_message.message_uid);
     assert_eq!(message_id, rmq_message.message.hash()?);
     assert_eq!(message_uid, get_message_uid(&rmq_message.message));
+    Ok(())
+}
+
+fn make_vector_of_remp_records<F>(f: F) -> Vec<ton_api::ton::ton_node::RempCatchainRecordV2> 
+    where F : Fn(usize) -> ton_api::ton::ton_node::RempCatchainRecordV2 
+{
+    let mut res: Vec<ton_api::ton::ton_node::RempCatchainRecordV2> = Vec::new();
+    for i in 0..REMP_CATCHAIN_RECORDS_PER_BLOCK {
+        res.push(f (i))
+    }
+    return res;
+}
+
+#[test]
+fn test_rmq_max_payload_constants() -> Result<()> {
+    let (header_payload, hp_ids) = RempCatchain::pack_payload(&make_vector_of_remp_records(
+        |idx| ton_api::ton::ton_node::RempCatchainRecordV2::TonNode_RempCatchainMessageHeaderV2 (
+            ton_api::ton::ton_node::rempcatchainrecordv2::RempCatchainMessageHeaderV2 {
+                message_id: Default::default(),
+                message_uid: Default::default(),
+                source_key_id: Default::default(),
+                source_idx: idx as i32,
+                masterchain_seqno: idx as i32
+            }
+        )
+    ));
+    println!("{} headers give total payload of {} bytes", hp_ids.len(), header_payload.data().len());
+    assert!(header_payload.data().len() <= REMP_MAX_BLOCK_PAYLOAD_LEN);
+
+    let (digest_payload, dp_ids) = RempCatchain::pack_payload(&make_vector_of_remp_records(
+        |idx| {
+            let mut digest = ton_api::ton::ton_node::rempcatchainrecordv2::RempCatchainMessageDigestV2::default();
+            digest.masterchain_seqno = idx as i32;
+            digest.messages.0.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
+                id: Default::default(),
+                uid: Default::default()
+            });
+            ton_api::ton::ton_node::RempCatchainRecordV2::TonNode_RempCatchainMessageDigestV2(digest)
+        }
+    ));
+    println!("{} digests give total payload of {} bytes", dp_ids.len(), digest_payload.data().len());
+    assert!(digest_payload.data().len() <= REMP_MAX_BLOCK_PAYLOAD_LEN);
+
     Ok(())
 }
 
