@@ -2,9 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
-## Version 0.58.12
+## Version 0.58.16
+
+- SMFT stability updates (fixes, increase sync periods), extra per-block statistics
+
+## Version 0.58.15
 
 - Support TL vector interface changes
+
+## Version 0.58.14
+
+- Patch for REMP load reduction
+
+## Version 0.58.13
+
+- REMP performance and stability improvements
+
+## Version 0.58.12
+
+- Send external messages as an overlay broadcast when REMP capability is set, but REMP-client is disabled
 
 ## Version 0.58.11
 

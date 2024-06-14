@@ -12,11 +12,11 @@
 */
 
 use crate::engine::now_duration;
-use adnl::common::{add_unbound_object_to_map, add_unbound_object_to_map_with_update};
+use adnl::common::add_unbound_object_to_map_with_update;
 use lockfree::map::Map;
 use std::sync::{Arc, atomic::{AtomicU64, Ordering, AtomicU32}};
 use ton_api::ton::ton_node::{RempMessageStatus, RempMessageLevel};
-use ever_block::{Deserializable, ShardIdent, Message, AccountIdPrefixFull, BlockIdExt};
+use ever_block::{Deserializable, ShardIdent, Message};
 use ever_block::{Result, types::UInt256, fail, read_boc};
 
 #[cfg(test)]
@@ -27,7 +27,7 @@ const MESSAGE_LIFETIME: u32 = 600; // seconds
 const MESSAGE_MAX_GENERATIONS: u8 = 3;
 
 const MAX_EXTERNAL_MESSAGE_DEPTH: u16 = 512;
-const MAX_EXTERNAL_MESSAGE_SIZE: usize = 65535;
+pub const MAX_EXTERNAL_MESSAGE_SIZE: usize = 65535;
 
 pub const EXT_MESSAGES_TRACE_TARGET: &str = "ext_messages";
 
@@ -290,7 +290,9 @@ impl MessagesPool {
             }
             if let Some(guard) = order.map.remove(&seqno) {
                 if let Some(guard) = self.messages.remove(&guard.val().id) {
+                    #[cfg(not(feature = "statsd"))]
                     metrics::increment_gauge!("ext_messages_expired", 1f64);
+                    #[cfg(not(feature = "statsd"))]
                     metrics::decrement_gauge!("ext_messages_len", 1f64);
                     log::debug!(
                         target: EXT_MESSAGES_TRACE_TARGET,
@@ -457,134 +459,5 @@ pub fn is_finally_accepted(status: &RempMessageStatus) -> bool {
     match get_level_and_level_change(status) {
         (RempMessageLevel::TonNode_RempMasterchain, chg) => chg > 0,
         _ => false
-    }
-}
-
-pub struct RempMessagesPool {
-    messages: Map<UInt256, Arc<Message>>,
-    statuses_queue: lockfree::queue::Queue<(UInt256, Arc<Message>, RempMessageStatus)>,
-}
-
-impl RempMessagesPool {
-
-    pub fn new() -> Self {
-        Self {
-            messages: Map::new(),
-            statuses_queue: lockfree::queue::Queue::new(),
-        }
-    }
-
-    pub fn new_message(&self, id: UInt256, message: Arc<Message>) -> Result<()> {
-        if !add_unbound_object_to_map(&self.messages, id.clone(), || Ok(message.clone()))? {
-            fail!("External message {:x} is already added", id)
-        }
-        Ok(())
-    }
-
-    // Important! If call get_messages with same shard two times in row (without finalize_messages between)
-    // the messages returned first call will return second time too.
-    pub fn get_messages(&self, shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
-        let mut result = vec!();
-        let mut ids = String::new();
-        for guard in self.messages.iter() {
-            if let Some(dst) = guard.val().dst_ref() {
-                if let Ok(prefix) = AccountIdPrefixFull::prefix(dst) {
-                    if shard.contains_full_prefix(&prefix) {
-                        result.push((guard.val().clone(), guard.key().clone()));
-                        if log::log_enabled!(log::Level::Debug) {
-                            ids.push_str(&format!("{:x} ", guard.key()));
-                        }
-                    }
-                }
-            }
-        }
-
-        log::debug!(
-            target: EXT_MESSAGES_TRACE_TARGET,
-            "get_messages(remp): shard {}, messages ({}pcs.): {}",
-            result.len(), shard, ids
-        );
-
-        Ok(result)
-    }
-
-    pub fn finalize_messages(
-        &self,
-        block: BlockIdExt,
-        accepted: Vec<UInt256>,
-        rejected: Vec<(UInt256, String)>,
-        ignored: Vec<UInt256>,
-    ) -> Result<()> {
-        for id in accepted {
-            if let Some(pair) = self.messages.remove(&id) {
-                self.statuses_queue.push((
-                    id,
-                    pair.val().clone(),
-                    RempMessageStatus::TonNode_RempAccepted(
-                        ton_api::ton::ton_node::rempmessagestatus::RempAccepted{
-                            level: RempMessageLevel::TonNode_RempCollator,
-                            block_id: block.clone(),
-                            master_id: BlockIdExt::default()
-                        }
-                    )
-                ));
-            } else {
-                log::warn!("finalize_messages: unknown accepted message {}", id);
-            }
-        }
-        for (id, error) in rejected {
-            if let Some(pair) = self.messages.remove(&id) {
-                self.statuses_queue.push((
-                    id,
-                    pair.val().clone(),
-                    RempMessageStatus::TonNode_RempRejected(
-                        ton_api::ton::ton_node::rempmessagestatus::RempRejected{
-                            level: RempMessageLevel::TonNode_RempCollator,
-                            block_id: block.clone(),
-                            error
-                        }
-                    )
-                ));
-            } else {
-                log::warn!("finalize_messages: unknown rejected message {}", id);
-            }
-        }
-        for id in ignored {
-            if let Some(pair) = self.messages.remove(&id) {
-                self.statuses_queue.push((
-                    id,
-                    pair.val().clone(),
-                    RempMessageStatus::TonNode_RempIgnored(
-                        ton_api::ton::ton_node::rempmessagestatus::RempIgnored{
-                            level: RempMessageLevel::TonNode_RempCollator,
-                            block_id: block.clone(),
-                        }
-                    )
-                ));
-            } else {
-                log::warn!("finalize_messages: unknown rejected message {}", id);
-            }
-        }
-        Ok(())
-    }
-
-    pub fn finalize_remp_messages_as_ignored(&self, block_id: &BlockIdExt)
-    -> Result<()> {
-        let mut ignored = vec!();
-        for guard in self.messages.iter() {
-            if let Some(dst) = guard.val().dst_ref() {
-                if let Ok(prefix) = AccountIdPrefixFull::prefix(dst) {
-                    if block_id.shard().contains_full_prefix(&prefix) {
-                        ignored.push(guard.key().clone());
-                    }
-                }
-            }
-        }
-        self.finalize_messages(block_id.clone(), vec!(), vec!(), ignored)?;
-        Ok(())
-    }
-
-    pub fn dequeue_message_status(&self) -> Result<Option<(UInt256, Arc<Message>, RempMessageStatus)>> {
-        Ok(self.statuses_queue.pop())
     }
 }

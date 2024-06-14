@@ -84,6 +84,7 @@ async fn try_collate_by_engine(
         created_by_opt.unwrap_or_default(),
         engine.clone(),
         rand_seed_opt,
+        None,
         CollatorSettings::default(),
     )?;
     let (block_candidate, new_state) = collator.collate().await?;
