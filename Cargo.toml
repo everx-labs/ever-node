@@ -51,6 +51,7 @@ bitflags = '1.2.1'
 chrono = '=0.4.19'
 clap = '2.33'
 colored = '1.9.3'
+console-subscriber = '0.3'
 crossbeam-channel = '0.4.2'
 ctrlc = { features = [ 'termination' ], version = '3.4.0' }
 dashmap = '5.4.0'
@@ -84,7 +85,7 @@ spin = '0.7.1'
 statsd = { optional = true, version = '0.15' }
 stream-cancel = '0.8.0'
 string-builder = '^0.2.0'
-tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
+tokio = { features = [ 'full', 'rt-multi-thread', 'tracing' ], version = '1.5' }
 tokio-util = '0.7'
 adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.10.27-fixed' }
 catchain = { path = 'catchain' }

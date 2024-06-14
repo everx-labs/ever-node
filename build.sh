@@ -1,0 +1,1 @@
+ RUSTFLAGS="--cfg tokio_unstable" cargo build --release

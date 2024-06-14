@@ -356,6 +356,8 @@ fn check_debug_build() {
 }
 
 fn main() {
+
+    console_subscriber::init();
     check_debug_build();
 
     #[cfg(target_os = "linux")]
