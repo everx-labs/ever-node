@@ -425,8 +425,8 @@ impl SendReceive for GetBlockchainConfig {
 impl SendReceive for GetConfig {
     fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
         let param_number = parse_int(params.next(), "paramnumber")?;
-        let mut params: ton::vector<ton::Bare, ton::int> = ton::vector::default();
-        params.0.push(param_number);
+        let mut params = Vec::new();
+        params.push(param_number);
         Ok(TLObject::new(ton::rpc::lite_server::GetConfigParams {
             mode: 0,
             id: BlockIdExt::default(),

@@ -397,17 +397,32 @@ impl VerificationManagerImpl {
 
                 metrics_dumper.update(&metrics_receiver);
 
+                debug!(target: "verificator", "Verification manager workchains dump:");
+
+                let current_workchains = workchains.lock().clone();
+
+                for (workchain_id, workchain) in current_workchains.iter() {
+                    let mut builder = string_builder::Builder::default();
+
+                    workchain.dump_state(&mut builder);
+
+                    if let Ok(result) = builder.string() {
+                        debug!(target: "verificator", "{}", result);
+                    } else {
+                        debug!(target: "verificator", "Error during workchain #{} dump", workchain_id);
+                    }
+                }
+
                 debug!(target: "verificator", "Verification manager metrics:");
 
                 metrics_dumper.dump(|string| {
                     debug!(target: "verificator", "{}", string);
                 });
 
+                #[cfg(not(feature = "statsd"))]
                 metrics_dumper.enumerate_as_f64(|key, value| {
                     metrics::gauge!(key.replace(".", "_"), value);
                 });
-
-                let current_workchains = workchains.lock().clone();
 
                 for (workchain_id, workchain) in current_workchains.iter() {
                     let mut dumper = workchain_metrics_dumpers.get_mut(workchain_id);

@@ -1,1 +1,0 @@
-rm msg*.boc

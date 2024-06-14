@@ -135,8 +135,7 @@ pub mod ton {
     /// Catchain block dependency
     pub type BlockDep = block::dep::Dep;
 
-    pub type BlockDepVec =
-        ::ton_api::ton::vector<::ton_api::ton::Bare, ::ton_api::ton::catchain::block::dep::Dep>;
+    pub type BlockDepVec = Vec<::ton_api::ton::catchain::block::dep::Dep>;
 
     /// Catchain block data (internal structure)
     pub type BlockData = block::data::Data;

@@ -27,7 +27,7 @@ use ton_api::{
     serialize_boxed, 
     AnyBoxedSerialize, IntoBoxed,
     ton::{
-        self, TLObject, Vector,
+        self, TLObject,
         rpc::ton_node::{
             DownloadBlock, DownloadBlockFull, DownloadBlockProof, DownloadBlockProofLink, 
             DownloadKeyBlockProof, DownloadKeyBlockProofLink, DownloadLatestMeshKit, DownloadMeshKit,
@@ -255,7 +255,7 @@ impl FullNodeOverlayService {
 
     fn build_next_key_blocks_answer(blocks: Vec<BlockIdExt>, incomplete: bool, error: bool) -> KeyBlocks {
         ton_node::keyblocks::KeyBlocks {
-            blocks: Vector::from(blocks),
+            blocks,
             incomplete: incomplete.into(),
             error: error.into(),
         }.into_boxed()
