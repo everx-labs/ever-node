@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.58.14
+
+- Patch for REMP load reduction
+
 ## Version 0.58.13
 
 - REMP performance and stability improvements

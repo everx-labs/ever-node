@@ -209,9 +209,8 @@ impl RempMessageHeader {
     }
 
     pub fn as_remp_message_query(&self) -> ton_api::ton::ton_node::RempMessageQuery {
-        ton_api::ton::ton_node::rempmessagequery::RempMessageQuery {
-            message_id: Default::default(),
-        }.into_boxed()
+        let message_id = self.message_id.clone().into();
+        ton_api::ton::ton_node::rempmessagequery::RempMessageQuery { message_id }.into_boxed()
     }
 }
 
