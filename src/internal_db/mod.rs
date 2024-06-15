@@ -93,7 +93,7 @@ impl BlockResult {
     }
 
     /// Any result 
-    #[cfg(not(feature = "external_db"))]
+    #[cfg(any(not(feature = "external_db"), test))]
     pub fn to_any(self) -> Arc<BlockHandle> {
         self.handle
     }

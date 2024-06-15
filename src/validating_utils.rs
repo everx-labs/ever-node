@@ -61,7 +61,7 @@ pub fn supported_capabilities() -> u64 {
 }
 
 pub fn supported_version() -> u32 {
-    53
+    54
 }
 
 pub fn check_this_shard_mc_info(

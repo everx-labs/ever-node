@@ -35,6 +35,7 @@ mod workchain_overlay;
 mod utils;
 
 pub const GENERATE_MISSING_BLS_KEY: bool = true; //generate missing BLS key from ED25519 public key (only for testing)
+pub const USE_VALIDATORS_WEIGHTS: bool = false; //use weights from ValidatorDescr for BLS signature weight aggregation
 
 /// Engine ptr
 type EnginePtr = Arc<dyn EngineOperations>;

@@ -1174,7 +1174,7 @@ impl RmqQueueManager {
                 if is_finally_rejected(&message_status) {
                     let mut digest = RempCatchainMessageDigestV2::default();
                     digest.masterchain_seqno = message_cc as i32;
-                    digest.messages.0.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
+                    digest.messages.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
                         id: message.message_id.clone(),
                         uid: message.message_uid.clone()
                     });
@@ -1206,7 +1206,7 @@ impl RmqQueueManager {
             }
 
             for digest in rejected_message_digests.into_iter() {
-                let digest_len = digest.messages.0.len();
+                let digest_len = digest.messages.len();
                 if digest_len > 1 {
                     log::warn!(target: "remp", "Point 5a. RMQ {}: message digest (len={}) is too long!", self, digest_len)
                 }

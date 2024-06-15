@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.58.16
+
+- SMFT stability updates (fixes, increase sync periods), extra per-block statistics
+
+## Version 0.58.15
+
+- Support TL vector interface changes
+
 ## Version 0.58.14
 
 - Patch for REMP load reduction
