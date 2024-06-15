@@ -67,7 +67,7 @@ impl std::fmt::Debug for MultiSignature {
             }
         }
 
-        write!(f, "[???]")
+        write!(f, "[]")
     }
 }
 
@@ -145,7 +145,11 @@ impl MultiSignature {
         if signature.len() > 0 {
             if let Ok(nodes_info) = get_nodes_info_from_sig(&signature) {
                 if let Ok(nodes_info) = NodesInfo::deserialize(&nodes_info) {
-                    for (validator_idx, _number_of_occurrence) in &nodes_info.map {
+                    for (validator_idx, number_of_occurrence) in &nodes_info.map {
+                        if *number_of_occurrence < 1 {
+                            continue;
+                        }
+
                         new_nodes.push(*validator_idx);
                     }
 

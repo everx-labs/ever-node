@@ -521,7 +521,7 @@ impl RempCatchain {
             Ok(::ton_api::ton::validator_session::BlockUpdate::ValidatorSession_BlockUpdate(pld)) => {
                 #[cfg(feature = "telemetry")]
                 let mut total = 0;
-                for msgbx in pld.actions.0.iter() {
+                for msgbx in pld.actions.iter() {
                     match msgbx {
                         ::ton_api::ton::validator_session::round::Message::ValidatorSession_Message_Commit(msg) => {
                             match RempMessageHeader::deserialize(&msg.signature) {

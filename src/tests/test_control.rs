@@ -479,7 +479,7 @@ async fn test_get_applied_shards_info() {
     ).await.unwrap();
     assert_eq!(
         answer.shards(),
-        &vec![engine.applied_shard_block_id.clone(), engine.applied_master_block_id.clone()].into()
+        &vec![engine.applied_shard_block_id.clone(), engine.applied_master_block_id.clone()]
     );
 
     client.shutdown().await.unwrap();

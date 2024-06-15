@@ -24,7 +24,10 @@ use crate::{
     collator_test_bundle::CollatorTestBundle,
     engine_traits::{EngineOperations, RempQueueCollatorInterface},
     validating_utils::{fmt_next_block_descr_from_next_seqno, fmt_next_block_descr},
-    validator::{CollatorSettings, validate_query::ValidateQuery, collator, verification::VerificationManagerPtr}
+    validator::{
+        CollatorSettings, validate_query::ValidateQuery, collator, 
+        verification::VerificationManagerPtr
+    }
 };
 use ever_block::{Block, BlockIdExt, Deserializable, Result, ShardIdent, UInt256, ValidatorSet};
 use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
