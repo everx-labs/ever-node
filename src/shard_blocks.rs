@@ -324,12 +324,25 @@ pub fn resend_top_shard_blocks_worker(engine: Arc<dyn EngineOperations>) {
 }
 
 async fn resend_top_shard_blocks(engine: &dyn EngineOperations) -> Result<()> {
-    let mc_state = engine.load_last_applied_mc_state().await?;
-    let tsbs = engine.get_own_shard_blocks(&mc_state).await?;
-    for tsb in tsbs {
-        engine.send_top_shard_block_description(tsb, 0, true).await?;
+    loop {
+        let mc_state = engine.load_last_applied_mc_state().await?;
+        let mut actual_last_mc_seqno = mc_state.block_id().seq_no;
+        match engine.get_own_shard_blocks(&mc_state, Some(&mut actual_last_mc_seqno)).await {
+            Ok(tsbs) => {
+                for tsb in tsbs {
+                    engine.send_top_shard_block_description(tsb, 0, true).await?;
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                if actual_last_mc_seqno != mc_state.block_id().seq_no {
+                    log::trace!("resend_top_shard_blocks: goto next attempt");
+                    continue;
+                }
+                fail!("resend_top_shard_blocks: {:?}", e);
+            }
+        }
     }
-    Ok(())
 }
 
 pub fn save_top_shard_blocks_worker(

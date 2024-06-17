@@ -625,7 +625,8 @@ pub trait EngineOperations : Sync + Send {
     }
     async fn get_own_shard_blocks(
         &self, 
-        last_mc_state: &Arc<ShardStateStuff>
+        last_mc_state: &Arc<ShardStateStuff>,
+        actual_last_mc_seqno: Option<&mut u32>,
     ) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
         unimplemented!()
     }
