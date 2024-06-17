@@ -142,7 +142,7 @@ fn test_rmq_max_payload_constants() -> Result<()> {
         |idx| {
             let mut digest = ton_api::ton::ton_node::rempcatchainrecordv2::RempCatchainMessageDigestV2::default();
             digest.masterchain_seqno = idx as i32;
-            digest.messages.0.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
+            digest.messages.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
                 id: Default::default(),
                 uid: Default::default()
             });
