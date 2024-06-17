@@ -63,4 +63,4 @@ while true; do
     $TOOLS_DIR/console -C ${CONSOLE_CONFIG_0} -c "sendmessage $TEST_ROOT/msg1.boc"
 done
 
-pkill ton_node
+pkill ever-node

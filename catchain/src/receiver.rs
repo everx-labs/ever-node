@@ -1981,7 +1981,7 @@ impl ReceiverImpl {
 
         let mut response_blocks_count = 0;
 
-        for block_hash in &query.blocks.0 {
+        for block_hash in &query.blocks {
             if let Some(block_ptr) = self.get_block_by_hash(&block_hash) {
                 let mut block = block_ptr.borrow_mut();
 

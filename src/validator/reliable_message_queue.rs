@@ -51,7 +51,8 @@ use crate::block::BlockIdExtExtention;
 #[derive(Debug,PartialEq,Eq,PartialOrd,Ord,Clone)]
 enum MessageQueueStatus { Created, Starting, Active, Stopping }
 const RMQ_STOP_POLLING_INTERVAL: Duration = Duration::from_millis(50);
-const RMQ_REQUEST_NEW_BLOCK_INTERVAL: Duration = Duration::from_millis(50);
+const RMQ_REQUEST_NEW_BLOCK_START_DELAY: Duration = Duration::from_millis(100);
+const RMQ_REQUEST_NEW_BLOCK_POLLING_INTERVAL: Duration = Duration::from_millis(500);
 const RMQ_MAXIMAL_BROADCASTS_IN_PACK: u32 = 1000;
 const RMQ_MAXIMAL_QUERIES_IN_PACK: u32 = 1000;
 const RMQ_MESSAGE_QUERY_TIMEOUT: Duration = Duration::from_millis(2000);
@@ -540,7 +541,15 @@ impl MessageQueue {
     }
 
     fn activate_exchange(&self) -> Result<()> {
-        self.catchain_instance.activate_exchange(RMQ_REQUEST_NEW_BLOCK_INTERVAL)
+        let no_messages = self.catchain_instance.pending_messages_queue_empty()?;
+        let delay = if no_messages {
+            RMQ_REQUEST_NEW_BLOCK_POLLING_INTERVAL
+        }
+        else {
+            RMQ_REQUEST_NEW_BLOCK_START_DELAY
+        };
+        log::trace!(target: "remp", "RMQ {}: activating exchange after {:?}, no messages {}", self, delay, no_messages);
+        self.catchain_instance.activate_exchange(delay)
     }
 
     /// Check received messages queue and put all received messages into
@@ -624,7 +633,7 @@ impl MessageQueue {
                     )?;
                     self.catchain_instance.pending_messages_queries_send(
                         dst_adnl_id,
-                        h.as_remp_message_query()
+                        Arc::new(h.as_remp_message_query())
                     )?;
                 }
                 else {
@@ -962,11 +971,13 @@ impl BlockProcessor for StatusUpdater {
     async fn process_message(&self, message_id: &UInt256, _message_uid: &UInt256) {
         match self.queue.remp_manager.message_cache.get_message_with_origin_status_cc(message_id) {
             Err(e) => log::error!(target: "remp", "Point 7. Cannot get message {:x} from cache: {}", message_id, e),
-            Ok(None) => log::warn!(target: "remp", "Point 7. Message {:x} is not stored in cache (origin is missing)", message_id),
-            Ok(Some((None, _, _, _, _))) => log::warn!(target: "remp", "Point 7. Message {:x} is not stored in cache (body is missing)", message_id),
-            Ok(Some((Some(message),_header,origin,_,_))) => {
-                log::trace!(target: "remp", "Point 7. RMQ {} shard accepted message {}, {}, new status {}",
-                    self.queue, message, origin, self.new_status
+            Ok(None) => {
+                log::error!(target: "remp", "Point 7. Message {:x} is not stored in cache (origin is missing), skipping setting its status", message_id);
+                // We hope that other nodes who validated the block will not accept the message anyway.
+            },
+            Ok(Some((_message,_header,origin,_,_))) => {
+                log::trace!(target: "remp", "Point 7. RMQ {} shard accepted message {:x}, {}, new status {}",
+                    self.queue, message_id, origin, self.new_status
                 );
                 self.queue.update_status_send_response(message_id, origin, self.new_status.clone())
             }
@@ -1163,7 +1174,7 @@ impl RmqQueueManager {
                 if is_finally_rejected(&message_status) {
                     let mut digest = RempCatchainMessageDigestV2::default();
                     digest.masterchain_seqno = message_cc as i32;
-                    digest.messages.0.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
+                    digest.messages.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
                         id: message.message_id.clone(),
                         uid: message.message_uid.clone()
                     });
@@ -1195,7 +1206,11 @@ impl RmqQueueManager {
             }
 
             for digest in rejected_message_digests.into_iter() {
-                let digest_len = digest.messages.0.len();
+                let digest_len = digest.messages.len();
+                if digest_len > 1 {
+                    log::warn!(target: "remp", "Point 5a. RMQ {}: message digest (len={}) is too long!", self, digest_len)
+                }
+
                 let msg = ton_api::ton::ton_node::RempCatchainRecordV2::TonNode_RempCatchainMessageDigestV2(digest);
                 for new in next_queues.iter() {
                     if let Err(x) = new.catchain_instance.pending_messages_queue_send(msg.clone()) {

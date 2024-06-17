@@ -165,4 +165,4 @@ find_new_block_of_shard "0\:f000000000000000"
 
 echo "TEST PASSED. Killing nodes"
 
-pkill ton_node
+pkill ever-node

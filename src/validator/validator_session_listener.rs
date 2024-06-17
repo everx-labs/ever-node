@@ -265,9 +265,9 @@ async fn process_validation_action(
 }
 
 const VALIDATION_ACTION_TOO_LONG: Duration = Duration::from_secs(3);
-const QUEUE_EMPTY_TOO_LONG: Duration = Duration::from_secs(10);
-const QUEUE_POLLING_DELAY: Duration = Duration::from_millis(10);
-const RMQ_POLLING_DELAY: Duration = Duration::from_millis(50);
+const VALIDATION_QUEUE_EMPTY_TOO_LONG: Duration = Duration::from_secs(10);
+const VALIDATION_QUEUE_POLLING_DELAY: Duration = Duration::from_millis(50);
+const RMQ_POLLING_DELAY: Duration = Duration::from_millis(100);
 
 pub async fn process_validation_queue(
     queue: Arc<crossbeam_channel::Receiver<ValidationAction>>,
@@ -300,8 +300,8 @@ pub async fn process_validation_queue(
                 break 'queue_loop;
             },
             Err(crossbeam_channel::TryRecvError::Empty) => {
-                tokio::time::sleep(QUEUE_POLLING_DELAY).await;
-                match (last_action + QUEUE_EMPTY_TOO_LONG).elapsed() {
+                tokio::time::sleep(VALIDATION_QUEUE_POLLING_DELAY).await;
+                match (last_action + VALIDATION_QUEUE_EMPTY_TOO_LONG).elapsed() {
                     Ok(_) => {
                         log::info!(
                             target: "validator", 
