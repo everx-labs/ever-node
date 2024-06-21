@@ -70,7 +70,7 @@ pub const MAX_SPLIT_MERGE_DELAY: u32 = 1000;   // end of split/merge interval mu
 
 macro_rules! error {
     ($($arg:tt)*) => {
-        failure::Error::from(NodeError::ValidatorReject(format!("=====> {}:{} {}", file!(), line!(), format_args!($($arg)*))))
+        ever_block::error!(NodeError::ValidatorReject(format!("=====> {}:{} {}", file!(), line!(), format_args!($($arg)*))))
     };
 }
 
@@ -82,7 +82,7 @@ macro_rules! reject_query {
 
 macro_rules! soft_reject_query {
     ($($arg:tt)*) => {
-        return Err(failure::Error::from(NodeError::ValidatorSoftReject(format!("=====> {}:{} {}", file!(), line!(), format_args!($($arg)*)))))
+        return Err(ever_block::error!(NodeError::ValidatorSoftReject(format!("=====> {}:{} {}", file!(), line!(), format_args!($($arg)*)))))
     }
 }
 

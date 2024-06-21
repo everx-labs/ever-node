@@ -320,7 +320,7 @@ impl MessageQueue {
             Ok(())
         } else {
             log::error!(target: "remp", "RMQ {} not started", self);
-            Err(failure::err_msg("RMQ is not started"))
+            fail!("RMQ is not started")
         }
     }
 
