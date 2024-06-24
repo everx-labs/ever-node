@@ -42,7 +42,7 @@ use ever_block::{
     TopBlockDescrSet, OutMsgQueue,
 };
 use ever_block::{ShardStateUnsplit, TopBlockDescr};
-use ever_block::{UInt256, fail, error, Result, CellType, read_boc, read_single_root_boc};
+use ever_block::{UInt256, fail, error, Error, Result, CellType, read_boc, read_single_root_boc};
 use crate::engine_traits::RempDuplicateStatus;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -69,7 +69,7 @@ struct CollatorTestBundleIndexJson {
 }
 
 impl TryFrom<CollatorTestBundleIndexJson> for CollatorTestBundleIndex {
-    type Error = failure::Error;
+    type Error = Error;
     fn try_from(value: CollatorTestBundleIndexJson) -> Result<Self> {
         let mut shard_blocks = vec!();
         for s in value.top_shard_blocks {

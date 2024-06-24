@@ -188,7 +188,7 @@ impl<I, R> AwaitersPool<I, R> where
 
         let r = match result {
             Ok(ref r) => Ok(r.clone()),
-            Err(ref e) => Err(format!("{}", e)), // failure::Error doesn't impl Clone, 
+            Err(ref e) => Err(format!("{}", e)), // Error doesn't impl Clone, 
                                                  // so it is impossible to clone full result
         };
         let _ = op_awaiters.tx.send(Some(r));

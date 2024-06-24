@@ -192,7 +192,7 @@ pub fn compute_validator_list_id(
 //         }
 //         idx += 1;
 //     }
-//     Err(failure::err_msg(format!("Key {} not found in validator set {:?}", key.id(), set)))
+//     fail!("Key {} not found in validator set {:?}", key.id(), set)
 // }
 
 pub fn get_validator_key_idx(public_key: &PublicKey, nodes: &Vec<CatchainNode>) -> Result<usize> {
@@ -339,7 +339,7 @@ pub fn try_calc_vset_for_workchain(
 ) -> Result<Vec<ValidatorDescr>> {
     let full_list = if cc_config.isolate_mc_validators {
         if vset.total() <= vset.main() {
-            failure::bail!("Count of validators is too small to make sharde's subset while `isolate_mc_validators` flag is set");
+            fail!("Count of validators is too small to make sharde's subset while `isolate_mc_validators` flag is set");
         }
         let list = vset.list()[vset.main() as usize .. ].to_vec();
         list
@@ -349,7 +349,7 @@ pub fn try_calc_vset_for_workchain(
     // in case on old block proof it doesn't contain workchains in config so 1 by default
     let workchains = config.workchains().unwrap_or_else(|_| SINGLE_WORKCHAIN.clone());
     match workchains.len()? as i32 {
-        0 => failure::bail!("workchain description is empty"),
+        0 => fail!("workchain description is empty"),
         1 => { Ok(full_list) },
         count => {
             let mut list = Vec::new();

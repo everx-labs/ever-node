@@ -18,17 +18,16 @@ use crate::{
     TypeDesc, Vector, VectorMerge, VoteCandidate, ton
 };
 use catchain::serialize_tl_boxed_object;
+use ever_block::crc32_digest;
 use std::fmt;
 use ton_api::{IntoBoxed, ton::Hashable};
-
-pub const CASTAGNOLI: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISCSI);
 
 /*
     hash specialization
 */
 
 pub(crate) fn compute_hash_from_buffer(data: &[u8]) -> HashType {
-    CASTAGNOLI.checksum(data)
+    crc32_digest(data)
 }
 
 pub(crate) fn compute_hash_from_buffer_u32(data: &[u32]) -> HashType {
