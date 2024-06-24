@@ -12,7 +12,7 @@
 */
 
 use super::*;
-use ever_block::{crc32_digest, Result, bls::BLS_PUBLIC_KEY_LEN};
+use ever_block::{crc32_digest, fail, Result, bls::BLS_PUBLIC_KEY_LEN};
 use validator_session::ValidatorWeight;
 
 /*
@@ -154,7 +154,7 @@ impl MultiSignature {
         let decoded = inflate::inflate_bytes(serialized_signature);
 
         if let Err(err) = decoded {
-            failure::bail!("inflate error: {}", err);
+            fail!("inflate error: {}", err);
         }
 
         let decoded = decoded.unwrap();

@@ -18,7 +18,7 @@ use crate::{
 
 use ever_block::{
     fail, Account, AccountBlock, AccountId, Block, BlockIdExt, BlockProcessingStatus, BlockProof,
-    BuilderData, Cell, DepthBalanceInfo, Deserializable, HashmapAugType, HashmapIterator,
+    BuilderData, Cell, DepthBalanceInfo, Deserializable, Error, HashmapAugType, HashmapIterator,
     HashmapType, Message, MessageProcessingStatus, MsgAddressInt, MsgAddrStd, Result,
     Serializable, ShardAccount, SliceData, Transaction, TransactionProcessingStatus, UInt256, 
     write_boc
@@ -451,7 +451,7 @@ impl<T: 'static + WriteData> Processor<T> {
         ))
     }
 
-    fn process_parsing_error(&self, block: &BlockStuff, e: failure::Error) {
+    fn process_parsing_error(&self, block: &BlockStuff, e: Error) {
         log::error!(
             "Error while parsing block (before put into kafka): {}   block: {}",
             block.id(), e);

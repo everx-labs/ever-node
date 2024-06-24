@@ -484,7 +484,7 @@ impl NodeNetwork {
             }
 
             let mut peers = self.get_peers_from_storage(client_overlay.overlay_id())?
-                .ok_or_else(|| failure::err_msg("Load peers from storage is fail!")
+                .ok_or_else(|| error!("Load peers from storage is fail!")
             )?;
 
             log::info!("new node: {:?}", &key.id());

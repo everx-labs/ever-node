@@ -26,6 +26,7 @@ use catchain::PublicKeyHash;
 use catchain::profiling::ResultStatusCounter;
 use catchain::profiling::InstanceCounter;
 use catchain::check_execution_time;
+use ever_block::fail;
 use log::*;
 use rand::Rng;
 use tokio::time::sleep;
@@ -206,7 +207,7 @@ impl Workchain {
         }
 
         if local_adnl_id.is_none() {
-            failure::bail!("local_adnl_id must exist for workchain {}", workchain_id);
+            fail!("local_adnl_id must exist for workchain {}", workchain_id);
         }
 
         let local_adnl_id = local_adnl_id.as_ref().expect("local_adnl_id must exist").clone();
@@ -1120,7 +1121,7 @@ impl Workchain {
         let rejections_signature = MultiSignature::deserialize(3, &candidate_id, &wc_pub_key_refs, &block_status.rejections_signature);
 
         if let Err(err) = deliveries_signature {
-            failure::bail!(
+            fail!(
                 "Can't parse block candidate status (deliveries signature) {:?}: {:?}",
                 block_status,
                 err
@@ -1128,7 +1129,7 @@ impl Workchain {
         }
 
         if let Err(err) = approvals_signature {
-            failure::bail!(
+            fail!(
                 "Can't parse block candidate status (approvals signature) {:?}: {:?}",
                 block_status,
                 err
@@ -1136,7 +1137,7 @@ impl Workchain {
         }
 
         if let Err(err) = rejections_signature {
-            failure::bail!(
+            fail!(
                 "Can't parse block candidate status (rejections signature) {:?}: {:?}",
                 block_status,
                 err
