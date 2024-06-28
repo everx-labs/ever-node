@@ -13,7 +13,7 @@
 
 use crate::SessionProcessor;
 use std::sync::Arc;
-use ever_block::Result;
+use ever_block::{Error, Result};
 
 /// Task of task queue
 pub type TaskPtr = Box<dyn FnOnce(&mut dyn SessionProcessor) + Send>;
@@ -135,7 +135,7 @@ pub trait CompletionHandler {
     fn get_creation_time(&self) -> std::time::SystemTime;
 
     ///Execute with error
-    fn reset_with_error(&mut self, error: failure::Error, receiver: &mut dyn SessionProcessor);
+    fn reset_with_error(&mut self, error: Error, receiver: &mut dyn SessionProcessor);
 
     /// Cast to Any
     fn get_mut_impl(&mut self) -> &mut dyn std::any::Any;
@@ -166,7 +166,7 @@ where
     }
 
     ///Execute handler with error
-    fn reset_with_error(&mut self, error: failure::Error, receiver: &mut dyn SessionProcessor) {
+    fn reset_with_error(&mut self, error: Error, receiver: &mut dyn SessionProcessor) {
         if let Some(handler) = self.handler.take() {
             handler(Err(error), receiver);
         }

@@ -7,7 +7,7 @@ use crate::{
     shard_state::ShardStateStuff,
 };
 use ever_block::{BlockIdExt, MASTERCHAIN_ID};
-use ever_block::{error, fail, Result, Cell};
+use ever_block::{error, fail, Error, Result, Cell};
 use storage::{
     traits::Serializable, dynamic_boc_rc_db::BROKEN_CELL_BEACON_FILE,
     shardstate_db_async::SsNotificationCallback,
@@ -36,7 +36,7 @@ pub async fn check_db(
 
 
     async fn force_db_reset(
-        err: failure::Error,
+        err: Error,
         check_stop: &(dyn Fn() -> Result<()> + Sync),
         is_broken: Option<&AtomicBool>
     ) -> ! {

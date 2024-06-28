@@ -28,7 +28,7 @@ use catchain::{
 };
 use metrics::Recorder;
 use std::{fmt, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, SystemTime}};
-use ever_block::Result;
+use ever_block::{fail, Result};
 
 /*
     Constants
@@ -368,7 +368,7 @@ impl CatchainOverlayManager for LoopbackOverlayManager {
         _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
     ) -> Result<CatchainOverlayPtr> {
         if let Err(_prev) = self.overlay_created.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
-            failure::bail!("Loopback overlay {} has been already created", overlay_short_id);
+            fail!("Loopback overlay {} has been already created", overlay_short_id);
         }
         
         Ok(Arc::new(LoopbackOverlay {

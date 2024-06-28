@@ -34,7 +34,7 @@ use adnl::{OverlayShortId, PrivateOverlayShortId};
 use std::time::Duration;
 use ton_api::ton::ton_node::blockcandidatestatus::BlockCandidateStatus;
 use ton_api::ton::ton_node::Broadcast;
-use ever_block::{error, Result};
+use ever_block::{error, fail, Result};
 
 //TODO: traffic metrics & derivatives
 //TODO: remove dependency from CatchainClient? (use private overlay directly)
@@ -138,7 +138,7 @@ impl WorkchainOverlay {
         let result = network.set_validator_list(overlay_id.clone(), &nodes).await?;
 
         if result.is_none() {
-            failure::bail!("Can't resolve ADNL IDs for overlay_id={}", overlay_id.to_hex_string());
+            fail!("Can't resolve ADNL IDs for overlay_id={}", overlay_id.to_hex_string());
         }
 
         let in_broadcast_counter = metrics_receiver.sink().register_counter(&format!("{}_in_broadcasts", metrics_prefix).into());
@@ -523,17 +523,17 @@ impl WorkchainListener {
                                 return Ok(block);
                             }
                             Err(err) => {
-                                failure::bail!("Can't process message received from {} in verification workchain's #{} private overlay: {:?}", adnl_id, workchain_id, err);
+                                fail!("Can't process message received from {} in verification workchain's #{} private overlay: {:?}", adnl_id, workchain_id, err);
                             }
                         }
                     }
                     Err(message) => message
                 };
 
-                failure::bail!("Unexpected message received in verification workchain's #{} private overlay: {:?}", workchain_id, message);
+                fail!("Unexpected message received in verification workchain's #{} private overlay: {:?}", workchain_id, message);
             }
             Err(err) => {
-                failure::bail!("Can't parse message received from {} in verification workchain's #{} private overlay: {:?}: {:?}", adnl_id, workchain_id, data.data(), err);
+                fail!("Can't parse message received from {} in verification workchain's #{} private overlay: {:?}: {:?}", adnl_id, workchain_id, data.data(), err);
             }
         }
     }

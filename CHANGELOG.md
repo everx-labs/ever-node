@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.0
+
+- Use modern crates anyhow and thiserror instead of failure
+
 ## Version 0.58.17
 
 - Some issues logged as errors in remp client are now warnings

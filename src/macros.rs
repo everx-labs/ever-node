@@ -45,19 +45,19 @@ macro_rules! CHECK {
     ($exp:expr) => {
         // TODO: remove for production
         if !($exp) {
-            return Err(failure::err_msg(format!("{} {}:{}", stringify!($exp), file!(), line!())))
+            ever_block::fail!("{} {}:{}", stringify!($exp), file!(), line!())
         }
     };
     ($exp:expr, inited) => {
         // TODO: remove for production
         if $exp == &Default::default() {
-            return Err(failure::err_msg(format!("{} {}:{}", stringify!($exp), file!(), line!())))
+            ever_block::fail!("{} {}:{}", stringify!($exp), file!(), line!())
         }
     };
     ($exp:expr, default) => {
         // TODO: remove for production
         if $exp != &Default::default() {
-            return Err(failure::err_msg(format!("{} {}:{}", stringify!($exp), file!(), line!())))
+            ever_block::fail!("{} {}:{}", stringify!($exp), file!(), line!())
         }
     };
     ($exp1:expr, $exp2:expr) => {{
@@ -65,7 +65,7 @@ macro_rules! CHECK {
         #[cfg(test)]
         pretty_assertions::assert_eq!($exp1, $exp2);
         if $exp1 != $exp2 {
-            return Err(failure::err_msg(format!("{} != {} {}:{}", stringify!($exp1), stringify!($exp2), file!(), line!())))
+            ever_block::fail!("{} != {} {}:{}", stringify!($exp1), stringify!($exp2), file!(), line!())
         }
     }};
 }
