@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.1
+
+- Added possibility to proxy external messages from outer TCP conneciton to node using console
+
 ## Version 0.59.0
 
 - Use modern crates anyhow and thiserror instead of failure
