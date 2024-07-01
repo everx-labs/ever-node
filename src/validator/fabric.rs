@@ -29,7 +29,7 @@ use crate::{
         verification::VerificationManagerPtr
     }
 };
-use ever_block::{Block, BlockIdExt, Deserializable, Result, ShardIdent, UInt256, ValidatorSet};
+use ever_block::{error, fail, Block, BlockIdExt, Deserializable, Result, ShardIdent, UInt256, ValidatorSet};
 use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
 
 #[allow(dead_code)]
@@ -89,16 +89,27 @@ pub async fn run_validate_query(
 ) -> Result<SystemTime> {
 
     let next_block_descr = fmt_next_block_descr(&block.block_id);
+    let mc = engine.load_last_applied_mc_state().await?;
+    let shard_info = mc.shard_state_extra()?.shards().find_shard(&shard)?.ok_or_else(|| error!("shard {} not found", shard))?;
+    let last_shard_block = shard_info.block_id();
+    let next_seqno = prev.iter().map(|x| x.seq_no).max().unwrap_or_default() + 1;
 
-    let seqno = prev.iter().fold(0, |a, b| u32::max(a, b.seq_no));
     log::info!(
         target: "validator", 
-        "({}): before validator query shard: {}, min: {}, seqno: {}",
+        "({}): before validator query shard: {}, min: {}, seqno: {}, last shard seqno: {}",
         next_block_descr,
         shard,
         min_masterchain_block_id,
-        seqno + 1
+        next_seqno,
+        last_shard_block.seq_no
     );
+
+    if last_shard_block.seq_no >= next_seqno {
+        fail!(
+            "Attempting to validate obsolete block {}, expected seqno {}, actual last shard block {}",
+            next_block_descr, next_seqno, last_shard_block
+        );
+    }
 
     let labels = [("shard", shard.to_string())];
     #[cfg(not(feature = "statsd"))]
