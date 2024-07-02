@@ -13,7 +13,7 @@
 
 use ever_block::{
     error, BlockIdExt, Block, Deserializable, ShardStateUnsplit, McShardRecord, 
-    HashmapAugType, Result
+    HashmapAugType, read_boc, Result
 };
 use ever_block_json::{debug_block, debug_block_full, debug_state, debug_state_full};
 use ever_node::{
@@ -140,6 +140,12 @@ async fn main() -> Result<()> {
             print_block(&block, brief)?;
         } else if let Ok(state) = ShardStateUnsplit::construct_from_bytes(&bytes) {
             print_state(&state, brief)?;
+        } else {
+            let res = read_boc(&bytes)?;
+            println!("{:?}", res.header);
+            for root in res.roots {
+                println!("{0:#.1$}", root, res.header.cells_count);
+            }
         }
     } else if let Some(db_dir) = args.value_of("PATH") {
         let db_config = InternalDbConfig { 

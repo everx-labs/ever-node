@@ -1316,7 +1316,7 @@ impl PrivateOverlayOperations for NodeNetwork {
         Ok(())
     }
 
-    async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
+    fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
         let context = self.validator_context.sets_contexts.get(&validator_list_id);
         let mut status = false;
         if let Some(context) = context {

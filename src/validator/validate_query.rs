@@ -224,6 +224,8 @@ pub struct ValidateQuery {
     next_block_descr: Arc<String>,
 }
 
+type TasksVec = Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>;
+
 impl ValidateQuery {
     fn shard(&self) -> &ShardIdent {
         &self.shard
@@ -519,10 +521,8 @@ impl ValidateQuery {
     }
 
     async fn get_ref_mc_state(&mut self, base: &ValidateBase) -> Result<McData> {
-        let mc_state = match base.info.read_master_ref()? {
-            Some(master_ref) => (self.engine.clone()).wait_state(&master_ref.master.master_block_id().1, Some(1_000), true).await?,
-            None => (self.engine.clone()).wait_state(&base.prev_blocks_ids[0], Some(1_000), true).await?
-        };
+        let (_, mc_id) = base.info.read_master_id()?.master_block_id();
+        let mc_state = self.engine.clone().wait_state(&mc_id, Some(1_000), true).await?;
         log::debug!(target: "validate_query", "({}): in ValidateQuery::get_ref_mc_state() {}", self.next_block_descr, mc_state.block_id());
         if mc_state.state()?.seq_no() < self.min_mc_seq_no {
             reject_query!("requested to validate a block referring to an unknown future masterchain block {} < {}",
@@ -1711,10 +1711,11 @@ impl ValidateQuery {
 
     fn precheck_account_transactions(
         base: Arc<ValidateBase>,
-        tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>,
+        tasks: &mut TasksVec,
         engine: &Arc<dyn EngineOperations>,
     ) -> Result<()> {
-        log::debug!(target: "validate_query", "({}): pre-checking all AccountBlocks, and all transactions of all accounts", base.next_block_descr);
+        // log::debug!(target: "validate_query", "({}): pre-checking all AccountBlocks, \
+        //     and all transactions of all accounts", base.next_block_descr);
         base.account_blocks.iterate_with_keys(|key, acc_blk| {
             let base = base.clone();
             let engine = engine.clone();
@@ -1853,9 +1854,9 @@ impl ValidateQuery {
         Ok(())
     }
 
-    fn precheck_message_queue_update(base: Arc<ValidateBase>, manager: &MsgQueueManager, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validate_query", "({}): pre-checking the difference between the \
-            old and the new outbound message queues", base.next_block_descr);
+    fn precheck_message_queue_update(base: Arc<ValidateBase>, manager: &MsgQueueManager, tasks: &mut TasksVec) -> Result<()> {
+        // log::debug!(target: "validate_query", "({}): pre-checking the difference between the \
+        //     old and the new outbound message queues", base.next_block_descr);
         manager.prev().out_queue()?.scan_diff_with_aug(
             manager.next().out_queue()?,
             |key, val1, val2| {
@@ -2278,8 +2279,9 @@ impl ValidateQuery {
         Ok(())
     }
 
-    fn check_in_msg_descr(base: Arc<ValidateBase>, manager: Arc<MsgQueueManager>, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validate_query", "({}): checking inbound messages listed in InMsgDescr", base.next_block_descr);
+    fn check_in_msg_descr(
+        base: Arc<ValidateBase>, manager: Arc<MsgQueueManager>, tasks: &mut TasksVec) -> Result<()> {
+        // log::debug!(target: "validate_query", "({}): checking inbound messages listed in InMsgDescr", base.next_block_descr);
         base.in_msg_descr.iterate_with_keys(|key, in_msg| {
             let base = base.clone();
             let manager = manager.clone();
@@ -2660,8 +2662,8 @@ impl ValidateQuery {
         Ok(())
     }
 
-    fn check_out_msg_descr(base: Arc<ValidateBase>, manager: Arc<MsgQueueManager>, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validate_query", "({}): checking outbound messages listed in OutMsgDescr", base.next_block_descr);
+    fn check_out_msg_descr(base: Arc<ValidateBase>, manager: Arc<MsgQueueManager>, tasks: &mut TasksVec) -> Result<()> {
+        // log::debug!(target: "validate_query", "({}): checking outbound messages listed in OutMsgDescr", base.next_block_descr);
         base.out_msg_descr.iterate_with_keys(|key, out_msg| {
             let base = base.clone();
             let manager = manager.clone();
@@ -3451,8 +3453,8 @@ impl ValidateQuery {
         }
     }
 
-    fn check_transactions(base: Arc<ValidateBase>, libraries: Libraries, tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
-        log::debug!(target: "validate_query", "({}): checking all transactions", base.next_block_descr);
+    fn check_transactions(base: Arc<ValidateBase>, libraries: Libraries, tasks: &mut TasksVec) -> Result<()> {
+        // log::debug!(target: "validate_query", "({}): checking all transactions", base.next_block_descr);
         let config = BlockchainConfig::with_config(base.config_params.clone())?;
         base.account_blocks.iterate_with_keys_and_aug(|account_addr, acc_block, fee| {
             let base = base.clone();
@@ -4415,11 +4417,11 @@ impl ValidateQuery {
         Ok((base, mc_data))
     }
 
-    fn add_task(tasks: &mut Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>, task: impl FnOnce() -> Result<()> + Send + 'static) {
+    fn add_task(tasks: &mut TasksVec, task: impl FnOnce() -> Result<()> + Send + 'static) {
         tasks.push(Box::new(task))
     }
 
-    async fn run_tasks(&self, tasks: Vec<Box<dyn FnOnce() -> Result<()> + Send + 'static>>) -> Result<()> {
+    async fn run_tasks(&self, tasks: TasksVec) -> Result<()> {
         if self.multithread {
             let tasks = tasks.into_iter().map(|t| tokio::task::spawn_blocking(t));
             futures::future::join_all(tasks).await

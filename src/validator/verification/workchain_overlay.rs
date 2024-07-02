@@ -342,7 +342,9 @@ impl Drop for WorkchainOverlay {
             network.stop_catchain_client(&self.overlay_short_id);
         }
 
-        let _result = self.engine.remove_validator_list(self.overlay_id.clone());
+        if let Err(e) = self.engine.remove_validator_list(self.overlay_id.clone()) {
+            log::warn!(target: "verificator", "Error when removing validator list: {}", e)
+        }
     }
 }
 

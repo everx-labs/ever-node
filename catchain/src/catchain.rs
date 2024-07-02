@@ -1713,13 +1713,13 @@ impl CatchainProcessor {
             return;
         }
 
-        if !self.force_process {
+        if !self.force_process && self.active_process {
             log::trace!("Catchain forcing creation of a new block");
         }
 
-        self.force_process = true;
-
-        if !self.active_process {
+        if self.active_process {
+            self.force_process = true;
+        } else {
             self.set_next_block_generation_time(time);
         }
     }
