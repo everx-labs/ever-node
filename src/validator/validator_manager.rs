@@ -25,7 +25,6 @@ use crate::{
         },
         validator_group::{ValidatorGroup, ValidatorGroupStatus},
         validator_utils::{
-            get_first_block_seqno_after_prevs,
             get_masterchain_seqno, get_block_info_by_id,
             compute_validator_list_id, get_group_members_by_validator_descrs, 
             is_remp_enabled, try_calc_subset_for_workchain, validatordescr_to_catchain_node,
@@ -67,6 +66,7 @@ use ever_block::{
 use ever_block::{error, fail, Result, UInt256};
 
 use crate::block::BlockIdExtExtention;
+use crate::validator::validator_utils::PrevBlockHistory;
 
 fn get_session_id_serialize(
     session_info: Arc<GeneralSessionInfo>,
@@ -881,7 +881,7 @@ impl ValidatorManagerImpl {
                 &mc_state,
                 ident,
                 cc_seqno,
-                get_first_block_seqno_after_prevs(prev_blocks).unwrap_or_default()
+                PrevBlockHistory::new_prevs(ident, prev_blocks).get_next_seqno().unwrap_or_default()
             )? {
                 Some(x) => x,
                 None => {

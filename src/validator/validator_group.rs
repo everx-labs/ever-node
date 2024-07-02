@@ -11,8 +11,7 @@
 * limitations under the License.
 */
 
-use std::{cmp::max, sync::{*, atomic::{Ordering, AtomicU64}}, time::*};
-use std::ops::RangeInclusive;
+use std::{cmp::max, ops::RangeInclusive, sync::{*, atomic::{Ordering, AtomicU64}}, time::*};
 use crossbeam_channel::Receiver;
 
 use catchain::utils::get_hash;
@@ -51,14 +50,14 @@ use crate::{
             validatordescr_to_session_node,
             validator_query_candidate_to_validator_block_candidate, ValidatorListHash,
         }
-    }, validating_utils::{fmt_next_block_descr_from_next_seqno, append_rh_to_next_block_descr}
+    }
 };
 use crate::validator::reliable_message_queue::RempQueueCollatorInterfaceImpl;
 
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::SlashingManagerPtr;
 //#[cfg(feature = "fast_finality")]
-use crate::validator::validator_utils::get_first_block_seqno_after_prevs;
+use crate::validator::validator_utils::PrevBlockHistory;
 // #[cfg(feature = "fast_finality")]
 // use crate::validator::workchains_fast_finality::compute_actual_finish;
 
@@ -96,7 +95,7 @@ impl ValidatorGroupStatus {
 }
 
 pub struct ValidatorGroupImpl {
-    prev_block_ids: Vec<BlockIdExt>,
+    prev_block_ids: PrevBlockHistory, //Vec<BlockIdExt>,
     last_known_round: u32,
 
     shard: ShardIdent,
@@ -113,9 +112,6 @@ pub struct ValidatorGroupImpl {
     on_candidate_invoked: bool,
 
     status: ValidatorGroupStatus,
-
-    next_block_seqno: Option<u32>,
-    next_block_descr: Arc<String>,
 }
 
 impl Drop for ValidatorGroupImpl {
@@ -124,10 +120,6 @@ impl Drop for ValidatorGroupImpl {
         // which otherwise would happen each time the validator-manager crashes.
         log::info!(target: "validator", "ValidatorGroupImpl: dropping session {}", self.info());
     }
-}
-
-pub fn prevs_to_string(prev_block_ids: &Vec<BlockIdExt>) -> String {
-    prev_block_ids.iter().map(|x| format!(" {} ", x)).collect()
 }
 
 impl ValidatorGroupImpl {
@@ -150,12 +142,10 @@ impl ValidatorGroupImpl {
         }
 
         self.status = ValidatorGroupStatus::Sync;
-        self.next_block_seqno = get_first_block_seqno_after_prevs(&prev);
-        self.next_block_descr = Arc::new(fmt_next_block_descr_from_next_seqno(&self.shard, self.next_block_seqno));
 
         log::info!(target: "validator", "Starting session {} (start remp: {})", self.info(), start_remp_session);
 
-        self.prev_block_ids = prev;
+        self.prev_block_ids.update_prev(&prev);
         self.min_masterchain_block_id = Some(min_masterchain_block_id.clone());
         self.min_ts = min_ts;
 
@@ -258,9 +248,9 @@ impl ValidatorGroupImpl {
 
         return format!("session_status: id {:x}, shard {}{}, {}, round {}, prevs {}",
                        self.session_id, self.shard,
-                       self.next_block_seqno.map_or("".to_owned(), |seqno| format!(", {} next seqno", seqno)),
+                       self.prev_block_ids.get_next_seqno().map_or("".to_owned(), |seqno| format!(", {} next seqno", seqno)),
                        self.status,
-                       round, prevs_to_string(&self.prev_block_ids)
+                       round, self.prev_block_ids
         );
     }
 
@@ -277,9 +267,9 @@ impl ValidatorGroupImpl {
         shard: ShardIdent,
         session_id: validator_session::SessionId,
     ) -> ValidatorGroupImpl {
-        let next_block_descr = Arc::new(fmt_next_block_descr_from_next_seqno(&shard, None));
         log::info!(target: "validator", "Initializing session {:x}, shard {}", session_id, shard);
 
+        let prev_block_ids = PrevBlockHistory::new(&shard);
         ValidatorGroupImpl {
             min_masterchain_block_id: None,
             min_ts: SystemTime::now(),
@@ -290,14 +280,11 @@ impl ValidatorGroupImpl {
             session_id,
             session_ptr: None,
             reliable_queue: None,
-            prev_block_ids: Vec::new(),
+            prev_block_ids,
 
             on_candidate_invoked: false,
             on_generate_slot_invoked: false,
             replay_finished: false,
-
-            next_block_seqno: None,
-            next_block_descr,
         }
     }
 
@@ -307,27 +294,7 @@ impl ValidatorGroupImpl {
     }
  */
 
-    // Advances block id counter
-    pub fn create_next_block_id(&self, root_hash: BlockHash, file_hash: BlockHash, shard: ShardIdent) -> Result<BlockIdExt> {
-        let mut seqno = 0;
-        for x in &self.prev_block_ids {
-            if seqno < x.seq_no {
-                seqno = x.seq_no;
-            }
-            if x.root_hash == root_hash && x.file_hash == file_hash {
-                fail!("New block is equal with one of previous prev {}, {}", x, self.info())
-            }
-        }
-
-        Ok(BlockIdExt {
-            shard_id: shard,
-            seq_no: seqno + 1,
-            root_hash,
-            file_hash,
-        })
-    }
-
-    pub fn update_round(&mut self, round: u32) -> (u32, Vec<BlockIdExt>, Option<BlockIdExt>, SystemTime)
+    pub fn update_round(&mut self, round: u32) -> (u32, PrevBlockHistory, Option<BlockIdExt>, SystemTime)
     {
         self.last_known_round = max(self.last_known_round, round);
         return (self.last_known_round, self.prev_block_ids.clone(), self.min_masterchain_block_id.clone(), self.min_ts)
@@ -405,9 +372,8 @@ impl ValidatorGroup {
     }
 
     /// Mutex used inside. Needs to cache the result
-    pub async fn get_next_block_descr(&self) -> Arc<String> {
-        let next_block_descr = self.group_impl.execute_sync(|group_impl| group_impl.next_block_descr.clone()).await;
-        next_block_descr
+    pub async fn get_next_block_descr(&self, root_hash: Option<&BlockHash>) -> String {
+        self.group_impl.execute_sync(|group_impl| group_impl.prev_block_ids.get_next_block_descr(root_hash)).await
     }
 
     pub fn shard(&self) -> &ShardIdent {
@@ -605,7 +571,7 @@ impl ValidatorGroup {
         };
     }
 
-    async fn check_in_sync(&self, mc_blocks: &Vec<BlockIdExt>) -> Result<bool> {
+    async fn check_in_sync(&self, mc_blocks: &PrevBlockHistory) -> Result<bool> {
         match self.get_status().await {
             ValidatorGroupStatus::Active => return Ok(true),
             ValidatorGroupStatus::Sync => (),
@@ -628,10 +594,10 @@ impl ValidatorGroup {
             }
             Some(mc_range) => {
                 if let Some(unknown_block) = check_history_up_to_cc(
-                    self.engine.clone(), remp.message_cache.clone(), mc_blocks, *mc_range.start()
+                    self.engine.clone(), remp.message_cache.clone(), mc_blocks.get_prevs(), *mc_range.start()
                 ).await? {
                     log::warn!(target: "validator", "Shard {} history from {:?} up to master cc {} is not fully known: block {} is not processed",
-                        self.info().await, mc_blocks, *mc_range.start(), unknown_block
+                        self.info().await, mc_blocks.get_prevs(), *mc_range.start(), unknown_block
                     );
                     Ok(false)
                 }
@@ -649,7 +615,7 @@ impl ValidatorGroup {
         callback: ValidatorBlockCandidateCallback, 
         rt: tokio::runtime::Handle
     ) {
-        let next_block_descr = self.get_next_block_descr().await;
+        let next_block_descr = self.get_next_block_descr(None).await;
         log::info!(
             target: "validator", 
             "({}): ValidatorGroup::on_generate_slot: collator request, {}",
@@ -678,7 +644,7 @@ impl ValidatorGroup {
                     self.shard().clone(),
                     min_ts,
                     mc.seq_no,
-                    prev_block_ids,
+                    &prev_block_ids,
                     remp_queue_collator_interface_impl.clone().map(|x| x.into_interface()),
                     self.local_key.clone(),
                     self.validator_set.clone(),
@@ -699,38 +665,14 @@ impl ValidatorGroup {
             None => None,
         };
 
-        let next_block_id = match &result {
-            Err(_) =>
-                match self.group_impl.execute_sync(|group_impl| group_impl.create_next_block_id(
-                    UInt256::default(), UInt256::default(),
-                    self.shard().clone()
-                )).await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        log::error!(target: "validator", "({}): Validator group {}: cannot generate next block id: `{}`",
-                                next_block_descr,
-                                self.info_round(round).await, e
-                            );
-                        BlockIdExt::default()
-                    }
-                },
-            Ok(candidate) =>
-                match self.group_impl.execute_sync(|group_impl|
-                   group_impl.create_next_block_id(
-                       candidate.id.root_hash.clone(),
-                       get_hash(&candidate.data.data()),
-                       self.shard().clone()
-                   )
-                ).await {
-                    Err(x) => {
-                        log::error!(target: "validator", "({}): validator group {}: cannot generate next block id: {}",
-                            next_block_descr, self.info_round(round).await, x
-                        );
-                        BlockIdExt::default()
-                    },
-                    Ok(x) => x
-                }
+        let (rh,fh) = match &result {
+            Err(_) => (UInt256::default(), UInt256::default()),
+            Ok(candidate) => (candidate.id.root_hash.clone(), get_hash(&candidate.data.data()))
         };
+
+        let next_block_id = self.group_impl.execute_sync(|group_impl|
+            group_impl.prev_block_ids.get_next_block_id(&rh, &fh)
+        ).await;
 
         let return_result_message = if let Some(x) = remp_queue_collator_interface_impl {
             match x.update_queues_after_collation(&next_block_id, result.is_ok()).await {
@@ -808,6 +750,78 @@ impl ValidatorGroup {
         }
     }
 
+    async fn do_candidate_validation(&self, round: u32, source: &PublicKey, candidate: BlockCandidate) -> Result<SystemTime> {
+        let (lk_round, prev_block_ids, mc_block_id_opt, min_ts) =
+            self.group_impl.execute_sync(|group_impl| group_impl.update_round(round)).await;
+
+        if round < lk_round {
+            fail!("round {} < self.last_known_round {}", round, lk_round);
+        }
+
+        /* TODO: check collated messages
+                    match self.check_in_sync(&prev_block_ids).await {
+                        Err(e) => {
+                            log::warn!(target: "validator", "ValidatorGroup::on_generate_slot: session {} shards are not in sync yet: {}", self.info_round(round).await, e);
+                            callback(Err(e));
+                            return;
+                        }
+                        Ok(()) => ()
+                    }
+        */
+
+        self.group_impl.execute_sync(|group_impl|
+            if !group_impl.prev_block_ids.is_next_block_new(
+                &candidate.block_id.root_hash,
+                &candidate.block_id.file_hash
+            ) {
+                fail!("Block candidate {} is not unique: prevs {}", candidate.block_id, group_impl.prev_block_ids)
+            }
+            else {
+                Ok(())
+            }
+        ).await?;
+
+        let mc_block_id = mc_block_id_opt.ok_or_else(|| error!("Min masterchain block id missing"))?;
+
+        let mc = self.engine.load_last_applied_mc_state().await?;
+        let shard_info = mc.shard_state_extra()?
+            .shards().find_shard(&self.general_session_info.shard)?
+            .ok_or_else(|| error!("shard {} not found", self.general_session_info.shard))?;
+        let last_shard_block = shard_info.block_id();
+
+        if last_shard_block.seq_no >= candidate.block_id.seq_no {
+            fail!(
+                "Attempting to validate obsolete candidate block {}, actual last shard block {}",
+                candidate.block_id, last_shard_block
+            );
+        }
+
+        let validation_completion_time = run_validate_query(
+            self.shard().clone(),
+            min_ts,
+            mc_block_id,
+            &prev_block_ids,
+            candidate.clone(),
+            self.validator_set.clone(),
+            self.engine.clone(),
+            SystemTime::now() + Duration::new(10, 0),
+            self.verification_manager.clone(),
+        ).await?;
+
+        let vb_candidate = validator_query_candidate_to_validator_block_candidate(
+            source.clone(), candidate
+        );
+
+        self.save_block_candidate(vb_candidate).await?;
+
+        self.last_validation_time.fetch_max(
+            validation_completion_time.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs(),
+            Ordering::Relaxed
+        );
+
+        Ok(validation_completion_time)
+    }
+
     // Validate_query
     pub async fn on_candidate(
         &self,
@@ -818,70 +832,34 @@ impl ValidatorGroup {
         collated_data: BlockPayloadPtr,
         callback: ValidatorBlockCandidateDecisionCallback,
     ) {
-        let next_block_descr = self.get_next_block_descr().await;
-        let next_block_descr = append_rh_to_next_block_descr(&next_block_descr, &root_hash);
+        let next_block_descr = self.get_next_block_descr(Some(&root_hash)).await;
 
         let candidate_id = format!("source {}, rh {:x}", source.id(), root_hash);
+
         log::trace!(target: "validator", "({}): ValidatorGroup::on_candidate: {}, {}",
             next_block_descr,
             candidate_id, self.info_round(round).await);
 
-        let mut candidate = super::BlockCandidate {
-            block_id: BlockIdExt::with_params(self.shard().clone(), 0, root_hash, get_hash(&data.data())),
+        let candidate_block_id = self.group_impl.execute_sync(|group_impl|
+            group_impl.prev_block_ids.get_next_block_id(&root_hash, &get_hash(&data.data()))
+        ).await;
+
+        let candidate = super::BlockCandidate {
+            block_id: candidate_block_id, //BlockIdExt::with_params(self.shard().clone(), 0, root_hash, get_hash(&data.data())),
             data: data.data().to_vec(),
             collated_file_hash: catchain::utils::get_hash (&collated_data.data()),
             collated_data: collated_data.data().to_vec(),
             created_by: UInt256::from(source.pub_key().expect("source must contain pub_key")),
         };
 
-        let result = {
-            let (lk_round, prev_block_ids, mm_block_id, min_ts) =
-                self.group_impl.execute_sync(|group_impl| group_impl.update_round(round)).await;
+        let validation_result = self.do_candidate_validation(round, &source, candidate).await;
 
-            if round < lk_round {
-                log::error!(target: "validator", "({}): round {} < self.last_known_round {}", next_block_descr, round, lk_round);
-                return;
-            }
-/* TODO: check collated messages
-            match self.check_in_sync(&prev_block_ids).await {
-                Err(e) => {
-                    log::warn!(target: "validator", "ValidatorGroup::on_generate_slot: session {} shards are not in sync yet: {}", self.info_round(round).await, e);
-                    callback(Err(e));
-                    return;
-                }
-                Ok(()) => ()
-            }
-*/
-            let next_block_id = match self.group_impl.execute_sync(|group_impl|
-                group_impl.create_next_block_id(
-                    candidate.block_id.root_hash.clone(),
-                    candidate.block_id.file_hash.clone(),
-                    self.shard().clone()
-                )
-            ).await {
-                Err(x) => { log::error!(target: "validator", "({}): {}", next_block_descr, x); return },
-                Ok(x) => x
-            };
-            candidate.block_id = next_block_id;
-
-            match mm_block_id {
-                Some(mc) => {
-                    run_validate_query(
-                        self.shard().clone(),
-                        min_ts,
-                        mc.clone(),
-                        prev_block_ids,
-                        candidate.clone(),
-                        self.validator_set.clone(),
-                        self.engine.clone(),
-                        SystemTime::now() + Duration::new(10, 0),
-                        self.verification_manager.clone(),
-                    ).await
-                }
-                None => Err(error!("Min masterchain block id missing")),
-            }
+        let validation_result_message = match &validation_result {
+            Ok(completion_time) => format!("Validation successful: finished at {:?}", completion_time),
+            Err(e) => format!("Validation failed with verdict `{}`", e),
         };
 
+/*
         let result_message = match &result {
             Ok(x) => {
                 let vb_candidate = validator_query_candidate_to_validator_block_candidate(
@@ -901,16 +879,19 @@ impl ValidatorGroup {
             }
             Err(x) => format!("Validation failed with verdict `{}`", x),
         };
+ */
         self.group_impl.execute_sync(|group_impl| group_impl.on_candidate_invoked = true).await;
 
         log::info!(target: "validator", "({}): ValidatorGroup::on_candidate: {}, {}, {}",
             next_block_descr,
-            candidate_id, self.info_round(round).await, result_message
+            candidate_id, self.info_round(round).await, validation_result_message
         );
-        callback(result);
+
+        callback(validation_result);
+
         log::trace!(target: "validator", "({}): ValidatorGroup::on_candidate: {}, {}, {}, callback called",
             next_block_descr,
-            candidate_id, self.info_round(round).await, result_message
+            candidate_id, self.info_round(round).await, validation_result_message
         );
     }
 
@@ -928,8 +909,7 @@ impl ValidatorGroup {
         sig_set: Vec<(PublicKeyHash, BlockPayloadPtr)>,
         approve_sig_set: Vec<(PublicKeyHash, BlockPayloadPtr)>,
     ) {
-        let next_block_descr = self.get_next_block_descr().await;
-        let next_block_descr = append_rh_to_next_block_descr(&next_block_descr, &root_hash);
+        let next_block_descr = self.get_next_block_descr(Some(&root_hash)).await;
 
         let data_vec = data.data().to_vec();
         let we_generated = source.id() == self.local_key.id();
@@ -946,10 +926,11 @@ impl ValidatorGroup {
                     group_impl.last_known_round = round + 1;
                 };
 
-                match group_impl.create_next_block_id(root_hash, file_hash, self.shard().clone()) {
-                    Ok(x) => Ok((x, group_impl.prev_block_ids.clone())),
-                    Err(x) => Err(x)
+                if group_impl.prev_block_ids.is_next_block_new(&root_hash, &file_hash) {
+                    fail!("Block candidate rh={:x}, fh={:x} is not unique: prevs {}", root_hash, file_hash, group_impl.prev_block_ids)
                 }
+
+                Ok((group_impl.prev_block_ids.get_next_block_id(&root_hash, &file_hash), group_impl.prev_block_ids.clone()))
             }).await
         {
             Err(x) => { log::error!(target: "validator", "({}): Error creating next block id: {}", next_block_descr, x); return },
@@ -969,7 +950,7 @@ impl ValidatorGroup {
             } else {
                 None
             },
-            prev_block_ids.clone(),
+            prev_block_ids.get_prevs().clone(),
             self.validator_set.clone(),
             sig_set,
             approve_sig_set,
@@ -987,7 +968,7 @@ impl ValidatorGroup {
         let (full_result, new_prevs) = self.group_impl.execute_sync(|group_impl| {
             let full_result = match result {
                 Ok(()) =>
-                    if group_impl.prev_block_ids != prev_block_ids {
+                    if !group_impl.prev_block_ids.same_prevs(&prev_block_ids) {
                         Err(error!("Sync error: two requests at a time, prevs have changed!!!"))
                     } else {
                         Ok(())
@@ -996,11 +977,9 @@ impl ValidatorGroup {
                 // TODO: retry block commit
             };
 
-            group_impl.prev_block_ids = vec![next_block_id];
-            group_impl.next_block_seqno = get_first_block_seqno_after_prevs(&group_impl.prev_block_ids);
-            group_impl.next_block_descr = Arc::new(fmt_next_block_descr_from_next_seqno(&group_impl.shard, group_impl.next_block_seqno));
-            
-            (full_result, prevs_to_string(&group_impl.prev_block_ids))
+            group_impl.prev_block_ids.update_prev(&vec!(next_block_id));
+
+            (full_result, group_impl.prev_block_ids.display_prevs())
         }).await;
 
         match full_result {
@@ -1028,7 +1007,7 @@ impl ValidatorGroup {
         log::info!(
             target: "validator", 
             "({}): ValidatorGroup::on_block_skipped, {}",
-            self.get_next_block_descr().await,
+            self.get_next_block_descr(None).await,
             self.info_round(round).await
         );
 
@@ -1047,8 +1026,7 @@ impl ValidatorGroup {
         _collated_data_hash: BlockHash,
         callback: ValidatorBlockCandidateCallback)
     {
-        let next_block_descr = self.get_next_block_descr().await;
-        let next_block_descr = append_rh_to_next_block_descr(&next_block_descr, &root_hash);
+        let next_block_descr = self.get_next_block_descr(Some(&root_hash)).await;
 
         log::info!(
             target: "validator", 

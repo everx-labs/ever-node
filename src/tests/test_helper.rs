@@ -47,6 +47,7 @@ use std::{
 };
 use storage::block_handle_db::{BlockHandle, Callback, StoreJob};
 use ton_api::ton::ton_node::broadcast::BlockBroadcast;
+use crate::validator::validator_utils::PrevBlockHistory;
 
 include!("../../common/src/config.rs");
 include!("../../common/src/test.rs");
@@ -711,7 +712,7 @@ impl TestEngine {
         let collator = Collator::new(
             block_stuff.id().shard().clone(),
             min_mc_seqno,
-            prev_blocks_ids.clone(),
+            &PrevBlockHistory::new_prevs(&block_stuff.id().shard(), &prev_blocks_ids),
             validator_set.clone(),
             extra.created_by().clone(),
             self.clone(),

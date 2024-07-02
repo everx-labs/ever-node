@@ -27,7 +27,7 @@ use crate::{
     validating_utils::{
         check_cur_validator_set, check_this_shard_mc_info, 
         may_update_shard_block_info, supported_capabilities, supported_version,
-        UNREGISTERED_CHAIN_MAX_LEN, fmt_next_block_descr_from_next_seqno,
+        UNREGISTERED_CHAIN_MAX_LEN,
     },
     validator::{
         BlockCandidate, CollatorSettings, McData,
@@ -74,7 +74,7 @@ use ever_executor::{
 use ever_block::{error, fail, AccountId, Cell, HashmapType, Result, UInt256, UsageTree, SliceData};
 use crate::engine_traits::RempQueueCollatorInterface;
 
-use crate::validator::validator_utils::is_remp_enabled;
+use crate::validator::validator_utils::{is_remp_enabled, PrevBlockHistory};
 
 // TODO move all constants (see validator query too) into one place
 pub const SPLIT_MERGE_DELAY: u32 = 100;        // prepare (delay) split/merge for 100 seconds
@@ -1072,7 +1072,7 @@ impl Collator {
     pub fn new(
         shard: ShardIdent,
         min_mc_seqno: u32,
-        prev_blocks_ids: Vec<BlockIdExt>,
+        prev_blocks_history: &PrevBlockHistory,
         validator_set: ValidatorSet,
         created_by: UInt256,
         engine: Arc<dyn EngineOperations>,
@@ -1081,19 +1081,23 @@ impl Collator {
         collator_settings: CollatorSettings
     ) -> Result<Self> {
 
-        log::debug!(
-            "prev_blocks_ids: {} {}",
-            prev_blocks_ids[0],
-            if prev_blocks_ids.len() > 1 { format!("{}", prev_blocks_ids[1]) } else { "".to_owned() }
-        );
+        let prev_blocks_ids = prev_blocks_history.get_prevs();
+
+        log::debug!("prev_blocks_ids:{}", prev_blocks_history);
 
         let new_block_seqno = match prev_blocks_ids.len() {
             1 => prev_blocks_ids[0].seq_no() + 1,
             2 => max(prev_blocks_ids[0].seq_no(), prev_blocks_ids[1].seq_no()) + 1,
-            _ => fail!("`prev_blocks_ids` has invlid length"),
+            _ => fail!("`prev_blocks_ids` has invalid length"),
         };
 
-        let collated_block_descr = Arc::new(fmt_next_block_descr_from_next_seqno(&shard, Some(new_block_seqno)));
+        if prev_blocks_history.get_next_seqno() != Some(new_block_seqno) {
+            fail!("`prev_blocks_history.get_next_seqno()`={:?} is not equal to `new_block_seqno`={}",
+                prev_blocks_history.get_next_seqno(), new_block_seqno
+            )
+        }
+
+        let collated_block_descr = Arc::new(prev_blocks_history.get_next_block_descr(None));
 
         log::trace!("{}: new", collated_block_descr);
 
@@ -1153,7 +1157,7 @@ impl Collator {
             remp_collator_interface,
             shard,
             min_mc_seqno,
-            prev_blocks_ids,
+            prev_blocks_ids: prev_blocks_ids.clone(),
             created_by,
             after_merge,
             after_split,

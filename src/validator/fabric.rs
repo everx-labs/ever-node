@@ -16,21 +16,21 @@ use std::{
     time::SystemTime,
 };
 use super::validator_utils::{
-    get_first_block_seqno_after_prevs,
     pairvec_to_cryptopair_vec,
     validator_query_candidate_to_validator_block_candidate,
 };
 use crate::{
     collator_test_bundle::CollatorTestBundle,
     engine_traits::{EngineOperations, RempQueueCollatorInterface},
-    validating_utils::{fmt_next_block_descr_from_next_seqno, fmt_next_block_descr},
+    validating_utils::{fmt_next_block_descr},
     validator::{
         CollatorSettings, validate_query::ValidateQuery, collator, 
         verification::VerificationManagerPtr
     }
 };
-use ever_block::{error, fail, Block, BlockIdExt, Deserializable, Result, ShardIdent, UInt256, ValidatorSet};
+use ever_block::{Block, BlockIdExt, Deserializable, Result, ShardIdent, UInt256, ValidatorSet};
 use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
+use crate::validator::validator_utils::PrevBlockHistory;
 
 #[allow(dead_code)]
 pub async fn run_validate_query_any_candidate(
@@ -40,7 +40,7 @@ pub async fn run_validate_query_any_candidate(
     let real_block = Block::construct_from_bytes(&block.data)?;
     let shard = block.block_id.shard().clone();
     let info = real_block.read_info()?;
-    let prev = info.read_prev_ids()?;
+    let prev = PrevBlockHistory::new_prevs(&shard, &info.read_prev_ids()?);
     let mc_state = engine.load_last_applied_mc_state().await?;
     let min_masterchain_block_id = mc_state.find_block_id(info.min_ref_mc_seqno())?;
     let mut cc_seqno_with_delta = 0;
@@ -67,7 +67,7 @@ pub async fn run_validate_query_any_candidate(
         shard,
         SystemTime::now(),
         min_masterchain_block_id,
-        prev,
+        &prev,
         block,
         validator_set,
         engine,
@@ -80,7 +80,7 @@ pub async fn run_validate_query(
     shard: ShardIdent,
     _min_ts: SystemTime,
     min_masterchain_block_id: BlockIdExt,
-    prev: Vec<BlockIdExt>,
+    prev: &PrevBlockHistory,
     block: super::BlockCandidate,
     set: ValidatorSet,
     engine: Arc<dyn EngineOperations>,
@@ -89,27 +89,14 @@ pub async fn run_validate_query(
 ) -> Result<SystemTime> {
 
     let next_block_descr = fmt_next_block_descr(&block.block_id);
-    let mc = engine.load_last_applied_mc_state().await?;
-    let shard_info = mc.shard_state_extra()?.shards().find_shard(&shard)?.ok_or_else(|| error!("shard {} not found", shard))?;
-    let last_shard_block = shard_info.block_id();
-    let next_seqno = prev.iter().map(|x| x.seq_no).max().unwrap_or_default() + 1;
 
     log::info!(
         target: "validator", 
-        "({}): before validator query shard: {}, min: {}, seqno: {}, last shard seqno: {}",
+        "({}): before validator query shard: {}, min: {}",
         next_block_descr,
         shard,
         min_masterchain_block_id,
-        next_seqno,
-        last_shard_block.seq_no
     );
-
-    if last_shard_block.seq_no >= next_seqno {
-        fail!(
-            "Attempting to validate obsolete block {}, expected seqno {}, actual last shard block {}",
-            next_block_descr, next_seqno, last_shard_block
-        );
-    }
 
     let labels = [("shard", shard.to_string())];
     #[cfg(not(feature = "statsd"))]
@@ -120,7 +107,7 @@ pub async fn run_validate_query(
         ValidateQuery::new(
             shard.clone(),
             min_masterchain_block_id.seq_no(),
-            prev,
+            prev.get_prevs().clone(),
             block,
             set,
             engine.clone(),
@@ -132,7 +119,7 @@ pub async fn run_validate_query(
         let query = ValidateQuery::new(
             shard.clone(),
             min_masterchain_block_id.seq_no(),
-            prev.clone(),
+            prev.get_prevs().clone(),
             block.clone(),
             set,
             engine.clone(),
@@ -149,10 +136,11 @@ pub async fn run_validate_query(
                     let path = test_bundles_config.path().to_string();
                     let engine = engine.clone();
                     let shard = shard.clone();
+                    let prev_vec = prev.get_prevs().clone();
                     tokio::spawn(
                         async move {
                             match CollatorTestBundle::build_for_validating_block(
-                                shard, min_masterchain_block_id, prev, block, &engine
+                                shard, min_masterchain_block_id, prev_vec, block, &engine
                             ).await {
                                 Err(e) => log::error!(
                                     "({}): Error while test bundle for {} building: {}", next_block_descr, id, e
@@ -222,7 +210,7 @@ pub async fn run_collate_query (
     shard: ShardIdent,
     _min_ts: SystemTime,
     min_mc_seqno: u32,
-    prev: Vec<BlockIdExt>,
+    prev: &PrevBlockHistory,
     remp_collator_interface: Option<Arc<dyn RempQueueCollatorInterface>>,
     collator_id: PublicKey,
     set: ValidatorSet,
@@ -234,12 +222,12 @@ pub async fn run_collate_query (
     #[cfg(not(feature = "statsd"))]
     metrics::increment_gauge!("run_collators", 1.0, &labels);
 
-    let next_block_descr = fmt_next_block_descr_from_next_seqno(&shard, get_first_block_seqno_after_prevs(&prev));
+    let next_block_descr = prev.get_next_block_descr(None); //fmt_next_block_descr_from_next_seqno(&shard, get_first_block_seqno_after_prevs(&prev));
 
     let collator = collator::Collator::new(
         shard.clone(),
         min_mc_seqno,
-        prev.clone(),
+        prev,
         set,
         UInt256::from(collator_id.pub_key()?),
         engine.clone(),
@@ -276,17 +264,14 @@ pub async fn run_collate_query (
 
             if test_bundles_config.is_enable() {
                 if test_bundles_config.need_to_build_for(&err_str) {
-                    let id = BlockIdExt {
-                        shard_id: shard,
-                        seq_no: prev.iter().max_by_key(|id| id.seq_no()).unwrap().seq_no() + 1,
-                        root_hash: UInt256::default(),
-                        file_hash: UInt256::default(),
-                    };
+                    let id = prev.get_next_block_id(&UInt256::default(), &UInt256::default());
+                    let prev_vec = prev.get_prevs().clone();
+
                     if !CollatorTestBundle::exists(test_bundles_config.path(), &id) {
                         let path = test_bundles_config.path().to_string();
                         let engine = engine.clone();
                         tokio::spawn(async move {
-                            match CollatorTestBundle::build_for_collating_block(prev, &engine).await {
+                            match CollatorTestBundle::build_for_collating_block(prev_vec, &engine).await {
                                 Err(e) => log::error!("({}): Error while test bundle for {} building: {}", next_block_descr, id, e),
                                 Ok(mut b) => {
                                     b.set_notes(err_str.to_string());
