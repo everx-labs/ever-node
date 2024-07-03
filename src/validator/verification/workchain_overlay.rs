@@ -34,7 +34,7 @@ use adnl::{OverlayShortId, PrivateOverlayShortId};
 use std::time::Duration;
 use ton_api::ton::ton_node::blockcandidatestatus::BlockCandidateStatus;
 use ton_api::ton::ton_node::Broadcast;
-use ever_block::{error, Result};
+use ever_block::{error, fail, Result};
 
 //TODO: traffic metrics & derivatives
 //TODO: remove dependency from CatchainClient? (use private overlay directly)
@@ -46,6 +46,8 @@ use ever_block::{error, Result};
 */
 
 const USE_QUERIES_FOR_BLOCK_STATUS: bool = false; //use queries for block status delivery, otherwise use messages
+const MIN_CANDIDATE_NEIGHBOURS_COUNT: usize = 3; //min number of neighbours to synchronize
+const MAX_CANDIDATE_NEIGHBOURS_COUNT: usize = 10; //max number of neighbours to synchronize
 
 /*
 ===============================================================================
@@ -138,7 +140,7 @@ impl WorkchainOverlay {
         let result = network.set_validator_list(overlay_id.clone(), &nodes).await?;
 
         if result.is_none() {
-            failure::bail!("Can't resolve ADNL IDs for overlay_id={}", overlay_id.to_hex_string());
+            fail!("Can't resolve ADNL IDs for overlay_id={}", overlay_id.to_hex_string());
         }
 
         let in_broadcast_counter = metrics_receiver.sink().register_counter(&format!("{}_in_broadcasts", metrics_prefix).into());
@@ -165,12 +167,15 @@ impl WorkchainOverlay {
         let replay_listener: Arc<dyn CatchainOverlayLogReplayListener + Send + Sync> =
             listener.clone();
 
+        let broadcast_hops = ((active_validators_count as f64).sqrt() as usize).clamp(MIN_CANDIDATE_NEIGHBOURS_COUNT, MAX_CANDIDATE_NEIGHBOURS_COUNT);
+
         let overlay = network.create_catchain_client(
             overlay_id.clone(),
             &overlay_short_id,
             &nodes,
             Arc::downgrade(&overlay_listener),
             Arc::downgrade(&replay_listener),
+            Some(broadcast_hops),
         )?;
 
         let active_validators_adnl_ids: Vec<PublicKeyHash> = nodes[0..active_validators_count].iter().map(|node| node.adnl_id.clone()).collect();
@@ -342,7 +347,9 @@ impl Drop for WorkchainOverlay {
             network.stop_catchain_client(&self.overlay_short_id);
         }
 
-        let _result = self.engine.remove_validator_list(self.overlay_id.clone());
+        if let Err(e) = self.engine.remove_validator_list(self.overlay_id.clone()) {
+            log::warn!(target: "verificator", "Error when removing validator list: {}", e)
+        }
     }
 }
 
@@ -523,17 +530,17 @@ impl WorkchainListener {
                                 return Ok(block);
                             }
                             Err(err) => {
-                                failure::bail!("Can't process message received from {} in verification workchain's #{} private overlay: {:?}", adnl_id, workchain_id, err);
+                                fail!("Can't process message received from {} in verification workchain's #{} private overlay: {:?}", adnl_id, workchain_id, err);
                             }
                         }
                     }
                     Err(message) => message
                 };
 
-                failure::bail!("Unexpected message received in verification workchain's #{} private overlay: {:?}", workchain_id, message);
+                fail!("Unexpected message received in verification workchain's #{} private overlay: {:?}", workchain_id, message);
             }
             Err(err) => {
-                failure::bail!("Can't parse message received from {} in verification workchain's #{} private overlay: {:?}: {:?}", adnl_id, workchain_id, data.data(), err);
+                fail!("Can't parse message received from {} in verification workchain's #{} private overlay: {:?}: {:?}", adnl_id, workchain_id, data.data(), err);
             }
         }
     }

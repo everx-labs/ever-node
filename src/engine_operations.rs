@@ -160,8 +160,8 @@ impl EngineOperations for Engine {
         self.remove_last_collation_time(shard)
     }
 
-    async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
-        self.validator_network().remove_validator_list(validator_list_id).await
+    fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
+        self.validator_network().remove_validator_list(validator_list_id)
     }
 
     fn create_catchain_client(
@@ -170,14 +170,16 @@ impl EngineOperations for Engine {
         overlay_short_id : &Arc<PrivateOverlayShortId>,
         nodes_public_keys : &Vec<CatchainNode>,
         listener : CatchainOverlayListenerPtr,
-        _log_replay_listener: CatchainOverlayLogReplayListenerPtr
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
+        broadcast_hops: Option<usize>,
     ) -> Result<Arc<dyn CatchainOverlay + Send>> {
         self.validator_network().create_catchain_client(
             validator_list_id,
             overlay_short_id,
             nodes_public_keys,
             listener,
-            _log_replay_listener
+            _log_replay_listener,
+            broadcast_hops,
         )
     }
 
@@ -1087,9 +1089,10 @@ impl EngineOperations for Engine {
     }
     async fn get_own_shard_blocks(
         &self, 
-        mc_state: &Arc<ShardStateStuff>
+        mc_state: &Arc<ShardStateStuff>,
+        actual_last_mc_seqno: Option<&mut u32>,
     ) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
-        self.shard_blocks().get_shard_blocks(mc_state, self, true, None).await
+        self.shard_blocks().get_shard_blocks(mc_state, self, true, actual_last_mc_seqno).await
     }
 
     // Save tsb into persistent storage

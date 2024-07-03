@@ -26,6 +26,7 @@ use catchain::PublicKeyHash;
 use catchain::profiling::ResultStatusCounter;
 use catchain::profiling::InstanceCounter;
 use catchain::check_execution_time;
+use ever_block::fail;
 use log::*;
 use rand::Rng;
 use tokio::time::sleep;
@@ -55,8 +56,6 @@ use catchain::utils::add_compute_result_metric;
 //TODO: cutoff weight configuration
 const MIN_FORWARDING_NEIGHBOURS_COUNT: usize = 5; //min number of neighbours to synchronize
 const MAX_FORWARDING_NEIGHBOURS_COUNT: usize = 32; //max number of neighbours to synchronize
-const MIN_CANDIDATE_NEIGHBOURS_COUNT: usize = 3; //min number of neighbours to synchronize
-const MAX_CANDIDATE_NEIGHBOURS_COUNT: usize = 10; //max number of neighbours to synchronize
 const BLOCK_SYNC_MIN_PERIOD_MS: u64 = 300; //min time for block sync
 const BLOCK_SYNC_MAX_PERIOD_MS: u64 = 600; //max time for block sync
 const MIN_FAR_NEIGHBOURS_COUNT: usize = 2; //min far neighbours count
@@ -80,7 +79,6 @@ pub type WorkchainPtr = Arc<Workchain>;
 struct WorkchainDeliveryParams {
     block_status_forwarding_neighbours_count: usize, //neighbours count for block status synchronization
     block_status_far_neighbours_count: usize,        //far neighbours count for block status synchronization
-    block_candidate_neighbours_count: usize,         //neighbours count for block candidate synchronization
 }
 
 pub struct Workchain {
@@ -206,7 +204,7 @@ impl Workchain {
         }
 
         if local_adnl_id.is_none() {
-            failure::bail!("local_adnl_id must exist for workchain {}", workchain_id);
+            fail!("local_adnl_id must exist for workchain {}", workchain_id);
         }
 
         let local_adnl_id = local_adnl_id.as_ref().expect("local_adnl_id must exist").clone();
@@ -322,7 +320,6 @@ impl Workchain {
             workchain_delivery_params: SpinMutex::new(WorkchainDeliveryParams {
                 block_status_forwarding_neighbours_count: 0,
                 block_status_far_neighbours_count: 0,
-                block_candidate_neighbours_count: 0,
             }),
             mc_overlay: SpinMutex::new(None),
             workchain_overlay: SpinMutex::new(None),
@@ -1120,7 +1117,7 @@ impl Workchain {
         let rejections_signature = MultiSignature::deserialize(3, &candidate_id, &wc_pub_key_refs, &block_status.rejections_signature);
 
         if let Err(err) = deliveries_signature {
-            failure::bail!(
+            fail!(
                 "Can't parse block candidate status (deliveries signature) {:?}: {:?}",
                 block_status,
                 err
@@ -1128,7 +1125,7 @@ impl Workchain {
         }
 
         if let Err(err) = approvals_signature {
-            failure::bail!(
+            fail!(
                 "Can't parse block candidate status (approvals signature) {:?}: {:?}",
                 block_status,
                 err
@@ -1136,7 +1133,7 @@ impl Workchain {
         }
 
         if let Err(err) = rejections_signature {
-            failure::bail!(
+            fail!(
                 "Can't parse block candidate status (rejections signature) {:?}: {:?}",
                 block_status,
                 err
@@ -1441,7 +1438,6 @@ impl Workchain {
         //TODO: implement dynamic configuration
 
         params.block_status_forwarding_neighbours_count = ((self.wc_validators.len() as f64).sqrt() as usize).clamp(MIN_FORWARDING_NEIGHBOURS_COUNT, MAX_FORWARDING_NEIGHBOURS_COUNT);
-        params.block_candidate_neighbours_count = ((self.wc_validators.len() as f64).sqrt() as usize).clamp(MIN_CANDIDATE_NEIGHBOURS_COUNT, MAX_CANDIDATE_NEIGHBOURS_COUNT);
         params.block_status_far_neighbours_count = ((params.block_status_forwarding_neighbours_count as f64).sqrt() as usize).clamp(MIN_FAR_NEIGHBOURS_COUNT, MAX_FAR_NEIGHBOURS_COUNT);
 
         params.clone()

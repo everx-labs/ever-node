@@ -88,7 +88,7 @@ impl RempReceiptsSubscriber for RempClient {
         log::info!("Processing REMP receipt for {} from {}", id, source);
         self.process_remp_receipt(receipt, source).await
             .map_err(|e| {
-                log::error!("Error while processing REMP receipt for {:x} from {}: {}", id, source, e);
+                log::warn!("Processing REMP receipt for {:x} from {}: {}", id, source, e);
                 e
             })?;
         log::info!("Processed REMP receipt for {}  from {}", id, source);
@@ -196,7 +196,7 @@ impl RempClient {
                 );
             }
             Err(e) => {
-                log::error!("Error while processing REMP message {:x}: {}", id, e);
+                log::warn!("Processing REMP message {:x}: {}", id, e);
                 #[cfg(feature = "telemetry")] {
                     if let Some(engine) = self.engine.get() {
                         engine.remp_client_telemetry().set_message_rejected(&id);
@@ -222,7 +222,7 @@ impl RempClient {
             match self.process_block(&block, true, None) {
                 Ok(_) => log::trace!("Processed new shard block {}", block.id()),
                 Err(e) => {
-                    log::error!("Error while processing new shard block {}: {}", block.id(), e);
+                    log::error!("Processing new shard block {}: {}", block.id(), e);
                 }
             }
         });
@@ -349,11 +349,11 @@ impl RempClient {
             prev_handle = handle;
 
             if let Err(e) = self.process_new_master_block(&block, &mut shard_blocks_observer).await {
-                log::error!("Error while check master block for applied messages: {}", e);
+                log::error!("Check master block for applied messages: {}", e);
             }
 
             if let Err(e) = self.resolve_validators_if_need(&block, &mut validators).await {
-                log::error!("Error while check master block for applied messages: {}", e);
+                log::error!("Check master block for applied messages: {}", e);
             }
         }
     }

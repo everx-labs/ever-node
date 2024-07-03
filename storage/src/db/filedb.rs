@@ -17,7 +17,7 @@ use crate::{
 };
 use std::{io::{ErrorKind, SeekFrom, Write, Read, Seek}, path::{Path, PathBuf}};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use ever_block::{error, Result};
+use ever_block::{error, Error, Result};
 
 #[derive(Debug)]
 pub struct FileDb {
@@ -142,7 +142,7 @@ impl FileDb {
         result
     }
 
-    fn transform_io_error(err: std::io::Error, key: &[u8]) -> failure::Error {
+    fn transform_io_error(err: std::io::Error, key: &[u8]) -> Error {
         match err.kind() {
             ErrorKind::NotFound => StorageError::KeyNotFound("&[u8]", hex::encode(key)).into(),
             ErrorKind::UnexpectedEof => StorageError::OutOfRange.into(),

@@ -484,7 +484,7 @@ impl NodeNetwork {
             }
 
             let mut peers = self.get_peers_from_storage(client_overlay.overlay_id())?
-                .ok_or_else(|| failure::err_msg("Load peers from storage is fail!")
+                .ok_or_else(|| error!("Load peers from storage is fail!")
             )?;
 
             log::info!("new node: {:?}", &key.id());
@@ -1316,7 +1316,7 @@ impl PrivateOverlayOperations for NodeNetwork {
         Ok(())
     }
 
-    async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
+    fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
         let context = self.validator_context.sets_contexts.get(&validator_list_id);
         let mut status = false;
         if let Some(context) = context {
@@ -1357,7 +1357,8 @@ impl PrivateOverlayOperations for NodeNetwork {
         overlay_short_id : &Arc<PrivateOverlayShortId>,
         nodes_public_keys : &Vec<CatchainNode>,
         listener : CatchainOverlayListenerPtr,
-        _log_replay_listener: CatchainOverlayLogReplayListenerPtr
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
+        broadcast_hops: Option<usize>,
     ) -> Result<Arc<dyn CatchainOverlay + Send>> {
     
         let validator_set_context = self.validator_context.sets_contexts.get(&validator_list_id)
@@ -1379,7 +1380,8 @@ impl PrivateOverlayOperations for NodeNetwork {
                     nodes_public_keys,
                     &adnl_key,
                     validator_set_context.val().validator_key.clone(),
-                    listener.clone()
+                    listener.clone(),
+                    broadcast_hops,
                 )?;
                 Ok(Arc::new(ret))
             }

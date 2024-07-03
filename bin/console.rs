@@ -21,7 +21,10 @@ use ever_block::{
     UInt256, write_boc
 };
 use ever_block_json::parse_state;
-use std::{collections::HashMap, convert::TryInto, env, str::FromStr, time::Duration};
+use std::{
+    collections::HashMap, convert::TryInto, env, net::SocketAddr, str::FromStr, time::Duration
+};
+use tokio::io::AsyncReadExt;
 use ton_api::{
     serialize_boxed,
     ton::{
@@ -39,31 +42,36 @@ const ELECTOR_ABI: &[u8] = include_bytes!("Elector.abi.json"); //elector's ABI
 const ELECTOR_PROCESS_NEW_STAKE_FUNC_NAME: &str = "process_new_stake"; //elector process_new_stake function name
 const USE_FIFTH_ELECTOR: bool = true;
 
-trait SendReceive {
-    fn send<Q: ToString>(params: impl Iterator<Item = Q>) -> Result<TLObject>;
-    fn receive<Q: ToString>(
+trait SendReceive<Q> {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject>;
+    fn receive(
         answer: TLObject, 
-        _params: impl Iterator<Item = Q>
+        _params: &mut impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
         downcast::<ton_api::ton::engine::validator::Success>(answer)?;
         Ok(("success".to_string(), vec![]))
     }
 }
 
+/*
 trait ConsoleCommand: SendReceive {
     fn _name() -> &'static str;
     fn help() -> &'static str;
 }
+*/
 
 macro_rules! commands {
     ($($command: ident, $name: literal, $help: literal)*) => {
         $(
             struct $command;
+/*
             impl ConsoleCommand for $command {
                 fn _name() -> &'static str {$name}
                 fn help() -> &'static str {$help}
             }
+*/
         )*
+/*
         #[allow(dead_code)]
         fn command_help(name: &str) -> Result<&str> {
             match name {
@@ -71,7 +79,11 @@ macro_rules! commands {
                 _ => fail!("command {} not supported", name)
             }
         }
-        fn command_send<Q: ToString>(name: &str, params: impl Iterator<Item = Q>) -> Result<TLObject> {
+*/
+        fn command_send<Q: ToString>(
+            name: &str, 
+            params: &mut impl Iterator<Item = Q>
+        ) -> Result<TLObject> {
             match name {
                 $($name => $command::send(params), )*
                 _ => fail!("command {} not supported", name)
@@ -80,7 +92,7 @@ macro_rules! commands {
         fn command_receive<Q: ToString>(
             name: &str,
             answer: TLObject,
-            params: impl Iterator<Item = Q>
+            params: &mut impl Iterator<Item = Q>
         ) -> Result<(String, Vec<u8>)> {
             match name {
                 $($name => $command::receive(answer, params), )*
@@ -91,25 +103,44 @@ macro_rules! commands {
 }
 
 commands! {
-    AddAdnlAddr, "addadnl", "addadnl <keyhash> <category>\tuse key as ADNL addr"
-    AddValidatorAdnlAddr, "addvalidatoraddr", "addvalidatoraddr <permkeyhash> <keyhash> <expireat>\tadd validator ADNL addr"
-    AddValidatorPermKey, "addpermkey", "addpermkey <keyhash> <election-date> <expire-at>\tadd validator permanent key"
-    AddValidatorTempKey, "addtempkey", "addtempkey <permkeyhash> <keyhash> <expire-at>\tadd validator temp key"
-    AddValidatorBlsKey, "addblskey", "addblskey <permkeyhash> <keyhash> <expire-at>\t add validator bls key"
-    Bundle, "bundle", "bundle <block_id>\tprepare bundle"
-    ExportPub, "exportpub", "exportpub <keyhash>\texports public key by key hash"
-    FutureBundle, "future_bundle", "future_bundle <block_id>\tprepare future bundle"
-    GetAccount, "getaccount", "getaccount <account id> <Option<file name>>\tget account info"
-    GetAccountState, "getaccountstate", "getaccountstate <account id> <file name>\tsave accountstate to file"
-    GetBlockchainConfig, "getblockchainconfig", "getblockchainconfig\tget current config from masterchain state"
-    GetConfig, "getconfig", "getconfig <param_number>\tget current config param from masterchain state"
-    GetSessionStats, "getconsensusstats", "getconsensusstats\tget consensus statistics for the node"
-    GetSelectedStats, "getstatsnew", "getstatsnew\tget status full node or validator in new format"
-    GetStats, "getstats", "getstats\tget status full node or validator"
-    NewKeypair, "newkey", "newkey\tgenerates new key pair on server"
-    SendMessage, "sendmessage", "sendmessage <filename>\tload a serialized message from <filename> and send it to server"
-    SetStatesGcInterval, "setstatesgcinterval", "setstatesgcinterval <milliseconds>\tset interval in <milliseconds> between shard states GC runs"
-    Sign, "sign", "sign <keyhash> <data>\tsigns bytestring with privkey"
+    AddAdnlAddr, "addadnl", 
+        "addadnl <keyhash> <category>\tuse key as ADNL addr"
+    AddValidatorAdnlAddr, "addvalidatoraddr", 
+        "addvalidatoraddr <permkeyhash> <keyhash> <expireat>\tadd validator ADNL addr"
+    AddValidatorPermKey, "addpermkey", 
+        "addpermkey <keyhash> <election-date> <expire-at>\tadd validator permanent key"
+    AddValidatorTempKey, "addtempkey", 
+        "addtempkey <permkeyhash> <keyhash> <expire-at>\tadd validator temp key"
+    AddValidatorBlsKey, "addblskey", 
+        "addblskey <permkeyhash> <keyhash> <expire-at>\t add validator bls key"
+    Bundle, "bundle", 
+        "bundle <block_id>\tprepare bundle"
+    ExportPub, "exportpub", 
+        "exportpub <keyhash>\texports public key by key hash"
+    FutureBundle, "future_bundle", 
+        "future_bundle <block_id>\tprepare future bundle"
+    GetAccount, "getaccount", 
+        "getaccount <account id> <Option<file name>>\tget account info"
+    GetAccountState, "getaccountstate", 
+        "getaccountstate <account id> <file name>\tsave accountstate to file"
+    GetBlockchainConfig, "getblockchainconfig", 
+        "getblockchainconfig\tget current config from masterchain state"
+    GetConfig, "getconfig", 
+        "getconfig <param_number>\tget current config param from masterchain state"
+    GetSessionStats, "getconsensusstats", 
+        "getconsensusstats\tget consensus statistics for the node"
+    GetSelectedStats, "getstatsnew", 
+        "getstatsnew\tget status full node or validator in new format"
+    GetStats, "getstats", 
+        "getstats\tget status full node or validator"
+    NewKeypair, "newkey", 
+        "newkey\tgenerates new key pair on server"
+    SendMessage, "sendmessage", 
+        "sendmessage <filename>\tload a serialized message from <filename> and send it to server"
+    SetStatesGcInterval, "setstatesgcinterval", 
+        "setstatesgcinterval <milliseconds>\tset interval in ms between shard states GC runs"
+    Sign, "sign", 
+        "sign <keyhash> <data>\tsigns bytestring with privkey"
 }
 
 fn parse_any<A, Q: ToString>(param_opt: Option<Q>, name: &str, parse_value: impl FnOnce(&str) -> Result<A>) -> Result<A> {
@@ -177,14 +208,11 @@ fn stats_to_json<'a>(stats: impl IntoIterator<Item = &'a OneStat>) -> serde_json
     map.into()
 }
 
-impl SendReceive for GetStats {
-    fn send<Q: ToString>(_params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for GetStats {
+    fn send(_params: &mut impl Iterator) -> Result<TLObject> {
         Ok(TLObject::new(ton::rpc::engine::validator::GetStats))
     }
-    fn receive<Q: ToString>(
-        answer: TLObject, 
-        mut _params: impl Iterator<Item = Q>
-    ) -> Result<(String, Vec<u8>)> {
+    fn receive(answer: TLObject, _params: &mut impl Iterator) -> Result<(String, Vec<u8>)> {
         let data = serialize_boxed(&answer)?;
         let stats = downcast::<ton_api::ton::engine::validator::Stats>(answer)?;
         let description = stats_to_json(stats.stats().iter());
@@ -193,17 +221,14 @@ impl SendReceive for GetStats {
     }
 }
 
-impl SendReceive for GetSelectedStats {
-    fn send<Q: ToString>(_params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for GetSelectedStats {
+    fn send(_params: &mut impl Iterator) -> Result<TLObject> {
         let req = ton::rpc::engine::validator::GetSelectedStats {
             filter: "*".to_string()
         };
         Ok(TLObject::new(req))
     }
-    fn receive<Q: ToString>(
-        answer: TLObject, 
-        mut _params: impl Iterator<Item = Q>
-    ) -> Result<(String, Vec<u8>)> {
+    fn receive(answer: TLObject, _params: &mut impl Iterator) -> Result<(String, Vec<u8>)> {
         let data = serialize_boxed(&answer)?;
         let stats = downcast::<ton_api::ton::engine::validator::Stats>(answer)?;
         let description = stats_to_json(stats.stats().iter());
@@ -212,14 +237,11 @@ impl SendReceive for GetSelectedStats {
     }
 }
 
-impl SendReceive for GetSessionStats {
-    fn send<Q: ToString>(_params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for GetSessionStats {
+    fn send(_params: &mut impl Iterator) -> Result<TLObject> {
         Ok(TLObject::new(ton::rpc::engine::validator::GetSessionStats))
     }
-    fn receive<Q: ToString>(
-        answer: TLObject, 
-        mut _params: impl Iterator<Item = Q>
-    ) -> Result<(String, Vec<u8>)> {
+    fn receive(answer: TLObject, _params: &mut impl Iterator) -> Result<(String, Vec<u8>)> {
         let data = serialize_boxed(&answer)?;
         let stats = downcast::<ton_api::ton::engine::validator::SessionStats>(answer)?;
         let description = stats.stats().iter().map(|session_stat| {
@@ -230,24 +252,19 @@ impl SendReceive for GetSessionStats {
     }
 }
 
-impl SendReceive for NewKeypair {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for NewKeypair {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         match params.next() {
             None => Ok(TLObject::new(ton::rpc::engine::validator::GenerateKeyPair)),
             Some(param) => {
-                let mut param = param.to_string();
-                param.make_ascii_lowercase();
-                match param.as_ref() {
+                match param.to_string().to_lowercase().as_str() {
                     "bls" => Ok(TLObject::new(ton::rpc::engine::validator::GenerateBlsKeyPair)),
                     _ => fail!("invalid parameters!")
                 }
             },
         }
     }
-    fn receive<Q: ToString>(
-        answer: TLObject, 
-        mut _params: impl Iterator<Item = Q>
-    ) -> Result<(String, Vec<u8>)> {
+    fn receive(answer: TLObject, _params: &mut impl Iterator) -> Result<(String, Vec<u8>)> {
         let answer = downcast::<ton_api::ton::engine::validator::KeyHash>(answer)?;
         let key_hash = answer.key_hash().as_slice().to_vec();
         let msg = format!(
@@ -258,17 +275,14 @@ impl SendReceive for NewKeypair {
     }
 }
 
-impl SendReceive for ExportPub {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for ExportPub {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let key_hash = parse_int256(params.next(), "key_hash")?;
         Ok(TLObject::new(ton::rpc::engine::validator::ExportPublicKey {
             key_hash
         }))
     }
-    fn receive<Q: ToString>(
-        answer: TLObject, 
-        mut _params: impl Iterator<Item = Q>
-    ) -> Result<(String, Vec<u8>)> {
+    fn receive(answer: TLObject, _params: &mut impl Iterator) -> Result<(String, Vec<u8>)> {
         let answer = downcast::<ton_api::ton::PublicKey>(answer)?;
         let pub_key = match answer.key() {
             Some(key) => key.clone().into_vec(),
@@ -283,8 +297,8 @@ impl SendReceive for ExportPub {
     }
 }
 
-impl SendReceive for Sign {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for Sign {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let key_hash = parse_int256(params.next(), "key_hash")?;
         let data = parse_data(params.next(), "data")?;
         Ok(TLObject::new(ton::rpc::engine::validator::Sign {
@@ -292,10 +306,7 @@ impl SendReceive for Sign {
             data
         }))
     }
-    fn receive<Q: ToString>(
-        answer: TLObject, 
-        mut _params: impl Iterator<Item = Q>
-    ) -> Result<(String, Vec<u8>)> {
+    fn receive(answer: TLObject, _params: &mut impl Iterator) -> Result<(String, Vec<u8>)> {
         let answer = downcast::<ton_api::ton::engine::validator::Signature>(answer)?;
         let signature = answer.signature().clone();
         let msg = format!(
@@ -306,8 +317,8 @@ impl SendReceive for Sign {
     }
 }
 
-impl SendReceive for AddValidatorPermKey {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for AddValidatorPermKey {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let key_hash =  parse_int256(params.next(), "key_hash")?;
         let election_date = parse_int(params.next(), "election_date")?;
         let ttl = parse_int(params.next(), "expire_at")? - election_date;
@@ -319,8 +330,8 @@ impl SendReceive for AddValidatorPermKey {
     }
 }
 
-impl SendReceive for AddValidatorBlsKey {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for AddValidatorBlsKey {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let permanent_key_hash = parse_int256(params.next(), "permanent_key_hash")?;
         let key_hash =  parse_int256(params.next(), "key_hash")?;
         let ttl = parse_int(params.next(), "expire_at")? - now();
@@ -332,8 +343,8 @@ impl SendReceive for AddValidatorBlsKey {
     }
 }
 
-impl SendReceive for AddValidatorTempKey {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for AddValidatorTempKey {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let permanent_key_hash = parse_int256(params.next(), "permanent_key_hash")?;
         let key_hash = parse_int256(params.next(), "key_hash")?;
         let ttl = parse_int(params.next(), "expire_at")? - now();
@@ -345,8 +356,8 @@ impl SendReceive for AddValidatorTempKey {
     }
 }
 
-impl SendReceive for AddValidatorAdnlAddr {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for AddValidatorAdnlAddr {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let permanent_key_hash = parse_int256(params.next(), "permanent_key_hash")?;
         let key_hash = parse_int256(params.next(), "key_hash")?;
         let ttl = parse_int(params.next(), "expire_at")? - now();
@@ -358,8 +369,8 @@ impl SendReceive for AddValidatorAdnlAddr {
     }
 }
 
-impl SendReceive for AddAdnlAddr {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for AddAdnlAddr {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let key_hash = parse_int256(params.next(), "key_hash")?;
         let category = parse_int(params.next(), "category")?;
         if category < 0 || category > 15 {
@@ -372,8 +383,8 @@ impl SendReceive for AddAdnlAddr {
     }
 }
 
-impl SendReceive for Bundle {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for Bundle {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let block_id = parse_blockid(params.next(), "block_id")?;
         Ok(TLObject::new(ton::rpc::engine::validator::GetBundle {
             block_id
@@ -381,8 +392,8 @@ impl SendReceive for Bundle {
     }
 }
 
-impl SendReceive for FutureBundle {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for FutureBundle {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let mut prev_block_ids = vec![parse_blockid(params.next(), "block_id")?];
         if let Ok(block_id) = parse_blockid(params.next(), "block_id") {
             prev_block_ids.push(block_id);
@@ -393,8 +404,8 @@ impl SendReceive for FutureBundle {
     }
 }
 
-impl SendReceive for SendMessage {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for SendMessage {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let filename = params.next().ok_or_else(|| error!("insufficient parameters"))?.to_string();
         let body = std::fs::read(&filename)
             .map_err(|e| error!("Can't read file {} with message: {}", filename, e))?;
@@ -402,17 +413,25 @@ impl SendReceive for SendMessage {
     }
 }
 
-impl SendReceive for GetBlockchainConfig {
-    fn send<Q: ToString>(_params: impl Iterator<Item = Q>) -> Result<TLObject> {
+struct SendMessageBinary;
+impl <Q: AsRef<Vec<u8>>> SendReceive<Q> for SendMessageBinary {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
+        let mut body = Vec::new();
+        body.extend_from_slice( 
+            &params.next().ok_or_else(|| error!("No binary message body"))?.as_ref()[..]
+        );
+        Ok(TLObject::new(ton::rpc::lite_server::SendMessage { body }))
+    }
+}
+
+impl <Q: ToString> SendReceive<Q> for GetBlockchainConfig {
+    fn send(_params: &mut impl Iterator) -> Result<TLObject> {
         Ok(TLObject::new(ton::rpc::lite_server::GetConfigAll {
             mode: 0,
             id: BlockIdExt::default()
         }))
     }
-    fn receive<Q: ToString>(
-        answer: TLObject, 
-        mut _params: impl Iterator<Item = Q>
-    ) -> Result<(String, Vec<u8>)> {
+    fn receive(answer: TLObject, _params: &mut impl Iterator) -> Result<(String, Vec<u8>)> {
         let config_info = downcast::<ton_api::ton::lite_server::ConfigInfo>(answer)?;
 
         // We use config_proof because we use standard struct ConfigInfo from ton-tl and
@@ -422,8 +441,8 @@ impl SendReceive for GetBlockchainConfig {
     }
 }
 
-impl SendReceive for GetConfig {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for GetConfig {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let param_number = parse_int(params.next(), "paramnumber")?;
         let mut params = Vec::new();
         params.push(param_number);
@@ -433,27 +452,28 @@ impl SendReceive for GetConfig {
             param_list: params
         }))
     }
-    fn receive<Q: ToString>(
-        answer: TLObject, 
-        mut _params: impl Iterator<Item = Q>
-    ) -> Result<(String, Vec<u8>)> {
+    fn receive(answer: TLObject, _params: &mut impl Iterator) -> Result<(String, Vec<u8>)> {
         let config_info = downcast::<ton_api::ton::lite_server::ConfigInfo>(answer)?;
-        let config_param = String::from_utf8(config_info.config_proof().clone())?;
-        Ok((config_param.to_string(), config_info.config_proof().clone()))
+        let config_proof = config_info.only().config_proof;
+        let config_param = String::from_utf8(config_proof.clone())?;
+        Ok((config_param, config_proof))
     }
 }
 
-impl SendReceive for GetAccount {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
+impl <Q: ToString> SendReceive<Q> for GetAccount {
+
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let account = AccountAddress { 
-            account_address: params.next().ok_or_else(|| error!("insufficient parameters"))?.to_string()
+            account_address: params.next().ok_or_else(
+                || error!("insufficient parameters")
+            )?.to_string()
         };
         Ok(TLObject::new(ton::rpc::raw::GetShardAccountState {account_address: account}))
     }
 
-    fn receive<Q: ToString>(
+    fn receive(
         answer: TLObject, 
-        mut params: impl Iterator<Item = Q>
+        params: &mut impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
         let shard_account_state = downcast::<ShardAccountState>(answer)?;
         let mut account_info = String::from("{");
@@ -503,18 +523,22 @@ impl SendReceive for GetAccount {
 
         Ok((account_info, account_data))
     }
+
 }
 
-impl SendReceive for GetAccountState {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
-        let account_address = params.next().ok_or_else(|| error!("insufficient parameters"))?.to_string();
+impl <Q: ToString> SendReceive<Q> for GetAccountState {
+
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
+        let account_address = params.next().ok_or_else(
+           || error!("insufficient parameters")
+        )?.to_string();
         let account_address = AccountAddress { account_address };
         Ok(TLObject::new(ton::rpc::raw::GetShardAccountState {account_address}))
     }
 
-    fn receive<Q: ToString>(
+    fn receive(
         answer: TLObject, 
-        mut params: impl Iterator<Item = Q>
+        params: &mut impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
         let shard_account_state = downcast::<ShardAccountState>(answer)?;
 
@@ -541,10 +565,14 @@ impl SendReceive for GetAccountState {
     }
 }
 
-impl SendReceive for SetStatesGcInterval {
-    fn send<Q: ToString>(mut params: impl Iterator<Item = Q>) -> Result<TLObject> {
-        let interval_ms_str = params.next().ok_or_else(|| error!("insufficient parameters"))?.to_string();
-        let interval_ms = interval_ms_str.parse().map_err(|e| error!("can't parse <milliseconds>: {}", e))?;
+impl <Q: ToString> SendReceive<Q> for SetStatesGcInterval {
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
+        let interval_ms_str = params.next().ok_or_else(
+            || error!("insufficient parameters")
+        )?.to_string();
+        let interval_ms = interval_ms_str.parse().map_err(
+            |e| error!("can't parse <milliseconds>: {}", e)
+        )?;
         Ok(TLObject::new(ton::rpc::engine::validator::SetStatesGcInterval { interval_ms }))
     }
 }
@@ -577,22 +605,24 @@ impl ControlClient {
         let result = shell_words::split(cmd)?;
         let mut params = result.iter();
         match params.next().expect("takes_value set for COMMANDS").as_str() {
-            "recover_stake" => self.process_recover_stake(params).await,
+            "config_param" |
+            "cparam" => self.process_config_param(&mut params).await,
             "ebid" |
             "election-bid" |
-            "election_bid" => self.process_election_bid(params).await,
-            "config_param" |
-            "cparam" => self.process_config_param(params).await,
-            name => self.process_command(name, params).await
+            "election_bid" => self.process_election_bid(&mut params).await,
+            "ext_msg_proxy" => self.process_ext_msg_proxy(&mut params).await,
+            "recover_stake" => self.process_recover_stake(&mut params).await,
+            name => self.process_command(name, &mut params).await
         }
     }
 
-    async fn process_command<Q: ToString>(
+    async fn process_any_type_command(
         &mut self,
         name: &str,
-        params: impl Iterator<Item = Q> + Clone
+        prepare: impl FnOnce(&str) -> Result<TLObject>,
+        process: impl FnOnce(&str, TLObject) -> Result<(String, Vec<u8>)>
     ) -> Result<(String, Vec<u8>)> {
-        let query = command_send(name, params.clone())?;
+        let query = prepare(name)?;
         let boxed = ControlQuery {
             data: serialize_boxed(&query)?
         };
@@ -606,7 +636,7 @@ impl ControlClient {
         let answer = self.adnl.query(&boxed).await
             .map_err(|err| error!("Error receiving answer: {}", err))?;
         match answer.downcast::<ControlQueryError>() {
-            Err(answer) => match command_receive(name, answer, params) {
+            Err(answer) => match process(name, answer) {
                 Err(answer) => fail!("Wrong response to {:?}: {:?}", query, answer),
                 Ok(result) => Ok(result)
             }
@@ -614,9 +644,37 @@ impl ControlClient {
         }
     }
 
+    async fn process_binary_command<Q: AsRef<Vec<u8>>> (
+        &mut self,
+        name: &str,
+        params: &mut impl Iterator<Item = Q>
+    ) -> Result<(String, Vec<u8>)> {
+        if name != "sendmessage_binary" {
+            fail!("Wrong command name {}", name)
+        }
+        self.process_any_type_command(
+            name,
+            |_| SendMessageBinary::send(params),
+            |_, answer| SendMessageBinary::receive(answer, &mut Vec::<Vec<u8>>::new().iter())
+        ).await
+    }
+
+    async fn process_command<Q: ToString>(
+        &mut self,
+        name: &str,
+        params: &mut (impl Iterator<Item = Q> + Clone)
+    ) -> Result<(String, Vec<u8>)> {
+        let mut params_clone = params.clone();
+        self.process_any_type_command(
+            name,
+            |name| command_send(name, params),
+            |name, answer| command_receive(name, answer, &mut params_clone)
+        ).await
+    }
+
     async fn process_recover_stake<Q: ToString>(
         &mut self, 
-        mut params: impl Iterator<Item = Q>
+        params: &mut impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
         let query_id = now() as u64;
         // recover-stake.fif
@@ -646,8 +704,9 @@ impl ControlClient {
     // @output validator-query.boc
     async fn process_election_bid<Q: ToString>(
         &mut self, 
-        mut params: impl Iterator<Item = Q>
+        params: &mut impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
+
         let wallet_id = parse_any(self.config.wallet_id.as_ref(), "wallet_id", |value| {
             match value.strip_prefix("-1:") {
                 Some(stripped) => Ok(hex::decode(stripped)?),
@@ -672,35 +731,47 @@ impl ControlClient {
         }
         let max_factor = (max_factor * 65536.0) as u32;
 
-        let (s, perm) = self.process_command("newkey", Vec::<String>::new().iter()).await?;
+        let (s, perm) = self.process_command(
+            "newkey", 
+            &mut Vec::<String>::new().iter()
+        ).await?;
         log::trace!("{}", s);
         let perm_str = hex::encode_upper(&perm);
 
-        let (s, pub_key) = self.process_command("exportpub", [&perm_str].iter()).await?;
+        let (s, pub_key) = self.process_command(
+            "exportpub", 
+            &mut [&perm_str].iter()
+        ).await?;
         log::trace!("{}", s);
 
         let (s, _) = self.process_command(
             "addpermkey", 
-            [&perm_str, &elect_time_str, &expire_time_str].iter()
+            &mut [&perm_str, &elect_time_str, &expire_time_str].iter()
         ).await?;
         log::trace!("{}", s);
 
         let (s, _) = self.process_command(
             "addtempkey", 
-            [&perm_str, &perm_str, &expire_time_str].iter()
+            &mut [&perm_str, &perm_str, &expire_time_str].iter()
         ).await?;
         log::trace!("{}", s);
 
-        let (s, adnl) = self.process_command("newkey", Vec::<String>::new().iter()).await?;
+        let (s, adnl) = self.process_command(
+            "newkey", 
+            &mut Vec::<String>::new().iter()
+        ).await?;
         log::trace!("{}", s);
         let adnl_str = hex::encode_upper(&adnl);
 
-        let (s, _) = self.process_command("addadnl", [&adnl_str, "0"].iter()).await?;
+        let (s, _) = self.process_command(
+            "addadnl", 
+            &mut [&adnl_str, "0"].iter()
+        ).await?;
         log::trace!("{}", s);
 
         let (s, _) = self.process_command(
             "addvalidatoraddr", 
-            [&perm_str, &adnl_str, &elect_time_str].iter()
+            &mut [&perm_str, &adnl_str, &elect_time_str].iter()
         ).await?;
         log::trace!("{}", s);
 
@@ -712,17 +783,35 @@ impl ControlClient {
         data.extend_from_slice(&adnl);
         let data_str = hex::encode_upper(&data);
         log::trace!("data to sign {}", data_str);
-        let (s, signature) = self.process_command("sign", [&perm_str, &data_str].iter()).await?;
+        let (s, signature) = self.process_command(
+            "sign", 
+            &mut [&perm_str, &data_str].iter()
+        ).await?;
         log::trace!("{}", s);
         Ed25519KeyOption::from_public_key(&pub_key[..].try_into()?)
             .verify(&data, &signature)?;
 
         let body = if USE_FIFTH_ELECTOR {
+            let mut version = ever_node::validating_utils::supported_version();
+            if version >= 61 {
+                let (s, _) = self.process_command("getconfig", &mut ["8"].iter()).await?;
+                log::trace!("{}", s);
+                version = version.min(serde_json::from_str::<serde_json::Value>(&s)?
+                    .get("p8").ok_or_else(|| error!("no p8 in config param 8"))?
+                    .get("version").ok_or_else(|| error!("no version in config param 8"))?
+                    .as_u64().ok_or_else(|| error!("p8.version is not unsigned integer"))? as u32);
+            }
             let query_id = now() as u64;
             // validator-elect-signed.fif
             let mut data = 0x4E73744Bu32.to_be_bytes().to_vec();
             data.extend_from_slice(&query_id.to_be_bytes());
-            data.extend_from_slice(&pub_key);
+            if version >= 61 {
+                data.extend_from_slice(&pub_key[0..28]);
+                let version = version ^ u32::from_be_bytes([pub_key[28], pub_key[29], pub_key[30], pub_key[31]]);
+                data.extend_from_slice(&version.to_be_bytes());
+            } else {
+                data.extend_from_slice(&pub_key);
+            }
             data.extend_from_slice(&elect_time.to_be_bytes());
             data.extend_from_slice(&max_factor.to_be_bytes());
             data.extend_from_slice(&adnl);
@@ -733,14 +822,24 @@ impl ControlClient {
             let body = body.into_cell()?;
             body
         } else {
-            let (s, bls) = self.process_command("newkey", vec!["bls"].iter()).await?;
-            log::trace!("{}", s);
-            let bls_str = &hex::encode_upper(&bls)[..];
 
-            let (s, bls_pub_key) = self.process_command("exportpub", vec![bls_str].iter()).await?;
+            let (s, bls) = self.process_command(
+                "newkey", 
+                &mut ["bls"].iter()
+            ).await?;
+            log::trace!("{}", s);
+            let bls_str = hex::encode_upper(&bls);
+
+            let (s, bls_pub_key) = self.process_command(
+                "exportpub", 
+                &mut [&bls_str].iter()
+            ).await?;
             log::trace!("{}", s);
 
-            let (s, _) = self.process_command("addblskey", vec![perm_str.clone(), bls_str.to_string(), elect_time_str].iter()).await?;
+            let (s, _) = self.process_command(
+                "addblskey", 
+                &mut [&perm_str, &bls_str, &elect_time_str].iter()
+            ).await?;
             log::trace!("{}", s);
 
             let contract = Contract::load(ELECTOR_ABI).expect("Elector's ABI must be valid");
@@ -779,6 +878,7 @@ impl ControlClient {
                 .and_then(|builder| builder.into_cell())?;
             body
         };
+
         log::trace!("message body {}", body);
         let data = write_boc(&body)?;
         let path = params.next().map(
@@ -786,13 +886,116 @@ impl ControlClient {
         );
         std::fs::write(&path, &data)?;
         Ok((format!("Message body is {} saved to path {}", base64_encode(&data), path), data))
+
+    }
+
+    // @input <tcp-port-to-listen-to>
+    // @output <number-of-proxied-messages>
+    async fn process_ext_msg_proxy<Q: ToString>(
+        &mut self, 
+        params: &mut impl Iterator<Item = Q>
+    ) -> Result<(String, Vec<u8>)> {
+
+        async fn read_stream(         
+            stream: &mut tokio::net::TcpStream,
+            token: &tokio_util::sync::CancellationToken
+        ) -> Result<Vec<u8>> {
+            let mut buf = [0u8; 2];
+            tokio::select! {
+                len = stream.read_exact(&mut buf) => len?,
+                _ = token.cancelled() => fail!("Proxy cancelled")
+            };
+            let len = ((buf[0] as usize) << 8) | (buf[1] as usize);
+            let mut buf = vec![0u8; len];
+            tokio::select! {
+                len = stream.read_exact(&mut buf) => len?,
+                _ = token.cancelled() => fail!("Proxy cancelled")
+            };
+            Ok(buf)
+        }
+
+        let Some(port) = params.next() else {
+            fail!("No TCP port specified")
+        };
+        let token = tokio_util::sync::CancellationToken::new();
+        let addr = SocketAddr::new([0, 0, 0, 0].into(), port.to_string().parse()?);
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let token_clone = token.clone();
+
+        tokio::spawn(
+            async move {
+                loop {
+                    let mut stream = tokio::select! {
+                        x = listener.accept() => match x {
+                            Err(e) => {
+                                log::warn!("Error in proxy listener: {}", e);
+                                break
+                            }
+                            Ok((stream, _)) => stream
+                        },
+                        _ = token_clone.cancelled() => break
+                    };
+                    let token = token_clone.clone();
+                    let sender = sender.clone();
+                    tokio::spawn(
+                        async move {
+                            loop {
+                                let msg = match read_stream(&mut stream, &token).await {
+                                    Err(e) => {
+                                        log::warn!("Proxy error: {}", e);
+                                        break
+                                    },
+                                    Ok(msg) => msg
+                                };
+                                if &msg[..] == "close_proxy".as_bytes() {
+                                    log::warn!("Close proxy signal received");
+                                    token.cancel();
+                                    break
+                                }
+                                match sender.send(msg) {
+                                    Err(e) => {
+                                        log::warn!("Proxy error: {}", e);
+                                        break
+                                    },
+                                    _ => ()
+                                }
+                            }
+                        }
+                    );
+                }
+            }
+        );
+
+        let mut count: u32 = 0;
+        loop {
+            let res = tokio::select! {
+                x = receiver.recv() => match x {
+                    None => break,
+                    Some(msg) => self.process_binary_command(
+                        "sendmessage_binary", 
+                         &mut [msg].iter()
+                    ).await
+                },
+                _ = token.cancelled() => break
+            };
+            if let Err(e) = res {
+                log::warn!("External message proxy error: {}", e);
+            }
+            count += 1;
+        }
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&count.to_be_bytes());
+        Ok((format!("{} external messages proxied", count), bytes))
+
     }
 
     // @input index zerostate.json <config-param.boc>
     // @output config-param.boc
     async fn process_config_param<Q: ToString>(
         &mut self, 
-        mut params: impl Iterator<Item = Q>
+        params: &mut impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
         let index = parse_int(params.next(), "index")?;
         if index < 0 {
@@ -937,9 +1140,14 @@ async fn main() {
 mod test {
     
     use super::*;
-    use std::{fs, path::Path, sync::Arc, thread};
+    use rand::{Rng, SeedableRng};
+    use std::{
+        cmp::min, fs, path::Path, sync::{Arc, atomic::{AtomicU64, Ordering}},
+        time::{Duration, Instant}, thread
+    };
     use serde_json::json;
     use storage::block_handle_db::BlockHandle;
+    use tokio::io::AsyncWriteExt;
     use ton_api::deserialize_boxed;
     use ever_block::{
         generate_test_account_by_init_code_hash,
@@ -963,6 +1171,7 @@ mod test {
     const DB_PATH: &str = "./target/node_db";
 
     struct TestEngine {
+        counter: Option<Arc<AtomicU64>>,
         db: InternalDb,
         master_state: Arc<ShardStateStuff>,
         master_state_id: BlockIdExt,
@@ -974,6 +1183,7 @@ mod test {
     impl TestEngine {
 
         async fn new(
+            counter: Option<Arc<AtomicU64>>,
             #[cfg(feature = "telemetry")]
             telemetry: Arc<EngineTelemetry>,
             allocated: Arc<EngineAlloc>
@@ -1065,6 +1275,7 @@ mod test {
             ).unwrap()._to_created().unwrap();
 
             Self {
+                counter,
                 db, 
                 master_state, 
                 master_state_id,
@@ -1149,6 +1360,12 @@ mod test {
             } else {
                 None
             })
+        }
+        async fn redirect_external_message(&self, _message: &[u8], _id: UInt256) -> Result<()> {
+            if let Some(counter) = &self.counter {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
         }
     }
     
@@ -1425,7 +1642,9 @@ mod test {
         }
     }"#;
 
-    async fn init_test() -> (ControlServer, ControlClient, Arc<TestEngine>) {
+    async fn init_test(
+        counter: Option<Arc<AtomicU64>>
+    ) -> (ControlServer, ControlClient, Arc<TestEngine>) {
         init_test_log();
         std::fs::write(Path::new(CFG_DIR).join(CFG_NODE_FILE), ADNL_SERVER_CONFIG).unwrap();
         std::fs::write(Path::new(CFG_DIR).join(CFG_GLOB_FILE), GLOBAL_CONFIG).unwrap();
@@ -1445,6 +1664,7 @@ mod test {
             allocated.clone()
         ).await.unwrap();
         let engine = TestEngine::new(
+            counter,
             #[cfg(feature = "telemetry")]
             telemetry, 
             allocated
@@ -1476,7 +1696,7 @@ mod test {
     }
 
     async fn test_one_cmd(cmd: &str, check_result: impl FnOnce(Vec<u8>)) {
-        let (server, mut client, engine) = init_test().await;
+        let (server, mut client, engine) = init_test(None).await;
         let (_, result) = client.command(cmd).await.unwrap();
         check_result(result);
         done_test(server, client, engine).await;
@@ -1636,7 +1856,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_new_key_with_export() {
-        let (server, mut client, engine) = init_test().await;
+        let (server, mut client, engine) = init_test(None).await;
         let (_, result) = client.command("newkey").await.unwrap();
         assert_eq!(result.len(), 32);
         let cmd = format!("exportpub {}", base64_encode(&result));
@@ -1714,6 +1934,96 @@ mod test {
         let value = stats_to_json(stats.iter());
         let ethalon = json!({"key": {"a": 777}});
         assert_eq!(ethalon, value);
+    }
+
+    fn generate_boc(mut size: u32) -> Result<Vec<u8>> {
+
+        // Raw data, withoud BOC format
+        // let data: Vec<u8> = (0..size).map(|_| rand::random::<u8>()).collect();
+        // Ok(data)
+
+        let mut cells = Vec::new();
+
+// Time per 100000 iterations
+// 0 ms
+        size *= 8;
+        while size > 0 {
+            let mut builder = BuilderData::new();
+            let bits = min(1023, size);
+            let data: Vec<u8> = (0..(bits + 7) / 8).map(|_| rand::random::<u8>()).collect();
+// 300 ms
+            builder.append_raw(&data, bits as usize)?;
+            size -= bits;
+// 330 ms
+            if let Some(child) = cells.pop() {
+                builder.checked_append_reference(child)?;
+            }
+// 330 ms
+            let cell = builder.into_cell()?;
+// 520 ms
+            cells.push(cell);
+// 550 ms
+        }
+
+        let Some(cell) = cells.pop() else {
+            fail!("BOC generation failed")
+        };
+// 550 ms
+        write_boc(&cell)
+// 850 ms
+
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_ext_msg_proxy() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let counter_clone = counter.clone();
+        tokio::spawn(
+            async move {
+                let addr: SocketAddr = "127.0.0.1:4001".parse().unwrap();
+                let mut stream = loop {
+                    if let Ok(stream) = tokio::net::TcpStream::connect(addr).await {
+                        break stream
+                    }
+                };
+                let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+                let start = Instant::now();
+                let count = 100000;
+                for _ in 0..count {
+                    let range = rand::distributions::Uniform::new(256, 1*1024);
+                    let len = rng.sample(&range);
+                    let msg = generate_boc(len).unwrap();
+                    let len = (msg.len() as u16).to_be_bytes();
+                    stream.write(&len[..]).await.unwrap();
+                    stream.write(&msg[..]).await.unwrap();
+                }
+                println!(
+                    "Generated {} messages during {} ms", 
+                    count, start.elapsed().as_millis()
+                );
+                while counter_clone.load(Ordering::Relaxed) < count {
+                    tokio::time::sleep(Duration::from_millis(1)).await
+                }
+                println!(
+                    "Proxied {} messages during {} ms", 
+                    count, start.elapsed().as_millis()
+                );
+                let close = "close_proxy";
+                let len = (close.as_bytes().len() as u16).to_be_bytes();
+                stream.write(&len[..]).await.unwrap();
+                stream.write(close.as_bytes()).await.unwrap();
+            }
+        );
+        
+        let (server, mut client, engine) = init_test(Some(counter.clone())).await;
+        let (_, result) = client.command("ext_msg_proxy 4001").await.unwrap();
+        let mut count: u64 = 0;
+        for i in 0..result.len() {
+            count = (count << 8) | (result[i] as u64);
+        }
+        assert_eq!(count, counter.load(Ordering::Relaxed));
+        done_test(server, client, engine).await;
+
     }
 
 }

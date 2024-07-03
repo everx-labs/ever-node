@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.6
+
+- Add broadcast candidate hops configuration
+
+## Version 0.59.5
+
+- Restore T-Node force_update behaviour (bugfix)
+
+## Version 0.59.4
+
+- Fixed AllowStateGcSmartResolver::allow_state_gc which caused memoty leak (no one shard state was deleted from cache)
+
+## Version 0.59.3
+
+- Removed extra logging in validate query
+
+## Version 0.59.2
+
+- Fixes for verificator
+
+## Version 0.59.1
+
+- Added possibility to proxy external messages from outer TCP conneciton to node using console
+
+## Version 0.59.0
+
+- Use modern crates anyhow and thiserror instead of failure
+
+## Version 0.58.17
+
+- Some issues logged as errors in remp client are now warnings
+- Fixed top shard blocks resend - now it retries sending when master block was updated. It logged a error before
+
 ## Version 0.58.16
 
 - SMFT stability updates (fixes, increase sync periods), extra per-block statistics

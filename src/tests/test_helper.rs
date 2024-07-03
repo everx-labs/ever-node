@@ -60,8 +60,8 @@ macro_rules! assert_eq {
         match (&($left), &($right)) {
             (left_val, right_val) => {
                 if !(*left_val == *right_val) {
-                    return Err(failure::err_msg(format!("{}, file {}:{}",
-                        pretty_assertions::Comparison::new(left_val, right_val), file!(), line!())))
+                    fail!("{}, file {}:{}",
+                        pretty_assertions::Comparison::new(left_val, right_val), file!(), line!())
                 }
             }
         }
@@ -70,9 +70,9 @@ macro_rules! assert_eq {
         match (&($left), &($right)) {
             (left_val, right_val) => {
                 if !(*left_val == *right_val) {
-                    return Err(failure::err_msg(format!("{}, {} file {}:{}",
+                    fail!("{}, {} file {}:{}",
                         pretty_assertions::Comparison::new(left_val, right_val),
-                        format_args!($($arg)*), file!(), line!())))
+                        format_args!($($arg)*), file!(), line!())
                 }
             }
         }

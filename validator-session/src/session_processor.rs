@@ -39,7 +39,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH}
 };
 use ton_api::IntoBoxed;
-use ever_block::{error, KeyId, Result, UInt256};
+use ever_block::{error, Error, KeyId, Result, UInt256};
 
 /*
     Constants
@@ -1519,11 +1519,11 @@ impl SessionProcessorImpl {
             let handler = self.completion_handlers.remove(&handler_id);
 
             if let Some(mut handler) = handler {
-                let warning = format!("Remove ValidatorSession completion handler #{} with latency {:.3}s (expected_latency={:.3}s): created at {}", handler_id, latency.as_secs_f64(), COMPLETION_HANDLERS_MAX_WAIT_PERIOD.as_secs_f64(), catchain::utils::time_to_string(&handler.get_creation_time()));
+                let warning = error!("Remove ValidatorSession completion handler #{} with latency {:.3}s (expected_latency={:.3}s): created at {}", handler_id, latency.as_secs_f64(), COMPLETION_HANDLERS_MAX_WAIT_PERIOD.as_secs_f64(), catchain::utils::time_to_string(&handler.get_creation_time()));
 
                 log::warn!("{}", warning);
 
-                handler.reset_with_error(failure::err_msg(warning), self);
+                handler.reset_with_error(warning, self);
             }
         }
     }
@@ -2995,7 +2995,7 @@ impl SessionProcessorImpl {
         }
     }
 
-    fn candidate_decision_fail(&mut self, round: u32, hash: BlockId, err: failure::Error) {
+    fn candidate_decision_fail(&mut self, round: u32, hash: BlockId, err: Error) {
         instrument!();
 
         self.validates_counter.failure();

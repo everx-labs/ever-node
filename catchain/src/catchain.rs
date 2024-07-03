@@ -31,7 +31,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH}
 };
 use ton_api::IntoBoxed;
-use ever_block::{error, Result, UInt256};
+use ever_block::{error, Error, Result, UInt256};
 
 /*
     Constants
@@ -398,7 +398,7 @@ trait CompletionHandler: std::any::Any {
     fn get_creation_time(&self) -> std::time::SystemTime;
 
     ///Execute with error
-    fn reset_with_error(&mut self, error: failure::Error, receiver: &mut dyn Receiver);
+    fn reset_with_error(&mut self, error: Error, receiver: &mut dyn Receiver);
 }
 
 struct SingleThreadedCompletionHandler<T> {
@@ -425,7 +425,7 @@ where
     }
 
     ///Execute handler with error
-    fn reset_with_error(&mut self, error: failure::Error, receiver: &mut dyn Receiver) {
+    fn reset_with_error(&mut self, error: Error, receiver: &mut dyn Receiver) {
         if let Some(handler) = self.handler.take() {
             handler(Err(error), receiver);
         }
@@ -1713,13 +1713,13 @@ impl CatchainProcessor {
             return;
         }
 
-        if !self.force_process {
+        if !self.force_process && self.active_process {
             log::trace!("Catchain forcing creation of a new block");
         }
 
-        self.force_process = true;
-
-        if !self.active_process {
+        if self.active_process {
+            self.force_process = true;
+        } else {
             self.set_next_block_generation_time(time);
         }
     }

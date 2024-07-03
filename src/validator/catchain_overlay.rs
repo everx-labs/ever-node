@@ -29,7 +29,7 @@ impl catchain::CatchainOverlayManager for CatchainOverlayManagerImpl {
         replay_listener: catchain::CatchainOverlayLogReplayListenerPtr,
     ) -> Result<CatchainOverlayPtr> {
         self.network.create_catchain_client(
-            self.validator_list_id.clone(), overlay_short_id, nodes, listener, replay_listener
+            self.validator_list_id.clone(), overlay_short_id, nodes, listener, replay_listener, None
         )
     }
 

@@ -13,7 +13,7 @@
 
 use super::*;
 use ever_block::{
-    crc32_digest, Result,
+    crc32_digest, fail, Result,
     bls::{
         aggregate_two_bls_signatures, aggregate_public_keys_based_on_nodes_info, 
         BLS_PUBLIC_KEY_LEN, BLS_SECRET_KEY_LEN, get_nodes_info_from_sig, NodesInfo, 
@@ -187,7 +187,7 @@ impl MultiSignature {
         let signature: Result<Vec<u8>> = Ok(serialized_signature.to_vec());
 
         if let Err(err) = signature {
-            failure::bail!("inflate error: {}", err);
+            fail!("inflate error: {}", err);
         }
 
         let signature = signature.unwrap();
@@ -204,7 +204,7 @@ impl MultiSignature {
             let aggregated_pub_key = aggregate_public_keys_based_on_nodes_info(wc_pub_key_refs, &nodes_info)?;
 
             if !truncate_nodes_info_and_verify(&signature, &aggregated_pub_key, &body.msg)? {
-                failure::bail!("Can't verify block candidate {:?} signature {:?} (type {})", candidate_id, body, type_id);
+                fail!("Can't verify block candidate {:?} signature {:?} (type {})", candidate_id, body, type_id);
             }
 
             let processing_delay = match start_time.elapsed() {
