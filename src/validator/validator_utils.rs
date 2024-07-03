@@ -539,6 +539,14 @@ impl PrevBlockHistory {
         self.prev.iter().all(|x| x.root_hash != *root_hash && x.file_hash != *file_hash)
     }
 
+    pub fn ensure_next_block_new(&self, root_hash: &BlockHash, file_hash: &BlockHash) -> Result<()> {
+        if !self.is_next_block_new(root_hash, file_hash)
+        {
+            fail!("Block candidate with rh {}, fh {} is not unique: prevs {}", root_hash, file_hash, self);
+        }
+        Ok(())
+    }
+
     pub fn get_next_block_id(&self, root_hash: &BlockHash, file_hash: &BlockHash) -> BlockIdExt {
         BlockIdExt {
             shard_id: self.shard.clone(),

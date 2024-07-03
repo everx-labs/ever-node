@@ -752,7 +752,9 @@ impl ValidatorGroup {
 
     async fn do_candidate_validation(&self, round: u32, source: &PublicKey, candidate: BlockCandidate) -> Result<SystemTime> {
         let (lk_round, prev_block_ids, mc_block_id_opt, min_ts) =
-            self.group_impl.execute_sync(|group_impl| group_impl.update_round(round)).await;
+            self.group_impl.execute_sync(|group_impl| {
+                group_impl.update_round(round)
+            }).await;
 
         if round < lk_round {
             fail!("round {} < self.last_known_round {}", round, lk_round);
@@ -769,30 +771,26 @@ impl ValidatorGroup {
                     }
         */
 
-        self.group_impl.execute_sync(|group_impl|
-            if !group_impl.prev_block_ids.is_next_block_new(
-                &candidate.block_id.root_hash,
-                &candidate.block_id.file_hash
-            ) {
-                fail!("Block candidate {} is not unique: prevs {}", candidate.block_id, group_impl.prev_block_ids)
-            }
-            else {
-                Ok(())
-            }
-        ).await?;
+        prev_block_ids.ensure_next_block_new(&candidate.block_id.root_hash, &candidate.block_id.file_hash)?;
 
         let mc_block_id = mc_block_id_opt.ok_or_else(|| error!("Min masterchain block id missing"))?;
 
         let mc = self.engine.load_last_applied_mc_state().await?;
-        let shard_info = mc.shard_state_extra()?
-            .shards().find_shard(&self.general_session_info.shard)?
-            .ok_or_else(|| error!("shard {} not found", self.general_session_info.shard))?;
-        let last_shard_block = shard_info.block_id();
 
-        if last_shard_block.seq_no >= candidate.block_id.seq_no {
+        let last_applied_block = if self.general_session_info.shard.is_masterchain() {
+            mc.block_id().clone()
+        }
+        else {
+            let shard_info = mc.shard_state_extra()?
+                .shards().find_shard(&self.general_session_info.shard)?
+                .ok_or_else(|| error!("shard {} not found", self.general_session_info.shard))?;
+            shard_info.block_id().clone()
+        };
+
+        if last_applied_block.seq_no >= candidate.block_id.seq_no {
             fail!(
                 "Attempting to validate obsolete candidate block {}, actual last shard block {}",
-                candidate.block_id, last_shard_block
+                candidate.block_id, last_applied_block
             );
         }
 
@@ -920,22 +918,21 @@ impl ValidatorGroup {
             source.id(), data_vec.len(), self.info_round(round).await
         );
 
-        let (next_block_id, prev_block_ids) = match
-            self.group_impl.execute_sync(|group_impl| {
-                if round >= group_impl.last_known_round {
-                    group_impl.last_known_round = round + 1;
-                };
+        let prev_block_history = self.group_impl.execute_sync(|group_impl| {
+            if round >= group_impl.last_known_round {
+                group_impl.last_known_round = round + 1;
+            };
 
-                if group_impl.prev_block_ids.is_next_block_new(&root_hash, &file_hash) {
-                    fail!("Block candidate rh={:x}, fh={:x} is not unique: prevs {}", root_hash, file_hash, group_impl.prev_block_ids)
-                }
+            group_impl.prev_block_ids.clone()
+        }).await;
 
-                Ok((group_impl.prev_block_ids.get_next_block_id(&root_hash, &file_hash), group_impl.prev_block_ids.clone()))
-            }).await
-        {
-            Err(x) => { log::error!(target: "validator", "({}): Error creating next block id: {}", next_block_descr, x); return },
-            Ok(result) => result
-        };
+        if let Err(e) = prev_block_history.ensure_next_block_new(&root_hash, &file_hash) {
+            log::error!(target: "validator", "({}): ValidatorGroup::on_block_committed: source {}, `{}`, {}",
+                next_block_descr, source.id(), e, self.info_round(round).await
+            );
+            return;
+        }
+        let next_block_id = prev_block_history.get_next_block_id(&root_hash, &file_hash);
 
         log::info!(target: "validator", 
             "({}): ValidatorGroup::on_block_committed: source {}, id {}, data size = {}, {}",
@@ -950,7 +947,7 @@ impl ValidatorGroup {
             } else {
                 None
             },
-            prev_block_ids.get_prevs().clone(),
+            prev_block_history.get_prevs().clone(),
             self.validator_set.clone(),
             sig_set,
             approve_sig_set,
@@ -968,7 +965,7 @@ impl ValidatorGroup {
         let (full_result, new_prevs) = self.group_impl.execute_sync(|group_impl| {
             let full_result = match result {
                 Ok(()) =>
-                    if !group_impl.prev_block_ids.same_prevs(&prev_block_ids) {
+                    if !group_impl.prev_block_ids.same_prevs(&prev_block_history) {
                         Err(error!("Sync error: two requests at a time, prevs have changed!!!"))
                     } else {
                         Ok(())
