@@ -3458,7 +3458,8 @@ impl Collator {
                 block_create_stats, 
                 global_balance,
                 state_copyleft_rewards: CopyleftRewards::default(),
-                mesh
+                mesh,
+                ..Default::default()
             }, 
             min_ref_mc_seqno
         ))
