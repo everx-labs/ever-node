@@ -61,6 +61,7 @@ impl CatchainClient {
         local_adnl_key: &Arc<dyn KeyOption>,
         local_validator_key: Arc<dyn KeyOption>,
         catchain_listener: CatchainOverlayListenerPtr,
+        broadcast_hops: Option<usize>,
     ) -> Result<Self> {
 
         let mut keys = HashMap::new();
@@ -85,7 +86,11 @@ impl CatchainClient {
             overlay_id, 
             &local_adnl_key, 
             &peers,
-            network_context.broadcast_hops
+            if let Some(broadcast_hops) = broadcast_hops {
+                Some(broadcast_hops as u8)
+            } else {
+                network_context.broadcast_hops
+            },
         )?;
         let consumer = Arc::new(
             CatchainClientConsumer::new(overlay_id.clone(), catchain_listener)

@@ -775,14 +775,9 @@ pub fn construct_and_check_prev_stuff(
     let out_mc_block_id = if info.shard().is_masterchain() {
         out_prev[0].clone()
     } else {
-        let master_ref = master_ref.ok_or_else(|| error!(
-            "non masterchain block doesn't contain mc block ref"))?;
-        BlockIdExt {
-            shard_id: ShardIdent::masterchain(),
-            seq_no: master_ref.master.seq_no,
-            root_hash: master_ref.master.root_hash,
-            file_hash: master_ref.master.file_hash,
-        }
+        master_ref
+            .ok_or_else(|| error!("non masterchain block doesn't contain mc block ref"))?
+            .master.master_block_id().1
     };
 
     if info.shard().is_masterchain() && (info.vert_seqno_incr() != 0) && !info.key_block() {

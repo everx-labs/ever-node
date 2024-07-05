@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.7
+
+- Add broadcast candidate hops configuration
+
+## Version 0.59.6
+
+- Preparation for future updates
+
+## Version 0.59.5
+
+- Restore T-Node force_update behaviour (bugfix)
+
+## Version 0.59.4
+
+- Fixed AllowStateGcSmartResolver::allow_state_gc which caused memoty leak (no one shard state was deleted from cache)
+
+## Version 0.59.3
+
+- Removed extra logging in validate query
+
+## Version 0.59.2
+
+- Fixes for verificator
+
 ## Version 0.59.1
 
 - Added possibility to proxy external messages from outer TCP conneciton to node using console
