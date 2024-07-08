@@ -41,7 +41,8 @@ pub async fn run_validate_query_any_candidate(
     let shard = block.block_id.shard().clone();
     let info = real_block.read_info()?;
     let prev = PrevBlockHistory::new_prevs(&shard, &info.read_prev_ids()?);
-    let mc_state = engine.load_last_applied_mc_state().await?;
+    let (_, master_ref) = info.read_master_id()?.master_block_id();
+    let mc_state = engine.load_state(&master_ref).await?;
     let min_masterchain_block_id = mc_state.find_block_id(info.min_ref_mc_seqno())?;
     let mut cc_seqno_with_delta = 0;
     let mc_state_extra = mc_state.shard_state_extra()?;
@@ -51,7 +52,7 @@ pub async fn run_validate_query_any_candidate(
         mc_state_extra.shards.calc_shard_cc_seqno(&shard)?
     };
     let nodes = crate::validator::validator_utils::compute_validator_set_cc(
-        &*engine.load_last_applied_mc_state().await?,
+        &mc_state,
         &shard,
         engine.now(),
         cc_seqno_from_state,

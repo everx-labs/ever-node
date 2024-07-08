@@ -517,7 +517,7 @@ impl ValidatorManagerImpl {
             if !self.validator_list_status.actual_or_coming (&id) {
                 log::trace!(target: "validator_manager", "Removing validator list: {:x}", id);
                 self.validator_list_status.remove_list(&id);
-                self.engine.remove_validator_list(id.clone()).await?;
+                self.engine.remove_validator_list(id.clone())?;
                 log::trace!(target: "validator_manager", "Validator list removed: {:x}", id);
             } else {
                 log::trace!(target: "validator_manager", "Validator list is still actual: {:x}", id);
