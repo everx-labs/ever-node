@@ -138,7 +138,8 @@ pub trait PrivateOverlayOperations: Sync + Send {
         overlay_short_id : &Arc<PrivateOverlayShortId>,
         nodes_public_keys : &Vec<CatchainNode>,
         listener : CatchainOverlayListenerPtr,
-        _log_replay_listener: CatchainOverlayLogReplayListenerPtr
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
+        broadcast_hops: Option<usize>,
     ) -> Result<Arc<dyn CatchainOverlay + Send>>;
 
     fn stop_catchain_client(&self, overlay_short_id: &Arc<PrivateOverlayShortId>);
@@ -234,7 +235,8 @@ pub trait EngineOperations : Sync + Send {
         overlay_short_id : &Arc<PrivateOverlayShortId>,
         nodes_public_keys : &Vec<CatchainNode>,
         listener : CatchainOverlayListenerPtr,
-        _log_replay_listener: CatchainOverlayLogReplayListenerPtr
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
+        broadcast_hops: Option<usize>,
     ) -> Result<Arc<dyn CatchainOverlay + Send>> {
         unimplemented!()
     }

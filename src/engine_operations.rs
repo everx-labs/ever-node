@@ -170,14 +170,16 @@ impl EngineOperations for Engine {
         overlay_short_id : &Arc<PrivateOverlayShortId>,
         nodes_public_keys : &Vec<CatchainNode>,
         listener : CatchainOverlayListenerPtr,
-        _log_replay_listener: CatchainOverlayLogReplayListenerPtr
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
+        broadcast_hops: Option<usize>,
     ) -> Result<Arc<dyn CatchainOverlay + Send>> {
         self.validator_network().create_catchain_client(
             validator_list_id,
             overlay_short_id,
             nodes_public_keys,
             listener,
-            _log_replay_listener
+            _log_replay_listener,
+            broadcast_hops,
         )
     }
 

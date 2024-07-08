@@ -1357,7 +1357,8 @@ impl PrivateOverlayOperations for NodeNetwork {
         overlay_short_id : &Arc<PrivateOverlayShortId>,
         nodes_public_keys : &Vec<CatchainNode>,
         listener : CatchainOverlayListenerPtr,
-        _log_replay_listener: CatchainOverlayLogReplayListenerPtr
+        _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
+        broadcast_hops: Option<usize>,
     ) -> Result<Arc<dyn CatchainOverlay + Send>> {
     
         let validator_set_context = self.validator_context.sets_contexts.get(&validator_list_id)
@@ -1379,7 +1380,8 @@ impl PrivateOverlayOperations for NodeNetwork {
                     nodes_public_keys,
                     &adnl_key,
                     validator_set_context.val().validator_key.clone(),
-                    listener.clone()
+                    listener.clone(),
+                    broadcast_hops,
                 )?;
                 Ok(Arc::new(ret))
             }

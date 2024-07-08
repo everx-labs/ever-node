@@ -46,6 +46,8 @@ use ever_block::{error, fail, Result};
 */
 
 const USE_QUERIES_FOR_BLOCK_STATUS: bool = false; //use queries for block status delivery, otherwise use messages
+const MIN_CANDIDATE_NEIGHBOURS_COUNT: usize = 3; //min number of neighbours to synchronize
+const MAX_CANDIDATE_NEIGHBOURS_COUNT: usize = 10; //max number of neighbours to synchronize
 
 /*
 ===============================================================================
@@ -165,12 +167,15 @@ impl WorkchainOverlay {
         let replay_listener: Arc<dyn CatchainOverlayLogReplayListener + Send + Sync> =
             listener.clone();
 
+        let broadcast_hops = ((active_validators_count as f64).sqrt() as usize).clamp(MIN_CANDIDATE_NEIGHBOURS_COUNT, MAX_CANDIDATE_NEIGHBOURS_COUNT);
+
         let overlay = network.create_catchain_client(
             overlay_id.clone(),
             &overlay_short_id,
             &nodes,
             Arc::downgrade(&overlay_listener),
             Arc::downgrade(&replay_listener),
+            Some(broadcast_hops),
         )?;
 
         let active_validators_adnl_ids: Vec<PublicKeyHash> = nodes[0..active_validators_count].iter().map(|node| node.adnl_id.clone()).collect();

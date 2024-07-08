@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.7
+
+- Add broadcast candidate hops configuration
+
+## Version 0.59.6
+
+- Preparation for future updates
+
 ## Version 0.59.5
 
 - Restore T-Node force_update behaviour (bugfix)

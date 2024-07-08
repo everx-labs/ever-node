@@ -56,8 +56,6 @@ use catchain::utils::add_compute_result_metric;
 //TODO: cutoff weight configuration
 const MIN_FORWARDING_NEIGHBOURS_COUNT: usize = 5; //min number of neighbours to synchronize
 const MAX_FORWARDING_NEIGHBOURS_COUNT: usize = 32; //max number of neighbours to synchronize
-const MIN_CANDIDATE_NEIGHBOURS_COUNT: usize = 3; //min number of neighbours to synchronize
-const MAX_CANDIDATE_NEIGHBOURS_COUNT: usize = 10; //max number of neighbours to synchronize
 const BLOCK_SYNC_MIN_PERIOD_MS: u64 = 300; //min time for block sync
 const BLOCK_SYNC_MAX_PERIOD_MS: u64 = 600; //max time for block sync
 const MIN_FAR_NEIGHBOURS_COUNT: usize = 2; //min far neighbours count
@@ -81,7 +79,6 @@ pub type WorkchainPtr = Arc<Workchain>;
 struct WorkchainDeliveryParams {
     block_status_forwarding_neighbours_count: usize, //neighbours count for block status synchronization
     block_status_far_neighbours_count: usize,        //far neighbours count for block status synchronization
-    block_candidate_neighbours_count: usize,         //neighbours count for block candidate synchronization
 }
 
 pub struct Workchain {
@@ -323,7 +320,6 @@ impl Workchain {
             workchain_delivery_params: SpinMutex::new(WorkchainDeliveryParams {
                 block_status_forwarding_neighbours_count: 0,
                 block_status_far_neighbours_count: 0,
-                block_candidate_neighbours_count: 0,
             }),
             mc_overlay: SpinMutex::new(None),
             workchain_overlay: SpinMutex::new(None),
@@ -1442,7 +1438,6 @@ impl Workchain {
         //TODO: implement dynamic configuration
 
         params.block_status_forwarding_neighbours_count = ((self.wc_validators.len() as f64).sqrt() as usize).clamp(MIN_FORWARDING_NEIGHBOURS_COUNT, MAX_FORWARDING_NEIGHBOURS_COUNT);
-        params.block_candidate_neighbours_count = ((self.wc_validators.len() as f64).sqrt() as usize).clamp(MIN_CANDIDATE_NEIGHBOURS_COUNT, MAX_CANDIDATE_NEIGHBOURS_COUNT);
         params.block_status_far_neighbours_count = ((params.block_status_forwarding_neighbours_count as f64).sqrt() as usize).clamp(MIN_FAR_NEIGHBOURS_COUNT, MAX_FAR_NEIGHBOURS_COUNT);
 
         params.clone()
