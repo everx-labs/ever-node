@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.8
+
+- Avoid repeated block validations
+
 ## Version 0.59.7
 
 - Add broadcast candidate hops configuration
