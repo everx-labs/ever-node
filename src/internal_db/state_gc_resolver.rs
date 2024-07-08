@@ -229,7 +229,7 @@ impl AllowStateGcResolver for AllowStateGcSmartResolver {
     ) -> Result<bool> {
         let old = AllowStateGcSmartResolver::allow_state_gc(self, nw_id, block_id, saved_at, gc_utime)?;
         let pinned = nw_id == 0 &&
-                     self.pinned_roots.read().get(block_id).map(|c| *c == 0).unwrap_or(true);
+                     self.pinned_roots.read().get(block_id).map(|c| *c > 0).unwrap_or(false);
         Ok(old && !pinned)
     }
 }

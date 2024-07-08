@@ -160,8 +160,8 @@ impl EngineOperations for Engine {
         self.remove_last_collation_time(shard)
     }
 
-    async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
-        self.validator_network().remove_validator_list(validator_list_id).await
+    fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
+        self.validator_network().remove_validator_list(validator_list_id)
     }
 
     fn create_catchain_client(

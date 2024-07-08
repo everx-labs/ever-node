@@ -128,7 +128,7 @@ pub trait PrivateOverlayOperations: Sync + Send {
 
     fn activate_validator_list(&self, validator_list_id: UInt256) -> Result<()>;
 
-    async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool>;
+    fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool>;
 
     async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>>;
 
@@ -212,7 +212,7 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!()
     }
 
-    async fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
+    fn remove_validator_list(&self, validator_list_id: UInt256) -> Result<bool> {
         unimplemented!()
     }
 
