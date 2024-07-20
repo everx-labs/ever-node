@@ -58,12 +58,13 @@ const MIN_FORWARDING_NEIGHBOURS_COUNT: usize = 5; //min number of neighbours to 
 const MAX_FORWARDING_NEIGHBOURS_COUNT: usize = 32; //max number of neighbours to synchronize
 const BLOCK_SYNC_MIN_PERIOD_MS: u64 = 300; //min time for block sync
 const BLOCK_SYNC_MAX_PERIOD_MS: u64 = 600; //max time for block sync
+const BLOCK_SYNC_LIFETIME_PERIOD: Duration = Duration::from_secs(10); //block's sync full time duration
 const MIN_FAR_NEIGHBOURS_COUNT: usize = 2; //min far neighbours count
 const MAX_FAR_NEIGHBOURS_COUNT: usize = 5; //min far neighbours count
 const FAR_NEIGHBOURS_SYNC_MIN_PERIOD_MS: u64 = 1000; //min time for sync with neighbour nodes
 const FAR_NEIGHBOURS_SYNC_MAX_PERIOD_MS: u64 = 2000; //max time for sync with neighbour nodes
 const FAR_NEIGHBOURS_RESYNC_PERIOD: Duration = Duration::from_millis(1000); //period for far neighbours resync
-const BLOCK_LIFETIME_PERIOD: Duration = Duration::from_secs(10); //block's lifetime
+const BLOCK_LIFETIME_PERIOD: Duration = Duration::from_secs(240); //block's lifetime
 const VERIFICATION_OBLIGATION_CUTOFF: f64 = 0.2; //cutoff for validator obligation to verify [0..1]
 const DYNAMIC_CONFIG_UPDATE_PERIOD: Duration = Duration::from_secs(30); //period for dynamic config update
 
@@ -83,6 +84,7 @@ struct WorkchainDeliveryParams {
 
 pub struct Workchain {
     runtime: tokio::runtime::Handle,      //runtime handle for spawns
+    metrics_receiver: MetricsHandle,      //metrics receiver
     wc_validator_set_hash: UInt256,       //hash of validators set for WC
     mc_validator_set_hash: UInt256,       //hash of validators set for MC
     wc_validators: Vec<ValidatorDescr>,   //WC validators
@@ -164,7 +166,6 @@ impl Workchain {
         local_id: &PublicKeyHash,
         local_bls_key: &PrivateKey,
         listener: VerificationListenerPtr,
-        metrics_receiver: MetricsHandle,
         workchains_instance_counter: Arc<InstanceCounter>,
         blocks_instance_counter: Arc<InstanceCounter>,
         wc_overlays_instance_counter: Arc<InstanceCounter>,
@@ -297,6 +298,7 @@ impl Workchain {
             }
         }
 
+        let metrics_receiver = MetricsHandle::new(Some(Duration::from_secs(30)));
         let workchain = Self {
             workchain_id,
             node_debug_id,
@@ -345,6 +347,7 @@ impl Workchain {
             block_status_received_in_mc_latency_histogram: metrics_receiver.sink().register_histogram(&format!("time:smft_wc{}_stage3_block_status_received_in_mc_latency", workchain_id).into()),
             block_status_merges_count_histogram: metrics_receiver.sink().register_histogram(&format!("smft_wc{}_block_status_merges_count", workchain_id).into()),
             block_external_request_delays_histogram: metrics_receiver.sink().register_histogram(&format!("time:smft_wc{}_block_mc_delay", workchain_id).into()),
+            metrics_receiver: metrics_receiver.clone(),
         };
         let workchain = Arc::new(workchain);
 
@@ -382,7 +385,7 @@ impl Workchain {
             runtime.clone(),
             metrics_receiver.clone(),
             mc_overlays_instance_counter,
-            format!("smft_mc{}_overlay", workchain_id),
+            format!("smft_wc{}_mc_overlay", workchain_id),
             true,
         ).await?;
         *workchain.mc_overlay.lock() = Some(mc_overlay);
@@ -403,7 +406,7 @@ impl Workchain {
                 runtime.clone(),
                 metrics_receiver,
                 wc_overlays_instance_counter,
-                format!("smft_wc{}_overlay", workchain_id),
+                format!("smft_wc{}_wc_overlay", workchain_id),
                 false,
             ).await?;
             *workchain.workchain_overlay.lock() = Some(workchain_overlay);
@@ -416,6 +419,10 @@ impl Workchain {
         Dumper
     */
 
+    pub fn get_metrics_receiver(&self) -> &MetricsHandle {
+        &self.metrics_receiver
+    }
+
     pub fn configure_dumper(&self, metrics_dumper: &mut MetricsDumper) {
         log::debug!(target: "verificator", "Creating verification workchain {} metrics dumper", self.node_debug_id);
 
@@ -425,19 +432,15 @@ impl Workchain {
         metrics_dumper.add_derivative_metric(format!("smft_wc{}_block_candidate_verifications.success", workchain_id));
         metrics_dumper.add_derivative_metric(format!("smft_wc{}_block_candidate_verifications.failure", workchain_id));
         metrics_dumper.add_derivative_metric(format!("smft_wc{}_new_block_candidates", workchain_id));
-        metrics_dumper.add_derivative_metric(format!("smft_mc{}_overlay_in_queries", workchain_id));
-        metrics_dumper.add_derivative_metric(format!("smft_mc{}_overlay_out_queries.total", workchain_id));
-        metrics_dumper.add_derivative_metric(format!("smft_mc{}_overlay_in_messages", workchain_id));
-        metrics_dumper.add_derivative_metric(format!("smft_mc{}_overlay_out_messages", workchain_id));
-
         metrics_dumper.add_derivative_metric(format!("smft_wc{}_block_status_processings", workchain_id));
 
         metrics_dumper.add_derivative_metric(format!("smft_wc{}_block_status_received_in_mc.total", workchain_id));
         metrics_dumper.add_derivative_metric(format!("smft_wc{}_block_status_received_in_mc.success", workchain_id));
         metrics_dumper.add_derivative_metric(format!("smft_wc{}_block_status_received_in_mc.failure", workchain_id));
 
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_in_block_candidates", workchain_id));
+
         add_compute_result_metric(metrics_dumper, &format!("smft_wc{}_block_candidate_verifications", workchain_id));
-        add_compute_result_metric(metrics_dumper, &format!("smft_mc{}_overlay_out_queries", workchain_id));
 
         add_compute_relative_metric(
             metrics_dumper,
@@ -462,6 +465,8 @@ impl Workchain {
             &format!("smft_wc{}_new_block_candidates", workchain_id),
             0.0,
         );
+
+        //metrics for requests from validator to SMFT
 
         use catchain::utils::add_compute_percentage_metric;
 
@@ -489,17 +494,145 @@ impl Workchain {
             0.0,
         );
 
-        add_compute_result_metric(metrics_dumper, &format!("smft_wc{}_overlay_out_queries", workchain_id));
+        //metrics for WC overlay
 
-        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_in_broadcasts", workchain_id));
-        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_out_broadcasts", workchain_id));
-        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_in_queries", workchain_id));
-        metrics_dumper.add_derivative_metric(format!("smft_wc{}_in_block_candidates", workchain_id));
-        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_out_queries.total", workchain_id));
-        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_send_message_to_neighbours_calls", workchain_id));
-        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_send_message_to_far_neighbours_calls", workchain_id));
-        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_in_messages", workchain_id));
-        metrics_dumper.add_derivative_metric(format!("smft_wc{}_overlay_out_messages", workchain_id));
+        add_compute_result_metric(metrics_dumper, &format!("smft_wc{}_wc_overlay_out_queries", workchain_id));
+
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_send_message_to_neighbours_calls", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_send_message_to_far_neighbours_calls", workchain_id));
+
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_in_broadcasts", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_in_broadcasts_size", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_out_broadcasts", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_out_broadcasts_size", workchain_id));
+
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_in_queries", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_in_queries_size", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_out_queries.total", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_out_queries_size", workchain_id));
+
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_in_messages", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_in_messages_size", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_out_messages", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_wc_overlay_out_messages_size", workchain_id));
+
+        add_compute_relative_metric(
+            metrics_dumper,
+            &format!("smft_wc{}_wc_overlay_in_broadcast_avg_size", workchain_id),
+            &format!("smft_wc{}_wc_overlay_in_broadcasts_size", workchain_id),
+            &format!("smft_wc{}_wc_overlay_in_broadcasts", workchain_id),
+            0.0,
+        );
+
+        add_compute_relative_metric(
+            metrics_dumper,
+            &format!("smft_wc{}_wc_overlay_out_broadcast_avg_size", workchain_id),
+            &format!("smft_wc{}_wc_overlay_out_broadcasts_size", workchain_id),
+            &format!("smft_wc{}_wc_overlay_out_broadcasts", workchain_id),
+            0.0,
+        );
+
+        add_compute_relative_metric(
+            metrics_dumper,
+            &format!("smft_wc{}_wc_overlay_in_query_avg_size", workchain_id),
+            &format!("smft_wc{}_wc_overlay_in_queries_size", workchain_id),
+            &format!("smft_wc{}_wc_overlay_in_queries", workchain_id),
+            0.0,
+        );
+
+        add_compute_relative_metric(
+            metrics_dumper,
+            &format!("smft_wc{}_wc_overlay_out_query_avg_size", workchain_id),
+            &format!("smft_wc{}_wc_overlay_out_queries_size", workchain_id),
+            &format!("smft_wc{}_wc_overlay_out_queries.total", workchain_id),
+            0.0,
+        );
+
+        add_compute_relative_metric(
+            metrics_dumper,
+            &format!("smft_wc{}_wc_overlay_in_message_avg_size", workchain_id),
+            &format!("smft_wc{}_wc_overlay_in_messages_size", workchain_id),
+            &format!("smft_wc{}_wc_overlay_in_messages", workchain_id),
+            0.0,
+        );
+
+        add_compute_relative_metric(
+            metrics_dumper,
+            &format!("smft_wc{}_wc_overlay_out_message_avg_size", workchain_id),
+            &format!("smft_wc{}_wc_overlay_out_messages_size", workchain_id),
+            &format!("smft_wc{}_wc_overlay_out_messages", workchain_id),
+            0.0,
+        );
+
+        //metrics for MC overlay
+
+        add_compute_result_metric(metrics_dumper, &format!("smft_wc{}_mc_overlay_out_queries", workchain_id));
+
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_send_message_to_neighbours_calls", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_send_message_to_far_neighbours_calls", workchain_id));
+
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_in_broadcasts", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_in_broadcasts_size", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_out_broadcasts", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_out_broadcasts_size", workchain_id));
+
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_in_queries", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_in_queries_size", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_out_queries.total", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_out_queries_size", workchain_id));
+
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_in_messages", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_in_messages_size", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_out_messages", workchain_id));
+        metrics_dumper.add_derivative_metric(format!("smft_wc{}_mc_overlay_out_messages_size", workchain_id));
+
+        add_compute_relative_metric(
+            metrics_dumper,
+            &format!("smft_wc{}_mc_overlay_in_broadcast_avg_size", workchain_id),
+            &format!("smft_wc{}_mc_overlay_in_broadcasts_size", workchain_id),
+            &format!("smft_wc{}_mc_overlay_in_broadcasts", workchain_id),
+            0.0,
+        );
+
+        add_compute_relative_metric(
+            metrics_dumper,
+            &format!("smft_wc{}_mc_overlay_out_broadcast_avg_size", workchain_id),
+            &format!("smft_wc{}_mc_overlay_out_broadcasts_size", workchain_id),
+            &format!("smft_wc{}_mc_overlay_out_broadcasts", workchain_id),
+            0.0,
+        );
+
+        add_compute_relative_metric(
+            metrics_dumper,
+            &format!("smft_wc{}_mc_overlay_in_query_avg_size", workchain_id),
+            &format!("smft_wc{}_mc_overlay_in_queries_size", workchain_id),
+            &format!("smft_wc{}_mc_overlay_in_queries", workchain_id),
+            0.0,
+        );
+
+        add_compute_relative_metric(
+            metrics_dumper,
+            &format!("smft_wc{}_mc_overlay_out_query_avg_size", workchain_id),
+            &format!("smft_wc{}_mc_overlay_out_queries_size", workchain_id),
+            &format!("smft_wc{}_mc_overlay_out_queries.total", workchain_id),
+            0.0,
+        );
+
+        add_compute_relative_metric(
+            metrics_dumper,
+            &format!("smft_wc{}_mc_overlay_in_message_avg_size", workchain_id),
+            &format!("smft_wc{}_mc_overlay_in_messages_size", workchain_id),
+            &format!("smft_wc{}_mc_overlay_in_messages", workchain_id),
+            0.0,
+        );
+
+        add_compute_relative_metric(
+            metrics_dumper,
+            &format!("smft_wc{}_mc_overlay_out_message_avg_size", workchain_id),
+            &format!("smft_mc{}_wc_overlay_out_messages_size", workchain_id),
+            &format!("smft_mc{}_wc_overlay_out_messages", workchain_id),
+            0.0,
+        );
     }
 
     /// Debug dump state
@@ -526,6 +659,7 @@ impl Workchain {
         result.append(format!("  - wc_cutoff_weight: {}\n", self.wc_cutoff_weight));
 
         result.append(format!("  - block_lifetime_period: {:.3}s\n", BLOCK_LIFETIME_PERIOD.as_secs_f64()));
+        result.append(format!("  - block_sync_lifetime_period: {:.3}s\n", BLOCK_SYNC_LIFETIME_PERIOD.as_secs_f64()));
         result.append(format!("  - blocks:\n"));
 
         for (i, (first_appearance_time, block)) in blocks.iter().enumerate() {
@@ -710,13 +844,17 @@ impl Workchain {
             }
         };
 
-        let (candidate_id, block_end_of_life_time, delivery_weight) = {
+        let (candidate_id, block_end_of_life_time, block_end_of_sync_time, delivery_weight) = {
             let block = block.lock();
             let delivered_weight = block.get_deliveries_signature().get_total_weight(&workchain.wc_validators);
 
             block.get_delivery_stats().syncs_count.fetch_add(1, Ordering::SeqCst);
 
-            (block.get_id().clone(), *block.get_first_appearance_time() + BLOCK_LIFETIME_PERIOD, delivered_weight)
+            (block.get_id().clone(),
+             *block.get_first_appearance_time() + BLOCK_LIFETIME_PERIOD,
+             *block.get_first_appearance_time() + BLOCK_SYNC_LIFETIME_PERIOD,
+             delivered_weight
+            )
         };
 
         //remove old blocks
@@ -726,9 +864,6 @@ impl Workchain {
             return; //prevent all further sync logic because the block is expired
         }
 
-        //trace!(target: "verificator", "Synchronize block {:?} for workchain {}", candidate_id, workchain.node_debug_id);
-        trace!(target: "verificator", "Synchronize block {:?} for workchain {}: {:?}", candidate_id, workchain.node_debug_id, block.lock());
-        
         let mut rng = rand::thread_rng();
         let delay = Duration::from_millis(rng.gen_range(
             BLOCK_SYNC_MIN_PERIOD_MS,
@@ -744,34 +879,39 @@ impl Workchain {
             }
         };
 
-        //get delivery params
+        if block_end_of_sync_time.elapsed().is_err() {
+            //trace!(target: "verificator", "Synchronize block {:?} for workchain {}", candidate_id, workchain.node_debug_id);
+            trace!(target: "verificator", "Synchronize block {:?} for workchain {}: {:?}", candidate_id, workchain.node_debug_id, block.lock());
 
-        let delivery_params = workchain.workchain_delivery_params.lock().clone();
+            //get delivery params
 
-        //periodically force push block status to neighbours
+            let delivery_params = workchain.workchain_delivery_params.lock().clone();
 
-        let workchain_id = workchain.workchain_id;
-        let node_debug_id = workchain.node_debug_id.clone();
+            //periodically force push block status to neighbours
 
-        if far_neighbours_force_sync {
-            if delivery_weight > 0 && delivery_weight < workchain.wc_total_weight {
-                trace!(
-                    target: "verificator",
-                    "Force block {:?} synchronization for workchain's #{} private overlay between far neighbours (overlay={})",
-                    candidate_id,
-                    workchain_id,
-                    node_debug_id);
+            let workchain_id = workchain.workchain_id;
+            let node_debug_id = workchain.node_debug_id.clone();
 
-                workchain.send_block_status_to_far_neighbours(&block, delivery_params.block_status_far_neighbours_count);
+            if far_neighbours_force_sync {
+                if delivery_weight > 0 && delivery_weight < workchain.wc_total_weight {
+                    trace!(
+                        target: "verificator",
+                        "Force block {:?} synchronization for workchain's #{} private overlay between far neighbours (overlay={})",
+                        candidate_id,
+                        workchain_id,
+                        node_debug_id);
+
+                    workchain.send_block_status_to_far_neighbours(&block, delivery_params.block_status_far_neighbours_count);
+                }
             }
-        }
 
-        //check if block updates has to be sent to network (updates buffering)
+            //check if block updates has to be sent to network (updates buffering)
 
-        let ready_to_send = block.lock().toggle_send_ready(false);
+            let ready_to_send = block.lock().toggle_send_ready(false);
 
-        if ready_to_send {
-            workchain.send_block_status_to_forwarding_neighbours(&block, delivery_params.block_status_forwarding_neighbours_count);
+            if ready_to_send {
+                workchain.send_block_status_to_forwarding_neighbours(&block, delivery_params.block_status_forwarding_neighbours_count);
+            }
         }
 
         //schedule next synchronization
@@ -1075,8 +1215,6 @@ impl Workchain {
 
         if let Some(workchain_overlay) = self.get_workchain_overlay() {
             trace!(target: "verificator", "Send new block broadcast in workchain {} with candidate_id {:?}", self.node_debug_id, candidate_id);
-
-            //TODO: create overlay with broadcast hops control
 
             workchain_overlay.send_broadcast(
                 &self.local_adnl_id,

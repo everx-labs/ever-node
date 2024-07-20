@@ -58,7 +58,7 @@ pub struct VerificationManagerImpl {
     workchains: Arc<SpinMutex<WorkchainMapPtr>>,                       //map of workchains
     should_stop_flag: Arc<AtomicBool>,                                 //flag to indicate manager should be stopped
     dump_thread_is_stopped_flag: Arc<AtomicBool>,                      //flag to indicate dump thread is stopped
-    metrics_receiver: MetricsHandle,                                   //metrics receiver
+    _metrics_receiver: MetricsHandle,                                  //metrics receiver
     blocks_instance_counter: Arc<InstanceCounter>,                     //instance counter for blocks
     workchains_instance_counter: Arc<InstanceCounter>,                 //instance counter for workchains
     wc_overlays_instance_counter: Arc<InstanceCounter>,                //instance counter for workchains WC overlays
@@ -248,7 +248,6 @@ impl VerificationManager for VerificationManagerImpl {
             &workchain_validators,
             mc_validators,
             listener,
-            self.metrics_receiver.clone(),
             self.workchains_instance_counter.clone(),
             self.blocks_instance_counter.clone(),
             self.wc_overlays_instance_counter.clone(),
@@ -309,7 +308,6 @@ impl VerificationManagerImpl {
         wc_validators: &Vec<ValidatorDescr>,
         mc_validators: &Vec<ValidatorDescr>,
         listener: &VerificationListenerPtr,
-        metrics_receiver: MetricsHandle,
         workchains_instance_counter: Arc<InstanceCounter>,
         blocks_instance_counter: Arc<InstanceCounter>,
         wc_overlays_instance_counter: Arc<InstanceCounter>,
@@ -340,7 +338,6 @@ impl VerificationManagerImpl {
             local_key_id,
             local_bls_key,
             listener.clone(),
-            metrics_receiver,
             workchains_instance_counter,
             blocks_instance_counter,
             wc_overlays_instance_counter,
@@ -442,7 +439,7 @@ impl VerificationManagerImpl {
 
                     *updated_loop_idx = loop_idx;
 
-                    workchain_metrics_dumper.update(&metrics_receiver);
+                    workchain_metrics_dumper.update(&workchain.get_metrics_receiver());
 
                     workchain_metrics_dumper.dump(|string| {
                         debug!(target: "verificator", "{}", string);
@@ -501,7 +498,7 @@ impl VerificationManagerImpl {
             engine,
             runtime,
             workchains: workchains.clone(),
-            metrics_receiver: metrics_receiver.clone(),
+            _metrics_receiver: metrics_receiver.clone(),
             send_new_block_candidate_counter: metrics_receiver.sink().register_counter(&"smft_candidates".into()),
             update_workchains_counter: metrics_receiver.sink().register_counter(&"smft_workchains_updates".into()),
             blocks_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"smft_block".to_string())),

@@ -527,7 +527,7 @@ impl CatchainOverlay for CatchainClient {
                     Some(&local_validator_key),
                     false
                 ).await;
-                log::trace!(target: Self::TARGET, "send_broadcast_fec_ex status: {:?}", result);
+                log::debug!(target: Self::TARGET, "send_broadcast_fec_ex status: {:?}", result);
             }
         );
     }

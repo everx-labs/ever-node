@@ -52,7 +52,8 @@ pub fn supported_capabilities() -> u64 {
         GlobalCapabilities::CapTvmV19 as u64 |
         GlobalCapabilities::CapTvmV20 as u64 |
         GlobalCapabilities::CapDuePaymentFix as u64 |
-        GlobalCapabilities::CapCommonMessage as u64;
+        GlobalCapabilities::CapCommonMessage as u64 |
+        GlobalCapabilities::CapUndeletableAccounts as u64;
     #[cfg(feature = "gosh")] 
     let caps = caps | GlobalCapabilities::CapDiff as u64;
     #[cfg(feature = "signature_with_id")] 
@@ -61,7 +62,7 @@ pub fn supported_capabilities() -> u64 {
 }
 
 pub fn supported_version() -> u32 {
-    54
+    56
 }
 
 pub fn check_this_shard_mc_info(

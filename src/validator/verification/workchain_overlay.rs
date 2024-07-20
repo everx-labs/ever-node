@@ -46,8 +46,7 @@ use ever_block::{error, fail, Result};
 */
 
 const USE_QUERIES_FOR_BLOCK_STATUS: bool = false; //use queries for block status delivery, otherwise use messages
-const MIN_CANDIDATE_NEIGHBOURS_COUNT: usize = 3; //min number of neighbours to synchronize
-const MAX_CANDIDATE_NEIGHBOURS_COUNT: usize = 10; //max number of neighbours to synchronize
+const MAX_BROADCAST_HOPS: usize = 3; //max number of hops for broadcast
 
 /*
 ===============================================================================
@@ -92,11 +91,13 @@ pub struct WorkchainOverlay {
     _instance_counter: InstanceCounter,     //instance counter
     send_message_to_neighbours_counter: metrics::Counter, //number of send message to private neighbours calls
     send_message_to_far_neighbours_counter: metrics::Counter, //number of send message to far neighbours calls
-    out_message_counter: metrics::Counter,                //number of outgoing messages
-    _in_message_counter: metrics::Counter,                //number of incoming messages
     send_all_counter: metrics::Counter,                   //number of send to all active nodes calls
     out_broadcast_counter: metrics::Counter,              //number of outgoing broadcasts
+    out_broadcast_size_counter: metrics::Counter,         //number of outgoing broadcasts size
     out_query_counter: ResultStatusCounter,               //number of outgoing queries
+    out_query_size_counter: metrics::Counter,             //number of outgoing queries size
+    out_message_counter: metrics::Counter,                //number of outgoing messages
+    out_message_size_counter: metrics::Counter,           //number of outgoing messages
     block_status_update_counter: metrics::Counter,        //number of block status updates
     is_master_chain_overlay: bool,                        //is this overlay for communication with MC
 }
@@ -144,22 +145,32 @@ impl WorkchainOverlay {
         }
 
         let in_broadcast_counter = metrics_receiver.sink().register_counter(&format!("{}_in_broadcasts", metrics_prefix).into());
+        let in_broadcast_size_counter = metrics_receiver.sink().register_counter(&format!("{}_in_broadcasts_size", metrics_prefix).into());
+        let out_broadcast_counter = metrics_receiver.sink().register_counter(&format!("{}_out_broadcasts", metrics_prefix).into());
+        let out_broadcast_size_counter = metrics_receiver.sink().register_counter(&format!("{}_out_broadcasts_size", metrics_prefix).into());
         let in_query_counter = metrics_receiver.sink().register_counter(&format!("{}_in_queries", metrics_prefix).into());
+        let in_query_size_counter = metrics_receiver.sink().register_counter(&format!("{}_in_queries_size", metrics_prefix).into());
+        let out_query_counter = ResultStatusCounter::new(&metrics_receiver, &format!("{}_out_queries", metrics_prefix));
+        let out_query_size_counter = metrics_receiver.sink().register_counter(&format!("{}_out_queries_size", metrics_prefix).into());
+        let in_message_counter = metrics_receiver.sink().register_counter(&format!("{}_in_messages", metrics_prefix).into());
+        let in_message_size_counter = metrics_receiver.sink().register_counter(&format!("{}_in_messages_size", metrics_prefix).into());
+        let out_message_counter = metrics_receiver.sink().register_counter(&format!("{}_out_messages", metrics_prefix).into());
+        let out_message_size_counter = metrics_receiver.sink().register_counter(&format!("{}_out_message_size", metrics_prefix).into());
         let in_block_candidate_counter = metrics_receiver.sink().register_counter(&format!("{}_in_block_candidates", metrics_prefix).into());
         let block_status_update_counter = metrics_receiver.sink().register_counter(&format!("{}_block_status_updates", metrics_prefix).into());
-        let out_message_counter = metrics_receiver.sink().register_counter(&format!("{}_out_messages", metrics_prefix).into());
-        let in_message_counter = metrics_receiver.sink().register_counter(&format!("{}_in_messages", metrics_prefix).into());
-        let out_query_counter = ResultStatusCounter::new(&metrics_receiver, &format!("{}_out_queries", metrics_prefix));
 
         let listener = Arc::new(WorkchainListener {
             workchain_id,
             listener,
             runtime_handle: runtime.clone(),
             node_debug_id: node_debug_id.clone(),
-            in_broadcast_counter: in_broadcast_counter.clone(),
-            in_query_counter: in_query_counter.clone(),
-            in_message_counter: in_message_counter.clone(),
-            in_block_candidate_counter: in_block_candidate_counter.clone(),
+            in_broadcast_counter,
+            in_query_counter,
+            in_message_counter,
+            in_broadcast_size_counter,
+            in_query_size_counter,
+            in_message_size_counter,
+            in_block_candidate_counter,
             block_status_update_counter: block_status_update_counter.clone(),
             is_master_chain_overlay,
         });
@@ -167,15 +178,13 @@ impl WorkchainOverlay {
         let replay_listener: Arc<dyn CatchainOverlayLogReplayListener + Send + Sync> =
             listener.clone();
 
-        let broadcast_hops = ((active_validators_count as f64).sqrt() as usize).clamp(MIN_CANDIDATE_NEIGHBOURS_COUNT, MAX_CANDIDATE_NEIGHBOURS_COUNT);
-
         let overlay = network.create_catchain_client(
             overlay_id.clone(),
             &overlay_short_id,
             &nodes,
             Arc::downgrade(&overlay_listener),
             Arc::downgrade(&replay_listener),
-            Some(broadcast_hops),
+            Some(MAX_BROADCAST_HOPS),
         )?;
 
         let active_validators_adnl_ids: Vec<PublicKeyHash> = nodes[0..active_validators_count].iter().map(|node| node.adnl_id.clone()).collect();
@@ -196,10 +205,12 @@ impl WorkchainOverlay {
             send_message_to_neighbours_counter: metrics_receiver.sink().register_counter(&format!("{}_send_message_to_neighbours_calls", metrics_prefix).into()),
             send_message_to_far_neighbours_counter: metrics_receiver.sink().register_counter(&format!("{}_send_message_to_far_neighbours_calls", metrics_prefix).into()),
             send_all_counter: metrics_receiver.sink().register_counter(&format!("{}_send_all_calls", metrics_prefix).into()),
-            out_broadcast_counter: metrics_receiver.sink().register_counter(&format!("{}_out_broadcasts", metrics_prefix).into()),
+            out_broadcast_counter,
+            out_broadcast_size_counter,
             out_query_counter,
+            out_query_size_counter,
             out_message_counter,
-            _in_message_counter: in_message_counter,
+            out_message_size_counter,
             block_status_update_counter,
             is_master_chain_overlay,
         };
@@ -307,6 +318,7 @@ impl WorkchainOverlay {
                 });
 
                 self.out_query_counter.total_increment();
+                self.out_query_size_counter.increment(data.data().len() as u64);
 
                 self.overlay.send_query(
                     adnl_id_ref,
@@ -318,6 +330,7 @@ impl WorkchainOverlay {
                 );
             } else {
                 self.out_message_counter.increment(1);
+                self.out_message_size_counter.increment(data.data().len() as u64);
 
                 self.overlay.send_message(adnl_id_ref, &self.local_adnl_id, &data);
             }
@@ -331,10 +344,11 @@ impl WorkchainOverlay {
         send_as: &PublicKeyHash,
         payload: BlockPayloadPtr,
     ) {
+        self.out_broadcast_counter.increment(1);
+        self.out_broadcast_size_counter.increment(payload.data().len() as u64);
+
         self.overlay
             .send_broadcast_fec_ex(sender_id, send_as, payload);
-
-        self.out_broadcast_counter.increment(1);
     }
 }
 
@@ -361,6 +375,9 @@ struct WorkchainListener {
     in_broadcast_counter: metrics::Counter,        //number of incoming broadcasts
     in_query_counter: metrics::Counter,            //number of incoming queries
     in_message_counter: metrics::Counter,          //number of incoming messages
+    in_broadcast_size_counter: metrics::Counter,   //number of incoming broadcasts bytes
+    in_query_size_counter: metrics::Counter,       //number of incoming queries bytes
+    in_message_size_counter: metrics::Counter,     //number of incoming messages bytes
     in_block_candidate_counter: metrics::Counter,  //number of incoming block candidates
     block_status_update_counter: metrics::Counter, //number of block status updates
     is_master_chain_overlay: bool,                 //is this overlay for communication with MC
@@ -386,6 +403,7 @@ impl CatchainOverlayListener for WorkchainListener {
         let _hang_checker = HangCheck::new(self.runtime_handle.clone(), format!("WorkchainListener::on_message: for workchain overlay {}", self.node_debug_id), Duration::from_millis(1000));
 
         self.in_message_counter.increment(1);
+        self.in_message_size_counter.increment(data.data().len() as u64);
 
         let data = data.clone();
         let workchain_id = self.workchain_id;
@@ -419,6 +437,7 @@ impl CatchainOverlayListener for WorkchainListener {
         let _hang_checker = HangCheck::new(self.runtime_handle.clone(), format!("WorkchainListener::on_broadcast: for workchain overlay {}", self.node_debug_id), Duration::from_millis(1000));                
 
         self.in_broadcast_counter.increment(1);
+        self.in_broadcast_size_counter.increment(data.data().len() as u64);
 
         let data = data.clone();
         let workchain_id = self.workchain_id;
@@ -473,6 +492,7 @@ impl CatchainOverlayListener for WorkchainListener {
         let _hang_checker = HangCheck::new(self.runtime_handle.clone(), format!("WorkchainListener::on_query: for workchain overlay {}", self.node_debug_id), Duration::from_millis(1000));        
 
         self.in_query_counter.increment(1);
+        self.in_query_size_counter.increment(data.data().len() as u64);
 
         let data = data.clone();
         let workchain_id = self.workchain_id;
