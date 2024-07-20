@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.9
+
+- CapUndeletableAccounts supported
+
+## Version 0.59.8
+
+- Log message about bad broadcast made "warn" instead of "error"
+
 ## Version 0.59.7
 
 - Add broadcast candidate hops configuration
