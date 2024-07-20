@@ -1991,7 +1991,7 @@ impl Engine {
                 if self.check_sync().await.unwrap_or(false) {
                     match self.clone().process_new_shard_block(broadcast).await {
                         Err(e) => {
-                            log::error!("Error while processing new shard block broadcast {} from {}: {}", id, src, e);
+                            log::warn!("Couldn't process new shard block broadcast {} from {}: {}", id, src, e);
                             #[cfg(feature = "telemetry")]
                             self.full_node_telemetry().bad_top_block_broadcast();
                         }

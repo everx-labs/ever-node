@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ever-node'
-version = '0.59.7'
+version = '0.59.10'
 
 [workspace]
 members = [ 'storage' ]
@@ -87,16 +87,16 @@ string-builder = '^0.2.0'
 thiserror = '1.0'
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
 tokio-util = '0.7'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.1' }
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.9' }
 catchain = { path = 'catchain' }
-ever_abi = { git = 'https://github.com/everx-labs/ever-abi.git', tag = '2.6.1' }
-ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.11.0' }
-ever_block_json = { git = 'https://github.com/everx-labs/ever-block-json.git', tag = '0.9.2' }
-ever_executor = { git = 'https://github.com/everx-labs/ever-executor.git', tag = '1.18.1' }
-ever_vm = { git = 'https://github.com/everx-labs/ever-vm.git', tag = '2.2.1' }
+ever_abi = { git = 'https://github.com/everx-labs/ever-abi.git', tag = '2.6.7' }
+ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.11.6' }
+ever_block_json = { git = 'https://github.com/everx-labs/ever-block-json.git', tag = '0.9.11' }
+ever_executor = { git = 'https://github.com/everx-labs/ever-executor.git', tag = '1.18.7' }
+ever_vm = { git = 'https://github.com/everx-labs/ever-vm.git', tag = '2.2.7' }
 lockfree = { git = 'https://github.com/everx-labs/lockfree.git' }
 storage = { path = 'storage' }
-ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.1' }
+ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.9' }
 validator_session = { path = 'validator-session' }
 
 [dev-dependencies]
