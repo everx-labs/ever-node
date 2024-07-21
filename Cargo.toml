@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ever-node'
-version = '0.59.9'
+version = '0.59.10'
 
 [workspace]
 members = [ 'storage' ]

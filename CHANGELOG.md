@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.10
+
+- SMFT fixes:
+1) lifetime and sync time of smft status block are separated: status lives much more than synced to avoid empty blocks syncs after deletion;
+2) messages size dump was added 
+3) broadcast hops is set to 3
+
 ## Version 0.59.9
 
 - CapUndeletableAccounts supported
