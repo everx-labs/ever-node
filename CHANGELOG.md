@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
 
 ## Version 0.59.8
 
-- Log message about bad broadcast made "warn" instead of "error"
+- Avoid repeated block validations
 
 ## Version 0.59.7
 
