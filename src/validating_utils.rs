@@ -502,33 +502,3 @@ pub fn fmt_next_block_descr(next_block_id: &BlockIdExt) -> String {
         rh_part,
     )
 }
-
-pub fn fmt_next_block_descr_from_next_seqno(
-    shard_ident: &ShardIdent,
-    next_seqno_opt: Option<u32>,
-) -> String {
-    match next_seqno_opt {
-        None => format!("{}:{}",
-            shard_ident.workchain_id(), 
-            shard_ident.shard_prefix_as_str_with_tag(),
-        ),
-        Some(next_seqno) => format!("{}:{}, {}",
-            shard_ident.workchain_id(), 
-            shard_ident.shard_prefix_as_str_with_tag(),
-            next_seqno,
-        ),
-    }
-}
-
-pub fn append_rh_to_next_block_descr(
-    next_block_descr: &str,
-    root_hash: &UInt256,
-) -> String {
-    let rh_part = &root_hash.as_slice()[0..2];
-    let rh_part = hex::encode(rh_part);
-    format!(
-        "{}, rh {}",
-        next_block_descr,
-        rh_part,
-    )
-}

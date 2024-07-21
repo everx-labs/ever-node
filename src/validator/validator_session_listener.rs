@@ -224,7 +224,7 @@ async fn process_validation_action(
     rt: tokio::runtime::Handle
 ) {
     let action_str = format!("{}", action);
-    let next_block_descr = g.get_next_block_descr().await;
+    let next_block_descr = g.get_next_block_descr(None).await;
     log::info!(
         target: "validator", 
         "({}): Processing action: {}, {}", next_block_descr, action_str, g.info().await
@@ -287,7 +287,7 @@ pub async fn process_validation_queue(
 
         let g_clone = g.clone();
         let g_info = g_clone.info().await;
-        let next_block_descr = g_clone.get_next_block_descr().await;
+        let next_block_descr = g_clone.get_next_block_descr(None).await;
 
         match queue.try_recv() { //recv_timeout(Duration::from_secs(10))
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
@@ -381,5 +381,10 @@ pub async fn process_validation_queue(
             }
         }
     }
-    log::info!(target: "validator", "({}): Exiting from validation queue processing: {}", g.get_next_block_descr().await, g.info().await);
+
+    log::info!(target: "validator",
+        "({}): Exiting from validation queue processing: {}",
+        g.get_next_block_descr(None).await,
+        g.info().await
+    );
 }

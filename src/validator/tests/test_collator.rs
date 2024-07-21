@@ -48,6 +48,7 @@ async fn try_collate_by_engine(
     rand_seed_opt: Option<UInt256>,
 ) -> Result<(Block, ShardStateUnsplit)> {
     std::fs::create_dir_all(RES_PATH).ok();
+    let prev_blocks_history = PrevBlockHistory::new_prevs(&shard, &prev_blocks_ids);
     let mc_state = engine.load_last_applied_mc_state().await?;
     let mc_state_extra = mc_state.shard_state_extra()?;
     let mut cc_seqno_with_delta = 0;
@@ -59,7 +60,7 @@ async fn try_collate_by_engine(
     let nodes = compute_validator_set_cc(
         &mc_state,
         &shard,
-        prev_blocks_ids.iter().max_by_key(|id1| id1.seq_no).unwrap().seq_no() + 1,
+        prev_blocks_history.get_next_seqno().ok_or_else(|| error!("Empty prev blocks"))?,
         cc_seqno_from_state,
         &mut cc_seqno_with_delta
     )?;
@@ -79,7 +80,7 @@ async fn try_collate_by_engine(
     let collator = collator::Collator::new(
         shard.clone(),
         min_mc_seq_no,
-        prev_blocks_ids.clone(),
+        &prev_blocks_history,
         validator_set.clone(),
         created_by_opt.unwrap_or_default(),
         engine.clone(),
