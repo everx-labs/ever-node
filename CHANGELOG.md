@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.9
+
+- CapUndeletableAccounts supported
+
 ## Version 0.59.8
 
 - Avoid repeated block validations
