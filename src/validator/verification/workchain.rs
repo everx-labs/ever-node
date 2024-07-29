@@ -21,6 +21,7 @@ use super::*;
 use super::utils::HangCheck;
 use super::utils::get_adnl_id;
 use crate::validator::validator_utils::sigpubkey_to_publickey;
+use ever_block::SmftParams;
 use catchain::BlockPayloadPtr;
 use catchain::PublicKeyHash;
 use catchain::profiling::ResultStatusCounter;
@@ -52,20 +53,7 @@ use catchain::utils::add_compute_result_metric;
 ===============================================================================
 */
 
-//TODO: move to network config
 //TODO: cutoff weight configuration
-const MIN_FORWARDING_NEIGHBOURS_COUNT: usize = 5; //min number of neighbours to synchronize
-const MAX_FORWARDING_NEIGHBOURS_COUNT: usize = 32; //max number of neighbours to synchronize
-const BLOCK_SYNC_MIN_PERIOD_MS: u64 = 300; //min time for block sync
-const BLOCK_SYNC_MAX_PERIOD_MS: u64 = 600; //max time for block sync
-const BLOCK_SYNC_LIFETIME_PERIOD: Duration = Duration::from_secs(10); //block's sync full time duration
-const MIN_FAR_NEIGHBOURS_COUNT: usize = 2; //min far neighbours count
-const MAX_FAR_NEIGHBOURS_COUNT: usize = 5; //min far neighbours count
-const FAR_NEIGHBOURS_SYNC_MIN_PERIOD_MS: u64 = 1000; //min time for sync with neighbour nodes
-const FAR_NEIGHBOURS_SYNC_MAX_PERIOD_MS: u64 = 2000; //max time for sync with neighbour nodes
-const FAR_NEIGHBOURS_RESYNC_PERIOD: Duration = Duration::from_millis(1000); //period for far neighbours resync
-const BLOCK_LIFETIME_PERIOD: Duration = Duration::from_secs(240); //block's lifetime
-const VERIFICATION_OBLIGATION_CUTOFF: f64 = 0.2; //cutoff for validator obligation to verify [0..1]
 const DYNAMIC_CONFIG_UPDATE_PERIOD: Duration = Duration::from_secs(30); //period for dynamic config update
 
 /*
@@ -80,9 +68,11 @@ pub type WorkchainPtr = Arc<Workchain>;
 struct WorkchainDeliveryParams {
     block_status_forwarding_neighbours_count: usize, //neighbours count for block status synchronization
     block_status_far_neighbours_count: usize,        //far neighbours count for block status synchronization
+    config_params: SmftParams,                       //configuration parameters
 }
 
 pub struct Workchain {
+    engine: EnginePtr,                    //pointer to engine
     runtime: tokio::runtime::Handle,      //runtime handle for spawns
     metrics_receiver: MetricsHandle,      //metrics receiver
     wc_validator_set_hash: UInt256,       //hash of validators set for WC
@@ -300,6 +290,7 @@ impl Workchain {
 
         let metrics_receiver = MetricsHandle::new(Some(Duration::from_secs(30)));
         let workchain = Self {
+            engine: engine.clone(),
             workchain_id,
             node_debug_id,
             runtime: runtime.clone(),
@@ -322,6 +313,7 @@ impl Workchain {
             workchain_delivery_params: SpinMutex::new(WorkchainDeliveryParams {
                 block_status_forwarding_neighbours_count: 0,
                 block_status_far_neighbours_count: 0,
+                config_params: SmftParams::default(),
             }),
             mc_overlay: SpinMutex::new(None),
             workchain_overlay: SpinMutex::new(None),
@@ -644,6 +636,8 @@ impl Workchain {
 
         blocks.sort_by(|a, b| b.0.cmp(&a.0));
 
+        let config_params = self.workchain_delivery_params.lock().config_params.clone();
+
         result.append(format!("Workchain {} dump:\n", self.node_debug_id));
         result.append(format!("  - blocks: {}\n", blocks.len()));
         result.append(format!("  - local_adnl_id: {}\n", self.local_adnl_id));
@@ -658,8 +652,15 @@ impl Workchain {
         result.append(format!("  - wc_total_weight: {}\n", self.wc_total_weight));
         result.append(format!("  - wc_cutoff_weight: {}\n", self.wc_cutoff_weight));
 
-        result.append(format!("  - block_lifetime_period: {:.3}s\n", BLOCK_LIFETIME_PERIOD.as_secs_f64()));
-        result.append(format!("  - block_sync_lifetime_period: {:.3}s\n", BLOCK_SYNC_LIFETIME_PERIOD.as_secs_f64()));
+        result.append(format!("  - fwd_neighbours_count: [{};{}]\n", config_params.min_forwarding_neighbours_count, config_params.max_forwarding_neighbours_count));
+        result.append(format!("  - far_neighbours_count: [{};{}]\n", config_params.min_far_neighbours_count, config_params.max_far_neighbours_count));
+        result.append(format!("  - far_sync_period_ms: [{};{}]\n", config_params.min_far_neighbours_sync_period_ms, config_params.max_far_neighbours_sync_period_ms));
+        result.append(format!("  - far_neighbours_resync_period_ms: {}\n", config_params.far_neighbours_resync_period_ms));
+        result.append(format!("  - block_sync_period_ms: [{};{}]\n", config_params.min_block_sync_period_ms, config_params.max_block_sync_period_ms));
+        result.append(format!("  - verification_obligation_cutoff: {}%\n", config_params.verification_obligation_cutoff));
+
+        result.append(format!("  - block_lifetime_period: {:.3}s\n", Duration::from_millis(config_params.block_lifetime_period_ms as u64).as_secs_f64()));
+        result.append(format!("  - block_sync_lifetime_period: {:.3}s\n", Duration::from_millis(config_params.block_sync_lifetime_period_ms as u64).as_secs_f64()));
         result.append(format!("  - blocks:\n"));
 
         for (i, (first_appearance_time, block)) in blocks.iter().enumerate() {
@@ -843,6 +844,7 @@ impl Workchain {
                 return;
             }
         };
+        let config_params = workchain.workchain_delivery_params.lock().config_params.clone();
 
         let (candidate_id, block_end_of_life_time, block_end_of_sync_time, delivery_weight) = {
             let block = block.lock();
@@ -851,8 +853,8 @@ impl Workchain {
             block.get_delivery_stats().syncs_count.fetch_add(1, Ordering::SeqCst);
 
             (block.get_id().clone(),
-             *block.get_first_appearance_time() + BLOCK_LIFETIME_PERIOD,
-             *block.get_first_appearance_time() + BLOCK_SYNC_LIFETIME_PERIOD,
+             *block.get_first_appearance_time() + Duration::from_millis(config_params.block_lifetime_period_ms as u64),
+             *block.get_first_appearance_time() + Duration::from_millis(config_params.block_sync_lifetime_period_ms as u64),
              delivered_weight
             )
         };
@@ -866,14 +868,15 @@ impl Workchain {
 
         let mut rng = rand::thread_rng();
         let delay = Duration::from_millis(rng.gen_range(
-            BLOCK_SYNC_MIN_PERIOD_MS,
-            BLOCK_SYNC_MAX_PERIOD_MS + 1,
-        ));
+            config_params.min_block_sync_period_ms,
+            config_params.max_block_sync_period_ms + 1,
+        ) as u64);
         let next_sync_time = SystemTime::now() + delay;
         let far_neighbours_force_sync = far_neighbours_sync_time.is_some() && far_neighbours_sync_time.unwrap().elapsed().is_ok();
         let far_neighbours_sync_time = {
             if far_neighbours_sync_time.is_none() || far_neighbours_force_sync {
-                Some(SystemTime::now() + Duration::from_millis(rng.gen_range(FAR_NEIGHBOURS_SYNC_MIN_PERIOD_MS, FAR_NEIGHBOURS_SYNC_MAX_PERIOD_MS + 1)))
+                Some(SystemTime::now() + Duration::from_millis(rng.gen_range(config_params.min_far_neighbours_sync_period_ms,
+                                        config_params.max_far_neighbours_sync_period_ms + 1) as u64))
             } else {
                 far_neighbours_sync_time
             }
@@ -901,7 +904,8 @@ impl Workchain {
                         workchain_id,
                         node_debug_id);
 
-                    workchain.send_block_status_to_far_neighbours(&block, delivery_params.block_status_far_neighbours_count);
+                    workchain.send_block_status_to_far_neighbours(&block, delivery_params.block_status_far_neighbours_count,
+                        Duration::from_millis(config_params.far_neighbours_resync_period_ms as u64));
                 }
             }
 
@@ -1398,8 +1402,8 @@ impl Workchain {
     }
 
     /// Send block to far neighbours
-    fn send_block_status_to_far_neighbours(&self, block: &BlockPtr, max_neighbours_count: usize) {
-        let max_far_neighbours_sync_time = std::time::SystemTime::now() - FAR_NEIGHBOURS_RESYNC_PERIOD;
+    fn send_block_status_to_far_neighbours(&self, block: &BlockPtr, max_neighbours_count: usize, far_neighbours_resync_period: Duration) {
+        let max_far_neighbours_sync_time = std::time::SystemTime::now() - far_neighbours_resync_period;
         let far_neighbours = block.lock().calc_low_delivery_nodes_indexes(max_neighbours_count, self.wc_cutoff_weight, self.wc_local_idx as usize, max_far_neighbours_sync_time);
 
         if far_neighbours.len() < 1 {
@@ -1450,9 +1454,10 @@ impl Workchain {
                 return false; //no verification in empty workchain
             }
             let random_value = (((hash as usize) % self.wc_validators.len()) as f64) / (self.wc_validators.len() as f64);
-            let result = random_value < VERIFICATION_OBLIGATION_CUTOFF;
+            let verification_obligation_cutoff = self.workchain_delivery_params.lock().config_params.verification_obligation_cutoff as f64 / 100.0;
+            let result = random_value < verification_obligation_cutoff;
 
-            trace!(target: "verificator", "Verification obligation for block candidate {} is {:.3} < {:.3} -> {} (node={})", candidate_id, random_value, VERIFICATION_OBLIGATION_CUTOFF, result, self.node_debug_id);
+            trace!(target: "verificator", "Verification obligation for block candidate {} is {:.3} < {:.3} -> {} (node={})", candidate_id, random_value, verification_obligation_cutoff, result, self.node_debug_id);
     
             return result;
         }
@@ -1571,12 +1576,30 @@ impl Workchain {
 
     /// Update dynamic configuration
     fn compute_delivery_params(&self, current_params: &WorkchainDeliveryParams) -> WorkchainDeliveryParams {
+        check_execution_time!(1_000);
+
         let mut params = current_params.clone();
+        let engine = self.engine.clone();
 
-        //TODO: implement dynamic configuration
+        let config_params = self.runtime.block_on(async {
+            match engine.load_actual_config_params().await {
+                Ok(params) => match params.smft_parameters() {
+                    Ok(params) => params,
+                    Err(err) => {
+                        log::error!(target: "verificator", "Can't load actual SMFT config params: {:?}", err);
+                        current_params.config_params.clone()
+                    }
+                }
+                Err(err) => {
+                    log::error!(target: "verificator", "Can't load actual config params: {:?}", err);
+                    current_params.config_params.clone()
+                }
+            }
+        });
 
-        params.block_status_forwarding_neighbours_count = ((self.wc_validators.len() as f64).sqrt() as usize).clamp(MIN_FORWARDING_NEIGHBOURS_COUNT, MAX_FORWARDING_NEIGHBOURS_COUNT);
-        params.block_status_far_neighbours_count = ((params.block_status_forwarding_neighbours_count as f64).sqrt() as usize).clamp(MIN_FAR_NEIGHBOURS_COUNT, MAX_FAR_NEIGHBOURS_COUNT);
+        params.block_status_forwarding_neighbours_count = ((self.wc_validators.len() as f64).sqrt() as usize).clamp(config_params.min_forwarding_neighbours_count as usize, config_params.max_forwarding_neighbours_count as usize);
+        params.block_status_far_neighbours_count = ((params.block_status_forwarding_neighbours_count as f64).sqrt() as usize).clamp(config_params.min_far_neighbours_count as usize, config_params.max_far_neighbours_count as usize);
+        params.config_params = config_params;
 
         params.clone()
     }

@@ -26,8 +26,9 @@ use ever_block::{
 };
 use ever_block::CatchainConfig;
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
+use std::fmt::{Display, Formatter};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
-use validator_session::SessionNode;
+use validator_session::{BlockHash, SessionNode};
 
 #[cfg(test)]
 #[path = "tests/test_validator_utils.rs"]
@@ -426,10 +427,6 @@ pub async fn get_shard_by_message(engine: Arc<dyn EngineOperations>, message: Ar
     Ok(shard)
 }
 
-pub fn get_first_block_seqno_after_prevs(prevs: &Vec<BlockIdExt>) -> Option<u32> {
-    prevs.iter().map(|blk| blk.seq_no).max().map(|x| x + 1)
-}
-
 pub fn get_group_members_by_validator_descrs(iterator: &Vec<ValidatorDescr>, dst: &mut Vec<GroupMember>)  {
     for descr in iterator.iter() {
         let node_id = descr.compute_node_id_short();
@@ -479,6 +476,103 @@ pub async fn get_masterchain_seqno(engine: Arc<dyn EngineOperations>, mc_state: 
     }
 
     Ok(master_cc_seqno)
+}
+
+#[derive(Clone)]
+pub struct PrevBlockHistory {
+    shard: ShardIdent,
+    prev: Vec<BlockIdExt>,
+    next_seqno: Option<u32>,
+}
+
+pub fn fmt_next_block_descr_from_next_seqno(
+    shard_ident: &ShardIdent,
+    next_seqno_opt: Option<u32>,
+    root_hash: Option<&BlockHash>
+) -> String {
+    match (next_seqno_opt, root_hash) {
+        (None, _) => format!("{}", shard_ident),
+        (Some(no), None) => format!("{}, {}", shard_ident, no),
+        (Some(no), Some(rh)) => format!("{}, {}, {:x}", shard_ident, no, rh)
+    }
+}
+
+impl PrevBlockHistory {
+    pub fn new(shard: &ShardIdent) -> Self {
+        Self {
+            shard: shard.clone(),
+            prev: vec!(),
+            next_seqno: None
+        }
+    }
+
+    pub fn new_prevs(shard: &ShardIdent, prevs: &Vec<BlockIdExt>) -> Self {
+        Self {
+            shard: shard.clone(),
+            prev: prevs.clone(),
+            next_seqno: get_first_block_seqno_after_prevs(prevs)
+        }
+    }
+
+    pub fn update_prev(&mut self, prev: &Vec<BlockIdExt>) {
+        self.prev = prev.clone();
+        self.next_seqno = get_first_block_seqno_after_prevs(&self.prev);
+    }
+
+    pub fn get_next_seqno(&self) -> Option<u32> {
+        self.next_seqno
+    }
+
+    pub fn get_next_block_descr(&self, rh: Option<&BlockHash>) -> String {
+        fmt_next_block_descr_from_next_seqno(&self.shard, self.next_seqno, rh)
+    }
+
+    pub fn get_prevs(&self) -> &Vec<BlockIdExt> {
+        &self.prev
+    }
+
+    pub fn same_prevs(&self, other: &PrevBlockHistory) -> bool {
+        self.shard == other.shard && self.prev == other.prev
+    }
+
+    pub fn is_next_block_new(&self, root_hash: &BlockHash, file_hash: &BlockHash) -> bool {
+        self.prev.iter().all(|x| x.root_hash != *root_hash && x.file_hash != *file_hash)
+    }
+
+    pub fn ensure_next_block_new(&self, root_hash: &BlockHash, file_hash: &BlockHash) -> Result<()> {
+        if !self.is_next_block_new(root_hash, file_hash)
+        {
+            fail!("Block candidate with rh {}, fh {} is not unique: prevs {}", root_hash, file_hash, self);
+        }
+        Ok(())
+    }
+
+    pub fn get_next_block_id(&self, root_hash: &BlockHash, file_hash: &BlockHash) -> BlockIdExt {
+        BlockIdExt {
+            shard_id: self.shard.clone(),
+            seq_no: self.next_seqno.unwrap_or(1),
+            root_hash: root_hash.clone(),
+            file_hash: file_hash.clone(),
+        }
+    }
+
+    pub fn display_prevs(&self) -> String {
+        prevs_to_string(&self.prev)
+    }
+}
+
+fn prevs_to_string(prev_block_ids: &Vec<BlockIdExt>) -> String {
+    prev_block_ids.iter().map(|x| format!(" {} ", x)).collect()
+}
+
+impl Display for PrevBlockHistory {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "prev: {}", self.display_prevs())
+    }
+}
+
+fn get_first_block_seqno_after_prevs(prevs: &Vec<BlockIdExt>) -> Option<u32> {
+    prevs.iter().map(|blk| blk.seq_no).max().map(|x| x + 1)
 }
 
 async fn try_get_block_info_by_id(engine: Arc<dyn EngineOperations>, mc_block_id: &BlockIdExt) -> Result<Option<(BlockInfo, Vec<BlockIdExt>)>> {
