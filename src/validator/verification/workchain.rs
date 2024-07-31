@@ -21,6 +21,7 @@ use super::*;
 use super::utils::HangCheck;
 use super::utils::get_adnl_id;
 use crate::validator::validator_utils::sigpubkey_to_publickey;
+use storage::block_handle_db::BlockHandle;
 use ever_block::SmftParams;
 use catchain::BlockPayloadPtr;
 use catchain::PublicKeyHash;
@@ -34,6 +35,7 @@ use tokio::time::sleep;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::Duration;
+use anyhow::format_err;
 use spin::mutex::SpinMutex;
 use ever_block::{crc32_digest, Result, bls::BLS_PUBLIC_KEY_LEN};
 use ton_api::ton::ton_node::blockcandidatestatus::BlockCandidateStatus;
@@ -54,7 +56,6 @@ use catchain::utils::add_compute_result_metric;
 */
 
 //TODO: cutoff weight configuration
-const DYNAMIC_CONFIG_UPDATE_PERIOD: Duration = Duration::from_secs(30); //period for dynamic config update
 
 /*
 ===============================================================================
@@ -1569,43 +1570,55 @@ impl Workchain {
         Configuration management
     */
 
-    /// Start updating of dynamic configuration
-    fn start_configuration_update(&self) {
-        Self::update_configuration(Arc::downgrade(&self.get_self()), None);
-    }
-
     /// Update dynamic configuration
-    fn compute_delivery_params(&self, current_params: &WorkchainDeliveryParams) -> WorkchainDeliveryParams {
+    fn compute_delivery_params(&self) -> Result<WorkchainDeliveryParams> {
         check_execution_time!(1_000);
 
-        let mut params = current_params.clone();
         let engine = self.engine.clone();
 
         let config_params = self.runtime.block_on(async {
             match engine.load_actual_config_params().await {
                 Ok(params) => match params.smft_parameters() {
-                    Ok(params) => params,
-                    Err(err) => {
-                        log::error!(target: "verificator", "Can't load actual SMFT config params: {:?}", err);
-                        current_params.config_params.clone()
-                    }
+                    Ok(params) => Ok(params),
+                    Err(err) => Err(err)
                 }
-                Err(err) => {
-                    log::error!(target: "verificator", "Can't load actual config params: {:?}", err);
-                    current_params.config_params.clone()
-                }
+                Err(err) => Err(err)
             }
-        });
+        })?;
 
-        params.block_status_forwarding_neighbours_count = ((self.wc_validators.len() as f64).sqrt() as usize).clamp(config_params.min_forwarding_neighbours_count as usize, config_params.max_forwarding_neighbours_count as usize);
-        params.block_status_far_neighbours_count = ((params.block_status_forwarding_neighbours_count as f64).sqrt() as usize).clamp(config_params.min_far_neighbours_count as usize, config_params.max_far_neighbours_count as usize);
-        params.config_params = config_params;
+        let status_fwd_neighbours_count = ((self.wc_validators.len() as f64).sqrt() as usize).clamp(config_params.min_forwarding_neighbours_count as usize, config_params.max_forwarding_neighbours_count as usize);
 
-        params.clone()
+        let params = WorkchainDeliveryParams {
+            block_status_forwarding_neighbours_count: status_fwd_neighbours_count,
+            block_status_far_neighbours_count: ((status_fwd_neighbours_count as f64).sqrt() as usize).clamp(config_params.min_far_neighbours_count as usize, config_params.max_far_neighbours_count as usize),
+            config_params,
+        };
+
+        Ok(params)
+    }
+
+    /// Start updating of dynamic configuration
+    fn start_configuration_update(&self) {
+        Self::update_configuration(Arc::downgrade(&self.get_self()), None);
+    }
+
+    /// Get first MC handle
+    fn get_mc_block_handle(&self) -> Result<Arc<BlockHandle>> {
+        match self.engine.load_last_applied_mc_block_id() {
+            Ok(Some(mc_block_id)) => {
+                match self.engine.load_block_handle(&mc_block_id) {
+                    Ok(Some(mc_block_handle)) => Ok(mc_block_handle),
+                    Err(err) => Err(err),
+                    _ => Err(format_err!("Can't get MC block handle for block ID {:?}", mc_block_id)),
+                }
+            },
+            Err(err) => Err(err),
+            _ => Err(format_err!("Can't get last applied MC block ID")),
+        }
     }
 
     /// Update dynamic configuration routine
-    fn update_configuration(workchain_weak: Weak<Workchain>, _last_update_time: Option<SystemTime>) {
+    fn update_configuration(workchain_weak: Weak<Workchain>, prev_mc_block_handle: Option<Arc<BlockHandle>>) {
         let workchain = {
             if let Some(workchain) = workchain_weak.upgrade() {
                 workchain
@@ -1614,41 +1627,67 @@ impl Workchain {
             }
         };
 
+        trace!(target: "verificator", "Workchain's #{} configuration update for {})", workchain.workchain_id, workchain.node_debug_id);        
+
+        let _hang_checker = HangCheck::new(workchain.runtime.clone(), format!("Workchain::update_configuration: for workchain {}", workchain.node_debug_id), Duration::from_millis(20000));
+
+        workchain.update_configuration_impl(prev_mc_block_handle);
+    }
+
+    /// Update dynamic configuration routine
+    fn update_configuration_impl(&self, prev_mc_block_handle: Option<Arc<BlockHandle>>) {        
         //update configuration
 
-        let _hang_checker = HangCheck::new(workchain.runtime.clone(), format!("Workchain::update_configuration: for workchain {}", workchain.node_debug_id), Duration::from_millis(1000));
-
-        {
-            let mut params = workchain.workchain_delivery_params.lock();
-
-            *params = workchain.compute_delivery_params(&params);
-
-            trace!(target: "verificator", "Workchain's #{} dynamic configuration updated (overlay={}): {:?}", workchain.workchain_id, workchain.node_debug_id, *params);
+        match self.compute_delivery_params() {
+            Ok(params) => {
+                trace!(target: "verificator", "Workchain's #{} dynamic configuration updated (overlay={}): {:?}", self.workchain_id, self.node_debug_id, params);                
+                *self.workchain_delivery_params.lock() = params;
+            }
+            Err(err) => {
+                log::error!(target: "verificator", "Can't update workchain's #{} configuration (overlay={}): {:?}", self.workchain_id, self.node_debug_id, err);
+            }
         }
 
         //schedule next update
 
-        let next_update_time = SystemTime::now() + DYNAMIC_CONFIG_UPDATE_PERIOD;
-        let last_update_time = SystemTime::now();
-        let workchain_id = workchain.workchain_id;
-        let node_debug_id = workchain.node_debug_id.clone();
-
-        workchain.runtime.spawn(async move {
-            if let Ok(timeout) = next_update_time.duration_since(SystemTime::now()) {
-                trace!(
-                    target: "verificator",
-                    "Next workchain's #{} dynamic configuration update is scheduled at {} (in {:.3}s from now; overlay={})",
-                    workchain_id,
-                    catchain::utils::time_to_string(&next_update_time),
-                    timeout.as_secs_f64(),
-                    node_debug_id);
-
-                sleep(timeout).await;
+        let prev_mc_block_handle = if let Some(prev_mc_block_handle) = prev_mc_block_handle {
+            Some(prev_mc_block_handle)
+        } else {
+            match self.get_mc_block_handle() {
+                Ok(mc_block_handle) => Some(mc_block_handle),
+                Err(err) => {
+                    log::error!(target: "verificator", "Can't get MC block handle for workchain's #{} configuration update (overlay={}): {:?}", self.workchain_id, self.node_debug_id, err);
+                    None
+                }
             }
+        };
+        let engine = self.engine.clone();
+        let workchain_weak = Arc::downgrade(&self.get_self());
 
-            //update configuration
+        self.runtime.spawn(async move {
+            let mc_block_handle = if let Some(prev_mc_block_handle) = prev_mc_block_handle {
+                loop {
+                    if let Ok(r) = engine.wait_next_applied_mc_block(&prev_mc_block_handle, Some(1000)).await {
+                        break Some(r.0);
+                    } else {
+                        if let Ok(block_gen_time) = prev_mc_block_handle.gen_utime() {
+                            let diff = engine.now() - block_gen_time;
+                            if diff > 15 {
+                                log::warn!(target:"verificator", "No next mc block more then {diff} sec");
+                            }
+                        }
+                    }
+    
+                    if workchain_weak.upgrade().is_none() {
+                        break None;
+                    }
+                }
+            } else {
+                sleep(Duration::from_millis(1000)).await;
+                None
+            };
 
-            Self::update_configuration(workchain_weak, Some(last_update_time));
+            Self::update_configuration(workchain_weak, mc_block_handle);
         });
     }
 }
