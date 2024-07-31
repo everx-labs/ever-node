@@ -350,7 +350,7 @@ impl Workchain {
 
         //set initial configuration
 
-        workchain.start_configuration_update();
+        workchain.start_configuration_update().await;
 
         //start overlay for interactions with MC
 
@@ -1571,20 +1571,13 @@ impl Workchain {
     */
 
     /// Update dynamic configuration
-    fn compute_delivery_params(&self) -> Result<WorkchainDeliveryParams> {
+    async fn compute_delivery_params(&self) -> Result<WorkchainDeliveryParams> {
         check_execution_time!(1_000);
 
         let engine = self.engine.clone();
 
-        let config_params = self.runtime.block_on(async {
-            match engine.load_actual_config_params().await {
-                Ok(params) => match params.smft_parameters() {
-                    Ok(params) => Ok(params),
-                    Err(err) => Err(err)
-                }
-                Err(err) => Err(err)
-            }
-        })?;
+        let config_params = engine.load_actual_config_params().await?;
+        let config_params = config_params.smft_parameters()?;
 
         let status_fwd_neighbours_count = ((self.wc_validators.len() as f64).sqrt() as usize).clamp(config_params.min_forwarding_neighbours_count as usize, config_params.max_forwarding_neighbours_count as usize);
 
@@ -1598,8 +1591,21 @@ impl Workchain {
     }
 
     /// Start updating of dynamic configuration
-    fn start_configuration_update(&self) {
-        Self::update_configuration(Arc::downgrade(&self.get_self()), None);
+    async fn start_configuration_update(&self) {
+        let workchain_weak = Arc::downgrade(&self.get_self());
+        match self.compute_delivery_params().await {
+            Ok(params) => {
+                trace!(target: "verificator", "Workchain's #{} dynamic configuration initialized (overlay={}): {:?}", self.workchain_id, self.node_debug_id, params);
+                *self.workchain_delivery_params.lock() = params;
+            }
+            Err(err) => {
+                log::error!(target: "verificator", "Can't initialize workchain's #{} configuration; using default (overlay={}): {:?}", self.workchain_id, self.node_debug_id, err);
+            }
+        }
+
+        self.runtime.spawn(async move {
+            Self::update_configuration(workchain_weak, None).await
+        });
     }
 
     /// Get first MC handle
@@ -1618,57 +1624,56 @@ impl Workchain {
     }
 
     /// Update dynamic configuration routine
-    fn update_configuration(workchain_weak: Weak<Workchain>, prev_mc_block_handle: Option<Arc<BlockHandle>>) {
-        let workchain = {
-            if let Some(workchain) = workchain_weak.upgrade() {
-                workchain
-            } else {
-                return;
-            }
-        };
+    async fn update_configuration(workchain_weak: Weak<Workchain>, mut prev_mc_block_handle: Option<Arc<BlockHandle>>) {
+        loop {
+            let workchain = {
+                if let Some(workchain) = workchain_weak.upgrade() {
+                    workchain
+                } else {
+                    break;
+                }
+            };
 
-        trace!(target: "verificator", "Workchain's #{} configuration update for {})", workchain.workchain_id, workchain.node_debug_id);        
+            trace!(target: "verificator", "Workchain's #{} configuration update for {}", workchain.workchain_id, workchain.node_debug_id);
 
-        let _hang_checker = HangCheck::new(workchain.runtime.clone(), format!("Workchain::update_configuration: for workchain {}", workchain.node_debug_id), Duration::from_millis(20000));
+            let _hang_checker = HangCheck::new(workchain.runtime.clone(), format!("Workchain::update_configuration: for workchain {}", workchain.node_debug_id), Duration::from_millis(20000));
 
-        workchain.update_configuration_impl(prev_mc_block_handle);
-    }
+            //update configuration
 
-    /// Update dynamic configuration routine
-    fn update_configuration_impl(&self, prev_mc_block_handle: Option<Arc<BlockHandle>>) {        
-        //update configuration
-
-        match self.compute_delivery_params() {
-            Ok(params) => {
-                trace!(target: "verificator", "Workchain's #{} dynamic configuration updated (overlay={}): {:?}", self.workchain_id, self.node_debug_id, params);                
-                *self.workchain_delivery_params.lock() = params;
-            }
-            Err(err) => {
-                log::error!(target: "verificator", "Can't update workchain's #{} configuration (overlay={}): {:?}", self.workchain_id, self.node_debug_id, err);
-            }
-        }
-
-        //schedule next update
-
-        let prev_mc_block_handle = if let Some(prev_mc_block_handle) = prev_mc_block_handle {
-            Some(prev_mc_block_handle)
-        } else {
-            match self.get_mc_block_handle() {
-                Ok(mc_block_handle) => Some(mc_block_handle),
+            match workchain.compute_delivery_params().await {
+                Ok(params) => {
+                    trace!(target: "verificator", "Workchain's #{} dynamic configuration updated (overlay={}): {:?}", workchain.workchain_id, workchain.node_debug_id, params);
+                    *workchain.workchain_delivery_params.lock() = params;
+                }
                 Err(err) => {
-                    log::error!(target: "verificator", "Can't get MC block handle for workchain's #{} configuration update (overlay={}): {:?}", self.workchain_id, self.node_debug_id, err);
-                    None
+                    log::error!(target: "verificator", "Can't update workchain's #{} configuration (overlay={}): {:?}", workchain.workchain_id, workchain.node_debug_id, err);
                 }
             }
-        };
-        let engine = self.engine.clone();
-        let workchain_weak = Arc::downgrade(&self.get_self());
 
-        self.runtime.spawn(async move {
-            let mc_block_handle = if let Some(prev_mc_block_handle) = prev_mc_block_handle {
+            //schedule next update
+
+            if prev_mc_block_handle.is_none() {
+                match workchain.get_mc_block_handle() {
+                    Ok(mc_block_handle) => prev_mc_block_handle = Some(mc_block_handle),
+                    Err(err) => {
+                        log::error!(target: "verificator", "Can't get MC block handle for workchain's #{} configuration update (overlay={}): {:?}", workchain.workchain_id, workchain.node_debug_id, err);
+                    }
+                }
+            }
+
+            let engine = workchain.engine.clone();
+
+            drop(workchain); //release variable to prevent retaining of workchain
+
+            prev_mc_block_handle = if let Some(prev_mc_block_handle) = prev_mc_block_handle {
                 loop {
                     if let Ok(r) = engine.wait_next_applied_mc_block(&prev_mc_block_handle, Some(1000)).await {
-                        break Some(r.0);
+                        let block = r.0;
+                        if let Ok(status) = block.is_key_block() {
+                            if status {
+                                break Some(block);
+                            }
+                        }
                     } else {
                         if let Ok(block_gen_time) = prev_mc_block_handle.gen_utime() {
                             let diff = engine.now() - block_gen_time;
@@ -1686,9 +1691,7 @@ impl Workchain {
                 sleep(Duration::from_millis(1000)).await;
                 None
             };
-
-            Self::update_configuration(workchain_weak, mc_block_handle);
-        });
+        }
     }
 }
 
