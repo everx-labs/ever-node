@@ -1665,17 +1665,20 @@ impl Workchain {
 
             drop(workchain); //release variable to prevent retaining of workchain
 
-            prev_mc_block_handle = if let Some(prev_mc_block_handle) = prev_mc_block_handle {
+            if let Some(mc_block_handle) = prev_mc_block_handle.clone() {
                 loop {
-                    if let Ok(r) = engine.wait_next_applied_mc_block(&prev_mc_block_handle, Some(1000)).await {
+                    if let Ok(r) = engine.wait_next_applied_mc_block(&mc_block_handle, Some(1000)).await {
                         let block = r.0;
+
+                        prev_mc_block_handle = Some(block.clone());
+
                         if let Ok(status) = block.is_key_block() {
                             if status {
-                                break Some(block);
+                                break;
                             }
                         }
                     } else {
-                        if let Ok(block_gen_time) = prev_mc_block_handle.gen_utime() {
+                        if let Ok(block_gen_time) = mc_block_handle.gen_utime() {
                             let diff = engine.now() - block_gen_time;
                             if diff > 15 {
                                 log::warn!(target:"verificator", "No next mc block more then {diff} sec");
@@ -1684,12 +1687,11 @@ impl Workchain {
                     }
     
                     if workchain_weak.upgrade().is_none() {
-                        break None;
+                        break;
                     }
                 }
             } else {
                 sleep(Duration::from_millis(1000)).await;
-                None
             };
         }
     }
