@@ -849,8 +849,9 @@ impl ValidateQuery {
             reject_query!("new shard configuration for shard {} contains different next_validator_shard {}",
                 shard, info.descr.next_validator_shard)
         }
-        if !shard.is_masterchain() {
+        if !shard.is_masterchain() && info.block_id.seq_no > 0 {
             //check only shard blocks during MC validator, skip masterchain blocks
+            //ignore zerostate checks
             if let Some(ref verification_manager) = &self.verification_manager {                
                 //TODO: rewrite check_one_shard for async
                 if !verification_manager.wait_for_block_verification(&info.block_id, None /* use timeout from node config */) {

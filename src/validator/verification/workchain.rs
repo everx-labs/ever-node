@@ -1636,8 +1636,6 @@ impl Workchain {
 
             trace!(target: "verificator", "Workchain's #{} configuration update for {}", workchain.workchain_id, workchain.node_debug_id);
 
-            let _hang_checker = HangCheck::new(workchain.runtime.clone(), format!("Workchain::update_configuration: for workchain {}", workchain.node_debug_id), Duration::from_millis(20000));
-
             //update configuration
 
             match workchain.compute_delivery_params().await {
@@ -1662,11 +1660,15 @@ impl Workchain {
             }
 
             let engine = workchain.engine.clone();
+            let runtime = workchain.runtime.clone();
+            let node_debug_id = workchain.node_debug_id.clone();
 
             drop(workchain); //release variable to prevent retaining of workchain
 
             if let Some(mc_block_handle) = prev_mc_block_handle.clone() {
                 loop {
+                    let _hang_checker = HangCheck::new(runtime.clone(), format!("Workchain::update_configuration: for workchain {}", node_debug_id), Duration::from_millis(20000));
+
                     if let Ok(r) = engine.wait_next_applied_mc_block(&mc_block_handle, Some(1000)).await {
                         let block = r.0;
 
