@@ -849,12 +849,13 @@ impl ValidateQuery {
             reject_query!("new shard configuration for shard {} contains different next_validator_shard {}",
                 shard, info.descr.next_validator_shard)
         }
-        if let Some(ref verification_manager) = &self.verification_manager {
-            const MAX_VERIFICATION_TIMEOUT : std::time::Duration = std::time::Duration::from_millis(20);
-            //TODO: rewrite check_one_shard for async
-            if !verification_manager.wait_for_block_verification(&info.block_id, &MAX_VERIFICATION_TIMEOUT) {
-                //reject_query!("can't verify block {}", info.block_id)
-                log::warn!(target:"verificator", "can't verify block {} in MC", info.block_id);
+        if !shard.is_masterchain() {
+            //check only shard blocks during MC validator, skip masterchain blocks
+            if let Some(ref verification_manager) = &self.verification_manager {                
+                //TODO: rewrite check_one_shard for async
+                if !verification_manager.wait_for_block_verification(&info.block_id, None /* use timeout from node config */) {
+                    reject_query!("can't verify shard block {} in MC", info.block_id);
+                }
             }
         }
         if info.descr.collators.is_some() {

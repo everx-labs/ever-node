@@ -777,21 +777,22 @@ impl ValidatorGroup {
 
         let mc = self.engine.load_last_applied_mc_state().await?;
 
-        let last_applied_block = if self.general_session_info.shard.is_masterchain() {
-            mc.block_id().clone()
+        let last_applied_block_opt = if self.general_session_info.shard.is_masterchain() {
+            Some(mc.block_id().clone())
         }
         else {
-            let shard_info = mc.shard_state_extra()?
+            mc.shard_state_extra()?
                 .shards().find_shard(&self.general_session_info.shard)?
-                .ok_or_else(|| error!("shard {} not found", self.general_session_info.shard))?;
-            shard_info.block_id().clone()
+                .map(|x| x.block_id().clone())
         };
 
-        if last_applied_block.seq_no >= candidate.block_id.seq_no {
-            fail!(
-                "Attempting to validate obsolete candidate block {}, actual last shard block {}",
-                candidate.block_id, last_applied_block
-            );
+        if let Some(last_applied_block) = last_applied_block_opt {
+            if last_applied_block.seq_no >= candidate.block_id.seq_no {
+                fail!(
+                    "Attempting to validate obsolete candidate block {}, actual last shard block {}",
+                    candidate.block_id, last_applied_block
+                );
+            }
         }
 
         let validation_completion_time = run_validate_query(

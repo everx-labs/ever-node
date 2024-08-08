@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.15
+
+- SMFT: configure timeout for delivery of shard blocks status to MC validator
+
+## Version 0.59.14
+
+- Fix for issue with shard merge
+
 ## Version 0.59.13
 
 - SMFT configuration parameters

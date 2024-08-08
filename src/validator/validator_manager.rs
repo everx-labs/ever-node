@@ -41,6 +41,7 @@ use crate::validator::{
     },
     verification::{
         GENERATE_MISSING_BLS_KEY, VerificationFactory, VerificationListener, 
+        VerificationManagerConfig,
         VerificationManagerPtr
     }
 };
@@ -407,7 +408,11 @@ impl ValidatorManagerImpl {
 
             log::info!(target: "verificator", "Initialize verification manager for validator manager");
 
-            let verification_manager = VerificationFactory::create_manager(self.engine.clone(), self.rt.clone());
+            let verification_manager_config = VerificationManagerConfig {
+                max_mc_delivery_wait_timeout: self.config.smft_max_mc_delivery_timeout,
+            };
+
+            let verification_manager = VerificationFactory::create_manager(self.engine.clone(), self.rt.clone(), verification_manager_config);
             let verification_listener = Arc::new(VerificationListenerImpl::new(self.engine.clone()));
 
             *self.verification_manager.lock() = Some(verification_manager);
