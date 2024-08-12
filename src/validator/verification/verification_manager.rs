@@ -129,10 +129,7 @@ impl VerificationManager for VerificationManagerImpl {
         };
 
         if let Some(workchain) = workchain {
-            let candidate_id =
-                Workchain::get_candidate_id_impl(block_id);
-
-            if let Some(block) = workchain.get_block_by_id(&candidate_id) {
+            if let Some(block) = workchain.get_block_by_id(&block_id) {
                 return workchain.get_block_status(&block);
             }
         }
@@ -146,6 +143,10 @@ impl VerificationManager for VerificationManagerImpl {
         block_id: &BlockIdExt,
         timeout: Option<std::time::Duration>,
     ) -> bool {
+        log::warn!(target: "verificator", "Wait for block verification is temporarily disabled!!!");
+        //todo !!!!!
+        return true; 
+
         log::trace!(target: "verificator", "Start block {} verification", block_id);
 
         let workchain_id = block_id.shard_id.workchain_id();
@@ -155,7 +156,6 @@ impl VerificationManager for VerificationManagerImpl {
         };
 
         if let Some(workchain) = workchain {
-            let candidate_id = Workchain::get_candidate_id_impl(block_id);
             let start_time = SystemTime::now();
             let timeout = if let Some(timeout) = timeout {
                 timeout
@@ -166,14 +166,16 @@ impl VerificationManager for VerificationManagerImpl {
             loop {
                   //check block status
 
-                if let Some(block) = workchain.get_block_by_id(&candidate_id) {
+                if let Some(block) = workchain.get_block_by_id(&block_id) {
                     let (delivered, rejected) = workchain.get_block_status(&block);
 
-                    workchain.update_block_external_delivery_metrics(&candidate_id, &start_time);
+                    workchain.update_block_external_delivery_metrics(&block_id, &start_time);
 
                     if rejected {
                         log::warn!(target: "verificator", "Finish block {} verification - NACK detected", block_id);
-                        //TODO: initiate arbitrage & wait for result instead of returning false
+
+                        workchain.start_arbitrage(&block_id);
+
                         return false;
                     }
 
@@ -187,8 +189,10 @@ impl VerificationManager for VerificationManagerImpl {
 
                 let elapsed_time = get_elapsed_time(&start_time);
                 if elapsed_time > timeout {
-                    log::warn!(target: "verificator", "Can't verify block {}: timeout {}ms expired", block_id, elapsed_time.as_millis());
-                    workchain.update_block_external_delivery_metrics(&candidate_id, &start_time);
+                    log::warn!(target: "verificator", "Can't verify block {}: timeout {}ms expired. Start force block delivery", block_id, elapsed_time.as_millis());
+                    workchain.update_block_external_delivery_metrics(&block_id, &start_time);
+
+                    workchain.start_force_block_delivery(&block_id);
 
                     if timeout.as_millis() == 0 {
                         //special case: in case of mc_max_delivery_wait_timeout = 0 - work in shadow mode and allow unverified blocks to be included in MC
