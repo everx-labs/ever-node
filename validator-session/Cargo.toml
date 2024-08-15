@@ -13,11 +13,11 @@ lazy_static = '1.4'
 log = '0.4'
 metrics = '0.21.0'
 rand = '0.8'
-adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.16' }
+adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.18' }
 catchain = { path = '../catchain' }
 ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.11.11' }
 storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.15' }
+ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.17' }
 
 [dev-dependencies]
 chrono = '0.4'

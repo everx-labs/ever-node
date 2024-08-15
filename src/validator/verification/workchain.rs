@@ -58,7 +58,7 @@ use catchain::utils::add_compute_result_metric;
 //TODO: cutoff weight configuration
 const MANUAL_CANDIDATE_LOADING_DELAY_MS: u64 = 4000; //delay for manual candidate loading
 const ALLOWED_FORCE_DELIVERY_DELAY_MS: u128 = 4000;   //delay between allowed force delivery requests
-const FORCE_DELIVERY_DUPLICATION_FACTOR: f64 = 2.0;  //duplication factor for force delivery requests (each MC validator sents request to FACTOR x WC_VALIDATORS_COUNT/MC_VALIDATORS_COUNT workchain nodes)
+const FORCE_DELIVERY_DUPLICATION_FACTOR: f64 = 3.0;  //duplication factor for force delivery requests (each MC validator sents request to FACTOR x WC_VALIDATORS_COUNT/MC_VALIDATORS_COUNT workchain nodes)
 
 /*
 ===============================================================================

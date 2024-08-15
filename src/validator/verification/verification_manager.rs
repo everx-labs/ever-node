@@ -143,10 +143,6 @@ impl VerificationManager for VerificationManagerImpl {
         block_id: &BlockIdExt,
         timeout: Option<std::time::Duration>,
     ) -> bool {
-        log::warn!(target: "verificator", "Wait for block verification is temporarily disabled!!!");
-        //todo !!!!!
-        return true; 
-
         log::trace!(target: "verificator", "Start block {} verification", block_id);
 
         let workchain_id = block_id.shard_id.workchain_id();
