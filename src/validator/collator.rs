@@ -3489,7 +3489,7 @@ impl Collator {
 
             let mut update_one_shard = |ident, descr: &mut ShardDescr, sibling: Option<&ShardDescr>| -> Result<()> {
                 min_ref_mc_seqno = min(min_ref_mc_seqno, descr.min_ref_mc_seqno);
-                let mut updated = self.update_one_shard(
+                let updated = self.update_one_shard(
                     collator_data,
                     &ident,
                     descr,
@@ -3497,15 +3497,11 @@ impl Collator {
                     wc_set.get(&ident.workchain_id())?.as_ref(),
                     update_cc,
                 )?;
-                 {
-                    updated = updated;
-                }
                 if updated {
                     collator_data.shards_mut()?.update_shard(&ident, |_| Ok(descr.clone()))?;
                 }
                 Ok(())
             };
-
 
             if let Some(sibling) = sibling.as_mut() {
                 update_one_shard(shard.sibling(), sibling, Some(&descr))?;
