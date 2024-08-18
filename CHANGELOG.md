@@ -18,10 +18,6 @@ All notable changes to this project will be documented in this file.
 
 - SMFT configuration parameters
 
-## Version 0.59.12
-
-- Fast finality: added new roles mechanism
-
 ## Version 0.59.11
 
 - Fix for broken shard merge
