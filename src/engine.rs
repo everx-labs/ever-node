@@ -2764,6 +2764,7 @@ pub async fn run(
         node_config.unsafe_catchain_patches_files(),
         node_config.validation_countdown_mode(),
         node_config.is_smft_disabled(),
+        node_config.smft_max_mc_delivery_timeout(),
     );
     let wc_from_config = node_config.workchain();
     let remp_client_pool = node_config.remp_config().remp_client_pool();
