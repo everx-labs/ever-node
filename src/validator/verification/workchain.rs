@@ -47,18 +47,10 @@ use metrics::Recorder;
 use catchain::utils::add_compute_relative_metric;
 use catchain::utils::add_compute_result_metric;
 
-//TODO: force request block from MC
-
-/*
-===============================================================================
-    Constants
-===============================================================================
-*/
-
-//TODO: cutoff weight configuration
-const MANUAL_CANDIDATE_LOADING_DELAY_MS: u64 = 4000; //delay for manual candidate loading
-const ALLOWED_FORCE_DELIVERY_DELAY_MS: u128 = 4000;   //delay between allowed force delivery requests
-const FORCE_DELIVERY_DUPLICATION_FACTOR: f64 = 3.0;  //duplication factor for force delivery requests (each MC validator sents request to FACTOR x WC_VALIDATORS_COUNT/MC_VALIDATORS_COUNT workchain nodes)
+//TODO: response to MC/WC node if this node has extra BLS information compared to sender node (do not send back if received from MC overlay)
+//TODO: sync time should be affected by last update time of the block status
+//TODO: load empty block statuses at workchain start (top of shards) to speed up recovery process after restart
+//TODO: test sync time is the same as lifetime and sync until block status is delivered
 
 /*
 ===============================================================================
@@ -72,6 +64,7 @@ pub type WorkchainPtr = Arc<Workchain>;
 struct WorkchainDeliveryParams {
     block_status_forwarding_neighbours_count: usize, //neighbours count for block status synchronization
     block_status_far_neighbours_count: usize,        //far neighbours count for block status synchronization
+    wc_cutoff_weight: ValidatorWeight,               //cutoff weight for WC
     config_params: SmftParams,                       //configuration parameters
 }
 
@@ -91,9 +84,7 @@ pub struct Workchain {
     workchain_id: i32,                    //workchain identifier
     self_weak_ref: SpinMutex<Option<Weak<Workchain>>>, //self weak reference
     wc_total_weight: ValidatorWeight,     //total weight for consensus in WC
-    wc_cutoff_weight: ValidatorWeight,    //cutoff weight for consensus in WC
     mc_total_weight: ValidatorWeight,     //total weight for consensus in MC
-    mc_cutoff_weight: ValidatorWeight,    //cutoff weight for consensus in MC
     local_bls_key: PrivateKey,            //private BLS key
     local_id: PublicKeyHash,              //local ID for this node
     workchain_delivery_params: SpinMutex<WorkchainDeliveryParams>, //delivery params
@@ -164,6 +155,7 @@ impl Workchain {
         blocks_instance_counter: Arc<InstanceCounter>,
         wc_overlays_instance_counter: Arc<InstanceCounter>,
         mc_overlays_instance_counter: Arc<InstanceCounter>,
+        use_debug_bls_keys: bool,
     ) -> Result<Arc<Self>> {
         if !USE_VALIDATORS_WEIGHTS {
             for desc in wc_validators.iter_mut() {
@@ -206,19 +198,19 @@ impl Workchain {
         let node_debug_id = Arc::new(format!("#{}.{}", workchain_id, local_adnl_id));
 
         let wc_total_weight: ValidatorWeight = wc_validators.iter().map(|desc| desc.weight).sum();
-        let wc_cutoff_weight = wc_total_weight / 2 + 1;
 
         let mut wc_pub_keys = Vec::new();
 
-        log::info!(target: "verificator", "Creating verification workchain {} (wc_validator_set_hash={}, mc_validator_set_hash={}) with {} workchain nodes (total_weight={}, cutoff_weight={}, wc_local_idx={}, mc_local_idx={})",
+        log::info!(target: "verificator", "Creating verification workchain {} (wc_validator_set_hash={}, mc_validator_set_hash={}) with {} workchain nodes (total_weight={}, wc_local_idx={}, mc_local_idx={}, use_debug_bls_keys={})",
             node_debug_id,
             wc_validator_set_hash.to_hex_string(),
             mc_validator_set_hash.to_hex_string(),
             wc_validators.len(),
             wc_total_weight,
-            wc_cutoff_weight,
             wc_local_idx,
-            mc_local_idx);
+            mc_local_idx,
+            use_debug_bls_keys,
+        );
 
         let wc_validators_count = wc_validators.len();
 
@@ -228,7 +220,7 @@ impl Workchain {
             let public_key = sigpubkey_to_publickey(&desc.public_key);
             let mut bls_public_key = desc.bls_public_key.clone();
 
-            if bls_public_key.is_none() && GENERATE_MISSING_BLS_KEY {
+            if bls_public_key.is_none() && use_debug_bls_keys {
                 match utils::generate_test_bls_key(&public_key) {
                     Ok(bls_key) => {
                         match bls_key.pub_key() {
@@ -264,15 +256,14 @@ impl Workchain {
         }
 
         let mc_total_weight: ValidatorWeight = mc_validators.iter().map(|desc| desc.weight).sum();
-        let mc_cutoff_weight = mc_total_weight * 2 / 3 + 1; //different from wc cutoff weight (50% + 1)
 
-        log::debug!(target: "verificator", "Workchain {} (wc_validator_set_hash={}, mc_validator_set_hash={}) has {} linked MC nodes (total_weight={}, cutoff_weight={})",
+        log::debug!(target: "verificator", "Workchain {} (wc_validator_set_hash={}, mc_validator_set_hash={}) has {} linked MC nodes (total_weight={})",
             node_debug_id,
             wc_validator_set_hash.to_hex_string(),
             mc_validator_set_hash.to_hex_string(),
             mc_validators.len(),
             mc_total_weight,
-            mc_cutoff_weight);
+        );
 
         for (i, desc) in mc_validators.iter().enumerate() {
             let adnl_id = get_adnl_id(&desc);
@@ -304,9 +295,7 @@ impl Workchain {
             wc_validator_set_hash,
             mc_validator_set_hash,
             wc_total_weight,
-            wc_cutoff_weight,
             mc_total_weight,
-            mc_cutoff_weight,
             local_bls_key: local_bls_key.clone(),
             local_adnl_id: local_adnl_id.clone().into(),
             local_id: local_id.clone(),
@@ -314,7 +303,7 @@ impl Workchain {
             mc_local_idx,
             wc_pub_keys,
             blocks: SpinMutex::new(HashMap::new()),
-            workchain_delivery_params: SpinMutex::new(Self::compute_delivery_params_from_smft_params(wc_validators_count, SmftParams::default())),
+            workchain_delivery_params: SpinMutex::new(Self::compute_delivery_params_from_smft_params(wc_validators_count, wc_total_weight, SmftParams::default())),
             mc_overlay: SpinMutex::new(None),
             workchain_overlay: SpinMutex::new(None),
             listener,
@@ -639,24 +628,29 @@ impl Workchain {
 
         result.append(format!("Workchain {} dump:\n", self.node_debug_id));
         result.append(format!("  - blocks: {}\n", blocks.len()));
+        result.append(format!("  - use_debug_bls_keys: {}\n", config_params.use_debug_bls_keys));
         result.append(format!("  - local_adnl_id: {}\n", self.local_adnl_id));
         result.append(format!("  - local_bls_key_id: {}\n", self.local_bls_key.id()));
         result.append(format!("  - mc_validators_count: {}\n", self.mc_validators.len()));
         result.append(format!("  - mc_local_idx: {}\n", self.mc_local_idx));
         result.append(format!("  - mc_total_weight: {}\n", self.mc_total_weight));
-        result.append(format!("  - mc_cutoff_weight: {}\n", self.mc_cutoff_weight));
         result.append(format!("  - wc_validators_count: {}\n", self.wc_validators.len()));
         result.append(format!("  - wc_local_idx: {}\n", self.wc_local_idx));
 
         result.append(format!("  - wc_total_weight: {}\n", self.wc_total_weight));
-        result.append(format!("  - wc_cutoff_weight: {}\n", self.wc_cutoff_weight));
+        result.append(format!("  - wc_cutoff_weight: {}\n", delivery_params.wc_cutoff_weight));
 
         result.append(format!("  - fwd_neighbours_count: {} (limits [{};{}])\n", delivery_params.block_status_forwarding_neighbours_count, config_params.min_forwarding_neighbours_count, config_params.max_forwarding_neighbours_count));
         result.append(format!("  - far_neighbours_count: {} (limits [{};{}])\n", delivery_params.block_status_far_neighbours_count, config_params.min_far_neighbours_count, config_params.max_far_neighbours_count));
         result.append(format!("  - far_sync_period_ms: [{};{}]\n", config_params.min_far_neighbours_sync_period_ms, config_params.max_far_neighbours_sync_period_ms));
         result.append(format!("  - far_neighbours_resync_period_ms: {}\n", config_params.far_neighbours_resync_period_ms));
         result.append(format!("  - block_sync_period_ms: [{};{}]\n", config_params.min_block_sync_period_ms, config_params.max_block_sync_period_ms));
-        result.append(format!("  - verification_obligation_cutoff: {}%\n", config_params.verification_obligation_cutoff));
+        result.append(format!("  - verification_obligation_cutoff: {:.1}%\n", (config_params.verification_obligation_cutoff_numerator as f64) / (config_params.verification_obligation_cutoff_denominator as f64) * 100.0));
+        result.append(format!("  - delivery_cutoff: {:.1}%\n", (config_params.delivery_cutoff_numerator as f64) / (config_params.delivery_cutoff_denominator as f64) * 100.0));
+        result.append(format!("  - manual_candidate_loading_delay_ms: {}\n", config_params.manual_candidate_loading_delay_ms));
+        result.append(format!("  - mc_max_delivery_waiting_timeout_ms: {}\n", config_params.mc_max_delivery_waiting_timeout_ms));
+        result.append(format!("  - mc_allowed_force_delivery_ms: {}\n", config_params.mc_allowed_force_delivery_delay_ms));
+        result.append(format!("  - mc_force_delivery_duplication_factor: {:.2}\n", (config_params.mc_force_delivery_duplication_factor_numerator as f64) / (config_params.mc_force_delivery_duplication_factor_denominator as f64)));
 
         result.append(format!("  - block_lifetime_period: {:.3}s\n", Duration::from_millis(config_params.block_lifetime_period_ms as u64).as_secs_f64()));
         result.append(format!("  - block_sync_lifetime_period: {:.3}s\n", Duration::from_millis(config_params.block_sync_lifetime_period_ms as u64).as_secs_f64()));
@@ -673,7 +667,7 @@ impl Workchain {
             result.append(format!("      - b{:03} ({:6.2}%): {}{}{}{}{} | delivery_latency={:.3}s, lifetime={:.3}s, hops={:2}, acks={:?}, nacks={:?}, stats={:?}, id={}\n",
                 i,
                 delivered_weight as f64 / self.wc_total_weight as f64 * 100.0,
-                if block.is_delivered(&self.wc_validators, self.wc_cutoff_weight) { " " } else { "↔" },
+                if block.is_delivered(&self.wc_validators, delivery_params.wc_cutoff_weight) { " " } else { "↔" },
                 if block.is_sent_to_mc() { "↑" } else { " " },
                 if block.is_received_from_mc() { "↓" } else { " " },
                 if block.is_rejected() { "N" } else { " "},
@@ -725,6 +719,16 @@ impl Workchain {
             .expect("Self ref must exist")
     }
 
+    /// Get cutoff weight
+    pub fn get_wc_cutoff_weight(&self) -> ValidatorWeight {
+        self.workchain_delivery_params.lock().wc_cutoff_weight
+    }
+
+    /// Get configuration
+    pub fn get_config(&self) -> SmftParams {
+        self.workchain_delivery_params.lock().config_params.clone()
+    }
+
     /*
         Block management
     */
@@ -732,7 +736,8 @@ impl Workchain {
     /// Block status (delivered, rejected)
     pub fn get_block_status(&self, block: &BlockPtr) -> (bool, bool) {
         let block = block.lock();
-        let is_delivered = block.is_delivered(&self.wc_validators, self.wc_cutoff_weight);
+        let wc_cutoff_weight = self.get_wc_cutoff_weight();   
+        let is_delivered = block.is_delivered(&self.wc_validators, wc_cutoff_weight);
         let is_rejected = block.is_rejected();
 
         (is_delivered, is_rejected)
@@ -839,7 +844,8 @@ impl Workchain {
                 return;
             }
         };
-        let config_params = workchain.workchain_delivery_params.lock().config_params.clone();
+        let delivery_params = workchain.workchain_delivery_params.lock().clone();
+        let config_params = &delivery_params.config_params;
 
         let (block_id, block_end_of_life_time, block_end_of_sync_time, delivery_weight) = {
             let block = block.lock();
@@ -888,20 +894,20 @@ impl Workchain {
         //manually load block candidate
 
         let has_candidate = block.lock().has_candidate();
-        let is_delivered = block.lock().is_delivered(&workchain.wc_validators, workchain.wc_cutoff_weight);
+        let is_delivered = block.lock().is_delivered(&workchain.wc_validators, delivery_params.wc_cutoff_weight);
 
         if !has_candidate && !is_delivered {
             if let Some(time) = manual_candidate_loading_time {
                 if time.elapsed().is_ok() {
-                    manual_candidate_loading_time = Some(SystemTime::now() + Duration::from_millis(MANUAL_CANDIDATE_LOADING_DELAY_MS as u64));
+                    manual_candidate_loading_time = Some(SystemTime::now() + Duration::from_millis(config_params.manual_candidate_loading_delay_ms as u64));
                     
                     log::debug!(target: "verificator", "Manually load block candidate for block {:?} in workchain {} (next attempt in {:.3}s from now)", block_id, workchain.node_debug_id,
-                        MANUAL_CANDIDATE_LOADING_DELAY_MS as f64 / 1000.0);
+                    config_params.manual_candidate_loading_delay_ms as f64 / 1000.0);
 
                     workchain.load_block_candidate(&block_id);                 
                 }
             } else {
-                manual_candidate_loading_time = Some(*block.lock().get_first_appearance_time() + Duration::from_millis(MANUAL_CANDIDATE_LOADING_DELAY_MS as u64));
+                manual_candidate_loading_time = Some(*block.lock().get_first_appearance_time() + Duration::from_millis(config_params.manual_candidate_loading_delay_ms as u64));
             }
         }
 
@@ -910,10 +916,6 @@ impl Workchain {
         if block_end_of_sync_time.elapsed().is_err() {
             //trace!(target: "verificator", "Synchronize block {:?} for workchain {}", candidate_id, workchain.node_debug_id);
             trace!(target: "verificator", "Synchronize block {:?} for workchain {}: {:?}", block_id, workchain.node_debug_id, block.lock());
-
-            //get delivery params
-
-            let delivery_params = workchain.workchain_delivery_params.lock().clone();
 
             //periodically force push block status to neighbours
 
@@ -942,7 +944,7 @@ impl Workchain {
         let ready_to_send = block.lock().toggle_send_ready(false);
 
         if ready_to_send {
-            workchain.send_block_status_to_forwarding_neighbours(&block, workchain.workchain_delivery_params.lock().block_status_forwarding_neighbours_count);
+            workchain.send_block_status_to_forwarding_neighbours(&block, delivery_params.block_status_forwarding_neighbours_count);
         }        
 
         //schedule next synchronization
@@ -1145,7 +1147,8 @@ impl Workchain {
     ) {
         let (should_update_delivery_metrics, is_first_time_external_request, has_approves, is_rejected, is_delivered, latency) = {
             let mut block = block.lock();
-            let is_delivered = block.is_delivered(&self.wc_validators, self.wc_cutoff_weight);
+            let wc_cutoff_weight = self.get_wc_cutoff_weight();
+            let is_delivered = block.is_delivered(&self.wc_validators, wc_cutoff_weight);
 
             let is_first_time_external_request = block.get_first_external_request_time().is_none() && external_request_time.is_some();
             if let Some(external_request_time) = external_request_time {
@@ -1371,9 +1374,10 @@ impl Workchain {
 
         if let Some(last_block_force_delivery_time) = last_block_force_delivery_time {
             if let Ok(elapsed) = last_block_force_delivery_time.elapsed() {
-                if elapsed.as_millis() < ALLOWED_FORCE_DELIVERY_DELAY_MS {
+                let mc_allowed_force_delivery_delay_ms = self.workchain_delivery_params.lock().config_params.mc_allowed_force_delivery_delay_ms as u128;
+                if elapsed.as_millis() < mc_allowed_force_delivery_delay_ms {
                     log::trace!(target: "verificator", "Force block delivery for block ID {:?} in workchain {} is already started (next attempt in {:.3}s)", block_id, self.node_debug_id,
-                        (ALLOWED_FORCE_DELIVERY_DELAY_MS - elapsed.as_millis()) as f64 / 1000.0);
+                        (mc_allowed_force_delivery_delay_ms - elapsed.as_millis()) as f64 / 1000.0);
                     return;
                 }
             }
@@ -1388,6 +1392,11 @@ impl Workchain {
         let workchain = Arc::downgrade(&self.get_self());
         let node_debug_id = self.node_debug_id.clone();
         let block_id = block_id.clone();
+        let force_delivery_duplication_factor = {
+            let params = &self.workchain_delivery_params.lock().config_params;
+
+            (params.mc_force_delivery_duplication_factor_numerator as f64) / (params.mc_force_delivery_duplication_factor_denominator as f64)
+        };
 
         self.runtime.spawn(async move {
             let workchain = match workchain.upgrade() {
@@ -1400,7 +1409,7 @@ impl Workchain {
 
             //calculate number of workchain nodes for force delivery request
 
-            let request_nodes_count = std::cmp::max(1, (workchain.wc_validators.len() as f64 / workchain.mc_validators.len() as f64 * FORCE_DELIVERY_DUPLICATION_FACTOR) as usize);
+            let request_nodes_count = std::cmp::max(1, (workchain.wc_validators.len() as f64 / workchain.mc_validators.len() as f64 * force_delivery_duplication_factor) as usize);
 
             //request block delivery from several workchain nodes
 
@@ -1625,7 +1634,8 @@ impl Workchain {
     /// Send block to far neighbours
     fn send_block_status_to_far_neighbours(&self, block: &BlockPtr, max_neighbours_count: usize, far_neighbours_resync_period: Duration) {
         let max_far_neighbours_sync_time = std::time::SystemTime::now() - far_neighbours_resync_period;
-        let far_neighbours = block.lock().calc_low_delivery_nodes_indexes(max_neighbours_count, self.wc_cutoff_weight, self.wc_local_idx as usize, max_far_neighbours_sync_time);
+        let wc_cutoff_weight = self.get_wc_cutoff_weight();
+        let far_neighbours = block.lock().calc_low_delivery_nodes_indexes(max_neighbours_count, wc_cutoff_weight, self.wc_local_idx as usize, max_far_neighbours_sync_time);
 
         if far_neighbours.len() < 1 {
             return;
@@ -1675,8 +1685,11 @@ impl Workchain {
             if self.wc_validators.len () < 1 {
                 return false; //no verification in empty workchain
             }
-            let random_value = (((hash as usize) % self.wc_validators.len()) as f64) / (self.wc_validators.len() as f64);
-            let verification_obligation_cutoff = self.workchain_delivery_params.lock().config_params.verification_obligation_cutoff as f64 / 100.0;
+            let random_value = (((hash as usize) % self.wc_validators.len()) as f64) / (self.wc_validators.len() as f64);            
+            let verification_obligation_cutoff = {
+                let params = &self.workchain_delivery_params.lock().config_params;
+                (params.verification_obligation_cutoff_numerator as f64) / (params.verification_obligation_cutoff_denominator as f64)
+            };
             let result = random_value < verification_obligation_cutoff;
 
             trace!(target: "verificator", "Verification obligation for block candidate {} is {:.3} < {:.3} -> {} (node={})", block_id, random_value, verification_obligation_cutoff, result, self.node_debug_id);
@@ -1816,16 +1829,17 @@ impl Workchain {
     async fn compute_delivery_params(&self) -> Result<WorkchainDeliveryParams> {
         check_execution_time!(1_000);
 
-        Ok(Self::compute_delivery_params_from_smft_params(self.wc_validators.len(), self.engine.load_actual_config_params().await?.smft_parameters()?))
+        Ok(Self::compute_delivery_params_from_smft_params(self.wc_validators.len(), self.wc_total_weight, self.engine.load_actual_config_params().await?.smft_parameters()?))
     }
 
     /// Compute workchain delivery parameters based on current configuration
-    fn compute_delivery_params_from_smft_params(wc_validators_count: usize, config_params: SmftParams) -> WorkchainDeliveryParams {
+    fn compute_delivery_params_from_smft_params(wc_validators_count: usize, wc_total_weight: ValidatorWeight, config_params: SmftParams) -> WorkchainDeliveryParams {
         let status_fwd_neighbours_count = ((wc_validators_count as f64).sqrt() as usize).clamp(config_params.min_forwarding_neighbours_count as usize, config_params.max_forwarding_neighbours_count as usize);
 
         WorkchainDeliveryParams {
             block_status_forwarding_neighbours_count: status_fwd_neighbours_count,
             block_status_far_neighbours_count: ((status_fwd_neighbours_count as f64).sqrt() as usize).clamp(config_params.min_far_neighbours_count as usize, config_params.max_far_neighbours_count as usize),
+            wc_cutoff_weight: wc_total_weight * config_params.delivery_cutoff_numerator as u64 / config_params.delivery_cutoff_denominator as u64 + 1,
             config_params,
         }
     }
