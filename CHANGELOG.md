@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.18
+
+- Cleanup fast_finality for SMFT. Add default parameters for workchain delivery
+
+## Version 0.59.17
+
+- Block version up
+
 ## Version 0.59.15
 
 - SMFT: configure timeout for delivery of shard blocks status to MC validator
@@ -17,6 +25,10 @@ All notable changes to this project will be documented in this file.
 ## Version 0.59.12
 
 - Fast finality: added new roles mechanism
+
+## Version 0.59.11
+
+- Fix for broken shard merge
 
 ## Version 0.59.10
 

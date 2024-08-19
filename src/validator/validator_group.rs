@@ -32,8 +32,6 @@ use validator_session_listener::{
     process_validation_queue,
     ValidatorSessionListener, ValidationAction,
 };
-//#[cfg(not(feature = "fast_finality"))]
-//use validator_utils::get_first_block_seqno_after_prevs;
 
 use super::*;
 use super::fabric::*;
@@ -722,18 +720,6 @@ impl ValidatorGroup {
             if let Some(candidate) = candidate {
                 log::debug!(target:"verificator", "Received new candidate for round {} for shard {:?}", round, self.shard());
                 let verification_manager = verification_manager.clone();
-                /*
-                let next_block_id = match self.group_impl.execute_sync(|group_impl|
-                    group_impl.create_next_block_id(
-                        candidate.id.root_hash.clone(),
-                        get_hash(&candidate.data.data()),
-                        self.shard().clone()
-                    )
-                ).await {
-                    Err(x) => { log::error!(target: "validator", "{}", x); return },
-                    Ok(x) => x
-                };
-                 */
 
                 let candidate = super::BlockCandidate {
                     block_id: next_block_id,

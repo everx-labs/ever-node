@@ -37,13 +37,18 @@ use crate::validator::{
     BlockCandidate,
     fabric::run_validate_query_any_candidate,
     validator_utils::{
-        is_smft_enabled, try_calc_vset_for_workchain, try_calc_subset_for_workchain_standard
+        is_smft_enabled, try_calc_vset_for_workchain,
     },
     verification::{
         GENERATE_MISSING_BLS_KEY, VerificationFactory, VerificationListener, 
         VerificationManagerConfig,
         VerificationManagerPtr
     }
+};
+use crate::validator::{
+    validator_utils::{
+        try_calc_subset_for_workchain_standard,
+    },
 };
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::{SlashingManager, SlashingManagerPtr};
@@ -1193,7 +1198,7 @@ impl ValidatorManagerImpl {
         let full_validator_set = mc_state_extra.config.validator_set()?;
         let possible_validator_change = next_validator_set.total() > 0;
         let mut mc_validators = Vec::new();
-
+        
         mc_validators.reserve(full_validator_set.total() as usize);
 
         for ident in future_shards.iter() {

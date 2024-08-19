@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 use ever_block::{
     base64_encode, ConfigParamEnum, ConfigParam12, Deserializable, HashmapType, MASTERCHAIN_ID,
     Result, Serializable, SHARD_FULL, ShardIdent, ShardStateUnsplit, StateInit, UInt256, 
-    write_boc, GlobalCapabilities, ValidatorsStat
+    write_boc
 };
 use ever_block_json::parse_state;
 
@@ -60,9 +60,6 @@ fn import_zerostate(json: &str) -> Result<ShardStateUnsplit> {
     extra.validator_info.validator_list_hash_short = hash_short;
     extra.validator_info.nx_cc_updated = true;
     extra.validator_info.catchain_seqno = 0;
-    if extra.config.has_capability(GlobalCapabilities::CapPipeline) {
-        extra.validators_stat = ValidatorsStat::new(extra.config.validator_set()?.total());
-    }
     mc_zero_state.write_custom(Some(&extra))?;
     Ok(mc_zero_state)
 }
