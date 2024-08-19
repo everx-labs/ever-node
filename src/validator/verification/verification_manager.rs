@@ -65,6 +65,7 @@ pub struct VerificationManagerImpl {
     mc_overlays_instance_counter: Arc<InstanceCounter>,                //instance counter for workchains MC overlays
     send_new_block_candidate_counter: metrics::Counter,  //counter for new candidates invocations
     update_workchains_counter: metrics::Counter,         //counter for workchains update invocations
+    config: VerificationManagerConfig,                                 //verification manager config
 }
 
 #[async_trait::async_trait]
@@ -128,10 +129,7 @@ impl VerificationManager for VerificationManagerImpl {
         };
 
         if let Some(workchain) = workchain {
-            let candidate_id =
-                Workchain::get_candidate_id_impl(block_id);
-
-            if let Some(block) = workchain.get_block_by_id(&candidate_id) {
+            if let Some(block) = workchain.get_block_by_id(&block_id) {
                 return workchain.get_block_status(&block);
             }
         }
@@ -143,7 +141,7 @@ impl VerificationManager for VerificationManagerImpl {
     fn wait_for_block_verification(
         &self,
         block_id: &BlockIdExt,
-        timeout: &std::time::Duration,
+        timeout: Option<std::time::Duration>,
     ) -> bool {
         log::trace!(target: "verificator", "Start block {} verification", block_id);
 
@@ -154,20 +152,26 @@ impl VerificationManager for VerificationManagerImpl {
         };
 
         if let Some(workchain) = workchain {
-            let candidate_id = Workchain::get_candidate_id_impl(block_id);
             let start_time = SystemTime::now();
+            let timeout = if let Some(timeout) = timeout {
+                timeout
+            } else {
+                self.config.max_mc_delivery_wait_timeout
+            };
 
             loop {
                   //check block status
 
-                if let Some(block) = workchain.get_block_by_id(&candidate_id) {
+                if let Some(block) = workchain.get_block_by_id(&block_id) {
                     let (delivered, rejected) = workchain.get_block_status(&block);
 
-                    workchain.update_block_external_delivery_metrics(&candidate_id, &start_time);
+                    workchain.update_block_external_delivery_metrics(&block_id, &start_time);
 
                     if rejected {
                         log::warn!(target: "verificator", "Finish block {} verification - NACK detected", block_id);
-                        //TODO: initiate arbitrage & wait for result instead of returning false
+
+                        workchain.start_arbitrage(&block_id);
+
                         return false;
                     }
 
@@ -180,15 +184,29 @@ impl VerificationManager for VerificationManagerImpl {
                   //check for timeout
 
                 let elapsed_time = get_elapsed_time(&start_time);
-                if elapsed_time > *timeout {
-                    log::warn!(target: "verificator", "Finish block {} verification - timeout {}ms expired", block_id, elapsed_time.as_millis());
-                    workchain.update_block_external_delivery_metrics(&candidate_id, &start_time);
+                if elapsed_time > timeout {
+                    log::warn!(target: "verificator", "Can't verify block {}: timeout {}ms expired. Start force block delivery", block_id, elapsed_time.as_millis());
+                    workchain.update_block_external_delivery_metrics(&block_id, &start_time);
+
+                    workchain.start_force_block_delivery(&block_id);
+
+                    if timeout.as_millis() == 0 {
+                        //special case: in case of mc_max_delivery_wait_timeout = 0 - work in shadow mode and allow unverified blocks to be included in MC
+                        log::warn!(target: "verificator", "Can't verify block {}: block is included in MC due to SMFT shadow mode (mc_max_delivery_wait_timeout=0)", block_id);
+                        return true;
+                    }
+
                     return false;
                 }
+
+                  //sleep
+
+                const WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+                std::thread::sleep(WAIT_TIMEOUT);
             }
         }
 
-        log::warn!(target: "verificator", "Finish block {} verification - no workchain found", block_id);
+        log::warn!(target: "verificator", "Can't verify block {}: no workchain found", block_id);
 
         false
     }    
@@ -486,7 +504,7 @@ impl VerificationManagerImpl {
         Constructor
     */
 
-    pub fn create(engine: EnginePtr, runtime: tokio::runtime::Handle) -> Arc<dyn VerificationManager> {
+    pub fn create(engine: EnginePtr, runtime: tokio::runtime::Handle, config: VerificationManagerConfig) -> Arc<dyn VerificationManager> {
         log::info!(target: "verificator", "Creating verification manager");
 
         let workchains = Arc::new(SpinMutex::new(Arc::new(HashMap::new())));
@@ -507,6 +525,7 @@ impl VerificationManagerImpl {
             mc_overlays_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"smft_mc_overlays".to_string())),
             should_stop_flag: should_stop_flag.clone(),
             dump_thread_is_stopped_flag: dump_thread_is_stopped_flag.clone(),
+            config,
         };
 
         Self::run_metrics_dumper(should_stop_flag, dump_thread_is_stopped_flag, metrics_receiver, workchains);

@@ -37,12 +37,18 @@ use crate::validator::{
     BlockCandidate,
     fabric::run_validate_query_any_candidate,
     validator_utils::{
-        is_smft_enabled, try_calc_vset_for_workchain, try_calc_subset_for_workchain_standard
+        is_smft_enabled, try_calc_vset_for_workchain,
     },
     verification::{
         GENERATE_MISSING_BLS_KEY, VerificationFactory, VerificationListener, 
+        VerificationManagerConfig,
         VerificationManagerPtr
     }
+};
+use crate::validator::{
+    validator_utils::{
+        try_calc_subset_for_workchain_standard,
+    },
 };
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::{SlashingManager, SlashingManagerPtr};
@@ -407,7 +413,11 @@ impl ValidatorManagerImpl {
 
             log::info!(target: "verificator", "Initialize verification manager for validator manager");
 
-            let verification_manager = VerificationFactory::create_manager(self.engine.clone(), self.rt.clone());
+            let verification_manager_config = VerificationManagerConfig {
+                max_mc_delivery_wait_timeout: self.config.smft_max_mc_delivery_timeout,
+            };
+
+            let verification_manager = VerificationFactory::create_manager(self.engine.clone(), self.rt.clone(), verification_manager_config);
             let verification_listener = Arc::new(VerificationListenerImpl::new(self.engine.clone()));
 
             *self.verification_manager.lock() = Some(verification_manager);
@@ -1188,7 +1198,7 @@ impl ValidatorManagerImpl {
         let full_validator_set = mc_state_extra.config.validator_set()?;
         let possible_validator_change = next_validator_set.total() > 0;
         let mut mc_validators = Vec::new();
-
+        
         mc_validators.reserve(full_validator_set.total() as usize);
 
         for ident in future_shards.iter() {
@@ -1361,7 +1371,6 @@ impl ValidatorManagerImpl {
         if let Some(verification_manager) = verification_manager {
             if let Some(verification_listener) = self.verification_listener.lock().clone() {
                 let config = &mc_state_extra.config;
-                let mut are_workchains_updated = false;
                 match try_calc_vset_for_workchain(
                     &full_validator_set, config, &catchain_config, workchain_id
                 ) {
@@ -1406,7 +1415,6 @@ impl ValidatorManagerImpl {
                                                 &mc_validators,
                                                 &verification_listener
                                             ).await;
-                                            are_workchains_updated = true;
                                             log::debug!(
                                                 target: "verificator", "Update workchains finish"
                                             );
@@ -1439,11 +1447,7 @@ impl ValidatorManagerImpl {
                     }
                 }
 
-                if !are_workchains_updated {
-                    log::debug!(target: "verificator", "Reset workchains start");
-                    verification_manager.reset_workchains().await;
-                    log::debug!(target: "verificator", "Reset workchains finish");
-                }
+                //TODO: add removing workchains logic in case of multi workchain configuration
             }
         }
 
