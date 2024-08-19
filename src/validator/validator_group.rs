@@ -243,12 +243,12 @@ impl ValidatorGroupImpl {
     }
 
     pub fn info_round(&self, round: u32) -> String {
-
-        return format!("session_status: id {:x}, shard {}{}, {}, round {}, prevs {}",
-                       self.session_id, self.shard,
-                       self.prev_block_ids.get_next_seqno().map_or("".to_owned(), |seqno| format!(", {} next seqno", seqno)),
-                       self.status,
-                       round, self.prev_block_ids
+        let next_seqno = self.prev_block_ids
+            .get_next_seqno()
+            .map_or("".to_owned(), |seqno| format!(", {} next seqno", seqno));
+        return format!(
+            "session_status: id {:x}, shard {}{}, {}, round {}, prevs {}",
+            self.session_id, self.shard, next_seqno, self.status, round, self.prev_block_ids
         );
     }
 
