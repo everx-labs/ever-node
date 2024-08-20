@@ -180,8 +180,13 @@ pub struct TonNodeConfig {
     sync_by_archives: bool,
     #[serde(default)]
     smft_disabled: bool,
+    #[serde(default="default_smft_max_mc_delivery_timeout_ms")]
+    smft_max_mc_delivery_timeout_ms: Option<u32>,
 }
 
+fn default_smft_max_mc_delivery_timeout_ms() -> Option<u32> {
+    None
+}
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
 
 #[derive(PartialEq, serde::Deserialize, serde::Serialize)]
@@ -427,6 +432,14 @@ impl TonNodeConfig {
 
     pub fn is_smft_disabled(&self) -> bool {
         self.smft_disabled
+    }
+
+    pub fn smft_max_mc_delivery_timeout(&self) -> Option<std::time::Duration> {
+        if let Some(timeout_ms) = self.smft_max_mc_delivery_timeout_ms {
+            Some(std::time::Duration::from_millis(timeout_ms as u64))
+        } else {
+            None
+        }
     }
 
     pub fn from_file(
@@ -1758,6 +1771,7 @@ pub struct ValidatorManagerConfig {
     pub unsafe_catchain_rotates: HashMap<u32, (u32, u32)>,
     pub no_countdown_for_zerostate: bool,
     pub smft_disabled: bool,
+    pub smft_max_mc_delivery_timeout: Option<std::time::Duration>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -1787,7 +1801,7 @@ impl Display for ValidatorManagerConfig {
 }
 
 impl ValidatorManagerConfig {
-    pub fn read_configs(config_files: Vec<String>, validation_countdown_mode: Option<String>, smft_disabled: bool) -> ValidatorManagerConfig {
+    pub fn read_configs(config_files: Vec<String>, validation_countdown_mode: Option<String>, smft_disabled: bool, smft_max_mc_delivery_timeout: Option<std::time::Duration>) -> ValidatorManagerConfig {
         log::debug!(target: "validator", "Reading validator manager config files: {}",
             config_files.iter().map(|x| format!("{}; ",x)).collect::<String>());
 
@@ -1803,6 +1817,7 @@ impl ValidatorManagerConfig {
         }
 
         validator_config.smft_disabled = smft_disabled;
+        validator_config.smft_max_mc_delivery_timeout = smft_max_mc_delivery_timeout;
 
         'iterate_configs: for one_config in config_files.into_iter() {
             if let Ok(config_file) = std::fs::File::open(one_config.clone()) {
@@ -1856,6 +1871,10 @@ impl Default for ValidatorManagerConfig {
             unsafe_catchain_rotates: HashMap::new(),
             no_countdown_for_zerostate: false,
             smft_disabled: false,
+            smft_max_mc_delivery_timeout: match default_smft_max_mc_delivery_timeout_ms() {
+                Some(timeout_ms) => Some(Duration::from_millis(timeout_ms as u64)),
+                None => None,
+            },
         }
     }
 }

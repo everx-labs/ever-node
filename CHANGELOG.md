@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.20
+
+- Fix compiler warnings
+
+## Version 0.59.19
+
+- SMFT configuration parameters
+
+## Version 0.59.18
+
+- Cleanup fast_finality for SMFT. Add default parameters for workchain delivery
+
+## Version 0.59.17
+
+- Block version up
+
+## Version 0.59.15
+
+- SMFT: configure timeout for delivery of shard blocks status to MC validator
+
+## Version 0.59.14
+
+- Fix for issue with shard merge
+
+## Version 0.59.13
+
+- SMFT configuration parameters
+
+## Version 0.59.12
+
+- Fast finality: added new roles mechanism
+
 ## Version 0.59.11
 
 - Fix for broken shard merge
@@ -9,8 +41,8 @@ All notable changes to this project will be documented in this file.
 ## Version 0.59.10
 
 - SMFT fixes:
-1) lifetime and sync time of smft status block are separated: status lives much more than synced to avoid empty blocks syncs after deletion;
-2) messages size dump was added 
+1) lifetime and sync time of smft status block are separated: status lives much more than synced to avoid empty blocks syncs after deletion
+2) messages size dump was added
 3) broadcast hops is set to 3
 
 ## Version 0.59.9

@@ -1029,6 +1029,7 @@ pub trait ExternalDb : Sync + Send {
         mc_seq_no: u32,
     ) -> Result<()>;
     async fn process_full_state(&self, state: &Arc<ShardStateStuff>) -> Result<()>;
+    #[cfg(test)]
     fn process_chain_range_enabled(&self) -> bool;
     async fn process_chain_range(&self, range: &ChainRange) -> Result<()>;
     fn process_shard_hashes_enabled(&self) -> bool;

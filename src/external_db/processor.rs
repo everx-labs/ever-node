@@ -877,6 +877,7 @@ impl<T: WriteData> ExternalDb for Processor<T> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn process_chain_range_enabled(&self) -> bool {
         self.writers.write_chain_range.enabled()
     }
