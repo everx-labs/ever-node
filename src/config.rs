@@ -79,10 +79,12 @@ impl Default for CellsGcConfig {
 pub struct CollatorConfig {
     pub cutoff_timeout_ms: u32,
     pub stop_timeout_ms: u32,
+    pub finalize_parallel_percentage_points: u32,
     pub clean_timeout_percentage_points: u32,
     pub optimistic_clean_percentage_points: u32,
     pub max_secondary_clean_timeout_percentage_points: u32,
     pub max_collate_threads: u32,
+    pub max_collate_msgs_queue_on_account: u32,
     pub retry_if_empty: bool,
     pub finalize_empty_after_ms: u32,
     pub empty_collation_sleep_ms: u32,
@@ -90,15 +92,22 @@ pub struct CollatorConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_messages_maximum_queue_length: Option<u32>, // None - unlimited
 }
+impl CollatorConfig {
+    pub fn get_finalize_parallel_timeout_ms(&self) -> u32 {
+        self.stop_timeout_ms * self.finalize_parallel_percentage_points / 1000
+    }
+}
 impl Default for CollatorConfig {
     fn default() -> Self {
         Self {
             cutoff_timeout_ms: 1000,
             stop_timeout_ms: 1500,
+            finalize_parallel_percentage_points: 800, // 0.8 = 80% * stop_timeout_ms = 1200
             clean_timeout_percentage_points: 150, // 0.150 = 15% = 150ms
             optimistic_clean_percentage_points: 1000, // 1.000 = 100% = 150ms
             max_secondary_clean_timeout_percentage_points: 350, // 0.350 = 35% = 350ms
             max_collate_threads: 10,
+            max_collate_msgs_queue_on_account: 3,
             retry_if_empty: false,
             finalize_empty_after_ms: 800,
             empty_collation_sleep_ms: 100,

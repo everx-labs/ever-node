@@ -775,6 +775,7 @@ impl HashmapOrderedFilterCursor {
             }
         }
 
+        // TODO: review and may be fix this because there can be many msgs with same LT
         // stop pocessing when max_lt reached
         #[cfg(not(feature = "only_sorted_clean"))]
         if current.node_obj_ref().lt() == self.max_lt {
