@@ -1380,13 +1380,6 @@ impl ExecutionManager {
                     )
                 }).await?;
 
-                if let Ok(transaction) = transaction_res.as_mut() {
-                    let res = shard_acc.add_transaction(transaction, account_root.clone());
-                    if let Err(err) = res {
-                        log::error!("FAILED to add transaction to shard account stuf: {}", &err);
-                        fail!(err);
-                    }
-                }
                 if cancellation_token.is_cancelled() {
                     log::debug!(
                         "{}: parallel collation was cancelled after message {} processing on {:x}",
@@ -1452,8 +1445,7 @@ impl ExecutionManager {
                 (Box::new(TickTockTransactionExecutor::new(config, tt.clone())), None)
             }
         };
-        let res = executor.execute_with_libs_and_params(msg_opt, account_root, params);
-        res
+        executor.execute_with_libs_and_params(msg_opt, account_root, params)
     }
 
     async fn wait_transaction(&mut self, collator_data: &mut CollatorData) -> Result<()> {
@@ -1481,7 +1473,8 @@ impl ExecutionManager {
     ) -> Result<AccountId> {
         let AsyncMessageSync(msg_sync_key, new_msg) = new_msg_sync;
         if let AsyncMessage::Ext(msg, msg_id) = new_msg {
-            let account_id = msg.get_std()?.int_dst_account_id().unwrap_or_default();
+            let msg = msg.get_std()?;
+            let account_id = msg.int_dst_account_id().unwrap_or_default();
             if let Err(err) = transaction_res {
                 log::warn!(
                     target: EXT_MESSAGES_TRACE_TARGET,
@@ -1497,7 +1490,7 @@ impl ExecutionManager {
                     self.collated_block_descr, account_id, msg_id,
                 );
                 collator_data.accepted_ext_messages.push(
-                    (msg_id.clone(), msg.get_std()?.dst_workchain_id().unwrap_or_default())
+                    (msg_id.clone(), msg.dst_workchain_id().unwrap_or_default())
                 );
             }
         }
@@ -3178,7 +3171,7 @@ impl Collator {
                 self.check_inbound_internal_message(&key, &enq, created_lt, block_id.shard())
                     .map_err(|err| error!("problem processing internal inbound message \
                         with hash {:x} : {}", key.hash, err))?;
-                let src_addr = enq.message().get_std()?.src().unwrap_or_default().address();
+                let src_addr = enq.src_account_id()?;
                 let our = self.shard.contains_full_prefix(&enq.cur_prefix());
                 let to_us = self.shard.contains_full_prefix(&enq.dst_prefix());
                 if to_us {
@@ -3228,8 +3221,7 @@ impl Collator {
         created_lt: u64,
         nb_shard: &ShardIdent,
     ) -> Result<()> {
-        let header = enq.message().get_std().ok().and_then(|msg| msg.int_header())
-            .ok_or_else(|| error!("message is not internal"))?;
+        let header = enq.int_header()?;
         if created_lt != header.created_lt {
             fail!("inbound internal message has an augmentation value in source OutMsgQueue \
                 distinct from the one in its contents")

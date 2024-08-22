@@ -13,12 +13,12 @@
 
 use std::fmt::{self, Display, Formatter};
 use ever_block::{
-    GlobalCapabilities,
+    error, fail, Result, AccountId, SliceData, UInt256,
+    GlobalCapabilities, InternalMessageHeader,
     EnqueuedMsg, MsgEnvelope, AccountIdPrefixFull, IntermediateAddress, OutMsgQueueKey,
     Serializable, Deserializable, Grams, ShardIdent, AddSub, CommonMessage, ChildCell
 };
 use ever_executor::{BlockchainConfig, CalcMsgFwdFees};
-use ever_block::{error, fail, Result, AccountId, SliceData, UInt256};
 
 #[cfg(test)]
 #[path = "tests/test_messages.rs"]
@@ -218,6 +218,18 @@ impl MsgEnqueueStuff {
     }
     pub fn out_msg_key(&self) -> OutMsgQueueKey {
         OutMsgQueueKey::with_account_prefix(&self.next_prefix(), self.message_hash())
+    }
+    pub fn int_header(&self) -> Result<&InternalMessageHeader> {
+        self.message().get_std()?.int_header()
+            .ok_or_else(|| error!("message with hash {:x} is not internal", self.message_hash()))
+    }
+    pub fn src_account_id(&self) -> Result<AccountId> {
+        self.message()
+            .get_std()?
+            .src_ref()
+            .map(|address| address.address())
+            .ok_or_else(|| error!("internal message with hash {:x} \
+                has wrong source address", self.message_hash()))
     }
     pub fn dst_account_id(&self) -> Result<AccountId> {
         self.message()
