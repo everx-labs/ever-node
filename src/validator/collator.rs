@@ -201,17 +201,6 @@ struct NewMessage {
     prefix: AccountIdPrefixFull,
 }
 
-impl NewMessage {
-    fn new(lt_hash: (u64, UInt256), msg: CommonMessage, tr_cell: Cell, prefix: AccountIdPrefixFull) -> Self {
-        Self {
-            lt_hash,
-            msg,
-            tr_cell,
-            prefix,
-        }
-    }
-}
-
 impl Ord for NewMessage {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         other.lt_hash.cmp(&self.lt_hash)
@@ -340,12 +329,12 @@ impl CollatorData {
         collated_block_descr: Arc<String>,
     ) -> Result<Self> {
         let limits = Arc::new(config.raw_config().block_limits(is_masterchain)?);
-        let opts = serde_opts_from_caps(&config);
+        let serde_opts = serde_opts_from_caps(&config);
         let split_queues = !config.has_capability(GlobalCapabilities::CapNoSplitOutQueue);
         let ret = Self {
-            in_msgs: InMsgDescr::with_serde_opts(opts),
+            in_msgs: InMsgDescr::with_serde_opts(serde_opts),
             in_msgs_descr_history: Default::default(),
-            out_msgs: OutMsgDescr::with_serde_opts(opts),
+            out_msgs: OutMsgDescr::with_serde_opts(serde_opts),
             out_msgs_descr_history: Default::default(),
             accounts: ShardAccountBlocks::default(),
             out_msg_queue_info: OutMsgQueueInfoStuff::default(),
@@ -401,7 +390,7 @@ impl CollatorData {
             remove_count: 0,
             msg_queue_depth_sum: 0,
             before_split: false,
-            serde_opts: opts,
+            serde_opts,
             split_queues,
             collated_block_descr,
         };
@@ -510,9 +499,8 @@ impl CollatorData {
             self.add_in_msg_descr_to_history(src_msg_sync_key, in_msg)?;
         }
         let shard = self.out_msg_queue_info.shard().clone();
-        let opts = self.serde_opts;
         transaction.out_msgs.iterate_slices(|slice| {
-            let msg_cell: ChildCell<CommonMessage> = ChildCell::with_cell_and_opts(slice.reference(0)?, opts);
+            let msg_cell: ChildCell<CommonMessage> = ChildCell::with_cell_and_opts(slice.reference(0)?, self.serde_opts);
             let msg_hash = msg_cell.hash();
             let common_msg = msg_cell.read_struct()?;
             let msg = common_msg.get_std()?;
@@ -521,13 +509,17 @@ impl CollatorData {
                     // Add out message to state for counting time and it may be removed if used
                     let use_hypercube = !self.config.has_capability(GlobalCapabilities::CapOffHypercube);
                     let fwd_fee = *info.fwd_fee();
-                    let enq = MsgEnqueueStuff::new(common_msg.clone(), &shard, fwd_fee, use_hypercube, opts)?;
+                    let enq = MsgEnqueueStuff::new(common_msg.clone(), &shard, fwd_fee, use_hypercube, self.serde_opts)?;
                     self.enqueue_count += 1;
                     self.msg_queue_depth_sum += self.out_msg_queue_info.add_message(&enq)?;
                     // Add to message block here for counting time later it may be replaced
                     let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
-                    let new_msg = NewMessage::new((info.created_lt, msg_hash.clone()), common_msg, tr_cell.cell(), enq.next_prefix().clone());
-
+                    let new_msg = NewMessage {
+                        lt_hash: (info.created_lt, msg_hash.clone()),
+                        msg: common_msg,
+                        tr_cell: tr_cell.cell(),
+                        prefix: enq.next_prefix().clone(),
+                    };
                     self.add_out_queue_msg_with_history(src_msg_sync_key, enq)?;
 
                     // Add to message block here for counting time later it may be replaced
@@ -1150,6 +1142,7 @@ struct ExecutionManager {
     min_lt: Arc<AtomicU64>,
     // block random seed
     seed_block: UInt256,
+    serde_opts: u8,
 
     #[cfg(feature = "signature_with_id")]
     // signature ID used in VM
@@ -1166,43 +1159,47 @@ struct ExecutionManager {
 
 impl ExecutionManager {
     pub fn new(
-        gen_utime: u32,
-        start_lt: u64,
-        seed_block: UInt256,
-        #[cfg(feature = "signature_with_id")]
-        signature_id: i32, 
-        libraries: Libraries,
-        config: BlockchainConfig,
-        max_collate_threads: usize,
-        max_collate_msgs_queue_on_account: usize,
-        collated_block_descr: Arc<String>,
-        debug: bool,
-        f_check_finalize_parallel_timeout: Box<dyn Fn() -> (bool, u32) + Send>,
+        collator: &Collator,
+        collator_data: &CollatorData,
+        mc_data: &McData,
     ) -> Result<Self> {
+        let collated_block_descr = collator_data.collated_block_descr.clone();
         log::trace!("{}: ExecutionManager::new", collated_block_descr);
         let (wait_tr, receive_tr) = Wait::new();
+        // closure to check the finalize timeout for parallel transactions
+        let collation_started = collator.started.clone();
+        let finalize_parallel_timeout_ms = collator.finalize_parallel_timeout_ms;
+        let f_check_finalize_parallel_timeout = Box::new(move || (
+            collation_started.elapsed().as_millis() as u32 > finalize_parallel_timeout_ms,
+            finalize_parallel_timeout_ms,
+        ));
+        let start_lt = collator_data.start_lt()?;
+        let max_collate_threads = collator.engine.collator_config().max_collate_threads as usize;
+        let max_collate_msgs_queue_on_account = collator.engine.collator_config().max_collate_msgs_queue_on_account as usize;
         Ok(Self {
             changed_accounts: HashMap::new(),
             msgs_queue: Vec::new(),
             accounts_processed_msgs: HashMap::new(),
+            // cancellation_token: collator.engine.collator_config() tokio_util::sync::CancellationToken::new(),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             f_check_finalize_parallel_timeout,
             receive_tr,
             wait_tr,
             max_collate_threads,
             parallel_msgs_counter: ParallelMsgsCounter::new(max_collate_threads, max_collate_msgs_queue_on_account),
-            libraries,
-            config,
+            libraries: mc_data.libraries()?.clone(),
+            config: collator_data.config.clone(),
             start_lt,
-            gen_utime,
-            seed_block,
+            gen_utime: collator_data.gen_utime(),
+            seed_block: collator.rand_seed.clone(),
+            serde_opts: collator_data.serde_opts,
             #[cfg(feature = "signature_with_id")]
-            signature_id, 
+            signature_id: mc_data.state().state()?.global_id(), // Use network global ID as signature ID
             max_lt: start_lt + 1,
             min_lt: Arc::new(AtomicU64::new(start_lt + 1)),
             total_trans_duration: Arc::new(AtomicU64::new(0)),
             collated_block_descr,
-            debug,
+            debug: collator.debug,
             #[cfg(test)]
             test_msg_process_sleep: 0,
         })
@@ -1313,7 +1310,7 @@ impl ExecutionManager {
             account_addr,
             shard_acc,
             self.min_lt.load(Ordering::Relaxed),
-            serde_opts_from_caps(&self.config)
+            self.serde_opts
         )?;
 
         let debug = self.debug;
@@ -2151,28 +2148,7 @@ impl Collator {
         // compute created / minted / recovered / from_prev_blk
         self.update_value_flow(mc_data, &prev_data, collator_data)?;
 
-        // closure to check the finalize timeout for parallel transactions
-        let collation_started = self.started.clone();
-        let finalize_parallel_timeout_ms = self.finalize_parallel_timeout_ms;
-        let check_finilize_parallel_timeout_closure = move || (
-            collation_started.elapsed().as_millis() as u32 > finalize_parallel_timeout_ms,
-            finalize_parallel_timeout_ms,
-        );
-
-        let mut exec_manager = ExecutionManager::new(
-            collator_data.gen_utime(),
-            collator_data.start_lt()?,
-            self.rand_seed.clone(),
-            #[cfg(feature = "signature_with_id")]
-            mc_data.state().state()?.global_id(), // Use network global ID as signature ID
-            mc_data.libraries()?.clone(),
-            collator_data.config.clone(),
-            self.engine.collator_config().max_collate_threads as usize,
-            self.engine.collator_config().max_collate_msgs_queue_on_account as usize,
-            self.collated_block_descr.clone(),
-            self.debug,
-            Box::new(check_finilize_parallel_timeout_closure),
-        )?;
+        let mut exec_manager = ExecutionManager::new(self, collator_data, mc_data)?;
 
         #[cfg(test)]
         exec_manager.set_test_msg_process_sleep(self.test_msg_process_sleep);
@@ -4455,7 +4431,7 @@ impl Collator {
         if !res {
             fail!(
                 "cannot apply the after-split update for {} without a corresponding sibling update",
-                new_info.blk_id()
+                new_info.block_id()
             );
         }
         if let Some(ancestor) = ancestor {
@@ -4656,12 +4632,12 @@ impl Collator {
         self.started.elapsed().as_millis() as u32 > cutoff_timeout
     }
 
-    fn check_finilize_parallel_timeout(&self) -> (bool, u32) {
-        (
-            self.started.elapsed().as_millis() as u32 > self.finalize_parallel_timeout_ms,
-            self.finalize_parallel_timeout_ms,
-        )
-    }
+    // fn check_finilize_parallel_timeout(&self) -> (bool, u32) {
+    //     (
+    //         self.started.elapsed().as_millis() as u32 > self.finalize_parallel_timeout_ms,
+    //         self.finalize_parallel_timeout_ms,
+    //     )
+    // }
 
     fn get_remaining_cutoff_time_limit_nanos(&self) -> i128 {
         let cutoff_timeout_nanos = self.engine.collator_config().cutoff_timeout_ms as i128 * 1_000_000;
