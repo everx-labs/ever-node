@@ -107,13 +107,14 @@ pub struct Block {
     last_block_force_delivery_request_time: Option<std::time::SystemTime>, //time of last force delivery request
     merges_count: u32,                                //merges count
     initially_mc_processed: bool,                     //was this block process in MC
-    received_from_mc: bool,                           //was this block received from MC overlay
+    delivered_and_received_from_mc: bool,             //was this block received from MC overlay
     sent_to_mc: bool,                                 //was this block sent to MC because of cutoff weight of delivery signatures
     ready_for_send: bool,                             //is this block ready for sending
     _instance_counter: InstanceCounter,               //instance counter
     first_external_request_time: Option<std::time::SystemTime>, //time of first external request
     node_delivery_descs: Vec<NodeDeliveryDesc>,       //delivery info for node
     delivery_stats: BlockDeliveryStats,               //delivery stats
+    block_start_sync_time: SystemTime,                //start time of block sync
 }
 
 pub type BlockPtr = Arc<SpinMutex<Block>>;
@@ -347,23 +348,44 @@ impl Block {
         self.sent_to_mc
     }    
 
-    /// Set received from MC flag
-    pub fn mark_as_received_from_mc(&mut self) {
-        self.received_from_mc = true;
+    /// Set delivered & received from MC flag
+    pub fn mark_as_delivered_and_received_from_mc(&mut self) {
+        self.delivered_and_received_from_mc = true;
     }
 
-    /// Is this block received from MC
-    pub fn is_received_from_mc(&self) -> bool {
-        self.received_from_mc
+    /// Is this block delivered & received from MC
+    pub fn is_delivered_and_received_from_mc(&self) -> bool {
+        self.delivered_and_received_from_mc
     }
 
     /// Set ready for sending flag
     pub fn toggle_send_ready(&mut self, new_state: bool) -> bool {
-        let prev_state = self.ready_for_send;
+        let prev_state = self.ready_for_send;        
 
         self.ready_for_send = new_state;
 
         prev_state
+    }
+
+    /// Awake block
+    pub fn awake_synchronization(&mut self) {
+        self.block_start_sync_time = SystemTime::now();
+    }
+
+    /// Is syncrhonizing
+    pub fn is_synchronizing(&self, timeout: std::time::Duration) -> bool {
+        let corrected_block_start_sync_time = std::cmp::max(
+            self.block_start_sync_time,
+            if let Some(creation_time) = self.get_creation_time() {
+                std::cmp::max(*self.get_first_appearance_time(), creation_time)
+            } else {
+                *self.get_first_appearance_time()
+            }
+        );
+
+        let block_end_of_sync_time = corrected_block_start_sync_time + timeout;
+
+        block_end_of_sync_time.elapsed().is_err()
     }
 
     /// Delivery signature
@@ -457,8 +479,10 @@ impl Block {
         rejections_signature: &MultiSignature,
         merges_count: u32,
         created_timestamp: i64,
-    ) -> Result<bool> {
-        let prev_hash = self.get_signatures_hash();
+    ) -> Result<(bool, bool)> {
+        let prev_self_hash = self.get_signatures_hash();
+        let prev_other_hash = Self::compute_hash(&deliveries_signature, &approvals_signature, &rejections_signature);
+
         let mut new_deliveries_signature = self.deliveries_signature.clone();
         let mut new_approvals_signature = self.approvals_signature.clone();
         let mut new_rejections_signature = self.rejections_signature.clone();
@@ -472,7 +496,7 @@ impl Block {
             &new_approvals_signature,
             &new_rejections_signature);
 
-        if new_hash != prev_hash { //prevent duplicate merges
+        if new_hash != prev_self_hash { //prevent duplicate merges
             self.deliveries_signature = new_deliveries_signature;
             self.approvals_signature = new_approvals_signature;
             self.rejections_signature = new_rejections_signature;
@@ -486,7 +510,7 @@ impl Block {
 
         self.set_creation_timestamp(created_timestamp);        
 
-        Ok(new_hash != prev_hash)
+        Ok((new_hash != prev_self_hash, new_hash != prev_other_hash))
     }
 
     /// Get signatures hash
@@ -562,7 +586,7 @@ impl Block {
             created_timestamp: None,
             merges_count: 0,
             initially_mc_processed: false,
-            received_from_mc: false,
+            delivered_and_received_from_mc: false,
             sent_to_mc: false,
             ready_for_send: false,
             first_appearance_time: std::time::SystemTime::now(),
@@ -576,6 +600,7 @@ impl Block {
                 last_status_received_time: None,
             }; nodes_count],
             delivery_stats: BlockDeliveryStats::default(),
+            block_start_sync_time: SystemTime::now(),
         };
 
         body.update_hash();

@@ -220,6 +220,15 @@ impl WorkchainOverlay {
     }
 
     /*
+        Common API
+    */
+
+    /// Nodes count
+    pub fn get_nodes_count(&self) -> usize {
+        self.validators_adnl_ids.len()
+    }
+
+    /*
         Sending API
     */
 
