@@ -179,11 +179,7 @@ impl VerificationManager for VerificationManagerImpl {
 
                         workchain.start_arbitrage(&block_id);
 
-                        //TODO: temporary solution to allow unverified blocks to be included in MC
-                        log::warn!(target: "verificator", "TEMPORARY: Block {} is included in MC but should be rejected due to NACK", block_id);
-
-                        return true;
-                        //return false;
+                        return false;
                     }
 
                     if delivered && !rejected {

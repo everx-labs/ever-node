@@ -47,7 +47,6 @@ use metrics::Recorder;
 use catchain::utils::add_compute_relative_metric;
 use catchain::utils::add_compute_result_metric;
 
-//TODO: test sync time is the same as lifetime and sync until block status is delivered
 //TODO: add cutoff to limit number of WC validators which can send block to MC during one time slot
 //TODO: send block status to MC via broadcast
 
@@ -812,7 +811,12 @@ impl Workchain {
                 None => {
                     trace!(target: "verificator", "Creating new block {:?} for workchain {}", block_id, self.node_debug_id);
 
-                    let new_block = Block::create(block_id, &*self.blocks_instance_counter, self.wc_validators.len());
+                    let new_block = Block::create(
+                        block_id,
+                        &*self.blocks_instance_counter,
+                        self.wc_validators.len(),
+                        self.mc_validators.len()
+                    );
 
                     blocks.insert(Self::get_candidate_id(block_id), new_block.clone());
 
@@ -1055,18 +1059,25 @@ impl Workchain {
 
         //update node's knowledge of the block
 
-        if let Some(source_node_idx) = self.get_wc_validator_idx_by_adnl_id(source_node_adnl_id) {
-            let source_node_delivery_weight = deliveries_signature.get_total_weight(&self.wc_validators);
+        let source_node_delivery_weight = deliveries_signature.get_total_weight(&self.wc_validators);        
+
+        if let Some(source_wc_node_idx) = self.get_wc_validator_idx_by_adnl_id(source_node_adnl_id) {
             let mut block = block.lock();
 
-            block.set_node_delivery_weight(source_node_idx, source_node_delivery_weight);
-            block.set_node_status_received_time(source_node_idx, SystemTime::now());
+            block.set_wc_node_delivery_weight(source_wc_node_idx, source_node_delivery_weight);
+            block.set_wc_node_status_received_time(source_wc_node_idx, SystemTime::now());
+        }
+
+        if let Some(source_mc_node_idx) = self.get_mc_validator_idx_by_adnl_id(source_node_adnl_id) {
+            let mut block = block.lock();
+
+            block.set_mc_node_delivery_weight(source_mc_node_idx, source_node_delivery_weight);
+            block.set_mc_node_status_received_time(source_mc_node_idx, SystemTime::now());
         }
 
         //update status
 
-        let status = block.lock().merge_status(deliveries_signature, approvals_signature, rejections_signature, merges_count, created_timestamp
-            );
+        let status = block.lock().merge_status(deliveries_signature, approvals_signature, rejections_signature, merges_count, created_timestamp);
         match status {
             Ok((self_status_changed, other_status_should_be_changed)) => {
                 if other_status_should_be_changed {
@@ -1081,19 +1092,43 @@ impl Workchain {
                         let is_delivered = block.lock().is_delivered(&self.wc_validators, delivery_params.wc_cutoff_weight);
 
                         if is_delivered {
-                            //send back to MC only delivered blocks
-                            if let Some(source_mc_node_idx) = self.get_mc_validator_idx_by_adnl_id(source_node_adnl_id) {
-                                if log_enabled!(log::Level::Debug)
-                                {        
-                                    log::debug!(target: "verificator", "Send block {:?} status back to MC overlay node [{}]={} in workchain {}. BlockInfo: delivery={}",
-                                        block_id,
-                                        source_mc_node_idx,
-                                        source_node_adnl_id,
-                                        self.node_debug_id,
-                                        self.get_readable_block_info(&block));
+                            let is_delivered_on_other_node = source_node_delivery_weight >= self.get_wc_cutoff_weight();
+
+                            if !is_delivered_on_other_node {
+                                //send back to MC only blocks which are delivered for this node and not delivered on MC node
+
+                                if let Some(source_mc_node_idx) = self.get_mc_validator_idx_by_adnl_id(source_node_adnl_id) {
+                                    //send back delivered blocks to MC only
+
+                                    let next_allowed_send_back_time = match block.lock().get_mc_node_status_sent_time(source_mc_node_idx) {
+                                        Some(last_send_back_time) => last_send_back_time + Duration::from_millis(delivery_params.config_params.mc_allowed_force_delivery_delay_ms as u64),
+                                        None => SystemTime::now(),
+                                    };
+
+                                    if next_allowed_send_back_time.elapsed().is_ok() {
+                                        //manage timeout between sends
+
+                                        if log_enabled!(log::Level::Debug)
+                                        {        
+                                            log::debug!(target: "verificator", "Block {:?} status was sent back to MC overlay node [{}]={} in workchain {}. BlockInfo: delivery={}",
+                                                block_id,
+                                                source_mc_node_idx,
+                                                source_node_adnl_id,
+                                                self.node_debug_id,
+                                                self.get_readable_block_info(&block));
+                                        }
+                
+                                        self.send_block_status_to_mc_node(&block, source_mc_node_idx);                                        
+                                    } else {
+                                        log::trace!(target: "verificator", "Block {:?} status is not sent back to MC overlay node [{}]={} in workchain {} because of timeout (next allowed send time is in {:.3}s)",
+                                            block_id,
+                                            source_mc_node_idx,
+                                            source_node_adnl_id,
+                                            self.node_debug_id,
+                                            next_allowed_send_back_time.duration_since(SystemTime::now()).unwrap_or(Duration::from_secs(0)).as_secs_f64(),
+                                        );
+                                    }
                                 }
-        
-                                self.send_block_status_to_mc_node(&block, source_mc_node_idx);
                             }
                         } else {
                             //awake block synchronization to deliver block to MC if syncrhonization phase is finished
@@ -1612,6 +1647,15 @@ impl Workchain {
                     block.get_delivery_stats().out_mc_sends_count.fetch_add(self.mc_validators.len(), Ordering::SeqCst);
                 }
 
+                {
+                    let mut block = block.lock();
+                    let now = SystemTime::now();
+    
+                    for mc_node_idx in 0..self.mc_validators.len() {
+                        block.set_mc_node_status_sent_time(mc_node_idx, now);
+                    }
+                }
+
                 self.send_block_status_to_mc(serialized_block_status);
             }
         }
@@ -1661,7 +1705,7 @@ impl Workchain {
             block.get_delivery_stats().out_wc_sends_count.fetch_add(nodes.len(), Ordering::SeqCst);
         
             for node_idx in nodes.iter() {
-                block.set_node_status_sent_time(*node_idx, now);
+                block.set_wc_node_status_sent_time(*node_idx, now);
             }
 
             (block.serialize(), block.get_id().clone())
@@ -1694,8 +1738,8 @@ impl Workchain {
             block.get_delivery_stats().forwarding_neighbours_sends.fetch_add(1, Ordering::SeqCst);
             block.get_delivery_stats().out_wc_sends_count.fetch_add(forwarding_neighbours.len(), Ordering::SeqCst);
         
-            for node_idx in forwarding_neighbours.iter() {
-                block.set_node_status_sent_time(*node_idx, now);
+            for wc_node_idx in forwarding_neighbours.iter() {
+                block.set_wc_node_status_sent_time(*wc_node_idx, now);
             }
 
             (block.serialize(), block.get_id().clone())
@@ -1712,7 +1756,7 @@ impl Workchain {
     fn send_block_status_to_far_neighbours(&self, block: &BlockPtr, max_neighbours_count: usize, far_neighbours_resync_period: Duration) {
         let max_far_neighbours_sync_time = std::time::SystemTime::now() - far_neighbours_resync_period;
         let wc_cutoff_weight = self.get_wc_cutoff_weight();
-        let far_neighbours = block.lock().calc_low_delivery_nodes_indexes(max_neighbours_count, wc_cutoff_weight, self.wc_local_idx as usize, max_far_neighbours_sync_time);
+        let far_neighbours = block.lock().calc_low_delivery_wc_nodes_indexes(max_neighbours_count, wc_cutoff_weight, self.wc_local_idx as usize, max_far_neighbours_sync_time);
 
         if far_neighbours.len() < 1 {
             return;
@@ -1731,7 +1775,7 @@ impl Workchain {
             block.get_delivery_stats().out_wc_sends_count.fetch_add(far_neighbours.len(), Ordering::SeqCst);
 
             for node_idx in far_neighbours.iter() {
-                block.set_node_status_sent_time(*node_idx, now);
+                block.set_wc_node_status_sent_time(*node_idx, now);
             }
 
             (block.serialize(), block.get_id().clone())
@@ -1873,7 +1917,7 @@ impl Workchain {
         if let Some(mc_overlay) = self.get_mc_overlay() {
             //convert nodes indexes to full list of validators indexes (shifted by number of MC validators)
 
-            let validators = validators.clone().iter().map(|idx| *idx + self.mc_validators.len()).collect();
+            let validators = validators.clone().iter().map(|idx| *idx + self.mc_validators.len()).collect();            
 
             mc_overlay.send_message_to_validators(data, &validators);
         }
@@ -1892,7 +1936,7 @@ impl Workchain {
         log::trace!(target: "verificator", "Workchain::send_block_status_to_mc");
 
         if let Some(mc_overlay) = self.get_mc_overlay() {
-            self.send_block_status_to_mc_counter.increment(mc_overlay.get_nodes_count() as u64);
+            self.send_block_status_to_mc_counter.increment(mc_overlay.get_nodes_count() as u64);            
 
             mc_overlay.send_all(data, 0, self.mc_validators.len());
         }
@@ -1905,8 +1949,12 @@ impl Workchain {
         if let Some(mc_overlay) = self.get_mc_overlay() {
             self.send_block_status_to_mc_counter.increment(1);
 
+            block.lock().get_delivery_stats().out_mc_sends_count.fetch_add(1, Ordering::SeqCst);
+
             let serialized_block_status = block.lock().serialize();
             let validators = vec![mc_node_idx];
+            
+            block.lock().set_mc_node_status_sent_time(mc_node_idx, SystemTime::now());
 
             mc_overlay.send_message_to_validators(serialized_block_status, &validators);
         }        
