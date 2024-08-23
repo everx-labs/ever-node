@@ -141,6 +141,8 @@ commands! {
         "setstatesgcinterval <milliseconds>\tset interval in ms between shard states GC runs"
     Sign, "sign", 
         "sign <keyhash> <data>\tsigns bytestring with privkey"
+    ResetExternalDb, "resetextdb",
+        "resetextdb\t sets external db block pointer to last applied block"
 }
 
 fn parse_any<A, Q: ToString>(param_opt: Option<Q>, name: &str, parse_value: impl FnOnce(&str) -> Result<A>) -> Result<A> {
@@ -574,6 +576,12 @@ impl <Q: ToString> SendReceive<Q> for SetStatesGcInterval {
             |e| error!("can't parse <milliseconds>: {}", e)
         )?;
         Ok(TLObject::new(ton::rpc::engine::validator::SetStatesGcInterval { interval_ms }))
+    }
+}
+
+impl <Q: ToString> SendReceive<Q> for ResetExternalDb {
+    fn send(_params: &mut impl Iterator) -> Result<TLObject> {
+        Ok(TLObject::new(ton::rpc::engine::validator::ResetExternalDb))
     }
 }
 

@@ -11,8 +11,6 @@
 * limitations under the License.
 */
 
-#![cfg(not(feature = "fast_finality"))]
-
 extern crate catchain;
 
 use crate::engine_traits::EngineOperations;
@@ -34,7 +32,7 @@ mod workchain;
 mod workchain_overlay;
 mod utils;
 
-pub const GENERATE_MISSING_BLS_KEY: bool = true; //generate missing BLS key from ED25519 public key (only for testing)
+pub const DEFAULT_USE_DEBUG_BLS_KEYS: bool = true; //generate missing BLS key from ED25519 public key (only for testing)
 pub const USE_VALIDATORS_WEIGHTS: bool = false; //use weights from ValidatorDescr for BLS signature weight aggregation
 
 /// Engine ptr
@@ -51,6 +49,13 @@ pub type VerificationListenerPtr = Weak<dyn VerificationListener>;
 pub trait VerificationListener: Sync + Send {
     /// Verify block candidate
     async fn verify(&self, block_candidate: &BlockCandidate) -> bool;
+}
+
+/// Verficiation manager config
+#[derive(Clone, Debug)]
+pub struct VerificationManagerConfig {
+    /// Max wait time for delivery of shardchain block to MC validator
+    pub max_mc_delivery_wait_timeout: Option<std::time::Duration>,
 }
 
 /// Verification manager
@@ -70,7 +75,7 @@ pub trait VerificationManager: Sync + Send {
     fn wait_for_block_verification(
         &self,
         block_id: &BlockIdExt,
-        timeout: &std::time::Duration,
+        timeout: Option<std::time::Duration>,
     ) -> bool;
 
     /// Update workchains
@@ -83,10 +88,13 @@ pub trait VerificationManager: Sync + Send {
         workchain_validators: &'a Vec<ValidatorDescr>,
         mc_validators: &'a Vec<ValidatorDescr>,
         listener: &'a VerificationListenerPtr,
+        use_debug_bls_keys: bool,
     );
 
+    /*
     /// Reset workchains
     async fn reset_workchains<'a>(&'a self);
+    */
 }
 
 /// Factory for verification objects
@@ -94,8 +102,8 @@ pub struct VerificationFactory {}
 
 impl VerificationFactory {
     /// Create new verification manager
-    pub fn create_manager(engine: EnginePtr, runtime: tokio::runtime::Handle) -> VerificationManagerPtr {
-        verification_manager::VerificationManagerImpl::create(engine, runtime)
+    pub fn create_manager(engine: EnginePtr, runtime: tokio::runtime::Handle, config: VerificationManagerConfig) -> VerificationManagerPtr {
+        verification_manager::VerificationManagerImpl::create(engine, runtime, config)
     }
 
     /// Generate test BLS key based on public key

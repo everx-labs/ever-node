@@ -36,7 +36,6 @@ use ton_api::ton::ton_node::blockcandidatestatus::BlockCandidateStatus;
 use ton_api::ton::ton_node::Broadcast;
 use ever_block::{error, fail, Result};
 
-//TODO: traffic metrics & derivatives
 //TODO: remove dependency from CatchainClient? (use private overlay directly)
 
 /*
@@ -85,7 +84,7 @@ pub struct WorkchainOverlay {
     overlay: OverlayPtr,                    //private overlay
     overlay_short_id: Arc<OverlayShortId>,  //private overlay short ID
     overlay_id: UInt256,             //ID of validator list
-    active_validators_adnl_ids: Vec<PublicKeyHash>, //ADNL IDs of active validators
+    validators_adnl_ids: Vec<PublicKeyHash>, //ADNL IDs of active validators
     listener: Arc<WorkchainListener>,       //linked listener
     node_debug_id: Arc<String>,             //debug ID of node
     _instance_counter: InstanceCounter,     //instance counter
@@ -113,7 +112,6 @@ impl WorkchainOverlay {
         debug_id_prefix: String,
         overlay_id: UInt256,
         validators: &Vec<ValidatorDescr>,
-        active_validators_count: usize,
         local_adnl_id: PublicKeyHash,
         listener: Weak<dyn WorkchainOverlayListener>,
         engine: &EnginePtr,
@@ -187,7 +185,7 @@ impl WorkchainOverlay {
             Some(MAX_BROADCAST_HOPS),
         )?;
 
-        let active_validators_adnl_ids: Vec<PublicKeyHash> = nodes[0..active_validators_count].iter().map(|node| node.adnl_id.clone()).collect();
+        let validators_adnl_ids: Vec<PublicKeyHash> = nodes.iter().map(|node| node.adnl_id.clone()).collect();
 
         let overlay = Self {
             node_debug_id,
@@ -195,7 +193,7 @@ impl WorkchainOverlay {
             overlay,
             overlay_short_id,
             network: Arc::downgrade(&network.clone()),
-            active_validators_adnl_ids,
+            validators_adnl_ids,
             overlay_id,
             local_adnl_id,
             _runtime_handle: runtime.clone(),
@@ -222,6 +220,15 @@ impl WorkchainOverlay {
     }
 
     /*
+        Common API
+    */
+
+    /// Nodes count
+    pub fn get_nodes_count(&self) -> usize {
+        self.validators_adnl_ids.len()
+    }
+
+    /*
         Sending API
     */
 
@@ -231,7 +238,7 @@ impl WorkchainOverlay {
 
         self.send_message_to_neighbours_counter.increment(1);
 
-        self.send_message_to_neighbours(data, neighbours);
+        self.send_message_to_validators(data, neighbours);
     }
 
     /// Send message to custom neighbours
@@ -240,41 +247,43 @@ impl WorkchainOverlay {
 
         self.send_message_to_far_neighbours_counter.increment(1);
 
-        self.send_message_to_neighbours(data, neighbours);
+        self.send_message_to_validators(data, neighbours);
     }
 
-    /// Send message to neighbours
-    fn send_message_to_neighbours(&self, data: BlockPayloadPtr, neighbours: &Vec<usize>) {
-        let mut neighbours_adnl_ids = Vec::with_capacity(neighbours.len());
+    /// Send message to validators
+    pub fn send_message_to_validators(&self, data: BlockPayloadPtr, validators: &Vec<usize>) {
+        let mut adnl_ids = Vec::with_capacity(validators.len());
 
-        for idx in neighbours {
-            if *idx >= self.active_validators_adnl_ids.len() {
+        for idx in validators {
+            if *idx >= self.validators_adnl_ids.len() {
                 continue;
             }
 
-            let adnl_id = self.active_validators_adnl_ids[*idx].clone();
+            let adnl_id = self.validators_adnl_ids[*idx].clone();
 
             if adnl_id == self.local_adnl_id {
                 continue;
             }
 
-            neighbours_adnl_ids.push(adnl_id.clone());
+            adnl_ids.push(adnl_id.clone());
         }
 
-        self.send_message_multicast(&neighbours_adnl_ids, data);
-    }
+        self.send_message_multicast(&adnl_ids, data);
+    }    
 
     /// Send message to all nodes
-    pub fn send_all(&self, data: BlockPayloadPtr) {
-        log::trace!(target: "verificator", "Sending multicast to all {} active nodes (overlay={})", self.active_validators_adnl_ids.len(), self.node_debug_id);
+    pub fn send_all(&self, data: BlockPayloadPtr, first_idx: usize, count: usize) {
+        log::trace!(target: "verificator", "Sending multicast to nodes [{};{}) (overlay={})", first_idx, first_idx + count, self.node_debug_id);
 
         self.send_all_counter.increment(1);
 
-        self.send_message_multicast(&self.active_validators_adnl_ids, data);
+        let nodes_slice = &self.validators_adnl_ids[first_idx..first_idx + count];
+
+        self.send_message_multicast(nodes_slice, data);
     }
 
     /// Send message to other nodes
-    fn send_message_multicast(&self, nodes: &Vec<PublicKeyHash>, data: BlockPayloadPtr) {
+    fn send_message_multicast(&self, nodes: &[PublicKeyHash], data: BlockPayloadPtr) {
         log::trace!(target: "verificator", "Sending multicast {} bytes to {} nodes (overlay={})", data.data().len(), nodes.len(), self.node_debug_id);
 
         let received_from_workchain = !self.is_master_chain_overlay;

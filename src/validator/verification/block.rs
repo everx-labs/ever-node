@@ -15,6 +15,7 @@ use std::sync::atomic::AtomicUsize;
 use std::time::SystemTime;
 //pub use multi_signature_unsafe::MultiSignature;
 pub use multi_signature_bls::MultiSignature;
+use workchain::Workchain;
 use super::*;
 use catchain::BlockPayloadPtr;
 use log::*;
@@ -88,13 +89,14 @@ pub struct BlockDeliveryStats {
     pub out_mc_sends_count: AtomicUsize,          //outgoing MC sends
     pub forwarding_neighbours_sends: AtomicUsize, //forwarding neighbours sends
     pub far_neighbours_sends: AtomicUsize,        //far neighbours sends
+    pub mc_to_wc_sends: AtomicUsize,              //sends from MC to WC
     pub syncs_count: AtomicUsize,                 //synchronizations count
 }
 
 pub struct Block {
     block_candidate: Option<Arc<BlockCandidateBody>>, //block candidate
     serialized_block_status: Option<BlockPayloadPtr>, //serialized status
-    candidate_id: UInt256,                            //block ID
+    block_id: BlockIdExt,                             //block ID
     deliveries_signature: MultiSignature,             //signature for deliveries
     approvals_signature: MultiSignature,              //signature for approvals
     rejections_signature: MultiSignature,             //signature for rejections
@@ -102,28 +104,31 @@ pub struct Block {
     created_timestamp: Option<i64>,                   //time of block creation
     first_appearance_time: std::time::SystemTime,     //time of first block appearance in a network
     delivery_state_change_time: Option<std::time::SystemTime>, //time when block is delivered
+    last_block_force_delivery_request_time: Option<std::time::SystemTime>, //time of last force delivery request
     merges_count: u32,                                //merges count
     initially_mc_processed: bool,                     //was this block process in MC
-    received_from_mc: bool,                           //was this block received from MC overlay
+    delivered_and_received_from_mc: bool,             //was this block received from MC overlay
     sent_to_mc: bool,                                 //was this block sent to MC because of cutoff weight of delivery signatures
     ready_for_send: bool,                             //is this block ready for sending
     _instance_counter: InstanceCounter,               //instance counter
     first_external_request_time: Option<std::time::SystemTime>, //time of first external request
-    node_delivery_descs: Vec<NodeDeliveryDesc>,       //delivery info for node
+    wc_node_delivery_descs: Vec<NodeDeliveryDesc>,    //delivery info for node
+    mc_node_delivery_descs: Vec<NodeDeliveryDesc>, //delivery info for MC nodes
     delivery_stats: BlockDeliveryStats,               //delivery stats
+    block_start_sync_time: SystemTime,                //start time of block sync
 }
 
 pub type BlockPtr = Arc<SpinMutex<Block>>;
 
 impl std::fmt::Debug for Block {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Block[candidate_id={:?}, deliveries={:?}, approvals={:?}, rejections={:?}, signatures_hash={}]", self.candidate_id, self.deliveries_signature, self.approvals_signature, self.rejections_signature, self.signatures_hash)
+        write!(f, "Block[block_id={:?}, deliveries={:?}, approvals={:?}, rejections={:?}, signatures_hash={}]", self.block_id, self.deliveries_signature, self.approvals_signature, self.rejections_signature, self.signatures_hash)
     }
 }
 
 impl std::fmt::Debug for BlockDeliveryStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[in_candidates={}, in_wc_merges={}/{}, out_wc_sends={}, out_mc_syncs={}, out_mc_sends={}, in_mc_merges={}/{}, neighbours_sends={}/{}, syncs={}]",
+        write!(f, "[in_candidates={}, in_wc_merges={}/{}, out_wc_sends={}, out_mc_syncs={}, out_mc_sends={}, in_mc_merges={}/{}, neighbours_sends={}/{}, mc_to_wc_sends={}, syncs={}]",
             self.in_candidates_count.load(std::sync::atomic::Ordering::Relaxed),
             self.in_wc_real_merges_count.load(std::sync::atomic::Ordering::Relaxed),
             self.in_wc_merges_count.load(std::sync::atomic::Ordering::Relaxed),
@@ -134,14 +139,15 @@ impl std::fmt::Debug for BlockDeliveryStats {
             self.in_mc_merges_count.load(std::sync::atomic::Ordering::Relaxed),
             self.forwarding_neighbours_sends.load(std::sync::atomic::Ordering::Relaxed),
             self.far_neighbours_sends.load(std::sync::atomic::Ordering::Relaxed),
+            self.mc_to_wc_sends.load(std::sync::atomic::Ordering::Relaxed),
             self.syncs_count.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
 impl Block {
     /// Candidate ID
-    pub fn get_id(&self) -> &UInt256 {
-        &self.candidate_id
+    pub fn get_id(&self) -> &BlockIdExt {
+        &self.block_id
     }
 
     /// Is block delivered
@@ -237,18 +243,28 @@ impl Block {
         self.delivery_state_change_time = Some(*time);
     }
 
+    /// Get last block force delivery request time
+    pub fn get_last_block_force_delivery_request_time(&self) -> &Option<std::time::SystemTime> {
+        &self.last_block_force_delivery_request_time
+    }
+
+    /// Set last block force delivery request time
+    pub fn set_last_block_force_delivery_request_time(&mut self, time: &std::time::SystemTime) {
+        self.last_block_force_delivery_request_time = Some(*time);
+    }
+
     /// Delivery stats
     pub fn get_delivery_stats(&self) -> &BlockDeliveryStats {
         &self.delivery_stats
     }
 
     /// Get nodes where block is undelivered for further delivery
-    pub fn calc_low_delivery_nodes_indexes(&self, max_nodes_count: usize, cutoff_weight: ValidatorWeight, local_idx: usize, max_last_sent_time: SystemTime) -> Vec<usize> {
+    pub fn calc_low_delivery_wc_nodes_indexes(&self, max_nodes_count: usize, cutoff_weight: ValidatorWeight, local_idx: usize, max_last_sent_time: SystemTime) -> Vec<usize> {
         check_execution_time!(1_000);
 
-        let mut result = Vec::with_capacity(self.node_delivery_descs.len());
+        let mut result = Vec::with_capacity(self.wc_node_delivery_descs.len());
 
-        for (idx, desc) in self.node_delivery_descs.iter().enumerate() {
+        for (idx, desc) in self.wc_node_delivery_descs.iter().enumerate() {
             if desc.delivery_weight >= cutoff_weight {
                 continue;
             }
@@ -282,36 +298,76 @@ impl Block {
         shuffled_result
     }
 
-    /// Update node status sent time
-    pub fn set_node_status_sent_time(&mut self, source_node_idx: usize, time: SystemTime) {
-        if source_node_idx >= self.node_delivery_descs.len() {
+    /// Update WC node status sent time
+    pub fn set_wc_node_status_sent_time(&mut self, source_node_idx: usize, time: SystemTime) {
+        if source_node_idx >= self.wc_node_delivery_descs.len() {
             return;
         }
 
-        self.node_delivery_descs[source_node_idx].last_status_sent_time = Some(time);
+        self.wc_node_delivery_descs[source_node_idx].last_status_sent_time = Some(time);
     }
 
-    /// Update node status received time
-    pub fn set_node_status_received_time(&mut self, source_node_idx: usize, time: SystemTime) {
-        if source_node_idx >= self.node_delivery_descs.len() {
+    /// Update WC node status received time
+    pub fn set_wc_node_status_received_time(&mut self, source_node_idx: usize, time: SystemTime) {
+        if source_node_idx >= self.wc_node_delivery_descs.len() {
             return;
         }
 
-        self.node_delivery_descs[source_node_idx].last_status_received_time = Some(time);
+        self.wc_node_delivery_descs[source_node_idx].last_status_received_time = Some(time);
     }
 
-    /// Set node's delivery weight
-    pub fn set_node_delivery_weight(&mut self, source_node_idx: usize, delivery_weight: ValidatorWeight) {
-        if source_node_idx >= self.node_delivery_descs.len() {
+    /// Set WC node's delivery weight
+    pub fn set_wc_node_delivery_weight(&mut self, source_node_idx: usize, delivery_weight: ValidatorWeight) {
+        if source_node_idx >= self.wc_node_delivery_descs.len() {
             return;
         }
 
-        let node_delivery_weight = &mut self.node_delivery_descs[source_node_idx];
+        let node_delivery_weight = &mut self.wc_node_delivery_descs[source_node_idx];
 
         if node_delivery_weight.delivery_weight < delivery_weight {
             node_delivery_weight.delivery_weight = delivery_weight;
         }
     }
+
+    /// Get MC node status sent time
+    pub fn get_mc_node_status_sent_time(&self, source_node_idx: usize) -> Option<SystemTime> {
+        if source_node_idx >= self.mc_node_delivery_descs.len() {
+            return None;
+        }
+
+        self.mc_node_delivery_descs[source_node_idx].last_status_sent_time
+    }    
+
+    /// Update MC node status sent time
+    pub fn set_mc_node_status_sent_time(&mut self, source_node_idx: usize, time: SystemTime) {
+        if source_node_idx >= self.mc_node_delivery_descs.len() {
+            return;
+        }
+
+        self.mc_node_delivery_descs[source_node_idx].last_status_sent_time = Some(time);
+    }
+
+    /// Update MC node status received time
+    pub fn set_mc_node_status_received_time(&mut self, source_node_idx: usize, time: SystemTime) {
+        if source_node_idx >= self.mc_node_delivery_descs.len() {
+            return;
+        }
+
+        self.mc_node_delivery_descs[source_node_idx].last_status_received_time = Some(time);
+    }
+
+    /// Set MC node's delivery weight
+    pub fn set_mc_node_delivery_weight(&mut self, source_node_idx: usize, delivery_weight: ValidatorWeight) {
+        if source_node_idx >= self.mc_node_delivery_descs.len() {
+            return;
+        }
+
+        let node_delivery_weight = &mut self.mc_node_delivery_descs[source_node_idx];
+
+        if node_delivery_weight.delivery_weight < delivery_weight {
+            node_delivery_weight.delivery_weight = delivery_weight;
+        }
+    }    
 
     /// Set MC processed status
     pub fn mark_as_mc_processed(&mut self) {
@@ -333,31 +389,44 @@ impl Block {
         self.sent_to_mc
     }    
 
-    /// Set received from MC flag
-    pub fn mark_as_received_from_mc(&mut self) {
-        self.received_from_mc = true;
+    /// Set delivered & received from MC flag
+    pub fn mark_as_delivered_and_received_from_mc(&mut self) {
+        self.delivered_and_received_from_mc = true;
     }
 
-    /// Is this block received from MC
-    pub fn is_received_from_mc(&self) -> bool {
-        self.received_from_mc
+    /// Is this block delivered & received from MC
+    pub fn is_delivered_and_received_from_mc(&self) -> bool {
+        self.delivered_and_received_from_mc
     }
 
     /// Set ready for sending flag
     pub fn toggle_send_ready(&mut self, new_state: bool) -> bool {
-        let prev_state = self.ready_for_send;
+        let prev_state = self.ready_for_send;        
 
         self.ready_for_send = new_state;
 
         prev_state
     }
 
-    /// Block ID
-    pub fn get_id_ext(&self) -> Option<BlockIdExt> {
-        match &self.block_candidate {
-            Some(candidate) => Some(candidate.candidate().id.clone()),
-            None => None
-        }
+    /// Awake block
+    pub fn awake_synchronization(&mut self) {
+        self.block_start_sync_time = SystemTime::now();
+    }
+
+    /// Is syncrhonizing
+    pub fn is_synchronizing(&self, timeout: std::time::Duration) -> bool {
+        let corrected_block_start_sync_time = std::cmp::max(
+            self.block_start_sync_time,
+            if let Some(creation_time) = self.get_creation_time() {
+                std::cmp::max(*self.get_first_appearance_time(), creation_time)
+            } else {
+                *self.get_first_appearance_time()
+            }
+        );
+
+        let block_end_of_sync_time = corrected_block_start_sync_time + timeout;
+
+        block_end_of_sync_time.elapsed().is_err()
     }
 
     /// Delivery signature
@@ -377,7 +446,7 @@ impl Block {
     /// Get status
     pub fn status(&self) -> BlockCandidateStatus {
         BlockCandidateStatus {
-            candidate_id: self.candidate_id.clone(),
+            id: self.block_id.clone(),
             deliveries_signature: self.deliveries_signature.serialize().into(),
             approvals_signature: self.approvals_signature.serialize().into(),
             rejections_signature: self.rejections_signature.serialize().into(),
@@ -451,8 +520,10 @@ impl Block {
         rejections_signature: &MultiSignature,
         merges_count: u32,
         created_timestamp: i64,
-    ) -> Result<bool> {
-        let prev_hash = self.get_signatures_hash();
+    ) -> Result<(bool, bool)> {
+        let prev_self_hash = self.get_signatures_hash();
+        let prev_other_hash = Self::compute_hash(&deliveries_signature, &approvals_signature, &rejections_signature);
+
         let mut new_deliveries_signature = self.deliveries_signature.clone();
         let mut new_approvals_signature = self.approvals_signature.clone();
         let mut new_rejections_signature = self.rejections_signature.clone();
@@ -466,7 +537,7 @@ impl Block {
             &new_approvals_signature,
             &new_rejections_signature);
 
-        if new_hash != prev_hash { //prevent duplicate merges
+        if new_hash != prev_self_hash { //prevent duplicate merges
             self.deliveries_signature = new_deliveries_signature;
             self.approvals_signature = new_approvals_signature;
             self.rejections_signature = new_rejections_signature;
@@ -480,7 +551,7 @@ impl Block {
 
         self.set_creation_timestamp(created_timestamp);        
 
-        Ok(new_hash != prev_hash)
+        Ok((new_hash != prev_self_hash, new_hash != prev_other_hash))
     }
 
     /// Get signatures hash
@@ -513,6 +584,11 @@ impl Block {
         }
     }
 
+    /// Does this block have a candidate received
+    pub fn has_candidate(&self) -> bool {
+        self.block_candidate.is_some()
+    }
+
     /// Update candidate (for later candidate body receivements)
     pub fn update_block_candidate(&mut self, new_block_candidate: Arc<BlockCandidateBody>) -> bool {
         if self.block_candidate.is_none() {
@@ -523,7 +599,7 @@ impl Block {
 
         let cur_block_candidate = self.block_candidate.as_ref().unwrap();
         if &new_block_candidate.hash != &cur_block_candidate.hash {
-            warn!(target: "verificator", "Attempt to update block candidate {:?} body with a new data: prev={:?}, new={:?}", self.candidate_id, cur_block_candidate.hash, new_block_candidate.hash);
+            warn!(target: "verificator", "Attempt to update block candidate {:?} body with a new data: prev={:?}, new={:?}", self.block_id, cur_block_candidate.hash, new_block_candidate.hash);
             return false;
         }
 
@@ -534,12 +610,15 @@ impl Block {
 
     /// Create new block
     pub fn create(
-        candidate_id: UInt256,
+        block_id: &BlockIdExt,
         instance_counter: &InstanceCounter,
-        nodes_count: usize,
+        wc_nodes_count: usize,
+        mc_nodes_count: usize,
     ) -> Arc<SpinMutex<Self>> {
+        let candidate_id = Workchain::get_candidate_id(block_id);
+
         let mut body = Self {
-            candidate_id: candidate_id.clone(),
+            block_id: block_id.clone(),
             block_candidate: None,
             deliveries_signature: MultiSignature::new(1, candidate_id.clone()),
             approvals_signature: MultiSignature::new(2, candidate_id.clone()),
@@ -549,19 +628,26 @@ impl Block {
             created_timestamp: None,
             merges_count: 0,
             initially_mc_processed: false,
-            received_from_mc: false,
+            delivered_and_received_from_mc: false,
             sent_to_mc: false,
             ready_for_send: false,
             first_appearance_time: std::time::SystemTime::now(),
+            last_block_force_delivery_request_time: None,
             _instance_counter: instance_counter.clone(),
             first_external_request_time: None,
             delivery_state_change_time: None,
-            node_delivery_descs: vec![NodeDeliveryDesc {
+            wc_node_delivery_descs: vec![NodeDeliveryDesc {
                 delivery_weight: 0,
                 last_status_sent_time: None,
                 last_status_received_time: None,
-            }; nodes_count],
+            }; wc_nodes_count],
+            mc_node_delivery_descs: vec![NodeDeliveryDesc {
+                delivery_weight: 0,
+                last_status_sent_time: None,
+                last_status_received_time: None,
+            }; mc_nodes_count],
             delivery_stats: BlockDeliveryStats::default(),
+            block_start_sync_time: SystemTime::now(),
         };
 
         body.update_hash();

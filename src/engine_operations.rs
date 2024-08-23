@@ -51,7 +51,7 @@ use adnl::{BroadcastSendInfo, PrivateOverlayShortId};
 use catchain::{
     CatchainNode, CatchainOverlay, CatchainOverlayListenerPtr, CatchainOverlayLogReplayListenerPtr
 };
-use std::{collections::HashSet, ops::Deref, sync::Arc};
+use std::{collections::HashSet, ops::Deref, sync::Arc, sync::atomic::Ordering};
 use storage::block_handle_db::BlockHandle;
 use ton_api::{
     serialize_boxed, 
@@ -304,6 +304,13 @@ impl EngineOperations for Engine {
     #[cfg(feature = "external_db")]
     fn load_external_db_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
         self.db().load_full_node_state(EXTERNAL_DB_BLOCK)
+    }
+    #[cfg(feature = "external_db")]
+    fn check_ext_db_reset(&self) -> bool {
+        self.ext_db_reset().swap(false, Ordering::Relaxed)
+    }
+    fn set_ext_db_reset(&self) {
+        self.ext_db_reset().store(true, Ordering::Relaxed);
     }
 
     fn load_shard_client_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
@@ -1117,7 +1124,7 @@ impl EngineOperations for Engine {
         self.db().db_root_dir()
     }
 
-    #[cfg(feature = "external_db")]
+    #[cfg(all(feature = "external_db", test))]
     fn produce_chain_ranges_enabled(&self) -> bool {
         self.ext_db().iter().any(|ext_db| ext_db.process_chain_range_enabled())
     }

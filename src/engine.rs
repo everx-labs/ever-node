@@ -22,7 +22,7 @@ use crate::{
     },
     ext_messages::{MessagesPool, EXT_MESSAGES_TRACE_TARGET},
     full_node::{
-        apply_block::{self, apply_block},
+        apply_block::{self, apply_block}, mesh_client::MeshClient,
         shard_client::{
             process_block_broadcast, start_masterchain_client, start_shards_client,
             SHARD_BROADCAST_WINDOW, apply_proof_chain,
@@ -57,7 +57,7 @@ use crate::{
     external_db::{kafka_consumer::KafkaConsumer, start_external_db_worker}
 };
 #[cfg(not(feature = "external_db"))]
-use crate::{full_node::mesh_client::MeshClient, internal_db::EXTERNAL_DB_BLOCK};
+use crate::internal_db::EXTERNAL_DB_BLOCK;
 #[cfg(feature = "slashing")]
 use crate::validator::{
     slashing::{ValidatedBlockStat, ValidatedBlockStatNode},
@@ -112,6 +112,7 @@ pub struct Engine {
     db: Arc<InternalDb>,
     #[cfg(feature = "external_db")]
     ext_db: Vec<Arc<dyn ExternalDb>>,
+    ext_db_reset: AtomicBool,
     candidate_db: CandidateDbPool,
     overlay_operations: Arc<dyn OverlayOperations>,
     shard_states_awaiters: AwaitersPool<BlockIdExt, Arc<ShardStateStuff>>,
@@ -181,7 +182,6 @@ pub struct Engine {
 
     tps_counter: TpsCounter,
 
-    #[cfg(not(feature = "external_db"))]
     mesh_client: tokio::sync::OnceCell<Arc<MeshClient>>,
 }
 
@@ -556,7 +556,6 @@ impl Stopper {
         self.stop.fetch_and(!mask, Ordering::Relaxed);
     }
 
-    #[cfg(not(feature = "external_db"))]
     pub fn token(&self) -> tokio_util::sync::CancellationToken {
         self.token.clone()
     }
@@ -832,6 +831,7 @@ impl Engine {
             db,
             #[cfg(feature = "external_db")]
             ext_db,
+            ext_db_reset: AtomicBool::new(false),
             candidate_db,
             overlay_operations: network.clone() as Arc<dyn OverlayOperations>,
             shard_states_awaiters: AwaitersPool::new(
@@ -931,8 +931,6 @@ impl Engine {
                 metrics
             ),
             tps_counter: TpsCounter::new(),
-
-            #[cfg(not(feature = "external_db"))]
             mesh_client: tokio::sync::OnceCell::new()
         });
 
@@ -1247,6 +1245,10 @@ impl Engine {
 
     pub fn processed_workchain(&self) -> Option<i32> {
         self.processed_workchain
+    }
+
+    pub fn ext_db_reset(&self) -> &AtomicBool {
+        &self.ext_db_reset
     }
 
     pub async fn download_and_apply_block_worker(
@@ -2764,6 +2766,7 @@ pub async fn run(
         node_config.unsafe_catchain_patches_files(),
         node_config.validation_countdown_mode(),
         node_config.is_smft_disabled(),
+        node_config.smft_max_mc_delivery_timeout(),
     );
     let wc_from_config = node_config.workchain();
     let remp_client_pool = node_config.remp_config().remp_client_pool();
@@ -2914,13 +2917,11 @@ pub async fn run(
         // top shard blocks
         resend_top_shard_blocks_worker(engine.clone());
 
-        #[cfg(not(feature="external_db"))] {
-            let mesh_client = MeshClient::start(engine.clone(), engine.stopper.token()).await?;
-            engine.mesh_client.set(mesh_client).map_err(
-                |_| error!("Attempt to set mesh_client twice")
-            )?;
-        }
-
+        let mesh_client = MeshClient::start(engine.clone(), engine.stopper.token()).await?;
+        engine.mesh_client.set(mesh_client).map_err(
+            |_| error!("Attempt to set mesh_client twice")
+        )?;
+        
         // blocks download clients
         engine.set_sync_status(Engine::SYNC_STATUS_SYNC_BLOCKS);
         Engine::check_finish_sync(Arc::clone(&engine));
