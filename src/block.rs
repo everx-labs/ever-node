@@ -18,14 +18,12 @@ use crate::{
 };
 
 use ever_block::{
-    error, fail, Block, BlockIdExt, BlkPrevInfo, BocReader, Cell, ConfigParams, Deserializable, 
-    ExtBlkRef, HashmapAugType, HashmapType, MerkleProof, OutQueueUpdate, Result, Serializable, 
-    ShardDescr, ShardIdent, ShardHashes, UInt256, UsageTree, MeshMsgQueueUpdates, MeshMsgQueuesKit,
-    MeshUpdate, BlockProof, MeshKit, ConnectedNwOutDescr, ConnectedNwDescrExt,
-    MerkleUpdate, BlockSignatures, GetRepresentationHash
+    error, fail, BlkPrevInfo, BlockProof, Block, BlockIdExt, BlockSignatures, BocReader, Cell,
+    ConfigParams, ConnectedNwOutDescr, ConnectedNwDescrExt, Deserializable, ExtBlkRef,
+    GetRepresentationHash, HashmapAugType, HashmapType, MeshKit, MeshMsgQueueUpdates,
+    MeshMsgQueuesKit, MeshUpdate, MerkleProof, MerkleUpdate, OutMsgQueueInfo, OutQueueUpdate,
+    Result, Serializable, ShardDescr, ShardIdent, ShardHashes, UInt256, UsageTree
 };
-#[cfg(not(feature = "external_db"))]
-use ever_block::OutMsgQueueInfo;
 #[cfg(test)]
 use ever_block::{BlockInfo, BlkMasterInfo, write_boc};
 use std::{cmp::max, io::Write, sync::Arc,collections::{HashMap, HashSet}};
@@ -578,7 +576,6 @@ impl BlockStuff {
         Ok(shards)
     }
 
-    #[cfg(not(feature = "external_db"))]
     // Commited master block for each connected network
     pub fn mesh_top_blocks(&self) -> Result<HashMap<i32, BlockIdExt>> {
         let mut tbs = HashMap::new();
@@ -661,7 +658,6 @@ impl BlockStuff {
         }
     }
 
-    #[cfg(not(feature = "external_db"))]
     pub fn mesh_queue(&self, src_shard: &ShardIdent) -> Result<Arc<OutMsgQueueInfo>> {
         match &self.block {
             BlockOrigin::MeshKit{queues, ..} => {

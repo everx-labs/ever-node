@@ -282,6 +282,13 @@ pub trait EngineOperations : Sync + Send {
     fn load_external_db_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
         unimplemented!()
     }
+    #[cfg(feature = "external_db")]
+    fn check_ext_db_reset(&self) -> bool {
+        false
+    }
+    fn set_ext_db_reset(&self) {
+        unimplemented!()
+    }
     async fn load_actual_config_params(&self) -> Result<ConfigParams> {
         match self.load_last_applied_mc_block_id()? {
             Some(block_id) => {
@@ -1029,6 +1036,7 @@ pub trait ExternalDb : Sync + Send {
         mc_seq_no: u32,
     ) -> Result<()>;
     async fn process_full_state(&self, state: &Arc<ShardStateStuff>) -> Result<()>;
+    #[cfg(test)]
     fn process_chain_range_enabled(&self) -> bool;
     async fn process_chain_range(&self, range: &ChainRange) -> Result<()>;
     fn process_shard_hashes_enabled(&self) -> bool;

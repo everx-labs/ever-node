@@ -91,8 +91,10 @@ pub trait VerificationManager: Sync + Send {
         use_debug_bls_keys: bool,
     );
 
+    /*
     /// Reset workchains
     async fn reset_workchains<'a>(&'a self);
+    */
 }
 
 /// Factory for verification objects

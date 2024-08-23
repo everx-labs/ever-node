@@ -222,6 +222,7 @@ impl VerificationManager for VerificationManagerImpl {
         Workchains management
     */
 
+    /*
     /// Reset workchains
     async fn reset_workchains<'a>(
         &'a self,
@@ -235,7 +236,8 @@ impl VerificationManager for VerificationManagerImpl {
         self.update_workchains_counter.increment(1);
 
         self.set_workchains(Arc::new(HashMap::new()));
-    }    
+    }
+    */    
 
     /// Update workchains
     async fn update_workchains<'a>(

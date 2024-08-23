@@ -574,6 +574,11 @@ impl ControlQuerySubscriber {
         Ok(Success::Engine_Validator_Success)
     }
 
+    fn set_ext_db_reset(&self) -> Result<Success> {
+        self.engine()?.set_ext_db_reset();
+        Ok(Success::Engine_Validator_Success)
+    }
+
     async fn try_consume_query_impl(&self, object: TLObject, _peers: &AdnlPeers) -> Result<QueryResult> {
         log::debug!("recieve object (control server): {:?}", object);
         let query = match object.downcast::<ControlQuery>() {
@@ -805,6 +810,17 @@ impl ControlQuerySubscriber {
             }
             Err(query) => query
         };
+        let query = match query.downcast::<ton::rpc::engine::validator::ResetExternalDb>() {
+            Ok(_) => {
+                return QueryResult::consume_boxed(
+                    self.set_ext_db_reset()?,
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+
         log::warn!("Unsupported ControlQuery (control server): {:?}", query);
         Ok(QueryResult::Rejected(query))
     }

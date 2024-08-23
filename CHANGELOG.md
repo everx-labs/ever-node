@@ -4,15 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## Version 0.59.22
 
-- Added `ResetExternalDb` console command
-- Fix compiler warnings
-- Increase package version
-- Increase package version
-- Remove commented code
-- Increase package version
-- SMFT: load initial workchain state during initialization
-- SMFT: block sync awake if a) MC request received, b) block status update detected; workchain node response to masterchain node. NACK was temporary disabled to be blocked by MC
-- Increase package version
+- SMFT: block sync awake
 
 ## Version 0.59.21
 

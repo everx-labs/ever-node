@@ -106,7 +106,6 @@ fn test_external_db_processor_with_state() {
     ).unwrap();
 }
 
-
 #[test]
 fn test_external_db_processor_with_proof() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -207,7 +206,6 @@ async fn test_external_db_processor_async(
         Ok(true)
     })?;
 
-
     let now = std::time::Instant::now();
     p.process_block_impl(
         &block,
@@ -235,13 +233,10 @@ async fn test_external_db_processor_async(
         assert_eq!(0, writers.write_transaction.records.load(Ordering::Relaxed));
     }
 
-
     let range = ChainRange {
         master_block: block.id().clone(),
         shard_blocks: Vec::new(),
     };
-
-
     p.process_chain_range(&range).await?;
 
     assert_eq!(p.process_chain_range_enabled(), enabled);
