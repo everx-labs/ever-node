@@ -102,7 +102,7 @@ impl Default for CollatorConfig {
         Self {
             cutoff_timeout_ms: 1000,
             stop_timeout_ms: 1500,
-            finalize_parallel_percentage_points: 800, // 0.8 = 80% * stop_timeout_ms = 1200
+            finalize_parallel_percentage_points: 650, // 0.650 = 65% * stop_timeout_ms = 1000
             clean_timeout_percentage_points: 150, // 0.150 = 15% = 150ms
             optimistic_clean_percentage_points: 1000, // 1.000 = 100% = 150ms
             max_secondary_clean_timeout_percentage_points: 350, // 0.350 = 35% = 350ms
