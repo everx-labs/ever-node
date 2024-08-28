@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.12
+
+- Use modern collator with aborting procedure
+
 ## Version 0.59.11
 
 - Fix for broken shard merge

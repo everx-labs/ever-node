@@ -27,7 +27,7 @@ use ever_block::{
     HashmapAugType, HashmapFilterResult, HashmapRemover, HashmapSubtree, HashmapType,
     IBitstring, IhrPendingInfo, LabelReader, MASTERCHAIN_ID, OutMsgQueue, OutMsgQueueInfo,
     OutMsgQueueKey, ProcessedInfo, ProcessedInfoKey, ProcessedUpto, Result, Serializable,
-    ShardIdent, ShardHashes, ShardStateUnsplit, SliceData, UInt256, UsageTree
+    ShardIdent, ShardHashes, ShardStateUnsplit, SliceData, UInt256, UsageTree, EnqueuedMsg,
 };
 
 #[cfg(test)]
@@ -622,11 +622,14 @@ impl OutMsgQueueInfoStuff {
         Ok(depth)
     }
 
-    pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<SliceData> {
+    pub fn del_message(&mut self, key: &OutMsgQueueKey) -> Result<EnqueuedMsg> {
         let labels = [("shard", self.shard().to_string())];
         metrics::counter!("out_msg_queue_del", 1, &labels);
-        self.out_queue_mut()?.remove(key.write_to_bitstring()?)?
-            .ok_or_else(|| error!("error deleting from out_msg_queue dictionary: {:x}", key))
+        let mut slice = self.out_queue_mut()?.remove(key.write_to_bitstring()?)?
+            .ok_or_else(|| error!("error deleting from out_msg_queue dictionary: {:x}", key))?;
+        let serde_opts = self.out_queue_mut()?.serde_opts();
+        let (enq, _) = OutMsgQueue::value_aug(serde_opts, &mut slice)?;
+        Ok(enq)
     }
 
     // remove all messages which are not from new_shard
@@ -1182,7 +1185,7 @@ impl MsgQueueManager {
                 ordered_cleaning_timeout_nanos,
                 |node_obj| {
                     if block_full {
-                        log::debug!("{}: BLOCK FULL when ordered cleaning output queue, cleanup is partial", self.block_descr);
+                        log::debug!("{}: BLOCK FULL (>= Soft) when ordered cleaning output queue, cleanup is partial", self.block_descr);
                         partial = true;
                         return Ok(HashmapFilterResult::Stop);
                     }
@@ -1254,7 +1257,7 @@ impl MsgQueueManager {
 
             queue.hashmap_filter(|_key, mut slice| {
                 if block_full {
-                    log::debug!("{}: BLOCK FULL when random cleaning output queue, cleanup is partial", self.block_descr);
+                    log::debug!("{}: BLOCK FULL (>= Soft) when random cleaning output queue, cleanup is partial", self.block_descr);
                     partial = true;
                     return Ok(HashmapFilterResult::Stop)
                 }

@@ -83,6 +83,7 @@ pub struct CollatorConfig {
     pub optimistic_clean_percentage_points: u32,
     pub max_secondary_clean_timeout_percentage_points: u32,
     pub max_collate_threads: u32,
+    pub max_collate_msgs_queue_on_account: u32,
     pub retry_if_empty: bool,
     pub finalize_empty_after_ms: u32,
     pub empty_collation_sleep_ms: u32,
@@ -99,6 +100,7 @@ impl Default for CollatorConfig {
             optimistic_clean_percentage_points: 1000, // 1.000 = 100% = 150ms
             max_secondary_clean_timeout_percentage_points: 350, // 0.350 = 35% = 350ms
             max_collate_threads: 10,
+            max_collate_msgs_queue_on_account: 3,
             retry_if_empty: false,
             finalize_empty_after_ms: 800,
             empty_collation_sleep_ms: 100,

@@ -39,10 +39,6 @@ mod ext_messages;
 
 mod shard_blocks;
 
-#[cfg(feature = "tracing")]
-mod jaeger;
-
-#[cfg(not(feature = "tracing"))]
 mod jaeger {
     pub fn init_jaeger(){}
     #[cfg(feature = "external_db")]
@@ -52,7 +48,7 @@ mod jaeger {
 
 use crate::{
     config::TonNodeConfig, engine::{Engine, Stopper, EngineFlags},
-    jaeger::init_jaeger, internal_db::restore::set_graceful_termination,
+    internal_db::restore::set_graceful_termination,
     validating_utils::supported_version
 };
 #[cfg(feature = "external_db")]
@@ -456,7 +452,7 @@ fn main() {
         .build()
         .expect("Can't create Validator tokio runtime");
 
-    init_jaeger();
+    jaeger::init_jaeger();
 
     #[cfg(feature = "trace_alloc_detail")]
     thread::spawn(
