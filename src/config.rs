@@ -79,7 +79,6 @@ impl Default for CellsGcConfig {
 pub struct CollatorConfig {
     pub cutoff_timeout_ms: u32,
     pub stop_timeout_ms: u32,
-    pub finalize_parallel_percentage_points: u32,
     pub clean_timeout_percentage_points: u32,
     pub optimistic_clean_percentage_points: u32,
     pub max_secondary_clean_timeout_percentage_points: u32,
@@ -92,17 +91,11 @@ pub struct CollatorConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_messages_maximum_queue_length: Option<u32>, // None - unlimited
 }
-impl CollatorConfig {
-    pub fn get_finalize_parallel_timeout_ms(&self) -> u32 {
-        self.stop_timeout_ms * self.finalize_parallel_percentage_points / 1000
-    }
-}
 impl Default for CollatorConfig {
     fn default() -> Self {
         Self {
             cutoff_timeout_ms: 1000,
             stop_timeout_ms: 1500,
-            finalize_parallel_percentage_points: 650, // 0.650 = 65% * stop_timeout_ms = 1000
             clean_timeout_percentage_points: 150, // 0.150 = 15% = 150ms
             optimistic_clean_percentage_points: 1000, // 1.000 = 100% = 150ms
             max_secondary_clean_timeout_percentage_points: 350, // 0.350 = 35% = 350ms

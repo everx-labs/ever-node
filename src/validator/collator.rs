@@ -1124,7 +1124,7 @@ struct ExecutionManager {
     accounts_processed_msgs: HashMap<AccountId, Vec<usize>>,
 
     cancellation_token: tokio_util::sync::CancellationToken,
-    f_check_finalize_parallel_timeout: Box<dyn Fn() -> (bool, u32) + Send>,
+    check_cutoff_timeout: Box<dyn Fn() -> (bool, u32) + Send>,
 
     receive_tr: tokio::sync::mpsc::UnboundedReceiver<Option<(Arc<AsyncMessageSync>, Result<Transaction>, u64)>>,
     wait_tr: Arc<Wait<(Arc<AsyncMessageSync>, Result<Transaction>, u64)>>,
@@ -1168,11 +1168,11 @@ impl ExecutionManager {
         let (wait_tr, receive_tr) = Wait::new();
         // closure to check the finalize timeout for parallel transactions
         let collation_started = collator.started.clone();
-        let finalize_parallel_timeout_ms = collator.finalize_parallel_timeout_ms;
-        let f_check_finalize_parallel_timeout = Box::new(move || (
-            collation_started.elapsed().as_millis() as u32 > finalize_parallel_timeout_ms,
-            finalize_parallel_timeout_ms,
-        ));
+        let check_cutoff_timeout = {
+            let cutoff_timeout = collator.engine.collator_config().cutoff_timeout_ms;
+            let started = collator.started.clone();
+            Box::new(move || (started.elapsed().as_millis() as u32 > cutoff_timeout, cutoff_timeout))
+        };
         let start_lt = collator_data.start_lt()?;
         let max_collate_threads = collator.engine.collator_config().max_collate_threads as usize;
         let max_collate_msgs_queue_on_account = collator.engine.collator_config().max_collate_msgs_queue_on_account as usize;
@@ -1182,7 +1182,7 @@ impl ExecutionManager {
             accounts_processed_msgs: HashMap::new(),
             // cancellation_token: collator.engine.collator_config() tokio_util::sync::CancellationToken::new(),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
-            f_check_finalize_parallel_timeout,
+            check_cutoff_timeout,
             receive_tr,
             wait_tr,
             max_collate_threads,
@@ -1225,10 +1225,10 @@ impl ExecutionManager {
             self.wait_transaction(collator_data).await?;
 
             // stop parallel collation if finalize timeout reached
-            let check_finalize_parallel = (self.f_check_finalize_parallel_timeout)();
-            if check_finalize_parallel.0 {
+            let (is_timeout, timeout_ms) = (self.check_cutoff_timeout)();
+            if is_timeout {
                 log::warn!("{}: FINALIZE PARALLEL TIMEOUT ({}ms) is elapsed, stop parallel collation",
-                    self.collated_block_descr, check_finalize_parallel.1,
+                    self.collated_block_descr, timeout_ms,
                 );
                 self.cancel_parallel_processing();
                 break;
@@ -1749,8 +1749,6 @@ pub struct Collator {
     started: Instant,
     stop_flag: Arc<AtomicBool>,
 
-    finalize_parallel_timeout_ms: u32,
-
     #[cfg(test)]
     test_msg_process_sleep: u64,
 }
@@ -1840,7 +1838,6 @@ impl Collator {
                 root_hash: UInt256::default(),
                 file_hash: UInt256::default(),
             },
-            finalize_parallel_timeout_ms: engine.collator_config().get_finalize_parallel_timeout_ms(),
             engine,
             remp_collator_interface,
             shard,
