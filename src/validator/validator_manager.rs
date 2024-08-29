@@ -1198,7 +1198,7 @@ impl ValidatorManagerImpl {
         let full_validator_set = mc_state_extra.config.validator_set()?;
         let possible_validator_change = next_validator_set.total() > 0;
         let mut mc_validators = Vec::new();
-        
+
         mc_validators.reserve(full_validator_set.total() as usize);
 
         for ident in future_shards.iter() {
