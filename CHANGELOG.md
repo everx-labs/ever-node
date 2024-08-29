@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.18
+
+- Cleanup fast_finality for SMFT. Add default parameters for workchain delivery
+
 ## Version 0.59.17
 
 - Block version up

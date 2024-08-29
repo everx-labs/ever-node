@@ -314,11 +314,9 @@ impl Workchain {
             mc_local_idx,
             wc_pub_keys,
             blocks: SpinMutex::new(HashMap::new()),
-            workchain_delivery_params: SpinMutex::new(WorkchainDeliveryParams {
-                block_status_forwarding_neighbours_count: 0,
-                block_status_far_neighbours_count: 0,
-                config_params: SmftParams::default(),
-            }),
+            workchain_delivery_params: SpinMutex::new(
+                Self::compute_delivery_params_from_smft_params(wc_validators_count, SmftParams::default())
+            ),
             mc_overlay: SpinMutex::new(None),
             workchain_overlay: SpinMutex::new(None),
             listener,
@@ -638,7 +636,8 @@ impl Workchain {
 
         blocks.sort_by(|a, b| b.0.cmp(&a.0));
 
-        let config_params = self.workchain_delivery_params.lock().config_params.clone();
+        let delivery_params = self.workchain_delivery_params.lock().clone();
+        let config_params = &delivery_params.config_params;
 
         result.append(format!("Workchain {} dump:\n", self.node_debug_id));
         result.append(format!("  - blocks: {}\n", blocks.len()));
@@ -654,8 +653,8 @@ impl Workchain {
         result.append(format!("  - wc_total_weight: {}\n", self.wc_total_weight));
         result.append(format!("  - wc_cutoff_weight: {}\n", self.wc_cutoff_weight));
 
-        result.append(format!("  - fwd_neighbours_count: [{};{}]\n", config_params.min_forwarding_neighbours_count, config_params.max_forwarding_neighbours_count));
-        result.append(format!("  - far_neighbours_count: [{};{}]\n", config_params.min_far_neighbours_count, config_params.max_far_neighbours_count));
+        result.append(format!("  - fwd_neighbours_count: {} (limits [{};{}])\n", delivery_params.block_status_forwarding_neighbours_count, config_params.min_forwarding_neighbours_count, config_params.max_forwarding_neighbours_count));
+        result.append(format!("  - far_neighbours_count: {} (limits [{};{}])\n", delivery_params.block_status_far_neighbours_count, config_params.min_far_neighbours_count, config_params.max_far_neighbours_count));
         result.append(format!("  - far_sync_period_ms: [{};{}]\n", config_params.min_far_neighbours_sync_period_ms, config_params.max_far_neighbours_sync_period_ms));
         result.append(format!("  - far_neighbours_resync_period_ms: {}\n", config_params.far_neighbours_resync_period_ms));
         result.append(format!("  - block_sync_period_ms: [{};{}]\n", config_params.min_block_sync_period_ms, config_params.max_block_sync_period_ms));
@@ -1819,20 +1818,18 @@ impl Workchain {
     async fn compute_delivery_params(&self) -> Result<WorkchainDeliveryParams> {
         check_execution_time!(1_000);
 
-        let engine = self.engine.clone();
+        Ok(Self::compute_delivery_params_from_smft_params(self.wc_validators.len(), self.engine.load_actual_config_params().await?.smft_parameters()?))
+    }
 
-        let config_params = engine.load_actual_config_params().await?;
-        let config_params = config_params.smft_parameters()?;
+    /// Compute workchain delivery parameters based on current configuration
+    fn compute_delivery_params_from_smft_params(wc_validators_count: usize, config_params: SmftParams) -> WorkchainDeliveryParams {
+        let status_fwd_neighbours_count = ((wc_validators_count as f64).sqrt() as usize).clamp(config_params.min_forwarding_neighbours_count as usize, config_params.max_forwarding_neighbours_count as usize);
 
-        let status_fwd_neighbours_count = ((self.wc_validators.len() as f64).sqrt() as usize).clamp(config_params.min_forwarding_neighbours_count as usize, config_params.max_forwarding_neighbours_count as usize);
-
-        let params = WorkchainDeliveryParams {
+        WorkchainDeliveryParams {
             block_status_forwarding_neighbours_count: status_fwd_neighbours_count,
             block_status_far_neighbours_count: ((status_fwd_neighbours_count as f64).sqrt() as usize).clamp(config_params.min_far_neighbours_count as usize, config_params.max_far_neighbours_count as usize),
             config_params,
-        };
-
-        Ok(params)
+        }
     }
 
     /// Start updating of dynamic configuration

@@ -11,8 +11,6 @@
 * limitations under the License.
 */
 
-#![cfg(not(feature = "fast_finality"))]
-
 extern crate catchain;
 
 use crate::engine_traits::EngineOperations;
