@@ -303,7 +303,9 @@ impl Workchain {
             mc_local_idx,
             wc_pub_keys,
             blocks: SpinMutex::new(HashMap::new()),
-            workchain_delivery_params: SpinMutex::new(Self::compute_delivery_params_from_smft_params(wc_validators_count, wc_total_weight, SmftParams::default())),
+            workchain_delivery_params: SpinMutex::new(
+                Self::compute_delivery_params_from_smft_params(wc_validators_count, wc_total_weight, SmftParams::default())
+            ),
             mc_overlay: SpinMutex::new(None),
             workchain_overlay: SpinMutex::new(None),
             listener,
@@ -1394,7 +1396,6 @@ impl Workchain {
         let block_id = block_id.clone();
         let force_delivery_duplication_factor = {
             let params = &self.workchain_delivery_params.lock().config_params;
-
             (params.mc_force_delivery_duplication_factor_numerator as f64) / (params.mc_force_delivery_duplication_factor_denominator as f64)
         };
 
