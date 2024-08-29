@@ -15,6 +15,7 @@ use std::sync::atomic::AtomicUsize;
 use std::time::SystemTime;
 //pub use multi_signature_unsafe::MultiSignature;
 pub use multi_signature_bls::MultiSignature;
+use workchain::Workchain;
 use super::*;
 use catchain::BlockPayloadPtr;
 use log::*;
@@ -88,13 +89,14 @@ pub struct BlockDeliveryStats {
     pub out_mc_sends_count: AtomicUsize,          //outgoing MC sends
     pub forwarding_neighbours_sends: AtomicUsize, //forwarding neighbours sends
     pub far_neighbours_sends: AtomicUsize,        //far neighbours sends
+    pub mc_to_wc_sends: AtomicUsize,              //sends from MC to WC
     pub syncs_count: AtomicUsize,                 //synchronizations count
 }
 
 pub struct Block {
     block_candidate: Option<Arc<BlockCandidateBody>>, //block candidate
     serialized_block_status: Option<BlockPayloadPtr>, //serialized status
-    candidate_id: UInt256,                            //block ID
+    block_id: BlockIdExt,                             //block ID
     deliveries_signature: MultiSignature,             //signature for deliveries
     approvals_signature: MultiSignature,              //signature for approvals
     rejections_signature: MultiSignature,             //signature for rejections
@@ -102,6 +104,7 @@ pub struct Block {
     created_timestamp: Option<i64>,                   //time of block creation
     first_appearance_time: std::time::SystemTime,     //time of first block appearance in a network
     delivery_state_change_time: Option<std::time::SystemTime>, //time when block is delivered
+    last_block_force_delivery_request_time: Option<std::time::SystemTime>, //time of last force delivery request
     merges_count: u32,                                //merges count
     initially_mc_processed: bool,                     //was this block process in MC
     received_from_mc: bool,                           //was this block received from MC overlay
@@ -117,13 +120,13 @@ pub type BlockPtr = Arc<SpinMutex<Block>>;
 
 impl std::fmt::Debug for Block {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Block[candidate_id={:?}, deliveries={:?}, approvals={:?}, rejections={:?}, signatures_hash={}]", self.candidate_id, self.deliveries_signature, self.approvals_signature, self.rejections_signature, self.signatures_hash)
+        write!(f, "Block[block_id={:?}, deliveries={:?}, approvals={:?}, rejections={:?}, signatures_hash={}]", self.block_id, self.deliveries_signature, self.approvals_signature, self.rejections_signature, self.signatures_hash)
     }
 }
 
 impl std::fmt::Debug for BlockDeliveryStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[in_candidates={}, in_wc_merges={}/{}, out_wc_sends={}, out_mc_syncs={}, out_mc_sends={}, in_mc_merges={}/{}, neighbours_sends={}/{}, syncs={}]",
+        write!(f, "[in_candidates={}, in_wc_merges={}/{}, out_wc_sends={}, out_mc_syncs={}, out_mc_sends={}, in_mc_merges={}/{}, neighbours_sends={}/{}, mc_to_wc_sends={}, syncs={}]",
             self.in_candidates_count.load(std::sync::atomic::Ordering::Relaxed),
             self.in_wc_real_merges_count.load(std::sync::atomic::Ordering::Relaxed),
             self.in_wc_merges_count.load(std::sync::atomic::Ordering::Relaxed),
@@ -134,14 +137,15 @@ impl std::fmt::Debug for BlockDeliveryStats {
             self.in_mc_merges_count.load(std::sync::atomic::Ordering::Relaxed),
             self.forwarding_neighbours_sends.load(std::sync::atomic::Ordering::Relaxed),
             self.far_neighbours_sends.load(std::sync::atomic::Ordering::Relaxed),
+            self.mc_to_wc_sends.load(std::sync::atomic::Ordering::Relaxed),
             self.syncs_count.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
 impl Block {
     /// Candidate ID
-    pub fn get_id(&self) -> &UInt256 {
-        &self.candidate_id
+    pub fn get_id(&self) -> &BlockIdExt {
+        &self.block_id
     }
 
     /// Is block delivered
@@ -235,6 +239,16 @@ impl Block {
         }
 
         self.delivery_state_change_time = Some(*time);
+    }
+
+    /// Get last block force delivery request time
+    pub fn get_last_block_force_delivery_request_time(&self) -> &Option<std::time::SystemTime> {
+        &self.last_block_force_delivery_request_time
+    }
+
+    /// Set last block force delivery request time
+    pub fn set_last_block_force_delivery_request_time(&mut self, time: &std::time::SystemTime) {
+        self.last_block_force_delivery_request_time = Some(*time);
     }
 
     /// Delivery stats
@@ -352,14 +366,6 @@ impl Block {
         prev_state
     }
 
-    /// Block ID
-    pub fn get_id_ext(&self) -> Option<BlockIdExt> {
-        match &self.block_candidate {
-            Some(candidate) => Some(candidate.candidate().id.clone()),
-            None => None
-        }
-    }
-
     /// Delivery signature
     pub fn get_deliveries_signature(&self) -> &MultiSignature {
         &self.deliveries_signature
@@ -377,7 +383,7 @@ impl Block {
     /// Get status
     pub fn status(&self) -> BlockCandidateStatus {
         BlockCandidateStatus {
-            candidate_id: self.candidate_id.clone(),
+            id: self.block_id.clone(),
             deliveries_signature: self.deliveries_signature.serialize().into(),
             approvals_signature: self.approvals_signature.serialize().into(),
             rejections_signature: self.rejections_signature.serialize().into(),
@@ -513,6 +519,11 @@ impl Block {
         }
     }
 
+    /// Does this block have a candidate received
+    pub fn has_candidate(&self) -> bool {
+        self.block_candidate.is_some()
+    }
+
     /// Update candidate (for later candidate body receivements)
     pub fn update_block_candidate(&mut self, new_block_candidate: Arc<BlockCandidateBody>) -> bool {
         if self.block_candidate.is_none() {
@@ -523,7 +534,7 @@ impl Block {
 
         let cur_block_candidate = self.block_candidate.as_ref().unwrap();
         if &new_block_candidate.hash != &cur_block_candidate.hash {
-            warn!(target: "verificator", "Attempt to update block candidate {:?} body with a new data: prev={:?}, new={:?}", self.candidate_id, cur_block_candidate.hash, new_block_candidate.hash);
+            warn!(target: "verificator", "Attempt to update block candidate {:?} body with a new data: prev={:?}, new={:?}", self.block_id, cur_block_candidate.hash, new_block_candidate.hash);
             return false;
         }
 
@@ -534,12 +545,14 @@ impl Block {
 
     /// Create new block
     pub fn create(
-        candidate_id: UInt256,
+        block_id: &BlockIdExt,
         instance_counter: &InstanceCounter,
         nodes_count: usize,
     ) -> Arc<SpinMutex<Self>> {
+        let candidate_id = Workchain::get_candidate_id(block_id);
+
         let mut body = Self {
-            candidate_id: candidate_id.clone(),
+            block_id: block_id.clone(),
             block_candidate: None,
             deliveries_signature: MultiSignature::new(1, candidate_id.clone()),
             approvals_signature: MultiSignature::new(2, candidate_id.clone()),
@@ -553,6 +566,7 @@ impl Block {
             sent_to_mc: false,
             ready_for_send: false,
             first_appearance_time: std::time::SystemTime::now(),
+            last_block_force_delivery_request_time: None,
             _instance_counter: instance_counter.clone(),
             first_external_request_time: None,
             delivery_state_change_time: None,

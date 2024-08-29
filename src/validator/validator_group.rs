@@ -852,7 +852,6 @@ impl ValidatorGroup {
         };
 
         let validation_result = self.do_candidate_validation(round, &source, candidate).await;
-
         let validation_result_message = match &validation_result {
             Ok(completion_time) => format!("Validation successful: finished at {:?}", completion_time),
             Err(e) => format!("Validation failed with verdict `{}`", e),
