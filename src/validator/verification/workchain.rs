@@ -314,7 +314,9 @@ impl Workchain {
             mc_local_idx,
             wc_pub_keys,
             blocks: SpinMutex::new(HashMap::new()),
-            workchain_delivery_params: SpinMutex::new(Self::compute_delivery_params_from_smft_params(wc_validators_count, SmftParams::default())),
+            workchain_delivery_params: SpinMutex::new(
+                Self::compute_delivery_params_from_smft_params(wc_validators_count, SmftParams::default())
+            ),
             mc_overlay: SpinMutex::new(None),
             workchain_overlay: SpinMutex::new(None),
             listener,
