@@ -565,7 +565,7 @@ impl PrevBlockHistory {
     }
 }
 
-fn prevs_to_string(prev_block_ids: &Vec<BlockIdExt>) -> String {
+pub fn prevs_to_string(prev_block_ids: &Vec<BlockIdExt>) -> String {
     prev_block_ids.iter().map(|x| format!(" {} ", x)).collect()
 }
 
@@ -575,7 +575,7 @@ impl Display for PrevBlockHistory {
     }
 }
 
-fn get_first_block_seqno_after_prevs(prevs: &Vec<BlockIdExt>) -> Option<u32> {
+pub fn get_first_block_seqno_after_prevs(prevs: &Vec<BlockIdExt>) -> Option<u32> {
     prevs.iter().map(|blk| blk.seq_no).max().map(|x| x + 1)
 }
 

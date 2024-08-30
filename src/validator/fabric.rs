@@ -25,9 +25,10 @@ use crate::{
     validating_utils::{fmt_next_block_descr},
     validator::{
         CollatorSettings, validate_query::ValidateQuery, collator, 
-        verification::VerificationManagerPtr
     }
 };
+use crate::validator::verification::VerificationManagerPtr;
+
 use ever_block::{Block, BlockIdExt, Deserializable, Result, ShardIdent, UInt256, ValidatorSet};
 use validator_session::{ValidatorBlockCandidate, BlockPayloadPtr, PublicKeyHash, PublicKey};
 use crate::validator::validator_utils::PrevBlockHistory;

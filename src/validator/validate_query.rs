@@ -42,7 +42,7 @@ use ever_block::{
     OutQueueUpdate, read_boc, Result, Serializable, ShardAccount, ShardAccountBlocks,
     ShardAccounts, ShardFeeCreated, ShardHashes, ShardIdent, SliceData, StateInitLib,
     TopBlockDescrSet, TrComputePhase, Transaction, TransactionDescr, ValidatorSet, ValueFlow,
-    U15, UInt256, WorkchainDescr, CommonMessage, SERDE_OPTS_COMMON_MESSAGE
+    U15, UInt256, WorkchainDescr, CommonMessage, SERDE_OPTS_COMMON_MESSAGE, 
 };
 use ever_executor::{
     BlockchainConfig, CalcMsgFwdFees, ExecuteParams, OrdinaryTransactionExecutor,
@@ -260,7 +260,7 @@ impl ValidateQuery {
             block_create_total: Default::default(),
             block_create_count: Default::default(),
             next_block_descr,
-            verification_manager
+            verification_manager,
         }
     }
 
@@ -849,12 +849,14 @@ impl ValidateQuery {
             reject_query!("new shard configuration for shard {} contains different next_validator_shard {}",
                 shard, info.descr.next_validator_shard)
         }
-        if let Some(ref verification_manager) = &self.verification_manager {
-            const MAX_VERIFICATION_TIMEOUT : std::time::Duration = std::time::Duration::from_millis(20);
-            //TODO: rewrite check_one_shard for async
-            if !verification_manager.wait_for_block_verification(&info.block_id, &MAX_VERIFICATION_TIMEOUT) {
-                //reject_query!("can't verify block {}", info.block_id)
-                log::warn!(target:"verificator", "can't verify block {} in MC", info.block_id);
+        if !shard.is_masterchain() && info.block_id.seq_no > 0 {
+            //check only shard blocks during MC validator, skip masterchain blocks
+            //ignore zerostate checks
+            if let Some(ref verification_manager) = &self.verification_manager {                
+                //TODO: rewrite check_one_shard for async
+                if !verification_manager.wait_for_block_verification(&info.block_id, None /* use timeout from node config */) {
+                    reject_query!("can't verify shard block {} in MC", info.block_id);
+                }
             }
         }
         if info.descr.collators.is_some() {
@@ -905,7 +907,7 @@ impl ValidateQuery {
                 reject_query!("newly-created shard {} has non-zero fees_collected", shard)
             }
             cc_seqno = 0;
-        } else if let Some(old) = old {
+        } else if let Some(old) = old.clone() {
             if old.block_id == info.block_id {
                 // shard unchanged ?
                 log::debug!(target: "validate_query", "({}): shard {} unchanged", self.next_block_descr, shard);
@@ -1156,13 +1158,14 @@ impl ValidateQuery {
             let descr = McShardRecord::from_shard_descr(shard, descr);
             if let Some(sibling) = sibling {
                 let sibling = McShardRecord::from_shard_descr(descr.shard().sibling(), sibling);
-                self.check_one_shard(base, mc_data, &sibling, Some(&descr), wc_info.as_ref())?;
                 self.check_one_shard(base, mc_data, &descr, Some(&sibling), wc_info.as_ref())?;
+                self.check_one_shard(base, mc_data, &sibling, Some(&descr), wc_info.as_ref())?;
             } else {
                 self.check_one_shard(base, mc_data, &descr, None, wc_info.as_ref())?;
             }
             Ok(true)
         }).map_err(|err| error!("new shard configuration is invalid : {}", err))?;
+
         base.prev_state_extra.config.workchains()?.iterate_keys(|wc_id: i32| {
             if base.mc_extra.shards().get(&wc_id)?.is_none() {
                 reject_query!("shards of workchain {} existed in previous \

@@ -51,6 +51,13 @@ pub trait VerificationListener: Sync + Send {
     async fn verify(&self, block_candidate: &BlockCandidate) -> bool;
 }
 
+/// Verficiation manager config
+#[derive(Clone, Debug)]
+pub struct VerificationManagerConfig {
+    /// Max wait time for delivery of shardchain block to MC validator
+    pub max_mc_delivery_wait_timeout: std::time::Duration,
+}
+
 /// Verification manager
 #[async_trait::async_trait]
 pub trait VerificationManager: Sync + Send {
@@ -68,7 +75,7 @@ pub trait VerificationManager: Sync + Send {
     fn wait_for_block_verification(
         &self,
         block_id: &BlockIdExt,
-        timeout: &std::time::Duration,
+        timeout: Option<std::time::Duration>,
     ) -> bool;
 
     /// Update workchains
@@ -92,8 +99,8 @@ pub struct VerificationFactory {}
 
 impl VerificationFactory {
     /// Create new verification manager
-    pub fn create_manager(engine: EnginePtr, runtime: tokio::runtime::Handle) -> VerificationManagerPtr {
-        verification_manager::VerificationManagerImpl::create(engine, runtime)
+    pub fn create_manager(engine: EnginePtr, runtime: tokio::runtime::Handle, config: VerificationManagerConfig) -> VerificationManagerPtr {
+        verification_manager::VerificationManagerImpl::create(engine, runtime, config)
     }
 
     /// Generate test BLS key based on public key

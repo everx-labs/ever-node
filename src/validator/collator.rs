@@ -241,6 +241,7 @@ struct CollatorData {
     // determined fields
     gen_utime: u32,
     config: BlockchainConfig,
+    prev_id: BlockIdExt,
 
     // fields, uninitialized by default
     start_lt: Option<u64>,
@@ -318,6 +319,7 @@ impl CollatorData {
             imported_visited: HashSet::new(),
             gen_utime,
             config,
+            prev_id: prev_data.state().block_id().clone(),
             start_lt: None,
             value_flow: ValueFlow::default(),
             now_upper_limit: u32::MAX,
@@ -640,7 +642,7 @@ impl CollatorData {
         self.mesh = Some(mesh);
         Ok(())
     }
-    
+
     //
     // fields with default values
     //
@@ -692,6 +694,7 @@ impl CollatorData {
         let pruned_count = self.estimate_pruned_count(); 
         self.block_limit_status.fits(level, pruned_count)
     }
+
 }
 
 struct ExecutionManager {
@@ -1256,7 +1259,7 @@ impl Collator {
             attempt += 1;
             let sleep = self.engine.collator_config().empty_collation_sleep_ms;
             let sleep = if duration < sleep { sleep - duration } else { 0 };
-            log::info!(
+            log::debug!(
                 "{}: EMPTY COLLATION: TIME: {duration}ms, attempt: {attempt}, sleep for {sleep}ms...", 
                 self.collated_block_descr, 
             );
@@ -1954,7 +1957,7 @@ impl Collator {
     fn adjust_shard_config(&self, mc_data: &McData, collator_data: &mut CollatorData) -> Result<()> {
         log::trace!("{}: adjust_shard_config", self.collated_block_descr);
         CHECK!(self.shard.is_masterchain());
-        let mut shards = mc_data.state().shards()?.clone();
+        collator_data.set_shards(mc_data.state().shards()?.clone())?;
         let wc_set = mc_data.config().workchains()?;
         wc_set.iterate_with_keys(|wc_id: i32, wc_info| {
             log::trace!(
@@ -1965,24 +1968,22 @@ impl Collator {
                 collator_data.gen_utime
             );
             if wc_info.active() && wc_info.enabled_since <= collator_data.gen_utime {
-                if !shards.has_workchain(wc_id)? {
+                if !collator_data.shards()?.has_workchain(wc_id)? {
                     log::info!("{}: adjust_shard_config added new wc {wc_id}", self.collated_block_descr);
                     collator_data.set_shard_conf_adjusted();
-                    shards.add_workchain(
+                    collator_data.shards_mut()?.add_workchain(
                         wc_id,
                         self.new_block_id_part.seq_no(),
                         wc_info.zerostate_root_hash,
                         wc_info.zerostate_file_hash,
                         None
                     )?;
-
                     collator_data.store_shard_fees_zero(&ShardIdent::with_workchain_id(wc_id)?)?;
                     self.check_stop_flag()?;
                 }
             }
             Ok(true)
         })?;
-        collator_data.set_shards(shards)?;
         Ok(())
     }
 
@@ -2104,12 +2105,10 @@ impl Collator {
                         descr.descr.reg_mc_seqno = self.new_block_id_part.seq_no;
                         let end_lt = prev_descr.descr.end_lt.max(descr.descr.end_lt);
                         if let Err(e) = self.update_shard_block_info2(
-                            collator_data.shards_mut()?,
+                            collator_data,
                             prev_descr.clone(), descr.clone(),
                             &start_blks2,
-                            mc_data.config(),
                             Some(&mut shards_updated),
-                            gen_utime,
                         ) {
                             log::debug!(
                                 "{}: cannot add new split top shard blocks {} and {} to shard configuration: {}",
@@ -2162,12 +2161,10 @@ impl Collator {
                     descr.descr.reg_mc_seqno = self.new_block_id_part.seq_no;
                     let end_lt = descr.descr.end_lt;
                     let result = self.update_shard_block_info(
-                        collator_data.shards_mut()?,
+                        collator_data,
                         descr.clone(),
                         &start_blks,
-                        mc_data.config(),
                         Some(&mut shards_updated),
-                        gen_utime,
                     );
                     if let Err(e) = result {
                         log::debug!("{}: cannot add new top shard block {} to shard configuration: {}",
@@ -3524,7 +3521,8 @@ impl Collator {
                 None
             };
 
-        // 10. pack new McStateExtra
+        let validators_stat = ValidatorsStat::default();
+
         Ok((
             McStateExtra {
                 shards: collator_data.shards()?.clone(),
@@ -3537,7 +3535,7 @@ impl Collator {
                 global_balance,
                 state_copyleft_rewards: CopyleftRewards::default(),
                 mesh,
-                ..Default::default()
+                validators_stat
             }, 
             min_ref_mc_seqno
         ))
@@ -3553,73 +3551,56 @@ impl Collator {
 
         let now = collator_data.gen_utime();
         let mut min_ref_mc_seqno = u32::max_value();
-        
-        
+
         // TODO iterate_shards_with_siblings_mut when it will be done
-       
-        // temp code, delete after iterate_shards_with_siblings_mut
-        let mut changed_shards = HashMap::new();
-        collator_data.shards()?.iterate_shards_with_siblings(|shard, mut descr, mut sibling| {
-            min_ref_mc_seqno = min_ref_mc_seqno.min(descr.min_ref_mc_seqno);
+        let old_shards = collator_data.shards()?.clone();
+        old_shards.iterate_shards_with_siblings(|shard, mut descr, mut sibling| {
+            min_ref_mc_seqno = min(min_ref_mc_seqno, descr.min_ref_mc_seqno);
 
             let unchanged_sibling = sibling.clone();
 
-            let updated_sibling = if let Some(sibling) = sibling.as_mut() {
-                min_ref_mc_seqno = min_ref_mc_seqno.min(sibling.min_ref_mc_seqno);
-                self.update_one_shard(
-                    &shard.sibling(),
+            let mut update_one_shard = |ident, descr: &mut ShardDescr, sibling: Option<&ShardDescr>| -> Result<()> {
+                min_ref_mc_seqno = min(min_ref_mc_seqno, descr.min_ref_mc_seqno);
+                let updated = self.update_one_shard(
+                    collator_data,
+                    &ident,
+                    descr,
                     sibling,
-                    Some(&descr),
-                    wc_set.get(&shard.workchain_id())?.as_ref(),
-                    now,
+                    wc_set.get(&ident.workchain_id())?.as_ref(),
                     update_cc,
-                    &collator_data.config.raw_config(),
-                )?
-            } else {
-                false
+                )?;
+                if updated {
+                    collator_data.shards_mut()?.update_shard(&ident, |_| Ok(descr.clone()))?;
+                }
+                Ok(())
             };
 
-            let updated = self.update_one_shard(
-                &shard,
-                &mut descr,
-                unchanged_sibling.as_ref(),
-                wc_set.get(&shard.workchain_id())?.as_ref(),
-                now,
-                update_cc,
-                &collator_data.config.raw_config(),
-            )?;
 
-            if updated_sibling {
-                if let Some(s) = sibling {
-                    changed_shards.insert(shard.sibling(), s);
-                }
-            }
-            if updated {
-                changed_shards.insert(shard, descr);
+            if let Some(sibling) = sibling.as_mut() {
+                update_one_shard(shard.sibling(), sibling, Some(&descr))?;
             }
 
+            update_one_shard(shard.clone(), &mut descr, unchanged_sibling.as_ref())?;
+            
             Ok(true)
         })?;
-        for (shard, info) in changed_shards {
-            collator_data.shards_mut()?.update_shard(&shard, |_| Ok(info))?;
-        }
-        // end of the temp code
 
         Ok(min_ref_mc_seqno)
     }
 
     fn update_one_shard(
         &self,
+        collator_data: &CollatorData,
         shard: &ShardIdent,
         info: &mut ShardDescr,
         sibling: Option<&ShardDescr>,
         wc_info: Option<&WorkchainDescr>, // new wc config (with changes made in the current block)
-        now: u32,
         mut update_cc: bool,
-        config: &ConfigParams,
     ) -> Result<bool> {
         log::trace!("{}: update_one_shard {}", self.collated_block_descr, shard);
 
+        let now = collator_data.gen_utime();
+        let config = collator_data.config.raw_config();
         let mut changed = false;
         let old_before_merge = info.before_merge;
         info.before_merge = false;
@@ -3672,7 +3653,7 @@ impl Collator {
                              depth > wc_info.min_split() &&                                            // min_split allows merge
                             !sibling.before_split &&                                                   // sibling is not going to split
                              sibling.is_fsm_merge() &&                                                 // sibling is in merge progress too
-                            (depth > wc_info.max_split() || (info.want_merge && sibling.want_merge))   // max_split was decreased or both shardes want merge
+                            (depth > wc_info.max_split() || (info.want_merge && sibling.want_merge))   // max_split was decreased or both shards want merge
                         {
                             // merge time come
                             if now >= info.fsm_utime() && now >= sibling.fsm_utime() {
@@ -3704,17 +3685,15 @@ impl Collator {
         Ok(changed)
     }
 
-    pub fn update_shard_block_info(
+    fn update_shard_block_info(
         &self,
-        shardes: &mut ShardHashes,
+        collator_data: &mut CollatorData,
         mut new_info: McShardRecord,
         old_blkids: &Vec<BlockIdExt>,
-        config: &ConfigParams,
         shards_updated: Option<&mut HashSet<ShardIdent>>,
-        now: u32,
     ) -> Result<()> {
     
-        let (res, ancestor) = may_update_shard_block_info(shardes, &new_info, old_blkids, !0,
+        let (res, ancestor) = may_update_shard_block_info(collator_data.shards()?, &new_info, old_blkids, !0,
             shards_updated.as_ref().map(|s| &**s))?;
         
         if !res {
@@ -3730,13 +3709,14 @@ impl Collator {
         }
         
         let shard = new_info.shard().clone();
+        let now = collator_data.gen_utime();
     
         if old_blkids.len() == 2 {
-            shardes.merge_shards(&shard, |_, _| Ok(new_info.descr))?;
+            collator_data.shards_mut()?.merge_shards(&shard, |_, _| Ok(new_info.descr))?;
     
         } else {
             
-            shardes.update_shard(&shard, |_| Ok(new_info.descr))?;
+            collator_data.shards_mut()?.update_shard(&shard, |_| Ok(new_info.descr))?;
             
         }
     
@@ -3746,20 +3726,19 @@ impl Collator {
         Ok(())
     }
     
-    pub fn update_shard_block_info2(
+    fn update_shard_block_info2(
         &self,
-        shardes: &mut ShardHashes,
+        collator_data: &mut CollatorData,
         mut new_info1: McShardRecord,
         mut new_info2: McShardRecord,
         old_blkids: &Vec<BlockIdExt>,
-        config: &ConfigParams,
         shards_updated: Option<&mut HashSet<ShardIdent>>,
-        now: u32,
     ) -> Result<()> {
     
-        let (res1, _) = may_update_shard_block_info(shardes, &new_info1, old_blkids, !0,
+        let shards = collator_data.shards_mut()?;
+        let (res1, _) = may_update_shard_block_info(shards, &new_info1, old_blkids, !0,
                             shards_updated.as_ref().map(|s| &**s))?;
-        let (res2, _) = may_update_shard_block_info(shardes, &new_info2, old_blkids, !0,
+        let (res2, _) = may_update_shard_block_info(shards, &new_info2, old_blkids, !0,
                             shards_updated.as_ref().map(|s| &**s))?;
     
         if res1 || res2 {
@@ -3771,7 +3750,7 @@ impl Collator {
     
         let shard1 = new_info1.shard().clone();
     
-        shardes.split_shard(&new_info1.shard().merge()?, |_| Ok((new_info1.descr, new_info2.descr)))?;
+        shards.split_shard(&new_info1.shard().merge()?, |_| Ok((new_info1.descr, new_info2.descr)))?;
     
         if let Some(shards_updated) = shards_updated {
             shards_updated.insert(shard1);
