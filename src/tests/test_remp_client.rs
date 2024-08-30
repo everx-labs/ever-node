@@ -1,6 +1,6 @@
 use crate::{
     block::BlockStuff, engine_traits::EngineOperations,
-    full_node::remp_client::{RempClient}, shard_state::ShardStateStuff, 
+    full_node::remp_client::RempClient, shard_state::ShardStateStuff, 
     validator::validator_utils::get_adnl_id,
 };
 #[cfg(feature = "telemetry")]
@@ -777,6 +777,7 @@ async fn test_remp_client() -> Result<()> {
         block_handle_storage: crate::collator_test_bundle::create_block_handle_storage(),
         sent_remp_messages: AtomicU32::new(0),
         signed_remp_messages: AtomicU32::new(0),
+        #[cfg(feature = "telemetry")]
         telemetry: RempClientTelemetry::default(),
     });
 

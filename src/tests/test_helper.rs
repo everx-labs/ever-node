@@ -14,8 +14,8 @@
 #![allow(dead_code)]
 use crate::{
     block::{BlockStuff, BlockKind}, block_proof::BlockProofStuff, 
-    config::{CollatorConfig, TonNodeConfig}, 
     collator_test_bundle::create_engine_allocated,
+    config::{CollatorConfig, TonNodeConfig}, 
     full_node::apply_block::apply_block,
     internal_db::{
         LAST_APPLIED_MC_BLOCK, SHARD_CLIENT_MC_BLOCK,
@@ -555,6 +555,7 @@ impl TestEngine {
     }
 
     pub async fn change_mc_state(&self, mc_state_id: &BlockIdExt) -> Result<()> {
+        log::debug!("Changing last masterchain state to {}", mc_state_id);
         let mc_state = self.db.load_shard_state_dynamic(&mc_state_id)?;
         self.save_last_applied_mc_block_id(&mc_state_id)?;
         self.shard_blocks.update_shard_blocks(&mc_state).await?;
@@ -565,9 +566,17 @@ impl TestEngine {
         let mc_state_id = self.db.load_full_node_state(LAST_APPLIED_MC_BLOCK)?.unwrap();
         let mc_state = self.load_state(&mc_state_id).await?;
         let (_, mc_state_id, _) = mc_state.shard_state_extra()?.prev_blocks.get(&mc_seq_no)?.unwrap().master_block_id();
-        log::debug!("Changing last masterchain state to {}", mc_state_id);
         self.change_mc_state(&mc_state_id).await?;
         Ok(mc_state_id)
+    }
+
+    pub async fn change_mc_state_by_prev_blocks_ids(&self, prev_blocks_ids: &[BlockIdExt]) -> Result<BlockIdExt> {
+        let mut mc_seq_no = u32::MAX;
+        for block_id in prev_blocks_ids {
+            let handle = self.load_block_handle(block_id)?.unwrap();
+            mc_seq_no = mc_seq_no.min(handle.masterchain_ref_seq_no());
+        }
+        self.change_mc_state_by_seqno(mc_seq_no).await
     }
 
     pub async fn load_block_by_id(&self, id: &BlockIdExt) -> Result<BlockStuff> {
@@ -718,10 +727,10 @@ impl TestEngine {
             self.clone(),
             Some(extra.rand_seed().clone()),
             None,
-            CollatorSettings::default(),
         )?;
 
-        let (block_candidate, new_state) = collator.collate().await?;
+        let collate_result = collator.collate(CollatorSettings::default()).await?;   
+        let block_candidate = collate_result.candidate.unwrap();
 
         if let Some(res_path) = &self.res_path {
 
@@ -772,7 +781,7 @@ impl TestEngine {
             )?;
             std::fs::write(
                 &format!("{}/state_candidate.txt", res_path), 
-                debug_state(new_state.clone())?
+                debug_state(collate_result.new_state.clone().unwrap())?
             )?;
 
             // std::fs::write(
@@ -1110,6 +1119,18 @@ impl EngineOperations for TestEngine {
         to_delete: Vec<(UInt256, i32)>
     ) -> Result<()> {
         self.ext_messages.complete_messages(to_delay, to_delete, self.now())
+    }
+    fn get_remp_messages(&self, _shard: &ShardIdent) -> Result<Vec<(Arc<Message>, UInt256)>> {
+        Ok(Vec::new())
+    }
+    fn finalize_remp_messages(
+        &self,
+        _block: BlockIdExt,
+        _accepted: Vec<UInt256>,
+        _rejected: Vec<(UInt256, String)>,
+        _ignored: Vec<UInt256>,
+    ) -> Result<()> {
+        Ok(())
     }
     async fn get_shard_blocks(
         &self,

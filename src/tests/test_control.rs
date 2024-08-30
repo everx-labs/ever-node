@@ -37,7 +37,7 @@ use std::{
 };
 use storage::block_handle_db::BlockHandle;
 use ton_api::{ 
-    serialize_boxed, tag_from_boxed_type, AnyBoxedSerialize,
+    serialize_boxed, AnyBoxedSerialize,
     ton::{
         self, TLObject, accountaddress::AccountAddress,
         engine::validator::{ControlQueryError, KeyHash, Stats},
@@ -51,6 +51,8 @@ use ton_api::{
 };
 use ton_api::ton::raw::ShardAccountMeta;
 use ton_api::ton::rpc::raw::{GetAccountMetaByBlock, GetShardAccountMeta};
+#[cfg(feature = "telemetry")]
+use ton_api::tag_from_boxed_type;
 use ever_block::{
     Account, BlockIdExt, ConfigParamEnum, ConfigParams, Deserializable,
     generate_test_account_by_init_code_hash, Message, Serializable, ShardIdent

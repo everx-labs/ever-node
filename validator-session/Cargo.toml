@@ -25,6 +25,6 @@ colored = '1.9'
 env_logger = '0.7'
 
 [features]
-export_key = [  ]
+export_key = [ 'ever_block/export_key' ]
 slashing = [  ]
 

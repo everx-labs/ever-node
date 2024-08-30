@@ -25,7 +25,6 @@ use crate::{
         BlockResult, INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, LAST_MESH_HARDFORK_BLOCK, 
         LAST_MESH_KEYBLOCK, LAST_MESH_MC_BLOCK, LAST_ROTATION_MC_BLOCK, SHARD_CLIENT_MC_BLOCK
     }, 
-    jaeger,
     shard_state::ShardStateStuff,
     shard_states_keeper::PinnedShardStateGuard,
     types::top_block_descr::{TopBlockDescrId, TopBlockDescrStuff},
@@ -1415,7 +1414,6 @@ async fn redirect_external_message(
         ).await;
         #[cfg(feature = "telemetry")]
         engine.full_node_telemetry().sent_ext_msg_broadcast();
-        jaeger::broadcast_sended(id.to_hex_string());
         res
     } else {
         fail!("External message is not properly formatted: {}", message)

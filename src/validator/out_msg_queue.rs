@@ -257,8 +257,7 @@ impl OutMsgQueueInfoStuff {
                 0x5777784F96FB1CFFu64,
                 "05aa297e3a2e003e1449e1297742d64f188985dc029c620edc84264f9786c0c3".parse().unwrap()
             );
-            let key = SliceData::load_bitstring(key.write_to_new_cell()?)?;
-            out_queue.remove(key)?;
+            out_queue.remove(key.write_to_bitstring()?)?;
         }
 
         let ihr_pending = out_queue_info.ihr_pending().clone();
@@ -1502,18 +1501,10 @@ impl MsgQueueMergerIterator<BlockIdExt> {
         let shard_prefix = shard.shard_key(true);
         let mut roots = vec![];
         for nb in manager.neighbors.iter().filter(|nb| !nb.is_disabled()) {
-            let out_queue_short = if let Ok(full_queue) = nb.out_queue() {
-                let mut q = full_queue.clone();
-                q.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
-                q
-            } else {
-                let mut q = nb.out_queue_part()?.clone();
-                q.into_subtree_with_prefix(&shard_prefix, &mut 0)?;
-                q
-            };
+            let out_queue_short = nb.out_queue().or_else(|_| nb.out_queue_part())?
+                .subtree_with_prefix(&shard_prefix, &mut 0)?;
             if let Some(cell) = out_queue_short.data() {
                 roots.push(RootRecord::from_cell(cell, out_queue_short.bit_len(), nb.block_id().clone())?);
-                // roots.push(RootRecord::new(lt, cursor, bit_len, key, nb.block_id().clone()));
             }
         }
         if !roots.is_empty() {

@@ -541,7 +541,9 @@ impl ControlQuerySubscriber {
 
     async fn prepare_bundle(&self, block_id: BlockIdExt) -> Result<Success> {
         if let DataSource::Engine(ref engine) = self.data_source {
-            let bundle = CollatorTestBundle::build_with_ethalon(&block_id, engine).await?;
+            let handle = engine.load_block_handle(&block_id)?.ok_or_else(|| error!("Block handle for {} not found", block_id))?;
+            let block = engine.load_block(&handle).await?;
+            let bundle = CollatorTestBundle::build_with_ethalon(engine, block).await?;
             tokio::task::spawn_blocking(move || {
                 bundle.save("target/bundles").ok();
             });
@@ -549,10 +551,10 @@ impl ControlQuerySubscriber {
         Ok(Success::Engine_Validator_Success)
     }
 
-    async fn prepare_future_bundle(&self, prev_block_ids: Vec<BlockIdExt>) -> Result<Success> {
+    async fn prepare_future_bundle(&self, prev_blocks_ids: Vec<BlockIdExt>) -> Result<Success> {
         if let DataSource::Engine(ref engine) = self.data_source {
             let bundle = CollatorTestBundle::build_for_collating_block(
-                prev_block_ids, engine
+                engine, prev_blocks_ids, None
             ).await?;
             tokio::task::spawn_blocking(move || {
                 bundle.save("target/bundles").ok();
@@ -703,6 +705,7 @@ impl ControlQuerySubscriber {
                 self.add_validator_bls_key(
                     query.permanent_key_hash.as_slice(), query.key_hash.as_slice(), query.ttl
                 ).await?,
+                #[cfg(feature = "telemetry")]
                 None
             ),
             Err(query) => query

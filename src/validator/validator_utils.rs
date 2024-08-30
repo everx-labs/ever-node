@@ -498,7 +498,7 @@ pub fn fmt_next_block_descr_from_next_seqno(
 }
 
 impl PrevBlockHistory {
-    pub fn new(shard: &ShardIdent) -> Self {
+    pub fn with_shard(shard: &ShardIdent) -> Self {
         Self {
             shard: shard.clone(),
             prev: vec!(),
@@ -506,16 +506,17 @@ impl PrevBlockHistory {
         }
     }
 
-    pub fn new_prevs(shard: &ShardIdent, prevs: &Vec<BlockIdExt>) -> Self {
+    pub fn with_prevs(shard: &ShardIdent, prev: Vec<BlockIdExt>) -> Self {
+        let next_seqno = get_first_block_seqno_after_prevs(&prev);
         Self {
             shard: shard.clone(),
-            prev: prevs.clone(),
-            next_seqno: get_first_block_seqno_after_prevs(prevs)
+            prev,
+            next_seqno
         }
     }
 
-    pub fn update_prev(&mut self, prev: &Vec<BlockIdExt>) {
-        self.prev = prev.clone();
+    pub fn update_prev(&mut self, prev: Vec<BlockIdExt>) {
+        self.prev = prev;
         self.next_seqno = get_first_block_seqno_after_prevs(&self.prev);
     }
 
@@ -529,6 +530,9 @@ impl PrevBlockHistory {
 
     pub fn get_prevs(&self) -> &Vec<BlockIdExt> {
         &self.prev
+    }
+    pub fn get_prev(&self, index: usize) -> Option<&BlockIdExt> {
+        self.prev.get(index)
     }
 
     pub fn same_prevs(&self, other: &PrevBlockHistory) -> bool {

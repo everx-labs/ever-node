@@ -411,7 +411,7 @@ fn test_clean_queue() {
                 continue;
             }
 
-            queue.remove(SliceData::load_builder(key.write_to_new_cell()?)?)?;
+            queue.remove(key.write_to_bitstring()?)?;
         }
         queue.after_remove()?;
 

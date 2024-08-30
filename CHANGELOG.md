@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.20
+
+- Enhanced bundler engine for creating short and quick bundles
+  using state proofs instead of full state for debugging and testing purposes
+
 ## Version 0.59.18
 
 - Cleanup fast_finality for SMFT. Add default parameters for workchain delivery

@@ -833,7 +833,7 @@ impl ValidatorManagerImpl {
     }
 
     async fn start_sessions(&mut self,
-        new_shards: &HashMap<ShardIdent, Vec<BlockIdExt>>,
+        new_shards: HashMap<ShardIdent, Vec<BlockIdExt>>,
         our_current_shards: &mut HashMap<ShardIdent, ValidatorSet>,
         keyblock_seqno: u32,
         session_options: validator_session::SessionOptions,
@@ -873,7 +873,7 @@ impl ValidatorManagerImpl {
         let remp_enabled = !do_unsafe_catchain_rotate
             && is_remp_enabled(self.engine.clone(), mc_state_extra.config());
 
-        for (ident, prev_blocks) in new_shards.iter() {
+        for (ident, prev_blocks) in new_shards.into_iter() {
             let cc_seqno_from_state = if ident.is_masterchain() {
                 *master_cc_range.end()
             } else {
@@ -886,12 +886,13 @@ impl ValidatorManagerImpl {
                 ident, cc_seqno_from_state
             );
 
+            let prev = PrevBlockHistory::with_prevs(&ident, prev_blocks);
             let subset = match try_calc_subset_for_workchain(
                 &full_validator_set,
                 &mc_state,
-                ident,
+                &ident,
                 cc_seqno,
-                PrevBlockHistory::new_prevs(ident, prev_blocks).get_next_seqno().unwrap_or_default()
+                prev.get_next_seqno().unwrap_or_default()
             )? {
                 Some(x) => x,
                 None => {
@@ -915,7 +916,7 @@ impl ValidatorManagerImpl {
                 max_vertical_seqno: 0
             });
 
-            let prev_block_seqno_opt = prev_blocks.get(0).map(|x| x.seq_no);
+            let prev_block_seqno_opt = prev.get_prev(0).map(|x| x.seq_no);
             let session_id = get_session_unsafe_id(
                 general_session_info.clone(),
                 &vsubset.list().to_vec(),
@@ -933,7 +934,7 @@ impl ValidatorManagerImpl {
             let prev_sessions = self.compute_prev_sessions_list(
                 &full_validator_set,
                 &mc_state,
-                prev_blocks,
+                prev.get_prevs(),
                 general_session_info.clone(),
                 &session_id
             ).await?;
@@ -1020,7 +1021,7 @@ impl ValidatorManagerImpl {
                         &prev_sessions.get_validator_list()?,
                         &vsubset,
                         group_start_status,
-                        prev_blocks.clone(),
+                        prev.get_prevs().clone(),
                         last_masterchain_block.clone(),
                         SystemTime::UNIX_EPOCH + Duration::from_secs(mc_now.as_u32() as u64),
                         master_cc_range,
@@ -1278,7 +1279,7 @@ impl ValidatorManagerImpl {
         let validation_status = self.engine.validation_status();
         if validation_status.allows_validate() {
             self.start_sessions(
-                &new_shards,
+                new_shards,
                 &mut our_current_shards,
                 keyblock_seqno,
                 session_options,

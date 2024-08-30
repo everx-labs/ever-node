@@ -143,7 +143,7 @@ impl ValidatorGroupImpl {
 
         log::info!(target: "validator", "Starting session {} (start remp: {})", self.info(), start_remp_session);
 
-        self.prev_block_ids.update_prev(&prev);
+        self.prev_block_ids.update_prev(prev);
         self.min_masterchain_block_id = Some(min_masterchain_block_id.clone());
         self.min_ts = min_ts;
 
@@ -267,7 +267,7 @@ impl ValidatorGroupImpl {
     ) -> ValidatorGroupImpl {
         log::info!(target: "validator", "Initializing session {:x}, shard {}", session_id, shard);
 
-        let prev_block_ids = PrevBlockHistory::new(&shard);
+        let prev_block_ids = PrevBlockHistory::with_shard(&shard);
         ValidatorGroupImpl {
             min_masterchain_block_id: None,
             min_ts: SystemTime::now(),
@@ -621,10 +621,10 @@ impl ValidatorGroup {
             self.info_round(round).await
         );
 
-        let (_lk_round, prev_block_ids, mm_block_id, min_ts) =
+        let (_lk_round, prev, mm_block_id, min_ts) =
             self.group_impl.execute_sync(|group_impl| group_impl.update_round (round)).await;
 
-        let remp_queue_collator_interface_impl = match self.check_in_sync(&prev_block_ids).await {
+        let remp_queue_collator_interface_impl = match self.check_in_sync(&prev).await {
             Err(e) => {
                 log::warn!(target: "validator", "({}): Error checking sync for {}: `{}`",
                     next_block_descr, self.info_round(round).await, e
@@ -642,7 +642,7 @@ impl ValidatorGroup {
                     self.shard().clone(),
                     min_ts,
                     mc.seq_no,
-                    &prev_block_ids,
+                    prev,
                     remp_queue_collator_interface_impl.clone().map(|x| x.into_interface()),
                     self.local_key.clone(),
                     self.validator_set.clone(),
@@ -784,8 +784,8 @@ impl ValidatorGroup {
         let validation_completion_time = run_validate_query(
             self.shard().clone(),
             min_ts,
-            mc_block_id,
-            &prev_block_ids,
+            mc_block_id.seq_no(),
+            prev_block_ids,
             candidate.clone(),
             self.validator_set.clone(),
             self.engine.clone(),
@@ -960,7 +960,7 @@ impl ValidatorGroup {
                 // TODO: retry block commit
             };
 
-            group_impl.prev_block_ids.update_prev(&vec!(next_block_id));
+            group_impl.prev_block_ids.update_prev(vec!(next_block_id));
 
             (full_result, group_impl.prev_block_ids.display_prevs())
         }).await;

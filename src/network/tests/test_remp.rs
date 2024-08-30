@@ -1,7 +1,9 @@
 use crate::{
     network::remp::{RempNode, RempMessagesSubscriber, RempReceiptsSubscriber, ReceiptStuff},
-    test_helper::{get_adnl_config, init_test_log}, validator::telemetry::RempCoreTelemetry
+    test_helper::{get_adnl_config, init_test_log},
 };
+#[cfg(feature = "telemetry")]
+use crate::validator::telemetry::RempCoreTelemetry;
 
 use adnl::node::AdnlNode;
 use std::{
@@ -16,7 +18,7 @@ use ever_block::{fail, KeyId, Result, UInt256};
 
 const KEY_TAG: usize = 0;
 
-async fn init_remp_node(ip: &str) -> Result<(Arc<AdnlNode>, Arc<RempNode>, Arc<RempCoreTelemetry>)> {
+async fn init_remp_node(ip: &str) -> Result<(Arc<AdnlNode>, Arc<RempNode>)> {
     let config = get_adnl_config("target/remp", ip, vec![KEY_TAG], true).await.unwrap();
     let node = AdnlNode::with_config(config).await.unwrap();
     let remp = Arc::new(RempNode::new(node.clone(), KEY_TAG)?);
@@ -26,9 +28,10 @@ async fn init_remp_node(ip: &str) -> Result<(Arc<AdnlNode>, Arc<RempNode>, Arc<R
     ).await.unwrap();
     #[cfg(feature = "telemetry")]
     let t = Arc::new(RempCoreTelemetry::new(1));
-    remp.set_telemetry(t.clone())?;
+    #[cfg(feature = "telemetry")]
+    remp.set_telemetry(t)?;
     remp.start()?;
-    Ok((node, remp, t))
+    Ok((node, remp))
 }
 
 struct TestRempSubscriber {
@@ -57,8 +60,8 @@ async fn test_remp_client_compact_protocol() -> Result<()> {
 
     init_test_log();
 
-    let (node1, remp1, telemetry1) = init_remp_node("127.0.0.1:4191").await?;
-    let (node2, remp2, telemetry2) = init_remp_node("127.0.0.1:4192").await?;
+    let (node1, remp1) = init_remp_node("127.0.0.1:4191").await?;
+    let (node2, remp2) = init_remp_node("127.0.0.1:4192").await?;
     let peer1 = node2.add_peer(
         node2.key_by_tag(KEY_TAG).unwrap().id(),
         node1.ip_address(),
@@ -114,8 +117,10 @@ async fn test_remp_client_compact_protocol() -> Result<()> {
     assert!(s1.got_receipts.load(Ordering::Relaxed) > 0);
     assert!(s2.got_receipts.load(Ordering::Relaxed) > 0);
 
-    log::info!("\n1{}", telemetry1.report());
-    log::info!("\n\n2{}", telemetry2.report());
+    #[cfg(feature = "telemetry")]
+    log::info!("\n1{}", remp1.telemetry().report());
+    #[cfg(feature = "telemetry")]
+    log::info!("\n\n2{}", remp2.telemetry().report());
 
     node1.stop().await;
     node2.stop().await;
@@ -162,6 +167,7 @@ async fn test_remp_receipts_send_worker() -> Result<()> {
         sender.clone(),
         receiver,
         receipts_in_channel.clone(),
+        #[cfg(feature = "telemetry")]
         telemetry.clone()
     );
 
@@ -203,6 +209,7 @@ async fn test_remp_receipts_send_worker() -> Result<()> {
     log::info!("sent packages {}", sender.sent_receipts.lock().unwrap().len());
     log::info!("sent receipts {}", sender.sent_receipts.lock().unwrap().iter().map(|p| p.receipts().len()).sum::<usize>());
 
+    #[cfg(feature = "telemetry")]
     log::info!("{}", telemetry.report());
 
     Ok(())
