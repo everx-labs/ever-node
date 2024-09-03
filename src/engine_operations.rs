@@ -1117,7 +1117,7 @@ impl EngineOperations for Engine {
         self.db().db_root_dir()
     }
 
-    #[cfg(feature = "external_db")]
+    #[cfg(all(feature = "external_db", test))]
     fn produce_chain_ranges_enabled(&self) -> bool {
         self.ext_db().iter().any(|ext_db| ext_db.process_chain_range_enabled())
     }

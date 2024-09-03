@@ -152,11 +152,18 @@ impl VerificationManager for VerificationManagerImpl {
         };
 
         if let Some(workchain) = workchain {
+            let smft_config = workchain.get_config();
             let start_time = SystemTime::now();
             let timeout = if let Some(timeout) = timeout {
                 timeout
             } else {
-                self.config.max_mc_delivery_wait_timeout
+                if let Some(max_mc_delivery_wait_timeout) = self.config.max_mc_delivery_wait_timeout {
+                    //node's config may override SMFT network config
+                    max_mc_delivery_wait_timeout
+                } else {
+                    //use SMFT network config
+                    Duration::from_millis(smft_config.mc_max_delivery_waiting_timeout_ms as u64)
+                }
             };
 
             loop {
@@ -215,6 +222,7 @@ impl VerificationManager for VerificationManagerImpl {
         Workchains management
     */
 
+    /*
     /// Reset workchains
     async fn reset_workchains<'a>(
         &'a self,
@@ -228,7 +236,8 @@ impl VerificationManager for VerificationManagerImpl {
         self.update_workchains_counter.increment(1);
 
         self.set_workchains(Arc::new(HashMap::new()));
-    }    
+    }
+    */    
 
     /// Update workchains
     async fn update_workchains<'a>(
@@ -240,6 +249,7 @@ impl VerificationManager for VerificationManagerImpl {
         workchain_validators: &'a Vec<ValidatorDescr>,
         mc_validators: &'a Vec<ValidatorDescr>,
         listener: &'a VerificationListenerPtr,
+        use_debug_bls_keys: bool,
     ) {
         check_execution_time!(100_000);
 
@@ -270,6 +280,7 @@ impl VerificationManager for VerificationManagerImpl {
             self.blocks_instance_counter.clone(),
             self.wc_overlays_instance_counter.clone(),
             self.mc_overlays_instance_counter.clone(),
+            use_debug_bls_keys,
         )
         .await
         {
@@ -330,6 +341,7 @@ impl VerificationManagerImpl {
         blocks_instance_counter: Arc<InstanceCounter>,
         wc_overlays_instance_counter: Arc<InstanceCounter>,
         mc_overlays_instance_counter: Arc<InstanceCounter>,
+        use_debug_bls_keys: bool,
     ) -> Result<WorkchainPtr> {
         let wc_validator_set_hash = Self::compute_validator_set_hash(utime_since, wc_validators);
         let mc_validator_set_hash = Self::compute_validator_set_hash(utime_since, mc_validators);
@@ -360,6 +372,7 @@ impl VerificationManagerImpl {
             blocks_instance_counter,
             wc_overlays_instance_counter,
             mc_overlays_instance_counter,
+            use_debug_bls_keys,
         )
         .await?;
 

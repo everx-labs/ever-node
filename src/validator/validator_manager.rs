@@ -40,16 +40,12 @@ use crate::validator::{
         is_smft_enabled, try_calc_vset_for_workchain,
     },
     verification::{
-        GENERATE_MISSING_BLS_KEY, VerificationFactory, VerificationListener, 
+        DEFAULT_USE_DEBUG_BLS_KEYS, VerificationFactory, VerificationListener, 
         VerificationManagerConfig,
         VerificationManagerPtr
     }
 };
-use crate::validator::{
-    validator_utils::{
-        try_calc_subset_for_workchain_standard,
-    },
-};
+use crate::validator::validator_utils::try_calc_subset_for_workchain_standard;
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::{SlashingManager, SlashingManagerPtr};
 
@@ -1390,7 +1386,14 @@ impl ValidatorManagerImpl {
                                 let mut local_bls_key = 
                                     self.engine.get_validator_bls_key(local_key_id).await;
                                 log::trace!(target: "verificator", "Request BLS key done");
-                                if local_bls_key.is_none() && GENERATE_MISSING_BLS_KEY {
+
+                                let use_debug_bls_keys = if let Ok(smft_params) = config.smft_parameters() {
+                                    smft_params.use_debug_bls_keys
+                                } else {
+                                    DEFAULT_USE_DEBUG_BLS_KEYS
+                                };
+
+                                if local_bls_key.is_none() && use_debug_bls_keys {
                                     match VerificationFactory::generate_test_bls_key(&local_key) {
                                         Ok(bls_key) => local_bls_key = Some(bls_key),
                                         Err(err) => log::error!(
@@ -1413,7 +1416,8 @@ impl ValidatorManagerImpl {
                                                 *utime_since,
                                                 &workchain_validators,
                                                 &mc_validators,
-                                                &verification_listener
+                                                &verification_listener,
+                                                use_debug_bls_keys,
                                             ).await;
                                             log::debug!(
                                                 target: "verificator", "Update workchains finish"

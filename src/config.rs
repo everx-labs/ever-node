@@ -181,11 +181,11 @@ pub struct TonNodeConfig {
     #[serde(default)]
     smft_disabled: bool,
     #[serde(default="default_smft_max_mc_delivery_timeout_ms")]
-    smft_max_mc_delivery_timeout_ms: u32,
+    smft_max_mc_delivery_timeout_ms: Option<u32>,
 }
 
-fn default_smft_max_mc_delivery_timeout_ms() -> u32 {
-    1000
+fn default_smft_max_mc_delivery_timeout_ms() -> Option<u32> {
+    None
 }
 pub struct TonNodeGlobalConfig(TonNodeGlobalConfigJson);
 
@@ -434,8 +434,12 @@ impl TonNodeConfig {
         self.smft_disabled
     }
 
-    pub fn smft_max_mc_delivery_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.smft_max_mc_delivery_timeout_ms as u64)
+    pub fn smft_max_mc_delivery_timeout(&self) -> Option<std::time::Duration> {
+        if let Some(timeout_ms) = self.smft_max_mc_delivery_timeout_ms {
+            Some(std::time::Duration::from_millis(timeout_ms as u64))
+        } else {
+            None
+        }
     }
 
     pub fn from_file(
@@ -1767,7 +1771,7 @@ pub struct ValidatorManagerConfig {
     pub unsafe_catchain_rotates: HashMap<u32, (u32, u32)>,
     pub no_countdown_for_zerostate: bool,
     pub smft_disabled: bool,
-    pub smft_max_mc_delivery_timeout: std::time::Duration,
+    pub smft_max_mc_delivery_timeout: Option<std::time::Duration>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -1797,7 +1801,7 @@ impl Display for ValidatorManagerConfig {
 }
 
 impl ValidatorManagerConfig {
-    pub fn read_configs(config_files: Vec<String>, validation_countdown_mode: Option<String>, smft_disabled: bool, smft_max_mc_delivery_timeout: std::time::Duration) -> ValidatorManagerConfig {
+    pub fn read_configs(config_files: Vec<String>, validation_countdown_mode: Option<String>, smft_disabled: bool, smft_max_mc_delivery_timeout: Option<std::time::Duration>) -> ValidatorManagerConfig {
         log::debug!(target: "validator", "Reading validator manager config files: {}",
             config_files.iter().map(|x| format!("{}; ",x)).collect::<String>());
 
@@ -1867,7 +1871,10 @@ impl Default for ValidatorManagerConfig {
             unsafe_catchain_rotates: HashMap::new(),
             no_countdown_for_zerostate: false,
             smft_disabled: false,
-            smft_max_mc_delivery_timeout: Duration::from_millis(default_smft_max_mc_delivery_timeout_ms() as u64),
+            smft_max_mc_delivery_timeout: match default_smft_max_mc_delivery_timeout_ms() {
+                Some(timeout_ms) => Some(Duration::from_millis(timeout_ms as u64)),
+                None => None,
+            },
         }
     }
 }

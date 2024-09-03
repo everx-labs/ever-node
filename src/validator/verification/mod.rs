@@ -32,7 +32,7 @@ mod workchain;
 mod workchain_overlay;
 mod utils;
 
-pub const GENERATE_MISSING_BLS_KEY: bool = true; //generate missing BLS key from ED25519 public key (only for testing)
+pub const DEFAULT_USE_DEBUG_BLS_KEYS: bool = true; //generate missing BLS key from ED25519 public key (only for testing)
 pub const USE_VALIDATORS_WEIGHTS: bool = false; //use weights from ValidatorDescr for BLS signature weight aggregation
 
 /// Engine ptr
@@ -55,7 +55,7 @@ pub trait VerificationListener: Sync + Send {
 #[derive(Clone, Debug)]
 pub struct VerificationManagerConfig {
     /// Max wait time for delivery of shardchain block to MC validator
-    pub max_mc_delivery_wait_timeout: std::time::Duration,
+    pub max_mc_delivery_wait_timeout: Option<std::time::Duration>,
 }
 
 /// Verification manager
@@ -88,10 +88,13 @@ pub trait VerificationManager: Sync + Send {
         workchain_validators: &'a Vec<ValidatorDescr>,
         mc_validators: &'a Vec<ValidatorDescr>,
         listener: &'a VerificationListenerPtr,
+        use_debug_bls_keys: bool,
     );
 
+    /*
     /// Reset workchains
     async fn reset_workchains<'a>(&'a self);
+    */
 }
 
 /// Factory for verification objects

@@ -1,5 +1,3 @@
-#![cfg(not(feature = "external_db"))]
-
 use std::{
     collections::HashMap,
     ops::Deref, 
