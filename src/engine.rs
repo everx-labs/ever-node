@@ -112,6 +112,7 @@ pub struct Engine {
     db: Arc<InternalDb>,
     #[cfg(feature = "external_db")]
     ext_db: Vec<Arc<dyn ExternalDb>>,
+    ext_db_reset: AtomicBool,
     candidate_db: CandidateDbPool,
     overlay_operations: Arc<dyn OverlayOperations>,
     shard_states_awaiters: AwaitersPool<BlockIdExt, Arc<ShardStateStuff>>,
@@ -830,6 +831,7 @@ impl Engine {
             db,
             #[cfg(feature = "external_db")]
             ext_db,
+            ext_db_reset: AtomicBool::new(false),
             candidate_db,
             overlay_operations: network.clone() as Arc<dyn OverlayOperations>,
             shard_states_awaiters: AwaitersPool::new(
@@ -1243,6 +1245,10 @@ impl Engine {
 
     pub fn processed_workchain(&self) -> Option<i32> {
         self.processed_workchain
+    }
+
+    pub fn ext_db_reset(&self) -> &AtomicBool {
+        &self.ext_db_reset
     }
 
     pub async fn download_and_apply_block_worker(

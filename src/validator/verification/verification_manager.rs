@@ -317,6 +317,9 @@ impl VerificationManagerImpl {
     fn compute_validator_set_hash(utime_since: u32, validators: &Vec<ValidatorDescr>) -> UInt256 {
         let mut result = Vec::<u8>::with_capacity(validators.len() * 32);
 
+        //TODO: change pubkey to bls pubkey, remove utime_since from hash calculation
+        //TODO: add hash of SMFT config params to restart workchains in case of reconfiguration
+
         for validator in validators {
             result.extend(validator.public_key.key_bytes());
         }

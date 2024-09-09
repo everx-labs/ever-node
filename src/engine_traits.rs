@@ -282,6 +282,13 @@ pub trait EngineOperations : Sync + Send {
     fn load_external_db_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
         unimplemented!()
     }
+    #[cfg(feature = "external_db")]
+    fn check_ext_db_reset(&self) -> bool {
+        false
+    }
+    fn set_ext_db_reset(&self) {
+        unimplemented!()
+    }
     async fn load_actual_config_params(&self) -> Result<ConfigParams> {
         match self.load_last_applied_mc_block_id()? {
             Some(block_id) => {

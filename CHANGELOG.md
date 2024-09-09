@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.59.22
+
+- SMFT: block sync awake
+
+## Version 0.59.21
+
+- Added `ResetExternalDb` console command which sets external db block pointer to last applied block
+
 ## Version 0.59.20
 
 - Fix compiler warnings

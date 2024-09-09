@@ -158,23 +158,26 @@ pub async fn external_db_worker(
             break 'm;
         }
 
-        // Wait for next master block
-        loop {
+        if engine.check_ext_db_reset() {
+            block = engine.load_last_applied_mc_block().await?;
+            handle = engine.load_block_handle(&block.id().clone())?.ok_or_else(
+                || error!("Cannot load handle for last mc block {}", block.id())
+            )?;
+            log::warn!("External DB worker: RESET to {}", block.id());
+        } else {
+            // Wait for next master block
             match engine.wait_next_applied_mc_block(&handle, Some(15000)).await {
                 Ok(r) => {
                     handle = r.0;
                     block = r.1;
-                    break;
                 }
                 Err(_) => {
-                    if engine.check_stop() {
-                        break 'm;
-                    }
                     log::warn!("External DB worker: wait_next_applied_mc_block({}): timeout",
                         handle.id());
+                    continue;
                 }
             }
-        };
+        }
 
         let mc_seq_no = handle.id().seq_no();
         let mut tasks: Vec<tokio::task::JoinHandle<Result<Vec<BlockIdExt>>>> = vec!();
