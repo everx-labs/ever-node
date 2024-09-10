@@ -16,9 +16,10 @@ use adnl::{
 };
 use ever_abi::{Contract, Token, TokenValue, Uint};
 use ever_block::{
-    error, fail, AccountStatus, base64_decode, base64_encode, BlockIdExt, BuilderData, 
+    error, fail, Account, AccountStatus, base64_decode, base64_encode, BlockIdExt, BuilderData,
     Deserializable, Ed25519KeyOption, Result, Serializable, ShardAccount, SliceData, 
-    UInt256, write_boc
+    UInt256, write_boc, MsgAddressInt, StateInit, ShardAccounts, Cell, ShardIdent,
+    Block, BlockInfo,
 };
 use ever_block_json::parse_state;
 use std::{
@@ -64,22 +65,13 @@ macro_rules! commands {
     ($($command: ident, $name: literal, $help: literal)*) => {
         $(
             struct $command;
-/*
-            impl ConsoleCommand for $command {
-                fn _name() -> &'static str {$name}
-                fn help() -> &'static str {$help}
-            }
-*/
         )*
-/*
-        #[allow(dead_code)]
         fn command_help(name: &str) -> Result<&str> {
             match name {
-                $($name => Ok($command::help()), )*
+                $($name => Ok($help), )*
                 _ => fail!("command {} not supported", name)
             }
         }
-*/
         fn command_send<Q: ToString>(
             name: &str, 
             params: &mut impl Iterator<Item = Q>
@@ -120,9 +112,15 @@ commands! {
     FutureBundle, "future_bundle", 
         "future_bundle <block_id>\tprepare future bundle"
     GetAccount, "getaccount", 
-        "getaccount <account id> <Option<file name>>\tget account info"
+        "getaccount <account id> <Option<file name>> <Option<block_id>>\tget account info"
     GetAccountState, "getaccountstate", 
-        "getaccountstate <account id> <file name>\tsave accountstate to file"
+        "getaccountstate <account id> <file name>\tsave accountstate to the file"
+    GetAccountByBlock, "getaccountstate_byblock", 
+        "getaccountstate_byblock <block root hash or masterchain block seq no> <account id> \
+        <Option<file name>>\tsave masterchain accountstate from old block to the file"
+    GetBlock, "getblock", 
+        "getblock <block id or root hash of block or masterchain seq no> <file name>\t\
+         find block by masterchain seq_no or block id or root hash of block then save it to the file"
     GetBlockchainConfig, "getblockchainconfig", 
         "getblockchainconfig\tget current config from masterchain state"
     GetConfig, "getconfig", 
@@ -191,7 +189,7 @@ fn parse_blockid<Q: ToString>(param_opt: Option<Q>, name: &str) -> Result<BlockI
 }
 
 fn now() -> ton::int {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as ton::int
+    ever_node::engine::now_duration().as_secs() as ton::int
 }
 
 fn stats_to_json<'a>(stats: impl IntoIterator<Item = &'a OneStat>) -> serde_json::Value {
@@ -426,12 +424,50 @@ impl <Q: AsRef<Vec<u8>>> SendReceive<Q> for SendMessageBinary {
     }
 }
 
+impl <Q: ToString> SendReceive<Q> for GetBlock {
+
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
+        let id = params.next()
+            .ok_or_else(|| error!("you need to set block_id"))?.to_string();
+        let id = if let Ok(seq_no) = id.parse() {
+            BlockIdExt {
+                shard_id: ShardIdent::masterchain(),
+                seq_no,
+                ..Default::default()
+            }
+        } else {
+            id.parse().map_err(|err| error!("Can`t parse block_id {}: {}", id, err))?
+        };
+        Ok(TLObject::new(ton::rpc::lite_server::GetBlock {id}))
+    }
+
+    fn receive(
+        answer: TLObject, 
+        params: &mut impl Iterator<Item = Q>
+    ) -> Result<(String, Vec<u8>)> {
+        let data = downcast::<ton::lite_server::BlockData>(answer)?;
+
+        if data.data().is_empty() {
+            fail!("block not found!")
+        }
+
+        let boc_name = params.next()
+            .map_or_else(|| format!("block_boc_{:x}.boc", data.id().root_hash()), |s| s.to_string());
+
+        std::fs::write(&boc_name, data.data())
+            .map_err(|err| error!("Can`t create file {}: {}", boc_name, err))?;
+
+        Ok((format!("{} {}",
+            hex::encode(&data.data()),
+            base64_encode(&data.data())),
+            data.only().data)
+        )
+    }
+}
+
 impl <Q: ToString> SendReceive<Q> for GetBlockchainConfig {
     fn send(_params: &mut impl Iterator) -> Result<TLObject> {
-        Ok(TLObject::new(ton::rpc::lite_server::GetConfigAll {
-            mode: 0,
-            id: BlockIdExt::default()
-        }))
+        Ok(TLObject::new(ton::rpc::lite_server::GetConfigAll::default()))
     }
     fn receive(answer: TLObject, _params: &mut impl Iterator) -> Result<(String, Vec<u8>)> {
         let config_info = downcast::<ton_api::ton::lite_server::ConfigInfo>(answer)?;
@@ -462,29 +498,54 @@ impl <Q: ToString> SendReceive<Q> for GetConfig {
     }
 }
 
+fn account_address<Q: ToString>(params: &mut impl Iterator<Item = Q>) -> Result<AccountAddress> {
+    let account_address = params.next().ok_or_else(
+        || error!("insufficient parameters")
+    )?.to_string();
+    Ok(AccountAddress { account_address })
+}
+
+fn receive_and_save_shard_account_state<Q: ToString>(
+    answer: TLObject, 
+    params: &mut impl Iterator<Item = Q>
+) -> Result<(String, Vec<u8>)> {
+    let shard_account_state = downcast::<ShardAccountState>(answer)?;
+
+    params.next(); // account address
+    let boc_name = params
+        .next()
+        .ok_or_else(|| error!("bad params (boc name not found)!"))?
+        .to_string();
+
+    let shard_account_state = shard_account_state
+        .shard_account()
+        .ok_or_else(|| error!("account not found!"))?;
+    
+    let shard_account = ShardAccount::construct_from_bytes(&shard_account_state)?;
+    let account_state = write_boc(&shard_account.account_cell())?;
+    std::fs::write(boc_name, &account_state)
+        .map_err(|err| error!("Can`t create file: {}", err))?;
+
+    Ok((format!("{}", base64_encode(&account_state)), account_state)
+    )
+}
+
 impl <Q: ToString> SendReceive<Q> for GetAccount {
 
     fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
-        let account = AccountAddress { 
-            account_address: params.next().ok_or_else(
-                || error!("insufficient parameters")
-            )?.to_string()
-        };
-        Ok(TLObject::new(ton::rpc::raw::GetShardAccountState {account_address: account}))
+        let account_address = account_address(params)?;
+        Ok(TLObject::new(ton::rpc::raw::GetShardAccountState {account_address}))
     }
 
     fn receive(
         answer: TLObject, 
         params: &mut impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
-        let shard_account_state = downcast::<ShardAccountState>(answer)?;
-        let mut account_info = String::from("{");
-        account_info.push_str("\n\"");
-        account_info.push_str("acc_type\":\t\"");
-
-        match shard_account_state {
+        let account_info = match downcast::<ShardAccountState>(answer)? {
             ShardAccountState::Raw_ShardAccountNone => {
-                account_info.push_str(&"Nonexist");
+                serde_json::json!({
+                    "acc_type": "Nonexist"
+                })
             },
             ShardAccountState::Raw_ShardAccountState(account_state) => {
                 let shard_account = ShardAccount::construct_from_bytes(&account_state.shard_account)?;
@@ -496,31 +557,23 @@ impl <Q: ToString> SendReceive<Q> for GetAccount {
                     AccountStatus::AccStateActive => "Active",
                     AccountStatus::AccStateNonexist => "Nonexist"
                 };
-                let balance = account.balance().map_or(0, |val| val.grams.as_u128());
-                account_info.push_str(&account_type);
-                account_info.push_str("\",\n\"");
-                account_info.push_str("balance\":\t");
-                account_info.push_str(&balance.to_string());
-                account_info.push_str(",\n\"");
-                account_info.push_str("last_paid\":\t");
-                account_info.push_str(&account.last_paid().to_string());
-                account_info.push_str(",\n\"");
-                account_info.push_str("last_trans_lt\":\t\"");
-                account_info.push_str(&format!("{:#x}", shard_account.last_trans_lt()));
-                account_info.push_str("\",\n\"");
-                account_info.push_str("data(boc)\":\t\"");
-                account_info.push_str(
-                    &hex::encode(&write_boc(&shard_account.account_cell())?)
-                );
+                serde_json::json!({
+                    "acc_type": account_type,
+                    "balance": account.balance().map_or(0, |val| val.grams.as_u128()),
+                    "last_paid": account.last_paid(),
+                    "last_trans": format!("{:#x}", shard_account.last_trans_lt()),
+                    "data(boc)": hex::encode(write_boc(&shard_account.account_cell())?)
+                })
             }
-        }
-        account_info.push_str("\"\n}");
+        };
 
         params.next();
+        let account_info = serde_json::to_string_pretty(&account_info)?;
         let account_data = account_info.as_bytes().to_vec();
         if let Some(boc_name) = params.next() {
-            std::fs::write(boc_name.to_string(), &account_data)
-                .map_err(|err| error!("Can`t create file: {}", err))?;
+            let boc_name = boc_name.to_string();
+            std::fs::write(&boc_name, &account_data)
+                .map_err(|err| error!("Can`t create file {}: {}", boc_name, err))?;
         }
 
         Ok((account_info, account_data))
@@ -531,10 +584,7 @@ impl <Q: ToString> SendReceive<Q> for GetAccount {
 impl <Q: ToString> SendReceive<Q> for GetAccountState {
 
     fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
-        let account_address = params.next().ok_or_else(
-           || error!("insufficient parameters")
-        )?.to_string();
-        let account_address = AccountAddress { account_address };
+        let account_address = account_address(params)?;
         Ok(TLObject::new(ton::rpc::raw::GetShardAccountState {account_address}))
     }
 
@@ -542,28 +592,28 @@ impl <Q: ToString> SendReceive<Q> for GetAccountState {
         answer: TLObject, 
         params: &mut impl Iterator<Item = Q>
     ) -> Result<(String, Vec<u8>)> {
-        let shard_account_state = downcast::<ShardAccountState>(answer)?;
+        receive_and_save_shard_account_state(answer, params)
+    }
+}
 
-        params.next();
-        let boc_name = params
-            .next()
-            .ok_or_else(|| error!("bad params (boc name not found)!"))?
-            .to_string();
+impl <Q: ToString> SendReceive<Q> for GetAccountByBlock {
 
-        let shard_account_state = shard_account_state
-            .shard_account()
-            .ok_or_else(|| error!("account not found!"))?;
-        
-        let shard_account = ShardAccount::construct_from_bytes(&shard_account_state)?;
-        let account_state = write_boc(&shard_account.account_cell())?;
-        std::fs::write(boc_name, &account_state)
-            .map_err(|err| error!("Can`t create file: {}", err))?;
+    fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
+        let block_root_hash = params.next().ok_or_else(
+            || error!("insufficient parameters")
+        )?.to_string().parse()?;
+        let account_id = params.next().ok_or_else(
+            || error!("insufficient parameters")
+        )?.to_string().parse()?;
+        Ok(TLObject::new(ton::rpc::raw::GetAccountByBlock {block_root_hash, account_id}))
+    }
 
-        Ok((format!("{} {}",
-            hex::encode(&account_state),
-            base64_encode(&account_state)),
-            account_state)
-        )
+    fn receive(
+        answer: TLObject, 
+        params: &mut impl Iterator<Item = Q>
+    ) -> Result<(String, Vec<u8>)> {
+        params.next(); // block_id
+        receive_and_save_shard_account_state(answer, params)
     }
 }
 
@@ -630,7 +680,14 @@ impl ControlClient {
         prepare: impl FnOnce(&str) -> Result<TLObject>,
         process: impl FnOnce(&str, TLObject) -> Result<(String, Vec<u8>)>
     ) -> Result<(String, Vec<u8>)> {
-        let query = prepare(name)?;
+        let query = match prepare(name) {
+            Ok(query) => query,
+            Err(err) => {
+                let help = command_help(name).map_or_else(|err| err.to_string(), |help| help.to_string());
+                println!("{}\n{}", err, help);
+                return Err(err)
+            }
+        };
         let boxed = ControlQuery {
             data: serialize_boxed(&query)?
         };
@@ -827,8 +884,7 @@ impl ControlClient {
             let mut body = BuilderData::with_raw(data, len)?;
             let len = signature.len() * 8;
             body.checked_append_reference(BuilderData::with_raw(signature, len)?.into_cell()?)?;
-            let body = body.into_cell()?;
-            body
+            body.into_cell()?
         } else {
 
             let (s, bls) = self.process_command(
@@ -858,10 +914,7 @@ impl ControlClient {
             log::trace!("Use process new stake function '{}' with id={:08X}",
                 ELECTOR_PROCESS_NEW_STAKE_FUNC_NAME, process_new_stake_fn.get_function_id());
 
-            let time_now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
+            let time_now_ms = ever_node::engine::now_duration().as_millis() as u64;
             let header: HashMap<_, _> = vec![("time".to_owned(), TokenValue::Time(time_now_ms))]
                 .into_iter()
                 .collect();
@@ -881,10 +934,9 @@ impl ControlClient {
 
             const INTERNAL_CALL: bool = true; //internal message
 
-            let body = process_new_stake_fn
-                .encode_input(&header, &parameters, INTERNAL_CALL, None, None)
-                .and_then(|builder| builder.into_cell())?;
-            body
+            process_new_stake_fn
+                .encode_input(&header, &parameters, INTERNAL_CALL, None, None)?
+                .into_cell()?
         };
 
         log::trace!("message body {}", body);
@@ -1109,7 +1161,8 @@ async fn main() {
     }
 
     let config = args.value_of("CONFIG").expect("required set for config");
-    let config = std::fs::read_to_string(config).expect("Can't read config file");
+    let config = std::fs::read_to_string(config)
+        .expect(&format!("Can't read config file {}", config));
     let config = serde_json::from_str(&config).expect("Can't parse config");
     let timeout = match args.value_of("TIMEOUT") {
         Some(timeout) => u64::from_str(timeout).expect("timeout must be set in microseconds"),
@@ -1158,20 +1211,20 @@ mod test {
     use tokio::io::AsyncWriteExt;
     use ton_api::deserialize_boxed;
     use ever_block::{
-        generate_test_account_by_init_code_hash,
-        BlockLimits, ConfigParam0, ConfigParam34, ConfigParamEnum, McStateExtra, ParamLimits, 
-        ShardIdent, ShardStateUnsplit, ValidatorDescr, ValidatorSet
+        generate_test_account_by_init_code_hash, BlockLimits, ConfigParam0, ConfigParam34, ConfigParamEnum, CurrencyCollection, HashmapAugType, McStateExtra, ParamLimits, ShardIdent, ShardStateUnsplit, ValidatorDescr, ValidatorSet
     };
     use ever_node::{
-        block::BlockKind, collator_test_bundle::{create_engine_telemetry, create_engine_allocated},
+        block::BlockKind, collator_test_bundle::create_engine_allocated,
         config::TonNodeConfig, engine_traits::{EngineAlloc, EngineOperations},
-        internal_db::{InternalDbConfig, InternalDb, state_gc_resolver::AllowStateGcSmartResolver}, 
+        internal_db::{state_gc_resolver::AllowStateGcSmartResolver, InternalDb, InternalDbConfig}, 
         network::{control::{ControlServer, DataSource}, node_network::NodeNetwork},
         shard_state::ShardStateStuff, shard_states_keeper::PinnedShardStateGuard,
         validator::validator_manager::ValidationStatus
     };
     #[cfg(feature = "telemetry")]
     use ever_node::engine_traits::EngineTelemetry;
+    #[cfg(feature = "telemetry")]
+    use ever_node::collator_test_bundle::create_engine_telemetry;
 
     const CFG_DIR: &str = "./target";
     const CFG_NODE_FILE: &str = "light_node.json";
@@ -1181,11 +1234,13 @@ mod test {
     struct TestEngine {
         counter: Option<Arc<AtomicU64>>,
         db: InternalDb,
-        master_state: Arc<ShardStateStuff>,
-        master_state_id: BlockIdExt,
-        shard_state: Arc<ShardStateStuff>,
-        shard_state_id: BlockIdExt,
-        last_validation_time: lockfree::map::Map<ShardIdent, u64>
+        states: HashMap<BlockIdExt, Arc<ShardStateStuff>>,
+        blocks: HashMap<BlockIdExt, Vec<u8>>,
+        last_mc_state: Arc<ShardStateStuff>,
+        last_validation_time: lockfree::map::Map<ShardIdent, u64>,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<EngineTelemetry>,
+        allocated: Arc<EngineAlloc>
     }
 
     impl TestEngine {
@@ -1196,68 +1251,6 @@ mod test {
             telemetry: Arc<EngineTelemetry>,
             allocated: Arc<EngineAlloc>
         ) -> Self {
-
-            let mut ss = ShardStateUnsplit::with_ident(ShardIdent::full(0));
-            let account = generate_test_account_by_init_code_hash(false);
-            let account_id = account.get_id().unwrap().get_next_hash().unwrap();
-            ss.insert_account(
-                &account_id, 
-                &ShardAccount::with_params(&account, UInt256::default(), 0).unwrap()
-            ).unwrap();
-            let cell = ss.serialize().unwrap();
-            let bytes = write_boc(&cell).unwrap();
-            let shard_state_id = BlockIdExt::with_params(
-                ShardIdent::full(0),
-                0,
-                cell.repr_hash(),
-                UInt256::calc_file_hash(&bytes)
-            );
-            let shard_state = ShardStateStuff::deserialize_zerostate(
-                shard_state_id.clone(), 
-                &bytes,
-                #[cfg(feature = "telemetry")]
-                &telemetry,
-                &allocated
-            ).unwrap();
-
-            let mut ss = ShardStateUnsplit::with_ident(ShardIdent::masterchain());
-            let mut ms = McStateExtra::default();
-            let mut param = ConfigParam0::new();
-            param.config_addr = UInt256::from([1;32]);
-            ms.config.set_config(ConfigParamEnum::ConfigParam0(param)).unwrap();
-            let mut param = ConfigParam34::new();
-            param.cur_validators = ValidatorSet::new(
-                1600000000,
-                1610000000,
-                1,
-                vec![ValidatorDescr::default()]
-            ).unwrap();
-            ms.config.set_config(ConfigParamEnum::ConfigParam34(param)).unwrap();
-            ms.shards.add_workchain(
-                0, 
-                0,
-                shard_state_id.root_hash.clone(),
-                shard_state_id.file_hash.clone(),
-                None
-            ).unwrap();
-            ss.write_custom(Some(&ms)).unwrap();
-
-            let cell = ss.serialize().unwrap();
-            let bytes = write_boc(&cell).unwrap();
-            let master_state_id = BlockIdExt::with_params(
-                ShardIdent::masterchain(),
-                0,
-                cell.repr_hash(),
-                UInt256::calc_file_hash(&bytes)
-            );
-            let master_state = ShardStateStuff::deserialize_zerostate(
-                master_state_id.clone(), 
-                &bytes,
-                #[cfg(feature = "telemetry")]
-                &telemetry,
-                &allocated
-            ).unwrap();
-
             fs::remove_dir_all(DB_PATH).ok();
             let db_config = InternalDbConfig {
                 db_directory: String::from(DB_PATH),
@@ -1274,24 +1267,167 @@ mod test {
                 telemetry.clone(),
                 allocated.clone()
             ).await.unwrap();
+
+            let mut states = HashMap::new();
+
+            let mut ss = ShardStateUnsplit::with_ident(ShardIdent::full(0));
+            let account = generate_test_account_by_init_code_hash(false);
+            let account_id = account.get_id().unwrap().get_next_hash().unwrap();
+            ss.insert_account(
+                &account_id, 
+                &ShardAccount::with_params(&account, UInt256::default(), 0).unwrap()
+            ).unwrap();
+            let cell = ss.serialize().unwrap();
+            let bytes = write_boc(&cell).unwrap();
+            let block_id = BlockIdExt::with_params(
+                ShardIdent::full(0),
+                0,
+                cell.repr_hash(),
+                UInt256::calc_file_hash(&bytes)
+            );
+            let shard_state = ShardStateStuff::deserialize_zerostate(
+                block_id.clone(), 
+                &bytes,
+                #[cfg(feature = "telemetry")]
+                &telemetry,
+                &allocated
+            ).unwrap();
+            states.insert(block_id, shard_state.clone());
+
+            let ss = Self::prepare_zero_state(shard_state.block_id()).unwrap();
+            let cell = ss.serialize().unwrap();
+            let bytes = write_boc(&cell).unwrap();
+            let block_id = BlockIdExt::with_params(
+                ShardIdent::masterchain(),
+                ss.seq_no(),
+                cell.repr_hash(),
+                UInt256::calc_file_hash(&bytes)
+            );
+
+            let last_mc_state = ShardStateStuff::deserialize_zerostate(
+                block_id,
+                &bytes,
+                #[cfg(feature = "telemetry")]
+                &telemetry,
+                &allocated
+            ).unwrap();
+
+            states.insert(last_mc_state.block_id().clone(), last_mc_state.clone());
             db.create_or_load_block_handle(
-                &master_state_id,
+                last_mc_state.block_id(),
                 None,
                 BlockKind::Block,
                 Some(1),
                 None
             ).unwrap()._to_created().unwrap();
+            
 
             Self {
                 counter,
-                db, 
-                master_state, 
-                master_state_id,
-                shard_state, 
-                shard_state_id,
-                last_validation_time: lockfree::map::Map::new()
+                db,
+                states,
+                blocks: HashMap::new(),
+                last_mc_state,
+                last_validation_time: lockfree::map::Map::new(),
+                telemetry,
+                allocated
             }
+        }
 
+        fn prepare_zero_state(wc_zero_state_id: &BlockIdExt) -> Result<ShardStateUnsplit> {
+            let config_addr = UInt256::with_array([0x55; 32]);
+
+            let mut ss = ShardStateUnsplit::with_ident(ShardIdent::masterchain());
+            let mut ms = McStateExtra::default();
+            let mut param = ConfigParam0::new();
+            param.config_addr = config_addr.clone();
+            ms.config.set_config(ConfigParamEnum::ConfigParam0(param))?;
+            let mut param = ConfigParam34::new();
+            param.cur_validators = ValidatorSet::new(
+                1600000000,
+                1610000000,
+                1,
+                vec![ValidatorDescr::default()]
+            )?;
+            ms.config.set_config(ConfigParamEnum::ConfigParam34(param))?;
+            ms.shards.add_workchain(
+                0, 
+                0,
+                wc_zero_state_id.root_hash().clone(),
+                wc_zero_state_id.file_hash().clone(),
+                None
+            )?;
+            ss.write_custom(Some(&ms))?;
+            let address = MsgAddressInt::standard(-1, config_addr.clone());
+            let state_init = StateInit {
+                data: Some(Cell::default().serialize()?), // empty cell with one ref
+                ..Default::default()
+            };
+            let mut config_smc = Account::system(address, 1_000_000_000, state_init)?;
+            config_smc.update_config_smc(ms.config())?;
+            let mut shard_accounts = ShardAccounts::new();
+            let account = ShardAccount::with_params(&config_smc, UInt256::default(), 0)?;
+            shard_accounts.set_augmentable(&config_addr, &account)?;
+            ss.write_accounts(&shard_accounts)?;
+
+            Ok(ss)
+        }
+
+        fn init_internal(&mut self) -> Result<()> {
+            let mut ss = self.last_mc_state.state()?.clone();
+            self.update_mc_state(&mut ss, 17).unwrap();
+            self.last_mc_state = self.update_mc_state(&mut ss, 19).unwrap();
+            Ok(())
+        }
+
+        fn update_mc_state(&mut self, ss: &mut ShardStateUnsplit, seq_no: u32) -> Result<Arc<ShardStateStuff>> {
+            assert!(seq_no < 100);
+            let config_addr = UInt256::with_array([0x55; 32]);
+            let mut shard_accounts = ss.read_accounts()?;
+            let mut account = shard_accounts.get(&config_addr)?.unwrap_or_default();
+            let mut config_smc = account.read_account()?;
+            config_smc.set_balance(CurrencyCollection::with_grams(seq_no as u64 * 1_000_000_000));
+            config_smc.set_code(((seq_no * 100 + seq_no) * 100 + seq_no).serialize()?);
+            account.write_account(&config_smc)?;
+            let account = ShardAccount::with_params(&config_smc, UInt256::default(), 0).unwrap();
+            shard_accounts.set_augmentable(&config_addr, &account).unwrap();
+            ss.write_accounts(&shard_accounts).unwrap();
+            
+            ss.set_seq_no(seq_no);
+            let mut block = Block::default();
+            let mut info = BlockInfo::new();
+            info.set_seq_no(seq_no)?;
+            info.set_gen_utime(seq_no.into());
+            block.write_info(&info)?;
+            block.global_id = 42;
+            let bytes = block.write_to_bytes()?;
+            let file_hash = UInt256::calc_file_hash(&bytes);
+            let block_id = BlockIdExt::with_params(
+                ShardIdent::masterchain(),
+                ss.seq_no(),
+                [seq_no as u8; 32].into(),
+                file_hash
+            );
+            self.blocks.insert(block_id.clone(), bytes);
+            let state = ShardStateStuff::from_state(
+                block_id.clone(),
+                ss.clone(),
+                #[cfg(feature = "telemetry")]
+                &self.telemetry,
+                &self.allocated
+            )?;
+            self.states.insert(block_id, state.clone());
+            let handle = self.db.create_or_load_block_handle(
+                state.block_id(),
+                Some(&block),
+                BlockKind::Block,
+                Some(seq_no),
+                None
+            ).unwrap()._to_created().unwrap();
+            handle.set_data();
+            handle.set_state();
+            handle.set_block_applied();
+            Ok(state)
         }
 
         async fn stop(&self) {
@@ -1328,46 +1464,50 @@ mod test {
             self.db.load_block_handle(id)
         }
         fn load_last_applied_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
-            Ok(Some(Arc::new(self.master_state_id.clone())))
+            Ok(Some(Arc::new(self.last_mc_state.block_id().clone())))
         }
         async fn load_last_applied_mc_state(&self) -> Result<Arc<ShardStateStuff>> {
-            Ok(self.master_state.clone())   
+            Ok(self.last_mc_state.clone())   
         }
         fn load_shard_client_mc_block_id(&self) -> Result<Option<Arc<BlockIdExt>>> {
-            Ok(Some(Arc::new(self.master_state_id.clone())))
+            Ok(Some(Arc::new(self.last_mc_state.block_id().clone())))
         }
         async fn load_state(&self, block_id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
-            if block_id == &self.master_state_id {
-                Ok(self.master_state.clone())   
-            } else if block_id == &self.shard_state_id {
-                Ok(self.shard_state.clone())   
-            } else {
-                fail!("Wrong block ID {}", block_id)
-            }
+            self.states.get(block_id).cloned().ok_or_else(|| error!("Can't find state {}", block_id))
         }
         async fn load_and_pin_state(&self, block_id: &BlockIdExt) -> Result<PinnedShardStateGuard> {
-            if *block_id == self.master_state_id {
-                PinnedShardStateGuard::new(
-                    self.master_state.clone(),
-                    Arc::new(AllowStateGcSmartResolver::new(10))
-                )
-            } else if *block_id == self.shard_state_id {
-                PinnedShardStateGuard::new(
-                    self.shard_state.clone(),
-                    Arc::new(AllowStateGcSmartResolver::new(10))
-                )
-            } else {
-                fail!("Wrong block ID {}", block_id)
+            let state = self.states.get(block_id).cloned()
+                .ok_or_else(|| error!("Wrong block ID {}", block_id))?;
+            PinnedShardStateGuard::new(
+                state,
+                Arc::new(AllowStateGcSmartResolver::new(10))
+            )
+        }
+        async fn load_block_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
+            if handle.has_data() {
+                if let Some(data) = self.blocks.get(handle.id()) {
+                    return Ok(data.clone());
+                }
             }
+            fail!("no block with id {}", handle.id())
         }
         fn find_full_block_id(&self, root_hash: &UInt256) -> Result<Option<BlockIdExt>> {
-            Ok(if *root_hash == self.master_state_id.root_hash {
-                Some(self.master_state_id.clone())
-            } else if *root_hash == self.shard_state_id.root_hash {
-                Some(self.shard_state_id.clone())
-            } else {
-                None
-            })
+            Ok(self.states.iter().find_map(|(id, _)| {
+                if id.root_hash() == root_hash {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            }))
+        }
+        async fn find_mc_block_by_seq_no(&self, seqno: u32) -> Result<Arc<BlockHandle>> {
+            for (id, _) in self.states.iter() {
+                if id.shard().is_masterchain() && id.seq_no() == seqno {
+                    return self.load_block_handle(id)?
+                        .ok_or_else(|| error!("Can't load block handle {}", id));
+                }
+            }
+            fail!("Wrong seqno {}", seqno)
         }
         async fn redirect_external_message(&self, _message: &[u8], _id: UInt256) -> Result<()> {
             if let Some(counter) = &self.counter {
@@ -1653,7 +1793,7 @@ mod test {
     async fn init_test(
         counter: Option<Arc<AtomicU64>>
     ) -> (ControlServer, ControlClient, Arc<TestEngine>) {
-        init_test_log();
+        // init_test_log();
         std::fs::write(Path::new(CFG_DIR).join(CFG_NODE_FILE), ADNL_SERVER_CONFIG).unwrap();
         std::fs::write(Path::new(CFG_DIR).join(CFG_GLOB_FILE), GLOBAL_CONFIG).unwrap();
         let node_config = TonNodeConfig::from_file(
@@ -1671,12 +1811,13 @@ mod test {
             telemetry.clone(),
             allocated.clone()
         ).await.unwrap();
-        let engine = TestEngine::new(
+        let mut engine = TestEngine::new(
             counter,
             #[cfg(feature = "telemetry")]
             telemetry, 
             allocated
         ).await;
+        engine.init_internal().unwrap();
         let engine = Arc::new(engine);
         let server = ControlServer::with_params(
             config,
@@ -1705,9 +1846,37 @@ mod test {
 
     async fn test_one_cmd(cmd: &str, check_result: impl FnOnce(Vec<u8>)) {
         let (server, mut client, engine) = init_test(None).await;
-        let (_, result) = client.command(cmd).await.unwrap();
+        let (answer, result) = client.command(cmd).await.unwrap();
+        println!("{} => {}", cmd, answer);
         check_result(result);
         done_test(server, client, engine).await;
+    }
+
+    async fn test_one_cmd_fail(cmd: &str) {
+        let (server, mut client, engine) = init_test(None).await;
+        let err = client.command(cmd).await.unwrap_err();
+        println!("{} => {}", cmd, err);
+        done_test(server, client, engine).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_getblock() {
+        let cmd = "getblock 17";
+        test_one_cmd(cmd, |result| {
+            assert_eq!(result.len(), 344);
+            let block = Block::construct_from_bytes(&result).unwrap();
+            assert_eq!(block.read_info().unwrap().seq_no(), 17);
+        }).await;
+        let cmd = "getblock 19";
+        test_one_cmd(cmd, |result| {
+            assert_eq!(result.len(), 344);
+            let block = Block::construct_from_bytes(&result).unwrap();
+            assert_eq!(block.read_info().unwrap().seq_no(), 19);
+        }).await;
+        let cmd = "getblock 15";
+        test_one_cmd_fail(cmd).await;
+        let cmd = "getblock \"\"";
+        test_one_cmd_fail(cmd).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1718,35 +1887,97 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_get_nonexist_account() {
-        let account = "-1:5555555555555555555555555555555555555555555555555555555555555555";
-        let cmd = format!(r#"getaccount {}"#, account);
-        let mut etalon_result = String::from("{");
-        etalon_result.push_str("\n\"");
-        etalon_result.push_str("acc_type\":\t\"Nonexist");
-        etalon_result.push_str("\"\n}");
-        test_one_cmd(&cmd, |result| assert_eq!(result, etalon_result.as_bytes().to_vec())).await;
+        // let account = "-1:5555555555555555555555555555555555555555555555555555555555555555";
+        let account = "-1:7777777777777777777777777777777777777777777777777777777777777777";
+        let cmd = format!("getaccount {}", account);
+        let etalon_result = "{\n  \"acc_type\": \"Nonexist\"\n}".as_bytes().to_vec();
+        test_one_cmd(&cmd, |result| pretty_assertions::assert_eq!(result, etalon_result)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_get_active_account() {
         let account = "983217:0:000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F";
-        let cmd = format!(r#"getaccount {}"#, account);
-        let mut etalon_result = String::from("{");
-        etalon_result.push_str("\n\"");
-        etalon_result.push_str("acc_type\":\t\"Active");
-        let etalon_result = etalon_result.as_bytes().to_vec();
-        test_one_cmd(&cmd, |result| assert_eq!(result[..etalon_result.len()], etalon_result)).await;
+        let cmd = format!("getaccount {}", account);
+        let etalon_result = "{\n  \"acc_type\": \"Active\",".as_bytes().to_vec();
+        test_one_cmd(&cmd, |result| pretty_assertions::assert_eq!(result[..etalon_result.len()], etalon_result)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_get_account_state() {
         const OUT_FILE: &str = "./target/test_file.boc";
         let account = "983217:0:000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F";
-        let cmd = format!(r#"getaccountstate {} {}"#, account, OUT_FILE);
+        let cmd = format!("getaccountstate {} {}", account, OUT_FILE);
         test_one_cmd(
             &cmd, 
             |result| { 
                 assert_eq!(result.len(), 257);
+                fs::remove_file(OUT_FILE).unwrap();
+            }
+        ).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_get_account_old_state() {
+        const OUT_FILE: &str = "./target/test_file.boc";
+        let account = "5555555555555555555555555555555555555555555555555555555555555555"; // config
+        // // first read from zerostate
+        // let cmd = format!("getaccountstate_byblock 0 {} {}", account, OUT_FILE);
+        // test_one_cmd(
+        //     &cmd, 
+        //     |result| {
+        //         assert_eq!(result.len(), 235);
+        //         let account = Account::construct_from_bytes(&result).unwrap();
+        //         assert_eq!(account.balance().unwrap().grams.as_u128(), 1_000_000_000);
+        //         assert!(account.code().is_none());
+        //         fs::remove_file(OUT_FILE).unwrap();
+        //     }
+        // ).await;
+
+        // read from block 17 (masterchain)
+        let id = "1111111111111111111111111111111111111111111111111111111111111111"; // 17
+        let cmd = format!("getaccountstate_byblock {} {} {}", id, account, OUT_FILE);
+        test_one_cmd(
+            &cmd, 
+            |result| {
+                assert_eq!(result.len(), 202);
+                let account = Account::construct_from_bytes(&result).unwrap();
+                assert_eq!(account.balance().unwrap().grams.as_u128(), 17_000_000_000);
+                let code = u32::construct_from_cell(account.code().unwrap().clone()).unwrap();
+                assert_eq!(code, 171717);
+                fs::remove_file(OUT_FILE).unwrap();
+            }
+        ).await;
+
+        // read from block 19 (masterchain)
+        let id = "1313131313131313131313131313131313131313131313131313131313131313"; // 19
+        let cmd = format!("getaccountstate_byblock {} {} {}", id, account, OUT_FILE);
+        test_one_cmd(
+            &cmd, 
+            |result| {
+                assert_eq!(result.len(), 202);
+                let account = Account::construct_from_bytes(&result).unwrap();
+                assert_eq!(account.balance().unwrap().grams.as_u128(), 19_000_000_000);
+                let code = u32::construct_from_cell(account.code().unwrap().clone()).unwrap();
+                assert_eq!(code, 191919);
+                fs::remove_file(OUT_FILE).unwrap();
+            }
+        ).await;
+
+        // read from wrong block
+        let id = "7777777777777777777777777777777777777777777777777777777777777777";
+        let cmd = format!("getaccountstate_byblock {} {} {}", id, account, OUT_FILE);
+        test_one_cmd_fail(&cmd).await;
+
+        // read from last block (19) (masterchain)
+        let cmd = format!("getaccountstate -1:{} {}", account, OUT_FILE);
+        test_one_cmd(
+            &cmd, 
+            |result| {
+                assert_eq!(result.len(), 202);
+                let account = Account::construct_from_bytes(&result).unwrap();
+                assert_eq!(account.balance().unwrap().grams.as_u128(), 19_000_000_000);
+                let code = u32::construct_from_cell(account.code().unwrap().clone()).unwrap();
+                assert_eq!(code, 191919);
                 fs::remove_file(OUT_FILE).unwrap();
             }
         ).await;
@@ -1765,7 +1996,7 @@ mod test {
             );
             for stat in stats.stats().iter() {
                 match ethalon.iter().find(|(key, _)| key == &stat.key) {
-                    Some((_, value)) => assert_eq!(&stat.value, value),
+                    Some((name, value)) => assert_eq!(&stat.value, value, "for {}", name),
                     None => println!("unknown stats: {} => {}", stat.key, stat.value)
                 }
             }
@@ -1776,8 +2007,8 @@ mod test {
             ("in_next_vset_p36", "false"),
             ("validation_stats", "{}"),
             ("collation_stats", "{}"),
-            ("masterchainblocknumber", "0"),
-            ("masterchainblocktime", "1"),
+            ("masterchainblocknumber", "19"),
+            ("masterchainblocktime", "19"),
             ("sync_status","\"no_set_status\""),
             ("processed_workchain", "\"not specified\""),
             ("public_overlay_key_id", "\"b52Bb8xv6roWwIDGQnBIdL7hsl3Sy3Ro9ITEV9UlIz8=\""),
@@ -1793,8 +2024,8 @@ mod test {
             ("global_id", "0"),
             ("last_validation_ago_sec", "{}"),
             ("last_collation_ago_sec", "{}"),
-            ("masterchainblocknumber", "0"),
-            ("masterchainblocktime", "1"),
+            ("masterchainblocknumber", "19"),
+            ("masterchainblocktime", "19"),
             ("node_status","\"no_set_status\""),
             ("processed_workchain", "\"not specified\""),
             ("public_overlay_key_id", "\"b52Bb8xv6roWwIDGQnBIdL7hsl3Sy3Ro9ITEV9UlIz8=\""),

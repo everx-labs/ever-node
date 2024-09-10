@@ -19,7 +19,7 @@ use ever_block::UnixTime32;
 #[test]
 fn test_construction() {
     assert_eq!(PackageId::for_block(0xFFFF_FFF0), PackageId::with_values(0xFFFF_FFF0, PackageType::Blocks));
-    assert_eq!(PackageId::for_key_block(0xFFFF_FFF0), PackageId::with_values((0xFFFF_FFF0) as u32, PackageType::KeyBlocks));
+    assert_eq!(PackageId::for_key_block(0xFFFF_FFF0), PackageId::with_values(0xFFFF_FFF0, PackageType::KeyBlocks));
 
     assert_eq!(PackageId::for_temp(&UnixTime32::new(5000)), PackageId::with_values(3600, PackageType::Temp));
     assert_eq!(PackageId::for_temp(&UnixTime32::new(20_000)), PackageId::with_values(18_000, PackageType::Temp));

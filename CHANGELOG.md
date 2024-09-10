@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.60.0
+
+- Cells db performance optimization. Added new 6th version of node database, migration performs automatically on startup.
+
+## Version 0.59.23
+
+- New commands in console: getblock, getaccountstate_byblock
+- Utility print can print account from boc and config params if account is config
+
 ## Version 0.59.22
 
 - SMFT: block sync awake

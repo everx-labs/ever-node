@@ -979,8 +979,8 @@ impl Engine {
         let engine = self.clone();
         tokio::spawn(
             async move {
-                 engine.db.stop_states_db().await;
-                 engine.stopper.release_stop(Self::MASK_SERVICE_SHARDSTATE_GC);
+                engine.db.stop_states_db().await;
+                engine.stopper.release_stop(Self::MASK_SERVICE_SHARDSTATE_GC);
             }
         );
 
@@ -1205,8 +1205,8 @@ impl Engine {
         self.remp_service.as_ref().map(|arc| arc.deref())
     }
 
-    pub fn remp_client(&self) -> Option<&Arc<RempClient>> {
-        self.remp_client.as_ref()
+    pub fn remp_client(&self) -> Option<&RempClient> {
+        self.remp_client.as_deref()
     }
 
     pub fn remp_capability(&self) -> bool {
@@ -1729,6 +1729,9 @@ impl Engine {
         fn create_metric(name: &str) -> Arc<Metric> {
             Metric::without_totals(name, Engine::TIMEOUT_TELEMETRY_SEC)
         }
+        fn create_metric_with_total_average(name: &str) -> Arc<Metric> {
+            Metric::with_total_average(name, Engine::TIMEOUT_TELEMETRY_SEC)
+        }
         fn create_metric_ex(name: &str) -> Arc<MetricBuilder> {
             MetricBuilder::with_metric_and_period(
                 Metric::with_total_amount(name, Engine::TIMEOUT_TELEMETRY_SEC),
@@ -1745,12 +1748,20 @@ impl Engine {
                 storing_cells: create_metric("Alloc NODE storing cells"),
                 shardstates_queue: create_metric("Alloc NODE shardstates queue"),
                 cells_counters: create_metric("Alloc NODE cells counters"),
-                cell_counter_from_cache: create_metric_ex("NODE read cache cell_counters/sec"),
-                cell_counter_from_db: create_metric_ex("NODE read db cell_counters/sec"),
-                updated_old_cells: create_metric_ex("NODE old format update cells/sec"),
-                updated_cells: create_metric_ex("NODE update cell_counters/sec"),
+                cell_counter_from_cache_speed: create_metric_ex("NODE read cache cell_counters/sec"),
+                cell_counter_from_db_speed: create_metric_ex("NODE read db cell_counters/sec"),
+                updated_cells_speed: create_metric_ex("NODE update cell_counters/sec"),
                 new_cells: create_metric_ex("NODE create new cells/sec"),
-                deleted_cells: create_metric_ex("NODE delete cells/sec"),
+                deleted_cells_speed: create_metric_ex("NODE delete cells/sec"),
+                cell_loading_from_db_nanos: create_metric_with_total_average("NODE cell loading from db, nanos"),
+                cell_loading_from_cache_nanos: create_metric_with_total_average("NODE cell loading from cache, nanos"),
+                cells_loaded_from_db: AtomicU64::new(0), // create_metric("NODE total cells loaded from db"),
+                cells_loaded_from_cache: AtomicU64::new(0), // create_metric("NODE total cells loaded from cache"),
+                counter_loading_from_db_nanos: create_metric_with_total_average("NODE counter loading from db, nanos"),
+                counter_loading_from_cache_nanos: create_metric_with_total_average("NODE counter loading from cache, nanos"),
+                counters_loaded_from_db: AtomicU64::new(0), // create_metric("NODE total counters loaded from db"),
+                counters_loaded_from_cache: AtomicU64::new(0), // create_metric("NODE total counters loaded from cache"),
+                boc_db_element_write_nanos: create_metric_with_total_average("NODE boc db element write, nanos"),
             }
         );
         let engine_telemetry = Arc::new(
@@ -1776,12 +1787,16 @@ impl Engine {
             TelemetryItem::Metric(engine_telemetry.storage.storing_cells.clone()),
             TelemetryItem::Metric(engine_telemetry.storage.shardstates_queue.clone()),
             TelemetryItem::Metric(engine_telemetry.storage.cells_counters.clone()),
-            TelemetryItem::MetricBuilder(engine_telemetry.storage.cell_counter_from_cache.clone()),
-            TelemetryItem::MetricBuilder(engine_telemetry.storage.cell_counter_from_db.clone()),
-            TelemetryItem::MetricBuilder(engine_telemetry.storage.updated_old_cells.clone()),
-            TelemetryItem::MetricBuilder(engine_telemetry.storage.updated_cells.clone()),
+            TelemetryItem::MetricBuilder(engine_telemetry.storage.cell_counter_from_cache_speed.clone()),
+            TelemetryItem::MetricBuilder(engine_telemetry.storage.cell_counter_from_db_speed.clone()),
+            TelemetryItem::MetricBuilder(engine_telemetry.storage.updated_cells_speed.clone()),
             TelemetryItem::MetricBuilder(engine_telemetry.storage.new_cells.clone()),
-            TelemetryItem::MetricBuilder(engine_telemetry.storage.deleted_cells.clone()),
+            TelemetryItem::MetricBuilder(engine_telemetry.storage.deleted_cells_speed.clone()),
+            TelemetryItem::Metric(engine_telemetry.storage.cell_loading_from_db_nanos.clone()),
+            TelemetryItem::Metric(engine_telemetry.storage.cell_loading_from_cache_nanos.clone()),
+            TelemetryItem::Metric(engine_telemetry.storage.counter_loading_from_db_nanos.clone()),
+            TelemetryItem::Metric(engine_telemetry.storage.counter_loading_from_cache_nanos.clone()),
+            TelemetryItem::Metric(engine_telemetry.storage.boc_db_element_write_nanos.clone()),
             TelemetryItem::Metric(engine_telemetry.awaiters.clone()),
             TelemetryItem::Metric(engine_telemetry.catchain_clients.clone()),
             TelemetryItem::Metric(engine_telemetry.cells.clone()),
@@ -3001,6 +3016,40 @@ fn telemetry_logger(engine: Arc<Engine>) {
                 engine.engine_allocated.validator_sets.load(Ordering::Relaxed)
             );        
             engine.telemetry_printer.try_print();
+
+            let cells_loaded_from_db = engine.engine_telemetry.storage.cells_loaded_from_db.load(Ordering::Relaxed);
+            log::info!(target: "telemetry", "{:<39} {:^37}", 
+                "NODE total cells loaded from db",
+                cells_loaded_from_db
+            );
+            let cells_loaded_from_cache = engine.engine_telemetry.storage.cells_loaded_from_cache.load(Ordering::Relaxed);
+            log::info!(target: "telemetry", "{:<39} {:^37}", 
+                "NODE total cells loaded from cache",
+                cells_loaded_from_cache
+            );
+            if cells_loaded_from_cache + cells_loaded_from_db > 0 {
+                log::info!(target: "telemetry", "{:<39} {:^37}", 
+                    "NODE cells cache hit ratio %",
+                    (cells_loaded_from_cache * 100) / (cells_loaded_from_cache + cells_loaded_from_db)
+                );
+            }
+            let counters_loaded_from_db = engine.engine_telemetry.storage.counters_loaded_from_db.load(Ordering::Relaxed);
+            log::info!(target: "telemetry", "{:<39} {:^37}", 
+                "NODE total counters loaded from db",
+                counters_loaded_from_db
+            );
+            let counters_loaded_from_cache = engine.engine_telemetry.storage.counters_loaded_from_cache.load(Ordering::Relaxed);
+            log::info!(target: "telemetry", "{:<39} {:^37}", 
+                "NODE total counters loaded from cache",
+                counters_loaded_from_cache
+            );
+            if counters_loaded_from_cache + counters_loaded_from_db > 0 {
+                log::info!(target: "telemetry", "{:<39} {:^37}", 
+                    "NODE counters cache hit ratio %",
+                    (counters_loaded_from_cache * 100) / (counters_loaded_from_cache + counters_loaded_from_db)
+                );
+            }
+
             elapsed += millis;
             if elapsed < Engine::TIMEOUT_TELEMETRY_SEC * 1000 {
                 continue

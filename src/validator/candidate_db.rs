@@ -12,7 +12,7 @@
 */
 
 use catchain::{BlockHash, CatchainFactory};
-use storage::{db_impl_single, db::traits::{DbKey, KvcWriteable}, traits::Serializable};
+use storage::{db_impl_single, db::{DbKey, rocksdb::RocksDb}, traits::Serializable};
 use std::{fmt::{Formatter, Display}, io::{Read, Write}, sync::Arc};
 use ever_block::{BlockIdExt, ShardIdent};
 use ever_block::{error, Result, UInt256};
@@ -128,7 +128,7 @@ impl CandidateDbPool {
     }
 }
 
-db_impl_single!(CandidateDb, KvcWriteable, CandidateDbKey);
+db_impl_single!(CandidateDb, CandidateDbKey);
 
 impl CandidateDb {
     pub fn save(&self, candidate: ValidatorBlockCandidate) -> Result<()> {

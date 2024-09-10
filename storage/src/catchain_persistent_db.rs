@@ -11,6 +11,6 @@
 * limitations under the License.
 */
 
-use crate::{db_impl_single, db::traits::KvcWriteable};
+use crate::{db_impl_single, db::rocksdb::RocksDb};
 
-db_impl_single!(CatchainPersistentDb, KvcWriteable, ever_block::types::UInt256);
+db_impl_single!(CatchainPersistentDb, ever_types::types::UInt256);

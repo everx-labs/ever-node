@@ -20,8 +20,8 @@ use chrono::Local;
 use env_logger::Builder;
 use log::{info, LevelFilter};
 use std::{io::Write, path::Path, sync::Arc};
+use storage::db::rocksdb::destroy_rocks_db;
 
-include!("../../storage/src/db/tests/destroy_db.rs");
 
 const DB_PATH: &str = "../target/test";
 

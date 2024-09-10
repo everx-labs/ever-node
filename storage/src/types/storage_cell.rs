@@ -12,22 +12,30 @@
 */
 
 use crate::{dynamic_boc_rc_db::DynamicBocDb, TARGET};
-use std::{io::{Cursor, Write}, sync::{Arc,Weak, atomic::{AtomicU64, Ordering}}};
+use std::{io::Cursor, sync::{Arc,Weak, atomic::{AtomicU64, Ordering}}};
 use ever_block::{
-    error, fail, ByteOrderRead, Cell, CellData, CellImpl, CellType, LevelMask, Result, UInt256, MAX_LEVEL, MAX_REFERENCES_COUNT
+    error, fail, ByteOrderRead, Cell, CellData, CellImpl, CellType, LevelMask, Result, UInt256, 
+    MAX_LEVEL,
 };
+
+#[cfg(test)]
+#[path = "tests/test_storage_cell.rs"]
+mod tests;
+
+const NOT_INITIALIZED_DEPTH: u16 = u16::MAX;
 
 struct Reference {
     hash: UInt256,
+    depth: u16,
     cell: Option<Weak<dyn CellImpl>>,
 }
 
 pub struct StorageCell {
     cell_data: CellData,
     references: parking_lot::RwLock<Vec<Reference>>,
-    boc_db: Weak<DynamicBocDb>,
     tree_bits_count: u64,
     tree_cell_count: u64,
+    boc_db: Weak<DynamicBocDb>,
     use_cache: bool,
 }
 
@@ -35,101 +43,210 @@ lazy_static::lazy_static!{
     static ref CELL_COUNT: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 }
 
+struct SliceReader<'a> {
+    data: &'a [u8],
+    position: usize,
+}
+impl<'a> SliceReader<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Self { data, position: 0 }
+    }
+    fn read(&mut self, size: usize) -> Result<&'a [u8]> {
+        if self.data.len() < self.position + size {
+            fail!("Buffer is too small to read {} bytes", size);
+        }
+        let slice = &self.data[self.position..self.position+size];
+        self.position += size;
+        Ok(slice)
+    }
+}
+
 /// Represents Cell for storing in persistent storage
 impl StorageCell {
 
-    /// Constructs StorageCell by deserialization
     pub fn deserialize(
-        boc_db: &Arc<DynamicBocDb>, 
-        data: &[u8], 
+        boc_db: &Arc<DynamicBocDb>,
+        repr_hash: &UInt256,
+        data: &[u8],
         use_cache: bool,
-        with_parents_count: bool,
-    ) -> Result<(Self, u32)> {
-        debug_assert!(!data.is_empty());
+    ) -> Result<Self> {
 
-        let mut reader = Cursor::new(data);
-        let parents_count = if with_parents_count {
-            reader.read_le_u32()?
-        } else {
-            0
-        };
-        let cell_data = CellData::deserialize(&mut reader)?;
-        let references_count = cell_data.references_count();
-        let mut references = Vec::with_capacity(references_count as usize);
-        for _ in 0..references_count {
-            let hash = UInt256::from(reader.read_u256()?);
-            references.push(Reference { hash, cell: None });
+        if data.len() < 2 {
+            fail!("Buffer is too small to read description bytes");
         }
-        let tree_bits_count = reader.read_le_u64()?;
-        let tree_cell_count = reader.read_le_u64()?;
 
-        let read = reader.position();
-        let data_len = data.len();
-        if read != data_len as u64 {
+        // Cell data (same as in BOC)
+        let mut cell_data = CellData::with_unbounded_raw_data_slice(data)?;
+        let mut reader = SliceReader::new(&data[cell_data.raw_data().len()..]);
+
+        // If the cell data isn't contain stored high hashes - read it now
+        let level = cell_data.level();
+        let store_hashes = cell_data.store_hashes();
+        let mut hash_array_index = 0;
+        if level > 0 && // there are high hashes
+           cell_data.cell_type() != CellType::PrunedBranch && // pruned branche stores high hashes in the data
+           !store_hashes // some cells store high hashes in the raw data
+        {
+            for _ in 0..level {
+                let hash = reader.read(32)?;
+                let depth = u16::from_le_bytes(reader.read(2)?.try_into()?);
+                cell_data.set_hash_depth(hash_array_index, hash, depth)?;
+                hash_array_index += 1;
+            }
+        }
+
+        if !store_hashes {
+            // Representation depth without hash, because DB key is repr hash
+            let depth = u16::from_le_bytes(reader.read(2)?.try_into()?);
+            cell_data.set_hash_depth(hash_array_index, repr_hash.as_slice(), depth)?;
+        }
+
+        // References (child repr hash + child repr depth)
+        let references_count = cell_data.references_count();
+        let mut references = Vec::with_capacity(references_count);
+        for _ in 0..references_count {
+            let hash = UInt256::from_slice(reader.read(32)?);
+            let depth = u16::from_le_bytes(reader.read(2)?.try_into()?);
+            references.push(Reference { hash, depth, cell: None });
+        }
+
+        // Tree bits & cells count
+        let tree_bits_count = u64::from_le_bytes(reader.read(8)?.try_into()?);
+        let tree_cell_count = u64::from_le_bytes(reader.read(8)?.try_into()?);
+
+        let read = cell_data.raw_data().len() + reader.position;
+        if read != data.len() {
             fail!("There is more data after storage cell deserialisation (read: {}, data len: {})",
-                read, data_len);
+                read, data.len());
         }
 
         CELL_COUNT.fetch_add(1, Ordering::Relaxed);
         boc_db.allocated().storage_cells.fetch_add(1, Ordering::Relaxed);
-        let cell = Self {
+
+        Ok(Self {
             cell_data,
             references: parking_lot::RwLock::new(references),
             boc_db: Arc::downgrade(boc_db),
             tree_bits_count,
             tree_cell_count,
             use_cache,
-        };
-        Ok((cell, parents_count))
+        })
+
+    }
+
+    pub fn migrate_to_v6(data: &[u8]) -> Result<Vec<u8>> {
+
+        let mut reader = Cursor::new(data);
+        let cell_data = CellData::deserialize(&mut reader)?;
+        let references_count = cell_data.references_count();
+        let store_hashes = cell_data.store_hashes();
+        let new_data_size = Self::calc_serialized_size(
+            cell_data.raw_data().len(),
+            store_hashes,
+            cell_data.level(),
+            references_count,
+            cell_data.cell_type(),
+        );
+        let mut new_data = Vec::with_capacity(new_data_size);
+
+        // Cell data (same as in BOC)
+        new_data.extend_from_slice(cell_data.raw_data());
+
+        // Hashes/depths
+        if !store_hashes && cell_data.cell_type() != CellType::PrunedBranch {
+            let level_mask = cell_data.level_mask().mask();
+            if level_mask != 0 {
+                for i in 0..MAX_LEVEL {
+                    if (1 << i) & level_mask != 0 {
+                        new_data.extend_from_slice(cell_data.hash(i).as_slice());
+                        new_data.extend_from_slice(&cell_data.depth(i).to_le_bytes());
+                    }
+                }
+            }
+        }
+        if !store_hashes {
+            new_data.extend_from_slice(&cell_data.depth(MAX_LEVEL).to_le_bytes());
+        }
+
+        // References
+        for _ in 0..references_count {
+            let ref_hash = reader.read_u256()?;
+            new_data.extend_from_slice(&ref_hash.as_slice());
+            new_data.extend_from_slice(&NOT_INITIALIZED_DEPTH.to_le_bytes());
+        }
+
+        // Tree bits/cells count
+        let pos = reader.position() as usize;
+        new_data.extend_from_slice(&data[pos..pos + 16]);
+
+        let read = reader.position() + 16;
+        let data_len = data.len();
+        if read != data_len as u64 {
+            fail!("There is more data after storage cell deserialisation (read: {}, data len: {})",
+                read, data_len);
+        }
+
+        Ok(new_data)
     }
 
     pub fn cell_count() -> u64 {
         CELL_COUNT.load(Ordering::Relaxed)
     }
 
-    pub fn deserialize_parents_count(data: &[u8]) -> Result<u32> {
-        let parents_count = Cursor::new(data).read_le_u32()?;
-        Ok(parents_count)
+    pub fn calc_serialized_size(
+        raw_data_len: usize,
+        store_hashes: bool,
+        level: u8,
+        references_count: usize,
+        cell_type: CellType,
+    ) -> usize {
+        let mut data_size = raw_data_len; // data
+        if !store_hashes {
+            if cell_type != CellType::PrunedBranch {
+                data_size += level as usize * 34; // hash + depth
+            }
+            data_size += 2; // repr depth
+        }
+        data_size += 16; // tree bits + tree cell count
+        data_size += references_count * 34; // reference hash + depth
+        data_size
     }
 
-    pub fn serialize_self(&self) -> Result<Vec<u8>> {
+    pub fn serialize(cell: &dyn CellImpl) -> Result<Vec<u8>> {
+        let store_hashes = cell.store_hashes();
+        let data_size = Self::calc_serialized_size(
+            cell.raw_data()?.len(),
+            store_hashes,
+            cell.level(),
+            cell.references_count(),
+            cell.cell_type(),
+        );
 
-        let mut data = Vec::new();
+        let mut data = Vec::with_capacity(data_size);
+        data.extend_from_slice(cell.raw_data()?);
 
-        self.cell_data.serialize(&mut data)?;
-
-        let references = &self.references.read();
-        for r in references.iter() {
-            data.write_all(r.hash.as_slice())?;
+        if !store_hashes {
+            if cell.cell_type() != CellType::PrunedBranch {
+                let level_mask = cell.level_mask().mask();
+                if level_mask != 0 {
+                    for i in 0..MAX_LEVEL {
+                        if (1 << i) & level_mask != 0 {
+                            data.extend_from_slice(cell.hash(i).as_slice());
+                            data.extend_from_slice(&cell.depth(i).to_le_bytes());
+                        }
+                    }
+                }
+            }
+            data.extend_from_slice(&cell.depth(MAX_LEVEL).to_le_bytes());
         }
 
-        data.write_all(&self.tree_bits_count().to_le_bytes())?;
-        data.write_all(&self.tree_cell_count().to_le_bytes())?;
-
-        debug_assert!(!data.is_empty());
-
-        Ok(data)
-    }
-
-    pub fn serialize(
-        cell: &dyn CellImpl
-    ) -> Result<Vec<u8>> {
-        let references_count = cell.references_count() as u8;
-
-        debug_assert!(references_count as usize <= MAX_REFERENCES_COUNT);
-
-        let mut data = Vec::new();
-
-        cell.cell_data().serialize(&mut data)?;
-
-        for i in 0..references_count {
-            data.write_all(cell.reference(i as usize)?.repr_hash().as_slice())?;
+        for i in 0..cell.references_count() {
+            data.extend_from_slice(cell.reference_repr_hash(i)?.as_slice());
+            data.extend_from_slice(&cell.reference_repr_depth(i)?.to_le_bytes());
         }
 
-        data.write_all(&cell.tree_bits_count().to_le_bytes())?;
-        data.write_all(&cell.tree_cell_count().to_le_bytes())?;
-
-        debug_assert!(!data.is_empty());
+        data.extend_from_slice(&cell.tree_bits_count().to_le_bytes());
+        data.extend_from_slice(&cell.tree_cell_count().to_le_bytes());
 
         Ok(data)
     }
@@ -144,39 +261,45 @@ impl StorageCell {
         let mut references = Vec::with_capacity(references_count);
         for i in 0..references_count {
             let hash = cell.reference_repr_hash(i)?;
+            let depth = cell.reference_repr_depth(i)?;
             if !take_refs {
                 log::trace!(target: TARGET, "Cell {:x} - reference [{}] {:x} is not taken", 
                     cell.hash(MAX_LEVEL), i, hash);
-                references.push(Reference {hash, cell: None} );
+                references.push(Reference {hash, depth, cell: None} );
             } else {
                 log::trace!(target: TARGET, "Cell {:x} - reference [{}] {:x} is taken", 
                     cell.hash(MAX_LEVEL), i, hash);
                 references.push(Reference {
                     hash,
+                    depth,
                     cell: Some(Arc::downgrade(&cell.reference(i)?.cell_impl()))
                 });
             }
         }
+        let mut cell_data = CellData::with_raw_data(cell.raw_data()?.to_vec())?;
+        if !cell.store_hashes() {
+            let mut hash_index = 0;
+            let level_mask = cell.level_mask().mask();
+            if level_mask != 0 {
+                for i in 0..MAX_LEVEL {
+                    if (1 << i) & level_mask != 0 {
+                        cell_data.set_hash_depth(hash_index, cell.hash(i).as_slice(), cell.depth(i))?;
+                        hash_index += 1;
+                    }
+                }
+            }
+            cell_data.set_hash_depth(hash_index, cell.hash(MAX_LEVEL).as_slice(), cell.depth(MAX_LEVEL))?;
+        }
         CELL_COUNT.fetch_add(1, Ordering::Relaxed);
         boc_db.allocated().storage_cells.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
-            cell_data: cell.cell_data().clone(),
+            cell_data,
             references: parking_lot::RwLock::new(references),
             boc_db: Arc::downgrade(boc_db),
             tree_bits_count: cell.tree_bits_count(),
             tree_cell_count: cell.tree_cell_count(),
             use_cache
         })
-    }
-
-    /// Gets cell's id
-    pub fn id(&self) -> UInt256 {
-        self.repr_hash()
-    }
-
-    /// Gets representation hash
-    pub fn repr_hash(&self) -> UInt256 {
-        self.hash(MAX_LEVEL as usize)
     }
 
     pub(crate) fn reference(&self, index: usize) -> Result<Arc<dyn CellImpl>> {
@@ -188,11 +311,11 @@ impl StorageCell {
                     return Ok(cell);
                 } else {
                     log::trace!(target: TARGET, "Cell {:x} - reference [{}] {:x} was freed", 
-                        self.repr_hash(), index, reference.hash);
+                        self.hash(MAX_LEVEL), index, reference.hash);
                 }
             } else {
                 log::trace!(target: TARGET, "Cell {:x} - reference [{}] {:x} is None", 
-                    self.repr_hash(), index, reference.hash);
+                    self.hash(MAX_LEVEL), index, reference.hash);
             }
             reference.hash.clone()
         };
@@ -200,7 +323,8 @@ impl StorageCell {
         let boc_db = self.boc_db.upgrade().ok_or_else(|| error!("BocDb is dropped"))?;
         let cell = boc_db.load_cell(
             &hash,
-            self.use_cache
+            self.use_cache,
+            true
         )?;
 
         if self.use_cache {
@@ -222,16 +346,12 @@ impl CellImpl for StorageCell {
         Ok(self.cell_data.raw_data())
     }
 
-    fn cell_data(&self) -> &CellData {
-        &self.cell_data
-    }
-
     fn bit_length(&self) -> usize {
-        self.cell_data.bit_length() as usize
+        self.cell_data.bit_length()
     }
 
     fn references_count(&self) -> usize {
-        self.cell_data.references_count() as usize
+        self.cell_data.references_count()
     }
 
     fn reference(&self, index: usize) -> Result<Cell> {
@@ -243,6 +363,21 @@ impl CellImpl for StorageCell {
             .get(index).ok_or_else(|| error!("There is no reference #{}", index))?
             .hash.clone()
         )
+    }
+
+    fn reference_repr_depth(&self, index: usize) -> Result<u16> {
+        let guard = self.references.read();
+        let r = guard.get(index).ok_or_else(|| error!("There is no reference #{}", index))?;
+
+        if r.depth != NOT_INITIALIZED_DEPTH {
+            Ok(r.depth)
+        } else {
+            drop(guard);
+            let cell = self.reference(index)?;
+            let depth = cell.depth(MAX_LEVEL);
+            self.references.write()[index].depth = depth;
+            Ok(depth)
+        }
     }
 
     fn cell_type(&self) -> CellType {
@@ -270,7 +405,7 @@ impl CellImpl for StorageCell {
     }
 
     fn tree_cell_count(&self) -> u64 {
-        self.tree_cell_count as u64
+        self.tree_cell_count
     }
 }
 

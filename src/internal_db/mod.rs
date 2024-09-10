@@ -59,12 +59,14 @@ pub const DB_VERSION: &str  = "DbVersion";
 pub const DB_VERSION_0: u32  = 0;
 pub const _DB_VERSION_1: u32  = 1; // with fixed cells/bits counter in StorageCell
 pub const _DB_VERSION_2: u32  = 2; // with async cells storage
-pub const DB_VERSION_3: u32  = 3; // with faster cells storage (separated counters)
+pub const _DB_VERSION_3: u32  = 3; // with faster cells storage (separated counters)
 pub const DB_VERSION_4: u32  = 4; // with updated cells (with counter) and correct allow_old_cells property
 pub const DB_VERSION_5: u32  = 5; // flag FLAG_STATE_SAVED in blocks handle
-pub const CURRENT_DB_VERSION: u32 = DB_VERSION_5;
+pub const DB_VERSION_6: u32  = 6; // separated column family for cell counters & new cell format
+pub const CURRENT_DB_VERSION: u32 = DB_VERSION_6;
 
-const CELLS_CF_NAME: &str = "cells_db";
+const CELLS_CF_NAME_V5: &str = "cells_db";
+const CELLS_CF_NAME: &str = "cells_db_v6";
 
 /// Validator state keys
 pub(crate) const LAST_ROTATION_MC_BLOCK: &str = "LastRotationBlockId";
@@ -245,7 +247,7 @@ impl InternalDb {
 
     async fn construct(
         config: InternalDbConfig,
-        allow_update: bool,
+        _allow_update: bool,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<EngineTelemetry>,
         allocated: Arc<EngineAlloc>,
@@ -274,34 +276,9 @@ impl InternalDb {
             )
         );
 
-        let mut assume_old_cells = false;
-        if let Some(db_slice) = full_node_state_db.try_get(&ASSUME_OLD_FORMAT_CELLS)? {
-            assume_old_cells = 1 == *db_slice.first()
-                .ok_or_else(|| error!("Empty value for ASSUME_OLD_FORMAT_CELLS property"))?;
-        } else if allow_update {
-            let version = if let Some(db_slice) = full_node_state_db.try_get(&DB_VERSION)? {
-                let mut cursor = Cursor::new(db_slice.as_ref());
-                u32::deserialize(&mut cursor)?
-            } else {
-                if block_handle_storage.is_empty()? {
-                    CURRENT_DB_VERSION
-                } else {
-                    0
-                }
-            };
-            if version < DB_VERSION_3 {
-                assume_old_cells = true;
-            }
-            if allow_update {
-                full_node_state_db.put(&ASSUME_OLD_FORMAT_CELLS, &[assume_old_cells as u8])?;
-            }
-        }
-        log::info!("Cells db - assume old cells: {}", assume_old_cells);
         let shard_state_dynamic_db = Self::create_shard_state_dynamic_db(
             db.clone(),
             &config,
-            assume_old_cells,
-            false,
             #[cfg(feature = "telemetry")]
             telemetry.storage.clone(),
             allocated.storage.clone()
@@ -372,8 +349,6 @@ impl InternalDb {
     fn create_shard_state_dynamic_db(
         db: Arc<RocksDb>,
         config: &InternalDbConfig,
-        assume_old_cells: bool,
-        update_cells: bool,
         #[cfg(feature = "telemetry")]
         telemetry: Arc<StorageTelemetry>,
         allocated: Arc<StorageAlloc>,
@@ -383,8 +358,6 @@ impl InternalDb {
             "shardstate_db",
             CELLS_CF_NAME,
             &config.db_directory,
-            assume_old_cells,
-            update_cells,
             config.cells_db_config.clone(),
             #[cfg(feature = "telemetry")]
             telemetry,
@@ -409,8 +382,6 @@ impl InternalDb {
         self.shard_state_dynamic_db = Self::create_shard_state_dynamic_db(
             self.db.clone(),
             &self.config,
-            false,
-            false,
             #[cfg(feature = "telemetry")]
             self.telemetry.storage.clone(),
             self.allocated.storage.clone()
@@ -419,21 +390,8 @@ impl InternalDb {
         Ok(())
     }
 
-    pub async fn update_cells_db_upto_4(&mut self) -> Result<()> {
-        // Node is just started when we call this function, so it is ok to block one worker here.
-        self.shard_state_dynamic_db = tokio::task::block_in_place(|| {
-            Self::create_shard_state_dynamic_db(
-                self.db.clone(),
-                &self.config,
-                true,
-                true,
-                #[cfg(feature = "telemetry")]
-                self.telemetry.storage.clone(),
-                self.allocated.storage.clone()
-            )
-        })?;
-        self.full_node_state_db.put(&ASSUME_OLD_FORMAT_CELLS, &[0])?;
-        Ok(())
+    pub async fn update_cells_db_to_v6(&self) -> Result<()> {
+        self.shard_state_dynamic_db.update_cells_db_to_v6(CELLS_CF_NAME_V5).await
     }
 
     pub fn start_states_gc(&self, resolver: Arc<dyn AllowStateGcResolver>) {
