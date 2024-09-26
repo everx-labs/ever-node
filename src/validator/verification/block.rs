@@ -471,6 +471,11 @@ impl Block {
         serialized_block_status
     }
 
+    /// Invalidate serialized block status
+    fn invalidate_serialized_block_status(&mut self) {
+        self.serialized_block_status = None;
+    }
+
     /// Update status of the block (returns true, if the block should be updated in the network)
     pub fn set_status(&mut self, local_key: &PrivateKey, local_idx: u16, nodes_count: u16, status: Option<bool>) -> Result<bool> {
         let prev_hash = self.get_signatures_hash();
@@ -502,6 +507,8 @@ impl Block {
             self.rejections_signature = new_rejections_signature;
 
             self.signatures_hash = new_hash;
+
+            self.invalidate_serialized_block_status();
         }
 
         Ok(new_hash != prev_hash)
@@ -547,6 +554,8 @@ impl Block {
             }
 
             self.signatures_hash = new_hash;
+
+            self.invalidate_serialized_block_status();
         }
 
         self.set_creation_timestamp(created_timestamp);        
@@ -568,20 +577,6 @@ impl Block {
         deliveries_signature.get_hash() ^ 
         approvals_signature.get_hash() ^
         rejections_signature.get_hash()
-    }
-
-    /// Update hash
-    fn update_hash(&mut self) {
-        let prev_hash = self.signatures_hash;
-
-        self.signatures_hash = Self::compute_hash(
-            &self.deliveries_signature,
-            &self.approvals_signature,
-            &self.rejections_signature);
-
-        if self.signatures_hash != prev_hash {
-            self.serialized_block_status = None;
-        }
     }
 
     /// Does this block have a candidate received
@@ -617,13 +612,20 @@ impl Block {
     ) -> Arc<SpinMutex<Self>> {
         let candidate_id = Workchain::get_candidate_id(block_id);
 
-        let mut body = Self {
+        let deliveries_signature = MultiSignature::new(1, candidate_id.clone());
+        let approvals_signature = MultiSignature::new(2, candidate_id.clone());
+        let rejections_signature = MultiSignature::new(3, candidate_id.clone());
+
+        let body = Self {
             block_id: block_id.clone(),
             block_candidate: None,
-            deliveries_signature: MultiSignature::new(1, candidate_id.clone()),
-            approvals_signature: MultiSignature::new(2, candidate_id.clone()),
-            rejections_signature: MultiSignature::new(3, candidate_id.clone()),
-            signatures_hash: 0,
+            signatures_hash: Self::compute_hash(
+                &deliveries_signature,
+                &approvals_signature,
+                &rejections_signature),
+            deliveries_signature,
+            approvals_signature,
+            rejections_signature,
             serialized_block_status: None,
             created_timestamp: None,
             merges_count: 0,
@@ -649,8 +651,6 @@ impl Block {
             delivery_stats: BlockDeliveryStats::default(),
             block_start_sync_time: SystemTime::now(),
         };
-
-        body.update_hash();
 
         Arc::new(SpinMutex::new(body))
     }

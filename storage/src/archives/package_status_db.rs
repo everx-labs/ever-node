@@ -12,13 +12,13 @@
 */
 
 use crate::{
-    db_impl_base, archives::package_status_key::PackageStatusKey, 
-    db::traits::KvcTransactional, traits::Serializable
+    db_impl_base, archives::package_status_key::PackageStatusKey,
+    traits::Serializable
 };
 use std::borrow::Borrow;
 use ever_block::Result;
 
-db_impl_base!(PackageStatusDb, KvcTransactional, PackageStatusKey);
+db_impl_base!(PackageStatusDb, PackageStatusKey);
 
 impl PackageStatusDb {
     pub fn try_get_value<T: Serializable>(&self, key: &PackageStatusKey) -> Result<Option<T>> {

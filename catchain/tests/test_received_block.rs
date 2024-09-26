@@ -13,8 +13,7 @@
 
 use catchain::CatchainFactory;
 use std::path::Path;
-
-include!("../../storage/src/db/tests/destroy_db.rs");
+use storage::db::rocksdb::destroy_rocks_db;
 
 const DB_PATH: &str = "../target/test";
 

@@ -12,6 +12,5 @@
 */
 
 use crate::db_impl_base;
-use crate::db::traits::KvcWriteable;
 
-db_impl_base!(ShardTopBlocksDb, KvcWriteable, Vec<u8>);
+db_impl_base!(ShardTopBlocksDb, Vec<u8>);

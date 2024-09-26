@@ -124,6 +124,8 @@ struct ValidateBase {
     after_merge: bool,
     after_split: bool,
 
+    validating_any_candidate: bool,
+
     prev_blocks_ids: Vec<BlockIdExt>,
 
     // TODO: maybe make some fileds Option
@@ -220,6 +222,7 @@ pub struct ValidateQuery {
 
     engine: Arc<dyn EngineOperations>,
     verification_manager: Option<VerificationManagerPtr>,
+    validating_any_candidate: bool,
 
     next_block_descr: Arc<String>,
 }
@@ -240,6 +243,7 @@ impl ValidateQuery {
         is_fake: bool,
         multithread: bool,
         verification_manager: Option<VerificationManagerPtr>,
+        validating_any_candidate: bool,
     ) -> Self {
         let next_block_descr = Arc::new(fmt_next_block_descr(&block_candidate.block_id));
         Self {
@@ -261,6 +265,7 @@ impl ValidateQuery {
             block_create_count: Default::default(),
             next_block_descr,
             verification_manager,
+            validating_any_candidate,
         }
     }
 
@@ -277,6 +282,7 @@ impl ValidateQuery {
         base.is_fake = self.is_fake;
         base.created_by = self.block_candidate.created_by.clone();
         base.prev_blocks_ids = std::mem::take(&mut self.prev_blocks_ids);
+        base.validating_any_candidate = self.validating_any_candidate;
         let block_id = &self.block_candidate.block_id;
         log::info!(target: "validate_query", "({}): validate query for {:#} started", self.next_block_descr, block_id);
         if block_id.shard() != self.shard() {
@@ -1755,7 +1761,7 @@ impl ValidateQuery {
                 &mut acc_state_hash
             ).map_err(|err| error!("transaction {:x} of account {:x} is invalid : {}", trans_lt, acc_id, err))?;
 
-            if is_remp_enabled(engine.clone(), &base.config_params) {
+            if !base.validating_any_candidate && is_remp_enabled(engine.clone(), &base.config_params) {
                 if let Some((id, is_internal)) = msg_info {
                     if !is_internal {
                         Self::check_message_ordering(
@@ -1803,7 +1809,10 @@ impl ValidateQuery {
         //     *there_were_remp_message = true;
             tokio::runtime::Handle::try_current()?.block_on(async {
                 match engine.check_remp_duplicate(id).await? {
-                    RempDuplicateStatus::Absent => reject_query!("message {:x} is not found in remp queue", id),
+                    RempDuplicateStatus::Absent => { //reject_query!("message {:x} is not found in remp queue", id),
+                        log::trace!(target: "validate_query", "({}): message {:x} is not found in remp queue, due to SMFT issues let us validate it anyway", base.next_block_descr, id);
+                        Ok(())
+                    },
                     RempDuplicateStatus::Duplicate(blk, uid, orig_msg_id) =>
                         reject_query!("message {:x} (message uid {:x}) is already included into valid block {} as message {:x}", id, uid, blk, orig_msg_id),
                     RempDuplicateStatus::Fresh(uid) => {

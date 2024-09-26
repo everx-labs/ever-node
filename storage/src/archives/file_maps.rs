@@ -12,7 +12,7 @@
 */
 
 use crate::{
-    StorageAlloc, 
+    StorageAlloc,
     archives::{
         archive_slice::ArchiveSlice, package_id::{PackageId, PackageType},
         package_index_db::{PackageIndexDb, PackageIndexEntry}
@@ -89,7 +89,7 @@ impl FileMap {
         telemetry: &Arc<StorageTelemetry>,
         allocated: &Arc<StorageAlloc>
     ) -> Result<Self> {
- 
+
         let storage = PackageIndexDb::with_db(db.clone(), path, true)?;
         let mut index_pairs = Vec::new();
 
@@ -138,10 +138,10 @@ impl FileMap {
                 value.deleted()
             ));
             elements.push(
-                FileMapEntry { 
-                    key,  
+                FileMapEntry {
+                    key,
                     value,
-                    counter: allocated.file_entries.clone().into() 
+                    counter: allocated.file_entries.clone().into()
                 }
             );
             #[cfg(feature = "telemetry")]
@@ -157,17 +157,17 @@ impl FileMap {
     }
 
     pub async fn put(
-        &self, 
-        mc_seq_no: u32, 
+        &self,
+        mc_seq_no: u32,
         file_description: Arc<FileDescription>,
         #[cfg(feature = "telemetry")]
         telemetry: &Arc<StorageTelemetry>,
         allocated: &Arc<StorageAlloc>
     ) -> Result<()> {
-        let entry = FileMapEntry { 
-            key: mc_seq_no, 
+        let entry = FileMapEntry {
+            key: mc_seq_no,
             value: file_description ,
-            counter: allocated.file_entries.clone().into() 
+            counter: allocated.file_entries.clone().into()
         };
         #[cfg(feature = "telemetry")]
         telemetry.file_entries.update(
@@ -233,8 +233,8 @@ impl FileMap {
                                 log::info!(target: "storage", "Archives GC: collected {}.", key);
                             }
                         },
-                        None => { 
-                            log::error!(target: "storage", "Archives GC: unable to get mutable reference to file_description"); 
+                        None => {
+                            log::error!(target: "storage", "Archives GC: unable to get mutable reference to file_description");
                             continue 'a;
                         }
                     }
@@ -330,7 +330,7 @@ impl FileMaps {
         Ok(Self {
             files: FileMap::new(
                 db.clone(),
-                db_root_path, 
+                db_root_path,
                 "files",
                 PackageType::Blocks,
                 last_unneeded_key_block,
@@ -340,7 +340,7 @@ impl FileMaps {
             ).await?,
             key_files: FileMap::new(
                 db.clone(),
-                db_root_path, 
+                db_root_path,
                 "key_files",
                 PackageType::KeyBlocks,
                 0,

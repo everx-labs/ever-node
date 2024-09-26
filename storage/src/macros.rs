@@ -13,65 +13,36 @@
 
 #[macro_export]
 macro_rules! db_impl_base {
-    ($type: ident, $trait: ident, $key_type: ty) => {
+    ($type: ident, $key_type: ty) => {
         #[derive(Debug)]
         pub struct $type {
-            db: Box<dyn $crate::db::traits::$trait<$key_type> + Send + Sync>,
+            db: $crate::db::rocksdb::RocksDbTable<$key_type>,
         }
 
-        impl $type{
-            /// Constructs new instance using in-memory key-value collection
-            #[allow(dead_code)]
-            pub fn in_memory() -> Self {
-                Self {
-                    db: Box::new($crate::db::memorydb::MemoryDb::new())
-                }
-            }
-
+        impl $type {
             /// Constructs new instance using RocksDB with given path
-            #[allow(dead_code)]
             pub fn with_db(
-                db: std::sync::Arc<$crate::db::rocksdb::RocksDb>, 
+                db: std::sync::Arc<$crate::db::rocksdb::RocksDb>,
                 family: impl ToString,
                 create_if_not_exist: bool,
             ) -> ever_block::Result<Self> {
-                let ret = Self {
-                    db: Box::new(db.table(family, create_if_not_exist)?)
-                };
-                Ok(ret)
+                Ok(Self {
+                    db: db.table(family, create_if_not_exist)?
+                })
             }
-
-            // /// Constructs new instance using RocksDB with given path
-            // #[allow(dead_code)]
-            // pub fn with_path(
-            //     path: &str, 
-            //     name: &str
-            // ) -> ever_block::Result<Self> {
-            //     let db = $crate::db::rocksdb::RocksDb::with_path(path, name);
-            //     let ret = Self {
-            //         db: Box::new(db)
-            //     };
-            //     Ok(ret)
-            // }
-
-            // /// Destroys instance of RocksDB with given path
-            // #[allow(dead_code)]
-            // pub fn destroy_db(path: impl AsRef<std::path::Path>) -> ever_block::Result<bool> {
-            //     $crate::db::rocksdb::RocksDb::destroy_db(path)
-            // }
         }
 
         impl std::ops::Deref for $type {
-            type Target = dyn $trait<$key_type> + Send + Sync;
+            type Target = $crate::db::rocksdb::RocksDbTable<$key_type>;
 
             fn deref(&self) -> &Self::Target {
-                self.db.deref()
+                &self.db
             }
         }
 
         impl std::ops::DerefMut for $type {
             fn deref_mut(&mut self) -> &mut Self::Target {
-                self.db.deref_mut()
+                &mut self.db
             }
         }
     }
@@ -79,7 +50,7 @@ macro_rules! db_impl_base {
 
 #[macro_export]
 macro_rules! db_impl_single {
-    ($type: ident, $trait: ident, $key_type: ty) => {
+    ($type: ident, $key_type: ty) => {
         #[derive(Debug)]
         pub struct $type {
             db: std::sync::Arc<$crate::db::rocksdb::RocksDb>,
@@ -87,24 +58,20 @@ macro_rules! db_impl_single {
 
         impl $type{
             /// Constructs new instance using RocksDB with given path
-            #[allow(dead_code)]
             pub fn with_path(
-                path: &str, 
+                path: impl AsRef<std::path::Path>,
                 name: &str
             ) -> ever_block::Result<Self> {
-                let db = $crate::db::rocksdb::RocksDb::with_path(path, name)?;
-                let ret = Self {
-                    db
-                };
-                Ok(ret)
+                Ok(Self {
+                    db: $crate::db::rocksdb::RocksDb::with_path(path, name)?
+                })
             }
 
             /// Destroys instance of RocksDB with given path
-            #[allow(dead_code)]
             pub fn destroy(&mut self) -> ever_block::Result<bool> {
                 let path = self.db.path().to_path_buf();
                 if let Some(db) = std::sync::Arc::get_mut(&mut self.db) {
-                    if let Err(err) = $crate::db::traits::Kvc::destroy(db) {
+                    if let Err(err) = db.destroy() {
                         ever_block::fail!(
                             "Database {:?} destroying error: {}",
                             path,
@@ -128,7 +95,7 @@ macro_rules! db_impl_single {
         }
 
         impl std::ops::Deref for $type {
-            type Target = dyn $trait<$key_type> + Send + Sync;
+            type Target = RocksDb;
 
             fn deref(&self) -> &Self::Target {
                 self.db.deref()
@@ -139,8 +106,8 @@ macro_rules! db_impl_single {
 
 #[macro_export]
 macro_rules! db_impl_cbor {
-    ($type: ident, $trait: ident, $key_type: ty, $value_type: ty) => {
-        $crate::db_impl_base!($type, $trait, $key_type);
+    ($type: ident, $key_type: ty, $value_type: ty) => {
+        $crate::db_impl_base!($type, $key_type);
 
         impl $type {
             #[allow(dead_code)]
@@ -162,7 +129,6 @@ macro_rules! db_impl_cbor {
                 Ok(serde_cbor::from_slice(self.get(key)?.as_ref())?)
             }
 
-            #[allow(dead_code)]
             pub fn put_value(&self, key: &$key_type, value: impl std::borrow::Borrow<$value_type>) -> ever_block::Result<()> {
                 self.put(key, &serde_cbor::to_vec(value.borrow())?)
             }
@@ -172,27 +138,24 @@ macro_rules! db_impl_cbor {
 
 #[macro_export]
 macro_rules! db_impl_serializable {
-    ($type: ident, $trait: ident, $key_type: ty, $value_type: ty) => {
-        $crate::db_impl_base!($type, $trait, $key_type);
+    ($type: ident, $key_type: ty, $value_type: ty) => {
+        $crate::db_impl_base!($type, $key_type);
 
         impl $type {
-            #[allow(dead_code)]
             pub fn try_get_value(&self, key: &$key_type) -> ever_block::Result<Option<$value_type>> {
-                if let Some(db_slice) = self.try_get(key)? {
+                if let Some(db_slice) = self.db.try_get(key)? {
                     return Ok(Some(<$value_type>::from_slice(db_slice.as_ref())?));
                 }
 
                 Ok(None)
             }
 
-            #[allow(dead_code)]
             pub fn get_value(&self, key: &$key_type) -> ever_block::Result<$value_type> {
-                <$value_type>::from_slice(self.get(key)?.as_ref())
+                <$value_type>::from_slice(self.db.get(key)?.as_ref())
             }
 
-            #[allow(dead_code)]
             pub fn put_value(&self, key: &$key_type, value: impl std::borrow::Borrow<$value_type>) -> ever_block::Result<()> {
-                self.put(key, &value.borrow().to_vec()?)
+                self.db.put(key, &value.borrow().to_vec()?)
             }
         }
     }

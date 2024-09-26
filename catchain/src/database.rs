@@ -56,7 +56,7 @@ impl Database for DatabaseImpl {
     fn is_block_in_db(&self, hash: &BlockHash) -> bool {
         instrument!();
 
-        match self.db.contains(&hash) {
+        match self.db.contains(hash) {
             Ok(status) => status,
             _ => false,
         }
@@ -80,7 +80,7 @@ impl Database for DatabaseImpl {
 
         self.put_tx_counter.increment(1);
 
-        match self.db.put(&hash, &data) {
+        match self.db.put(hash, &data) {
             Err(err) => log::error!("Block {} DB saving error: {:?}", hash, err),
             _ => (),
         }
@@ -90,7 +90,7 @@ impl Database for DatabaseImpl {
         check_execution_time!(50000);
         instrument!();
 
-        match self.db.delete(&hash) {
+        match self.db.delete(hash) {
             Err(err) => log::warn!("Block {} DB erasing error: {:?}", hash, err),
             _ => (),
         }

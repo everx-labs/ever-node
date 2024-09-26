@@ -791,6 +791,7 @@ impl ValidatorGroup {
             self.engine.clone(),
             SystemTime::now() + Duration::new(10, 0),
             self.verification_manager.clone(),
+            false,
         ).await?;
 
         let vb_candidate = validator_query_candidate_to_validator_block_candidate(

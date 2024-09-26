@@ -75,6 +75,7 @@ pub async fn run_validate_query_any_candidate(
         engine,
         SystemTime::now(),
         None, //no verification manager for validations within verification
+        true,
     ).await
 }
 
@@ -88,6 +89,7 @@ pub async fn run_validate_query(
     engine: Arc<dyn EngineOperations>,
     _timeout: SystemTime,
     verification_manager: Option<VerificationManagerPtr>,
+    validating_any_candidate: bool,
 ) -> Result<SystemTime> {
 
     let next_block_descr = fmt_next_block_descr(&block.block_id);
@@ -116,6 +118,7 @@ pub async fn run_validate_query(
             false,
             true,
             verification_manager,
+            validating_any_candidate,
         ).try_validate().await
     } else {
         let query = ValidateQuery::new(
@@ -128,6 +131,7 @@ pub async fn run_validate_query(
             false,
             true,
             verification_manager,
+            validating_any_candidate,
         );
         let validator_result = query.try_validate().await;
         if let Err(err) = &validator_result {

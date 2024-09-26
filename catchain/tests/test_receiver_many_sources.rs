@@ -17,8 +17,7 @@ use chrono::Local;
 use env_logger::Builder;
 use log::{error, info, LevelFilter};
 use std::{io::Write, path::Path, rc::Rc};
-
-include!("../../storage/src/db/tests/destroy_db.rs");
+use storage::db::rocksdb::destroy_rocks_db;
 
 const DB_PATH: &str = "../target/test";
 
