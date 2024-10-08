@@ -39,9 +39,6 @@ mod ext_messages;
 
 mod shard_blocks;
 
-#[cfg(feature = "tracing")]
-mod jaeger;
-
 use crate::{
     config::TonNodeConfig, engine::{Engine, Stopper, EngineFlags},
     internal_db::restore::set_graceful_termination,
@@ -447,9 +444,6 @@ fn main() {
         .thread_stack_size(8 * 1024 * 1024)
         .build()
         .expect("Can't create Validator tokio runtime");
-
-    #[cfg(feature = "tracing")]
-    crate::jaeger::init_jaeger();
 
     #[cfg(feature = "trace_alloc_detail")]
     thread::spawn(

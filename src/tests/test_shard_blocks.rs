@@ -14,7 +14,7 @@
 use super::*;
 use crate::test_helper::gen_master_state;
 use crate::collator_test_bundle::{create_block_handle_storage, create_engine_allocated};
-#[cfg(all(feature = "telemetry", not(feature = "fast_finality")))]
+#[cfg(all(feature = "telemetry"))]
 use crate::collator_test_bundle::create_engine_telemetry;
 use std::{sync::{atomic::{AtomicU32, Ordering}, Arc}, collections::HashSet};
 use storage::{block_handle_db::{BlockHandle, BlockHandleStorage}, types::BlockMeta};

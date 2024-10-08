@@ -16,10 +16,9 @@ use adnl::{
 };
 use ever_abi::{Contract, Token, TokenValue, Uint};
 use ever_block::{
-    error, fail, Account, AccountStatus, base64_decode, base64_encode, BlockIdExt, BuilderData,
+    error, fail, AccountStatus, base64_decode, base64_encode, BlockIdExt, BuilderData,
     Deserializable, Ed25519KeyOption, Result, Serializable, ShardAccount, SliceData, 
-    UInt256, write_boc, MsgAddressInt, StateInit, ShardAccounts, Cell, ShardIdent,
-    Block, BlockInfo,
+    UInt256, write_boc, ShardIdent,
 };
 use ever_block_json::parse_state;
 use std::{
@@ -1211,7 +1210,7 @@ mod test {
     use tokio::io::AsyncWriteExt;
     use ton_api::deserialize_boxed;
     use ever_block::{
-        generate_test_account_by_init_code_hash, BlockLimits, ConfigParam0, ConfigParam34, ConfigParamEnum, CurrencyCollection, HashmapAugType, McStateExtra, ParamLimits, ShardIdent, ShardStateUnsplit, ValidatorDescr, ValidatorSet
+        generate_test_account_by_init_code_hash, Account, Block, BlockInfo, BlockLimits, Cell, ConfigParam0, ConfigParam34, ConfigParamEnum, CurrencyCollection, HashmapAugType, McStateExtra, MsgAddressInt, ParamLimits, ShardAccounts, ShardIdent, ShardStateUnsplit, StateInit, ValidatorDescr, ValidatorSet
     };
     use ever_node::{
         block::BlockKind, collator_test_bundle::create_engine_allocated,
