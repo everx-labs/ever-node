@@ -33,26 +33,25 @@ declare_counted!(
 impl PackageInfo {
 
     pub fn with_data(
-        package_id: PackageId, 
-        package: Package, 
-        idx: u32, 
+        package_id: PackageId,
+        package: Package,
+        idx: u32,
         version: u32,
         #[cfg(feature = "telemetry")]
         telemetry: &Arc<StorageTelemetry>,
-        allocated: &Arc<StorageAlloc>     
+        allocated: &Arc<StorageAlloc>
     ) -> Self {
-        let ret = Self { 
-            package_id, 
-            package, 
-            idx, 
-            version,
-            counter: allocated.packages.clone().into() 
-        };
         #[cfg(feature = "telemetry")]
         telemetry.packages.update(
             allocated.packages.load(Ordering::Relaxed)
         );
-        ret
+        Self {
+            package_id,
+            package,
+            idx,
+            version,
+            counter: allocated.packages.clone().into()
+        }
     }
 
     #[allow(dead_code)]

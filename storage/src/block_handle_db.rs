@@ -12,8 +12,8 @@
 */
 
 use crate::{
-    TARGET, StorageAlloc, db_impl_serializable, db::traits::KvcWriteable, 
-    traits::Serializable, types::BlockMeta, db_impl_base
+    TARGET, StorageAlloc, db_impl_base,
+    traits::Serializable, types::BlockMeta
 };
 #[cfg(feature = "telemetry")]
 use crate::StorageTelemetry;
@@ -58,7 +58,7 @@ pub(crate) const FLAG_IS_MESH: u32               = 0x00040000;
 // not serializing flags (possible flags - 1, 2, 4, 8)
 const FLAG_ARCHIVING: u32 = 0x80000000;
 
-db_impl_base!(NodeStateDb, KvcWriteable, &'static str);
+db_impl_base!(NodeStateDb, &'static str);
 
 /// Meta information related to block
 #[derive(Debug)]
@@ -477,7 +477,7 @@ impl Drop for BlockHandle {
 // Real value is
 // - BlockMeta if FLAG_HAS_FULL_ID is not set
 // - BlockMeta + wc (i32) + shard (u64) + seqno (u32) + file_hash (UInt256) if FLAG_HAS_FULL_ID is set
-db_impl_serializable!(BlockHandleDb, KvcWriteable, BlockIdExt, BlockMeta);
+db_impl_base!(BlockHandleDb, BlockIdExt);
 
 declare_counted!(
     struct HandleObject {
@@ -676,19 +676,15 @@ impl BlockHandleStorage {
 
     pub fn load_full_block_id(&self, root_hash: &UInt256) -> Result<Option<BlockIdExt>> {
         log::trace!(target: TARGET, "load_full_block_id {:x}", root_hash);
-        let ret = loop {
-            let weak = self.handle_cache.get(root_hash);
-            if let Some(Some(handle)) = weak.map(|weak| weak.val().object.upgrade()) {
-                break Some(handle.id.clone())
-            }
-            if let Some(data) = self.handle_db.try_get_raw(root_hash.as_slice())? {
-                let mut cursor = Cursor::new(data);
-                break BlockHandle::deserialize_full_id(root_hash, &mut cursor)?
-            } else {
-                break None
-            }
-        };
-        Ok(ret)
+        let weak = self.handle_cache.get(root_hash);
+        if let Some(Some(handle)) = weak.map(|weak| weak.val().object.upgrade()) {
+            Ok(Some(handle.id.clone()))
+        } else if let Some(data) = self.handle_db.try_get_raw(root_hash.as_slice())? {
+            let mut cursor = Cursor::new(data);
+            Ok(BlockHandle::deserialize_full_id(root_hash, &mut cursor)?)
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn is_empty(&self) -> Result<bool> {

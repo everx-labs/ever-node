@@ -26,7 +26,7 @@ impl AsRef<[u8]> for DbSlice<'_> {
         match self {
             DbSlice::RocksDbTable(slice) => slice.as_ref(),
             DbSlice::Vector(vector) => vector.as_slice(),
-            DbSlice::Slice(slice) => *slice,
+            DbSlice::Slice(slice) => slice,
         }
     }
 }

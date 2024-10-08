@@ -13,10 +13,9 @@
 
 use crate::{
     archives::{
-        ARCHIVE_PACKAGE_SIZE, archive_manager::ArchiveManager, 
-        package_entry_id::{GetFileNameShort, PackageEntryId},
+        archive_manager::ArchiveManager, package_entry_id::{GetFileNameShort, PackageEntryId}, ARCHIVE_PACKAGE_SIZE
     },
-    block_handle_db::{FLAG_KEY_BLOCK, BlockHandleStorage}, db::rocksdb::RocksDb,
+    block_handle_db::{BlockHandleStorage, FLAG_KEY_BLOCK}, db::rocksdb::{destroy_rocks_db, RocksDb},
     tests::utils::create_block_handle_storage, types::BlockMeta, StorageAlloc,
 };
 #[cfg(feature = "telemetry")]
@@ -24,8 +23,6 @@ use crate::StorageTelemetry;
 use std::{path::Path, sync::Arc};
 use ever_block::{BlockIdExt, ShardIdent};
 use ever_block::{error, Result, UInt256};
-
-include!("../../db/tests/destroy_db.rs");
 
 const DB_PATH: &str = "../target/test";
 
@@ -38,7 +35,7 @@ const ARCHIVE_00200_GOLD: &str = "archive.00200.pack.gold";
 
 #[tokio::test]
 async fn test_scenario() -> Result<()> {
-   
+
     const DB_NAME: &str = "test_archive_manager_scenario";
 
     let db_root = Path::new(DB_PATH).join(DB_NAME);
@@ -52,7 +49,7 @@ async fn test_scenario() -> Result<()> {
         Arc::new(StorageTelemetry::default()),
         Arc::new(StorageAlloc::default()),
     ).await?;
-    let (block_handle_storage, _) = create_block_handle_storage(None);
+    let (block_handle_storage, _) = create_block_handle_storage(db.clone());
 
     let data = vec![1, 2, 3, 4, 5];
     for mc_seq_no in 0..250 {
@@ -98,9 +95,9 @@ async fn test_scenario() -> Result<()> {
 }
 
 async fn test_downloading(manager: &ArchiveManager, mc_seq_no: u32, gold_path: &str) -> Result<()> {
-    let data = simulate_downloading(&manager, mc_seq_no).await?;
+    let data = simulate_downloading(manager, mc_seq_no).await?;
     assert_eq!(
-        &data[..], 
+        &data[..],
         tokio::fs::read(Path::new(TESTDATA_PATH).join(gold_path)).await.unwrap().as_slice()
     );
     Ok(())
@@ -118,7 +115,7 @@ async fn simulate_downloading(manager: &ArchiveManager, mc_seq_no: u32) -> Resul
             break;
         }
         offset += slice.len() as u64;
-    }    
+    }
     Ok(data)
 }
 
@@ -130,7 +127,7 @@ async fn test_scenario_keyblocks_10m() -> Result<()> {
     // init_log("./../common/config/log_cfg.yml");
     let path = Path::new(DB_PATH).join(DB_NAME);
     let db = RocksDb::with_path(DB_PATH, DB_NAME)?;
-    let (block_handle_storage, _) = create_block_handle_storage(Some(db.clone()));
+    let (block_handle_storage, _) = create_block_handle_storage(db.clone());
     let manager = ArchiveManager::with_data(
         db.clone(),
         Arc::new(path),
@@ -164,9 +161,9 @@ async fn test_scenario_keyblocks_10m() -> Result<()> {
         let meta = BlockMeta::with_data(FLAG_KEY_BLOCK, 0, 0, 0, 0);
 
         let entry_id = PackageEntryId::<_, &UInt256, &UInt256>::Proof(&block_id);
-        
+
         manager.add_file(&entry_id, data.clone()).await?;
-        
+
         let handle = block_handle_storage
             .create_handle(block_id.clone(), meta, None)?
             .ok_or_else(|| error!("Cannot create handle for block {}", block_id))?;
@@ -182,7 +179,7 @@ async fn test_scenario_keyblocks_10m() -> Result<()> {
 
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
-        let block_id = BlockIdExt::with_params(ShardIdent::masterchain(), mc_seq_no, 
+        let block_id = BlockIdExt::with_params(ShardIdent::masterchain(), mc_seq_no,
             UInt256::from_le_bytes(&mc_seq_no.to_le_bytes()), UInt256::default());
         let handle = block_handle_storage.load_handle_by_id(&block_id)?
             .ok_or_else(|| error!("Cannot load handle for block {}", block_id))?;
@@ -193,7 +190,7 @@ async fn test_scenario_keyblocks_10m() -> Result<()> {
         let entry_id = PackageEntryId::<_, &UInt256, &UInt256>::Proof(&block_id);
         manager.get_file(&handle, &entry_id).await?;
     }
-    
+
     drop(block_handle_storage);
     drop(manager);
     drop(db);
@@ -228,7 +225,7 @@ async fn test_clean_unapplied_files() {
         Arc::new(StorageTelemetry::default()),
         Arc::new(StorageAlloc::default()),
     ).await.unwrap();
-    
+
     let id = generate_block_id(555, 0xF8000000_00000000, 100);
     let filename = generate_short_filename(&id);
     let path = manager.unapplied_files_path().join(filename);
@@ -236,22 +233,22 @@ async fn test_clean_unapplied_files() {
     std::fs::write(&path, "test").unwrap();
 
     let id = generate_block_id(555, 0xF8000000_00000000, 99);
-    manager.clean_unapplied_files(&vec![id]).await;
+    manager.clean_unapplied_files(&[id]).await;
 
     assert!(path.exists(), "file {:?} must not be removed", path);
 
     let id = generate_block_id(333, 0xF8000000_00000000, 101);
-    manager.clean_unapplied_files(&vec![id]).await;
+    manager.clean_unapplied_files(&[id]).await;
 
     assert!(path.exists(), "file {:?} must not be removed", path);
 
     let id = generate_block_id(555, 0xE8000000_00000000, 101);
-    manager.clean_unapplied_files(&vec![id]).await;
+    manager.clean_unapplied_files(&[id]).await;
 
     assert!(path.exists(), "file {:?} must not be removed", path);
 
     let id = generate_block_id(555, 0xF8000000_00000000, 101);
-    manager.clean_unapplied_files(&vec![id]).await;
+    manager.clean_unapplied_files(&[id]).await;
 
     assert!(!path.exists(), "file {:?} must be removed", path);
 
@@ -281,7 +278,7 @@ impl TestArchiveManager {
             Arc::new(StorageTelemetry::default()),
             Arc::new(StorageAlloc::default()),
         ).await.unwrap();
-        let (block_handle_storage, _) = create_block_handle_storage(Some(db.clone()));
+        let (block_handle_storage, _) = create_block_handle_storage(db.clone());
         Ok(Self {
             db,
             archive_manager,
@@ -370,7 +367,7 @@ async fn test_archive_truncate() {
     manager.trunc_with_check(10_000_053, 1).await;
     manager.trunc_with_check(10_000_001, 1).await;
 
-    drop(manager);   
+    drop(manager);
     destroy_rocks_db(DB_PATH, DB_NAME).await.unwrap()
 
 }

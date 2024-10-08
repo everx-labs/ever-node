@@ -13,13 +13,10 @@
 
 use crate::{
     db::{
-        rocksdb::{RocksDb, RocksDbTable},
+        rocksdb::{RocksDb, RocksDbTable, destroy_rocks_db},
         tests::utils::{
-            expect_error, expect_key_not_found_error, KEY0, KEY1,
+            expect_error, expect_key_not_found_error,
         },
-        traits::{
-            KvcReadable, KvcSnapshotable, KvcTransactional, KvcWriteable
-        }
     },
     error::StorageError
 };
@@ -27,9 +24,9 @@ use rocksdb::{DB, Options, WriteBatch, Cache, BlockBasedOptions, MultiThreaded, 
 use std::{path::Path, sync::Arc};
 use ever_block::Result;
 
-include!("destroy_db.rs");
-
 const DB_PATH: &str = "../target/test";
+const KEY0: &[u8] = b"key0";
+const KEY1: &[u8] = b"key1";
 
 #[tokio::test]
 async fn test_get_put_delete() -> Result<()> {
@@ -67,7 +64,7 @@ async fn test_transactions() -> Result<()> {
 
     let db = RocksDb::with_path(DB_PATH, DB_NAME)?;
     let tb = RocksDbTable::with_db(db.clone(), "test", true)?;
-    
+
     {
         let mut transaction = tb.begin_transaction()?;
         transaction.put(&KEY0, &[0])?;
@@ -99,7 +96,7 @@ async fn test_transactions() -> Result<()> {
 
 #[tokio::test]
 async fn test_snapshots() -> Result<()> {
-  
+
     const DB_NAME: &str = "test_snapshots";
 
     let db = RocksDb::with_path(DB_PATH, DB_NAME)?;
@@ -130,14 +127,13 @@ async fn test_foreach() -> Result<()> {
     let db = RocksDb::with_path(DB_PATH, DB_NAME)?;
     let tb = RocksDbTable::with_db(db.clone(), "test", true)?;
 
-    let vec = vec![(KEY0, 0), (KEY1, 1)];
+    let vec = [(KEY0, 0), (KEY1, 1)];
     for (key, value) in vec.iter() {
         tb.put(key, &[*value])?;
     }
 
     let mut index = 0;
-    let result = KvcReadable::<&[u8]>::for_each(
-        &tb, 
+    let result = tb.for_each(
         &mut |key, value| {
             let (key0, value0) = vec.get(index).unwrap();
             index += 1;
@@ -151,8 +147,7 @@ async fn test_foreach() -> Result<()> {
 
     let snapshot = tb.snapshot()?;
     index = 0;
-    let result = KvcReadable::<&[u8]>::for_each(
-        snapshot.as_ref(), 
+    let result = snapshot.for_each(
         &mut |key, value| {
             let (key0, value0) = vec.get(index).unwrap();
             index += 1;
@@ -254,19 +249,19 @@ async fn test_double_create() {
     let mut block_opts = BlockBasedOptions::default();
     block_opts.set_block_cache(&cache);
     // save in LRU block cache also indexes and bloom filters
-    block_opts.set_cache_index_and_filter_blocks(true); 
+    block_opts.set_cache_index_and_filter_blocks(true);
     // keep indexes and filters in block cache until tablereader freed
-    block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true); 
+    block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
     block_opts.set_block_size(16 << 10);
     // use latest available format version with new implementation of bloom filters
-    block_opts.set_format_version(5); 
+    block_opts.set_format_version(5);
 
     let mut options = Options::default();
     options.create_if_missing(true);
     options.set_max_total_wal_size(512 << 20); // 512Mb for one instance
     options.set_max_background_jobs(4);
     // allow background async incrementall file sync to disk by 1Mb per sync
-    options.set_bytes_per_sync(1 << 20); 
+    options.set_bytes_per_sync(1 << 20);
     options.set_block_based_table_factory(&block_opts);
     options.create_missing_column_families(true);
     options.enable_statistics();
@@ -284,8 +279,8 @@ async fn test_double_create() {
     assert!(db.create_cf(name0, &Default::default()).is_err());
     assert!(db.create_cf(name1, &Default::default()).is_err());
     drop(db);
- 
-    let cfs = DBWithThreadMode::<MultiThreaded>::list_cf(&options, &path.as_path()).unwrap();
+
+    let cfs = DBWithThreadMode::<MultiThreaded>::list_cf(&options, path.as_path()).unwrap();
     dbg!(cfs);
     destroy_rocks_db(DB_PATH, DB_NAME).await.unwrap();
 

@@ -14,8 +14,8 @@
 use crate::{
     StorageAlloc,
     archives::{
-        archive_slice::ArchiveSlice, file_maps::{FileDescription, FileMaps}, 
-        get_mc_seq_no, package_entry::PackageEntry, 
+        archive_slice::ArchiveSlice, file_maps::{FileDescription, FileMaps},
+        get_mc_seq_no, package_entry::PackageEntry,
         package_entry_id::{GetFileNameShort, PackageEntryId, parse_short_filename},
         package_id::PackageId, ARCHIVE_SLICE_SIZE, KEY_ARCHIVE_PACKAGE_SIZE
     },
@@ -148,8 +148,8 @@ impl ArchiveManager {
 
         if handle.is_archived() {
             let file = self.get_package_entry(
-                handle, 
-                entry_id, 
+                handle,
+                entry_id,
                 handle.is_key_block()?
             ).await?
             .ok_or_else(|| error!("{} is archived, but archive was not found", entry_id))?;
@@ -197,13 +197,13 @@ impl ArchiveManager {
         let proof_filename = if proof_inited {
             let _lock = handle.proof_file_lock().write().await;
             self.move_file_to_archives(
-                handle, 
+                handle,
                 &PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::Proof(handle.id())
             ).await?
         } else if prooflink_inited {
             let _lock = handle.proof_file_lock().write().await;
             self.move_file_to_archives(
-                handle, 
+                handle,
                 &PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::ProofLink(handle.id())
             ).await?
         } else {
@@ -212,7 +212,7 @@ impl ArchiveManager {
         let block_filename = if data_inited {
             let _lock = handle.block_file_lock().write().await;
             self.move_file_to_archives(
-                handle, 
+                handle,
                 &PackageEntryId::<&BlockIdExt, &UInt256, &UInt256>::Block(handle.id())
             ).await?
         } else {
@@ -304,7 +304,7 @@ impl ArchiveManager {
                 Err(err) => log::warn!(
                     "clean_unapplied_files: wrong file name: {:?}: {}", entry.path(), err
                 )
-            } 
+            }
         }
     }
 
@@ -317,16 +317,16 @@ impl ArchiveManager {
     }
 
     pub async fn get_archive_slice(
-        &self, 
-        archive_id: u64, 
-        offset: u64, 
+        &self,
+        archive_id: u64,
+        offset: u64,
         limit: u32
     ) -> Result<Vec<u8>> {
         let fd = match self.get_file_desc(&PackageId::for_block(archive_id as u32), false).await? {
             Some(file_desc) => file_desc,
             None => {
                 match self.get_file_desc(
-                    &PackageId::for_key_block(archive_id as u32 / KEY_ARCHIVE_PACKAGE_SIZE), 
+                    &PackageId::for_key_block(archive_id as u32 / KEY_ARCHIVE_PACKAGE_SIZE),
                     false
                 ).await? {
                     Some(key_file_desc) => key_file_desc,
@@ -334,7 +334,7 @@ impl ArchiveManager {
                 }
             },
         };
-            
+
         fd.archive_slice().get_slice(archive_id, offset, limit).await
     }
 
@@ -345,8 +345,8 @@ impl ArchiveManager {
     }
 
     async fn get_package_entry<B, U256, PK>(
-        &self, 
-        handle: &BlockHandle, 
+        &self,
+        handle: &BlockHandle,
         entry_id: &PackageEntryId<B, U256, PK>,
         is_key: bool
     ) -> Result<Option<PackageEntry>>
@@ -364,8 +364,8 @@ impl ArchiveManager {
     }
 
     async fn move_file_to_archives<B, U256, PK>(
-        &self, 
-        handle: &BlockHandle, 
+        &self,
+        handle: &BlockHandle,
         entry_id: &PackageEntryId<B, U256, PK>
     ) -> Result<Option<PathBuf>>
     where
@@ -390,10 +390,10 @@ impl ArchiveManager {
             }
         };
 
-        let data = self.move_file_to_archive(data, handle, entry_id, false).await?; 
+        let data = self.move_file_to_archive(data, handle, entry_id, false).await?;
 
         if handle.is_key_block()? {
-            self.move_file_to_archive(data, handle, entry_id, true).await?; 
+            self.move_file_to_archive(data, handle, entry_id, true).await?;
         }
 
         Ok(Some(filename))
@@ -416,7 +416,7 @@ impl ArchiveManager {
 
         let package_id = self.get_package_id_force(mc_seq_no, key_archive, is_key).await;
         log::debug!(
-            target: "storage", 
+            target: "storage",
             "PackageId for ({},{},{}) (mc_seq_no = {}, key block = {:?}) is {:?}, path: {:?}",
             handle.id().shard().workchain_id(),
             handle.id().shard().shard_prefix_as_str_with_tag(),
@@ -434,7 +434,7 @@ impl ArchiveManager {
     }
 
     async fn read_temp_file<B, U256, PK>(
-        &self, 
+        &self,
         entry_id: &PackageEntryId<B, U256, PK>
     ) -> Result<(PathBuf, Vec<u8>)>
     where
@@ -453,8 +453,8 @@ impl ArchiveManager {
             })?;
         if data.is_empty() {
             fail!(
-                "Read temp file {} ({}) is corrupted! It cannot have zero length!", 
-                temp_filename.as_os_str().to_str().unwrap_or("bad path"), 
+                "Read temp file {} ({}) is corrupted! It cannot have zero length!",
+                temp_filename.as_os_str().to_str().unwrap_or("bad path"),
                 entry_id
             )
         }
@@ -462,8 +462,8 @@ impl ArchiveManager {
     }
 
     async fn get_file_desc(
-        &self, 
-        id: &PackageId, 
+        &self,
+        id: &PackageId,
         force_create: bool
     ) -> Result<Option<Arc<FileDescription>>> {
         // TODO: Rewrite logics in order to handle multithreaded adding of packages
@@ -501,7 +501,7 @@ impl ArchiveManager {
             false
         ));
         file_map.put(
-            id.id(), 
+            id.id(),
             Arc::clone(&fd),
             #[cfg(feature = "telemetry")]
             &self.telemetry,

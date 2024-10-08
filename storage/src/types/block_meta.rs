@@ -65,9 +65,9 @@ impl BlockMeta {
     }
 
     pub fn with_data(
-        flags: u32, 
-        gen_utime: u32, 
-        gen_lt: u64, 
+        flags: u32,
+        gen_utime: u32,
+        gen_lt: u64,
         masterchain_ref_seq_no: u32,
         params: u32,
     ) -> Self {

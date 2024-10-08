@@ -12,7 +12,7 @@
 */
 
 use crate::{
-    db::traits::DbKey,
+    db::DbKey,
     error::StorageError
 };
 use std::{io::{ErrorKind, SeekFrom, Write, Read, Seek}, path::{Path, PathBuf}};
@@ -100,7 +100,7 @@ impl FileDb {
     }
 
     pub fn for_each_key(&self, predicate: &mut dyn FnMut(&[u8]) -> Result<bool>) -> Result<bool> {
-        self.for_each_key_worker(&self.path, &[], 1, predicate)
+        Self::for_each_key_worker(&self.path, &[], 1, predicate)
     }
 
     pub async fn delete_file(&self, key: &(dyn DbKey + Send + Sync)) -> Result<()> {
@@ -160,7 +160,6 @@ impl FileDb {
     }
 
     fn for_each_key_worker<P: AsRef<Path>>(
-        &self,
         path: P,
         key: &[u8],
         depth: usize,
@@ -171,11 +170,11 @@ impl FileDb {
             let file_name = entry.file_name();
             let file_name = file_name.to_str().ok_or_else(|| error!("Can't decode filename"))?;
             let mut key = key.to_vec();
-            key.append(&mut hex::decode(&file_name)?);
+            key.append(&mut hex::decode(file_name)?);
             let result = if depth == PATH_MAX_DEPTH {
                 predicate(&key)?
             } else {
-                self.for_each_key_worker(entry.path(), &key, depth + 1, predicate)?
+                Self::for_each_key_worker(entry.path(), &key, depth + 1, predicate)?
             };
             if !result {
                 return Ok(false)

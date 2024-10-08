@@ -125,7 +125,7 @@ impl PackageEntryId<BlockIdExt, UInt256, UInt256> {
         }
 
         fail!("Cannot parse filename: {}", filename)
-    
+
     }
 
     fn parse_block_ids(filename: &str, dummy: PackageEntryId<&BlockIdExt, UInt256, UInt256>, count: usize) -> Result<Option<Vec<BlockIdExt>>> {
@@ -226,10 +226,10 @@ fn parse_block_id(filename: &str) -> Result<(BlockIdExt, usize)> {
 
 /// parse file name for example block_555_F800000000000000_100_19685CDC8B64BBB5
 pub fn parse_short_filename(filename: &str) -> Result<(i32, u64, u32)> {
-    enum Id { 
-        Wc = 1, 
-        Shard, 
-        SeqNo, 
+    enum Id {
+        Wc = 1,
+        Shard,
+        SeqNo,
         Count = 5
     }
     fn parse_ids(ids: &Vec<&str>) -> Result<(i32, u64, u32)> {
@@ -237,9 +237,9 @@ pub fn parse_short_filename(filename: &str) -> Result<(i32, u64, u32)> {
             fail!("too short")
         } else {
             let ret = (
-                i32::from_str(&ids[Id::Wc as usize])?,
-                u64::from_str_radix(&ids[Id::Shard as usize], 16)?,
-                u32::from_str(&ids[Id::SeqNo as usize])?
+                i32::from_str(ids[Id::Wc as usize])?,
+                u64::from_str_radix(ids[Id::Shard as usize], 16)?,
+                u32::from_str(ids[Id::SeqNo as usize])?
             );
             Ok(ret)
         }
@@ -277,7 +277,7 @@ where
             PackageEntryId::Proof(block_id) |
             PackageEntryId::ProofLink(block_id) |
             PackageEntryId::Signatures(block_id) |
-            PackageEntryId::BlockInfo(block_id) => 
+            PackageEntryId::BlockInfo(block_id) =>
                 format!("{}_{}", self.filename_prefix(), block_id.borrow().filename()),
 
             PackageEntryId::PersistentState { mc_block_id, block_id } =>
@@ -331,7 +331,7 @@ where
             PackageEntryId::Proof(block_id) |
             PackageEntryId::ProofLink(block_id) |
             PackageEntryId::Signatures(block_id) |
-            PackageEntryId::BlockInfo(block_id) => 
+            PackageEntryId::BlockInfo(block_id) =>
                 format!("{}_{}", self.filename_prefix(), block_id.borrow().filename_short()),
 
             PackageEntryId::PersistentState { mc_block_id, block_id } =>

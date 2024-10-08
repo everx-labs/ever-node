@@ -11,7 +11,7 @@
 * limitations under the License.
 */
 
-use crate::db::traits::DbKey;
+use crate::db::DbKey;
 use strum_macros::AsRefStr;
 
 #[derive(Debug, AsRefStr)]

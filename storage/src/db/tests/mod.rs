@@ -12,30 +12,12 @@
 */
 
 pub mod test_filedb;
-pub mod test_memorydb;
 pub mod test_rocksdb;
 
 pub mod utils {
  
-    use crate::{db::traits::DbKey, error::StorageError};
+    use crate::{db::DbKey, error::StorageError};
     use ever_block::Result;
-
-    pub const KEY0: &[u8] = b"key0";
-    pub const KEY1: &[u8] = b"key1";
-
-    pub fn test_for_dropped_error<T>(result: Result<T>) {
-        match result {
-            Ok(_) => panic!("We don't expect any value to return"),
-            Err(error) => {
-                let kind = error.downcast::<StorageError>()
-                    .expect("Expected error of type StorageError");
-                match kind {
-                    StorageError::DbIsDropped => (),
-                    _ => panic!("Expected DbIsDropped error"),
-                }
-            },
-        }
-    }
 
     pub fn expect_key_not_found_error<T, K: DbKey>(result: Result<T>, key: K) {
         match result {
@@ -44,7 +26,7 @@ pub mod utils {
                 let kind = error.downcast::<StorageError>()
                     .expect("Expected error of type StorageError");
                 match kind {
-                    StorageError::KeyNotFound(_key_name, err_key) => 
+                    StorageError::KeyNotFound(_key_name, err_key) =>
                         assert!(err_key.starts_with(key.as_string().as_str())),
                     _ => panic!("Expected KeyNotFound error"),
                 }
@@ -65,4 +47,14 @@ pub mod utils {
         }
     }
 
+}
+
+impl super::DbKey for &[u8] {
+    fn key_name(&self) -> &'static str {
+        "&[u8]"
+    }
+
+    fn key(&self) -> &[u8] {
+        self
+    }
 }

@@ -11,7 +11,7 @@
 * limitations under the License.
 */
 
-use crate::{db_impl_cbor, db::traits::{KvcWriteable, U32Key}};
+use crate::{db_impl_cbor, db::U32Key};
 use std::convert::TryInto;
 use ever_block::Result;
 
@@ -39,7 +39,7 @@ impl PackageIndexEntry {
     }
 }
 
-db_impl_cbor!(PackageIndexDb, KvcWriteable, U32Key, PackageIndexEntry);
+db_impl_cbor!(PackageIndexDb, U32Key, PackageIndexEntry);
 
 impl PackageIndexDb {
     pub fn for_each_deserialized(&self, mut predicate: impl FnMut(u32, PackageIndexEntry) -> Result<bool>) -> Result<bool> {

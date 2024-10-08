@@ -29,10 +29,8 @@ use std::{
     ops::Deref, sync::{Arc, atomic::AtomicU64} 
 };
 use storage::{
-    StorageAlloc, TimeChecker,
-    block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage}, 
-    block_handle_db::NodeStateDb,
-    types::BlockMeta,
+    StorageAlloc, block_handle_db::{BlockHandle, BlockHandleDb, BlockHandleStorage, NodeStateDb}, 
+    types::BlockMeta, db::rocksdb::RocksDb, TimeChecker,
 };
 #[cfg(feature = "telemetry")]
 use storage::StorageTelemetry;
@@ -175,15 +173,21 @@ fn construct_from_file<T: Deserializable>(path: &str) -> Result<(T, UInt256, UIn
     Ok((T::construct_from_cell(cell)?, fh, rh))
 }
 
-pub fn create_block_handle_storage() -> BlockHandleStorage {
-    BlockHandleStorage::with_dbs(
-        Arc::new(BlockHandleDb::in_memory()),
-        Arc::new(NodeStateDb::in_memory()),
-        Arc::new(NodeStateDb::in_memory()),
+pub fn create_block_handle_storage() -> Result<BlockHandleStorage> {
+    let temp_dir = std::env::temp_dir()
+        .join(format!("collator-test-bundle-{:?}", UInt256::rand()));
+    let db = RocksDb::with_path(temp_dir, "collator_test_bundle")?;
+    let handle_db = BlockHandleDb::with_db(db.clone(), "handle_db", true)?;
+    let full_node_state_db = NodeStateDb::with_db(db.clone(), "full_node_state_db", true)?;
+    let validator_state_db = NodeStateDb::with_db(db, "validator_state_db", true)?;
+    Ok(BlockHandleStorage::with_dbs(
+        Arc::new(handle_db),
+        Arc::new(full_node_state_db),
+        Arc::new(validator_state_db),
         #[cfg(feature = "telemetry")]
         Arc::new(StorageTelemetry::default()),
         Arc::new(StorageAlloc::default()),
-    )
+    ))
 }
 
 #[cfg(feature = "telemetry")]
@@ -303,7 +307,7 @@ impl CollatorTestBundle {
             states,
             mc_merkle_updates: Default::default(),
             blocks: Default::default(),
-            block_handle_storage: create_block_handle_storage(),
+            block_handle_storage: create_block_handle_storage()?,
             candidate: None,
             #[cfg(feature = "telemetry")]
             telemetry,
@@ -502,7 +506,7 @@ impl CollatorTestBundle {
             states,
             mc_merkle_updates,
             blocks,
-            block_handle_storage: create_block_handle_storage(),
+            block_handle_storage: create_block_handle_storage()?,
             candidate,
             #[cfg(feature = "telemetry")]
             telemetry,
@@ -726,7 +730,7 @@ impl CollatorTestBundle {
             states,
             mc_merkle_updates,
             blocks,
-            block_handle_storage: create_block_handle_storage(),
+            block_handle_storage: create_block_handle_storage()?,
             candidate: None,
             #[cfg(feature = "telemetry")]
             telemetry: create_engine_telemetry(),
@@ -885,7 +889,7 @@ impl CollatorTestBundle {
             states,
             mc_merkle_updates,
             blocks,
-            block_handle_storage: create_block_handle_storage(),
+            block_handle_storage: create_block_handle_storage()?,
             candidate: Some(candidate),
             #[cfg(feature = "telemetry")]
             telemetry: create_engine_telemetry(),
@@ -1094,7 +1098,7 @@ impl CollatorTestBundle {
             states,
             mc_merkle_updates,
             blocks,
-            block_handle_storage: create_block_handle_storage(),
+            block_handle_storage: create_block_handle_storage()?,
             candidate: None,
             #[cfg(feature = "telemetry")]
             telemetry: create_engine_telemetry(),

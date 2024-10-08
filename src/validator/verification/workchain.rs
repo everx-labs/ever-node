@@ -303,9 +303,7 @@ impl Workchain {
             mc_local_idx,
             wc_pub_keys,
             blocks: SpinMutex::new(HashMap::new()),
-            workchain_delivery_params: SpinMutex::new(
-                Self::compute_delivery_params_from_smft_params(wc_validators_count, wc_total_weight, SmftParams::default())
-            ),
+            workchain_delivery_params: SpinMutex::new(Self::compute_delivery_params_from_smft_params(wc_validators_count, wc_total_weight, SmftParams::default())),
             mc_overlay: SpinMutex::new(None),
             workchain_overlay: SpinMutex::new(None),
             listener,
@@ -896,14 +894,6 @@ impl Workchain {
             let delivered_weight = block.get_deliveries_signature().get_total_weight(&workchain.wc_validators);
 
             block.get_delivery_stats().syncs_count.fetch_add(1, Ordering::SeqCst);
-
-            //if block candidate was received after block status - shift sync time to allow neighbours to sync
-
-            let block_start_sync_time = if let Some(creation_time) = block.get_creation_time() {
-                std::cmp::max(*block.get_first_appearance_time(), creation_time)
-            } else {
-                *block.get_first_appearance_time()
-            };
 
             (block.get_id().clone(),
              *block.get_first_appearance_time() + Duration::from_millis(config_params.block_lifetime_period_ms as u64),
@@ -1512,6 +1502,7 @@ impl Workchain {
         let block_id = block_id.clone();
         let force_delivery_duplication_factor = {
             let params = &self.workchain_delivery_params.lock().config_params;
+
             (params.mc_force_delivery_duplication_factor_numerator as f64) / (params.mc_force_delivery_duplication_factor_denominator as f64)
         };
 

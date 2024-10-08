@@ -167,7 +167,7 @@ impl RempClient {
     }
 
     pub fn process_remp_message(
-        self: Arc<Self>,
+        &self,
         raw_message: Vec<u8>,
         id: UInt256,
     ) {

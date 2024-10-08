@@ -96,7 +96,7 @@ impl PackageEntry {
     }
 
     pub(super) async fn write_to<W: tokio::io::AsyncWriteExt + Unpin>(
-        &self, 
+        &self,
         writer: &mut W
     ) -> Result<u64> {
         let entry_header = PackageEntryHeader::with_data(

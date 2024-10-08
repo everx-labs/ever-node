@@ -1,15 +1,14 @@
 use crate::internal_db::{
-    InternalDb, CURRENT_DB_VERSION, DB_VERSION_3, DB_VERSION_4, DB_VERSION_5,
-    restore::check_db
+    InternalDb, CURRENT_DB_VERSION, DB_VERSION_5, DB_VERSION_4,
 };
 use std::sync::atomic::AtomicBool;
 use ever_block::{Result, fail};
 
 pub async fn update(
-    mut db: InternalDb, 
+    db: InternalDb, 
     mut version: u32,
-    check_stop: &(dyn Fn() -> Result<()> + Sync),
-    is_broken: Option<&AtomicBool>,
+    _check_stop: &(dyn Fn() -> Result<()> + Sync),
+    _is_broken: Option<&AtomicBool>,
     _force_check_db: bool,
     _restore_db_enabled: bool,
 ) -> Result<InternalDb> {
@@ -17,30 +16,23 @@ pub async fn update(
         return Ok(db)
     }
 
-    if version < DB_VERSION_3 {
-        log::info!(
-            "Detected old database version {version}. Need to migrate to latest version"
-        );
-        db = check_db(db, 0, true, true, check_stop, is_broken).await?;
-        db.store_db_version(DB_VERSION_4)?;
-        version = DB_VERSION_4;
-    } else if version == DB_VERSION_3 {
-        log::info!(
-            "Detected old database version 3. This version contains performance issue in cells DB. \
-            Database will be updated."
-        );
-        db.update_cells_db_upto_4().await?;
-        db.store_db_version(DB_VERSION_4)?;
-        version = DB_VERSION_4;
+    if version < DB_VERSION_4 {
+        fail!("Detected tool old database version {version}. Last supported version is {DB_VERSION_4}. \
+            Please stop the node and clean database.", );
     }
-
-    if version < DB_VERSION_5 {
-        log::info!(
-            "Detected old database version {version}. Need to migrate to version 5",
-        );
+    if version == DB_VERSION_4 {
+        log::info!("Detected old database version {version}. Migration to v5 will take some time...");
         db.migrate_handles_to_v5()?;
         db.store_db_version(DB_VERSION_5)?;
         version = DB_VERSION_5;
+    }
+    if version == DB_VERSION_5 {
+        log::info!("Detected old database version {version}. Migration to v6 will take some time...");
+
+        db.update_cells_db_to_v6().await?;
+
+        db.store_db_version(CURRENT_DB_VERSION)?;
+        version = CURRENT_DB_VERSION;
     }
 
     if version != CURRENT_DB_VERSION {

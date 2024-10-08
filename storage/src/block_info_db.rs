@@ -11,7 +11,7 @@
 * limitations under the License.
 */
 
-use crate::{db_impl_base, db::traits::KvcWriteable};
+use crate::db_impl_base;
 use ever_block::BlockIdExt;
 
-db_impl_base!(BlockInfoDb, KvcWriteable, BlockIdExt);
+db_impl_base!(BlockInfoDb, BlockIdExt);

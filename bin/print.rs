@@ -12,10 +12,9 @@
 */
 
 use ever_block::{
-    error, BlockIdExt, Block, Deserializable, ShardStateUnsplit, McShardRecord, 
-    HashmapAugType, read_boc, Result
+    error, read_boc, Account, Block, BlockIdExt, ConfigParams, Deserializable, HashmapAugType, McShardRecord, Result, ShardStateUnsplit
 };
-use ever_block_json::{debug_block, debug_block_full, debug_state, debug_state_full};
+use ever_block_json::{debug_account, debug_block, debug_block_full, debug_state, debug_state_full};
 use ever_node::{
     collator_test_bundle::create_engine_allocated, 
     internal_db::{InternalDb, InternalDbConfig, LAST_APPLIED_MC_BLOCK}
@@ -136,16 +135,26 @@ async fn main() -> Result<()> {
     let brief = args.is_present("BRIEF");
     if let Some(path) = args.value_of("BOC") {
         let bytes = std::fs::read(path)?;
-        if let Ok(block) = Block::construct_from_bytes(&bytes) {
-            print_block(&block, brief)?;
-        } else if let Ok(state) = ShardStateUnsplit::construct_from_bytes(&bytes) {
-            print_state(&state, brief)?;
-        } else {
-            let res = read_boc(&bytes)?;
-            println!("{:?}", res.header);
+        let res = read_boc(&bytes)?;
+        println!("{:?}", res.header);
+        if res.roots.len() > 1 {
             for root in res.roots {
                 println!("{0:#.1$}", root, res.header.cells_count);
             }
+        } else if let Ok(block) = Block::construct_from_cell(res.roots[0].clone()) {
+            print_block(&block, brief)?;
+        } else if let Ok(state) = ShardStateUnsplit::construct_from_cell(res.roots[0].clone()) {
+            print_state(&state, brief)?;
+        } else if let Ok(account) = Account::construct_from_cell(res.roots[0].clone()) {
+            if let Some(data) = account.data().and_then(|data| data.reference(0).ok()) {
+                let config_params = ConfigParams::with_root(data);
+                let mut json = Default::default();
+                let mode = ever_block_json::SerializationMode::Debug;
+                if ever_block_json::serialize_config(&mut json, &config_params, mode).is_ok() {
+                    println!("config params: {}", serde_json::to_string_pretty(&json)?);
+                }
+            }
+            println!("{}", debug_account(account)?);
         }
     } else if let Some(db_dir) = args.value_of("PATH") {
         let db_config = InternalDbConfig { 

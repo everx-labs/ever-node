@@ -12,13 +12,14 @@
 */
 
 use crate::{
-    db_impl_cbor, archives::package_entry_id::PackageEntryId, 
-    db::traits::{DbKey, KvcWriteable}
+    db_impl_cbor, archives::package_entry_id::PackageEntryId,
+    db::DbKey,
 };
 use std::{borrow::Borrow, collections::hash_map::DefaultHasher, hash::{Hash, Hasher}};
 use ever_block::BlockIdExt;
 use ever_block::UInt256;
 
+#[derive(Debug)]
 pub struct PackageOffsetKey {
     entry_id_hash: [u8; 8],
 }
@@ -58,4 +59,4 @@ impl DbKey for PackageOffsetKey {
     }
 }
 
-db_impl_cbor!(PackageOffsetsDb, KvcWriteable, PackageOffsetKey, u64);
+db_impl_cbor!(PackageOffsetsDb, PackageOffsetKey, u64);

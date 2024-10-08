@@ -27,7 +27,7 @@ const KEY_ARCHIVE_00000_PATH: &str = "src/archives/tests/testdata/key.archive.00
 #[tokio::test]
 async fn test_creation() -> Result<()> {
 
-    const DB_NAME: &str = "test_package_creation"; 
+    const DB_NAME: &str = "test_package_creation";
 
     let dir = Path::new(DB_PATH).join(DB_NAME);
     fs::remove_dir_all(dir.as_path()).ok();
@@ -47,7 +47,7 @@ async fn test_creation() -> Result<()> {
     package.append_entry(&entry, |_offset, _size| Ok(())).await?;
 
     assert_eq!(
-        tokio::fs::read(package.path()).await.unwrap(), 
+        tokio::fs::read(package.path()).await.unwrap(),
         tokio::fs::read(ARCHIVE_00001_GOLD_PATH).await.unwrap()
     );
 

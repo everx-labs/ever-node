@@ -11,7 +11,7 @@
 * limitations under the License.
 */
 
-use crate::db::traits::DbKey;
+use crate::db::DbKey;
 use strum_macros::AsRefStr;
 
 #[derive(Debug, AsRefStr)]
@@ -27,7 +27,6 @@ impl DbKey for StatusKey {
     fn as_string(&self) -> String {
         self.as_ref().to_string()
     }
-
     fn key(&self) -> &[u8] {
         self.as_ref().as_bytes()
     }

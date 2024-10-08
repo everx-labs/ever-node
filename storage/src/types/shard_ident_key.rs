@@ -11,9 +11,8 @@
 * limitations under the License.
 */
 
-use crate::{db::traits::DbKey, traits::Serializable};
-use ever_block::ShardIdent;
-use ever_block::Result;
+use crate::{db::DbKey, traits::Serializable};
+use ever_block::{ShardIdent, Result};
 
 pub struct ShardIdentKey(Vec<u8>);
 

@@ -13,7 +13,7 @@
 
 use std::{sync::Arc, collections::HashSet};
 use storage::{
-    db::rocksdb::RocksDb,
+    db::rocksdb::{RocksDb, destroy_rocks_db},
     shardstate_db_async::{AllowStateGcResolver, CellsDbConfig, ShardStateDb, SsNotificationCallback},
     StorageAlloc,
 };
@@ -23,7 +23,6 @@ use ever_block::{BlockIdExt, ShardIdent};
 use ever_block::{Cell, Result, BuilderData};
 use rand::{Rng, SeedableRng};
 
-include!("../src/db/tests/destroy_db.rs");
 include!("../../common/src/log.rs");
 
 const DB_PATH: &str = "../target/test";
@@ -36,33 +35,33 @@ impl AllowStateGcResolver for MockedResolver {
     }
 }
 
-fn update_boc(old_root: &Cell, need_cells: u32, new_cells: &mut u32, rng: &mut impl rand::RngCore) -> Cell {
+fn update_boc(old_root: &Cell, need_cells: u32, new_cells: &mut u32, rng: &mut impl rand::RngCore) -> Result<Cell> {
     let mut new_root = old_root.clone();
     while *new_cells < need_cells {
-        new_root = update_boc_(&new_root, (need_cells as f32 * 2.5) as u32, new_cells, rng);
+        new_root = update_boc_(&new_root, (need_cells as f32 * 2.5) as u32, new_cells, rng)?;
         //println!("update_boc iteration, new_cells: {new_cells}");
     }
-    new_root
+    Ok(new_root)
 }
 
-fn update_boc_(old_root: &Cell, need_cells: u32, new_cells: &mut u32, rng: &mut impl rand::RngCore) -> Cell {
+fn update_boc_(old_root: &Cell, need_cells: u32, new_cells: &mut u32, rng: &mut impl rand::RngCore) -> Result<Cell> {
     let mut builder = BuilderData::new();
     let bits = rng.gen_range(0..=1023);
     let mut data = vec!(0_u8; (bits + 7) / 8);
     rng.fill(&mut data[..]);
-    builder.append_raw(&data, bits).unwrap();
+    builder.append_raw(&data, bits)?;
 
     for child in old_root.clone_references() {
         if rng.gen_range(0..need_cells) < *new_cells {
-            builder.checked_append_reference(child).unwrap();
+            builder.checked_append_reference(child)?;
         } else {
             *new_cells += 1;
-            let child = update_boc_(&child, need_cells, new_cells, rng);
-            builder.checked_append_reference(child).unwrap();
+            let child = update_boc_(&child, need_cells, new_cells, rng)?;
+            builder.checked_append_reference(child)?;
         }
     }
 
-    builder.into_cell().unwrap()
+    builder.into_cell()
 }
 
 /// Creates a BOC with random topology and specifed number of cells
@@ -82,8 +81,8 @@ fn generate_boc(need_cells: u32, rng: &mut impl rand::RngCore) -> Cell {
         level += 1;
         println!("Next level #{level} started; prev level cells: {cells}", cells = cells.len());
 
-        while cells.len() > 0 || bottom_level && next_level_cells.len() < bottom_level_cells {
-            if rng.gen_range(1..5) == 1 && cells.len() > 0 {
+        while !cells.is_empty() || bottom_level && next_level_cells.len() < bottom_level_cells {
+            if rng.gen_range(1..5) == 1 && !cells.is_empty() {
                 next_level_cells.push(cells.pop().unwrap());
                 continue;
             }
@@ -101,7 +100,7 @@ fn generate_boc(need_cells: u32, rng: &mut impl rand::RngCore) -> Cell {
             };
 
             for _ in 0..rc {
-                if cells.len() == 0 {
+                if cells.is_empty() {
                     break;
                 }
                 let child = if rng.gen_range(1..3) == 1 {
@@ -139,36 +138,30 @@ async fn main() -> Result<()> {
 
     init_log("../common/config/log_cfg_debug.yml");
 
-    const DB_NAME: &str = "test_shardstate_db_async_2";
+    const DB_NAME: &str = "bench_shardstate_db";
 
-    destroy_rocks_db(DB_PATH, DB_NAME).await.unwrap();
+    destroy_rocks_db(DB_PATH, DB_NAME).await?;
 
-    let open_db = || {
+    let open_db = || -> Result<(Arc<RocksDb>, Arc<ShardStateDb>)> {
         let mut hi_perf_cfs = HashSet::new();
         hi_perf_cfs.insert("cells_db".to_string());
-        let db = RocksDb::with_options(DB_PATH, DB_NAME, hi_perf_cfs, false).unwrap();
+        let db = RocksDb::with_options(DB_PATH, DB_NAME, hi_perf_cfs, false)?;
         let ss_db = ShardStateDb::new(
             db.clone(),
-            DB_NAME,
             "shardstate_db",
-            "cell_db",
+            "cells_db",
+            DB_PATH,
             false,
             false,
-            CellsDbConfig {
-                states_db_queue_len: 1000,
-                max_pss_slowdown_mcs: 1000,
-                prefill_cells_counters: false,
-                cache_cells_counters: true,
-                cache_size_bytes: 10000000,
-            },
+            CellsDbConfig::default(),
             #[cfg(feature = "telemetry")]
             Arc::new(StorageTelemetry::default()),
             Arc::new(StorageAlloc::default()),
-        ).unwrap();
-        (db, ss_db)
+        )?;
+        Ok((db, ss_db))
     };
 
-    let (db, ss_db) = open_db();
+    let (db, ss_db) = open_db()?;
     let mut cell = Cell::default();
     let mut first_put_time = vec!();
     let mut block_id = BlockIdExt::default();
@@ -188,7 +181,7 @@ async fn main() -> Result<()> {
         let cb = SsNotificationCallback::new();
         let first_put = std::time::Instant::now();
 
-        ss_db.put(&block_id, cell.clone(), Some(cb.clone())).await.unwrap();
+        ss_db.put(&block_id, cell.clone(), Some(cb.clone())).await?;
         cb.wait().await;
 
         first_put_time.push(first_put.elapsed().as_millis());
@@ -198,13 +191,13 @@ async fn main() -> Result<()> {
     drop(db);
 
 
-    let (_db, ss_db) = open_db();
+    let (_db, ss_db) = open_db()?;
 
     let before_updates = std::time::Instant::now();
 
     for i in 0..updates {
         let mut new_cells = 0;
-        cell = update_boc(&cell, update, &mut new_cells, &mut rng);
+        cell = update_boc(&cell, update, &mut new_cells, &mut rng)?;
         println!("updated {new_cells}");
 
         block_id = BlockIdExt {
@@ -215,10 +208,10 @@ async fn main() -> Result<()> {
         };
 
         if i != updates - 1 {
-            ss_db.put(&block_id, cell.clone(), None).await.unwrap();
+            ss_db.put(&block_id, cell.clone(), None).await?;
         } else {
             let cb = SsNotificationCallback::new();
-            ss_db.put(&block_id, cell.clone(), Some(cb.clone())).await.unwrap();
+            ss_db.put(&block_id, cell.clone(), Some(cb.clone())).await?;
             cb.wait().await;
         }
     }
@@ -231,7 +224,7 @@ async fn main() -> Result<()> {
     for t in first_put_time {
         print!("{} ", t);
     }
-    print!("\n");
+    println!();
     let update_total = before_updates.elapsed().as_millis();
     println!("updates total time {}, per update {}", update_total, update_total / updates as u128);
 

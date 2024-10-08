@@ -11,21 +11,25 @@
 * limitations under the License.
 */
 
-use crate::{block_db::BlockDb, tests::utils::*};
+use crate::{block_db::BlockDb, tests::utils::*, db::rocksdb::RocksDb};
 use ever_block::Result;
+
+const DB_PATH: &str = "../target/test";
 
 #[test]
 fn test_get_put_raw_block() -> Result<()> {
-    let db = BlockDb::in_memory();
-    assert!(db.is_empty()?);
+    const DB_NAME: &str = "test_get_put_raw_block";
 
-    let block_id= get_test_block_id().into();
+    let db = RocksDb::with_path(DB_PATH, DB_NAME).unwrap();
+    let block_db = BlockDb::with_db(db, "block_db", true)?;
+
+    let block_id = get_test_block_id();
     let data = get_test_raw_boc();
 
-    db.put(&block_id, &data)?;
-    assert_eq!(db.len()?, 1);
+    block_db.put(&block_id, &data)?;
+    assert_eq!(block_db.len()?, 1);
 
-    let result = db.get(&block_id)?;
+    let result = block_db.get(&block_id)?;
     assert_eq!(result.as_ref(), data.as_slice());
 
     Ok(())

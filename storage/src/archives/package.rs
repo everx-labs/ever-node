@@ -78,9 +78,9 @@ impl Package {
         Self::remove_by_path(&self.path).await
     }
 
-    pub async fn remove_by_path(path: &PathBuf) -> Result<()> {
-        if std::path::Path::new(path.as_path()).try_exists()? {
-            tokio::fs::remove_file(path.as_path()).await
+    pub async fn remove_by_path(path: &Path) -> Result<()> {
+        if path.try_exists()? {
+            tokio::fs::remove_file(path).await
                 .map_err(|err| error!("destroy package error {}", err))?;
         }
         Ok(())
@@ -145,8 +145,8 @@ impl Package {
     }
 
     pub async fn open_file_ext(
-        read_only: bool, 
-        create: bool, 
+        read_only: bool,
+        create: bool,
         path: impl AsRef<Path>
     ) -> Result<tokio::fs::File> {
         Ok(tokio::fs::OpenOptions::new()

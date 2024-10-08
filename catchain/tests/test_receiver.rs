@@ -14,8 +14,7 @@
 use catchain::utils::*;
 use catchain::{CatchainFactory, CatchainNode, ReceiverPtr};
 use std::{path::Path, rc::Rc};
-
-include!("../../storage/src/db/tests/destroy_db.rs");
+use storage::db::rocksdb::destroy_rocks_db;
 
 const DB_PATH: &str = "../target/test";
 
