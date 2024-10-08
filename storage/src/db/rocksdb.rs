@@ -12,15 +12,13 @@
 */
 
 use crate::{
-    db::traits::{
-        DbKey, Kvc, KvcReadable, KvcSnapshotable, KvcTransaction, KvcTransactional, KvcWriteable,
-    },
+    db::DbKey,
     traits::Serializable,
-    types::DbSlice
+    types::DbSlice, error::StorageError
 };
 use adnl::common::add_unbound_object_to_map;
 use rocksdb::{
-    BlockBasedOptions, BoundColumnFamily, Cache, DBWithThreadMode, IteratorMode, MultiThreaded, 
+    BlockBasedOptions, BoundColumnFamily, Cache, DBWithThreadMode, IteratorMode, MultiThreaded,
     Options, SnapshotWithThreadMode, WriteBatch
 };
 use std::{
@@ -33,6 +31,8 @@ use ever_block::BlockIdExt;
 pub const LAST_UNNEEDED_KEY_BLOCK: &str = "LastUnneededKeyBlockId"; // Latest key block we can delete in archives GC
 pub const NODE_STATE_DB_NAME: &str = "node_state_db";
 
+pub type DbPredicateMut<'a> = &'a mut dyn FnMut(&[u8], &[u8]) -> Result<bool>;
+
 #[derive(Debug)]
 pub struct RocksDb {
     db: Option<DBWithThreadMode<MultiThreaded>>,
@@ -43,25 +43,24 @@ pub struct RocksDb {
 impl RocksDb {
 
     /// Creates new instance with given path
-    pub fn with_path(path: &str, name: &str) -> Result<Arc<Self>> {
+    pub fn with_path(path: impl AsRef<Path>, name: &str) -> Result<Arc<Self>> {
         Self::with_options(path, name, HashSet::new(), false)
     }
 
     /// Creates new instance read only with given path
-    pub fn read_only(path: &str, name: &str) -> Result<Arc<Self>> {
+    pub fn read_only(path: impl AsRef<Path>, name: &str) -> Result<Arc<Self>> {
         Self::with_options(path, name, HashSet::new(), true)
     }
 
     /// Creates new instance with given path and ability to additionally configure options
     pub fn with_options(
-        path: &str, 
+        path: impl AsRef<Path>,
         name: &str,
         hi_perf_cfs: HashSet<String>,
         read_only: bool
     ) -> Result<Arc<Self>> {
 
-        let path = Path::new(path);
-        let path = path.join(name);
+        let path = path.as_ref().join(name);
 
         let options = Self::build_db_options();
 
@@ -93,16 +92,15 @@ impl RocksDb {
             };
 
 
-            // 
+            //
             // Clean up CF from old archives
             //
-            if !read_only && cfs.len() > 100 && iteration <= 3 {
-                if Self::clean_up_old_cf(&db, &cfs)
-                    .map_err(|e| error!("Error while clean_up_old_cf: {}", e))? 
-                {
-                    drop(db);
-                    continue;
-                }
+            if !read_only && cfs.len() > 100 && iteration <= 3 &&
+                Self::clean_up_old_cf(&db, &cfs)
+                    .map_err(|e| error!("Error while clean_up_old_cf: {}", e))?
+            {
+                drop(db);
+                continue;
             }
 
             let db = Self {
@@ -124,12 +122,12 @@ impl RocksDb {
         block_opts.set_block_cache(&cache);
 
         // save in LRU block cache also indexes and bloom filters
-        block_opts.set_cache_index_and_filter_blocks(true); 
+        block_opts.set_cache_index_and_filter_blocks(true);
 
         // keep indexes and filters in block cache until tablereader freed
-        block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true); 
+        block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
 
-        // Setup bloom filter with length of 10 bits per key. 
+        // Setup bloom filter with length of 10 bits per key.
         // This length provides less than 1% false positive rate.
         block_opts.set_bloom_filter(10.0, false);
 
@@ -187,7 +185,7 @@ impl RocksDb {
 
         // If true, missing column families will be automatically created.
         options.create_missing_column_families(true);
-        
+
         options.set_max_total_wal_size(1024 * 1024 * 1024);
 
         options.enable_statistics();
@@ -219,7 +217,7 @@ impl RocksDb {
                 for cf_name in cfs {
                     for pfx in &prefixes {
                         if cf_name.contains(pfx) {
-                            let num = u32::from_str_radix(&cf_name.replace(pfx, ""), 10).unwrap_or(u32::MAX);
+                            let num = cf_name.replace(pfx, "").parse::<u32>().unwrap_or(u32::MAX);
                             if num < id.seq_no() {
                                 log::warn!(target: "storage", "Dropping old CF {}", cf_name);
                                 let result = db.drop_cf(cf_name);
@@ -235,15 +233,15 @@ impl RocksDb {
         Ok(false)
     }
 
-    pub fn table(
+    pub fn table<K: DbKey + Send + Sync>(
         self: Arc<Self>,
         family: impl ToString,
         create_if_not_exist: bool,
-    ) -> Result<RocksDbTable> {
+    ) -> Result<RocksDbTable<K>> {
         RocksDbTable::with_db(self, family, create_if_not_exist)
     }
 
-    fn db(&self) -> &DBWithThreadMode<MultiThreaded> {
+    pub fn db(&self) -> &DBWithThreadMode<MultiThreaded> {
         self.db.as_ref().expect("rocksdb was occasionaly destroyed")
     }
 
@@ -292,17 +290,8 @@ impl RocksDb {
             Err(err) => fail!("cannot destroy database {:?} : {}", path.as_ref(), err)
         }
     }
-}
 
-/// Implementation of key-value collection for RocksDB
-impl Kvc for RocksDb {
-
-    fn len(&self) -> Result<usize> {
-        // be careful in usual code
-        Ok(self.db().iterator(IteratorMode::Start).count())
-    }
-
-    fn destroy(&mut self) -> Result<bool> {
+    pub fn destroy(&mut self) -> Result<bool> {
         match self.db.take() {
             Some(db) => {
                 let path = db.path().to_path_buf();
@@ -312,9 +301,6 @@ impl Kvc for RocksDb {
             None => fail!("rocksdb already destroyed")
         }
     }
-}
-
-impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDb {
 
     fn get_meta(&self) -> &str {
         self.db().path().to_str().unwrap()
@@ -325,55 +311,54 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDb {
         Ok(ret.map(|value| value.into()))
     }
 
-    fn for_each(&self, predicate: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool>) -> Result<bool> {
-        for iter in self.db().iterator(IteratorMode::Start) {
-            let (key, value) = iter?;
-            if !predicate(key.as_ref(), value.as_ref())? {
-                return Ok(false)
-            }
-        }
-        Ok(true)
+    pub fn try_get<K: DbKey + Send + Sync>(&self, key: &K) -> Result<Option<DbSlice>> {
+        self.try_get_raw(key.key())
     }
 
-}
+    /// Gets value from collection by the key
+    pub fn get<K: DbKey + Send + Sync>(&self, key: &K) -> Result<DbSlice> {
+        self.try_get(key)?.ok_or_else(|| {
+            let meta = self.get_meta();
+            let what = if meta.is_empty() {
+                key.as_string()
+            } else {
+                format!("{} ({})", key.as_string(), meta)
+            };
+            StorageError::KeyNotFound(key.key_name(), what).into()
+        })
+    }
 
-impl<K: DbKey + Send + Sync> KvcWriteable<K> for RocksDb {
     fn put_raw(&self, key: &[u8], value: &[u8]) -> Result<()> {
         Ok(self.db().put(key, value)?)
     }
 
-    fn delete_raw(&self, key: &[u8]) -> Result<()> {
+    /// Puts value into collection by the key
+    pub fn put<K: DbKey + Send + Sync>(&self, key: &K, value: &[u8]) -> Result<()> {
+        self.put_raw(key.key(), value)
+    }
+
+    pub fn delete_raw(&self, key: &[u8]) -> Result<()> {
         Ok(self.db().delete(key)?)
     }
-}
 
-/// Implementation of transaction support for key-value collection for RocksDB.
-impl<K: DbKey + Send + Sync> KvcTransactional<K> for RocksDb {
-    fn begin_transaction(&self) -> Result<Box<dyn KvcTransaction<K>>> {
-        unreachable!()
+    /// Deletes value from collection by the key
+    pub fn delete<K: DbKey + Send + Sync>(&self, key: &K) -> Result<()> {
+        self.delete_raw(key.key())
     }
-}
-
-impl Deref for RocksDb {
-    type Target = DBWithThreadMode<MultiThreaded>;
-    fn deref(&self) -> &Self::Target {
-        self.db.as_ref().unwrap()
-    }
-}
-
-impl AsRef<DBWithThreadMode<MultiThreaded>> for RocksDb {
-    fn as_ref(&self) -> &DBWithThreadMode<MultiThreaded> {
-        self.db()
+    
+    pub fn contains<K: DbKey + Send + Sync>(&self, key: &K) -> Result<bool> {
+        Ok(self.try_get(key)?.is_some())
     }
 }
 
 #[derive(Debug)]
-pub struct RocksDbTable {
+pub struct RocksDbTable<K> {
     db: Arc<RocksDb>,
     family: String,
+    phantom: std::marker::PhantomData<K>,
 }
 
-impl RocksDbTable {
+impl<K: DbKey + Send + Sync> RocksDbTable<K> {
 
     pub(crate) fn with_db(
         db: Arc<RocksDb>,
@@ -393,14 +378,15 @@ impl RocksDbTable {
                 }
             }
             add_unbound_object_to_map(
-                &db.locks, 
-                family.clone(), 
+                &db.locks,
+                family.clone(),
                 || Ok(AtomicI32::new(0))
             )?;
         }
         let ret = Self {
             db,
-            family
+            family,
+            phantom: std::marker::PhantomData
         };
         Ok(ret)
     }
@@ -409,42 +395,25 @@ impl RocksDbTable {
         self.db.cf(&self.family)
     }
 
-}
-
-impl AsRef<DBWithThreadMode<MultiThreaded>> for RocksDbTable {
-    fn as_ref(&self) -> &DBWithThreadMode<MultiThreaded> {
-        self.db.db()
-    }               
-}
-
-impl Deref for RocksDbTable {
-    type Target = DBWithThreadMode<MultiThreaded>;
-    fn deref(&self) -> &Self::Target {
-        self.db.db()
-    }
-}
-
-/// Implementation of key-value collection for RocksDB
-impl Kvc for RocksDbTable {
-
-    fn len(&self) -> Result<usize> {
+    pub fn len(&self) -> Result<usize> {
         // be careful in usual code
         Ok(self.db.iterator_cf(&self.cf()?, IteratorMode::Start).count())
     }
 
-    fn destroy(&mut self) -> Result<bool> {
+    /// Returns true, if collection is empty; false otherwise
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.len()? == 0)
+    }
+
+    pub fn destroy(&mut self) -> Result<bool> {
         self.db.drop_table(&self.family)
     }
-}
-
-/// Implementation of readable key-value collection for RocksDB. Actual implementation is blocking.
-impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbTable {
 
     fn get_meta(&self) -> &str {
         self.family.as_str()
     }
 
-    fn try_get_raw(&self, key: &[u8]) -> Result<Option<DbSlice>> {
+    pub fn try_get_raw(&self, key: &[u8]) -> Result<Option<DbSlice>> {
         if let Some(lock) = self.db.locks.get(&self.family) {
             let lock = lock.val();
             if lock.fetch_add(1, Ordering::Relaxed) >= 0 {
@@ -456,7 +425,7 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbTable {
         fail!("Attempt to read from dropped table {}", self.family)
     }
 
-    fn for_each(&self, predicate: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool>) -> Result<bool> {
+    pub fn for_each(&self, predicate: DbPredicateMut) -> Result<bool> {
         if let Some(lock) = self.db.locks.get(&self.family) {
             let lock = lock.val();
             if lock.fetch_add(1, Ordering::Relaxed) >= 0 {
@@ -481,12 +450,7 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbTable {
         fail!("Attempt to iterate over dropped table {}", self.family)
     }
 
-}
-
-/// Implementation of writable key-value collection for RocksDB. Actual implementation is blocking.
-impl<K: DbKey + Send + Sync> KvcWriteable<K> for RocksDbTable {
-
-    fn put_raw(&self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn put_raw(&self, key: &[u8], value: &[u8]) -> Result<()> {
         if let Some(lock) = self.db.locks.get(&self.family) {
             let lock = lock.val();
             if lock.fetch_add(1, Ordering::Relaxed) >= 0 {
@@ -498,7 +462,12 @@ impl<K: DbKey + Send + Sync> KvcWriteable<K> for RocksDbTable {
         fail!("Attempt to write into dropped table {}", self.family)
     }
 
-    fn delete_raw(&self, key: &[u8]) -> Result<()> {
+    /// Puts value into collection by the key
+    pub fn put(&self, key: &K, value: &[u8]) -> Result<()> {
+        self.put_raw(key.key(), value)
+    }
+
+    pub fn delete_raw(&self, key: &[u8]) -> Result<()> {
         if let Some(lock) = self.db.locks.get(&self.family) {
             let lock = lock.val();
             if lock.fetch_add(1, Ordering::Relaxed) >= 0 {
@@ -510,17 +479,69 @@ impl<K: DbKey + Send + Sync> KvcWriteable<K> for RocksDbTable {
         fail!("Attempt to delete from dropped table {}", self.family)
     }
 
+    /// Deletes value from collection by the key
+    pub fn delete(&self, key: &K) -> Result<()> {
+        self.delete_raw(key.key())
+    }
+
+    pub fn try_get(&self, key: &K) -> Result<Option<DbSlice>> {
+        self.try_get_raw(key.key())
+    }
+
+    /// Gets value from collection by the key
+    pub fn get(&self, key: &K) -> Result<DbSlice> {
+        self.try_get(key)?.ok_or_else(|| {
+            let meta = self.get_meta();
+            let what = if meta.is_empty() {
+                key.as_string()
+            } else {
+                format!("{} ({})", key.as_string(), meta)
+            };
+            StorageError::KeyNotFound(key.key_name(), what).into()
+        })
+    }
+
+    /// Gets slice with given size starting from given offset from collection by the key
+    pub fn get_slice(&self, key: &K, offset: u64, size: u64) -> Result<DbSlice> {
+        self.get_vec(key, offset, size).map(DbSlice::Vector)
+    }
+
+    fn get_vec(&self, key: &K, offset: u64, size: u64) -> Result<Vec<u8>> {
+        self.get(key).and_then(|value| {
+            if offset >= value.len() as u64 || offset + size > value.as_ref().len() as u64 {
+                return Err(StorageError::OutOfRange.into());
+            }
+
+            let mut result = Vec::new();
+            result.extend_from_slice(&value[offset as usize..(offset + size) as usize]);
+            Ok(result)
+        })
+    }
+
+    /// Determines, is key exists in key-value collection
+    pub fn contains(&self, key: &K) -> Result<bool> {
+        Ok(self.try_get(key)?.is_some())
+    }
+
+    pub fn snapshot(&self) -> Result<Arc<RocksDbSnapshot>> {
+        Ok(Arc::new(RocksDbSnapshot::new(self.db.clone(), self.db.snapshot(), self.family.clone())))
+    }
+
+    pub fn begin_transaction(&self) -> Result<Box<RocksDbTransaction>> {
+        Ok(Box::new(RocksDbTransaction::new(self.db.clone(), self.family.clone())))
+    }
 }
 
-/// Implementation of support for take snapshots for RocksDB.
-impl<K: DbKey + Send + Sync> KvcSnapshotable<K> for RocksDbTable {
-    fn snapshot<'db>(&'db self) -> Result<Arc<dyn KvcReadable<K> + 'db>> {
-        Ok(Arc::new(RocksDbSnapshot::new(self.db.clone(), self.db.snapshot(), self.family.clone())))
+impl Deref for RocksDb {
+    type Target = rocksdb::DBWithThreadMode<MultiThreaded>;
+
+    fn deref(&self) -> &Self::Target {
+        self.db.as_ref().unwrap()
     }
 }
 
 // TODO: snapshot without family by RocksDb
-struct RocksDbSnapshot<'db> {
+pub struct RocksDbSnapshot<'db> {
     db: Arc<RocksDb>,
     snapshot: SnapshotWithThreadMode<'db, DBWithThreadMode<MultiThreaded>>,
     family: String,
@@ -528,8 +549,8 @@ struct RocksDbSnapshot<'db> {
 
 impl<'db> RocksDbSnapshot<'db> {
     pub(crate) fn new(
-        db: Arc<RocksDb>, 
-        snapshot: SnapshotWithThreadMode<'db, DBWithThreadMode<MultiThreaded>>, 
+        db: Arc<RocksDb>,
+        snapshot: SnapshotWithThreadMode<'db, DBWithThreadMode<MultiThreaded>>,
         family: String
     ) -> Self {
         Self {
@@ -538,31 +559,38 @@ impl<'db> RocksDbSnapshot<'db> {
             family,
         }
     }
+
+    /// Get meta information (like DB name or something)
+    fn get_meta(&self) -> &str {
+        ""
+    }
+
     fn cf(&self) -> Result<Arc<BoundColumnFamily>> {
         self.db.cf(&self.family)
     }
-}
 
-impl Debug for RocksDbSnapshot<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[snapshot] for {}", self.family)
-    }
-}
-
-impl Kvc for RocksDbSnapshot<'_> {
-    fn len(&self) -> Result<usize> {
-        fail!("len() is not supported for snapshots")
-    }
-    fn destroy(&mut self) -> Result<bool> {
-        fail!("destroy() is not supported for snapshots")
-    }
-}
-
-impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbSnapshot<'_> {
     fn try_get_raw(&self, key: &[u8]) -> Result<Option<DbSlice>> {
         Ok(self.snapshot.get_cf(&self.cf()?, key)?.map(|value| value.into()))
     }
-    fn for_each(&self, predicate: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool>) -> Result<bool> {
+
+    fn try_get<K: DbKey + Send + Sync>(&self, key: &K) -> Result<Option<DbSlice>> {
+        self.try_get_raw(key.key())
+    }
+
+    /// Gets value from collection by the key
+    pub fn get<K: DbKey + Send + Sync>(&self, key: &K) -> Result<DbSlice> {
+        self.try_get(key)?.ok_or_else(|| {
+            let meta = self.get_meta();
+            let what = if meta.is_empty() {
+                key.as_string()
+            } else {
+                format!("{} ({})", key.as_string(), meta)
+            };
+            StorageError::KeyNotFound(key.key_name(), what).into()
+        })
+    }
+
+    pub fn for_each(&self, predicate: DbPredicateMut) -> Result<bool> {
         for iter in self.snapshot.iterator_cf(&self.cf()?, IteratorMode::Start) {
             let (key, value) = iter?;
             if !predicate(key.as_ref(), value.as_ref())? {
@@ -573,10 +601,9 @@ impl<K: DbKey + Send + Sync> KvcReadable<K> for RocksDbSnapshot<'_> {
     }
 }
 
-/// Implementation of transaction support for key-value collection for RocksDB.
-impl<K: DbKey + Send + Sync> KvcTransactional<K> for RocksDbTable {
-    fn begin_transaction(&self) -> Result<Box<dyn KvcTransaction<K>>> {
-        Ok(Box::new(RocksDbTransaction::new(self.db.clone(), self.family.clone())))
+impl Debug for RocksDbSnapshot<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[snapshot] for {}", self.family)
     }
 }
 
@@ -600,36 +627,70 @@ impl RocksDbTransaction {
     fn cf(&self) -> Result<Arc<BoundColumnFamily>> {
         self.db.cf(&self.family)
     }
-}
 
-impl<'db, K: DbKey + Send + Sync> KvcTransaction<K> for RocksDbTransaction {
-    fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let mut batch = self.batch.take().unwrap();
         batch.put_cf(&self.cf()?, key, value);
         self.batch = Some(batch);
         Ok(())
     }
 
-    fn delete_raw(&mut self, key: &[u8]) -> Result<()> {
+    /// Puts value into collection by the key
+    pub fn put<K: DbKey + Send + Sync>(&mut self, key: &K, value: &[u8]) -> Result<()> {
+        self.put_raw(key.key(), value)
+    }
+
+    pub fn delete_raw(&mut self, key: &[u8]) -> Result<()> {
         let mut batch = self.batch.take().unwrap();
         batch.delete_cf(&self.cf()?, key);
         self.batch = Some(batch);
         Ok(())
     }
 
-    fn clear(&mut self) {
-        self.batch.as_mut().unwrap().clear();
+    /// Deletes value from collection by the key
+    pub fn delete<K: DbKey + Send + Sync>(&mut self, key: &K) -> Result<()> {
+        self.delete_raw(key.key())
     }
 
-    fn commit(self: Box<Self>) -> Result<()> {
+    pub fn commit(self) -> Result<()> {
         Ok(self.db.write(self.batch.unwrap())?)
     }
+}
 
-    fn len(&self) -> usize {
-        self.batch.as_ref().unwrap().len()
+pub async fn destroy_rocks_db(path: &str, name: &str) -> ever_block::Result<()> {
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    let mut path = std::path::Path::new(path);
+    let db_path = path.join(name);
+    // Clean up DB
+    if db_path.exists() {
+        let opts = rocksdb::Options::default();
+        while let Err(e) = rocksdb::DBWithThreadMode::<rocksdb::MultiThreaded>::destroy(
+                &opts, 
+                db_path.as_path()
+        ) {
+            println!("Can't destroy DB: {}", e);
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        }
     }
-
-    fn is_empty(&self) -> bool {
-        self.batch.as_ref().unwrap().is_empty()
+    // Clean up DB folder
+    if db_path.exists() {
+        std::fs::remove_dir_all(db_path).map_err(
+            |e| ever_block::error!("Can't clean DB folder: {}", e)
+        )?
     }
+    // Clean up upper folder if empty
+    while path.exists() {
+        if std::fs::read_dir(path)?.count() > 0 {
+            break
+        }
+        std::fs::remove_dir_all(path).map_err(
+            |e| ever_block::error!("Can't clean DB enclosing folder: {}", e)
+        )?;
+        path = if let Some(path) = path.parent() {
+            path
+        } else { 
+            break
+        }
+    }
+    Ok(())
 }

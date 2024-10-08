@@ -207,7 +207,7 @@ impl ControlQuerySubscriber {
     ) -> Result<Option<(ShardAccount, PinnedShardStateGuard)>> {
         let engine = self.engine()?;
         let block_id = engine.find_full_block_id(block_root_hash)?
-            .ok_or_else(|| error!("Cannot find full block id by root hash"))?;
+            .ok_or_else(|| error!("Cannot find full block id by root hash {:x}", block_root_hash))?;
         let shard_state = engine.load_and_pin_state(&block_id).await?;
         Ok(shard_state.state().shard_account(account_id)?.map(|acc| (acc, shard_state)))
     }
@@ -216,11 +216,12 @@ impl ControlQuerySubscriber {
         shard_account: Option<(ShardAccount, PinnedShardStateGuard)>
     ) -> Result<ShardAccountStateBoxed> {
         Ok(match shard_account {
-            Some((account, _state_guard)) => ShardAccountStateBoxed::Raw_ShardAccountState(
-                ShardAccountState {
-                    shard_account: account.write_to_bytes()?
-                }
-            ),
+            Some((account, _state_guard)) => {
+                let shard_account = account.write_to_bytes()?;
+                ShardAccountStateBoxed::Raw_ShardAccountState(
+                    ShardAccountState { shard_account }
+                )
+            }
             None => ShardAccountStateBoxed::Raw_ShardAccountNone
         })
     }
@@ -759,6 +760,31 @@ impl ControlQuerySubscriber {
                 let param_number = query.param_list.iter().next().ok_or_else(|| error!("Invalid param_number"))?;
                 let answer = self.get_config_params(*param_number as u32).await?;
 
+                return QueryResult::consume_boxed(
+                    answer.into_boxed(),
+                    #[cfg(feature = "telemetry")]
+                    None
+                )
+            },
+            Err(query) => query
+        };
+        let query = match query.downcast::<ton::rpc::lite_server::GetBlock>() {
+            Ok(ton::rpc::lite_server::GetBlock{ mut id }) => {
+                let engine = self.engine()?;
+                let handle = if id.shard().is_masterchain() {
+                    engine.find_mc_block_by_seq_no(id.seq_no()).await?
+                } else {
+                    if let Ok(Some(block_id)) = engine.find_full_block_id(id.root_hash()) {
+                        id = block_id
+                    }
+                    engine.load_block_handle(&id)?
+                        .ok_or_else(|| error!("Cannot load handle for block {}", id))?
+                };
+                let data = engine.load_block_raw(&handle).await?;
+                let answer = ton::lite_server::blockdata::BlockData {
+                    id: handle.id().clone(),
+                    data
+                };
                 return QueryResult::consume_boxed(
                     answer.into_boxed(),
                     #[cfg(feature = "telemetry")]

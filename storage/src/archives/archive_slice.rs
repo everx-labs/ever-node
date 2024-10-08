@@ -12,14 +12,14 @@
 */
 
 use crate::{
-    StorageAlloc, 
+    StorageAlloc,
     archives::{
         get_mc_seq_no_opt, ARCHIVE_PACKAGE_SIZE, KEY_ARCHIVE_PACKAGE_SIZE,
         archive_manager::ArchiveManager, package::{Package, read_package_from},
         package_entry::PackageEntry, package_entry_id::{GetFileName, PackageEntryId},
         package_entry_meta::PackageEntryMeta, package_entry_meta_db::PackageEntryMetaDb,
         package_id::{PackageId, PackageType}, package_info::PackageInfo,
-        package_offsets_db::PackageOffsetsDb, package_status_db::PackageStatusDb, 
+        package_offsets_db::PackageOffsetsDb, package_status_db::PackageStatusDb,
         package_status_key::PackageStatusKey
     },
     block_handle_db::BlockHandle, db::rocksdb::RocksDb, traits::Serializable
@@ -56,6 +56,7 @@ pub struct ArchiveSlice {
 
 impl ArchiveSlice {
 
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         db: Arc<RocksDb>,
         db_root_path: Arc<PathBuf>,
@@ -79,17 +80,17 @@ impl ArchiveSlice {
             ("", ARCHIVE_PACKAGE_SIZE, true)
         };
         let index_db = PackageEntryMetaDb::with_db(
-            db.clone(), 
+            db.clone(),
             format!("entry_meta_{}db_{}", prefix, archive_id),
             create_if_not_exist,
         )?;
         let offsets_db = PackageOffsetsDb::with_db(
-            db.clone(), 
+            db.clone(),
             format!("offsets_{}db_{}", prefix, archive_id),
             create_if_not_exist,
         )?;
         let package_status_db = PackageStatusDb::with_db(
-            db, 
+            db,
             format!("status_{}db_{}", prefix, archive_id),
             create_if_not_exist,
         )?;
@@ -144,7 +145,7 @@ impl ArchiveSlice {
             transaction.put(&PackageStatusKey::SliceSize, self.slice_size.to_vec()?.as_slice())?;
 
             let meta = PackageEntryMeta::with_data(0, DEFAULT_PKG_VERSION);
-            self.index_db.put_value(&0.into(), &meta)?;
+            self.index_db.put_value(&0.into(), meta)?;
             transaction.commit()?;
 
             assert_eq!(self.index_db.len().unwrap(), 1);
@@ -166,6 +167,7 @@ impl ArchiveSlice {
         Ok(self)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn with_data(
         db: Arc<RocksDb>,
         db_root_path: Arc<PathBuf>,
@@ -207,7 +209,7 @@ impl ArchiveSlice {
 
                 match self.new_package(
                     i,
-                    self.archive_id + self.slice_size * i, 
+                    self.archive_id + self.slice_size * i,
                     meta.entry_size(),
                     meta.version()
                 ).await {
@@ -254,7 +256,7 @@ impl ArchiveSlice {
                 let seq_no = self.archive_id + self.slice_size * i;
                 let package_id = PackageId::with_values(seq_no, self.package_type);
                 let path = package_id.full_path(self.db_root_path.as_path(), "pack");
-        
+
                 match Package::remove_by_path(&path).await {
                     Ok(_) => log::info!(
                             target: "storage",
@@ -334,7 +336,7 @@ impl ArchiveSlice {
         let offset_key = entry_id.into();
         if self.offsets_db.contains(&offset_key)? {
             // afrer DB's truncation it is possible to have some remains in offsets_db
-            log::warn!(target: "storage", 
+            log::warn!(target: "storage",
                 "Entry {} was already presented in offsets_db, it will be rewrite", entry_id);
         }
 
@@ -362,8 +364,8 @@ impl ArchiveSlice {
     }
 
     pub async fn get_file<B, U256, PK>(
-        &self, 
-        block_handle: Option<&BlockHandle>, 
+        &self,
+        block_handle: Option<&BlockHandle>,
         entry_id: &PackageEntryId<B, U256, PK>
     ) -> Result<Option<PackageEntry>>
     where
@@ -494,7 +496,7 @@ impl ArchiveSlice {
                 let pi = self.new_package(idx, mc_seq_no, 0, DEFAULT_PKG_VERSION).await?;
 
                 let index_entry = PackageEntryMeta::with_data(0, DEFAULT_PKG_VERSION);
-                self.index_db.put_value(&idx.into(), &index_entry)?;
+                self.index_db.put_value(&idx.into(), index_entry)?;
                 self.package_status_db.put_value(&PackageStatusKey::TotalSlices, idx + 1)?;
                 write_guard.push(Arc::clone(&pi));
 
@@ -547,7 +549,7 @@ impl ArchiveSlice {
             let old_package = package_info.package();
             let new_name = old_package.get_path() + ".new";
             log::trace!(target: "storage", "repack package {}", old_package.get_path());
-            let _ = tokio::fs::remove_file(&new_name);
+            let _ = tokio::fs::remove_file(&new_name).await;
             let new_package = Package::open(new_name.into(), false, true).await?;
             let mut old_reader = read_package_from(old_package.open_file().await?).await?;
             while let Some(entry) = old_reader.next().await? {
@@ -579,7 +581,7 @@ impl ArchiveSlice {
                             let meta = PackageEntryMeta::with_data(size, package_info.version());
                             let idx = package_info.idx();
                             log::debug!(
-                                target: "storage", 
+                                target: "storage",
                                 "Writing package entry metadata for slice #{}: {:?}, offset: {}",
                                 idx, meta, offset
                             );

@@ -12,7 +12,7 @@
 */
 
 use crate::{
-    engine_traits::{EngineOperations, Server}, config::KafkaConsumerConfig, jaeger
+    engine_traits::{EngineOperations, Server}, config::KafkaConsumerConfig,
 };
 use futures::StreamExt;
 use rdkafka::{consumer::Consumer, Message, message::BorrowedMessage};
@@ -89,8 +89,9 @@ impl KafkaConsumer {
             consumer.commit_message(&borrowed_message, rdkafka::consumer::CommitMode::Async)?;
             log::trace!("Processed record, {}, time: {} mcs", message_descr, now.elapsed().as_micros());
 
-            if let Some(msg_key) = rdkafka::Message::key(&borrowed_message){
-                jaeger::message_from_kafka_received(msg_key);
+            if let Some(msg_key) = rdkafka::Message::key(&borrowed_message) {
+                #[cfg(feature = "tracing")]
+                crate::jaeger::message_from_kafka_received(msg_key);
             } else {
                 log::error!(target: "jaeger", "Can't read key from record");
             }

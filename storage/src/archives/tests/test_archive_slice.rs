@@ -17,7 +17,7 @@ use crate::{
         package_entry::PKG_ENTRY_HEADER_SIZE, package_entry_id::{GetFileName, PackageEntryId},
         package_id::PackageType,
     },
-    block_handle_db::{BlockHandleStorage, FLAG_KEY_BLOCK}, db::rocksdb::RocksDb,
+    block_handle_db::{BlockHandleStorage, FLAG_KEY_BLOCK}, db::rocksdb::{RocksDb, destroy_rocks_db},
     tests::utils::create_block_handle_storage, types::BlockMeta,
     StorageAlloc,
 };
@@ -27,8 +27,6 @@ use std::{future::Future, path::Path, pin::Pin, sync::Arc};
 use ever_block::{BlockIdExt, ShardIdent};
 use ever_block::{error, Result, UInt256};
 
-include!("../../db/tests/destroy_db.rs");
-
 const DB_PATH: &str = "../target/test";
 
 const ARCHIVE_PATH: &str = "archive/packages/arch0000/";
@@ -37,12 +35,12 @@ const ARCHIVE_00100_GOLD_PATH: &str = "src/archives/tests/testdata/archive.00100
 const ARCHIVE_00200_GOLD_PATH: &str = "src/archives/tests/testdata/archive.00200.pack.gold";
 
 struct TestContext {
-    archive_slice: ArchiveSlice, 
+    archive_slice: ArchiveSlice,
     block_handle_storage: BlockHandleStorage
 }
 
 async fn prepare_test(
-    name: &str, 
+    name: &str,
     package_type: PackageType
 ) -> Result<(Arc<RocksDb>, TestContext)> {
     let db_root = Path::new(DB_PATH).join(name);
@@ -57,9 +55,9 @@ async fn prepare_test(
         Arc::new(StorageTelemetry::default()),
         Arc::new(StorageAlloc::default()),
     ).await?;
-    let (block_handle_storage, _) = create_block_handle_storage(None);
+    let (block_handle_storage, _) = create_block_handle_storage(db.clone());
     let test_context = TestContext {
-        archive_slice, 
+        archive_slice,
         block_handle_storage
     };
     Ok((db, test_context))
@@ -73,7 +71,7 @@ async fn destroy_db(db: Arc<RocksDb>, name: &str) {
 type Pinned = Pin<Box<dyn Future<Output = Result<()>>>>;
 
 async fn run_test(
-    name: &str, 
+    name: &str,
     package_type: PackageType,
     scenario: impl Fn(TestContext) -> Pinned
 ) -> Result<()> {
@@ -85,14 +83,14 @@ async fn run_test(
 
 #[tokio::test]
 async fn test_scenario_gold() -> Result<()> {
-                                 
+
     async fn scenario(mut test_context: TestContext) -> Result<()> {
-                              
+
         // Populating...
         let entry_id = PackageEntryId::<BlockIdExt, UInt256, UInt256>::Empty;
         test_context.archive_slice.add_file(None, &entry_id, vec![1, 2, 3]).await?;
 
-        let data = vec![1, 2, 3, 4, 5];   
+        let data = vec![1, 2, 3, 4, 5];
         for mc_seq_no in 0..250 {
             let block_id = BlockIdExt::with_params(
                 ShardIdent::masterchain(), 
@@ -113,7 +111,7 @@ async fn test_scenario_gold() -> Result<()> {
             ).await?.ok_or_else(
                 || error!("Cannot get file from archive for block {}", block_id)
             )?;
-           
+
             assert_eq!(file.filename(), &entry_id.filename());
             assert_eq!(file.data(), &data);
         }
@@ -122,19 +120,19 @@ async fn test_scenario_gold() -> Result<()> {
 
         let archive_path = test_context.archive_slice.db_root_path.join(ARCHIVE_PATH);
         assert_eq!(
-            tokio::fs::read(archive_path.join("archive.00000.pack")).await.unwrap(), 
+            tokio::fs::read(archive_path.join("archive.00000.pack")).await.unwrap(),
             tokio::fs::read(ARCHIVE_00000_GOLD_PATH).await.unwrap()
         );
         assert_eq!(
-            tokio::fs::read(archive_path.join("archive.00100.pack")).await.unwrap(), 
+            tokio::fs::read(archive_path.join("archive.00100.pack")).await.unwrap(),
             tokio::fs::read(ARCHIVE_00100_GOLD_PATH).await.unwrap()
         );
         assert_eq!(
-            tokio::fs::read(archive_path.join("archive.00200.pack")).await.unwrap(), 
+            tokio::fs::read(archive_path.join("archive.00200.pack")).await.unwrap(),
             tokio::fs::read(ARCHIVE_00200_GOLD_PATH).await.unwrap()
         );
-    
-        let hdr = PKG_HEADER_SIZE + PKG_ENTRY_HEADER_SIZE; 
+
+        let hdr = PKG_HEADER_SIZE + PKG_ENTRY_HEADER_SIZE;
         let read = test_context.archive_slice.get_slice(
             0,
             (hdr + entry_id.filename().as_bytes().len()) as u64 + 1,
@@ -143,7 +141,7 @@ async fn test_scenario_gold() -> Result<()> {
         assert_eq!(read, vec![2, 3]);
 
         // Deleting...
-        
+
         test_context.archive_slice.destroy().await?;
         assert!(!archive_path.join("archive.00000.pack").exists());
         assert!(!archive_path.join("archive.00100.pack").exists());
@@ -157,7 +155,7 @@ async fn test_scenario_gold() -> Result<()> {
         "test_archive_slice_scenario_gold",
         PackageType::Blocks,
         |ctx| Box::pin(scenario(ctx))
-    ).await 
+    ).await
 
 }
 
@@ -169,7 +167,7 @@ async fn test_key_blocks_slice() -> Result<()> {
         let key_blocks = vec![456, 777, 1976, 5456, 7324, 10345, 15822, 24054, 27000];
         for mc_seq_no in key_blocks {
             let block_id = BlockIdExt::with_params(
-                ShardIdent::masterchain(), 
+                ShardIdent::masterchain(),
                 mc_seq_no,
                 UInt256::rand(),
                 UInt256::rand(),
@@ -198,6 +196,6 @@ async fn test_key_blocks_slice() -> Result<()> {
         "test_key_blocks_slice",
         PackageType::KeyBlocks,
         |ctx| Box::pin(scenario(ctx))
-    ).await 
+    ).await
 
 }

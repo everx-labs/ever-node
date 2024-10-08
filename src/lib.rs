@@ -42,14 +42,6 @@ include!("../common/src/info.rs");
 #[cfg(feature = "tracing")]
 pub mod jaeger;
 
-#[cfg(not(feature = "tracing"))]
-pub mod jaeger {
-    pub fn init_jaeger(){}
-    #[cfg(feature = "external_db")]
-    pub fn message_from_kafka_received(_kf_key: &[u8]) {}
-    pub fn broadcast_sended(_msg_id: String) {}
-}
-
 #[cfg(feature = "external_db")]
 mod external_db;
 

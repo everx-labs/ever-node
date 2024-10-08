@@ -96,7 +96,7 @@ async fn test_shard_blocks_pool() {
     let engine = Arc::new(TestEngine {
         last_applied_mc_block_seqno: AtomicU32::new(0),
         last_applied_mc_block_utime: AtomicU32::new(0),
-        block_handle_storage: create_block_handle_storage(),
+        block_handle_storage: create_block_handle_storage().unwrap(),
         shard_blocks: std::sync::Mutex::new(HashSet::default()),
         #[cfg(feature = "telemetry")]
         engine_telemetry: create_engine_telemetry(),
@@ -148,7 +148,7 @@ async fn test_shard_blocks_pool_threads() {
     let engine = Arc::new(TestEngine {
         last_applied_mc_block_seqno: AtomicU32::new(0),
         last_applied_mc_block_utime: AtomicU32::new(0),
-        block_handle_storage: create_block_handle_storage(),
+        block_handle_storage: create_block_handle_storage().unwrap(),
         shard_blocks: std::sync::Mutex::new(HashSet::default()),
         #[cfg(feature = "telemetry")]
         engine_telemetry: create_engine_telemetry(),

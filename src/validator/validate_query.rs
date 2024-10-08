@@ -1115,12 +1115,122 @@ impl ValidateQuery {
             )
         }
 
+        //#[cfg(feature = "true_fast_finality")]
+        //self.check_shard_validators_stat(base, old.as_ref(), info)?;
+
         base.result.min_shard_ref_mc_seqno.fetch_min(info.descr.min_ref_mc_seqno, Ordering::Relaxed);
         base.result.max_shard_utime.fetch_max(info.descr.gen_utime, Ordering::Relaxed);
         base.result.max_shard_lt.fetch_max(info.descr.end_lt, Ordering::Relaxed);
         // dbg!(base.min_shard_ref_mc_seqno, base.max_shard_utime, base.max_shard_lt);
         Ok(())
     }
+
+    /*#[cfg(feature = "true_fast_finality")]
+    fn check_shard_validators_stat(
+        &mut self,
+        base: &ValidateBase,
+        old: Option<&McShardRecord>,
+        cur: &McShardRecord
+    ) -> Result<()> {
+
+        log::debug!("{}: check_shard_validators_stat {}", self.next_block_descr, cur.shard());
+
+        let ff_config = base.config_params.fast_finality_config().unwrap_or_default();
+        let mut calc_stat;
+
+        if let Some(old) = old {
+            let new_blocks = (cur.descr.seq_no - old.descr.seq_no) as u16;
+            let collators = cur.descr.collators()?.clone();
+            calc_stat = old.descr.collators()?.stat.clone();
+
+            if base.mc_extra.is_key_block() {
+                // key block - reset statistic
+                let len = base.mc_extra.config()
+                            .ok_or_else(|| error!("No config in mc_extra"))?
+                            .validator_set()?.total() as u16;
+                calc_stat = ValidatorsStat::new(len);
+
+            } else if cur.shard() == old.shard() || old.shard().is_parent_for(cur.shard()) {
+                // shard updated without split/merge  OR  has been split
+                self.apply_unreliability_fading(&ff_config, &collators.current, new_blocks)?;
+                for i in 0..calc_stat.len() as u16 {
+                    calc_stat.update(i, |familiarity| {
+                        let (new_familiarity, name) = if i == collators.current.collator {
+                            (familiarity.saturating_add(ff_config.familiarity_collator_fine * new_blocks)
+                                        .min(ff_config.familiarity_max), "familiarity_collator_fine")
+                        } else if collators.current.mempool.contains(&i) {
+                            (familiarity.saturating_add(ff_config.familiarity_msgpool_fine * new_blocks)
+                                        .min(ff_config.familiarity_max), "familiarity_msgpool_fine")
+                        } else {
+                            (familiarity.saturating_sub(ff_config.familiarity_fading * new_blocks),
+                                "familiarity_fading")
+                        };
+                        log::debug!("{}: {}: shard {} validator {} familiarity {} -> {}",
+                            self.next_block_descr, name, cur.shard(), i, familiarity, new_familiarity);
+                        new_familiarity
+                    })?;
+                }
+
+            } else if cur.shard().is_parent_for(old.shard()) {
+
+                // shard has been merged - merge statistic
+                let old2 = self.old_mc_shards.find_shard(&cur.shard().right_ancestor_mask()?)?
+                    .ok_or_else(|| error!("No plus_one shard"))?;
+
+                self.apply_unreliability_fading(&ff_config, &collators.next, new_blocks)?;
+
+                calc_stat = ValidatorsStat::new(base.config_params.validator_set()?.total());
+                let old_collators1 = old.descr.collators()?.clone();
+                let old_collators2 = old2.descr.collators()?.clone();
+                for i in 0..calc_stat.len() as u16 {
+                    let familiarity1 = old_collators1.stat.get(i).unwrap_or(0);
+                    let familiarity2 = old_collators2.stat.get(i).unwrap_or(0);
+                    let familiarity = ((familiarity1 as u32 + familiarity2 as u32) / 2) as u16;
+                    calc_stat.update(i, |_| {
+                        let new_familiarity = if i == collators.current.collator {
+                            min(familiarity.saturating_add(ff_config.familiarity_collator_fine * new_blocks),
+                                ff_config.familiarity_max)
+                        } else if collators.current.mempool.contains(&i) {
+                            min(familiarity.saturating_add(ff_config.familiarity_msgpool_fine * new_blocks),
+                                ff_config.familiarity_max)
+                        } else {
+                            familiarity.saturating_sub(ff_config.familiarity_fading * new_blocks)
+                        };
+                        log::debug!(
+                            "{}: merge shard validators stat: shard {} validator {} familiarity {}, {} -> {}",
+                            self.next_block_descr, cur.shard(), i, familiarity1, familiarity2, new_familiarity);
+                        new_familiarity
+                    })?;
+                }
+            }
+        } else {
+            // newly created workchain
+            let len = base.config_params.validator_set()?.total() as u16;
+            calc_stat = ValidatorsStat::new(len);
+        }
+
+        let stat = &cur.descr.collators()?.stat;
+        if calc_stat.len() != stat.len() {
+            reject_query!("validators stat length mismatch is shard {} {} != {}",
+                cur.shard(), calc_stat.len(), stat.len());
+        }
+        let mut err = false;
+        for i in 0..stat.len() as u16 {
+            if stat.get(i)? != calc_stat.get(i)? {
+                log::error!("{}: stat mismatch - validator: {}, calculated: {}, in block: {}",
+                    self.next_block_descr, i, calc_stat.get(i)?, stat.get(i)?);
+                err = true;
+            } else {
+                log::trace!("{}: stat ok       - validator: {}, calculated: {}, in block: {}",
+                    self.next_block_descr, i, calc_stat.get(i)?, stat.get(i)?);
+            }
+        }
+        if err {
+            reject_query!("validators stat mismatch is shard {}", cur.shard());
+        }
+
+        Ok(())
+    }*/
 
     // checks old_shard_conf_ -> base.mc_extra.shards() transition using top_shard_descr_dict_ from collated data
     // similar to Collator::update_shard_config()
@@ -1165,6 +1275,7 @@ impl ValidateQuery {
             }
             Ok(true)
         }).map_err(|err| error!("new shard configuration is invalid : {}", err))?;
+
 
         base.prev_state_extra.config.workchains()?.iterate_keys(|wc_id: i32| {
             if base.mc_extra.shards().get(&wc_id)?.is_none() {

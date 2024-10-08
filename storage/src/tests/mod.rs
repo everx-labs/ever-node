@@ -20,14 +20,14 @@ pub mod utils {
 
     use crate::{
         db::rocksdb::RocksDb,
-        StorageAlloc, block_handle_db::{BlockHandleDb, BlockHandleStorage, NodeStateDb}, 
+        StorageAlloc, block_handle_db::{BlockHandleDb, BlockHandleStorage, NodeStateDb},
     };
     #[cfg(feature = "telemetry")]
     use crate::StorageTelemetry;
     use fnv::FnvHashSet;
     use std::sync::Arc;
     use ever_block::{BlockIdExt, SHARD_FULL, ShardIdent};
-    use ever_block::{Cell, Result, UInt256, read_single_root_boc};
+    use ever_block::{Cell, UInt256, read_single_root_boc};
 
     pub fn get_test_raw_boc() -> Vec<u8> {
         include_bytes!("testdata/2467080").to_vec()
@@ -59,34 +59,12 @@ pub mod utils {
 
     pub fn get_test_tree_of_cells() -> Cell {
         let data = include_bytes!("testdata/2467080").to_vec();
-        read_single_root_boc(&data).unwrap()
+        read_single_root_boc(data).unwrap()
     }
 
     pub fn get_another_test_tree_of_cells() -> Cell {
         let data = include_bytes!("testdata/2467119").to_vec();
-        read_single_root_boc(&data).unwrap()
-    }
-
-    #[allow(dead_code)]
-    pub fn compare_trees(cell_left: Cell, cell_right: Cell) -> Result<()> {
-        assert_eq!(cell_left.cell_data(), cell_right.cell_data());
-        assert_eq!(cell_left.cell_type(), cell_right.cell_type());
-        assert_eq!(cell_left.is_pruned(), cell_right.is_pruned());
-        assert_eq!(cell_left.is_merkle(), cell_right.is_merkle());
-        assert_eq!(cell_left.bit_length(), cell_right.bit_length());
-        assert_eq!(cell_left.data(), cell_right.data());
-        assert_eq!(cell_left.repr_hash(), cell_right.repr_hash());
-        assert_eq!(cell_left.repr_depth(), cell_right.repr_depth());
-        assert_eq!(cell_left.level(), cell_right.level());
-        for i in 0..(cell_left.level() + 1) as usize {
-            assert_eq!(cell_left.hash(i), cell_right.hash(i));
-            assert_eq!(cell_left.depth(i), cell_right.depth(i));
-        }
-        assert_eq!(cell_left.references_count(), cell_right.references_count());
-        for i in 0..cell_left.references_count() {
-            compare_trees(cell_left.reference(i)?, cell_left.reference(i)?)?;
-        }
-        Ok(())
+        read_single_root_boc(data).unwrap()
     }
 
     pub fn count_tree_unique_cells(root_cell: Cell) -> usize {
@@ -96,7 +74,7 @@ pub mod utils {
     }
 
     fn count_tree_unique_cells_recursive(cell: Cell, unique_cells: &mut FnvHashSet<UInt256>) {
-        if unique_cells.insert(cell.repr_hash().into()) {
+        if unique_cells.insert(cell.repr_hash()) {
             for i in 0..cell.references_count() {
                 count_tree_unique_cells_recursive(cell.reference(i).unwrap(), unique_cells);
             }
@@ -104,29 +82,19 @@ pub mod utils {
     }
 
     pub fn create_block_handle_storage(
-        db: Option<Arc<RocksDb>>
+        db: Arc<RocksDb>
     ) -> (BlockHandleStorage, Arc<BlockHandleDb>) {
-        let block_handle_db = if let Some(db) = db.clone() {
-            Arc::new(BlockHandleDb::with_db(db, "block_handles", true).unwrap())
-        } else {
-            Arc::new(BlockHandleDb::in_memory())
-        };
+        let block_handle_db =
+            Arc::new(BlockHandleDb::with_db(db.clone(), "block_handles", true).unwrap());
         let block_handle_storage = BlockHandleStorage::with_dbs(
             block_handle_db.clone(),
-            if let Some(db) = db.clone() {
-                Arc::new(NodeStateDb::with_db(db, "full_node_states", true).unwrap())
-            } else {
-                Arc::new(NodeStateDb::in_memory())
-            },
-            if let Some(db) = db {
-                Arc::new(NodeStateDb::with_db(db, "validator_states", true).unwrap())
-            } else {
-                Arc::new(NodeStateDb::in_memory())
-            },
+            Arc::new(NodeStateDb::with_db(db.clone(), "full_node_states", true).unwrap()),
+            Arc::new(NodeStateDb::with_db(db, "validator_states", true).unwrap()),
             #[cfg(feature = "telemetry")]
             Arc::new(StorageTelemetry::default()),
             Arc::new(StorageAlloc::default()),
         );
         (block_handle_storage, block_handle_db)
     }
+
 }

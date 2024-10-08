@@ -12,7 +12,7 @@
 */
 
 use crate::{
-    cell_db::CellDb, db::rocksdb::RocksDb, dynamic_boc_rc_db::DynamicBocDb, 
+    db::rocksdb::{RocksDb, destroy_rocks_db}, dynamic_boc_rc_db::DynamicBocDb,
     tests::utils::*, StorageAlloc
 };
 #[cfg(feature = "telemetry")]
@@ -21,7 +21,6 @@ use std::sync::Arc;
 use ever_block::CellsFactory;
 use ever_block::{BuilderData, Cell, IBitstring, Result};
 
-include!("../db/tests/destroy_db.rs");
 include!("../../../common/src/log.rs");
 
 const DB_PATH: &str = "../target/test";
@@ -37,24 +36,24 @@ async fn test_dynamic_boc_rc_db() -> Result<()> {
 
     let db = RocksDb::with_path(DB_PATH, DB_NAME)?;
     let boc_db = Arc::new(DynamicBocDb::with_db(
-        Arc::new(CellDb::with_db(db.clone(), DB_NAME, true)?), 
+        db.clone(),
+        DB_NAME,
         "",
-        false,
         1_000_000,
         #[cfg(feature = "telemetry")]
         Arc::new(StorageTelemetry::default()),
         Arc::new(StorageAlloc::default()),
-    ));
+    )?);
 
     let root_cell = get_test_tree_of_cells();
     let mut cells_counters = Some(fnv::FnvHashMap::default());
 
-    assert!(boc_db.is_empty()?);
+    assert!(boc_db.len() == 0);
     let initial_cell_count = count_tree_unique_cells(root_cell.clone());
     boc_db.save_boc(root_cell.clone(), true, &|| Ok(()), &mut cells_counters, false)?;
-    assert_eq!(boc_db.len()?, initial_cell_count * 2);
+    assert_eq!(boc_db.len(), initial_cell_count);
 
-    let loaded_boc = boc_db.load_boc(&root_cell.repr_hash().into(), true)?;
+    let loaded_boc = boc_db.load_boc(&root_cell.repr_hash(), true)?;
     let fetched_count = count_tree_unique_cells(loaded_boc.clone());
     assert_eq!(fetched_count, initial_cell_count);
     assert_eq!(boc_db.cells_cache_len(), initial_cell_count);
@@ -62,11 +61,11 @@ async fn test_dynamic_boc_rc_db() -> Result<()> {
     let root_cell_2 = get_another_test_tree_of_cells();
     boc_db.save_boc(root_cell_2.clone(), true, &|| Ok(()), &mut cells_counters, false)?;
 
-    boc_db.delete_boc(&root_cell.repr_hash().into(), &|| Ok(()), &mut cells_counters, false)?;
-    assert!(boc_db.len()? > 0);
+    boc_db.delete_boc(&root_cell.repr_hash(), &|| Ok(()), &mut cells_counters, false)?;
+    assert!(boc_db.len() > 0);
 
-    boc_db.delete_boc(&root_cell_2.repr_hash().into(), &|| Ok(()), &mut cells_counters, false)?;
-    assert_eq!(boc_db.len()?, 0);
+    boc_db.delete_boc(&root_cell_2.repr_hash(), &|| Ok(()), &mut cells_counters, false)?;
+    assert_eq!(boc_db.len(), 0);
 
     drop(boc_db);
     drop(db);
@@ -87,14 +86,14 @@ async fn test_dynamic_boc_rc_db_2() -> Result<()> {
 
     let db = RocksDb::with_path(DB_PATH, DB_NAME)?;
     let boc_db = Arc::new(DynamicBocDb::with_db(
-        Arc::new(CellDb::with_db(db.clone(), DB_NAME, true)?), 
+        db.clone(), 
+        "cell_db",
         "",
-        false,
         1_000_000,
         #[cfg(feature = "telemetry")]
         Arc::new(StorageTelemetry::default()),
         Arc::new(StorageAlloc::default()),
-    ));
+    )?);
 
     let cells_factory = boc_db.clone() as Arc<dyn CellsFactory>;
     let create_ss = |cells_chain: Vec<&str>| -> Cell {
