@@ -3024,7 +3024,7 @@ fn telemetry_logger(engine: Arc<Engine>) {
                 elapsed = 0
             }
 
-                        let cells_loaded_from_db = engine.engine_telemetry.storage.cells_loaded_from_db.load(Ordering::Relaxed);
+            let cells_loaded_from_db = engine.engine_telemetry.storage.cells_loaded_from_db.load(Ordering::Relaxed);
             log::info!(target: "telemetry", "{:<39} {:^37}", 
                 "NODE total cells loaded from db",
                 cells_loaded_from_db
