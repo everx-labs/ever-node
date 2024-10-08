@@ -1166,7 +1166,6 @@ impl ValidateQuery {
             Ok(true)
         }).map_err(|err| error!("new shard configuration is invalid : {}", err))?;
 
-
         base.prev_state_extra.config.workchains()?.iterate_keys(|wc_id: i32| {
             if base.mc_extra.shards().get(&wc_id)?.is_none() {
                 reject_query!("shards of workchain {} existed in previous \
