@@ -3017,7 +3017,14 @@ fn telemetry_logger(engine: Arc<Engine>) {
             );        
             engine.telemetry_printer.try_print();
 
-            let cells_loaded_from_db = engine.engine_telemetry.storage.cells_loaded_from_db.load(Ordering::Relaxed);
+            elapsed += millis;
+            if elapsed < Engine::TIMEOUT_TELEMETRY_SEC * 1000 {
+                continue
+            } else {
+                elapsed = 0
+            }
+
+                        let cells_loaded_from_db = engine.engine_telemetry.storage.cells_loaded_from_db.load(Ordering::Relaxed);
             log::info!(target: "telemetry", "{:<39} {:^37}", 
                 "NODE total cells loaded from db",
                 cells_loaded_from_db
@@ -3050,12 +3057,6 @@ fn telemetry_logger(engine: Arc<Engine>) {
                 );
             }
 
-            elapsed += millis;
-            if elapsed < Engine::TIMEOUT_TELEMETRY_SEC * 1000 {
-                continue
-            } else {
-                elapsed = 0
-            }
             let period = crate::full_node::telemetry::TPS_PERIOD_1;
             let tps_1 = engine.tps_counter.calc_tps(period)
                 .unwrap_or_else(|e| { 
